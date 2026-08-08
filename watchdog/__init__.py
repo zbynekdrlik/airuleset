@@ -2509,7 +2509,17 @@ _MACHINE_PROMPT_PREFIXES = (
     "stuck-check:", "Priorita: prio:bounce", "bounce-backstop:",
     "gk-request backstop:", "/goal ",
     "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku",
-    "<task-notification>", "<local-command", "<command-", "<system-reminder")
+    "<task-notification>", "<local-command", "<command-", "<system-reminder",
+    # #339 adversarial-review MINOR: a Stop-hook-rejected turn is ALSO
+    # machine-injected, not human-typed -- this repo's own
+    # `_STOP_FEEDBACK_PREFIX` (defined ~5000 lines below, next to job 20's
+    # compact-boundary code) carries the identical literal; duplicated
+    # here rather than reordering that far-away constant, and must be kept
+    # in sync if it ever changes. Without this entry, a Stop-hook rejection
+    # (a routine, real transcript entry -- #108/#109 measured thousands of
+    # them corpus-wide) counted as a genuine human prompt and could delay
+    # a genuinely-headless virgin arm by up to GOAL_AUTOARM_RECENT_HUMAN_S.
+    "Stop hook feedback:")
 
 
 def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
@@ -5356,6 +5366,114 @@ def _goal_was_cleared_by_user(tpath):
             and not mark.get("arm_after"))
 
 
+GOAL_AUTOARM_RECENT_HUMAN_S = 30 * 60
+# #339 -- reuses `PWEDGE_MIN_IDLE_S`'s own VALUE (job 10's already-
+# established "must be idle this long before treated as genuinely at
+# rest" bound), never the constant NAME (this one governs a structurally
+# different question and stays independently tunable). The live
+# incident's own observed gap was ~2 minutes (human prompt -> auto-arm);
+# 30 min is a ~15x margin, chosen deliberately generous because the two
+# failure directions are asymmetric -- a missed arm just retries next
+# sweep (cheap), a wrong arm interrupts a live human conversation (the
+# reported incident).
+
+
+def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None):
+    """#339 -- job 9's virgin-candidate path (`_goal_autoarm_virgin_candidate`)
+    had NO discriminator at all for "is a live human using this pane RIGHT
+    NOW" -- only whether `/goal` had ever been touched. montalu3's own
+    first-ever session was interactive (the user typed "kto si?"), had
+    never touched `/goal`, satisfied every existing gate, and got
+    auto-armed ~2 minutes later -- the live incident this closes.
+
+    Combines TWO independent signals, EITHER sufficient to refuse:
+
+    1. The presence marker `/tmp/claude-user-active-<sid>` (stamped by
+       `clear-question-dedup.sh` on UserPromptSubmit ONLY -- a `/goal`
+       re-poke or a hook-feedback re-invocation never stamps it). A fresh
+       mtime is cheap, direct evidence of a live human. A MISSING marker
+       fails OPEN (the established #128 axis: `/tmp` gets cleared under
+       long-running sessions or a box reboot, so absence never
+       MANUFACTURES a "human present" signal on its own) -- it only means
+       fall through to signal 2, never "safe to arm".
+    2. `_last_human_prompt_ts(tpath)` -- the mandatory, always-available
+       signal (no `/tmp` dependency, already used elsewhere in this file
+       for question-dedup pruning). It excludes goal re-pokes, Stop-hook
+       feedback, AND job-7 Discord-reply deliveries via its own
+       `_MACHINE_PROMPT_PREFIXES` list ("Odpoveď z Discordu:" and
+       "Stop hook feedback:" both there) -- the ticket's own named
+       job-7 edge case needed no special-casing here at all.
+
+    Both timestamps are clamped `-window_s <= now - ts < window_s`
+    ("recent" in EITHER direction, bounded) before counting as recent.
+
+    #339-review MAJOR (fresh-context adversarial review, live-reproduced
+    against the real function): the first shipped clamp was the
+    ASYMMETRIC `0 <= age < window_s` -- reasoning (wrongly) that a
+    future-dated value must be clock-skew and should never read as
+    recent, mirroring the #177 `min()` clamp lesson elsewhere in this
+    file. That lesson does NOT transfer here: `now` is captured ONCE at
+    the top of the whole sweep (`run_once`), while job 9 (and this
+    check) runs at the sweep's TAIL, so a human's FIRST prompt landing
+    AFTER `now` was captured but BEFORE this pane's own turn in the loop
+    produces a transcript/marker timestamp genuinely NEWER than `now` --
+    a negative `age` that the asymmetric clamp read as "not recent",
+    reproducing the EXACT #339 incident through a timing hole. The
+    symmetric bound absorbs that mid-sweep-drift case (a human prompt up
+    to `window_s` in the future still counts as recent) while still
+    refusing a GROSSLY future-dated value (clock skew, a transcript
+    synced off another box, anything beyond `window_s`) -- and being
+    generous on the future side costs nothing: it can only ever make this
+    function MORE cautious (refuse when uncertain), never arm when it
+    shouldn't. `window_s` defaults to `GOAL_AUTOARM_RECENT_HUMAN_S`.
+
+    Evaluated and REJECTED (full reasoning on the #339 design comment):
+    requiring ZERO human prompts in the WHOLE transcript before ever
+    treating a session as virgin-armable. The genuinely-headless
+    population this path targets includes reduced-authority stream boxes
+    a human periodically attaches to and briefly chats with -- normal,
+    expected use, not evidence the box should never self-heal into an
+    armed loop again. The RECENT-window form already fixes the reported
+    failure (arming DURING a live conversation, a recency question); a
+    whole-transcript form would additionally, permanently disqualify a
+    large legitimate population for zero extra safety on the incident
+    actually reported.
+
+    Fail direction: an unreadable transcript is refused OUTSIDE this
+    function entirely (the caller's own `find_active_transcript` already
+    gates it); `_last_human_prompt_ts` itself returns `None` on any read
+    failure (its own documented contract), which this function treats as
+    "no signal, not recent" -- never a manufactured refusal from an
+    unmeasurable read, mirroring `_goal_never_armed`'s own adjacent
+    discipline one function down."""
+    window_s = GOAL_AUTOARM_RECENT_HUMAN_S if window_s is None else window_s
+    try:
+        mtime = os.stat("/tmp/claude-user-active-%s" % sid).st_mtime
+    except OSError:
+        mtime = None
+    if mtime is not None:
+        age = now - mtime
+        if -window_s <= age < window_s:
+            return True, "presence marker %s" % _human_age_desc(age)
+    try:
+        hts = _last_human_prompt_ts(tpath)
+    except Exception:
+        hts = None
+    if hts is not None:
+        age = now - hts
+        if -window_s <= age < window_s:
+            return True, "transcript human prompt %s" % _human_age_desc(age)
+    return False, ""
+
+
+def _human_age_desc(age):
+    """#339-review MAJOR -- a human-activity timestamp can legitimately land
+    slightly AFTER `now` (mid-sweep drift, see the caller's own docstring),
+    so the log line must read sensibly either way rather than printing a
+    confusing negative number."""
+    return "%ds old" % int(age) if age >= 0 else "%ds in the future" % int(-age)
+
+
 def _goal_never_armed(tpath):
     """True when this session's transcript has NEVER shown a `/goal` marker
     of any kind (#320 shape 2) — never armed, never cleared. A FULL-file
@@ -5494,6 +5612,28 @@ def _goal_autoarm_virgin_candidate(now, run, state, pid, cwd, templates,
         return logs
     if pane_in_mode(pid, run):
         return logs
+    # #339 -- a session with RECENT real human activity is never a virgin
+    # candidate, regardless of what the (expensive) full-file scan below
+    # would say. Checked here (cheaper than that scan, after every cheaper
+    # gate above it) so a candidate mid-conversation is refused before the
+    # scan is ever paid for. #101/#266 transient-refusal discipline: this
+    # is a zero-keystroke SKIP-TRANSIENT -- `va`/`hg`/`ga` stay untouched,
+    # so the very next sweep after the human leaves (or the window lapses)
+    # retries and arms normally. The per-pane log is throttled to once per
+    # continuous streak (mirrors `goalarm_noresolve`'s own dedup shape a
+    # few lines up in the caller) and cleared the moment the check no
+    # longer fires.
+    rc = state.setdefault("goalarm_recentuser", {})
+    recent, reason = _goal_autoarm_recent_human_activity(sid, tr[0], now)
+    if recent:
+        if not rc.get(pid):
+            rc[pid] = True
+            logs.append(
+                "goal-autoarm SKIP-TRANSIENT (virgin) %s (%s) -> %s -- "
+                "recent human activity, never overwrite a live "
+                "conversation" % (pid, loc, reason))
+        return logs
+    rc.pop(pid, None)
     if not _goal_never_armed(tr[0]):
         hg[sid] = True
         return logs

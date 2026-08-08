@@ -15,6 +15,8 @@ import sys
 import time
 import unittest
 import unittest.mock as m
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -1248,6 +1250,260 @@ class TestGoalAutoarmVirginCandidate(unittest.TestCase):
                             templates_path=self.templates_path)
         self.assertFalse(tmux.typed())
         self.assertTrue(any("degraded" in ln for ln in logs), logs)
+
+
+def _iso(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def human_entry(ts_epoch, text="kto si?"):
+    return {"type": "user", "timestamp": _iso(ts_epoch),
+            "message": {"content": text}}
+
+
+class TestGoalAutoarmVirginCandidateRecentHuman(unittest.TestCase):
+    """#339 -- montalu3: a virgin (never-`/goal`-touched) session with a
+    LIVE human at the terminal must never get an auto-armed `/goal` loop
+    pasted into it. `_goal_autoarm_recent_human_activity` combines the
+    `/tmp/claude-user-active-<sid>` presence marker with the transcript's
+    own `_last_human_prompt_ts` -- exercised independently here, plus the
+    retry-once-the-human-leaves proof, the genuinely-headless positive
+    control (proving this does not regress #320's own feature), cost
+    ordering (never pays the full-file scan while a human is present),
+    and the future-timestamp clamp."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tpl_dir = TemporaryDirectory()
+        self.addCleanup(self.tpl_dir.cleanup)
+        self.templates_path = write_templates(self.tpl_dir.name)
+        self.sid = "recenthuman-%s" % uuid.uuid4().hex[:12]
+
+    def _write(self, entries):
+        return write_transcript(entries, self.tmp.name, VIRGIN_CWD, self.sid)
+
+    def _touch_active(self, age=0):
+        f = "/tmp/claude-user-active-%s" % self.sid
+        Path(f).write_text("")
+        if age:
+            old = time.time() - age
+            os.utime(f, (old, old))
+        self.addCleanup(lambda: os.path.exists(f) and os.remove(f))
+        return f
+
+    def _go(self, now=None, state=None, dry_run=False):
+        return go(NO_QUESTION_PANE, state=state, now=now,
+                  projects_dir=self.tmp.name,
+                  templates_path=self.templates_path, dry_run=dry_run)
+
+    def test_recent_transcript_human_prompt_refuses_with_no_marker_at_all(self):
+        now = time.time()
+        self._write([human_entry(now - 120)])  # the incident's own ~2min gap
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = self._go(now=now)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "recent human" in ln
+               for ln in logs), logs)
+
+    def test_recent_presence_marker_refuses_even_with_no_transcript_hint(self):
+        now = time.time()
+        self._write([])  # transcript itself shows no human line at all
+        self._touch_active(age=60)
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = self._go(now=now)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "presence marker" in ln
+               for ln in logs), logs)
+
+    def test_a_stale_marker_and_stale_prompt_still_arms_normally(self):
+        # a marker/transcript that both exist but are OLDER than the
+        # window are not "recent" -- must not be confused with "no marker
+        # at all" and still allow the genuinely-at-rest session through.
+        now = time.time()
+        self._write([human_entry(now - wd.GOAL_AUTOARM_RECENT_HUMAN_S - 300)])
+        self._touch_active(age=wd.GOAL_AUTOARM_RECENT_HUMAN_S + 300)
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = self._go(now=now)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
+
+    def test_retries_and_arms_the_instant_the_human_leaves(self):
+        # SAME transcript, never rewritten -- proves the refusal is a
+        # genuine per-sweep re-evaluation (#101/#266 transient discipline),
+        # not a cached "this session is disqualified forever" decision.
+        now0 = time.time()
+        self._write([human_entry(now0)])
+        state = {}
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            t1, logs1 = self._go(now=now0, state=state)
+            self.assertFalse(t1.typed(), logs1)
+            t2, logs2 = self._go(
+                now=now0 + wd.GOAL_AUTOARM_RECENT_HUMAN_S + 5, state=state)
+        self.assertEqual(t2.typed(), [TEMPLATE_FULL], logs2)
+
+    def test_a_genuinely_headless_session_still_arms_normally(self):
+        # positive control -- no marker, transcript has no human prompt at
+        # all -- this new gate must not regress the #320 feature it sits
+        # inside of.
+        now = time.time()
+        self._write([{"type": "assistant", "timestamp": _iso(now - 60),
+                     "message": {"content": "hi"}}])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = self._go(now=now)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
+
+    def test_a_grossly_future_dated_marker_beyond_the_window_still_arms(self):
+        # #339-review MAJOR -- the clamp is SYMMETRIC now (a near-future
+        # value counts as recent, see the mid-sweep-drift tests below), but
+        # a value well BEYOND the window in the future (clock skew, a
+        # transcript synced off another box) must still be bounded, never
+        # treated as recent forever.
+        now = time.time()
+        self._write([])
+        f = "/tmp/claude-user-active-%s" % self.sid
+        Path(f).write_text("")
+        future = now + 3600  # 1h, well past the 30-min window either side
+        os.utime(f, (future, future))
+        self.addCleanup(lambda: os.path.exists(f) and os.remove(f))
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = self._go(now=now)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
+
+    def test_a_grossly_future_dated_transcript_prompt_still_arms(self):
+        now = time.time()
+        self._write([human_entry(now + 3600)])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = self._go(now=now)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
+
+    def test_a_near_future_marker_from_mid_sweep_drift_refuses(self):
+        # #339-review MAJOR (the CRITICAL live-reproduced finding): `now`
+        # is captured once at sweep start; job 9 runs at the sweep's TAIL,
+        # so a human prompt landing seconds AFTER `now` was captured (but
+        # before this pane's own turn in the per-pane loop) stamps a
+        # timestamp NEWER than `now` -- a small NEGATIVE age. The old
+        # asymmetric `0 <= age` clamp read that as "not recent" and armed
+        # into a conversation that had, in wall-clock terms, already
+        # started. The fix must refuse here.
+        now = time.time()
+        self._write([])
+        f = "/tmp/claude-user-active-%s" % self.sid
+        Path(f).write_text("")
+        near_future = now + 10  # the incident's own observed ~2min gap
+                                 # scaled down -- well inside the window
+        os.utime(f, (near_future, near_future))
+        self.addCleanup(lambda: os.path.exists(f) and os.remove(f))
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = self._go(now=now)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "presence marker" in ln
+               for ln in logs), logs)
+
+    def test_a_near_future_transcript_prompt_from_mid_sweep_drift_refuses(self):
+        now = time.time()
+        self._write([human_entry(now + 10)])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = self._go(now=now)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "transcript human prompt" in ln
+               for ln in logs), logs)
+
+    def test_a_stop_hook_feedback_entry_is_never_read_as_human(self):
+        # #339-review MINOR -- a Stop-hook-rejected turn writes a real,
+        # routine top-level `user` entry starting "Stop hook feedback:"
+        # (#108/#109 measured thousands of these corpus-wide). It is
+        # machine-injected, not human-typed, and must never delay a
+        # genuinely-headless virgin arm.
+        now = time.time()
+        self._write([{
+            "type": "user", "timestamp": _iso(now - 5),
+            "message": {"content": "Stop hook feedback: [some-hook.sh] "
+                                    "blocked this turn"}}])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, _logs = self._go(now=now)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL])
+
+    def test_recent_human_activity_never_pays_the_full_file_scan(self):
+        now = time.time()
+        self._write([human_entry(now)])
+        calls = []
+        real = wd._goal_never_armed
+
+        def spy(tpath):
+            calls.append(tpath)
+            return real(tpath)
+
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"), \
+             m.patch.object(wd, "_goal_never_armed", side_effect=spy):
+            self._go(now=now)
+        self.assertEqual(calls, [], "recent-human-activity candidates must "
+                                    "never reach the full-file scan")
+
+    def test_skip_transient_logs_once_per_streak_not_every_sweep(self):
+        now0 = time.time()
+        self._write([human_entry(now0)])
+        state = {}
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            _t1, logs1 = self._go(now=now0, state=state)
+            _t2, logs2 = self._go(now=now0 + 60, state=state)
+        self.assertTrue(any("SKIP-TRANSIENT" in ln for ln in logs1), logs1)
+        self.assertFalse(any("SKIP-TRANSIENT" in ln for ln in logs2), logs2)
+
+    def test_dry_run_also_refuses_recent_human_activity(self):
+        now = time.time()
+        self._write([human_entry(now)])
+        with m.patch.object(airuleset, "resolve_authority",
+                           return_value="full"):
+            tmux, logs = self._go(now=now, dry_run=True)
+        self.assertFalse(tmux.typed())
+        self.assertFalse(any("READY" in ln for ln in logs), logs)
+
+
+class TestGoalAutoarmRecentHumanActivityUnit(unittest.TestCase):
+    """Direct unit coverage of `_goal_autoarm_recent_human_activity` itself
+    -- independent of the whole `goal_autoarm` sweep, so the clamp/fallback
+    logic is provable without a full FakeTmux/transcript round-trip too."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sid = "unit-%s" % uuid.uuid4().hex[:12]
+
+    def _write(self, entries):
+        p = Path(self.tmp.name) / (self.sid + ".jsonl")
+        with open(p, "w") as f:
+            for e in entries:
+                f.write(_json.dumps(e) + "\n")
+        return str(p)
+
+    def test_no_marker_no_human_prompt_is_not_recent(self):
+        p = self._write([])
+        recent, reason = wd._goal_autoarm_recent_human_activity(
+            self.sid, p, time.time())
+        self.assertFalse(recent)
+        self.assertEqual(reason, "")
+
+    def test_unreadable_transcript_is_not_treated_as_recent(self):
+        recent, _reason = wd._goal_autoarm_recent_human_activity(
+            self.sid, "/nonexistent/path-339.jsonl", time.time())
+        self.assertFalse(recent)
 
 
 class TestGoalNeverArmedReadFailure(unittest.TestCase):
