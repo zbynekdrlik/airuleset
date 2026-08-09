@@ -6870,6 +6870,72 @@ def _is_ssh_auth_failure(returncode, stderr):
     return returncode == 255 and bool(_SSH_AUTH_DENIED_RX.search(stderr or ""))
 
 
+# --- #347: push-time guard against a newly-activated subdev stream account
+# silently never gaining its own REMOTE_HOSTS registration -------------------
+# Root cause of the incident this guards against: david2/david3/david4 were
+# provisioned on the shared subdev VPS (odoo-erp#3282) days before airuleset
+# gained their REMOTE_HOSTS/AUTHORITY_BY_USER/etc entries (#326) — nothing in
+# `push` ever compared "which Linux accounts actually exist on the shared
+# box" against "which accounts we think we manage", so the gap was invisible
+# until the owner caught it live. montalu2/3/4 (#251/#263) and simap/miva1
+# (#143/#300) hit variants of the identical class before that.
+_HOME_AUDIT_MARKER = "===AIRULESET-HOMES==="
+
+
+def _shared_remote_host_ips():
+    """Host IPs backed by MORE than one REMOTE_HOSTS entry — boxes where a
+    brand-new account can be hand-provisioned without ever gaining its own
+    registration entry. A single-entry host (dev2, gatekeeper) has no such
+    gap by construction, so auditing it would be pure overhead for zero
+    possible finding."""
+    seen = {}
+    for r in REMOTE_HOSTS:
+        h = r.get("host")
+        seen[h] = seen.get(h, 0) + 1
+    return {h for h, n in seen.items() if n > 1}
+
+
+def _remote_cmd_with_home_audit(remote_cmd):
+    """Append a same-connection `/home` listing to an existing remote
+    install command, WITHOUT letting the trailing `ls` change the ssh
+    call's own exit code — `;` sequencing after the `&&`-chained install
+    steps would otherwise make the LAST command's exit code win, silently
+    turning a genuine `git pull`/`install` failure into a false push
+    success the moment this audit rides along on that connection. Capture
+    the real exit code with `$?` immediately after the original chain, run
+    the audit unconditionally, then `exit` with the ORIGINAL code."""
+    return (
+        remote_cmd
+        + "; __ar_rc=$?; echo '%s'; ls -1 /home 2>/dev/null; exit $__ar_rc"
+        % _HOME_AUDIT_MARKER
+    )
+
+
+def _parse_home_audit_output(stdout):
+    """Extract the `/home` listing appended by `_remote_cmd_with_home_audit`
+    from a completed ssh call's stdout. Returns "" when the marker never
+    appears — e.g. ssh itself failed before the remote shell ever ran the
+    audit at all, which is not this guard's concern (a real auth/timeout
+    failure is already tracked by `cmd_push`'s own `failed` list)."""
+    text = stdout or ""
+    if _HOME_AUDIT_MARKER not in text:
+        return ""
+    return text.split(_HOME_AUDIT_MARKER, 1)[1]
+
+
+def unregistered_home_accounts(host, home_listing):
+    """Home directory names present on `host` (from a real `/home` listing)
+    that have NO matching REMOTE_HOSTS entry for that EXACT host — #347's
+    push-time guard against a newly-activated stream account silently never
+    being registered as a push target. Read-only: the caller decides what
+    to do with a non-empty result (a loud, non-blocking warning — refusing
+    to push over an unrelated new account would be a worse failure mode
+    than the gap this exists to report)."""
+    registered = {r["user"] for r in REMOTE_HOSTS if r.get("host") == host}
+    names = {ln.strip() for ln in (home_listing or "").splitlines() if ln.strip()}
+    return sorted(names - registered)
+
+
 def cmd_push(args):
     """Push to GitHub and deploy to all remote machines.
 
@@ -6983,10 +7049,22 @@ def cmd_push(args):
             failed.append(("local(dev1)", "install rc=%s" % e.code))
 
     # 3. Deploy to each remote
+    # #347: audit ANY shared VPS host's /home listing for an account with
+    # no REMOTE_HOSTS entry, exactly ONCE per host, riding the FIRST
+    # already-happening connection to that host — never a dedicated extra
+    # ssh call (#341: never re-probe the same host for a second, unrelated
+    # purpose — that is exactly what compounded the fail2ban risk there).
+    shared_hosts = _shared_remote_host_ips()
+    audited_hosts = set()
     for remote in REMOTE_HOSTS:
         print(f"\n{'=' * 50}")
         print(f"Deploying to {remote['name']} ({remote['host']})...")
         remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
+        audit_this_call = (remote["host"] in shared_hosts
+                            and remote["host"] not in audited_hosts)
+        if audit_this_call:
+            audited_hosts.add(remote["host"])
+            remote_cmd = _remote_cmd_with_home_audit(remote_cmd)
         identity = remote.get("identity")
         if identity:
             # key-based SSH (e.g. the gatekeeper — prod-critical, no shared
@@ -7056,6 +7134,26 @@ def cmd_push(args):
             stderr_out = ssh_result.stderr.strip()
             if stderr_out:
                 print(f"  [stderr] {stderr_out}")
+
+        # #347: report (never block) any home directory on this shared
+        # host with no matching REMOTE_HOSTS entry — the systemic guard
+        # against a newly-activated stream account silently never being
+        # registered as a push target. Advisory only: one unrelated stray
+        # /home entry (a not-yet-onboarded or test account) must never
+        # abort deployment to every OTHER, already-registered account.
+        if audit_this_call:
+            gap = unregistered_home_accounts(
+                remote["host"], _parse_home_audit_output(ssh_result.stdout))
+            if gap:
+                print(f"\n⚠ REGISTRATION GAP on {remote['host']}: /home has "
+                      f"account(s) with NO REMOTE_HOSTS entry: "
+                      f"{', '.join(gap)} — a stream account was activated but "
+                      f"never registered as a push target. Register it: "
+                      f"REMOTE_HOSTS + AUTHORITY_BY_USER + the "
+                      f"block-subdev-ssh-misuse.sh allow-list + watchdog's "
+                      f"_REDUCED_STREAM_USERS + notify's STREAM_NOTIFY_OWNER "
+                      f"(see #251/#263/#300/#326/#347's own onboarding "
+                      f"checklist).", file=sys.stderr)
 
     # 3b. Deliver the meeting-analysis Soniox key to every subdev stream
     # account (#275) -- a true no-op when REMOTE_HOSTS has no such account
