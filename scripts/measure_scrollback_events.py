@@ -65,6 +65,7 @@ import signal
 import struct
 import sys
 import termios
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -85,29 +86,90 @@ def _pty_resize(fd, cols, rows):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+def _drain_fd(fd):
+    """Continuously read a pty MASTER fd and discard the bytes, so the
+    slave-side writer (an attached tmux client re-rendering the whole
+    screen on every spinner tick) can never block on write() once the
+    kernel pty buffer (~64KB) fills with nobody reading it. Runs as a
+    background daemon thread for the lifetime of the fd; a read error just
+    means the fd was closed elsewhere (kill_pty_client) or the process
+    holding the slave end exited -- expected, logged, non-fatal."""
+    try:
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+    except OSError as e:
+        print(f"_drain_fd: read(fd={fd}) ended (non-fatal): {e}", file=sys.stderr)
+
+
+def terminate_pid(pid, timeout=3.0, poll=0.05):
+    """Bounded reap: SIGTERM, poll for exit up to `timeout` seconds, then
+    an unconditional SIGKILL + a final blocking waitpid. SIGKILL cannot be
+    ignored or blocked, so this call is GUARANTEED to return -- the
+    harness must never again hang indefinitely on a child that doesn't
+    honor SIGTERM (#291: a live run hung >500s on exactly a plain
+    unbounded `os.waitpid(pid, 0)` with no escalation at all).
+
+    Uses time.monotonic() for the deadline (adversarial review, #291
+    round 2): time.time() can step BACKWARD (an NTP correction), which
+    would extend the SIGTERM grace window arbitrarily -- SIGKILL still
+    eventually fires either way, so this was never an unbounded-hang risk,
+    just an avoidable one."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError as e:
+        print(f"terminate_pid: pid {pid} already gone before SIGTERM (non-fatal): {e}",
+              file=sys.stderr)
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            reaped, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError as e:
+            print(f"terminate_pid: waitpid({pid}, WNOHANG) failed -- already reaped "
+                  f"(non-fatal): {e}", file=sys.stderr)
+            return
+        if reaped == pid:
+            return
+        time.sleep(poll)
+    print(f"terminate_pid: pid {pid} did not exit within {timeout}s of SIGTERM -- "
+          f"escalating to SIGKILL", file=sys.stderr)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError as e:
+        print(f"terminate_pid: pid {pid} gone before SIGKILL (non-fatal): {e}", file=sys.stderr)
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError as e:
+        print(f"terminate_pid: final waitpid({pid}) failed (non-fatal): {e}", file=sys.stderr)
+
+
 def attach_pty_client(sock, session, cols, rows):
     """A REAL tmux client attach via a genuine attached pty (never
     `send-keys` -- see this repo's own #236/#267 precedent: only a truly
     attached client's negotiated size makes tmux's `window-size` option
     logic fire for real). Sized BEFORE exec so tmux's own initial
-    negotiation already sees the target geometry."""
+    negotiation already sees the target geometry.
+
+    Two #291 hardenings over the naive form: FD_CLOEXEC on the master fd
+    (so a LATER attach_pty_client() call's own pty.fork()+exec never
+    inherits an earlier client's still-open master), and a background
+    drain thread on the master (see _drain_fd) so the attached client can
+    never block on a full, unread pty buffer."""
     pid, fd = pty.fork()
     if pid == 0:
         _pty_resize(0, cols, rows)  # child's own fd 0 is the pty slave
         os.execvp("tmux", ["tmux", "-L", sock, "attach", "-t", session])
         os._exit(1)
+    flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+    fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
+    threading.Thread(target=_drain_fd, args=(fd,), daemon=True).start()
     return pid, fd
 
 
 def kill_pty_client(pid, fd):
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError as e:
-        print(f"kill_pty_client: pid {pid} already gone (non-fatal): {e}", file=sys.stderr)
-    try:
-        os.waitpid(pid, 0)
-    except ChildProcessError as e:
-        print(f"kill_pty_client: waitpid({pid}) failed (non-fatal): {e}", file=sys.stderr)
+    terminate_pid(pid)
     try:
         os.close(fd)
     except OSError as e:
@@ -249,6 +311,14 @@ def run_compact_arm(sock, base_dir, n_lines, model):
 
 
 def teardown(sock, root, keep):
+    """#291 adversarial review, M2: `shutil.rmtree(..., ignore_errors=True)`
+    sometimes silently leaves `root` behind even on an otherwise fully
+    successful run (observed twice live, root cause not chased down --
+    a plausible ENOTEMPTY from something under the tree racing the walk,
+    e.g. the just-killed claude process's own async config writes). `root`
+    always holds a scratch-profile COPY of the real credentials file, so
+    a silent leftover is a lingering credential copy, not just clutter.
+    Retry once, then WARN LOUDLY (never silently) if it is still there."""
     try:
         msh.tmux(sock, "kill-server", timeout=10)
     except Exception as e:
@@ -256,6 +326,12 @@ def teardown(sock, root, keep):
     if not keep:
         import shutil
         shutil.rmtree(root, ignore_errors=True)
+        if Path(root).exists():
+            shutil.rmtree(root, ignore_errors=True)
+        if Path(root).exists():
+            print(f"teardown: LEFTOVER scratch dir survived two rmtree attempts "
+                  f"-- still holds a credential-copy scratch profile: {root}",
+                  file=sys.stderr)
 
 
 def main():
