@@ -44,6 +44,28 @@ set -euo pipefail
 # MID-STREAM <event> has no <status> — still live), or a TaskStop/KillShell
 # tool_use naming the id. Inherently ownership-scoped (own transcript).
 #
+# UNBACKED-MONITORING-CLAIM CHECK (airuleset #343). The block above catches
+# a subagent that OWNS live background work and terminates without waiting —
+# the mirror-image failure has no check anywhere: a subagent whose final
+# message CLAIMS ongoing monitoring/watching ("monitoring shadow E2E to
+# terminal" — the odoo-erp incident this ticket documents) while owning
+# NOTHING live. A SubagentStop is terminal by construction — nothing resumes
+# a stopped subagent — so an un-backed "still watching" claim is a genuine
+# lie with no mechanism catching it: neither `stop-check-working-liveness.sh`
+# nor `stop-check-status-marker.sh` reaches a SubagentStop at all (both are
+# `Stop`-only). Fires ONLY once LIVE is already confirmed empty (the existing
+# check above has first crack, unchanged) — scans `last_assistant_message`
+# for an ONGOING-tense monitor/watch claim (present participle or bare/future
+# form: "monitoring", "monitors", "will monitor", "watching" — deliberately
+# narrow to the ticket's own vocabulary). Past-tense forms ("monitored",
+# "watched") never match: the `\b` word boundary immediately after
+# "monitor"/"watch" fails to hold when the very next character is "ed" (both
+# are word characters — no transition), so a genuinely COMPLETED report
+# ("I monitored the deploy, it succeeded") is untouched. Reuses the SAME
+# per-(session, agent) BLOCK_FILE the check above already writes — a
+# repeated unbacked claim still fails open past MAX_BLOCKS, same as every
+# other reason in this hook.
+#
 # Fail-open everywhere: no jq/python, missing/unreadable transcript
 # (ownership unprovable → nothing blocks), parse errors, and after
 # MAX_BLOCKS blocks per (session, agent) — the transcript is written
@@ -215,7 +237,40 @@ PYEOF
 )
 LIVE=$(echo "$LIVE" | tr -s ' \n' ' ' | sed 's/^ *//;s/ *$//')
 
-[ -z "$LIVE" ] && { rm -f "$BLOCK_FILE" "$LEDGER_FILE"; exit 0; }
+if [ -z "$LIVE" ]; then
+    rm -f "$LEDGER_FILE"
+
+    # #343 -- nothing live is owned; check for an UNBACKED "still watching"
+    # claim instead. Present/future tense only (see the header note above
+    # for why "monitored"/"watched" past tense never match).
+    MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || echo "")
+    if echo "$MSG" | grep -qiE '\bmonitor(ing|s)?\b|\bwatching\b'; then
+        echo $((BLOCKS + 1)) > "$BLOCK_FILE"
+        REASON2="Your final message claims you are still monitoring/watching \
+something, but you have NO live tracked background work — you are a \
+SUBAGENT, and your SubagentStop is TERMINAL: nothing resumes a stopped \
+subagent, so nothing continues watching once this turn ends. This is the \
+exact odoo-erp incident airuleset #343 documents: a lane agent's last words \
+were 'monitoring shadow E2E to terminal', the run failed 20 minutes later, \
+and nothing woke the coordinator. Pick ONE: (1) if the resource genuinely \
+has not resolved yet, hold this turn with a real bounded FOREGROUND poll \
+(e.g. 'sleep 300 && gh run view <id> --json status,conclusion', repeated \
+until terminal) and report the ACTUAL outcome, never a promise to keep \
+checking; (2) launch genuinely trackable background work (Bash \
+run_in_background / Monitor / an async Agent dispatch) so this SAME hook's \
+own live-task check covers you on your next stop; (3) if your dispatch \
+contract hands the watch back to your caller, drop the 'monitoring'/\
+'watching' language entirely and instead report the CURRENT status as a \
+plain fact (e.g. 'run <id> was in-progress as of <time>; status unknown \
+after this — re-check needed') so the coordinator's own transcript captures \
+something it can act on, not an open-ended claim nobody is honoring."
+        jq -n --arg r "$REASON2" '{"decision":"block","reason":$r}'
+        exit 0
+    fi
+
+    rm -f "$BLOCK_FILE"
+    exit 0
+fi
 
 echo $((BLOCKS + 1)) > "$BLOCK_FILE"
 
