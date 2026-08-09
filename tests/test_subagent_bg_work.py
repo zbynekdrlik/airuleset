@@ -760,5 +760,112 @@ class TestWiring(unittest.TestCase):
         self.assertIn("subagent-stop-check-bg-work.sh", txt)
 
 
+class TestBgtasksDirEnvOverride(unittest.TestCase):
+    """#346: both bgtasks-ledger hooks hardcode /tmp with no isolation, and
+    this file's OWN tests write/read that exact shared namespace. Most
+    tests randomize their session id, but two (path-traversal-sanitization
+    regression tests, elsewhere in this file) deliberately use a FIXED,
+    non-randomized id -- so when the SAME test runs concurrently in two
+    separate PROCESSES on the same box (two fleet-dispatched workers each
+    running the full local suite is a live, documented shape on this repo's
+    own boxes), the two processes' ledger writes/deletes collide on the
+    literal same file. This class proves the collision deterministically
+    (no timing race -- the exact interleaving is driven by hand, in one
+    test method) and proves an AIRULESET_BGTASKS_DIR override eliminates
+    it even for two runs sharing the IDENTICAL session_id/agent_id."""
+
+    SID, AID = "t-346-shared", "aSHARED1"
+
+    @staticmethod
+    def _env(bgdir):
+        env = dict(os.environ)
+        if bgdir is None:
+            env.pop("AIRULESET_BGTASKS_DIR", None)
+        else:
+            env["AIRULESET_BGTASKS_DIR"] = bgdir
+        return env
+
+    def _record(self, task_id, bgdir):
+        return subprocess.run(
+            ["bash", str(RECORD_HOOK)],
+            input=json.dumps({
+                "session_id": self.SID, "agent_id": self.AID,
+                "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "x"},
+                "tool_response": {"backgroundTaskId": task_id}}),
+            capture_output=True, text=True, env=self._env(bgdir))
+
+    def _stop(self, live_task_id, bgdir):
+        return subprocess.run(
+            ["bash", str(STOP_HOOK)],
+            input=json.dumps({
+                "session_id": self.SID, "agent_id": self.AID,
+                "hook_event_name": "SubagentStop",
+                "transcript_path": "/nonexistent/x.jsonl",
+                "agent_transcript_path": "/nonexistent/x.jsonl",
+                "background_tasks": [
+                    {"id": live_task_id, "type": "shell",
+                     "status": "running"}]}),
+            capture_output=True, text=True, env=self._env(bgdir))
+
+    def test_two_runs_sharing_a_ledger_path_collide_unless_each_has_its_own_dir(self):
+        with TemporaryDirectory() as dirA, TemporaryDirectory() as dirB:
+            # "Run A" (a concurrently-running OTHER process) records its
+            # own launch under the shared sid/aid, asking (via env) for
+            # dirA -- an unfixed hook ignores this and still writes /tmp.
+            rA = self._record("run-a-task", dirA)
+            self.assertEqual(rA.returncode, 0, rA.stderr)
+            self.addCleanup(lambda: Path(
+                "/tmp/airuleset-bgtasks-%s-%s" % (self.SID, self.AID)
+                ).unlink(missing_ok=True))
+            self.addCleanup(lambda: Path(
+                dirA, "airuleset-bgtasks-%s-%s" % (self.SID, self.AID)
+                ).unlink(missing_ok=True))
+
+            # "Run B" is THIS invocation -- it also launches under the
+            # SAME sid/aid (unavoidable while the hook hardcodes /tmp with
+            # no isolation) and asks for dirB.
+            rB = self._record("run-b-task", dirB)
+            self.assertEqual(rB.returncode, 0, rB.stderr)
+
+            # Run A "finishes" and its OWN cleanup removes ITS OWN ledger
+            # file -- wherever its write actually landed (either /tmp, if
+            # the hook still ignores the env var, or dirA, once fixed).
+            Path("/tmp/airuleset-bgtasks-%s-%s" % (self.SID, self.AID)
+                 ).unlink(missing_ok=True)
+            Path(dirA, "airuleset-bgtasks-%s-%s" % (self.SID, self.AID)
+                 ).unlink(missing_ok=True)
+
+            # Run B now stops, expecting ITS OWN live task to still block
+            # it -- this must hold regardless of what Run A just did.
+            out = self._stop("run-b-task", dirB)
+            self.assertIn(
+                "block", out.stdout,
+                "Run B's own live task must still block Run B's stop, "
+                "even though Run A shared and then cleared the ledger "
+                "path for the IDENTICAL session_id/agent_id -- #346")
+
+    def test_default_behavior_is_unchanged_when_the_env_var_is_unset(self):
+        # production callers never set AIRULESET_BGTASKS_DIR -- confirm the
+        # override is opt-in, not a silent behavior change.
+        sid = "t-346-default-" + uuid.uuid4().hex[:8]
+        aid = "aDEF1"
+        legacy = Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, aid))
+        self.addCleanup(lambda: legacy.unlink(missing_ok=True))
+        r = subprocess.run(
+            ["bash", str(RECORD_HOOK)],
+            input=json.dumps({
+                "session_id": sid, "agent_id": aid,
+                "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": {"command": "x"},
+                "tool_response": {"backgroundTaskId": "deftask1"}}),
+            capture_output=True, text=True, env=self._env(None))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(legacy.exists(),
+                        "with no override set, the ledger must still "
+                        "land at the historical /tmp path")
+        self.assertIn("deftask1", legacy.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
