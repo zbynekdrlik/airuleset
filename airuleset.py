@@ -9652,13 +9652,31 @@ def _remote_ssh_prefix(remote):
 
     ONE place, so a second collector (`_delegation_remote_cmd`, #130) reuses
     the sanctioned ssh shape byte-for-byte instead of inventing a parallel one
-    — `hooks/block-subdev-ssh-misuse.sh` guards exactly this."""
+    — `hooks/block-subdev-ssh-misuse.sh` guards exactly this.
+
+    #342: the same per-connection retry-cap hardening a sibling ticket
+    already added to `cmd_push`'s deploy loop and
+    `provision_subdev_soniox_key()` — BatchMode=yes on the identity branch
+    so a failed pubkey attempt against an unprovisioned/misconfigured
+    account fails IMMEDIATELY instead of falling through to an interactive
+    password/keyboard-interactive retry, and NumberOfPasswordPrompts=1 on
+    the sshpass branch so a wrong/unprovisioned password is tried ONCE
+    instead of openssh's own default of 3 (sshpass happily re-supplies the
+    same password on every re-prompt). Deliberately NOT porting that
+    sibling ticket's cross-account "never re-probe a known-bad host this
+    run" tracking set here — burn/delegation are on-demand, usually
+    single-host CLI reports, and job 16's fleet fetch (the third caller,
+    via `_fleet_remote_cmd` below) already gates each host to at most one
+    attempt per UTC hour, spreading any retries comfortably inside a
+    typical fail2ban findtime window without new state."""
     identity = remote.get("identity")
     if identity:
         return ["ssh", "-i", os.path.expanduser(identity),
                 "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes",
                 f"{remote['user']}@{remote['host']}"]
     return ["sshpass", "-p", "newlevel", "ssh", "-o", "StrictHostKeyChecking=no",
+            "-o", "NumberOfPasswordPrompts=1",
             f"{remote['user']}@{remote['host']}"]
 
 
@@ -9698,15 +9716,17 @@ def _burn_remote(remote, days):
 
 def _fleet_remote_cmd(remote):
     """Pure ssh-command builder — split out for unit-testability, mirroring
-    `_burn_remote_cmd`'s own split."""
+    `_burn_remote_cmd`'s own split.
+
+    #342: this used to duplicate `_remote_ssh_prefix()`'s identity/sshpass
+    branching inline instead of calling it — so this docstring's own claim
+    of reusing "the EXACT same identity/sshpass selection" was false, and
+    a hardening fix landing on `_remote_ssh_prefix()` alone would silently
+    NOT reach job 16's fleet fetch. Calling the shared builder directly
+    makes the claim true by construction and guarantees this stays in sync
+    with `_burn_remote_cmd`/`_delegation_remote_cmd` automatically."""
     remote_cmd = "tail -n 1 ~/.claude/burn-history/snapshots.jsonl"
-    identity = remote.get("identity")
-    if identity:
-        return ["ssh", "-i", os.path.expanduser(identity),
-                "-o", "StrictHostKeyChecking=no",
-                f"{remote['user']}@{remote['host']}", remote_cmd]
-    return ["sshpass", "-p", "newlevel", "ssh", "-o", "StrictHostKeyChecking=no",
-            f"{remote['user']}@{remote['host']}", remote_cmd]
+    return _remote_ssh_prefix(remote) + [remote_cmd]
 
 
 def _hour_bucket_of_ts(ts_str):
