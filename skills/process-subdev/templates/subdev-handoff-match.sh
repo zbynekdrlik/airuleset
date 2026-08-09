@@ -89,14 +89,19 @@ BODY="$(cat)"
 FIRST_LINE="${BODY%%$'\n'*}"
 
 # Gatekeeper finding/review comments open with **GATEKEEPER — never a match,
-# in any mode. #331: the character right after GATEKEEPER must NOT be a
-# hyphen — every real gatekeeper-authored opening observed to date is
-# "**GATEKEEPER " / "**GATEKEEPER:" / "**GATEKEEPER —" (space/colon/dash-as-
-# separator), never "GATEKEEPER-something" glued on — so this exemption must
-# NOT also swallow a legitimate bolded **GATEKEEPER-ACTION:** request marker
-# from a sub-dev stream (grep -E has no negative lookahead, so the exclusion
-# is written as "next char is anything but a literal hyphen, or end of line").
-if grep -qE '^[[:space:]]*\*\*GATEKEEPER([^-]|$)' <<<"$FIRST_LINE"; then
+# in any mode. #331 (adversarial-review fix): a "next char is not a literal
+# hyphen" carve-out is too narrow an exception in EITHER direction — it must
+# exclude every real gatekeeper-authored opening ("**GATEKEEPER " /
+# "**GATEKEEPER:" / "**GATEKEEPER —") while NEVER excluding the one
+# legitimate hyphenated marker a sub-dev stream can open a comment with,
+# **GATEKEEPER-ACTION:**. grep -E has no negative lookahead, so this is
+# split into two greps: "opens with **GATEKEEPER" AND "is not the
+# **GATEKEEPER-ACTION: marker" — a hyphen-glued opening OTHER than that one
+# marker (e.g. **GATEKEEPER-BOUNCE**, the review's own live repro) is now
+# correctly excluded, which the earlier single-lookahead-substitute regex
+# missed.
+if grep -qE '^[[:space:]]*\*\*GATEKEEPER' <<<"$FIRST_LINE" \
+   && ! grep -qE '^[[:space:]]*\*\*GATEKEEPER-ACTION:' <<<"$FIRST_LINE"; then
   echo "gatekeeper finding/review comment — no label (#1500)"
   exit 1
 fi
