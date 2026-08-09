@@ -491,6 +491,114 @@ if msg_has "$MSG_MENTION" -qiE "(can|could|would) you (please )?(test|verify|con
     fi
 fi
 
+# Check for a DIRECT request that the user PASTE a credential VALUE into chat
+# (#152 point 3, user-decided 2026-08-08: mechanically enforce via THIS
+# existing hook — FREEZE forbids a new hook file). receive-files-via-upload-
+# url.md already bans this in prose ("send me the API key here", "paste the
+# token", "čo je to heslo?") and documents the real channel (`secret
+# request`/`secret exec`) — this makes the ban mechanical.
+#
+# Scoped NARROW on purpose per the user's own decision ("úzke vzory priamej
+# žiadosti... minimum falošných poplachov je výslovná podmienka rozhodnutia").
+# A fresh-context adversarial review of the first cut found the DOMINANT
+# false-positive class: verb+noun proximity ALONE, with no requirement that
+# the destination is chat/the assistant, hard-blocks routine third-person
+# technical prose ("The client must send the token in the Authorization
+# header.", "Paste the token into the GitHub Secrets UI.", "...give each
+# stage a token budget of ~50k."). The fix: an INCRIMINATING match now also
+# requires a CHAT-DIRECTED marker present in the message ("me"/"here"/"to
+# me"/"in chat" — English; "mi"/"sem"/"chatu"/"chate" — Slovak), computed
+# as its own boolean and ANDed in bash (never folded into one giant regex —
+# mirrors this file's own established HAS_BOXDRAW/HAS_LAYOUT_KW/
+# NO_COMPANION_URL shape a few checks above). Every one of the review's own
+# false-positive sentences names a DIFFERENT destination (a header, a
+# Secrets UI, a budget, a browser) and so carries none of these markers.
+# The genuine interrogative form ("what's the password?"/"aké je heslo?")
+# needs no destination marker — a direct question already expects the
+# answer typed back in the SAME chat, which is exactly the risk.
+#
+# The interrogative branch requires a LITERAL trailing "?" (not merely
+# optional) and is ANCHORED at the end of its own line, so a policy/format
+# question ("what's the password REQUIREMENT") or a declarative sentence
+# that happens to end in the noun with no question mark ("...see what's in
+# the token.") do not collide — both were review findings.
+#
+# The noun family is deliberately narrow: password / API key / token /
+# connection string / (plural) credentials — the module's own enumerated
+# list, plus "credentials" (only the plural, only paired with the same
+# destination-marker gate above) per the review's own finding that a bare
+# "share the login credentials" request is a common, low-ambiguity real
+# shape worth covering. "secret" / singular "credential" / "PAT" remain
+# REJECTED: common, ambiguous English words/acronyms ("give him a pat on
+# the back", "share the secret of your success") a proximity match cannot
+# tell apart from a genuine request, and minimising false positives is the
+# explicit condition of this decision.
+#
+# Genuinely natural SLOVAK coverage, not just the English loanword form
+# (#316/#319's own lesson: an English-only regex is blind on every away/
+# stream box, since every real question this repo ships is Slovak) —
+# verified empirically against dedicated Slovak fixtures. LC_ALL=C.UTF-8 is
+# forced on every Slovak grep call: \b next to a diacritic is itself
+# locale-dependent under a bare C/POSIX locale (the SAME gotcha
+# SK_DISPATCH_RX/SK_APPROVAL_RX/SK_MERGE_FLAT already hit in this file), and
+# converting bracket classes to plain alternation does NOT close it by
+# itself (#316's own reproduction) — only a real UTF-8 locale does. The verb
+# "daj" (give) was DROPPED from the Slovak list — the review found it
+# collides with the extremely common idiom "daj mi vedieť" ("let me know"),
+# which pairs "daj" with the dative "mi" (a destination marker!) for a
+# reason that has nothing to do with a credential, and the ticket's own
+# four named Slovak examples never used "daj" anyway.
+#
+# Escape: the SAME message referencing the sanctioned channel (`secret
+# request`/`secret exec`) is the CORRECT shape and must never be blocked —
+# checked on raw MSG (not MSG_MENTION), since the reference is routinely
+# inside backticks and mention-stripping would delete it before the escape
+# could ever be seen. It is an EXONERATING signal, so an unanswerable check
+# denies it (msg_missing's own fail-closed direction, #194's taxonomy).
+#
+# The main verb+noun pattern runs on MSG_MENTION (mention-stripped) — a
+# message merely QUOTING the banned phrase (documenting the rule, explaining
+# what NOT to say) is a MENTION, not a bare offer, and must not be gated.
+#
+# Accepted residuals (narrow-on-purpose, matching this file's own established
+# convention elsewhere — all FALSE NEGATIVES, never false positives, per
+# review): a request verb/noun split across more than ~20 characters or a
+# sentence boundary; a credential name given only as a backtick-quoted
+# env-var identifier ("paste your `STRIPE_API_KEY` here") — mention-stripping
+# removes the backtick span entirely, along with the only word that would
+# have identified it as a credential; a message that rationalises the
+# request by NAMING the (allegedly broken) secret-request channel while
+# still asking for the value in the same breath — the escape is a raw
+# substring match, by design, and does not try to tell a genuine escape
+# from a self-serving one; Slovak inflections outside the declared forms
+# ("zadaj heslo", "heslá", "heslom"); a synonym verb/noun outside the
+# declared word families (e.g. "forward me the key", "odošli mi heslo").
+CRED_VERB_RX="(paste|send|share|type|enter|copy|give)"
+CRED_NOUN_RX="(password(s)?|api[ _-]?key(s)?|token(s)?|connection[ _-]?string(s)?|credentials)"
+CRED_DEST_RX="\b(me|here|to me|in (the )?chat|into (the )?chat)\b"
+CRED_ESCAPE_MISSING=$(msg_missing "$MSG" -qiE "secret request|secret exec|airuleset\.py secret" && echo 1 || echo 0)
+CRED_VN_MATCH=$(msg_has "$MSG_MENTION" -qiE "\b${CRED_VERB_RX}\b.{0,20}\b${CRED_NOUN_RX}\b|\b${CRED_NOUN_RX}\b.{0,20}\b${CRED_VERB_RX}\b" && echo 1 || echo 0)
+CRED_HAS_DEST=$(msg_has "$MSG_MENTION" -qiE "$CRED_DEST_RX" && echo 1 || echo 0)
+CRED_INTERROG_MATCH=$(msg_has "$MSG_MENTION" -qiE "\bwhat('s| is)\b.{0,15}\b${CRED_NOUN_RX}\b\?[[:space:]]*$" && echo 1 || echo 0)
+if [ "$CRED_ESCAPE_MISSING" = "1" ] && { { [ "$CRED_VN_MATCH" = "1" ] && [ "$CRED_HAS_DEST" = "1" ]; } || [ "$CRED_INTERROG_MATCH" = "1" ]; }; then
+    echo "VIOLATION: You asked the user to paste/send a credential VALUE directly into chat (password / API key / token / connection string / credentials). A value typed into chat writes into the transcript FOREVER — it survives compaction and cannot be revoked. Use 'python3 ~/devel/airuleset/airuleset.py secret request <NAME>' (hand the user the printed URL, they paste it from their own browser) or 'secret exec <NAME> -- <cmd>' to hand it to a process without ever seeing the value. See receive-files-via-upload-url.md's credentials section." >&2
+    add_hard "Direct credential-value request in chat — use 'airuleset.py secret request'/'secret exec', never ask the user to paste it here"
+fi
+
+# Same shape, stated in genuinely natural SLOVAK (no English loanword
+# needed) — see the block comment above for the full rationale.
+SK_CRED_VERB_RX="(po[sš]li|nap[íi][sš]|vlo[zž]|zdie[ľl]aj|skop[íi]ruj)"
+SK_CRED_NOUN_RX="(hesl[oau]|token(u|om)?|api[[:space:]]+k[ľl][uú][čc][a]?|prihlasovacie[[:space:]]+[uú]daje)"
+SK_CRED_DEST_RX="\b(mi|sem|chatu|chate)\b"
+SK_CRED_INTERROG_RX="(ak[eé] je|[cč]o je( to)?)"
+SK_CRED_VN_MATCH=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE "\b${SK_CRED_VERB_RX}\b.{0,20}\b${SK_CRED_NOUN_RX}\b|\b${SK_CRED_NOUN_RX}\b.{0,20}\b${SK_CRED_VERB_RX}\b" && echo 1 || echo 0)
+SK_CRED_HAS_DEST=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE "$SK_CRED_DEST_RX" && echo 1 || echo 0)
+SK_CRED_INTERROG_MATCH=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE "\b${SK_CRED_INTERROG_RX}\b.{0,15}\b${SK_CRED_NOUN_RX}\b\?[[:space:]]*$" && echo 1 || echo 0)
+if [ "$CRED_ESCAPE_MISSING" = "1" ] && { { [ "$SK_CRED_VN_MATCH" = "1" ] && [ "$SK_CRED_HAS_DEST" = "1" ]; } || [ "$SK_CRED_INTERROG_MATCH" = "1" ]; }; then
+    echo "VIOLATION: Požiadal si používateľa, aby vložil hodnotu credentialu (heslo / API kľúč / token / prihlasovacie údaje) priamo do chatu. Hodnota napísaná do chatu sa navždy zapíše do transkriptu — prežije kompakciu a nedá sa odvolať. Použi 'python3 ~/devel/airuleset/airuleset.py secret request <NAME>' (pošli používateľovi vypísanú URL, hodnotu vloží z vlastného prehliadača) alebo 'secret exec <NAME> -- <cmd>' na odovzdanie hodnoty procesu bez toho, aby si ju niekedy videl. Pozri sekciu o credentialoch v receive-files-via-upload-url.md." >&2
+    add_hard "Priama žiadosť o hodnotu credentialu v chate (SK) — použi 'airuleset.py secret request'/'secret exec', nikdy nežiadaj vloženie sem"
+fi
+
 # Check for "say go / ready to proceed" prose questions
 if msg_has "$MSG_NOGOAL" -qiE "say.?go|shall (i|we) proceed|if good.?say|ready when you are|ready for.?next|ready to execute"; then
     echo "VIOLATION: You asked the user to 'say go' or confirm proceed in prose. The plan is approved — chain directly to the next step without asking. See ask-before-assuming.md pre-answered table." >&2
