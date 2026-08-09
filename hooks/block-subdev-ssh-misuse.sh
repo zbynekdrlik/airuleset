@@ -29,9 +29,9 @@ set -euo pipefail
 #                          `identity` entry; montalu2/3/4 are three MORE
 #                          full parallel montalu streams, airuleset#251).
 #   - marek@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519.
-#   - david@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519.
 #   - david[234]@<subdev> — ONLY with -i .../gatekeeper_access_ed25519
-#                          (airuleset#326 — three MORE parallel david
+#                          (covers david itself PLUS its family david2/3/4,
+#                          airuleset#326 — three MORE parallel david
 #                          streams, additional capacity for the same
 #                          external developer, so they share david's own
 #                          identity requirement).
@@ -444,7 +444,6 @@ if [ "$RC" -eq 2 ]; then
     echo "  source of truth, read it before any ad-hoc subdev ssh):" >&2
     echo "    montalu[234]@subdev   — default key OR sshpass -p" >&2
     echo "    marek@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
-    echo "    david@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    david[234]@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    simap@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    miva1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2

@@ -4351,25 +4351,34 @@ BOUNCE_RENUDGE_SECONDS = 6 * 3600    # same ticket set re-nudged at most this of
 #
 # simap and miva1 (airuleset#143 / #300) are NOT in this tuple -- an
 # omission carried over unrevisited from #143, never a documented decision.
-# Consequence, scoped to _CROSS_STREAM_REPOS (odoo-erp): _gkreq_supervisor_root
-# would (wrongly) treat a pane under /home/simap/ or /home/miva1/ as a
-# FULL-authority supervisor root, so job 11 could nudge that stream's OWN
-# pane to work a needs-gatekeeper ticket it filed itself -- backwards, the
-# same failure _gkreq_supervisor_root's own docstring says to avoid. Neither
-# stream has ever produced that failure in production (this repo's own FREEZE:
-# "the same defect exists in N more places" is not fixed pre-emptively) --
-# if it ever does, start here.
+# Their odoo-erp involvement was never confirmed at onboarding time, so
+# widening the tuple for them would be exactly the speculative pre-emptive
+# fix this repo's own FREEZE forbids ("the same defect exists in N more
+# places" is not fixed pre-emptively). Consequence, scoped to
+# _CROSS_STREAM_REPOS (odoo-erp): _gkreq_supervisor_root would (wrongly)
+# treat a pane under /home/simap/ or /home/miva1/ as a FULL-authority
+# supervisor root, so job 11 could nudge that stream's OWN pane to work a
+# needs-gatekeeper ticket it filed itself -- backwards, the same failure
+# _gkreq_supervisor_root's own docstring says to avoid. Neither stream has
+# ever produced that failure in production -- if it ever does, start here.
 #
-# david2/david3/david4 (airuleset#326, 2026-08-08) are ALSO deliberately NOT
-# in this tuple, following the SAME simap/miva1 precedent above -- even
-# though they DO work on odoo-erp (a _CROSS_STREAM_REPOS member, same as
-# david itself, which IS in this tuple). Widening the tuple for a stream
-# this ticket's own scope didn't cover would be exactly the pre-emptive fix
-# FREEZE forbids; the identical failure shape this bullet already describes
-# for simap/miva1 applies to david2/3/4 too, unrevisited until it produces
-# a real incident.
+# david2/david3/david4 (airuleset#326, 2026-08-08) ARE in this tuple --
+# corrected by adversarial review after the first onboarding pass initially
+# left them out, misapplying the simap/miva1 precedent above. The two cases
+# are NOT the same: simap/miva1's odoo-erp involvement is unconfirmed
+# (speculative), while #326's own ticket text states david2/3/4 are
+# provisioned specifically "for the odoo-erp repo" as clones of `david`
+# itself (which IS in this tuple) -- a KNOWN, ticket-scoped fact, not a
+# pre-emptive guess. Confirmed live before the fix: `_bounce_quals(
+# "/home/david2/devel/odoo-erp")` returned the full-authority exclude-all
+# fragment instead of `["label:stream:david2"]`, and `_gkreq_supervisor_root(
+# "/home/david2/devel/odoo-erp")` returned True (would nudge david2's own
+# pane about its own gk-request) -- the same montalu2/3/4-style regression
+# item 3 of #326 exists to prevent, just in the watchdog's separate
+# bounce/gkreq registry rather than AUTHORITY_BY_USER's generic one.
 _REDUCED_STREAM_USERS = ("david", "marek", "montalu",
-                         "montalu2", "montalu3", "montalu4")
+                         "montalu2", "montalu3", "montalu4",
+                         "david2", "david3", "david4")
 
 BOUNCE_NUDGE = ("bounce-backstop: open prio:bounce tickets %s in %s — "
                 "gatekeeper-returned work is waiting. Per the autopilot "
