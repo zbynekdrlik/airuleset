@@ -228,6 +228,37 @@ class TestCmdBurnRegistration(unittest.TestCase):
         self.assertNotEqual(ctx.exception.code, 0)
 
 
+# --------------------------------------------------------------------------- #
+# #342: `_remote_ssh_prefix()` is the ONE shared ssh-command builder
+# `_burn_remote_cmd`/`_delegation_remote_cmd` both call — it never got the
+# same two per-connection retry-cap flags a sibling ticket (#341) already
+# added to `cmd_push`'s deploy loop and `provision_subdev_soniox_key()`:
+# `-o BatchMode=yes` on the identity (pubkey) branch (a failed pubkey
+# attempt must fail immediately, never fall through to an interactive
+# password retry) and `-o NumberOfPasswordPrompts=1` on the sshpass branch
+# (caps a wrong/unprovisioned password to ONE try instead of openssh's own
+# default of 3). Asserted directly on the returned argv list — this
+# function builds a command, it never calls subprocess itself, so no fake
+# `run`/`subprocess.run` is needed at all.
+# --------------------------------------------------------------------------- #
+
+class TestRemoteSshPrefixHardeningFlags(unittest.TestCase):
+    def test_sshpass_branch_caps_password_prompts_to_one(self):
+        remote = {"name": "dev2", "host": "5.6.7.8", "user": "newlevel",
+                  "repo_path": "~/devel/airuleset"}
+        argv = airuleset._remote_ssh_prefix(remote)
+        self.assertIn("-o", argv)
+        self.assertIn("NumberOfPasswordPrompts=1", argv)
+
+    def test_identity_branch_uses_batch_mode(self):
+        remote = {"name": "gatekeeper", "host": "1.2.3.4", "user": "gatekeeper",
+                  "repo_path": "~/devel/airuleset",
+                  "identity": "~/.secrets/gatekeeper_access_ed25519"}
+        argv = airuleset._remote_ssh_prefix(remote)
+        self.assertIn("-o", argv)
+        self.assertIn("BatchMode=yes", argv)
+
+
 class TestCmdBurnEndToEnd(unittest.TestCase):
     def _with_home(self, fn):
         with TemporaryDirectory() as home:
@@ -1744,6 +1775,40 @@ class TestFleetRemoteCmd(unittest.TestCase):
         cmd = airuleset._fleet_remote_cmd(remote)
         self.assertIn("sshpass", cmd)
         self.assertIn("newlevel@5.6.7.8", cmd)
+
+    # -- #342: job 16's fleet fetch must inherit the SAME per-connection
+    # retry-cap hardening `_burn_remote_cmd`/`_delegation_remote_cmd` get
+    # via `_remote_ssh_prefix()` -- never a parallel, independently-
+    # maintained ssh shape that can silently drift unhardened. --
+
+    def test_sshpass_branch_caps_password_prompts_to_one(self):
+        remote = {"name": "dev2", "host": "5.6.7.8", "user": "newlevel",
+                  "repo_path": "~/devel/airuleset"}
+        cmd = airuleset._fleet_remote_cmd(remote)
+        self.assertIn("-o", cmd)
+        self.assertIn("NumberOfPasswordPrompts=1", cmd)
+
+    def test_identity_branch_uses_batch_mode(self):
+        remote = {"name": "gatekeeper", "host": "1.2.3.4", "user": "gatekeeper",
+                  "repo_path": "~/devel/airuleset",
+                  "identity": "~/.secrets/gatekeeper_access_ed25519"}
+        cmd = airuleset._fleet_remote_cmd(remote)
+        self.assertIn("-o", cmd)
+        self.assertIn("BatchMode=yes", cmd)
+
+    def test_matches_the_shared_remote_ssh_prefix_exactly(self):
+        """Reuse the sanctioned mechanism -- never invent a new ssh shape.
+
+        Compares against `_remote_ssh_prefix()` directly (the shared
+        builder), not just `_burn_remote_cmd` -- proving `_fleet_remote_cmd`
+        genuinely calls the shared function rather than merely happening to
+        produce the same flags via its own independent, driftable copy."""
+        remote = {"name": "gatekeeper", "host": "1.2.3.4", "user": "gatekeeper",
+                  "repo_path": "~/devel/airuleset",
+                  "identity": "~/.secrets/gatekeeper_access_ed25519"}
+        cmd = airuleset._fleet_remote_cmd(remote)
+        prefix = airuleset._remote_ssh_prefix(remote)
+        self.assertEqual(cmd[:-1], prefix)
 
 
 class TestHourBucketOfTs(unittest.TestCase):
