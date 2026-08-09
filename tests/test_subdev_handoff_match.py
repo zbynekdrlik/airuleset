@@ -281,6 +281,29 @@ class TestHeadingStyleGatekeeperOpening(TestCase):
                           mode="gatekeeper-action")
         self.assertEqual(rc, 0)
 
+    def test_a_line2_gatekeeper_heading_does_not_exclude_a_real_marker(self):
+        # F1, adversarial review of #340 (mirrors #331's own F3): the new
+        # heading branch is deliberately scoped to FIRST_LINE only, but no
+        # fixture covered the case that PROVES the scoping matters -- a
+        # mutant swapping FIRST_LINE for BODY in the new heading grep
+        # passed the whole suite unnoticed. A genuine hand-off that later
+        # quotes/references a heading-shaped gatekeeper verdict on line
+        # >= 2 must still label.
+        rc, out, _ = run("READY-FOR-REVIEW: done\n"
+                          "## Gatekeeper verdict quoted below")
+        self.assertEqual(rc, 0)
+
+    def test_a_lowercase_gatekeeper_heading_still_matches_normally(self):
+        # F5, adversarial review of #340: the new heading branch requires
+        # the corpus's exact observed casing ("Gatekeeper", title case) --
+        # a lowercase "gatekeeper" heading opening must NOT be excluded,
+        # locking the design decision from the OTHER side (the existing
+        # test_a_heading_decorated_all_caps_action_marker_still_matches
+        # only pins the ALL-CAPS side).
+        rc, out, _ = run("## gatekeeper feedback addressed\n\n"
+                          "READY-FOR-REVIEW: done\n")
+        self.assertEqual(rc, 0)
+
 
 if __name__ == "__main__":
     main()
