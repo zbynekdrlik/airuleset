@@ -785,5 +785,159 @@ class TestPushRemoteDeployTimeoutAndStderr(TestCase):
         self.assertIn("sys.exit(1)", src)
 
 
+# ---------------------------------------------------------------------------
+# cmd_push: never burn repeated password-auth attempts against an
+# unprovisioned/unreachable subdev account (#341)
+# ---------------------------------------------------------------------------
+
+class TestPushSshHardeningFlags(TestCase):
+    """#341: neither ssh branch capped retries PER connection -- openssh's
+    own default (NumberOfPasswordPrompts=3) let a single sshpass call to a
+    wrong/unprovisioned account send up to 3 password guesses, and a failed
+    pubkey attempt on an identity-based host fell through to an interactive
+    password/keyboard-interactive attempt too (BatchMode unset) -- both
+    multiply the auth-failure log lines a single connection can generate,
+    which is what let 3 new subdev accounts alone trip fail2ban in one
+    `push` run."""
+
+    def test_cmd_push_sshpass_branch_caps_password_prompts(self):
+        src = inspect.getsource(airuleset.cmd_push)
+        self.assertIn("NumberOfPasswordPrompts=1", src)
+
+    def test_cmd_push_identity_branch_uses_batch_mode(self):
+        src = inspect.getsource(airuleset.cmd_push)
+        self.assertIn("BatchMode=yes", src)
+
+
+class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
+    """#341: an account whose deploy leg already failed with `Permission
+    denied` must not be probed a SECOND time by the soniox-key delivery
+    phase that runs right after it in the same push -- contacting the same
+    known-bad account twice is what tripped subdev's fail2ban and knocked
+    out every LATER ssh call in the run (montalu got TimeoutExpired
+    mid-ban-onset in the reported incident)."""
+
+    def _fake_run(self, calls, deploy_rc_by_user):
+        import unittest.mock as m
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            # a real ssh/sshpass invocation -- the user@host token is always
+            # the second-to-last argv element on both call sites.
+            user = str(cmd[-2]).split("@")[0]
+            rc = deploy_rc_by_user.get(user, 0)
+            if rc:
+                return m.Mock(returncode=rc, stdout="",
+                               stderr="Permission denied (publickey,password).")
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+        return fake_run
+
+    def test_a_permission_denied_deploy_leg_is_never_reattempted_for_soniox(self):
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        fake_hosts = [
+            {"name": "david2@subdev", "host": "9.9.9.9", "user": "david2",
+             "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+            {"name": "david@subdev", "host": "9.9.9.9", "user": "david",
+             "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+        ]
+        fake_authority = {"david2": "fork-no-merge", "david": "fork-no-merge"}
+        with m.patch("subprocess.run",
+                     side_effect=self._fake_run(calls, {"david2": 255})), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
+                m.patch.object(airuleset, "_soniox_key_line",
+                                return_value="SONIOX_API_KEY=fake"):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        david2_calls = [c for c in calls if any("david2@" in str(a) for a in c)]
+        self.assertEqual(len(david2_calls), 1,
+                          "david2 must be contacted at most ONCE across the "
+                          "whole push (its own deploy leg only) -- the "
+                          "soniox phase must skip an account already known "
+                          "to have failed auth this run: %r" % david2_calls)
+        david_calls = [c for c in calls if any("david@" in str(a) for a in c)]
+        self.assertEqual(len(david_calls), 2,
+                          "a healthy sibling account must still get BOTH "
+                          "its deploy leg AND its soniox key delivery")
+
+    def test_a_healthy_account_is_never_skipped(self):
+        # control: nothing failed this run -- both phases must run normally
+        # for every account, exactly as before.
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        fake_hosts = [
+            {"name": "marek@subdev", "host": "9.9.9.9", "user": "marek",
+             "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+        ]
+        fake_authority = {"marek": "branch-merge"}
+        with m.patch("subprocess.run", side_effect=self._fake_run(calls, {})), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
+                m.patch.object(airuleset, "_soniox_key_line",
+                                return_value="SONIOX_API_KEY=fake"):
+            airuleset.cmd_push(args)   # must NOT raise
+        marek_calls = [c for c in calls if any("marek@" in str(a) for a in c)]
+        self.assertEqual(len(marek_calls), 2)
+
+    def test_a_remote_command_failure_is_not_treated_as_an_auth_failure(self):
+        # rc != 0 with no "Permission denied" in stderr means auth SUCCEEDED
+        # and the remote command itself failed (e.g. a bad `git pull`) --
+        # the soniox phase must still be attempted normally for that host.
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        fake_hosts = [
+            {"name": "simap@subdev", "host": "9.9.9.9", "user": "simap",
+             "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+        ]
+        fake_authority = {"simap": "branch-merge"}
+        simap_ssh_calls_seen = {"n": 0}
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            if any("simap@" in str(a) for a in cmd):
+                simap_ssh_calls_seen["n"] += 1
+                if simap_ssh_calls_seen["n"] == 1:
+                    # the deploy leg's own remote command failed (e.g. a
+                    # `git pull` conflict) -- auth worked, nothing to do
+                    # with credentials.
+                    return m.Mock(returncode=1, stdout="", stderr="conflict")
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
+                m.patch.object(airuleset, "_soniox_key_line",
+                                return_value="SONIOX_API_KEY=fake"):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        simap_calls = [c for c in calls if any("simap@" in str(a) for a in c)]
+        self.assertEqual(len(simap_calls), 2,
+                          "a plain remote-command failure (auth succeeded) "
+                          "must NOT suppress the soniox delivery attempt")
+
+
 if __name__ == "__main__":
     main()

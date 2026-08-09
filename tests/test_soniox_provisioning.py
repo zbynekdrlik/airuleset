@@ -268,6 +268,114 @@ class TestProvisionSubdevSonioxKey(TestCase):
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0][0], "montalu@subdev")
 
+    # -- #341: never re-probe a host the deploy loop already saw fail auth --
+
+    def test_skip_names_prevents_a_second_connection_attempt(self):
+        # montalu is in the skip set (its deploy leg already failed auth,
+        # per cmd_push's own reported findings this run) -- marek is not.
+        src = self._source_with_key()
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return _fake_cp()
+
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY):
+            failed = airuleset.provision_subdev_soniox_key(
+                hosts=FAKE_HOSTS, run=run, source=src,
+                skip_names={"montalu@subdev"})
+        self.assertEqual(len(calls), 1, "the skipped host must never be "
+                          "contacted a second time")
+        argv, _kw = calls[0]
+        self.assertIn("marek@", " ".join(str(a) for a in argv))
+        self.assertNotIn("montalu@", " ".join(str(a) for a in argv))
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0][0], "montalu@subdev")
+
+    def test_skipped_host_is_reported_loudly_not_silently(self):
+        src = self._source_with_key()
+        out = StringIO()
+
+        def run(argv, **kw):
+            return _fake_cp()
+
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                             {"montalu": "branch-merge"}), \
+                m.patch("sys.stderr", out):
+            airuleset.provision_subdev_soniox_key(
+                hosts=[FAKE_HOSTS[1]], run=run, source=src,
+                skip_names={"montalu@subdev"})
+        self.assertIn("montalu@subdev", out.getvalue())
+        self.assertIn("auth", out.getvalue().lower())
+
+    def test_all_targets_skipped_never_reads_the_source(self):
+        # mirrors test_no_source_targets_means_no_source_read_at_all: no
+        # deliverable target left means no reason to touch the filesystem.
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return _fake_cp()
+
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                             {"montalu": "branch-merge"}), \
+                m.patch.object(airuleset, "_soniox_key_line") as line_fn:
+            failed = airuleset.provision_subdev_soniox_key(
+                hosts=[FAKE_HOSTS[1]], run=run,
+                skip_names={"montalu@subdev"})
+        line_fn.assert_not_called()
+        self.assertEqual(calls, [])
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0][0], "montalu@subdev")
+
+    def test_no_skip_names_behaves_exactly_as_before(self):
+        # control: an absent/empty skip set must not change delivery at all.
+        src = self._source_with_key()
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return _fake_cp()
+
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY):
+            failed = airuleset.provision_subdev_soniox_key(
+                hosts=FAKE_HOSTS, run=run, source=src)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(failed, [])
+
+    # -- #341: cap retries PER connection (openssh default is 3 prompts) --
+
+    def test_sshpass_calls_cap_password_prompts_to_one(self):
+        src = self._source_with_key()
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return _fake_cp()
+
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                             {"montalu": "branch-merge"}):
+            airuleset.provision_subdev_soniox_key(
+                hosts=[FAKE_HOSTS[1]], run=run, source=src)
+        argv, _kw = calls[0]
+        self.assertIn("-o", argv)
+        self.assertIn("NumberOfPasswordPrompts=1", argv)
+
+    def test_identity_calls_use_batch_mode(self):
+        src = self._source_with_key()
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return _fake_cp()
+
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                             {"marek": "branch-merge"}):
+            airuleset.provision_subdev_soniox_key(
+                hosts=[FAKE_HOSTS[2]], run=run, source=src)
+        argv, _kw = calls[0]
+        self.assertIn("BatchMode=yes", argv)
+
 
 # ---------------------------------------------------------------------------
 # ffmpeg + ffprobe static binaries — the no-sudo subdev accounts have NO
