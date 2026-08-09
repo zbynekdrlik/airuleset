@@ -10601,6 +10601,55 @@ class TestUnregisteredHomeAccounts(TestCase):
                 "9.9.9.9", "zoe\nalice\nmax\nbob\n")
         self.assertEqual(gap, ["max", "zoe"])
 
+    def test_lost_and_found_is_never_reported_as_a_gap(self):
+        # #347 adversarial-review MINOR m2: "lost+found" is a filesystem
+        # artifact on a /home that is its own mount point, never a stream
+        # account -- reporting it on EVERY push forever trains the reader
+        # to ignore the one warning that will someday be real.
+        with m.patch.object(airuleset, "REMOTE_HOSTS", self._hosts()):
+            gap = airuleset.unregistered_home_accounts(
+                "9.9.9.9", "alice\nbob\nlost+found\n")
+        self.assertEqual(gap, [])
+
+    def test_a_host_entry_missing_the_user_key_does_not_crash(self):
+        # #347 adversarial-review THEORETICAL T3: unregistered_home_accounts
+        # guarded r.get("host") but indexed r["user"] unguarded in the same
+        # comprehension -- inconsistent, and a KeyError here would crash
+        # the whole push loop rather than degrading.
+        hosts = [{"host": "9.9.9.9"}]   # no "user" key at all
+        with m.patch.object(airuleset, "REMOTE_HOSTS", hosts):
+            gap = airuleset.unregistered_home_accounts("9.9.9.9", "alice\n")
+        self.assertEqual(gap, ["alice"])
+
+
+class TestHomeListingTrustworthy(TestCase):
+    """#347 adversarial-review MAJOR finding (M1): `_HOME_AUDIT_MARKER`
+    being present in stdout only proves the remote SHELL reached the
+    audit -- not that `ls -1 /home` actually SUCCEEDED. A hardened or
+    root-owned /home makes `ls` fail with its stderr redirected to
+    /dev/null, returning an EMPTY listing at rc 0 -- which the marker-only
+    check would read as "checked, no gap found" forever, permanently and
+    silently defeating the guard. Positive control: the very account this
+    ssh connection authenticated AS must appear in any genuine listing
+    (that same connection just `cd`'d into its own home's checkout)."""
+
+    def test_a_genuine_listing_containing_the_connecting_user_is_trusted(self):
+        self.assertTrue(
+            airuleset._home_listing_trustworthy("alice", "alice\nbob\ncarol\n"))
+
+    def test_an_empty_listing_is_never_trusted(self):
+        # the exact M1 failure shape: ls failed silently, marker still
+        # printed, listing is empty.
+        self.assertFalse(airuleset._home_listing_trustworthy("alice", ""))
+        self.assertFalse(airuleset._home_listing_trustworthy("alice", None))
+
+    def test_a_listing_missing_the_connecting_users_own_name_is_not_trusted(self):
+        # some other partial/corrupted listing that happens to have SOME
+        # names but not the one account this connection just proved exists
+        # (it authenticated as it) -- still untrustworthy.
+        self.assertFalse(
+            airuleset._home_listing_trustworthy("alice", "bob\ncarol\n"))
+
 
 class TestCmdPushSubdevRegistrationAudit(TestCase):
     """#347: cmd_push must audit /home on any SHARED remote host (multiple
@@ -10799,6 +10848,51 @@ class TestCmdPushSubdevRegistrationAuditRetryOnFailure(TestCase):
         self.assertNotIn("REGISTRATION GAP", err,
                           "an unverified host must never be reported as "
                           "if a real gap-check happened")
+
+    def test_a_marker_present_but_empty_listing_is_never_trusted_as_clean(self):
+        # #347 adversarial-review MAJOR finding M1: the ssh call SUCCEEDS
+        # (rc=0), the marker DOES print, but `ls -1 /home` itself failed
+        # silently (e.g. a hardened/root-owned /home, stderr redirected to
+        # /dev/null) and produced NO names at all. The old marker-only
+        # check would trust this as "checked, clean" forever. The fix must
+        # refuse to trust it -- falling through to retry (here: no second
+        # entry, so UNVERIFIED) instead of silently reporting no gap.
+        import io
+        import contextlib
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            if cmd and cmd[0] in ("ssh", "sshpass"):
+                remote_cmd = cmd[-1]
+                marker = airuleset._HOME_AUDIT_MARKER
+                if marker in remote_cmd:
+                    # rc 0, marker present, but `ls` itself produced
+                    # nothing -- the exact M1 shape.
+                    return m.Mock(returncode=0, stdout="ok\n%s\n" % marker,
+                                   stderr="")
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        args = m.Mock()
+        buf_err = io.StringIO()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
+                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                                return_value=[]):
+            with contextlib.redirect_stderr(buf_err):
+                airuleset.cmd_push(args)   # must NOT raise (both ssh calls "succeed")
+        err = buf_err.getvalue()
+        self.assertIn("REGISTRATION AUDIT NOT VERIFIED", err,
+                       "an untrustworthy (self-absent) listing must fall "
+                       "through to the honest UNVERIFIED report, never a "
+                       "silent 'no gap found'")
+        self.assertNotIn("REGISTRATION GAP", err)
 
 
 class TestBlockTestSkipsHook(TestCase):
