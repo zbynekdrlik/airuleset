@@ -85,6 +85,12 @@ class TestEnglishDirectCredentialRequestsAreBlocked(TestCase):
         p = _run("Give me the connection string for the staging database.")
         self.assertTrue(_blocked(p))
 
+    def test_share_the_login_credentials_with_me(self):
+        """#152-review: plural "credentials" was added as a noun, paired
+        with the SAME destination-marker gate as every other noun."""
+        p = _run("Please share the login credentials with me.")
+        self.assertTrue(_blocked(p))
+
 
 class TestSlovakDirectCredentialRequestsAreBlocked(TestCase):
     """Genuinely natural Slovak — no English loanword needed. Includes the
@@ -175,6 +181,14 @@ class TestTheSecretRequestChannelEscapesTheGate(TestCase):
             "secret-request channel was wrongly blocked")
 
 
+class TestSlovakCredentialsPluralAndDestinationGate(TestCase):
+    """#152-review: the SAME two fixes as the English side, in Slovak."""
+
+    def test_posli_mi_prihlasovacie_udaje_blocks(self):
+        p = _run("Pošli mi prihlasovacie údaje.")
+        self.assertTrue(_blocked(p))
+
+
 class TestOrdinaryTalkAboutCredentialsStaysWelcome(TestCase):
     """The explicit precondition of the user's own decision: minimum false
     positives. Ordinary documentation / code-review / explanation sentences
@@ -233,6 +247,83 @@ class TestOrdinaryTalkAboutCredentialsStaysWelcome(TestCase):
             "heslo sem`."
         )
         self.assertFalse(_blocked(_run(msg)))
+
+
+class TestDestinationlessVerbNounProximityStaysWelcome(TestCase):
+    """#152-review CRITICAL finding: verb+noun proximity ALONE (no
+    destination marker — "me"/"here"/"in chat") false-blocked routine
+    third-person technical prose. Every fixture here genuinely satisfies
+    the OLD verb+noun-proximity pattern; none of them names chat/the
+    assistant as the destination, so the new destination gate must keep
+    every one of them unblocked."""
+
+    def test_third_person_auth_description(self):
+        msg = "The client must send the token in the Authorization header."
+        self.assertFalse(
+            _blocked(_run(msg)),
+            "a third-person API-auth description ('must send the token "
+            "in the header') was wrongly blocked")
+
+    def test_llm_token_budget_prose(self):
+        msg = "Give each Fable stage a token budget of about 50k tokens."
+        self.assertFalse(
+            _blocked(_run(msg)),
+            "'token' in the LLM-budget sense was wrongly blocked")
+
+    def test_instruction_to_store_in_github_secrets(self):
+        """The SANCTIONED destination (GitHub Secrets, per
+        security-basics.md) must never be confused with 'paste it in
+        chat' just because the verb+noun pair matches."""
+        msg = "Paste the token into the GitHub Secrets UI."
+        self.assertFalse(
+            _blocked(_run(msg)),
+            "an instruction to store a token in GitHub Secrets (the "
+            "SANCTIONED destination) was wrongly blocked")
+
+    def test_cli_onboarding_narration(self):
+        msg = ("Run gh auth login, press Enter, and copy the token from "
+               "the browser.")
+        self.assertFalse(_blocked(_run(msg)))
+
+    def test_declarative_sentence_ending_in_the_noun_with_no_question_mark(self):
+        """#152-review MINOR: the interrogative branch used to accept an
+        OPTIONAL trailing '?' -- a declarative debugging sentence that
+        merely happens to end in the noun, with no question mark at all,
+        must not be read as a question."""
+        msg = "Let me decode the JWT and see what's in the token"
+        self.assertFalse(
+            _blocked(_run(msg)),
+            "a declarative sentence with no trailing '?' was wrongly "
+            "read as an interrogative credential request")
+
+    def test_verb_and_noun_far_apart_stays_unblocked(self):
+        """#152-review: a distance/window control -- nothing in this repo
+        had one. Verb and noun sit >20 characters apart in an unrelated
+        sentence; the proximity window must keep this unblocked."""
+        msg = (
+            "Give the new intern a full guided tour of the whole office "
+            "building today, and only once that is finished should we "
+            "discuss the API token situation with the vendor."
+        )
+        self.assertFalse(_blocked(_run(msg)))
+
+    def test_slovak_daj_mi_vediet_idiom_stays_unblocked(self):
+        """#152-review: 'daj mi vedieť' ('let me know') is an extremely
+        common Slovak idiom that pairs 'daj' with the dative 'mi' for a
+        reason that has nothing to do with a credential. 'daj' was
+        DROPPED from the Slovak verb list specifically for this."""
+        msg = "Daj mi vedieť, či token funguje."
+        self.assertFalse(
+            _blocked(_run(msg)),
+            "the 'daj mi vedieť' (let me know) idiom, merely co-occurring "
+            "with 'token' in the same sentence, was wrongly blocked")
+
+    def test_slovak_instruction_to_store_in_github_secrets(self):
+        msg = "Skopíruj API kľúč do konfiguračného súboru GitHub Secrets."
+        self.assertFalse(
+            _blocked(_run(msg)),
+            "a Slovak instruction to store the key in GitHub Secrets "
+            "(no destination marker) was wrongly blocked")
 
 
 if __name__ == "__main__":
