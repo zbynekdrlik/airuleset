@@ -279,6 +279,15 @@ class TestEnsureStreamTmuxSession(TestCase):
         self.assertIn("/home/miva1", result)
         self.assertIn(str(checkout), result)
         self.assertIn("kill it manually", result)
+        # #309 adversarial-review MINOR: "re-run push" was never true -- a
+        # bootstrapped account's next push always hits the sentinel's
+        # "already bootstrapped once -- never re-created" branch, so
+        # nothing about a manual kill is ever undone by pushing again. The
+        # #264 ssh auto-attach (`tmux new-session -A ... -c`, honored only
+        # on CREATE, i.e. only once the session genuinely no longer exists)
+        # is what actually rebuilds it, on the operator's NEXT SSH LOGIN.
+        self.assertNotIn("re-run push", result)
+        self.assertIn("ssh login", result)
         # NEVER auto-kill, NEVER re-cwd, NEVER send keys -- report only.
         self.assertFalse(any(c[:2] == ["tmux", "new-session"] for c in calls))
         self.assertFalse(any(c[:2] == ["tmux", "send-keys"] for c in calls))
