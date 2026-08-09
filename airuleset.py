@@ -7788,7 +7788,10 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
                 return ("WARNING: session '%s' already exists with cwd %s "
                          "(expected %s or a subdirectory of it) -- if this "
                          "is a leftover pre-registration session, kill it "
-                         "manually and re-run push"
+                         "manually; a push alone will NOT re-create it "
+                         "(sentinel already bootstrapped) -- the account's "
+                         "next ssh login rebuilds it fresh with the right "
+                         "cwd (#264)"
                          % (user, actual, expected))
         if bootstrapped:
             return ("already bootstrapped once for '%s' -- never re-created "
