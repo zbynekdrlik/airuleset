@@ -64,6 +64,13 @@ class TestSkillConversions(TestCase):
         self.assertIn("windows-remote-gui", t)
         self.assertIn("Windows MCP Server Error Handling",
                       read("skills/windows-remote-gui/SKILL.md"))
+        # #249: the module states the TWO-CONTEXT model, not the old
+        # absolute "never ssh" the codebase itself had to violate for
+        # headless CI/watchdog ssh paths — and points at the mechanical
+        # enforcement (never leaves the two-context rule as prose alone).
+        self.assertIn("session 0", t.lower())
+        self.assertIn("EnumWindows", t)
+        self.assertIn("block-destructive-remote.sh", t)
         # deploy-from-clean-tree -> deploy-ssh: clean-tree gate survives inline
         t = read("modules/deploy/deploy-from-clean-tree.md")
         self.assertIn("git status --porcelain", t)

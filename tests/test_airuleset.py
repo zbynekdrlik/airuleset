@@ -11128,6 +11128,226 @@ class TestBlockDestructiveRemoteHook(TestCase):
         self.assertTrue(any("block-destructive-remote.sh" in c for c in cmds))
 
 
+class TestBlockDestructiveRemoteWinSshHazard(TestCase):
+    """hooks/block-destructive-remote.sh's win-* MCP vs ssh extension
+    (issue #249) — the ssh path was frictionless while the MCP path got the
+    lecture: camera-box PR #989 probed `Get-Process obs64 | ... MainWindowTitle`
+    OVER SSH and failed a healthy rig 3x (session 0 / ssh can never see a
+    session-1 window via EnumWindows — the title is ALWAYS empty cross-session).
+    Scoped to a project that DECLARES a win-* MCP server in .mcp.json (never a
+    blanket ssh ban); exempts the sanctioned schtasks .../it bridge the
+    windows-remote-gui skill teaches."""
+
+    HOOK = "block-destructive-remote.sh"
+
+    def _win_mcp_dir(self, server_name="win-resolume", entry=None):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        cfg = {"mcpServers": {server_name: entry or {
+            "command": "node", "args": ["server.js"]
+        }}}
+        with open(os.path.join(d, ".mcp.json"), "w") as f:
+            json.dump(cfg, f)
+        return d
+
+    def _run(self, command, cwd=None, env_extra=None, payload_cwd=None):
+        d = cwd or tempfile.mkdtemp()
+        if cwd is None:
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        body = {"tool_input": {"command": command}}
+        if payload_cwd is not None:
+            body["cwd"] = payload_cwd
+        payload = json.dumps(body)
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                              input=payload, text=True, capture_output=True,
+                              cwd=d, timeout=30, env=env)
+
+    # --- true positive: the exact reported incident -----------------------
+
+    def test_blocks_mainwindowtitle_probe_over_ssh_in_win_mcp_project(self):
+        d = self._win_mcp_dir()
+        cmd = ('ssh USER@HOST "Get-Process obs64 | Select-Object '
+               '-ExpandProperty MainWindowTitle"')
+        r = self._run(cmd, cwd=d)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("mainwindow", r.stderr.lower())
+
+    def test_blocks_enumwindows_over_ssh_in_win_mcp_project(self):
+        d = self._win_mcp_dir()
+        r = self._run('ssh USER@HOST "powershell -c [User32]::EnumWindows(...)"', cwd=d)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_block_message_names_two_context_rule_and_mcp_alternative(self):
+        d = self._win_mcp_dir()
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."', cwd=d)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        lowered = r.stderr.lower()
+        self.assertIn("mcp", lowered)
+        self.assertIn("session 0", lowered)
+
+    # --- never a blanket ssh ban: only gated projects ----------------------
+
+    def test_allows_gui_atom_over_ssh_when_project_has_no_win_mcp(self):
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_allows_gui_atom_when_only_a_non_win_mcp_server_declared(self):
+        d = self._win_mcp_dir(server_name="resolume-mcp")
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."', cwd=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_win_prefix_match_is_case_insensitive(self):
+        d = self._win_mcp_dir(server_name="WIN-Resolume")
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."', cwd=d)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_win_prefix_must_be_at_the_START_of_the_server_name(self):
+        # #249 adversarial-review finding 3: an UNANCHORED "win-" substring
+        # match (e.g. a server literally named "a-win-x") must NOT gate —
+        # only a genuine `win-*` mcpServers key does.
+        d = self._win_mcp_dir(server_name="a-win-x")
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."', cwd=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_symlinked_mcp_json_to_an_endless_read_source_never_hangs(self):
+        # #249 adversarial-review finding 1 (MAJOR, live-triggered): a
+        # `.mcp.json` symlinked to /dev/zero used to hang EVERY Bash call
+        # in that cwd (the old open(path).read() has no bound and follows
+        # symlinks). O_NOFOLLOW + a bounded read must refuse it outright —
+        # a real timeout (not just a wrong verdict) would mean the bug is
+        # still present.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.symlink("/dev/zero", os.path.join(d, ".mcp.json"))
+        payload = json.dumps({"tool_input": {"command": "echo hi"}})
+        r = subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+            input=payload, text=True, capture_output=True, cwd=d, timeout=10,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_oversize_mcp_json_never_gates(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        big = {"mcpServers": {"win-x": {"padding": "a" * 100000}}}
+        with open(os.path.join(d, ".mcp.json"), "w") as f:
+            json.dump(big, f)
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."', cwd=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_malformed_mcp_json_never_crashes_and_never_gates(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        with open(os.path.join(d, ".mcp.json"), "w") as f:
+            f.write("{ not valid json ")
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."', cwd=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    # --- sanctioned bridge: schtasks .../it exempts the same atoms --------
+
+    def test_schtasks_interactive_bridge_is_not_blocked(self):
+        d = self._win_mcp_dir()
+        cmd = ('ssh USER@HOST "schtasks /create /tn T /tr \\"powershell -c '
+               'Start-Process obs64.exe\\" /sc once /st 00:00 /ru USER /it /f '
+               '&& schtasks /run /tn T && schtasks /delete /tn T /f"')
+        r = self._run(cmd, cwd=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_schtasks_without_the_it_flag_does_not_exempt_a_gui_atom(self):
+        # #249 adversarial-review finding 3: `schtasks` alone (no `/it`) is
+        # NOT the sanctioned bridge — a genuine GUI atom in the same remote
+        # command must still block.
+        d = self._win_mcp_dir()
+        cmd = 'ssh USER@HOST "schtasks /run /tn T && Start-Process obs64.exe"'
+        r = self._run(cmd, cwd=d)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    # --- WARN (never block) on other ssh use in a win-mcp project ---------
+
+    def test_warns_but_allows_other_ssh_use_in_win_mcp_project(self):
+        d = self._win_mcp_dir()
+        r = self._run('ssh USER@HOST "tasklist | findstr app"', cwd=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(r.stdout.strip(), "expected an additionalContext reminder")
+        out = json.loads(r.stdout)
+        ctx = out["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("mcp", ctx.lower())
+
+    def test_decoy_hazard_text_in_an_unrelated_block_does_not_add_windows_guidance(self):
+        # #249 adversarial-review finding 4: a genuinely UNRELATED block
+        # (rm -rf on filesystem root) whose own ECHOED command text happens
+        # to CONTAIN the words "GUI-session-dependent" (a decoy comment)
+        # must still block for the RIGHT reason, and must NOT print the
+        # Windows two-context guidance meant only for a REAL hazard block.
+        d = self._win_mcp_dir()
+        r = self._run(
+            'ssh USER@HOST "rm -rf / # GUI-session-dependent decoy"', cwd=d)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("root", r.stderr.lower())
+        self.assertNotIn("Two-context rule", r.stderr)
+
+    def test_no_warn_output_outside_a_win_mcp_project(self):
+        r = self._run('ssh USER@HOST "tasklist | findstr app"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_scp_deploy_in_win_mcp_project_stays_unwarned_and_unblocked(self):
+        # scp is a file-copy transport, not an ssh remote-command call at
+        # all — check_remote_segment() is never reached for it, so it must
+        # never be warned about (the ticket's own "stays frictionless" bar).
+        d = self._win_mcp_dir()
+        r = self._run("scp binary USER@HOST:/path/to/install/dir/", cwd=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+    # --- reuses the EXISTING bypass infra, no new escape hatch ------------
+
+    def test_existing_inline_bypass_marker_covers_the_new_hazard_too(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        d = self._win_mcp_dir()
+        r = self._run(
+            'ssh USER@HOST "... MainWindowTitle ..."'
+            '  # airuleset:destructive-ok tested on the real rig',
+            cwd=d, env_extra={"HOME": home},
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    # --- the JSON payload's own .cwd wins over the hook process's $PWD ----
+    # (mirrors block-tier0-local-build.sh's own `dir="${CWD:-$PWD}"` shape —
+    # a hook process's own bash cwd is not guaranteed to match the tool's
+    # logical cwd, e.g. a worktree-dispatched subagent).
+
+    def test_payload_cwd_wins_even_when_process_pwd_has_no_win_mcp(self):
+        bare = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bare, ignore_errors=True)
+        win_mcp = self._win_mcp_dir()
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."',
+                       cwd=bare, payload_cwd=win_mcp)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_payload_cwd_wins_even_when_process_pwd_has_win_mcp(self):
+        win_mcp = self._win_mcp_dir()
+        bare = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bare, ignore_errors=True)
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."',
+                       cwd=win_mcp, payload_cwd=bare)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_autopilot_worker_carries_the_standing_windows_constraint(self):
+        # #249 item 3: this survives a reduced-context dispatch even before
+        # the hook fires — agents/*.md IS the subagent's own system prompt
+        # (measured #104, unlike a skill body which never reaches one).
+        t = (airuleset.REPO_DIR / "agents" / "autopilot-worker.md").read_text(
+            encoding="utf-8")
+        self.assertIn("mcp__win-*", t)
+        self.assertIn("session-agnostic", t.lower())
+        self.assertIn("NEVER ssh", t)
+
+
 class TestBlockSubdevSshMisuseHook(TestCase):
     """hooks/block-subdev-ssh-misuse.sh (issue #51) — the subdev VPS was
     fail2ban-banned TWICE in one day (2026-07-25) by ad-hoc ssh probes with

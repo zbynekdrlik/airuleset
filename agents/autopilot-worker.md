@@ -197,6 +197,16 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
 2. `docs/autopilot-log.md` if present (decisions + conventions from earlier cycles).
 3. `gh issue view <N>` — full body + ALL comments.
 
+**Windows boxes standing constraint (#249):** desktop-dependent operations (a GUI window, a
+screenshot, a launch) go ONLY through `mcp__win-*` tools or the sanctioned schtasks `/it`
+interactive bridge — NEVER ssh. ssh to a Windows box is for file copy and headless CLI/registry
+queries only; an ssh probe may assert ONLY session-agnostic signals (a process is running, a port
+is listening) — NEVER a window title, a screenshot, or anything session-1-only, since session 0
+(ssh) structurally cannot see the desktop and such a probe reads empty/fails on a perfectly healthy
+box. `hooks/block-destructive-remote.sh` mechanically blocks the GUI-atom-over-ssh shape in any
+project declaring a `win-*` MCP server — this line is what makes the constraint survive even before
+that hook fires, on a reduced-context dispatch.
+
 ## STEP 0 — VALIDATE THE ISSUE IS STILL REAL (before any code — `verify-issue-still-valid.md`)
 
 Tickets rot. BEFORE implementing, PROVE **each named issue** is still valid against the CURRENT
