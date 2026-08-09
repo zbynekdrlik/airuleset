@@ -114,8 +114,13 @@ class TestBounceRuleUpdateLoop(TestCase):
         # not a stray paragraph elsewhere -- it must sit right where the
         # bounce actually happens (step 5's FINDINGS branch), so a
         # gatekeeper reading that one bullet sees the whole obligation.
+        # Anchored on the FULL bullet-opening phrase, not a bare "FINDINGS"
+        # substring -- the file legitimately mentions "FINDINGS" elsewhere
+        # too (the frontmatter description, and #278's own step 2b FAIL
+        # cross-reference), and a bare-substring anchor would resolve to
+        # whichever of those sits FIRST in the file (#278 review, MINOR-4).
         t = read(SKILL)
-        i = t.index("FINDINGS")
+        i = t.index("**FINDINGS → the bounce lane**")
         j = t.index("Parallel-run rule")   # the next bullet after step 5
         window = t[i:j]
         self.assertIn("which sub-dev rule", window.lower())
@@ -185,14 +190,24 @@ class TestMechanicalPreReviewGateRecheck(TestCase):
         self.assertLess(i2b, i3)
 
     def test_fail_bounces_before_deep_review_pass_proceeds(self):
+        # #278 review MINOR-1/-2: assert the EXACT bullet openers and the
+        # FAIL cross-reference target, not bare substrings a rationale
+        # paragraph could also satisfy (e.g. "PASS" appears in prose too).
         t = read(SKILL)
         i2b = t.index("Mechanical pre-review gate re-check")
         i3 = t.index("### 3. INDEPENDENT REVIEW")
         window = t[i2b:i3]
-        self.assertIn("FAIL", window)
+        self.assertIn("**FAIL**", window)
         self.assertIn("bounce", window.lower())
-        self.assertIn("PASS", window)
+        self.assertIn("step 5", window.lower())
+        self.assertIn("**PASS**", window)
         self.assertIn("step 3", window.lower())
+        # normalize before this one check: the real prose wraps "never a"
+        # onto its own line in the markdown source, which a raw substring
+        # match against un-normalized text would miss (playbook: markdown
+        # line-wrap breaks a literal multi-word assertIn).
+        flat = " ".join(window.lower().split())
+        self.assertIn("never a substitute for the cold read", flat)
 
     def test_absent_repo_command_skips_straight_to_step_3(self):
         t = read(SKILL)

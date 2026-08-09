@@ -75,8 +75,9 @@ flowing. The loop **NEVER idles while ANY lane has work**.
 
 - **LANE 1 REVIEW** — `ready-for-review` present for any stream (or a re-handoff after
   a bounce)? Run the `process-subdev` pipeline for that stream (its steps 2–6: pin the
-  slice, cold diff-first review, own CI, verdict CLEAN → feeds LANE 2 / FINDINGS →
-  bounce lane). One stream's hand-off per pass; re-check the queue next pass. **A CLEAN
+  slice, step 2b's repo-parameterized mechanical pre-review gate re-check (if the repo
+  declares one), cold diff-first review, own CI, verdict CLEAN → feeds LANE 2 / FINDINGS
+  → bounce lane). One stream's hand-off per pass; re-check the queue next pass. **A CLEAN
   verdict that ships fires the per-ticket run-card for EVERY ticket in the slice**
   (`process-subdev` step 5.4, `airuleset.py notify --run-card`) — never silent (#47).
 - **LANE 2 RELEASE** — release debt (a CLEAN slice not yet contained in origin/main, or
