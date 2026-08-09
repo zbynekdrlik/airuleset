@@ -7060,10 +7060,19 @@ def cmd_push(args):
         print(f"\n{'=' * 50}")
         print(f"Deploying to {remote['name']} ({remote['host']})...")
         remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
+        # #347 adversarial-review CRITICAL finding: `audited_hosts` must
+        # NOT be marked here (before the ssh call even runs) — a first
+        # entry that fails (timeout/auth) before the remote shell ever
+        # reaches the appended `ls` would then PERMANENTLY skip the audit
+        # for the rest of this push, with the failure looking IDENTICAL to
+        # "checked, no gap found" (unregistered_home_accounts() on an
+        # empty/no-marker listing silently returns []). `audited_hosts` is
+        # only marked below, once the marker is CONFIRMED present in the
+        # real stdout — so a failed first connection lets the NEXT entry
+        # sharing this host retry the audit instead of silently giving up.
         audit_this_call = (remote["host"] in shared_hosts
                             and remote["host"] not in audited_hosts)
         if audit_this_call:
-            audited_hosts.add(remote["host"])
             remote_cmd = _remote_cmd_with_home_audit(remote_cmd)
         identity = remote.get("identity")
         if identity:
@@ -7141,7 +7150,13 @@ def cmd_push(args):
         # registered as a push target. Advisory only: one unrelated stray
         # /home entry (a not-yet-onboarded or test account) must never
         # abort deployment to every OTHER, already-registered account.
-        if audit_this_call:
+        # `audited_hosts` is marked HERE, only once the marker is
+        # positively confirmed present — never on a mere attempt — so a
+        # never-executed audit (ssh failed before the remote shell ran it)
+        # is never mistaken for "ran and found nothing" (adversarial-review
+        # CRITICAL finding, see the comment above `audit_this_call`).
+        if audit_this_call and _HOME_AUDIT_MARKER in (ssh_result.stdout or ""):
+            audited_hosts.add(remote["host"])
             gap = unregistered_home_accounts(
                 remote["host"], _parse_home_audit_output(ssh_result.stdout))
             if gap:
@@ -7154,6 +7169,22 @@ def cmd_push(args):
                       f"_REDUCED_STREAM_USERS + notify's STREAM_NOTIFY_OWNER "
                       f"(see #251/#263/#300/#326/#347's own onboarding "
                       f"checklist).", file=sys.stderr)
+
+    # #347: any shared host every entry FAILED to audit this run (every
+    # connection attempted for it died before the appended `ls` ever ran)
+    # must be reported as UNVERIFIED, not silently read as "no gap found"
+    # — the exact false-negative the adversarial review flagged. Every
+    # shared host gets `audit_this_call = True` on its FIRST-seen entry
+    # (audited_hosts starts empty), so any host still missing from
+    # `audited_hosts` here was genuinely never confirmed this run.
+    unverified_shared = shared_hosts - audited_hosts
+    if unverified_shared:
+        print(f"\n⚠ REGISTRATION AUDIT NOT VERIFIED this run for: "
+              f"{', '.join(sorted(unverified_shared))} — every connection "
+              f"attempted to the shared host failed before the /home "
+              f"listing could run, so a registration gap there could exist "
+              f"and go unreported until a later push confirms it.",
+              file=sys.stderr)
 
     # 3b. Deliver the meeting-analysis Soniox key to every subdev stream
     # account (#275) -- a true no-op when REMOTE_HOSTS has no such account
