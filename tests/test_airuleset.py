@@ -11257,6 +11257,16 @@ class TestBlockDestructiveRemoteWinSshHazard(TestCase):
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_autopilot_worker_carries_the_standing_windows_constraint(self):
+        # #249 item 3: this survives a reduced-context dispatch even before
+        # the hook fires — agents/*.md IS the subagent's own system prompt
+        # (measured #104, unlike a skill body which never reaches one).
+        t = (airuleset.REPO_DIR / "agents" / "autopilot-worker.md").read_text(
+            encoding="utf-8")
+        self.assertIn("mcp__win-*", t)
+        self.assertIn("session-agnostic", t.lower())
+        self.assertIn("NEVER ssh", t)
+
 
 class TestBlockSubdevSshMisuseHook(TestCase):
     """hooks/block-subdev-ssh-misuse.sh (issue #51) — the subdev VPS was

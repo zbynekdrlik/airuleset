@@ -39,6 +39,26 @@ set -euo pipefail
 #     (a wrapper script invoked over ssh that itself shuts down the host)
 #     is invisible to argv-level matching.
 #
+# --- win-* MCP vs ssh (issue #249) --------------------------------------
+# ALSO hard-blocks a GUI-session-dependent Windows command (MainWindow*,
+# EnumWindows, SendKeys, Start-Process, or a screenshot API mention) sent
+# over ssh, but ONLY inside a project whose .mcp.json declares a `win-*`
+# MCP server. Session 0 (an ssh shell on Windows) structurally cannot see a
+# session-1 desktop window via EnumWindows — a MainWindowTitle probe over
+# ssh reads empty on a perfectly healthy box, which is exactly what failed
+# camera-box PR #989's rig-health gate 3x (issuecomment-5191660073). The
+# sanctioned `schtasks ... /it` interactive-session bridge the
+# windows-remote-gui skill teaches is exempted when present in the SAME
+# remote command. This is a project-scoped gate (never a blanket ssh ban —
+# a project with no win-* MCP server is untouched); NOT scoped to the exact
+# declared host, since `.mcp.json`'s mcpServers schema has no standardized
+# host field to extract reliably (see #249's design comment for why exact
+# host resolution was rejected). Every OTHER ssh call reaching this
+# classifier inside a win-* MCP project gets a non-blocking
+# `additionalContext` reminder of the two-context litmus test (never a
+# block) — file-copy/CLI/registry-query ssh usage (camera-box #701/#703's
+# own headless decode, `scp` deploys) stays frictionless.
+#
 # Bypass (rare, user-instructed only, logged): append
 # '# airuleset:destructive-ok <reason>' to the command, or set
 # AIRULESET_ALLOW_DESTRUCTIVE_REMOTE=1.
@@ -93,11 +113,50 @@ if [ -n "$BYPASS_REASON" ]; then
 fi
 
 VIOLATION=$(python3 - "$INPUT" <<'PYEOF'
+import json
+import os
 import re
 import shlex
 import sys
 
 cmd = sys.argv[1]
+
+# --- win-* MCP vs ssh (issue #249): project-scoped GUI-hazard gate --------
+GUI_HAZARD_RE = re.compile(
+    r"(?i)\b(MainWindow\w*|EnumWindows|SendKeys|Start-Process"
+    r"|CopyFromScreen|System\.Windows\.Forms|System\.Drawing\.Bitmap)\b"
+)
+SCHTASKS_BRIDGE_RE = re.compile(r"(?i)\bschtasks\b.*(/it\b|/interactive\b)")
+WIN_MCP_SERVER_RE = re.compile(r"(?i)^win-")
+
+
+def _win_mcp_active(cwd):
+    """True iff <cwd>/.mcp.json declares >=1 `win-*` mcpServers entry.
+
+    Best-effort, project-scoped ONLY (never a blanket ssh ban) — a missing
+    or malformed .mcp.json (or one with no win-* key) means "not gated",
+    never a guess in either direction. Deliberately does NOT try to
+    resolve which HOST each win-* server targets: the mcpServers schema
+    has no standardized host field, and a wrong extraction would fail in
+    the dangerous direction (narrowing the block off the real host). See
+    #249's design comment for the full reasoning.
+    """
+    path = os.path.join(cwd, ".mcp.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    servers = cfg.get("mcpServers")
+    if not isinstance(servers, dict):
+        return False
+    return any(WIN_MCP_SERVER_RE.match(str(name)) for name in servers)
+
+
+WIN_MCP_ACTIVE = _win_mcp_active(os.getcwd())
+warnings = []
 
 
 def split_segments(text):
@@ -298,6 +357,17 @@ def check_remote_segment(seg_text):
                         + inner.strip()[:120])
     if is_win_root_wipe(seg_text):
         hits.append("Windows drive-root wipe over ssh: " + seg_text.strip()[:120])
+    if WIN_MCP_ACTIVE:
+        atom = GUI_HAZARD_RE.search(seg_text)
+        if atom and not SCHTASKS_BRIDGE_RE.search(seg_text):
+            hits.append(
+                "GUI-session-dependent command over ssh in a win-* MCP "
+                "project (" + atom.group(0) + "): " + seg_text.strip()[:120]
+            )
+        elif not atom:
+            # some OTHER ssh use in a win-* MCP project — never a block,
+            # just the litmus-test reminder (fired once, on the ALLOW path).
+            warnings.append(seg_text.strip()[:120])
     return hits
 
 
@@ -320,6 +390,21 @@ if violations:
     seen = list(dict.fromkeys(violations))
     print("\n".join(f"  {v}" for v in seen))
     sys.exit(2)
+if warnings:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": (
+                "Windows remote over ssh in a win-* MCP project — the "
+                "two-context litmus test: desktop-dependent (a GUI window, "
+                "a screenshot, anything session-1-only)? use the mcp__win-* "
+                "tools (or the windows-remote-gui skill's schtasks .../it "
+                "bridge) — session 0 (ssh) cannot see the desktop. File "
+                "copy / a CLI exe / a process-or-port-registry query? ssh "
+                "is fine, proceed."
+            ),
+        }
+    }))
 sys.exit(0)
 PYEOF
 ) || RC=$?
@@ -341,6 +426,18 @@ if [ "$RC" -eq 2 ]; then
     echo "  /F, sc start/stop), or rm -rf on a non-root path (temp/build" >&2
     echo "  dirs) — those are approved per approval-scope.md." >&2
     echo "" >&2
+    case "$VIOLATION" in
+        *"GUI-session-dependent"*)
+            echo "  Two-context rule (Windows / win-* MCP): session 0 (an ssh" >&2
+            echo "  shell on Windows) structurally cannot see a session-1" >&2
+            echo "  desktop window — a MainWindowTitle/EnumWindows probe over" >&2
+            echo "  ssh reads EMPTY on a perfectly HEALTHY box, not a broken" >&2
+            echo "  one. Use the mcp__win-* tools instead (or the" >&2
+            echo "  windows-remote-gui skill's schtasks .../it interactive" >&2
+            echo "  bridge for a genuine GUI launch) — never an ssh probe." >&2
+            echo "" >&2
+            ;;
+    esac
     echo "  Bypass (rare, user-instructed only, logged): append" >&2
     echo "  '# airuleset:destructive-ok <reason>' to the command, or set" >&2
     echo "  AIRULESET_ALLOW_DESTRUCTIVE_REMOTE=1." >&2
@@ -362,4 +459,10 @@ elif [ "$RC" -ne 0 ]; then
     exit 2
 fi
 
+# RC == 0 (allow). $VIOLATION may carry a non-blocking win-* MCP litmus-test
+# reminder (JSON additionalContext, issue #249) — empty on the ordinary
+# no-op-nothing-detected path, so this never prints a stray blank line.
+if [ -n "$VIOLATION" ]; then
+    printf '%s\n' "$VIOLATION"
+fi
 exit 0
