@@ -9874,9 +9874,15 @@ def _secret_redact(blob, value, marker=b"<<REDACTED>>"):
     child that deliberately transforms it (encrypts it, reverses it, prints it
     a character per line, base64s it twice) still defeats the filter — nothing
     at this layer can prevent that, because the session genuinely has to be
-    able to USE the credential. The containment that would (resolving the
-    command from a user-written template instead of agent argv) is a product
-    decision, filed as #154 and blocked on the user's call there.
+    able to USE the credential. The containment that would close it —
+    resolving the command from a user-written template instead of agent
+    argv — was filed as #154 and is now IMPLEMENTED for a TEMPLATED name:
+    `cmd_secret`'s `exec` action refuses agent-supplied `-- CMD` argv outright
+    once `filedrop.vault.has_template(name)` is true, and runs only
+    `read_template(name)`'s result instead — the child is whatever the
+    operator wrote, never whatever the agent chose, so this whole class of
+    deliberate transformation no longer applies to it. Templating is OPT-IN
+    per name: an UNTEMPLATED name keeps the full residual above, unchanged.
 
     THE OTHER RESIDUAL, which redaction cannot touch at all: this filters the
     child's captured fd 1/2 ONLY. Nothing constrains where the child WRITES —
@@ -10004,12 +10010,25 @@ def cmd_secret(args):
         boundary, because the agent's uid holds NOPASSWD sudo on these boxes,
         so no store location is out of its reach. It guarantees the unsafe path
         is refused by default and that circumventing it leaves an artifact.
-      * `exec`'s CHILD is unconstrained on disk. Output redaction covers the
-        captured fd 1/2 only; nothing stops the child WRITING the value
-        anywhere, including a git-tracked file — `secret exec DB -- sh -c
-        'echo "$DB" > config.ini'` is not something any output filter can see.
-        The containment that would close it is #154, blocked on a product
-        decision.
+      * `exec`'s CHILD is unconstrained on disk FOR AN UNTEMPLATED NAME.
+        Output redaction covers the captured fd 1/2 only; nothing stops the
+        child WRITING the value anywhere, including a git-tracked file —
+        `secret exec DB -- sh -c 'echo "$DB" > config.ini'` is not something
+        any output filter can see. #154 closes this for a TEMPLATED name:
+        `secret exec NAME` for a name locked to a user-written command
+        template (`~/.claude/secrets/NAME.template`, see filedrop/vault.py's
+        `has_template`/`read_template`) runs ONLY that command —
+        agent-supplied `-- CMD` argv is refused outright — so the child is
+        whatever the operator wrote, never whatever the agent chose. An
+        UNTEMPLATED name keeps the residual above unchanged: templating is
+        opt-in per name, never a blanket requirement. Templating has its OWN
+        honest limit, stated where the file lives (filedrop/vault.py's own
+        module docstring) rather than gestured at here: this repo ships no
+        function that WRITES a template, on purpose — any such function
+        would be reachable by `python3 -c "..."`, a route no text-matching
+        hook can see, so the only safe design is to not have one. A template
+        is authored by placing the file directly, by a means outside
+        anything this repo ships.
       * `exec` BUFFERS all child output until the child exits
         (`capture_output=True`, required in order to filter it). So there is no
         streaming for a long-running or interactive child, and if the CLI is
@@ -10025,6 +10044,7 @@ def cmd_secret(args):
         minimum `keep` can survive up to ~1h past its expiry.
     """
     import secrets as _secrets
+    import shlex
     import subprocess
     import time
 
@@ -10056,13 +10076,25 @@ def cmd_secret(args):
         return
 
     if action == "list":
-        rows = st.list_entries()
-        if not rows:
+        # Keyed by name so a #154 template-only entry (no `.secret`/`.meta`
+        # at all) can be unioned in without touching `list_entries()`/
+        # `_entry_names()` — those drive `purge()`'s sweep, and a template
+        # has no expiry to purge (see `template_names()`'s own docstring).
+        rows = {r[0]: r for r in st.list_entries()}
+        templated = set(st.template_names())
+        names = sorted(set(rows) | templated)
+        if not names:
             print("no secrets stored")
             return
-        print("%-24s %-8s %-26s %s" % ("NAME", "STATE", "RECEIVED", "EXPIRES"))
-        for nm, state, _req, recv, exp in rows:
-            print("%-24s %-8s %-26s %s" % (nm, state, recv, exp))
+        print("%-24s %-8s %-9s %-26s %s"
+              % ("NAME", "STATE", "TEMPLATE", "RECEIVED", "EXPIRES"))
+        for nm in names:
+            if nm in rows:
+                _nm, row_state, _req, recv, exp = rows[nm]
+            else:
+                row_state, recv, exp = st.state(nm), "-", "-"
+            print("%-24s %-8s %-9s %-26s %s"
+                  % (nm, row_state, "yes" if nm in templated else "no", recv, exp))
         return
 
     if action == "status":
@@ -10072,6 +10104,13 @@ def cmd_secret(args):
         extra = ""
         if state == "ready" and isinstance(meta.get("expires_at"), (int, float)):
             extra = "  expires=%s" % st._iso(meta["expires_at"])
+        # The COMMAND, not the value — non-sensitive, and showing it is what
+        # "does it know whether a name is templated" (#154) asked for.
+        try:
+            if st.has_template(nm):
+                extra += "  templated=%s" % shlex.join(st.read_template(nm))
+        except st.SecretError as e:
+            extra += "  templated=<error: %s>" % e
         print("%s %s%s" % (nm, state, extra))
         return
 
@@ -10088,6 +10127,26 @@ def cmd_secret(args):
     if action == "exec":
         nm = _need_name()
         cmd = list(getattr(args, "cmd", None) or [])
+        # #154: a TEMPLATED name is LOCKED — agent-supplied `-- CMD` is
+        # refused outright, and the template's own argv is used instead.
+        # Resolved BEFORE `read_value` so a locked name with a bad CMD
+        # refuses without ever touching the stored value.
+        try:
+            templated = st.has_template(nm)
+        except st.SecretError as e:
+            print("secret exec: %s" % e, file=sys.stderr)
+            sys.exit(1)
+        if templated:
+            if cmd:
+                print("secret exec: %s is locked to a command template — "
+                      "the CMD after `--` is refused (omit it; the "
+                      "templated command always runs)" % nm, file=sys.stderr)
+                sys.exit(2)
+            try:
+                cmd = st.read_template(nm)
+            except st.SecretError as e:
+                print("secret exec: %s" % e, file=sys.stderr)
+                sys.exit(1)
         if not cmd:
             print("secret exec: needs a command after `--`", file=sys.stderr)
             sys.exit(2)
@@ -11385,7 +11444,9 @@ def main():
              "chat (a value typed into chat is in the transcript forever)")
     p_sec.add_argument("action", choices=list(SECRET_ACTIONS),
                        help="request (stand up the URL) | status | list | "
-                            "exec NAME -- CMD (hand the value to a child) | "
+                            "exec NAME -- CMD (hand the value to a child; a "
+                            "name LOCKED to a template ignores CMD and runs "
+                            "its own command instead, #154) | "
                             "forget NAME | purge (drop everything past its TTL)")
     p_sec.add_argument("name", nargs="?", default=None,
                        help="Secret name: letters/digits/underscore, also used "

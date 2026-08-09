@@ -55,13 +55,19 @@ set -euo pipefail
 # Use `secret request` — the user posts it from their own browser.
 #
 # NOT ONLY BASH. An agent asked what is in the store reaches for the `Read`
-# TOOL long before it reaches for `cat`, so Read/Grep/Glob are matched too (by
-# EXACT tool name, one settings entry each — an alternation matcher has been
-# observed in this repo to silently never match, and a guard that never runs is
-# worse than none because it reads as coverage). For those the inspected fields
-# are file_path / notebook_path / path / glob, plus `pattern` for Glob ONLY:
-# Grep's pattern is a regex to search FOR, and treating it as a path would
-# block searching this repo for the guard's own subject matter.
+# TOOL long before it reaches for `cat`, so Read/Grep/Glob/Write/Edit are all
+# matched too (by EXACT tool name, one settings entry each — an alternation
+# matcher has been observed in this repo to silently never match, and a guard
+# that never runs is worse than none because it reads as coverage). For those
+# the inspected fields are file_path / notebook_path / path / glob, plus
+# `pattern` for Glob ONLY: Grep's pattern is a regex to search FOR, and
+# treating it as a path would block searching this repo for the guard's own
+# subject matter. Write and Edit joined this list at #154: a `<name>.template`
+# command-lock file (filedrop/vault.py) lives in this SAME directory, and an
+# agent's reflexive Write/Edit against it needs the identical refusal a value
+# file already had — no Python change was needed here, only the
+# settings/hooks.json wiring, since Write/Edit's own `tool_input` shape
+# (`{"file_path": ..., ...}`) already matches the fields this branch scans.
 #
 # ALLOWED heads (provably content-free AND non-mutating): ls, stat, test, [.
 # Plus the whole sanctioned CLI surface (`airuleset.py secret
@@ -120,18 +126,37 @@ set -euo pipefail
 #     (`python3 -c "import pathlib; open(pathlib.Path.home()/'.claude'/'secrets'/n)"`,
 #     a variable assembled from parts, a path read out of another file) does
 #     not match either pattern — text matching cannot see it.
-#   - AUTHORING THEN RUNNING is out of scope, decided rather than overlooked
-#     (#156). `Write` a script that reads the store, then `bash` it: both halves
-#     are allowed, and no `Write` matcher is registered. Adding one was
-#     considered and REJECTED for two reasons. It would block editing this hook
-#     and its own tests, which necessarily contain the store path, so the guard
-#     would prevent its own maintenance — and it would destroy the documented
-#     remedy for the accepted false positive below, which is precisely "write
-#     the body to a file with the Write tool". Against that it buys little: a
-#     script whose path is assembled at runtime defeats a content match anyway,
-#     the same limit already stated for computed paths. The honest scope is
-#     that this hook gates the ACT of reading, not the authoring of something
-#     that will later read.
+#   - AUTHORING THEN RUNNING is STILL out of scope for CONTENT, even though a
+#     `Write` matcher IS now registered (#154, see NOT ONLY BASH above). This
+#     bullet used to say "no `Write` matcher is registered" — no longer true —
+#     but the REASON that decision was written down still holds for what
+#     actually matters: the Write/Edit branch inspects the WRITE TARGET
+#     (`file_path`) only, never `content`. `Write` a NEW file at an ordinary
+#     path (`/tmp/reader.py`) whose CONTENT reads the store, then `bash` it:
+#     both halves are still allowed, because neither the file's own path nor
+#     the bash command that runs it names the store — a script whose path is
+#     assembled at runtime defeats a content match anyway, the same limit
+#     already stated for computed paths. This is NOT the concern #156
+#     rejected a Write matcher over: that concern was about a
+#     CONTENT-SCANNING design, which would have blocked editing this hook and
+#     its own tests (their SOURCE TEXT necessarily contains the store path as
+#     a string literal) and would have destroyed the documented remedy for
+#     the accepted false positive below ("write the body to a file with the
+#     Write tool"). The #154 design scans `file_path` only — the SAME field
+#     the Read/Grep/Glob branch already scanned — so editing this hook, its
+#     tests, or any ordinary file is unaffected regardless of what text they
+#     contain. The honest scope, unchanged: this hook gates WHICH PATH is
+#     read or written, never WHAT CONTENT passes through an unrelated path.
+#   - TEMPLATE FILES (#154, `<name>.template`, filedrop/vault.py) get the
+#     SAME protection as a value file for free — they live in this same
+#     directory, so rule A already matches them regardless of extension
+#     (VALUE_FILE_RE, rule B, was never extended to `.template` — it did not
+#     need to be). The WRITE side of that lock is deliberately NOT this
+#     hook's job: filedrop/vault.py ships no write_template()/
+#     set_template() function at all, on purpose (a computed
+#     module.function() call names no literal path this hook could ever
+#     see) — the only route this hook needs to close is the reflexive one
+#     (cat, Write, Edit against the literal path), which it now does.
 #   - Not a shell parser: `xargs` fed from a file LIST, and a wrapper script
 #     that does the read internally, are invisible. The measured shape of this
 #     is `find <parent> -type f | xargs cat`, which reads every credential and

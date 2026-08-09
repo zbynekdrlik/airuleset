@@ -60,11 +60,67 @@ THE THREE NO-LEAK PROPERTIES THIS MODULE IS RESPONSIBLE FOR:
   3. Values live 0600 inside a 0700 dir under `~/.claude/`, outside every repo,
      and are deleted by `--forget` or by TTL — never written to a skill or a
      CLAUDE.md, both of which are git-committed.
+
+A FOURTH property, OPT-IN per name (#154): a name LOCKED to a user-written
+command TEMPLATE (`<name>.template`, next to `<name>.secret`/`<name>.meta` in
+this same dir) closes the one residual `_secret_redact`'s own docstring
+states plainly — a child that deliberately TRANSFORMS the value (encrypts it,
+reverses it, prints it a character per line) defeats any output filter,
+because nothing at that layer can tell a legitimate render from an
+exfiltration. `secret exec` for a templated name refuses agent-supplied
+`-- CMD` argv outright and runs only `read_template()`'s result — the CHILD
+is fixed by whoever wrote the template, never chosen by the agent. A name
+with no template keeps behaving exactly as before this ticket.
+
+THE LOOPHOLE, addressed rather than hidden: the agent runs as the SAME unix
+user a template file would live under, so nothing here is a hard boundary
+against a sufficiently deliberate agent — the same "GUARDRAIL, not boundary"
+honesty this module already states for NOPASSWD sudo above applies here too.
+Two things narrow it as far as this repo's own code reasonably can, and one
+thing is DELIBERATELY absent:
+
+  1. `hooks/block-vault-store-read.sh` is now ALSO wired for the Write and
+     Edit TOOLS (settings/hooks.json only — no new hook file). A
+     `<name>.template` file lives inside the SAME guarded `.claude/secrets/`
+     dir a value file does, so an agent's reflexive `cat`/`echo >>`/Read/
+     Grep/Glob/Write/Edit against it is refused exactly like a value file
+     already was.
+  2. This module ships NO `write_template()`/`set_template()` function —
+     not even a private one, and `cmd_secret` has no CLI action for it
+     either. This is a structural choice, not an oversight: a text-matching
+     hook matches the RAW TEXT of a Bash command, but a computed path
+     defeats it regardless of whether a dedicated helper exists —
+     `python3 -c "from filedrop import vault; vault.write_template(...)"`
+     is the obvious route THIS module would open if it shipped one, but
+     even a plain stdlib one-liner with no vault import at all —
+     `python3 -c "open(__import__('pathlib').Path.home()/'.claude'/
+     'secrets'/'X.template','w').write('cmd')"` — names no literal store
+     path either, so it is exactly as invisible to a text-matching hook.
+     Removing this module's own write function therefore does not, by
+     itself, close the whole class — it closes the one route THIS module
+     could have made easier. Any write-capable function in an importable
+     module is one Python one-liner away from the very agent the whole
+     feature exists to constrain, and `secret exec` itself already requires
+     the agent to be able to run Python. The only way this repo's own code
+     closes that specific route is to not contain it, which is why this
+     module goes no further than "read-only, and say so honestly" — the
+     residual stdlib route is real regardless and is left to the same
+     "guardrail, not boundary" limit stated below. A template is
+     therefore authored by placing the file at `template_path(name)`
+     directly, by a means outside anything this repo ships — a human
+     editing it via a channel outside the Claude Code session entirely, or
+     a trusted provisioning step run outside any agent.
+  3. Neither (1) nor (2) is a boundary. NOPASSWD sudo past the hook, or
+     editing `settings.json` to unregister it, remain open exactly as they
+     already are for the value store — stated above, unchanged by this.
+     What is delivered is the SAME thing the read-guard hook already
+     delivers for values: refused by default, not by reflex — never more.
 """
 import json
 import os
 import re
 import secrets as _secrets
+import shlex
 import signal
 import sys
 import tempfile
@@ -205,6 +261,22 @@ def value_path(name):
 
 def meta_path(name):
     return ensure_dir() / (check_name(name) + ".meta")
+
+
+def template_path(name):
+    """Where a per-name LOCKED COMMAND TEMPLATE would live (#154).
+
+    Read-only helper — there is deliberately no `write_template()` sibling
+    to `value_path`/`meta_path`. See the module docstring's "THE LOOPHOLE"
+    section for why: every function this module exposes is importable and
+    callable by anyone who can run `python3 -c "..."`, which the SANCTIONED
+    `secret exec` flow itself requires — so a write primitive here would be
+    reachable by exactly the agent the whole feature exists to constrain,
+    via a route no text-matching hook can see (a computed module.function()
+    call names no literal path at all). The file is authored by placing it
+    at this path directly, by a means outside anything this repo ships.
+    """
+    return ensure_dir() / (check_name(name) + ".template")
 
 
 def _now(now=None):
@@ -421,6 +493,86 @@ def read_value(name):
         return value_path(name).read_bytes()
     except OSError as e:
         raise SecretError("%s is not stored (state=%s)" % (name, state(name))) from e
+
+
+def has_template(name):
+    """True iff `name` is LOCKED to a user-written command template (#154).
+
+    A name with a template ignores agent-supplied `-- CMD` argv entirely:
+    `secret exec` runs only `read_template(name)`'s result instead, closing
+    the deliberate-transformation residual `_secret_redact`'s own docstring
+    states plainly (encrypt/reverse/print-a-character-per-line — nothing an
+    OUTPUT filter can catch, because the session must be able to USE the
+    value). A name with no template behaves exactly as before this ticket:
+    agent argv, unchanged.
+    """
+    return template_path(name).exists()
+
+
+def read_template(name):
+    """The templated child's argv, or raise.
+
+    NEVER returns None. Once `template_path(name)` exists the name is
+    LOCKED — an unreadable or malformed template must fail LOUD, never fall
+    back to agent-supplied argv, or a corrupted/emptied file (by anything
+    that can still touch it) would silently re-open a name the operator
+    believed was locked. Call this ONLY when `has_template(name)` is True; a
+    name with no template file never reaches this function at all.
+
+    The content is ONE shell-word-quoted command line, split with
+    `shlex.split(..., comments=True)` and later run via
+    `subprocess.run(argv, shell=False)` — literal-only, by construction:
+    there is no shell to interpret `&&`/`|`/`;`/redirection, so those
+    characters (if typed) become ordinary literal arguments to the templated
+    program rather than shell operators. The credential VALUE never appears
+    in this file at all — it still reaches the templated child through the
+    exact same env-var/`--stdin` mechanism `exec` already used for agent
+    argv, never spliced into the command text (which would put it in
+    /proc/<pid>/cmdline, world-readable on these boxes — the same reasoning
+    this module already applies to the endpoint token in vault_server.py).
+    """
+    check_name(name)
+    p = template_path(name)
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        # UnicodeDecodeError is a ValueError subclass, NOT an OSError —
+        # read_text's own decode step can raise it on non-UTF-8 bytes, and
+        # it must fail exactly as loud as an unreadable file (#154 review).
+        raise SecretError(
+            "%s: locked to a template that could not be read: %s"
+            % (name, e)) from e
+    try:
+        argv = shlex.split(raw, comments=True)
+    except ValueError as e:
+        raise SecretError(
+            "%s: template is not valid shell-word syntax: %s" % (name, e)) from e
+    if not argv:
+        raise SecretError(
+            "%s: template is empty — refusing rather than falling back to "
+            "agent-supplied argv" % name)
+    return argv
+
+
+def template_names():
+    """Every name with a template file, independent of value state (#154).
+
+    Deliberately NOT folded into `_entry_names()`/`list_entries()`: those
+    drive `purge()`'s sweep, and a name with only a `.template` (no
+    `.secret`/`.meta`) has neither a value nor an expiry to purge — adding
+    it there would make `purge()` report a name as "expired" while its
+    template file (never touched by `_unlink_entry`) silently survives, a
+    false removal claim this module's `forget()`/`purge()` explicitly
+    refuse to make elsewhere.
+    """
+    d = secrets_dir()
+    if not d.exists():
+        return []
+    names = set()
+    for p in d.iterdir():
+        if p.suffix == ".template" and NAME_RE.fullmatch(p.stem):
+            names.add(p.stem)
+    return sorted(names)
 
 
 def forget(name):
