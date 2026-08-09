@@ -122,7 +122,13 @@ class SubagentStopHookBase(unittest.TestCase):
 
     def _run(self, lines, agent_id="aTESTAGENT1", transcript_path=None,
              sid=None, background_tasks=None, parent_lines=None,
-             ledger=None):
+             ledger=None,
+             last_assistant_message="task finished, see summary above"):
+        # NB: the default message is deliberately NEUTRAL — it must not
+        # contain "monitor"/"watching" (airuleset #343's own unbacked-claim
+        # check), since none of the tests in THIS file that use the default
+        # are about message content at all; only TestSubagentClaimsMonitor
+        # WithNoLiveWork below passes an explicit monitoring-shaped message.
         sid = sid or ("t-" + uuid.uuid4().hex[:10])
         if ledger is not None:
             Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, agent_id)).write_text(
@@ -137,7 +143,7 @@ class SubagentStopHookBase(unittest.TestCase):
             payload = {
                 "session_id": sid, "hook_event_name": "SubagentStop",
                 "agent_id": agent_id, "agent_type": "autopilot-worker",
-                "last_assistant_message": "⏳ monitoring CI run",
+                "last_assistant_message": last_assistant_message,
                 "transcript_path": parent,
                 "agent_transcript_path": tr}
             if background_tasks is not None:
@@ -411,6 +417,85 @@ class TestLedgerOwnership(SubagentStopHookBase):
         self.assertNotIn("block", out.stdout)
         self.assertFalse(path.exists(),
                          "a passing stop must clean up the agent's ledger")
+
+
+class TestSubagentClaimsMonitoringWithNoLiveWork(SubagentStopHookBase):
+    """airuleset #343 (odoo-erp incident): a background LANE subagent ended
+    its turn with 'monitoring shadow E2E to terminal' as its final words —
+    but a SubagentStop is terminal by construction, nothing continues
+    watching once it fires, and the subagent owned no live tracked work at
+    all. The watched run failed 20 minutes later; nothing woke the
+    coordinator. Neither existing Stop-event hook
+    (stop-check-working-liveness.sh / stop-check-status-marker.sh) reaches a
+    SubagentStop at all, and subagent-stop-check-bg-work.sh only ever
+    checked the OPPOSITE condition (live work present) — this class proves
+    the missing THIRD condition: an un-backed 'still monitoring/watching'
+    claim with NOTHING live, on the SubagentStop path specifically."""
+
+    def test_monitoring_claim_with_no_live_work_blocks(self):
+        # the exact incident phrase, no background work anywhere
+        out = self._run([], last_assistant_message=
+                        "monitoring shadow E2E to terminal")
+        self.assertIn("block", out.stdout)
+        self.assertIn("terminal", out.stdout.lower())
+
+    def test_watching_claim_with_no_live_work_blocks(self):
+        out = self._run([], last_assistant_message=
+                        "I will keep watching for the deploy to finish")
+        self.assertIn("block", out.stdout)
+
+    def test_future_intent_to_monitor_blocks_too(self):
+        # "I'll monitor X" is the SAME unbacked-ongoing-watch shape as the
+        # present participle — future intent with nothing live to back it
+        out = self._run([], last_assistant_message=
+                        "I'll monitor the run and report back")
+        self.assertIn("block", out.stdout)
+
+    def test_past_tense_monitored_does_not_block(self):
+        # a genuinely COMPLETED report ("I monitored X, it succeeded") is
+        # not a forward-looking claim -- must never match
+        out = self._run([], last_assistant_message=
+                        "I monitored the deploy earlier and it succeeded")
+        self.assertNotIn("block", out.stdout)
+
+    def test_past_tense_watched_does_not_block(self):
+        out = self._run([], last_assistant_message=
+                        "I watched the build finish, all green")
+        self.assertNotIn("block", out.stdout)
+
+    def test_neutral_message_with_no_live_work_passes(self):
+        out = self._run([], last_assistant_message=
+                        "done — review found nothing further to fix")
+        self.assertNotIn("block", out.stdout)
+        self.assertEqual(out.returncode, 0)
+
+    def test_monitoring_claim_with_genuine_live_work_still_blocks(self):
+        # live work present -> the OLD reason (not the new one) blocks first;
+        # unaffected by this ticket's fix either way, kept as a regression
+        # guard that the two branches never fight each other
+        out = self._run([bash_bg_launch("b343live1")], last_assistant_message=
+                        "monitoring shadow E2E to terminal")
+        self.assertIn("block", out.stdout)
+        self.assertIn("b343live1", out.stdout)
+
+    def test_retry_cap_still_applies_to_the_new_reason(self):
+        # the new check reuses the SAME per-(session,agent) BLOCK_FILE the
+        # live-work check already writes -- it must fail open past the cap,
+        # never wedge a subagent forever on a repeated unbacked claim
+        sid = "t-343cap-" + uuid.uuid4().hex[:8]
+        blocks = 0
+        last = None
+        for _ in range(5):
+            last = self._run([], sid=sid, last_assistant_message=
+                             "monitoring shadow E2E to terminal")
+            if "block" in last.stdout:
+                blocks += 1
+            else:
+                break
+        self.assertGreaterEqual(blocks, 1)
+        self.assertLessEqual(blocks, 3)
+        self.assertNotIn("block", last.stdout,
+                         "after the cap the hook must fail open")
 
 
 class TestPostToolUseRecorder(unittest.TestCase):
