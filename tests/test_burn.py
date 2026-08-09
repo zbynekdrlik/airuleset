@@ -10,6 +10,7 @@ already-deployed `airuleset.py burn --json` (never scp).
 import argparse
 import contextlib
 import datetime
+import inspect
 import io
 import json
 import os
@@ -1809,6 +1810,18 @@ class TestFleetRemoteCmd(unittest.TestCase):
         cmd = airuleset._fleet_remote_cmd(remote)
         prefix = airuleset._remote_ssh_prefix(remote)
         self.assertEqual(cmd[:-1], prefix)
+
+    def test_fleet_remote_cmd_genuinely_calls_the_shared_builder(self):
+        """#342 adversarial-review MINOR: the value-comparison test above
+        (`test_matches_the_shared_remote_ssh_prefix_exactly`) passes for a
+        WRONG "fix" too -- a `_fleet_remote_cmd` that reverts to its own
+        duplicated identity/sshpass branching but manually appends the
+        same two `-o` flags would produce byte-identical output and still
+        pass, silently re-forking the two implementations again the next
+        time `_remote_ssh_prefix()` is hardened. Read the SOURCE and
+        require the real call, not just a matching result."""
+        src = inspect.getsource(airuleset._fleet_remote_cmd)
+        self.assertIn("_remote_ssh_prefix(remote)", src)
 
 
 class TestHourBucketOfTs(unittest.TestCase):

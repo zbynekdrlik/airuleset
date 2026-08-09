@@ -9664,10 +9664,15 @@ def _remote_ssh_prefix(remote):
     instead of openssh's own default of 3 (sshpass happily re-supplies the
     same password on every re-prompt). Deliberately NOT porting that
     sibling ticket's cross-account "never re-probe a known-bad host this
-    run" tracking set here — burn/delegation are on-demand, usually
-    single-host CLI reports, and job 16's fleet fetch (the third caller,
-    via `_fleet_remote_cmd` below) already gates each host to at most one
-    attempt per UTC hour, spreading any retries comfortably inside a
+    run" tracking set here — `_burn_remote`/`_delegation_remote` each open
+    EXACTLY ONE connection per host per call and never retry a failed one
+    (a `--host all` run still visits every host, but only once each, same
+    as a single-host run), so there is no in-process retry-storm shape for
+    that tracking set to guard against; and job 16's fleet fetch (the third
+    caller, via `_fleet_remote_cmd` below) already gates each host to at
+    most one attempt per UTC hour — regardless of whether that attempt
+    succeeds or fails, since `fleet_burn_job` claims the hour unconditionally
+    once its `fetch()` returns — spreading any retries comfortably inside a
     typical fail2ban findtime window without new state."""
     identity = remote.get("identity")
     if identity:
