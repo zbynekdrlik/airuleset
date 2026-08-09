@@ -54,10 +54,24 @@ set -euo pipefail
 # declared host, since `.mcp.json`'s mcpServers schema has no standardized
 # host field to extract reliably (see #249's design comment for why exact
 # host resolution was rejected). Every OTHER ssh call reaching this
-# classifier inside a win-* MCP project gets a non-blocking
-# `additionalContext` reminder of the two-context litmus test (never a
-# block) — file-copy/CLI/registry-query ssh usage (camera-box #701/#703's
-# own headless decode, `scp` deploys) stays frictionless.
+# classifier inside a win-* MCP project is never BLOCKED — only an
+# ssh-invoked CLI/headless command (camera-box #701/#703's own decode)
+# gets a non-blocking `additionalContext` reminder of the two-context
+# litmus test; a pure file-copy transport (`scp`/`rsync`) stays fully
+# silent.
+#
+# KNOWN GAPS in this extension (adversarial review, #249 — best-effort,
+# same rigor level as the rest of this hook, not a full shell parser):
+#   - Requires the literal `win-` PREFIX on an mcpServers key — a
+#     project naming its server `windows-obs` (off the `win-*`/`mcp__win-*`
+#     ecosystem convention every real project uses) is not gated.
+#   - A quote-spliced atom (`'Main'"'"'WindowTitle'`) or one hidden behind
+#     `bash -c "..."` indirection is invisible — the argv parser doesn't
+#     reassemble splices or recurse into a nested shell, same limitation
+#     already stated above for the destructive-verb checks.
+#   - `Start-Process` matches a hyphen-delimited SUBSTRING too (e.g.
+#     `start-process-manager`) — `\b` anchors on the hyphen. Implausible
+#     over ssh to a Windows box; not worth a narrower pattern.
 #
 # Bypass (rare, user-instructed only, logged): append
 # '# airuleset:destructive-ok <reason>' to the command, or set
@@ -138,6 +152,9 @@ SCHTASKS_BRIDGE_RE = re.compile(r"(?i)\bschtasks\b.*(/it\b|/interactive\b)")
 WIN_MCP_SERVER_RE = re.compile(r"(?i)^win-")
 
 
+MCP_JSON_MAX_BYTES = 65536  # a real .mcp.json is tiny; this only bounds a hostile/huge one
+
+
 def _win_mcp_active(cwd):
     """True iff <cwd>/.mcp.json declares >=1 `win-*` mcpServers entry.
 
@@ -148,11 +165,33 @@ def _win_mcp_active(cwd):
     has no standardized host field, and a wrong extraction would fail in
     the dangerous direction (narrowing the block off the real host). See
     #249's design comment for the full reasoning.
+
+    Runs on EVERY Bash tool call in a project (not just ssh ones), so the
+    read must be BOUNDED and REFUSE a symlink (#249 adversarial-review
+    finding 1, live-triggered): a `.mcp.json` symlinked to `/dev/zero` (or
+    any endless-read device) made the OLD `open(path).read()` shape hang
+    every single Bash command in that cwd, not just an ssh one — a boxes
+    hosting foreign uids by design makes a planted/hostile `.mcp.json`
+    realistic, not hypothetical. O_NOFOLLOW refuses the symlink outright
+    (a legitimate symlinked config just reads as "not gated" — same fail
+    direction as any other unreadable file); the bounded os.read() closes
+    the slower sibling case (a genuinely huge REGULAR file) the same way.
     """
     path = os.path.join(cwd, ".mcp.json")
     try:
-        with open(path, encoding="utf-8") as f:
-            cfg = json.load(f)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except Exception:
+        return False
+    try:
+        raw = os.read(fd, MCP_JSON_MAX_BYTES + 1)
+    except Exception:
+        return False
+    finally:
+        os.close(fd)
+    if len(raw) > MCP_JSON_MAX_BYTES:
+        return False
+    try:
+        cfg = json.loads(raw.decode("utf-8"))
     except Exception:
         return False
     if not isinstance(cfg, dict):
@@ -435,7 +474,11 @@ if [ "$RC" -eq 2 ]; then
     echo "  dirs) — those are approved per approval-scope.md." >&2
     echo "" >&2
     case "$VIOLATION" in
-        *"GUI-session-dependent"*)
+        # matches the FIXED prefix this hook itself generates for the new
+        # hazard (never a bare "GUI-session-dependent" substring, which a
+        # decoy comment inside an UNRELATED command's own echoed text could
+        # coincidentally embed — #249 adversarial-review finding 4).
+        *"GUI-session-dependent command over ssh in a win-* MCP project"*)
             echo "  Two-context rule (Windows / win-* MCP): session 0 (an ssh" >&2
             echo "  shell on Windows) structurally cannot see a session-1" >&2
             echo "  desktop window — a MainWindowTitle/EnumWindows probe over" >&2

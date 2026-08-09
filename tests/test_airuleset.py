@@ -11204,6 +11204,40 @@ class TestBlockDestructiveRemoteWinSshHazard(TestCase):
         r = self._run('ssh USER@HOST "... MainWindowTitle ..."', cwd=d)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
+    def test_win_prefix_must_be_at_the_START_of_the_server_name(self):
+        # #249 adversarial-review finding 3: an UNANCHORED "win-" substring
+        # match (e.g. a server literally named "a-win-x") must NOT gate —
+        # only a genuine `win-*` mcpServers key does.
+        d = self._win_mcp_dir(server_name="a-win-x")
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."', cwd=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_symlinked_mcp_json_to_an_endless_read_source_never_hangs(self):
+        # #249 adversarial-review finding 1 (MAJOR, live-triggered): a
+        # `.mcp.json` symlinked to /dev/zero used to hang EVERY Bash call
+        # in that cwd (the old open(path).read() has no bound and follows
+        # symlinks). O_NOFOLLOW + a bounded read must refuse it outright —
+        # a real timeout (not just a wrong verdict) would mean the bug is
+        # still present.
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        os.symlink("/dev/zero", os.path.join(d, ".mcp.json"))
+        payload = json.dumps({"tool_input": {"command": "echo hi"}})
+        r = subprocess.run(
+            ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+            input=payload, text=True, capture_output=True, cwd=d, timeout=10,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_oversize_mcp_json_never_gates(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        big = {"mcpServers": {"win-x": {"padding": "a" * 100000}}}
+        with open(os.path.join(d, ".mcp.json"), "w") as f:
+            json.dump(big, f)
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."', cwd=d)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_malformed_mcp_json_never_crashes_and_never_gates(self):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
@@ -11222,6 +11256,15 @@ class TestBlockDestructiveRemoteWinSshHazard(TestCase):
         r = self._run(cmd, cwd=d)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_schtasks_without_the_it_flag_does_not_exempt_a_gui_atom(self):
+        # #249 adversarial-review finding 3: `schtasks` alone (no `/it`) is
+        # NOT the sanctioned bridge — a genuine GUI atom in the same remote
+        # command must still block.
+        d = self._win_mcp_dir()
+        cmd = 'ssh USER@HOST "schtasks /run /tn T && Start-Process obs64.exe"'
+        r = self._run(cmd, cwd=d)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
     # --- WARN (never block) on other ssh use in a win-mcp project ---------
 
     def test_warns_but_allows_other_ssh_use_in_win_mcp_project(self):
@@ -11232,6 +11275,19 @@ class TestBlockDestructiveRemoteWinSshHazard(TestCase):
         out = json.loads(r.stdout)
         ctx = out["hookSpecificOutput"]["additionalContext"]
         self.assertIn("mcp", ctx.lower())
+
+    def test_decoy_hazard_text_in_an_unrelated_block_does_not_add_windows_guidance(self):
+        # #249 adversarial-review finding 4: a genuinely UNRELATED block
+        # (rm -rf on filesystem root) whose own ECHOED command text happens
+        # to CONTAIN the words "GUI-session-dependent" (a decoy comment)
+        # must still block for the RIGHT reason, and must NOT print the
+        # Windows two-context guidance meant only for a REAL hazard block.
+        d = self._win_mcp_dir()
+        r = self._run(
+            'ssh USER@HOST "rm -rf / # GUI-session-dependent decoy"', cwd=d)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("root", r.stderr.lower())
+        self.assertNotIn("Two-context rule", r.stderr)
 
     def test_no_warn_output_outside_a_win_mcp_project(self):
         r = self._run('ssh USER@HOST "tasklist | findstr app"')
