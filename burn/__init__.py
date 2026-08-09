@@ -718,7 +718,15 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
                           "by_model": row.get("by_model") or {},
                           # #269: box->account mapping — piggybacks on the
                           # SAME collection round-trip, no new ssh reads.
-                          "account_email": row.get("account_email") or ""}
+                          "account_email": row.get("account_email") or "",
+                          # #286: this host's OWN weekly %/reset (from ITS
+                          # OWN local usage cache, fetched over the SAME ssh
+                          # round-trip by `_fleet_remote_row`) — present but
+                          # None when unavailable (mirrors account_email's
+                          # own present-but-blank convention); validated
+                          # (numeric, not a guess) by `group_fleet_by_account`.
+                          "weekly_pct": row.get("weekly_pct"),
+                          "resets_at": row.get("resets_at")}
         total_usd += usd
         total_msgs += msgs
         weighted_ctx_sum += avg_ctx * msgs
@@ -788,38 +796,62 @@ def group_fleet_by_account(per_host, cache=None):
       local cache, or a pre-#269 row) is collected into a single trailing
       "unknown" bucket (`"account": None`) — placed LAST, never merged into
       a real account by guessing, and never dropped.
-    - `weekly_pct`/`resets_at` are populated ONLY for the ONE account
-      matching `cache.get("account_email")` (the box actually RUNNING the
-      report — the only account this feature can see a real weekly-usage
-      window for, since the fleet ssh collection only ever tails a remote's
-      `snapshots.jsonl` $/msgs row, never a remote's OWN usage cache — see
-      #269's design comment for why that is a deliberately deferred,
-      separately-scoped follow-up rather than guessed here). Every other
-      account's window is left `None` — rendered as "?" by `render_fleet()`,
-      never fabricated.
+    - `weekly_pct`/`resets_at` (#286): for each REAL account, every
+      contributing host's OWN carried `weekly_pct`/`resets_at` (from that
+      host's OWN local usage cache — fetched over the SAME ssh round-trip
+      by `airuleset._fleet_remote_row`, piggybacking on the existing
+      `merge_fleet_row()` per-host whitelist, never a new remote read) is a
+      candidate window, PLUS — for the ONE account matching
+      `cache.get("account_email")` (the box actually RUNNING the report) —
+      that box's own `cache`-derived window (the pre-#286 mechanism,
+      still needed since `REMOTE_HOSTS` never includes the reporting box
+      itself, so its own account otherwise has no other candidate at all).
+      Among all candidates for an account, the MAX percent wins — mirroring
+      `shared_weekly_window()`'s own multiple-matching-entries convention,
+      now applied across boxes instead of within one cache. Zero
+      candidates (every contributing host's own cache was unreadable/stale,
+      AND it isn't the reporting box's own account) leaves the window
+      `None` — rendered as "?" by `render_fleet()`, NEVER fabricated. The
+      unknown-account bucket (`"account": None`) NEVER collects or receives
+      a window under any circumstance, even when `cache`'s own
+      `account_email` happens to also be blank (`None == None` would
+      otherwise wrongly match it) — see
+      `test_unknown_bucket_never_leaks_the_local_boxs_window_even_when_its_own_account_email_is_blank`.
 
     Never raises: an empty/None `per_host` returns `[]`. Also never raises on
     a malformed field crossing this legacy-file/ssh-tailed boundary — a
     non-string `account_email` (a corrupted local cache, a hand-edited
     `fleet.jsonl`) is treated exactly like a missing one (unknown bucket),
     never sorted/hashed as-is (the account key must be `str` or `None` for
-    both `sorted()` and the dict grouping to stay safe)."""
+    both `sorted()` and the dict grouping to stay safe); a non-numeric or
+    boolean `weekly_pct` on a host row is silently excluded from the
+    candidate list (`isinstance(x, (int, float)) and not isinstance(x, bool)`
+    — `isinstance(True, int)` is `True` in Python, so the bool exclusion is
+    explicit, never implicit)."""
     groups = {}
     for host, v in (per_host or {}).items():
         if not v or not isinstance(v, dict) or v.get("error"):
             continue
         acct = v.get("account_email")
         acct = acct if isinstance(acct, str) and acct else None
-        g = groups.setdefault(acct, {"hosts": [], "total_usd": 0.0})
+        g = groups.setdefault(acct, {"hosts": [], "total_usd": 0.0, "windows": []})
         g["hosts"].append(host)
         g["total_usd"] += v.get("usd", 0.0) or 0.0
+        if acct is not None:
+            pct = v.get("weekly_pct")
+            if isinstance(pct, (int, float)) and not isinstance(pct, bool):
+                g["windows"].append((pct, v.get("resets_at")))
     cache = cache if isinstance(cache, dict) else None
     wk = shared_weekly_window(cache) if cache else None
     my_account = (cache or {}).get("account_email") or None
     out = []
     for acct in sorted(k for k in groups if k is not None):
         g = groups[acct]
-        weekly_pct, resets_at = (wk if (wk and acct == my_account) else (None, None))
+        candidates = list(g["windows"])
+        if wk and acct == my_account:
+            candidates.append(wk)
+        weekly_pct, resets_at = (max(candidates, key=lambda c: c[0])
+                                 if candidates else (None, None))
         out.append({"account": acct, "hosts": sorted(g["hosts"]),
                     "total_usd": round(g["total_usd"], 4),
                     "weekly_pct": weekly_pct, "resets_at": resets_at})
@@ -1031,13 +1063,15 @@ def render_fleet(rows, hours=24, cache=None, now=None):
     `$0.00` (a real, verified zero-usage sample); conflating "no data yet"
     with "spent nothing" was the false -39.8% trend the ticket reported.
 
-    Also prints an "ucty" (accounts) section (#269): the LATEST hour's
-    `per_host` grouped by Anthropic subscription account via
-    `group_fleet_by_account()` — box list + $ subtotal per account, real
-    `%`/reset only for the account matching `cache`'s own (the box running
-    this report), an honest "% neznamy" for every other account (see
-    `group_fleet_by_account()`'s own docstring for why), and any host with
-    no known account_email in its own trailing "neznamy ucet" bucket."""
+    Also prints an "ucty" (accounts) section (#269, cross-account real
+    windows since #286): the LATEST hour's `per_host` grouped by Anthropic
+    subscription account via `group_fleet_by_account()` — box list + $
+    subtotal per account, a real `%`/reset for EVERY account with at least
+    one reachable contributing host (its own, or the reporting box's own
+    for its own account), an honest "% neznamy" only when genuinely no
+    host of that account could be resolved (see `group_fleet_by_account()`'s
+    own docstring for why), and any host with no known account_email in its
+    own trailing "neznamy ucet" bucket."""
     if not rows:
         return ("airuleset burn --fleet -- zatial nie su zaznamenane ziadne "
                 "fleet snapshoty. Bezi len na koordinatorovi (dev1) — pockaj "
@@ -1076,7 +1110,7 @@ def render_fleet(rows, hours=24, cache=None, now=None):
         elif g["account"] is None:
             window = ""
         else:
-            window = "  (% neznamy — cudzi ucet, bez lokalneho cache)"
+            window = "  (% neznamy — nepodarilo sa zistit z ziadneho boxu tohto uctu)"
         lines.append("    %s: %s  celkovo=$%.2f%s"
                      % (label, ", ".join(g["hosts"]), g["total_usd"], window))
     trend = fleet_trend(rows)
