@@ -853,6 +853,16 @@ class DocumentedGaps(unittest.TestCase):
                          "the header still promises the full command at "
                          "line(s) %s" % offenders)
 
+    def test_the_write_edit_extension_is_documented(self):
+        # #154: the header must say it now also guards Write/Edit, and why
+        # (a template file lives in the same dir), not leave it implied by
+        # the wiring alone.
+        text = HOOK.read_text()
+        self.assertIn("#154", text)
+        self.assertIn("template", text.lower())
+        self.assertIn("Write", text)
+        self.assertIn("Edit", text)
+
 
 class ToolsOtherThanBash(unittest.TestCase):
     """Adversarial review finding F1 (CRITICAL) — Bash was never the most
@@ -945,6 +955,66 @@ class ToolsOtherThanBash(unittest.TestCase):
         self.assertIn("tool=Read", body)
         self.assertIn("DB_PASS.secret", body)
         self.assertIn("sha256=", body)
+
+    # --- Write / Edit (#154) -------------------------------------------------
+    # A `<name>.template` command-lock file lives in the SAME `.claude/secrets/`
+    # dir a value file does, so it is caught by the SAME `file_path`-scanning
+    # branch above — no Python change, only the settings/hooks.json wiring.
+    def test_write_tool_on_a_value_file(self):
+        self.assertBlocked({"tool_name": "Write",
+                            "tool_input": {"file_path": "%s/DB_PASS.secret" % ABS,
+                                           "content": "x"}})
+
+    def test_write_tool_on_a_template_file(self):
+        self.assertBlocked({"tool_name": "Write",
+                            "tool_input": {"file_path": "%s/DB_PASS.template" % ABS,
+                                           "content": "psql -h host"}})
+
+    def test_write_tool_on_the_store_dir(self):
+        self.assertBlocked({"tool_name": "Write",
+                            "tool_input": {"file_path": "%s/anything" % ABS,
+                                           "content": "x"}})
+
+    def test_write_tool_on_an_ordinary_file_is_allowed(self):
+        self.assertAllowed(
+            {"tool_name": "Write",
+             "tool_input": {"file_path": "/home/newlevel/devel/airuleset/scratch.md",
+                            "content": "hi"}})
+
+    def test_edit_tool_on_a_template_file(self):
+        self.assertBlocked({"tool_name": "Edit",
+                            "tool_input": {"file_path": "%s/DB_PASS.template" % ABS,
+                                           "old_string": "a", "new_string": "b"}})
+
+    def test_edit_tool_on_a_value_file(self):
+        self.assertBlocked({"tool_name": "Edit",
+                            "tool_input": {"file_path": "%s/DB_PASS.secret" % ABS,
+                                           "old_string": "a", "new_string": "b"}})
+
+    def test_edit_tool_on_an_ordinary_file_is_allowed(self):
+        self.assertAllowed(
+            {"tool_name": "Edit",
+             "tool_input": {"file_path": "/home/newlevel/devel/airuleset/scratch.md",
+                            "old_string": "a", "new_string": "b"}})
+
+    def test_a_write_bypass_is_audited_too(self):
+        td = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
+        log = Path(td) / "a.log"
+        r = run_payload({"tool_name": "Write",
+                         "tool_input": {"file_path": "%s/DB_PASS.template" % ABS,
+                                        "content": "psql -h host"}},
+                        env_extra={"AIRULESET_ALLOW_VAULT_READ": "1",
+                                   "AIRULESET_VAULT_READ_AUDIT": str(log)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        body = log.read_text()
+        self.assertIn("tool=Write", body)
+        # VALUE_FILE_RE only ever recognises the `.secret` extension (by
+        # design, #165) — a `.template` reference is caught by the
+        # DIRECTORY rule (A) instead, so the trail records the dir, not
+        # the specific stem. Still a real, non-empty audit line, which is
+        # what this asserts.
+        self.assertIn(".claude/secrets", body)
 
 
 class PerformanceIsBoundedFarBelowTheHarnessTimeout(unittest.TestCase):
@@ -1173,6 +1243,20 @@ class Registered(unittest.TestCase):
         # been observed to silently never match, and a guard that never runs
         # is worse than no guard because it reads as coverage.
         for matcher in ("Read", "Grep", "Glob"):
+            with self.subTest(matcher=matcher):
+                cmds = self._pretooluse(matcher)
+                self.assertTrue(
+                    any("block-vault-store-read.sh" in c for c in cmds),
+                    "no vault guard registered for %s: %s" % (matcher, cmds))
+
+    def test_it_is_wired_for_write_and_edit_too(self):
+        # #154: a `<name>.template` command-lock file lives in this SAME
+        # guarded directory — an agent's reflexive Write/Edit against it
+        # needs the identical refusal a value file already had. Both
+        # matcher blocks already exist in settings/hooks.json (for
+        # pre-write-script-check.sh / block-main-implementation.sh); this
+        # is one more entry in each, not a new hook file.
+        for matcher in ("Write", "Edit"):
             with self.subTest(matcher=matcher):
                 cmds = self._pretooluse(matcher)
                 self.assertTrue(
