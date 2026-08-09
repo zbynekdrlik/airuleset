@@ -27,8 +27,10 @@ Two layers, both fail-open on anything unparseable:
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 import uuid
 from pathlib import Path
@@ -114,11 +116,28 @@ def task_stop(task_id):
 
 
 class SubagentStopHookBase(unittest.TestCase):
+    """#346: every hook subprocess call in this base class (and every
+    subclass method that talks to the hooks directly) is routed through a
+    PER-TEST-METHOD isolated directory via AIRULESET_BGTASKS_DIR — a fresh
+    tempfile.mkdtemp() per setUp, torn down wholesale in addCleanup. This
+    is what stops two test invocations (whether sequential in one process
+    or concurrent across two processes on the same box) from ever sharing
+    a ledger/block-file path again, regardless of whether the session id
+    happens to be randomized or (as in test_stop_gate_sanitizes_ids_
+    consistently_with_recorder below) deliberately fixed. The old
+    glob-based cleanup deleted files by PATTERN, not by ownership, so a
+    sibling process's teardown could delete THIS process's still-in-flight
+    file if both happened to use a same-shaped sid — directory-scoped
+    cleanup removes only what this test itself could ever have created."""
+
     def setUp(self):
-        import glob
-        self.addCleanup(lambda: [os.remove(f) for f in glob.glob(
-            "/tmp/airuleset-subagent-bgwork-block-t-*")
-            + glob.glob("/tmp/airuleset-bgtasks-t-*")])
+        self._bgdir = tempfile.mkdtemp(prefix="airuleset-bgtest-")
+        self.addCleanup(lambda: shutil.rmtree(self._bgdir, ignore_errors=True))
+
+    def _hook_env(self):
+        env = dict(os.environ)
+        env["AIRULESET_BGTASKS_DIR"] = self._bgdir
+        return env
 
     def _run(self, lines, agent_id="aTESTAGENT1", transcript_path=None,
              sid=None, background_tasks=None, parent_lines=None,
@@ -132,8 +151,8 @@ class SubagentStopHookBase(unittest.TestCase):
         # WithNoLiveWork below passes an explicit monitoring-shaped message.
         sid = sid or ("t-" + uuid.uuid4().hex[:10])
         if ledger is not None:
-            Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, agent_id)).write_text(
-                "\n".join(ledger) + "\n")
+            Path(self._bgdir, "airuleset-bgtasks-%s-%s" % (sid, agent_id)
+                 ).write_text("\n".join(ledger) + "\n")
         with TemporaryDirectory() as d:
             tr = transcript_path
             if tr is None:
@@ -151,7 +170,8 @@ class SubagentStopHookBase(unittest.TestCase):
                 payload["background_tasks"] = background_tasks
             return subprocess.run(["bash", str(STOP_HOOK)],
                                   input=json.dumps(payload),
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True,
+                                  env=self._hook_env())
 
 
 class TestSubagentStopBlocksLiveBgWork(SubagentStopHookBase):
@@ -390,9 +410,15 @@ class TestLedgerOwnership(SubagentStopHookBase):
         self.assertNotIn("block", out.stdout)
 
     def test_stop_gate_sanitizes_ids_consistently_with_recorder(self):
-        # the stop gate must sanitize session_id/agent_id the SAME way as the
-        # recorder, or the ledger written at launch is never found at stop
-        safe = Path("/tmp/airuleset-bgtasks-t-led-evil-aX2")
+        # the stop gate must sanitize session_id/agent_id the SAME way as
+        # the recorder, or the ledger written at launch is never found at
+        # stop -- a DELIBERATELY fixed, non-randomized session/agent id
+        # (needed so both hooks' sanitization is checked against the SAME
+        # known target), safe from a concurrent process's own run of this
+        # SAME test only because setUp() gives THIS invocation its own
+        # isolated directory (#346) -- a fixed id alone would still collide
+        # across two processes sharing the historical /tmp default.
+        safe = Path(self._bgdir, "airuleset-bgtasks-t-led-evil-aX2")
         safe.write_text("bown1\n")
         self.addCleanup(lambda: safe.unlink(missing_ok=True))
         payload = {"session_id": "../t-led-evil", "agent_id": "a/../X2",
@@ -403,15 +429,16 @@ class TestLedgerOwnership(SubagentStopHookBase):
                        {"id": "bown1", "type": "shell", "status": "running"}]}
         out = subprocess.run(["bash", str(STOP_HOOK)],
                              input=json.dumps(payload),
-                             capture_output=True, text=True)
+                             capture_output=True, text=True,
+                             env=self._hook_env())
         self.assertIn("block", out.stdout,
                       "the sanitized ledger path must be found → block")
-        Path("/tmp/airuleset-subagent-bgwork-block-t-led-evil-aX2"
+        Path(self._bgdir, "airuleset-subagent-bgwork-block-t-led-evil-aX2"
              ).unlink(missing_ok=True)
 
     def test_ledger_removed_when_stop_passes(self):
         sid = self._sid()
-        path = Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, self.AID))
+        path = Path(self._bgdir, "airuleset-bgtasks-%s-%s" % (sid, self.AID))
         out = self._run([], agent_id=self.AID, sid=sid,
                         ledger=["bolddone1"],
                         background_tasks=[self_task(self.AID)])
@@ -547,7 +574,7 @@ class TestMonitoringClaimReviewFixes(SubagentStopHookBase):
         # MINOR-5 sibling: the CANDIDATES-empty exit must ALSO clear the
         # ledger on a genuinely clean pass (neutral message, no claim)
         sid = "t-343ledger-" + uuid.uuid4().hex[:8]
-        path = Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, self.AID))
+        path = Path(self._bgdir, "airuleset-bgtasks-%s-%s" % (sid, self.AID))
         out = self._run([], agent_id=self.AID, sid=sid,
                         ledger=["bstale343"],
                         background_tasks=[self_task(self.AID)])
@@ -588,12 +615,22 @@ class TestPostToolUseRecorder(unittest.TestCase):
     """post-record-subagent-bg-launch.sh — the synchronous ownership ledger.
     Live PostToolUse payload (captured 2026-07-24): subagent context carries
     agent_id; tool_response is the structured sidecar (backgroundTaskId for
-    Bash, taskId for Monitor, isAsync+agentId for a background Agent)."""
+    Bash, taskId for Monitor, isAsync+agentId for a background Agent).
+
+    #346: routed through a per-test-method isolated directory (mirroring
+    SubagentStopHookBase) — the old glob-based cleanup matched files by
+    PATTERN ("t-rec-*"), which any randomized sid this class generates
+    also matches, so a concurrently-running sibling process's teardown
+    could delete THIS process's still-in-flight ledger file mid-test."""
 
     def setUp(self):
-        import glob
-        self.addCleanup(lambda: [os.remove(f) for f in glob.glob(
-            "/tmp/airuleset-bgtasks-t-rec-*")])
+        self._bgdir = tempfile.mkdtemp(prefix="airuleset-bgtest-rec-")
+        self.addCleanup(lambda: shutil.rmtree(self._bgdir, ignore_errors=True))
+
+    def _hook_env(self):
+        env = dict(os.environ)
+        env["AIRULESET_BGTASKS_DIR"] = self._bgdir
+        return env
 
     def _run(self, tool_response, agent_id="aREC1", sid=None,
              tool_name="Bash"):
@@ -607,8 +644,9 @@ class TestPostToolUseRecorder(unittest.TestCase):
             payload["agent_type"] = "general-purpose"
         r = subprocess.run(["bash", str(RECORD_HOOK)],
                            input=json.dumps(payload),
-                           capture_output=True, text=True)
-        return r, Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, agent_id))
+                           capture_output=True, text=True,
+                           env=self._hook_env())
+        return r, Path(self._bgdir, "airuleset-bgtasks-%s-%s" % (sid, agent_id))
 
     def test_bash_background_launch_recorded(self):
         r, ledger = self._run({"stdout": "", "stderr": "",
@@ -636,7 +674,7 @@ class TestPostToolUseRecorder(unittest.TestCase):
         r, ledger = self._run({"backgroundTaskId": "bmainx1"}, agent_id="")
         self.assertEqual(r.returncode, 0)
         self.assertFalse(
-            Path("/tmp/airuleset-bgtasks-%s-" % "t-rec-none").exists())
+            Path(self._bgdir, "airuleset-bgtasks-%s-" % "t-rec-none").exists())
 
     def test_foreground_bash_not_recorded(self):
         r, ledger = self._run({"stdout": "ok", "stderr": "",
@@ -647,8 +685,12 @@ class TestPostToolUseRecorder(unittest.TestCase):
         # review finding 2026-07-24: session_id/agent_id come from the hook
         # payload and land in a /tmp file path — '../'-style values must be
         # stripped to [A-Za-z0-9_-] before path construction. Sanitized:
-        # '../t-rec-evil' → 't-rec-evil', 'a/../X1' → 'aX1'.
-        safe = Path("/tmp/airuleset-bgtasks-t-rec-evil-aX1")
+        # '../t-rec-evil' → 't-rec-evil', 'a/../X1' → 'aX1'. A DELIBERATELY
+        # fixed, non-randomized id (needed for a reproducible sanitized
+        # target) -- safe from a concurrent process's own run of this SAME
+        # test only because setUp() gives THIS invocation its own isolated
+        # directory (#346).
+        safe = Path(self._bgdir, "airuleset-bgtasks-t-rec-evil-aX1")
         self.addCleanup(lambda: safe.unlink(missing_ok=True))
         payload = {"session_id": "../t-rec-evil", "agent_id": "a/../X1",
                    "hook_event_name": "PostToolUse", "tool_name": "Bash",
@@ -656,7 +698,8 @@ class TestPostToolUseRecorder(unittest.TestCase):
                    "tool_response": {"backgroundTaskId": "btrav1"}}
         r = subprocess.run(["bash", str(RECORD_HOOK)],
                            input=json.dumps(payload),
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           env=self._hook_env())
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(safe.exists(),
                         "ledger must land at the SANITIZED path")

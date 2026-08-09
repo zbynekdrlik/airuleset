@@ -20,6 +20,14 @@ set -euo pipefail
 # structured sidecar — backgroundTaskId (Bash run_in_background), taskId
 # (Monitor), isAsync+agentId (background Agent dispatch; a FOREGROUND
 # dispatch has agentId too but no isAsync — not a detached task, skipped).
+#
+# #346 — AIRULESET_BGTASKS_DIR (default /tmp, unchanged production
+# behavior): the base directory for the ledger. tests/test_subagent_bg_work.py
+# writes/reads this exact same namespace, and a fixed /tmp base let two
+# concurrently-running test PROCESSES on the same box (a real, documented
+# shape on this repo's own boxes) collide on the same ledger file — this
+# override lets the test suite give every test its own isolated directory
+# instead.
 
 command -v jq &>/dev/null || exit 0
 
@@ -43,5 +51,7 @@ SESSION_ID=$(printf '%s' "$SESSION_ID" | tr -cd 'A-Za-z0-9_-')
 AGENT_ID=$(printf '%s' "$AGENT_ID" | tr -cd 'A-Za-z0-9_-')
 [ -n "$SESSION_ID" ] || SESSION_ID="unknown"
 [ -n "$AGENT_ID" ] || exit 0
-echo "$TID" >> "/tmp/airuleset-bgtasks-${SESSION_ID}-${AGENT_ID}"
+BGDIR="${AIRULESET_BGTASKS_DIR:-/tmp}"
+BGDIR="${BGDIR%/}"
+echo "$TID" >> "${BGDIR}/airuleset-bgtasks-${SESSION_ID}-${AGENT_ID}"
 exit 0

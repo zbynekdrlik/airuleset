@@ -94,6 +94,12 @@ set -euo pipefail
 # asynchronously and may lag (observed live: a lagged launch missed on one
 # run, an over-block after cleanup on another — the payload liveness path
 # has neither problem).
+#
+# #346 — AIRULESET_BGTASKS_DIR (default /tmp, unchanged production
+# behavior): the base directory for BOTH the ledger and the retry-cap
+# BLOCK_FILE, mirroring post-record-subagent-bg-launch.sh's own override —
+# MUST resolve to the SAME directory as that hook's, or the ledger it wrote
+# is never found here. See that hook's own comment for why this exists.
 
 command -v jq &>/dev/null || exit 0
 
@@ -115,8 +121,10 @@ SAFE_AGENT=$(printf '%s' "$AGENT_ID" | tr -cd 'A-Za-z0-9_-')
 [ -n "$SAFE_SESSION" ] || SAFE_SESSION="unknown"
 [ -n "$SAFE_AGENT" ] || SAFE_AGENT="unknown"
 
-BLOCK_FILE="/tmp/airuleset-subagent-bgwork-block-${SAFE_SESSION}-${SAFE_AGENT}"
-LEDGER_FILE="/tmp/airuleset-bgtasks-${SAFE_SESSION}-${SAFE_AGENT}"
+BGDIR="${AIRULESET_BGTASKS_DIR:-/tmp}"
+BGDIR="${BGDIR%/}"
+BLOCK_FILE="${BGDIR}/airuleset-subagent-bgwork-block-${SAFE_SESSION}-${SAFE_AGENT}"
+LEDGER_FILE="${BGDIR}/airuleset-bgtasks-${SAFE_SESSION}-${SAFE_AGENT}"
 # an unreadable/corrupt counter reads as 0 — deliberate fail-open direction
 BLOCKS=$(cat "$BLOCK_FILE" 2>/dev/null || echo 0)
 MAX_BLOCKS=3
