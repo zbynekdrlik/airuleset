@@ -241,11 +241,12 @@ it; `hooks/subagent-stop-check-design.sh` blocks your stop once per issue if you
 with no such marker for it. If the supervisor already ran `ticket-validator` for this dispatch and
 gave you its verdict, you may quote it directly in this comment rather than re-deriving from
 scratch — the comment is what makes either source durable and mechanically checked.
-**fork-no-merge EXCEPTION:** you may `gh issue close` ONLY your OWN self-authored sub-findings
-(hook-verified: author == your gh login). An obsolete ASSIGNED / foreign-authored ticket you MUST
-NOT close — COMMENT the finding instead: `gh issue comment <N> --body "OBSOLETE: <evidence>"`,
-leave it OPEN, note it on the evidence block's `obsolete_handed_off:` line, and let the maintainer
-close it.
+**REDUCED-AUTHORITY EXCEPTION (fork-no-merge AND branch-merge, #349):** you may `gh issue close`
+ONLY your OWN self-authored sub-findings (hook-verified: author == your gh login — AND, on a
+shared-gh-identity stream, that login is NOT the maintainer's, #349 CRITICAL). An obsolete ASSIGNED
+/ foreign-authored ticket you MUST NOT close, under EITHER profile — COMMENT the finding instead:
+`gh issue comment <N> --body "OBSOLETE: <evidence>"`, leave it OPEN, note it on the evidence
+block's `obsolete_handed_off:` line, and let the maintainer close it.
 
 ## CYCLE (no pauses, no process questions — `ask-before-assuming.md`)
 
@@ -441,7 +442,7 @@ variant exists to prevent):
 ```
 issues: #<A> <title>, #<B> <title>, …
 plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — self-audit vs what the ticket asked for>
-validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — closed: <what>">
+validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — commented, left OPEN: <what>">
 approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a" — CYCLE step 2 is unconditional.>
 review: <per issue: `/review` + `/requesting-code-review` result before hand-off, ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED on the integration branch — verbatim into each --handoff card's Dosiahnuté>
@@ -452,7 +453,7 @@ ready_for_review: <#A: READY-FOR-REVIEW comment posted ✓, label added/best-eff
 cards_fired: <#A ✓, #B ✓  (notify --run-card --handoff, one per issue)>
 issue_state: <#A=OPEN (merged into integration, hand-off posted, awaiting gatekeeper release), #B=OPEN, …>   ← NEVER closed by you
 dropped: <#K split out of the batch mid-flight (gate violation), issue left OPEN, re-dispatch solo | "none">
-obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence, NOT via this PR | "none">
+obsolete_handed_off: <#K commented OBSOLETE, left OPEN | "none">
 unverified: <list | "none">
 filed: <#K list | "none">
 ```
