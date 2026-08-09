@@ -100,6 +100,16 @@ set -euo pipefail
 # BLOCK_FILE, mirroring post-record-subagent-bg-launch.sh's own override —
 # MUST resolve to the SAME directory as that hook's, or the ledger it wrote
 # is never found here. See that hook's own comment for why this exists.
+#
+# #346 review residual (THEORETICAL, no fix under FREEZE): if AIRULESET_
+# BGTASKS_DIR points at a nonexistent/unwritable directory (test/dev-env
+# misuse only — production always uses the real /tmp default), the retry-
+# cap write below (`echo ... > "$BLOCK_FILE"`) can die under `set -e`
+# BEFORE the jq verdict prints — the write-before-verdict ordering this
+# repo's own #196 fix already established elsewhere in this file. This is
+# a pre-existing pattern (an unwritable /tmp BLOCK_FILE already had this
+# same theoretical gap before #346), not something #346 introduces; the
+# env var only adds one more way to reach a bad directory.
 
 command -v jq &>/dev/null || exit 0
 
