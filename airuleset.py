@@ -6699,7 +6699,8 @@ def _soniox_key_line(source: Path = None):
     return None
 
 
-def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None):
+def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
+                                 skip_names=None):
     """Deliver `~/.soniox.env` (the meeting-analysis skill's canonical,
     UN-guarded Soniox key path -- see skills/meeting-analysis/SKILL.md and
     hooks/block-vault-store-read.sh) to every subdev stream account (#275).
@@ -6717,13 +6718,40 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None):
     failure -- never a silent skip (the gatekeeper Discord `.env` lesson:
     a silent provisioning gap is a dead feature). Returns the list of
     `(remote_name, reason)` failures, mirroring `cmd_push()`'s own
-    `failed` accumulator shape."""
+    `failed` accumulator shape.
+
+    `skip_names` (#341): a set of `remote["name"]` values ALREADY known to
+    have failed ssh auth this run (`cmd_push()`'s own deploy loop passes its
+    own `auth_failed` set here) -- each is skipped with a loud stderr line
+    and a `failed` entry, never given a fresh ssh connection. A second
+    connection attempt against an account the deploy loop already proved is
+    unprovisioned/unreachable is exactly what compounded the fail2ban risk
+    this parameter exists to remove; it never touches an account that has
+    not already, independently, failed auth THIS run."""
     import subprocess
     run = run or subprocess.run
     targets = [h for h in (hosts if hosts is not None else REMOTE_HOSTS)
                if h.get("user") in AUTHORITY_BY_USER]
     if not targets:
         return []
+
+    failed = []
+    skip = set(skip_names or ())
+    if skip:
+        deliverable = []
+        for h in targets:
+            if h["name"] in skip:
+                print("  ⚠ soniox key delivery to %s SKIPPED — its deploy "
+                      "leg already failed auth this run (see the FAILED "
+                      "line above); not opening a second ssh connection "
+                      "against a known-unprovisioned/unreachable account."
+                      % h["name"], file=sys.stderr)
+                failed.append((h["name"], "skipped-known-auth-failure"))
+            else:
+                deliverable.append(h)
+        targets = deliverable
+        if not targets:
+            return failed
 
     line = _soniox_key_line(source)
     if line is None:
@@ -6732,17 +6760,30 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None):
               "delivery to %d subdev stream account(s). Run `airuleset.py "
               "push` from dev1 (the maintainer box) instead."
               % (src, len(targets)), file=sys.stderr)
-        return [(h["name"], "soniox-key-source-missing") for h in targets]
+        return failed + [(h["name"], "soniox-key-source-missing")
+                          for h in targets]
 
-    failed = []
     for remote in targets:
         identity = remote.get("identity")
         if identity:
+            # #341: BatchMode=yes -- a failed pubkey attempt (an
+            # unprovisioned/misconfigured account) must fail IMMEDIATELY
+            # rather than falling through to an interactive password/
+            # keyboard-interactive attempt, which is what turned a single
+            # "Permission denied" connection into several distinct
+            # auth-failure log lines against subdev.
             ssh_prefix = ["ssh", "-i", os.path.expanduser(identity),
-                          "-o", "StrictHostKeyChecking=no"]
+                          "-o", "StrictHostKeyChecking=no",
+                          "-o", "BatchMode=yes"]
         else:
+            # #341: NumberOfPasswordPrompts=1 -- caps a wrong/unprovisioned
+            # password attempt to ONE try (openssh's own default is 3,
+            # and sshpass happily re-supplies the same password for every
+            # re-prompt), so a single sshpass call can burn at most one
+            # fail2ban-countable strike instead of up to three.
             ssh_prefix = ["sshpass", "-p", "newlevel", "ssh",
-                          "-o", "StrictHostKeyChecking=no"]
+                          "-o", "StrictHostKeyChecking=no",
+                          "-o", "NumberOfPasswordPrompts=1"]
         argv = ssh_prefix + [f"{remote['user']}@{remote['host']}",
                               "umask 077; cat > ~/.soniox.env && "
                               "chmod 600 ~/.soniox.env"]
@@ -6762,6 +6803,27 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None):
         else:
             print("    soniox key: delivered to %s" % remote["name"])
     return failed
+
+
+# #341 adversarial-review F1 (MAJOR, TRIGGERED): a bare `"Permission denied"
+# in stderr` substring check misfires on a REMOTE COMMAND's own stderr —
+# `subprocess.run(..., capture_output=True)` on an ssh call captures
+# whatever the remote process itself prints too (ssh forwards it), and a
+# real `git pull` hitting a root-owned file under `.git`, or an
+# `airuleset.py install` traceback, can both legitimately contain that
+# literal substring with ssh auth completely intact. ssh's OWN client-side
+# auth-exhaustion message is structurally distinct on two properties no
+# remote process has any reason to reproduce: it always exits 255, and it
+# is always literally prefixed "<user>@<host>: " (openssh's
+# `permission_denied()`, unchanged for decades). Requiring BOTH closes the
+# false-positive without weakening detection of a genuine auth failure.
+_SSH_AUTH_DENIED_RX = re.compile(r"(?m)^\S+@\S+: Permission denied")
+
+
+def _is_ssh_auth_failure(returncode, stderr):
+    """True only for ssh's OWN auth-exhaustion failure, never a remote
+    COMMAND's stderr that merely happens to contain the same words."""
+    return returncode == 255 and bool(_SSH_AUTH_DENIED_RX.search(stderr or ""))
 
 
 def cmd_push(args):
@@ -6848,6 +6910,15 @@ def cmd_push(args):
     # exiting non-zero if any occurred restores the "impossible to miss"
     # property without reintroducing the abort-the-whole-loop defect.
     failed = []
+    # #341: host NAMES whose deploy leg failed with a genuine ssh AUTH
+    # failure this run ("Permission denied" — never a timeout, never a
+    # plain remote-command failure, both of which mean auth actually
+    # succeeded). Passed to provision_subdev_soniox_key() below so it never
+    # opens a SECOND connection against an account already proven
+    # unprovisioned/unreachable this run — contacting the same known-bad
+    # account twice (once here, once again independently in the soniox
+    # phase) is what compounded the fail2ban risk this set exists to close.
+    auth_failed = set()
 
     # 2. Install locally
     # Adversarial-review CRITICAL finding (plugin-marketplace fix,
@@ -6874,17 +6945,30 @@ def cmd_push(args):
         remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
         identity = remote.get("identity")
         if identity:
-            # key-based SSH (e.g. the gatekeeper — prod-critical, no shared password)
+            # key-based SSH (e.g. the gatekeeper — prod-critical, no shared
+            # password). #341: BatchMode=yes -- a failed pubkey attempt
+            # against an unprovisioned/misconfigured account must fail
+            # IMMEDIATELY instead of falling through to an interactive
+            # password/keyboard-interactive attempt (the "Permission denied
+            # (publickey,password)" shape), which is what let a single
+            # connection generate several distinct auth-failure log lines.
             ssh_cmd = [
                 "ssh", "-i", os.path.expanduser(identity),
                 "-o", "StrictHostKeyChecking=no",
+                "-o", "BatchMode=yes",
                 f"{remote['user']}@{remote['host']}",
                 remote_cmd,
             ]
         else:
+            # #341: NumberOfPasswordPrompts=1 -- caps a wrong/unprovisioned
+            # password attempt to ONE try (openssh's own default is 3, and
+            # sshpass happily re-supplies the same password on every
+            # re-prompt), so one sshpass call burns at most one
+            # fail2ban-countable strike instead of up to three.
             ssh_cmd = [
                 "sshpass", "-p", "newlevel",
                 "ssh", "-o", "StrictHostKeyChecking=no",
+                "-o", "NumberOfPasswordPrompts=1",
                 f"{remote['user']}@{remote['host']}",
                 remote_cmd,
             ]
@@ -6909,6 +6993,12 @@ def cmd_push(args):
         if ssh_result.returncode != 0:
             print(f"  FAILED: {ssh_result.stderr.strip()}")
             failed.append((remote["name"], "rc=%d" % ssh_result.returncode))
+            # #341: a genuine ssh AUTH failure (never a remote-command
+            # failure with auth intact, e.g. a bad `git pull`) marks this
+            # host so the soniox phase below skips it instead of opening a
+            # second connection against an already-known-bad account.
+            if _is_ssh_auth_failure(ssh_result.returncode, ssh_result.stderr):
+                auth_failed.add(remote["name"])
         else:
             print(f"  {ssh_result.stdout.strip()}")
             # #263: a successful remote install's STDERR was being silently
@@ -6928,11 +7018,17 @@ def cmd_push(args):
     # (dev2/gatekeeper-only pushes never reach the source read at all).
     print(f"\n{'=' * 50}")
     print("Delivering Soniox key to subdev stream accounts...")
-    failed.extend(provision_subdev_soniox_key())
+    failed.extend(provision_subdev_soniox_key(skip_names=auth_failed))
 
     if failed:
-        print(f"\n⚠ {len(failed)} of {len(REMOTE_HOSTS)} remote(s) FAILED: "
-              f"{failed}", file=sys.stderr)
+        # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
+        # stream host now yields TWO `failed` entries by design (its own
+        # deploy `rc=...` PLUS the soniox `skipped-known-auth-failure`), so
+        # len(failed) double-counts -- report the DISTINCT host count, the
+        # full list still shows each reason.
+        distinct_failed = {name for name, _reason in failed}
+        print(f"\n⚠ {len(distinct_failed)} of {len(REMOTE_HOSTS)} remote(s) "
+              f"FAILED: {failed}", file=sys.stderr)
         sys.exit(1)
     print("\nAll deployments complete.")
 
