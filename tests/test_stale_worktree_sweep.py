@@ -32,6 +32,7 @@ to catch it).
 """
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -95,6 +96,62 @@ def _add_worktree(repo, branch, name=None, locked=False, commits=0, dirty=False,
     if locked:
         _git(["worktree", "lock", str(wt_dir)], repo)
     return wt_dir
+
+
+def _add_worktree_with_reason(repo, branch, reason, name=None, commits=0, dirty=False):
+    """Same as `_add_worktree` but locked with an EXPLICIT `--reason`
+    text (#348) — the shape `discover_stale_worktrees`'s locked-dead-
+    session classification actually parses a pid/starttime out of."""
+    name = name or branch
+    wt_dir = repo / ".claude" / "worktrees" / name
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+    _git(["worktree", "add", "-b", branch, str(wt_dir)], repo)
+    for i in range(commits):
+        (wt_dir / ("f%d.txt" % i)).write_text("work %d\n" % i)
+        _git(["add", "."], wt_dir)
+        _git(["commit", "-q", "-m", "work %d" % i], wt_dir)
+    if dirty:
+        (wt_dir / "dirty.txt").write_text("uncommitted\n")
+    _git(["worktree", "lock", str(wt_dir), "--reason", reason], repo)
+    return wt_dir
+
+
+def _mkbranch(repo, branch, from_ref="HEAD", commits=0):
+    """A real local branch with NO registered worktree (#348's own
+    "hand-removed directory" root cause) — `git branch <branch>
+    <from_ref>`, optionally with N extra commits made through a
+    throwaway worktree that is immediately `worktree remove`d again, so
+    the branch stays genuinely orphaned afterward."""
+    _git(["branch", branch, from_ref], repo)
+    if commits:
+        tmp_wt = repo / ".claude" / "worktrees" / ("_mkbranch_tmp_" + branch)
+        tmp_wt.parent.mkdir(parents=True, exist_ok=True)
+        _git(["worktree", "add", str(tmp_wt), branch], repo)
+        for i in range(commits):
+            (tmp_wt / ("f%d.txt" % i)).write_text("work %d\n" % i)
+            _git(["add", "."], tmp_wt)
+            _git(["commit", "-q", "-m", "work %d" % i], tmp_wt)
+        _git(["worktree", "remove", str(tmp_wt)], repo)
+
+
+def _backdate(path, now, age_s):
+    """Set both atime and mtime of `path` to `now - age_s` — how a test
+    proves a branch ref / lock marker is "several days old" without
+    waiting for real wall-clock time to pass. `now` is always the
+    module's own FIXED `NOW` constant, never `time.time()`, so this is
+    deterministic regardless of when the test actually runs."""
+    t = now - age_s
+    os.utime(str(path), (t, t))
+
+
+def _fake_proc_stat(pid, start):
+    """A syntactically real-shaped `/proc/<pid>/stat` line — `comm` is a
+    fixed name, 19 filler fields (state..itrealvalue) precede `start`
+    (field 22 overall == index 19 once pid+comm are stripped), matching
+    the REAL field layout `_pid_is_dead` parses (verified live against a
+    genuine `/proc/<pid>/stat` on this box before writing this helper)."""
+    fields_after_comm = ["0"] * 19 + [str(start)] + ["0", "0"]
+    return "%d (proc) %s" % (pid, " ".join(fields_after_comm))
 
 
 # ---------------------------------------------------------------------------
@@ -619,6 +676,397 @@ class TestReviewTheoretical1_PorcelainNulSafety(unittest.TestCase):
         self.assertTrue(victim.exists(),
                         "a newline in another worktree's branch name must never "
                         "cause an unrelated, healthy worktree to be removed")
+
+
+# ---------------------------------------------------------------------------
+# #348 -- pure-unit tests for the small parsing/liveness helpers, no git
+# ---------------------------------------------------------------------------
+
+class TestWorktreeLockPidParsing(unittest.TestCase):
+    def test_parses_pid_and_start(self):
+        self.assertEqual(
+            airuleset._worktree_lock_pid("claude agent agent-x (pid 123 start 456)"),
+            (123, 456))
+
+    def test_parses_pid_with_no_start(self):
+        self.assertEqual(airuleset._worktree_lock_pid("(pid 789)"), (789, None))
+
+    def test_no_match_returns_none_none(self):
+        self.assertEqual(airuleset._worktree_lock_pid("some other reason"), (None, None))
+
+    def test_empty_or_none_returns_none_none(self):
+        self.assertEqual(airuleset._worktree_lock_pid(""), (None, None))
+        self.assertEqual(airuleset._worktree_lock_pid(None), (None, None))
+
+
+class TestPidIsDead(unittest.TestCase):
+    def test_no_such_process_is_positively_dead(self):
+        self.assertTrue(airuleset._pid_is_dead(123, 456, stat_reader=lambda p: None))
+
+    def test_alive_matching_start_is_alive(self):
+        raw = _fake_proc_stat(123, 456)
+        self.assertFalse(airuleset._pid_is_dead(123, 456, stat_reader=lambda p: raw))
+
+    def test_alive_but_different_start_means_pid_reused_original_is_dead(self):
+        raw = _fake_proc_stat(123, 999)   # pid 123 is now a DIFFERENT process
+        self.assertTrue(airuleset._pid_is_dead(123, 456, stat_reader=lambda p: raw))
+
+    def test_alive_with_no_start_to_check_is_never_guessed_dead(self):
+        raw = _fake_proc_stat(123, 456)
+        self.assertFalse(airuleset._pid_is_dead(123, None, stat_reader=lambda p: raw))
+
+    def test_malformed_stat_is_undeterminable(self):
+        self.assertIsNone(airuleset._pid_is_dead(123, 456, stat_reader=lambda p: "garbage"))
+
+    def test_non_int_pid_is_undeterminable(self):
+        self.assertIsNone(airuleset._pid_is_dead(None, 456))
+        self.assertIsNone(airuleset._pid_is_dead(-1, 456))
+
+
+# ---------------------------------------------------------------------------
+# #348 -- discover_orphaned_worktree_branches (real repos, no worktree at all)
+# ---------------------------------------------------------------------------
+
+class TestDiscoverOrphanedBranches(unittest.TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-worktree-sweep-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def _by_branch(self, candidates, branch):
+        for c in candidates:
+            if c.get("branch") == branch:
+                return c
+        return None
+
+    def test_no_orphans_when_nothing_but_primary_exists(self):
+        _mkrepo(self.root, "proj")
+        cands = airuleset.discover_orphaned_worktree_branches(home=self.root, now=NOW)
+        self.assertEqual(cands, [])
+
+    def test_orphan_branch_old_and_clean_is_a_genuine_candidate(self):
+        repo = _mkrepo(self.root, "proj")
+        _mkbranch(repo, "old-orphan-empty")
+        _backdate(repo / ".git" / "refs" / "heads" / "old-orphan-empty", NOW, 10 * DAY)
+        cands = airuleset.discover_orphaned_worktree_branches(home=self.root, now=NOW)
+        row = self._by_branch(cands, "old-orphan-empty")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["reason"])
+        self.assertEqual(row["kind"], "orphan_branch")
+        self.assertEqual(row["path"], "")
+
+    def test_orphan_branch_too_recent_is_never_a_candidate(self):
+        repo = _mkrepo(self.root, "proj")
+        _mkbranch(repo, "fresh-orphan")
+        cands = airuleset.discover_orphaned_worktree_branches(home=self.root, now=NOW)
+        row = self._by_branch(cands, "fresh-orphan")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+
+    def test_orphan_branch_with_commits_ahead_is_never_a_candidate(self):
+        repo = _mkrepo(self.root, "proj")
+        _mkbranch(repo, "old-workinprogress", commits=2)
+        _backdate(repo / ".git" / "refs" / "heads" / "old-workinprogress", NOW, 10 * DAY)
+        cands = airuleset.discover_orphaned_worktree_branches(home=self.root, now=NOW)
+        row = self._by_branch(cands, "old-workinprogress")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("ahead", row["reason"].lower())
+
+    def test_branch_with_a_registered_worktree_is_never_in_the_orphan_list(self):
+        repo = _mkrepo(self.root, "proj")
+        _add_worktree(repo, "worktree-agent-live")
+        _backdate(repo / ".git" / "refs" / "heads" / "worktree-agent-live", NOW, 10 * DAY)
+        cands = airuleset.discover_orphaned_worktree_branches(home=self.root, now=NOW)
+        self.assertIsNone(self._by_branch(cands, "worktree-agent-live"),
+                          "a branch with a live registered worktree must never appear "
+                          "in the orphan list, however old its ref looks")
+
+    def test_orphan_dev_branch_is_protected_even_though_unregistered(self):
+        repo = _mkrepo(self.root, "proj", base_branch="main")
+        _mkbranch(repo, "dev")
+        _backdate(repo / ".git" / "refs" / "heads" / "dev", NOW, 10 * DAY)
+        cands = airuleset.discover_orphaned_worktree_branches(home=self.root, now=NOW)
+        row = self._by_branch(cands, "dev")
+        self.assertIsNotNone(row)
+        self.assertIn("protected", row["reason"].lower())
+
+    def test_packed_ref_orphan_branch_is_never_a_candidate(self):
+        repo = _mkrepo(self.root, "proj")
+        _mkbranch(repo, "old-orphan-packed")
+        _backdate(repo / ".git" / "refs" / "heads" / "old-orphan-packed", NOW, 10 * DAY)
+        _git(["pack-refs", "--all"], repo)
+        self.assertFalse((repo / ".git" / "refs" / "heads" / "old-orphan-packed").exists(),
+                         "sanity: the loose ref file must genuinely be gone after packing")
+        cands = airuleset.discover_orphaned_worktree_branches(home=self.root, now=NOW)
+        row = self._by_branch(cands, "old-orphan-packed")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+
+    def test_toctou_recheck_saves_a_branch_that_gained_commits(self):
+        repo = _mkrepo(self.root, "proj")
+        _mkbranch(repo, "old-orphan-racer")
+        _backdate(repo / ".git" / "refs" / "heads" / "old-orphan-racer", NOW, 10 * DAY)
+        cands = airuleset.discover_orphaned_worktree_branches(home=self.root, now=NOW)
+        row = self._by_branch(cands, "old-orphan-racer")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["reason"])
+        # Something checks the branch out and commits real work between
+        # discovery and the candidate's own turn in sweep.
+        tmp_wt = repo / ".claude" / "worktrees" / "racer-tmp"
+        tmp_wt.parent.mkdir(parents=True, exist_ok=True)
+        _git(["worktree", "add", str(tmp_wt), "old-orphan-racer"], repo)
+        (tmp_wt / "late.txt").write_text("real work\n")
+        _git(["add", "."], tmp_wt)
+        _git(["commit", "-q", "-m", "late real work"], tmp_wt)
+        _git(["worktree", "remove", str(tmp_wt)], repo)
+
+        results = airuleset.sweep_stale_worktrees(
+            home=self.root, dry_run=False, force=True, now=NOW,
+            log_path=self.root / "log", state_path=self.root / "state",
+            candidates=[row])
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["removed"], "the branch must survive -- it gained real work")
+        branches = _git(["branch", "--list", "old-orphan-racer"], repo)
+        self.assertIn("old-orphan-racer", branches)
+
+
+# ---------------------------------------------------------------------------
+# #348 -- sweep_stale_worktrees mutation for orphan branches
+# ---------------------------------------------------------------------------
+
+class TestSweepOrphanBranches(unittest.TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-worktree-sweep-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.log_path = self.root / "logs" / "worktree-sweep.log"
+        self.state_path = self.root / "state" / "worktree-sweep-state.json"
+
+    def _sweep(self, **kw):
+        kw.setdefault("home", self.root)
+        kw.setdefault("now", NOW)
+        kw.setdefault("log_path", self.log_path)
+        kw.setdefault("state_path", self.state_path)
+        kw.setdefault("force", True)
+        return airuleset.sweep_stale_worktrees(**kw)
+
+    def test_genuine_orphan_branch_is_deleted_end_to_end(self):
+        repo = _mkrepo(self.root, "proj")
+        _mkbranch(repo, "old-orphan")
+        _backdate(repo / ".git" / "refs" / "heads" / "old-orphan", NOW, 10 * DAY)
+        results = self._sweep(dry_run=False)
+        row = next((r for r in results if r.get("branch") == "old-orphan"), None)
+        self.assertIsNotNone(row)
+        self.assertTrue(row["removed"])
+        branches = _git(["branch", "--list", "old-orphan"], repo)
+        self.assertEqual(branches.strip(), "")
+
+    def test_dry_run_never_deletes_an_orphan_branch(self):
+        repo = _mkrepo(self.root, "proj")
+        _mkbranch(repo, "old-orphan")
+        _backdate(repo / ".git" / "refs" / "heads" / "old-orphan", NOW, 10 * DAY)
+        self._sweep(dry_run=True)
+        branches = _git(["branch", "--list", "old-orphan"], repo)
+        self.assertIn("old-orphan", branches)
+
+
+# ---------------------------------------------------------------------------
+# #348 -- locked worktree, dead-session reclamation
+# ---------------------------------------------------------------------------
+
+class TestLockedDeadSession(unittest.TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-worktree-sweep-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def _by_branch(self, candidates, branch):
+        for c in candidates:
+            if c.get("branch") == branch:
+                return c
+        return None
+
+    def test_dead_pid_old_clean_zero_ahead_is_a_candidate(self):
+        repo = _mkrepo(self.root, "proj")
+        wt = _add_worktree_with_reason(repo, "worktree-agent-longdead",
+                                       "claude agent agent-x (pid 424242 start 1)")
+        admin = airuleset._worktree_admin_dir(repo, wt)
+        self.assertIsNotNone(admin)
+        _backdate(admin / "locked", NOW, 10 * DAY)
+        cands = airuleset.discover_stale_worktrees(
+            home=self.root, now=NOW, pid_is_dead=lambda pid, start: True)
+        row = self._by_branch(cands, "worktree-agent-longdead")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["reason"])
+        self.assertEqual(row["kind"], "locked_dead")
+
+    def test_alive_pid_is_never_touched(self):
+        repo = _mkrepo(self.root, "proj")
+        _add_worktree_with_reason(repo, "worktree-agent-alive",
+                                  "claude agent agent-x (pid 1 start 1)")
+        cands = airuleset.discover_stale_worktrees(
+            home=self.root, now=NOW, pid_is_dead=lambda pid, start: False)
+        row = self._by_branch(cands, "worktree-agent-alive")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("active worker", row["reason"].lower())
+
+    def test_undeterminable_liveness_is_never_touched(self):
+        repo = _mkrepo(self.root, "proj")
+        _add_worktree_with_reason(repo, "worktree-agent-unknownlive",
+                                  "claude agent agent-x (pid 1 start 1)")
+        cands = airuleset.discover_stale_worktrees(
+            home=self.root, now=NOW, pid_is_dead=lambda pid, start: None)
+        row = self._by_branch(cands, "worktree-agent-unknownlive")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("undeterminable", row["reason"].lower())
+
+    def test_unparseable_lock_reason_never_guessed(self):
+        repo = _mkrepo(self.root, "proj")
+        # A manual `git worktree lock` with NO --reason -- mirrors the
+        # already-existing pre-#348 test's own fixture shape exactly.
+        _add_worktree(repo, "worktree-agent-manuallock", locked=True)
+        cands = airuleset.discover_stale_worktrees(
+            home=self.root, now=NOW, pid_is_dead=lambda pid, start: True)
+        row = self._by_branch(cands, "worktree-agent-manuallock")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("no parseable session pid", row["reason"].lower())
+
+    def test_dead_but_lock_too_recent_is_never_touched(self):
+        repo = _mkrepo(self.root, "proj")
+        _add_worktree_with_reason(repo, "worktree-agent-recentdead",
+                                  "claude agent agent-x (pid 424242 start 1)")
+        # No backdating -- the lock marker is fresh.
+        cands = airuleset.discover_stale_worktrees(
+            home=self.root, now=NOW, pid_is_dead=lambda pid, start: True)
+        row = self._by_branch(cands, "worktree-agent-recentdead")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("recent", row["reason"].lower())
+
+    def test_dead_old_but_has_unmerged_work_is_never_touched(self):
+        repo = _mkrepo(self.root, "proj")
+        wt = _add_worktree_with_reason(repo, "worktree-agent-deadwork",
+                                       "claude agent agent-x (pid 424242 start 1)",
+                                       commits=2)
+        admin = airuleset._worktree_admin_dir(repo, wt)
+        _backdate(admin / "locked", NOW, 10 * DAY)
+        cands = airuleset.discover_stale_worktrees(
+            home=self.root, now=NOW, pid_is_dead=lambda pid, start: True)
+        row = self._by_branch(cands, "worktree-agent-deadwork")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("unmerged work", row["reason"].lower())
+
+    def test_dead_old_but_dirty_tree_is_never_touched(self):
+        repo = _mkrepo(self.root, "proj")
+        wt = _add_worktree_with_reason(repo, "worktree-agent-deaddirty",
+                                       "claude agent agent-x (pid 424242 start 1)",
+                                       dirty=True)
+        admin = airuleset._worktree_admin_dir(repo, wt)
+        _backdate(admin / "locked", NOW, 10 * DAY)
+        cands = airuleset.discover_stale_worktrees(
+            home=self.root, now=NOW, pid_is_dead=lambda pid, start: True)
+        row = self._by_branch(cands, "worktree-agent-deaddirty")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("not provably clean", row["reason"].lower())
+        self.assertTrue((wt / "dirty.txt").exists(), "the dirty file must survive intact")
+
+    def test_sweep_unlocks_removes_and_deletes_branch_end_to_end(self):
+        repo = _mkrepo(self.root, "proj")
+        wt = _add_worktree_with_reason(repo, "worktree-agent-reclaim",
+                                       "claude agent agent-x (pid 424242 start 1)")
+        admin = airuleset._worktree_admin_dir(repo, wt)
+        _backdate(admin / "locked", NOW, 10 * DAY)
+        results = airuleset.sweep_stale_worktrees(
+            home=self.root, dry_run=False, force=True, now=NOW,
+            log_path=self.root / "log", state_path=self.root / "state",
+            pid_is_dead=lambda pid, start: True)
+        row = next((r for r in results if r.get("branch") == "worktree-agent-reclaim"), None)
+        self.assertIsNotNone(row)
+        self.assertTrue(row["removed"])
+        self.assertFalse(wt.exists())
+        branches = _git(["branch", "--list", "worktree-agent-reclaim"], repo)
+        self.assertEqual(branches.strip(), "")
+
+    def test_the_existing_pre_348_locked_test_still_never_becomes_a_candidate(self):
+        """Regression guard: `test_locked_worktree_is_never_a_candidate`
+        (pre-#348) must keep excluding a plainly-locked, no-reason
+        worktree even with the REAL (non-injected) `_pid_is_dead` -- the
+        unparseable-reason refusal must fire before any liveness check is
+        even attempted."""
+        repo = _mkrepo(self.root, "proj")
+        wt = _add_worktree(repo, "worktree-agent-live2", locked=True)
+        cands = airuleset.discover_stale_worktrees(home=self.root, now=NOW)
+        row = self._by_branch(cands, "worktree-agent-live2")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"])
+        self.assertTrue(wt.exists())
+
+
+class TestWorktreeAdminDirResolution(unittest.TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-worktree-sweep-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_resolves_the_real_admin_dir_for_a_registered_worktree(self):
+        repo = _mkrepo(self.root, "proj")
+        wt = _add_worktree(repo, "worktree-agent-x")
+        admin = airuleset._worktree_admin_dir(repo, wt)
+        self.assertIsNotNone(admin)
+        self.assertTrue((admin / "gitdir").exists())
+        self.assertTrue((admin / "HEAD").exists())
+
+    def test_unknown_path_resolves_to_none(self):
+        repo = _mkrepo(self.root, "proj")
+        admin = airuleset._worktree_admin_dir(repo, self.root / "not-a-real-worktree")
+        self.assertIsNone(admin)
+
+
+# ---------------------------------------------------------------------------
+# #348 -- the ONE test that does NOT inject `pid_is_dead`: proves the real
+# /proc/<pid>/stat mechanism against a genuinely spawned-and-exited process.
+# ---------------------------------------------------------------------------
+
+class TestRealProcessDeathDetection(unittest.TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-worktree-sweep-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_a_genuinely_exited_process_is_positively_confirmed_dead(self):
+        proc = subprocess.Popen(["sleep", "0.05"])
+        stat_before = Path("/proc/%d/stat" % proc.pid).read_text()
+        after_comm = stat_before.rsplit(")", 1)[1]
+        start = int(after_comm.split()[19])
+        proc.wait(timeout=5)
+        import time as _t
+        for _ in range(50):
+            if not Path("/proc/%d" % proc.pid).exists():
+                break
+            _t.sleep(0.05)
+        self.assertFalse(Path("/proc/%d" % proc.pid).exists(),
+                         "sanity: the exited process's /proc entry must be gone")
+
+        repo = _mkrepo(self.root, "proj")
+        wt = _add_worktree_with_reason(
+            repo, "worktree-agent-realdead",
+            "claude agent agent-x (pid %d start %d)" % (proc.pid, start))
+        admin = airuleset._worktree_admin_dir(repo, wt)
+        _backdate(admin / "locked", NOW, 10 * DAY)
+
+        # No `pid_is_dead=` injection here -- exercises the REAL /proc reader.
+        cands = airuleset.discover_stale_worktrees(home=self.root, now=NOW)
+        row = next((c for c in cands if c.get("branch") == "worktree-agent-realdead"), None)
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["reason"],
+                          "a genuinely exited process's OWN pid+starttime must be "
+                          "positively confirmed dead by the real /proc reader")
 
 
 if __name__ == "__main__":
