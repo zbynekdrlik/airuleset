@@ -11150,11 +11150,14 @@ class TestBlockDestructiveRemoteWinSshHazard(TestCase):
             json.dump(cfg, f)
         return d
 
-    def _run(self, command, cwd=None, env_extra=None):
+    def _run(self, command, cwd=None, env_extra=None, payload_cwd=None):
         d = cwd or tempfile.mkdtemp()
         if cwd is None:
             self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        payload = json.dumps({"tool_input": {"command": command}})
+        body = {"tool_input": {"command": command}}
+        if payload_cwd is not None:
+            body["cwd"] = payload_cwd
+        payload = json.dumps(body)
         env = dict(os.environ)
         if env_extra:
             env.update(env_extra)
@@ -11255,6 +11258,27 @@ class TestBlockDestructiveRemoteWinSshHazard(TestCase):
             '  # airuleset:destructive-ok tested on the real rig',
             cwd=d, env_extra={"HOME": home},
         )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    # --- the JSON payload's own .cwd wins over the hook process's $PWD ----
+    # (mirrors block-tier0-local-build.sh's own `dir="${CWD:-$PWD}"` shape —
+    # a hook process's own bash cwd is not guaranteed to match the tool's
+    # logical cwd, e.g. a worktree-dispatched subagent).
+
+    def test_payload_cwd_wins_even_when_process_pwd_has_no_win_mcp(self):
+        bare = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bare, ignore_errors=True)
+        win_mcp = self._win_mcp_dir()
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."',
+                       cwd=bare, payload_cwd=win_mcp)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_payload_cwd_wins_even_when_process_pwd_has_win_mcp(self):
+        win_mcp = self._win_mcp_dir()
+        bare = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, bare, ignore_errors=True)
+        r = self._run('ssh USER@HOST "... MainWindowTitle ..."',
+                       cwd=win_mcp, payload_cwd=bare)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_autopilot_worker_carries_the_standing_windows_constraint(self):

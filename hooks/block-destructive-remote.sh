@@ -74,6 +74,14 @@ except Exception: pass' 2>/dev/null || echo "")
 
 [ -z "$INPUT" ] && exit 0
 
+# #249: the win-* MCP gate needs the TOOL's own cwd (a project can genuinely
+# differ from wherever this hook process's own $PWD happens to be) — prefer
+# the JSON payload's `.cwd`, same fallback shape block-tier0-local-build.sh
+# already uses (`dir="${CWD:-$PWD}"`), never trust bash's own cwd alone.
+HOOK_CWD=$(printf '%s' "$PAYLOAD" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("cwd","") or "")
+except Exception: pass' 2>/dev/null || echo "")
+
 AUDIT_LOG="$HOME/devel/airuleset/audits/destructive-remote-bypasses.log"
 
 # Bypass 1: explicit env opt-out.
@@ -112,7 +120,7 @@ if [ -n "$BYPASS_REASON" ]; then
     exit 0
 fi
 
-VIOLATION=$(python3 - "$INPUT" <<'PYEOF'
+VIOLATION=$(python3 - "$INPUT" "${HOOK_CWD:-$PWD}" <<'PYEOF'
 import json
 import os
 import re
@@ -155,7 +163,7 @@ def _win_mcp_active(cwd):
     return any(WIN_MCP_SERVER_RE.match(str(name)) for name in servers)
 
 
-WIN_MCP_ACTIVE = _win_mcp_active(os.getcwd())
+WIN_MCP_ACTIVE = _win_mcp_active(sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else os.getcwd())
 warnings = []
 
 
