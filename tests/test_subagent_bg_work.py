@@ -123,7 +123,8 @@ class SubagentStopHookBase(unittest.TestCase):
     def _run(self, lines, agent_id="aTESTAGENT1", transcript_path=None,
              sid=None, background_tasks=None, parent_lines=None,
              ledger=None,
-             last_assistant_message="task finished, see summary above"):
+             last_assistant_message="task finished, see summary above",
+             agent_type="autopilot-worker"):
         # NB: the default message is deliberately NEUTRAL — it must not
         # contain "monitor"/"watching" (airuleset #343's own unbacked-claim
         # check), since none of the tests in THIS file that use the default
@@ -142,7 +143,7 @@ class SubagentStopHookBase(unittest.TestCase):
             Path(parent).write_text("\n".join(parent_lines or []) + "\n")
             payload = {
                 "session_id": sid, "hook_event_name": "SubagentStop",
-                "agent_id": agent_id, "agent_type": "autopilot-worker",
+                "agent_id": agent_id, "agent_type": agent_type,
                 "last_assistant_message": last_assistant_message,
                 "transcript_path": parent,
                 "agent_transcript_path": tr}
@@ -496,6 +497,91 @@ class TestSubagentClaimsMonitoringWithNoLiveWork(SubagentStopHookBase):
         self.assertLessEqual(blocks, 3)
         self.assertNotIn("block", last.stdout,
                          "after the cap the hook must fail open")
+
+
+class TestMonitoringClaimReviewFixes(SubagentStopHookBase):
+    """Adversarial-review findings on the #343 fix above, all independently
+    verified against the real hook by the reviewer before this test class
+    was written:
+
+    CRITICAL-1: the first draft only wired the unbacked-monitoring-claim
+    check into the SECOND "nothing is live" exit point (after the Python
+    ownership scan) — but a MODERN payload (background_tasks present) for a
+    SOLO subagent (self-entry only, or an empty array) hits an EARLIER exit
+    (`[ -z "$CANDIDATES" ] && ...`) that never reached the check at all.
+    That earlier exit is exactly the incident's own shape — a lane agent
+    with nothing else running in the session.
+
+    MAJOR-2: `echo "$MSG" | grep -qiE ...` is this repo's own documented
+    banned idiom (`pipefail` + `grep -q`'s early exit races the echo writer
+    into SIGPIPE) — a genuine claim on an early line of a message at or
+    past ~64KiB silently read as "not found".
+
+    MAJOR-3: SubagentStop also fires once per PARALLEL TOOL-CALL BRANCH with
+    `agent_type: ""`, whose `last_assistant_message` is the Bash tool's own
+    DESCRIPTION string (house style routinely starts "Monitor ..."/
+    "Watch ..."). That population owns nothing live by construction and
+    would false-positive on nearly every such branch without a gate."""
+
+    AID = "a343reviewfixagent1"
+
+    def test_modern_payload_solo_subagent_monitoring_claim_blocks(self):
+        # CRITICAL-1: background_tasks PRESENT, self entry only (no
+        # siblings at all) -- the exact incident shape, reached via the
+        # CANDIDATES-empty early exit, not the post-scan LIVE-empty one
+        out = self._run([], agent_id=self.AID,
+                        background_tasks=[self_task(self.AID)],
+                        last_assistant_message=
+                        "monitoring shadow E2E to terminal")
+        self.assertIn("block", out.stdout)
+        self.assertIn("terminal", out.stdout.lower())
+
+    def test_modern_payload_empty_background_tasks_monitoring_claim_blocks(self):
+        # CRITICAL-1 sibling shape: background_tasks present but literally []
+        out = self._run([], agent_id=self.AID, background_tasks=[],
+                        last_assistant_message=
+                        "monitoring shadow E2E to terminal")
+        self.assertIn("block", out.stdout)
+
+    def test_modern_payload_solo_subagent_ledger_still_cleaned_up(self):
+        # MINOR-5 sibling: the CANDIDATES-empty exit must ALSO clear the
+        # ledger on a genuinely clean pass (neutral message, no claim)
+        sid = "t-343ledger-" + uuid.uuid4().hex[:8]
+        path = Path("/tmp/airuleset-bgtasks-%s-%s" % (sid, self.AID))
+        out = self._run([], agent_id=self.AID, sid=sid,
+                        ledger=["bstale343"],
+                        background_tasks=[self_task(self.AID)])
+        self.assertNotIn("block", out.stdout)
+        self.assertFalse(path.exists(),
+                         "the CANDIDATES-empty exit must clean up the "
+                         "ledger too, same as the post-scan exit")
+
+    def test_huge_message_with_early_claim_still_blocks(self):
+        # MAJOR-2: the claim sits on an early line; padding pushes the
+        # message comfortably past the 64KiB pipe-buffer boundary where the
+        # piped `echo | grep -q` form reliably false-passed
+        padding = "\n".join("filler line %d with nothing relevant" % i
+                            for i in range(4000))
+        huge = "monitoring shadow E2E to terminal\n" + padding
+        self.assertGreater(len(huge), 100_000)
+        out = self._run([], last_assistant_message=huge)
+        self.assertIn("block", out.stdout)
+
+    def test_parallel_branch_empty_agent_type_never_blocks(self):
+        # MAJOR-3: agent_type=="" (a parallel tool-call branch, not a real
+        # dispatched agent) -- must NEVER be scanned for a monitoring claim,
+        # even with the exact incident phrasing and zero live work
+        out = self._run([], agent_type="", last_assistant_message=
+                        "Monitor CI run status")
+        self.assertNotIn("block", out.stdout)
+        self.assertEqual(out.returncode, 0)
+
+    def test_dispatched_agent_type_with_same_message_still_blocks(self):
+        # the positive control for the MAJOR-3 fix: the SAME message, but a
+        # genuinely dispatched agent_type -- must still block
+        out = self._run([], agent_type="general-purpose",
+                        last_assistant_message="Monitor CI run status")
+        self.assertIn("block", out.stdout)
 
 
 class TestPostToolUseRecorder(unittest.TestCase):
