@@ -270,7 +270,10 @@ class TestWorkerCarriesProfiles(TestCase):
         # #349 (2026-08-09 montalu3 regression): the ban + hand-off recipe must
         # apply to branch-merge exactly like fork-no-merge — the mechanical hook
         # was widened to gate any authority != full, and the prose must say so.
-        w = read("agents/autopilot-worker.md")
+        # Normalized (collapsed whitespace) because the prose wraps across
+        # markdown line breaks and a literal multi-word needle can straddle one
+        # (this repo's own recurring "anchor spans a wrap" test-quality trap).
+        w = " ".join(read("agents/autopilot-worker.md").split())
         self.assertIn("NEVER close an ASSIGNED", w)
         self.assertIn("EITHER reduced-authority profile", w)
         self.assertIn("full `/process-subdev` release pipeline", w)
