@@ -54,11 +54,16 @@ A stream with `airuleset.py authority` != full has no PR-to-main / merge / deplo
 
 ```
 ✅ Lokálne overenie: <tests + lint result on the fork/integration branch>
-✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta   ← fork-no-merge
-✅ PR: #M do <integration branch> zmergnutý <sha>                          ← branch-merge (ends there)
+✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta   ← fork-no-merge AND branch-merge (posted AFTER the merge — SAME hand-off convention for both; repo automation labels it `ready-for-review`; NEVER a self-close)
+✅ PR: #M do <integration branch> zmergnutý <sha>                          ← branch-merge (ends there; ticket stays OPEN — gatekeeper closes it only after the full `/process-subdev` release pipeline, #349)
 ```
 
 No 🌐/Deploy lines (nothing deployed by this stream); Goal + What changed stay mandatory and plain-language.
+**`branch-merge` NEVER omits the Hand-off line** — merging into the project's INTEGRATION
+branch does NOT auto-close the ticket (that branch is not the repo's default branch, so
+GitHub's `Closes #N` never fires there), and skipping the hand-off comment leaves the
+ticket invisible to `/process-subdev`'s queue (#349, the montalu3 regression: three
+tickets were self-closed with no hand-off at all and sat neither queued nor reviewed).
 
 #### Hard rules
 

@@ -41,20 +41,31 @@ prove local verification green (tests/lint), then hand off with a COMMENT starti
 (it works at read role; a fork-derived collaborator often cannot add labels, #17); ALSO try
 `gh issue edit <N> --add-label ready-for-review` best-effort and silently accept a 403 — you NEVER
 open or merge a PR, and never push to upstream branches. **You NEVER close an ASSIGNED /
-foreign-authored issue — the gatekeeper MAINTAINER closes it at cross-fork review/merge** (this is
-HOOK-ENFORCED: `block-fork-no-merge-issue-close.sh` blocks `gh issue close` unless the issue's
-AUTHOR is your own gh login; do not route around it). Closing a foreign ticket removes the
-READY-FOR-REVIEW hand-off event and bypasses the review this stream exists for. **Your OWN
-self-authored sub-findings** (tickets YOU filed while working) you MAY close, with evidence in the
-closing comment — that is normal bookkeeping (gatekeeper-refined semantics, 2026-07-11). At each
-ASSIGNED ticket's hand-off, **FIRE THE FORK-NO-MERGE CARD** (the per-ticket evaluation the user
-reads on their phone — the merge-shaped card never fires for this stream, so you MUST use
-`--handoff`):
+foreign-authored issue under EITHER reduced-authority profile** — the gatekeeper MAINTAINER closes
+it: for `fork-no-merge` at cross-fork review/merge, for `branch-merge` only AFTER the full
+`/process-subdev` release pipeline (integration→staging→main + deploy + verify — merging into the
+INTEGRATION branch is NOT the end, #349) (this is HOOK-ENFORCED for BOTH profiles:
+`block-fork-no-merge-issue-close.sh` blocks `gh issue close` for any authority != `full` unless the
+issue's AUTHOR is your own gh login; do not route around it — #349, 2026-08-09: a `branch-merge`
+stream self-closed three already-merged tickets because merging into the INTEGRATION branch does
+NOT auto-close via GitHub's `Closes #N`, which only fires on the repo's actual DEFAULT branch).
+Closing a foreign ticket yourself removes the hand-off event and bypasses the review this authority
+exists to enforce. `branch-merge` hands off exactly like `fork-no-merge` — the SAME
+`READY-FOR-REVIEW:` comment convention, posted right after your integration-branch merge lands (the
+repo's `subdev-handoff-label` workflow auto-applies the `ready-for-review` label from that comment,
+and `/process-subdev`'s queue query picks it up); also try `gh issue edit <N> --add-label
+ready-for-review` best-effort and silently accept a 403. **Your OWN self-authored sub-findings**
+(tickets YOU filed while working) you MAY close, with evidence in the closing comment — that is
+normal bookkeeping (gatekeeper-refined semantics, 2026-07-11), unchanged for either profile. At
+each ASSIGNED ticket's hand-off (BOTH reduced-authority profiles), **FIRE THE HAND-OFF CARD** (the
+per-ticket evaluation the user reads on their phone — the merge-shaped card never fires for either
+stream, so you MUST use `--handoff`):
 `python3 ~/devel/airuleset/airuleset.py notify --run-card --handoff --repo <owner/name> --issue <N> --goal "<plain Slovak>" --achieved "<plain Slovak: čo je hotové + lokálne overené>" [--url "<kde to vidno=…>"]`
-(no `--version`/`--pr` — nothing merged/deployed; the card shows a 🔎 "odovzdané na review" status).
-At the hand-off also clear the bounce lane best-effort: `gh issue edit <N> --remove-label
-prio:bounce 2>/dev/null || true` (silently accept a 403 at read role — the maintainer clears it at
-review otherwise). Reduced-authority streams work ONLY issues assigned to them.
+(no `--version`/`--pr` — nothing merged/deployed/released; the card shows a 🔎 "odovzdané na
+review" status). At the hand-off also clear the bounce lane best-effort: `gh issue edit <N>
+--remove-label prio:bounce 2>/dev/null || true` (silently accept a 403 at read role — the
+maintainer clears it at review otherwise). Reduced-authority streams work ONLY issues assigned to
+them.
 
 **Batch = ONE PR closing every member** (`autonomous-batch-issue-development.md` — load the `batch-issue-development` skill for the full gate): all members land
 on the same `dev` branch, in ONE push, ONE CI run, ONE PR whose body has a `Closes #<n>` line for
@@ -417,6 +428,31 @@ ready_for_review: <#A: comment posted ✓, label added/403; #B: …>  (the READY
 cards_fired: <#A ✓, #B ✓  (notify --run-card --handoff, one per issue)>
 issue_state: <#A=OPEN (handed off), #B=OPEN (handed off), …>   ← NEVER closed by you
 obsolete_handed_off: <#K commented OBSOLETE, left OPEN | "none">
+unverified: <list | "none">
+filed: <#K list | "none">
+```
+
+**branch-merge variant of the FINAL MESSAGE** (your PR merges into the project's INTEGRATION
+branch only — no promotion to staging/main, no deploy, no merge-to-main run-card exists for this
+stream; do NOT free-style a terse "hotové" and do NOT invent merge-to-main/deploy fields; report
+the HAND-OFF, issues left OPEN — #349, 2026-08-09: self-closing here is EXACTLY the incident this
+variant exists to prevent):
+
+```
+issues: #<A> <title>, #<B> <title>, …
+plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — self-audit vs what the ticket asked for>
+validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — closed: <what>">
+approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a" — CYCLE step 2 is unconditional.>
+review: <per issue: `/review` + `/requesting-code-review` result before hand-off, ALSO posted as its own `gh issue comment <N>`>
+achieved: <per issue, ONE Slovak line of what LANDED on the integration branch — verbatim into each --handoff card's Dosiahnuté>
+pr: #<M> <url>  (dev → <integration branch>, body Closes #A #B … — GitHub does NOT auto-close from this branch, see below)
+merge_sha: <sha — merged into the INTEGRATION branch, NOT main>
+integration_ci: <run-id> <conclusion>
+ready_for_review: <#A: READY-FOR-REVIEW comment posted ✓, label added/best-effort (403 accepted); #B: …>  (the hand-off signal — NEVER a self-close)
+cards_fired: <#A ✓, #B ✓  (notify --run-card --handoff, one per issue)>
+issue_state: <#A=OPEN (merged into integration, hand-off posted, awaiting gatekeeper release), #B=OPEN, …>   ← NEVER closed by you
+dropped: <#K split out of the batch mid-flight (gate violation), issue left OPEN, re-dispatch solo | "none">
+obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence, NOT via this PR | "none">
 unverified: <list | "none">
 filed: <#K list | "none">
 ```

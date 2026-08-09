@@ -3,24 +3,33 @@ set -euo pipefail
 
 # Hook: PreToolUse (Bash)
 # Blocks `gh issue close` (and the equivalent `gh api ... PATCH state=closed`) when
-# THIS stream's autopilot authority is `fork-no-merge` — UNLESS the issue being
-# closed is the stream's OWN (self-authored). Exit 2 = block; Claude sees stderr.
+# THIS stream's autopilot authority is REDUCED (fork-no-merge OR branch-merge) —
+# UNLESS the issue being closed is the stream's OWN (self-authored). Exit 2 = block;
+# Claude sees stderr.
 #
-# Semantics (refined by the gatekeeper, 2026-07-11):
-#   - ASSIGNED / foreign-authored tickets: NEVER closed by a fork-no-merge stream —
-#     the gatekeeper maintainer closes them at cross-fork review/merge. Self-closing
-#     one removes the READY-FOR-REVIEW hand-off event and bypasses review.
+# Semantics (refined by the gatekeeper, 2026-07-11; widened to branch-merge #349,
+# 2026-08-09):
+#   - ASSIGNED / foreign-authored tickets: NEVER closed by a reduced-authority
+#     stream itself — the gatekeeper maintainer closes them: for fork-no-merge at
+#     cross-fork review/merge, for branch-merge only AFTER the full
+#     `/process-subdev` release pipeline. Self-closing one removes the
+#     READY-FOR-REVIEW hand-off event and bypasses review.
 #   - SELF-AUTHORED sub-findings (tickets the stream itself filed while working,
 #     e.g. kvaskodev-authored kiosk sub-issues): closing them WITH evidence is the
-#     stream's normal bookkeeping — ALLOWED. The 2026-07-10 "drift" suspicion was
-#     falsified: those ~10 closes were David's own sub-findings, review was NOT
-#     bypassed (the hand-off tickets stayed open).
+#     stream's normal bookkeeping — ALLOWED, for BOTH profiles. The 2026-07-10
+#     "drift" suspicion was falsified: those ~10 closes were David's own
+#     sub-findings, review was NOT bypassed (the hand-off tickets stayed open).
 #   The check is mechanical: issue author == the stream's authenticated gh login.
 #   Undeterminable (gh error, no auth) → fail-SAFE: block, with the hand-off recipe.
 #
-# Scope: only a `fork-no-merge` stream is gated. `full` / `branch-merge` streams
-# legitimately close issues (obsolete tickets, or via a merged PR's `Closes #N`), so
-# they pass untouched — resolved per-stream via `airuleset.py authority` (marker-aware).
+# Scope (#349): every REDUCED-authority stream is gated (authority != `full`) — this
+# used to exempt `branch-merge` on the assumption its PR "legitimately closes issues
+# ... via a merged PR's `Closes #N`", which is FALSE: a branch-merge PR merges into
+# the project's INTEGRATION branch, never the repository's actual DEFAULT branch, so
+# GitHub's `Closes #N` auto-close never fires there either. A live incident
+# (montalu3, 2026-08-09) self-closed three merged tickets with no hand-off at all as
+# a direct result. Only `full` authority legitimately closes issues itself —
+# resolved per-stream via `airuleset.py authority` (marker-aware).
 
 command -v jq >/dev/null 2>&1 || exit 0
 
@@ -61,11 +70,12 @@ if [ -z "$AUTH" ]; then
     echo "  Refusing 'gh issue close' until authority can be verified. Fix airuleset.py, then retry — or hand off via a comment and let the maintainer close." >&2
     exit 2
 fi
-[ "$AUTH" != "fork-no-merge" ] && exit 0
+[ "$AUTH" = "full" ] && exit 0
 
-# fork-no-merge: allow closing a SELF-AUTHORED issue (the stream's own sub-finding).
-# Extract the issue number + optional -R/--repo from the `gh issue close` form; the
-# `gh api PATCH` form is never exempted (use `gh issue close` for legit self-closes).
+# reduced-authority stream (fork-no-merge OR branch-merge): allow closing a
+# SELF-AUTHORED issue (the stream's own sub-finding). Extract the issue number +
+# optional -R/--repo from the `gh issue close` form; the `gh api PATCH` form is
+# never exempted (use `gh issue close` for legit self-closes).
 ISSUE_NUM=$(printf '%s' "$CMD" | grep -oE 'gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?([0-9]+)' | grep -oE '[0-9]+' | head -1 || echo "")
 REPO_ARG=$(printf '%s' "$CMD" | grep -oE '(-R|--repo)[[:space:]=]+"?[A-Za-z0-9._/-]+' | head -1 | sed -E 's/^(-R|--repo)[[:space:]=]+"?//' || echo "")
 if [ -n "$ISSUE_NUM" ]; then
@@ -80,19 +90,41 @@ if [ -n "$ISSUE_NUM" ]; then
     fi
 fi
 
-echo "BLOCKED: fork-no-merge stream — you may close ONLY your OWN (self-authored) issues." >&2
-echo "" >&2
-echo "  This issue is assigned / foreign-authored (or its author could not be verified):" >&2
-echo "  the gatekeeper MAINTAINER closes it at cross-fork review/merge. Closing it yourself" >&2
-echo "  removes the READY-FOR-REVIEW hand-off event and bypasses the review this authority" >&2
-echo "  stream exists to enforce. (Self-authored sub-findings ARE closable — the hook" >&2
-echo "  verifies author == your gh login; if gh failed just now, fix auth and retry.)" >&2
-echo "" >&2
-echo "  HAND OFF instead, leaving the issue OPEN:" >&2
-echo "    - DONE ticket:     gh issue comment <N> --body \"READY-FOR-REVIEW: <branch> — <local verify evidence>\"" >&2
-echo "                       then fire the card:" >&2
-echo "                       airuleset.py notify --run-card --handoff --repo <owner/name> --issue <N> --goal \"…\" --achieved \"…\"" >&2
-echo "    - OBSOLETE ticket: gh issue comment <N> --body \"OBSOLETE: <evidence>\"   (do NOT close)" >&2
-echo "" >&2
-echo "  See agents/autopilot-worker.md (fork-no-merge) + pr-merge-policy.md (reduced-authority scope)." >&2
+if [ "$AUTH" = "branch-merge" ]; then
+    echo "BLOCKED: branch-merge stream — you may close ONLY your OWN (self-authored) issues." >&2
+    echo "" >&2
+    echo "  This issue is assigned / foreign-authored (or its author could not be verified):" >&2
+    echo "  merging into the project's INTEGRATION branch does NOT close it — that branch is" >&2
+    echo "  not the repo's default branch, so GitHub's Closes #N auto-close never fires there." >&2
+    echo "  Your authority ENDS at that merge; the gatekeeper closes the ticket only AFTER the" >&2
+    echo "  full /process-subdev release pipeline (integration→staging→main + deploy + verify)." >&2
+    echo "  Closing it yourself hides the hand-off and skips that review. (Self-authored" >&2
+    echo "  sub-findings ARE closable — the hook verifies author == your gh login; if gh failed" >&2
+    echo "  just now, fix auth and retry.)" >&2
+    echo "" >&2
+    echo "  HAND OFF instead, leaving the issue OPEN:" >&2
+    echo "    - DONE (merged into integration): gh issue comment <N> --body \"READY-FOR-REVIEW: <PR/branch> — <local verify evidence>\"" >&2
+    echo "                       (the repo's hand-off automation labels it ready-for-review; /process-subdev picks it up)" >&2
+    echo "                       then fire the card:" >&2
+    echo "                       airuleset.py notify --run-card --handoff --repo <owner/name> --issue <N> --goal \"…\" --achieved \"…\"" >&2
+    echo "    - OBSOLETE ticket: gh issue comment <N> --body \"OBSOLETE: <evidence>\"   (do NOT close)" >&2
+    echo "" >&2
+    echo "  See agents/autopilot-worker.md (branch-merge) + skills/process-subdev/SKILL.md." >&2
+else
+    echo "BLOCKED: fork-no-merge stream — you may close ONLY your OWN (self-authored) issues." >&2
+    echo "" >&2
+    echo "  This issue is assigned / foreign-authored (or its author could not be verified):" >&2
+    echo "  the gatekeeper MAINTAINER closes it at cross-fork review/merge. Closing it yourself" >&2
+    echo "  removes the READY-FOR-REVIEW hand-off event and bypasses the review this authority" >&2
+    echo "  stream exists to enforce. (Self-authored sub-findings ARE closable — the hook" >&2
+    echo "  verifies author == your gh login; if gh failed just now, fix auth and retry.)" >&2
+    echo "" >&2
+    echo "  HAND OFF instead, leaving the issue OPEN:" >&2
+    echo "    - DONE ticket:     gh issue comment <N> --body \"READY-FOR-REVIEW: <branch> — <local verify evidence>\"" >&2
+    echo "                       then fire the card:" >&2
+    echo "                       airuleset.py notify --run-card --handoff --repo <owner/name> --issue <N> --goal \"…\" --achieved \"…\"" >&2
+    echo "    - OBSOLETE ticket: gh issue comment <N> --body \"OBSOLETE: <evidence>\"   (do NOT close)" >&2
+    echo "" >&2
+    echo "  See agents/autopilot-worker.md (fork-no-merge) + pr-merge-policy.md (reduced-authority scope)." >&2
+fi
 exit 2
