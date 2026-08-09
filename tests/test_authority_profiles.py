@@ -250,6 +250,46 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         self.assertIn("slice-quals --list", t)
         self.assertIn("slice-quals --count", t)
 
+    def test_branch_merge_dispatch_posts_ready_for_review_too(self):
+        # #349 MAJOR-3: the "Authority rides the dispatch" bullet used to
+        # describe branch-merge as done once its PR merges into the
+        # integration branch — no mention of the hand-off comment at all,
+        # which is exactly the montalu3 self-close-and-never-hand-off
+        # regression. It must now explicitly say branch-merge posts the SAME
+        # READY-FOR-REVIEW comment fork-no-merge uses, and never self-closes.
+        idx = t = read(self.SKILL)
+        idx = t.index("Authority rides the dispatch")
+        bullet = t[idx:idx + 1400]
+        self.assertIn("posts the SAME `READY-FOR-REVIEW:` hand-off comment", bullet)
+        self.assertIn("never a self-close", bullet)
+
+    def test_step4_verification_checks_both_reduced_profiles_never_main(self):
+        # #349 MAJOR-3: Step 4's own verification sentence must state BOTH
+        # reduced-authority done-points (branch-merge needs the PR-merged
+        # check AND the comment; fork-no-merge needs only the comment) and
+        # explicitly forbid a merge to main for either.
+        idx = t = read(self.SKILL)
+        idx = t.index("Step 4 verification then checks the PROFILE")
+        window = t[idx:idx + 700]
+        self.assertIn("branch-merge: PR merged into integration AND the", window)
+        self.assertIn("fork-no-merge: the `READY-FOR-REVIEW:` comment present", window)
+        self.assertIn("NEVER a merge to main for either", window)
+        self.assertIn("NEVER the ticket closed by the worker itself", window)
+
+    def test_step5_handoff_line_covers_both_profiles(self):
+        # #349 MAJOR-3: Step 5's reduced-authority report mapping must state
+        # the Hand-off line applies to BOTH profiles (not just fork-no-merge),
+        # and that branch-merge's own PR line is ADDITIONAL, ending at the
+        # integration branch — never a substitute for the Hand-off line.
+        idx = t = read(self.SKILL)
+        idx = t.index("Reduced-authority streams (branch-merge / fork-no-merge) carry")
+        window = t[idx:idx + 900]
+        self.assertIn("Hand-off: READY-FOR-REVIEW komentár na #N", window)
+        self.assertIn("for BOTH profiles", window)
+        self.assertIn("branch-merge posts it too, right after its integration-branch merge", window)
+        self.assertIn("a merge alone does NOT", window)
+        self.assertIn("additionally for branch-merge", window)
+
 
 class TestWorkerCarriesProfiles(TestCase):
     def test_worker_has_authority_section(self):
@@ -302,6 +342,30 @@ class TestWorkerCarriesProfiles(TestCase):
         self.assertIn("branch-merge variant of the FINAL MESSAGE", w)
         self.assertIn("NEVER closed by you", w)
         self.assertIn("ready_for_review:", w)
+
+    def test_step0_obsolete_exception_covers_branch_merge_too(self):
+        # #349 adversarial-review MAJOR-2: STEP 0's obsolete-ticket path used
+        # to instruct `gh issue close` unconditionally, with the "you may
+        # close only self-authored" carve-out labelled "fork-no-merge
+        # EXCEPTION" only — a branch-merge reader had no carve-out at all and
+        # would follow the DEFAULT (close-obsolete) instruction, directly
+        # contradicting the new ban.
+        w = read("agents/autopilot-worker.md")
+        self.assertIn("REDUCED-AUTHORITY EXCEPTION (fork-no-merge AND branch-merge", w)
+        self.assertIn("under EITHER profile", w)
+
+    def test_branch_merge_final_message_uses_the_handed_off_obsolete_shape(self):
+        # #349 adversarial-review MAJOR-2: the new branch-merge fence had
+        # copied the FULL variant's "OBSOLETE — closed" / obsolete_closed:
+        # shape instead of the fork-no-merge variant's "commented, left
+        # OPEN" / obsolete_handed_off: shape it should mirror.
+        idx = read("agents/autopilot-worker.md").find(
+            "branch-merge variant of the FINAL MESSAGE")
+        fence = read("agents/autopilot-worker.md")[idx:idx + 2000]
+        self.assertIn('"OBSOLETE — commented, left OPEN:', fence)
+        self.assertIn("obsolete_handed_off:", fence)
+        self.assertNotIn('"OBSOLETE — closed:', fence)
+        self.assertNotIn("obsolete_closed:", fence)
 
 
 if __name__ == "__main__":

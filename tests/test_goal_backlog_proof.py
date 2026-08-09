@@ -651,6 +651,30 @@ class TestBranchMergeTemplateNeverReadsAsSelfClose(TestCase):
         self.assertIn("is MERGED via my own PR into",
                       goal_lines()[BRANCH_MERGE])
 
+    def test_the_proof_verifies_a_hand_off_not_a_close(self):
+        # #349 MAJOR-4 (adversarial-review fix): the branch-merge template's
+        # verification sentence used to say "Count a ticket done ONLY after
+        # verifying ... gh issue view (closed)" — branch-merge tickets are
+        # NEVER closed by the worker, so that literal instruction told the
+        # worker to look for a signal that must never exist. It now verifies
+        # a HAND-OFF instead, via the READY-FOR-REVIEW comment.
+        line = goal_lines()[BRANCH_MERGE]
+        self.assertIn("Count a hand-off done ONLY after verifying it from primary sources",
+                      line)
+        self.assertIn("the READY-FOR-REVIEW comment posted", line)
+        self.assertNotIn("gh issue view (closed)", line)
+
+    def test_a_handed_off_ticket_with_release_pending_is_not_done(self):
+        # #349 MAJOR-4: the review-watch trigger used to read "An empty
+        # backlog with the release still pending is NOT done" — worded only
+        # for the empty-backlog case, silently missing the far more common
+        # branch-merge shape (one just-handed-off ticket, release pending).
+        line = goal_lines()[BRANCH_MERGE]
+        self.assertIn(
+            "A handed-off ticket or an empty backlog, release still pending, "
+            "is NOT done",
+            line)
+
 
 # --------------------------------------------------------------------------- #
 # #161 — condition (A), decided the way the shipped template instructs
