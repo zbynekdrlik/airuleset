@@ -4021,6 +4021,32 @@ class TestReadinessCommentMatcher(TestCase):
             "**GATEKEEPER FINDING:** not ready.\n"
             "READY-FOR-REVIEW is NOT accurate here."))
 
+    def test_a_heading_style_gatekeeper_opening_never_matches(self):
+        # airuleset#340 adversarial-review MAJOR-2: this port's docstring
+        # claims it enforces "the SAME contract" as
+        # subdev-handoff-match.sh -- #340 widened that shell script's own
+        # exclusion to also recognise a markdown-HEADING gatekeeper
+        # opening ("## Gatekeeper review — BOUNCE", the real odoo-erp#2878
+        # corpus shape), which this Python port had not been updated to
+        # match. Live-reproduced against the pre-fix port: True (bug).
+        self.assertFalse(airuleset._is_readiness_comment(
+            "## Gatekeeper review — BOUNCE\n\n"
+            "READY-FOR-REVIEW: was claimed but incomplete\n"))
+
+    def test_a_deeper_heading_level_gatekeeper_opening_never_matches(self):
+        self.assertFalse(airuleset._is_readiness_comment(
+            "### Gatekeeper finding\n\n"
+            "READY-FOR-REVIEW: was claimed but incomplete\n"))
+
+    def test_a_heading_only_mentioning_gatekeeper_mid_title_still_matches(self):
+        # Negative control mirroring subdev-handoff-match.sh's own -- a
+        # heading merely mentioning "gatekeeper" as a topic word (not the
+        # heading's own opening word, lower-case) is a genuine sub-dev
+        # heading, not the gatekeeper speaking.
+        self.assertTrue(airuleset._is_readiness_comment(
+            "## Round 2 fixes for the gatekeeper bounce review\n\n"
+            "READY-FOR-REVIEW: done\n"))
+
     def test_an_unrelated_comment_does_not_match(self):
         self.assertFalse(airuleset._is_readiness_comment("still working on it"))
 
@@ -4028,6 +4054,21 @@ class TestReadinessCommentMatcher(TestCase):
         self.assertFalse(airuleset._is_readiness_comment(None))
         self.assertFalse(airuleset._is_readiness_comment(123))
         self.assertFalse(airuleset._is_readiness_comment(""))
+
+
+class TestCommentReadinessSignalGatekeeperExclusion(TestCase):
+    """`_comment_readiness_signal` shares the SAME gatekeeper-opening
+    exclusion regex as `_is_readiness_comment` -- airuleset#340
+    adversarial-review MAJOR-2 found both consumers of
+    `_READINESS_GATEKEEPER_FIRST_LINE_RE` diverged from
+    subdev-handoff-match.sh's own widened contract identically."""
+
+    def test_a_heading_style_gatekeeper_opening_signals_false_not_none(self):
+        # False = an explicit gatekeeper-authored rejection (can override
+        # an earlier True); None would be neutral and never override.
+        self.assertIs(airuleset._comment_readiness_signal(
+            "## Gatekeeper review — BOUNCE\n\n"
+            "READY-FOR-REVIEW: was claimed but incomplete\n"), False)
 
 
 class TestPaneOwnerAlwaysRedirected(TestCase):
