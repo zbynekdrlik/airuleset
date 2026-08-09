@@ -21,6 +21,7 @@ must never be touched by either feature.
 """
 
 import inspect
+import subprocess
 import sys
 import tempfile
 import unittest.mock as m
@@ -782,6 +783,121 @@ class TestStreamMarkerBlockSpansSafety(TestCase):
         p.write_text(corrupted)
         airuleset.apply_stream_ssh_attach(p, user="montalu2")
         self.assertNotIn("IMPORTANT_SECRET", p.read_text())
+
+
+# ---------------------------------------------------------------------------
+# #284: grouped-session cleanup survivor -- the launcher's exact-name -A
+# reattach must not silently orphan a surviving, differently-named sibling
+# once #254's destroy-unattached sweep reduces a multi-member group down to
+# one iteration-order-arbitrary survivor. Drives the REAL bash content of
+# STREAM_SSH_ATTACH_BLOCK through a real `bash -c` interpreter against a
+# scripted fake `tmux`/`whoami` on PATH -- never a string/regex proxy for
+# shell semantics, which could pass while the actual bash is wrong.
+# ---------------------------------------------------------------------------
+
+_FAKE_TMUX_SRC = """#!/usr/bin/env bash
+if [ -n "${FAKE_TMUX_LOG:-}" ]; then
+  printf '%s\\n' "$*" >> "$FAKE_TMUX_LOG"
+fi
+case "$1" in
+  has-session)
+    rc=1
+    if [ -n "${FAKE_TMUX_HAS_SESSION_RC:-}" ] && [ -f "$FAKE_TMUX_HAS_SESSION_RC" ]; then
+      rc="$(cat "$FAKE_TMUX_HAS_SESSION_RC")"
+    fi
+    exit "${rc:-1}"
+    ;;
+  list-sessions)
+    if [ -n "${FAKE_TMUX_LIST_SESSIONS_OUT:-}" ] && [ -f "$FAKE_TMUX_LIST_SESSIONS_OUT" ]; then
+      cat "$FAKE_TMUX_LIST_SESSIONS_OUT"
+    fi
+    exit 0
+    ;;
+  new-session)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"""
+
+
+class TestGroupSurvivorReattach(TestCase):
+    def _run_block(self, has_session_rc=1, list_sessions_out="", whoami="zbynek"):
+        d = Path(tempfile.mkdtemp())
+        bin_dir = d / "bin"
+        bin_dir.mkdir()
+        fake_tmux = bin_dir / "tmux"
+        fake_tmux.write_text(_FAKE_TMUX_SRC)
+        fake_tmux.chmod(0o755)
+        fake_whoami = bin_dir / "whoami"
+        fake_whoami.write_text("#!/usr/bin/env bash\necho '%s'\n" % whoami)
+        fake_whoami.chmod(0o755)
+        rc_file = d / "has_session_rc"
+        rc_file.write_text(str(has_session_rc))
+        list_file = d / "list_sessions_out"
+        list_file.write_text(list_sessions_out)
+        log_path = d / "tmux.log"
+        home_dir = d / "home"
+        home_dir.mkdir()
+        env = {
+            "PATH": "%s:/usr/bin:/bin" % bin_dir,
+            "HOME": str(home_dir),
+            "SSH_TTY": "/dev/pts/0",
+            "FAKE_TMUX_LOG": str(log_path),
+            "FAKE_TMUX_HAS_SESSION_RC": str(rc_file),
+            "FAKE_TMUX_LIST_SESSIONS_OUT": str(list_file),
+        }
+        r = subprocess.run(
+            ["bash", "--norc", "-i", "-c", airuleset.STREAM_SSH_ATTACH_BLOCK],
+            env=env, capture_output=True, text=True, timeout=15,
+            stdin=subprocess.DEVNULL,
+        )
+        log = log_path.read_text() if log_path.exists() else ""
+        return log, r
+
+    def test_group_survivor_is_joined_as_an_independent_view(self):
+        # #284's own reproduction: exact-name "zbynek" is gone, but
+        # "zbynek-4" survives in the SAME group -- the launcher must join
+        # it (`new-session -t`), never blindly create a fresh empty one.
+        log, r = self._run_block(
+            has_session_rc=1,
+            list_sessions_out="zbynek-4 zbynek\nmarek-0 marek\n",
+            whoami="zbynek",
+        )
+        self.assertIn("new-session -t zbynek-4", log)
+        self.assertNotIn("new-session -A -s zbynek", log)
+
+    def test_no_survivor_falls_back_to_the_exact_name_create_or_attach(self):
+        log, r = self._run_block(
+            has_session_rc=1,
+            list_sessions_out="",
+            whoami="zbynek",
+        )
+        self.assertIn("new-session -A -s zbynek", log)
+
+    def test_exact_name_session_present_skips_the_survivor_scan_entirely(self):
+        # the common case (the pre-existing behaviour) must stay exactly as
+        # cheap as before -- no extra tmux round-trip when the exact-name
+        # session already exists.
+        log, r = self._run_block(
+            has_session_rc=0,
+            list_sessions_out="marek-0 marek\n",
+            whoami="zbynek",
+        )
+        self.assertNotIn("list-sessions", log)
+        self.assertIn("new-session -A -s zbynek", log)
+
+    def test_a_sibling_in_a_DIFFERENT_group_is_never_mistaken_for_a_survivor(self):
+        # marek-0's group is "marek", not "zbynek" -- must never be joined.
+        log, r = self._run_block(
+            has_session_rc=1,
+            list_sessions_out="marek-0 marek\n",
+            whoami="zbynek",
+        )
+        self.assertNotIn("new-session -t marek-0", log)
+        self.assertIn("new-session -A -s zbynek", log)
 
 
 # ---------------------------------------------------------------------------
