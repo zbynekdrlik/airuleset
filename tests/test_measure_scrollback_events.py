@@ -55,6 +55,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "scripts" / "measure_scrollback_events.py"
 
+_REAL_RMTREE = shutil.rmtree  # captured before any test patches shutil.rmtree
+
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("measure_scrollback_events", SCRIPT)
@@ -207,10 +209,13 @@ class TestTeardownRetriesALeftoverScratchDir(unittest.TestCase):
         calls = []
 
         def fake_rmtree(path, ignore_errors=False):
+            # Uses the pre-patch REAL rmtree, never the module-global
+            # `shutil.rmtree` name -- that name IS this mock while the
+            # patch is active, so calling it here would recurse forever.
             calls.append(path)
             if len(calls) == 1:
                 return  # simulate the swallowed-failure leftover
-            shutil.rmtree(path, ignore_errors=ignore_errors)
+            _REAL_RMTREE(path, ignore_errors=ignore_errors)
 
         with unittest.mock.patch("shutil.rmtree", side_effect=fake_rmtree):
             mod.teardown("airuleset-nonexistent-sock-291", tmpdir, False)
@@ -239,7 +244,7 @@ class TestTeardownRetriesALeftoverScratchDir(unittest.TestCase):
                 "silently swallowed")
             self.assertIn(tmpdir, stderr.getvalue(), "the warning must name the path")
         finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            _REAL_RMTREE(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":
