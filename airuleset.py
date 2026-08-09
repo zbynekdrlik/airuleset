@@ -3570,30 +3570,45 @@ def _worktree_git(args, cwd, timeout: int = 15):
 
 
 def _worktree_porcelain_entries(repo_root, git_run=None):
-    """Parse `git worktree list --porcelain` -- one dict per registered
+    """Parse `git worktree list --porcelain -z` -- one dict per registered
     worktree: {"path", "branch" (bare name, no `refs/heads/`, None if
     detached/bare), "locked": bool}. Entry 0 is ALWAYS the PRIMARY
     checkout -- callers must skip it by INDEX, never by path-matching (a
     renamed/symlinked primary checkout must still be protected). Returns
     [] on any read failure -- a repo git can't be read from is simply
-    skipped, never guessed at."""
+    skipped, never guessed at.
+
+    `-z` (NUL-delimited fields, record boundary = an empty field -- the
+    NUL-mode equivalent of the blank line git's own non-`-z` format uses)
+    is required, not cosmetic: #345 adversarial-review THEORETICAL-1,
+    confirmed live -- a worktree whose PATH contains a literal `\\n`
+    (legal on Linux) corrupts a plain newline-split parse into a phantom
+    entry that can point at an UNRELATED, healthy worktree, which the
+    sweep then genuinely removes. `-z` needs no escaping/quoting to be
+    newline-safe by construction.
+    """
     git_run = git_run or _worktree_git
-    out = git_run(["worktree", "list", "--porcelain"], repo_root)
+    out = git_run(["worktree", "list", "--porcelain", "-z"], repo_root)
     if out is None:
         return []
     entries = []
     cur = None
-    for line in out.splitlines():
-        if line.startswith("worktree "):
+    for field in out.split("\x00"):
+        if field == "":
             if cur is not None:
                 entries.append(cur)
-            cur = {"path": line[len("worktree "):], "branch": None, "locked": False}
+                cur = None
+            continue
+        if field.startswith("worktree "):
+            if cur is not None:
+                entries.append(cur)
+            cur = {"path": field[len("worktree "):], "branch": None, "locked": False}
         elif cur is None:
             continue
-        elif line.startswith("branch "):
-            ref = line[len("branch "):]
+        elif field.startswith("branch "):
+            ref = field[len("branch "):]
             cur["branch"] = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else None
-        elif line == "locked" or line.startswith("locked "):
+        elif field == "locked" or field.startswith("locked "):
             cur["locked"] = True
     if cur is not None:
         entries.append(cur)
@@ -3622,7 +3637,12 @@ def _worktree_sweep_base_branch(repo_root, git_run=None):
     """
     git_run = git_run or _worktree_git
     for name in ("dev", "main", "master"):
-        if git_run(["rev-parse", "--verify", "--quiet", name], repo_root) is not None:
+        # #345 adversarial-review MINOR-1: `rev-parse --verify` resolves a
+        # TAG named dev/main/master just as happily as a branch -- fully
+        # qualify with `refs/heads/` so this can only ever resolve to a
+        # genuine local branch, never a same-named tag.
+        if git_run(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % name],
+                   repo_root) is not None:
             return name
     return None
 
@@ -3684,7 +3704,14 @@ def discover_stale_worktrees(home=None, git_run=None):
                 row["reason"] = "no dev/main/master to compare against"
                 out.append(row)
                 continue
-            ahead = git_run(["rev-list", "--count", "%s..%s" % (base, branch)], root)
+            # #345 adversarial-review MAJOR-2 (confirmed data loss): a bare
+            # short name here silently resolves to a same-named TAG ahead of
+            # the branch (refs/tags/ before refs/heads/ in gitrevisions ref
+            # resolution order) with only a stderr warning, rc 0 -- a branch
+            # carrying real commits then reads as "0 ahead" and is deleted.
+            # Fully-qualify both sides so this can only ever mean the branch.
+            ahead = git_run(["rev-list", "--count",
+                            "refs/heads/%s..refs/heads/%s" % (base, branch)], root)
             if ahead is None:
                 row["reason"] = "could not measure commits ahead of %s" % base
                 out.append(row)
@@ -3746,6 +3773,15 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
     mirroring #315's `purge_stale_tier0_targets` exactly -- never leans
     on the 60s watchdog timer (FREEZE: no new job). `force=True` (the
     CLI's own manual invocation) or `dry_run=True` always bypasses it.
+
+    Known, deliberate residual (#345 adversarial-review THEORETICAL-2):
+    `git worktree remove` reports a worktree holding ONLY gitignored files
+    (a stray `.env`, a `target/` build dir) as clean and removes it, taking
+    those files with it -- this is the intended disk-reclaim behaviour and
+    matches git's own definition of "safe" (it still correctly REFUSES on
+    any untracked, non-ignored file). A per-worktree gitignored SECRET
+    would be lost this way; a dead worker's own worktree is never the
+    source of truth for one.
     """
     import time as _time
     now = _time.time() if now is None else now
@@ -3807,7 +3843,11 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
         base = c.get("base")
         still_zero = True
         if base:
-            recheck = git_run(["rev-list", "--count", "%s..%s" % (base, c["branch"])], c["repo"])
+            # #345 adversarial-review MAJOR-2: fully-qualify both sides here
+            # too -- the same ambiguous-short-name-resolves-to-a-tag hazard
+            # applies to this re-check exactly as it does to discovery's own.
+            recheck = git_run(["rev-list", "--count",
+                              "refs/heads/%s..refs/heads/%s" % (base, c["branch"])], c["repo"])
             still_zero = recheck is not None and recheck.strip() == "0"
         if not still_zero:
             entry["branch_deleted"] = False
@@ -3843,16 +3883,26 @@ def cmd_sweep_worktrees(args):
         if r.get("path") is None:
             print("  ERROR: %s" % r.get("reason", ""))
             continue
-        if r.get("removed"):
+        # #345 adversarial-review MAJOR-1: sweep_stale_worktrees() leaves
+        # `removed=False` on EVERY row in dry-run (correct -- nothing was
+        # actually deleted), so keying the tag/count on `removed` alone
+        # mislabelled every genuine candidate "skip" and always reported
+        # "0 worktree(s) would be removed". A dry-run candidate is
+        # identified by its own distinct `reason` text instead.
+        acted = (str(r.get("reason", "")).startswith("would remove")
+                if dry_run else bool(r.get("removed")))
+        if acted:
             tag = "WOULD REMOVE" if dry_run else "REMOVED"
         else:
             tag = "skip"
         print("  %s: %s (branch %s, repo %s) -- %s" % (
             tag, r["path"], r.get("branch"), r.get("repo"), r.get("reason", "")))
-    removed = [r for r in results if r.get("removed")]
+    acted_rows = [r for r in results
+                 if (str(r.get("reason", "")).startswith("would remove")
+                     if dry_run else r.get("removed"))]
     print()
     verb = "would be " if dry_run else ""
-    print("%d worktree(s) %sremoved." % (len(removed), verb))
+    print("%d worktree(s) %sremoved." % (len(acted_rows), verb))
     print("Log: %s" % STALE_WORKTREE_LOG_PATH)
 
 

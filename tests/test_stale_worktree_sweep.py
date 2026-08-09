@@ -549,7 +549,7 @@ class TestReviewMajor2_AmbiguousRefResolution(unittest.TestCase):
 
     def test_a_tag_sharing_the_branch_name_never_causes_deletion_of_real_work(self):
         repo = _mkrepo(self.root, "proj")
-        wt = _add_worktree(repo, "ticket-999", commits=2)
+        _add_worktree(repo, "ticket-999", commits=2)
         # A tag with the SAME name as the worktree's branch -- git resolves
         # the bare short name to the tag ahead of the branch.
         _git(["tag", "ticket-999", "main"], repo)
@@ -561,14 +561,17 @@ class TestReviewMajor2_AmbiguousRefResolution(unittest.TestCase):
                              "a branch carrying real commits must NEVER be a "
                              "candidate, even when a same-named tag exists")
 
-        results = airuleset.sweep_stale_worktrees(
+        airuleset.sweep_stale_worktrees(
             home=self.root, dry_run=False, force=True,
             log_path=self.root / "log", state_path=self.root / "state")
         branches = _git(["branch", "--list", "ticket-999"], repo)
         self.assertIn("ticket-999", branches, "the real-work branch must survive")
-        log_out = _git(["log", "--oneline", "ticket-999"], repo)
+        # `ticket-999` alone is itself AMBIGUOUS (the same tag/branch name
+        # collision under test) -- read the BRANCH back via a fully
+        # qualified ref, exactly like the fix under test now does, so this
+        # assertion is not the same ambiguity bug in disguise.
+        log_out = _git(["log", "--oneline", "refs/heads/ticket-999"], repo)
         self.assertIn("work 1", log_out, "its real commits must survive")
-        self.assertTrue(wt.exists() or True)  # worktree fate is not the point here
 
 
 class TestReviewTheoretical1_PorcelainNulSafety(unittest.TestCase):
@@ -585,14 +588,21 @@ class TestReviewTheoretical1_PorcelainNulSafety(unittest.TestCase):
 
     def test_a_worktree_path_containing_a_newline_never_corrupts_a_sibling(self):
         repo = _mkrepo(self.root, "proj")
-        victim = _add_worktree(repo, "worktree-agent-victim")
+        # The victim carries REAL, unmerged commits -- it must NEVER be
+        # touched under ANY correct classification. (A victim that is
+        # itself a genuine 0-ahead/unlocked candidate would legitimately
+        # get removed regardless of any parsing bug, which would prove
+        # nothing about the injection.)
+        victim = _add_worktree(repo, "worktree-agent-victim", commits=2)
         # A second worktree whose DIRECTORY PATH itself embeds a literal
         # newline followed by "worktree <victim's real path>" -- legal on
-        # Linux (a path component may contain any byte but NUL and `/`),
-        # and exactly the injection shape that corrupts a naive
-        # newline-split porcelain parse: `git worktree list --porcelain`'s
-        # own `worktree <path>` line, once split on `\n`, produces a
-        # PHANTOM second "worktree" entry pointing straight at the victim.
+        # Linux (a path component may contain any byte but NUL and `/`).
+        # Under a naive newline-split parse, the evil worktree's OWN
+        # "worktree <path>" LINE splits into a PHANTOM entry whose path is
+        # the VICTIM's real path but whose branch/lock fields are actually
+        # the EVIL worktree's (0-ahead, unlocked) -- so the sweep schedules
+        # the victim's real path for removal using the evil branch's SAFE
+        # classification, deleting the victim's real, unmerged commits.
         evil_dir = repo / ".claude" / "worktrees" / ("evil\nworktree " + str(victim))
         evil_dir.parent.mkdir(parents=True, exist_ok=True)
         _git(["worktree", "add", "-b", "evilbranch", str(evil_dir)], repo)
@@ -603,7 +613,7 @@ class TestReviewTheoretical1_PorcelainNulSafety(unittest.TestCase):
                       "the victim worktree's own real path must appear verbatim, "
                       "never replaced by a phantom entry")
         # The victim must never be swept away as a side effect of the evil entry.
-        results = airuleset.sweep_stale_worktrees(
+        airuleset.sweep_stale_worktrees(
             home=self.root, dry_run=False, force=True,
             log_path=self.root / "log", state_path=self.root / "state")
         self.assertTrue(victim.exists(),
