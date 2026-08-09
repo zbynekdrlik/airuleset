@@ -1146,11 +1146,15 @@ class TestLockedDeadMinAgeEnvOverride(unittest.TestCase):
 
     def test_locked_dead_min_age_env_override_is_actually_honoured(self):
         repo = _mkrepo(self.root, "proj")
-        _add_worktree_with_reason(repo, "worktree-agent-envdead",
-                                  "claude agent agent-x (pid 424242 start 1)")
-        # No backdating -- a fresh (age ~0) lock, which the hardcoded 3-day
-        # default would refuse. Lowering the env override to 0 must let it
-        # through -- proving the env var is genuinely READ, not decorative.
+        wt = _add_worktree_with_reason(repo, "worktree-agent-envdead",
+                                       "claude agent agent-x (pid 424242 start 1)")
+        admin = airuleset._worktree_admin_dir(repo, wt)
+        # Backdate to EXACTLY `NOW` (age 0 relative to the fixed `NOW` this
+        # test always passes) -- NOT "leave it un-backdated", which would
+        # measure age against the REAL wall clock and could read as a
+        # (correctly-refused) NEGATIVE/unmeasurable age if `NOW` happens to
+        # be in the past relative to whenever this test actually runs.
+        _backdate(admin / "locked", NOW, 0)
         with m.patch.dict(os.environ, {"AIRULESET_WORKTREE_LOCKED_DEAD_MIN_AGE_S": "0"}):
             cands = airuleset.discover_stale_worktrees(
                 home=self.root, now=NOW, pid_is_dead=lambda pid, start: True)
@@ -1161,6 +1165,7 @@ class TestLockedDeadMinAgeEnvOverride(unittest.TestCase):
     def test_orphan_min_age_env_override_is_actually_honoured(self):
         repo = _mkrepo(self.root, "proj")
         _mkbranch(repo, "fresh-orphan-envtest")
+        _backdate(repo / ".git" / "refs" / "heads" / "fresh-orphan-envtest", NOW, 0)
         with m.patch.dict(os.environ, {"AIRULESET_WORKTREE_ORPHAN_MIN_AGE_S": "0"}):
             cands = airuleset.discover_orphaned_worktree_branches(home=self.root, now=NOW)
         row = self._by_branch(cands, "fresh-orphan-envtest")

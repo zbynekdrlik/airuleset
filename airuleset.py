@@ -3682,35 +3682,62 @@ def _worktree_sweep_base_branch(repo_root, git_run=None):
     return None
 
 
-_WORKTREE_LOCK_PID_RX = re.compile(r"\(pid\s+(\d+)(?:\s+start\s+(\d+))?\)")
+_WORKTREE_LOCK_PID_RX = re.compile(r"claude agent \S+ \(pid (\d+) start (\d+)\)")
 
 
 def _worktree_lock_pid(reason):
-    """Extract `(pid, start)` from a harness-style lock reason string of
-    the shape "... (pid <N> start <M>)" -- verified live against a real
-    worktree lock on this box (`claude agent agent-<id> (pid <N> start
-    <M>)`), `start` matching `/proc/<pid>/stat` field 22 byte-for-byte.
-    `(None, None)` when the reason does not match this exact shape at all
-    (a manual `git worktree lock` with no `--reason`, or a future harness
-    format change) -- NEVER guessed at; the caller must refuse to treat
-    an unparseable reason as anything but "cannot determine liveness"."""
+    """Extract `(pid, start)` from a harness-style lock reason string --
+    STRICTLY the harness's OWN observed shape, in FULL, via
+    `re.fullmatch`: "claude agent <agent-id> (pid <N> start <M>)"
+    (verified live against a real worktree lock on this box), `start`
+    matching `/proc/<pid>/stat` field 22 byte-for-byte. `(None, None)`
+    for ANYTHING else -- including a human-authored reason that merely
+    MENTIONS a "(pid N)"-shaped substring somewhere in its own text.
+
+    #348 adversarial-review MAJOR-1 (TRIGGERED live, no injection): the
+    original `re.search`-anywhere form with an OPTIONAL `start` accepted
+    a human's own `--reason "debugging crash (pid 999999) - DO NOT
+    REMOVE"` (unlocked + swept) and a reason ENDING "... (pid 1 start
+    999999999)" (pid 1 genuinely alive, wrong starttime, still read as
+    "confirmed dead"). Anchoring the WHOLE reason to the harness's own
+    literal "claude agent <id> " prefix -- and requiring `start` (never
+    optional; the harness always records it) -- rejects both: neither
+    trigger starts with "claude agent ", so neither can ever match,
+    regardless of where inside the string a pid-shaped substring sits.
+    """
     if not reason:
         return (None, None)
-    match = _WORKTREE_LOCK_PID_RX.search(reason)
+    match = _WORKTREE_LOCK_PID_RX.fullmatch(reason.strip())
     if not match:
         return (None, None)
-    pid = int(match.group(1))
-    start = int(match.group(2)) if match.group(2) else None
-    return (pid, start)
+    return (int(match.group(1)), int(match.group(2)))
 
 
-def _proc_stat_text(pid):
+def _proc_stat_text(pid, proc_root=None):
     """Real `/proc/<pid>/stat` reader -- None when the pid does not exist
-    (already exited) or is unreadable for any other reason. The one seam
-    `_pid_is_dead`'s tests inject a fake for; production code always goes
-    through the real filesystem."""
+    (already exited) or is unreadable for any other reason. `proc_root`
+    (default `/proc`) exists only so a test can point this at a fake
+    directory tree -- production code always uses the real filesystem.
+
+    `errors="replace"` is deliberate, not cosmetic (#348 adversarial-
+    review MINOR-2, TRIGGERED live against a real forked process with a
+    `comm` set to invalid UTF-8 via `prctl(PR_SET_NAME, ...)` -- legal,
+    and NOT rare on a box running arbitrary tooling): a bare
+    `Path.read_text()` raises `UnicodeDecodeError`, uncaught by the
+    `except OSError` here, and that raise propagates all the way out of
+    `sweep_stale_worktrees`'s blanket discovery-error handler -- silently
+    disabling BOTH new #348 leak categories fleet-wide the instant any
+    locked worktree's recorded pid happens to be occupied by such a
+    process. Every field this module ever reads out of a stat line
+    (state..starttime) is plain ASCII and sits AFTER the `comm` field's
+    own closing paren, so replacing invalid bytes inside `comm` with
+    U+FFFD can never corrupt the numeric fields this code actually
+    parses -- it must NOT return `None` on decode failure either: that
+    would read as "no such process" to `_pid_is_dead`, i.e. a manufactured
+    FALSE POSITIVE for a process that is very much alive."""
+    proc_root = proc_root or Path("/proc")
     try:
-        return Path("/proc/%d/stat" % pid).read_text()
+        return (proc_root / str(pid) / "stat").read_text(errors="replace")
     except OSError:
         return None
 
@@ -3831,11 +3858,24 @@ def _classify_locked_worktree(root, path, branch, lock_reason, git_run, now,
     (busy on other tickets) is unreachable by signal 2 and is simply
     never swept -- a FALSE NEGATIVE only, never a false positive: a
     still-alive (or undeterminable) pid always refuses.
+
+    A SECOND, narrower residual (#348 adversarial-review MINOR-4,
+    confirmed): a worktree that is BOTH locked (dead session, otherwise
+    reclaimable) AND has had its directory removed by hand is
+    permanently unreachable by EITHER mechanism at once -- signal 5
+    (`git status --porcelain`) cannot run against a missing directory
+    and refuses forever, while `discover_orphaned_worktree_branches`
+    never sees the branch either (it is still "registered" by the
+    surviving locked admin entry). False negative only, never fixed
+    here -- closing it would need a directory-existence-aware variant of
+    signal 5, out of this ticket's own named scope.
     """
     pid_is_dead = pid_is_dead or _pid_is_dead
-    min_age_s = STALE_LOCKED_DEAD_MIN_AGE_S if min_age_s is None else min_age_s
+    min_age_s = (_worktree_env_age_s("AIRULESET_WORKTREE_LOCKED_DEAD_MIN_AGE_S",
+                                     STALE_LOCKED_DEAD_MIN_AGE_S)
+                if min_age_s is None else min_age_s)
     row = {"path": path, "branch": branch, "repo": root, "reason": None,
-          "kind": "locked_dead"}
+          "kind": "locked_dead", "lock_reason": lock_reason}
     pid, start = _worktree_lock_pid(lock_reason)
     if pid is None:
         row["reason"] = "locked, no parseable session pid -- never guessed at"
@@ -3917,9 +3957,22 @@ def discover_orphaned_worktree_branches(home=None, git_run=None, now=None,
         qualified `refs/heads/<base>..refs/heads/<branch>` comparison
         `discover_stale_worktrees` already uses (so #345's own same-
         named-tag hardening covers this path for free).
+
+    Residual (#348 adversarial-review MINOR-3, confirmed): `git pack-
+    refs`/`git gc --auto` deletes the branch's own loose ref FILE (the
+    thing the age check's mtime comes from) with nothing recreating it
+    short of new activity on that branch -- so once a genuinely-old,
+    genuinely-reclaimable orphan gets swept up in a routine repack, it
+    reads "age unmeasurable (packed ref)" and is refused FOREVER after,
+    never becoming eligible again on its own. Safe direction only (a
+    packed ref can never look artificially OLDER than it is, only
+    unmeasurable) -- it just means this sweep will under-fire on any
+    repo whose git gc runs routinely, which is worth knowing, not fixing
+    here.
     """
-    min_age_s = (STALE_ORPHAN_BRANCH_MIN_AGE_S if min_age_s is None
-                else min_age_s)
+    min_age_s = (_worktree_env_age_s("AIRULESET_WORKTREE_ORPHAN_MIN_AGE_S",
+                                     STALE_ORPHAN_BRANCH_MIN_AGE_S)
+                if min_age_s is None else min_age_s)
     git_run = git_run or _worktree_git
     import time as _time
     now = _time.time() if now is None else now
@@ -4215,6 +4268,24 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
         rc = git_run(["worktree", "remove", c["path"]], c["repo"],
                      timeout=STALE_WORKTREE_REMOVE_TIMEOUT_S)
         if rc is None:
+            if kind == "locked_dead":
+                # #348 adversarial-review MINOR-1 (TRIGGERED live): the
+                # unlock above already succeeded -- if remove now refuses
+                # (a dirty file raced in between classification and this
+                # candidate's own turn, a permissions blip, a timeout),
+                # leaving the worktree UNLOCKED with its forensic pid/
+                # start reason gone forever would silently strip a real
+                # protection, and the very next ORDINARY #345 sweep would
+                # finish the job with NONE of this function's 5 safety
+                # checks. Best-effort restore the ORIGINAL lock+reason;
+                # the outcome is not re-verified further here -- a failed
+                # re-lock just means the next sweep re-discovers this
+                # worktree with an unparseable/no reason and refuses
+                # again on that basis, never worse than today's state.
+                relock = ["worktree", "lock", c["path"]]
+                if c.get("lock_reason"):
+                    relock += ["--reason", c["lock_reason"]]
+                git_run(relock, c["repo"])
             entry["reason"] = "worktree remove refused (dirty tree, in use, or timed out) -- left in place"
             results.append(entry)
             continue
