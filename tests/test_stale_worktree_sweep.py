@@ -308,6 +308,67 @@ class TestSweepStaleWorktrees(unittest.TestCase):
             self.assertNotIn("--force", c)
             self.assertNotIn("-f", c)
 
+    def test_worktree_remove_uses_a_generous_timeout(self):
+        """A worktree can carry several GB of build artefacts (#315's own
+        camera-box/songplayer/spinbike measurements) -- `worktree remove`
+        must not share the lightweight 15s default every other git-plumbing
+        call in this module uses, or a genuinely large, removable worktree
+        reads as permanently 'refused' on every sweep."""
+        repo = _mkrepo(self.root, "proj")
+        _add_worktree(repo, "worktree-agent-dead1")
+        calls = []
+        real = airuleset._worktree_git
+
+        def spy(args, cwd, timeout=15):
+            calls.append((list(args), timeout))
+            return real(args, cwd, timeout=timeout)
+
+        self._sweep(dry_run=False, git_run=spy)
+        remove_calls = [t for a, t in calls if a[:2] == ["worktree", "remove"]]
+        self.assertTrue(remove_calls, "the sweep must have attempted a real removal")
+        for t in remove_calls:
+            self.assertEqual(t, airuleset.STALE_WORKTREE_REMOVE_TIMEOUT_S)
+            self.assertGreater(t, 15, "must be strictly more generous than the plumbing default")
+
+    def test_new_commit_between_discovery_and_removal_saves_the_branch(self):
+        """TOCTOU close: a candidate list handed to sweep_stale_worktrees
+        (candidates=..., bypassing a fresh discover_stale_worktrees call)
+        may be stale by the time this specific candidate's turn comes up --
+        something could have added a genuine commit to the branch in the
+        meantime. `git worktree remove` itself only refuses on a DIRTY
+        (uncommitted) tree, never on extra COMMITS, so the worktree removal
+        succeeds regardless -- the branch delete must independently
+        re-verify 0-ahead immediately before acting, or a real commit is
+        silently destroyed (salvage-before-discarding-work.md)."""
+        repo = _mkrepo(self.root, "proj")
+        wt = _add_worktree(repo, "worktree-agent-racer")
+        # Discover BEFORE the extra commit lands -- proves ahead=0 as of
+        # discovery time, exactly like a real (possibly slow) sweep would.
+        stale_candidates = airuleset.discover_stale_worktrees(home=self.root)
+        self.assertEqual(len(stale_candidates), 1)
+        self.assertIsNone(stale_candidates[0]["reason"])
+        # Now something adds a REAL commit to the branch -- e.g. a stray
+        # process still attached to the worktree between discovery and this
+        # candidate's turn in a long candidate list.
+        (wt / "late.txt").write_text("real work\n")
+        _git(["add", "."], wt)
+        _git(["commit", "-q", "-m", "late real work"], wt)
+
+        results = self._sweep(dry_run=False, candidates=stale_candidates)
+        self.assertEqual(len(results), 1)
+        # The worktree directory itself is gone (git worktree remove only
+        # refuses on UNCOMMITTED changes -- a committed extra commit is not
+        # "dirty").
+        self.assertFalse(wt.exists())
+        self.assertTrue(results[0]["removed"])
+        # But the branch -- carrying real work now -- must survive.
+        self.assertFalse(results[0]["branch_deleted"],
+                         "a branch that gained real commits must never be deleted")
+        branches = _git(["branch", "--list", "worktree-agent-racer"], repo)
+        self.assertIn("worktree-agent-racer", branches)
+        log = _git(["log", "--oneline", "worktree-agent-racer"], repo)
+        self.assertIn("late real work", log)
+
     def test_only_rows_with_reason_none_are_ever_acted_on(self):
         """Direct test of sweep's OWN filtering, independent of discovery —
         a hand-built mixed candidate list must only ever act on the

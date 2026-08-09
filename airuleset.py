@@ -3545,6 +3545,14 @@ def cmd_purge_targets(args):
 STALE_WORKTREE_LOG_PATH = CLAUDE_DIR / "worktree-sweep.log"
 STALE_WORKTREE_STATE_PATH = CLAUDE_DIR / "worktree-sweep-state.json"
 STALE_WORKTREE_MIN_INTERVAL_S = 6 * 3600      # env AIRULESET_WORKTREE_SWEEP_INTERVAL_S
+# A worktree can carry several GB of build artefacts (camera-box/songplayer/
+# spinbike measured 4-10GB each under #315's own target-purge finding) --
+# `git worktree remove` walks and deletes that whole tree, which can genuinely
+# take longer than the lightweight git-plumbing default (_worktree_git's own
+# 15s) on a busy, I/O-contended box. A short timeout here would make a large,
+# perfectly-removable worktree read as "refused (dirty/in use)" every sweep,
+# never actually reclaiming the disk it exists to reclaim.
+STALE_WORKTREE_REMOVE_TIMEOUT_S = 120
 _STALE_WORKTREE_PROTECTED_BRANCHES = ("main", "dev", "master")
 
 
@@ -3782,13 +3790,30 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
             entry["reason"] = "would remove (dry-run)"
             results.append(entry)
             continue
-        rc = git_run(["worktree", "remove", c["path"]], c["repo"])
+        rc = git_run(["worktree", "remove", c["path"]], c["repo"],
+                     timeout=STALE_WORKTREE_REMOVE_TIMEOUT_S)
         if rc is None:
-            entry["reason"] = "worktree remove refused (dirty tree or in use) -- left in place"
+            entry["reason"] = "worktree remove refused (dirty tree, in use, or timed out) -- left in place"
             results.append(entry)
             continue
         entry["removed"] = True
         entry["reason"] = "removed"
+        # Re-verify 0-ahead immediately before deleting the branch -- closes the
+        # window between discovery's own ahead-count read and THIS candidate's
+        # turn in a (possibly long) candidate list, during which something could
+        # have added a genuine commit to the branch elsewhere. Mirrors #315's own
+        # adversarial-review finding 2 (re-check right before the destructive
+        # step, not just at discovery time) -- salvage-before-discarding-work.md.
+        base = c.get("base")
+        still_zero = True
+        if base:
+            recheck = git_run(["rev-list", "--count", "%s..%s" % (base, c["branch"])], c["repo"])
+            still_zero = recheck is not None and recheck.strip() == "0"
+        if not still_zero:
+            entry["branch_deleted"] = False
+            entry["reason"] = "removed worktree, but branch now carries new commits -- branch left in place"
+            results.append(entry)
+            continue
         bd = git_run(["branch", "-D", c["branch"]], c["repo"])
         entry["branch_deleted"] = bd is not None
         results.append(entry)
