@@ -423,10 +423,25 @@ class TestItem95_Item12NewSkillTriggers(TestCase):
             )
 
     def test_heavy_local_build_injects_fast_iterate(self):
-        ctx = injected(run({"command": "cargo build --release"}, tmpdir=self.tmpdir))
-        self.assertIsNotNone(ctx, "a heavy local build must load fast-iterate")
+        # local-builds shares the SAME trigger pattern (a real, existing
+        # precedent — deploy-ssh + post-deploy-verification already share
+        # one trigger too) and its own body alone (9662 chars) plus
+        # fast-iterate's (5825 chars) exceed the per-call MAX_TOTAL budget
+        # (14000), so the FIRST matching call in a session only delivers
+        # local-builds — fast-iterate's marker stays UNSET (deferred, per
+        # the injector's own documented "defer, never drop" contract) and
+        # fires on the session's NEXT matching action, once local-builds'
+        # own marker is already consumed and stops competing for budget.
+        first = injected(run({"command": "cargo build --release"}, tmpdir=self.tmpdir))
+        self.assertIsNotNone(first, "a heavy local build must load local-builds")
+        second = injected(
+            run({"command": "cargo build --release"}, tmpdir=self.tmpdir)
+        )
+        self.assertIsNotNone(
+            second, "fast-iterate must fire on the session's next heavy build"
+        )
         # a string that exists ONLY in fast-iterate's own body
-        self.assertIn("Toggle Tier-2 Local Build Mode", ctx)
+        self.assertIn("Toggle Tier-2 Local Build Mode", second)
 
     def test_meeting_recording_prompt_injects_meeting_analysis(self):
         r = self._prompt(
