@@ -6923,6 +6923,30 @@ def _parse_home_audit_output(stdout):
     return text.split(_HOME_AUDIT_MARKER, 1)[1]
 
 
+def _parse_home_names(home_listing):
+    """Home directory names from a raw `/home` listing, blank lines
+    dropped. Shared by `unregistered_home_accounts` and
+    `_home_listing_trustworthy` so both read the same real shape."""
+    return {ln.strip() for ln in (home_listing or "").splitlines() if ln.strip()}
+
+
+def _home_listing_trustworthy(user, home_listing):
+    """#347 adversarial-review MAJOR finding (M1): `_HOME_AUDIT_MARKER`
+    being present in an ssh call's stdout only proves the remote SHELL
+    reached the audit — NOT that `ls -1 /home` itself actually succeeded.
+    A hardened or root-owned `/home` makes `ls` fail with its stderr
+    redirected to `/dev/null`, returning an EMPTY listing at rc 0 — which
+    a marker-only check would read as "checked, no gap found" FOREVER,
+    silently and permanently defeating the whole guard. Positive control:
+    the very account THIS ssh connection authenticated AS must appear in
+    any genuine listing (the same connection just `cd`'d into that
+    account's own checkout, so its home directory unquestionably exists
+    on this host) — if it's missing, the listing cannot be trusted at
+    all, and the caller must fall through to a retry / an honest
+    UNVERIFIED report rather than a false "clean"."""
+    return user in _parse_home_names(home_listing)
+
+
 def unregistered_home_accounts(host, home_listing):
     """Home directory names present on `host` (from a real `/home` listing)
     that have NO matching REMOTE_HOSTS entry for that EXACT host — #347's
@@ -6930,10 +6954,16 @@ def unregistered_home_accounts(host, home_listing):
     being registered as a push target. Read-only: the caller decides what
     to do with a non-empty result (a loud, non-blocking warning — refusing
     to push over an unrelated new account would be a worse failure mode
-    than the gap this exists to report)."""
-    registered = {r["user"] for r in REMOTE_HOSTS if r.get("host") == host}
-    names = {ln.strip() for ln in (home_listing or "").splitlines() if ln.strip()}
-    return sorted(names - registered)
+    than the gap this exists to report).
+
+    "lost+found" is excluded unconditionally — a filesystem artifact on a
+    `/home` that is its own mount point, never a stream account. Reporting
+    it as a "gap" on every single push forever would train the reader to
+    ignore the one warning that will someday be real (adversarial-review
+    MINOR m2, alarm fatigue)."""
+    registered = {r.get("user") for r in REMOTE_HOSTS if r.get("host") == host}
+    names = _parse_home_names(home_listing)
+    return sorted(names - registered - {"lost+found"})
 
 
 def cmd_push(args):
@@ -7151,40 +7181,48 @@ def cmd_push(args):
         # /home entry (a not-yet-onboarded or test account) must never
         # abort deployment to every OTHER, already-registered account.
         # `audited_hosts` is marked HERE, only once the marker is
-        # positively confirmed present — never on a mere attempt — so a
-        # never-executed audit (ssh failed before the remote shell ran it)
-        # is never mistaken for "ran and found nothing" (adversarial-review
-        # CRITICAL finding, see the comment above `audit_this_call`).
+        # positively confirmed present AND the listing itself passes the
+        # `_home_listing_trustworthy` positive control (adversarial-review
+        # MAJOR M1: the marker alone only proves the remote shell reached
+        # the audit, never that `ls -1 /home` actually succeeded — a
+        # hardened/root-owned /home fails silently at rc 0 with an EMPTY
+        # listing, which would otherwise read as "checked, clean" forever)
+        # — so a never-executed OR untrustworthy audit is never mistaken
+        # for "ran and found nothing".
         if audit_this_call and _HOME_AUDIT_MARKER in (ssh_result.stdout or ""):
-            audited_hosts.add(remote["host"])
-            gap = unregistered_home_accounts(
-                remote["host"], _parse_home_audit_output(ssh_result.stdout))
-            if gap:
-                print(f"\n⚠ REGISTRATION GAP on {remote['host']}: /home has "
-                      f"account(s) with NO REMOTE_HOSTS entry: "
-                      f"{', '.join(gap)} — a stream account was activated but "
-                      f"never registered as a push target. Register it: "
-                      f"REMOTE_HOSTS + AUTHORITY_BY_USER + the "
-                      f"block-subdev-ssh-misuse.sh allow-list + watchdog's "
-                      f"_REDUCED_STREAM_USERS + notify's STREAM_NOTIFY_OWNER "
-                      f"(see #251/#263/#300/#326/#347's own onboarding "
-                      f"checklist).", file=sys.stderr)
+            home_listing = _parse_home_audit_output(ssh_result.stdout)
+            if _home_listing_trustworthy(remote["user"], home_listing):
+                audited_hosts.add(remote["host"])
+                gap = unregistered_home_accounts(remote["host"], home_listing)
+                if gap:
+                    print(f"\n⚠ REGISTRATION GAP on {remote['host']}: /home has "
+                          f"account(s) with NO REMOTE_HOSTS entry: "
+                          f"{', '.join(gap)} — a stream account was activated "
+                          f"but never registered as a push target. Register "
+                          f"it: REMOTE_HOSTS + AUTHORITY_BY_USER + the "
+                          f"block-subdev-ssh-misuse.sh allow-list + watchdog's "
+                          f"_REDUCED_STREAM_USERS + notify's STREAM_NOTIFY_OWNER "
+                          f"(see #251/#263/#300/#326/#347's own onboarding "
+                          f"checklist).", file=sys.stderr)
 
-    # #347: any shared host every entry FAILED to audit this run (every
-    # connection attempted for it died before the appended `ls` ever ran)
-    # must be reported as UNVERIFIED, not silently read as "no gap found"
-    # — the exact false-negative the adversarial review flagged. Every
-    # shared host gets `audit_this_call = True` on its FIRST-seen entry
-    # (audited_hosts starts empty), so any host still missing from
-    # `audited_hosts` here was genuinely never confirmed this run.
+    # #347: any shared host that never got a TRUSTWORTHY audit this run
+    # (every connection failed before the appended `ls` ever ran, or every
+    # listing that did run failed the positive control) must be reported
+    # as UNVERIFIED, not silently read as "no gap found" — the exact
+    # false-negative the adversarial review flagged (both the original
+    # CRITICAL and the follow-up MAJOR M1). Every shared host gets
+    # `audit_this_call = True` on its FIRST-seen entry (audited_hosts
+    # starts empty), so any host still missing from `audited_hosts` here
+    # was genuinely never confirmed this run.
     unverified_shared = shared_hosts - audited_hosts
     if unverified_shared:
         print(f"\n⚠ REGISTRATION AUDIT NOT VERIFIED this run for: "
-              f"{', '.join(sorted(unverified_shared))} — every connection "
-              f"attempted to the shared host failed before the /home "
-              f"listing could run, so a registration gap there could exist "
-              f"and go unreported until a later push confirms it.",
-              file=sys.stderr)
+              f"{', '.join(sorted(unverified_shared))} — no connection ever "
+              f"returned a trustworthy /home listing for the shared host "
+              f"(either every attempt failed before reaching it, or the "
+              f"listing itself could not be trusted), so a registration gap "
+              f"there could exist and go unreported until a later push "
+              f"confirms it.", file=sys.stderr)
 
     # 3b. Deliver the meeting-analysis Soniox key to every subdev stream
     # account (#275) -- a true no-op when REMOTE_HOSTS has no such account
