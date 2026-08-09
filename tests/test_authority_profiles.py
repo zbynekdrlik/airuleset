@@ -69,10 +69,25 @@ class TestAuthorityResolution(TestCase):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
     def test_cli_prints_the_profile(self):
+        # #349: `m.Mock` auto-creates any unspecified attribute as a truthy
+        # Mock, so the new `--maintainer-login` early-return branch would
+        # silently hijack this test unless pinned False (the established
+        # `m.Mock(...)`-args gotcha this repo's own dev rules already
+        # document for exactly this shape).
         with m.patch.object(airuleset, "_current_user", return_value="marek"):
             with m.patch("builtins.print") as p:
-                airuleset.cmd_authority(m.Mock(explain=False))
+                airuleset.cmd_authority(
+                    m.Mock(explain=False, maintainer_login=False))
         p.assert_any_call("branch-merge")
+
+    def test_cli_prints_maintainer_login(self):
+        # #349: the close-guard hook's shared-identity fix needs this to tell
+        # a genuine self-authored sub-finding apart from maintainer-authored
+        # assigned work on a shared-gh-identity reduced-authority box.
+        with m.patch("builtins.print") as p:
+            airuleset.cmd_authority(
+                m.Mock(explain=False, maintainer_login=True))
+        p.assert_any_call(airuleset.MAINTAINER_GH_LOGIN)
 
     def test_project_marker_overrides_the_user_map(self):
         # cmd_authority's explain text has always PROMISED the marker override; it must
