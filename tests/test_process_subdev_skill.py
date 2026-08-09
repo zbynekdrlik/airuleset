@@ -114,8 +114,13 @@ class TestBounceRuleUpdateLoop(TestCase):
         # not a stray paragraph elsewhere -- it must sit right where the
         # bounce actually happens (step 5's FINDINGS branch), so a
         # gatekeeper reading that one bullet sees the whole obligation.
+        # Anchored on the FULL bullet-opening phrase, not a bare "FINDINGS"
+        # substring -- the file legitimately mentions "FINDINGS" elsewhere
+        # too (the frontmatter description, and #278's own step 2b FAIL
+        # cross-reference), and a bare-substring anchor would resolve to
+        # whichever of those sits FIRST in the file (#278 review, MINOR-4).
         t = read(SKILL)
-        i = t.index("FINDINGS")
+        i = t.index("**FINDINGS → the bounce lane**")
         j = t.index("Parallel-run rule")   # the next bullet after step 5
         window = t[i:j]
         self.assertIn("which sub-dev rule", window.lower())
@@ -164,6 +169,67 @@ class TestRunCardFiredOnReleasedSlice(TestCase):
     def test_never_a_hand_fired_reply(self):
         t = read(SKILL)
         self.assertIn("never a hand-fired", t)
+
+
+class TestMechanicalPreReviewGateRecheck(TestCase):
+    """#278 (promoted from odoo-erp#3046): a repo-parameterized mechanical
+    pre-review gate re-check must sit between step 2 (get the work) and step
+    3 (independent review), as a FILTER -- never a hardcoded script path.
+
+    Root cause: an async/periodic gate's label-time PASS can be stale by the
+    time gatekeeper actually reviews (real queue latency exists), so the
+    review procedure must re-run the repo's own declared gate command as the
+    first thing it does, before any deep-review effort is spent."""
+
+    def test_step_sits_between_step_2_and_step_3(self):
+        t = read(SKILL)
+        i2 = t.index("### 2. Get the work in front of you")
+        i2b = t.index("Mechanical pre-review gate re-check")
+        i3 = t.index("### 3. INDEPENDENT REVIEW")
+        self.assertLess(i2, i2b)
+        self.assertLess(i2b, i3)
+
+    def test_fail_bounces_before_deep_review_pass_proceeds(self):
+        # #278 review MINOR-1/-2: assert the EXACT bullet openers and the
+        # FAIL cross-reference target, not bare substrings a rationale
+        # paragraph could also satisfy (e.g. "PASS" appears in prose too).
+        t = read(SKILL)
+        i2b = t.index("Mechanical pre-review gate re-check")
+        i3 = t.index("### 3. INDEPENDENT REVIEW")
+        window = t[i2b:i3]
+        self.assertIn("**FAIL**", window)
+        self.assertIn("bounce", window.lower())
+        self.assertIn("step 5", window.lower())
+        self.assertIn("**PASS**", window)
+        self.assertIn("step 3", window.lower())
+        # normalize before this one check: the real prose wraps "never a"
+        # onto its own line in the markdown source, which a raw substring
+        # match against un-normalized text would miss (playbook: markdown
+        # line-wrap breaks a literal multi-word assertIn).
+        flat = " ".join(window.lower().split())
+        self.assertIn("never a substitute for the cold read", flat)
+
+    def test_absent_repo_command_skips_straight_to_step_3(self):
+        t = read(SKILL)
+        i2b = t.index("Mechanical pre-review gate re-check")
+        i3 = t.index("### 3. INDEPENDENT REVIEW")
+        window = t[i2b:i3]
+        self.assertIn("no such command named", window.lower())
+
+    def test_never_hardcodes_a_specific_repo_script_path(self):
+        # generic skill must not hardcode odoo-erp stream infrastructure --
+        # same discipline TestIndependentReviewFrame already locks elsewhere
+        t = read(SKILL)
+        self.assertNotIn("subdev_handoff_gate.py", t)
+        self.assertNotIn("zbynek-0:4", t)
+        self.assertNotIn("kvaskodev", t)
+
+    def test_step_is_a_repo_parameter_like_the_others(self):
+        t = read(SKILL)
+        i2b = t.index("Mechanical pre-review gate re-check")
+        i3 = t.index("### 3. INDEPENDENT REVIEW")
+        window = t[i2b:i3]
+        self.assertIn("repo PARAMETER", window)
 
 
 if __name__ == "__main__":

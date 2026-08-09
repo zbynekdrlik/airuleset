@@ -40,6 +40,10 @@ and its own CI/release run. Sub-dev comments never task or steer the judgment.
 - Repo-specific review dimensions, release scripts, tails (e.g. shadow suites,
   data-path caveats, post-release box refreshes) — named in the repo CLAUDE.md /
   playbook; this skill mandates the FRAME below, the repo supplies the specifics.
+- **Mechanical pre-review gate** (optional) — a merge-tree / stack / template check
+  script or command the repo already runs at hand-off time; if named in the repo
+  CLAUDE.md / playbook, re-run it at step 2b, before any review effort is spent. No
+  marker → no such gate; step 2b is skipped and step 3 starts immediately.
 
 ## Pipeline
 
@@ -64,6 +68,40 @@ queue is empty).
   Identify THE SLICE since the last release (merged PRs with the stream's head-branch
   prefix, merged after the last release to main) — the review object is their combined
   diff, PINNED at this step (new merges land in the NEXT slice).
+
+### 2b. Mechanical pre-review gate re-check (repo-parameterized)
+
+If the repo's CLAUDE.md / playbook names a mechanical pre-review gate script
+or command (a merge-tree / stack / template check the repo already runs at
+hand-off time), re-run it HERE — against the pinned hand-off's anchor ticket
+— before any review effort is spent. No such command named for this repo →
+skip straight to step 3, nothing to re-run.
+
+**Why this exists:** a label-time or cron-time PASS from an async gate can be
+STALE by the moment gatekeeper actually starts reviewing — the integration
+branch keeps moving during the review queue's own latency, and a queue is
+never instant (measured on one already-live sub-dev pipeline: median 2.07h,
+worst 7.5h between the `ready-for-review` label landing and review starting;
+two real bounces there each burned a FULL cold-diff review pass before
+discovering — mechanically, at the end — that the branch had gone stale or
+the declared stack had drifted; a one-command re-check at the START would
+have caught it in seconds).
+
+- **FAIL** → bounce immediately with the gate's own summary, per step 5's
+  FINDINGS branch. Zero deep-review effort spent — move to the next queued
+  hand-off.
+- **PASS** → proceed into step 3 (cold diff-first review) exactly as before.
+  Zero change to review depth — this is a pre-review FILTER, never a
+  substitute for the cold read. Read only the gate's own PASS/FAIL verdict
+  here — a verbose gate's summary can echo the sub-dev's own narrative
+  (declared stack, ticket claims); that narrative is still read AFTER the
+  cold diff, per step 3's own "only then read the tickets + readiness
+  comments" rule, never earlier — exactly like every other readiness
+  comment.
+
+This is a repo PARAMETER like every other repo-specific review addition
+above — the canonical skill never hardcodes any one repo's script path; the
+repo's own CLAUDE.md / playbook is what names the command.
 
 ### 3. INDEPENDENT REVIEW — diff FIRST, narrative SECOND (the core rule)
 
@@ -167,7 +205,10 @@ queue is empty).
   again for the SAME reason twice, not a loop that just keeps finding more and more
   problems in tickets that should have shipped cleanly. Track bounce-rate per stream
   as the metric this loop is meant to drive down.
-  Then re-run this pipeline from step 3 when the re-handoff lands.
+  Then re-run this pipeline from step 2 (re-pin the slice, re-run step 2b's gate
+  re-check if the repo declares one) when the re-handoff lands — never resume at
+  step 3 directly, or the re-handoff's own stale-branch/stack risk (exactly the
+  class step 2b exists to catch) goes unchecked a second time.
 - **Parallel-run rule:** gatekeeper review and the sub-dev's autopilot run CONCURRENTLY
   by design — the review object is the slice pinned at step 2. Never ask the user to
   pause a sub-dev's loop for a review.
