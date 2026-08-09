@@ -44,6 +44,50 @@ set -euo pipefail
 # MID-STREAM <event> has no <status> — still live), or a TaskStop/KillShell
 # tool_use naming the id. Inherently ownership-scoped (own transcript).
 #
+# UNBACKED-MONITORING-CLAIM CHECK (airuleset #343, `_check_unbacked_
+# monitoring_claim`). The block above catches a subagent that OWNS live
+# background work and terminates without waiting — the mirror-image failure
+# has no check anywhere: a subagent whose final message CLAIMS ongoing
+# monitoring/watching ("monitoring shadow E2E to terminal" — the odoo-erp
+# incident this ticket documents) while owning NOTHING live. A SubagentStop
+# is terminal by construction — nothing resumes a stopped subagent — so an
+# un-backed "still watching" claim is a genuine lie with no mechanism
+# catching it: neither `stop-check-working-liveness.sh` nor
+# `stop-check-status-marker.sh` reaches a SubagentStop at all (both are
+# `Stop`-only). Called from BOTH places this script concludes nothing is
+# live — the CANDIDATES-empty early exit below (a MODERN payload, self-only
+# or empty `background_tasks` — the incident's own exact shape) AND the
+# post-scan LIVE-empty check — never only one (adversarial-review CRITICAL-1:
+# a first draft wired only the second site, so the SOLO-subagent modern-
+# payload case, tested nowhere by the original suite, bypassed the check
+# entirely). Scans `last_assistant_message` for an ONGOING-tense monitor/
+# watch claim (present participle or bare/future form: "monitoring",
+# "monitors", "will monitor", "watching" — deliberately narrow to the
+# ticket's own vocabulary, English only — a Slovak "monitorujem"/"sledujem"
+# equivalent is a known, undetected residual). Past-tense forms ("monitored",
+# "watched") never match: the `\b` word boundary immediately after
+# "monitor"/"watch" fails to hold when the very next character is "ed" (both
+# are word characters — no transition), so a genuinely COMPLETED report
+# ("I monitored the deploy, it succeeded") is untouched — though a genuinely
+# present-tense but ALREADY-RESOLVED report ("I was monitoring the run until
+# it finished; it succeeded") or a mere recommendation ("recommend
+# monitoring the deploy after merge") CAN still false-match; accepted,
+# bounded by MAX_BLOCKS below, not chased further. Gated on a non-empty
+# `agent_type` (adversarial-review MAJOR-3): a SubagentStop ALSO fires once
+# per PARALLEL TOOL-CALL BRANCH with `agent_type: ""` (far more often than a
+# genuine dispatched-agent stop, #123) whose `last_assistant_message` is the
+# Bash tool's own DESCRIPTION string (e.g. "Monitor CI run status") — that
+# population owns nothing live by construction and would false-positive on
+# nearly every such branch without the gate. Reuses the SAME per-(session,
+# agent) BLOCK_FILE the check above already writes — a repeated unbacked
+# claim still fails open past MAX_BLOCKS, same as every other reason in
+# this hook. The message match uses a HERE-STRING (`<<<`), never
+# `echo "$MSG" | grep -q` (adversarial-review MAJOR-2): the piped form is
+# this repo's own documented-banned idiom — `grep -q` exits at its first
+# match without draining stdin, SIGPIPEs the echo writer, and under
+# `pipefail` that reads as "not found" for any genuine claim on an early
+# line of a message at or past ~64KiB.
+#
 # Fail-open everywhere: no jq/python, missing/unreadable transcript
 # (ownership unprovable → nothing blocks), parse errors, and after
 # MAX_BLOCKS blocks per (session, agent) — the transcript is written
@@ -56,6 +100,12 @@ command -v jq &>/dev/null || exit 0
 INPUT=$(cat 2>/dev/null || echo "")
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // "unknown"' 2>/dev/null || echo "unknown")
+# empty for a PARALLEL TOOL-CALL BRANCH stop (#123 -- fires far more often
+# than a real dispatched-agent stop; last_assistant_message there is the
+# Bash tool's own DESCRIPTION string, e.g. "Monitor CI run status") --
+# _check_unbacked_monitoring_claim below gates its own check on this being
+# non-empty, so that population is never scanned for a "monitoring" claim.
+AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null || echo "")
 # ids land in /tmp paths — strip to [A-Za-z0-9_-] (defensive; MUST match the
 # recorder's sanitization or the launch ledger is never found at stop). NB:
 # the RAW agent_id stays what the payload's background_tasks self-entry
@@ -74,6 +124,54 @@ if [ "$BLOCKS" -ge "$MAX_BLOCKS" ] 2>/dev/null; then
     exit 0     # fail open — never wedge a subagent in an endless block loop
 fi
 
+# #343 -- SHARED "nothing is live" handler, called from EVERY place this
+# script concludes the subagent owns no live work (there are TWO such
+# places below: the CANDIDATES-empty early exit in intersect mode, and the
+# LIVE-empty check after the Python ownership scan in either mode) --
+# review finding CRITICAL-1: a first draft only wired the check into the
+# SECOND site, so the intersect-mode early exit (which is what a MODERN
+# payload hits for a SOLO subagent with self-only/empty background_tasks —
+# the incident's own exact shape) bypassed the new check entirely. ALWAYS
+# exits; never returns to its caller.
+_check_unbacked_monitoring_claim() {
+    rm -f "$LEDGER_FILE"
+    if [ -n "$AGENT_TYPE" ]; then
+        # here-string, NOT `echo "$MSG" | grep -q` -- the piped form is the
+        # repo's own banned #190 idiom: grep -q exits at its first match
+        # without draining stdin, SIGPIPEs the echo writer, and under
+        # `pipefail` a genuine claim on an early line of a >=64KiB message
+        # silently reads as "not found" (measured: reliable false-PASS from
+        # 64KiB up). A here-string has no separate writer process, so the
+        # race cannot exist.
+        MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || echo "")
+        if grep -qiE '\bmonitor(ing|s)?\b|\bwatching\b' <<<"$MSG"; then
+            echo $((BLOCKS + 1)) > "$BLOCK_FILE"
+            REASON2="Your final message claims you are still monitoring/watching \
+something, but you have NO live tracked background work — you are a \
+SUBAGENT, and your SubagentStop is TERMINAL: nothing resumes a stopped \
+subagent, so nothing continues watching once this turn ends. This is the \
+exact odoo-erp incident airuleset #343 documents: a lane agent's last words \
+were 'monitoring shadow E2E to terminal', the run failed 20 minutes later, \
+and nothing woke the coordinator. Pick ONE: (1) if the resource genuinely \
+has not resolved yet, hold this turn with a real bounded FOREGROUND poll \
+(e.g. 'sleep 300 && gh run view <id> --json status,conclusion', repeated \
+until terminal) and report the ACTUAL outcome, never a promise to keep \
+checking; (2) launch genuinely trackable background work (Bash \
+run_in_background / Monitor / an async Agent dispatch) so this SAME hook's \
+own live-task check covers you on your next stop; (3) if your dispatch \
+contract hands the watch back to your caller, drop the 'monitoring'/\
+'watching' language entirely and instead report the CURRENT status as a \
+plain fact (e.g. 'run <id> was in-progress as of <time>; status unknown \
+after this — re-check needed') so the coordinator's own transcript captures \
+something it can act on, not an open-ended claim nobody is honoring."
+            jq -n --arg r "$REASON2" '{"decision":"block","reason":$r}'
+            exit 0
+        fi
+    fi
+    rm -f "$BLOCK_FILE"
+    exit 0
+}
+
 HAS_BG=$(echo "$INPUT" | jq -r 'has("background_tasks")' 2>/dev/null || echo "false")
 TRANSCRIPT=$(echo "$INPUT" | jq -r \
     '.agent_transcript_path // .transcript_path // empty' \
@@ -87,7 +185,7 @@ if [ "$HAS_BG" = "true" ]; then
         '[.background_tasks[]? | select(.status == "running") | .id
           | strings | select(. != $a and . != "")] | unique | join(" ")' \
         2>/dev/null || echo "")
-    [ -z "$CANDIDATES" ] && { rm -f "$BLOCK_FILE" "$LEDGER_FILE"; exit 0; }
+    [ -z "$CANDIDATES" ] && _check_unbacked_monitoring_claim
     MODE="intersect"
 fi
 
@@ -215,7 +313,7 @@ PYEOF
 )
 LIVE=$(echo "$LIVE" | tr -s ' \n' ' ' | sed 's/^ *//;s/ *$//')
 
-[ -z "$LIVE" ] && { rm -f "$BLOCK_FILE" "$LEDGER_FILE"; exit 0; }
+[ -z "$LIVE" ] && _check_unbacked_monitoring_claim
 
 echo $((BLOCKS + 1)) > "$BLOCK_FILE"
 
