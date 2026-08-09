@@ -76,16 +76,38 @@ fi
 # SELF-AUTHORED issue (the stream's own sub-finding). Extract the issue number +
 # optional -R/--repo from the `gh issue close` form; the `gh api PATCH` form is
 # never exempted (use `gh issue close` for legit self-closes).
+#
+# #349 adversarial review, CRITICAL: every CURRENTLY REGISTERED branch-merge
+# stream (marek, montalu, montalu2/3/4) authenticates as the SAME shared gh
+# identity as the repo's MAINTAINER — on those boxes `ME` (below) resolves to
+# the maintainer's own login, and so does the AUTHOR of virtually every
+# assigned ticket (the maintainer files them). `ME == AUTHOR` is then ALWAYS
+# true regardless of whether the ticket is a genuine self-filed sub-finding or
+# the maintainer-assigned work this whole guard exists to protect — a verbatim
+# replay of the montalu3 incident closes cleanly through this exemption. The
+# discriminator is unusable once `ME` equals the maintainer's own identity, so
+# the exemption is refused outright in that case (fail toward hand-off, never
+# toward guessing — same direction as the fail-safe above): a shared-identity
+# stream loses the self-close bookkeeping shortcut and hands off EVERY closed
+# ticket, including its own sub-findings, which costs one extra comment and
+# closes the actual regression. A genuinely separate-identity stream
+# (fork-no-merge's david, whose gh login is never the maintainer's) is
+# unaffected.
 ISSUE_NUM=$(printf '%s' "$CMD" | grep -oE 'gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?([0-9]+)' | grep -oE '[0-9]+' | head -1 || echo "")
 REPO_ARG=$(printf '%s' "$CMD" | grep -oE '(-R|--repo)[[:space:]=]+"?[A-Za-z0-9._/-]+' | head -1 | sed -E 's/^(-R|--repo)[[:space:]=]+"?//' || echo "")
 if [ -n "$ISSUE_NUM" ]; then
     ME=$(gh api user -q .login 2>/dev/null || echo "")
+    MAINTAINER_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --maintainer-login 2>/dev/null || echo "")
     if [ -n "$REPO_ARG" ]; then
         AUTHOR=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json author -q .author.login 2>/dev/null || echo "")
     else
         AUTHOR=$(gh issue view "$ISSUE_NUM" --json author -q .author.login 2>/dev/null || echo "")
     fi
-    if [ -n "$ME" ] && [ -n "$AUTHOR" ] && [ "$ME" = "$AUTHOR" ]; then
+    # MAINTAINER_LOGIN unresolvable -> cannot PROVE $ME is not the maintainer
+    # -> refuse the exemption (same fail-SAFE direction as the rest of this
+    # hook: undeterminable never means "allow").
+    if [ -n "$ME" ] && [ -n "$AUTHOR" ] && [ "$ME" = "$AUTHOR" ] \
+       && [ -n "$MAINTAINER_LOGIN" ] && [ "$ME" != "$MAINTAINER_LOGIN" ]; then
         exit 0   # self-authored sub-finding — the stream's own bookkeeping, allowed
     fi
 fi
