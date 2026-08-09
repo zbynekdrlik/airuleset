@@ -137,6 +137,22 @@ class TestReadTemplate(_StoreCase):
         self.assertNotIn(VAL, argv)
         self.assertNotIn(VAL, " ".join(argv))
 
+    def test_a_non_utf8_template_fails_loud_as_secreterror_not_uncaught(self):
+        # Adversarial-review MINOR-1 (#154, second review pass): the
+        # docstring promises "NEVER returns None ... must fail LOUD [as
+        # SecretError]" for ANY unreadable/malformed template — but
+        # `Path.read_text(encoding="utf-8")` raises `UnicodeDecodeError` on
+        # invalid bytes, a `ValueError` subclass, NOT an `OSError`. The old
+        # `except OSError` therefore missed it, and the exception escaped
+        # uncaught into both `secret exec` and `secret status`, which only
+        # catch `st.SecretError`. It still failed CLOSED (no argv fallback,
+        # since `cmd` was never assigned) but with an ugly traceback instead
+        # of the documented refusal — this asserts the documented contract.
+        p = st.template_path("DB_PASS")
+        p.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+        with self.assertRaises(st.SecretError):
+            st.read_template("DB_PASS")
+
 
 class TestTemplateNames(_StoreCase):
     def test_empty_when_nothing_is_templated(self):
