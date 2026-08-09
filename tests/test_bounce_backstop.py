@@ -312,6 +312,21 @@ class TestBounceQuals(unittest.TestCase):
             self.assertEqual(wd._bounce_quals("/home/%s/devel/odoo-erp" % u),
                              ["label:stream:%s" % u], u)
 
+    def test_david_family_home_scopes_by_own_label(self):
+        # airuleset#326 (adversarial-review MAJOR finding, live-triggered):
+        # david2/david3/david4 ALSO work on odoo-erp (a _CROSS_STREAM_REPOS
+        # member) from day one -- unlike simap/miva1 (which merge nowhere and
+        # were correctly left out of _REDUCED_STREAM_USERS), the matching
+        # precedent here is montalu2/3/4 above, whose entries were added AT
+        # onboarding for exactly this reason. Without its own entry, a
+        # david2/3/4 pane fell through to the full-authority exclude-all
+        # branch instead of its own label -- confirmed live before this fix:
+        # `_bounce_quals("/home/david2/devel/odoo-erp")` returned the
+        # exclude-all fragment, not `["label:stream:david2"]`.
+        for u in ("david2", "david3", "david4"):
+            self.assertEqual(wd._bounce_quals("/home/%s/devel/odoo-erp" % u),
+                             ["label:stream:%s" % u], u)
+
     def test_full_authority_home_excludes_subdev_streams(self):
         # Live dry-run finding (2026-07-19): an unscoped full-box query picked
         # up DAVID's stream bounces from newlevel's dev1 checkout and would
@@ -320,8 +335,19 @@ class TestBounceQuals(unittest.TestCase):
         quals = wd._bounce_quals("/home/newlevel/devel/demo")
         self.assertEqual(len(quals), 1)
         for u in ("david", "marek", "montalu", "montalu2", "montalu3",
-                  "montalu4"):
+                  "montalu4", "david2", "david3", "david4"):
             self.assertIn("-label:stream:%s" % u, quals[0])
+
+    def test_david_family_pane_is_not_a_gkreq_supervisor_root(self):
+        # airuleset#326 (adversarial-review MAJOR finding, live-triggered):
+        # _gkreq_supervisor_root must be False under a reduced stream's own
+        # HOME -- nudging the REQUESTER about its own request is backwards
+        # (the inverse of _bounce_quals' gatekeeper skip, same docstring).
+        # Before this fix: `_gkreq_supervisor_root("/home/david2/...")`
+        # returned True (treated as a full-authority supervisor).
+        for u in ("david2", "david3", "david4"):
+            self.assertFalse(wd._gkreq_supervisor_root("/home/%s/devel/odoo-erp" % u), u)
+        self.assertTrue(wd._gkreq_supervisor_root("/home/newlevel/devel/odoo-erp"))
 
 
 class TestCrossStreamRepoScope(unittest.TestCase):

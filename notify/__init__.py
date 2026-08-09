@@ -83,6 +83,29 @@ STREAM_NOTIFY_OWNER = {
     # anything but fail-safe silently; check_discord_notify_config() already
     # surfaces that gap loudly at install time, same as for every stream.
     "miva1": "zbynek",
+    # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE parallel
+    # david streams -- additional capacity for the SAME external developer
+    # david already is, so they redirect to david's own already-self-mapped
+    # thread (never a NEW DISCORD_MIRROR_DAVID2/3/4 local .env key, which
+    # this repo's code cannot provision or deploy at all -- the ticket's own
+    # suggested shape, rejected in favour of this code-side redirect, the
+    # same #300 precedent already established for miva1). This also
+    # inherits david's own real DISCORD_MIRROR_DAVID=zbynek local mirror
+    # config for free, once resolved -- no extra config needed for that.
+    #
+    # RESIDUAL (adversarial-review MAJOR finding, #326): this routing
+    # decision is CODE, not PROOF -- #326's own item 4 explicitly demands a
+    # real test ping + a DELIVERED line per stream in
+    # ~/.claude/notify-delivery.log before the ticket counts as done (the
+    # #134/#135 "configured-but-unproven routing does not count as done"
+    # policy). That live check is structurally impossible from this
+    # worktree (no ssh, and the code isn't even deployed to david2/3/4 until
+    # a post-merge `push` runs) -- it is the SUPERVISOR's job, after push,
+    # before treating #326 as genuinely closed. See #326's own review
+    # comment for the "Closes #326" auto-close caveat this residual implies.
+    "david2": "david",
+    "david3": "david",
+    "david4": "david",
 }
 
 

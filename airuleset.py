@@ -6634,6 +6634,38 @@ REMOTE_HOSTS = [
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
+    {
+        # david2 -- 6th/7th/8th sub-dev streams (airuleset#326, 2026-08-08):
+        # THREE MORE parallel david streams, additional capacity for the
+        # SAME external slovnormal odoo developer (fork-based, no sudo, no
+        # prod keys), provisioned by gatekeeper on the SAME subdev VPS as
+        # david itself (odoo-erp#3282). Registered here as a data-only
+        # mirror of david's own entry (host + identity requirement) -- the
+        # identity ASSUMPTION is unverified for these specific accounts
+        # (mirroring david's shape is the registration; it does not confirm
+        # THIS account's authorized_keys accepts the same operator key --
+        # #300's own precedent for this exact caveat). No ssh was attempted
+        # from this worktree to verify it (fail2ban risk, #300).
+        "name": "david2@subdev",
+        "host": "100.118.174.27",
+        "user": "david2",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
+    {
+        "name": "david3@subdev",
+        "host": "100.118.174.27",
+        "user": "david3",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
+    {
+        "name": "david4@subdev",
+        "host": "100.118.174.27",
+        "user": "david4",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+    },
 ]
 
 
@@ -7579,6 +7611,12 @@ AUTHORITY_BY_USER = {
     # miva1 (airuleset#300, 2026-08-07): phase-1 isolated stream, same shape
     # as simap -- merges nowhere, fork-no-merge is already correct.
     "miva1": "fork-no-merge",
+    # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE clones of
+    # the david external-developer fork stream (additional capacity for the
+    # same slovnormal odoo developer) -- same authority as david itself.
+    "david2": "fork-no-merge",
+    "david3": "fork-no-merge",
+    "david4": "fork-no-merge",
 }
 
 
