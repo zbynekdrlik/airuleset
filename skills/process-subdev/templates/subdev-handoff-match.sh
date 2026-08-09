@@ -100,9 +100,26 @@ FIRST_LINE="${BODY%%$'\n'*}"
 # marker (e.g. **GATEKEEPER-BOUNCE**, the review's own live repro) is now
 # correctly excluded, which the earlier single-lookahead-substitute regex
 # missed.
-if grep -qE '^[[:space:]]*\*\*GATEKEEPER' <<<"$FIRST_LINE" \
-   && ! grep -qE '^[[:space:]]*\*\*GATEKEEPER-ACTION:' <<<"$FIRST_LINE"; then
-  echo "gatekeeper finding/review comment — no label (#1500)"
+#
+# #340: a real gatekeeper-authored review comment can ALSO open with a
+# markdown HEADING instead of bold text ("## Gatekeeper review — BOUNCE",
+# odoo-erp#2878, the exact shape locked as a fixture in this repo's own
+# test suite) — the bold-only check above never matched that shape, so
+# such a comment quoting/mentioning a READY-FOR-REVIEW:/GATEKEEPER-
+# ACTION:/BOUNCE-RESOLVED: line for context got mislabelled. Matched as a
+# SEPARATE, ORed grep (never folded into the bold check's own regex) —
+# the corpus's exact observed casing ("Gatekeeper", title case) is
+# required, never bare "GATEKEEPER", so a sub-dev's own legitimate
+# heading-decorated ALL-CAPS marker (e.g. "# GATEKEEPER-ACTION: ...")
+# stays unaffected without needing its own negated exception branch (no
+# real marker is ever written as a heading whose text starts with
+# "Gatekeeper" in title case). Plain ASCII, no \b — the locale-dependent
+# \b-near-multibyte bug this repo's own playbook documents (#316/#319)
+# does not apply here.
+if { grep -qE '^[[:space:]]*\*\*GATEKEEPER' <<<"$FIRST_LINE" \
+       && ! grep -qE '^[[:space:]]*\*\*GATEKEEPER-ACTION:' <<<"$FIRST_LINE"; } \
+   || grep -qE '^[[:space:]]*#{1,6}[[:space:]]*Gatekeeper' <<<"$FIRST_LINE"; then
+  echo "gatekeeper finding/review comment — no label (#1500, #340)"
   exit 1
 fi
 
