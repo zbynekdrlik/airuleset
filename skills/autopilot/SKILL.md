@@ -337,6 +337,37 @@ independently editing the same file in two separate worktrees is a guaranteed me
 integration — worse than simply doing it next round. An overlapping issue is not lost — it seeds a
 LATER round, exactly like any issue that fails the bundling gate today.
 
+**Total concurrent agent cap (rate-limit, not just CPU/collision) + stagger — measured, not
+estimated (#332, 2026-08-08, this repo's own dogfooding).** The **3–5** figure above bounds only
+the WORKER fleet; it says nothing about the read-only `ticket-validator` dispatches Step 1b fires
+for EVERY batch member "in parallel" — and those are the SAME kind of Claude-API-consuming
+subagent as a worker, from the SAME account, against the SAME server-side rate limit. Live data,
+same repo, same day: a round of 4 parallel worktree workers ran with no rate-limit kills (it did
+hit a benign doc-append merge conflict at integration, resolved keep-both per
+`docs/autopilot-log.md` — unrelated to rate limiting); a LATER round with 5 workers PLUS 13
+concurrent `ticket-validator` dispatches — 18 total agents fired at once — had 3 of them (a
+worker and two validators) killed by a server-side rate limit ("Server is temporarily limiting
+requests (not your usage limit) · Rate limited") within a few minutes. The limiting resource is
+TOTAL concurrent account-wide agent dispatches, workers and read-only helpers alike, never CPU or
+git collisions (Step 1b validators never touch the working tree at all, so the worker-only cap
+gave them no ceiling whatsoever). **Rule: cap the ACCOUNT-WIDE TOTAL of every concurrently running
+agent dispatch at 8.** This is NEVER "8 per round" — the cap covers this round's worker fleet PLUS
+every Step 1b validator PLUS any other helper subagent (e.g. an adversarial-review dispatch, or
+LANE 1's own `process-subdev` review dispatches running concurrently on the SAME instance) PLUS
+anything a DIFFERENT concurrently-running round or lane under this account is dispatching at that
+same instant — the account has ONE rate limit shared by everything it runs, not a fresh 8-budget
+per round, per lane, or per repo. 8 sits comfortably above the highest CLEAN measurement this repo
+has (4 workers, no validator burst — the only 5-worker run on record is the failing 18-agent one
+above) and comfortably below the failing one (18); recalibrate this number the moment a NEW real
+incident changes the picture — never lower or raise it on a guess. **Stagger: when a round's
+PLANNED total dispatch count (every Step 1b validator for every batch member, plus the worker
+fleet itself) would exceed 8 in one burst, split it into sequential WAVES bounded by the cap** —
+dispatch the first wave (however many Agent tool_use blocks fit under 8), wait for that wave to
+genuinely return (not merely fire — a real bounded pause, e.g. tens of seconds, gives the
+account's rate limiter room to recover) before firing the next wave. Never fire every validator
+for a multi-member, multi-batch round in one giant simultaneous burst just because the harness
+lets a single message hold arbitrarily many `Agent` tool_use blocks.
+
 **Serial fallback (documented, not an improvisation).** Dispatch stays the single-worker,
 shared-tree, cross-session-locked shape (unchanged, described in full below) whenever: worktree
 isolation is genuinely unavailable in this environment, or every remaining round candidate this
@@ -359,6 +390,22 @@ unsafe to use.
   exactly as today — a fork-no-merge worker's worktree branch IS its own fork branch: pushed and
   handed off by the worker itself, never merged by the supervisor, never folded into a round-wide
   integration wave.
+
+**When fleet dispatch pays off (and when it doesn't) — generalizes to every project, including
+long-CI repos (#332).** Fleet parallelism is a PURE WIN on a `dev`→`main` PR repo with a genuinely
+long CI, at least as much as on a fast one: the round's ONE CI cycle (repo-flow policy above) is
+paid exactly once no matter how many workers built the branches feeding it, so parallelizing the
+IMPLEMENTATION phase never costs anything on the CI side — it only saves wall-clock. The
+supervisor's own CI wait during that one cycle is its own long-lived job and follows
+`ci-monitoring.md`'s short-wait-foreground / long-wait-background split exactly like any other CI
+wait (the supervisor, never a worker, is the component a `run_in_background` poll safely
+re-invokes across a long wait). Fleet dispatch genuinely is NOT worth it — fall back to a plain
+solo dispatch (still `isolation: "worktree"` for consistency where available, but no wall-clock
+benefit to expect) — only when a round has nothing to parallelize: a single workable candidate
+this round, which is exactly the state the collision heuristic above naturally drives most rounds
+toward once file-overlapping issues have been sequenced across several rounds. The bundling gate
+(`autonomous-batch-issue-development.md`) plus the collision heuristic together are the whole
+answer to "which issues share one round" — this ticket found no gap in either.
 
 1. **Per round SLOT — assemble one BATCH; bundle by default to spend ONE CI cycle on many issues**
    (`autonomous-batch-issue-development.md`). CI here is long, so bundling small issues into one PR
@@ -397,7 +444,14 @@ unsafe to use.
 1b. **VALIDATE EACH batch member FIRST — hard gate** (`verify-issue-still-valid.md`). Before dispatching
    the worker, dispatch the read-only **`ticket-validator`** subagent
    (`subagent_type: ticket-validator`, prompt `Validate issue #<N> in <repo>`) for EVERY member — they
-   are independent, so validate them in parallel. Branch PER member:
+   are independent, so validate them in parallel, **but respect the TOTAL concurrent agent cap
+   above (#332): a multi-batch round's validator count PLUS its worker fleet must not exceed 8 at
+   once — split into staggered waves when it would.** A validator KILLED by a rate limit (or any
+   other fatal API error) mid-dispatch is NEVER re-dispatched and NEVER blocks the round — treat
+   that ONE member exactly as if Step 1b had simply been skipped for it (the worker's own Step 0
+   re-validation, `verify-issue-still-valid.md`, mechanically backstops every member regardless of
+   whether Step 1b ran — #213), and dispatch its worker normally without a Step 1b verdict. Branch
+   PER member (for every validator that DID return):
    - **STILL_VALID** → keep in the batch. **PARTIAL** → keep, pass its `still_to_do` as that issue's scope.
    - **OVERCOME + `overcome_confidence: hard`** (a concrete merged PR resolved it OR a passing repro proves it) →
      do NOT implement; **auto-close** the issue with the validator's evidence as a closing comment
@@ -518,7 +572,38 @@ unsafe to use.
    > deduped on repo-name#issue, so a fresh worker re-dispatched for the same issue does NOT
    > double-post its card. A worker ending mid-issue (turn boundary, error, your answer to its
    > question) is recovered by ONE fresh dispatch with the resume context in the prompt — silently,
-   > never by narrating the tooling, never by restarting from scratch.
+   > never by narrating the tooling, never by restarting from scratch. This includes a worker
+   > KILLED by a server-side rate limit mid-round (#332) — no different from any other API-error
+   > death: the same "presumed dead, dispatch fresh, resume from durable state" rule applies.
+
+   > **Worktree/fleet mode: a dead worker's branch is NOT self-discovering — name it explicitly
+   > (#332).** A fresh replacement worker gets its OWN new `isolation: "worktree"` checkout and has
+   > no way to know a previous attempt ever existed unless you tell it — the resume text above
+   > ("the existing `dev` branch") only describes the serial/shared-tree case. Before re-dispatching,
+   > find the SPECIFIC dead worker's branch — `git branch --list 'worktree-agent-*'` alone is NOT
+   > enough: a live repo routinely carries dozens of stray branches from past rounds with no issue
+   > number in the name, so do not guess from that bare list alone — naming the WRONG branch
+   > re-dispatches on top of a different, possibly still-live worker's work. Two reliable ways to
+   > find the RIGHT one: (1) when no custom worktree `name` was passed, the branch is
+   > DETERMINISTIC — `EnterWorktree`'s auto-generated branch is `worktree-agent-<agentId>` for
+   > worktree directory `agent-<agentId>`, so the dead worker's own dispatch `agentId` (from its
+   > dispatch record, or the task notification that reported its death) names its branch directly;
+   > (2) otherwise, run `git log --all --oneline -20 --grep '#<N>'` for commits referencing the
+   > issue, then `git branch --contains <sha>` on each hit to resolve the OWNING branch —
+   > `git log` alone never prints branch names. A worktree's branch is a normal ref shared via the
+   > ONE `.git`, so it survives even after `git worktree remove` cleans up the directory. If real
+   > commits exist on it, name that branch explicitly in the fresh worker's dispatch prompt
+   > (`Resume from existing branch <name> — it already has: <one-line summary of what's
+   > committed>`) so it continues from that tip instead of starting a fresh RED→GREEN cycle from
+   > scratch — nothing lost, nothing duplicated. If no commits exist yet (the worker died before
+   > its first commit — the common shape for a rate-limit kill during Step 0/1b, before any code
+   > was written), there is nothing to resume: dispatch fresh in a NEW worktree exactly as
+   > documented above, no special handling needed. Either way the round is NOT blocked waiting on
+   > the dead worker indefinitely — once its death is confirmed (a fatal-API-error task
+   > notification, or a bounded liveness check per `verify-launched-work-liveness.md` rather than
+   > an unbounded silent wait), re-dispatch that ONE issue's fresh worker and let the round's
+   > OTHER, still-healthy workers keep going — Step 4 integration simply waits for the LAST worker
+   > in the round (including the replacement) before proceeding, same as always.
 
    > **Multi-stage / long pipelines (e.g. a 3-branch `develop→staging→main` flow) — YOU own the CI
    > waits, not the worker.** A single worker cannot safely hold an hour-plus of successive CI waits:
