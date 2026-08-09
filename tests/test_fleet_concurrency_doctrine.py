@@ -168,6 +168,74 @@ class TestAutopilotMasterPointsAtTheCanonicalHome(TestCase):
         self.assertLessEqual(len(lines[0]), 4000)
 
 
+class TestAccountWideCapScopeNotPerRound(TestCase):
+    """Review finding (#332, MAJOR-1): the cap's ROOT CAUSE is stated as
+    account-wide, but the original RULE sentence said "cap a round's TOTAL" --
+    read literally, a master loop running LANE 1 (process-subdev review
+    dispatches) alongside LANE 3 (an 8-agent round), or several autopilot
+    instances on different repos under the SAME account, could each stay
+    individually "8-compliant" while recreating the measured-fatal 18-agent
+    regime account-wide. The rule sentence itself must say the cap applies
+    across everything concurrently running, not per round."""
+
+    def test_the_rule_sentence_says_account_wide_not_per_round(self):
+        w = window(read(AUTOPILOT), "**Total concurrent agent cap",
+                   "**Serial fallback")
+        self.assertIn("at 8.", w)
+        self.assertIn("ACCOUNT-WIDE", w)
+        self.assertIn("never", w.lower())
+        self.assertIn("per round", w.lower())
+
+    def test_master_collision_guards_says_across_lanes_and_repos_not_per_round(self):
+        w = window(read(MASTER), "**Collision guards:**", "Single-lane commands")
+        self.assertIn("8", w)
+        self.assertIn("not per round", w.lower())
+
+
+class TestDeadWorkerBranchMappingIsFollowable(TestCase):
+    """Review finding (#332, MAJOR-2): the bare `git branch --list
+    'worktree-agent-*'` / `git log --all --grep` recipe returns unmapped
+    candidates on a real repo (67 stray branches, no issue in the name;
+    `git log` prints no branch names at all) -- the recipe must include the
+    actual mapping step."""
+
+    def test_it_names_the_contains_mapping_step(self):
+        t = read(AUTOPILOT)
+        w = window(t, "Worktree/fleet mode: a dead worker's branch",
+                   "Step 4 integration simply waits")
+        self.assertIn("git branch --contains", w)
+
+    def test_it_names_the_deterministic_agentid_branch_convention(self):
+        t = read(AUTOPILOT)
+        w = window(t, "Worktree/fleet mode: a dead worker's branch",
+                   "Step 4 integration simply waits")
+        self.assertIn("worktree-agent-<agentId>", w)
+
+    def test_it_warns_against_guessing_from_the_bare_list(self):
+        t = read(AUTOPILOT)
+        w = window(t, "Worktree/fleet mode: a dead worker's branch",
+                   "Step 4 integration simply waits")
+        self.assertIn("do not guess", w.lower())
+
+
+class TestMeasurementClaimsAreAccurate(TestCase):
+    """Review findings (#332, MINOR/TRIGGERED): the doctrine's own
+    measurement claims must match what issue #332 actually recorded --
+    Kolo 2 had a (benign, resolved) merge conflict, not "zero issues"; only
+    4 workers is a confirmed-clean data point, 5 workers only ever ran
+    combined with the failing validator burst."""
+
+    def test_kolo_2_claim_does_not_overstate_zero_issues(self):
+        w = window(read(AUTOPILOT), "**Total concurrent agent cap", "**Serial fallback")
+        self.assertIn("no rate-limit kills", w.lower())
+        self.assertNotIn("ran clean with zero issues", w)
+
+    def test_the_five_worker_band_is_not_claimed_clean(self):
+        w = window(read(AUTOPILOT), "**Total concurrent agent cap", "**Serial fallback")
+        self.assertNotIn("(4–5 workers, no validator burst)", w)
+        self.assertNotIn("(4-5 workers, no validator burst)", w)
+
+
 class TheGoalTemplatesStillFitTheCap(TestCase):
     """Companion to `tests/test_goal_backlog_proof.py`'s own cap lock --
     re-asserted here, scoped to THIS ticket's own claim that it touched no
