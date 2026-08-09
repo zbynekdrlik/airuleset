@@ -88,14 +88,24 @@ thing is DELIBERATELY absent:
   2. This module ships NO `write_template()`/`set_template()` function —
      not even a private one, and `cmd_secret` has no CLI action for it
      either. This is a structural choice, not an oversight: a text-matching
-     hook matches the RAW TEXT of a Bash command, but
+     hook matches the RAW TEXT of a Bash command, but a computed path
+     defeats it regardless of whether a dedicated helper exists —
      `python3 -c "from filedrop import vault; vault.write_template(...)"`
-     names no literal store path at all — no hook, this one or any future
-     one, could ever see it. Any write-capable function in an importable
+     is the obvious route THIS module would open if it shipped one, but
+     even a plain stdlib one-liner with no vault import at all —
+     `python3 -c "open(__import__('pathlib').Path.home()/'.claude'/
+     'secrets'/'X.template','w').write('cmd')"` — names no literal store
+     path either, so it is exactly as invisible to a text-matching hook.
+     Removing this module's own write function therefore does not, by
+     itself, close the whole class — it closes the one route THIS module
+     could have made easier. Any write-capable function in an importable
      module is one Python one-liner away from the very agent the whole
      feature exists to constrain, and `secret exec` itself already requires
      the agent to be able to run Python. The only way this repo's own code
-     closes that specific route is to not contain it. A template is
+     closes that specific route is to not contain it, which is why this
+     module goes no further than "read-only, and say so honestly" — the
+     residual stdlib route is real regardless and is left to the same
+     "guardrail, not boundary" limit stated below. A template is
      therefore authored by placing the file at `template_path(name)`
      directly, by a means outside anything this repo ships — a human
      editing it via a channel outside the Claude Code session entirely, or
@@ -525,7 +535,10 @@ def read_template(name):
     p = template_path(name)
     try:
         raw = p.read_text(encoding="utf-8")
-    except OSError as e:
+    except (OSError, UnicodeDecodeError) as e:
+        # UnicodeDecodeError is a ValueError subclass, NOT an OSError —
+        # read_text's own decode step can raise it on non-UTF-8 bytes, and
+        # it must fail exactly as loud as an unreadable file (#154 review).
         raise SecretError(
             "%s: locked to a template that could not be read: %s"
             % (name, e)) from e
