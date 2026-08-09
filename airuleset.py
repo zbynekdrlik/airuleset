@@ -9798,7 +9798,13 @@ def _fleet_remote_row(remote, want_hour_bucket, timeout=15):
     present, since it is the more directly-attributable source), and adds
     `weekly_pct`/`resets_at` via `burn.shared_weekly_window()` — the SAME
     account-wide-window selector `fleet_burn_job`/`cmd_burn` already use,
-    never a new one."""
+    never a new one. Also carries the cache's OWN `ts` (its write time,
+    unix epoch) through as `weekly_ts` — an adversarial review of this
+    same #286 branch flagged that `group_fleet_by_account()`'s cross-host
+    MAX-percent selection had no way to tell a fresh candidate from a
+    stale one (a remote box whose watchdog stopped refreshing its cache
+    could otherwise win over a fresher, correct sample from another box on
+    the same account); `weekly_ts` is what lets it gate on that."""
     import subprocess
     cmd = _fleet_remote_cmd(remote)
     try:
@@ -9830,6 +9836,7 @@ def _fleet_remote_row(remote, want_hour_bucket, timeout=15):
         wk = burn_mod.shared_weekly_window(cache)
         if wk:
             row["weekly_pct"], row["resets_at"] = wk
+            row["weekly_ts"] = cache.get("ts")
     return row
 
 

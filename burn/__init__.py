@@ -726,7 +726,12 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
                           # own present-but-blank convention); validated
                           # (numeric, not a guess) by `group_fleet_by_account`.
                           "weekly_pct": row.get("weekly_pct"),
-                          "resets_at": row.get("resets_at")}
+                          "resets_at": row.get("resets_at"),
+                          # #286-review: the WRITE TIME of the remote cache
+                          # this candidate came from — `group_fleet_by_account`
+                          # uses it to refuse a stale candidate, mirroring
+                          # `weekly_pct`'s own present-but-None convention.
+                          "weekly_ts": row.get("weekly_ts")}
         total_usd += usd
         total_msgs += msgs
         weighted_ctx_sum += avg_ctx * msgs
@@ -777,7 +782,34 @@ def weekly_budget(cache, now=None):
             "budget_pct_per_day": round(budget, 2) if budget is not None else None}
 
 
-def group_fleet_by_account(per_host, cache=None):
+# #286-review — how STALE a cross-host weekly-window CANDIDATE may be before
+# `group_fleet_by_account()` refuses to trust it. Mirrors
+# `watchdog.FABLE_GATE_MAX_AGE`'s own 6h staleness bound for this EXACT same
+# cache file (`~/.claude/airuleset-usage-cache.json`) — a deliberate MIRROR,
+# never a shared import: `burn` must never import `watchdog`, which already
+# imports `burn` (see `usage_cache_path()`'s own docstring for why).
+FLEET_WEEKLY_CANDIDATE_MAX_AGE = 6 * 3600
+
+
+def _weekly_candidate_is_fresh(ts, now_epoch):
+    """True iff `ts` (a host's own usage-cache WRITE time, unix epoch
+    seconds — see `_fleet_remote_row`'s `weekly_ts`) is within
+    `FLEET_WEEKLY_CANDIDATE_MAX_AGE` of `now_epoch`. Mirrors
+    `watchdog.fable_gate()`'s own clock-skew-safe staleness check for the
+    SAME cache file: age outside `[0, MAX]` — including a FUTURE `ts`
+    (clock skew, a cache synced off another box), which a plain
+    `age > MAX` check would wrongly call "fresh" forever — is unknown,
+    never trusted. A missing/non-numeric `ts` (a legacy pre-#286 row that
+    never carried one) is never fresh by omission — excluded from the
+    candidate list, never guessed."""
+    try:
+        age = float(now_epoch) - float(ts)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age <= FLEET_WEEKLY_CANDIDATE_MAX_AGE
+
+
+def group_fleet_by_account(per_host, cache=None, now=None):
     """#269 — box->Anthropic-account mapping + subtotal, over a `per_host`
     dict (the shape `merge_fleet_row()` writes, typically the LATEST
     `fleet.jsonl` row's `per_host` — mirroring how `fleet_trend()`/
@@ -805,13 +837,20 @@ def group_fleet_by_account(per_host, cache=None):
       `cache.get("account_email")` (the box actually RUNNING the report) —
       that box's own `cache`-derived window (the pre-#286 mechanism,
       still needed since `REMOTE_HOSTS` never includes the reporting box
-      itself, so its own account otherwise has no other candidate at all).
-      Among all candidates for an account, the MAX percent wins — mirroring
-      `shared_weekly_window()`'s own multiple-matching-entries convention,
-      now applied across boxes instead of within one cache. Zero
-      candidates (every contributing host's own cache was unreadable/stale,
-      AND it isn't the reporting box's own account) leaves the window
-      `None` — rendered as "?" by `render_fleet()`, NEVER fabricated. The
+      itself, so its own account otherwise has no other candidate at all;
+      this LOCAL window is a live read on THIS call and is never staleness-
+      gated, unlike the cross-host candidates below). A cross-host
+      candidate is trusted ONLY when its own `weekly_ts` (the write time of
+      the REMOTE box's usage cache — see `_fleet_remote_row`) is within
+      `FLEET_WEEKLY_CANDIDATE_MAX_AGE` (6h, #286-review) of `now` — a
+      candidate with no `weekly_ts` at all (a legacy pre-#286 row) is NEVER
+      trusted by omission. Among the remaining FRESH candidates for an
+      account, the MAX percent wins — mirroring `shared_weekly_window()`'s
+      own multiple-matching-entries convention, now applied across boxes
+      instead of within one cache. Zero fresh candidates (every
+      contributing host's own cache was unreadable/stale/too old, AND it
+      isn't the reporting box's own account) leaves the window `None` —
+      rendered as "?" by `render_fleet()`, NEVER fabricated. The
       unknown-account bucket (`"account": None`) NEVER collects or receives
       a window under any circumstance, even when `cache`'s own
       `account_email` happens to also be blank (`None == None` would
@@ -840,14 +879,22 @@ def group_fleet_by_account(per_host, cache=None):
         if acct is not None:
             pct = v.get("weekly_pct")
             if isinstance(pct, (int, float)) and not isinstance(pct, bool):
-                g["windows"].append((pct, v.get("resets_at")))
+                g["windows"].append((pct, v.get("resets_at"), v.get("weekly_ts")))
     cache = cache if isinstance(cache, dict) else None
     wk = shared_weekly_window(cache) if cache else None
     my_account = (cache or {}).get("account_email") or None
+    if now is None:
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+    elif isinstance(now, datetime.datetime):
+        now_dt = now
+    else:
+        now_dt = datetime.datetime.fromtimestamp(float(now), datetime.timezone.utc)
+    now_epoch = now_dt.timestamp()
     out = []
     for acct in sorted(k for k in groups if k is not None):
         g = groups[acct]
-        candidates = list(g["windows"])
+        candidates = [(pct, resets_at) for (pct, resets_at, ts) in g["windows"]
+                     if _weekly_candidate_is_fresh(ts, now_epoch)]
         if wk and acct == my_account:
             candidates.append(wk)
         weekly_pct, resets_at = (max(candidates, key=lambda c: c[0])
@@ -1097,7 +1144,7 @@ def render_fleet(rows, hours=24, cache=None, now=None):
                      % (r.get("ts", "?"), r.get("total_usd", 0.0), r.get("total_msgs", 0),
                         _fmt_int(r.get("weighted_avg_ctx", 0)), ", ".join(parts), note))
     latest_per_host = (shown[-1].get("per_host") or {}) if shown else {}
-    acct_groups = group_fleet_by_account(latest_per_host, cache)
+    acct_groups = group_fleet_by_account(latest_per_host, cache, now=now)
     lines.append("")
     lines.append("  ucty (box -> Anthropic ucet, poslednej hodiny):")
     if not acct_groups:
