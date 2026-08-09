@@ -507,7 +507,16 @@ def strip_rewordings_coda(line: str) -> tuple[str, bool]:
     boundary (``". "``, ``"; "``, or an em-dash ``"— "``) untouched. A bare
     quoted/backticked MENTION of the phrase is never touched (mention-vs-use,
     the same discipline this repo already applies to every other classifier).
-    Returns ``(new_line, changed)``."""
+
+    A trailing ``";"``/``"—"`` CONNECTOR left dangling with nothing after it
+    reads as a grammatical leftover (real corpus example:
+    ``autonomous-verification.md``'s "...is banned; applies to all
+    rewordings..." would otherwise ablate to "...is banned;" — a semicolon
+    with nothing following it), so those two are stripped from the result
+    too; a trailing ``"."`` is DELIBERATELY kept — it is the previous
+    sentence's own terminal punctuation, not a connector, and removing it
+    would leave the sentence unterminated. Returns ``(new_line, changed)``.
+    """
     m = _REWORDINGS_PHRASE_RE.search(line)
     if not m or _is_clause_mention(line, m.start()):
         return line, False
@@ -520,7 +529,10 @@ def strip_rewordings_coda(line: str) -> tuple[str, bool]:
     if boundary == 0 and before.strip("*- \t") == "":
         # the whole line is only a bullet/bold marker + the clause itself
         return "", True
-    return before[:boundary].rstrip(), True
+    result = before[:boundary].rstrip()
+    while result and result[-1] in ";—":
+        result = result[:-1].rstrip()
+    return result, True
 
 
 def ablate_module_text(text: str) -> tuple[str, int]:

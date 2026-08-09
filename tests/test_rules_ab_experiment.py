@@ -634,7 +634,35 @@ def test_strip_rewordings_coda_removes_only_the_coda_after_a_semicolon():
     line = "The intent is banned; applies to all rewordings and semantic equivalents."
     new_line, changed = ab.strip_rewordings_coda(line)
     assert changed is True
-    assert new_line == "The intent is banned;"
+    # the trailing semicolon (a CONNECTOR, not a sentence terminator) is
+    # stripped too -- "The intent is banned;" would read as a dangling
+    # leftover with nothing left to connect to (#95 item 11 adversarial
+    # review, 🔵 finding).
+    assert new_line == "The intent is banned"
+
+
+def test_strip_rewordings_coda_never_leaves_a_dangling_connector_real_corpus_shape():
+    # the exact real modules/core/autonomous-verification.md:76 shape --
+    # a semicolon boundary immediately preceding the clause.
+    line = (
+        'The intent — not the exact wording — is banned; applies to all '
+        "rewordings and semantic equivalents."
+    )
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == "The intent — not the exact wording — is banned"
+    assert not new_line.endswith(";")
+    assert not new_line.endswith("—")
+
+
+def test_strip_rewordings_coda_keeps_the_terminal_period_never_strips_it():
+    # a period is the PREVIOUS sentence's own terminator, not a connector --
+    # it must survive, unlike a trailing ";"/"—".
+    line = "Do the real thing. Applies to all rewordings and semantic equivalents."
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == "Do the real thing."
+    assert new_line.endswith(".")
 
 
 def test_strip_rewordings_coda_removes_only_the_coda_after_an_em_dash():
@@ -645,6 +673,20 @@ def test_strip_rewordings_coda_removes_only_the_coda_after_an_em_dash():
     new_line, changed = ab.strip_rewordings_coda(line)
     assert changed is True
     assert new_line == ""
+
+
+def test_strip_rewordings_coda_strips_a_dangling_trailing_em_dash_too():
+    # the exact real modules/core/autonomous-quality-discipline.md:63 shape
+    # -- an em-dash boundary immediately preceding the clause, with real
+    # text before it (unlike the empty-result em-dash case above).
+    line = (
+        "The intent is banned, not the wording — applies to all "
+        "rewordings and semantic equivalents."
+    )
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == "The intent is banned, not the wording"
+    assert not new_line.endswith("—")
 
 
 def test_strip_rewordings_coda_drops_a_bullet_only_line_entirely():
