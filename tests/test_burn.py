@@ -14,6 +14,7 @@ import io
 import json
 import os
 import sys
+import time
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -990,6 +991,41 @@ class TestGroupFleetByAccount(unittest.TestCase):
         self.assertEqual(by_account["other@example.com"]["weekly_pct"], 77)
         self.assertEqual(by_account["other@example.com"]["resets_at"],
                          "2026-08-12T00:00:00+00:00")
+
+    def test_a_stale_cross_host_candidate_loses_to_a_fresher_lower_one(self):
+        # #286-review 🟡 (adversarial review of the branch): the cross-host
+        # MAX-percent selection must not let a STALE candidate (a remote
+        # box whose own watchdog stopped refreshing its usage cache) beat a
+        # FRESHER, correct candidate from another box on the SAME account
+        # purely because its stale percent happens to be numerically
+        # higher. Mirrors watchdog.FABLE_GATE_MAX_AGE's own 6h staleness
+        # bound for this EXACT cache file -- burn must never import
+        # watchdog (see usage_cache_path()'s own docstring), so the bound
+        # is a deliberate mirror, never a shared import.
+        now = time.time()
+        stale_ts = now - (6 * 3600) - 3600   # 7h old -- past the 6h bound
+        fresh_ts = now - 3600                # 1h old -- comfortably fresh
+        per_host = {
+            "stale-box": {**self._row(1.0, "z@example.com"), "weekly_pct": 99,
+                         "resets_at": "stale-reset", "weekly_ts": stale_ts},
+            "fresh-box": {**self._row(1.0, "z@example.com"), "weekly_pct": 10,
+                         "resets_at": "fresh-reset", "weekly_ts": fresh_ts},
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        g = [x for x in groups if x["account"] == "z@example.com"][0]
+        self.assertEqual(g["weekly_pct"], 10)
+        self.assertEqual(g["resets_at"], "fresh-reset")
+
+    def test_a_cross_host_candidate_with_no_weekly_ts_is_never_trusted(self):
+        # A legacy/pre-#286-fix host row (weekly_pct present, no weekly_ts
+        # at all) must never be treated as "fresh" by omission -- absence
+        # of a timestamp is unmeasurable, not zero age.
+        per_host = {"stale-box": {**self._row(1.0, "z@example.com"),
+                                  "weekly_pct": 99, "resets_at": "x"}}
+        groups = burn.group_fleet_by_account(per_host)
+        g = [x for x in groups if x["account"] == "z@example.com"][0]
+        self.assertIsNone(g["weekly_pct"])
+        self.assertIsNone(g["resets_at"])
 
     def test_multiple_hosts_same_account_take_the_max_percent(self):
         # mirrors shared_weekly_window's own multiple-matching-entries
