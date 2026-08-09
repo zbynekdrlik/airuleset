@@ -65,6 +65,35 @@ queue is empty).
   prefix, merged after the last release to main) — the review object is their combined
   diff, PINNED at this step (new merges land in the NEXT slice).
 
+### 2b. Mechanical pre-review gate re-check (repo-parameterized)
+
+If the repo's CLAUDE.md / playbook names a mechanical pre-review gate script
+or command (a merge-tree / stack / template check the repo already runs at
+hand-off time), re-run it HERE — against the pinned hand-off's anchor ticket
+— before any review effort is spent. No such command named for this repo →
+skip straight to step 3, nothing to re-run.
+
+**Why this exists:** a label-time or cron-time PASS from an async gate can be
+STALE by the moment gatekeeper actually starts reviewing — the integration
+branch keeps moving during the review queue's own latency, and a queue is
+never instant (measured on one already-live sub-dev pipeline: median 2.07h,
+worst 7.5h between the `ready-for-review` label landing and review starting;
+two real bounces there each burned a FULL cold-diff review pass before
+discovering — mechanically, at the end — that the branch had gone stale or
+the declared stack had drifted; a one-command re-check at the START would
+have caught it in seconds).
+
+- **FAIL** → bounce immediately with the gate's own summary, per step 5's
+  FINDINGS branch. Zero deep-review effort spent — move to the next queued
+  hand-off.
+- **PASS** → proceed into step 3 (cold diff-first review) exactly as before.
+  Zero change to review depth — this is a pre-review FILTER, never a
+  substitute for the cold read.
+
+This is a repo PARAMETER like every other repo-specific review addition
+above — the canonical skill never hardcodes any one repo's script path; the
+repo's own CLAUDE.md / playbook is what names the command.
+
 ### 3. INDEPENDENT REVIEW — diff FIRST, narrative SECOND (the core rule)
 
 1. **Cold read:** review the full diff BEFORE reading tickets/readiness comments. Form
