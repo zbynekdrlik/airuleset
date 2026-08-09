@@ -38,13 +38,18 @@ terminate_pid itself, so a still-broken mutant produces a clean assertion
 failure here rather than hanging this test -- and, since this file runs
 inside the fail-closed pre-push test suite, hanging the whole push.
 """
+import contextlib
 import importlib.util
+import io
 import os
+import shutil
 import signal
 import sys
+import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -181,6 +186,60 @@ class TestTerminatePidBoundedReap(unittest.TestCase):
                 "instantly, not wait out the full SIGTERM-grace budget")
         finally:
             _force_reap(pid, "cooperative")
+
+
+class TestTeardownRetriesALeftoverScratchDir(unittest.TestCase):
+    """#291 adversarial review, M2: on real runs, teardown()'s own
+    `shutil.rmtree(root, ignore_errors=True)` sometimes silently leaves
+    the scratch directory behind even though the run otherwise completed
+    cleanly -- observed twice, live, on genuinely successful #291 runs.
+    Each leftover still held a scratch-profile COPY of the real
+    ~/.claude/.credentials.json (mode 0600 -- no cross-uid exposure risk
+    on these boxes, but a credential copy that should not linger).
+    teardown() must retry the removal once, and print a loud LEFTOVER
+    warning if the directory still exists after both attempts, rather
+    than silently leaking it forever."""
+
+    def test_a_first_swallowed_rmtree_failure_is_retried_and_the_dir_removed(self):
+        mod = _load_module()
+        tmpdir = tempfile.mkdtemp(prefix="airuleset-teardown-retry-test-")
+        (Path(tmpdir) / "cred.json").write_text("scratch-copy")
+        calls = []
+
+        def fake_rmtree(path, ignore_errors=False):
+            calls.append(path)
+            if len(calls) == 1:
+                return  # simulate the swallowed-failure leftover
+            shutil.rmtree(path, ignore_errors=ignore_errors)
+
+        with unittest.mock.patch("shutil.rmtree", side_effect=fake_rmtree):
+            mod.teardown("airuleset-nonexistent-sock-291", tmpdir, False)
+
+        self.assertEqual(
+            len(calls), 2,
+            "teardown must retry rmtree exactly once when the first attempt "
+            "leaves the directory behind")
+        self.assertFalse(
+            Path(tmpdir).exists(),
+            "the scratch directory (and its credential copy) must be gone "
+            "after the retry succeeds")
+
+    def test_a_directory_still_present_after_retry_is_warned_about_loudly(self):
+        mod = _load_module()
+        tmpdir = tempfile.mkdtemp(prefix="airuleset-teardown-retry-test-")
+        try:
+            with unittest.mock.patch("shutil.rmtree"):  # no-op every call
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    mod.teardown("airuleset-nonexistent-sock-291", tmpdir, False)
+            self.assertIn(
+                "LEFTOVER", stderr.getvalue(),
+                "a scratch dir (holding a credential copy) still present "
+                "after two rmtree attempts must be surfaced loudly, never "
+                "silently swallowed")
+            self.assertIn(tmpdir, stderr.getvalue(), "the warning must name the path")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":
