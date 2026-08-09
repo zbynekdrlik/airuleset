@@ -16,7 +16,9 @@ silently break those tests without an obvious local failure first.
 """
 
 import json
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -86,7 +88,7 @@ class TestCoreModuleShrunk(TestCase):
         # untouched -- this module's own is not to be dropped as a side
         # effect of the item 9 trim.
         t = read(CORE)
-        self.assertIn("applies to all rewordings and semantic equivalents", t)
+        self.assertIn("Applies to all rewordings and semantic equivalents", t)
 
 
 class TestSkillCarriesTheMovedContentVerbatim(TestCase):
@@ -123,6 +125,19 @@ class TestSkillCarriesTheMovedContentVerbatim(TestCase):
 
 
 class TestAskUserQuestionWiring(TestCase):
+    def setUp(self):
+        # #95 item 9's own real-call test needs the SAME per-test TMPDIR
+        # isolation test_situational_injection.py's TestInjection already
+        # uses — the injector's once-per-session dedup marker lives under
+        # $TMPDIR/airuleset-situational-<session_id>/, so a fixed session
+        # id with no isolation collides across repeated pytest invocations
+        # (the second run sees the first run's marker and correctly
+        # returns nothing — a real dedup, not a bug, but it makes THIS
+        # test flaky/order-dependent without its own scratch TMPDIR).
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
     def _rows(self):
         rows = []
         for line in CONF.read_text(encoding="utf-8").splitlines():
@@ -188,8 +203,9 @@ class TestAskUserQuestionWiring(TestCase):
                 },
             }
         )
+        env = dict(os.environ, TMPDIR=self.tmpdir)
         r = subprocess.run(
-            ["bash", str(INJECT_HOOK)], input=payload, capture_output=True, text=True
+            ["bash", str(INJECT_HOOK)], input=payload, capture_output=True, text=True, env=env
         )
         self.assertEqual(r.returncode, 0)
         self.assertTrue(r.stdout.strip(), "AskUserQuestion call injected nothing")
