@@ -1697,7 +1697,51 @@ STREAM_SSH_ATTACH_BLOCK = (
     '&& command -v tmux >/dev/null 2>&1; then\n'
     f'  __airuleset_cwd="$HOME/{STREAM_DEV_CWD_REL}"\n'
     '  [ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"\n'
-    '  exec tmux new-session -A -s "$(whoami)" -c "$__airuleset_cwd"\n'
+    '  __airuleset_me="$(whoami)"\n'
+    "  # #284: a tmux destroy-unattached sweep (#254) can reduce a\n"
+    "  # multi-member session GROUP down to exactly one survivor whose\n"
+    "  # NAME is iteration-order-arbitrary -- not necessarily this exact\n"
+    "  # username the -A reattach below depends on. If a differently-named\n"
+    "  # survivor is invisible to the exact check, the plain -A path would\n"
+    "  # silently create a fresh EMPTY session while the real, populated\n"
+    "  # one sits orphaned in its own group. Search for a live group\n"
+    "  # survivor FIRST -- `=`-anchored EXACT match (#263's own\n"
+    "  # established fix: a bare target does PREFIX matching and would\n"
+    "  # wrongly match e.g. zbynek-4 for zbynek) -- and, if found, join it\n"
+    "  # as a new independent VIEW onto the SAME windows (grouped session,\n"
+    "  # `new-session -t`) -- the user's own decided reattach behaviour.\n"
+    "  # The survivor's own name is captured into a variable and the\n"
+    "  # actual `exec` happens AFTER the `while ... done < <(...)` loop\n"
+    "  # closes, never inside it -- an adversarial review proved live\n"
+    "  # that an `exec` sitting INSIDE the process-substitution loop\n"
+    "  # inherits that pipe as its own stdin, so a real tmux client\n"
+    "  # refuses to attach (`open terminal failed: not a terminal`) and\n"
+    "  # the ssh login dies right there, since `exec` already replaced\n"
+    "  # the shell -- worse than the pre-#284 behaviour it was meant to\n"
+    "  # fix. Falls through to the plain exact-name path below when no\n"
+    "  # survivor is found, or tmux itself is unreachable. Residual\n"
+    "  # (documented, not chased): if the survivor is destroyed by a\n"
+    "  # concurrent sweep in the narrow window between `list-sessions`\n"
+    "  # returning its name and the `exec` below running, real tmux does\n"
+    "  # NOT error -- it silently creates a brand-new session in a\n"
+    "  # freshly-derived group name instead of falling through to -A -s;\n"
+    "  # still a live, working session either way, just not the exact\n"
+    "  # -A -s fallback this comment used to (wrongly) promise.\n"
+    '  if ! tmux has-session -t "=$__airuleset_me" 2>/dev/null; then\n'
+    '    __airuleset_survivor=""\n'
+    '    while read -r __airuleset_g __airuleset_n; do\n'
+    '      if [ -n "$__airuleset_n" ] '
+    '&& [ "$__airuleset_g" = "$__airuleset_me" ]; then\n'
+    '        __airuleset_survivor="$__airuleset_n"\n'
+    "        break\n"
+    "      fi\n"
+    "    done < <(tmux list-sessions "
+    "-F '#{session_group} #{session_name}' 2>/dev/null)\n"
+    '    if [ -n "$__airuleset_survivor" ]; then\n'
+    '      exec tmux new-session -t "$__airuleset_survivor"\n'
+    "    fi\n"
+    "  fi\n"
+    '  exec tmux new-session -A -s "$__airuleset_me" -c "$__airuleset_cwd"\n'
     "fi\n"
     f"{STREAM_SSH_ATTACH_MARK_END}"
 )
