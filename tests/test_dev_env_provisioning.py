@@ -798,15 +798,69 @@ class TestPushSshHardeningFlags(TestCase):
     password/keyboard-interactive attempt too (BatchMode unset) -- both
     multiply the auth-failure log lines a single connection can generate,
     which is what let 3 new subdev accounts alone trip fail2ban in one
-    `push` run."""
+    `push` run.
 
-    def test_cmd_push_sshpass_branch_caps_password_prompts(self):
-        src = inspect.getsource(airuleset.cmd_push)
-        self.assertIn("NumberOfPasswordPrompts=1", src)
+    #341 adversarial-review F2: the original version of these two tests
+    asserted on `inspect.getsource(cmd_push)` -- which ALSO contains the
+    explanatory code COMMENT sitting right next to each new `-o` flag, so a
+    mutant that deletes the actual argv element while leaving the comment
+    in place survives both tests untouched (this repo's own documented
+    "a lock test matches its own prose" trap). These now assert on the
+    ARGV a fake `subprocess.run` actually records, exactly like the
+    soniox-side hardening tests already correctly do."""
 
-    def test_cmd_push_identity_branch_uses_batch_mode(self):
-        src = inspect.getsource(airuleset.cmd_push)
-        self.assertIn("BatchMode=yes", src)
+    def _fake_run(self, calls):
+        import unittest.mock as m
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+        return fake_run
+
+    def _deploy_calls(self, calls):
+        # the deploy leg's remote command always ends in this literal
+        # suffix (see cmd_push's own `remote_cmd` string) -- the soniox
+        # phase's own remote command never contains it, so this is a safe
+        # way to isolate deploy-leg argv from soniox-leg argv.
+        return [c for c in calls
+                if any("python3 airuleset.py install" in str(a) for a in c)]
+
+    def test_cmd_push_sshpass_branch_argv_caps_password_prompts(self):
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        fake_hosts = [
+            {"name": "dev2", "host": "1.2.3.4", "user": "newlevel",
+             "repo_path": "~/devel/airuleset"},
+        ]
+        with m.patch("subprocess.run", side_effect=self._fake_run(calls)), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", {}):
+            airuleset.cmd_push(args)
+        deploy = self._deploy_calls(calls)
+        self.assertEqual(len(deploy), 1)
+        self.assertIn("-o", deploy[0])
+        self.assertIn("NumberOfPasswordPrompts=1", deploy[0])
+
+    def test_cmd_push_identity_branch_argv_uses_batch_mode(self):
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        fake_hosts = [
+            {"name": "gk", "host": "5.6.7.8", "user": "gatekeeper",
+             "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+        ]
+        with m.patch("subprocess.run", side_effect=self._fake_run(calls)), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", {}):
+            airuleset.cmd_push(args)
+        deploy = self._deploy_calls(calls)
+        self.assertEqual(len(deploy), 1)
+        self.assertIn("-o", deploy[0])
+        self.assertIn("BatchMode=yes", deploy[0])
 
 
 class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
@@ -830,11 +884,18 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 return m.Mock(returncode=0, stdout="ok", stderr="")
             # a real ssh/sshpass invocation -- the user@host token is always
             # the second-to-last argv element on both call sites.
-            user = str(cmd[-2]).split("@")[0]
+            user_at_host = str(cmd[-2])
+            user = user_at_host.split("@")[0]
             rc = deploy_rc_by_user.get(user, 0)
             if rc:
+                # ssh's OWN client-side auth-exhaustion message: rc 255,
+                # literally prefixed "<user>@<host>: " -- #341
+                # adversarial-review F1's fixture, so the tightened
+                # classifier (rc==255 + this exact message shape) still
+                # recognizes a REAL auth failure correctly.
                 return m.Mock(returncode=rc, stdout="",
-                               stderr="Permission denied (publickey,password).")
+                               stderr="%s: Permission denied (publickey,"
+                                      "password)." % user_at_host)
             return m.Mock(returncode=0, stdout="ok", stderr="")
         return fake_run
 
@@ -937,6 +998,93 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
         self.assertEqual(len(simap_calls), 2,
                           "a plain remote-command failure (auth succeeded) "
                           "must NOT suppress the soniox delivery attempt")
+
+    def test_a_remote_side_permission_denied_message_is_not_ssh_auth_failure(self):
+        # #341 adversarial-review F1 (MAJOR, TRIGGERED): a REMOTE command's
+        # own stderr (forwarded verbatim through ssh's capture_output) can
+        # legitimately contain the literal substring "Permission denied"
+        # with ssh auth completely intact -- a `git pull` hitting a
+        # root-owned file under .git, or an `airuleset.py install`
+        # traceback, are both real shapes on this fleet. The classifier
+        # must NOT skip soniox delivery for this host: ssh's own
+        # auth-exhaustion message always exits 255 and is always literally
+        # prefixed "<user>@<host>: " -- a remote command has no reason to
+        # reproduce either property.
+        import unittest.mock as m
+        calls = []
+        args = m.Mock()
+        fake_hosts = [
+            {"name": "miva1@subdev", "host": "9.9.9.9", "user": "miva1",
+             "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+        ]
+        fake_authority = {"miva1": "fork-no-merge"}
+        miva1_ssh_calls_seen = {"n": 0}
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            if any("miva1@" in str(a) for a in cmd):
+                miva1_ssh_calls_seen["n"] += 1
+                if miva1_ssh_calls_seen["n"] == 1:
+                    # rc=1 (a real remote `git`/python exit code, never
+                    # ssh's own 255), no "user@host: " prefix -- a genuine
+                    # remote-side permission error, auth fully intact.
+                    return m.Mock(
+                        returncode=1, stdout="",
+                        stderr="error: cannot open '.git/FETCH_HEAD': "
+                               "Permission denied")
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
+                m.patch.object(airuleset, "_soniox_key_line",
+                                return_value="SONIOX_API_KEY=fake"):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        miva1_calls = [c for c in calls if any("miva1@" in str(a) for a in c)]
+        self.assertEqual(len(miva1_calls), 2,
+                          "a remote-side 'Permission denied' MESSAGE with "
+                          "ssh auth genuinely intact must NOT suppress the "
+                          "soniox delivery attempt: %r" % miva1_calls)
+
+    def test_failure_summary_counts_distinct_hosts_not_failed_entries(self):
+        # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
+        # host now yields TWO `failed` entries by design (its own deploy
+        # `rc=...` PLUS the soniox `skipped-known-auth-failure`) -- the
+        # final summary line must still report the count of DISTINCT hosts
+        # that failed, not len(failed) (which would print "2 of 1" for a
+        # single bad account).
+        import unittest.mock as m
+        out = StringIO()
+        calls = []
+        args = m.Mock()
+        fake_hosts = [
+            {"name": "david3@subdev", "host": "9.9.9.9", "user": "david3",
+             "repo_path": "~/devel/airuleset",
+             "identity": "~/.secrets/gatekeeper_access_ed25519"},
+        ]
+        fake_authority = {"david3": "fork-no-merge"}
+        with m.patch("subprocess.run",
+                     side_effect=self._fake_run(calls, {"david3": 255})), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
+                m.patch.object(airuleset, "_soniox_key_line",
+                                return_value="SONIOX_API_KEY=fake"), \
+                m.patch("sys.stderr", out):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        self.assertIn("1 of 1 remote(s) FAILED", out.getvalue(),
+                      "must count the ONE distinct host, not the two "
+                      "failed() entries it produced: %r" % out.getvalue())
 
 
 if __name__ == "__main__":
