@@ -279,6 +279,15 @@ class TestEnsureStreamTmuxSession(TestCase):
         self.assertIn("/home/miva1", result)
         self.assertIn(str(checkout), result)
         self.assertIn("kill it manually", result)
+        # #309 adversarial-review MINOR: "re-run push" was never true -- a
+        # bootstrapped account's next push always hits the sentinel's
+        # "already bootstrapped once -- never re-created" branch, so
+        # nothing about a manual kill is ever undone by pushing again. The
+        # #264 ssh auto-attach (`tmux new-session -A ... -c`, honored only
+        # on CREATE, i.e. only once the session genuinely no longer exists)
+        # is what actually rebuilds it, on the operator's NEXT SSH LOGIN.
+        self.assertNotIn("re-run push", result)
+        self.assertIn("ssh login", result)
         # NEVER auto-kill, NEVER re-cwd, NEVER send keys -- report only.
         self.assertFalse(any(c[:2] == ["tmux", "new-session"] for c in calls))
         self.assertFalse(any(c[:2] == ["tmux", "send-keys"] for c in calls))
@@ -438,9 +447,82 @@ class TestEnsureStreamTmuxSession(TestCase):
                 user="montalu2", run=run, sentinel_path=sentinel)
         self.assertIn("already bootstrapped once", second)
         self.assertIn("never re-created", second)
-        # NOT ONE tmux call this time -- no has-session, no new-session,
-        # no send-keys -- the account is left completely alone.
-        self.assertEqual(calls, [])
+        # #309: has-session now DOES run on every call, even a bootstrapped
+        # one -- that is the whole point of the fix (a later push must still
+        # be able to see a session that reappeared with the wrong cwd). The
+        # invariant this test actually protects is narrower and unchanged:
+        # NO CREATE ever happens a second time -- no new-session, no
+        # send-keys, no kill-session -- regardless of how many read-only
+        # probe calls ran.
+        self.assertEqual(calls, [["tmux", "has-session", "-t", "=montalu2"]])
+        self.assertFalse(any(c[:2] in (["tmux", "new-session"],
+                                        ["tmux", "send-keys"],
+                                        ["tmux", "kill-session"])
+                              for c in calls))
+
+    def test_an_already_bootstrapped_accounts_drift_is_still_caught(self):
+        # #309: the #308 cwd-mismatch WARNING used to be structurally
+        # unreachable for any account whose sentinel was already written by
+        # a PRIOR push (the sentinel-exists early return fired before the
+        # probe ever ran) -- i.e. every currently-registered stream account.
+        # A LATER push for an already-bootstrapped account must still catch
+        # a session that has since drifted to the wrong cwd (a future
+        # scripted change, an operator mistake, or a session created before
+        # the checkout existed and only later diverging) -- never silently
+        # report "already bootstrapped, left alone" for a wrong cwd.
+        calls = []
+        d = Path(tempfile.mkdtemp())
+
+        def run(argv):
+            calls.append(argv)
+            if argv[:2] == ["tmux", "has-session"]:
+                return _FakeCP(returncode=0)   # a session exists
+            if argv[:2] == ["tmux", "list-panes"]:
+                return _FakeCP(returncode=0, stdout="/home/montalu2\n")  # wrong cwd
+            return _FakeCP(returncode=0)
+
+        checkout = d / "devel" / "odoo" / "odoo-erp"
+        checkout.mkdir(parents=True)
+        sentinel = self._sentinel()
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text("bootstrapped for montalu2\n")   # already bootstrapped
+        with m.patch.object(Path, "home", return_value=d):
+            result = airuleset.ensure_stream_tmux_session(
+                user="montalu2", run=run, sentinel_path=sentinel)
+        self.assertIn("WARNING", result)
+        self.assertIn("/home/montalu2", result)
+        self.assertIn(str(checkout), result)
+        # Still never a mutation, on an already-bootstrapped account either.
+        self.assertFalse(any(c[:2] == ["tmux", "new-session"] for c in calls))
+        self.assertFalse(any(c[:2] == ["tmux", "send-keys"] for c in calls))
+        self.assertFalse(any(c[:2] == ["tmux", "kill-session"] for c in calls))
+
+    def test_an_already_bootstrapped_accounts_matching_cwd_stays_quiet(self):
+        # #309 companion: the SAME already-bootstrapped account, but the
+        # session's cwd genuinely still matches -- the probe now runs every
+        # time, but the message stays the same quiet one it always was.
+        calls = []
+        d = Path(tempfile.mkdtemp())
+
+        def run(argv):
+            calls.append(argv)
+            if argv[:2] == ["tmux", "has-session"]:
+                return _FakeCP(returncode=0)
+            if argv[:2] == ["tmux", "list-panes"]:
+                return _FakeCP(returncode=0, stdout=str(d) + "\n")   # matches
+            return _FakeCP(returncode=0)
+
+        sentinel = self._sentinel()
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text("bootstrapped for montalu2\n")
+        with m.patch.object(Path, "home", return_value=d):
+            result = airuleset.ensure_stream_tmux_session(
+                user="montalu2", run=run, sentinel_path=sentinel)
+        self.assertNotIn("WARNING", result)
+        self.assertIn("already bootstrapped once", result)
+        self.assertIn("never re-created", result)
+        self.assertFalse(any(c[:2] == ["tmux", "new-session"] for c in calls))
+        self.assertFalse(any(c[:2] == ["tmux", "send-keys"] for c in calls))
 
     def test_sentinel_is_written_even_when_the_session_already_existed(self):
         # the ONE-TIME decision (whether to act or not) is what's recorded,
