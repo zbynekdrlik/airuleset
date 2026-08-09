@@ -1697,7 +1697,32 @@ STREAM_SSH_ATTACH_BLOCK = (
     '&& command -v tmux >/dev/null 2>&1; then\n'
     f'  __airuleset_cwd="$HOME/{STREAM_DEV_CWD_REL}"\n'
     '  [ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"\n'
-    '  exec tmux new-session -A -s "$(whoami)" -c "$__airuleset_cwd"\n'
+    '  __airuleset_me="$(whoami)"\n'
+    "  # #284: a tmux destroy-unattached sweep (#254) can reduce a\n"
+    "  # multi-member session GROUP down to exactly one survivor whose\n"
+    "  # NAME is iteration-order-arbitrary -- not necessarily this exact\n"
+    "  # username the -A reattach below depends on. If a differently-named\n"
+    "  # survivor is invisible to the exact check, the plain -A path would\n"
+    "  # silently create a fresh EMPTY session while the real, populated\n"
+    "  # one sits orphaned in its own group. Search for a live group\n"
+    "  # survivor FIRST -- `=`-anchored EXACT match (#263's own\n"
+    "  # established fix: a bare target does PREFIX matching and would\n"
+    "  # wrongly match e.g. zbynek-4 for zbynek) -- and, if found, join it\n"
+    "  # as a new independent VIEW onto the SAME windows (grouped session,\n"
+    "  # `new-session -t`) -- the user's own decided reattach behaviour.\n"
+    "  # Falls through to the plain exact-name path below on ANY failure\n"
+    "  # (tmux unreachable, no match, or the survivor vanishing in a race\n"
+    "  # before the exec below runs) -- never a hard failure.\n"
+    '  if ! tmux has-session -t "=$__airuleset_me" 2>/dev/null; then\n'
+    '    while read -r __airuleset_n __airuleset_g; do\n'
+    '      if [ -n "$__airuleset_n" ] '
+    '&& [ "$__airuleset_g" = "$__airuleset_me" ]; then\n'
+    '        exec tmux new-session -t "$__airuleset_n"\n'
+    "      fi\n"
+    "    done < <(tmux list-sessions "
+    "-F '#{session_name} #{session_group}' 2>/dev/null)\n"
+    "  fi\n"
+    '  exec tmux new-session -A -s "$__airuleset_me" -c "$__airuleset_cwd"\n'
     "fi\n"
     f"{STREAM_SSH_ATTACH_MARK_END}"
 )
