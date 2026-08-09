@@ -116,7 +116,18 @@ TASKS: dict[int, Task] = {
     )
 }
 
-CONDITIONS = ("A", "B")
+CONDITIONS = ("A", "B", "C")
+
+# Condition C (item 11, #95) — the FULL ruleset minus architecture-first.md
+# minus every genuine "applies to all rewordings and semantic equivalents"
+# clause USE elsewhere in modules/. Scoped to modules/ ONLY: the same 7
+# occurrences of the phrase living in skills/ and rules/ are a DIFFERENT
+# surface (a skill body loads only on an explicit Skill call, #104; a
+# rules/ path-scoped file is a main-session-only nested_memory attachment,
+# #105) and are deliberately left untouched here — this condition measures
+# exactly the "always-on CLAUDE.md prefix" layer #94 already measures,
+# nothing wider.
+ARCHITECTURE_FIRST_MODULE = "modules/quality/architecture-first.md"
 
 
 # --------------------------------------------------------------------------
@@ -473,6 +484,108 @@ def claude_binary() -> str:
     return str(Path.home() / ".local/bin/claude")
 
 
+_REWORDINGS_PHRASE_RE = re.compile(
+    r"[Aa]pplies to all rewordings and semantic equivalents"
+)
+_ARCH_IMPORT_RE = re.compile(r"^@~/devel/airuleset/(modules/.+\.md)\s*$")
+
+
+def _is_clause_mention(line: str, start: int) -> bool:
+    """True when the phrase sits inside a quote/backtick span on this line —
+    a MENTION teaching about the clause (``model-awareness.md``'s own "End
+    with 'applies to all rewordings...'" sentence is the one real example in
+    modules/), never a genuine trailing-clause USE. An odd count of a quote
+    character before the match means the match sits inside an open span of
+    that kind on this single line — every real occurrence is single-line."""
+    before = line[:start]
+    return (before.count('"') % 2 == 1) or (before.count("`") % 2 == 1)
+
+
+def strip_rewordings_coda(line: str) -> tuple[str, bool]:
+    """Remove a genuine trailing "Applies to all rewordings..." clause
+    sentence from ``line``, leaving everything before its nearest sentence
+    boundary (``". "``, ``"; "``, or an em-dash ``"— "``) untouched. A bare
+    quoted/backticked MENTION of the phrase is never touched (mention-vs-use,
+    the same discipline this repo already applies to every other classifier).
+
+    A trailing ``";"``/``"—"`` CONNECTOR left dangling with nothing after it
+    reads as a grammatical leftover (real corpus example:
+    ``autonomous-verification.md``'s "...is banned; applies to all
+    rewordings..." would otherwise ablate to "...is banned;" — a semicolon
+    with nothing following it), so those two are stripped from the result
+    too; a trailing ``"."`` is DELIBERATELY kept — it is the previous
+    sentence's own terminal punctuation, not a connector, and removing it
+    would leave the sentence unterminated. Returns ``(new_line, changed)``.
+    """
+    m = _REWORDINGS_PHRASE_RE.search(line)
+    if not m or _is_clause_mention(line, m.start()):
+        return line, False
+    before = line[: m.start()]
+    boundary = 0
+    for sep in (". ", "; ", "— "):
+        idx = before.rfind(sep)
+        if idx != -1:
+            boundary = max(boundary, idx + len(sep))
+    if boundary == 0 and before.strip("*- \t") == "":
+        # the whole line is only a bullet/bold marker + the clause itself
+        return "", True
+    result = before[:boundary].rstrip()
+    while result and result[-1] in ";—":
+        result = result[:-1].rstrip()
+    return result, True
+
+
+def ablate_module_text(text: str) -> tuple[str, int]:
+    """Strip every genuine rewordings-clause USE from a module's text.
+    Never touches a quoted/backticked MENTION. Returns
+    ``(new_text, stripped_count)``."""
+    out_lines = []
+    stripped = 0
+    for line in text.splitlines():
+        new_line, changed = strip_rewordings_coda(line)
+        if changed:
+            stripped += 1
+        out_lines.append(new_line)
+    return "\n".join(out_lines), stripped
+
+
+def write_architecture_ablated_claude_md(real: Path, cfg: Path) -> tuple[int, int]:
+    """Build condition C's ``CLAUDE.md`` at ``cfg / "CLAUDE.md"``.
+
+    Drops the ``architecture-first.md`` ``@import`` line outright, and for
+    every OTHER ``modules/*.md`` import writes an ablated COPY (rewordings
+    clauses stripped) under ``cfg / "ablated-modules/"`` — the REAL files
+    under ``modules/`` are never written to. The new ``CLAUDE.md``'s
+    ``@import`` lines are rewired to point at the ablated copies instead of
+    the real repo paths. Returns ``(modules_touched, clauses_stripped)``.
+    """
+    ablated_dir = cfg / "ablated-modules"
+    ablated_dir.mkdir(parents=True, exist_ok=True)
+
+    real_claude_md = (real / "CLAUDE.md").read_text(encoding="utf-8")
+    new_lines = []
+    modules_touched = 0
+    total_stripped = 0
+    for line in real_claude_md.splitlines():
+        m = _ARCH_IMPORT_RE.match(line)
+        if not m:
+            new_lines.append(line)
+            continue
+        rel = m.group(1)
+        if rel == ARCHITECTURE_FIRST_MODULE:
+            continue  # the module ITSELF is dropped from the prefix
+        module_text = (REPO / rel).read_text(encoding="utf-8")
+        ablated_text, n = ablate_module_text(module_text)
+        modules_touched += 1
+        total_stripped += n
+        dest = ablated_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(ablated_text, encoding="utf-8")
+        new_lines.append(f"@{dest}")
+    (cfg / "CLAUDE.md").write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    return modules_touched, total_stripped
+
+
 def bootstrap(root: Path) -> None:
     """Build the two scratch profiles. Never touches the real ``~/.claude``."""
     real = Path.home() / ".claude"
@@ -491,6 +604,8 @@ def bootstrap(root: Path) -> None:
 
         if cond == "A":
             shutil.copy2(real / "CLAUDE.md", cfg / "CLAUDE.md")
+        elif cond == "C":
+            write_architecture_ablated_claude_md(real, cfg)
         else:
             (cfg / "CLAUDE.md").write_text(minimal_claude_md())
 
@@ -516,10 +631,14 @@ def bootstrap(root: Path) -> None:
 
         (cfg / "projects").mkdir(exist_ok=True)
 
-    print(f"bootstrapped: {root}/config-A (full), {root}/config-B (minimal)")
+    print(
+        f"bootstrapped: {root}/config-A (full), {root}/config-B (minimal), "
+        f"{root}/config-C (full minus architecture-first.md minus rewordings clauses)"
+    )
     a_md = (root / "config-A" / "CLAUDE.md").read_text()
     b_md = (root / "config-B" / "CLAUDE.md").read_text()
-    print(f"  CLAUDE.md bytes: A={len(a_md)} B={len(b_md)}")
+    c_md = (root / "config-C" / "CLAUDE.md").read_text()
+    print(f"  CLAUDE.md bytes: A={len(a_md)} B={len(b_md)} C={len(c_md)}")
 
 
 def make_tree(root: Path, task: Task, cond: str, rep: int = 1) -> Path:

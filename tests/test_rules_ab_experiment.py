@@ -606,3 +606,225 @@ def test_report_writes_json(tmp_path):
     ab.report(tmp_path)
     out = json.loads((tmp_path / "report.json").read_text())
     assert out["aggregate"]["A"]["runs"] == 1
+
+
+# --- item 11 (#95) — condition C: architecture-first.md + rewordings-clause
+# ablation -------------------------------------------------------------
+
+
+def test_condition_c_is_registered():
+    assert "C" in ab.CONDITIONS
+
+
+def test_strip_rewordings_coda_removes_a_standalone_clause_sentence():
+    line = "Applies to all rewordings and semantic equivalents."
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == ""
+
+
+def test_strip_rewordings_coda_removes_only_the_coda_after_a_period():
+    line = "Do the real thing. Applies to all rewordings and semantic equivalents."
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == "Do the real thing."
+
+
+def test_strip_rewordings_coda_removes_only_the_coda_after_a_semicolon():
+    line = "The intent is banned; applies to all rewordings and semantic equivalents."
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    # the trailing semicolon (a CONNECTOR, not a sentence terminator) is
+    # stripped too -- "The intent is banned;" would read as a dangling
+    # leftover with nothing left to connect to (#95 item 11 adversarial
+    # review, 🔵 finding).
+    assert new_line == "The intent is banned"
+
+
+def test_strip_rewordings_coda_never_leaves_a_dangling_connector_real_corpus_shape():
+    # the exact real modules/core/autonomous-verification.md:76 shape --
+    # a semicolon boundary immediately preceding the clause.
+    line = (
+        'The intent — not the exact wording — is banned; applies to all '
+        "rewordings and semantic equivalents."
+    )
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == "The intent — not the exact wording — is banned"
+    assert not new_line.endswith(";")
+    assert not new_line.endswith("—")
+
+
+def test_strip_rewordings_coda_keeps_the_terminal_period_never_strips_it():
+    # a period is the PREVIOUS sentence's own terminator, not a connector --
+    # it must survive, unlike a trailing ";"/"—".
+    line = "Do the real thing. Applies to all rewordings and semantic equivalents."
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == "Do the real thing."
+    assert new_line.endswith(".")
+
+
+def test_strip_rewordings_coda_removes_only_the_coda_after_an_em_dash():
+    line = (
+        "Applies to all rewordings and semantic equivalents — the intent: "
+        "do X, never Y."
+    )
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == ""
+
+
+def test_strip_rewordings_coda_strips_a_dangling_trailing_em_dash_too():
+    # the exact real modules/core/autonomous-quality-discipline.md:63 shape
+    # -- an em-dash boundary immediately preceding the clause, with real
+    # text before it (unlike the empty-result em-dash case above).
+    line = (
+        "The intent is banned, not the wording — applies to all "
+        "rewordings and semantic equivalents."
+    )
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == "The intent is banned, not the wording"
+    assert not new_line.endswith("—")
+
+
+def test_strip_rewordings_coda_drops_a_bullet_only_line_entirely():
+    line = "- Applies to all rewordings and semantic equivalents (extra detail)."
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is True
+    assert new_line == ""
+
+
+def test_strip_rewordings_coda_never_touches_a_double_quoted_mention():
+    line = (
+        '- **End with "applies to all rewordings and semantic equivalents"** '
+        "— prevents 4.8 from taking bullet-point lists as exhaustive."
+    )
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is False
+    assert new_line == line
+
+
+def test_strip_rewordings_coda_never_touches_a_backticked_mention():
+    line = "See `applies to all rewordings and semantic equivalents` in the docs."
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is False
+    assert new_line == line
+
+
+def test_strip_rewordings_coda_leaves_a_clause_free_line_untouched():
+    line = "Follow existing patterns in the codebase."
+    new_line, changed = ab.strip_rewordings_coda(line)
+    assert changed is False
+    assert new_line == line
+
+
+def test_ablate_module_text_counts_every_genuine_strip():
+    text = (
+        "First sentence stays.\n"
+        "Applies to all rewordings and semantic equivalents.\n"
+        'Mentioning "applies to all rewordings and semantic equivalents" stays put.\n'
+        "Second real one. Applies to all rewordings and semantic equivalents.\n"
+    )
+    new_text, stripped = ab.ablate_module_text(text)
+    assert stripped == 2
+    assert "Mentioning" in new_text
+    assert '"applies to all rewordings and semantic equivalents"' in new_text
+    lines = new_text.splitlines()
+    assert lines[0] == "First sentence stays."
+    assert lines[1] == ""
+    assert lines[3] == "Second real one."
+
+
+def test_ablate_module_text_on_the_real_architecture_first_module_finds_none():
+    """architecture-first.md itself carries no rewordings clause — it is
+    dropped from the prefix outright, not ablated, so this is a genuine
+    zero, never a silent parsing failure."""
+    text = (REPO / ab.ARCHITECTURE_FIRST_MODULE).read_text(encoding="utf-8")
+    _, stripped = ab.ablate_module_text(text)
+    assert stripped == 0
+
+
+def _fake_real_claude_md_source(tmp_path):
+    """A scratch ``~/.claude``-shaped dir whose CLAUDE.md imports two REAL
+    repo modules (architecture-first.md + one known to carry a genuine
+    rewordings-clause use) plus a settings.json bootstrap() also needs."""
+    real = tmp_path / "fake-real"
+    real.mkdir()
+    (real / "CLAUDE.md").write_text(
+        "# fake\n"
+        f"@~/devel/airuleset/{ab.ARCHITECTURE_FIRST_MODULE}\n"
+        "@~/devel/airuleset/modules/core/tdd-workflow.md\n",
+        encoding="utf-8",
+    )
+    return real
+
+
+def test_write_architecture_ablated_claude_md_drops_the_architecture_first_import(tmp_path):
+    real = _fake_real_claude_md_source(tmp_path)
+    cfg = tmp_path / "config-C"
+    cfg.mkdir()
+    ab.write_architecture_ablated_claude_md(real, cfg)
+    new_md = (cfg / "CLAUDE.md").read_text(encoding="utf-8")
+    assert ab.ARCHITECTURE_FIRST_MODULE not in new_md
+
+
+def test_write_architecture_ablated_claude_md_rewires_the_other_import_to_an_ablated_copy(tmp_path):
+    real = _fake_real_claude_md_source(tmp_path)
+    cfg = tmp_path / "config-C"
+    cfg.mkdir()
+    ab.write_architecture_ablated_claude_md(real, cfg)
+    new_md = (cfg / "CLAUDE.md").read_text(encoding="utf-8")
+    dest = cfg / "ablated-modules" / "modules" / "core" / "tdd-workflow.md"
+    assert f"@{dest}" in new_md
+    assert dest.is_file()
+    ablated_text = dest.read_text(encoding="utf-8")
+    # a genuine use, stripped -- no live "Applies to all rewordings..." left
+    for line in ablated_text.splitlines():
+        m = ab._REWORDINGS_PHRASE_RE.search(line)
+        assert m is None or ab._is_clause_mention(line, m.start())
+
+
+def test_write_architecture_ablated_claude_md_never_writes_to_the_real_module(tmp_path):
+    """Safety-critical: the function must ONLY ever write under ``cfg`` —
+    the real ``modules/core/tdd-workflow.md`` this repo ships must be
+    byte-identical before and after the call."""
+    real_module = REPO / "modules" / "core" / "tdd-workflow.md"
+    before = real_module.read_bytes()
+    real = _fake_real_claude_md_source(tmp_path)
+    cfg = tmp_path / "config-C"
+    cfg.mkdir()
+    ab.write_architecture_ablated_claude_md(real, cfg)
+    after = real_module.read_bytes()
+    assert before == after
+
+
+def test_write_architecture_ablated_claude_md_returns_touched_and_stripped_counts(tmp_path):
+    real = _fake_real_claude_md_source(tmp_path)
+    cfg = tmp_path / "config-C"
+    cfg.mkdir()
+    touched, stripped = ab.write_architecture_ablated_claude_md(real, cfg)
+    assert touched == 1  # only tdd-workflow.md -- architecture-first.md was dropped
+    assert stripped >= 1  # tdd-workflow.md carries at least one genuine use
+
+
+def test_bootstrap_builds_condition_c_alongside_a_and_b(tmp_path):
+    """bootstrap() reads the REAL ~/.claude — a real profile must exist on
+    this box (true for every managed box, and this session's own)."""
+    if not (Path.home() / ".claude" / "settings.json").is_file():
+        pytest.skip("no real ~/.claude/settings.json on this box")
+    root = tmp_path / "ab95"
+    ab.bootstrap(root)
+    assert (root / "config-C" / "CLAUDE.md").is_file()
+    c_md = (root / "config-C" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert ab.ARCHITECTURE_FIRST_MODULE not in c_md
+    a_md = (root / "config-A" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert ab.ARCHITECTURE_FIRST_MODULE in a_md
+    # condition C keeps full rule delivery (unlike B) -- only the CLAUDE.md
+    # content differs from A, never the hook wiring.
+    c_settings = json.loads((root / "config-C" / "settings.json").read_text())
+    b_settings = json.loads((root / "config-B" / "settings.json").read_text())
+    a_settings = json.loads((root / "config-A" / "settings.json").read_text())
+    assert c_settings == a_settings
+    assert c_settings != b_settings

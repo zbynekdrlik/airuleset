@@ -366,6 +366,108 @@ class TestFalsePositives(TestCase):
         )
 
 
+class TestItem95_Item12NewSkillTriggers(TestCase):
+    """#95 item 12 (2026-08-09): `fast-iterate`, `meeting-analysis` and
+    `playbook-cleanup` had ZERO injection AND zero Skill-tool invocations in
+    the 7-day 2026-08-08 measurement (issue #95 comment 5223460819), because
+    none of the three had a trigger row in the table at all. User decision
+    (comment 5230729320): add trigger rows for these three real skills
+    only -- nothing withdrawn, and re-measure in a few weeks whether the
+    trigger alone is enough to make each skill actually get delivered.
+
+    Each trigger is picked from the skill's OWN "when to use" description,
+    not guessed: fast-iterate binds to the same heavy-local-build Bash
+    shape `local-builds` already fires on (the exact moment its own
+    SKILL.md says Tier-2 switching becomes actionable); meeting-analysis
+    and playbook-cleanup bind to UserPromptSubmit, since both are
+    inherently user-request-driven with no Bash action of their own."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def _prompt(self, text, session_id="sess-item12"):
+        payload = json.dumps(
+            {
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": text,
+            }
+        )
+        env = dict(os.environ, TMPDIR=self.tmpdir)
+        return subprocess.run(
+            ["bash", str(HOOK)], input=payload, capture_output=True, text=True, env=env
+        )
+
+    def _injected_prompt(self, result):
+        """Same shape as the module-level `injected()`, but for the
+        UserPromptSubmit surface, whose `hookEventName` is "UserPromptSubmit"
+        -- `injected()` hard-asserts "PreToolUse" and would fail here for
+        the wrong reason."""
+        out = result.stdout.strip()
+        if not out:
+            return None
+        data = json.loads(out)
+        spec = data["hookSpecificOutput"]
+        assert spec["hookEventName"] == "UserPromptSubmit", spec
+        return spec["additionalContext"]
+
+    def test_all_three_topics_have_a_trigger_row(self):
+        bodies = {r[3] for r in load_conf()}
+        for skill in ["fast-iterate", "meeting-analysis", "playbook-cleanup"]:
+            self.assertIn(
+                f"skills/{skill}/SKILL.md",
+                bodies,
+                f"{skill} has no automatic load trigger — #95 item 12",
+            )
+
+    def test_heavy_local_build_injects_fast_iterate(self):
+        # local-builds shares the SAME trigger pattern (a real, existing
+        # precedent — deploy-ssh + post-deploy-verification already share
+        # one trigger too) and its own body alone (9662 chars) plus
+        # fast-iterate's (5825 chars) exceed the per-call MAX_TOTAL budget
+        # (14000), so the FIRST matching call in a session only delivers
+        # local-builds — fast-iterate's marker stays UNSET (deferred, per
+        # the injector's own documented "defer, never drop" contract) and
+        # fires on the session's NEXT matching action, once local-builds'
+        # own marker is already consumed and stops competing for budget.
+        first = injected(run({"command": "cargo build --release"}, tmpdir=self.tmpdir))
+        self.assertIsNotNone(first, "a heavy local build must load local-builds")
+        second = injected(
+            run({"command": "cargo build --release"}, tmpdir=self.tmpdir)
+        )
+        self.assertIsNotNone(
+            second, "fast-iterate must fire on the session's next heavy build"
+        )
+        # a string that exists ONLY in fast-iterate's own body
+        self.assertIn("Toggle Tier-2 Local Build Mode", second)
+
+    def test_meeting_recording_prompt_injects_meeting_analysis(self):
+        r = self._prompt(
+            "Mam nahravku zo stretnutia so zakaznikom, analyzuj ju prosim."
+        )
+        ctx = self._injected_prompt(r)
+        self.assertIsNotNone(ctx, "a meeting-recording prompt must load meeting-analysis")
+        self.assertIn("Multimodal Meeting Analysis", ctx)
+
+    def test_playbook_cleanup_request_injects_the_skill(self):
+        r = self._prompt(
+            "Potrebujem spravit playbook cleanup pre tento projekt, vela je "
+            "rozhadzane po memory a CLAUDE.md."
+        )
+        ctx = self._injected_prompt(r)
+        self.assertIsNotNone(ctx, "an explicit playbook-cleanup request must load the skill")
+        self.assertIn("Playbook Cleanup", ctx)
+
+    def test_unrelated_prompt_injects_neither_new_userpromptsubmit_skill(self):
+        r = self._prompt("Ako sa mas, aky je dnes den?")
+        ctx = self._injected_prompt(r)
+        if ctx is not None:
+            self.assertNotIn("Multimodal Meeting Analysis", ctx)
+            self.assertNotIn("Playbook Cleanup", ctx)
+
+
 class TestWiring(TestCase):
     def test_hook_is_wired_on_pretooluse(self):
         conf = json.loads((ROOT / "settings" / "hooks.json").read_text())
