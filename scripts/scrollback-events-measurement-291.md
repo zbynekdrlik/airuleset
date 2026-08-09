@@ -82,9 +82,14 @@ named amplifier ("viacero ludi na jeden tmux"). This is the SAME
 duplication mechanism #235/#253 already diagnosed for a single-client
 `resize-window` call (a small, event-triggered percentage, not the
 near-total loss `CLAUDE_CODE_NO_FLICKER=1` causes by design) — a second
-real *client* attach reproduces it too, at a materially higher rate per
-event (20% here vs 2.67-6.0% for #267's resize-window burst) for the
-same class of defect.
+real *client* attach reproduces the same class of defect. The two numbers
+(20% here vs 2.67-6.0% for #267's own resize-window burst) are NOT
+directly comparable per-event — #267's burst mixes 8 resizes + 4 Ctrl+O +
+4 Shift+Tab (16 distinct triggers) against this run's 3 attach/detach
+cycles, so no single "% per event" figure follows from either. What the
+two DO both support is the qualitative point: real, event-triggered,
+partial (never near-total) corruption, for two different real relayout
+triggers.
 
 **`window-size manual` measurably prevents it** — zero duplication across
 the identical 3-cycle burst that produced 20% duplication under `latest`.
@@ -109,12 +114,39 @@ independently causal factor.
 ## Verdict
 
 Confirms #289's own final scoping: the event-frequency measurement is a
-pure documentation record. Both higher-priority mitigations already
-shipped (native NO_FLICKER+PageUp scroll, and the popup's two content
-sources — capture-pane and, since #337, an independent transcript-
-primary path) read the session's own JSONL transcript directly and are
-therefore immune to every event class measured here BY CONSTRUCTION,
-regardless of how frequently a genuinely corrupting event (multi-client
-resize, quantified above at 20% per burst under the live default) fires
-in practice. No further code or config change follows from these
-numbers.
+pure documentation record. The two higher-priority mitigations that
+already shipped do NOT both rest on the same immunity mechanism — stated
+precisely, per source, since lumping them together overstates the case:
+
+- **NO_FLICKER (`CLAUDE_CODE_NO_FLICKER=1` + PageUp scroll)** is immune to
+  every event class measured here BY CONSTRUCTION, because alternate-
+  screen mode never WRITES into tmux's native scrollback buffer at all
+  (#253) — there is nothing there for a relayout event to duplicate.
+- **The popup's transcript-reconstruction source** (S-DC's own PRIMARY
+  since #337; also S-F1's FALLBACK, #327) is immune BY CONSTRUCTION for
+  the same underlying reason as NO_FLICKER: it rebuilds the history from
+  the session's JSONL transcript file, never from tmux's native
+  scrollback buffer, so it structurally cannot inherit a duplication this
+  measurement finds there.
+- **The popup's capture-pane source** (S-F1's own PRIMARY, #327; S-DC's
+  FALLBACK, #337) is explicitly **NOT immune** — it reads tmux's native
+  scrollback directly, by design, for exact visual fidelity (same colors/
+  wrapping/typography as the real screen), and therefore DOES inherit
+  whatever this measurement finds there: a multi-client-resize burst
+  duplicating 20% of recent lines under today's live default is exactly
+  the defect a capture-pane view would show.
+
+So one popup entry point (S-F1) shows the not-immune source by default,
+and the other (S-DC) shows the immune source by default with the
+not-immune one only as a fallback — a deliberate, already-shipped trade
+(visual fidelity vs guaranteed completeness), not a gap this ticket needs
+to close. Item 4 of #291's own action list (does the shipped mitigation
+already cover compact-event corruption, regardless of root cause) is
+still answered by design, unaffected by this correction: `/compact`
+itself measures 0% corruption here (Result 2) REGARDLESS of which source
+a user is looking at, so no source's immunity is even being tested by
+that event class.
+
+`window-size manual` still cannot ship for the separate, unconditional
+reason already stated (#241, conf-parse-time crash on tmux 3.4). No
+further code or config change follows from these numbers.

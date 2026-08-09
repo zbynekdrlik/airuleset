@@ -109,15 +109,21 @@ def terminate_pid(pid, timeout=3.0, poll=0.05):
     ignored or blocked, so this call is GUARANTEED to return -- the
     harness must never again hang indefinitely on a child that doesn't
     honor SIGTERM (#291: a live run hung >500s on exactly a plain
-    unbounded `os.waitpid(pid, 0)` with no escalation at all)."""
+    unbounded `os.waitpid(pid, 0)` with no escalation at all).
+
+    Uses time.monotonic() for the deadline (adversarial review, #291
+    round 2): time.time() can step BACKWARD (an NTP correction), which
+    would extend the SIGTERM grace window arbitrarily -- SIGKILL still
+    eventually fires either way, so this was never an unbounded-hang risk,
+    just an avoidable one."""
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError as e:
         print(f"terminate_pid: pid {pid} already gone before SIGTERM (non-fatal): {e}",
               file=sys.stderr)
         return
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         try:
             reaped, _status = os.waitpid(pid, os.WNOHANG)
         except ChildProcessError as e:
