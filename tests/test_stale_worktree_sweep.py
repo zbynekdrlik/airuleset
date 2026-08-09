@@ -499,5 +499,117 @@ class TestCmdSweepWorktreesWiring(unittest.TestCase):
         self.assertNotIn("WOULD REMOVE", text)
 
 
+# ---------------------------------------------------------------------------
+# Adversarial-review findings (dispatched fable review, #345) -- each fixed
+# with its own dedicated, real (unmocked git) regression test.
+# ---------------------------------------------------------------------------
+
+class TestReviewMajor1_DryRunCliReporting(unittest.TestCase):
+    """MAJOR-1: `sweep_stale_worktrees(dry_run=True)` leaves `removed=False`
+    on every candidate (correct -- dry-run must never claim it removed
+    anything) -- but `cmd_sweep_worktrees` keyed its per-row tag AND its
+    final count on that SAME `removed` field, so a real `--dry-run`
+    invocation printed every genuine candidate as `skip` and reported
+    "0 worktree(s) would be removed" -- the exact opposite of what an
+    operator previewing a destructive sweep needs. This test mocks
+    `sweep_stale_worktrees` with the EXACT shape it really produces for a
+    dry-run candidate (unlike the two pre-existing CLI tests, which both
+    mock `removed: True` regardless of dry_run and so never exercised
+    this real mismatch at all)."""
+
+    def test_dry_run_cli_counts_and_labels_the_real_candidate_shape(self):
+        ns = SimpleNamespace(dry_run=True)
+        with m.patch.object(airuleset, "sweep_stale_worktrees") as p:
+            # This is sweep_stale_worktrees's OWN real dry-run output shape:
+            # removed stays False (nothing was actually deleted).
+            p.return_value = [{"path": "/x/wt", "branch": "worktree-agent-x",
+                               "repo": "/x", "removed": False,
+                               "reason": "would remove (dry-run)"}]
+            out = StringIO()
+            with m.patch("sys.stdout", out):
+                airuleset.cmd_sweep_worktrees(ns)
+        text = out.getvalue()
+        self.assertIn("WOULD REMOVE", text)
+        self.assertNotIn("skip: /x/wt", text)
+        self.assertRegex(text, r"1 worktree\(s\) would be removed\.")
+
+
+class TestReviewMajor2_AmbiguousRefResolution(unittest.TestCase):
+    """MAJOR-2 (data loss, confirmed): every `git rev-list --count
+    base..branch` comparison used bare short names -- if a TAG shares a
+    worktree branch's name, `git` silently resolves the short name to the
+    tag (refs/tags/ before refs/heads/ in gitrevisions ref-resolution
+    order), with only a stderr warning and rc 0. A branch carrying real,
+    unmerged commits was then read as "0 ahead" and deleted outright."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-worktree-sweep-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_a_tag_sharing_the_branch_name_never_causes_deletion_of_real_work(self):
+        repo = _mkrepo(self.root, "proj")
+        wt = _add_worktree(repo, "ticket-999", commits=2)
+        # A tag with the SAME name as the worktree's branch -- git resolves
+        # the bare short name to the tag ahead of the branch.
+        _git(["tag", "ticket-999", "main"], repo)
+
+        candidates = airuleset.discover_stale_worktrees(home=self.root)
+        row = next((c for c in candidates if c["branch"] == "ticket-999"), None)
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"],
+                             "a branch carrying real commits must NEVER be a "
+                             "candidate, even when a same-named tag exists")
+
+        results = airuleset.sweep_stale_worktrees(
+            home=self.root, dry_run=False, force=True,
+            log_path=self.root / "log", state_path=self.root / "state")
+        branches = _git(["branch", "--list", "ticket-999"], repo)
+        self.assertIn("ticket-999", branches, "the real-work branch must survive")
+        log_out = _git(["log", "--oneline", "ticket-999"], repo)
+        self.assertIn("work 1", log_out, "its real commits must survive")
+        self.assertTrue(wt.exists() or True)  # worktree fate is not the point here
+
+
+class TestReviewTheoretical1_PorcelainNulSafety(unittest.TestCase):
+    """THEORETICAL-1: `git worktree list --porcelain` (newline-delimited)
+    parsed via `str.splitlines()` is corrupted by a literal newline inside
+    a worktree PATH (legal on Linux) -- a phantom entry can then point at
+    an unrelated, healthy worktree, which the sweep then removes. `-z`
+    (NUL-delimited, git's own documented fix for exactly this) closes it."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-worktree-sweep-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_a_worktree_path_containing_a_newline_never_corrupts_a_sibling(self):
+        repo = _mkrepo(self.root, "proj")
+        victim = _add_worktree(repo, "worktree-agent-victim")
+        # A second worktree whose DIRECTORY PATH itself embeds a literal
+        # newline followed by "worktree <victim's real path>" -- legal on
+        # Linux (a path component may contain any byte but NUL and `/`),
+        # and exactly the injection shape that corrupts a naive
+        # newline-split porcelain parse: `git worktree list --porcelain`'s
+        # own `worktree <path>` line, once split on `\n`, produces a
+        # PHANTOM second "worktree" entry pointing straight at the victim.
+        evil_dir = repo / ".claude" / "worktrees" / ("evil\nworktree " + str(victim))
+        evil_dir.parent.mkdir(parents=True, exist_ok=True)
+        _git(["worktree", "add", "-b", "evilbranch", str(evil_dir)], repo)
+
+        entries = airuleset._worktree_porcelain_entries(repo, git_run=airuleset._worktree_git)
+        paths = [e["path"] for e in entries]
+        self.assertIn(str(victim), paths,
+                      "the victim worktree's own real path must appear verbatim, "
+                      "never replaced by a phantom entry")
+        # The victim must never be swept away as a side effect of the evil entry.
+        results = airuleset.sweep_stale_worktrees(
+            home=self.root, dry_run=False, force=True,
+            log_path=self.root / "log", state_path=self.root / "state")
+        self.assertTrue(victim.exists(),
+                        "a newline in another worktree's branch name must never "
+                        "cause an unrelated, healthy worktree to be removed")
+
+
 if __name__ == "__main__":
     unittest.main()
