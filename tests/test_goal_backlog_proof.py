@@ -635,6 +635,23 @@ class TestClauseARearmHintIsFullAuthorityOnlyByDesign(TestCase):
             self.assertNotIn(self.REARM_HINT, goal_lines()[idx])
 
 
+class TestBranchMergeTemplateNeverReadsAsSelfClose(TestCase):
+    """#349 (2026-08-09, montalu3 regression): the branch-merge template used to
+    say "is closed via my own PR merged into the project's INTEGRATION branch",
+    which is easily misread as an instruction to close the ticket yourself. The
+    fix drops the word "closed" (and is 7 chars SHORTER — the template had only
+    40 chars of headroom against the 4000-char /goal cap when this landed, so a
+    net-negative wording fix was the only kind that fit)."""
+
+    def test_the_ambiguous_phrase_is_gone(self):
+        self.assertNotIn("is closed via my own PR",
+                        goal_lines()[BRANCH_MERGE])
+
+    def test_the_replacement_phrase_is_present(self):
+        self.assertIn("is MERGED via my own PR into",
+                      goal_lines()[BRANCH_MERGE])
+
+
 # --------------------------------------------------------------------------- #
 # #161 — condition (A), decided the way the shipped template instructs
 # (mirrors `backlog_empty_holds` above for condition (B)): a PURE function

@@ -6,8 +6,15 @@ gatekeeper maintainer closes them at cross-fork review/merge) — but closing it
 self-authored sub-findings with evidence is normal bookkeeping and MUST be allowed
 (the original blanket block was a false positive on David's legit workflow). The
 hook verifies issue author == the stream's authenticated gh login; undeterminable
-(gh error / no auth) fails SAFE (block). full / branch-merge streams pass untouched,
-resolved via `airuleset.py authority` (marker-aware).
+(gh error / no auth) fails SAFE (block).
+
+#349 (2026-08-09, montalu3 regression): the guard used to exempt `branch-merge`
+on the false assumption its PR "legitimately closes issues via a merged PR's
+`Closes #N`" — a branch-merge PR merges into the project's INTEGRATION branch,
+never the repo's actual DEFAULT branch, so GitHub's auto-close never fires there
+either. The guard now gates ANY reduced-authority stream (authority != `full`) —
+only `full` authority passes untouched, resolved via `airuleset.py authority`
+(marker-aware).
 
 Tests are hermetic: a fake `gh` is PATH-injected so no network/auth is needed —
 FAKE_GH_ME controls `gh api user`, FAKE_GH_AUTHOR controls `gh issue view --json
@@ -120,9 +127,31 @@ class TestForkNoMergeCloseGuard(TestCase):
         r = run("gh issue close 5 --comment obsolete", self.full)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_allows_gh_issue_close_under_branch_merge(self):
-        r = run("gh issue close 5 --comment obsolete", self.branch)
+    # --- #349: branch-merge is gated identically to fork-no-merge ---
+
+    def test_blocks_close_of_foreign_authored_issue_under_branch_merge(self):
+        # Was `test_allows_gh_issue_close_under_branch_merge` — INVERTED (#349):
+        # the pre-fix behaviour this asserted (unconditional allow) was the
+        # montalu3 regression itself, not a legitimate exemption.
+        r = run("gh issue close 5 --comment obsolete", self.branch,
+                me="kvaskodev", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+        self.assertIn("READY-FOR-REVIEW", r.stderr)
+        self.assertIn("process-subdev", r.stderr)
+        self.assertNotIn("fork-no-merge", r.stderr)
+
+    def test_allows_close_of_self_authored_issue_under_branch_merge(self):
+        # Mirrors test_allows_close_of_self_authored_issue — the same bookkeeping
+        # exception must apply identically under branch-merge.
+        r = run("gh issue close 1408 --comment 'fixed, tests green'",
+                self.branch, me="kvaskodev", author="kvaskodev")
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_blocks_close_in_a_compound_command_under_branch_merge(self):
+        r = run("cd sub && gh issue close 1400", self.branch,
+                me="kvaskodev", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_allows_unrelated_commands_under_fork_no_merge(self):
         for cmd in ("git status", "gh issue list --state open",

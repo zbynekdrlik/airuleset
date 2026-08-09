@@ -266,9 +266,44 @@ class TestWorkerCarriesProfiles(TestCase):
         cmds = " ".join(h["command"] for h in bash["hooks"])
         self.assertIn("block-fork-no-merge-issue-close.sh", cmds)
 
+    def test_worker_forbids_foreign_close_under_branch_merge_too(self):
+        # #349 (2026-08-09 montalu3 regression): the ban + hand-off recipe must
+        # apply to branch-merge exactly like fork-no-merge — the mechanical hook
+        # was widened to gate any authority != full, and the prose must say so.
+        w = read("agents/autopilot-worker.md")
+        self.assertIn("NEVER close an ASSIGNED", w)
+        self.assertIn("EITHER reduced-authority profile", w)
+        self.assertIn("full `/process-subdev` release pipeline", w)
+        self.assertIn("authority != `full`", w)
+
+    def test_worker_has_branch_merge_final_message_variant(self):
+        # Previously ONLY a "fork-no-merge variant" existed — a branch-merge
+        # worker had no evidence-block template telling it to leave the issue
+        # OPEN instead of inventing merge-to-main/deploy fields (#349).
+        w = read("agents/autopilot-worker.md")
+        self.assertIn("branch-merge variant of the FINAL MESSAGE", w)
+        self.assertIn("NEVER closed by you", w)
+        self.assertIn("ready_for_review:", w)
+
 
 if __name__ == "__main__":
     main()
+
+
+class TestCompletionReportBranchMergeHandoff(TestCase):
+    """#349: the reduced-authority completion-report template used to show a
+    Hand-off line ONLY for fork-no-merge — a branch-merge worker had no
+    instruction to signal hand-off at all, which is exactly how montalu3's
+    three merged tickets sat neither queued nor reviewed."""
+
+    def test_handoff_line_covers_branch_merge_too(self):
+        t = read("modules/core/completion-report.md")
+        self.assertIn("fork-no-merge AND branch-merge", t)
+        self.assertIn("NEVER a self-close", t)
+
+    def test_pr_line_states_ticket_stays_open(self):
+        t = read("modules/core/completion-report.md")
+        self.assertIn("ticket stays OPEN", t)
 
 
 class TestPerBoxSkillScoping(TestCase):
