@@ -166,5 +166,56 @@ class TestRunCardFiredOnReleasedSlice(TestCase):
         self.assertIn("never a hand-fired", t)
 
 
+class TestMechanicalPreReviewGateRecheck(TestCase):
+    """#278 (promoted from odoo-erp#3046): a repo-parameterized mechanical
+    pre-review gate re-check must sit between step 2 (get the work) and step
+    3 (independent review), as a FILTER -- never a hardcoded script path.
+
+    Root cause: an async/periodic gate's label-time PASS can be stale by the
+    time gatekeeper actually reviews (real queue latency exists), so the
+    review procedure must re-run the repo's own declared gate command as the
+    first thing it does, before any deep-review effort is spent."""
+
+    def test_step_sits_between_step_2_and_step_3(self):
+        t = read(SKILL)
+        i2 = t.index("### 2. Get the work in front of you")
+        i2b = t.index("Mechanical pre-review gate re-check")
+        i3 = t.index("### 3. INDEPENDENT REVIEW")
+        self.assertLess(i2, i2b)
+        self.assertLess(i2b, i3)
+
+    def test_fail_bounces_before_deep_review_pass_proceeds(self):
+        t = read(SKILL)
+        i2b = t.index("Mechanical pre-review gate re-check")
+        i3 = t.index("### 3. INDEPENDENT REVIEW")
+        window = t[i2b:i3]
+        self.assertIn("FAIL", window)
+        self.assertIn("bounce", window.lower())
+        self.assertIn("PASS", window)
+        self.assertIn("step 3", window.lower())
+
+    def test_absent_repo_command_skips_straight_to_step_3(self):
+        t = read(SKILL)
+        i2b = t.index("Mechanical pre-review gate re-check")
+        i3 = t.index("### 3. INDEPENDENT REVIEW")
+        window = t[i2b:i3]
+        self.assertIn("no such command named", window.lower())
+
+    def test_never_hardcodes_a_specific_repo_script_path(self):
+        # generic skill must not hardcode odoo-erp stream infrastructure --
+        # same discipline TestIndependentReviewFrame already locks elsewhere
+        t = read(SKILL)
+        self.assertNotIn("subdev_handoff_gate.py", t)
+        self.assertNotIn("zbynek-0:4", t)
+        self.assertNotIn("kvaskodev", t)
+
+    def test_step_is_a_repo_parameter_like_the_others(self):
+        t = read(SKILL)
+        i2b = t.index("Mechanical pre-review gate re-check")
+        i3 = t.index("### 3. INDEPENDENT REVIEW")
+        window = t[i2b:i3]
+        self.assertIn("repo PARAMETER", window)
+
+
 if __name__ == "__main__":
     main()
