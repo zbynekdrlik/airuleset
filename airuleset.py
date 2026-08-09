@@ -6870,6 +6870,102 @@ def _is_ssh_auth_failure(returncode, stderr):
     return returncode == 255 and bool(_SSH_AUTH_DENIED_RX.search(stderr or ""))
 
 
+# --- #347: push-time guard against a newly-activated subdev stream account
+# silently never gaining its own REMOTE_HOSTS registration -------------------
+# Root cause of the incident this guards against: david2/david3/david4 were
+# provisioned on the shared subdev VPS (odoo-erp#3282) days before airuleset
+# gained their REMOTE_HOSTS/AUTHORITY_BY_USER/etc entries (#326) — nothing in
+# `push` ever compared "which Linux accounts actually exist on the shared
+# box" against "which accounts we think we manage", so the gap was invisible
+# until the owner caught it live. montalu2/3/4 (#251/#263) and simap/miva1
+# (#143/#300) hit variants of the identical class before that.
+_HOME_AUDIT_MARKER = "===AIRULESET-HOMES==="
+
+
+def _shared_remote_host_ips():
+    """Host IPs backed by MORE than one REMOTE_HOSTS entry — boxes where a
+    brand-new account can be hand-provisioned without ever gaining its own
+    registration entry. A single-entry host (dev2, gatekeeper) has no such
+    gap by construction, so auditing it would be pure overhead for zero
+    possible finding."""
+    seen = {}
+    for r in REMOTE_HOSTS:
+        h = r.get("host")
+        seen[h] = seen.get(h, 0) + 1
+    return {h for h, n in seen.items() if n > 1}
+
+
+def _remote_cmd_with_home_audit(remote_cmd):
+    """Append a same-connection `/home` listing to an existing remote
+    install command, WITHOUT letting the trailing `ls` change the ssh
+    call's own exit code — `;` sequencing after the `&&`-chained install
+    steps would otherwise make the LAST command's exit code win, silently
+    turning a genuine `git pull`/`install` failure into a false push
+    success the moment this audit rides along on that connection. Capture
+    the real exit code with `$?` immediately after the original chain, run
+    the audit unconditionally, then `exit` with the ORIGINAL code."""
+    return (
+        remote_cmd
+        + "; __ar_rc=$?; echo '%s'; ls -1 /home 2>/dev/null; exit $__ar_rc"
+        % _HOME_AUDIT_MARKER
+    )
+
+
+def _parse_home_audit_output(stdout):
+    """Extract the `/home` listing appended by `_remote_cmd_with_home_audit`
+    from a completed ssh call's stdout. Returns "" when the marker never
+    appears — e.g. ssh itself failed before the remote shell ever ran the
+    audit at all, which is not this guard's concern (a real auth/timeout
+    failure is already tracked by `cmd_push`'s own `failed` list)."""
+    text = stdout or ""
+    if _HOME_AUDIT_MARKER not in text:
+        return ""
+    return text.split(_HOME_AUDIT_MARKER, 1)[1]
+
+
+def _parse_home_names(home_listing):
+    """Home directory names from a raw `/home` listing, blank lines
+    dropped. Shared by `unregistered_home_accounts` and
+    `_home_listing_trustworthy` so both read the same real shape."""
+    return {ln.strip() for ln in (home_listing or "").splitlines() if ln.strip()}
+
+
+def _home_listing_trustworthy(user, home_listing):
+    """#347 adversarial-review MAJOR finding (M1): `_HOME_AUDIT_MARKER`
+    being present in an ssh call's stdout only proves the remote SHELL
+    reached the audit — NOT that `ls -1 /home` itself actually succeeded.
+    A hardened or root-owned `/home` makes `ls` fail with its stderr
+    redirected to `/dev/null`, returning an EMPTY listing at rc 0 — which
+    a marker-only check would read as "checked, no gap found" FOREVER,
+    silently and permanently defeating the whole guard. Positive control:
+    the very account THIS ssh connection authenticated AS must appear in
+    any genuine listing (the same connection just `cd`'d into that
+    account's own checkout, so its home directory unquestionably exists
+    on this host) — if it's missing, the listing cannot be trusted at
+    all, and the caller must fall through to a retry / an honest
+    UNVERIFIED report rather than a false "clean"."""
+    return user in _parse_home_names(home_listing)
+
+
+def unregistered_home_accounts(host, home_listing):
+    """Home directory names present on `host` (from a real `/home` listing)
+    that have NO matching REMOTE_HOSTS entry for that EXACT host — #347's
+    push-time guard against a newly-activated stream account silently never
+    being registered as a push target. Read-only: the caller decides what
+    to do with a non-empty result (a loud, non-blocking warning — refusing
+    to push over an unrelated new account would be a worse failure mode
+    than the gap this exists to report).
+
+    "lost+found" is excluded unconditionally — a filesystem artifact on a
+    `/home` that is its own mount point, never a stream account. Reporting
+    it as a "gap" on every single push forever would train the reader to
+    ignore the one warning that will someday be real (adversarial-review
+    MINOR m2, alarm fatigue)."""
+    registered = {r.get("user") for r in REMOTE_HOSTS if r.get("host") == host}
+    names = _parse_home_names(home_listing)
+    return sorted(names - registered - {"lost+found"})
+
+
 def cmd_push(args):
     """Push to GitHub and deploy to all remote machines.
 
@@ -6983,10 +7079,31 @@ def cmd_push(args):
             failed.append(("local(dev1)", "install rc=%s" % e.code))
 
     # 3. Deploy to each remote
+    # #347: audit ANY shared VPS host's /home listing for an account with
+    # no REMOTE_HOSTS entry, exactly ONCE per host, riding the FIRST
+    # already-happening connection to that host — never a dedicated extra
+    # ssh call (#341: never re-probe the same host for a second, unrelated
+    # purpose — that is exactly what compounded the fail2ban risk there).
+    shared_hosts = _shared_remote_host_ips()
+    audited_hosts = set()
     for remote in REMOTE_HOSTS:
         print(f"\n{'=' * 50}")
         print(f"Deploying to {remote['name']} ({remote['host']})...")
         remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
+        # #347 adversarial-review CRITICAL finding: `audited_hosts` must
+        # NOT be marked here (before the ssh call even runs) — a first
+        # entry that fails (timeout/auth) before the remote shell ever
+        # reaches the appended `ls` would then PERMANENTLY skip the audit
+        # for the rest of this push, with the failure looking IDENTICAL to
+        # "checked, no gap found" (unregistered_home_accounts() on an
+        # empty/no-marker listing silently returns []). `audited_hosts` is
+        # only marked below, once the marker is CONFIRMED present in the
+        # real stdout — so a failed first connection lets the NEXT entry
+        # sharing this host retry the audit instead of silently giving up.
+        audit_this_call = (remote["host"] in shared_hosts
+                            and remote["host"] not in audited_hosts)
+        if audit_this_call:
+            remote_cmd = _remote_cmd_with_home_audit(remote_cmd)
         identity = remote.get("identity")
         if identity:
             # key-based SSH (e.g. the gatekeeper — prod-critical, no shared
@@ -7056,6 +7173,56 @@ def cmd_push(args):
             stderr_out = ssh_result.stderr.strip()
             if stderr_out:
                 print(f"  [stderr] {stderr_out}")
+
+        # #347: report (never block) any home directory on this shared
+        # host with no matching REMOTE_HOSTS entry — the systemic guard
+        # against a newly-activated stream account silently never being
+        # registered as a push target. Advisory only: one unrelated stray
+        # /home entry (a not-yet-onboarded or test account) must never
+        # abort deployment to every OTHER, already-registered account.
+        # `audited_hosts` is marked HERE, only once the marker is
+        # positively confirmed present AND the listing itself passes the
+        # `_home_listing_trustworthy` positive control (adversarial-review
+        # MAJOR M1: the marker alone only proves the remote shell reached
+        # the audit, never that `ls -1 /home` actually succeeded — a
+        # hardened/root-owned /home fails silently at rc 0 with an EMPTY
+        # listing, which would otherwise read as "checked, clean" forever)
+        # — so a never-executed OR untrustworthy audit is never mistaken
+        # for "ran and found nothing".
+        if audit_this_call and _HOME_AUDIT_MARKER in (ssh_result.stdout or ""):
+            home_listing = _parse_home_audit_output(ssh_result.stdout)
+            if _home_listing_trustworthy(remote["user"], home_listing):
+                audited_hosts.add(remote["host"])
+                gap = unregistered_home_accounts(remote["host"], home_listing)
+                if gap:
+                    print(f"\n⚠ REGISTRATION GAP on {remote['host']}: /home has "
+                          f"account(s) with NO REMOTE_HOSTS entry: "
+                          f"{', '.join(gap)} — a stream account was activated "
+                          f"but never registered as a push target. Register "
+                          f"it: REMOTE_HOSTS + AUTHORITY_BY_USER + the "
+                          f"block-subdev-ssh-misuse.sh allow-list + watchdog's "
+                          f"_REDUCED_STREAM_USERS + notify's STREAM_NOTIFY_OWNER "
+                          f"(see #251/#263/#300/#326/#347's own onboarding "
+                          f"checklist).", file=sys.stderr)
+
+    # #347: any shared host that never got a TRUSTWORTHY audit this run
+    # (every connection failed before the appended `ls` ever ran, or every
+    # listing that did run failed the positive control) must be reported
+    # as UNVERIFIED, not silently read as "no gap found" — the exact
+    # false-negative the adversarial review flagged (both the original
+    # CRITICAL and the follow-up MAJOR M1). Every shared host gets
+    # `audit_this_call = True` on its FIRST-seen entry (audited_hosts
+    # starts empty), so any host still missing from `audited_hosts` here
+    # was genuinely never confirmed this run.
+    unverified_shared = shared_hosts - audited_hosts
+    if unverified_shared:
+        print(f"\n⚠ REGISTRATION AUDIT NOT VERIFIED this run for: "
+              f"{', '.join(sorted(unverified_shared))} — no connection ever "
+              f"returned a trustworthy /home listing for the shared host "
+              f"(either every attempt failed before reaching it, or the "
+              f"listing itself could not be trusted), so a registration gap "
+              f"there could exist and go unreported until a later push "
+              f"confirms it.", file=sys.stderr)
 
     # 3b. Deliver the meeting-analysis Soniox key to every subdev stream
     # account (#275) -- a true no-op when REMOTE_HOSTS has no such account

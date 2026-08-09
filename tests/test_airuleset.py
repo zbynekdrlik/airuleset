@@ -10474,6 +10474,427 @@ class TestCmdPushLocalInstallFailureContinuesToRemotes(TestCase):
         fake_install.assert_called_once()
 
 
+class TestSharedRemoteHostIps(TestCase):
+    """#347: a host backed by MORE than one REMOTE_HOSTS entry (the subdev
+    VPS, shared by 11 stream accounts today) is the exact class of box
+    where a brand-new Linux account can be hand-provisioned without ever
+    gaining its own registration entry -- david2/david3/david4 sat
+    unregistered for days before #326 caught it. A single-entry host
+    (dev2, gatekeeper) has no such gap by construction."""
+
+    def test_hosts_with_multiple_entries_are_shared(self):
+        fake = [
+            {"host": "1.1.1.1", "user": "a"},
+            {"host": "1.1.1.1", "user": "b"},
+            {"host": "2.2.2.2", "user": "c"},
+        ]
+        with m.patch.object(airuleset, "REMOTE_HOSTS", fake):
+            self.assertEqual(airuleset._shared_remote_host_ips(), {"1.1.1.1"})
+
+    def test_single_entry_hosts_are_not_shared(self):
+        fake = [{"host": "3.3.3.3", "user": "solo"}]
+        with m.patch.object(airuleset, "REMOTE_HOSTS", fake):
+            self.assertEqual(airuleset._shared_remote_host_ips(), set())
+
+    def test_empty_remote_hosts_is_safe(self):
+        with m.patch.object(airuleset, "REMOTE_HOSTS", []):
+            self.assertEqual(airuleset._shared_remote_host_ips(), set())
+
+    def test_real_remote_hosts_flags_the_subdev_vps_as_shared(self):
+        # control against the REAL REMOTE_HOSTS constant (no mocking) --
+        # proves this actually engages for the real fleet today, not just
+        # a hand-built fixture.
+        shared = airuleset._shared_remote_host_ips()
+        self.assertIn("100.118.174.27", shared,
+                       "the subdev VPS (11 REMOTE_HOSTS entries today) must "
+                       "be a shared host")
+
+
+class TestRemoteCmdWithHomeAudit(TestCase):
+    """#347: the /home listing must ride an ALREADY-happening ssh
+    connection (never a dedicated extra ssh call -- #341's fail2ban-risk
+    lesson: never re-probe the same host for a second, unrelated purpose)
+    -- and it must NEVER change the original install chain's own exit
+    code, since `;`-sequencing after the trailing `ls` would otherwise let
+    the LAST command's exit status silently overwrite a genuine
+    `git pull`/`install` failure with a false success."""
+
+    def test_marker_present_and_original_failing_exit_code_preserved(self):
+        cmd = airuleset._remote_cmd_with_home_audit("false")
+        r = subprocess.run(["bash", "-c", cmd], capture_output=True,
+                            text=True, timeout=10)
+        self.assertEqual(r.returncode, 1,
+                          "the ORIGINAL chain's failing exit code must survive "
+                          "the trailing audit, never the ls's own exit code")
+        self.assertIn(airuleset._HOME_AUDIT_MARKER, r.stdout)
+
+    def test_marker_present_and_original_successful_exit_code_preserved(self):
+        cmd = airuleset._remote_cmd_with_home_audit("true")
+        r = subprocess.run(["bash", "-c", cmd], capture_output=True,
+                            text=True, timeout=10)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(airuleset._HOME_AUDIT_MARKER, r.stdout)
+
+
+class TestParseHomeAuditOutput(TestCase):
+
+    def test_extracts_the_text_after_the_marker(self):
+        marker = airuleset._HOME_AUDIT_MARKER
+        stdout = "install ok\n%s\nalice\nbob\n" % marker
+        self.assertEqual(airuleset._parse_home_audit_output(stdout),
+                          "\nalice\nbob\n")
+
+    def test_missing_marker_returns_empty_string(self):
+        # e.g. ssh itself failed before the remote shell ever ran the
+        # audit -- not this guard's concern, cmd_push's own `failed`
+        # tracking already covers that.
+        self.assertEqual(airuleset._parse_home_audit_output("Permission denied"), "")
+
+    def test_none_stdout_returns_empty_string(self):
+        self.assertEqual(airuleset._parse_home_audit_output(None), "")
+
+
+class TestUnregisteredHomeAccounts(TestCase):
+    """#347: the pure diff function the push-time guard is built on --
+    which real /home directory names have NO REMOTE_HOSTS entry for that
+    EXACT host."""
+
+    def _hosts(self):
+        return [
+            {"host": "9.9.9.9", "user": "alice", "name": "a@subdev"},
+            {"host": "9.9.9.9", "user": "bob", "name": "b@subdev"},
+            {"host": "1.1.1.1", "user": "zed", "name": "zed@other"},
+        ]
+
+    def test_flags_a_home_dir_with_no_matching_entry(self):
+        with m.patch.object(airuleset, "REMOTE_HOSTS", self._hosts()):
+            gap = airuleset.unregistered_home_accounts(
+                "9.9.9.9", "alice\nbob\ncarol\n")
+        self.assertEqual(gap, ["carol"])
+
+    def test_no_gap_when_every_home_dir_is_registered(self):
+        with m.patch.object(airuleset, "REMOTE_HOSTS", self._hosts()):
+            gap = airuleset.unregistered_home_accounts(
+                "9.9.9.9", "alice\nbob\n")
+        self.assertEqual(gap, [])
+
+    def test_a_different_hosts_registration_does_not_count(self):
+        # "zed" is registered, but for host 1.1.1.1 -- irrelevant to 9.9.9.9
+        with m.patch.object(airuleset, "REMOTE_HOSTS", self._hosts()):
+            gap = airuleset.unregistered_home_accounts("9.9.9.9", "zed\n")
+        self.assertEqual(gap, ["zed"])
+
+    def test_blank_and_whitespace_lines_are_ignored(self):
+        with m.patch.object(airuleset, "REMOTE_HOSTS", self._hosts()):
+            gap = airuleset.unregistered_home_accounts(
+                "9.9.9.9", "alice\n\n   \nbob\n")
+        self.assertEqual(gap, [])
+
+    def test_empty_listing_reports_no_gap(self):
+        with m.patch.object(airuleset, "REMOTE_HOSTS", self._hosts()):
+            self.assertEqual(airuleset.unregistered_home_accounts("9.9.9.9", ""), [])
+            self.assertEqual(airuleset.unregistered_home_accounts("9.9.9.9", None), [])
+
+    def test_gap_is_sorted(self):
+        with m.patch.object(airuleset, "REMOTE_HOSTS", self._hosts()):
+            gap = airuleset.unregistered_home_accounts(
+                "9.9.9.9", "zoe\nalice\nmax\nbob\n")
+        self.assertEqual(gap, ["max", "zoe"])
+
+    def test_lost_and_found_is_never_reported_as_a_gap(self):
+        # #347 adversarial-review MINOR m2: "lost+found" is a filesystem
+        # artifact on a /home that is its own mount point, never a stream
+        # account -- reporting it on EVERY push forever trains the reader
+        # to ignore the one warning that will someday be real.
+        with m.patch.object(airuleset, "REMOTE_HOSTS", self._hosts()):
+            gap = airuleset.unregistered_home_accounts(
+                "9.9.9.9", "alice\nbob\nlost+found\n")
+        self.assertEqual(gap, [])
+
+    def test_a_host_entry_missing_the_user_key_does_not_crash(self):
+        # #347 adversarial-review THEORETICAL T3: unregistered_home_accounts
+        # guarded r.get("host") but indexed r["user"] unguarded in the same
+        # comprehension -- inconsistent, and a KeyError here would crash
+        # the whole push loop rather than degrading.
+        hosts = [{"host": "9.9.9.9"}]   # no "user" key at all
+        with m.patch.object(airuleset, "REMOTE_HOSTS", hosts):
+            gap = airuleset.unregistered_home_accounts("9.9.9.9", "alice\n")
+        self.assertEqual(gap, ["alice"])
+
+
+class TestHomeListingTrustworthy(TestCase):
+    """#347 adversarial-review MAJOR finding (M1): `_HOME_AUDIT_MARKER`
+    being present in stdout only proves the remote SHELL reached the
+    audit -- not that `ls -1 /home` actually SUCCEEDED. A hardened or
+    root-owned /home makes `ls` fail with its stderr redirected to
+    /dev/null, returning an EMPTY listing at rc 0 -- which the marker-only
+    check would read as "checked, no gap found" forever, permanently and
+    silently defeating the guard. Positive control: the very account this
+    ssh connection authenticated AS must appear in any genuine listing
+    (that same connection just `cd`'d into its own home's checkout)."""
+
+    def test_a_genuine_listing_containing_the_connecting_user_is_trusted(self):
+        self.assertTrue(
+            airuleset._home_listing_trustworthy("alice", "alice\nbob\ncarol\n"))
+
+    def test_an_empty_listing_is_never_trusted(self):
+        # the exact M1 failure shape: ls failed silently, marker still
+        # printed, listing is empty.
+        self.assertFalse(airuleset._home_listing_trustworthy("alice", ""))
+        self.assertFalse(airuleset._home_listing_trustworthy("alice", None))
+
+    def test_a_listing_missing_the_connecting_users_own_name_is_not_trusted(self):
+        # some other partial/corrupted listing that happens to have SOME
+        # names but not the one account this connection just proved exists
+        # (it authenticated as it) -- still untrustworthy.
+        self.assertFalse(
+            airuleset._home_listing_trustworthy("alice", "bob\ncarol\n"))
+
+
+class TestCmdPushSubdevRegistrationAudit(TestCase):
+    """#347: cmd_push must audit /home on any SHARED remote host (multiple
+    REMOTE_HOSTS entries pointing at the same box -- today only the subdev
+    VPS) exactly ONCE per push, riding an ALREADY-successful connection
+    (never a dedicated extra ssh call), and print a LOUD, non-blocking
+    warning naming any home directory with no matching REMOTE_HOSTS entry
+    for that host -- david2/david3/david4 sat unregistered for days before
+    #326 caught it live; this is the systemic guard against the SAME class
+    recurring for the next stream account."""
+
+    def _fake_hosts(self):
+        return [
+            {"name": "a@subdev", "host": "9.9.9.9", "user": "alice",
+             "repo_path": "~/x", "identity": "~/.secrets/k"},
+            {"name": "b@subdev", "host": "9.9.9.9", "user": "bob",
+             "repo_path": "~/x", "identity": "~/.secrets/k"},
+            {"name": "solo", "host": "1.2.3.4", "user": "solo",
+             "repo_path": "~/x"},
+        ]
+
+    def _fake_run(self, calls, homes):
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            if cmd and cmd[0] in ("ssh", "sshpass"):
+                remote_cmd = cmd[-1]
+                marker = airuleset._HOME_AUDIT_MARKER
+                if marker in remote_cmd:
+                    out = "ok\n%s\n%s" % (marker, homes)
+                    return m.Mock(returncode=0, stdout=out, stderr="")
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+        return fake_run
+
+    def _run_push(self, calls, homes):
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=self._fake_run(calls, homes)), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
+                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                                return_value=[]):
+            airuleset.cmd_push(args)
+
+    def test_audits_exactly_once_for_the_shared_host(self):
+        calls = []
+        self._run_push(calls, "alice\nbob\n")
+        audited = [c for c in calls if c and c[0] in ("ssh", "sshpass")
+                   and airuleset._HOME_AUDIT_MARKER in c[-1]]
+        self.assertEqual(len(audited), 1,
+                          "the /home listing must ride ONE existing "
+                          "connection, never a dedicated extra ssh call")
+
+    def test_the_solo_host_is_never_audited(self):
+        calls = []
+        self._run_push(calls, "alice\nbob\n")
+        solo_calls = [c for c in calls if c and c[0] in ("ssh", "sshpass")
+                      and "1.2.3.4" in c[-2]]
+        self.assertTrue(solo_calls)
+        self.assertFalse(any(airuleset._HOME_AUDIT_MARKER in c[-1]
+                              for c in solo_calls))
+
+    def test_reports_an_unregistered_home_account_loudly(self):
+        import io
+        import contextlib
+        calls = []
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self._run_push(calls, "alice\nbob\ncarol\n")
+        out = buf.getvalue()
+        self.assertIn("carol", out)
+        self.assertIn("9.9.9.9", out)
+
+    def test_no_warning_when_every_home_dir_is_registered(self):
+        import io
+        import contextlib
+        calls = []
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self._run_push(calls, "alice\nbob\n")
+        out = buf.getvalue()
+        self.assertNotIn("REGISTRATION GAP", out)
+
+    def test_the_audit_never_blocks_the_push(self):
+        # a reported gap is advisory-only -- the push must still succeed
+        # (exit code 0) so ONE unrelated stray home dir can never abort
+        # deployment to every OTHER already-registered, working account.
+        calls = []
+        self._run_push(calls, "alice\nbob\ncarol\n")   # must not raise
+
+
+class TestCmdPushSubdevRegistrationAuditRetryOnFailure(TestCase):
+    """#347 adversarial-review CRITICAL finding: `audited_hosts` must NOT
+    be marked before the ssh call even runs -- a first entry that fails
+    (timeout/auth) before the remote shell ever reaches the appended `ls`
+    would otherwise PERMANENTLY skip the audit for the rest of this push,
+    with the failure reading IDENTICALLY to "checked, no gap found"
+    (unregistered_home_accounts() on an empty/no-marker listing silently
+    returns []) -- exactly backwards for a guard whose only job is
+    detecting the opposite. Fix: only mark a host audited once the marker
+    is CONFIRMED present in real stdout, so a failed first connection lets
+    the NEXT entry sharing that host retry; and if EVERY entry for a
+    shared host fails, report that honestly as UNVERIFIED, never silently
+    as "no gap"."""
+
+    def _fake_hosts(self):
+        return [
+            {"name": "a@subdev", "host": "9.9.9.9", "user": "alice",
+             "repo_path": "~/x", "identity": "~/.secrets/k"},
+            {"name": "b@subdev", "host": "9.9.9.9", "user": "bob",
+             "repo_path": "~/x", "identity": "~/.secrets/k"},
+        ]
+
+    def test_first_entry_ssh_failure_lets_the_second_entry_retry_and_report(self):
+        import io
+        import contextlib
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            if cmd and cmd[0] in ("ssh", "sshpass"):
+                remote_cmd = cmd[-1]
+                marker = airuleset._HOME_AUDIT_MARKER
+                # alice's connection (audited first, since REMOTE_HOSTS
+                # order puts her first) fails BEFORE the remote shell ever
+                # ran anything -- a genuine ssh auth failure, so the
+                # marker never appears in stdout at all.
+                if "alice" in cmd[-2]:
+                    return m.Mock(returncode=255, stdout="",
+                                   stderr="alice@9.9.9.9: Permission denied")
+                if marker in remote_cmd:
+                    return m.Mock(returncode=0,
+                                   stdout="ok\n%s\nalice\nbob\ncarol\n" % marker,
+                                   stderr="")
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        args = m.Mock()
+        buf_err = io.StringIO()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
+                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                                return_value=[]), \
+                contextlib.redirect_stderr(buf_err):
+            with self.assertRaises(SystemExit):
+                # alice's own failed ssh call is a genuine deploy failure
+                # (unrelated to the audit) -- cmd_push exits 1 for THAT
+                # reason regardless of the audit outcome.
+                airuleset.cmd_push(args)
+        err = buf_err.getvalue()
+        self.assertIn("carol", err,
+                       "the SECOND entry sharing the host must retry the "
+                       "audit and still report the real gap")
+        self.assertIn("REGISTRATION GAP", err)
+        self.assertNotIn("REGISTRATION AUDIT NOT VERIFIED", err)
+
+    def test_every_entry_failing_reports_unverified_not_silently_clean(self):
+        import io
+        import contextlib
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            if cmd and cmd[0] in ("ssh", "sshpass"):
+                return m.Mock(returncode=255, stdout="",
+                               stderr="x@9.9.9.9: Permission denied")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        args = m.Mock()
+        buf_err = io.StringIO()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
+                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                                return_value=[]), \
+                contextlib.redirect_stderr(buf_err):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        err = buf_err.getvalue()
+        self.assertIn("REGISTRATION AUDIT NOT VERIFIED", err)
+        self.assertIn("9.9.9.9", err)
+        self.assertNotIn("REGISTRATION GAP", err,
+                          "an unverified host must never be reported as "
+                          "if a real gap-check happened")
+
+    def test_a_marker_present_but_empty_listing_is_never_trusted_as_clean(self):
+        # #347 adversarial-review MAJOR finding M1: the ssh call SUCCEEDS
+        # (rc=0), the marker DOES print, but `ls -1 /home` itself failed
+        # silently (e.g. a hardened/root-owned /home, stderr redirected to
+        # /dev/null) and produced NO names at all. The old marker-only
+        # check would trust this as "checked, clean" forever. The fix must
+        # refuse to trust it -- falling through to retry (here: no second
+        # entry, so UNVERIFIED) instead of silently reporting no gap.
+        import io
+        import contextlib
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            if cmd and cmd[0] in ("ssh", "sshpass"):
+                remote_cmd = cmd[-1]
+                marker = airuleset._HOME_AUDIT_MARKER
+                if marker in remote_cmd:
+                    # rc 0, marker present, but `ls` itself produced
+                    # nothing -- the exact M1 shape.
+                    return m.Mock(returncode=0, stdout="ok\n%s\n" % marker,
+                                   stderr="")
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        args = m.Mock()
+        buf_err = io.StringIO()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
+                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                                return_value=[]):
+            with contextlib.redirect_stderr(buf_err):
+                airuleset.cmd_push(args)   # must NOT raise (both ssh calls "succeed")
+        err = buf_err.getvalue()
+        self.assertIn("REGISTRATION AUDIT NOT VERIFIED", err,
+                       "an untrustworthy (self-absent) listing must fall "
+                       "through to the honest UNVERIFIED report, never a "
+                       "silent 'no gap found'")
+        self.assertNotIn("REGISTRATION GAP", err)
+
+
 class TestBlockTestSkipsHook(TestCase):
     """hooks/block-test-skips.sh (issue #10) — mechanical enforcement of
     test-strictness.md's banned skip/tautology syntax. Only ADDED lines
