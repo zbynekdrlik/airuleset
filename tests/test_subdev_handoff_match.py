@@ -109,6 +109,17 @@ class TestBackwardCompatibleDefaultMode(TestCase):
                           "Ready for gatekeeper cross-fork review.")
         self.assertEqual(rc, 1)
 
+    def test_a_hyphen_glued_gatekeeper_opening_is_still_excluded(self):
+        # F1, adversarial review of #331: the exclusion used to be written
+        # as "next char after GATEKEEPER is not a literal hyphen", so ANY
+        # hyphenated opening (**GATEKEEPER-BOUNCE**, not just the one
+        # legitimate **GATEKEEPER-ACTION:** marker) escaped it and would
+        # re-add ready-for-review on a gatekeeper's own comment. Live-
+        # reproduced against the pre-fix shipped code: rc=0 (bug).
+        rc, out, _ = run("**GATEKEEPER-BOUNCE**\n"
+                          "READY-FOR-REVIEW: x")
+        self.assertEqual(rc, 1)
+
 
 class TestGatekeeperActionMode(TestCase):
     def test_line_start_marker_matches(self):
@@ -197,6 +208,17 @@ class TestRealCorpusFixtures(TestCase):
             "Ready for gatekeeper cross-fork review.\n"
         )
         rc, out, _ = run(body)
+        self.assertEqual(rc, 0)
+
+    def test_a_line_start_gatekeeper_mention_past_line_one_does_not_exclude_a_real_marker(self):
+        # F3, adversarial review of #331: the exclusion is deliberately
+        # scoped to FIRST_LINE only, but no fixture covered the case that
+        # PROVES the scoping matters -- a mutant swapping FIRST_LINE for
+        # BODY in the exclusion grep passed the whole suite unnoticed.
+        # A genuine hand-off that later quotes/references a gatekeeper
+        # verdict on line >= 2 must still label.
+        rc, out, _ = run("READY-FOR-REVIEW: done\n"
+                          "**GATEKEEPER quoted verdict below")
         self.assertEqual(rc, 0)
 
     def test_a_real_gatekeeper_bounce_review_never_matches(self):
