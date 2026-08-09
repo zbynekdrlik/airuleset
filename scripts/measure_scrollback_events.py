@@ -311,6 +311,14 @@ def run_compact_arm(sock, base_dir, n_lines, model):
 
 
 def teardown(sock, root, keep):
+    """#291 adversarial review, M2: `shutil.rmtree(..., ignore_errors=True)`
+    sometimes silently leaves `root` behind even on an otherwise fully
+    successful run (observed twice live, root cause not chased down --
+    a plausible ENOTEMPTY from something under the tree racing the walk,
+    e.g. the just-killed claude process's own async config writes). `root`
+    always holds a scratch-profile COPY of the real credentials file, so
+    a silent leftover is a lingering credential copy, not just clutter.
+    Retry once, then WARN LOUDLY (never silently) if it is still there."""
     try:
         msh.tmux(sock, "kill-server", timeout=10)
     except Exception as e:
@@ -318,6 +326,12 @@ def teardown(sock, root, keep):
     if not keep:
         import shutil
         shutil.rmtree(root, ignore_errors=True)
+        if Path(root).exists():
+            shutil.rmtree(root, ignore_errors=True)
+        if Path(root).exists():
+            print(f"teardown: LEFTOVER scratch dir survived two rmtree attempts "
+                  f"-- still holds a credential-copy scratch profile: {root}",
+                  file=sys.stderr)
 
 
 def main():
