@@ -44,6 +44,17 @@ Every `❓ NEEDS YOU` / `❓ ASKED` turn is HARD-GATED by `stop-check-question-q
 
 2. **ONE ❓ ping = ONE decision.** Never `(1) …? (2) …? (3) …?` piles, never *"odpovedz na ktorékoľvek z 3, aj postupne"*. The Discord REPLY to a ping is typed back into the asking session as ONE prompt (watchdog job 7) — a multi-question ping is UNANSWERABLE (which of the 3 does the reply answer?). Multiple pending questions → ask the FIRST one now (its own structured block), track the rest on their tickets (`needs-answer`), and ask the NEXT one after the first answer arrives — small sequential questions are exactly what the user wants (the "Ask in SMALL parts" section below). `(1)/(2)` describing STEPS with a single final question is fine.
 
+#### Nezodpovedaná otázka po inej konverzácii sa kladie NANOVO a CELÁ — zákaz odvolávok do histórie
+
+**The user does not search your scrollback for what an old question was about — this is the same self-contained principle above, applied to a question that was ALREADY asked once and is still open.** Repeated complaint (naposledy 2026-07-25): the model refers back to an earlier question instead of restating it — *"jediné otvorené rozhodnutie je ultracode (pýtal som sa skôr)"* — and expects the user to remember or dig up what that was. The user's own words: *"dokolečka ťa žiadam, aby si sa neodvolával na nejaké staré otázky niekde v histórii… vždy sa musíš nanovo spýtať celú otázku s úvodom a nie chcieť odo mňa, aby som v tvojej mega dlhej histórii hľadal, o čo ti vlastne ide."* An allusion reaches the phone with no briefing, no options, and often no ping at all — it is the equivalent of never having asked.
+
+**Two branches — do not confuse them (`message-status-marker.md` documents both):**
+
+- **Re-poke with NO user input since the last ask** (a `/goal` evaluator or task-notification re-fires the same blocked turn, nothing changed) → repeat the previous `❓` line **VERBATIM, byte-identical**. The device-ping dedup keys on an exact match, so this alone stays silent — see `message-status-marker.md`.
+- **ANY conversation happened in between** (the user answered something else, a different ticket got worked, a turn with real user input passed) → the question is **NEW** and is asked **NANOVO A CELÁ**: the full `**Otázka — projekt …:**` block again — briefing, options, `❓` line — exactly as if asking for the first time. It is a genuinely new ask and MUST ping again.
+
+**Banned formulations (and every rewording) — a reference INSTEAD OF the full block:** "pýtal som sa skôr", "ako som spomínal vyššie", "ako som už písal/uviedol", "tá otázka o X stále platí", "jediné otvorené rozhodnutie je X (pýtal som sa)", "vráť sa k mojej otázke o…", "stále čakám na odpoveď ohľadom X" — used in place of restating the question. Adding a `**Otázka — projekt …:**` head line to one of these does NOT satisfy the rule if the briefing itself is still just a pointer to history instead of the real content; write it fresh, as if the user has genuinely never seen it (they may not have — they don't watch the terminal). Hook-enforced: `stop-check-question-quality.sh` scans the delivered block for these phrases (Check 5) whenever it is not a byte-identical verbatim repeat.
+
 #### Anti-pattern #2 — assumed context + unexplained cross-project link (this exact question — BANNED)
 
 > *Ticket #137: nasadenie novej OBS knižnice (obs.dll) reštartne OBS, čo predtým rozbíjalo stream. Skutočnú príčinu už vyriešil a živo nasadil susedný projekt restreamer (jeho #255, zmergované). Chýba len živé potvrdenie na rigu. Čo s #137?*

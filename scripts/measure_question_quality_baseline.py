@@ -25,9 +25,15 @@ Usage::
 
     python3 scripts/measure_question_quality_baseline.py [--limit N] [--json]
 
-Read-only: only ever reads `~/.claude/projects/**/*.jsonl` and shells out to
-the (also read-only, non-blocking) hook script. Never writes anything other
-than the report it prints.
+Read-only for its transcript source: only ever READS `~/.claude/projects/**/*.jsonl`.
+It shells out to the real hook script per sample -- that hook is itself
+non-blocking and side-effect-light, but it DOES persist one small per-call
+retry-marker file under `/tmp` on every BLOCKED classification
+(`/tmp/airuleset-question-quality-block-<session_id>`); since this script
+mints a FRESH, never-reused session id per sample (so the hook's own
+per-session retry cap and presence marker never leak across samples), that
+marker is immediately cleaned up after each call rather than left to
+accumulate -- see `classify()`.
 """
 import argparse
 import glob
@@ -42,12 +48,35 @@ import uuid
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO_ROOT, "hooks", "stop-check-question-quality.sh")
 
-# Same marker shape the hook itself keys on (ASKED_RX / the bare-❓-last-line
-# form) -- broad on purpose: this measures every REAL attempt at a ❓
-# question, well-formed or not, not just the ones that already comply.
-QUESTION_MARKER_RE = re.compile(
-    r"❓[\s]*\**[\s]*(NEEDS\s+YOU|ASKED)[\s]*\**[\s]*:", re.IGNORECASE
+# Mirrors the REAL hook's own two-branch marker precedence (grepped from
+# hooks/stop-check-question-quality.sh's ASKED_RX + its bare-last-line
+# check, not guessed): a `❓ ... ASKED:`-shaped body line ANYWHERE in the
+# message, OR a bare `❓` (optionally preceded by markdown decoration
+# chars `*_>~-`) starting the message's own LAST non-blank line -- the
+# hook's `LAST_LINE` branch does NOT require the literal words "NEEDS YOU"
+# to be present, only that the marker glyph itself opens that line. A
+# pre-filter narrower than this (e.g. requiring "NEEDS YOU"/"ASKED"
+# literally) would silently UNDER-sample: a real historical turn whose
+# closing line the hook recognizes as a question (any bare `❓ ...` last
+# line) would never even reach the hook for classification.
+_ASKED_ANYWHERE_RE = re.compile(
+    r"❓[\s]*\**[\s]*ASKED[\s]*\**[\s]*:", re.IGNORECASE
 )
+_BARE_LAST_LINE_RE = re.compile(r"^[\s]*[*_>~-]*[\s]*❓")
+
+
+def _is_question_turn(text):
+    """True iff `text` matches the SAME marker shape
+    `stop-check-question-quality.sh` itself uses to decide "is this a
+    question turn at all" -- reused as the sampling pre-filter so the
+    population fed to `classify()` matches the population the real hook
+    would ever gate in production, neither wider nor narrower."""
+    if _ASKED_ANYWHERE_RE.search(text):
+        return True
+    non_blank = [ln for ln in text.splitlines() if ln.strip()]
+    if not non_blank:
+        return False
+    return bool(_BARE_LAST_LINE_RE.match(non_blank[-1]))
 
 
 def assistant_texts(path):
@@ -80,7 +109,7 @@ def assistant_texts(path):
                     )
                 else:
                     continue
-                if QUESTION_MARKER_RE.search(text or ""):
+                if _is_question_turn(text or ""):
                     yield text
     except OSError:
         return
@@ -96,9 +125,20 @@ def classify(text):
     call. Returns (blocked: bool, reason: str|None) -- reason is the hook's
     own REASON line when blocked, else None. Never raises; a hook failure
     (missing jq, timeout, ...) is reported as "unmeasurable", not guessed
-    either way."""
+    either way.
+
+    Cleans up the hook's OWN per-session `/tmp` retry marker
+    (`/tmp/airuleset-question-quality-block-<session_id>`) immediately
+    after the call. Since every call here mints a fresh, never-reused
+    session id, that marker (written by the hook on a BLOCK verdict) never
+    gets a later same-session call to trigger the hook's own self-cleanup
+    paths -- so a full-corpus run would otherwise leave one leftover file
+    per blocked sample. Best-effort: a removal failure is logged, never
+    silently swallowed, and is not fatal to the measurement.
+    """
+    sid = "qbaseline-" + uuid.uuid4().hex[:12]
     payload = json.dumps({
-        "session_id": "qbaseline-" + uuid.uuid4().hex[:12],
+        "session_id": sid,
         "last_assistant_message": text,
     })
     try:
@@ -107,6 +147,17 @@ def classify(text):
         )
     except (OSError, subprocess.SubprocessError):
         return None, "unmeasurable (hook invocation failed)"
+    finally:
+        marker_path = "/tmp/airuleset-question-quality-block-%s" % sid
+        if os.path.exists(marker_path):
+            try:
+                os.remove(marker_path)
+            except OSError as exc:
+                print(
+                    "measure_question_quality_baseline: could not remove "
+                    "retry marker %r: %s" % (marker_path, exc),
+                    file=sys.stderr,
+                )
     out = (r.stdout or "").strip()
     if not out:
         return False, None

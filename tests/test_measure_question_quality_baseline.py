@@ -78,6 +78,33 @@ class TestAssistantTextExtraction(TestCase):
     def test_missing_file_yields_nothing_never_raises(self):
         self.assertEqual(list(mqq.assistant_texts("/no/such/path.jsonl")), [])
 
+    def test_bare_last_line_question_with_neither_needs_you_nor_asked_is_sampled(self):
+        # mirrors the REAL hook's own second branch (a bare ❓ opening the
+        # LAST non-blank line, with no "NEEDS YOU"/"ASKED" keyword
+        # required at all) -- a pre-filter requiring those literal words
+        # would silently UNDER-sample this real, hook-recognized shape
+        # (#95 item 9 adversarial review, 🟡 finding).
+        bare_last_line = "Nejaká rozpracovaná otázka bez šablóny.\n\n❓ mažem to súbor?"
+        path = self._write_transcript([
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": bare_last_line}
+            ]}},
+        ])
+        texts = list(mqq.assistant_texts(path))
+        self.assertEqual(texts, [bare_last_line])
+
+    def test_a_message_where_the_glyph_appears_but_not_as_a_real_marker_is_not_sampled(self):
+        path = self._write_transcript([
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "The plan is done, no ❓ decision needed here at all."}
+            ]}},
+        ])
+        # "❓" appears mid-sentence but does not open the last non-blank
+        # line, and is not an ASKED-shaped body line either -- neither of
+        # the real hook's two branches would recognize this as a question
+        # turn, so it must not be sampled.
+        self.assertEqual(list(mqq.assistant_texts(path)), [])
+
 
 class TestReasonBucketing(TestCase):
     def test_each_real_hook_reason_buckets_correctly(self):
