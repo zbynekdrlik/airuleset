@@ -661,6 +661,14 @@ answer to "which issues share one round" — this ticket found no gap in either.
    > 5. `git worktree remove` each worker's worktree once its branch is safely merged (or leave it
    >    for salvage per `salvage-before-discarding-work.md` if anything looked wrong — never delete
    >    a worktree whose branch you have not yet confirmed merged).
+   > A worker KILLED mid-round (API error / session limit) leaves a worktree + branch this step
+   > never reaches at all (its branch was never merged) — that leak is now cleaned SYSTEMICALLY,
+   > not by you: `sweep_stale_worktrees()` (#345) runs fleet-wide, non-fatal, on every
+   > `install`/`push` (cadence-gated, at most every few hours), reclaiming only a worktree that is
+   > unlocked, has ZERO commits ahead of the repo's own base, and whose tree `git worktree remove`
+   > itself confirms is clean — never `--force`, never `main`/`dev`. You do not need to hunt for
+   > these by hand; if you want one run immediately (e.g. to reclaim disk before dispatching a big
+   > round), `airuleset.py sweep-worktrees [--dry-run]` bypasses the cadence gate on demand.
    > Then run the SAME per-member verification bullets as the serial-fallback box above, against
    > the ONE round PR/push instead of a per-worker one, before writing `docs/autopilot-log.md`.
    > **Fire the per-ticket run-card yourself, for EACH surviving member, right after this ONE

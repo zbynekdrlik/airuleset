@@ -32,7 +32,6 @@ to catch it).
 """
 
 import json
-import os
 import subprocess
 import sys
 import unittest
@@ -147,7 +146,12 @@ class TestDiscoverStaleWorktrees(unittest.TestCase):
         self.assertIn("ahead", row["reason"].lower())
 
     def test_a_second_worktree_literally_checked_out_to_main_is_protected(self):
-        repo = _mkrepo(self.root, "proj")
+        # `main` cannot be checked out a SECOND time while the primary
+        # worktree already has it -- create the repo on a differently-
+        # named default branch, then check `main` out only in the second
+        # worktree (never in the primary).
+        repo = _mkrepo(self.root, "proj", base_branch="trunk")
+        _git(["branch", "main"], repo)
         wt = repo / ".claude" / "worktrees" / "second-main"
         wt.parent.mkdir(parents=True, exist_ok=True)
         _git(["worktree", "add", str(wt), "main"], repo)

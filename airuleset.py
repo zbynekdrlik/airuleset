@@ -3527,6 +3527,310 @@ def cmd_purge_targets(args):
     print("Log: %s" % TARGET_PURGE_LOG_PATH)
 
 
+# --- Stale worktree sweep (#345) --------------------------------------------
+# The harness auto-removes a worker's `.claude/worktrees/agent-<id>` ONLY on
+# a NORMAL agent exit -- a worker killed by an API error / session limit
+# leaves the worktree registered (locked forever, so even `git branch -D`
+# refuses) with nothing that ever deletes its branch once someone removes
+# the directory by hand. A round's own close-out
+# (`skills/autopilot/SKILL.md` ROUND INTEGRATION step 5) only ever cleans
+# branches it actually merged -- never a sibling round's dead leftovers.
+# Dead workers therefore leak one worktree + one branch each, unboundedly,
+# fleet-wide. This reuses #315's own `purge_stale_tier0_targets` shape
+# EXACTLY: a plain, cadence-gated function (its own state file, never the
+# 60s watchdog timer -- the FREEZE forbids a new job, and rate-limiting a
+# plain function call needs none) wired as a non-fatal step inside
+# `cmd_install()`, plus a manual/testable CLI entry point.
+
+STALE_WORKTREE_LOG_PATH = CLAUDE_DIR / "worktree-sweep.log"
+STALE_WORKTREE_STATE_PATH = CLAUDE_DIR / "worktree-sweep-state.json"
+STALE_WORKTREE_MIN_INTERVAL_S = 6 * 3600      # env AIRULESET_WORKTREE_SWEEP_INTERVAL_S
+_STALE_WORKTREE_PROTECTED_BRANCHES = ("main", "dev", "master")
+
+
+def _worktree_git(args, cwd, timeout: int = 15):
+    """`git -C <cwd> <args>` -- stdout text on rc==0, else None (never
+    guess; every caller treats None as "skip this repo/candidate", never
+    as a false positive or negative)."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "-C", str(cwd)] + list(args),
+                           capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _worktree_porcelain_entries(repo_root, git_run=None):
+    """Parse `git worktree list --porcelain` -- one dict per registered
+    worktree: {"path", "branch" (bare name, no `refs/heads/`, None if
+    detached/bare), "locked": bool}. Entry 0 is ALWAYS the PRIMARY
+    checkout -- callers must skip it by INDEX, never by path-matching (a
+    renamed/symlinked primary checkout must still be protected). Returns
+    [] on any read failure -- a repo git can't be read from is simply
+    skipped, never guessed at."""
+    git_run = git_run or _worktree_git
+    out = git_run(["worktree", "list", "--porcelain"], repo_root)
+    if out is None:
+        return []
+    entries = []
+    cur = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            if cur is not None:
+                entries.append(cur)
+            cur = {"path": line[len("worktree "):], "branch": None, "locked": False}
+        elif cur is None:
+            continue
+        elif line.startswith("branch "):
+            ref = line[len("branch "):]
+            cur["branch"] = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else None
+        elif line == "locked" or line.startswith("locked "):
+            cur["locked"] = True
+    if cur is not None:
+        entries.append(cur)
+    return entries
+
+
+def _worktree_sweep_base_branch(repo_root, git_run=None):
+    """`dev` if a LOCAL `dev` branch exists, else `main`, else `master`;
+    `None` if none of the three exist (caller skips the whole repo).
+
+    Deliberately NOT the ticket's own literal "ahead of main" wording --
+    `skills/autopilot/SKILL.md`'s ROUND INTEGRATION step 2 documents a
+    worktree worker as forked from "local main for a local-merge repo,
+    local dev for a dev->main PR repo" -- most fleet repos use the
+    two-branch dev+main flow (two-branch-workflow.md), where dev is
+    normally AHEAD of main by whatever unreleased work is in flight.
+    Comparing against bare main would count every one of those in-flight
+    dev commits as "the worker's own real work" and permanently skip
+    cleanup on every such repo. Preferring dev when present is strictly
+    SAFER, never less safe, than bare main (dev >= main in a well-behaved
+    two-branch repo, so 0-ahead-of-dev implies 0-ahead-of-main too, never
+    the reverse) -- it only makes the sweep MORE conservative where it
+    matters. For a single-branch repo (airuleset itself -- no local
+    `dev`) this resolves to plain `main`, matching the ticket's literal
+    wording and the one-off cleanup's own already-used criterion exactly.
+    """
+    git_run = git_run or _worktree_git
+    for name in ("dev", "main", "master"):
+        if git_run(["rev-parse", "--verify", "--quiet", name], repo_root) is not None:
+            return name
+    return None
+
+
+def discover_stale_worktrees(home=None, git_run=None):
+    """Every worktree, across every managed repo under `home`, that is
+    SAFE to reclaim -- a list of dicts {"path", "branch", "repo",
+    "reason", "base"}. `reason` is `None` for a genuine candidate, else
+    WHY it was excluded (a `--dry-run` report needs both). Pure
+    discovery+classification -- `sweep_stale_worktrees` is the only
+    function that ever mutates anything.
+
+    Safety criteria (#345, NON-NEGOTIABLE):
+      - never worktree-list entry 0 (the primary checkout);
+      - never a branch literally named main/dev/master, wherever found;
+      - never a LOCKED worktree (an active worker holds it);
+      - only a branch with ZERO commits ahead of `_worktree_sweep_base_branch`
+        -- a branch carrying real, unmerged work is NEVER a candidate
+        (salvage-before-discarding.md).
+    Deliberately NOT filtered by branch-NAME shape (e.g.
+    `worktree-agent-*`) -- the ticket's own evidence names five stale
+    worktrees from the OLD custom-naming convention that predates
+    `isolation: "worktree"` becoming the default; the objective safety
+    criteria above are branch-name-agnostic and equally safe regardless
+    of naming convention.
+    """
+    git_run = git_run or _worktree_git
+    out = []
+    for root in _checkout_roots(home):
+        if not (Path(root) / ".git").is_dir():
+            continue          # a worktree/submodule itself -- never a primary repo
+        git_run(["worktree", "prune"], root)   # dangling admin-only entries -- always safe
+        entries = _worktree_porcelain_entries(root, git_run=git_run)
+        if len(entries) <= 1:
+            continue          # nothing but the primary checkout
+        base = None
+        base_resolved = False
+        for i, e in enumerate(entries):
+            if i == 0:
+                continue       # the primary worktree -- never a candidate
+            branch = e.get("branch")
+            row = {"path": e.get("path"), "branch": branch, "repo": root, "reason": None}
+            if branch in _STALE_WORKTREE_PROTECTED_BRANCHES:
+                row["reason"] = "protected branch name (%s)" % branch
+                out.append(row)
+                continue
+            if e.get("locked"):
+                row["reason"] = "locked (active worker)"
+                out.append(row)
+                continue
+            if branch is None:
+                row["reason"] = "detached HEAD -- never guessed at"
+                out.append(row)
+                continue
+            if not base_resolved:
+                base = _worktree_sweep_base_branch(root, git_run=git_run)
+                base_resolved = True
+            if not base:
+                row["reason"] = "no dev/main/master to compare against"
+                out.append(row)
+                continue
+            ahead = git_run(["rev-list", "--count", "%s..%s" % (base, branch)], root)
+            if ahead is None:
+                row["reason"] = "could not measure commits ahead of %s" % base
+                out.append(row)
+                continue
+            ahead = ahead.strip()
+            if ahead != "0":
+                row["reason"] = "%s commit(s) ahead of %s -- has real work" % (ahead, base)
+                out.append(row)
+                continue
+            row["base"] = base
+            out.append(row)     # reason stays None -- genuine candidate
+    return out
+
+
+def _log_stale_worktree_results(results, log_path, now, dry_run: bool):
+    import time as _time
+    lines = []
+    ts = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(now))
+    for r in results:
+        if r.get("path") is None:
+            lines.append("%s ERROR %s" % (ts, r.get("reason", "")))
+            continue
+        if dry_run:
+            tag = "WOULD-REMOVE" if not r.get("reason") or "dry" in r.get("reason", "") else "SKIP"
+        else:
+            tag = "REMOVED" if r.get("removed") else "SKIP"
+        lines.append("%s %s %s branch=%s repo=%s -- %s" % (
+            ts, tag, r.get("path"), r.get("branch"), r.get("repo"), r.get("reason", "")))
+    if not lines:
+        return
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        print("  worktree-sweep: could not write log %s: %s" % (log_path, e), file=sys.stderr)
+
+
+def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=None,
+                          state_path=None, force: bool = False, git_run=None,
+                          candidates=None):
+    """Reclaim every stale worktree `discover_stale_worktrees` classifies
+    as a genuine candidate (`reason is None`) -- `git worktree remove
+    <path>` NEVER passed `--force` (a dirty/untracked-file tree makes git
+    itself refuse; that refusal is reported, never overridden), and only
+    once THAT succeeds is the branch deleted via `git branch -D <branch>`.
+
+    `-D` (force) here is safe and deliberate, not the same `--force` the
+    ticket forbids on `worktree remove`: `discover_stale_worktrees`
+    already independently proved zero commits ahead of the resolved
+    base via `git rev-list --count` -- a MORE precise, base-aware check
+    than `-d`'s own "merged into whatever HEAD the primary checkout
+    happens to have" heuristic, which would depend on an unrelated
+    coincidence (what ref the primary checkout is on at sweep time). The
+    worktree directory is already gone by the time this runs, so nothing
+    can add a new commit to the branch in between.
+
+    Cadence-gated via its own state file (`STALE_WORKTREE_STATE_PATH`)
+    mirroring #315's `purge_stale_tier0_targets` exactly -- never leans
+    on the 60s watchdog timer (FREEZE: no new job). `force=True` (the
+    CLI's own manual invocation) or `dry_run=True` always bypasses it.
+    """
+    import time as _time
+    now = _time.time() if now is None else now
+    log_path = Path(log_path) if log_path else STALE_WORKTREE_LOG_PATH
+    state_path = Path(state_path) if state_path else STALE_WORKTREE_STATE_PATH
+    git_run = git_run or _worktree_git
+
+    if not force and not dry_run:
+        try:
+            st = json.loads(state_path.read_text())
+            last = float(st.get("last_run", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            last = 0
+        if last > now:
+            last = 0            # a future-dated stamp must not wedge the gate forever
+        interval = STALE_WORKTREE_MIN_INTERVAL_S
+        try:
+            interval = int(os.environ.get("AIRULESET_WORKTREE_SWEEP_INTERVAL_S", interval))
+        except ValueError:
+            interval = STALE_WORKTREE_MIN_INTERVAL_S
+        if now - last < interval:
+            return []
+
+    results = []
+    discovery_failed = False
+    if candidates is None:
+        try:
+            candidates = discover_stale_worktrees(home, git_run=git_run)
+        except Exception as e:
+            candidates = []
+            discovery_failed = True
+            results.append({"path": None, "removed": False,
+                            "reason": "discovery error: %s" % e})
+
+    for c in candidates:
+        entry = dict(c)
+        entry["removed"] = False
+        if c.get("reason"):
+            results.append(entry)
+            continue
+        if dry_run:
+            entry["reason"] = "would remove (dry-run)"
+            results.append(entry)
+            continue
+        rc = git_run(["worktree", "remove", c["path"]], c["repo"])
+        if rc is None:
+            entry["reason"] = "worktree remove refused (dirty tree or in use) -- left in place"
+            results.append(entry)
+            continue
+        entry["removed"] = True
+        entry["reason"] = "removed"
+        bd = git_run(["branch", "-D", c["branch"]], c["repo"])
+        entry["branch_deleted"] = bd is not None
+        results.append(entry)
+
+    _log_stale_worktree_results(results, log_path, now, dry_run)
+
+    if not dry_run and not discovery_failed:
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"last_run": now}))
+        except OSError as e:
+            print("  worktree-sweep: could not write state %s: %s" % (state_path, e), file=sys.stderr)
+
+    return results
+
+
+def cmd_sweep_worktrees(args):
+    """`airuleset.py sweep-worktrees [--dry-run]` -- manual/testable entry
+    point for the #345 sweep. Always `force=True` (bypasses the cadence
+    gate that guards the automatic install/push wiring -- a deliberate
+    manual call should never be silently skipped)."""
+    print("airuleset sweep-worktrees")
+    print("=" * 50)
+    dry_run = bool(getattr(args, "dry_run", False))
+    results = sweep_stale_worktrees(dry_run=dry_run, force=True)
+    for r in results:
+        if r.get("path") is None:
+            print("  ERROR: %s" % r.get("reason", ""))
+            continue
+        if r.get("removed"):
+            tag = "WOULD REMOVE" if dry_run else "REMOVED"
+        else:
+            tag = "skip"
+        print("  %s: %s (branch %s, repo %s) -- %s" % (
+            tag, r["path"], r.get("branch"), r.get("repo"), r.get("reason", "")))
+    removed = [r for r in results if r.get("removed")]
+    print()
+    verb = "would be " if dry_run else ""
+    print("%d worktree(s) %sremoved." % (len(removed), verb))
+    print("Log: %s" % STALE_WORKTREE_LOG_PATH)
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     print("airuleset install")
@@ -3830,6 +4134,23 @@ def cmd_install(args):
                   f"{_human_size(total)} reclaimed (log: {TARGET_PURGE_LOG_PATH})")
     except Exception as e:
         print(f"  target/ purge error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 9. Stale worktree sweep: reclaim dead-worker leaks fleet-wide (#345)
+    # A worker killed mid-run by an API error / session limit leaves its
+    # `.claude/worktrees/agent-<id>` worktree + branch registered forever —
+    # a round's own close-out only ever cleans branches it MERGED, never a
+    # sibling round's dead leftovers. Cadence-gated to at most once per
+    # STALE_WORKTREE_MIN_INTERVAL_S via sweep_stale_worktrees' own state
+    # file, so this doesn't add a git-porcelain sweep to every push either —
+    # non-fatal, best-effort, matches every other step above.
+    try:
+        sweep_results = sweep_stale_worktrees()
+        removed = [r for r in sweep_results if r.get("removed")]
+        if removed:
+            print(f"  Removed {len(removed)} stale worktree(s)/branch(es) "
+                  f"(log: {STALE_WORKTREE_LOG_PATH})")
+    except Exception as e:
+        print(f"  worktree sweep error (non-fatal): {e}", file=sys.stderr)
 
     print()
     if install_failed:
@@ -10520,6 +10841,14 @@ def main():
     p_purge.add_argument("--max-age-days", dest="max_age_days", type=int, default=None,
                          help=f"Age threshold in days (default {TARGET_PURGE_MAX_AGE_DAYS_DEFAULT})")
 
+    # --- Stale worktree sweep: manual/testable entry point (#345) ---------
+    p_sweep_wt = sub.add_parser(
+        "sweep-worktrees",
+        help="Reclaim dead-worker worktrees + branches (0 commits ahead, "
+             "unlocked, clean) fleet-wide (#345)")
+    p_sweep_wt.add_argument("--dry-run", dest="dry_run", action="store_true",
+                            help="Report what would be removed without deleting anything")
+
     # --- File-Drop: share (give the user a clickable LAN URL) + filedrop (control)
     p_share = sub.add_parser(
         "share", help="Copy a file into the file-drop server and print its LAN URL")
@@ -10911,6 +11240,7 @@ SUBCOMMANDS = {
     "status": cmd_status,
     "push": cmd_push,
     "purge-targets": cmd_purge_targets,
+    "sweep-worktrees": cmd_sweep_worktrees,
     "share": cmd_share,
     "filedrop": cmd_filedrop,
     "notify": cmd_notify,
