@@ -7706,46 +7706,55 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
     Scoped STRICTLY to AUTHORITY_BY_USER's keys -- dev1/dev2/gatekeeper are
     the human's own interactive login and are NEVER touched.
 
-    ONE-TIME ONLY, ever, per account -- gated on `sentinel_path` (default
-    `STREAM_TMUX_BOOTSTRAP_SENTINEL`). An adversarial review of the first
-    version of this fix caught the real defect: "never touches an EXISTING
-    session" alone is not enough, because a session that a human
+    ONE-TIME CREATE ONLY, ever, per account -- gated on `sentinel_path`
+    (default `STREAM_TMUX_BOOTSTRAP_SENTINEL`). An adversarial review of the
+    first version of this fix caught the real defect: "never touches an
+    EXISTING session" alone is not enough, because a session that a human
     DELIBERATELY killed (out of token budget, done for the day, a VPS
     reboot) also reads as "doesn't exist" to has-session -- so the OLD code
     would silently re-create the session and auto-launch claude into it on
     the very next `push`, which is exactly the standing, angry, repeated
     user complaint this repo's own memory already records ('never touch a
     session the user deliberately stopped'). The sentinel is written the
-    MOMENT this function makes its one real decision (right after resolving
-    `exists`, before creating anything) -- so even a failed first attempt
-    never retries automatically, and a session that later disappears (killed
-    on purpose) is never resurrected. A genuinely UNREACHABLE tmux (`exists
-    is None`) does NOT write the sentinel -- nothing was decided, so a later
-    push may still get the very first real attempt."""
+    MOMENT this function makes its one real CREATE-OR-NOT decision (right
+    after resolving `exists`, before creating anything) -- so even a failed
+    first attempt never retries automatically, and a session that later
+    disappears (killed on purpose) is never resurrected. A genuinely
+    UNREACHABLE tmux (`exists is None`) does NOT write the sentinel --
+    nothing was decided, so a later push may still get the very first real
+    attempt.
+
+    #309: the sentinel gates ONLY that create decision -- it does NOT gate
+    the #308 cwd-mismatch probe below. Before #309, the sentinel-exists
+    check was the function's very FIRST statement, so the probe was
+    structurally unreachable for any account already bootstrapped by a
+    prior push (i.e. the whole existing fleet -- #308's own fix had been
+    inert in production for all of them). The probe is read-only (never
+    kills/re-cwds/sends keys, per #308's own rule below) and cheap, so it
+    now runs on EVERY call whenever a session exists, bootstrapped or not."""
     user = user or _current_user()
     if user not in AUTHORITY_BY_USER:
         return None
     sentinel = sentinel_path or STREAM_TMUX_BOOTSTRAP_SENTINEL
-    if sentinel.exists():
-        return ("already bootstrapped once for '%s' -- never re-created "
-                 "(a since-stopped session stays stopped)" % user)
     run = run or _default_tmux_run
     exists = _tmux_session_exists(user, run)
     if exists is None:
         return "tmux unreachable -- left untouched"
-    try:
-        sentinel.parent.mkdir(parents=True, exist_ok=True)
-        sentinel.write_text("bootstrapped for %s\n" % user)
-    except OSError as e:
-        # Best-effort; a failed write just means one more push may retry
-        # this same one-time decision -- never a resurrection of an
-        # already-seen-and-stopped session, since none has been seen yet
-        # on this account. Logged so a persistently-failing write (e.g. a
-        # permissions problem) is visible rather than silently retried
-        # forever.
-        print("  ⚠ could not write %s (%s) -- this one-time bootstrap "
-              "decision may repeat on the next install" % (sentinel, e),
-              file=sys.stderr)
+    bootstrapped = sentinel.exists()
+    if not bootstrapped:
+        try:
+            sentinel.parent.mkdir(parents=True, exist_ok=True)
+            sentinel.write_text("bootstrapped for %s\n" % user)
+        except OSError as e:
+            # Best-effort; a failed write just means one more push may retry
+            # this same one-time decision -- never a resurrection of an
+            # already-seen-and-stopped session, since none has been seen yet
+            # on this account. Logged so a persistently-failing write (e.g. a
+            # permissions problem) is visible rather than silently retried
+            # forever.
+            print("  ⚠ could not write %s (%s) -- this one-time bootstrap "
+                  "decision may repeat on the next install" % (sentinel, e),
+                  file=sys.stderr)
     if exists:
         # #308 (the miva1 incident): a session created by ANY path other
         # than this function's own bootstrap (manual account provisioning,
@@ -7757,7 +7766,8 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
         # repeatedly-angry user rule ("never touch a session the user
         # deliberately stopped"). `actual is None` (tmux unreachable for
         # JUST this probe, no matching pane) stays quiet -- an inconclusive
-        # read must never manufacture a false WARNING.
+        # read must never manufacture a false WARNING. #309: unconditional
+        # now -- runs whether or not `bootstrapped` is true.
         expected = _stream_session_cwd()
         actual = _tmux_session_pane_cwd(user, run)
         if actual is not None:
@@ -7780,7 +7790,13 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
                          "is a leftover pre-registration session, kill it "
                          "manually and re-run push"
                          % (user, actual, expected))
+        if bootstrapped:
+            return ("already bootstrapped once for '%s' -- never re-created "
+                     "(a since-stopped session stays stopped)" % user)
         return "session '%s' already exists -- left untouched" % user
+    if bootstrapped:
+        return ("already bootstrapped once for '%s' -- never re-created "
+                 "(a since-stopped session stays stopped)" % user)
     cwd = _stream_session_cwd()
     script = launch_script or CLAUDE_LAUNCH_SCRIPT_DEST
     try:
