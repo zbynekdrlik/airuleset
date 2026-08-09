@@ -10697,6 +10697,110 @@ class TestCmdPushSubdevRegistrationAudit(TestCase):
         self._run_push(calls, "alice\nbob\ncarol\n")   # must not raise
 
 
+class TestCmdPushSubdevRegistrationAuditRetryOnFailure(TestCase):
+    """#347 adversarial-review CRITICAL finding: `audited_hosts` must NOT
+    be marked before the ssh call even runs -- a first entry that fails
+    (timeout/auth) before the remote shell ever reaches the appended `ls`
+    would otherwise PERMANENTLY skip the audit for the rest of this push,
+    with the failure reading IDENTICALLY to "checked, no gap found"
+    (unregistered_home_accounts() on an empty/no-marker listing silently
+    returns []) -- exactly backwards for a guard whose only job is
+    detecting the opposite. Fix: only mark a host audited once the marker
+    is CONFIRMED present in real stdout, so a failed first connection lets
+    the NEXT entry sharing that host retry; and if EVERY entry for a
+    shared host fails, report that honestly as UNVERIFIED, never silently
+    as "no gap"."""
+
+    def _fake_hosts(self):
+        return [
+            {"name": "a@subdev", "host": "9.9.9.9", "user": "alice",
+             "repo_path": "~/x", "identity": "~/.secrets/k"},
+            {"name": "b@subdev", "host": "9.9.9.9", "user": "bob",
+             "repo_path": "~/x", "identity": "~/.secrets/k"},
+        ]
+
+    def test_first_entry_ssh_failure_lets_the_second_entry_retry_and_report(self):
+        import io
+        import contextlib
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            if cmd and cmd[0] in ("ssh", "sshpass"):
+                remote_cmd = cmd[-1]
+                marker = airuleset._HOME_AUDIT_MARKER
+                # alice's connection (audited first, since REMOTE_HOSTS
+                # order puts her first) fails BEFORE the remote shell ever
+                # ran anything -- a genuine ssh auth failure, so the
+                # marker never appears in stdout at all.
+                if "alice" in cmd[-2]:
+                    return m.Mock(returncode=255, stdout="",
+                                   stderr="alice@9.9.9.9: Permission denied")
+                if marker in remote_cmd:
+                    return m.Mock(returncode=0,
+                                   stdout="ok\n%s\nalice\nbob\ncarol\n" % marker,
+                                   stderr="")
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        args = m.Mock()
+        buf_err = io.StringIO()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
+                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                                return_value=[]), \
+                contextlib.redirect_stderr(buf_err):
+            with self.assertRaises(SystemExit):
+                # alice's own failed ssh call is a genuine deploy failure
+                # (unrelated to the audit) -- cmd_push exits 1 for THAT
+                # reason regardless of the audit outcome.
+                airuleset.cmd_push(args)
+        err = buf_err.getvalue()
+        self.assertIn("carol", err,
+                       "the SECOND entry sharing the host must retry the "
+                       "audit and still report the real gap")
+        self.assertIn("REGISTRATION GAP", err)
+        self.assertNotIn("REGISTRATION AUDIT NOT VERIFIED", err)
+
+    def test_every_entry_failing_reports_unverified_not_silently_clean(self):
+        import io
+        import contextlib
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["ruff", "check"]:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if "unittest" in cmd:
+                return m.Mock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "push"]:
+                return m.Mock(returncode=0, stdout="ok", stderr="")
+            if cmd and cmd[0] in ("ssh", "sshpass"):
+                return m.Mock(returncode=255, stdout="",
+                               stderr="x@9.9.9.9: Permission denied")
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        args = m.Mock()
+        buf_err = io.StringIO()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
+                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                                return_value=[]), \
+                contextlib.redirect_stderr(buf_err):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        err = buf_err.getvalue()
+        self.assertIn("REGISTRATION AUDIT NOT VERIFIED", err)
+        self.assertIn("9.9.9.9", err)
+        self.assertNotIn("REGISTRATION GAP", err,
+                          "an unverified host must never be reported as "
+                          "if a real gap-check happened")
+
+
 class TestBlockTestSkipsHook(TestCase):
     """hooks/block-test-skips.sh (issue #10) — mechanical enforcement of
     test-strictness.md's banned skip/tautology syntax. Only ADDED lines
