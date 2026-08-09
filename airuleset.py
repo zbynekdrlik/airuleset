@@ -5223,8 +5223,16 @@ _HANDOFF_COMMENT_CHECK_LIMIT = 40
 # odoo-erp#1489: "**Po READY-FOR-REVIEW pokračujem hneď.**"), falsely reads
 # as a hand-off. These three regexes are a direct Python port of that
 # script's own matching contract -- case-SENSITIVE and line-anchored, same
-# as its `grep -E` (no `-i`).
-_READINESS_GATEKEEPER_FIRST_LINE_RE = re.compile(r"^\s*\*\*GATEKEEPER")
+# as its `grep -E` (no `-i`). #340 review MAJOR-2: the gatekeeper-opening
+# exclusion also recognises a markdown-HEADING opening ("## Gatekeeper
+# review — BOUNCE", the real odoo-erp#2878 corpus shape), matching the
+# shell script's own #340 widening -- kept as an alternation branch on the
+# SAME compiled pattern (a single `re.match`, no locale/grep concerns
+# apply to Python's `re`), requiring the corpus's exact observed casing
+# ("Gatekeeper", title case) so a sub-dev's own heading-decorated
+# ALL-CAPS marker never collides, exactly like the shell script.
+_READINESS_GATEKEEPER_FIRST_LINE_RE = re.compile(
+    r"^\s*(?:\*\*GATEKEEPER|#{1,6}\s*Gatekeeper)")
 _READINESS_LINE_RE = re.compile(
     r"^\s*([#*_-]+\s*)?READY-FOR-REVIEW", re.MULTILINE)
 _READINESS_CROSS_FORK_RE = re.compile(
