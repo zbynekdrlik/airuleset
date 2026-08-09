@@ -797,7 +797,12 @@ class TestStreamMarkerBlockSpansSafety(TestCase):
 
 _FAKE_TMUX_SRC = """#!/usr/bin/env bash
 if [ -n "${FAKE_TMUX_LOG:-}" ]; then
-  printf '%s\\n' "$*" >> "$FAKE_TMUX_LOG"
+  # [%d] argv-count prefix lets a test distinguish "one arg containing a
+  # space" from "several separate args" -- plain `"$*"` alone collapses
+  # both to the same joined text (#284 adversarial review, MINOR-2
+  # regression test). assertIn substring checks elsewhere in this file
+  # keep working unmodified since the prefix is just extra leading text.
+  printf '[%d] %s\\n' "$#" "$*" >> "$FAKE_TMUX_LOG"
 fi
 case "$1" in
   has-session)
@@ -861,13 +866,23 @@ class TestGroupSurvivorReattach(TestCase):
         # #284's own reproduction: exact-name "zbynek" is gone, but
         # "zbynek-4" survives in the SAME group -- the launcher must join
         # it (`new-session -t`), never blindly create a fresh empty one.
+        # list-sessions is queried "-F '#{session_group} #{session_name}'"
+        # (group FIRST -- see the spacy-name test below), so a fixture
+        # line is "<group> <name>".
         log, r = self._run_block(
             has_session_rc=1,
-            list_sessions_out="zbynek-4 zbynek\nmarek-0 marek\n",
+            list_sessions_out="zbynek zbynek-4\nmarek marek-0\n",
             whoami="zbynek",
         )
         self.assertIn("new-session -t zbynek-4", log)
         self.assertNotIn("new-session -A -s zbynek", log)
+        # MINOR-1 (adversarial review, #284): the exact-name check MUST use
+        # tmux's `=`-anchored exact match, never a bare (prefix-matching,
+        # per #263) target -- assert the real ARGV, not just the observed
+        # outcome, so a regression to a bare target is caught even though
+        # this fake `has-session` ignores its own target and would let it
+        # silently pass otherwise.
+        self.assertIn("has-session -t =zbynek", log)
 
     def test_no_survivor_falls_back_to_the_exact_name_create_or_attach(self):
         log, r = self._run_block(
@@ -883,21 +898,83 @@ class TestGroupSurvivorReattach(TestCase):
         # session already exists.
         log, r = self._run_block(
             has_session_rc=0,
-            list_sessions_out="marek-0 marek\n",
+            list_sessions_out="marek marek-0\n",
             whoami="zbynek",
         )
         self.assertNotIn("list-sessions", log)
         self.assertIn("new-session -A -s zbynek", log)
+        self.assertIn("has-session -t =zbynek", log)
 
     def test_a_sibling_in_a_DIFFERENT_group_is_never_mistaken_for_a_survivor(self):
         # marek-0's group is "marek", not "zbynek" -- must never be joined.
         log, r = self._run_block(
             has_session_rc=1,
-            list_sessions_out="marek-0 marek\n",
+            list_sessions_out="marek marek-0\n",
             whoami="zbynek",
         )
         self.assertNotIn("new-session -t marek-0", log)
         self.assertIn("new-session -A -s zbynek", log)
+
+    def test_a_session_name_containing_a_space_is_never_misparsed_as_a_group(self):
+        # MINOR-2 (adversarial review, #284): live-reproduced against the
+        # real block -- an UNGROUPED session (empty #{session_group})
+        # named "cats zbynek" used to print as "cats zbynek " under the
+        # old name-then-group field order, which `read -r n g` misparsed
+        # as n="cats" g="zbynek" -- a false match on this user's own
+        # group, since the embedded space in the NAME collided with the
+        # field separator. Group-FIRST ordering ("#{session_group}
+        # #{session_name}") avoids this: "" + " " + "cats zbynek" reads
+        # as g="cats" n="zbynek", and g != "zbynek" correctly refuses it.
+        log, r = self._run_block(
+            has_session_rc=1,
+            list_sessions_out=" cats zbynek\n",
+            whoami="zbynek",
+        )
+        self.assertNotIn("new-session -t cats", log)
+        self.assertNotIn('new-session -t "cats zbynek"', log)
+        self.assertIn("new-session -A -s zbynek", log)
+
+    def test_a_grouped_session_whose_name_contains_a_space_is_still_joined_intact(self):
+        # the positive counterpart of the above: a REAL survivor whose own
+        # name has an embedded space must still be captured WHOLE (never
+        # truncated at the space) and exec'd as ONE argument -- the [%d]
+        # argv-count prefix is what proves "my session two" landed as a
+        # SINGLE argument (count 3: new-session, -t, "my session two"),
+        # not three separate ones a naive split would have produced.
+        log, r = self._run_block(
+            has_session_rc=1,
+            list_sessions_out="zbynek my session two\n",
+            whoami="zbynek",
+        )
+        self.assertIn("[3] new-session -t my session two", log)
+
+    def test_the_survivor_exec_runs_outside_the_process_substitution_loop(self):
+        # CRITICAL-1 (adversarial review, #284, live-verified against a
+        # real tmux client + pty): an `exec` sitting INSIDE
+        # `while read ...; done < <(tmux list-sessions ...)` inherits that
+        # process-substitution PIPE as its own stdin -- a real tmux client
+        # then refuses to attach ("open terminal failed: not a terminal")
+        # and the ssh login dies right there, since `exec` already
+        # replaced the shell. This structural check (the fake tmux here
+        # is stdin-indifferent and cannot see the bug itself, per the
+        # review's own finding) asserts the source POSITION instead: the
+        # captured-survivor `exec` line must appear strictly AFTER the
+        # `done < <(...)` line that closes the loop's own redirect.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        done_idx = block.index("done < <(tmux list-sessions")
+        survivor_exec_idx = block.index(
+            'exec tmux new-session -t "$__airuleset_survivor"'
+        )
+        self.assertGreater(
+            survivor_exec_idx, done_idx,
+            "the survivor exec must run after the process-substitution "
+            "while-loop closes, never inside it",
+        )
+        # and no `exec` line at all sits between the loop's own `while`
+        # opener and its `done` -- i.e. nothing execs from inside the body.
+        while_idx = block.index("while read -r __airuleset_g __airuleset_n")
+        loop_body = block[while_idx:done_idx]
+        self.assertNotIn("exec ", loop_body)
 
 
 # ---------------------------------------------------------------------------

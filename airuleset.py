@@ -1710,17 +1710,36 @@ STREAM_SSH_ATTACH_BLOCK = (
     "  # wrongly match e.g. zbynek-4 for zbynek) -- and, if found, join it\n"
     "  # as a new independent VIEW onto the SAME windows (grouped session,\n"
     "  # `new-session -t`) -- the user's own decided reattach behaviour.\n"
-    "  # Falls through to the plain exact-name path below on ANY failure\n"
-    "  # (tmux unreachable, no match, or the survivor vanishing in a race\n"
-    "  # before the exec below runs) -- never a hard failure.\n"
+    "  # The survivor's own name is captured into a variable and the\n"
+    "  # actual `exec` happens AFTER the `while ... done < <(...)` loop\n"
+    "  # closes, never inside it -- an adversarial review proved live\n"
+    "  # that an `exec` sitting INSIDE the process-substitution loop\n"
+    "  # inherits that pipe as its own stdin, so a real tmux client\n"
+    "  # refuses to attach (`open terminal failed: not a terminal`) and\n"
+    "  # the ssh login dies right there, since `exec` already replaced\n"
+    "  # the shell -- worse than the pre-#284 behaviour it was meant to\n"
+    "  # fix. Falls through to the plain exact-name path below when no\n"
+    "  # survivor is found, or tmux itself is unreachable. Residual\n"
+    "  # (documented, not chased): if the survivor is destroyed by a\n"
+    "  # concurrent sweep in the narrow window between `list-sessions`\n"
+    "  # returning its name and the `exec` below running, real tmux does\n"
+    "  # NOT error -- it silently creates a brand-new session in a\n"
+    "  # freshly-derived group name instead of falling through to -A -s;\n"
+    "  # still a live, working session either way, just not the exact\n"
+    "  # -A -s fallback this comment used to (wrongly) promise.\n"
     '  if ! tmux has-session -t "=$__airuleset_me" 2>/dev/null; then\n'
-    '    while read -r __airuleset_n __airuleset_g; do\n'
+    '    __airuleset_survivor=""\n'
+    '    while read -r __airuleset_g __airuleset_n; do\n'
     '      if [ -n "$__airuleset_n" ] '
     '&& [ "$__airuleset_g" = "$__airuleset_me" ]; then\n'
-    '        exec tmux new-session -t "$__airuleset_n"\n'
+    '        __airuleset_survivor="$__airuleset_n"\n'
+    "        break\n"
     "      fi\n"
     "    done < <(tmux list-sessions "
-    "-F '#{session_name} #{session_group}' 2>/dev/null)\n"
+    "-F '#{session_group} #{session_name}' 2>/dev/null)\n"
+    '    if [ -n "$__airuleset_survivor" ]; then\n'
+    '      exec tmux new-session -t "$__airuleset_survivor"\n'
+    "    fi\n"
     "  fi\n"
     '  exec tmux new-session -A -s "$__airuleset_me" -c "$__airuleset_cwd"\n'
     "fi\n"
