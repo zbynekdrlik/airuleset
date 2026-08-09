@@ -231,5 +231,56 @@ class TestRealCorpusFixtures(TestCase):
         self.assertEqual(rc, 1)
 
 
+class TestHeadingStyleGatekeeperOpening(TestCase):
+    """#340: the **GATEKEEPER-anchored exclusion misses a real markdown-
+    HEADING gatekeeper opening ("## Gatekeeper review — BOUNCE", the real
+    shape already locked as a fixture above from odoo-erp#2878). Live-
+    reproduced against the pre-fix shipped code (post-#331 merge): a
+    gatekeeper comment opening this way that also quotes/mentions a
+    READY-FOR-REVIEW: line was NOT excluded -- rc=0 (bug)."""
+
+    def test_the_ticket_s_own_repro_is_excluded(self):
+        rc, out, _ = run("## Gatekeeper review — BOUNCE\n\n"
+                          "READY-FOR-REVIEW: was claimed but incomplete\n")
+        self.assertEqual(rc, 1)
+
+    def test_heading_opening_excludes_a_quoted_gatekeeper_action_marker_too(self):
+        rc, out, _ = run("## Gatekeeper review — BOUNCE\n\n"
+                          "GATEKEEPER-ACTION: quoting for context",
+                          mode="gatekeeper-action")
+        self.assertEqual(rc, 1)
+
+    def test_heading_opening_excludes_a_quoted_bounce_resolved_marker_too(self):
+        rc, out, _ = run("## Gatekeeper review — BOUNCE\n\n"
+                          "BOUNCE-RESOLVED: quoting for context",
+                          mode="bounce-resolved")
+        self.assertEqual(rc, 1)
+
+    def test_a_deeper_heading_level_is_also_excluded(self):
+        rc, out, _ = run("### Gatekeeper finding\n\n"
+                          "READY-FOR-REVIEW: was claimed but incomplete\n")
+        self.assertEqual(rc, 1)
+
+    def test_a_heading_only_mentioning_gatekeeper_mid_title_is_not_excluded(self):
+        # Negative control: "gatekeeper" as a topic word INSIDE a genuine
+        # sub-dev heading (not the heading's own opening word, and lower-
+        # case) must not be treated as the gatekeeper speaking -- otherwise
+        # a real hand-off whose own heading happens to mention the word
+        # would be silently swallowed.
+        rc, out, _ = run("## Round 2 fixes for the gatekeeper bounce review\n\n"
+                          "READY-FOR-REVIEW: done\n")
+        self.assertEqual(rc, 0)
+
+    def test_a_heading_decorated_all_caps_action_marker_still_matches(self):
+        # Rejected-alternative lock: the new heading pattern matches only
+        # the corpus's exact "Gatekeeper" (title case) shape, never bare
+        # ALL-CAPS "GATEKEEPER" -- so a sub-dev's OWN legitimate
+        # GATEKEEPER-ACTION: marker, heading-decorated per the markers'
+        # own documented contract (# * _ - prefixes allowed), still works.
+        rc, out, _ = run("# GATEKEEPER-ACTION: unblock the docker socket",
+                          mode="gatekeeper-action")
+        self.assertEqual(rc, 0)
+
+
 if __name__ == "__main__":
     main()
