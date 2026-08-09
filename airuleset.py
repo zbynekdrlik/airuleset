@@ -9761,11 +9761,29 @@ def _burn_remote(remote, days):
 # hour by every managed box) — cheap, no remote transcript scanning. Reuses
 # the EXACT same identity/sshpass selection as `_burn_remote_cmd` — never
 # invent a new ssh shape (hooks/block-subdev-ssh-misuse.sh guards this).
+#
+# #286 follow-up (2026-08-09) — the SAME ssh round-trip ALSO tails the
+# remote's own `~/.claude/airuleset-usage-cache.json` (a marker line, never
+# a second connection — #269's own design comment rejected a separate
+# second ssh call for exactly the doubled-cost reason), so
+# `group_fleet_by_account()` can resolve a real weekly %/reset for EVERY
+# reachable account, not just the reporting box's own.
 # --------------------------------------------------------------------------- #
+
+# Separates the snapshot-tail output from the usage-cache output in ONE
+# combined stdout — chosen to be something no real JSON line or shell
+# output would ever legitimately contain.
+_FLEET_CACHE_MARKER = "===AIRULESET-FLEET-CACHE==="
+
 
 def _fleet_remote_cmd(remote):
     """Pure ssh-command builder — split out for unit-testability, mirroring
-    `_burn_remote_cmd`'s own split.
+    `_burn_remote_cmd`'s own split. One ssh call, two commands: the
+    pre-existing snapshot tail (byte-identical substring, still asserted
+    verbatim by TestFleetRemoteCmd), then the marker, then a best-effort
+    cat of the remote's own usage cache (`2>/dev/null || true` — a
+    missing/unreadable cache must never make the WHOLE ssh call fail,
+    since the snapshot half is still perfectly good data on its own).
 
     #342: this used to duplicate `_remote_ssh_prefix()`'s identity/sshpass
     branching inline instead of calling it — so this docstring's own claim
@@ -9773,8 +9791,15 @@ def _fleet_remote_cmd(remote):
     a hardening fix landing on `_remote_ssh_prefix()` alone would silently
     NOT reach job 16's fleet fetch. Calling the shared builder directly
     makes the claim true by construction and guarantees this stays in sync
-    with `_burn_remote_cmd`/`_delegation_remote_cmd` automatically."""
-    remote_cmd = "tail -n 1 ~/.claude/burn-history/snapshots.jsonl"
+    with `_burn_remote_cmd`/`_delegation_remote_cmd` automatically.
+    (Merge note, #342+#286: the #286 combined-command extension above rides
+    the SAME shared builder — the extended remote_cmd string is the one
+    argument appended after the shared prefix.)"""
+    remote_cmd = (
+        "tail -n 1 ~/.claude/burn-history/snapshots.jsonl; "
+        "echo '" + _FLEET_CACHE_MARKER + "'; "
+        "cat ~/.claude/airuleset-usage-cache.json 2>/dev/null || true"
+    )
     return _remote_ssh_prefix(remote) + [remote_cmd]
 
 
@@ -9794,6 +9819,27 @@ def _hour_bucket_of_ts(ts_str):
     return burn_mod.hour_bucket_of_ts(ts_str)
 
 
+def _parse_fleet_cache_section(text):
+    """Best-effort parse of the `_FLEET_CACHE_MARKER`-delimited usage-cache
+    half of a `_fleet_remote_row` ssh reply — mirrors `hourly_snapshot()`'s
+    own degrade-to-None convention for a missing/malformed local cache read
+    (never blocks, never crashes, never guesses). `None` on an empty
+    section (no marker in stdout at all — every pre-#286 fixture/caller),
+    unparsable JSON, or a JSON value that parses but isn't an object (the
+    SAME "valid JSON, wrong shape" guard `hourly_snapshot()` already
+    applies to its own local cache read)."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        cache = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(cache, dict):
+        return None
+    return cache
+
+
 def _fleet_remote_row(remote, want_hour_bucket, timeout=15):
     """One remote host's latest hourly burn-snapshot row FOR THE SPECIFIC
     `want_hour_bucket` (an epoch-hour index — see `_hour_bucket_of_ts`), or
@@ -9810,7 +9856,27 @@ def _fleet_remote_row(remote, want_hour_bucket, timeout=15):
     silently reusing an old row produced a false fleet trend/total (5/6
     hosts double-counting the same stale sample read as "-39.8%
     (lepšie)"). A single unreachable/stale box must never crash the fleet
-    job or the rest of the watchdog sweep. Never raises."""
+    job or the rest of the watchdog sweep. Never raises.
+
+    #286: the ssh reply's stdout carries a SECOND section after
+    `_FLEET_CACHE_MARKER` — the remote's own usage cache. Parsed
+    best-effort ONLY when the snapshot half is fresh (an error/stale row
+    already contributes nothing to `group_fleet_by_account`, so there is
+    nothing useful to attach weekly data to — and skipping it keeps the
+    #60 stale/error contract exactly as strict as before, never softened
+    by a cache section happening to be present). On a fresh row: backfills
+    `account_email` ONLY when the snapshot row itself is missing it (a
+    legacy pre-#269 row — the snapshot's own value always wins when
+    present, since it is the more directly-attributable source), and adds
+    `weekly_pct`/`resets_at` via `burn.shared_weekly_window()` — the SAME
+    account-wide-window selector `fleet_burn_job`/`cmd_burn` already use,
+    never a new one. Also carries the cache's OWN `ts` (its write time,
+    unix epoch) through as `weekly_ts` — an adversarial review of this
+    same #286 branch flagged that `group_fleet_by_account()`'s cross-host
+    MAX-percent selection had no way to tell a fresh candidate from a
+    stale one (a remote box whose watchdog stopped refreshing its cache
+    could otherwise win over a fresher, correct sample from another box on
+    the same account); `weekly_ts` is what lets it gate on that."""
     import subprocess
     cmd = _fleet_remote_cmd(remote)
     try:
@@ -9819,7 +9885,8 @@ def _fleet_remote_row(remote, want_hour_bucket, timeout=15):
         return {"error": "%s: %s" % (type(e).__name__, e)}
     if result.returncode != 0:
         return {"error": (result.stderr or "").strip()[:200] or "ssh failed"}
-    lines = (result.stdout or "").strip().splitlines()
+    snap_part, _, cache_part = (result.stdout or "").partition(_FLEET_CACHE_MARKER)
+    lines = snap_part.strip().splitlines()
     if not lines:
         return {"error": "no snapshot data yet"}
     try:
@@ -9832,6 +9899,16 @@ def _fleet_remote_row(remote, want_hour_bucket, timeout=15):
     if row_hour != want_hour_bucket:
         return {"error": "no sample for hour %s (latest %s)" % (want_hour_bucket, row.get("ts")),
                "stale": True}
+    cache = _parse_fleet_cache_section(cache_part)
+    if cache:
+        import burn as burn_mod
+        row = dict(row)
+        if not row.get("account_email"):
+            row["account_email"] = cache.get("account_email") or ""
+        wk = burn_mod.shared_weekly_window(cache)
+        if wk:
+            row["weekly_pct"], row["resets_at"] = wk
+            row["weekly_ts"] = cache.get("ts")
     return row
 
 

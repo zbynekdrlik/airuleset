@@ -15,6 +15,7 @@ import io
 import json
 import os
 import sys
+import time
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -883,6 +884,35 @@ class TestFleetMerge(unittest.TestCase):
         merged = burn.merge_fleet_row("t", {"dev1": _host_row(1.0, 10, 100000)})
         self.assertEqual(merged["per_host"]["dev1"]["account_email"], "")
 
+    def test_weekly_pct_and_resets_at_carried_through_to_per_host(self):
+        # #286: piggybacks on the SAME collection round-trip _fleet_remote_row
+        # now provides -- the whitelist must carry it through, not drop it.
+        row = dict(_host_row(1.0, 10, 100000))
+        row["weekly_pct"] = 42
+        row["resets_at"] = "2026-08-10T00:00:00+00:00"
+        merged = burn.merge_fleet_row("t", {"dev1": row})
+        self.assertEqual(merged["per_host"]["dev1"]["weekly_pct"], 42)
+        self.assertEqual(merged["per_host"]["dev1"]["resets_at"],
+                         "2026-08-10T00:00:00+00:00")
+
+    def test_missing_weekly_pct_becomes_none_not_a_crash(self):
+        merged = burn.merge_fleet_row("t", {"dev1": _host_row(1.0, 10, 100000)})
+        self.assertIsNone(merged["per_host"]["dev1"]["weekly_pct"])
+        self.assertIsNone(merged["per_host"]["dev1"]["resets_at"])
+
+    def test_weekly_ts_is_carried_through_to_per_host(self):
+        # #286-review: the candidate's own cache WRITE TIME must survive
+        # the same whitelist, or group_fleet_by_account's freshness gate
+        # has nothing to check.
+        row = dict(_host_row(1.0, 10, 100000))
+        row["weekly_ts"] = 1700000000.0
+        merged = burn.merge_fleet_row("t", {"dev1": row})
+        self.assertEqual(merged["per_host"]["dev1"]["weekly_ts"], 1700000000.0)
+
+    def test_missing_weekly_ts_becomes_none_not_a_crash(self):
+        merged = burn.merge_fleet_row("t", {"dev1": _host_row(1.0, 10, 100000)})
+        self.assertIsNone(merged["per_host"]["dev1"]["weekly_ts"])
+
 
 class TestGroupFleetByAccount(unittest.TestCase):
     """#269: box->account mapping + subtotal for `airuleset.py burn --fleet`."""
@@ -967,6 +997,13 @@ class TestGroupFleetByAccount(unittest.TestCase):
                                     "charlie@example.com", None])
 
     def test_weekly_pct_and_resets_at_populated_only_for_the_reporting_boxs_own_account(self):
+        # #286: this fixture's "gk" row never carries its OWN weekly_pct
+        # (the new cross-account source), so it correctly still resolves to
+        # (None, None) -- zero candidates, never fabricated. This is now
+        # one case of the general rule ("no candidate window -> unknown"),
+        # not "foreign accounts can never resolve" -- see
+        # test_foreign_accounts_own_weekly_pct_now_resolves_from_its_own_host_row
+        # for the actual new cross-account behavior.
         per_host = {
             "dev1": self._row(1.0, "z@example.com"),
             "gk": self._row(2.0, "other@example.com"),
@@ -982,6 +1019,113 @@ class TestGroupFleetByAccount(unittest.TestCase):
                          "2026-08-10T00:00:00+00:00")
         self.assertIsNone(by_account["other@example.com"]["weekly_pct"])
         self.assertIsNone(by_account["other@example.com"]["resets_at"])
+
+    def test_foreign_accounts_own_weekly_pct_now_resolves_from_its_own_host_row(self):
+        # #286: the actual cross-account fix -- a foreign account's host row
+        # now carries ITS OWN weekly_pct/resets_at (from that host's own
+        # local usage cache, fetched over the SAME collection round trip) --
+        # no longer only the reporting box's own account can ever resolve.
+        # #286-review: both candidates need a FRESH weekly_ts now that the
+        # cross-host selection is staleness-gated -- see the dedicated
+        # freshness tests below for the gate itself.
+        fresh = time.time() - 3600
+        per_host = {
+            "dev1": {**self._row(1.0, "z@example.com"), "weekly_pct": 10,
+                    "resets_at": "2026-08-05T00:00:00+00:00", "weekly_ts": fresh},
+            "gk": {**self._row(2.0, "other@example.com"), "weekly_pct": 77,
+                  "resets_at": "2026-08-12T00:00:00+00:00", "weekly_ts": fresh},
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        by_account = {g["account"]: g for g in groups}
+        self.assertEqual(by_account["other@example.com"]["weekly_pct"], 77)
+        self.assertEqual(by_account["other@example.com"]["resets_at"],
+                         "2026-08-12T00:00:00+00:00")
+
+    def test_a_stale_cross_host_candidate_loses_to_a_fresher_lower_one(self):
+        # #286-review 🟡 (adversarial review of the branch): the cross-host
+        # MAX-percent selection must not let a STALE candidate (a remote
+        # box whose own watchdog stopped refreshing its usage cache) beat a
+        # FRESHER, correct candidate from another box on the SAME account
+        # purely because its stale percent happens to be numerically
+        # higher. Mirrors watchdog.FABLE_GATE_MAX_AGE's own 6h staleness
+        # bound for this EXACT cache file -- burn must never import
+        # watchdog (see usage_cache_path()'s own docstring), so the bound
+        # is a deliberate mirror, never a shared import.
+        now = time.time()
+        stale_ts = now - (6 * 3600) - 3600   # 7h old -- past the 6h bound
+        fresh_ts = now - 3600                # 1h old -- comfortably fresh
+        per_host = {
+            "stale-box": {**self._row(1.0, "z@example.com"), "weekly_pct": 99,
+                         "resets_at": "stale-reset", "weekly_ts": stale_ts},
+            "fresh-box": {**self._row(1.0, "z@example.com"), "weekly_pct": 10,
+                         "resets_at": "fresh-reset", "weekly_ts": fresh_ts},
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        g = [x for x in groups if x["account"] == "z@example.com"][0]
+        self.assertEqual(g["weekly_pct"], 10)
+        self.assertEqual(g["resets_at"], "fresh-reset")
+
+    def test_a_cross_host_candidate_with_no_weekly_ts_is_never_trusted(self):
+        # A legacy/pre-#286-fix host row (weekly_pct present, no weekly_ts
+        # at all) must never be treated as "fresh" by omission -- absence
+        # of a timestamp is unmeasurable, not zero age.
+        per_host = {"stale-box": {**self._row(1.0, "z@example.com"),
+                                  "weekly_pct": 99, "resets_at": "x"}}
+        groups = burn.group_fleet_by_account(per_host)
+        g = [x for x in groups if x["account"] == "z@example.com"][0]
+        self.assertIsNone(g["weekly_pct"])
+        self.assertIsNone(g["resets_at"])
+
+    def test_multiple_hosts_same_account_take_the_max_percent(self):
+        # mirrors shared_weekly_window's own multiple-matching-entries
+        # convention, now applied across two boxes sharing one account.
+        # #286-review: both candidates need a FRESH weekly_ts now that the
+        # cross-host selection is staleness-gated.
+        fresh = time.time() - 3600
+        per_host = {
+            "dev1": {**self._row(1.0, "z@example.com"), "weekly_pct": 10,
+                    "resets_at": "a", "weekly_ts": fresh},
+            "dev2": {**self._row(1.0, "z@example.com"), "weekly_pct": 55,
+                    "resets_at": "b", "weekly_ts": fresh},
+        }
+        groups = burn.group_fleet_by_account(per_host)
+        g = [x for x in groups if x["account"] == "z@example.com"][0]
+        self.assertEqual(g["weekly_pct"], 55)
+        self.assertEqual(g["resets_at"], "b")
+
+    def test_non_numeric_weekly_pct_on_a_host_row_is_ignored_not_crashed(self):
+        per_host = {"dev1": {**self._row(1.0, "z@example.com"),
+                            "weekly_pct": "not-a-number", "resets_at": "x"}}
+        groups = burn.group_fleet_by_account(per_host)
+        self.assertIsNone(groups[0]["weekly_pct"])
+
+    def test_bool_weekly_pct_is_ignored_not_treated_as_a_real_percent(self):
+        # isinstance(True, int) is True in Python -- must be excluded
+        # explicitly, mirroring shared_weekly_window's own guard.
+        per_host = {"dev1": {**self._row(1.0, "z@example.com"),
+                            "weekly_pct": True, "resets_at": "x"}}
+        groups = burn.group_fleet_by_account(per_host)
+        self.assertIsNone(groups[0]["weekly_pct"])
+
+    def test_error_hosts_own_weekly_pct_is_never_used(self):
+        # error/stale rows already contribute nothing (the pre-existing
+        # test_error_and_stale_hosts_contribute_nothing) -- confirm that
+        # invariant extends to the new weekly fields too.
+        per_host = {"gk": self._row(0, "z@example.com", error=True)}
+        groups = burn.group_fleet_by_account(per_host)
+        self.assertEqual(groups, [])
+
+    def test_reporting_boxs_own_cache_still_wins_when_no_host_row_carries_it(self):
+        # dev1 is never in REMOTE_HOSTS -- its own row (built locally, never
+        # through _fleet_remote_row) never carries weekly_pct, so the
+        # existing cache= mechanism must stay the ONLY source for its own
+        # account.
+        per_host = {"dev1": self._row(1.0, "z@example.com")}
+        cache = {"account_email": "z@example.com", "windows": [
+            {"group": "weekly", "percent": 42, "model": None,
+             "resets_at": "2026-08-10T00:00:00+00:00"}]}
+        groups = burn.group_fleet_by_account(per_host, cache=cache)
+        self.assertEqual(groups[0]["weekly_pct"], 42)
 
     def test_no_cache_never_populates_any_window(self):
         per_host = {"dev1": self._row(1.0, "z@example.com")}
@@ -1669,6 +1813,24 @@ class TestRenderFleet(unittest.TestCase):
         self.assertIn("new@x.com", section)
         self.assertNotIn("old@x.com", section)
 
+    def test_renders_a_foreign_accounts_real_window_from_its_own_host_row(self):
+        # #286: no cache= argument passed at all -- the foreign account's
+        # own host row is the only source, and it must be used.
+        # #286-review: needs a FRESH weekly_ts (no explicit now= passed to
+        # render_fleet either, so this is fresh relative to real wall-clock
+        # -- no boundary-crossing risk, the delta is milliseconds).
+        rows = [{"ts": "t", "total_usd": 2.0, "total_msgs": 10,
+                "weighted_avg_ctx": 1000, "per_host": {
+                    "gk": {**_host_row(2.0, 10, 1000),
+                          "account_email": "other@example.com",
+                          "weekly_pct": 77,
+                          "resets_at": "2026-08-12T00:00:00+00:00",
+                          "weekly_ts": time.time()},
+                }}]
+        out = burn.render_fleet(rows)
+        self.assertIn("tyzdenny limit 77%", out)
+        self.assertIn("2026-08-12T00:00:00+00:00", out)
+
     def test_unknown_account_hosts_render_in_their_own_bucket(self):
         rows = [{"ts": "2026-07-25T17:00:00+00:00", "total_usd": 1.0, "total_msgs": 10,
                 "weighted_avg_ctx": 100000, "per_host": {
@@ -1823,6 +1985,16 @@ class TestFleetRemoteCmd(unittest.TestCase):
         src = inspect.getsource(airuleset._fleet_remote_cmd)
         self.assertIn("_remote_ssh_prefix(remote)", src)
 
+    def test_remote_cmd_also_reads_the_remotes_own_usage_cache(self):
+        # #286: one combined round trip -- never a second ssh connection.
+        remote = {"name": "gk", "host": "1.2.3.4", "user": "gk",
+                  "repo_path": "~"}
+        cmd = airuleset._fleet_remote_cmd(remote)
+        joined = " ".join(cmd)
+        self.assertIn("airuleset-usage-cache.json", joined)
+        # the pre-existing snapshot-tail invocation stays byte-identical.
+        self.assertIn("tail -n 1 ~/.claude/burn-history/snapshots.jsonl", joined)
+
 
 class TestHourBucketOfTs(unittest.TestCase):
     def test_same_utc_instant_different_offsets_bucket_equal(self):
@@ -1944,6 +2116,131 @@ class TestFleetRemoteRow(unittest.TestCase):
                     return_value=m.Mock(returncode=0, stdout="42\n", stderr="")):
             got = airuleset._fleet_remote_row(self.REMOTE, 0)
         self.assertIn("error", got)
+
+    # ----------------------------------------------------------------- #
+    # #286 — the remote's own usage-cache section, appended to the SAME
+    # stdout via a marker line (one ssh round trip, never a second
+    # connection). Every test builds the combined stdout by hand to prove
+    # the parsing, never assumes _fleet_remote_cmd's own output.
+    # ----------------------------------------------------------------- #
+
+    def test_cache_section_populates_weekly_pct_and_resets_at(self):
+        ts = "2026-07-25T17:00:00+00:00"
+        snap_row = {"ts": ts, "host": "dev2", "usd": 1.0, "msgs": 1,
+                   "avg_ctx": 1, "by_model": {}, "account_email": "z@example.com"}
+        cache = {"account_email": "z@example.com", "windows": [
+            {"group": "weekly", "percent": 42, "model": None,
+             "resets_at": "2026-08-10T00:00:00+00:00"}]}
+        stdout = (json.dumps(snap_row) + "\n" + airuleset._FLEET_CACHE_MARKER
+                  + "\n" + json.dumps(cache))
+        want = airuleset._hour_bucket_of_ts(ts)
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=stdout, stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertEqual(got["weekly_pct"], 42)
+        self.assertEqual(got["resets_at"], "2026-08-10T00:00:00+00:00")
+
+    def test_cache_section_populates_weekly_ts_from_the_caches_own_ts(self):
+        # #286-review: group_fleet_by_account's freshness gate needs the
+        # REMOTE cache's own write time -- confirm it survives the ssh
+        # round-trip alongside weekly_pct/resets_at.
+        ts = "2026-07-25T17:00:00+00:00"
+        snap_row = {"ts": ts, "host": "dev2", "usd": 1.0, "msgs": 1,
+                   "avg_ctx": 1, "by_model": {}, "account_email": "z@example.com"}
+        cache = {"ts": 1753462800, "account_email": "z@example.com", "windows": [
+            {"group": "weekly", "percent": 42, "model": None,
+             "resets_at": "2026-08-10T00:00:00+00:00"}]}
+        stdout = (json.dumps(snap_row) + "\n" + airuleset._FLEET_CACHE_MARKER
+                  + "\n" + json.dumps(cache))
+        want = airuleset._hour_bucket_of_ts(ts)
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=stdout, stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertEqual(got["weekly_ts"], 1753462800)
+
+    def test_missing_cache_section_leaves_weekly_pct_unset(self):
+        # no marker anywhere in stdout at all (mirrors every pre-existing
+        # fixture in this class) -- no cache data available, never guess.
+        ts = "2026-07-25T17:00:00+00:00"
+        row = {"ts": ts, "host": "dev2", "usd": 1.5, "msgs": 3, "avg_ctx": 2000,
+              "by_model": {}}
+        want = airuleset._hour_bucket_of_ts(ts)
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=json.dumps(row) + "\n",
+                                        stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertIsNone(got.get("weekly_pct"))
+        self.assertEqual(got["usd"], 1.5)
+
+    def test_malformed_cache_section_never_crashes(self):
+        ts = "2026-07-25T17:00:00+00:00"
+        snap_row = {"ts": ts, "host": "dev2", "usd": 1.0, "msgs": 1,
+                   "avg_ctx": 1, "by_model": {}}
+        stdout = (json.dumps(snap_row) + "\n" + airuleset._FLEET_CACHE_MARKER
+                  + "\nNOT JSON AT ALL")
+        want = airuleset._hour_bucket_of_ts(ts)
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=stdout, stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertEqual(got["usd"], 1.0)
+        self.assertIsNone(got.get("weekly_pct"))
+
+    def test_non_dict_cache_section_never_crashes(self):
+        ts = "2026-07-25T17:00:00+00:00"
+        snap_row = {"ts": ts, "host": "dev2", "usd": 1.0, "msgs": 1,
+                   "avg_ctx": 1, "by_model": {}}
+        stdout = (json.dumps(snap_row) + "\n" + airuleset._FLEET_CACHE_MARKER
+                  + "\n42")
+        want = airuleset._hour_bucket_of_ts(ts)
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=stdout, stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertEqual(got["usd"], 1.0)
+        self.assertIsNone(got.get("weekly_pct"))
+
+    def test_cache_backfills_account_email_when_snapshot_row_lacks_it(self):
+        # legacy pre-#269 remote row -- no account_email key at all.
+        ts = "2026-07-25T17:00:00+00:00"
+        snap_row = {"ts": ts, "host": "dev2", "usd": 1.0, "msgs": 1,
+                   "avg_ctx": 1, "by_model": {}}
+        cache = {"account_email": "legacy@example.com", "windows": []}
+        stdout = (json.dumps(snap_row) + "\n" + airuleset._FLEET_CACHE_MARKER
+                  + "\n" + json.dumps(cache))
+        want = airuleset._hour_bucket_of_ts(ts)
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=stdout, stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertEqual(got["account_email"], "legacy@example.com")
+
+    def test_snapshot_rows_own_account_email_is_never_overwritten_by_the_cache(self):
+        ts = "2026-07-25T17:00:00+00:00"
+        snap_row = {"ts": ts, "host": "dev2", "usd": 1.0, "msgs": 1,
+                   "avg_ctx": 1, "by_model": {}, "account_email": "real@example.com"}
+        cache = {"account_email": "wrong@example.com", "windows": []}
+        stdout = (json.dumps(snap_row) + "\n" + airuleset._FLEET_CACHE_MARKER
+                  + "\n" + json.dumps(cache))
+        want = airuleset._hour_bucket_of_ts(ts)
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=stdout, stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertEqual(got["account_email"], "real@example.com")
+
+    def test_stale_hour_row_still_errors_even_with_a_cache_section_present(self):
+        # #60 must stay intact: hour-mismatch is a hard error regardless of
+        # whether cache data happens to be attached in the same stdout.
+        snap_row = {"ts": "2026-07-25T16:00:00+00:00", "host": "dev2",
+                   "usd": 999.0, "msgs": 1, "avg_ctx": 1, "by_model": {}}
+        cache = {"account_email": "z@example.com", "windows": [
+            {"group": "weekly", "percent": 5, "model": None, "resets_at": "x"}]}
+        stdout = (json.dumps(snap_row) + "\n" + airuleset._FLEET_CACHE_MARKER
+                  + "\n" + json.dumps(cache))
+        want = airuleset._hour_bucket_of_ts("2026-07-25T17:00:00+00:00")
+        with m.patch("subprocess.run",
+                    return_value=m.Mock(returncode=0, stdout=stdout, stderr="")):
+            got = airuleset._fleet_remote_row(self.REMOTE, want)
+        self.assertIn("error", got)
+        self.assertTrue(got.get("stale"))
+        self.assertNotIn("weekly_pct", got)
 
 
 class TestWatchdogFleetFetch(unittest.TestCase):
