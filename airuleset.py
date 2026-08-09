@@ -6797,6 +6797,27 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     return failed
 
 
+# #341 adversarial-review F1 (MAJOR, TRIGGERED): a bare `"Permission denied"
+# in stderr` substring check misfires on a REMOTE COMMAND's own stderr —
+# `subprocess.run(..., capture_output=True)` on an ssh call captures
+# whatever the remote process itself prints too (ssh forwards it), and a
+# real `git pull` hitting a root-owned file under `.git`, or an
+# `airuleset.py install` traceback, can both legitimately contain that
+# literal substring with ssh auth completely intact. ssh's OWN client-side
+# auth-exhaustion message is structurally distinct on two properties no
+# remote process has any reason to reproduce: it always exits 255, and it
+# is always literally prefixed "<user>@<host>: " (openssh's
+# `permission_denied()`, unchanged for decades). Requiring BOTH closes the
+# false-positive without weakening detection of a genuine auth failure.
+_SSH_AUTH_DENIED_RX = re.compile(r"(?m)^\S+@\S+: Permission denied")
+
+
+def _is_ssh_auth_failure(returncode, stderr):
+    """True only for ssh's OWN auth-exhaustion failure, never a remote
+    COMMAND's stderr that merely happens to contain the same words."""
+    return returncode == 255 and bool(_SSH_AUTH_DENIED_RX.search(stderr or ""))
+
+
 def cmd_push(args):
     """Push to GitHub and deploy to all remote machines.
 
@@ -6968,7 +6989,7 @@ def cmd_push(args):
             # failure with auth intact, e.g. a bad `git pull`) marks this
             # host so the soniox phase below skips it instead of opening a
             # second connection against an already-known-bad account.
-            if "Permission denied" in (ssh_result.stderr or ""):
+            if _is_ssh_auth_failure(ssh_result.returncode, ssh_result.stderr):
                 auth_failed.add(remote["name"])
         else:
             print(f"  {ssh_result.stdout.strip()}")
@@ -6992,8 +7013,14 @@ def cmd_push(args):
     failed.extend(provision_subdev_soniox_key(skip_names=auth_failed))
 
     if failed:
-        print(f"\n⚠ {len(failed)} of {len(REMOTE_HOSTS)} remote(s) FAILED: "
-              f"{failed}", file=sys.stderr)
+        # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
+        # stream host now yields TWO `failed` entries by design (its own
+        # deploy `rc=...` PLUS the soniox `skipped-known-auth-failure`), so
+        # len(failed) double-counts -- report the DISTINCT host count, the
+        # full list still shows each reason.
+        distinct_failed = {name for name, _reason in failed}
+        print(f"\n⚠ {len(distinct_failed)} of {len(REMOTE_HOSTS)} remote(s) "
+              f"FAILED: {failed}", file=sys.stderr)
         sys.exit(1)
     print("\nAll deployments complete.")
 
