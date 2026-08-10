@@ -9379,6 +9379,24 @@ class TestApiWatchdog(TestCase):
         self.assertFalse(self.w._pane_live_shell_evidence(""))
         self.assertFalse(self.w._pane_live_shell_evidence(None))
 
+    def test_pane_live_shell_evidence_ignores_a_quoted_badge_line_in_scrollback(self):
+        # (#352 F1, adversarial review round 1) A capture can contain an
+        # OLDER quoted rendering of the ⏵⏵ badge (a completion report
+        # discussing this exact ticket, a playbook excerpt) sitting ABOVE
+        # the real conversation and the pane's OWN current (badge-free)
+        # footer. Scanning the WHOLE capture for any `⏵⏵`-prefixed line
+        # would misread that scrollback quote as live evidence; only a
+        # `⏵⏵` line reached by walking the pane's genuinely TRAILING
+        # chrome (bottom-up, stopping at the first non-chrome row — the
+        # bare `❯` input-box boundary here) may count.
+        cap = ("Poznamka z minuleho debugovania: bol tam presne tento riadok:\n"
+               "  ⏵⏵ bypass permissions on · 1 shell\n"
+               "ale to uz davno skoncilo.\n"
+               "❯ \n"
+               "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+        self.assertFalse(self.w._pane_live_shell_evidence(cap),
+                         "a scrollback-quoted badge line must never count as CURRENT evidence")
+
     # --- (#352) job 4 skips the working-stall check entirely while the pane
     # itself already proves the session alive (a live bg shell/monitor badge)
     _LIVE_SHELL_PANE = ("● Waiting for 1 background agent to finish\n❯ \n"
@@ -9451,6 +9469,95 @@ class TestApiWatchdog(TestCase):
                          "nudge/answered history must stay FROZEN during the skip, "
                          "not reset to a fresh first-sighting episode")
         self.assertEqual(fake.selfchecks_sent(), 0)
+
+    def test_run_once_live_shell_skip_also_preserves_busypane_seed(self):
+        # (#352 F4, adversarial review round 1) the SAME persistence must
+        # hold for a seeded `busypane:` entry, not just `working:` — a
+        # mutant dropping just that half of the refresh loop must be
+        # caught, not merely one that drops both.
+        now, cwd = 1_000_000, "/devel/wliveshellbusypersist"
+        self._transcript(cwd, [self._WORKING], 3600, now)
+        bkey = "busypane:" + self._SID
+        self.w.save_state(self.state, {bkey: {"first_seen": now - 2000,
+                                              "pinged": True, "last_seen": now - 1000}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        self._run4(now, fake)
+        self._run4(now + 200, fake)
+        st = self.w.load_state(self.state)
+        self.assertIn(bkey, st, "seeded busypane: entry must ALSO survive the skip")
+        self.assertTrue(st[bkey]["pinged"], "its own history must stay untouched, not reset")
+
+    def test_run_once_responded_history_survives_the_regrowth_gap(self):
+        # (#352 F2, adversarial review round 1) After a landed nudge is
+        # ANSWERED, idle drops near zero and the OUTER job-4 gate
+        # (idle >= stall_working) goes FALSE for the whole regrowth window
+        # -- during which NOTHING in job 4 touches this session's state at
+        # all (neither the live-shell skip above nor decide_working runs).
+        # The generic wait_clear (90s) cleanup must NOT delete a `working:`
+        # entry that carries real ANSWERED history during this gap, or the
+        # whole 1h/3h/6h schedule silently resets to a fresh nudge#1 every
+        # single time and is never actually reachable.
+        now, cwd = 1_000_000, "/devel/wresponded30"
+        # a FRESH transcript write (idle=100s, well under stall_working=300
+        # that _run4 uses) — the OUTER job-4 gate is FALSE this sweep
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        stale_last_seen = now - 200   # > the OLD 90s TTL, < the NEW 2x-stall_working one
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000],
+                                              "answered": 1, "escalated": False,
+                                              "last_seen": stale_last_seen}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertIn(wkey, st, "answered history must survive the regrowth gap, "
+                     "not just the generic 90s window")
+        self.assertEqual(st[wkey]["answered"], 1, "history must stay intact, not reset")
+
+    def test_run_once_no_answered_history_still_uses_the_generic_90s_window(self):
+        # A `working:` entry with NO answered history (a plain wedged
+        # episode that never got a response) must keep using the ORIGINAL
+        # generic wait_clear (90s) rule unchanged — the new carve-out is
+        # scoped to entries that genuinely carry backoff history.
+        now, cwd = 1_000_000, "/devel/wnoresp"
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000],
+                                              "escalated": False,
+                                              "last_seen": now - 200}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertNotIn(wkey, st, "no answered history → still pruned at the generic 90s TTL")
+
+    def test_run_once_live_shell_trust_cap_forces_a_periodic_real_check(self):
+        # (#352 F3, adversarial review round 1) A pane whose LAST RENDER
+        # shows the badge but never genuinely advances (repro of a wedged
+        # CC process: the badge is never refreshed because nothing is
+        # rendering any more) must NOT be trusted forever -- past
+        # LIVE_SHELL_TRUST_CAP_S of CONSECUTIVE skipping, the very next
+        # sweep must fall through to a REAL check instead of skipping
+        # again unconditionally.
+        now, cwd = 1_000_000, "/devel/wliveshelltrustcap"
+        self._transcript(cwd, [self._WORKING], 3600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        cap = self.w.LIVE_SHELL_TRUST_CAP_S
+        logs = self._run4(now, fake)
+        self.assertTrue(any("skip live-shell" in ln for ln in logs))
+        self.assertEqual(fake.selfchecks_sent(), 0)
+        # still well within the cap → keeps skipping
+        self._run4(now + cap - 1, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0, "must still trust the badge before the cap")
+        # the cap is exceeded → the SAME still-showing badge must no longer
+        # be trusted unconditionally; the normal flow gets a real look
+        logs2 = self._run4(now + cap, fake)
+        self.assertTrue(any("live-shell trust cap exceeded" in ln for ln in logs2), logs2)
+        self.assertEqual(fake.selfchecks_sent(), 1,
+                         "past the trust cap, a real nudge attempt must fire — "
+                         "the skip must never be permanent")
 
     # --- decide_working state machine (job 4) --------------------------------
     def _decw(self, st, key, now, idle):
