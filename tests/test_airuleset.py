@@ -9515,11 +9515,22 @@ class TestApiWatchdog(TestCase):
                      "not just the generic 90s window")
         self.assertEqual(st[wkey]["answered"], 1, "history must stay intact, not reset")
 
-    def test_run_once_no_answered_history_still_uses_the_generic_90s_window(self):
-        # A `working:` entry with NO answered history (a plain wedged
-        # episode that never got a response) must keep using the ORIGINAL
-        # generic wait_clear (90s) rule unchanged — the new carve-out is
-        # scoped to entries that genuinely carry backoff history.
+    def test_run_once_first_cycle_history_also_survives_the_regrowth_gap(self):
+        # (#352 F2, adversarial review round 2, finding 1) INVERTS the old
+        # "no answered history -> generic 90s TTL" assertion: gating the
+        # carve-out on `answered` was organically UNREACHABLE -- `answered`
+        # is only ever set INSIDE decide_working's `responded=True` branch,
+        # which itself needs a `working:` entry to have already survived one
+        # full regrowth gap (idle must regrow past stall_working before
+        # decide_working runs again at all). A first-cycle entry (nudged
+        # once, never yet re-checked) can NEVER acquire `answered` before
+        # the OLD 90s-only carve-out already pruned it -- so the whole
+        # 1h/3h/6h staged schedule was dead code for every real session; the
+        # bootstrap circularity, proven live against the round-1 fix. Fix:
+        # key the carve-out on `nudges` (present the instant a wedged
+        # episode is nudged, first sighting or not) + `not escalated`, never
+        # on `answered` specifically -- so a bare first-cycle nudge history
+        # now ALSO survives the regrowth gap, not just a re-confirmed one.
         now, cwd = 1_000_000, "/devel/wnoresp"
         self._transcript(cwd, [self._WORKING], 100, now)
         wkey = "working:" + self._SID
@@ -9530,7 +9541,63 @@ class TestApiWatchdog(TestCase):
         fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
         self._run4(now, fake)
         st = self.w.load_state(self.state)
-        self.assertNotIn(wkey, st, "no answered history → still pruned at the generic 90s TTL")
+        self.assertIn(wkey, st, "a bare first-cycle nudge history (no `answered` yet) "
+                     "must ALSO survive the regrowth gap -- the carve-out keys on "
+                     "`nudges`, never on `answered` alone")
+
+    def test_run_once_escalated_history_still_uses_the_generic_90s_window(self):
+        # (#352 F2, adversarial review round 2, finding 1) the `not
+        # escalated` half of the carve-out predicate is load-bearing: an
+        # ALREADY-escalated entry surviving past the generic 90s window
+        # into a brand-new stall (same session, same wkey) would become
+        # IMMORTAL under decide_working's own unconditional top-of-function
+        # `last_seen` refresh (it fires even on the `escalated -> noop`
+        # early return) -- and, worse, decide_working's very own escalated
+        # check (`if e.get("escalated"): return "noop", e`) would silently
+        # swallow the NEW episode's entire nudge ladder, since the same key
+        # would never look like a fresh first sighting again. An escalated
+        # entry must therefore keep pruning at the ORIGINAL generic 90s TTL
+        # -- proven by hand-mutation (dropping `not escalated` here lets
+        # this exact fixture survive to the 2x-stall_working TTL instead).
+        now, cwd = 1_000_000, "/devel/wescalated"
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000, now - 4000,
+                                                         now - 3000],
+                                              "escalated": True,
+                                              "last_seen": now - 200}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertNotIn(wkey, st, "an ESCALATED entry must still be pruned at the "
+                     "generic 90s TTL, never extended -- or a later, genuinely NEW "
+                     "stall on the same session would be swallowed as `noop` forever")
+
+    def test_run_once_carveout_ttl_is_2x_stall_not_1x(self):
+        # (#352 F2, adversarial review round 2, finding 4) the existing
+        # regrowth-gap regression lock ages its fixture at only 200s, which
+        # is BELOW both `stall_working` (300s) and `2 * stall_working`
+        # (600s) in this test harness -- so it cannot discriminate a
+        # correct `2 * stall_working` TTL from an accidentally-shrunk
+        # `stall_working` one. Age the fixture strictly past 1x (300s) but
+        # still under 2x (600s): only the genuine `2 * stall_working` TTL
+        # keeps it alive.
+        now, cwd = 1_000_000, "/devel/wttlmult"
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        stall_working = 300
+        aged_last_seen = now - (stall_working + 100)   # 400s: > 1x, < 2x
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000],
+                                              "escalated": False,
+                                              "last_seen": aged_last_seen}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertIn(wkey, st, "the carve-out TTL must be the FULL 2x-stall_working "
+                     "window, not a bare 1x -- a mutation shrinking it to "
+                     "`stall_working` alone must be caught here")
 
     def test_run_once_live_shell_trust_cap_forces_a_periodic_real_check(self):
         # (#352 F3, adversarial review round 1) A pane whose LAST RENDER
