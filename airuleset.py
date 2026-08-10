@@ -9873,15 +9873,69 @@ def _core_search_excl():
                     if profile != "full")
 
 
+def _gh_app_token_dir():
+    """The GitHub App installation-token directory for THIS stream box
+    (`~/.config/gh-app-tokens/`), resolved at CALL time so a relocated
+    `$HOME`/override is honoured on every call, mirroring
+    `watchdog.draft_rescue_dir()`'s own established shape.
+
+    This is the EXACT path the real, deployed odoo-erp#3281 mechanism
+    reads/writes on the subdev VPS — confirmed directly against the
+    shipped scripts in zbynekdrlik/odoo-erp: `push-stream-tokens.sh`'s
+    `REMOTE_DIR_NAME=".config/gh-app-tokens"` (created via `install -d
+    -m 700` on the first successful token delivery) and
+    `gh-app-token.sh`'s `TOKEN_DIR="${GH_APP_TOKEN_DIR:-$HOME/.config/
+    gh-app-tokens}"` — never an invented convention.
+
+    `GH_APP_TOKEN_DIR` overrides it for tests, mirroring that SAME shell
+    script's own env var name so both sides of the mechanism agree."""
+    override = os.environ.get("GH_APP_TOKEN_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / ".config" / "gh-app-tokens"
+
+
+def _is_gh_app_token_box():
+    """True when this box authenticates `gh` via a GitHub App INSTALLATION
+    token (odoo-erp#3281's `gh-app-stream-tokens` mechanism — david2/
+    david3/david4, odoo-erp#3282), detected from a LOCAL, STATIC fact —
+    the App-token directory's presence — never a network call (#356).
+
+    Why a network call cannot answer this question at all: an App
+    installation token carries no user identity, so `gh api user` 403s
+    ("Resource not accessible by integration") on EVERY call, structurally,
+    not intermittently — there is no failure signature to distinguish
+    "this is an App-token box" from "this box's gh is genuinely broken for
+    an unrelated reason", which is exactly the ambiguity `SliceUnresolved`
+    exists to refuse rather than guess at (#181 I-2). A local signal
+    removes the ambiguity instead of trying to classify it.
+
+    `.is_dir()`, never a bare `.exists()` — a stray FILE at this path must
+    not be misread as "provisioned"."""
+    try:
+        return _gh_app_token_dir().is_dir()
+    except OSError:
+        return False
+
+
 def _slice_quals(user, cwd=None):
     """gh search quals for a reduced-authority stream's OWN ticket slice.
     Own-account streams (david/kvaskodev): assigned ∪ authored ∪ stream label.
     Shared-account boxes (gh login == the maintainer account): the stream
     LABEL alone — @me there matches the whole maintainer-authored backlog.
+    App-token boxes (david2/david3/david4, #356): the stream LABEL alone,
+    the SAME branch a shared-account box takes — an App installation token
+    carries no user identity at all, so the assignee/author signal
+    `assignee:@me`/`author:@me` would rely on is meaningless here, and the
+    label is the only sound one. Detected via `_is_gh_app_token_box()`
+    BEFORE `_gh_login()` is ever called, so this box never pays for (or
+    depends on) a network call that is guaranteed to fail.
 
     Raises `SliceUnresolved` when the gh login cannot be resolved at all
     (#181 I-2) — an unresolvable identity cannot pick between those two
     branches, and guessing either one is a wrong answer on some box."""
+    if _is_gh_app_token_box():
+        return ["label:stream:" + user]
     login = _gh_login(cwd)
     if login is None:
         raise SliceUnresolved(
