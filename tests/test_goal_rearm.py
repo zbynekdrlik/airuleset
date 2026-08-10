@@ -4063,6 +4063,24 @@ class TestGoalBlockedOnUnansweredQuestion(unittest.TestCase):
         self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
                          "❓ NEEDS YOU: schváliš merge PR #5?")
 
+    def test_a_compact_summary_flagged_but_differently_worded_stays_blocked(self):
+        # #350 round-2 review MINOR -- the literal prefix above is CC's
+        # summarizer WORDING and could go silently stale after a future
+        # CC build reworks the preamble; `isCompactSummary` is CC's own
+        # STRUCTURAL marker on the same entries (790/790 real corpus
+        # specimens carry it) and must catch this even when the wording
+        # no longer matches the known prefix at all.
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "isCompactSummary": True,
+             "message": {"content":
+                         "A future CC build's totally reworded compact "
+                         "preamble that shares no words with the old "
+                         "prefix at all."}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
     def test_a_non_dict_message_never_crashes_the_whole_sweep(self):
         # #350 round-1 review MINOR -- `(entry.get("message") or {})
         # .get("content")` raises `AttributeError` on a truthy non-dict
