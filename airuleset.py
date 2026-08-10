@@ -4396,13 +4396,23 @@ def _min_age_days_env(explicit, env_key, default):
     ever actually read -- a silently no-op safety knob). An unparseable
     override falls back to `default`, never crashes the sweep over a
     typo'd env var (mirrors this repo's own established pattern for a
-    cadence INTERVAL override, applied here to an AGE floor)."""
+    cadence INTERVAL override, applied here to an AGE floor).
+
+    `float("nan")` is explicitly refused too (#355 round-2 adversarial-
+    review finding F3, live-executed): `"nan"` parses cleanly, but
+    `age_days < nan` is `False` for EVERY value, which silently disables
+    the ENTIRE age floor -- the one string that slips the docstring's own
+    "never crashes" promise into "never PROTECTS" instead.
+    `float("inf")` is deliberately still accepted (an operator setting it
+    genuinely means "nothing is ever old enough" -- a legitimate,
+    fail-SAFE disable switch, the opposite direction from `nan`)."""
     if explicit is not None:
         return explicit
     try:
-        return float(os.environ.get(env_key, default))
+        v = float(os.environ.get(env_key, default))
     except (TypeError, ValueError):
         return default
+    return default if v != v else v   # v != v is the portable NaN test
 
 
 def _cli_versions_dir(home=None) -> Path:
@@ -4811,14 +4821,25 @@ def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
       - a candidate still needs BOTH the age floor AND a live-process
         check (`_target_in_live_use`) before being genuine.
 
-    Known, deliberate residual (#355 adversarial-review finding 4,
-    THEORETICAL): a session tmux-parked idle for MORE than `min_age_days`
-    with no cwd/fd currently held inside its own tree can still have real
-    (non-empty) scratch data reclaimed -- the live-use check only sees
-    processes ACTIVELY holding a reference, and mtime only sees recent
-    writes, neither of which "this session is parked but will resume"
-    can express. Same residual every mtime-based ager in this repo
-    accepts; not cheaply closable under the FREEZE (no new watchdog job).
+    Known, deliberate residuals (round 1/round 2 adversarial review,
+    THEORETICAL, none closed under the FREEZE -- no new watchdog job):
+      - finding 4: a session tmux-parked idle for MORE than `min_age_days`
+        with no cwd/fd currently held inside its own tree can still have
+        real (non-empty) scratch data reclaimed -- the live-use check
+        only sees processes ACTIVELY holding a reference, and mtime only
+        sees recent writes, neither of which "this session is parked but
+        will resume" can express. Same residual every mtime-based ager in
+        this repo accepts. A parked session whose tree stayed EMPTY the
+        whole time hits the SAME gap through the empty-tree fallback
+        above (round-2 finding F2) -- strictly weaker (zero bytes lost;
+        worst case one failed scratch write later);
+      - round-2 finding F1: `_dir_stats`'s `onerror=lambda e: None` walk
+        silently SKIPS a subdirectory it cannot read -- a same-uid
+        mode-000 dir hiding a genuinely FRESH file, under an otherwise
+        stale top-level mtime, still reads as "empty" and ages by the
+        stale fallback. Live-executed and confirmed reachable, but needs
+        a self-inflicted unreadable subdir to trigger; not present in any
+        real fleet scratch tree observed so far.
     """
     import time as _time
     now = _time.time() if now is None else now
