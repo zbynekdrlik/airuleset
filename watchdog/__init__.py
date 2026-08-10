@@ -4989,9 +4989,25 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
     logs = []
 
     panes = list_claude_panes(run, logs=logs, dry_run=dry_run)
+    # #353 round-2 review, MAJOR-3 — computed BEFORE the pane targets so a
+    # pane-covered root can reuse the cache's own origin-derived name below.
+    cache_roots = _cache_repo_roots(home, max_age_s=GKREQ_CACHE_MAX_AGE_S)
     targets = {}                               # root -> (name, pane_id | None)
     for pid, cwd in panes:
-        targets[cwd] = (os.path.basename(cwd.rstrip("/")), pid)
+        # MAJOR-3 (TRIGGERED, live on dev1: forestshop_app -> forestshop-app,
+        # odoo-slovnormal -> odoo-erp -- the incident's OWN repo): a pane
+        # target used to key `seen` on the directory BASENAME while a
+        # cache-only (no-pane) sweep of the SAME root keys on the cache's
+        # origin-derived name. Whenever those differ, the appear-then-
+        # disappear reset below is structurally dead code -- the two
+        # observation types write to two DIFFERENT `seen[name]` records
+        # that never see each other's half of the cycle. Prefer the
+        # already-known cache name for this EXACT root (no new subprocess
+        # call — `cache_roots` is already being computed for the loop
+        # below); fall back to the basename only for a root with no cache
+        # entry at all (genuinely never seen before).
+        name = cache_roots.get(cwd) or os.path.basename(cwd.rstrip("/"))
+        targets[cwd] = (name, pid)
     pane_cwds = [c for _p, c in panes]
 
     def _covered_by_pane(root):
@@ -5002,8 +5018,7 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 return True
         return False
 
-    for root, name in _cache_repo_roots(
-            home, max_age_s=GKREQ_CACHE_MAX_AGE_S).items():
+    for root, name in cache_roots.items():
         if not _covered_by_pane(root):
             targets.setdefault(root, (name, None))
 
@@ -5021,13 +5036,37 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
         # open backlog, regardless of whether a ping fires this sweep, so a
         # later appear→disappear transition is never missed just because
         # the interim sweep stayed silent under the staged schedule.
+        #
+        # #353 round-2 review, MAJOR-1 (TRIGGERED live: a single transient
+        # `list_claude_panes` read blip — #199's own documented "empty ≠
+        # genuine negative" class — made a healthy, mid-work session read
+        # as "gone" for exactly one sweep, firing an immediate false
+        # "nebeží žiadna supervízorská Claude session" ping: 2 pings in 90
+        # minutes where the OLD 6h-window code produced 0). A single absent
+        # observation is therefore only PENDING, never confirmed — the
+        # material-change reset fires only once the SAME session has been
+        # observed absent on TWO CONSECUTIVE sweeps (`pane_absent_pending`),
+        # never on the first.
         pane_now = bool(pid)
         had_pane = bool(prev.get("pane_seen"))
-        if had_pane != pane_now:
-            seen[name] = dict(prev, pane_seen=pane_now)
+        pending_gone = bool(prev.get("pane_absent_pending"))
+        confirmed_disappear = False
+        if pane_now:
+            new_pane_seen, new_pending = True, False
+        elif had_pane:
+            if pending_gone:
+                new_pane_seen, new_pending = False, False
+                confirmed_disappear = True
+            else:
+                new_pane_seen, new_pending = True, True
+        else:
+            new_pane_seen, new_pending = False, False
+        if new_pane_seen != had_pane or new_pending != pending_gone:
+            seen[name] = dict(prev, pane_seen=new_pane_seen,
+                              pane_absent_pending=new_pending)
             persist()
             prev = seen[name]
-        material_change = prev.get("tickets") != tickets or (had_pane and not pane_now)
+        material_change = prev.get("tickets") != tickets or confirmed_disappear
         if material_change:
             due, count = True, 1
         else:
@@ -5059,12 +5098,14 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                                     % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
                 seen[name] = {"tickets": tickets, "ts": int(now),
-                              "reping_count": count, "pane_seen": pane_now}
+                              "reping_count": count, "pane_seen": new_pane_seen,
+                              "pane_absent_pending": new_pending}
                 persist()
                 logs.append("gkreq-nudge %s %s" % (name, tick_str))
                 continue
             seen[name] = {"tickets": tickets, "ts": int(now),
-                          "reping_count": count, "pane_seen": pane_now}
+                          "reping_count": count, "pane_seen": new_pane_seen,
+                          "pane_absent_pending": new_pending}
             persist()                          # dedup memory BEFORE the keystroke
             if not dry_run:
                 send_continue(pid, GKREQ_NUDGE % (tick_str, name), run)
@@ -5076,11 +5117,31 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     "master loop si žiadosti zoberie."
                     % (name, len(tickets), tick_str, root))
             seen[name] = {"tickets": tickets, "ts": int(now),
-                          "reping_count": count, "pane_seen": pane_now}
+                          "reping_count": count, "pane_seen": new_pane_seen,
+                          "pane_absent_pending": new_pending}
             persist()                          # dedup memory BEFORE the ping
-            send_fn(body, dedup_key="gkreq:%s:%s" % (name, tick_str),
-                    dry_run=dry_run)
-            logs.append("gkreq-ping %s %s" % (name, tick_str))
+            # #353 round-2 review, MAJOR-2/MAJOR-A (both TRIGGERED): the
+            # dedup key used to embed ONLY the ticket-set text, so notify's
+            # OWN independent 14-day marker TTL (`notify._DEDUP_TTL_S`, a
+            # pre-existing, unrelated mechanism) silently swallowed every
+            # STAGED reping of an unchanged set (the 24h/3d/7d schedule
+            # never actually reached Discord past the first send) AND
+            # swallowed a genuine material-change reset whenever the ticket
+            # set reverted to one seen within the last 14 days. This
+            # function's own `_gkreq_reping_due`/material-change logic is
+            # now the SOLE authority on whether a send is due, so the key
+            # only needs to be fresh per DECISION INSTANT, not per content —
+            # `int(now)` is unique across any two real decisions this
+            # function ever makes (sweeps are >= GKREQ_INTERVAL apart) and,
+            # unlike the old tick_str-based key, stays short regardless of
+            # backlog size (MAJOR-B: a very large ticket list embedded
+            # verbatim can exceed the filesystem's NAME_MAX and make
+            # notify's own dedup fail OPEN — out of this lane's scope to
+            # fix in notify.py itself, but this function no longer builds
+            # a key that can trigger it).
+            result = send_fn(body, dedup_key="gkreq:%s:%d" % (name, int(now)),
+                             dry_run=dry_run)
+            logs.append("gkreq-ping %s %s (send=%r)" % (name, tick_str, result))
     return logs
 
 
@@ -14251,10 +14312,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           the repo's IDLE supervisor pane / deduped Discord ping when no session
           runs; reduced-stream homes never nudged (gk_request_backstop, mirror
           of job 8, ~30 min cadence). #353: a materially UNCHANGED state
-          (same ticket set, no supervisor-pane appear-then-disappear cycle)
-          re-pings on an EXPLICIT staged schedule (24h → 3d → 7d, holding at
-          7d) instead of a fixed 6h window that used to fire up to 4x/day
-          forever;
+          (same ticket set, no CONFIRMED supervisor-pane appear-then-
+          disappear cycle) re-pings on an EXPLICIT staged schedule (24h →
+          3d → 7d, holding at 7d) instead of a fixed 6h window that used
+          to fire up to 4x/day forever. A single transient pane-read blip
+          is only PENDING, never a confirmed disappearance (needs 2
+          consecutive absent sweeps — round-2 review MAJOR-1); the dedup
+          key sent to Discord is fresh per real decision instant, not per
+          ticket content (round-2 MAJOR-2/A — notify's own unrelated
+          14-day marker TTL used to silently swallow every staged
+          re-ping); a pane target reuses the tickets-status cache's own
+          origin-derived name for its root when one is known, not the
+          directory basename (round-2 MAJOR-3), so the appear/disappear
+          tracking stays keyed consistently across both observation types;
       (9) /GOAL AUTO-ARM — an idle pane asking to paste a printed /goal template
           gets it typed + submitted (goal_autoarm; the user's exact keystrokes,
           never over user text, never when a goal is already armed);
