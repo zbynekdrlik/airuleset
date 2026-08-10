@@ -3094,8 +3094,26 @@ def _typed_exclusively(text, itext):
 # than refusing it by six characters.
 STASH_UNDO_MAX_BACKSPACES = 4096
 
+# Backs `_undo_typed_text`/`_undo_appended_text`'s own post-backspace verify
+# (#354) — reuses the SAME bounded-settle magnitude job 20's own forward
+# TYPE direction already established for a large payload
+# (`GOAL_TYPE_SETTLE_POLLS`/`_S`, `_await_typed`), rather than guessing at a
+# new one: sending up to `STASH_UNDO_MAX_BACKSPACES` individual BSpace
+# keystrokes in ONE `send-keys` call needs the SAME kind of render-settle
+# time a multi-KB paste does. A single immediate capture right after
+# backspacing can read the box as still non-bare purely from that lag — the
+# SAME mechanism #176 F4 already found and fixed for `deliver_with_stash`'s
+# own post-toggle verify (`_await_stash_settled`), never before extended to
+# this post-backspace verify. Reported live on gatekeeper (#354): two real
+# deliveries logged "stash-abort: typed-NOT-undone, draft left parked" with
+# the /goal text visibly stuck, unsent, in the pane — the user's own draft
+# left permanently parked in the single stash slot because the (genuinely
+# successful, just not-yet-rendered) undo was declared failed.
+STASH_UNDO_SETTLE_POLLS = 8
+STASH_UNDO_SETTLE_S = 1
 
-def _undo_appended_text(pid, run, pre_text, text):
+
+def _undo_appended_text(pid, run, pre_text, text, sleep_fn=None):
     """Remove exactly the characters WE typed from a box that already held
     `pre_text`, and VERIFY the box came back to `pre_text` (#189).
 
@@ -3106,14 +3124,24 @@ def _undo_appended_text(pid, run, pre_text, text):
     text, jamming the single slot into the one decline this design keeps and
     leaving the user's draft invisible. Backspacing our own characters is the
     only recovery that touches nothing of the user's. Returns whether the
-    draft verifiably came back."""
+    draft verifiably came back.
+
+    #354 — a bounded settle poll (never a blind timeout — returns the
+    instant the box agrees) backs the verify, see `STASH_UNDO_SETTLE_POLLS`'s
+    own comment for why a single immediate capture is not enough."""
     if not text or len(text) > STASH_UNDO_MAX_BACKSPACES:
         return False
+    sleep_fn = sleep_fn or time.sleep
     run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(text))
-    return _input_line_text(capture_pane(pid, run, lines=30)) == pre_text
+    for i in range(STASH_UNDO_SETTLE_POLLS):
+        if _input_line_text(capture_pane(pid, run, lines=30)) == pre_text:
+            return True
+        if i < STASH_UNDO_SETTLE_POLLS - 1:
+            sleep_fn(STASH_UNDO_SETTLE_S)
+    return False
 
 
-def _undo_typed_text(pid, run, text):
+def _undo_typed_text(pid, run, text, sleep_fn=None):
     """Remove exactly the characters WE typed from a box that was VERIFIED
     BARE immediately before we typed, and confirm it came back to bare (#193).
 
@@ -3127,11 +3155,21 @@ def _undo_typed_text(pid, run, text):
 
     Note it can only run at all when the verify FAILED: a payload Claude Code
     collapsed into `[Pasted text #N]` verifies through that placeholder and is
-    submitted, so this never has to reason about a collapsed buffer."""
+    submitted, so this never has to reason about a collapsed buffer.
+
+    #354 — a bounded settle poll (never a blind timeout — returns the
+    instant the box agrees) backs the verify, see `STASH_UNDO_SETTLE_POLLS`'s
+    own comment for why a single immediate capture is not enough."""
     if not text or len(text) > STASH_UNDO_MAX_BACKSPACES:
         return False
+    sleep_fn = sleep_fn or time.sleep
     run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(text))
-    return _input_line_text(capture_pane(pid, run, lines=30)) == ""
+    for i in range(STASH_UNDO_SETTLE_POLLS):
+        if _input_line_text(capture_pane(pid, run, lines=30)) == "":
+            return True
+        if i < STASH_UNDO_SETTLE_POLLS - 1:
+            sleep_fn(STASH_UNDO_SETTLE_S)
+    return False
 
 
 def draft_rescue_dir():
@@ -3361,7 +3399,7 @@ def _draft_rescue_persist(pid, captured, now=None, dir_path=None, logs=None):
     return None
 
 
-def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix):
+def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None):
     """Backspace exactly `text` and, only once bare is CONFIRMED, pop a
     PARKED draft back with one corrective `C-s` -- the shared recovery
     THREE call sites need (`deliver_with_stash`'s original #193
@@ -3386,8 +3424,15 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix):
     `log_fn(reason)` receives exactly ONE reason string, built from
     `prefix` (e.g. `"stash-abort"` for the original call site, so the
     result is byte-identical to the pre-#306 wording; a fuller phrase like
-    `"stash-abort: swallowed-submit-not-recovered"` for the new ones)."""
-    undone = _undo_typed_text(pid, run, text)
+    `"stash-abort: swallowed-submit-not-recovered"` for the new ones).
+
+    `sleep_fn` (#354) backs `_undo_typed_text`'s own bounded settle poll --
+    threaded through from the caller's existing `sleep_fn` param (never a
+    new one invented here), so a genuine render-lagged undo verify is
+    retried before this function ever calls it a failure and abandons the
+    parked draft. Production defaults to real `time.sleep`; tests inject a
+    no-op."""
+    undone = _undo_typed_text(pid, run, text, sleep_fn=sleep_fn)
     if not parked:
         log_fn("%s: typed-undone" % prefix if undone
                else "%s: typed-NOT-undone" % prefix)
@@ -3559,7 +3604,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
             # PARKED or NOOP — the settle poll VERIFIED this box bare a moment
             # ago, so every character in it is ours and backspacing exactly
             # what we typed can reach nothing of the user's.
-            _undo_and_release_slot(pid, run, text, parked, _log, "stash-abort")
+            _undo_and_release_slot(pid, run, text, parked, _log, "stash-abort",
+                                   sleep_fn=sleep_fn)
         elif itext == pre_text + text or _typed_landed(text, itext):
             # We only ever type into a SINGLE-ROW unresolved box — the wrapped
             # shape is refused above — so `pre_text` is that box's COMPLETE
@@ -3569,7 +3615,7 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
             # exactly what we typed restores it, and `_undo_appended_text`
             # verifies that byte-for-byte before reporting success.
             _log("stash-abort: append-undone" if
-                 _undo_appended_text(pid, run, pre_text, text)
+                 _undo_appended_text(pid, run, pre_text, text, sleep_fn=sleep_fn)
                  else "stash-abort: append-NOT-undone")
         else:
             # The box does not end with our text at all — a truncated type, or
@@ -3601,7 +3647,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
             # our own garbled text AND the single stash slot silently
             # occupied forever (the live david@subdev ~2h wedge).
             _undo_and_release_slot(pid, run, text, parked, _log,
-                                   "stash-abort: swallowed-submit-not-recovered")
+                                   "stash-abort: swallowed-submit-not-recovered",
+                                   sleep_fn=sleep_fn)
             return False
     _log("stash-delivered")
     return True
@@ -11254,7 +11301,8 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
             # `/goal …` glued in the box unrecovered.
             _undo_and_release_slot(pid, run, text, False, _log,
                                    "goal-verify-abort: "
-                                   "swallowed-submit-not-recovered")
+                                   "swallowed-submit-not-recovered",
+                                   sleep_fn=sleep_fn)
             return False
     return True
 

@@ -504,8 +504,9 @@ class UndoVerifyRaceIsSettledNotLeftHanging(unittest.TestCase):
         logs = []
         ok = deliver(pane, logs=logs)
         self.assertFalse(ok, logs)             # the delivery itself still failed
-        self.assertEqual(pane.draft, "",
-                         "our own typed text must end up backspaced out: %r"
+        self.assertEqual(pane.draft, DRAFT,
+                         "the user's original draft must survive "
+                         "byte-identical, popped back out of the slot: %r"
                          % logs)
         self.assertIsNone(pane.stash,
                           "the user's real draft must still be popped back "
