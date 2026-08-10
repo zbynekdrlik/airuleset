@@ -10876,6 +10876,27 @@ class TestIsSshTransientFailure(TestCase):
         self.assertTrue(airuleset._is_ssh_transient_failure(
             255, "Connection closed by 100.90.94.41 port 22\n"))
 
+    def test_bare_connection_reset_by_host_port_is_transient(self):
+        # #358 adversarial-review F5: `strings /usr/bin/ssh` confirms
+        # "Connection reset by %s port %d" is a real client-side message
+        # (sshpkt_vfatal's own ECONNRESET branch) -- the same bare-line
+        # shape as the already-covered "closed by" line, but for the
+        # reset case. Live-reproduced (ProxyCommand trick) on the real
+        # gk incident's own host/port.
+        self.assertTrue(airuleset._is_ssh_transient_failure(
+            255, "Connection reset by 100.90.94.41 port 22\n"))
+
+    def test_ssh_dispatch_run_fatal_broken_pipe_is_transient(self):
+        # #358 adversarial-review F5: a proxy that sends a banner then
+        # drops produces "ssh_dispatch_run_fatal: Connection to <host>
+        # port <port>: Broken pipe" -- confirmed via `strings` to be
+        # ssh's own internal log tag, the same class as the two
+        # `*_exchange_identification:` prefixes already covered.
+        self.assertTrue(airuleset._is_ssh_transient_failure(
+            255,
+            "ssh_dispatch_run_fatal: Connection to UNKNOWN port 65535: "
+            "Broken pipe\n"))
+
     def test_auth_failure_is_not_transient(self):
         self.assertFalse(airuleset._is_ssh_transient_failure(
             255, "gatekeeper@100.90.94.41: Permission denied (publickey).\n"))
@@ -11088,6 +11109,36 @@ class TestCmdPushTargetLevelSshRetry(TestCase):
                           "must stop at the bound, never keep retrying "
                           "forever")
 
+    def test_retry_exhaustion_sleeps_exactly_max_attempts_minus_one_times(self):
+        # #358 adversarial-review F3: the SIBLING test above only asserts
+        # the ssh CALL count, which is capped by the `range()` bound
+        # either way -- it stays green even under a mutant that flips
+        # `attempt >= SSH_RETRY_MAX_ATTEMPTS` to `attempt > ...` (which
+        # sleeps one extra, useless time after the LAST attempt, printing
+        # a misleading "retrying" line for a retry that never happens).
+        # Assert the SLEEP count too -- exhausting N attempts must sleep
+        # exactly N-1 times, never N.
+        calls = []
+        script = {"5.6.7.8": [(255, "", self._TRANSIENT_ERR),
+                               (255, "", self._TRANSIENT_ERR),
+                               (255, "", self._TRANSIENT_ERR)]}
+        with m.patch("time.sleep") as sleep_mock:
+            args = m.Mock()
+            with m.patch("subprocess.run",
+                          side_effect=self._scripted_run(calls, script)), \
+                    m.patch.object(airuleset, "cmd_install"), \
+                    m.patch.object(airuleset, "REMOTE_HOSTS",
+                                    self._fake_hosts()), \
+                    m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                    return_value=None):
+                with self.assertRaises(SystemExit):
+                    airuleset.cmd_push(args)
+            self.assertEqual(sleep_mock.call_count,
+                              airuleset.SSH_RETRY_MAX_ATTEMPTS - 1,
+                              "must sleep exactly N-1 times for N exhausted "
+                              "attempts -- never sleep after the LAST one, "
+                              "which would claim a retry that never happens")
+
     def test_auth_failure_is_never_retried(self):
         calls = []
         err = "g@5.6.7.8: Permission denied (publickey).\n"
@@ -11193,8 +11244,34 @@ class TestCmdPushSshMultiplexing(TestCase):
         self.assertIn("ControlMaster=auto", ssh_call)
         self.assertIn("ControlPath=/tmp/arsshcm-fake/%C", ssh_call)
 
+    def test_sshpass_branch_also_carries_the_multiplex_options(self):
+        # #358 adversarial-review F4: the sibling test above only ever
+        # used an identity-based (key) host, so a mutant dropping
+        # `control_opts` from JUST the sshpass (no-identity) branch --
+        # 5 of 13 real REMOTE_HOSTS entries (dev2, montalu/2/3/4) --
+        # survived the whole suite untouched. Cover that branch directly.
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+
+        hosts = [{"name": "dev2", "host": "1.2.3.4", "user": "newlevel",
+                   "repo_path": "~/x"}]  # no identity -> sshpass branch
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
+                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                return_value="/tmp/arsshcm-fake-sshpass"):
+            airuleset.cmd_push(args)
+        ssh_call = next(c for c in calls if c and c[0] == "sshpass")
+        self.assertIn("ControlMaster=auto", ssh_call)
+        self.assertIn("ControlPath=/tmp/arsshcm-fake-sshpass/%C", ssh_call)
+
     def test_control_dir_is_cleaned_up_after_a_successful_push(self):
         real_dir = tempfile.mkdtemp(prefix="arsshcm-test-")
+        self.addCleanup(shutil.rmtree, real_dir, ignore_errors=True)
         args = m.Mock()
         with m.patch("subprocess.run",
                       return_value=m.Mock(returncode=0, stdout="ok",
@@ -11208,6 +11285,7 @@ class TestCmdPushSshMultiplexing(TestCase):
 
     def test_control_dir_is_cleaned_up_even_when_the_push_fails(self):
         real_dir = tempfile.mkdtemp(prefix="arsshcm-test-")
+        self.addCleanup(shutil.rmtree, real_dir, ignore_errors=True)
         hosts = [{"name": "gk", "host": "5.6.7.8", "user": "g",
                    "repo_path": "~/x", "identity": "~/.secrets/k"}]
 

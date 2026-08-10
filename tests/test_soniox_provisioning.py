@@ -378,6 +378,95 @@ class TestProvisionSubdevSonioxKey(TestCase):
 
 
 # ---------------------------------------------------------------------------
+# #358 adversarial-review F2 (MAJOR): the soniox delivery leg was exactly
+# as exposed to gk's saturated-MaxStartups drop as the deploy leg, but had
+# NO retry at all -- a transient connection failure permanently lost that
+# account's soniox delivery, precisely the hole #358's own ticket text
+# says the deploy loop's retry exists to close. Uses the SAME
+# `_is_ssh_transient_failure` classifier and `SSH_RETRY_MAX_ATTEMPTS`/
+# backoff as cmd_push()'s own deploy loop.
+# ---------------------------------------------------------------------------
+
+class TestProvisionSubdevSonioxKeyRetry(TestCase):
+    _TRANSIENT_ERR = ("kex_exchange_identification: read: Connection reset "
+                       "by peer\n")
+
+    def _source_with_key(self, value=FAKE_KEY):
+        d = Path(tempfile.mkdtemp())
+        src = d / ".env"
+        src.write_text("SONIOX_API_KEY=%s\n" % value)
+        return src
+
+    def _scripted_run(self, calls, results):
+        counters = {"n": 0}
+
+        def run(argv, **kw):
+            calls.append((list(argv), dict(kw)))
+            idx = counters["n"]
+            counters["n"] += 1
+            rc, out, err = results[min(idx, len(results) - 1)]
+            return m.Mock(returncode=rc, stdout=out, stderr=err)
+        return run
+
+    def test_transient_failure_is_retried_and_succeeds(self):
+        src = self._source_with_key()
+        calls = []
+        results = [(255, "", self._TRANSIENT_ERR), (0, "ok", "")]
+        hosts = [FAKE_HOSTS[1]]  # montalu@subdev only
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY), \
+                m.patch("time.sleep"):
+            failed = airuleset.provision_subdev_soniox_key(
+                hosts=hosts, run=self._scripted_run(calls, results),
+                source=src)
+        self.assertEqual(failed, [])
+        self.assertEqual(len(calls), 2,
+                          "a transient connection failure must be retried, "
+                          "not permanently lose the account's soniox key")
+
+    def test_retry_is_bounded(self):
+        src = self._source_with_key()
+        calls = []
+        results = [(255, "", self._TRANSIENT_ERR)] * 5
+        hosts = [FAKE_HOSTS[1]]
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY), \
+                m.patch("time.sleep"):
+            failed = airuleset.provision_subdev_soniox_key(
+                hosts=hosts, run=self._scripted_run(calls, results),
+                source=src)
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(len(calls), airuleset.SSH_RETRY_MAX_ATTEMPTS,
+                          "must stop at the bound, never keep retrying "
+                          "forever")
+
+    def test_ordinary_failure_is_never_retried(self):
+        src = self._source_with_key()
+        calls = []
+        # rc=1 -- an ordinary failed write (disk full, permission
+        # problem), NOT an ssh connection failure -- retrying it would
+        # just repeat the same failing remote command for no benefit.
+        results = [(1, "", "cat: write error\n"), (0, "ok", "")]
+        hosts = [FAKE_HOSTS[1]]
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY):
+            failed = airuleset.provision_subdev_soniox_key(
+                hosts=hosts, run=self._scripted_run(calls, results),
+                source=src)
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(len(calls), 1)
+
+    def test_backoff_is_applied_between_retries(self):
+        src = self._source_with_key()
+        calls = []
+        results = [(255, "", self._TRANSIENT_ERR), (0, "ok", "")]
+        hosts = [FAKE_HOSTS[1]]
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY), \
+                m.patch("time.sleep") as sleep_mock:
+            airuleset.provision_subdev_soniox_key(
+                hosts=hosts, run=self._scripted_run(calls, results),
+                source=src)
+        sleep_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # ffmpeg + ffprobe static binaries — the no-sudo subdev accounts have NO
 # other install path (RUNTIME_DEPS' apt-get can never run there). #275
 # adversarial-review MAJOR-1/2/3: extract.sh needs BOTH binaries, they must
