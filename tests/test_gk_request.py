@@ -253,6 +253,10 @@ class TestGkreqRepingBackoff(unittest.TestCase):
         self.assertEqual(len(self.pings), 2)
 
     def test_supervisor_pane_appear_then_disappear_resets_to_fresh_ping(self):
+        # #353 round 2 (MAJOR-1): the disappearance itself must be
+        # CONFIRMED on a SECOND consecutive absent sweep before it resets
+        # anything -- a single absent sweep is only PENDING (see the
+        # dedicated single-blip test below).
         state = {}
         now = time.time()
         self._sweep(now, state, [7], panes=[])
@@ -262,11 +266,98 @@ class TestGkreqRepingBackoff(unittest.TestCase):
         self._sweep(now + 3600, state, [7],
                    panes=[("%1", self.root)], captured=IDLE)
         self.assertEqual(len(self.pings), 1, "appearing alone must not ping")
-        # +2h total: the pane is GONE again -- a full appear-then-disappear
-        # cycle -- must ping immediately even though only 2h elapsed.
+        # +2h: the pane is GONE -- the FIRST absent sweep, only pending.
         self._sweep(now + 2 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1,
+                         "a single absent sweep must not reset yet")
+        # +2.5h: STILL gone -- the SECOND consecutive absent sweep confirms
+        # the disappearance -- must ping immediately even though only 2.5h
+        # elapsed since the first ping.
+        self._sweep(now + 2.5 * 3600, state, [7], panes=[])
         self.assertEqual(len(self.pings), 2,
-                         "appear-then-disappear must reset the backoff")
+                         "a CONFIRMED appear-then-disappear must reset "
+                         "the backoff")
+
+    def test_a_single_transient_pane_absence_does_not_reset_the_backoff(self):
+        # #353 round 2, MAJOR-1 (live-reproduced regression against the
+        # round-1 code): a single `list_claude_panes` read blip (#199's own
+        # documented "an empty read is not a genuine negative" class) must
+        # NOT be mistaken for a real disappearance and must NOT fire a
+        # false "nebeží žiadna supervízorská Claude session" ping while the
+        # session is genuinely still alive.
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 1)
+        # +2h: ONE transient absent sweep -- the blip.
+        self._sweep(now + 2 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1, "a lone blip must not ping")
+        # +2h5m: the pane is back -- the blip resolved itself before a
+        # second consecutive absence could ever confirm it.
+        self._sweep(now + 2 * 3600 + 300, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 1,
+                         "a resolved blip must never have reset the backoff")
+
+    def test_pane_target_uses_the_cache_name_not_the_directory_basename(self):
+        # #353 round 2, MAJOR-3 (TRIGGERED live: dev1's own real cache has
+        # `forestshop_app` -> `forestshop-app`, `odoo-slovnormal` ->
+        # `odoo-erp` -- the incident's OWN repo): a pane target used to key
+        # `seen` on `os.path.basename(cwd)`, while a no-pane (cache-only)
+        # sweep of the SAME root keys on the cache's own origin-derived
+        # name. When those differ, the appear-then-disappear reset above
+        # is structurally DEAD CODE -- the two observation types write to
+        # two different `seen[]` records that never see each other's half
+        # of the cycle. Re-seed this root's cache entry under a name that
+        # genuinely differs from its directory basename ("demo") and
+        # confirm the reset still fires through a full
+        # present -> absent -> absent(confirmed) cycle.
+        seed_repo_cache(self.home, self.root, "demo-origin-name")
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 2 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1, "first absence only pending")
+        self._sweep(now + 2.5 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 2,
+                         "the reset must fire even though the pane's "
+                         "directory basename ('demo') differs from the "
+                         "cache's own origin-derived name")
+
+    def test_dedup_key_is_unique_per_real_ping_decision(self):
+        # #353 round 2, MAJOR-2/MAJOR-A (both TRIGGERED against notify's
+        # real 14-day marker TTL): the OLD dedup key embedded only the
+        # ticket-set text, so notify.send's own unrelated dedup mechanism
+        # silently swallowed every STAGED reping of an unchanged set (the
+        # 24h/3d/7d schedule never actually reached Discord past the first
+        # send) and swallowed a genuine material-change reset whenever the
+        # set reverted to one seen within the last 14 days. The key must
+        # now be unique per real DECISION instant, not per ticket content.
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[])
+        first_key = self.pings[0][1]["dedup_key"]
+        self._sweep(now + 24 * 3600 + 5, state, [7], panes=[])
+        second_key = self.pings[1][1]["dedup_key"]
+        self.assertNotEqual(first_key, second_key,
+                            "each real ping decision must claim its own "
+                            "dedup key, or notify's own 14-day marker TTL "
+                            "silently swallows every staged re-ping")
+        # a reverted-then-reverted-back ticket set (a MATERIAL change each
+        # time) must also claim distinct keys, not collide with the very
+        # first send's key.
+        self._sweep(now + 25 * 3600, state, [9], panes=[])   # different set
+        third_key = self.pings[2][1]["dedup_key"]
+        self._sweep(now + 26 * 3600, state, [7], panes=[])   # reverted back
+        fourth_key = self.pings[3][1]["dedup_key"]
+        self.assertNotIn(fourth_key, (first_key, second_key, third_key))
 
     def test_pane_appearing_with_no_prior_disappearance_is_not_a_reset(self):
         # a pane simply BEING there from the start (never having been
