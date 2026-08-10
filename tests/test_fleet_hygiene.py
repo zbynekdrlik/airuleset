@@ -295,6 +295,19 @@ class TestDiscoverCliVersionCandidates(unittest.TestCase):
         self.assertIsNotNone(fresh["reason"])
         self.assertIn("too recent", fresh["reason"])
 
+    def test_min_age_days_env_override_is_actually_read(self):
+        """#355 adversarial-review finding 2 (MINOR): the constant's own
+        comment advertises AIRULESET_CLI_VERSION_MIN_AGE_DAYS -- it must
+        genuinely change the outcome, not be a silently no-op knob."""
+        vdir = _mk_versions(self.root, [
+            ("2.1.223", 1), ("2.1.224", 5), ("2.1.225", 0)])
+        env = _mk_current_env(self.root, vdir, "2.1.225")
+        with m.patch.dict(os.environ, {"AIRULESET_CLI_VERSION_MIN_AGE_DAYS": "0.5"}):
+            found = airuleset.discover_cli_version_candidates(
+                home=self.root, versions_dir=vdir, now=NOW, min_age_days=None, env=env)
+        row = self._by_name(found, "2.1.223")
+        self.assertIsNone(row["reason"], "env override to 0.5d must admit a 1-day-old version")
+
     def test_live_process_guard_skips_a_running_old_version(self):
         # current=2.1.226, rollback (kept)=2.1.225 -- 2.1.223/2.1.224 are
         # the two genuinely-below-rollback candidates this test targets.
@@ -382,10 +395,68 @@ class TestSweepStaleCliVersions(unittest.TestCase):
         vdir, env = self._setup_layout()
         self.state_path.write_text(json.dumps(
             {"last_run": NOW - airuleset.CLI_VERSION_MIN_INTERVAL_S - 1}))
+        airuleset.sweep_stale_cli_versions(
+            home=self.root, versions_dir=vdir, dry_run=False, force=False, now=NOW,
+            log_path=self.log_path, state_path=self.state_path,
+            min_age_days=2, env=env)
+        self.assertFalse((vdir / "2.1.223").exists())
+
+    def test_dry_run_never_writes_cadence_state(self):
+        """#355 adversarial-review finding 3a: a manual --dry-run must
+        NEVER consume the next 24h of the automatic install-time cadence
+        gate -- mutating the write guard to unconditional stays green
+        without this lock."""
+        vdir, env = self._setup_layout()
+        self.assertFalse(self.state_path.exists())
+        airuleset.sweep_stale_cli_versions(
+            home=self.root, versions_dir=vdir, dry_run=True, now=NOW,
+            log_path=self.log_path, state_path=self.state_path,
+            min_age_days=2, env=env)
+        self.assertFalse(self.state_path.exists(),
+                         "dry-run must never write the cadence-gate state file")
+
+    def test_delete_time_toctou_recheck_refuses_a_newly_symlinked_path(self):
+        """#355 adversarial-review finding 3b: the delete-time re-check
+        must actually run -- inject a candidate whose path was replaced by
+        a symlink between discovery and delete."""
+        vdir, env = self._setup_layout()
+        target = self.root / "elsewhere.bin"
+        target.write_bytes(b"y")
+        stale_path = vdir / "2.1.223"
+        stale_path.unlink()
+        stale_path.symlink_to(target)
+        candidates = [{"path": str(stale_path), "version": "2.1.223", "reason": None}]
+        results = airuleset.sweep_stale_cli_versions(
+            home=self.root, versions_dir=vdir, dry_run=False, force=True, now=NOW,
+            log_path=self.log_path, state_path=self.state_path,
+            candidates=candidates, env=env)
+        self.assertFalse(results[0]["removed"])
+        self.assertIn("no longer a plain regular file", results[0]["reason"])
+        self.assertTrue(stale_path.is_symlink(), "the symlink must survive untouched")
+
+    def test_delete_time_toctou_recheck_refuses_a_now_live_path(self):
+        vdir, env = self._setup_layout()
+        target_path = vdir / "2.1.223"
+        proc = _mkfakeproc(self.root, [
+            {"pid": "333", "exe": str(target_path.resolve())}])
+        candidates = [{"path": str(target_path), "version": "2.1.223", "reason": None}]
+        results = airuleset.sweep_stale_cli_versions(
+            home=self.root, versions_dir=vdir, dry_run=False, force=True, now=NOW,
+            log_path=self.log_path, state_path=self.state_path,
+            candidates=candidates, env=env, proc_dir=proc)
+        self.assertFalse(results[0]["removed"])
+        self.assertIn("in live use", results[0]["reason"])
+        self.assertTrue(target_path.exists())
+
+    def test_future_dated_cadence_stamp_does_not_wedge_the_gate_forever(self):
+        """#355 adversarial-review finding 3c."""
+        vdir, env = self._setup_layout()
+        self.state_path.write_text(json.dumps({"last_run": NOW + 999999}))
         results = airuleset.sweep_stale_cli_versions(
             home=self.root, versions_dir=vdir, dry_run=False, force=False, now=NOW,
             log_path=self.log_path, state_path=self.state_path,
             min_age_days=2, env=env)
+        self.assertNotEqual(results, [], "a future-dated stamp must be clamped, not honoured")
         self.assertFalse((vdir / "2.1.223").exists())
 
     def test_log_lines_written_for_every_row(self):
@@ -408,9 +479,6 @@ class TestCliVersionCLICommand(unittest.TestCase):
 
     def test_dry_run_reports_and_prints_log_path(self):
         vdir = _mk_versions(self.root, [("2.1.223", 30), ("2.1.226", 0)])
-        env = _mk_current_env(self.root, vdir, "2.1.226")
-        fake_results = airuleset.discover_cli_version_candidates(
-            home=self.root, versions_dir=vdir, now=NOW, min_age_days=2, env=env)
         with m.patch.object(airuleset, "sweep_stale_cli_versions") as fake_sweep:
             fake_sweep.return_value = [
                 {"path": str(vdir / "2.1.223"), "version": "2.1.223",
@@ -478,6 +546,54 @@ class TestDiscoverClaudeScratchCandidates(unittest.TestCase):
         row = found[0]
         self.assertIsNotNone(row["reason"])
         self.assertIn("too recent", row["reason"])
+
+    def test_freshly_created_empty_session_dir_is_never_reclaimable(self):
+        """#355 adversarial-review finding 1 (MAJOR, live-confirmed on
+        dev1): the harness pre-creates <cwd>/<session>/scratchpad EMPTY at
+        session start, before a live session has written anything. An
+        empty tree must NEVER read as "infinitely stale" (unlike #315's
+        target/ purge, where an empty target/ genuinely has zero bytes to
+        protect) -- it must fall back to the directory's OWN mtime, so a
+        tree created SECONDS ago stays protected by the age floor exactly
+        like a non-empty one would."""
+        r = self._mk_root()
+        empty_tree = r / "some-cwd" / "sessionid" / "scratchpad"
+        empty_tree.mkdir(parents=True)
+        # Stamp every level FRESH (age 0) -- a session that just started.
+        for d in (r / "some-cwd", r / "some-cwd" / "sessionid", empty_tree):
+            os.utime(d, (NOW, NOW))
+        found = airuleset.discover_claude_scratch_candidates(
+            tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=7)
+        row = [r_ for r_ in found if Path(r_["path"]).name == "some-cwd"][0]
+        self.assertIsNotNone(row["reason"], "an empty, seconds-old tree must NOT be a genuine candidate")
+        self.assertIn("too recent", row["reason"])
+
+    def test_old_empty_tree_still_reclaimable(self):
+        """The fix must not make an empty tree PERMANENTLY unreclaimable --
+        an old, empty, abandoned tree (its own dir mtime old) is still a
+        genuine candidate."""
+        r = self._mk_root()
+        empty_tree = r / "old-cwd" / "sessionid" / "scratchpad"
+        empty_tree.mkdir(parents=True)
+        old_stamp = NOW - 30 * DAY
+        for d in (r / "old-cwd", r / "old-cwd" / "sessionid", empty_tree):
+            os.utime(d, (old_stamp, old_stamp))
+        found = airuleset.discover_claude_scratch_candidates(
+            tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=7)
+        row = [r_ for r_ in found if Path(r_["path"]).name == "old-cwd"][0]
+        self.assertIsNone(row["reason"])
+
+    def test_min_age_days_env_override_is_actually_read(self):
+        """#355 adversarial-review finding 2 (MINOR): the constant's own
+        comment advertises AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS -- it must
+        genuinely change the outcome, not be a silently no-op knob."""
+        r = self._mk_root()
+        self._mkfile(r / "f.txt", age_days=3)
+        with m.patch.dict(os.environ, {"AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS": "1"}):
+            found = airuleset.discover_claude_scratch_candidates(
+                tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=None)
+        row = found[0]
+        self.assertIsNone(row["reason"], "env override to 1 day must admit a 3-day-old file")
 
     def test_newest_file_anywhere_inside_protects_a_live_session_dir(self):
         """A dir whose TOP entry mtime looks old but has a FRESH file deep
@@ -618,7 +734,7 @@ class TestSweepClaudeScratch(unittest.TestCase):
         self.assertTrue((r / "old.txt").exists())
 
     def test_never_touches_a_differently_named_sibling(self):
-        r = self._setup()
+        self._setup()
         foreign = self.root / "claude-999999"
         foreign.mkdir()
         self._mkfile(foreign / "not-mine.txt", age_days=30)
@@ -626,6 +742,58 @@ class TestSweepClaudeScratch(unittest.TestCase):
             tmp_dir=self.root, uid=self.uid, dry_run=False, force=True, now=NOW,
             log_path=self.log_path, state_path=self.state_path, min_age_days=7)
         self.assertTrue((foreign / "not-mine.txt").exists())
+
+    def test_dry_run_never_writes_cadence_state(self):
+        """#355 adversarial-review finding 3a."""
+        self._setup()
+        self.assertFalse(self.state_path.exists())
+        airuleset.sweep_claude_scratch(
+            tmp_dir=self.root, uid=self.uid, dry_run=True, now=NOW,
+            log_path=self.log_path, state_path=self.state_path, min_age_days=7)
+        self.assertFalse(self.state_path.exists(),
+                         "dry-run must never write the cadence-gate state file")
+
+    def test_delete_time_toctou_recheck_refuses_a_newly_symlinked_path(self):
+        """#355 adversarial-review finding 3b."""
+        r = self._setup()
+        target = self.root / "elsewhere-dir"
+        target.mkdir()
+        stale_path = r / "old.txt"
+        stale_path.unlink()
+        stale_path.symlink_to(target)
+        candidates = [{"path": str(stale_path), "reason": None}]
+        results = airuleset.sweep_claude_scratch(
+            tmp_dir=self.root, uid=self.uid, dry_run=False, force=True, now=NOW,
+            log_path=self.log_path, state_path=self.state_path,
+            candidates=candidates)
+        self.assertFalse(results[0]["removed"])
+        self.assertIn("symlink", results[0]["reason"])
+        self.assertTrue(stale_path.is_symlink())
+
+    def test_delete_time_toctou_recheck_refuses_a_now_live_path(self):
+        """#355 adversarial-review finding 3b."""
+        r = self._setup()
+        old_dir = r / "old-cwd"
+        proc = _mkfakeproc(self.root, [
+            {"pid": "444", "cwd": str(old_dir.resolve())}])
+        candidates = [{"path": str(old_dir), "reason": None}]
+        results = airuleset.sweep_claude_scratch(
+            tmp_dir=self.root, uid=self.uid, dry_run=False, force=True, now=NOW,
+            log_path=self.log_path, state_path=self.state_path,
+            candidates=candidates, proc_dir=proc)
+        self.assertFalse(results[0]["removed"])
+        self.assertIn("in live use", results[0]["reason"])
+        self.assertTrue(old_dir.exists())
+
+    def test_future_dated_cadence_stamp_does_not_wedge_the_gate_forever(self):
+        """#355 adversarial-review finding 3c."""
+        r = self._setup()
+        self.state_path.write_text(json.dumps({"last_run": NOW + 999999}))
+        results = airuleset.sweep_claude_scratch(
+            tmp_dir=self.root, uid=self.uid, dry_run=False, force=False, now=NOW,
+            log_path=self.log_path, state_path=self.state_path, min_age_days=7)
+        self.assertNotEqual(results, [], "a future-dated stamp must be clamped, not honoured")
+        self.assertFalse((r / "old.txt").exists())
 
 
 class TestClaudeScratchCLICommand(unittest.TestCase):
