@@ -9599,6 +9599,30 @@ class TestApiWatchdog(TestCase):
                      "window, not a bare 1x -- a mutation shrinking it to "
                      "`stall_working` alone must be caught here")
 
+    def test_run_once_carveout_ttl_still_has_an_upper_bound(self):
+        # (#352, adversarial review round 3, F2-sibling coverage) the
+        # previous test only ever proves the LOWER edge of the 2x TTL
+        # (survives past 1x, under 2x) -- nothing asserted the UPPER edge:
+        # that an eligible (nudged, not-escalated) entry genuinely gets
+        # pruned once it goes stale PAST `2 * stall_working`, rather than
+        # the carve-out silently making it immortal. Age the fixture past
+        # the FULL 2x window and require it gone.
+        now, cwd = 1_000_000, "/devel/wttlupper"
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        stall_working = 300
+        aged_last_seen = now - (2 * stall_working + 100)   # 700s: past the full 2x TTL
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000],
+                                              "escalated": False,
+                                              "last_seen": aged_last_seen}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertNotIn(wkey, st, "an eligible entry stale past the FULL "
+                     "2x-stall_working window must still be pruned -- the carve-out "
+                     "extends the TTL, it does not make the entry immortal")
+
     def test_run_once_live_shell_trust_cap_forces_a_periodic_real_check(self):
         # (#352 F3, adversarial review round 1) A pane whose LAST RENDER
         # shows the badge but never genuinely advances (repro of a wedged
