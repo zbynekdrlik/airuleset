@@ -662,6 +662,13 @@ class TestBranchMergeTemplateNeverReadsAsSelfClose(TestCase):
         self.assertIn("Count a hand-off done ONLY after verifying it from primary sources",
                       line)
         self.assertIn("the READY-FOR-REVIEW comment posted", line)
+        # #349 review m2: the ORIGINAL wrong phrasing wrapped the command name
+        # in backticks (`` `gh issue view` (closed) ``) — a bare unquoted
+        # "gh issue view (closed)" needle does NOT match that shape (the
+        # backtick sits between "view" and " (closed)"), so it would silently
+        # pass even if the exact old wording were reintroduced. Lock the real
+        # shape.
+        self.assertNotIn("`gh issue view` (closed)", line)
         self.assertNotIn("gh issue view (closed)", line)
 
     def test_a_handed_off_ticket_with_release_pending_is_not_done(self):

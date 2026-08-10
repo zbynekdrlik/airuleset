@@ -257,9 +257,14 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         # which is exactly the montalu3 self-close-and-never-hand-off
         # regression. It must now explicitly say branch-merge posts the SAME
         # READY-FOR-REVIEW comment fork-no-merge uses, and never self-closes.
-        idx = t = read(self.SKILL)
+        # #349 review m4: anchor the window's END to the next stable bullet
+        # marker rather than a magic character count — a magic-number window
+        # silently truncates (or over-includes unrelated later prose) the
+        # moment nearby wording is edited.
+        t = read(self.SKILL)
         idx = t.index("Authority rides the dispatch")
-        bullet = t[idx:idx + 1400]
+        end = t.index("Every dispatch RETURNS IMMEDIATELY", idx)
+        bullet = t[idx:end]
         self.assertIn("posts the SAME `READY-FOR-REVIEW:` hand-off comment", bullet)
         self.assertIn("never a self-close", bullet)
 
@@ -268,9 +273,10 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         # reduced-authority done-points (branch-merge needs the PR-merged
         # check AND the comment; fork-no-merge needs only the comment) and
         # explicitly forbid a merge to main for either.
-        idx = t = read(self.SKILL)
+        t = read(self.SKILL)
         idx = t.index("Step 4 verification then checks the PROFILE")
-        window = t[idx:idx + 700]
+        end = t.index("Every dispatch RETURNS IMMEDIATELY", idx)
+        window = t[idx:end]
         self.assertIn("branch-merge: PR merged into integration AND the", window)
         self.assertIn("fork-no-merge: the `READY-FOR-REVIEW:` comment present", window)
         self.assertIn("NEVER a merge to main for either", window)
@@ -281,14 +287,39 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         # the Hand-off line applies to BOTH profiles (not just fork-no-merge),
         # and that branch-merge's own PR line is ADDITIONAL, ending at the
         # integration branch — never a substitute for the Hand-off line.
-        idx = t = read(self.SKILL)
+        t = read(self.SKILL)
         idx = t.index("Reduced-authority streams (branch-merge / fork-no-merge) carry")
-        window = t[idx:idx + 900]
+        end = t.index("The heading + audits", idx)
+        window = t[idx:end]
         self.assertIn("Hand-off: READY-FOR-REVIEW komentár na #N", window)
         self.assertIn("for BOTH profiles", window)
         self.assertIn("branch-merge posts it too, right after its integration-branch merge", window)
         self.assertIn("a merge alone does NOT", window)
         self.assertIn("additionally for branch-merge", window)
+
+    def test_pr_merge_policy_skill_states_the_hand_off_too(self):
+        # #349 round-2-review M1: `skills/pr-merge-policy/SKILL.md`'s own
+        # reduced-authority scope bullet described branch-merge as ending at
+        # "its PR merged into the project's INTEGRATION branch" with no
+        # mention of the hand-off comment at all — a FIFTH place in the repo
+        # restating the same wrong-shape omission MAJOR-3 already fixed
+        # elsewhere.
+        t = read("skills/pr-merge-policy/SKILL.md")
+        self.assertIn("THEN posts the same `READY-FOR-REVIEW:` hand-off comment", t)
+        self.assertIn("Neither profile ever closes the ticket itself", t)
+
+    def test_authority_profiles_canonical_comment_states_the_hand_off_too(self):
+        # #349 round-2-review m1: the canonical AUTHORITY_PROFILES comment in
+        # airuleset.py described branch-merge with strictly LESS detail than
+        # its fork-no-merge sibling bullet right below it (no hand-off
+        # mention at all) — the canonical definition every other doc points
+        # back to must not itself omit the invariant.
+        t = read("airuleset.py")
+        idx = t.index("branch-merge  — own PR merged into the project INTEGRATION branch")
+        end = t.index("fork-no-merge — fork branch pushed", idx)
+        window = t[idx:end]
+        self.assertIn("THEN the same ready-for-review hand-off comment", window)
+        self.assertIn("never closes the issue itself", window)
 
 
 class TestWorkerCarriesProfiles(TestCase):
@@ -359,9 +390,12 @@ class TestWorkerCarriesProfiles(TestCase):
         # copied the FULL variant's "OBSOLETE — closed" / obsolete_closed:
         # shape instead of the fork-no-merge variant's "commented, left
         # OPEN" / obsolete_handed_off: shape it should mirror.
-        idx = read("agents/autopilot-worker.md").find(
-            "branch-merge variant of the FINAL MESSAGE")
-        fence = read("agents/autopilot-worker.md")[idx:idx + 2000]
+        # #349 review m4: anchor the window's END to the next stable section
+        # heading rather than a magic character count.
+        w = read("agents/autopilot-worker.md")
+        idx = w.index("branch-merge variant of the FINAL MESSAGE")
+        end = w.index("Worktree-mode variant of the FINAL MESSAGE", idx)
+        fence = w[idx:end]
         self.assertIn('"OBSOLETE — commented, left OPEN:', fence)
         self.assertIn("obsolete_handed_off:", fence)
         self.assertNotIn('"OBSOLETE — closed:', fence)
