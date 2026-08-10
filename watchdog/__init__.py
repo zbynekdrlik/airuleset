@@ -15596,25 +15596,45 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             if int(now) - state[k].get("last_seen", 0) > SUBAGENT_NUDGE_STATE_TTL_SECONDS:
                 del state[k]
         elif (k.startswith("working:") and isinstance(state.get(k), dict)
-                and state[k].get("answered")):
-            # (#352 F2, adversarial review round 1) An episode that has
-            # ALREADY been through at least one RESPONDED round carries
-            # real backoff history (the 1h/3h/6h schedule) — WITHOUT this
-            # carve-out the generic wait_clear (90s) rule below deletes it
-            # during the ordinary gap between a response (idle resets near
-            # 0, so the OUTER `idle >= stall_working` gate goes false and
-            # NOTHING in job 4 touches this key at all) and the next
-            # re-check (idle must regrow past `stall_working`, ~30 min by
-            # default, before decide_working is even reachable again) —
-            # silently resetting the whole schedule to a fresh nudge#1
-            # every single time and making it dead code (proven live by
-            # the round-1 review). Give it a TTL comfortably longer than
-            # that ONE-TIME regrowth gap (2x `stall_working`, floored at
-            # `wait_clear` so it is never SHORTER than the generic rule it
-            # replaces) — once decide_working IS reachable again it
-            # refreshes `last_seen` every sweep on its own (same as
-            # before), so this only ever has to survive the regrowth
-            # window, never the schedule's own multi-hour gaps.
+                and state[k].get("nudges") and not state[k].get("escalated")):
+            # (#352 F2, adversarial review round 2, finding 1) round-1's own
+            # fix gated this carve-out on `answered` — organically
+            # UNREACHABLE: `answered` is set ONLY inside decide_working's
+            # `responded=True` branch, which itself needs THIS SAME entry
+            # to have already survived one full regrowth gap under the OLD
+            # 90s-only rule before `answered` can ever be written at all.
+            # A first-cycle entry (nudged once, not yet re-checked) can
+            # NEVER acquire `answered` before the old carve-out prunes it
+            # first — so the whole 1h/3h/6h staged schedule stayed dead
+            # code for every real session, proven live (a bare nudge#1,
+            # answered within 60s, pruned at 180s, fresh nudge#1 again at
+            # regrowth — `answered` never gets set, forever).
+            #
+            # Key it on `nudges` instead — present the instant a wedged
+            # episode is FIRST nudged, not only once it has been re-checked
+            # — plus `not escalated`. The `not escalated` half is
+            # load-bearing on its own: WITHOUT it, an already-escalated
+            # entry surviving past the generic 90s window into a brand-new
+            # stall (same session, same wkey) would become IMMORTAL under
+            # decide_working's own unconditional top-of-function
+            # `last_seen` refresh (it fires even on the
+            # `escalated -> "noop"` early return) — and, worse,
+            # decide_working's own `if e.get("escalated"): return "noop"`
+            # check would then silently swallow the NEW episode's entire
+            # nudge ladder, since the key would never again look like a
+            # fresh first sighting. An escalated entry therefore keeps
+            # using the ORIGINAL generic wait_clear (90s) rule below,
+            # unchanged, so a later genuinely-new stall on the same session
+            # starts completely fresh.
+            #
+            # Give the eligible (nudged, not-yet-escalated) entry a TTL
+            # comfortably longer than the ONE-TIME regrowth gap (2x
+            # `stall_working`, floored at `wait_clear` so it is never
+            # SHORTER than the generic rule it replaces) — once
+            # decide_working IS reachable again it refreshes `last_seen`
+            # every sweep on its own (same as before), so this only ever
+            # has to survive the regrowth window, never the schedule's own
+            # multi-hour gaps.
             if int(now) - state[k].get("last_seen", 0) > max(2 * stall_working, wait_clear):
                 del state[k]
         elif (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
