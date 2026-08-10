@@ -308,6 +308,35 @@ class TestDiscoverCliVersionCandidates(unittest.TestCase):
         row = self._by_name(found, "2.1.223")
         self.assertIsNone(row["reason"], "env override to 0.5d must admit a 1-day-old version")
 
+    def test_explicit_min_age_days_beats_the_env_override(self):
+        """#355 round-2 adversarial-review finding F4: an EXPLICIT
+        `min_age_days=` call argument must win over the env var, never the
+        reverse."""
+        vdir = _mk_versions(self.root, [
+            ("2.1.223", 1), ("2.1.224", 5), ("2.1.225", 0)])
+        env = _mk_current_env(self.root, vdir, "2.1.225")
+        with m.patch.dict(os.environ, {"AIRULESET_CLI_VERSION_MIN_AGE_DAYS": "0.1"}):
+            found = airuleset.discover_cli_version_candidates(
+                home=self.root, versions_dir=vdir, now=NOW, min_age_days=7, env=env)
+        row = self._by_name(found, "2.1.223")
+        self.assertIsNotNone(row["reason"], "explicit min_age_days=7 must NOT be overridden by env=0.1")
+        self.assertIn("too recent", row["reason"])
+
+    def test_nan_env_override_is_refused_never_disables_the_age_floor(self):
+        """#355 round-2 adversarial-review finding F3: "nan" parses as a
+        valid float, and `age_days < nan` is False for every value --
+        silently disabling the ENTIRE age floor. Must fall back to the
+        default instead."""
+        vdir = _mk_versions(self.root, [
+            ("2.1.223", 1), ("2.1.224", 5), ("2.1.225", 0)])
+        env = _mk_current_env(self.root, vdir, "2.1.225")
+        with m.patch.dict(os.environ, {"AIRULESET_CLI_VERSION_MIN_AGE_DAYS": "nan"}):
+            found = airuleset.discover_cli_version_candidates(
+                home=self.root, versions_dir=vdir, now=NOW, min_age_days=None, env=env)
+        row = self._by_name(found, "2.1.223")
+        self.assertIsNotNone(row["reason"], "a 'nan' env override must NEVER disable the age floor")
+        self.assertIn("too recent", row["reason"])
+
     def test_live_process_guard_skips_a_running_old_version(self):
         # current=2.1.226, rollback (kept)=2.1.225 -- 2.1.223/2.1.224 are
         # the two genuinely-below-rollback candidates this test targets.
@@ -594,6 +623,28 @@ class TestDiscoverClaudeScratchCandidates(unittest.TestCase):
                 tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=None)
         row = found[0]
         self.assertIsNone(row["reason"], "env override to 1 day must admit a 3-day-old file")
+
+    def test_explicit_min_age_days_beats_the_env_override(self):
+        """#355 round-2 adversarial-review finding F4."""
+        r = self._mk_root()
+        self._mkfile(r / "f.txt", age_days=3)
+        with m.patch.dict(os.environ, {"AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS": "0.1"}):
+            found = airuleset.discover_claude_scratch_candidates(
+                tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=7)
+        row = found[0]
+        self.assertIsNotNone(row["reason"], "explicit min_age_days=7 must NOT be overridden by env=0.1")
+        self.assertIn("too recent", row["reason"])
+
+    def test_nan_env_override_is_refused_never_disables_the_age_floor(self):
+        """#355 round-2 adversarial-review finding F3."""
+        r = self._mk_root()
+        self._mkfile(r / "f.txt", age_days=3)
+        with m.patch.dict(os.environ, {"AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS": "nan"}):
+            found = airuleset.discover_claude_scratch_candidates(
+                tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=None)
+        row = found[0]
+        self.assertIsNotNone(row["reason"], "a 'nan' env override must NEVER disable the age floor")
+        self.assertIn("too recent", row["reason"])
 
     def test_newest_file_anywhere_inside_protects_a_live_session_dir(self):
         """A dir whose TOP entry mtime looks old but has a FRESH file deep
