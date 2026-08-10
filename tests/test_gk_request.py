@@ -155,6 +155,290 @@ class TestGkRequestBackstop(unittest.TestCase):
         self.assertFalse(self.pings)
 
 
+class TestGkreqRepingBackoff(unittest.TestCase):
+    """#353: the fixed 6h `GKREQ_RENUDGE_SECONDS` re-ping window re-pinged
+    Discord up to 4x/day forever for a persistently-unaddressed no-action
+    state (simap deliberately off, 21 open needs-gatekeeper tickets on
+    odoo-erp -- "toto je spam!!!"). Replaced with an EXPLICIT staged
+    schedule (24h -> 3d -> 7d, holding at 7d), reset ONLY on a materially
+    different observation: a changed ticket SET, or a supervisor pane
+    appearing then disappearing again."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.root = str(Path(tmp.name) / "devel" / "demo")
+        Path(self.root).mkdir(parents=True)
+        seed_repo_cache(self.home, self.root, "demo")
+        self.pings = []
+
+    def _send(self, body, **kw):
+        self.pings.append((body, kw))
+        return "sent"
+
+    def _sweep(self, now, state, tickets, panes=None, captured=IDLE,
+              persist=None):
+        tmux = FakeTmux(panes if panes is not None else [], captured)
+        return wd.gk_request_backstop(
+            now, tmux, state, self._send, home=self.home,
+            gh_fetch=lambda root: tickets, user="gatekeeper",
+            persist=persist)
+
+    def test_schedule_is_the_explicit_24h_3d_7d_staged_shape(self):
+        # regression pin -- a future edit shrinking/widening the schedule
+        # must fail this test loudly rather than silently drift.
+        self.assertEqual(wd.GKREQ_REPING_SCHEDULE_S,
+                         (24 * 3600, 3 * 24 * 3600, 7 * 24 * 3600))
+
+    def test_same_state_stays_silent_well_past_the_old_6h_window(self):
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7])
+        self.assertEqual(len(self.pings), 1)
+        # 12h later -- well past the OLD 6h fixed renudge, well under the
+        # NEW 24h first stage -- must stay silent.
+        self._sweep(now + 12 * 3600, state, [7])
+        self.assertEqual(len(self.pings), 1,
+                         "must not re-ping before the 24h first stage")
+
+    def test_reping_fires_once_the_24h_stage_clears(self):
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7])
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 24 * 3600 + 5, state, [7])
+        self.assertEqual(len(self.pings), 2)
+
+    def test_escalates_24h_then_3d_then_holds_at_7d_cap(self):
+        state = {}
+        t = time.time()
+        self._sweep(t, state, [7])
+        self.assertEqual(len(self.pings), 1)
+        t += 24 * 3600 + 5                      # stage 1 clears
+        self._sweep(t, state, [7])
+        self.assertEqual(len(self.pings), 2)
+        self._sweep(t + 24 * 3600, state, [7])    # +1d, still inside 3d stage
+        self.assertEqual(len(self.pings), 2, "must hold for the 3d stage")
+        t += 3 * 24 * 3600 + 5                  # stage 2 clears
+        self._sweep(t, state, [7])
+        self.assertEqual(len(self.pings), 3)
+        t += 7 * 24 * 3600 + 5                  # stage 3 (cap) clears
+        self._sweep(t, state, [7])
+        self.assertEqual(len(self.pings), 4)
+        t += 7 * 24 * 3600 + 5                  # cap holds indefinitely
+        self._sweep(t, state, [7])
+        self.assertEqual(len(self.pings), 5)
+        self._sweep(t + 3 * 24 * 3600, state, [7])   # +3d, still under 7d cap
+        self.assertEqual(len(self.pings), 5,
+                         "the 7d cap must never re-escalate further")
+
+    def test_a_new_ticket_joining_the_set_resets_to_an_immediate_ping(self):
+        # false-positive control: a genuinely NEW request must never be
+        # swallowed by an in-progress backoff window.
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7])
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, [7, 9])   # 1h later, well under 24h
+        self.assertEqual(len(self.pings), 2,
+                         "a new ticket in the set must ping immediately")
+
+    def test_a_ticket_leaving_the_set_also_resets(self):
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7, 9])
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, [7])      # 9 resolved -- a different set
+        self.assertEqual(len(self.pings), 2)
+
+    def test_supervisor_pane_appear_then_disappear_resets_to_fresh_ping(self):
+        # #353 round 2 (MAJOR-1): the disappearance itself must be
+        # CONFIRMED on a SECOND consecutive absent sweep before it resets
+        # anything -- a single absent sweep is only PENDING (see the
+        # dedicated single-blip test below).
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1)
+        # +1h: a supervisor pane APPEARS (idle) -- well inside the 24h
+        # stage, so this alone must not ping.
+        self._sweep(now + 3600, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 1, "appearing alone must not ping")
+        # +2h: the pane is GONE -- the FIRST absent sweep, only pending.
+        self._sweep(now + 2 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1,
+                         "a single absent sweep must not reset yet")
+        # +2.5h: STILL gone -- the SECOND consecutive absent sweep confirms
+        # the disappearance -- must ping immediately even though only 2.5h
+        # elapsed since the first ping.
+        self._sweep(now + 2.5 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 2,
+                         "a CONFIRMED appear-then-disappear must reset "
+                         "the backoff")
+
+    def test_a_single_transient_pane_absence_does_not_reset_the_backoff(self):
+        # #353 round 2, MAJOR-1 (live-reproduced regression against the
+        # round-1 code): a single `list_claude_panes` read blip (#199's own
+        # documented "an empty read is not a genuine negative" class) must
+        # NOT be mistaken for a real disappearance and must NOT fire a
+        # false "nebeží žiadna supervízorská Claude session" ping while the
+        # session is genuinely still alive.
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 1)
+        # +2h: ONE transient absent sweep -- the blip.
+        self._sweep(now + 2 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1, "a lone blip must not ping")
+        # +2h5m: the pane is back -- the blip resolved itself before a
+        # second consecutive absence could ever confirm it.
+        self._sweep(now + 2 * 3600 + 300, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 1,
+                         "a resolved blip must never have reset the backoff")
+
+    def test_a_scheduled_reping_landing_on_the_first_absent_sweep_still_confirms(self):
+        # round-2 review MINOR (coverage gap, code already correct): the
+        # PING branch's own `seen[name]` write must persist the DEBOUNCED
+        # `pane_seen`/`pane_absent_pending` values, never the raw
+        # `pane_now` -- otherwise a STAGED reping that happens to land on
+        # the exact same sweep as the FIRST (unconfirmed) pane absence
+        # silently destroys the pending-confirmation bookkeeping, and the
+        # disappearance is never confirmed on the NEXT (second consecutive)
+        # absent sweep.
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 1)
+        # +25h: the 24h staged schedule is due on THIS sweep, and it is
+        # ALSO the first absent sweep since the pane appeared.
+        self._sweep(now + 25 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 2, "the scheduled reping fires")
+        # +25.5h: the SECOND consecutive absent sweep must still confirm
+        # the disappearance and reset, even though the prior sweep also
+        # pinged (for an unrelated, schedule-driven reason).
+        self._sweep(now + 25.5 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 3,
+                         "confirmation must still fire after a scheduled "
+                         "reping shared the same sweep as the first absence")
+
+    def test_pane_target_falls_back_to_basename_with_no_cache_entry(self):
+        # round-2 review MINOR (coverage gap, code already correct): a
+        # brand-new root with NO tickets-status cache entry at all (never
+        # seen before) must still resolve a usable pane-target name via
+        # the `os.path.basename(cwd)` fallback -- the cache-name-preferred
+        # path (MAJOR-3's own fix) must never make an uncached root
+        # unnamed/unnudgeable.
+        with TemporaryDirectory() as home2:
+            root = str(Path(home2) / "devel" / "freshrepo")
+            Path(root).mkdir(parents=True)
+            # deliberately NO seed_repo_cache() call here.
+            tmux = FakeTmux([("%1", root)], IDLE)
+            logs = wd.gk_request_backstop(
+                time.time(), tmux, {}, self._send, home=home2,
+                dry_run=False, gh_fetch=lambda r: [7], user="newlevel")
+        typed = tmux.typed()
+        self.assertTrue(typed, logs)
+        self.assertIn("freshrepo", typed[0])
+
+    def test_pane_target_uses_the_cache_name_not_the_directory_basename(self):
+        # #353 round 2, MAJOR-3 (TRIGGERED live: dev1's own real cache has
+        # `forestshop_app` -> `forestshop-app`, `odoo-slovnormal` ->
+        # `odoo-erp` -- the incident's OWN repo): a pane target used to key
+        # `seen` on `os.path.basename(cwd)`, while a no-pane (cache-only)
+        # sweep of the SAME root keys on the cache's own origin-derived
+        # name. When those differ, the appear-then-disappear reset above
+        # is structurally DEAD CODE -- the two observation types write to
+        # two different `seen[]` records that never see each other's half
+        # of the cycle. Re-seed this root's cache entry under a name that
+        # genuinely differs from its directory basename ("demo") and
+        # confirm the reset still fires through a full
+        # present -> absent -> absent(confirmed) cycle.
+        seed_repo_cache(self.home, self.root, "demo-origin-name")
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 2 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1, "first absence only pending")
+        self._sweep(now + 2.5 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 2,
+                         "the reset must fire even though the pane's "
+                         "directory basename ('demo') differs from the "
+                         "cache's own origin-derived name")
+
+    def test_dedup_key_is_unique_per_real_ping_decision(self):
+        # #353 round 2, MAJOR-2/MAJOR-A (both TRIGGERED against notify's
+        # real 14-day marker TTL): the OLD dedup key embedded only the
+        # ticket-set text, so notify.send's own unrelated dedup mechanism
+        # silently swallowed every STAGED reping of an unchanged set (the
+        # 24h/3d/7d schedule never actually reached Discord past the first
+        # send) and swallowed a genuine material-change reset whenever the
+        # set reverted to one seen within the last 14 days. The key must
+        # now be unique per real DECISION instant, not per ticket content.
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[])
+        first_key = self.pings[0][1]["dedup_key"]
+        self._sweep(now + 24 * 3600 + 5, state, [7], panes=[])
+        second_key = self.pings[1][1]["dedup_key"]
+        self.assertNotEqual(first_key, second_key,
+                            "each real ping decision must claim its own "
+                            "dedup key, or notify's own 14-day marker TTL "
+                            "silently swallows every staged re-ping")
+        # a reverted-then-reverted-back ticket set (a MATERIAL change each
+        # time) must also claim distinct keys, not collide with the very
+        # first send's key.
+        self._sweep(now + 25 * 3600, state, [9], panes=[])   # different set
+        third_key = self.pings[2][1]["dedup_key"]
+        self._sweep(now + 26 * 3600, state, [7], panes=[])   # reverted back
+        fourth_key = self.pings[3][1]["dedup_key"]
+        self.assertNotIn(fourth_key, (first_key, second_key, third_key))
+
+    def test_pane_appearing_with_no_prior_disappearance_is_not_a_reset(self):
+        # a pane simply BEING there from the start (never having been
+        # absent) must not, by itself, count as the appear/disappear cycle.
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 0)   # nudged the pane, no Discord ping
+        self._sweep(now + 3600, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 0,
+                         "a still-present pane must stay on the schedule")
+
+    def test_state_persists_across_a_simulated_watchdog_restart(self):
+        # #353 requirement 4: a restart must not forget the backoff clock
+        # and re-spam from a fresh "first sighting".
+        state_path = str(Path(self.home) / "gkreq-state.json")
+        state1 = wd.load_state(state_path)
+        now = time.time()
+        self._sweep(now, state1, [7],
+                   persist=lambda: wd.save_state(state_path, state1))
+        self.assertEqual(len(self.pings), 1)
+        # simulate the process restarting: throw away `state1`, reload a
+        # FRESH dict from disk (exactly what a killed-and-relaunched
+        # systemd timer tick does).
+        state2 = wd.load_state(state_path)
+        self.assertTrue(state2, "the sweep must have persisted something")
+        self._sweep(now + 12 * 3600, state2, [7],
+                   persist=lambda: wd.save_state(state_path, state2))
+        self.assertEqual(len(self.pings), 1,
+                         "a restarted process must still honour the "
+                         "backoff clock it already persisted")
+
+
 class TestGkreqFetch(unittest.TestCase):
     def test_label_and_title_fallback_queries_union(self):
         calls = []
