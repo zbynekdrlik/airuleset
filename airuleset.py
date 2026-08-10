@@ -8304,8 +8304,12 @@ def cmd_compact_request(args):
 # migration (the AIRULESET_NOTIFY_OWNER loss pattern), and every push carries the
 # map to every managed target. Profiles:
 #   full          — merge PR to main + main green + deploy verified (default)
-#   branch-merge  — own PR merged into the project INTEGRATION branch (develop)
-#                   only; never staging/main promotion, never deploy
+#   branch-merge  — own PR merged into the project INTEGRATION branch (develop),
+#                   THEN the same ready-for-review hand-off comment fork-no-merge
+#                   uses (#349: a merge alone does NOT close the ticket, and
+#                   skipping the comment leaves it invisible to the gatekeeper's
+#                   review queue); never staging/main promotion, never deploy,
+#                   never closes the issue itself
 #   fork-no-merge — fork branch pushed + local verification green + ready-for-review
 #                   hand-off on the issue; never opens/merges a PR, never closes
 #                   the issue itself (the maintainer does, at merge)

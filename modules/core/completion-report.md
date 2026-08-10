@@ -54,7 +54,7 @@ A stream with `airuleset.py authority` != full has no PR-to-main / merge / deplo
 
 ```
 ✅ Lokálne overenie: <tests + lint result on the fork/integration branch>
-✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta   ← fork-no-merge AND branch-merge (posted AFTER the merge — SAME hand-off convention for both; repo automation labels it `ready-for-review`; NEVER a self-close)
+✅ Hand-off: READY-FOR-REVIEW komentár na #N (<topic>) + --handoff karta   ← fork-no-merge AND branch-merge (SAME hand-off comment convention for both, posted once the profile's own end-point is reached — branch-merge: after its integration-branch merge; fork-no-merge: after the fork branch push, no merge exists there at all; repo automation labels it `ready-for-review`; NEVER a self-close)
 ✅ PR: #M do <integration branch> zmergnutý <sha>                          ← branch-merge (ends there; ticket stays OPEN — gatekeeper closes it only after the full `/process-subdev` release pipeline, #349)
 ```
 
