@@ -254,19 +254,54 @@ _LIVE_BG_TASK_RX = re.compile(r"\b\d+\s+(?:shells?|monitors?)\b", re.I)
 
 
 def _pane_live_shell_evidence(captured):
-    """True if the pane's own mode-hint line (`⏵⏵ …`, the SAME line
-    `_is_bottom_chrome` already classifies as chrome) shows CC's live
-    background-shell/monitor badge. Scoped to that ONE line, never the
-    whole capture — quoted transcript prose mentioning e.g. "3 shells" (a
-    completion report, a playbook excerpt, this very docstring) must never
-    be mistaken for live evidence, the same chrome-line discipline every
-    other footer reader in this file already applies (mirrors
-    `_is_bottom_chrome`'s own `s.startswith("⏵⏵")` mode-hint match)."""
-    for raw in str(captured or "").splitlines():
-        s = raw.strip()
+    """True if the pane's own GENUINELY CURRENT mode-hint line (`⏵⏵ …`)
+    shows CC's live background-shell/monitor badge. (#352 F1, adversarial
+    review round 1: scanning the WHOLE bounded capture for ANY
+    `⏵⏵`-prefixed line was WRONG — a completion report or playbook excerpt
+    quoted verbatim inside the SAME capture window can contain that exact
+    text as scrollback, sitting above the real conversation, and would be
+    misread as live evidence even with a badge-free CURRENT footer, proven
+    by execution.) Fixed the same way every other footer reader in this
+    file resolves "what is the pane's OWN trailing chrome right now": walk
+    UP from the bottom, peeling only rows `_is_bottom_chrome` accepts as
+    genuinely trailing chrome (agent strip, statusline, mode hint, border
+    rules — the identical bounded walk `_above_input_box` already uses),
+    and only ever look for the badge WITHIN that walk. The walk stops dead
+    at the first non-chrome row (an ordinary input-box `❯` line, real
+    conversation prose) — a quoted scrollback line sitting ABOVE that
+    boundary is structurally unreachable, never merely unlikely to match."""
+    lines = str(captured or "").splitlines()
+    i = len(lines)
+    n = 0
+    while i > 0 and _is_bottom_chrome(lines[i - 1].strip()) and n < 40:
+        i -= 1
+        n += 1
+        s = lines[i].strip()
         if s.startswith("⏵⏵") and _LIVE_BG_TASK_RX.search(s):
             return True
     return False
+
+
+# (#352 F3, adversarial review round 1) The skip above trusts whatever the
+# pane's LAST RENDER shows — that is sound for a HEALTHY session (the render
+# is only ever as old as the last screen update), but if Claude Code's own
+# process wedges WHILE the badge happens to be on screen, the frozen render
+# keeps "proving" life forever with nothing left alive behind it, which
+# would permanently silence the busy-pane wedge-ping for exactly the
+# wedged-process population that check exists to catch (a #134-class
+# suppression with no reachable exit, reproduced live: `kill -STOP` the
+# claude process mid-turn with the badge showing, then kill the background
+# PIDs too — the badge never leaves the screen). Bound how long the badge
+# ALONE is trusted without the normal flow getting a real look: past this
+# many CONSECUTIVE seconds of skipping the SAME session, fall through once
+# (still gated by every existing safety check that flow already has —
+# copy-mode, the busy-pane ping's own one-shot dedup, decide_working's own
+# schedule) and then reset the streak, so a still-legitimate long task earns
+# a fresh trust window rather than being force-checked every sweep from then
+# on. Sized well past the reported incident's own bounded monitor (3h strop)
+# so it never interrupts the exact case this fix exists for, while still
+# giving a genuinely wedged pane a periodic real check instead of none ever.
+LIVE_SHELL_TRUST_CAP_S = 6 * 3600
 
 
 # (4a) TEXT-EMITTED TOOL-CALL STALL — a faster, higher-precision sibling of job 4.
@@ -15306,15 +15341,34 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 # nudge/backoff history mid-skip. Re-evaluated fresh every
                 # sweep, never a one-way door: the instant the badge is gone
                 # (the shell died), the very next sweep resumes normal
-                # nudge/escalate flow with no special reset required.
+                # nudge/escalate flow with no special reset required. (F3,
+                # round-1 review) The badge alone is trusted only for
+                # LIVE_SHELL_TRUST_CAP_S of CONSECUTIVE skipping — a
+                # genuinely wedged CC process whose last render happens to
+                # show the badge would otherwise be trusted FOREVER; past
+                # the cap the streak resets and this ONE sweep falls through
+                # to the normal flow for a real re-check.
+                lsk = "liveshell:" + key
                 if _pane_live_shell_evidence(captured):
-                    for _pfx in ("working:", "busypane:"):
-                        _lk = _pfx + key
-                        if isinstance(state.get(_lk), dict):
-                            state[_lk]["last_seen"] = int(now)
-                    logs.append("skip live-shell (working-stall) %s [%s]"
-                                % (project, key))
-                    continue
+                    ls = state.get(lsk)
+                    if not isinstance(ls, dict):
+                        ls = {"first_skip": int(now)}
+                    if (now - ls["first_skip"]) < LIVE_SHELL_TRUST_CAP_S:
+                        ls["last_seen"] = int(now)
+                        state[lsk] = ls
+                        for _pfx in ("working:", "busypane:"):
+                            _lk = _pfx + key
+                            if isinstance(state.get(_lk), dict):
+                                state[_lk]["last_seen"] = int(now)
+                        logs.append("skip live-shell (working-stall) %s [%s]"
+                                    % (project, key))
+                        continue
+                    state.pop(lsk, None)
+                    logs.append(
+                        "live-shell trust cap exceeded (working-stall) %s [%s] "
+                        "— forcing a real re-check" % (project, key))
+                else:
+                    state.pop(lsk, None)
                 # DECLARED WAIT — the marker names a future clock time ("čakám
                 # na 14:15 auto-sync", "deploy okno 22:00"): a scheduled
                 # external event, not a stall. No nudge until it passes
@@ -15541,9 +15595,32 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             # docstring for why this can never fire prematurely).
             if int(now) - state[k].get("last_seen", 0) > SUBAGENT_NUDGE_STATE_TTL_SECONDS:
                 del state[k]
+        elif (k.startswith("working:") and isinstance(state.get(k), dict)
+                and state[k].get("answered")):
+            # (#352 F2, adversarial review round 1) An episode that has
+            # ALREADY been through at least one RESPONDED round carries
+            # real backoff history (the 1h/3h/6h schedule) — WITHOUT this
+            # carve-out the generic wait_clear (90s) rule below deletes it
+            # during the ordinary gap between a response (idle resets near
+            # 0, so the OUTER `idle >= stall_working` gate goes false and
+            # NOTHING in job 4 touches this key at all) and the next
+            # re-check (idle must regrow past `stall_working`, ~30 min by
+            # default, before decide_working is even reachable again) —
+            # silently resetting the whole schedule to a fresh nudge#1
+            # every single time and making it dead code (proven live by
+            # the round-1 review). Give it a TTL comfortably longer than
+            # that ONE-TIME regrowth gap (2x `stall_working`, floored at
+            # `wait_clear` so it is never SHORTER than the generic rule it
+            # replaces) — once decide_working IS reachable again it
+            # refreshes `last_seen` every sweep on its own (same as
+            # before), so this only ever has to survive the regrowth
+            # window, never the schedule's own multi-hour gaps.
+            if int(now) - state[k].get("last_seen", 0) > max(2 * stall_working, wait_clear):
+                del state[k]
         elif (k.startswith("wait:") or k.startswith("working:") or k.startswith("textcall:")
                 or k.startswith("sesslimit:") or k.startswith("busypane:")
-                or k.startswith("apierr-busypane:") or k.startswith("apierr-stashabort:")):
+                or k.startswith("apierr-busypane:") or k.startswith("apierr-stashabort:")
+                or k.startswith("liveshell:")):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
             # condition has been ABSENT for wait_clear seconds (the prompt was
             # answered / the session moved on), so the SAME episode pings/nudges exactly
