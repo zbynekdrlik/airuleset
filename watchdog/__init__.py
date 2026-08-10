@@ -10478,6 +10478,141 @@ def _needs_you_block_ts(tpath):
     return None, None
 
 
+# #350 — every entry in `_MACHINE_PROMPT_PREFIXES` EXCEPT the two
+# Discord-relay shapes: `_goal_blocked_on_unanswered_question` needs the
+# OPPOSITE exclusion set from `_last_human_prompt_ts` (which deliberately
+# excludes "Odpoveď z Discordu:"/"Odpoveď užívateľa..." because job 9's own
+# question is "did a HUMAN type this directly into the pane", where a
+# Discord relay must NOT count). #350's question is "has this question
+# been ANSWERED at all" — a Discord-relayed reply genuinely IS the
+# answer, so it stays counted as a real newer turn; every OTHER machine
+# nudge in that list (a watchdog backstop, a task-notification, a bare
+# `/goal ` re-arm attempt) is NOT an answer and must be treated as
+# transparent bookkeeping instead, so the walk keeps looking further back
+# for the actual decision point.
+_GOAL_BLOCKED_ANSWER_TRANSPARENT_PREFIXES = tuple(
+    p for p in _MACHINE_PROMPT_PREFIXES
+    if p not in ("Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku"))
+
+
+def _goal_blocked_on_unanswered_question(tpath):
+    """The genuine terminal `❓ NEEDS YOU:` marker LINE (a truthy `str`)
+    when this session's own STOP CONDITION (A) — BLOCKED ON MY ANSWER —
+    genuinely still holds RIGHT NOW; `''` otherwise.
+
+    #350 — job 20's ACHIEVED-marker check (further down `goal_rearm`,
+    `GOAL_ACHIEVED_MARKER in _above_input_box(captured)`) used to treat
+    "CC's own footer shows `✔ Goal achieved` yet the repo's backlog is
+    still open" as unconditional proof the loop died PREMATURELY —
+    re-arming it every time. But EVERY shipped `/goal` template's own
+    STOP CONDITIONS include (A) as an EQUALLY legitimate stop: the loop
+    correctly ends there, footer dark, backlog untouched, waiting on the
+    USER — and the achieved-marker check alone could never tell the two
+    apart. Livelock, live-evidenced 2026-08-10 (dev1, session zbynek-4):
+    goal stops on (A) -> watchdog re-arms it a minute later -> the
+    freshly re-armed session immediately re-evaluates the SAME unanswered
+    question and re-stops -> repeat, every cycle re-sending the whole
+    context for nothing, "for days" per the ticket's own words.
+
+    Structurally MIRRORS `_needs_you_block_ts` (#161's own armed-branch
+    "genuine trailing NEEDS YOU, never a mere mention" classifier) — same
+    walk source, same sentinel/api-error skip, same 3-trailing-line
+    marker search, same `"❓" in line and "NEEDS YOU" in line` substring
+    test — rather than calling it, because #350 ALSO needs to know
+    whether a NEWER real turn (any GENUINE `user`-typed answer — a
+    human's own reply, OR a Discord-relayed one, `compose_reply_prompt`,
+    delivered by job 7 as a plain `user`-typed entry — needs no special-
+    casing here since it's simply "a later real turn" like any other)
+    already exists — something `_needs_you_block_ts` structurally cannot
+    answer (it walks PAST every non-assistant entry silently, by design,
+    since ITS own caller `_goal_question_park_nudge` answers a different
+    question: "how long since DELIVERY", never "has this been
+    superseded"). Per this file's own established rule
+    (`_last_real_turn_ts_excluding_command_bookkeeping`'s own docstring:
+    never widen a shared classifier's meaning for a caller with a
+    different need), this is a SEPARATE reader rather than a change to
+    `_needs_you_block_ts` itself — and a single self-contained walk,
+    rather than composing two independently-windowed reads, sidesteps
+    any risk of the two disagreeing about which entries are even "in
+    view".
+
+    A `user`-typed entry matching `_GOAL_BLOCKED_ANSWER_TRANSPARENT_
+    PREFIXES` (a watchdog nudge, a task-notification, a bare `/goal `
+    re-arm attempt — every machine-injected shape this file already
+    knows about, EXCEPT the two Discord-relay ones) or carrying only a
+    `tool_result` (a routine post-tool-call entry, mirrors `_last_human_
+    prompt_ts`'s own extraction) is treated as TRANSPARENT bookkeeping,
+    never a genuine answer — the walk keeps scanning further back for the
+    real decision point instead of concluding "answered". Without this, a
+    bare nudge landing as the transcript's newest entry with no
+    subsequent assistant turn yet would misread as "answered" even though
+    the user never replied — narrower than the #350 ticket's own reported
+    incident, but the same false-negative direction it explicitly warns
+    against.
+
+    Returns `''` the moment the walk finds a GENUINE newer `user`-typed
+    turn — the REACHABLE exit condition #350 needs (mirrors #134: name
+    the event that releases the guard, then prove it fires without the
+    guarded action). If the loop is genuinely STILL blocked (nothing new
+    happened, or an intervening nudge only produced another turn that
+    repeats the SAME unanswered question — message-status-marker.md's
+    own verbatim re-poke rule), the newest real turn resolves right back
+    to an assistant entry ending in `❓ NEEDS YOU:` on the very next
+    sweep, so re-arming stays correctly suppressed.
+
+    Also returns `''` on an api-error entry, a message with no marker at
+    all, or a message ending in a DIFFERENT terminal marker (`⏳`/`✅`, or
+    a bare `❓ ASKED:` with no accompanying `NEEDS YOU` — ask-and-continue,
+    whose own terminal line is `⏳ WORKING` per message-status-marker.md,
+    and must never be misread as (A)-BLOCKED — the ticket's own explicit
+    worry) — the walk stops the moment the truly-last non-blank line
+    resolves to anything other than a genuine NEEDS YOU line, never
+    scanning further back for one instead. And `''` on an unreadable/
+    empty transcript — an UNMEASURABLE read must never manufacture a NEW
+    suppression; the existing FALSE-ACHIEVED machinery this sits in
+    front of already has its own bounded, reachable give-up/reset gates
+    for a genuinely-stuck pane."""
+    for entry in reversed(_iter_jsonl_tail(tpath)):
+        if not isinstance(entry, dict):
+            continue
+        etype = entry.get("type")
+        if etype not in _REAL_TURN_TYPES:
+            continue
+        if etype == "user":
+            c = (entry.get("message") or {}).get("content")
+            if isinstance(c, str):
+                t = c
+            elif isinstance(c, list):
+                if any(isinstance(b, dict) and b.get("type") == "tool_result"
+                       for b in c):
+                    continue            # a routine tool-call result -- transparent
+                t = " ".join(b.get("text", "") for b in c
+                             if isinstance(b, dict) and b.get("type") == "text")
+            else:
+                continue                # unparseable content -- transparent
+            t = t.strip()
+            if (not t or t in _MACHINE_PROMPT_EXACT
+                    or any(t.startswith(p)
+                           for p in _GOAL_BLOCKED_ANSWER_TRANSPARENT_PREFIXES)):
+                continue                # a machine nudge, not a user answer
+            return ""                   # a GENUINE later real turn exists
+        if entry.get("isApiErrorMessage") is True:
+            return ""                  # api-error, not a status marker
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue                   # synthetic/tool-only -- keep scanning back
+        nonblank = [ln for ln in text.splitlines() if ln.strip()]
+        line = ""
+        for ln in reversed(nonblank[-3:]):
+            if _MARKER_RX.match(ln):
+                line = ln
+                break
+        if "❓" not in line or "NEEDS YOU" not in line:
+            return ""
+        return line
+    return ""
+
+
 def _goal_question_delivered_ts(sid, questions_path=None, logs=None):
     """Epoch seconds the NEWEST `❓` ping for session `sid` was DELIVERED,
     read from `discord-questions.json` (`notify.record_question` stamps
@@ -12337,6 +12472,22 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 logs.append("skip goal-achieved (goal-rearm) %s -> loop finished "
                             "legitimately (%s)" % (loc, claim_reason))
                 continue
+            # #350 -- checked BEFORE the (network-calling) backlog_open
+            # lookup just below, deliberately: when the loop is genuinely
+            # still (A)-BLOCKED there is no reason to spend a `gh` call at
+            # all (nothing here is going to re-arm either way), and doing
+            # it first means EVERY branch that follows -- the dark-outage-
+            # revival ping AND the plain FALSE-ACHIEVED re-arm -- is
+            # uniformly protected, never just the one log line. See the
+            # function's own docstring for the full incident + design.
+            blocked_line = _goal_blocked_on_unanswered_question(tpath)
+            if blocked_line:
+                logs.append(
+                    "skip (A)-blocked (goal-rearm) %s -> the loop's own "
+                    "last real turn is still an unanswered %r; this is a "
+                    "LEGITIMATE stop condition, never re-arming without "
+                    "the user's own reply" % (loc, blocked_line))
+                continue
             backlog_open = _cached_backlog_open(cwd, backlog_fetch, state, now)
             if backlog_open is True and revived_from_dark_outage:
                 # #335 P0 -- live-reproduced on simap@subdev: an achieved
@@ -13986,7 +14137,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           `Goal set:` marker older than `GOAL_REARM_MAX_DARK_S` since it was
           last confirmed lit is never revived at all (#101); a `Goal cleared:`
           newer than the last `Goal set:` is a deliberate shutdown and is
-          never touched. Runs LAST so job 14 (and, until REMOVED #102, jobs
+          never touched. A session whose OWN last real turn is still an
+          unanswered `❓ NEEDS YOU:` (STOP CONDITION (A) — never a bare
+          `❓ ASKED:` body line paired with a terminal `⏳ WORKING`, which
+          keeps working and is never this) is likewise never re-armed,
+          regardless of what CC's own achieved-marker/backlog state says —
+          a loop legitimately BLOCKED on the user's own answer is not a
+          died one (`_goal_blocked_on_unanswered_question`, #350 — the
+          livelock this closes: re-arm -> the freshly-armed session
+          re-evaluates the SAME unanswered question -> immediately
+          re-stops -> repeat, forever, until the user actually replies).
+          Runs LAST so job 14 (and, until REMOVED #102, jobs
           15/17) gets first crack at the same pane, and skips any sid it
           compacted this sweep (`handled`) or that holds an outstanding
           shared claim (#78).
