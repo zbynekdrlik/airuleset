@@ -25,6 +25,7 @@ import re
 import sys
 import json
 import time
+import hashlib
 import tempfile
 import contextlib
 import subprocess
@@ -38,6 +39,10 @@ _FIELD_CAP = 320
 _ENV_REL = "channels/discord/.env"
 _DEDUP_DIRNAME = "autopilot-notify-sent"
 _DEDUP_TTL_S = 14 * 24 * 3600
+# Well under the ~255-byte NAME_MAX most filesystems enforce on a single path
+# COMPONENT (ext4/xfs/btrfs) — leaves headroom for any TTL/status suffix a
+# future caller might append to the sanitised key (#359).
+_DEDUP_NAME_MAX = 180
 
 # Stream personas whose tmux session name has NO Discord identity of its own
 # (airuleset#259, 2026-08-06): montalu/montalu2/montalu3/simap/miva1 (#300)
@@ -944,7 +949,28 @@ def _dedup_dir():
 
 
 def _dedup_path(key):
-    return os.path.join(_dedup_dir(), re.sub(r"[^A-Za-z0-9._#-]", "_", str(key)))
+    """The marker FILE for `key` — always a single, filesystem-safe filename.
+
+    `key` is sanitised to `[A-Za-z0-9._#-]` first, same as ever. When that
+    sanitised form would exceed `_DEDUP_NAME_MAX` bytes, the RAW key is
+    hashed instead (#359): `os.open(..., O_CREAT | O_EXCL)` in
+    `_dedup_claim` raises `OSError` (`ENAMETOOLONG`) once a filename crosses
+    the filesystem's real NAME_MAX (~255 bytes), and `_dedup_claim`'s own
+    deliberate `except OSError: return True` fail-open then turns THAT into
+    "first attempt, send it" on EVERY call for that key — the marker never
+    reaches disk, so dedup silently never happens for it. A sha256 hex
+    digest is itself pure `[a-f0-9]`, so it needs no further sanitisation,
+    and the `long-` prefix is never produced by sanitising anything SHORT —
+    so a hashed name can never collide with a real short key's own
+    namespace. Every existing short key (the overwhelming majority — a
+    `<repo>#<issue>` card, a session/pid-keyed watchdog key) resolves to
+    EXACTLY the same path it always has; only a key long enough to be
+    unsafe on disk in the first place is affected."""
+    safe = re.sub(r"[^A-Za-z0-9._#-]", "_", str(key))
+    if len(safe) > _DEDUP_NAME_MAX:
+        digest = hashlib.sha256(str(key).encode("utf-8", "replace")).hexdigest()
+        safe = "long-%s" % digest
+    return os.path.join(_dedup_dir(), safe)
 
 
 def _dedup_claim(key):

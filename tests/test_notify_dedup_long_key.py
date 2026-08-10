@@ -102,7 +102,7 @@ class TestDedupPathStaysWithinAFilesystemSafeLength(_HomeIsolated):
         # the length threshold.
         key = "airuleset#41"
         path = notify._dedup_path(key)
-        self.assertEqual(os.path.basename(path), "airuleset_41")
+        self.assertEqual(os.path.basename(path), "airuleset#41")
 
 
 class TestSendEndToEndWithALongDedupKey(_HomeIsolated):
