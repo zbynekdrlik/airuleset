@@ -9911,7 +9911,19 @@ def _is_gh_app_token_box():
     removes the ambiguity instead of trying to classify it.
 
     `.is_dir()`, never a bare `.exists()` — a stray FILE at this path must
-    not be misread as "provisioned"."""
+    not be misread as "provisioned".
+
+    Known, accepted residual (adversarial review of #356): a stray or
+    stale App-token directory delivered to an OWN-account (PAT) box —
+    e.g. a misdirected `push-stream-tokens.sh` delivery, or a leftover
+    from an App-token-to-PAT migration — silently NARROWS that box's own
+    slice from 3 quals (assignee ∪ author ∪ label) down to 1 (label
+    alone), dropping any assigned/authored-but-unlabeled ticket from the
+    stop-proof with no refusal (the existing empty-result validators check
+    the LABEL dimension, never the missing assignee/author one). This is
+    an operational-error trigger, not something this local, static check
+    can distinguish from a genuine App-token box — a real App token proves
+    nothing beyond "this directory exists" either."""
     try:
         return _gh_app_token_dir().is_dir()
     except OSError:

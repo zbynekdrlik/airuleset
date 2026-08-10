@@ -25,6 +25,7 @@ primitive, and it composes cleanly with any test's OWN more specific
 `unittest.mock.patch.object(wd, "draft_rescue_dir", ...)` (whichever patch
 is innermost simply wins for its own scope, exactly like any other nested
 `mock.patch`)."""
+import os
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -43,3 +44,33 @@ def _isolate_draft_rescue():
         rescue_dir = Path(d) / "draft-rescue"
         with mock.patch.object(wd, "draft_rescue_dir", return_value=rescue_dir):
             yield rescue_dir
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gh_app_token_dir():
+    """`airuleset._is_gh_app_token_box()` (#356) reads `GH_APP_TOKEN_DIR`
+    (falling back to `~/.config/gh-app-tokens/`) with NO test-only bypass —
+    it is a plain, always-live directory-presence check, same shape as
+    `draft_rescue_dir()` above and for the SAME reason it needs isolating
+    here: a `pytest`-direct run (not `cmd_push`'s own `unittest discover`,
+    which airuleset.py never touches this variable for either) inherits
+    the REAL process environment/`$HOME` unmodified. On a genuinely
+    App-token-authenticated box (david2/david3/david4, odoo-erp#3281/#3282)
+    that directory really exists — a fresh-context adversarial review of
+    #356 reproduced it live (a fake `$HOME` with the real directory
+    present) and found 3 of `TestSliceQualsRefusesAnUnresolvableIdentity`'s
+    own PRE-EXISTING tests fail outright, since they assume `_slice_quals`
+    still calls `_gh_login()` unconditionally.
+
+    Point `GH_APP_TOKEN_DIR` at a path inside a throwaway directory that is
+    deliberately NEVER created — `.is_dir()` on a genuinely missing path is
+    exactly "not an App-token box", the correct default for every test that
+    never mentions the mechanism. A test that DOES want to exercise the
+    App-token branch (`tests/test_authority_profiles.py`'s own
+    `TestSliceQualsHandlesAppTokenBoxes`) still wins with its own,
+    innermost `mock.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": ...})` —
+    identical composability to `_isolate_draft_rescue` above."""
+    with TemporaryDirectory() as d:
+        missing = Path(d) / "gh-app-tokens"    # never .mkdir()'d — the point
+        with mock.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": str(missing)}):
+            yield missing
