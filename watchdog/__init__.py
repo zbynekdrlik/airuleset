@@ -10509,6 +10509,14 @@ _GOAL_BLOCKED_ANSWER_TRANSPARENT_PREFIXES = tuple(
     # set (a `+` concatenation, not a change to `_MACHINE_PROMPT_
     # PREFIXES` itself) precisely so `_last_human_prompt_ts` and its
     # many other callers stay byte-for-byte unaffected.
+    #
+    # #350 round-2 review MINOR: this literal is CC's summarizer WORDING,
+    # which could reword in a future build and go silently stale. The
+    # `entry.get("isCompactSummary")` check in the function body below is
+    # CC's own STRUCTURAL flag on the identical entries (confirmed live:
+    # 790/790 real compact-continuation entries across a 120-transcript
+    # sample carry it) -- ORing both means a future wording change alone
+    # can never reopen this gap.
     "This session is being continued from a previous conversation",
 )
 
@@ -10559,17 +10567,21 @@ def _goal_blocked_on_unanswered_question(tpath):
     re-arm attempt — every machine-injected shape this file already
     knows about, EXCEPT the two Discord-relay ones), carrying only a
     `tool_result` (a routine post-tool-call entry, mirrors `_last_human_
-    prompt_ts`'s own extraction), or flagged `isMeta` (CC's own system-
+    prompt_ts`'s own extraction), flagged `isMeta` (CC's own system-
     injected user-type entries — a goal-arm confirmation echo, a resume-
     injection notice, a skill-directory listing, a malformed-tool-call
     notice — none of which is a genuine typed answer either, and none of
     which carries a recognisable prefix at all, so this check catches
-    what the prefix list structurally cannot) is treated as TRANSPARENT
-    bookkeeping, never a genuine answer — the walk keeps scanning further
-    back for the real decision point instead of concluding "answered".
-    Without this, a bare nudge (or an `isMeta` entry) landing as the
-    transcript's newest entry with no subsequent assistant turn yet would
-    misread as "answered" even though the user never replied — narrower
+    what the prefix list structurally cannot), or flagged
+    `isCompactSummary` (CC's own STRUCTURAL marker on a `/compact`
+    continuation entry, checked alongside the wording-based prefix above
+    so a future summarizer rewording alone can never reopen the gap) is
+    treated as TRANSPARENT bookkeeping, never a genuine answer — the walk
+    keeps scanning further back for the real decision point instead of
+    concluding "answered". Without this, a bare nudge (or an `isMeta`
+    entry) landing as the transcript's newest entry with no subsequent
+    assistant turn yet would misread as "answered" even though the user
+    never replied — narrower
     than the #350 ticket's own reported incident, but the same
     false-negative direction it explicitly warns against.
 
@@ -10617,7 +10629,7 @@ def _goal_blocked_on_unanswered_question(tpath):
         if etype not in _REAL_TURN_TYPES:
             continue
         if etype == "user":
-            if entry.get("isMeta"):
+            if entry.get("isMeta") or entry.get("isCompactSummary"):
                 continue            # CC-injected system text -- transparent
             msg = entry.get("message")
             c = msg.get("content") if isinstance(msg, dict) else None
