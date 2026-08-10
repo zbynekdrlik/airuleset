@@ -8,6 +8,7 @@ separate linux users), resolved at runtime from AUTHORITY_BY_USER — no per-box
 state to lose on a home-dir migration.
 """
 
+import os
 import sys
 from pathlib import Path
 from unittest import TestCase, main
@@ -1286,6 +1287,155 @@ class TestSliceQualsRefusesAnUnresolvableIdentity(TestCase):
                              ["label:stream:montalu"])
         with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
             self.assertEqual(len(airuleset._slice_quals("david")), 3)
+
+
+class TestSliceQualsHandlesAppTokenBoxes(TestCase):
+    """#356: david2/david3/david4 (odoo-erp#3282, spun up by airuleset#326)
+    authenticate `gh` via a GitHub App INSTALLATION token
+    (odoo-erp#3281's `gh-app-stream-tokens` mechanism), never a PAT. An
+    App installation token carries NO user identity at all, so
+    `gh api user` 403s ("Resource not accessible by integration") on
+    EVERY call, structurally — not intermittently. `_gh_login()`
+    correctly returns `None` on that (#181 I-2's own established
+    contract, unchanged here), which used to make `_slice_quals()`
+    raise `SliceUnresolved` unconditionally, so `slice-quals --count`
+    could never reach 0 and the fork-no-merge/branch-merge `/goal`
+    stop-proof condition (B) could never legitimately terminate on
+    these boxes.
+
+    Detection is a LOCAL, static fact — the App-token directory's
+    presence (`~/.config/gh-app-tokens/`, the exact path
+    `scripts/gh-app/gh-app-token.sh`/`push-stream-tokens.sh` read from
+    and create in the real, deployed `zbynekdrlik/odoo-erp` mechanism)
+    — never the network call itself. That is what makes it safe: it
+    removes the identity ambiguity structurally instead of trying to
+    classify a transient/generic gh failure (see the rejected
+    alternative on the ticket's own design comment)."""
+
+    def _app_token_dir(self, tmp):
+        d = Path(tmp) / "gh-app-tokens"
+        d.mkdir(parents=True)
+        return d
+
+    def _failing_gh_api_user(self):
+        # Mirrors TestSliceQualsRefusesAnUnresolvableIdentity's own helper
+        # ABOVE — a real 403 is just one more non-zero exit, and
+        # `_gh_login` already treats ANY non-zero exit identically
+        # (#181 I-2). Reusing the SAME shape here is deliberate: it proves
+        # the fix works for the real failure mode, not a hand-picked one.
+        import subprocess
+        import unittest.mock as mk
+
+        real = subprocess.run
+
+        def run(argv, *a, **k):
+            if list(argv[:3]) == ["gh", "api", "user"]:
+                return subprocess.CompletedProcess(
+                    argv, 1, "",
+                    "gh: HTTP 403: Resource not accessible by integration "
+                    "(https://api.github.com/user)")
+            return real(argv, *a, **k)
+
+        return mk.patch("subprocess.run", side_effect=run)
+
+    def test_an_app_token_box_gets_the_label_only_slice_never_slice_unresolved(self):
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._app_token_dir(tmp)
+            with mk.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": str(d)}):
+                with self._failing_gh_api_user():
+                    quals = airuleset._slice_quals("david2")
+        self.assertEqual(quals, ["label:stream:david2"])
+
+    def test_an_app_token_box_never_calls_gh_login_at_all(self):
+        # The whole point is removing the network dependency, not just
+        # tolerating its failure — assert the call never happens.
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._app_token_dir(tmp)
+            with mk.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": str(d)}):
+                with mk.patch.object(airuleset, "_gh_login") as spy:
+                    quals = airuleset._slice_quals("david3")
+        spy.assert_not_called()
+        self.assertEqual(quals, ["label:stream:david3"])
+
+    def test_a_pat_box_with_no_app_token_dir_is_completely_unaffected(self):
+        # False-positive control: without the App-token dir, both of
+        # _slice_quals()'s EXISTING branches behave byte-identically to
+        # before this fix.
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "gh-app-tokens"      # deliberately never created
+            with mk.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": str(missing)}):
+                with mk.patch.object(airuleset, "_gh_login",
+                                     return_value="zbynekdrlik"):
+                    self.assertEqual(airuleset._slice_quals("montalu"),
+                                     ["label:stream:montalu"])
+                with mk.patch.object(airuleset, "_gh_login",
+                                     return_value="kvaskodev"):
+                    self.assertEqual(len(airuleset._slice_quals("david")), 3)
+
+    def test_the_default_token_dir_matches_the_real_deployed_path(self):
+        # Locks the ACTUAL path the real scripts/gh-app/*.sh in
+        # zbynekdrlik/odoo-erp read from and create -- not an invented
+        # convention.
+        import unittest.mock as mk
+
+        with mk.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GH_APP_TOKEN_DIR", None)
+            got = airuleset._gh_app_token_dir()
+        self.assertEqual(got, Path.home() / ".config" / "gh-app-tokens")
+
+    def test_a_plain_file_at_that_path_is_not_treated_as_the_token_dir(self):
+        # A stray FILE (not a directory) at the path must not be misread as
+        # "provisioned" -- `.is_dir()`, never a bare `.exists()`.
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stray = Path(tmp) / "gh-app-tokens"
+            stray.write_text("not a directory")
+            with mk.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": str(stray)}):
+                with self._failing_gh_api_user():
+                    with self.assertRaises(airuleset.SliceUnresolved):
+                        airuleset._slice_quals("david4")
+
+    def test_a_network_failure_counting_the_slice_still_refuses_never_a_false_zero(self):
+        # Fail-SAFE, not fail-OPEN: once the identity ambiguity is resolved
+        # LOCALLY (never calls _gh_login at all -- asserted below), a
+        # genuine gh failure while actually COUNTING the slice must still
+        # refuse (non-zero exit, empty stdout) -- never a false
+        # "0 = slice empty".
+        import contextlib
+        import io
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._app_token_dir(tmp)
+            buf = io.StringIO()
+            with mk.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": str(d)}):
+                with mk.patch.object(airuleset, "resolve_authority",
+                                     return_value="fork-no-merge"):
+                    with mk.patch.object(airuleset, "_current_user",
+                                         return_value="david2"):
+                        with mk.patch.object(airuleset, "_gh_login") as spy:
+                            with mk.patch.object(airuleset, "_gh_out",
+                                                 return_value=""):
+                                with contextlib.redirect_stdout(buf):
+                                    with self.assertRaises(SystemExit) as cm:
+                                        airuleset.cmd_slice_quals(
+                                            mk.Mock(count=True, list=False,
+                                                   extra=None))
+        spy.assert_not_called()
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(buf.getvalue().strip(), "")
 
 
 class TestSearchIndexCrossCheckAssertsNonEmpty(TestCase):
