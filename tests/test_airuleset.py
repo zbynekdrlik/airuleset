@@ -10848,6 +10848,510 @@ class TestCmdPushLocalInstallFailureContinuesToRemotes(TestCase):
         fake_install.assert_called_once()
 
 
+# --------------------------------------------------------------------------- #
+# #358: gk sshd (MaxStartups/fail2ban) drops a burst of rapid ssh connections
+# during a push wave -- ssh multiplexing (ControlMaster/ControlPersist) plus
+# a bounded, backed-off target-level retry for a connection-closed/reset
+# ssh failure. Every test here uses a fake `subprocess.run` / fake `run` --
+# no real ssh connection is ever opened.
+# --------------------------------------------------------------------------- #
+
+class TestIsSshTransientFailure(TestCase):
+    """Distinguishes ssh's OWN connection-establishment failure (a
+    MaxStartups/fail2ban-style drop mid-handshake) from an ordinary
+    remote-command failure or ssh's own auth-exhaustion failure -- only
+    the FORMER is worth a target-level retry."""
+
+    def test_kex_exchange_identification_reset_is_transient(self):
+        self.assertTrue(airuleset._is_ssh_transient_failure(
+            255,
+            "kex_exchange_identification: read: Connection reset by peer\n"))
+
+    def test_ssh_exchange_identification_closed_is_transient(self):
+        self.assertTrue(airuleset._is_ssh_transient_failure(
+            255,
+            "ssh_exchange_identification: Connection closed by remote host\n"))
+
+    def test_bare_connection_closed_by_host_port_is_transient(self):
+        self.assertTrue(airuleset._is_ssh_transient_failure(
+            255, "Connection closed by 100.90.94.41 port 22\n"))
+
+    def test_bare_connection_reset_by_host_port_is_transient(self):
+        # #358 adversarial-review F5: `strings /usr/bin/ssh` confirms
+        # "Connection reset by %s port %d" is a real client-side message
+        # (sshpkt_vfatal's own ECONNRESET branch) -- the same bare-line
+        # shape as the already-covered "closed by" line, but for the
+        # reset case. Live-reproduced (ProxyCommand trick) on the real
+        # gk incident's own host/port.
+        self.assertTrue(airuleset._is_ssh_transient_failure(
+            255, "Connection reset by 100.90.94.41 port 22\n"))
+
+    def test_ssh_dispatch_run_fatal_broken_pipe_is_transient(self):
+        # #358 adversarial-review F5: a proxy that sends a banner then
+        # drops produces "ssh_dispatch_run_fatal: Connection to <host>
+        # port <port>: Broken pipe" -- confirmed via `strings` to be
+        # ssh's own internal log tag, the same class as the two
+        # `*_exchange_identification:` prefixes already covered.
+        self.assertTrue(airuleset._is_ssh_transient_failure(
+            255,
+            "ssh_dispatch_run_fatal: Connection to UNKNOWN port 65535: "
+            "Broken pipe\n"))
+
+    def test_auth_failure_is_not_transient(self):
+        self.assertFalse(airuleset._is_ssh_transient_failure(
+            255, "gatekeeper@100.90.94.41: Permission denied (publickey).\n"))
+
+    def test_non_255_returncode_is_never_transient(self):
+        self.assertFalse(airuleset._is_ssh_transient_failure(
+            1,
+            "kex_exchange_identification: read: Connection reset by peer\n"))
+
+    def test_a_remote_processs_own_connectionreseterror_is_not_transient(self):
+        # A REMOTE python process crashing with its own network error must
+        # never be misread as ssh's own connection failure -- it carries
+        # neither ssh-internal log-tag prefix nor the bare
+        # "Connection closed by HOST port N" shape.
+        stderr = (
+            "Traceback (most recent call last):\n"
+            '  File "airuleset.py", line 1, in <module>\n'
+            "ConnectionResetError: [Errno 104] Connection reset by peer\n"
+        )
+        self.assertFalse(airuleset._is_ssh_transient_failure(255, stderr))
+
+    def test_none_stderr_is_safe(self):
+        self.assertFalse(airuleset._is_ssh_transient_failure(255, None))
+
+    def test_empty_stderr_is_safe(self):
+        self.assertFalse(airuleset._is_ssh_transient_failure(255, ""))
+
+
+class TestSshRetryMaxAttemptsValue(TestCase):
+    """A literal-value lock, deliberately independent of
+    `airuleset.SSH_RETRY_MAX_ATTEMPTS` itself -- the OTHER retry tests
+    reference the constant dynamically, which would pass unchanged even
+    if the constant's own value silently drifted. #358's REVISED root
+    cause (issue comment 5245989172: a RANDOM per-connection drop against
+    gk's globally-saturated MaxStartups pool, not a per-source ban) is
+    what justifies "a few attempts" (3 total, 2 retries) rather than a
+    single retry -- pin the literal here so a future edit changing it is
+    a deliberate, visible diff."""
+
+    def test_bound_is_three_total_attempts(self):
+        self.assertEqual(airuleset.SSH_RETRY_MAX_ATTEMPTS, 3)
+
+
+class TestSshControlPersistSValue(TestCase):
+    """#358 adversarial-review F1 (MAJOR): 60s was sized as "a few seconds
+    between the deploy call and the soniox call", but those two calls are
+    NOT adjacent -- an account near the front of REMOTE_HOSTS can sit
+    behind up to a dozen other targets' own deploy legs (each up to
+    REMOTE_DEPLOY_TIMEOUT_S) before its own soniox-phase turn arrives.
+    1800s matches REMOTE_DEPLOY_TIMEOUT_S itself. Pinned as its own
+    literal-value lock, independent of any test that merely references
+    the constant dynamically."""
+
+    def test_persist_window_covers_a_full_remote_deploy_timeout(self):
+        self.assertEqual(airuleset.SSH_CONTROL_PERSIST_S,
+                          airuleset.REMOTE_DEPLOY_TIMEOUT_S)
+        self.assertEqual(airuleset.SSH_CONTROL_PERSIST_S, 1800)
+
+
+class TestSshRetryBackoffS(TestCase):
+    """`AIRULESET_SSH_RETRY_BACKOFF_S` clamped to [1, 300] -- an unclamped
+    0/negative value would defeat the backoff entirely (the same class of
+    gap #172's AIRULESET_SWEEP_BUDGET_S fix closed elsewhere in this
+    file), and an unclamped huge value would stall the whole wave behind
+    one flaky target."""
+
+    def test_default_is_60(self):
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_SSH_RETRY_BACKOFF_S", None)
+            self.assertEqual(airuleset._ssh_retry_backoff_s(), 60)
+
+    def test_valid_override_is_honored(self):
+        with m.patch.dict(os.environ, {"AIRULESET_SSH_RETRY_BACKOFF_S": "5"}):
+            self.assertEqual(airuleset._ssh_retry_backoff_s(), 5)
+
+    def test_zero_is_clamped_to_one(self):
+        with m.patch.dict(os.environ, {"AIRULESET_SSH_RETRY_BACKOFF_S": "0"}):
+            self.assertEqual(airuleset._ssh_retry_backoff_s(), 1)
+
+    def test_negative_is_clamped_to_one(self):
+        with m.patch.dict(os.environ, {"AIRULESET_SSH_RETRY_BACKOFF_S": "-10"}):
+            self.assertEqual(airuleset._ssh_retry_backoff_s(), 1)
+
+    def test_huge_value_is_clamped_to_300(self):
+        with m.patch.dict(os.environ, {"AIRULESET_SSH_RETRY_BACKOFF_S": "99999"}):
+            self.assertEqual(airuleset._ssh_retry_backoff_s(), 300)
+
+    def test_garbage_falls_back_to_default(self):
+        with m.patch.dict(os.environ,
+                           {"AIRULESET_SSH_RETRY_BACKOFF_S": "notanumber"}):
+            self.assertEqual(airuleset._ssh_retry_backoff_s(), 60)
+
+
+class TestSshMultiplexOpts(TestCase):
+    """The ControlMaster/ControlPersist/ControlPath triple that lets a
+    repeated connection to the SAME target reuse one already-authenticated
+    ssh session -- degrades to [] (plain unmultiplexed ssh) when no
+    control_dir is available."""
+
+    def test_no_control_dir_degrades_to_empty(self):
+        self.assertEqual(airuleset._ssh_multiplex_opts(None), [])
+        self.assertEqual(airuleset._ssh_multiplex_opts(""), [])
+
+    def test_control_dir_produces_the_expected_options(self):
+        opts = airuleset._ssh_multiplex_opts("/tmp/arsshcm-xyz")
+        self.assertIn("ControlMaster=auto", opts)
+        self.assertIn(
+            "ControlPersist=%ds" % airuleset.SSH_CONTROL_PERSIST_S, opts)
+        self.assertIn("ControlPath=/tmp/arsshcm-xyz/%C", opts)
+
+
+class TestSshControlDirForPush(TestCase):
+    """A bounded, per-run temp directory for ssh ControlMaster sockets --
+    degrades to None (never raises) if it cannot be created."""
+
+    def test_creates_a_real_directory(self):
+        d = airuleset._ssh_control_dir_for_push()
+        try:
+            self.assertTrue(d)
+            self.assertTrue(os.path.isdir(d))
+        finally:
+            if d:
+                shutil.rmtree(d, ignore_errors=True)
+
+    def test_degrades_to_none_on_failure(self):
+        with m.patch("tempfile.mkdtemp", side_effect=OSError("no space")):
+            self.assertIsNone(airuleset._ssh_control_dir_for_push())
+
+
+class TestRedactedSshCmd(TestCase):
+    """The manual single-target retry hint printed on an exhausted
+    transient failure must never leak the shared subdev password into the
+    push log (security-basics.md)."""
+
+    def test_identity_based_cmd_is_unchanged(self):
+        cmd = ["ssh", "-i", "/x/k", "-o", "StrictHostKeyChecking=no",
+               "gatekeeper@1.2.3.4", "echo hi"]
+        self.assertEqual(airuleset._redacted_ssh_cmd(cmd), cmd)
+
+    def test_sshpass_password_is_redacted(self):
+        cmd = ["sshpass", "-p", "newlevel", "ssh", "-o",
+               "StrictHostKeyChecking=no", "u@1.2.3.4", "echo hi"]
+        out = airuleset._redacted_ssh_cmd(cmd)
+        self.assertNotIn("newlevel", out)
+        self.assertIn("<REDACTED>", out)
+        expected = list(cmd)
+        expected[2] = "<REDACTED>"
+        self.assertEqual(out, expected)
+
+    def test_original_cmd_list_is_not_mutated(self):
+        cmd = ["sshpass", "-p", "newlevel", "ssh", "u@1.2.3.4", "echo hi"]
+        original = list(cmd)
+        airuleset._redacted_ssh_cmd(cmd)
+        self.assertEqual(cmd, original)
+
+
+class TestCmdPushTargetLevelSshRetry(TestCase):
+    """A connection-closed/reset ssh failure on ONE target must not leave
+    the wave with a permanent hole -- it retries ONLY that target,
+    bounded, with a backoff, never re-running ruff/tests/git push."""
+
+    _TRANSIENT_ERR = ("kex_exchange_identification: read: Connection reset "
+                       "by peer\n")
+
+    def _fake_hosts(self):
+        return [
+            {"name": "dev2", "host": "1.2.3.4", "user": "u",
+             "repo_path": "~/x"},
+            {"name": "gk", "host": "5.6.7.8", "user": "g",
+             "repo_path": "~/x", "identity": "~/.secrets/k"},
+        ]
+
+    def _scripted_run(self, calls, script):
+        counters = {}
+
+        def fake_run(cmd, *a, **k):
+            calls.append((list(cmd), dict(k)))
+            if cmd and cmd[0] in ("ssh", "sshpass"):
+                for needle, results in script.items():
+                    if any(needle in str(t) for t in cmd):
+                        idx = counters.get(needle, 0)
+                        counters[needle] = idx + 1
+                        rc, out, err = results[min(idx, len(results) - 1)]
+                        return m.Mock(returncode=rc, stdout=out, stderr=err)
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+        return fake_run
+
+    def _run_push(self, calls, script, backoff_env=None, control_dir=None):
+        args = m.Mock()
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_SSH_RETRY_BACKOFF_S", None)
+            if backoff_env is not None:
+                os.environ["AIRULESET_SSH_RETRY_BACKOFF_S"] = backoff_env
+            with m.patch("subprocess.run",
+                          side_effect=self._scripted_run(calls, script)), \
+                    m.patch.object(airuleset, "cmd_install"), \
+                    m.patch.object(airuleset, "REMOTE_HOSTS",
+                                    self._fake_hosts()), \
+                    m.patch("time.sleep"), \
+                    m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                    return_value=control_dir):
+                try:
+                    airuleset.cmd_push(args)
+                    return None
+                except SystemExit as e:
+                    return e.code
+
+    def test_transient_failure_succeeds_on_retry_and_is_not_reported_failed(self):
+        calls = []
+        script = {"5.6.7.8": [(255, "", self._TRANSIENT_ERR),
+                               (0, "ok", "")]}
+        code = self._run_push(calls, script)
+        self.assertIsNone(code)
+        gk_calls = [c for c, k in calls if any("5.6.7.8" in str(t) for t in c)]
+        self.assertEqual(len(gk_calls), 2)
+
+    def test_retry_is_bounded_and_reports_failed_when_exhausted(self):
+        calls = []
+        script = {"5.6.7.8": [(255, "", self._TRANSIENT_ERR),
+                               (255, "", self._TRANSIENT_ERR),
+                               (255, "", self._TRANSIENT_ERR)]}
+        code = self._run_push(calls, script)
+        self.assertEqual(code, 1)
+        gk_calls = [c for c, k in calls if any("5.6.7.8" in str(t) for t in c)]
+        self.assertEqual(len(gk_calls), airuleset.SSH_RETRY_MAX_ATTEMPTS,
+                          "must stop at the bound, never keep retrying "
+                          "forever")
+
+    def test_retry_exhaustion_sleeps_exactly_max_attempts_minus_one_times(self):
+        # #358 adversarial-review F3: the SIBLING test above only asserts
+        # the ssh CALL count, which is capped by the `range()` bound
+        # either way -- it stays green even under a mutant that flips
+        # `attempt >= SSH_RETRY_MAX_ATTEMPTS` to `attempt > ...` (which
+        # sleeps one extra, useless time after the LAST attempt, printing
+        # a misleading "retrying" line for a retry that never happens).
+        # Assert the SLEEP count too -- exhausting N attempts must sleep
+        # exactly N-1 times, never N.
+        calls = []
+        script = {"5.6.7.8": [(255, "", self._TRANSIENT_ERR),
+                               (255, "", self._TRANSIENT_ERR),
+                               (255, "", self._TRANSIENT_ERR)]}
+        with m.patch("time.sleep") as sleep_mock:
+            args = m.Mock()
+            with m.patch("subprocess.run",
+                          side_effect=self._scripted_run(calls, script)), \
+                    m.patch.object(airuleset, "cmd_install"), \
+                    m.patch.object(airuleset, "REMOTE_HOSTS",
+                                    self._fake_hosts()), \
+                    m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                    return_value=None):
+                with self.assertRaises(SystemExit):
+                    airuleset.cmd_push(args)
+            self.assertEqual(sleep_mock.call_count,
+                              airuleset.SSH_RETRY_MAX_ATTEMPTS - 1,
+                              "must sleep exactly N-1 times for N exhausted "
+                              "attempts -- never sleep after the LAST one, "
+                              "which would claim a retry that never happens")
+
+    def test_auth_failure_is_never_retried(self):
+        calls = []
+        err = "g@5.6.7.8: Permission denied (publickey).\n"
+        script = {"5.6.7.8": [(255, "", err), (0, "ok", "")]}
+        code = self._run_push(calls, script)
+        self.assertEqual(code, 1)
+        gk_calls = [c for c, k in calls if any("5.6.7.8" in str(t) for t in c)]
+        self.assertEqual(len(gk_calls), 1,
+                          "an auth failure must never be retried -- it's "
+                          "permanent")
+
+    def test_ordinary_remote_command_failure_is_never_retried(self):
+        calls = []
+        # rc=1 -- an ordinary failed `git pull`/install, NOT an ssh
+        # connection failure -- retrying it would just repeat the same
+        # failing remote command for no benefit.
+        script = {"5.6.7.8": [(1, "", "error: cannot open FETCH_HEAD\n"),
+                               (0, "ok", "")]}
+        code = self._run_push(calls, script)
+        self.assertEqual(code, 1)
+        gk_calls = [c for c, k in calls if any("5.6.7.8" in str(t) for t in c)]
+        self.assertEqual(len(gk_calls), 1)
+
+    def test_retry_never_re_runs_ruff_tests_or_git_push(self):
+        calls = []
+        script = {"5.6.7.8": [(255, "", self._TRANSIENT_ERR),
+                               (0, "ok", "")]}
+        self._run_push(calls, script)
+        ruff_calls = [c for c, k in calls if c[:1] == ["ruff"]]
+        test_calls = [c for c, k in calls
+                      if len(c) > 2 and c[1:3] == ["-m", "unittest"]]
+        git_push_calls = [c for c, k in calls if c[:2] == ["git", "push"]]
+        self.assertEqual(len(ruff_calls), 1)
+        self.assertEqual(len(test_calls), 1)
+        self.assertEqual(len(git_push_calls), 1)
+
+    def test_backoff_env_var_is_honored(self):
+        calls = []
+        script = {"5.6.7.8": [(255, "", self._TRANSIENT_ERR),
+                               (0, "ok", "")]}
+        with m.patch("time.sleep") as sleep_mock:
+            args = m.Mock()
+            with m.patch("subprocess.run",
+                          side_effect=self._scripted_run(calls, script)), \
+                    m.patch.object(airuleset, "cmd_install"), \
+                    m.patch.object(airuleset, "REMOTE_HOSTS",
+                                    self._fake_hosts()), \
+                    m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                    return_value=None), \
+                    m.patch.dict(os.environ,
+                                  {"AIRULESET_SSH_RETRY_BACKOFF_S": "7"}):
+                airuleset.cmd_push(args)
+            sleep_mock.assert_called_once_with(7)
+
+    def test_manual_retry_hint_is_printed_and_password_redacted(self):
+        import io
+        import contextlib
+        calls = []
+        hosts = [{"name": "sub", "host": "9.9.9.9", "user": "u",
+                   "repo_path": "~/x"}]  # no identity -> sshpass branch
+        script = {"9.9.9.9": [(255, "", self._TRANSIENT_ERR),
+                               (255, "", self._TRANSIENT_ERR)]}
+        buf = io.StringIO()
+        args = m.Mock()
+        with m.patch("subprocess.run",
+                      side_effect=self._scripted_run(calls, script)), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
+                m.patch("time.sleep"), \
+                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                return_value=None), \
+                contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        out = buf.getvalue()
+        self.assertIn("Manual retry once reachable:", out)
+        self.assertNotIn("newlevel", out)
+        self.assertIn("<REDACTED>", out)
+
+
+class TestCmdPushSshMultiplexing(TestCase):
+    """The deploy loop AND the soniox-key phase share ONE per-run ssh
+    ControlMaster socket directory, and it is torn down at the end of the
+    push regardless of success/failure."""
+
+    def test_ssh_calls_carry_the_multiplex_options(self):
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+
+        hosts = [{"name": "gk", "host": "5.6.7.8", "user": "g",
+                   "repo_path": "~/x", "identity": "~/.secrets/k"}]
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
+                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                return_value="/tmp/arsshcm-fake"):
+            airuleset.cmd_push(args)
+        ssh_call = next(c for c in calls if c and c[0] == "ssh")
+        self.assertIn("ControlMaster=auto", ssh_call)
+        self.assertIn("ControlPath=/tmp/arsshcm-fake/%C", ssh_call)
+
+    def test_sshpass_branch_also_carries_the_multiplex_options(self):
+        # #358 adversarial-review F4: the sibling test above only ever
+        # used an identity-based (key) host, so a mutant dropping
+        # `control_opts` from JUST the sshpass (no-identity) branch --
+        # 5 of 13 real REMOTE_HOSTS entries (dev2, montalu/2/3/4) --
+        # survived the whole suite untouched. Cover that branch directly.
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+
+        hosts = [{"name": "dev2", "host": "1.2.3.4", "user": "newlevel",
+                   "repo_path": "~/x"}]  # no identity -> sshpass branch
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
+                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                return_value="/tmp/arsshcm-fake-sshpass"):
+            airuleset.cmd_push(args)
+        ssh_call = next(c for c in calls if c and c[0] == "sshpass")
+        self.assertIn("ControlMaster=auto", ssh_call)
+        self.assertIn("ControlPath=/tmp/arsshcm-fake-sshpass/%C", ssh_call)
+
+    def test_control_dir_is_cleaned_up_after_a_successful_push(self):
+        real_dir = tempfile.mkdtemp(prefix="arsshcm-test-")
+        self.addCleanup(shutil.rmtree, real_dir, ignore_errors=True)
+        args = m.Mock()
+        with m.patch("subprocess.run",
+                      return_value=m.Mock(returncode=0, stdout="ok",
+                                           stderr="")), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", []), \
+                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                return_value=real_dir):
+            airuleset.cmd_push(args)
+        self.assertFalse(os.path.isdir(real_dir))
+
+    def test_control_dir_is_cleaned_up_even_when_the_push_fails(self):
+        real_dir = tempfile.mkdtemp(prefix="arsshcm-test-")
+        self.addCleanup(shutil.rmtree, real_dir, ignore_errors=True)
+        hosts = [{"name": "gk", "host": "5.6.7.8", "user": "g",
+                   "repo_path": "~/x", "identity": "~/.secrets/k"}]
+
+        def fake_run(cmd, *a, **k):
+            if cmd and cmd[0] in ("ssh", "sshpass"):
+                return m.Mock(returncode=1, stdout="", stderr="boom")
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
+                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                return_value=real_dir):
+            with self.assertRaises(SystemExit):
+                airuleset.cmd_push(args)
+        self.assertFalse(os.path.isdir(real_dir))
+
+    def test_soniox_phase_receives_the_same_control_opts_as_the_deploy_loop(self):
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append((list(cmd), dict(k)))
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+
+        hosts = [{"name": "david@subdev", "host": "9.9.9.9", "user": "david",
+                   "repo_path": "~/x",
+                   "identity": "~/.secrets/gatekeeper_access_ed25519"}]
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                                {"david": "fork-no-merge"}), \
+                m.patch.object(airuleset, "_soniox_key_line",
+                                return_value="SONIOX_API_KEY=x"), \
+                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                                return_value="/tmp/arsshcm-fake2"):
+            airuleset.cmd_push(args)
+        deploy_call = next(
+            c for c, k in calls
+            if c and c[0] == "ssh"
+            and "cat > ~/.soniox.env" not in " ".join(c))
+        soniox_call = next(
+            c for c, k in calls
+            if c and c[0] == "ssh" and "cat > ~/.soniox.env" in " ".join(c))
+        self.assertIn("ControlPath=/tmp/arsshcm-fake2/%C", deploy_call)
+        self.assertIn("ControlPath=/tmp/arsshcm-fake2/%C", soniox_call)
+
+
 class TestSharedRemoteHostIps(TestCase):
     """#347: a host backed by MORE than one REMOTE_HOSTS entry (the subdev
     VPS, shared by 11 stream accounts today) is the exact class of box
