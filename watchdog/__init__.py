@@ -10492,7 +10492,25 @@ def _needs_you_block_ts(tpath):
 # for the actual decision point.
 _GOAL_BLOCKED_ANSWER_TRANSPARENT_PREFIXES = tuple(
     p for p in _MACHINE_PROMPT_PREFIXES
-    if p not in ("Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku"))
+    if p not in ("Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku")
+) + (
+    # A `/compact` continuation summary is a real, top-level `user`-typed
+    # entry (confirmed live across several transcripts under
+    # ~/.claude/projects/) that is NEITHER `isMeta` NOR a bare
+    # `<system-reminder>`-wrapped block -- Claude Code writes its own
+    # summarizer's output as plain string content, so it slips past
+    # every OTHER transparent check above. It is still never a genuine
+    # typed answer: without this entry, a compaction landing right
+    # after a real (A)-blocked stop (this repo's own job 14/#65 compact
+    # machinery can fire on an armed `/goal` session at a ticket
+    # boundary) would misread the summary text as "a GENUINE later real
+    # turn exists" and wrongly release a block the user never actually
+    # answered. Scoped to THIS one function's own transparent-prefix
+    # set (a `+` concatenation, not a change to `_MACHINE_PROMPT_
+    # PREFIXES` itself) precisely so `_last_human_prompt_ts` and its
+    # many other callers stay byte-for-byte unaffected.
+    "This session is being continued from a previous conversation",
+)
 
 
 def _goal_blocked_on_unanswered_question(tpath):
@@ -10539,16 +10557,21 @@ def _goal_blocked_on_unanswered_question(tpath):
     A `user`-typed entry matching `_GOAL_BLOCKED_ANSWER_TRANSPARENT_
     PREFIXES` (a watchdog nudge, a task-notification, a bare `/goal `
     re-arm attempt — every machine-injected shape this file already
-    knows about, EXCEPT the two Discord-relay ones) or carrying only a
+    knows about, EXCEPT the two Discord-relay ones), carrying only a
     `tool_result` (a routine post-tool-call entry, mirrors `_last_human_
-    prompt_ts`'s own extraction) is treated as TRANSPARENT bookkeeping,
-    never a genuine answer — the walk keeps scanning further back for the
-    real decision point instead of concluding "answered". Without this, a
-    bare nudge landing as the transcript's newest entry with no
-    subsequent assistant turn yet would misread as "answered" even though
-    the user never replied — narrower than the #350 ticket's own reported
-    incident, but the same false-negative direction it explicitly warns
-    against.
+    prompt_ts`'s own extraction), or flagged `isMeta` (CC's own system-
+    injected user-type entries — a goal-arm confirmation echo, a resume-
+    injection notice, a skill-directory listing, a malformed-tool-call
+    notice — none of which is a genuine typed answer either, and none of
+    which carries a recognisable prefix at all, so this check catches
+    what the prefix list structurally cannot) is treated as TRANSPARENT
+    bookkeeping, never a genuine answer — the walk keeps scanning further
+    back for the real decision point instead of concluding "answered".
+    Without this, a bare nudge (or an `isMeta` entry) landing as the
+    transcript's newest entry with no subsequent assistant turn yet would
+    misread as "answered" even though the user never replied — narrower
+    than the #350 ticket's own reported incident, but the same
+    false-negative direction it explicitly warns against.
 
     Returns `''` the moment the walk finds a GENUINE newer `user`-typed
     turn — the REACHABLE exit condition #350 needs (mirrors #134: name
@@ -10571,7 +10594,22 @@ def _goal_blocked_on_unanswered_question(tpath):
     empty transcript — an UNMEASURABLE read must never manufacture a NEW
     suppression; the existing FALSE-ACHIEVED machinery this sits in
     front of already has its own bounded, reachable give-up/reset gates
-    for a genuinely-stuck pane."""
+    for a genuinely-stuck pane.
+
+    Accepted, DELIBERATELY undocumented-in-code residual (round-1
+    review, defensible either way): an interrupt PSEUDO-ENTRY — the
+    synthetic `user`-typed record Claude Code writes when the user
+    presses Escape mid-turn (no recognised prefix, no `isMeta`, no
+    `isApiErrorMessage`) — is NOT distinguished from a genuine typed
+    answer here, same as it is not distinguished by `_last_human_
+    prompt_ts` either. An interrupt is, in the overwhelming common
+    case, itself accompanied by real subsequent human input (the user
+    interrupted TO type something), so this walk resolving it as "a
+    later real turn exists" is very rarely wrong in practice — and
+    building a dedicated exclusion for a shape this file has never
+    needed to identify anywhere else would be exactly the kind of
+    speculative widening the FREEZE forbids (fix what has actually
+    failed in production, not every theoretically-adjacent shape)."""
     for entry in reversed(_iter_jsonl_tail(tpath)):
         if not isinstance(entry, dict):
             continue
@@ -10579,7 +10617,10 @@ def _goal_blocked_on_unanswered_question(tpath):
         if etype not in _REAL_TURN_TYPES:
             continue
         if etype == "user":
-            c = (entry.get("message") or {}).get("content")
+            if entry.get("isMeta"):
+                continue            # CC-injected system text -- transparent
+            msg = entry.get("message")
+            c = msg.get("content") if isinstance(msg, dict) else None
             if isinstance(c, str):
                 t = c
             elif isinstance(c, list):
