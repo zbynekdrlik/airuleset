@@ -302,6 +302,53 @@ class TestGkreqRepingBackoff(unittest.TestCase):
         self.assertEqual(len(self.pings), 1,
                          "a resolved blip must never have reset the backoff")
 
+    def test_a_scheduled_reping_landing_on_the_first_absent_sweep_still_confirms(self):
+        # round-2 review MINOR (coverage gap, code already correct): the
+        # PING branch's own `seen[name]` write must persist the DEBOUNCED
+        # `pane_seen`/`pane_absent_pending` values, never the raw
+        # `pane_now` -- otherwise a STAGED reping that happens to land on
+        # the exact same sweep as the FIRST (unconfirmed) pane absence
+        # silently destroys the pending-confirmation bookkeeping, and the
+        # disappearance is never confirmed on the NEXT (second consecutive)
+        # absent sweep.
+        state = {}
+        now = time.time()
+        self._sweep(now, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, [7],
+                   panes=[("%1", self.root)], captured=IDLE)
+        self.assertEqual(len(self.pings), 1)
+        # +25h: the 24h staged schedule is due on THIS sweep, and it is
+        # ALSO the first absent sweep since the pane appeared.
+        self._sweep(now + 25 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 2, "the scheduled reping fires")
+        # +25.5h: the SECOND consecutive absent sweep must still confirm
+        # the disappearance and reset, even though the prior sweep also
+        # pinged (for an unrelated, schedule-driven reason).
+        self._sweep(now + 25.5 * 3600, state, [7], panes=[])
+        self.assertEqual(len(self.pings), 3,
+                         "confirmation must still fire after a scheduled "
+                         "reping shared the same sweep as the first absence")
+
+    def test_pane_target_falls_back_to_basename_with_no_cache_entry(self):
+        # round-2 review MINOR (coverage gap, code already correct): a
+        # brand-new root with NO tickets-status cache entry at all (never
+        # seen before) must still resolve a usable pane-target name via
+        # the `os.path.basename(cwd)` fallback -- the cache-name-preferred
+        # path (MAJOR-3's own fix) must never make an uncached root
+        # unnamed/unnudgeable.
+        with TemporaryDirectory() as home2:
+            root = str(Path(home2) / "devel" / "freshrepo")
+            Path(root).mkdir(parents=True)
+            # deliberately NO seed_repo_cache() call here.
+            tmux = FakeTmux([("%1", root)], IDLE)
+            logs = wd.gk_request_backstop(
+                time.time(), tmux, {}, self._send, home=home2,
+                dry_run=False, gh_fetch=lambda r: [7], user="newlevel")
+        typed = tmux.typed()
+        self.assertTrue(typed, logs)
+        self.assertIn("freshrepo", typed[0])
+
     def test_pane_target_uses_the_cache_name_not_the_directory_basename(self):
         # #353 round 2, MAJOR-3 (TRIGGERED live: dev1's own real cache has
         # `forestshop_app` -> `forestshop-app`, `odoo-slovnormal` ->
