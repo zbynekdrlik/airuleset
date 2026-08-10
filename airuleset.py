@@ -4363,6 +4363,632 @@ def cmd_sweep_worktrees(args):
     print("Log: %s" % STALE_WORKTREE_LOG_PATH)
 
 
+# --- Old Claude CLI binary sweep (#355) -------------------------------------
+# Every managed box installs the `claude` CLI natively (ensure_claude_cli_
+# installed, #263): `~/.local/bin/claude` symlinks to ONE file inside
+# `~/.local/share/claude/versions/<dotted-version>` (each ~280-300MB), and
+# EVERY auto-update lays down a NEW versioned file while leaving the OLD
+# one behind forever -- nothing has ever swept it. On subdev's 11 stream
+# accounts this measured 9-12G reclaimable (each account carrying 3-4 old
+# versions); on THIS box alone it was 4 versions / 1.2G (#355 STEP 0
+# comment). Mirrors #315/#345's own shape exactly: discovery separated from
+# destruction, own log+state file, cadence-gated (FREEZE: no new watchdog
+# job, so a plain state-file stamp rate-limits this instead), wired as a
+# non-fatal cmd_install() step plus a manual/testable CLI entry point.
+
+CLI_VERSION_LOG_PATH = CLAUDE_DIR / "cli-version-sweep.log"
+CLI_VERSION_STATE_PATH = CLAUDE_DIR / "cli-version-sweep-state.json"
+CLI_VERSION_MIN_INTERVAL_S = 24 * 3600     # env AIRULESET_CLI_VERSION_SWEEP_INTERVAL_S
+# Deliberately generous -- current+previous are KEPT unconditionally
+# regardless of age (see discover_cli_version_candidates); this floor only
+# protects a version ranked BELOW previous from being reclaimed while it
+# might still be mid-download/mid-update-race.
+CLI_VERSION_MIN_AGE_DAYS_DEFAULT = 2       # env AIRULESET_CLI_VERSION_MIN_AGE_DAYS
+_CLI_VERSION_NAME_RX = re.compile(r"^\d+(\.\d+)+$")
+
+
+def _cli_versions_dir(home=None) -> Path:
+    """`~/.local/share/claude/versions/` -- the native installer's own
+    layout (confirmed live, #355 STEP 0: a flat dir of version-named FILES,
+    never a subdirectory-per-version)."""
+    home = Path(home or os.environ.get("HOME") or os.path.expanduser("~"))
+    return home / ".local" / "share" / "claude" / "versions"
+
+
+def _cli_version_key(name: str):
+    """Parse a dotted-decimal version NAME into a tuple of ints for sorting
+    (e.g. "2.1.226" -> (2, 1, 226)). `None` when `name` does not match the
+    strict `^\\d+(\\.\\d+)+$` shape -- never guessed; the caller refuses any
+    entry this returns `None` for, individually, rather than assume it's
+    "probably" a version."""
+    if not _CLI_VERSION_NAME_RX.match(name):
+        return None
+    return tuple(int(p) for p in name.split("."))
+
+
+def _resolve_current_cli_version(versions_dir, env=None):
+    """The REAL, currently-live version FILE inside `versions_dir` --
+    resolved via `shutil.which("claude")` (the same repaired-PATH
+    `_claude_cli_env()` `_claude_cli_installed` already uses) followed by
+    `os.path.realpath`, NEVER guessed from mtime (#355 design comment: a
+    genuinely-current-but-manually-downgraded version must never look
+    deletable just because a newer file happens to exist in the dir).
+
+    Returns the resolved absolute path STRING, or `None` when it cannot be
+    confidently determined -- `claude` not on PATH at all, or it resolves
+    to something OUTSIDE `versions_dir` entirely (an unexpected install
+    method: a system package, a different install layout). Callers MUST
+    refuse the WHOLE sweep on `None`, never guess which file is "probably"
+    current."""
+    import shutil as _shutil
+    e = env or _claude_cli_env()
+    which = _shutil.which("claude", path=e.get("PATH", ""))
+    if not which:
+        return None
+    try:
+        resolved = os.path.realpath(which)
+        vdir_resolved = os.path.realpath(str(versions_dir))
+    except OSError:
+        return None
+    if os.path.dirname(resolved) != vdir_resolved:
+        return None
+    return resolved
+
+
+def discover_cli_version_candidates(home=None, versions_dir=None, now=None,
+                                    min_age_days=None, env=None, proc_dir=None):
+    """Every installed Claude CLI version FILE under `~/.local/share/claude/
+    versions/` that is safe to reclaim -- #355. A list of dicts
+    `{"path", "version", "reason", "size"?, "age_days"?}` -- `reason` is
+    `None` for a genuine candidate, else WHY it was excluded (mirrors
+    `discover_stale_worktrees`/`discover_target_purge_candidates`'s own
+    shape exactly). A discovery-level REFUSAL (current unresolvable, the
+    dir unlistable) returns a SINGLE `{"path": None, "reason": ...}` row --
+    the same ERROR-sentinel shape those two functions already use.
+
+    Safety criteria (NON-NEGOTIABLE):
+      - the CURRENT version (resolved via the real `~/.local/bin/claude`
+        symlink target, never guessed) is NEVER a candidate;
+      - the version ranked immediately BELOW current in a version-tuple-
+        sorted-DESCENDING list is kept too (the rollback target) -- even
+        when current is not the newest entry present (a manual downgrade,
+        a newer build downloaded but not yet symlinked);
+      - a THIRD, redundant guard: ANY entry whose own resolved realpath
+        equals the resolved current path is kept regardless of index
+        arithmetic -- belt-and-suspenders on the one truly non-negotiable
+        invariant here ("NIKDY bežiacu/aktuálnu verziu");
+      - an entry whose name does not parse as a plain dotted-decimal
+        version, or that is not a plain regular file (never a symlink,
+        never a directory), is refused INDIVIDUALLY -- unexpected layout,
+        never guessed at;
+      - if `versions_dir` doesn't exist at all, this returns `[]` (this box
+        simply doesn't use the native install layout -- nothing to do, not
+        an error); if it exists but the CURRENT version cannot be
+        confidently resolved inside it, the WHOLE box is refused;
+      - a surviving candidate still needs BOTH an age floor (mtime) AND a
+        live-process check (`_target_in_live_use`, #315's own /proc
+        exe-scan, reused verbatim -- catches a still-running OLD process
+        that hasn't picked up a newer `current` yet) before being genuine.
+    """
+    import time as _time
+    now = _time.time() if now is None else now
+    min_age_days = (CLI_VERSION_MIN_AGE_DAYS_DEFAULT if min_age_days is None
+                    else min_age_days)
+    home = Path(home or os.environ.get("HOME") or os.path.expanduser("~"))
+    vdir = Path(versions_dir) if versions_dir else _cli_versions_dir(home)
+
+    if not vdir.is_dir():
+        return []
+
+    try:
+        names = sorted(os.listdir(vdir))
+    except OSError as e:
+        return [{"path": None, "reason": "could not list %s: %s" % (vdir, e)}]
+
+    current = _resolve_current_cli_version(vdir, env=env)
+    if current is None:
+        return [{"path": None,
+                "reason": "current CLI version could not be confidently "
+                          "resolved inside %s -- refusing the whole sweep "
+                          "for this box" % vdir}]
+
+    out = []
+    parsed = []   # list of (key, name, path) -- name-parseable plain files only
+    for name in names:
+        p = vdir / name
+        key = _cli_version_key(name)
+        if key is None:
+            out.append({"path": str(p), "version": name,
+                       "reason": "name does not parse as a dotted-decimal "
+                                 "version -- unexpected layout, skipped"})
+            continue
+        if p.is_symlink() or not p.is_file():
+            out.append({"path": str(p), "version": name,
+                       "reason": "not a plain regular file -- unexpected "
+                                 "layout, skipped"})
+            continue
+        parsed.append((key, name, p))
+
+    parsed.sort(key=lambda t: t[0], reverse=True)
+
+    try:
+        current_idx = next(i for i, (_, _, p) in enumerate(parsed)
+                           if os.path.realpath(str(p)) == current)
+    except StopIteration:
+        # Never guess which discovered entry is "probably" current --
+        # refuse the whole sweep (the ERROR row leads the result list; any
+        # already-classified unexpected-layout rows above it stay reported
+        # too, since a caller may still want to see the full picture).
+        out.insert(0, {"path": None,
+                      "reason": "resolved current version %s does not match "
+                                "any discovered version entry -- refusing "
+                                "the whole sweep for this box" % current})
+        return out
+
+    keep_idxs = {current_idx}
+    if current_idx + 1 < len(parsed):
+        keep_idxs.add(current_idx + 1)
+
+    for i, (key, name, p) in enumerate(parsed):
+        entry = {"path": str(p), "version": name, "reason": None}
+        # Redundant guard (belt-and-suspenders on the non-negotiable
+        # invariant): a resolved-path match against `current` is checked
+        # independently of `i in keep_idxs`.
+        try:
+            is_current_path = os.path.realpath(str(p)) == current
+        except OSError:
+            is_current_path = False
+        if is_current_path:
+            entry["reason"] = "current version -- never deleted"
+            out.append(entry)
+            continue
+        if i in keep_idxs:
+            entry["reason"] = "rollback version (immediately below current) -- kept"
+            out.append(entry)
+            continue
+        try:
+            st = os.lstat(p)
+        except OSError as e:
+            entry["reason"] = "could not stat: %s" % e
+            out.append(entry)
+            continue
+        entry["size"] = st.st_size
+        age_days = (now - st.st_mtime) / 86400.0
+        entry["age_days"] = age_days
+        if age_days < min_age_days:
+            entry["reason"] = "too recent (%.1fd < %sd)" % (age_days, min_age_days)
+            out.append(entry)
+            continue
+        if _target_in_live_use(p, proc_dir=proc_dir):
+            entry["reason"] = "in live use (or undeterminable) -- skipped"
+            out.append(entry)
+            continue
+        out.append(entry)   # reason stays None -- genuine candidate
+
+    return out
+
+
+def _log_cli_version_sweep_results(results, log_path, now, dry_run: bool):
+    import time as _time
+    lines = []
+    ts = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(now))
+    for r in results:
+        if r.get("path") is None:
+            lines.append("%s ERROR %s" % (ts, r.get("reason", "")))
+            continue
+        if dry_run:
+            tag = "WOULD-REMOVE" if not r.get("reason") or "dry" in r.get("reason", "") else "SKIP"
+        else:
+            tag = "REMOVED" if r.get("removed") else "SKIP"
+        lines.append("%s %s %s version=%s -- %s" % (
+            ts, tag, r.get("path"), r.get("version"), r.get("reason", "")))
+    if not lines:
+        return
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        print("  cli-version-sweep: could not write log %s: %s" % (log_path, e), file=sys.stderr)
+
+
+def sweep_stale_cli_versions(home=None, versions_dir=None, dry_run: bool = False,
+                             now=None, log_path=None, state_path=None,
+                             force: bool = False, min_age_days=None,
+                             candidates=None, env=None, proc_dir=None):
+    """Reclaim every stale CLI version `discover_cli_version_candidates`
+    classifies as a genuine candidate (`reason is None`) -- #355. Never
+    `--force`-deletes anything the discovery step already excluded;
+    re-verifies "still a plain regular file, not in live use" immediately
+    before EACH delete (a TOCTOU re-check, mirroring #315's own
+    re-verify-before-delete pattern) rather than trusting discovery-time
+    state.
+
+    Cadence-gated via its own state file, mirroring #315/#345 exactly --
+    never leans on the 60s watchdog timer (FREEZE: no new job).
+    `force=True` (the CLI's own manual invocation) or `dry_run=True` always
+    bypasses the gate."""
+    import time as _time
+    now = _time.time() if now is None else now
+    log_path = Path(log_path) if log_path else CLI_VERSION_LOG_PATH
+    state_path = Path(state_path) if state_path else CLI_VERSION_STATE_PATH
+
+    if not force and not dry_run:
+        try:
+            st = json.loads(state_path.read_text())
+            last = float(st.get("last_run", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            last = 0
+        if last > now:
+            last = 0            # a future-dated stamp must not wedge the gate forever
+        interval = CLI_VERSION_MIN_INTERVAL_S
+        try:
+            interval = int(os.environ.get("AIRULESET_CLI_VERSION_SWEEP_INTERVAL_S", interval))
+        except ValueError:
+            interval = CLI_VERSION_MIN_INTERVAL_S
+        if now - last < interval:
+            return []
+
+    results = []
+    discovery_failed = False
+    if candidates is None:
+        try:
+            candidates = discover_cli_version_candidates(
+                home, versions_dir=versions_dir, now=now,
+                min_age_days=min_age_days, env=env, proc_dir=proc_dir)
+        except Exception as e:
+            candidates = []
+            discovery_failed = True
+            results.append({"path": None, "removed": False,
+                            "reason": "discovery error: %s" % e})
+
+    for c in candidates:
+        entry = dict(c)
+        entry["removed"] = False
+        if c.get("path") is None:
+            results.append(entry)
+            continue
+        if c.get("reason"):
+            results.append(entry)
+            continue
+        if dry_run:
+            entry["reason"] = "would remove (dry-run)"
+            results.append(entry)
+            continue
+
+        p = Path(c["path"])
+        try:
+            if p.is_symlink() or not p.is_file():
+                entry["reason"] = ("no longer a plain regular file -- refused "
+                                   "(re-checked before delete)")
+                results.append(entry)
+                continue
+            if _target_in_live_use(p, proc_dir=proc_dir):
+                entry["reason"] = ("in live use (or undeterminable) -- refused "
+                                   "(re-checked before delete)")
+                results.append(entry)
+                continue
+            p.unlink()
+            entry["removed"] = True
+            entry["reason"] = "removed"
+        except OSError as e:
+            entry["reason"] = "delete failed: %s" % e
+        results.append(entry)
+
+    _log_cli_version_sweep_results(results, log_path, now, dry_run)
+
+    if not dry_run and not discovery_failed:
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"last_run": now}))
+        except OSError as e:
+            print("  cli-version-sweep: could not write state %s: %s" % (state_path, e), file=sys.stderr)
+
+    return results
+
+
+def cmd_sweep_cli_versions(args):
+    """`airuleset.py sweep-cli-versions [--dry-run] [--min-age-days N]` --
+    manual/testable entry point for the #355 CLI-version sweep. Always
+    `force=True` (bypasses the cadence gate that guards the automatic
+    install/push wiring -- a deliberate manual call should never be
+    silently skipped)."""
+    print("airuleset sweep-cli-versions")
+    print("=" * 50)
+    dry_run = bool(getattr(args, "dry_run", False))
+    min_age_days = getattr(args, "min_age_days", None)
+    results = sweep_stale_cli_versions(dry_run=dry_run, force=True, min_age_days=min_age_days)
+    for r in results:
+        if r.get("path") is None:
+            print("  ERROR: %s" % r.get("reason", ""))
+            continue
+        acted = (str(r.get("reason", "")).startswith("would remove")
+                if dry_run else bool(r.get("removed")))
+        if acted:
+            tag = "WOULD REMOVE" if dry_run else "REMOVED"
+        else:
+            tag = "skip"
+        print("  %s: %s (version %s) -- %s" % (
+            tag, r["path"], r.get("version"), r.get("reason", "")))
+    acted_rows = [r for r in results
+                 if (str(r.get("reason", "")).startswith("would remove")
+                     if dry_run else r.get("removed"))]
+    total = sum(r.get("size", 0) or 0 for r in acted_rows)
+    print()
+    verb = "would be " if dry_run else ""
+    print("%d CLI version(s) %sremoved, %s %sreclaimed." % (
+        len(acted_rows), verb, _human_size(total), verb))
+    print("Log: %s" % CLI_VERSION_LOG_PATH)
+
+
+# --- Claude scratch/tmp sweep (#355) ----------------------------------------
+# Every Claude Code session writes into `/tmp/claude-<uid>/<encoded-cwd>/
+# <session-id>/scratchpad/...` (the harness's own convention -- this very
+# session's scratchpad lives there) plus, in practice, loose scratch files
+# dropped directly at the per-uid root. Nothing has ever swept it -- the
+# worktree sweep (#345/#348) is scoped strictly to `.claude/worktrees/`
+# git worktrees and never touches `/tmp` at all. Measured live on THIS box:
+# 42 entries, 1.4G under /tmp/claude-1000 (#355 STEP 0 comment) -- and a
+# same-owner, DIFFERENTLY-NAMED sibling (`/tmp/claude-286`) sits right next
+# to it, proving name-only matching is not a safe enough anchor (see
+# discover_claude_scratch_candidates's own docstring).
+
+CLAUDE_SCRATCH_LOG_PATH = CLAUDE_DIR / "claude-scratch-sweep.log"
+CLAUDE_SCRATCH_STATE_PATH = CLAUDE_DIR / "claude-scratch-sweep-state.json"
+CLAUDE_SCRATCH_MIN_INTERVAL_S = 24 * 3600   # env AIRULESET_CLAUDE_SCRATCH_SWEEP_INTERVAL_S
+CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT = 7      # env AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS
+
+
+def _claude_scratch_root(tmp_dir=None, uid=None) -> Path:
+    """`<tmp_dir>/claude-<uid>` -- THIS account's own per-uid Claude Code
+    scratch root (session scratchpads + loose working files -- exactly the
+    directory this very session's own scratchpad lives under). `tmp_dir`
+    defaults to `/tmp`; `uid` defaults to `os.getuid()`."""
+    tmp_dir = Path(tmp_dir) if tmp_dir else Path("/tmp")
+    uid = os.getuid() if uid is None else uid
+    return tmp_dir / ("claude-%d" % uid)
+
+
+def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
+                                       min_age_days=None, proc_dir=None):
+    """Every direct child (file OR directory) of THIS account's OWN
+    `/tmp/claude-<uid>/` scratch root that is safe to reclaim -- #355. A
+    list of dicts `{"path", "reason", "size"?, "age_days"?}` -- `reason` is
+    `None` for a genuine candidate, else WHY it was excluded.
+
+    Safety criteria (NON-NEGOTIABLE):
+      - the root must be NAMED `claude-<N>` where N is LITERALLY
+        `str(uid)` for THIS account, AND independently confirmed owned
+        (`st_uid`) by that SAME uid -- both checks, never just one (a
+        same-owner-but-DIFFERENTLY-NAMED sibling proves name alone is not
+        a safe enough anchor -- live on this very box, see the module
+        comment above). If the root doesn't exist, isn't a directory, is
+        itself a symlink, or the ownership check fails, this returns `[]`
+        -- and critically, NO OTHER user's `/tmp` content is EVER even
+        listed, let alone touched;
+      - a candidate's age is the NEWEST mtime found ANYWHERE inside its
+        own subtree (`_dir_stats`'s recursive newest-file walk for a
+        directory, or the bare file's own mtime) -- never the top entry's
+        OWN mtime alone, so a session still actively writing somewhere
+        deep inside an old-looking sibling tree is never wrongly judged
+        idle (this is the "nikdy scratch ŽIVEJ session" mtime/age
+        poistka);
+      - a symlinked child is refused outright -- never followed, never
+        deleted through;
+      - a candidate still needs BOTH the age floor AND a live-process
+        check (`_target_in_live_use`) before being genuine.
+    """
+    import time as _time
+    now = _time.time() if now is None else now
+    min_age_days = (CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT if min_age_days is None
+                    else min_age_days)
+    uid = os.getuid() if uid is None else uid
+    root = _claude_scratch_root(tmp_dir, uid)
+
+    if root.is_symlink() or not root.is_dir():
+        return []
+    try:
+        if os.stat(str(root)).st_uid != uid:
+            return []
+    except OSError:
+        return []
+
+    try:
+        names = sorted(os.listdir(root))
+    except OSError as e:
+        return [{"path": None, "reason": "could not list %s: %s" % (root, e)}]
+
+    out = []
+    for name in names:
+        p = root / name
+        entry = {"path": str(p), "reason": None}
+        if p.is_symlink():
+            entry["reason"] = "symlink entry -- never followed, never deleted through"
+            out.append(entry)
+            continue
+        try:
+            if p.is_dir():
+                size_bytes, newest_mtime = _dir_stats(p)
+            else:
+                st = os.lstat(p)
+                size_bytes, newest_mtime = st.st_size, st.st_mtime
+        except OSError as e:
+            entry["reason"] = "could not stat: %s" % e
+            out.append(entry)
+            continue
+        entry["size"] = size_bytes
+        age_days = float("inf") if newest_mtime is None else (now - newest_mtime) / 86400.0
+        entry["age_days"] = None if age_days == float("inf") else age_days
+        if age_days < min_age_days:
+            age_txt = "empty" if age_days == float("inf") else "%.1fd" % age_days
+            entry["reason"] = "too recent (%s < %sd)" % (age_txt, min_age_days)
+            out.append(entry)
+            continue
+        if _target_in_live_use(p, proc_dir=proc_dir):
+            entry["reason"] = "in live use (or undeterminable) -- skipped"
+            out.append(entry)
+            continue
+        out.append(entry)   # reason stays None -- genuine candidate
+
+    return out
+
+
+def _log_claude_scratch_results(results, log_path, now, dry_run: bool):
+    import time as _time
+    lines = []
+    ts = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(now))
+    for r in results:
+        if r.get("path") is None:
+            lines.append("%s ERROR %s" % (ts, r.get("reason", "")))
+            continue
+        if dry_run:
+            tag = "WOULD-REMOVE" if not r.get("reason") or "dry" in r.get("reason", "") else "SKIP"
+        else:
+            tag = "REMOVED" if r.get("removed") else "SKIP"
+        size = r.get("size")
+        size_txt = " size=%s" % _human_size(size) if size is not None else ""
+        lines.append("%s %s %s%s -- %s" % (
+            ts, tag, r.get("path"), size_txt, r.get("reason", "")))
+    if not lines:
+        return
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        print("  claude-scratch-sweep: could not write log %s: %s" % (log_path, e), file=sys.stderr)
+
+
+def sweep_claude_scratch(tmp_dir=None, uid=None, dry_run: bool = False,
+                         now=None, log_path=None, state_path=None,
+                         force: bool = False, min_age_days=None,
+                         candidates=None, proc_dir=None):
+    """Reclaim every stale claude scratch/tmp path
+    `discover_claude_scratch_candidates` classifies as a genuine candidate
+    (`reason is None`) -- #355. Re-verifies "still not a symlink, still
+    exists, still not in live use" immediately before EACH delete (a
+    TOCTOU re-check), rather than trusting discovery-time state.
+
+    Cadence-gated via its own state file, mirroring #315/#345/the CLI-
+    version sweep exactly -- never leans on the 60s watchdog timer
+    (FREEZE: no new job). `force=True` (the CLI's own manual invocation) or
+    `dry_run=True` always bypasses the gate."""
+    import time as _time
+    now = _time.time() if now is None else now
+    log_path = Path(log_path) if log_path else CLAUDE_SCRATCH_LOG_PATH
+    state_path = Path(state_path) if state_path else CLAUDE_SCRATCH_STATE_PATH
+
+    if not force and not dry_run:
+        try:
+            st = json.loads(state_path.read_text())
+            last = float(st.get("last_run", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            last = 0
+        if last > now:
+            last = 0
+        interval = CLAUDE_SCRATCH_MIN_INTERVAL_S
+        try:
+            interval = int(os.environ.get("AIRULESET_CLAUDE_SCRATCH_SWEEP_INTERVAL_S", interval))
+        except ValueError:
+            interval = CLAUDE_SCRATCH_MIN_INTERVAL_S
+        if now - last < interval:
+            return []
+
+    results = []
+    discovery_failed = False
+    if candidates is None:
+        try:
+            candidates = discover_claude_scratch_candidates(
+                tmp_dir, uid=uid, now=now, min_age_days=min_age_days, proc_dir=proc_dir)
+        except Exception as e:
+            candidates = []
+            discovery_failed = True
+            results.append({"path": None, "removed": False,
+                            "reason": "discovery error: %s" % e})
+
+    for c in candidates:
+        entry = dict(c)
+        entry["removed"] = False
+        if c.get("path") is None:
+            results.append(entry)
+            continue
+        if c.get("reason"):
+            results.append(entry)
+            continue
+        if dry_run:
+            entry["reason"] = "would remove (dry-run)"
+            results.append(entry)
+            continue
+
+        p = Path(c["path"])
+        try:
+            if p.is_symlink():
+                entry["reason"] = "symlink entry -- refused (re-checked before delete)"
+                results.append(entry)
+                continue
+            if not p.exists():
+                entry["reason"] = "already gone"
+                results.append(entry)
+                continue
+            if _target_in_live_use(p, proc_dir=proc_dir):
+                entry["reason"] = ("in live use (or undeterminable) -- refused "
+                                   "(re-checked before delete)")
+                results.append(entry)
+                continue
+            if p.is_dir():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+            entry["removed"] = True
+            entry["reason"] = "removed"
+        except OSError as e:
+            entry["reason"] = "delete failed: %s" % e
+        results.append(entry)
+
+    _log_claude_scratch_results(results, log_path, now, dry_run)
+
+    if not dry_run and not discovery_failed:
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"last_run": now}))
+        except OSError as e:
+            print("  claude-scratch-sweep: could not write state %s: %s" % (state_path, e), file=sys.stderr)
+
+    return results
+
+
+def cmd_sweep_claude_scratch(args):
+    """`airuleset.py sweep-claude-scratch [--dry-run] [--min-age-days N]` --
+    manual/testable entry point for the #355 scratch/tmp sweep. Always
+    `force=True` (bypasses the cadence gate that guards the automatic
+    install/push wiring)."""
+    print("airuleset sweep-claude-scratch")
+    print("=" * 50)
+    dry_run = bool(getattr(args, "dry_run", False))
+    min_age_days = getattr(args, "min_age_days", None)
+    results = sweep_claude_scratch(dry_run=dry_run, force=True, min_age_days=min_age_days)
+    for r in results:
+        if r.get("path") is None:
+            print("  ERROR: %s" % r.get("reason", ""))
+            continue
+        acted = (str(r.get("reason", "")).startswith("would remove")
+                if dry_run else bool(r.get("removed")))
+        if acted:
+            tag = "WOULD REMOVE" if dry_run else "REMOVED"
+        else:
+            tag = "skip"
+        print("  %s: %s -- %s" % (tag, r["path"], r.get("reason", "")))
+    acted_rows = [r for r in results
+                 if (str(r.get("reason", "")).startswith("would remove")
+                     if dry_run else r.get("removed"))]
+    total = sum(r.get("size", 0) or 0 for r in acted_rows)
+    print()
+    verb = "would be " if dry_run else ""
+    print("%d claude scratch path(s) %sremoved, %s %sreclaimed." % (
+        len(acted_rows), verb, _human_size(total), verb))
+    print("Log: %s" % CLAUDE_SCRATCH_LOG_PATH)
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     print("airuleset install")
@@ -4683,6 +5309,36 @@ def cmd_install(args):
                   f"(log: {STALE_WORKTREE_LOG_PATH})")
     except Exception as e:
         print(f"  worktree sweep error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 10. Old Claude CLI binary sweep: keep current + previous only (#355)
+    # Every native `claude` auto-update leaves the OLD versioned binary
+    # behind (~280-300MB each) under ~/.local/share/claude/versions/ --
+    # nothing has ever swept it, fleet-wide. Cadence-gated the same way as
+    # step 8/9 above -- non-fatal, best-effort.
+    try:
+        cli_sweep_results = sweep_stale_cli_versions()
+        cli_removed = [r for r in cli_sweep_results if r.get("removed")]
+        if cli_removed:
+            total = sum(r.get("size", 0) or 0 for r in cli_removed)
+            print(f"  Removed {len(cli_removed)} old CLI version(s), "
+                  f"{_human_size(total)} reclaimed (log: {CLI_VERSION_LOG_PATH})")
+    except Exception as e:
+        print(f"  cli-version sweep error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 11. Claude scratch/tmp sweep: reclaim aging session scratchpads (#355)
+    # /tmp/claude-<uid>/<encoded-cwd>/<session-id>/scratchpad/... accumulates
+    # unboundedly -- nothing has ever swept it either. Scoped strictly to
+    # THIS account's own uid-named root (never another user's /tmp content).
+    # Cadence-gated the same way as every step above -- non-fatal, best-effort.
+    try:
+        scratch_sweep_results = sweep_claude_scratch()
+        scratch_removed = [r for r in scratch_sweep_results if r.get("removed")]
+        if scratch_removed:
+            total = sum(r.get("size", 0) or 0 for r in scratch_removed)
+            print(f"  Removed {len(scratch_removed)} claude scratch path(s), "
+                  f"{_human_size(total)} reclaimed (log: {CLAUDE_SCRATCH_LOG_PATH})")
+    except Exception as e:
+        print(f"  claude-scratch sweep error (non-fatal): {e}", file=sys.stderr)
 
     print()
     if install_failed:
@@ -11614,6 +12270,28 @@ def main():
     p_sweep_wt.add_argument("--dry-run", dest="dry_run", action="store_true",
                             help="Report what would be removed without deleting anything")
 
+    # --- Old Claude CLI binary sweep: manual/testable entry point (#355) --
+    p_sweep_cli = sub.add_parser(
+        "sweep-cli-versions",
+        help="Reclaim old Claude CLI binaries under ~/.local/share/claude/"
+             "versions/ -- keeps current + one rollback version (#355)")
+    p_sweep_cli.add_argument("--dry-run", dest="dry_run", action="store_true",
+                             help="Report what would be removed without deleting anything")
+    p_sweep_cli.add_argument("--min-age-days", dest="min_age_days", type=int, default=None,
+                             help=f"Age threshold in days for a NON-kept version "
+                                  f"(default {CLI_VERSION_MIN_AGE_DAYS_DEFAULT})")
+
+    # --- Claude scratch/tmp sweep: manual/testable entry point (#355) -----
+    p_sweep_scratch = sub.add_parser(
+        "sweep-claude-scratch",
+        help="Reclaim aging /tmp/claude-<uid>/ session scratchpads for THIS "
+             "account only (#355)")
+    p_sweep_scratch.add_argument("--dry-run", dest="dry_run", action="store_true",
+                                 help="Report what would be removed without deleting anything")
+    p_sweep_scratch.add_argument("--min-age-days", dest="min_age_days", type=int, default=None,
+                                 help=f"Age threshold in days "
+                                      f"(default {CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT})")
+
     # --- File-Drop: share (give the user a clickable LAN URL) + filedrop (control)
     p_share = sub.add_parser(
         "share", help="Copy a file into the file-drop server and print its LAN URL")
@@ -12015,6 +12693,8 @@ SUBCOMMANDS = {
     "push": cmd_push,
     "purge-targets": cmd_purge_targets,
     "sweep-worktrees": cmd_sweep_worktrees,
+    "sweep-cli-versions": cmd_sweep_cli_versions,
+    "sweep-claude-scratch": cmd_sweep_claude_scratch,
     "share": cmd_share,
     "filedrop": cmd_filedrop,
     "notify": cmd_notify,
