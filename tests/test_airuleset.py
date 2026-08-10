@@ -9625,6 +9625,17 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.selfchecks_sent(), 1,
                          "past the trust cap, a real nudge attempt must fire — "
                          "the skip must never be permanent")
+        # (#352 F5, adversarial review round 2) the forced check must reset
+        # the streak — the VERY NEXT sweep, one minute later, must resume
+        # skipping (never re-force again immediately) and must NOT fire a
+        # second nudge attempt, proving exactly ONE real check per
+        # LIVE_SHELL_TRUST_CAP_S window rather than a permanently-broken
+        # trust (which would spam a nudge every sweep from here on).
+        logs3 = self._run4(now + cap + 60, fake)
+        self.assertTrue(any("skip live-shell" in ln for ln in logs3), logs3)
+        self.assertEqual(fake.selfchecks_sent(), 1,
+                         "the skip must resume after a forced check, not stay forced — "
+                         "no second nudge on the very next sweep")
 
     # --- decide_working state machine (job 4) --------------------------------
     def _decw(self, st, key, now, idle):
