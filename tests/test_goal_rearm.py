@@ -880,7 +880,7 @@ class TestGoalRearmTransientRefusalNeverGivesUp(GoalRearmBase):
     to verify is a real attempt."""
 
     def _stub(self, reason):
-        def _fake(pid, text, run, captured=None, logs=None):
+        def _fake(pid, text, run, captured=None, logs=None, sleep_fn=None):
             if isinstance(logs, list):
                 logs.append(reason)
             return False

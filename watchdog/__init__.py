@@ -3095,20 +3095,27 @@ def _typed_exclusively(text, itext):
 STASH_UNDO_MAX_BACKSPACES = 4096
 
 # Backs `_undo_typed_text`/`_undo_appended_text`'s own post-backspace verify
-# (#354) — reuses the SAME bounded-settle magnitude job 20's own forward
-# TYPE direction already established for a large payload
-# (`GOAL_TYPE_SETTLE_POLLS`/`_S`, `_await_typed`), rather than guessing at a
-# new one: sending up to `STASH_UNDO_MAX_BACKSPACES` individual BSpace
-# keystrokes in ONE `send-keys` call needs the SAME kind of render-settle
-# time a multi-KB paste does. A single immediate capture right after
-# backspacing can read the box as still non-bare purely from that lag — the
-# SAME mechanism #176 F4 already found and fixed for `deliver_with_stash`'s
-# own post-toggle verify (`_await_stash_settled`), never before extended to
-# this post-backspace verify. Reported live on gatekeeper (#354): two real
-# deliveries logged "stash-abort: typed-NOT-undone, draft left parked" with
-# the /goal text visibly stuck, unsent, in the pane — the user's own draft
-# left permanently parked in the single stash slot because the (genuinely
+# (#354). A single immediate capture right after backspacing can read the
+# box as still non-bare purely from render lag — the SAME mechanism #176 F4
+# already found and fixed for `deliver_with_stash`'s own post-toggle verify
+# (`_await_stash_settled`), never before extended to this post-backspace
+# verify. Reported live on gatekeeper (#354): two real deliveries logged
+# "stash-abort: typed-NOT-undone, draft left parked" with the /goal text
+# visibly stuck, unsent, in the pane — the user's own draft left
+# permanently parked in the single stash slot because the (genuinely
 # successful, just not-yet-rendered) undo was declared failed.
+#
+# `_await_stash_settled` is the SHAPE precedent (bounded-poll-never-a-blind-
+# timeout, #176 F4) but NOT the magnitude one — its 3x0.3s budget backs a
+# single `C-s` toggle, a far smaller render event than backspacing up to
+# `STASH_UNDO_MAX_BACKSPACES` individual keystrokes. The MAGNITUDE here is
+# deliberately borrowed from `GOAL_TYPE_SETTLE_POLLS`/`_S` (`_await_typed`)
+# instead — this job's own already-established budget for the render lag a
+# multi-KB PASTE causes, the closer analogue by payload size. Accepted cost
+# (adversarial-review finding, #354): ~12x `_await_stash_settled`'s own
+# budget, worst case ~7s added to ONE pane's delivery inside job 20's own
+# per-sweep wall-clock budget — reached only on a genuine settle-window-
+# exhausting failure, never on the already-working happy path.
 STASH_UNDO_SETTLE_POLLS = 8
 STASH_UNDO_SETTLE_S = 1
 
@@ -6239,7 +6246,8 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
                 logs.append("goal-autoarm READY (stash) %s (%s)" % (pid, loc))
                 continue
             dlogs = []
-            ok = deliver_with_stash(pid, full, run, captured=cap, logs=dlogs)
+            ok = deliver_with_stash(pid, full, run, captured=cap, logs=dlogs,
+                                    sleep_fn=sleep_fn)
             if not ok and dlogs and dlogs[-1] in _GOAL_REARM_TRANSIENT_REASONS:
                 # never touched the pane (still mid-typing, another stash in
                 # flight) — NOT counted against the per-pane dedup window, so
@@ -12954,7 +12962,7 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # never typed OVER a user's draft — stash it around the delivery
             dlogs = []
             ok = deliver_with_stash(pid, text, run, captured=captured,
-                                    logs=dlogs)
+                                    logs=dlogs, sleep_fn=sleep_fn)
             tag = "goal-rearm, stash"
         else:
             if not pane_at_idle_prompt(captured):

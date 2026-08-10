@@ -563,3 +563,47 @@ class AppendUndoVerifyRaceIsSettledToo(unittest.TestCase):
         self.assertIn("stash-abort: append-NOT-undone", logs,
                       "a genuine double failure must still be logged "
                       "LOUDLY, never silently: %r" % logs)
+
+
+class UndoSettlePollHasRealTeeth(unittest.TestCase):
+    """#354 adversarial-review findings 2/3 — the settle loop's own CORE
+    properties (it genuinely waits between polls; it never sleeps after the
+    LAST, already-given-up-on attempt) had no test proving them: a mutant
+    setting `STASH_UNDO_SETTLE_S = 0` or dropping the loop's own
+    `if i < POLLS - 1` guard survived the whole suite untouched, because
+    every existing test injects a no-op `sleep_fn` (via the `deliver()`
+    helper) and none of them ever inspected what it was called WITH."""
+
+    def test_the_settle_interval_is_a_real_positive_wait(self):
+        # No sleep_fn recording needed at all -- a zero-valued settle
+        # interval makes the "bounded settle poll" into 8 back-to-back
+        # captures in milliseconds, i.e. #354's own bug reproduced. This is
+        # a direct, structural check on the constant itself.
+        self.assertGreater(wd.STASH_UNDO_SETTLE_S, 0)
+        self.assertGreater(wd.STASH_UNDO_SETTLE_POLLS, 1)
+
+    def test_it_never_sleeps_after_the_final_failed_attempt(self):
+        # A genuinely-stuck undo (every poll sees the same stale capture)
+        # must sleep EXACTLY `STASH_UNDO_SETTLE_POLLS - 1` times -- between
+        # each pair of attempts, never once more after the last, already-
+        # given-up-on one. Reached via the SAME swallow_enters=2 trigger
+        # the sibling #354 tests above already use.
+        pane = FakePane(draft=DRAFT, swallow_enters=2,
+                        bspace_lag_captures=999999)
+        slept = []
+        ok = wd.deliver_with_stash("%1", TEXT, pane.run, logs=[],
+                                   sleep_fn=slept.append)
+        self.assertFalse(ok)
+        self.assertEqual(len(slept), wd.STASH_UNDO_SETTLE_POLLS - 1,
+                         "the settle loop must sleep BETWEEN attempts, "
+                         "never after the last one: %r" % slept)
+
+    def test_a_single_retry_sleeps_exactly_once(self):
+        pane = FakePane(draft=DRAFT, swallow_enters=2, bspace_lag_captures=1)
+        slept = []
+        ok = wd.deliver_with_stash("%1", TEXT, pane.run, logs=[],
+                                   sleep_fn=slept.append)
+        self.assertFalse(ok)                   # the delivery itself failed
+        self.assertEqual(len(slept), 1,
+                         "converging on the 2nd attempt sleeps exactly "
+                         "once, between attempt 1 and attempt 2: %r" % slept)
