@@ -635,6 +635,54 @@ class TestClauseARearmHintIsFullAuthorityOnlyByDesign(TestCase):
             self.assertNotIn(self.REARM_HINT, goal_lines()[idx])
 
 
+class TestBranchMergeTemplateNeverReadsAsSelfClose(TestCase):
+    """#349 (2026-08-09, montalu3 regression): the branch-merge template used to
+    say "is closed via my own PR merged into the project's INTEGRATION branch",
+    which is easily misread as an instruction to close the ticket yourself. The
+    fix drops the word "closed" (and is 7 chars SHORTER — the template had only
+    40 chars of headroom against the 4000-char /goal cap when this landed, so a
+    net-negative wording fix was the only kind that fit)."""
+
+    def test_the_ambiguous_phrase_is_gone(self):
+        self.assertNotIn("is closed via my own PR",
+                        goal_lines()[BRANCH_MERGE])
+
+    def test_the_replacement_phrase_is_present(self):
+        self.assertIn("is MERGED via my own PR into",
+                      goal_lines()[BRANCH_MERGE])
+
+    def test_the_proof_verifies_a_hand_off_not_a_close(self):
+        # #349 MAJOR-4 (adversarial-review fix): the branch-merge template's
+        # verification sentence used to say "Count a ticket done ONLY after
+        # verifying ... gh issue view (closed)" — branch-merge tickets are
+        # NEVER closed by the worker, so that literal instruction told the
+        # worker to look for a signal that must never exist. It now verifies
+        # a HAND-OFF instead, via the READY-FOR-REVIEW comment.
+        line = goal_lines()[BRANCH_MERGE]
+        self.assertIn("Count a hand-off done ONLY after verifying it from primary sources",
+                      line)
+        self.assertIn("the READY-FOR-REVIEW comment posted", line)
+        # #349 review m2: the ORIGINAL wrong phrasing wrapped the command name
+        # in backticks (`` `gh issue view` (closed) ``) — a bare unquoted
+        # "gh issue view (closed)" needle does NOT match that shape (the
+        # backtick sits between "view" and " (closed)"), so it would silently
+        # pass even if the exact old wording were reintroduced. Lock the real
+        # shape.
+        self.assertNotIn("`gh issue view` (closed)", line)
+        self.assertNotIn("gh issue view (closed)", line)
+
+    def test_a_handed_off_ticket_with_release_pending_is_not_done(self):
+        # #349 MAJOR-4: the review-watch trigger used to read "An empty
+        # backlog with the release still pending is NOT done" — worded only
+        # for the empty-backlog case, silently missing the far more common
+        # branch-merge shape (one just-handed-off ticket, release pending).
+        line = goal_lines()[BRANCH_MERGE]
+        self.assertIn(
+            "A handed-off ticket or an empty backlog, release still pending, "
+            "is NOT done",
+            line)
+
+
 # --------------------------------------------------------------------------- #
 # #161 — condition (A), decided the way the shipped template instructs
 # (mirrors `backlog_empty_holds` above for condition (B)): a PURE function

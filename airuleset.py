@@ -8754,8 +8754,12 @@ def cmd_compact_request(args):
 # migration (the AIRULESET_NOTIFY_OWNER loss pattern), and every push carries the
 # map to every managed target. Profiles:
 #   full          — merge PR to main + main green + deploy verified (default)
-#   branch-merge  — own PR merged into the project INTEGRATION branch (develop)
-#                   only; never staging/main promotion, never deploy
+#   branch-merge  — own PR merged into the project INTEGRATION branch (develop),
+#                   THEN the same ready-for-review hand-off comment fork-no-merge
+#                   uses (#349: a merge alone does NOT close the ticket, and
+#                   skipping the comment leaves it invisible to the gatekeeper's
+#                   review queue); never staging/main promotion, never deploy,
+#                   never closes the issue itself
 #   fork-no-merge — fork branch pushed + local verification green + ready-for-review
 #                   hand-off on the issue; never opens/merges a PR, never closes
 #                   the issue itself (the maintainer does, at merge)
@@ -9330,6 +9334,9 @@ def resolve_authority(cwd=None) -> str:
 
 def cmd_authority(args):
     """Print the current stream's autopilot authority profile (one word)."""
+    if getattr(args, "maintainer_login", False):
+        print(MAINTAINER_GH_LOGIN)
+        return
     profile = resolve_authority()
     print(profile)
     if getattr(args, "explain", False):
@@ -11936,6 +11943,13 @@ def main():
              "(full / branch-merge / fork-no-merge)")
     p_auth.add_argument("--explain", action="store_true",
                         help="Also print how the profile was resolved")
+    p_auth.add_argument("--maintainer-login", action="store_true",
+                        help="Print MAINTAINER_GH_LOGIN instead of the profile "
+                             "(#349: lets a shared-gh-identity reduced-authority "
+                             "stream's own hook tell a genuine self-authored "
+                             "sub-finding apart from the maintainer-authored "
+                             "assigned work every such stream shares an "
+                             "identity with)")
 
     p_slice = sub.add_parser(
         "slice-quals",

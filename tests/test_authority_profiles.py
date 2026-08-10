@@ -69,10 +69,25 @@ class TestAuthorityResolution(TestCase):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
     def test_cli_prints_the_profile(self):
+        # #349: `m.Mock` auto-creates any unspecified attribute as a truthy
+        # Mock, so the new `--maintainer-login` early-return branch would
+        # silently hijack this test unless pinned False (the established
+        # `m.Mock(...)`-args gotcha this repo's own dev rules already
+        # document for exactly this shape).
         with m.patch.object(airuleset, "_current_user", return_value="marek"):
             with m.patch("builtins.print") as p:
-                airuleset.cmd_authority(m.Mock(explain=False))
+                airuleset.cmd_authority(
+                    m.Mock(explain=False, maintainer_login=False))
         p.assert_any_call("branch-merge")
+
+    def test_cli_prints_maintainer_login(self):
+        # #349: the close-guard hook's shared-identity fix needs this to tell
+        # a genuine self-authored sub-finding apart from maintainer-authored
+        # assigned work on a shared-gh-identity reduced-authority box.
+        with m.patch("builtins.print") as p:
+            airuleset.cmd_authority(
+                m.Mock(explain=False, maintainer_login=True))
+        p.assert_any_call(airuleset.MAINTAINER_GH_LOGIN)
 
     def test_project_marker_overrides_the_user_map(self):
         # cmd_authority's explain text has always PROMISED the marker override; it must
@@ -235,6 +250,77 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         self.assertIn("slice-quals --list", t)
         self.assertIn("slice-quals --count", t)
 
+    def test_branch_merge_dispatch_posts_ready_for_review_too(self):
+        # #349 MAJOR-3: the "Authority rides the dispatch" bullet used to
+        # describe branch-merge as done once its PR merges into the
+        # integration branch — no mention of the hand-off comment at all,
+        # which is exactly the montalu3 self-close-and-never-hand-off
+        # regression. It must now explicitly say branch-merge posts the SAME
+        # READY-FOR-REVIEW comment fork-no-merge uses, and never self-closes.
+        # #349 review m4: anchor the window's END to the next stable bullet
+        # marker rather than a magic character count — a magic-number window
+        # silently truncates (or over-includes unrelated later prose) the
+        # moment nearby wording is edited.
+        t = read(self.SKILL)
+        idx = t.index("Authority rides the dispatch")
+        end = t.index("Every dispatch RETURNS IMMEDIATELY", idx)
+        bullet = t[idx:end]
+        self.assertIn("posts the SAME `READY-FOR-REVIEW:` hand-off comment", bullet)
+        self.assertIn("never a self-close", bullet)
+
+    def test_step4_verification_checks_both_reduced_profiles_never_main(self):
+        # #349 MAJOR-3: Step 4's own verification sentence must state BOTH
+        # reduced-authority done-points (branch-merge needs the PR-merged
+        # check AND the comment; fork-no-merge needs only the comment) and
+        # explicitly forbid a merge to main for either.
+        t = read(self.SKILL)
+        idx = t.index("Step 4 verification then checks the PROFILE")
+        end = t.index("Every dispatch RETURNS IMMEDIATELY", idx)
+        window = t[idx:end]
+        self.assertIn("branch-merge: PR merged into integration AND the", window)
+        self.assertIn("fork-no-merge: the `READY-FOR-REVIEW:` comment present", window)
+        self.assertIn("NEVER a merge to main for either", window)
+        self.assertIn("NEVER the ticket closed by the worker itself", window)
+
+    def test_step5_handoff_line_covers_both_profiles(self):
+        # #349 MAJOR-3: Step 5's reduced-authority report mapping must state
+        # the Hand-off line applies to BOTH profiles (not just fork-no-merge),
+        # and that branch-merge's own PR line is ADDITIONAL, ending at the
+        # integration branch — never a substitute for the Hand-off line.
+        t = read(self.SKILL)
+        idx = t.index("Reduced-authority streams (branch-merge / fork-no-merge) carry")
+        end = t.index("The heading + audits", idx)
+        window = t[idx:end]
+        self.assertIn("Hand-off: READY-FOR-REVIEW komentár na #N", window)
+        self.assertIn("for BOTH profiles", window)
+        self.assertIn("branch-merge posts it too, right after its integration-branch merge", window)
+        self.assertIn("a merge alone does NOT", window)
+        self.assertIn("additionally for branch-merge", window)
+
+    def test_pr_merge_policy_skill_states_the_hand_off_too(self):
+        # #349 round-2-review M1: `skills/pr-merge-policy/SKILL.md`'s own
+        # reduced-authority scope bullet described branch-merge as ending at
+        # "its PR merged into the project's INTEGRATION branch" with no
+        # mention of the hand-off comment at all — a FIFTH place in the repo
+        # restating the same wrong-shape omission MAJOR-3 already fixed
+        # elsewhere.
+        t = read("skills/pr-merge-policy/SKILL.md")
+        self.assertIn("THEN posts the same `READY-FOR-REVIEW:` hand-off comment", t)
+        self.assertIn("Neither profile ever closes the ticket itself", t)
+
+    def test_authority_profiles_canonical_comment_states_the_hand_off_too(self):
+        # #349 round-2-review m1: the canonical AUTHORITY_PROFILES comment in
+        # airuleset.py described branch-merge with strictly LESS detail than
+        # its fork-no-merge sibling bullet right below it (no hand-off
+        # mention at all) — the canonical definition every other doc points
+        # back to must not itself omit the invariant.
+        t = read("airuleset.py")
+        idx = t.index("branch-merge  — own PR merged into the project INTEGRATION branch")
+        end = t.index("fork-no-merge — fork branch pushed", idx)
+        window = t[idx:end]
+        self.assertIn("THEN the same ready-for-review hand-off comment", window)
+        self.assertIn("never closes the issue itself", window)
+
 
 class TestWorkerCarriesProfiles(TestCase):
     def test_worker_has_authority_section(self):
@@ -266,9 +352,74 @@ class TestWorkerCarriesProfiles(TestCase):
         cmds = " ".join(h["command"] for h in bash["hooks"])
         self.assertIn("block-fork-no-merge-issue-close.sh", cmds)
 
+    def test_worker_forbids_foreign_close_under_branch_merge_too(self):
+        # #349 (2026-08-09 montalu3 regression): the ban + hand-off recipe must
+        # apply to branch-merge exactly like fork-no-merge — the mechanical hook
+        # was widened to gate any authority != full, and the prose must say so.
+        # Normalized (collapsed whitespace) because the prose wraps across
+        # markdown line breaks and a literal multi-word needle can straddle one
+        # (this repo's own recurring "anchor spans a wrap" test-quality trap).
+        w = " ".join(read("agents/autopilot-worker.md").split())
+        self.assertIn("NEVER close an ASSIGNED", w)
+        self.assertIn("EITHER reduced-authority profile", w)
+        self.assertIn("full `/process-subdev` release pipeline", w)
+        self.assertIn("authority != `full`", w)
+
+    def test_worker_has_branch_merge_final_message_variant(self):
+        # Previously ONLY a "fork-no-merge variant" existed — a branch-merge
+        # worker had no evidence-block template telling it to leave the issue
+        # OPEN instead of inventing merge-to-main/deploy fields (#349).
+        w = read("agents/autopilot-worker.md")
+        self.assertIn("branch-merge variant of the FINAL MESSAGE", w)
+        self.assertIn("NEVER closed by you", w)
+        self.assertIn("ready_for_review:", w)
+
+    def test_step0_obsolete_exception_covers_branch_merge_too(self):
+        # #349 adversarial-review MAJOR-2: STEP 0's obsolete-ticket path used
+        # to instruct `gh issue close` unconditionally, with the "you may
+        # close only self-authored" carve-out labelled "fork-no-merge
+        # EXCEPTION" only — a branch-merge reader had no carve-out at all and
+        # would follow the DEFAULT (close-obsolete) instruction, directly
+        # contradicting the new ban.
+        w = read("agents/autopilot-worker.md")
+        self.assertIn("REDUCED-AUTHORITY EXCEPTION (fork-no-merge AND branch-merge", w)
+        self.assertIn("under EITHER profile", w)
+
+    def test_branch_merge_final_message_uses_the_handed_off_obsolete_shape(self):
+        # #349 adversarial-review MAJOR-2: the new branch-merge fence had
+        # copied the FULL variant's "OBSOLETE — closed" / obsolete_closed:
+        # shape instead of the fork-no-merge variant's "commented, left
+        # OPEN" / obsolete_handed_off: shape it should mirror.
+        # #349 review m4: anchor the window's END to the next stable section
+        # heading rather than a magic character count.
+        w = read("agents/autopilot-worker.md")
+        idx = w.index("branch-merge variant of the FINAL MESSAGE")
+        end = w.index("Worktree-mode variant of the FINAL MESSAGE", idx)
+        fence = w[idx:end]
+        self.assertIn('"OBSOLETE — commented, left OPEN:', fence)
+        self.assertIn("obsolete_handed_off:", fence)
+        self.assertNotIn('"OBSOLETE — closed:', fence)
+        self.assertNotIn("obsolete_closed:", fence)
+
 
 if __name__ == "__main__":
     main()
+
+
+class TestCompletionReportBranchMergeHandoff(TestCase):
+    """#349: the reduced-authority completion-report template used to show a
+    Hand-off line ONLY for fork-no-merge — a branch-merge worker had no
+    instruction to signal hand-off at all, which is exactly how montalu3's
+    three merged tickets sat neither queued nor reviewed."""
+
+    def test_handoff_line_covers_branch_merge_too(self):
+        t = read("modules/core/completion-report.md")
+        self.assertIn("fork-no-merge AND branch-merge", t)
+        self.assertIn("NEVER a self-close", t)
+
+    def test_pr_line_states_ticket_stays_open(self):
+        t = read("modules/core/completion-report.md")
+        self.assertIn("ticket stays OPEN", t)
 
 
 class TestPerBoxSkillScoping(TestCase):

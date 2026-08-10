@@ -190,6 +190,7 @@ COVERAGE_TABLE = {
     "merge_sha": ("hook", ("subagent-stop-check-design.sh",
                            "subagent-stop-check-run-card.sh")),
     "main_ci": ("supervisor-reverify", ()),
+    "integration_ci": ("supervisor-reverify", ()),
     "deployed_version": ("supervisor-reverify", ()),
     "cards_fired": ("hook", ("subagent-stop-check-run-card.sh",)),
     "issue_state": ("hook", ("subagent-stop-check-design.sh",
