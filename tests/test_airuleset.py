@@ -10904,6 +10904,21 @@ class TestIsSshTransientFailure(TestCase):
         self.assertFalse(airuleset._is_ssh_transient_failure(255, ""))
 
 
+class TestSshRetryMaxAttemptsValue(TestCase):
+    """A literal-value lock, deliberately independent of
+    `airuleset.SSH_RETRY_MAX_ATTEMPTS` itself -- the OTHER retry tests
+    reference the constant dynamically, which would pass unchanged even
+    if the constant's own value silently drifted. #358's REVISED root
+    cause (issue comment 5245989172: a RANDOM per-connection drop against
+    gk's globally-saturated MaxStartups pool, not a per-source ban) is
+    what justifies "a few attempts" (3 total, 2 retries) rather than a
+    single retry -- pin the literal here so a future edit changing it is
+    a deliberate, visible diff."""
+
+    def test_bound_is_three_total_attempts(self):
+        self.assertEqual(airuleset.SSH_RETRY_MAX_ATTEMPTS, 3)
+
+
 class TestSshRetryBackoffS(TestCase):
     """`AIRULESET_SSH_RETRY_BACKOFF_S` clamped to [1, 300] -- an unclamped
     0/negative value would defeat the backoff entirely (the same class of

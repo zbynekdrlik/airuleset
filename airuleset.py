@@ -8328,10 +8328,19 @@ def _soniox_key_line(source: Path = None):
 
 
 def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
-                                 skip_names=None):
+                                 skip_names=None, control_opts=None):
     """Deliver `~/.soniox.env` (the meeting-analysis skill's canonical,
     UN-guarded Soniox key path -- see skills/meeting-analysis/SKILL.md and
     hooks/block-vault-store-read.sh) to every subdev stream account (#275).
+
+    `control_opts` (#358): the SAME `_ssh_multiplex_opts()` list
+    `cmd_push()`'s own deploy loop built for this run, so an account
+    contacted here for a SECOND time (already dialed once by the deploy
+    loop above) reuses that account's already-authenticated ssh master
+    connection instead of paying for a fresh TCP+SSH handshake. Defaults
+    to `[]` -- a caller with no multiplexing set up (or a direct test
+    call) gets plain, unmultiplexed ssh, byte-identical to before this
+    parameter existed.
 
     The value is piped to each remote via `input=` on the ssh subprocess
     call -- never embedded in argv, never printed by this process -- and
@@ -8358,6 +8367,7 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     not already, independently, failed auth THIS run."""
     import subprocess
     run = run or subprocess.run
+    control_opts = list(control_opts or [])
     targets = [h for h in (hosts if hosts is not None else REMOTE_HOSTS)
                if h.get("user") in AUTHORITY_BY_USER]
     if not targets:
@@ -8412,9 +8422,10 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
             ssh_prefix = ["sshpass", "-p", "newlevel", "ssh",
                           "-o", "StrictHostKeyChecking=no",
                           "-o", "NumberOfPasswordPrompts=1"]
-        argv = ssh_prefix + [f"{remote['user']}@{remote['host']}",
-                              "umask 077; cat > ~/.soniox.env && "
-                              "chmod 600 ~/.soniox.env"]
+        argv = ssh_prefix + control_opts + [
+            f"{remote['user']}@{remote['host']}",
+            "umask 077; cat > ~/.soniox.env && "
+            "chmod 600 ~/.soniox.env"]
         try:
             r = run(argv, input=line + "\n", capture_output=True,
                     text=True, timeout=20)
@@ -8452,6 +8463,153 @@ def _is_ssh_auth_failure(returncode, stderr):
     """True only for ssh's OWN auth-exhaustion failure, never a remote
     COMMAND's stderr that merely happens to contain the same words."""
     return returncode == 255 and bool(_SSH_AUTH_DENIED_RX.search(stderr or ""))
+
+
+# --- #358: ssh connection reuse + target-level retry with backoff ----------
+# Live incident (2026-08-10, this repo's own gatekeeper/subdev push targets):
+# a burst of rapid independent ssh handshakes within one push wave (11 of
+# REMOTE_HOSTS' 13 entries share the subdev VPS; provision_subdev_soniox_key
+# below re-dials several of the SAME accounts a second time in the same run)
+# tripped a connection drop against gk with NO retry at all -- one flaky
+# target permanently lost the whole wave's deploy to it.
+#
+# Root cause REVISED after live diagnostics on gk itself (issue comment
+# 5245989172, supervisor session via the dev2 jump host): this is NOT a
+# per-source ban (fail2ban's own ban list never contained dev1's address)
+# and NOT a targeted fail2ban/MaxStartups window against ONE source -- gk's
+# sshd has `MaxStartups 10:30:100` with `PerSourceMaxStartups none`, and an
+# ongoing internet-wide bruteforce flood (126k+ failed attempts, 60+
+# concurrently in flight at diagnosis time) keeps that GLOBAL unauthenticated-
+# connection pool saturated, so sshd RANDOMLY drops legitimate connections
+# too (the tailscale path shares the identical pool). The observed
+# "recovery after 20-40 min" was the bruteforce wave itself ebbing, not a
+# ban expiring. This makes a SHORT in-wave retry the directly-correct fix,
+# not merely "worth trying anyway": each retry is a genuinely independent
+# roll against the SAME saturated pool, with real per-attempt odds of
+# landing while the pool has briefly cleared -- never a hopeless repeat
+# against a fixed-duration ban.
+#
+# Same rc==255 + ssh-client-only-message discriminator shape as
+# `_is_ssh_auth_failure` above, on purpose: it is the same false-positive
+# class (a REMOTE command's own stderr must never be misread as ssh's OWN
+# connection-level failure).
+_SSH_TRANSIENT_RX = re.compile(
+    r"(?m)^(?:kex_exchange_identification|ssh_exchange_identification):"
+    r"|^Connection closed by \S+ port \d+\s*$"
+)
+
+# Bounded: at most this many total attempts (initial + retries) per target.
+# 3 (2 retries) -- "a few attempts", matching the revised diagnosis: since a
+# drop is a random per-connection event against a saturated pool (not a
+# fixed-duration ban), a second retry has real, undiminished odds of success,
+# unlike retrying against an actual ban where every attempt is equally
+# futile. Kept as a plain constant, not env-tunable -- only the backoff
+# between attempts needs to be (see `_ssh_retry_backoff_s`'s own docstring).
+SSH_RETRY_MAX_ATTEMPTS = 3
+
+# ControlPersist window for a target's shared ssh master connection -- long
+# enough to cover the gap between the deploy loop's own call for an account
+# and the LATER soniox-key call to the same account (step "3b", a few
+# seconds to low tens of seconds away in the same run), short enough that an
+# orphaned master (e.g. cleanup racing it) self-terminates promptly rather
+# than lingering indefinitely.
+SSH_CONTROL_PERSIST_S = 60
+
+
+def _is_ssh_transient_failure(returncode, stderr):
+    """True only for ssh's OWN connection-establishment failure -- a
+    MaxStartups-pool-exhaustion drop mid-handshake (a random per-connection
+    event, never a per-source ban -- see the #358 root-cause comment above
+    this function), the two live #358 incident signatures: a line starting
+    `kex_exchange_identification:` /
+    `ssh_exchange_identification:` (openssh's own internal log tags,
+    printed only by the CLIENT before any remote shell exists -- a remote
+    command's own stderr structurally cannot reproduce them) or a bare
+    `Connection closed by <host> port <port>` line with nothing else on
+    it. Requiring rc==255 (mirrors `_is_ssh_auth_failure`'s own
+    discriminator) excludes an ordinary failed remote command (a bad
+    `git pull`, a crashing `install`), which never exits via ssh's own
+    255 connection-failure path."""
+    return returncode == 255 and bool(_SSH_TRANSIENT_RX.search(stderr or ""))
+
+
+def _ssh_retry_backoff_s():
+    """`AIRULESET_SSH_RETRY_BACKOFF_S` override for the target-level retry
+    delay, clamped to [1, 300]. Unclamped, a misconfigured 0/negative
+    value would defeat the whole backoff (the same class of gap #172's own
+    `AIRULESET_SWEEP_BUDGET_S` fix closed elsewhere in this file), and an
+    absurdly large one would block the WHOLE wave behind one flaky target
+    for minutes it will never actually need.
+
+    Default 60s, "order of seconds to ~2 min" per the REVISED diagnosis
+    (issue comment 5245989172): the drop is a RANDOM per-connection event
+    against gk's globally-saturated MaxStartups unauthenticated-connection
+    pool (internet-wide bruteforce noise, not a per-source ban), so each
+    retry is a genuinely independent roll with real odds of landing once
+    the pool has briefly cleared -- unlike retrying against a real ban,
+    where a longer wait would be needed and every short retry would be
+    equally futile. Combined with SSH_RETRY_MAX_ATTEMPTS=3 (2 retries),
+    the worst-case added time for one exhausted target is ~2 backoffs of
+    the default (about 2 min) -- still short enough that one flaky target
+    never meaningfully delays the whole semi-foreground wave, and a
+    genuinely exhausted target is reported loudly with the exact manual
+    re-run command instead of silently vanishing from it."""
+    raw = os.environ.get("AIRULESET_SSH_RETRY_BACKOFF_S", "")
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        val = 60
+    return max(1, min(300, val))
+
+
+def _ssh_control_dir_for_push():
+    """One short-lived directory for this push run's ssh ControlMaster
+    sockets -- multiplexes REPEATED connections to the SAME target within
+    one push (the deploy call, then the LATER soniox-key call, #275) onto
+    a single already-authenticated master, so the wave opens fewer
+    distinct TCP+SSH handshakes against a target's sshd rather than more.
+    A UNIX socket path is capped at roughly 104-108 bytes on Linux, so the
+    prefix here stays short and ssh's own `%C` (a fixed-length per-target
+    connection hash) supplies the per-target uniqueness -- one shared
+    directory safely serves every REMOTE_HOSTS entry in the same push; a
+    DIFFERENT target (different user/host/port) can never collide on, or
+    reuse, another target's socket. Returns None (never raises) when the
+    temp dir can't be created, so a caller degrades to plain unmultiplexed
+    ssh calls rather than failing the whole push over a missing sandbox
+    capability."""
+    import tempfile
+    try:
+        return tempfile.mkdtemp(prefix="arsshcm-")
+    except OSError:
+        return None
+
+
+def _ssh_multiplex_opts(control_dir):
+    """The `-o ControlMaster=... -o ControlPersist=... -o ControlPath=...`
+    triple built from a `_ssh_control_dir_for_push()` result. Returns []
+    (plain, unmultiplexed ssh -- never a hard failure) when `control_dir`
+    is falsy, e.g. because the temp dir itself could not be created."""
+    if not control_dir:
+        return []
+    return [
+        "-o", "ControlMaster=auto",
+        "-o", "ControlPersist=%ds" % SSH_CONTROL_PERSIST_S,
+        "-o", "ControlPath=%s/%%C" % control_dir,
+    ]
+
+
+def _redacted_ssh_cmd(cmd):
+    """The same argv `ssh_cmd`/`ssh_prefix` list built for a deploy or
+    soniox-key call, with any `sshpass -p <password>` password argument
+    replaced -- this is printed into the push LOG as a manual single-
+    target retry hint once retries are exhausted (#358), and the shared
+    subdev password must never land in a log file (security-basics.md).
+    Never mutates the input list."""
+    out = list(cmd)
+    for i, tok in enumerate(out):
+        if tok == "-p" and i > 0 and out[i - 1] == "sshpass" and i + 1 < len(out):
+            out[i + 1] = "<REDACTED>"
+    return out
 
 
 # --- #347: push-time guard against a newly-activated subdev stream account
@@ -8559,7 +8717,9 @@ def cmd_push(args):
     internal subprocess call, so the PreToolUse pre-push-lint.sh hook (which
     only fires for a real Bash `git push` tool invocation) never sees this
     flow — this in-process gate is what actually protects it (issue #7)."""
+    import shlex
     import subprocess
+    import time
 
     # 0a. Lint the whole repo — fail-closed before any push/deploy. Unlike the
     # PreToolUse hook (which lints only the files a real `git push` command
@@ -8663,169 +8823,232 @@ def cmd_push(args):
             failed.append(("local(dev1)", "install rc=%s" % e.code))
 
     # 3. Deploy to each remote
-    # #347: audit ANY shared VPS host's /home listing for an account with
-    # no REMOTE_HOSTS entry, exactly ONCE per host, riding the FIRST
-    # already-happening connection to that host — never a dedicated extra
-    # ssh call (#341: never re-probe the same host for a second, unrelated
-    # purpose — that is exactly what compounded the fail2ban risk there).
-    shared_hosts = _shared_remote_host_ips()
-    audited_hosts = set()
-    for remote in REMOTE_HOSTS:
+    # #358: one per-run ssh ControlMaster socket directory, shared by the
+    # deploy loop below AND the soniox-key phase (3b) -- multiplexes a
+    # REPEATED connection to the SAME target within this one push onto a
+    # single already-authenticated master. Degrades to `control_opts = []`
+    # (plain, unmultiplexed ssh) if the temp dir can't be created; the
+    # `finally` at the end of this block removes it regardless of how the
+    # deploy phase finishes (success, a failed target, or a raised
+    # SystemExit from the failure-summary branch below).
+    control_dir = _ssh_control_dir_for_push()
+    control_opts = _ssh_multiplex_opts(control_dir)
+    try:
+        # #347: audit ANY shared VPS host's /home listing for an account with
+        # no REMOTE_HOSTS entry, exactly ONCE per host, riding the FIRST
+        # already-happening connection to that host — never a dedicated extra
+        # ssh call (#341: never re-probe the same host for a second, unrelated
+        # purpose — that is exactly what compounded the fail2ban risk there).
+        shared_hosts = _shared_remote_host_ips()
+        audited_hosts = set()
+        for remote in REMOTE_HOSTS:
+            print(f"\n{'=' * 50}")
+            print(f"Deploying to {remote['name']} ({remote['host']})...")
+            remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
+            # #347 adversarial-review CRITICAL finding: `audited_hosts` must
+            # NOT be marked here (before the ssh call even runs) — a first
+            # entry that fails (timeout/auth) before the remote shell ever
+            # reaches the appended `ls` would then PERMANENTLY skip the audit
+            # for the rest of this push, with the failure looking IDENTICAL to
+            # "checked, no gap found" (unregistered_home_accounts() on an
+            # empty/no-marker listing silently returns []). `audited_hosts` is
+            # only marked below, once the marker is CONFIRMED present in the
+            # real stdout — so a failed first connection lets the NEXT entry
+            # sharing this host retry the audit instead of silently giving up.
+            audit_this_call = (remote["host"] in shared_hosts
+                                and remote["host"] not in audited_hosts)
+            if audit_this_call:
+                remote_cmd = _remote_cmd_with_home_audit(remote_cmd)
+            identity = remote.get("identity")
+            if identity:
+                # key-based SSH (e.g. the gatekeeper — prod-critical, no shared
+                # password). #341: BatchMode=yes -- a failed pubkey attempt
+                # against an unprovisioned/misconfigured account must fail
+                # IMMEDIATELY instead of falling through to an interactive
+                # password/keyboard-interactive attempt (the "Permission denied
+                # (publickey,password)" shape), which is what let a single
+                # connection generate several distinct auth-failure log lines.
+                ssh_cmd = [
+                    "ssh", "-i", os.path.expanduser(identity),
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "BatchMode=yes",
+                ] + control_opts + [
+                    f"{remote['user']}@{remote['host']}",
+                    remote_cmd,
+                ]
+            else:
+                # #341: NumberOfPasswordPrompts=1 -- caps a wrong/unprovisioned
+                # password attempt to ONE try (openssh's own default is 3, and
+                # sshpass happily re-supplies the same password on every
+                # re-prompt), so one sshpass call burns at most one
+                # fail2ban-countable strike instead of up to three.
+                ssh_cmd = [
+                    "sshpass", "-p", "newlevel",
+                    "ssh", "-o", "StrictHostKeyChecking=no",
+                    "-o", "NumberOfPasswordPrompts=1",
+                ] + control_opts + [
+                    f"{remote['user']}@{remote['host']}",
+                    remote_cmd,
+                ]
+            # #263: never let ONE slow/hanging remote (a first-time claude-CLI
+            # curl install, ensure_playwright_browsers()'s npx install) abort
+            # deployment to every REMAINING host — the loop used to have no
+            # try/except around this call at all, so a TimeoutExpired here
+            # propagated straight out of cmd_push() and silently skipped every
+            # host still queued after this one.
+            #
+            # #358: retry ONLY a genuine ssh connection-establishment failure
+            # (a MaxStartups-pool-exhaustion drop mid-handshake -- a random
+            # per-connection event, never a per-source ban) -- bounded to
+            # SSH_RETRY_MAX_ATTEMPTS total attempts, with a short backoff
+            # between them. This is a TARGET-LEVEL retry only: it never
+            # re-runs step 0a/0b/1 (ruff/tests/git push), which already ran
+            # exactly once above, before this loop even started -- a retry
+            # here can only ever repeat the SAME ssh_cmd for THIS ONE target.
+            timed_out = False
+            ssh_result = None
+            for attempt in range(1, SSH_RETRY_MAX_ATTEMPTS + 1):
+                try:
+                    ssh_result = subprocess.run(
+                        ssh_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=REMOTE_DEPLOY_TIMEOUT_S,
+                    )
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    break
+                if ssh_result.returncode == 0:
+                    break
+                if (attempt >= SSH_RETRY_MAX_ATTEMPTS
+                        or not _is_ssh_transient_failure(
+                            ssh_result.returncode, ssh_result.stderr)):
+                    break
+                backoff = _ssh_retry_backoff_s()
+                print(f"  transient ssh failure on {remote['name']} "
+                      f"(attempt {attempt}/{SSH_RETRY_MAX_ATTEMPTS}) — "
+                      f"retrying in {backoff}s: "
+                      f"{ssh_result.stderr.strip()[:200]}")
+                time.sleep(backoff)
+            if timed_out:
+                print(f"  FAILED: timed out after {REMOTE_DEPLOY_TIMEOUT_S}s "
+                      f"— continuing to the next host")
+                failed.append((remote["name"], "timeout"))
+                continue
+            if ssh_result.returncode != 0:
+                print(f"  FAILED: {ssh_result.stderr.strip()}")
+                failed.append((remote["name"], "rc=%d" % ssh_result.returncode))
+                # #341: a genuine ssh AUTH failure (never a remote-command
+                # failure with auth intact, e.g. a bad `git pull`) marks this
+                # host so the soniox phase below skips it instead of opening a
+                # second connection against an already-known-bad account.
+                if _is_ssh_auth_failure(ssh_result.returncode, ssh_result.stderr):
+                    auth_failed.add(remote["name"])
+                # #358: an exhausted transient (connection-closed/reset)
+                # failure names the exact single-target command to retry
+                # manually once the target is reachable again -- never the
+                # whole push (which would re-run the full-suite gate for
+                # nothing), and never the shared subdev PASSWORD (a
+                # redacted placeholder stands in for it, security-basics.md).
+                if _is_ssh_transient_failure(ssh_result.returncode,
+                                              ssh_result.stderr):
+                    hint = " ".join(shlex.quote(c)
+                                     for c in _redacted_ssh_cmd(ssh_cmd))
+                    print(f"  Manual retry once reachable: {hint}")
+            else:
+                print(f"  {ssh_result.stdout.strip()}")
+                # #263: a successful remote install's STDERR was being silently
+                # discarded here — this repo's own ensure_playwright_browsers()
+                # warning writes to stderr (RUNTIME_DEPS' and this diff's own
+                # report_stream_dev_env() gap warnings write to STDOUT and were
+                # already reaching the console via the branch above), so on the
+                # common success path that warning never reached the push
+                # console. Surface it too, so a gap really is reported loudly
+                # rather than swallowed by push's own success branch.
+                stderr_out = ssh_result.stderr.strip()
+                if stderr_out:
+                    print(f"  [stderr] {stderr_out}")
+
+            # #347: report (never block) any home directory on this shared
+            # host with no matching REMOTE_HOSTS entry — the systemic guard
+            # against a newly-activated stream account silently never being
+            # registered as a push target. Advisory only: one unrelated stray
+            # /home entry (a not-yet-onboarded or test account) must never
+            # abort deployment to every OTHER, already-registered account.
+            # `audited_hosts` is marked HERE, only once the marker is
+            # positively confirmed present AND the listing itself passes the
+            # `_home_listing_trustworthy` positive control (adversarial-review
+            # MAJOR M1: the marker alone only proves the remote shell reached
+            # the audit, never that `ls -1 /home` actually succeeded — a
+            # hardened/root-owned /home fails silently at rc 0 with an EMPTY
+            # listing, which would otherwise read as "checked, clean" forever)
+            # — so a never-executed OR untrustworthy audit is never mistaken
+            # for "ran and found nothing".
+            if audit_this_call and _HOME_AUDIT_MARKER in (ssh_result.stdout or ""):
+                home_listing = _parse_home_audit_output(ssh_result.stdout)
+                if _home_listing_trustworthy(remote["user"], home_listing):
+                    audited_hosts.add(remote["host"])
+                    gap = unregistered_home_accounts(remote["host"], home_listing)
+                    if gap:
+                        print(f"\n⚠ REGISTRATION GAP on {remote['host']}: /home has "
+                              f"account(s) with NO REMOTE_HOSTS entry: "
+                              f"{', '.join(gap)} — a stream account was activated "
+                              f"but never registered as a push target. Register "
+                              f"it: REMOTE_HOSTS + AUTHORITY_BY_USER + the "
+                              f"block-subdev-ssh-misuse.sh allow-list + watchdog's "
+                              f"_REDUCED_STREAM_USERS + notify's STREAM_NOTIFY_OWNER "
+                              f"(see #251/#263/#300/#326/#347's own onboarding "
+                              f"checklist).", file=sys.stderr)
+
+        # #347: any shared host that never got a TRUSTWORTHY audit this run
+        # (every connection failed before the appended `ls` ever ran, or every
+        # listing that did run failed the positive control) must be reported
+        # as UNVERIFIED, not silently read as "no gap found" — the exact
+        # false-negative the adversarial review flagged (both the original
+        # CRITICAL and the follow-up MAJOR M1). Every shared host gets
+        # `audit_this_call = True` on its FIRST-seen entry (audited_hosts
+        # starts empty), so any host still missing from `audited_hosts` here
+        # was genuinely never confirmed this run.
+        unverified_shared = shared_hosts - audited_hosts
+        if unverified_shared:
+            print(f"\n⚠ REGISTRATION AUDIT NOT VERIFIED this run for: "
+                  f"{', '.join(sorted(unverified_shared))} — no connection ever "
+                  f"returned a trustworthy /home listing for the shared host "
+                  f"(either every attempt failed before reaching it, or the "
+                  f"listing itself could not be trusted), so a registration gap "
+                  f"there could exist and go unreported until a later push "
+                  f"confirms it.", file=sys.stderr)
+
+        # 3b. Deliver the meeting-analysis Soniox key to every subdev stream
+        # account (#275) -- a true no-op when REMOTE_HOSTS has no such account
+        # (dev2/gatekeeper-only pushes never reach the source read at all).
+        # #358: shares this run's OWN `control_opts` with the deploy loop
+        # above, so an account contacted here a second time reuses that
+        # account's already-authenticated master connection.
         print(f"\n{'=' * 50}")
-        print(f"Deploying to {remote['name']} ({remote['host']})...")
-        remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
-        # #347 adversarial-review CRITICAL finding: `audited_hosts` must
-        # NOT be marked here (before the ssh call even runs) — a first
-        # entry that fails (timeout/auth) before the remote shell ever
-        # reaches the appended `ls` would then PERMANENTLY skip the audit
-        # for the rest of this push, with the failure looking IDENTICAL to
-        # "checked, no gap found" (unregistered_home_accounts() on an
-        # empty/no-marker listing silently returns []). `audited_hosts` is
-        # only marked below, once the marker is CONFIRMED present in the
-        # real stdout — so a failed first connection lets the NEXT entry
-        # sharing this host retry the audit instead of silently giving up.
-        audit_this_call = (remote["host"] in shared_hosts
-                            and remote["host"] not in audited_hosts)
-        if audit_this_call:
-            remote_cmd = _remote_cmd_with_home_audit(remote_cmd)
-        identity = remote.get("identity")
-        if identity:
-            # key-based SSH (e.g. the gatekeeper — prod-critical, no shared
-            # password). #341: BatchMode=yes -- a failed pubkey attempt
-            # against an unprovisioned/misconfigured account must fail
-            # IMMEDIATELY instead of falling through to an interactive
-            # password/keyboard-interactive attempt (the "Permission denied
-            # (publickey,password)" shape), which is what let a single
-            # connection generate several distinct auth-failure log lines.
-            ssh_cmd = [
-                "ssh", "-i", os.path.expanduser(identity),
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "BatchMode=yes",
-                f"{remote['user']}@{remote['host']}",
-                remote_cmd,
-            ]
-        else:
-            # #341: NumberOfPasswordPrompts=1 -- caps a wrong/unprovisioned
-            # password attempt to ONE try (openssh's own default is 3, and
-            # sshpass happily re-supplies the same password on every
-            # re-prompt), so one sshpass call burns at most one
-            # fail2ban-countable strike instead of up to three.
-            ssh_cmd = [
-                "sshpass", "-p", "newlevel",
-                "ssh", "-o", "StrictHostKeyChecking=no",
-                "-o", "NumberOfPasswordPrompts=1",
-                f"{remote['user']}@{remote['host']}",
-                remote_cmd,
-            ]
-        # #263: never let ONE slow/hanging remote (a first-time claude-CLI
-        # curl install, ensure_playwright_browsers()'s npx install) abort
-        # deployment to every REMAINING host — the loop used to have no
-        # try/except around this call at all, so a TimeoutExpired here
-        # propagated straight out of cmd_push() and silently skipped every
-        # host still queued after this one.
-        try:
-            ssh_result = subprocess.run(
-                ssh_cmd,
-                capture_output=True,
-                text=True,
-                timeout=REMOTE_DEPLOY_TIMEOUT_S,
-            )
-        except subprocess.TimeoutExpired:
-            print(f"  FAILED: timed out after {REMOTE_DEPLOY_TIMEOUT_S}s "
-                  f"— continuing to the next host")
-            failed.append((remote["name"], "timeout"))
-            continue
-        if ssh_result.returncode != 0:
-            print(f"  FAILED: {ssh_result.stderr.strip()}")
-            failed.append((remote["name"], "rc=%d" % ssh_result.returncode))
-            # #341: a genuine ssh AUTH failure (never a remote-command
-            # failure with auth intact, e.g. a bad `git pull`) marks this
-            # host so the soniox phase below skips it instead of opening a
-            # second connection against an already-known-bad account.
-            if _is_ssh_auth_failure(ssh_result.returncode, ssh_result.stderr):
-                auth_failed.add(remote["name"])
-        else:
-            print(f"  {ssh_result.stdout.strip()}")
-            # #263: a successful remote install's STDERR was being silently
-            # discarded here — this repo's own ensure_playwright_browsers()
-            # warning writes to stderr (RUNTIME_DEPS' and this diff's own
-            # report_stream_dev_env() gap warnings write to STDOUT and were
-            # already reaching the console via the branch above), so on the
-            # common success path that warning never reached the push
-            # console. Surface it too, so a gap really is reported loudly
-            # rather than swallowed by push's own success branch.
-            stderr_out = ssh_result.stderr.strip()
-            if stderr_out:
-                print(f"  [stderr] {stderr_out}")
+        print("Delivering Soniox key to subdev stream accounts...")
+        failed.extend(provision_subdev_soniox_key(skip_names=auth_failed,
+                                                    control_opts=control_opts))
 
-        # #347: report (never block) any home directory on this shared
-        # host with no matching REMOTE_HOSTS entry — the systemic guard
-        # against a newly-activated stream account silently never being
-        # registered as a push target. Advisory only: one unrelated stray
-        # /home entry (a not-yet-onboarded or test account) must never
-        # abort deployment to every OTHER, already-registered account.
-        # `audited_hosts` is marked HERE, only once the marker is
-        # positively confirmed present AND the listing itself passes the
-        # `_home_listing_trustworthy` positive control (adversarial-review
-        # MAJOR M1: the marker alone only proves the remote shell reached
-        # the audit, never that `ls -1 /home` actually succeeded — a
-        # hardened/root-owned /home fails silently at rc 0 with an EMPTY
-        # listing, which would otherwise read as "checked, clean" forever)
-        # — so a never-executed OR untrustworthy audit is never mistaken
-        # for "ran and found nothing".
-        if audit_this_call and _HOME_AUDIT_MARKER in (ssh_result.stdout or ""):
-            home_listing = _parse_home_audit_output(ssh_result.stdout)
-            if _home_listing_trustworthy(remote["user"], home_listing):
-                audited_hosts.add(remote["host"])
-                gap = unregistered_home_accounts(remote["host"], home_listing)
-                if gap:
-                    print(f"\n⚠ REGISTRATION GAP on {remote['host']}: /home has "
-                          f"account(s) with NO REMOTE_HOSTS entry: "
-                          f"{', '.join(gap)} — a stream account was activated "
-                          f"but never registered as a push target. Register "
-                          f"it: REMOTE_HOSTS + AUTHORITY_BY_USER + the "
-                          f"block-subdev-ssh-misuse.sh allow-list + watchdog's "
-                          f"_REDUCED_STREAM_USERS + notify's STREAM_NOTIFY_OWNER "
-                          f"(see #251/#263/#300/#326/#347's own onboarding "
-                          f"checklist).", file=sys.stderr)
-
-    # #347: any shared host that never got a TRUSTWORTHY audit this run
-    # (every connection failed before the appended `ls` ever ran, or every
-    # listing that did run failed the positive control) must be reported
-    # as UNVERIFIED, not silently read as "no gap found" — the exact
-    # false-negative the adversarial review flagged (both the original
-    # CRITICAL and the follow-up MAJOR M1). Every shared host gets
-    # `audit_this_call = True` on its FIRST-seen entry (audited_hosts
-    # starts empty), so any host still missing from `audited_hosts` here
-    # was genuinely never confirmed this run.
-    unverified_shared = shared_hosts - audited_hosts
-    if unverified_shared:
-        print(f"\n⚠ REGISTRATION AUDIT NOT VERIFIED this run for: "
-              f"{', '.join(sorted(unverified_shared))} — no connection ever "
-              f"returned a trustworthy /home listing for the shared host "
-              f"(either every attempt failed before reaching it, or the "
-              f"listing itself could not be trusted), so a registration gap "
-              f"there could exist and go unreported until a later push "
-              f"confirms it.", file=sys.stderr)
-
-    # 3b. Deliver the meeting-analysis Soniox key to every subdev stream
-    # account (#275) -- a true no-op when REMOTE_HOSTS has no such account
-    # (dev2/gatekeeper-only pushes never reach the source read at all).
-    print(f"\n{'=' * 50}")
-    print("Delivering Soniox key to subdev stream accounts...")
-    failed.extend(provision_subdev_soniox_key(skip_names=auth_failed))
-
-    if failed:
-        # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
-        # stream host now yields TWO `failed` entries by design (its own
-        # deploy `rc=...` PLUS the soniox `skipped-known-auth-failure`), so
-        # len(failed) double-counts -- report the DISTINCT host count, the
-        # full list still shows each reason.
-        distinct_failed = {name for name, _reason in failed}
-        print(f"\n⚠ {len(distinct_failed)} of {len(REMOTE_HOSTS)} remote(s) "
-              f"FAILED: {failed}", file=sys.stderr)
-        sys.exit(1)
-    print("\nAll deployments complete.")
+        if failed:
+            # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
+            # stream host now yields TWO `failed` entries by design (its own
+            # deploy `rc=...` PLUS the soniox `skipped-known-auth-failure`), so
+            # len(failed) double-counts -- report the DISTINCT host count, the
+            # full list still shows each reason.
+            distinct_failed = {name for name, _reason in failed}
+            print(f"\n⚠ {len(distinct_failed)} of {len(REMOTE_HOSTS)} remote(s) "
+                  f"FAILED: {failed}", file=sys.stderr)
+            sys.exit(1)
+        print("\nAll deployments complete.")
+    finally:
+        # #358: the ControlMaster socket directory is bounded on its own
+        # (ControlPersist expires any leftover master promptly), but remove
+        # it here too so a repeated push run never accumulates stale
+        # per-run directories -- runs regardless of how the try block above
+        # exits (success, a failed target, or `sys.exit(1)` above).
+        if control_dir:
+            shutil.rmtree(control_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
