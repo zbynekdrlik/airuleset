@@ -4387,6 +4387,24 @@ CLI_VERSION_MIN_AGE_DAYS_DEFAULT = 2       # env AIRULESET_CLI_VERSION_MIN_AGE_D
 _CLI_VERSION_NAME_RX = re.compile(r"^\d+(\.\d+)+$")
 
 
+def _min_age_days_env(explicit, env_key, default):
+    """`explicit` if given (an actual `min_age_days=` CALL ARGUMENT always
+    wins); else the env var `env_key` if it parses as a float; else
+    `default`. Shared by both #355 sweeps below (#355 adversarial-review
+    finding 2: the constant comments advertised `AIRULESET_CLI_VERSION_
+    MIN_AGE_DAYS`/`AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS` but neither was
+    ever actually read -- a silently no-op safety knob). An unparseable
+    override falls back to `default`, never crashes the sweep over a
+    typo'd env var (mirrors this repo's own established pattern for a
+    cadence INTERVAL override, applied here to an AGE floor)."""
+    if explicit is not None:
+        return explicit
+    try:
+        return float(os.environ.get(env_key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _cli_versions_dir(home=None) -> Path:
     """`~/.local/share/claude/versions/` -- the native installer's own
     layout (confirmed live, #355 STEP 0: a flat dir of version-named FILES,
@@ -4419,7 +4437,15 @@ def _resolve_current_cli_version(versions_dir, env=None):
     to something OUTSIDE `versions_dir` entirely (an unexpected install
     method: a system package, a different install layout). Callers MUST
     refuse the WHOLE sweep on `None`, never guess which file is "probably"
-    current."""
+    current.
+
+    Known, deliberate residual (#355 adversarial-review finding 5,
+    THEORETICAL): unlike `_claude_cli_installed`, this deliberately does
+    NOT fall back to a real LOGIN shell's own `command -v claude` (nvm/
+    login-only PATH machinery) -- a box whose `claude` resolves ONLY that
+    way refuses the whole CLI-version sweep FOREVER, correctly (never
+    guessed), but that refusal is loud and logged as an ERROR row on
+    every sweep, never silent."""
     import shutil as _shutil
     e = env or _claude_cli_env()
     which = _shutil.which("claude", path=e.get("PATH", ""))
@@ -4472,8 +4498,8 @@ def discover_cli_version_candidates(home=None, versions_dir=None, now=None,
     """
     import time as _time
     now = _time.time() if now is None else now
-    min_age_days = (CLI_VERSION_MIN_AGE_DAYS_DEFAULT if min_age_days is None
-                    else min_age_days)
+    min_age_days = _min_age_days_env(min_age_days, "AIRULESET_CLI_VERSION_MIN_AGE_DAYS",
+                                     CLI_VERSION_MIN_AGE_DAYS_DEFAULT)
     home = Path(home or os.environ.get("HOME") or os.path.expanduser("~"))
     vdir = Path(versions_dir) if versions_dir else _cli_versions_dir(home)
 
@@ -4772,16 +4798,32 @@ def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
         OWN mtime alone, so a session still actively writing somewhere
         deep inside an old-looking sibling tree is never wrongly judged
         idle (this is the "nikdy scratch ŽIVEJ session" mtime/age
-        poistka);
+        poistka). An EMPTY subtree (`_dir_stats` finds no file at all --
+        the harness pre-creates `<cwd>/<session>/scratchpad` empty at
+        session start, before a live session has written anything) falls
+        back to the DIRECTORY's OWN mtime, NEVER "infinitely stale"
+        (#355 adversarial-review finding 1, MAJOR, live-confirmed on
+        dev1 -- unlike #315's target/ purge, where an empty `target/`
+        genuinely has zero bytes to protect, an empty scratch tree has a
+        live SESSION to protect instead);
       - a symlinked child is refused outright -- never followed, never
         deleted through;
       - a candidate still needs BOTH the age floor AND a live-process
         check (`_target_in_live_use`) before being genuine.
+
+    Known, deliberate residual (#355 adversarial-review finding 4,
+    THEORETICAL): a session tmux-parked idle for MORE than `min_age_days`
+    with no cwd/fd currently held inside its own tree can still have real
+    (non-empty) scratch data reclaimed -- the live-use check only sees
+    processes ACTIVELY holding a reference, and mtime only sees recent
+    writes, neither of which "this session is parked but will resume"
+    can express. Same residual every mtime-based ager in this repo
+    accepts; not cheaply closable under the FREEZE (no new watchdog job).
     """
     import time as _time
     now = _time.time() if now is None else now
-    min_age_days = (CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT if min_age_days is None
-                    else min_age_days)
+    min_age_days = _min_age_days_env(min_age_days, "AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS",
+                                     CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT)
     uid = os.getuid() if uid is None else uid
     root = _claude_scratch_root(tmp_dir, uid)
 
@@ -4809,6 +4851,19 @@ def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
         try:
             if p.is_dir():
                 size_bytes, newest_mtime = _dir_stats(p)
+                if newest_mtime is None:
+                    # #355 adversarial-review finding 1 (MAJOR, live-
+                    # confirmed on dev1): the harness pre-creates
+                    # <cwd>/<session>/scratchpad EMPTY at session start,
+                    # before a live session has written anything -- an
+                    # empty tree must NEVER read as "infinitely stale"
+                    # (unlike #315's target/ purge, where an empty
+                    # target/ genuinely has zero bytes to protect and
+                    # "always reclaimable" is correct there). Fall back
+                    # to the DIRECTORY's OWN mtime so a tree created
+                    # seconds ago stays protected by the age floor
+                    # exactly like a non-empty one would.
+                    newest_mtime = os.lstat(p).st_mtime
             else:
                 st = os.lstat(p)
                 size_bytes, newest_mtime = st.st_size, st.st_mtime
@@ -4817,11 +4872,10 @@ def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
             out.append(entry)
             continue
         entry["size"] = size_bytes
-        age_days = float("inf") if newest_mtime is None else (now - newest_mtime) / 86400.0
-        entry["age_days"] = None if age_days == float("inf") else age_days
+        age_days = (now - newest_mtime) / 86400.0
+        entry["age_days"] = age_days
         if age_days < min_age_days:
-            age_txt = "empty" if age_days == float("inf") else "%.1fd" % age_days
-            entry["reason"] = "too recent (%s < %sd)" % (age_txt, min_age_days)
+            entry["reason"] = "too recent (%.1fd < %sd)" % (age_days, min_age_days)
             out.append(entry)
             continue
         if _target_in_live_use(p, proc_dir=proc_dir):
