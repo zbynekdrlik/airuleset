@@ -9346,6 +9346,321 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.continues_sent(), 1, "api-error → continue")
         self.assertEqual(fake.selfchecks_sent(), 0, "not a working-stall nudge")
 
+    # --- (#352) live-shell-evidence pane classifier --------------------------
+    def test_pane_live_shell_evidence_singular(self):
+        cap = ("● Hotovo.\n❯ \n  ctx ███░  caveman:lite\n"
+               "  ⏵⏵ bypass permissions on · 1 shell\n")
+        self.assertTrue(self.w._pane_live_shell_evidence(cap))
+
+    def test_pane_live_shell_evidence_plural(self):
+        cap = ("● Hotovo.\n❯ \n  ctx ███░  caveman:lite\n"
+               "  ⏵⏵ bypass permissions on · 3 shells\n")
+        self.assertTrue(self.w._pane_live_shell_evidence(cap))
+
+    def test_pane_live_shell_evidence_monitor_form(self):
+        # CC also badges its "monitor" kind of local_bash task the same way
+        cap = ("● Hotovo.\n❯ \n  ⏵⏵ bypass permissions on · 1 monitor\n")
+        self.assertTrue(self.w._pane_live_shell_evidence(cap))
+
+    def test_pane_live_shell_evidence_false_on_plain_idle_pane(self):
+        # the ordinary idle footer (no bg task) carries no count at all
+        self.assertFalse(self.w._pane_live_shell_evidence(_IDLE_PANE))
+
+    def test_pane_live_shell_evidence_ignores_prose_mention_elsewhere(self):
+        # "3 shells" appearing OUTSIDE the ⏵⏵ mode-hint line (e.g. quoted in a
+        # completion report or this very playbook) must NEVER be mistaken for
+        # live evidence — the same chrome-line discipline every other footer
+        # reader in this file already applies (mention vs use).
+        cap = ("● Cleaned up 3 shells from the leftover pool.\n❯ \n"
+               "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+        self.assertFalse(self.w._pane_live_shell_evidence(cap))
+
+    def test_pane_live_shell_evidence_empty_capture(self):
+        self.assertFalse(self.w._pane_live_shell_evidence(""))
+        self.assertFalse(self.w._pane_live_shell_evidence(None))
+
+    def test_pane_live_shell_evidence_ignores_a_quoted_badge_line_in_scrollback(self):
+        # (#352 F1, adversarial review round 1) A capture can contain an
+        # OLDER quoted rendering of the ⏵⏵ badge (a completion report
+        # discussing this exact ticket, a playbook excerpt) sitting ABOVE
+        # the real conversation and the pane's OWN current (badge-free)
+        # footer. Scanning the WHOLE capture for any `⏵⏵`-prefixed line
+        # would misread that scrollback quote as live evidence; only a
+        # `⏵⏵` line reached by walking the pane's genuinely TRAILING
+        # chrome (bottom-up, stopping at the first non-chrome row — the
+        # bare `❯` input-box boundary here) may count.
+        cap = ("Poznamka z minuleho debugovania: bol tam presne tento riadok:\n"
+               "  ⏵⏵ bypass permissions on · 1 shell\n"
+               "ale to uz davno skoncilo.\n"
+               "❯ \n"
+               "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+        self.assertFalse(self.w._pane_live_shell_evidence(cap),
+                         "a scrollback-quoted badge line must never count as CURRENT evidence")
+
+    # --- (#352) job 4 skips the working-stall check entirely while the pane
+    # itself already proves the session alive (a live bg shell/monitor badge)
+    _LIVE_SHELL_PANE = ("● Waiting for 1 background agent to finish\n❯ \n"
+                        "  ctx ███░  caveman:lite\n"
+                        "  ⏵⏵ bypass permissions on · 1 shell\n")
+
+    def test_run_once_working_stall_skips_when_live_shell_evidence(self):
+        now, cwd = 1_000_000, "/devel/wliveshell"
+        self._transcript(cwd, [self._WORKING], 3600, now)   # idle 1h, well past threshold
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        logs = self._run4(now, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0,
+                         "pane-visible live shell → never burn a self-check nudge")
+        self.assertEqual(fake.continues_sent(), 0)
+        self.assertEqual(self.pings, [], "must not ping either — evidence already proves life")
+        self.assertTrue(any("skip live-shell (working-stall)" in ln for ln in logs), logs)
+
+    def test_run_once_working_stall_skip_also_covers_busy_pane_branch(self):
+        # the busy-pane (no free ❯) escalate-ping path must ALSO be skipped —
+        # "before ANY nudge", not just the keystroke branch.
+        now, cwd = 1_000_000, "/devel/wliveshellbusy"
+        self._transcript(cwd, [self._WORKING], 3600, now)   # ≥ 2× threshold too
+        busy_with_shell = ("● Validate issue #233\n  ⎿ running…\n"
+                           "✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n"
+                           "  ⏵⏵ bypass permissions on · 2 shells\n")
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", default_capture=busy_with_shell)
+        self._run4(now, fake)
+        self.assertEqual(self.pings, [], "busy-pane wedge ping must also be skipped")
+        self.assertEqual(fake.selfchecks_sent() + fake.continues_sent(), 0)
+
+    def test_run_once_working_stall_resumes_once_shell_evidence_gone(self):
+        # (#352 item 3) the exit condition is REACHABLE: a shell that later
+        # dies (badge gone from the footer) must re-enable normal nudging on
+        # the very next sweep — never a permanent skip.
+        now, cwd = 1_000_000, "/devel/wliveshellgone"
+        self._transcript(cwd, [self._WORKING], 3600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        self._run4(now, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0, "skipped while evidence lives")
+        # the shell died — footer reverts to the plain idle prompt
+        fake.default_capture = _IDLE_PANE
+        self._run4(now + 60, fake)
+        self.assertEqual(fake.selfchecks_sent(), 1,
+                         "evidence gone → normal working-stall nudge resumes")
+
+    def test_run_once_live_shell_skip_preserves_episode_state_across_wait_clear(self):
+        # An ALREADY-nudged episode's history (nudges/answered) must survive a
+        # long stretch of live-shell skipping that spans MORE than wait_clear
+        # (90s) — the end-of-sweep cleanup prunes an episode key once its
+        # last_seen goes stale that long, which would otherwise silently wipe
+        # the escalation history mid-skip (the skip branch never calls
+        # decide_working, so last_seen must be refreshed by hand).
+        now, cwd = 1_000_000, "/devel/wliveshellpersist"
+        self._transcript(cwd, [self._WORKING], 3600, now)
+        wkey = "working:" + self._SID
+        seeded_nudges = [now - 1000]
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 2000,
+                                              "nudges": list(seeded_nudges),
+                                              "answered": 1, "escalated": False,
+                                              "last_seen": now - 1000}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        self._run4(now, fake)
+        self._run4(now + 200, fake)          # > wait_clear (90s) since the seed's last_seen
+        st = self.w.load_state(self.state)
+        self.assertIn(wkey, st, "episode must survive the skip, not get pruned as stale")
+        self.assertEqual(st[wkey]["nudges"], seeded_nudges,
+                         "nudge/answered history must stay FROZEN during the skip, "
+                         "not reset to a fresh first-sighting episode")
+        self.assertEqual(fake.selfchecks_sent(), 0)
+
+    def test_run_once_live_shell_skip_also_preserves_busypane_seed(self):
+        # (#352 F4, adversarial review round 1) the SAME persistence must
+        # hold for a seeded `busypane:` entry, not just `working:` — a
+        # mutant dropping just that half of the refresh loop must be
+        # caught, not merely one that drops both.
+        now, cwd = 1_000_000, "/devel/wliveshellbusypersist"
+        self._transcript(cwd, [self._WORKING], 3600, now)
+        bkey = "busypane:" + self._SID
+        self.w.save_state(self.state, {bkey: {"first_seen": now - 2000,
+                                              "pinged": True, "last_seen": now - 1000}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        self._run4(now, fake)
+        self._run4(now + 200, fake)
+        st = self.w.load_state(self.state)
+        self.assertIn(bkey, st, "seeded busypane: entry must ALSO survive the skip")
+        self.assertTrue(st[bkey]["pinged"], "its own history must stay untouched, not reset")
+
+    def test_run_once_responded_history_survives_the_regrowth_gap(self):
+        # (#352 F2, adversarial review round 1) After a landed nudge is
+        # ANSWERED, idle drops near zero and the OUTER job-4 gate
+        # (idle >= stall_working) goes FALSE for the whole regrowth window
+        # -- during which NOTHING in job 4 touches this session's state at
+        # all (neither the live-shell skip above nor decide_working runs).
+        # The generic wait_clear (90s) cleanup must NOT delete a `working:`
+        # entry that carries real ANSWERED history during this gap, or the
+        # whole 1h/3h/6h schedule silently resets to a fresh nudge#1 every
+        # single time and is never actually reachable.
+        now, cwd = 1_000_000, "/devel/wresponded30"
+        # a FRESH transcript write (idle=100s, well under stall_working=300
+        # that _run4 uses) — the OUTER job-4 gate is FALSE this sweep
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        stale_last_seen = now - 200   # > the OLD 90s TTL, < the NEW 2x-stall_working one
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000],
+                                              "answered": 1, "escalated": False,
+                                              "last_seen": stale_last_seen}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertIn(wkey, st, "answered history must survive the regrowth gap, "
+                     "not just the generic 90s window")
+        self.assertEqual(st[wkey]["answered"], 1, "history must stay intact, not reset")
+
+    def test_run_once_first_cycle_history_also_survives_the_regrowth_gap(self):
+        # (#352 F2, adversarial review round 2, finding 1) INVERTS the old
+        # "no answered history -> generic 90s TTL" assertion: gating the
+        # carve-out on `answered` was organically UNREACHABLE -- `answered`
+        # is only ever set INSIDE decide_working's `responded=True` branch,
+        # which itself needs a `working:` entry to have already survived one
+        # full regrowth gap (idle must regrow past stall_working before
+        # decide_working runs again at all). A first-cycle entry (nudged
+        # once, never yet re-checked) can NEVER acquire `answered` before
+        # the OLD 90s-only carve-out already pruned it -- so the whole
+        # 1h/3h/6h staged schedule was dead code for every real session; the
+        # bootstrap circularity, proven live against the round-1 fix. Fix:
+        # key the carve-out on `nudges` (present the instant a wedged
+        # episode is nudged, first sighting or not) + `not escalated`, never
+        # on `answered` specifically -- so a bare first-cycle nudge history
+        # now ALSO survives the regrowth gap, not just a re-confirmed one.
+        now, cwd = 1_000_000, "/devel/wnoresp"
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000],
+                                              "escalated": False,
+                                              "last_seen": now - 200}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertIn(wkey, st, "a bare first-cycle nudge history (no `answered` yet) "
+                     "must ALSO survive the regrowth gap -- the carve-out keys on "
+                     "`nudges`, never on `answered` alone")
+
+    def test_run_once_escalated_history_still_uses_the_generic_90s_window(self):
+        # (#352 F2, adversarial review round 2, finding 1) the `not
+        # escalated` half of the carve-out predicate is load-bearing: an
+        # ALREADY-escalated entry surviving past the generic 90s window
+        # into a brand-new stall (same session, same wkey) would become
+        # IMMORTAL under decide_working's own unconditional top-of-function
+        # `last_seen` refresh (it fires even on the `escalated -> noop`
+        # early return) -- and, worse, decide_working's very own escalated
+        # check (`if e.get("escalated"): return "noop", e`) would silently
+        # swallow the NEW episode's entire nudge ladder, since the same key
+        # would never look like a fresh first sighting again. An escalated
+        # entry must therefore keep pruning at the ORIGINAL generic 90s TTL
+        # -- proven by hand-mutation (dropping `not escalated` here lets
+        # this exact fixture survive to the 2x-stall_working TTL instead).
+        now, cwd = 1_000_000, "/devel/wescalated"
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000, now - 4000,
+                                                         now - 3000],
+                                              "escalated": True,
+                                              "last_seen": now - 200}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertNotIn(wkey, st, "an ESCALATED entry must still be pruned at the "
+                     "generic 90s TTL, never extended -- or a later, genuinely NEW "
+                     "stall on the same session would be swallowed as `noop` forever")
+
+    def test_run_once_carveout_ttl_is_2x_stall_not_1x(self):
+        # (#352 F2, adversarial review round 2, finding 4) the existing
+        # regrowth-gap regression lock ages its fixture at only 200s, which
+        # is BELOW both `stall_working` (300s) and `2 * stall_working`
+        # (600s) in this test harness -- so it cannot discriminate a
+        # correct `2 * stall_working` TTL from an accidentally-shrunk
+        # `stall_working` one. Age the fixture strictly past 1x (300s) but
+        # still under 2x (600s): only the genuine `2 * stall_working` TTL
+        # keeps it alive.
+        now, cwd = 1_000_000, "/devel/wttlmult"
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        stall_working = 300
+        aged_last_seen = now - (stall_working + 100)   # 400s: > 1x, < 2x
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000],
+                                              "escalated": False,
+                                              "last_seen": aged_last_seen}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertIn(wkey, st, "the carve-out TTL must be the FULL 2x-stall_working "
+                     "window, not a bare 1x -- a mutation shrinking it to "
+                     "`stall_working` alone must be caught here")
+
+    def test_run_once_carveout_ttl_still_has_an_upper_bound(self):
+        # (#352, adversarial review round 3, F2-sibling coverage) the
+        # previous test only ever proves the LOWER edge of the 2x TTL
+        # (survives past 1x, under 2x) -- nothing asserted the UPPER edge:
+        # that an eligible (nudged, not-escalated) entry genuinely gets
+        # pruned once it goes stale PAST `2 * stall_working`, rather than
+        # the carve-out silently making it immortal. Age the fixture past
+        # the FULL 2x window and require it gone.
+        now, cwd = 1_000_000, "/devel/wttlupper"
+        self._transcript(cwd, [self._WORKING], 100, now)
+        wkey = "working:" + self._SID
+        stall_working = 300
+        aged_last_seen = now - (2 * stall_working + 100)   # 700s: past the full 2x TTL
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 5000,
+                                              "nudges": [now - 5000],
+                                              "escalated": False,
+                                              "last_seen": aged_last_seen}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n")
+        self._run4(now, fake)
+        st = self.w.load_state(self.state)
+        self.assertNotIn(wkey, st, "an eligible entry stale past the FULL "
+                     "2x-stall_working window must still be pruned -- the carve-out "
+                     "extends the TTL, it does not make the entry immortal")
+
+    def test_run_once_live_shell_trust_cap_forces_a_periodic_real_check(self):
+        # (#352 F3, adversarial review round 1) A pane whose LAST RENDER
+        # shows the badge but never genuinely advances (repro of a wedged
+        # CC process: the badge is never refreshed because nothing is
+        # rendering any more) must NOT be trusted forever -- past
+        # LIVE_SHELL_TRUST_CAP_S of CONSECUTIVE skipping, the very next
+        # sweep must fall through to a REAL check instead of skipping
+        # again unconditionally.
+        now, cwd = 1_000_000, "/devel/wliveshelltrustcap"
+        self._transcript(cwd, [self._WORKING], 3600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        cap = self.w.LIVE_SHELL_TRUST_CAP_S
+        logs = self._run4(now, fake)
+        self.assertTrue(any("skip live-shell" in ln for ln in logs))
+        self.assertEqual(fake.selfchecks_sent(), 0)
+        # still well within the cap → keeps skipping
+        self._run4(now + cap - 1, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0, "must still trust the badge before the cap")
+        # the cap is exceeded → the SAME still-showing badge must no longer
+        # be trusted unconditionally; the normal flow gets a real look
+        logs2 = self._run4(now + cap, fake)
+        self.assertTrue(any("live-shell trust cap exceeded" in ln for ln in logs2), logs2)
+        self.assertEqual(fake.selfchecks_sent(), 1,
+                         "past the trust cap, a real nudge attempt must fire — "
+                         "the skip must never be permanent")
+        # (#352 F5, adversarial review round 2) the forced check must reset
+        # the streak — the VERY NEXT sweep, one minute later, must resume
+        # skipping (never re-force again immediately) and must NOT fire a
+        # second nudge attempt, proving exactly ONE real check per
+        # LIVE_SHELL_TRUST_CAP_S window rather than a permanently-broken
+        # trust (which would spam a nudge every sweep from here on).
+        logs3 = self._run4(now + cap + 60, fake)
+        self.assertTrue(any("skip live-shell" in ln for ln in logs3), logs3)
+        self.assertEqual(fake.selfchecks_sent(), 1,
+                         "the skip must resume after a forced check, not stay forced — "
+                         "no second nudge on the very next sweep")
+
     # --- decide_working state machine (job 4) --------------------------------
     def _decw(self, st, key, now, idle):
         return self.w.decide_working(st, key, now, idle, interval=300, max_nudges=3)
@@ -9381,6 +9696,65 @@ class TestApiWatchdog(TestCase):
         st, now = {}, 1_000_000
         _, e = self._decw(st, "w", now, 2700)
         self.assertEqual(e["first_seen"], now - 2700)
+
+    # --- (#352) decide_working RESPONDED backoff — explicit 1h/3h/6h schedule
+    def test_decide_working_responded_schedule_is_1h_3h_6h(self):
+        # NOTE: `responded=True` advances `e["answered"]` on EVERY call, even a
+        # "wait" verdict (pre-existing decide_working behaviour, unchanged by
+        # this ticket) — so each "must not fire before the step" probe below
+        # runs against a DISCARDED deep-copy of state, never the real
+        # progression, or it would itself advance past the step it's probing.
+        import copy
+        self.assertEqual(self.w.WORKING_RESPONDED_BACKOFF_SCHEDULE_S,
+                         (3600, 3 * 3600, 6 * 3600))
+        st, now = {}, 1_000_000
+        a, e = self._decw(st, "w", now, 3000)          # nudge #1 (first sighting)
+        self.assertEqual(a, "nudge")
+        st["w"] = e
+        base = now
+
+        # 1st post-response repeat: due at +3600s (the 1h step)
+        probe = copy.deepcopy(st)
+        a, _ = self.w.decide_working(probe, "w", base + 3599, 3000, interval=300,
+                                     max_nudges=3, responded=True)
+        self.assertEqual(a, "wait", "must not fire 1s before the 1h step")
+        a, e = self.w.decide_working(st, "w", base + 3600, 3000, interval=300,
+                                     max_nudges=3, responded=True)
+        self.assertEqual(a, "nudge", "fires exactly at the 1h step")
+        self.assertEqual(e["answered"], 1)
+        st["w"] = e
+        base += 3600
+
+        # 2nd post-response repeat: due at +3h (NOT the naive-exponential 2h)
+        probe = copy.deepcopy(st)
+        a, _ = self.w.decide_working(probe, "w", base + 3 * 3600 - 1, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "wait", "must not fire 1s before the 3h step")
+        a, e = self.w.decide_working(st, "w", base + 3 * 3600, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "nudge", "fires exactly at the 3h step")
+        self.assertEqual(e["answered"], 2)
+        st["w"] = e
+        base += 3 * 3600
+
+        # 3rd post-response repeat: due at +6h
+        probe = copy.deepcopy(st)
+        a, _ = self.w.decide_working(probe, "w", base + 6 * 3600 - 1, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "wait", "must not fire 1s before the 6h step")
+        a, e = self.w.decide_working(st, "w", base + 6 * 3600, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "nudge", "fires exactly at the 6h step")
+        self.assertEqual(e["answered"], 3)
+        st["w"] = e
+        base += 6 * 3600
+
+        # 4th+ repeat: HOLDS at the last (6h) step — never widens further,
+        # never collapses back to a shorter interval
+        a, e = self.w.decide_working(st, "w", base + 6 * 3600, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "nudge", "still fires at exactly 6h on the held step")
+        self.assertEqual(e["answered"], 4)
 
     # --- job 5: deliver a pending ✅ (idle_prompt backstop) ------------------
     def _txn_for_sid(self, sid, entries, age_s, now, cwd="/devel/projx"):
