@@ -9346,6 +9346,112 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(fake.continues_sent(), 1, "api-error → continue")
         self.assertEqual(fake.selfchecks_sent(), 0, "not a working-stall nudge")
 
+    # --- (#352) live-shell-evidence pane classifier --------------------------
+    def test_pane_live_shell_evidence_singular(self):
+        cap = ("● Hotovo.\n❯ \n  ctx ███░  caveman:lite\n"
+               "  ⏵⏵ bypass permissions on · 1 shell\n")
+        self.assertTrue(self.w._pane_live_shell_evidence(cap))
+
+    def test_pane_live_shell_evidence_plural(self):
+        cap = ("● Hotovo.\n❯ \n  ctx ███░  caveman:lite\n"
+               "  ⏵⏵ bypass permissions on · 3 shells\n")
+        self.assertTrue(self.w._pane_live_shell_evidence(cap))
+
+    def test_pane_live_shell_evidence_monitor_form(self):
+        # CC also badges its "monitor" kind of local_bash task the same way
+        cap = ("● Hotovo.\n❯ \n  ⏵⏵ bypass permissions on · 1 monitor\n")
+        self.assertTrue(self.w._pane_live_shell_evidence(cap))
+
+    def test_pane_live_shell_evidence_false_on_plain_idle_pane(self):
+        # the ordinary idle footer (no bg task) carries no count at all
+        self.assertFalse(self.w._pane_live_shell_evidence(_IDLE_PANE))
+
+    def test_pane_live_shell_evidence_ignores_prose_mention_elsewhere(self):
+        # "3 shells" appearing OUTSIDE the ⏵⏵ mode-hint line (e.g. quoted in a
+        # completion report or this very playbook) must NEVER be mistaken for
+        # live evidence — the same chrome-line discipline every other footer
+        # reader in this file already applies (mention vs use).
+        cap = ("● Cleaned up 3 shells from the leftover pool.\n❯ \n"
+               "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n")
+        self.assertFalse(self.w._pane_live_shell_evidence(cap))
+
+    def test_pane_live_shell_evidence_empty_capture(self):
+        self.assertFalse(self.w._pane_live_shell_evidence(""))
+        self.assertFalse(self.w._pane_live_shell_evidence(None))
+
+    # --- (#352) job 4 skips the working-stall check entirely while the pane
+    # itself already proves the session alive (a live bg shell/monitor badge)
+    _LIVE_SHELL_PANE = ("● Waiting for 1 background agent to finish\n❯ \n"
+                        "  ctx ███░  caveman:lite\n"
+                        "  ⏵⏵ bypass permissions on · 1 shell\n")
+
+    def test_run_once_working_stall_skips_when_live_shell_evidence(self):
+        now, cwd = 1_000_000, "/devel/wliveshell"
+        self._transcript(cwd, [self._WORKING], 3600, now)   # idle 1h, well past threshold
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        logs = self._run4(now, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0,
+                         "pane-visible live shell → never burn a self-check nudge")
+        self.assertEqual(fake.continues_sent(), 0)
+        self.assertEqual(self.pings, [], "must not ping either — evidence already proves life")
+        self.assertTrue(any("skip live-shell (working-stall)" in ln for ln in logs), logs)
+
+    def test_run_once_working_stall_skip_also_covers_busy_pane_branch(self):
+        # the busy-pane (no free ❯) escalate-ping path must ALSO be skipped —
+        # "before ANY nudge", not just the keystroke branch.
+        now, cwd = 1_000_000, "/devel/wliveshellbusy"
+        self._transcript(cwd, [self._WORKING], 3600, now)   # ≥ 2× threshold too
+        busy_with_shell = ("● Validate issue #233\n  ⎿ running…\n"
+                           "✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n"
+                           "  ⏵⏵ bypass permissions on · 2 shells\n")
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n", default_capture=busy_with_shell)
+        self._run4(now, fake)
+        self.assertEqual(self.pings, [], "busy-pane wedge ping must also be skipped")
+        self.assertEqual(fake.selfchecks_sent() + fake.continues_sent(), 0)
+
+    def test_run_once_working_stall_resumes_once_shell_evidence_gone(self):
+        # (#352 item 3) the exit condition is REACHABLE: a shell that later
+        # dies (badge gone from the footer) must re-enable normal nudging on
+        # the very next sweep — never a permanent skip.
+        now, cwd = 1_000_000, "/devel/wliveshellgone"
+        self._transcript(cwd, [self._WORKING], 3600, now)
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        self._run4(now, fake)
+        self.assertEqual(fake.selfchecks_sent(), 0, "skipped while evidence lives")
+        # the shell died — footer reverts to the plain idle prompt
+        fake.default_capture = _IDLE_PANE
+        self._run4(now + 60, fake)
+        self.assertEqual(fake.selfchecks_sent(), 1,
+                         "evidence gone → normal working-stall nudge resumes")
+
+    def test_run_once_live_shell_skip_preserves_episode_state_across_wait_clear(self):
+        # An ALREADY-nudged episode's history (nudges/answered) must survive a
+        # long stretch of live-shell skipping that spans MORE than wait_clear
+        # (90s) — the end-of-sweep cleanup prunes an episode key once its
+        # last_seen goes stale that long, which would otherwise silently wipe
+        # the escalation history mid-skip (the skip branch never calls
+        # decide_working, so last_seen must be refreshed by hand).
+        now, cwd = 1_000_000, "/devel/wliveshellpersist"
+        self._transcript(cwd, [self._WORKING], 3600, now)
+        wkey = "working:" + self._SID
+        seeded_nudges = [now - 1000]
+        self.w.save_state(self.state, {wkey: {"first_seen": now - 2000,
+                                              "nudges": list(seeded_nudges),
+                                              "answered": 1, "escalated": False,
+                                              "last_seen": now - 1000}})
+        fake = _FakeTmux(panes="%5\tclaude\t" + cwd + "\n",
+                         default_capture=self._LIVE_SHELL_PANE)
+        self._run4(now, fake)
+        self._run4(now + 200, fake)          # > wait_clear (90s) since the seed's last_seen
+        st = self.w.load_state(self.state)
+        self.assertIn(wkey, st, "episode must survive the skip, not get pruned as stale")
+        self.assertEqual(st[wkey]["nudges"], seeded_nudges,
+                         "nudge/answered history must stay FROZEN during the skip, "
+                         "not reset to a fresh first-sighting episode")
+        self.assertEqual(fake.selfchecks_sent(), 0)
+
     # --- decide_working state machine (job 4) --------------------------------
     def _decw(self, st, key, now, idle):
         return self.w.decide_working(st, key, now, idle, interval=300, max_nudges=3)
@@ -9381,6 +9487,65 @@ class TestApiWatchdog(TestCase):
         st, now = {}, 1_000_000
         _, e = self._decw(st, "w", now, 2700)
         self.assertEqual(e["first_seen"], now - 2700)
+
+    # --- (#352) decide_working RESPONDED backoff — explicit 1h/3h/6h schedule
+    def test_decide_working_responded_schedule_is_1h_3h_6h(self):
+        # NOTE: `responded=True` advances `e["answered"]` on EVERY call, even a
+        # "wait" verdict (pre-existing decide_working behaviour, unchanged by
+        # this ticket) — so each "must not fire before the step" probe below
+        # runs against a DISCARDED deep-copy of state, never the real
+        # progression, or it would itself advance past the step it's probing.
+        import copy
+        self.assertEqual(self.w.WORKING_RESPONDED_BACKOFF_SCHEDULE_S,
+                         (3600, 3 * 3600, 6 * 3600))
+        st, now = {}, 1_000_000
+        a, e = self._decw(st, "w", now, 3000)          # nudge #1 (first sighting)
+        self.assertEqual(a, "nudge")
+        st["w"] = e
+        base = now
+
+        # 1st post-response repeat: due at +3600s (the 1h step)
+        probe = copy.deepcopy(st)
+        a, _ = self.w.decide_working(probe, "w", base + 3599, 3000, interval=300,
+                                     max_nudges=3, responded=True)
+        self.assertEqual(a, "wait", "must not fire 1s before the 1h step")
+        a, e = self.w.decide_working(st, "w", base + 3600, 3000, interval=300,
+                                     max_nudges=3, responded=True)
+        self.assertEqual(a, "nudge", "fires exactly at the 1h step")
+        self.assertEqual(e["answered"], 1)
+        st["w"] = e
+        base += 3600
+
+        # 2nd post-response repeat: due at +3h (NOT the naive-exponential 2h)
+        probe = copy.deepcopy(st)
+        a, _ = self.w.decide_working(probe, "w", base + 3 * 3600 - 1, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "wait", "must not fire 1s before the 3h step")
+        a, e = self.w.decide_working(st, "w", base + 3 * 3600, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "nudge", "fires exactly at the 3h step")
+        self.assertEqual(e["answered"], 2)
+        st["w"] = e
+        base += 3 * 3600
+
+        # 3rd post-response repeat: due at +6h
+        probe = copy.deepcopy(st)
+        a, _ = self.w.decide_working(probe, "w", base + 6 * 3600 - 1, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "wait", "must not fire 1s before the 6h step")
+        a, e = self.w.decide_working(st, "w", base + 6 * 3600, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "nudge", "fires exactly at the 6h step")
+        self.assertEqual(e["answered"], 3)
+        st["w"] = e
+        base += 6 * 3600
+
+        # 4th+ repeat: HOLDS at the last (6h) step — never widens further,
+        # never collapses back to a shorter interval
+        a, e = self.w.decide_working(st, "w", base + 6 * 3600, 3000,
+                                     interval=300, max_nudges=3, responded=True)
+        self.assertEqual(a, "nudge", "still fires at exactly 6h on the held step")
+        self.assertEqual(e["answered"], 4)
 
     # --- job 5: deliver a pending ✅ (idle_prompt backstop) ------------------
     def _txn_for_sid(self, sid, entries, age_s, now, cwd="/devel/projx"):
