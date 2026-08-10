@@ -4025,6 +4025,58 @@ class TestGoalBlockedOnUnansweredQuestion(unittest.TestCase):
         p = self._write([])
         self.assertEqual(wd._goal_blocked_on_unanswered_question(p), "")
 
+    def test_an_ismeta_entry_with_no_reply_yet_stays_blocked(self):
+        # #350 round-1 review MAJOR -- a CC-injected `isMeta` user entry
+        # (a goal-arm confirmation echo, a resume-injection notice, a
+        # skill-directory listing) carries NO recognisable machine
+        # prefix, so the pre-hardening code read it as a genuine typed
+        # answer the instant it landed as the newest entry -- exactly
+        # the false-negative direction #350 exists to prevent, just
+        # triggered by a different transcript shape than the reported
+        # incident.
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "isMeta": True,
+             "message": {"content": "Session resumed. Loaded N skills."}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_a_compact_continuation_summary_with_no_reply_yet_stays_blocked(self):
+        # #350 round-1 review followup -- a `/compact` continuation
+        # summary is a REAL top-level `user`-typed entry (verified
+        # against real transcripts) that is neither `isMeta` nor a
+        # `<system-reminder>`-wrapped block, so it slipped past every
+        # other transparent check: compaction landing right after a
+        # genuine (A)-blocked stop must never read as "the user
+        # answered".
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": {"content":
+                         "This session is being continued from a "
+                         "previous conversation that ran out of "
+                         "context. The summary below covers the "
+                         "earlier portion of the conversation.\n\n"
+                         "Summary:\n1. Primary Request and Intent:\n"
+                         "..."}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_a_non_dict_message_never_crashes_the_whole_sweep(self):
+        # #350 round-1 review MINOR -- `(entry.get("message") or {})
+        # .get("content")` raises `AttributeError` on a truthy non-dict
+        # `message` (e.g. a bare string); an uncaught exception here
+        # would abort job 20's WHOLE sweep, for every pane, not just the
+        # one carrying the malformed entry. Mirrors `_entry_text`'s own
+        # `isinstance(msg, dict)` guard.
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": "not-a-dict"}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
 
 class TestGoalAchievedNeverAutoResumesAfterAbandonment(GoalRearmBase):
     """#335 P0 -- live-reproduced on simap@subdev: a `/goal` loop that
