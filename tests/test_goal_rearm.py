@@ -3766,6 +3766,336 @@ class TestGoalAchievedBacklogVerification(GoalRearmBase):
                          "a non-backlog-shaped payload must never spend gh")
 
 
+class TestGoalAchievedNeverRearmsWhileBlockedOnAnAnswer(GoalRearmBase):
+    """#350 — job 20's FALSE-ACHIEVED path (`TestGoalAchievedBacklogVerification`,
+    above) used to re-arm a `/goal` loop the instant CC's own achieved
+    banner showed with the repo's backlog still open, with no regard for
+    WHY the loop stopped. But STOP CONDITION (A) — BLOCKED ON MY ANSWER —
+    is an EQUALLY legitimate stop every shipped `/goal` template defines:
+    the loop correctly ends there, waiting on the user, backlog
+    untouched. Livelock, live-evidenced 2026-08-10 (dev1, session
+    zbynek-4): goal stops on (A) -> watchdog re-arms it a minute later ->
+    the freshly re-armed session immediately re-evaluates the SAME
+    unanswered question and re-stops -> repeat, every cycle re-sending
+    the whole context for nothing."""
+
+    ACHIEVED_PANE = ("● Hotovo.\n"
+                     "✔ Goal achieved (3s · 1 turn · 56 tokens)\n" + FOOTER_DARK)
+
+    # A batch-shaped payload -- every shipped `/goal` STOP CONDITIONS text
+    # embeds the literal `🏁 BACKLOG EMPTY:` marker verbatim (#312 item 3),
+    # so `backlog_shaped` is True from the PAYLOAD alone, independent of
+    # whatever the last turn itself said.
+    BLOCKED_PAYLOAD = ("STOP CONDITIONS -- done once EITHER holds: (A) "
+                       "BLOCKED ON MY ANSWER -- the latest assistant "
+                       "message ends with `❓ NEEDS YOU:`. (B) BACKLOG "
+                       "DONE -- print 🏁 BACKLOG EMPTY: 0 open, main green.")
+
+    def test_an_unanswered_needs_you_never_rearms_and_never_spends_gh(self):
+        entries = [marker_entry("set", self.BLOCKED_PAYLOAD),
+                  assistant_entry("Rozobral som PR #5.\n\n"
+                                  "❓ NEEDS YOU: schváliš merge PR #5?")]
+        calls = []
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            backlog_fetch=lambda cwd: calls.append(cwd) or 3)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("(A)-blocked" in ln for ln in logs), logs)
+        self.assertFalse(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+        self.assertEqual(calls, [],
+                         "genuinely (A)-blocked -> no need to spend a gh "
+                         "call at all, the loop is not going to re-arm "
+                         "either way")
+
+    def test_ask_and_continue_is_never_mistaken_for_a_blocked_stop(self):
+        # the ticket's own explicit false-positive worry: a body
+        # `❓ ASKED:` line whose TERMINAL line is `⏳ WORKING:` (ask-and-
+        # continue, the loop keeps working) must re-arm exactly as before
+        # this ticket.
+        entries = [marker_entry("set", self.BLOCKED_PAYLOAD),
+                  assistant_entry("❓ ASKED: schváliš aj tento balík?\n"
+                                  "⏳ WORKING: kontrolujem ďalší tiket")]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            cap_seq=[self.ACHIEVED_PANE] + self._typed_seq()[1:],
+            backlog_fetch=lambda cwd: 3)
+        self.assertTrue(tmux.typed(), logs)
+        self.assertTrue(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+
+    def test_a_plain_completion_with_no_question_still_rearms(self):
+        # the control -- no ❓ marker at all keeps the pre-#350 behavior.
+        entries = [marker_entry("set", self.BLOCKED_PAYLOAD),
+                  assistant_entry("Hotovo, žiadne otázky.\n✅ DONE: hotovo")]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            cap_seq=[self.ACHIEVED_PANE] + self._typed_seq()[1:],
+            backlog_fetch=lambda cwd: 3)
+        self.assertTrue(tmux.typed(), logs)
+        self.assertTrue(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+
+    def test_a_users_own_reply_after_the_question_is_the_reachable_exit(self):
+        # #134/#350's own reachable-exit-condition requirement: once the
+        # user's own reply lands as a LATER real turn, the suppression
+        # releases on the very next sweep and normal FALSE-ACHIEVED
+        # machinery resumes.
+        entries = [marker_entry("set", self.BLOCKED_PAYLOAD),
+                  assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+                  {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+                   "message": {"content": "Áno, schvaľujem."}}]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            cap_seq=[self.ACHIEVED_PANE] + self._typed_seq()[1:],
+            backlog_fetch=lambda cwd: 3)
+        self.assertTrue(tmux.typed(), logs)
+        self.assertTrue(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+        self.assertFalse(any("(A)-blocked" in ln for ln in logs), logs)
+
+    def test_a_discord_relayed_reply_is_also_a_reachable_exit(self):
+        # job 7's own Discord-reply relay (`compose_reply_prompt`) delivers
+        # the answer as a plain `user`-typed entry -- needs no special
+        # casing here, it is simply "a later real turn" like any other,
+        # unlike `_last_human_prompt_ts`'s DELIBERATELY different exclusion
+        # of this exact shape for its own unrelated purpose (job 9).
+        entries = [marker_entry("set", self.BLOCKED_PAYLOAD),
+                  assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+                  {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+                   "message": {"content":
+                               "Odpoveď z Discordu: 2026-08-10 03:45 ti "
+                               "bola cez Discord položená táto otázka: "
+                               "«schváliš merge PR #5?» Užívateľ na ňu "
+                               "teraz odpovedal: «áno»"}}]
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            cap_seq=[self.ACHIEVED_PANE] + self._typed_seq()[1:],
+            backlog_fetch=lambda cwd: 3)
+        self.assertTrue(tmux.typed(), logs)
+        self.assertTrue(any("FALSE-ACHIEVED" in ln for ln in logs), logs)
+
+    def test_re_poke_that_repeats_the_same_question_verbatim_stays_blocked(
+            self):
+        # message-status-marker.md's own re-poke rule: an intervening
+        # machine nudge (never a genuine user answer) that only produces a
+        # turn re-stating the SAME unanswered question must resolve right
+        # back to (A)-BLOCKED, never a false-negative through the nudge's
+        # own transient "user" entry.
+        entries = [marker_entry("set", self.BLOCKED_PAYLOAD),
+                  assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?",
+                                  ts="2026-08-10T03:44:00.000Z"),
+                  {"type": "user", "timestamp": "2026-08-10T03:45:00.000Z",
+                   "message": {"content":
+                               "bounce-backstop: skontroluj prosim "
+                               "otvorene bounce tikety pre tento repo"}},
+                  assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?",
+                                  ts="2026-08-10T03:45:30.000Z")]
+        calls = []
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            backlog_fetch=lambda cwd: calls.append(cwd) or 3)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("(A)-blocked" in ln for ln in logs), logs)
+        self.assertEqual(calls, [])
+
+    def test_a_bare_nudge_with_no_reply_yet_never_unblocks_prematurely(
+            self):
+        # the narrower false-negative shape a hard adversarial review
+        # would target: a watchdog nudge lands as the transcript's NEWEST
+        # entry, with NO subsequent assistant turn re-stating the
+        # question yet -- must stay blocked, never read as "answered".
+        entries = [marker_entry("set", self.BLOCKED_PAYLOAD),
+                  assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+                  {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+                   "message": {"content":
+                               "bounce-backstop: skontroluj prosim "
+                               "otvorene bounce tikety pre tento repo"}}]
+        calls = []
+        tmux, logs = self._go(
+            self.ACHIEVED_PANE, entries=entries,
+            backlog_fetch=lambda cwd: calls.append(cwd) or 3)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("(A)-blocked" in ln for ln in logs), logs)
+        self.assertEqual(calls, [])
+
+
+class TestGoalBlockedOnUnansweredQuestion(unittest.TestCase):
+    """Direct unit coverage of `_goal_blocked_on_unanswered_question`
+    (#350) — the classifier `TestGoalAchievedNeverRearmsWhileBlockedOnAn
+    Answer` (above) exercises through the full `goal_rearm` sweep."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, entries):
+        p = Path(self.tmp.name) / "t.jsonl"
+        with open(p, "w") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
+        return str(p)
+
+    def test_a_genuine_terminal_needs_you_is_blocked(self):
+        p = self._write([assistant_entry(
+            "Rozobral som PR #5.\n\n❓ NEEDS YOU: schváliš merge PR #5?")])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_ask_and_continue_is_not_blocked(self):
+        p = self._write([assistant_entry(
+            "❓ ASKED: schváliš zmenu?\n⏳ WORKING: kontrolujem ďalší balík")])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p), "")
+
+    def test_a_plain_reply_with_no_marker_is_not_blocked(self):
+        p = self._write([assistant_entry("✅ DONE: hotovo")])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p), "")
+
+    def test_a_genuine_newer_reply_releases_the_block(self):
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": {"content": "Áno, schvaľujem."}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p), "")
+
+    def test_a_discord_relayed_reply_also_releases_the_block(self):
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": {"content":
+                         "Odpoveď z Discordu: 2026-08-10 03:45 ti bola "
+                         "cez Discord položená táto otázka: «x» "
+                         "Užívateľ na ňu teraz odpovedal: «áno»"}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p), "")
+
+    def test_a_watchdog_nudge_with_no_reply_yet_stays_blocked(self):
+        # the narrow false-negative window: a machine nudge lands as the
+        # newest entry with no subsequent assistant re-poke yet.
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": {"content":
+                         "bounce-backstop: skontroluj prosim otvorene "
+                         "bounce tikety"}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_a_task_notification_with_no_reply_yet_stays_blocked(self):
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": {"content":
+                         "<task-notification>agent finished"
+                         "</task-notification>"}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_a_tool_result_carrying_entry_is_transparent(self):
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": {"content": [
+                 {"type": "tool_result",
+                  "content": [{"type": "text", "text": "ok"}]}]}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_a_re_poke_after_a_nudge_still_reads_as_blocked(self):
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?",
+                            ts="2026-08-10T03:44:00.000Z"),
+            {"type": "user", "timestamp": "2026-08-10T03:45:00.000Z",
+             "message": {"content":
+                         "bounce-backstop: skontroluj prosim otvorene "
+                         "bounce tikety"}},
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?",
+                            ts="2026-08-10T03:45:30.000Z")])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_an_api_error_entry_is_not_blocked(self):
+        p = self._write([
+            {"type": "assistant", "timestamp": "2026-08-10T03:45:00.000Z",
+             "message": {"id": "m1", "content": "some error text"},
+             "isApiErrorMessage": True}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p), "")
+
+    def test_a_missing_transcript_is_not_blocked(self):
+        self.assertEqual(
+            wd._goal_blocked_on_unanswered_question("/no/such/file.jsonl"),
+            "")
+
+    def test_an_empty_transcript_is_not_blocked(self):
+        p = self._write([])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p), "")
+
+    def test_an_ismeta_entry_with_no_reply_yet_stays_blocked(self):
+        # #350 round-1 review MAJOR -- a CC-injected `isMeta` user entry
+        # (a goal-arm confirmation echo, a resume-injection notice, a
+        # skill-directory listing) carries NO recognisable machine
+        # prefix, so the pre-hardening code read it as a genuine typed
+        # answer the instant it landed as the newest entry -- exactly
+        # the false-negative direction #350 exists to prevent, just
+        # triggered by a different transcript shape than the reported
+        # incident.
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "isMeta": True,
+             "message": {"content": "Session resumed. Loaded N skills."}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_a_compact_continuation_summary_with_no_reply_yet_stays_blocked(self):
+        # #350 round-1 review followup -- a `/compact` continuation
+        # summary is a REAL top-level `user`-typed entry (verified
+        # against real transcripts) that is neither `isMeta` nor a
+        # `<system-reminder>`-wrapped block, so it slipped past every
+        # other transparent check: compaction landing right after a
+        # genuine (A)-blocked stop must never read as "the user
+        # answered".
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": {"content":
+                         "This session is being continued from a "
+                         "previous conversation that ran out of "
+                         "context. The summary below covers the "
+                         "earlier portion of the conversation.\n\n"
+                         "Summary:\n1. Primary Request and Intent:\n"
+                         "..."}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_a_compact_summary_flagged_but_differently_worded_stays_blocked(self):
+        # #350 round-2 review MINOR -- the literal prefix above is CC's
+        # summarizer WORDING and could go silently stale after a future
+        # CC build reworks the preamble; `isCompactSummary` is CC's own
+        # STRUCTURAL marker on the same entries (790/790 real corpus
+        # specimens carry it) and must catch this even when the wording
+        # no longer matches the known prefix at all.
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "isCompactSummary": True,
+             "message": {"content":
+                         "A future CC build's totally reworded compact "
+                         "preamble that shares no words with the old "
+                         "prefix at all."}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+    def test_a_non_dict_message_never_crashes_the_whole_sweep(self):
+        # #350 round-1 review MINOR -- `(entry.get("message") or {})
+        # .get("content")` raises `AttributeError` on a truthy non-dict
+        # `message` (e.g. a bare string); an uncaught exception here
+        # would abort job 20's WHOLE sweep, for every pane, not just the
+        # one carrying the malformed entry. Mirrors `_entry_text`'s own
+        # `isinstance(msg, dict)` guard.
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": "not-a-dict"}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
+
 class TestGoalAchievedNeverAutoResumesAfterAbandonment(GoalRearmBase):
     """#335 P0 -- live-reproduced on simap@subdev: a `/goal` loop that
     legitimately FINISHED (a genuine achieved banner, not a crash) and then
