@@ -10940,6 +10940,22 @@ class TestSshRetryMaxAttemptsValue(TestCase):
         self.assertEqual(airuleset.SSH_RETRY_MAX_ATTEMPTS, 3)
 
 
+class TestSshControlPersistSValue(TestCase):
+    """#358 adversarial-review F1 (MAJOR): 60s was sized as "a few seconds
+    between the deploy call and the soniox call", but those two calls are
+    NOT adjacent -- an account near the front of REMOTE_HOSTS can sit
+    behind up to a dozen other targets' own deploy legs (each up to
+    REMOTE_DEPLOY_TIMEOUT_S) before its own soniox-phase turn arrives.
+    1800s matches REMOTE_DEPLOY_TIMEOUT_S itself. Pinned as its own
+    literal-value lock, independent of any test that merely references
+    the constant dynamically."""
+
+    def test_persist_window_covers_a_full_remote_deploy_timeout(self):
+        self.assertEqual(airuleset.SSH_CONTROL_PERSIST_S,
+                          airuleset.REMOTE_DEPLOY_TIMEOUT_S)
+        self.assertEqual(airuleset.SSH_CONTROL_PERSIST_S, 1800)
+
+
 class TestSshRetryBackoffS(TestCase):
     """`AIRULESET_SSH_RETRY_BACKOFF_S` clamped to [1, 300] -- an unclamped
     0/negative value would defeat the backoff entirely (the same class of

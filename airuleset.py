@@ -8366,6 +8366,7 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     this parameter exists to remove; it never touches an account that has
     not already, independently, failed auth THIS run."""
     import subprocess
+    import time
     run = run or subprocess.run
     control_opts = list(control_opts or [])
     targets = [h for h in (hosts if hosts is not None else REMOTE_HOSTS)
@@ -8426,13 +8427,41 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
             f"{remote['user']}@{remote['host']}",
             "umask 077; cat > ~/.soniox.env && "
             "chmod 600 ~/.soniox.env"]
-        try:
-            r = run(argv, input=line + "\n", capture_output=True,
-                    text=True, timeout=20)
-        except Exception as e:
+        # #358 adversarial-review F2 (MAJOR): this call used to be a
+        # single, un-retried attempt -- a connection-closed/reset drop
+        # here permanently lost that account's soniox key, the exact hole
+        # cmd_push()'s own deploy-loop retry exists to close, one
+        # function over. Same bounded target-level retry shape as that
+        # loop: only a genuine ssh connection-establishment failure
+        # (never an ordinary write failure) gets retried, up to
+        # SSH_RETRY_MAX_ATTEMPTS total attempts, with the SAME
+        # env-tunable backoff.
+        r = None
+        exc = None
+        for attempt in range(1, SSH_RETRY_MAX_ATTEMPTS + 1):
+            exc = None
+            try:
+                r = run(argv, input=line + "\n", capture_output=True,
+                        text=True, timeout=20)
+            except Exception as e:
+                exc = e
+                break
+            if r.returncode == 0:
+                break
+            if (attempt >= SSH_RETRY_MAX_ATTEMPTS
+                    or not _is_ssh_transient_failure(r.returncode,
+                                                      r.stderr)):
+                break
+            backoff = _ssh_retry_backoff_s()
+            print(f"  transient ssh failure delivering soniox key to "
+                  f"{remote['name']} (attempt {attempt}/"
+                  f"{SSH_RETRY_MAX_ATTEMPTS}) — retrying in {backoff}s: "
+                  f"{r.stderr.strip()[:200]}")
+            time.sleep(backoff)
+        if exc is not None:
             print("  ⚠ soniox key delivery to %s failed: %s"
-                  % (remote["name"], e), file=sys.stderr)
-            failed.append((remote["name"], repr(e)))
+                  % (remote["name"], exc), file=sys.stderr)
+            failed.append((remote["name"], repr(exc)))
             continue
         if r.returncode != 0:
             print("  ⚠ soniox key delivery to %s failed (rc=%d): %s"
@@ -8493,9 +8522,28 @@ def _is_ssh_auth_failure(returncode, stderr):
 # `_is_ssh_auth_failure` above, on purpose: it is the same false-positive
 # class (a REMOTE command's own stderr must never be misread as ssh's OWN
 # connection-level failure).
+#
+# #358 adversarial-review F5 (live-reproduced with a network-free
+# ProxyCommand trick against the real /usr/bin/ssh binary): two further
+# real client-only shapes were originally MISSED --
+# `ssh_dispatch_run_fatal: Connection to <host> port <port>: Broken pipe`
+# (a proxy that sends a banner then drops -- `ssh_dispatch_run_fatal:` is
+# the same class of internal log tag as the two `*_exchange_identification:`
+# prefixes, confirmed via `strings` on the real binary) and a bare
+# `Connection reset by <host> port <port>` line (confirmed via `strings`
+# to be `sshpkt_vfatal`'s own ECONNRESET message, the same shape as the
+# already-covered "closed by" line but for the reset case). Both are now
+# covered. Honest residual: `ssh_dispatch_run_fatal:` is not exclusively a
+# PRE-auth message -- unlike the two `*_exchange_identification:` prefixes
+# (which only ever fire before any remote shell exists), it can in
+# principle also fire on a MID-session drop. That is still safe here: the
+# retried remote command (`git pull --ff-only && ... install`, or the
+# soniox `cat > ~/.soniox.env`) is idempotent, so a retry after a
+# mid-session drop just repeats a safe operation, never double-applies one.
 _SSH_TRANSIENT_RX = re.compile(
-    r"(?m)^(?:kex_exchange_identification|ssh_exchange_identification):"
-    r"|^Connection closed by \S+ port \d+\s*$"
+    r"(?m)^(?:kex_exchange_identification|ssh_exchange_identification|"
+    r"ssh_dispatch_run_fatal):"
+    r"|^Connection (?:closed|reset) by \S+ port \d+\s*$"
 )
 
 # Bounded: at most this many total attempts (initial + retries) per target.
@@ -8507,29 +8555,47 @@ _SSH_TRANSIENT_RX = re.compile(
 # between attempts needs to be (see `_ssh_retry_backoff_s`'s own docstring).
 SSH_RETRY_MAX_ATTEMPTS = 3
 
-# ControlPersist window for a target's shared ssh master connection -- long
-# enough to cover the gap between the deploy loop's own call for an account
-# and the LATER soniox-key call to the same account (step "3b", a few
-# seconds to low tens of seconds away in the same run), short enough that an
-# orphaned master (e.g. cleanup racing it) self-terminates promptly rather
-# than lingering indefinitely.
-SSH_CONTROL_PERSIST_S = 60
+# ControlPersist window for a target's shared ssh master connection.
+#
+# #358 adversarial-review F1 (MAJOR, measured against the real
+# REMOTE_HOSTS list): 60s was sized as "a few seconds to low tens of
+# seconds" between an account's deploy call and its LATER soniox-key call
+# -- but those two calls are NOT adjacent. montalu@subdev sits at deploy-
+# loop index 2 and is also soniox-phase's FIRST target, so its own real
+# gap is TEN complete `git pull --ff-only && python3 airuleset.py install`
+# runs for every OTHER account still queued in the deploy loop -- a
+# budget this file's own REMOTE_DEPLOY_TIMEOUT_S sizes at up to 1560s
+# EACH for a slow first-time install (apt-get + claude-CLI curl +
+# caveman/managed-plugin marketplace installs + Playwright browsers).
+# 60s expired long before that gap in the realistic slow-account case,
+# making the multiplexing structurally unable to help the account it was
+# sized around. 1800s matches REMOTE_DEPLOY_TIMEOUT_S itself -- a natural,
+# already-justified ceiling -- and costs nothing extra: the sockets live
+# under a 0700 per-run temp dir the `finally` block deletes regardless of
+# how long the underlying master process itself takes to notice and exit,
+# so a longer window only ever leaves an IDLE, UNREACHABLE master
+# process a little longer, never anything a caller can observe.
+SSH_CONTROL_PERSIST_S = 1800
 
 
 def _is_ssh_transient_failure(returncode, stderr):
     """True only for ssh's OWN connection-establishment failure -- a
     MaxStartups-pool-exhaustion drop mid-handshake (a random per-connection
     event, never a per-source ban -- see the #358 root-cause comment above
-    this function), the two live #358 incident signatures: a line starting
-    `kex_exchange_identification:` /
-    `ssh_exchange_identification:` (openssh's own internal log tags,
-    printed only by the CLIENT before any remote shell exists -- a remote
-    command's own stderr structurally cannot reproduce them) or a bare
-    `Connection closed by <host> port <port>` line with nothing else on
-    it. Requiring rc==255 (mirrors `_is_ssh_auth_failure`'s own
-    discriminator) excludes an ordinary failed remote command (a bad
-    `git pull`, a crashing `install`), which never exits via ssh's own
-    255 connection-failure path."""
+    this function). Matches a line starting `kex_exchange_identification:` /
+    `ssh_exchange_identification:` / `ssh_dispatch_run_fatal:` (openssh's
+    own internal log tags -- a remote command's own stderr structurally
+    cannot reproduce them) or a bare `Connection closed|reset by <host>
+    port <port>` line with nothing else on it. Requiring rc==255 (mirrors
+    `_is_ssh_auth_failure`'s own discriminator) excludes an ordinary
+    failed remote command (a bad `git pull`, a crashing `install`), which
+    never exits via ssh's own 255 connection-failure path.
+
+    NOT claimed: that every matched message can only ever appear BEFORE a
+    remote shell exists (`ssh_dispatch_run_fatal:` is a documented
+    exception -- see the classifier regex's own comment) -- only that
+    every matched message is genuinely ssh-client-internal, never text a
+    remote command could produce on its own."""
     return returncode == 255 and bool(_SSH_TRANSIENT_RX.search(stderr or ""))
 
 
@@ -8553,7 +8619,20 @@ def _ssh_retry_backoff_s():
     the default (about 2 min) -- still short enough that one flaky target
     never meaningfully delays the whole semi-foreground wave, and a
     genuinely exhausted target is reported loudly with the exact manual
-    re-run command instead of silently vanishing from it."""
+    re-run command instead of silently vanishing from it.
+
+    Stated explicitly for the WHOLE wave, not just one target (#358
+    adversarial-review F7): retries do NOT meaningfully worsen the pool
+    saturation (spread >=60s apart per target, a tiny fraction of the
+    126k+ ambient bruteforce attempts already hitting gk), but the wave's
+    own worst-case wall clock is real and grows with REMOTE_HOSTS' size --
+    at today's 13 entries, EVERY target hitting a transient failure once
+    adds up to `13 * 2 * 60s` = ~26 minutes at the default backoff, or up
+    to `13 * 2 * 300s` = ~130 minutes at the `[1, 300]` clamp ceiling if an
+    operator raises the override. This is the honest worst case, not the
+    expected one -- the revised root cause means most retries either land
+    on their first extra attempt or fail fast, not spend their whole
+    backoff every time."""
     raw = os.environ.get("AIRULESET_SSH_RETRY_BACKOFF_S", "")
     try:
         val = int(raw)
