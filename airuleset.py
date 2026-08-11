@@ -2476,6 +2476,15 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     ]
     live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
     live_argvs += [["tmux"] + argv for argv in TMUX_POPUP_BIND_ARGVS]
+    # #376 CLEANUP: an ALREADY-RUNNING server that was live-bound before
+    # this fix deployed still has S-F1/S-DC registered -- rewriting the
+    # CONF file (above) does not retroactively unbind an already-live
+    # key-table entry, and `live_argvs` above only ever ADDS bindings, it
+    # never removes stale ones. `unbind-key` on a key that was never
+    # bound is a documented tmux no-op (rc 0), so this is safe to run
+    # unconditionally on every box, whether or not it ever had them.
+    live_argvs += [["tmux", "unbind-key", "-n", "S-F1"],
+                   ["tmux", "unbind-key", "-n", "S-DC"]]
     for argv in live_argvs:
         try:
             result = runner(argv)
