@@ -3679,6 +3679,202 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
     return True
 
 
+# --------------------------------------------------------------------------- #
+# #372 — GENERIC JANITOR backstop. Root-cause (the multi-line placeholder
+# regex, fixed above) closes TODAY's specific trigger, but the user's own
+# binding acceptance criteria demand more: an invariant that watchdog NEVER
+# leaves its own typed text in a pane across a sweep boundary (submitted +
+# verified / fully undone / a loud one-time ping — never silent), a GENERIC
+# backstop that self-heals an UNKNOWN future failure shape (not just today's
+# two evidenced ones), and a REACHABLE exit for the "stash occupied"
+# deadlock. This is deliberately keyed on OBSERVING our own recognizable
+# content sitting stuck — never on a persisted "delivery in flight" marker
+# threaded through every one of jobs 7/9/14/20's own call sites (a much
+# larger, riskier signature change to a primitive already reviewed 5 times)
+# — so it works for ANY caller of `deliver_with_stash`/`send_continue`
+# without touching their signatures at all. Hosted in job 20 (`goal_rearm`,
+# below) because it is the one job that already sweeps every candidate pane
+# every cycle, per this ticket's own FREEZE-compatible design (extend an
+# existing job, not a new one).
+# --------------------------------------------------------------------------- #
+
+# The two payload shapes THIS codebase's own delivery jobs are known to
+# type (#372's two forensically-confirmed incidents): a `/goal <condition>`
+# re-arm (jobs 9/20) and a bare `/compact` request (job 14, `COMPACT_TEXT`).
+# Used ONLY to recognize a box's content as PROVABLY our own — never to
+# guess about a genuine foreign draft that merely starts with a slash.
+_JANITOR_OWN_PREFIXES = ("/goal ", "/compact")
+
+JANITOR_CLEAR_MAX_ITER = 25       # bounds the observed-state clear loop
+JANITOR_CLEAR_BATCH_MAX = 200     # per-iteration backspace batch, sized to
+                                  # the CURRENTLY OBSERVED remaining content
+                                  # -- never a blind `len(text)`-sized single
+                                  # burst (#372's own root cause: exactly
+                                  # that assumption left a box
+                                  # "typed-NOT-undone" in production,
+                                  # guessing at a placeholder's true length
+                                  # instead of reading it)
+JANITOR_CLEAR_SETTLE_S = 0.3
+
+
+def _looks_like_own_payload(text):
+    """#372 — True when `text` starts with one of THIS codebase's own
+    recognized slash-command payloads (`_JANITOR_OWN_PREFIXES`)."""
+    return bool(text) and text.startswith(_JANITOR_OWN_PREFIXES)
+
+
+def _looks_like_own_stuck_content(itext):
+    """#372 — True when a pane's CURRENT input-box content can ONLY be OUR
+    OWN stuck delivery: either Claude Code's own collapsed-paste placeholder
+    shape (only a long single-line `send-keys -l` burst ever renders this —
+    a human pasting something that happens to render identically is a far
+    rarer coincidence than a routine automated delivery) or a literal,
+    uncollapsed KNOWN own-payload prefix (`_looks_like_own_payload`).
+    Ownership is never guessed from resemblance alone; anything else
+    (including a genuinely truncated/partial own payload with no
+    recognizable prefix) is left completely untouched — the janitor would
+    rather miss a recoverable case than risk a genuine foreign draft."""
+    if not itext:
+        return False
+    return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip())) \
+        or _looks_like_own_payload(itext)
+
+
+def _janitor_clear_box(pid, run, sleep_fn, log_fn):
+    """#372 — clear the pane's CURRENT input-box content down to bare.
+
+    ONE Escape first — a short slash command (`/compact`) can leave Claude
+    Code's own command-palette MENU overlay open after typing (the THIRD
+    #372 incident, forensically confirmed: the box held `/compact` with an
+    open menu, which confused the ordinary verify read enough that neither
+    tail-match nor the placeholder regex recognized the landed type) — a
+    single Escape closes any such overlay before the clear loop begins.
+    NEVER a second Escape (issue #35: a rapid double-Escape into a pane
+    holding a draft PERMANENTLY DELETES it — the exact data loss this
+    whole mechanism exists to prevent).
+
+    Then an ITERATIVE, OBSERVED-STATE-DRIVEN backspace loop: each batch is
+    sized to the length ACTUALLY SEEN this iteration (re-captured every
+    time), never assumed from a remembered/source length — the #372 root
+    cause was `len(payload)` (~3800) backspaces against a box that really
+    held a ~26-char placeholder. Converges correctly regardless of whether
+    Claude Code clears a collapsed placeholder atomically (bare after the
+    first small batch) or character-by-character (several batches).
+    Bounded by `JANITOR_CLEAR_MAX_ITER`; returns True only once a fresh
+    capture confirms bare."""
+    sleep_fn = sleep_fn or time.sleep
+    run(["tmux", "send-keys", "-t", pid, "Escape"])
+    for _ in range(JANITOR_CLEAR_MAX_ITER):
+        cap = capture_pane(pid, run, lines=30)
+        cur = _input_line_text(cap)
+        if cur == "":
+            return True
+        batch = min(len(cur), JANITOR_CLEAR_BATCH_MAX)
+        run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * batch)
+        sleep_fn(JANITOR_CLEAR_SETTLE_S)
+    log_fn("janitor: clear did not converge within %d iterations"
+           % JANITOR_CLEAR_MAX_ITER)
+    return False
+
+
+def _janitor_pop_stash(pid, run, log_fn):
+    """#372 — the box is confirmed bare and the single stash slot is
+    occupied: `C-s` always safely restores a parked draft onto a bare box
+    (the identical operation Claude Code's own post-delivery auto-restore
+    performs). Returns True only once a fresh capture shows non-empty
+    content (the restored draft) — READ BACK, never asserted (the #134
+    "a log line that claims a delivery it never checked" lesson)."""
+    run(["tmux", "send-keys", "-t", pid, "C-s"])
+    cap = capture_pane(pid, run, lines=30)
+    if _input_line_text(cap):
+        return True
+    log_fn("janitor: stash pop unverified")
+    return False
+
+
+def _goal_janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
+                          dry_run, sleep_fn):
+    """#372 — job 20's GENERIC janitor (see the section comment above).
+    Mutates `rec` (the caller persists it); returns log lines.
+
+    Runs at the START of every pane's sweep in this job, BEFORE any
+    delivery attempt of its own (job 20's or a sibling job's) gets a
+    chance to hit the SAME stuck state and abort again — this is what
+    makes the "stash occupied" deadlock's exit REACHABLE (criterion 3):
+    at most one sweep's delay, never forever.
+
+    Two independently recoverable shapes, both provably safe (never a
+    guess about a genuine foreign draft):
+      * the STASH SLOT is occupied (`STASH_MARKER` present) — the visible
+        box is either already bare (an earlier undo cleared it but the
+        pop was never verified) or holds our own recognizable stuck
+        content (`_looks_like_own_stuck_content`) — clear it if needed,
+        then pop the parked draft back.
+      * NO stash is involved at all, but the visible box directly holds
+        our own recognizable stuck content — job 14's no-draft `/compact`
+        path (`send_continue`) never touches the stash slot, so this is
+        the ONLY way that specific incident's stuck state is ever
+        recovered. Just clear it to bare.
+    A box holding anything else is left COMPLETELY untouched either way —
+    ownership is never guessed from resemblance.
+
+    Bounded: on a recovery FAILURE, ping the owner ONCE (deduped via
+    `rec['janitor_pinged']`, cleared the moment a later sweep observes a
+    clean pane again) and stop attempting the ping every sweep — never a
+    silent, indefinite retry-forever (criterion 1c)."""
+    logs = []
+    itext = _input_line_text(captured)
+    occupied = STASH_MARKER in (captured or "")
+    if occupied:
+        if itext == "":
+            action = "pop"
+        elif _looks_like_own_stuck_content(itext):
+            action = "clear-and-pop"
+        else:
+            return logs                     # a genuine foreign occupant
+    elif _looks_like_own_stuck_content(itext):
+        action = "clear"
+    else:
+        return logs                         # nothing recognizable stuck
+
+    if dry_run:
+        logs.append("READY (janitor) %s -> would attempt %s recovery"
+                    % (loc, action))
+        return logs
+
+    def _log(reason):
+        logs.append(reason)
+
+    if action == "pop":
+        recovered = _janitor_pop_stash(pid, run, _log)
+    elif action == "clear-and-pop":
+        recovered = (_janitor_clear_box(pid, run, sleep_fn, _log)
+                    and _janitor_pop_stash(pid, run, _log))
+    else:                                    # "clear"
+        recovered = _janitor_clear_box(pid, run, sleep_fn, _log)
+
+    if recovered:
+        rec["janitor_pinged"] = False
+        logs.append("RECOVERED (janitor) %s -> stuck own delivery cleared"
+                    % loc)
+    else:
+        if not rec.get("janitor_pinged"):
+            rec["janitor_pinged"] = True
+            if send_fn is not None:
+                from notify import stream_redirect   # #212
+                send_fn(
+                    "\U0001f6a8 **%s** — watchdog má vlastný neodoslaný "
+                    "text uviaznutý v pane (%s) a nedokázal ho automaticky "
+                    "vyčistiť. Skontroluj a vybav prosím ručne."
+                    % (project_label(cwd), loc),
+                    owner=stream_redirect(pane_owner(pid, run)) or None,
+                    dedup_key="janitor-stuck:%s:%s" % (cwd, loc),
+                    dry_run=dry_run)
+        logs.append("ESCALATED (janitor) %s -> recovery failed, pinged"
+                    % loc)
+    return logs
+
+
 def _pane_location(pid, run):
     """Best-effort 'session:window.pane' for a pane — a job-10 wedge ping
     that named no window was a live complaint ('nevidim nikde ziaden
@@ -12508,6 +12704,22 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         # job exists for (live, 2026-07-26). CC redraws its own screen, so the
         # viewport is always the CURRENT session's content.
         captured = run(["tmux", "capture-pane", "-p", "-t", pid]) or ""
+        # --- #372: the GENERIC JANITOR runs FIRST, before anything else in
+        # this loop (including `armed = pane_goal_armed(...)` below) gets a
+        # chance to act on — or be confused by — a pane already stuck
+        # holding a watchdog-typed delivery. See its own section comment
+        # (above `_goal_janitor_recover`) for why this is hosted here.
+        loc = _pane_location(pid, run) or pid
+        jlogs = _goal_janitor_recover(run, rec, pid, cwd, captured, loc,
+                                      send_fn, dry_run, sleep_fn)
+        if jlogs:
+            logs += jlogs
+            recs[sid] = rec
+            _save()
+            # A pane the janitor just acted on (recovered or escalated) is
+            # re-read fresh next sweep, exactly like every other "not safe
+            # to act on further this cycle" outcome in this loop.
+            continue
         armed = pane_goal_armed(captured)
         if armed is None:
             continue                       # undeterminable — never guess
