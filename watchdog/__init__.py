@@ -11262,6 +11262,20 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
 # --------------------------------------------------------------------------- #
 
 GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
+# #393 -- the real indicator's own header render is SHORT and TIGHT: the
+# glyph, "/goal", the word "active", and an optional "(Nh)"/"(Nm)" age
+# suffix, nothing else. A bare `.startswith(GOAL_INDICATOR)` check also
+# matches a rendered CONTINUATION row of ordinary word-wrapped assistant
+# prose that happens to start with the same glyph+word followed by real
+# trailing sentence text (a genuine live incident: "◎ /goal active, right
+# where the earlier bug expected only chrome." wrapped as the SECOND line
+# of a paragraph). Bounding the tail to a short run of spaces/word chars/
+# parens (no `,`/`.`/other punctuation) accepts every real render
+# ("active", "active (2h)") while rejecting a wrapped-prose continuation,
+# whose very next character after the glyph+word is genuine sentence
+# punctuation.
+_GOAL_HEADER_INDICATOR_RX = re.compile(
+    r"^" + re.escape(GOAL_INDICATOR) + r"[ \w()]{0,40}$")
 GOAL_ACHIEVED_MARKER = "Goal achieved"   # CC's own completion line, printed
                                     # into the CONVERSATION (never persisted
                                     # to the transcript) when the evaluator
@@ -12235,12 +12249,17 @@ def pane_goal_armed(captured):
     # footer this function scans). Confirmed live 2026-08-11 on 3 armed panes
     # (camera-box, airuleset, forestshop). The real indicator line, stripped,
     # STARTS WITH the indicator (right-aligned, alone on its line); a
-    # conversation MENTION has it embedded mid-prose, so `.startswith` excludes
-    # it, and the 3-line bound keeps the search inside the box header, never
-    # reaching the conversation. Placed here (only when the footer path would
+    # conversation MENTION has it embedded mid-prose. #393 tightened the
+    # match from a bare `.startswith` to `_GOAL_HEADER_INDICATOR_RX` --  a
+    # wrapped-prose CONTINUATION row can also start with the glyph+word
+    # (unlike a mid-prose mention, which never starts a rendered line with
+    # it at all), so the tail must additionally look like the real render
+    # (short, no sentence punctuation) rather than trailing prose. The
+    # 3-line bound keeps the search inside the box header, never reaching
+    # the conversation. Placed here (only when the footer path would
     # otherwise say False) so every #383 `None` branch above is preserved.
     header = lines[max(0, idx - 3):idx]
-    if any(ln.strip().startswith(GOAL_INDICATOR) for ln in header):
+    if any(_GOAL_HEADER_INDICATOR_RX.match(ln.strip()) for ln in header):
         return True
     return False
 
