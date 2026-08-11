@@ -121,6 +121,24 @@ MANAGED_MODEL = "claude-opus-5[1m]"
 # more, and the concurrency cap still bounds instantaneous load either way.
 MANAGED_MAX_SUBAGENTS_PER_SESSION = "1000"
 
+# #376: Claude Code's own installed binary (2.1.227) documents a NATIVE
+# transcript-retention auto-cleanup in its Zod settings schema --
+# `cleanupPeriodDays:it().int().positive().optional().describe("Number of
+# days to retain chat transcripts before automatic cleanup (default: 30).
+# ...")` -- confirmed by reading the binary directly, not guessed. A box
+# with no explicit override (a fresh sub-dev stream account, e.g. david2,
+# gatekeeper-provisioned 2026-08-08) is exposed to that 30-day default;
+# dev1 only avoids it because someone set 365 manually, outside airuleset,
+# which this repo's own history has zero record of (never airuleset-
+# managed, so it would never propagate to any other box). The VALUE is CC's
+# own suggested one, quoted verbatim from its own "too_small" validation
+# tip string ("cleanupPeriodDays must be at least 1. ... set a large number
+# (e.g. 3650 for ~10 years) ...") -- never an invented number. Same
+# unconditional-managed-default treatment as every other key in
+# apply_managed_settings_defaults: a managed box always gets this on the
+# next install, even one already carrying a smaller manual value.
+MANAGED_CLEANUP_PERIOD_DAYS = 3650
+
 # REVERTED (2026-07-25 correction batch, same day it was added): a managed
 # `MANAGED_AUTOCOMPACT_WINDOW = 300000` ("krok 1c") briefly capped the
 # auto-compact threshold. The user's call, which overrides that decision:
@@ -2734,6 +2752,13 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       feature that also needs an `env` key does not silently clobber this
       one (or vice versa).
 
+    - `cleanupPeriodDays = MANAGED_CLEANUP_PERIOD_DAYS` (#376) overrides
+      Claude Code's OWN native transcript-retention auto-cleanup (default
+      30 days when unset -- see MANAGED_CLEANUP_PERIOD_DAYS's own comment
+      for the confirmed source) so a fresh box never silently loses chat
+      history to a default the user never configured. Same unconditional-
+      managed-default treatment as every other key here.
+
     Idempotent; preserves all other keys."""
     result = dict(settings)
     result["effortLevel"] = MANAGED_EFFORT_LEVEL
@@ -2761,6 +2786,7 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     existing_env = result.get("env")
     result["env"] = dict(existing_env) if isinstance(existing_env, dict) else {}
     result["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = MANAGED_MAX_SUBAGENTS_PER_SESSION
+    result["cleanupPeriodDays"] = MANAGED_CLEANUP_PERIOD_DAYS
     return result
 
 
