@@ -6973,7 +6973,7 @@ def cmd_tickets_status(args):
                 quals, failed = [], True
             for qual in quals:
                 raw = _out(["gh", "issue", "list", "--state", "open", "--search",
-                            "-label:autopilot-skip " + qual, "-L", "200",
+                            AUTOPILOT_SKIP_EXCL + " " + qual, "-L", "200",
                             "--json", "number,labels"], root)
                 try:
                     for x in json.loads(raw):
@@ -7046,8 +7046,8 @@ def cmd_tickets_status(args):
                     quals[0].startswith("label:stream:"):
                 user = _current_user()
                 raw = _out(["gh", "issue", "list", "--state", "open", "--search",
-                            "-label:autopilot-skip "
-                            "label:needs-gatekeeper,ready-for-review",
+                            AUTOPILOT_SKIP_EXCL +
+                            " label:needs-gatekeeper,ready-for-review",
                             "-L", "200", "--json", "number,labels"], root)
                 # #191 m1: a failed candidate query (or a failed
                 # _last_origin_owner call below) degrades to "recover
@@ -7188,7 +7188,7 @@ def cmd_tickets_status(args):
             # population was largest. 1000 comfortably exceeds any real
             # backlog size seen on a managed repo.
             n = _out(["gh", "issue", "list", "--state", "open", "--search",
-                      "-label:autopilot-skip " + excl, "-L", "1000",
+                      AUTOPILOT_SKIP_EXCL + " " + excl, "-L", "1000",
                       "--json", "number", "-q", "length"], root)
             try:
                 entry["open"] = int(n)
@@ -7203,7 +7203,7 @@ def cmd_tickets_status(args):
             # reasoning that already keeps `gk` visible at 0 applies with far
             # more force here. total(non-skip, whole repo) - core = streamy.
             t = _out(["gh", "issue", "list", "--state", "open", "--search",
-                      "-label:autopilot-skip", "-L", "1000",
+                      AUTOPILOT_SKIP_EXCL, "-L", "1000",
                       "--json", "number", "-q", "length"], root)
             try:
                 total_open = int(t)
@@ -7945,7 +7945,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
                 slice_quals, failed = [], True
             for qual in slice_quals:
                 raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
-                              "--search", "-label:autopilot-skip " + qual,
+                              "--search", AUTOPILOT_SKIP_EXCL + " " + qual,
                               "-L", "200", "--json", "number")
                 try:
                     nums.update(x["number"] for x in json.loads(raw))
@@ -7964,7 +7964,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
             # arithmetic that could zero out the footer's `streamy` bucket
             # also understated `remaining` here.
             rem_raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
-                              "--search", "-label:autopilot-skip " + excl,
+                              "--search", AUTOPILOT_SKIP_EXCL + " " + excl,
                               "-L", "1000", "--json", "number", "-q", "length",
                               timeout=20)
             try:
@@ -10158,6 +10158,37 @@ class SliceUnresolved(Exception):
     wrong number). #181 I-2."""
 
 
+# The label a stream applies to a PERMANENT ops-channel ticket — a
+# self-declared "this issue never auto-closes" channel (odoo-erp #1861:
+# "[TRVALÝ OPS KANÁL — NEZATVÁRAŤ] erp-test-* teardown/recreate/refresh";
+# #3037: a snapshot-retention alert log). It is never workable /autopilot
+# backlog, no matter how long it stays open (#362).
+OPS_CHANNEL_LABEL = "ops-channel"
+
+# The qualifying-set EXCLUSION fragment shared by every open-issue search in
+# this file that must never surface a manually-skipped OR a PERMANENT
+# ops-channel ticket as workable backlog — `core-quals`/`slice-quals` (the
+# `/goal` stop-proof), the footer's own counts (`cmd_tickets_status`), and
+# the Discord run-card's `remaining` count all AND this onto their base
+# query, so none of them can ever disagree about which population is
+# "qualifying" (#362, same tier as the pre-existing `autopilot-skip`
+# exclusion — before this fix, `core-quals --count` could NEVER reach `0`
+# while a permanent ops-channel ticket sat open, and the /autopilot loop
+# dispatched a full worker onto one that found "nothing to do").
+#
+# Deliberately NOT extended to the two POSITIVE `label:autopilot-skip`
+# "skipped" bucket queries (`cmd_tickets_status`'s own `entry["skipped"]`) —
+# that bucket answers a DIFFERENT question ("how many of the qualifying
+# tickets are also explicitly skip-labelled"), not "the qualifying set"
+# itself, and an ops-channel ticket without the skip label already never
+# appears there. Deliberately NOT rendered as its own statusline bucket
+# either (documented-invisible instead) — #313 is a direct, repeated user
+# request to SIMPLIFY the footer ("counter chaos"), and a permanent,
+# rarely-applied label is exactly the kind of population a new bucket would
+# be noise for.
+AUTOPILOT_SKIP_EXCL = "-label:autopilot-skip -label:%s" % OPS_CHANNEL_LABEL
+
+
 def _core_search_excl():
     """The full-authority CORE slice's exclusion fragment: every REDUCED-
     authority sub-dev stream's own `stream:<user>` label, so the footer
@@ -10953,7 +10984,7 @@ def cmd_slice_quals(args):
         return
 
     extra = getattr(args, "extra", None)
-    base = "-label:autopilot-skip" + ((" " + extra) if extra else "")
+    base = AUTOPILOT_SKIP_EXCL + ((" " + extra) if extra else "")
     # -L 1000, matching core-quals (#181 M-2): a single population can only
     # be UNDER-counted by a clamp, never zeroed — but the documented
     # "0 = slice empty" contract must not silently cap either.
@@ -11059,7 +11090,7 @@ def cmd_core_quals(args):
         # query, the exact whole-repo never-stops shape #181 rejected
         # (adversarial review of #307).
         extra = extra.strip() or None
-    base = "-label:autopilot-skip" + ((" " + extra) if extra else "")
+    base = AUTOPILOT_SKIP_EXCL + ((" " + extra) if extra else "")
     search_quals = quals
     if extra:
         # #307: `prio:bounce` is no longer one of MAINTAINER_ACTION_LABELS,

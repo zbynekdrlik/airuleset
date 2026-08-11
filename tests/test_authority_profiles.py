@@ -543,6 +543,84 @@ class TestRunCardRemainingScopedToStream(TestCase):
         self.assertIsNotNone(m, captured["b"])
         self.assertEqual(m.group(1), "2", captured["b"])   # slice, NOT 26
 
+    def test_reduced_authority_remaining_excludes_ops_channel(self):
+        # #362 review: the reduced-authority "remaining" queries (both the
+        # per-qual slice loop and the origin-recovery candidates query, one
+        # frame up in cmd_tickets_status) must AND -label:ops-channel onto
+        # the same base as -label:autopilot-skip. #4 below carries BOTH
+        # assignee:@me and author:@me AND ops-channel -- if the exclusion is
+        # ever dropped from the search string the fake reverts to the
+        # inflated (assignee/author-only) population, so this fails against
+        # a mutant that removes AUTOPILOT_SKIP_EXCL's ops-channel half.
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "view" in j:
+                return "T"
+            if "-label:ops-channel" in j and "assignee:@me" in j:
+                return '[{"number":1}]'
+            if "assignee:@me" in j:
+                return '[{"number":1},{"number":4}]'
+            if "-label:ops-channel" in j and "author:@me" in j:
+                return '[{"number":2}]'
+            if "author:@me" in j:
+                return '[{"number":2},{"number":4}]'
+            if "label:stream:" in j:
+                return "[]"
+            return "26"
+
+        captured = {}
+        with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+            with mk.patch.object(airuleset, "resolve_authority",
+                                 return_value="fork-no-merge"):
+                with mk.patch.object(airuleset, "_gh_login",
+                                     return_value="kvaskodev"):
+                    with mk.patch("notify.send",
+                                  side_effect=lambda body, **k: (
+                                      captured.setdefault("b", body),
+                                      "sent")[1]):
+                        airuleset.cmd_notify(self._args())
+        import re
+        m = re.search(r"ostáva (\d+)", captured["b"])
+        self.assertIsNotNone(m, captured["b"])
+        self.assertEqual(
+            m.group(1), "2",
+            "ops-channel ticket #4 leaked into the reduced-authority "
+            "'remaining' count -- body: %r" % captured["b"])
+
+    def test_full_authority_remaining_excludes_ops_channel(self):
+        # #362 review: the full-authority "remaining" (core-scoped) query
+        # must ALSO AND -label:ops-channel onto its search. Without it, the
+        # count would read the inflated whole-core figure (5 here); with it,
+        # the correctly-scoped 2.
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "view" in j:
+                return "T"
+            if "-label:ops-channel" in j:
+                return "2"
+            return "5"
+
+        captured = {}
+        with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+            with mk.patch.object(airuleset, "resolve_authority",
+                                 return_value="full"):
+                with mk.patch("notify.send",
+                              side_effect=lambda body, **k: (
+                                  captured.setdefault("b", body),
+                                  "sent")[1]):
+                    airuleset.cmd_notify(self._args())
+        import re
+        m = re.search(r"ostáva (\d+)", captured["b"])
+        self.assertIsNotNone(m, captured["b"])
+        self.assertEqual(
+            m.group(1), "2",
+            "the full-authority core-scoped 'remaining' count did not "
+            "exclude ops-channel -- body: %r" % captured["b"])
+
 
 class TestSliceQualsIsTheOneSliceDefinition(TestCase):
     """#181: montalu@subdev's armed /goal declared the backlog EMPTY (its own
@@ -1097,8 +1175,11 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
             "label:ready-for-review": set(),
         })
         self.assertEqual(out.strip(), "1")
+        # #362: the "bare" shape is now AUTOPILOT_SKIP_EXCL (autopilot-skip
+        # + ops-channel), never the plain literal alone — checking against
+        # the shared constant keeps this a real (non-vacuous) assertion.
         bare = [s for s in searches
-                if s.strip() == "-label:autopilot-skip"]
+                if s.strip() == airuleset.AUTOPILOT_SKIP_EXCL]
         self.assertEqual(
             bare, [],
             "a bare whole-repo query is back — that is the never-stops "
@@ -1119,15 +1200,17 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
         AND) so that coverage survives the correction."""
         _, searches = self._run(count=False, list=True,
                                 extra="label:prio:bounce")
-        self.assertIn("-label:autopilot-skip label:prio:bounce", searches)
+        self.assertIn(
+            airuleset.AUTOPILOT_SKIP_EXCL + " label:prio:bounce", searches)
 
     def test_whitespace_only_extra_never_leaks_the_bare_whole_repo_query(self):
         """Adversarial review of #307: `extra=" "` is truthy, so an
         unstripped check would still take the bare-extra branch and union in
-        a plain `-label:autopilot-skip` query -- the exact whole-repo
+        a plain AUTOPILOT_SKIP_EXCL query -- the exact whole-repo
         never-stops shape #181 rejected."""
         _, searches = self._run(count=False, list=True, extra="   ")
-        bare = [s for s in searches if s.strip() == "-label:autopilot-skip"]
+        bare = [s for s in searches
+                if s.strip() == airuleset.AUTOPILOT_SKIP_EXCL]
         self.assertEqual(
             bare, [],
             "a whitespace-only --extra leaked the bare whole-repo query")
@@ -2361,3 +2444,131 @@ class TestHeartbeatOnAReviewOnlyRun(TestCase):
         doc = " ".join((airuleset._write_autopilot_progress.__doc__ or "").split())
         self.assertIn("review-only", doc)
         self.assertIn("no evidence of CORE progress", doc)
+
+
+def _fake_gh_search_filtered(items):
+    """A `_gh_out` stand-in that evaluates a `gh issue list --search "..."`
+    query against `items` (a list of `{"number", "labels": set(...)}`) with
+    REAL exclusion semantics -- `-label:X` genuinely removes an item
+    carrying X, `label:A,B` matches an item carrying A OR B (gh's own
+    documented comma-OR-within-one-qualifier behaviour, #181 M8/M-6) --
+    unlike `_fake_gh_by_search`'s pure substring-INCLUSION model above,
+    which cannot prove that an EXCLUSION term added to the built query
+    actually removes a ticket (#362): that fake would report a ticket as
+    still present just because SOME population key's substring occurs in
+    the search string, with no regard for whether a `-label:` term should
+    have removed it. `assignee:`/`author:`/`sort:` tokens are accepted but
+    ignored -- this fixture is only ever driven with label-only quals."""
+    searches = []
+
+    def gh(*a, **k):
+        args = [str(x) for x in a]
+        if "--search" not in args:
+            return "[]"
+        search = args[args.index("--search") + 1]
+        searches.append(search)
+        want_length = "-q" in args
+        matched = []
+        for it in items:
+            labels = it.get("labels") or set()
+            ok = True
+            for tok in search.split():
+                if tok.startswith("-label:"):
+                    names = tok[len("-label:"):].split(",")
+                    if any(n in labels for n in names):
+                        ok = False
+                        break
+                elif tok.startswith("label:"):
+                    names = tok[len("label:"):].split(",")
+                    if not any(n in labels for n in names):
+                        ok = False
+                        break
+            if ok:
+                matched.append(it)
+        if want_length:
+            return str(len(matched))
+        import json as _json
+        return _json.dumps([
+            {"number": it["number"],
+             "title": it.get("title", "t%d" % it["number"]),
+             "createdAt": it.get("createdAt", "2026-01-01T00:00:00Z"),
+             "labels": [{"name": n} for n in sorted(it.get("labels") or [])]}
+            for it in matched])
+
+    return gh, searches
+
+
+class TestQualsExcludePermanentOpsChannelTickets(TestCase):
+    """#362: a stream self-declares a ticket PERMANENT via the `ops-channel`
+    label (odoo-erp #1861 -- "[TRVALY OPS KANAL -- NEZATVARAT] erp-test-*
+    teardown/recreate/refresh", and #3037 -- a snapshot-retention alert log)
+    so it deliberately never auto-closes. Before this fix `core-quals`/
+    `slice-quals` treated it as ordinary workable backlog -- the /goal
+    stop-proof's `--count 0` was UNREACHABLE while it stayed open, and the
+    /autopilot loop dispatched a full worker onto it that found "nothing to
+    do -- permanent log ticket" (~220k wasted subagent tokens)."""
+
+    def test_core_quals_count_excludes_a_permanent_ops_channel_ticket(self):
+        import contextlib
+        import io
+
+        items = [
+            {"number": 1, "labels": set()},              # ordinary core work
+            {"number": 2, "labels": {"ops-channel"}},     # permanent channel
+        ]
+        gh, searches = _fake_gh_search_filtered(items)
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with m.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with contextlib.redirect_stdout(buf):
+                    airuleset.cmd_core_quals(
+                        m.Mock(count=True, list=False, extra=None))
+        self.assertEqual(
+            buf.getvalue().strip(), "1",
+            "a permanent ops-channel ticket is still counted as workable "
+            "backlog -- searches issued: %r" % searches)
+
+    def test_core_quals_list_omits_a_permanent_ops_channel_ticket(self):
+        import contextlib
+        import io
+
+        items = [
+            {"number": 1, "labels": set()},
+            {"number": 2, "labels": {"ops-channel"}},
+        ]
+        gh, _ = _fake_gh_search_filtered(items)
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with m.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with contextlib.redirect_stdout(buf):
+                    airuleset.cmd_core_quals(
+                        m.Mock(count=False, list=True, extra=None))
+        out = buf.getvalue()
+        self.assertIn("1\t", out)
+        self.assertNotIn("2\t", out)
+
+    def test_slice_quals_count_excludes_a_permanent_ops_channel_ticket(self):
+        import contextlib
+        import io
+
+        # The SHARED-account, single-label slice shape (montalu/marek/simap):
+        # _slice_quals() mocked directly so this test is about cmd_slice_quals'
+        # own query-building, not about resolving gh identity.
+        items = [
+            {"number": 1, "labels": {"stream:montalu"}},
+            {"number": 2, "labels": {"stream:montalu", "ops-channel"}},
+        ]
+        gh, searches = _fake_gh_search_filtered(items)
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="branch-merge"):
+            with m.patch.object(airuleset, "_slice_quals",
+                                return_value=["label:stream:montalu"]):
+                with m.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            m.Mock(count=True, list=False, extra=None))
+        self.assertEqual(
+            buf.getvalue().strip(), "1",
+            "a permanent ops-channel ticket is still in this stream's own "
+            "slice -- searches issued: %r" % searches)
