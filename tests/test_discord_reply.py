@@ -215,6 +215,16 @@ class DeliverDiscordReplies(unittest.TestCase):
         j = " ".join(argv)
         if "pane_in_mode" in j:
             return "0"
+        if "capture-pane" in j:
+            # #372 -- a genuinely BARE pane capture (a real `❯` boundary
+            # line with nothing after it), matching what `send_continue`'s
+            # own post-Enter verify actually observes on a successful
+            # delivery. A bare `""` here does NOT model this: `_input_
+            # line_text("")` returns None (no boundary locatable at all --
+            # "capture failed"), which is a DIFFERENT, undeterminable state
+            # this file's own #372 fix now correctly refuses to treat as a
+            # confirmed delivery.
+            return IDLE
         return ""
 
     def _reply_msg(self, rid="rep1", ref="888001", author=None, content="najprv 0.28.0"):
