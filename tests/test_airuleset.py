@@ -7059,12 +7059,33 @@ class TestClaudeHistoryScript(TestCase):
         return r
 
     @staticmethod
-    def _user(text):
-        return {"type": "user", "message": {"role": "user", "content": text}}
+    def _user(text, uuid=None, parent_uuid=None):
+        rec = {"type": "user", "message": {"role": "user", "content": text}}
+        if uuid is not None:
+            rec["uuid"] = uuid
+        if parent_uuid is not None:
+            rec["parentUuid"] = parent_uuid
+        return rec
 
     @staticmethod
-    def _assistant(*blocks):
-        return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
+    def _assistant(*blocks, uuid=None, parent_uuid=None):
+        rec = {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
+        if uuid is not None:
+            rec["uuid"] = uuid
+        if parent_uuid is not None:
+            rec["parentUuid"] = parent_uuid
+        return rec
+
+    @staticmethod
+    def _compact_boundary(pre=None, post=None, uuid=None, parent_uuid=None):
+        rec = {"type": "system", "subtype": "compact_boundary"}
+        if pre is not None or post is not None:
+            rec["compactMetadata"] = {"preTokens": pre, "postTokens": post}
+        if uuid is not None:
+            rec["uuid"] = uuid
+        if parent_uuid is not None:
+            rec["parentUuid"] = parent_uuid
+        return rec
 
     @staticmethod
     def _text_block(t):
@@ -7202,6 +7223,126 @@ class TestClaudeHistoryScript(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("q0", r.stdout)
         self.assertIn("q4", r.stdout)
+
+    # -- #376: readable compaction-boundary marker + whole-file completeness
+    # (never silently drop pre-compact / orphaned-branch content) + chain
+    # every session file for the project, not just the newest -----------
+
+    def test_full_shows_a_readable_marker_for_a_compaction_boundary(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [
+            self._user("before compaction"),
+            self._assistant(self._text_block("ack")),
+            self._compact_boundary(pre=123456, post=789),
+            self._user("after compaction"),
+            self._assistant(self._text_block("still here")),
+        ])
+        r = self._run("--cwd", str(cwd), "--full")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("COMPACTED", r.stdout)
+        self.assertIn("123456", r.stdout)
+        self.assertIn("789", r.stdout)
+        self.assertIn("before compaction", r.stdout)
+        self.assertIn("after compaction", r.stdout)
+
+    def test_full_renders_the_full_history_across_compaction_including_orphaned_pre_compact_branches(self):
+        # A real Claude Code transcript is a UUID/parentUuid TREE, not a
+        # flat list -- an interrupted/retried turn leaves an ORPHANED
+        # sibling branch (never chosen as the live leaf) physically present
+        # in the file. The acceptance is COMPLETENESS (never silently drop
+        # data), not branch selection -- both the abandoned branch and the
+        # real continuation must render, on both sides of a compaction.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [
+            self._user("kto si?", uuid="u1"),
+            self._assistant(self._text_block("Som stream."), uuid="u2", parent_uuid="u1"),
+            # orphaned branch: an alternate, abandoned child of u1
+            self._user("ORPHANED aky si model?", uuid="u3-orphan", parent_uuid="u1"),
+            self._assistant(self._text_block("ORPHANED-REPLY"), uuid="u4-orphan", parent_uuid="u3-orphan"),
+            # the real continuation instead comes from u2
+            self._user("pokracujme", uuid="u5", parent_uuid="u2"),
+            self._assistant(self._text_block("ok"), uuid="u6", parent_uuid="u5"),
+            self._compact_boundary(pre=100000, post=500, uuid="u7", parent_uuid="u6"),
+            self._user("Continue the conversation from where it left off.", uuid="u8"),
+            self._assistant(self._text_block("Pokracujem po kompaktovani."), uuid="u9", parent_uuid="u8"),
+        ])
+        r = self._run("--cwd", str(cwd), "--full")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for expected in ("kto si?", "Som stream.", "ORPHANED aky si model?",
+                          "ORPHANED-REPLY", "pokracujme", "ok", "COMPACTED",
+                          "Continue the conversation from where it left off.",
+                          "Pokracujem po kompaktovani."):
+            self.assertIn(expected, r.stdout, expected)
+
+    def test_full_chains_all_session_files_for_the_project_not_just_the_newest(self):
+        # A `claude-new`-mode fresh session (or any other reason a second
+        # session id/file exists for one project) must never silently drop
+        # the OLDER file's own content once a newer one exists.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("older session content"),
+                                      self._assistant(self._text_block("older reply"))], sid="old")
+        old_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "old.jsonl"
+        os.utime(old_path, (1000, 1000))
+        self._write_transcript(cwd, [self._user("newer session content"),
+                                      self._assistant(self._text_block("newer reply"))], sid="new")
+        new_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "new.jsonl"
+        os.utime(new_path, (2000, 2000))
+        r = self._run("--cwd", str(cwd), "--full")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("older session content", r.stdout)
+        self.assertIn("older reply", r.stdout)
+        self.assertIn("newer session content", r.stdout)
+        self.assertIn("newer reply", r.stdout)
+        # chronological: the older file's content appears BEFORE the newer's
+        self.assertLess(r.stdout.index("older session content"),
+                         r.stdout.index("newer session content"))
+
+    def test_full_dedupes_a_uuid_appearing_in_more_than_one_chained_file(self):
+        # `only in old`/`only in new` are the DISCRIMINATOR: this test must
+        # fail two DIFFERENT ways depending on which half of the fix is
+        # missing -- chaining not implemented at all ("only in old"
+        # absent, since the old file is never even read) vs. chaining
+        # implemented WITHOUT dedup ("shared prompt" appears twice). A
+        # naive version of this test asserting only the dedup count would
+        # pass "green" even with zero chaining (the old file's content
+        # simply never read at all) -- this shape catches that trap.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("shared prompt", uuid="dup1"),
+                                      self._user("only in old", uuid="only-old")], sid="old")
+        old_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "old.jsonl"
+        os.utime(old_path, (1000, 1000))
+        self._write_transcript(cwd, [self._user("shared prompt", uuid="dup1"),
+                                      self._user("only in new", uuid="only-new")], sid="new")
+        new_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "new.jsonl"
+        os.utime(new_path, (2000, 2000))
+        r = self._run("--cwd", str(cwd), "--full")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("only in old", r.stdout)
+        self.assertIn("only in new", r.stdout)
+        self.assertEqual(r.stdout.count("shared prompt"), 1)
+
+    def test_default_last_mode_still_uses_only_the_newest_file_when_multiple_exist(self):
+        # Scoping decision (#376 design comment): chaining is `--full`-only.
+        # `--last` (the quick-glance default) keeps its EXISTING single-
+        # newest-file behavior unchanged -- locks
+        # test_resolves_the_newest_transcript_for_a_cwd_by_default's own
+        # claim under the presence of a genuinely older sibling file too.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("old session")], sid="old")
+        old_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "old.jsonl"
+        os.utime(old_path, (1000, 1000))
+        self._write_transcript(cwd, [self._user("new session")], sid="new")
+        new_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "new.jsonl"
+        os.utime(new_path, (2000, 2000))
+        r = self._run("--cwd", str(cwd))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("new session", r.stdout)
+        self.assertNotIn("old session", r.stdout)
 
     def test_list_prints_every_transcript_for_the_cwd_without_rendering_content(self):
         cwd = self.home / "proj"
