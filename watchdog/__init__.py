@@ -12033,7 +12033,18 @@ def pane_goal_armed(captured):
     wrapped at 80/120/176 columns, and without disturbing the pre-existing
     `test_statusline_without_a_ctx_segment_still_reads` case (a mode-hint
     row alone already counts as chrome, independent of the statusline
-    row's own segment-count threshold)."""
+    row's own segment-count threshold).
+
+    A bare BORDER-RULE row alone does NOT count as that chrome evidence,
+    even though `_is_bottom_chrome` itself does classify one: the box's own
+    closing border can be the LAST thing that fit in the capture, with the
+    real statusline/mode-hint/agent-strip rows (and the `◎ /goal` glyph
+    riding on the statusline one) cut off immediately after it — a border
+    alone proves the box CLOSED, never that the indicator's own row is in
+    view. Every other chrome shape (`ctx `, the >=2-segment statusline, the
+    mode hint, an agent-strip row, a selected-strip row, the selector hint)
+    still counts on its own; none of them can render without the row that
+    would carry the indicator already being on screen."""
     lines = (captured or "").splitlines()
     idx = None
     for i, ln in enumerate(lines):
@@ -12047,9 +12058,12 @@ def pane_goal_armed(captured):
         return None                        # nothing rendered below it
     if any(GOAL_INDICATOR in ln for ln in footer):
         return True
-    if not any(_is_bottom_chrome(ln.strip()) for ln in footer if ln.strip()):
-        return None                        # #383: footer is box content,
-                                            # not chrome -- real footer is
+    if not any(_is_bottom_chrome(s) and not _is_border_rule(s)
+               for s in (ln.strip() for ln in footer) if s):
+        return None                        # #383: footer is box content
+                                            # (or a bare closing border with
+                                            # nothing past it) -- not real
+                                            # chrome -- real footer is
                                             # off-screen, "dark" unproven
     return False
 

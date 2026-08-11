@@ -475,6 +475,18 @@ class TestPaneGoalIndicator(unittest.TestCase):
         # False; the goal was genuinely still armed the whole time.
         self.assertIsNone(wd.pane_goal_armed(REAL_STUCK_DRAFT_CAPTURE_383))
 
+    def test_a_bare_closing_border_alone_is_not_enough_to_claim_dark(self):
+        # #383 self-review hardening: `_is_bottom_chrome` DOES classify a
+        # lone border-rule row as chrome, but a border alone only proves the
+        # box CLOSED -- not that the row which would actually carry the
+        # `◎ /goal` glyph (the statusline row, always rendered directly
+        # after the closing border) is anywhere in view. A capture that
+        # ends immediately after the closing border, with nothing past it,
+        # must stay undeterminable rather than confidently dark.
+        pane = ("● hello\n" + "─" * 60 + "\n"
+                "❯ open issue etc etc\n" + "─" * 60 + "\n")
+        self.assertIsNone(wd.pane_goal_armed(pane))
+
 
 class GoalRearmBase(unittest.TestCase):
     def setUp(self):
