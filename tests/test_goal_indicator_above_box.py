@@ -73,6 +73,24 @@ class GoalIndicatorAboveBox(unittest.TestCase):
             TOP, "❯ ", BOT, STAT, STRIP])
         self.assertIs(pane_goal_armed(cap), False)
 
+    def test_short_unpunctuated_continuation_is_also_never_armed(self):
+        # #393-review MINOR-1 (fresh-context adversarial review,
+        # 2026-08-12, executed against the real function) -- the FIRST
+        # cut of this fix bounded the tail to an open allowlist of
+        # spaces/word-chars/parens, which still accepted a wrapped-prose
+        # continuation whose first 40 chars happen to contain NO
+        # punctuation at all ("◎ /goal armed", "◎ /goal active and the
+        # loop keeps going" -- 7 of 8 constructed cases matched). The
+        # closed-form regex must reject the SHORTEST, most dangerous one
+        # of those: a bare "◎ /goal armed" continuation row with nothing
+        # else on the line, which the open allowlist alone could not
+        # distinguish from a genuine (but truncated) render.
+        cap = "\n".join([
+            "  Discussing whether the indicator is lit right now:",
+            "  ◎ /goal armed",
+            TOP, "❯ ", BOT, STAT, STRIP])
+        self.assertIs(pane_goal_armed(cap), False)
+
 
 if __name__ == "__main__":
     unittest.main()

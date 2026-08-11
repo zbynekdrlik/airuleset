@@ -653,26 +653,50 @@ class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
         })
 
     @staticmethod
-    def _autopilot_prompt(ts="2026-07-31T11:02:03.000Z", text="/autopilot"):
-        """#393 — a GENUINE, human-typed `/autopilot` invocation: a
-        TOP-LEVEL `type=="user"` entry whose `.message.content` is a plain
-        STRING starting `/autopilot` — the only signal `_goal_was_cleared_
-        by_user`'s tightened release condition now accepts."""
+    def _autopilot_prompt(ts="2026-07-31T11:02:03.000Z"):
+        """#393 — a GENUINE, human-typed `/autopilot` invocation: the EXACT
+        wrapped shape Claude Code actually writes for a skill-command
+        invocation. #393-review CRITICAL-1 (fresh-context adversarial
+        review, 2026-08-12, executed against 1787 real local transcript
+        files / 1127 real occurrences of the substring "/autopilot"): a
+        bare `"/autopilot"` string — what this fixture used to build —
+        appeared in ZERO of them; every real invocation is this exact
+        two-tag sequence, a SKILL command's `<command-message>`-first
+        order (the OPPOSITE of a BUILTIN command's `<command-name>`-first
+        order this file's own `_EXIT_CMD_MARKER` matches for `/exit`)."""
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content":
+                        "<command-message>autopilot</command-message>\n"
+                        "<command-name>/autopilot</command-name>"}})
+
+    @staticmethod
+    def _autopilot_lookalike_prose(
+            ts="2026-07-31T11:02:03.000Z",
+            text="/autopilot-worker died mid-run, can you check it?"):
+        """#393-review CRITICAL-2 (fresh-context adversarial review,
+        2026-08-12, executed) — an ORDINARY user message that merely
+        NAMES the worker, not a real slash-command invocation at all.
+        `\\b` fires on the hyphen (a non-word character), so the FIRST
+        shipped regex (`^/autopilot\\b`) wrongly read this as a genuine
+        release too — a real, plausible sentence in this very repo. Must
+        never release the clear."""
         return _json.dumps({
             "type": "user", "timestamp": ts,
             "message": {"content": text}})
 
     @staticmethod
     def _quoted_autopilot_prompt():
-        """The SAME `/autopilot` text arriving as a tool_result — one
-        session grepping ANOTHER session's transcript. Structurally
+        """The SAME real `/autopilot` shape arriving as a tool_result —
+        one session grepping ANOTHER session's transcript. Structurally
         excluded, mirroring `_quoted_ask` above."""
         return _json.dumps({
             "type": "user",
             "timestamp": "2026-07-31T11:02:03.000Z",
             "message": {"content": [{
                 "type": "tool_result",
-                "content": "/autopilot",
+                "content": "<command-message>autopilot</command-message>\n"
+                            "<command-name>/autopilot</command-name>",
             }]},
         })
 
@@ -742,6 +766,61 @@ class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
             tmux.typed(),
             "a tool_result quoting another session's arm question is not "
             "this session asking for anything")
+
+    def test_a_lookalike_autopilot_worker_message_never_releases(self):
+        """#393-review CRITICAL-2 — a plausible, ordinary user message that
+        merely MENTIONS the worker by name (`/autopilot-worker ...`) is
+        NOT a real slash-command invocation and must never release a
+        deliberate clear."""
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"),
+                            self._autopilot_lookalike_prose())
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(
+            tmux.typed(),
+            "a message merely NAMING the autopilot-worker must never be "
+            "mistaken for a genuine /autopilot slash-command invocation")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
+    def test_autopilot_prompt_fixture_matches_the_real_corpus_shape(self):
+        """Positive control — the fixture's own content must be exactly
+        the real shape #393-review CRITICAL-1 confirmed against 1127 real
+        local transcript occurrences, so a future edit to this fixture
+        cannot silently drift back to the bare (dead) form."""
+        entry = _json.loads(self._autopilot_prompt())
+        self.assertEqual(
+            entry["message"]["content"],
+            "<command-message>autopilot</command-message>\n"
+            "<command-name>/autopilot</command-name>")
+
+    def test_an_autopilot_invocation_buried_past_the_old_tail_window_still_releases(
+            self):
+        """#393-review MAJOR-1 (fresh-context adversarial review, 2026-08-12,
+        executed) — a genuine `/autopilot` invocation followed by enough
+        transcript WRITING to push it past the old 2 MB tail-window
+        default must still be found; `_goal_autopilot_reinvoked_after` now
+        reads the WHOLE file (no tail truncation), mirroring #173's own
+        `_goal_dark_died_by_outage` fix for the identical shape."""
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"),
+                            self._autopilot_prompt())
+        tr = pd / wd.encode_project_dir(cwd) / "sess-relapse.jsonl"
+        with open(tr, "a") as f:
+            filler = _json.dumps({"type": "assistant",
+                                  "message": {"content": "x" * 900}}) + "\n"
+            while f.tell() < 2_200_000:
+                f.write(filler)
+        self.assertGreater(
+            tr.stat().st_size, 2_000_000,
+            "fixture must genuinely exceed the OLD tail-window default")
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(
+            tmux.typed(),
+            "a genuine /autopilot invocation buried past the old 2 MB "
+            "tail window must still release the clear")
+        self.assertFalse([ln for ln in logs if "skip cleared" in ln], logs)
 
     def test_a_quoted_autopilot_invocation_never_releases_the_suppression(
             self):
