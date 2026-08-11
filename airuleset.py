@@ -6900,6 +6900,17 @@ def _gh_out(*gh_args, timeout=8, cwd=None):
         return ""
 
 
+def _repo_slug(cwd=None):
+    """`owner/repo` via `gh repo view`, or "" on any failure — the REST-API
+    slug a hand-off comment-fallback fetch needs (`repos/<slug>/issues/N/
+    comments`). Shared by `cmd_tickets_status`'s footer and
+    `cmd_slice_quals`'s `/goal` stop-proof (#391 consistency guard) so a
+    comment-fallback recovery a reduced-authority box's stop-proof relies on
+    cannot resolve a different repo than the one the footer resolves."""
+    return _gh_out("repo", "view", "--json", "nameWithOwner",
+                   "-q", ".nameWithOwner", cwd=cwd, timeout=20)
+
+
 def _write_autopilot_progress(name, remaining, bump_done=True):
     """Persist per-repo autopilot run progress (~/.claude/autopilot-progress/
     <repo>.json). `done` counts the completion cards sent within ONE run
@@ -7126,15 +7137,28 @@ def cmd_tickets_status(args):
         if resolve_authority(cwd=root) != "full":
             entry["scope"] = "mine"
             # Own slice = assigned-to-me ∪ authored-by-me ∪ labeled stream:<me>,
-            # partitioned into ACTIVE-on-me vs already HANDED OFF to the gatekeeper:
-            # a ticket carrying `ready-for-review` (auto-labeled by the repo's
-            # subdev-handoff-label workflow at the hand-off comment) is waiting on
-            # the gatekeeper — the statusline shows both ("Issues 1 · gk 5").
-            # SHARED-ACCOUNT boxes (montalu's PAT logs in as the MAINTAINER
-            # account) must NOT use @me — author:@me matched every user-authored
-            # ticket and the footer showed foreign streams' numbers (2026-07-20);
-            # there the slice is the stream LABEL alone.
-            handed, mine, failed = {}, set(), False
+            # partitioned into own UNHANDLED work vs already HANDED OFF to the
+            # gatekeeper: a ticket carrying `ready-for-review` (auto-labeled
+            # by the repo's subdev-handoff-label workflow at the hand-off
+            # comment) is waiting on the gatekeeper — the statusline shows
+            # both ("Issues 1 · gk 5"). SHARED-ACCOUNT boxes (montalu's PAT
+            # logs in as the MAINTAINER account) must NOT use @me —
+            # author:@me matched every user-authored ticket and the footer
+            # showed foreign streams' numbers (2026-07-20); there the slice
+            # is the stream LABEL alone.
+            #
+            # #391 (2026-08-11) REVERSES the prior "N is the FULL slice"
+            # choice for this reduced-authority path ONLY: a sub-dev's own
+            # responsibility for a ticket is fulfilled the moment it is
+            # HANDED OFF, not once the gatekeeper has also closed it — the
+            # full-authority side (below) is unchanged, since THAT box is
+            # the one still on the hook for a hand-off until it acts on it.
+            # `_slice_mine_and_handed` is the SAME shared derivation
+            # `cmd_slice_quals`'s own `/goal` stop-proof calls (#391
+            # consistency guard, mirroring the guard already established for
+            # the full-authority obligation set) — never a parallel
+            # re-derivation that could silently drift from it.
+            #
             # SliceUnresolved (#181 I-2): an unresolvable gh identity is a gh
             # ERROR, and a gh error is never an empty slice — keep open=None,
             # exactly as a failed query already does. Guessing a qual set here
@@ -7142,200 +7166,11 @@ def cmd_tickets_status(args):
             try:
                 quals = _slice_quals(_current_user(), root)
             except SliceUnresolved:
-                quals, failed = [], True
-            for qual in quals:
-                raw = _out(["gh", "issue", "list", "--state", "open", "--search",
-                            AUTOPILOT_SKIP_EXCL + " " + qual, "-L", "200",
-                            "--json", "number,labels"], root)
-                try:
-                    for x in json.loads(raw):
-                        n_num = x["number"]
-                        mine.add(n_num)
-                        labels = {(lb or {}).get("name") for lb in (x.get("labels") or [])}
-                        # #191 Part A ("different lane"): needs-gatekeeper is
-                        # airuleset's OWN hand-off lane (cmd_gk_request), not
-                        # just the repo-workflow's ready-for-review — a ticket
-                        # carrying either is equally "out of my hands, waiting
-                        # on someone else" from this stream's point of view,
-                        # so both fold into the SAME gk bucket (no new badge;
-                        # #223 already shortened every label to keep the
-                        # footer on one line).
-                        label_handed = ("ready-for-review" in labels) or \
-                            ("needs-gatekeeper" in labels)
-                        # #313 pt 2 adversarial review round 2 (findings F2 +
-                        # F3): `prio:bounce` is the gatekeeper's own "returned
-                        # to the sub-dev, not ready" verdict — round 1's fix
-                        # HARD-EXCLUDED a bounced ticket from the comment
-                        # fallback below entirely, which fixed the label-side
-                        # concern (a stale hand-off comment must not read as
-                        # forever handed-off) but reintroduced the opposite
-                        # bug in the exact broken-workflow scenario this
-                        # whole point exists for: a sub-dev who genuinely
-                        # RE-hands-off after a bounce (a fresh comment) was
-                        # then permanently invisible too, because the repo's
-                        # own subdev-handoff-label workflow (which is
-                        # SUPPOSED to add ready-for-review + drop prio:bounce
-                        # in the SAME step) is precisely what's broken here.
-                        # Fixed instead by having the bounce verdict override
-                        # a stale/lagged LABEL (F3) rather than gate the
-                        # fallback — this also makes a bounced ticket reach
-                        # `unhandled` below naturally (its own label-derived
-                        # `handed` state is now correctly False), so the
-                        # comment fallback's own in-order, GATEKEEPER-reset
-                        # walk (see below) is what actually resolves both a
-                        # stale pre-bounce comment AND a genuine post-bounce
-                        # re-submission correctly, with no separate
-                        # exclusion or extra API call needed.
-                        if "prio:bounce" in labels:
-                            label_handed = False
-                        handed[n_num] = handed.get(n_num, False) or label_handed
-                except (ValueError, TypeError, KeyError):
-                    failed = True   # gh error ≠ empty slice — keep open=None
-            # #191 Part B ("ownership relabel"): a SHARED-account stream's
-            # slice is `label:stream:<user>` ALONE (see _slice_quals) — once
-            # a handed-off ticket's stream:<user> label is removed (the fix
-            # moved to shared code this stream cannot push to), it vanishes
-            # from `mine` entirely, because that label was the only query
-            # that could ever find it. Own-account streams (assignee/author
-            # quals present) already see this for free via author:@me and
-            # need no recovery step — scope this to the single-qual shared
-            # shape only, the same discriminator `_refuse_unless_empty_is_
-            # trustworthy` already uses for its own C2 guard.
-            #
-            # #191 adversarial review (round 1): the ORIGINAL recovery here
-            # checked "was MY stream label EVER applied", which lets TWO
-            # streams that both once owned a ticket (A -> B -> unlabelled)
-            # BOTH reclaim it — the current-label bounding below only helps
-            # when a current label survives, exactly the case this recovery
-            # exists to handle the ABSENCE of. `_last_origin_owner` resolves
-            # the TEMPORALLY-LAST origin-shaped labeled event instead of
-            # "ever", which settles a genuine competing claim correctly. The
-            # cheap current-label skip stays as a volume-reducing
-            # OPTIMISATION only (never re-ask GraphQL about a ticket a
-            # DIFFERENT registered stream currently, visibly owns) — it is
-            # not the correctness guarantee any more.
-            if not failed and len(quals) == 1 and \
-                    quals[0].startswith("label:stream:"):
-                user = _current_user()
-                raw = _out(["gh", "issue", "list", "--state", "open", "--search",
-                            AUTOPILOT_SKIP_EXCL +
-                            " label:needs-gatekeeper,ready-for-review",
-                            "-L", "200", "--json", "number,labels"], root)
-                # #191 m1: a failed candidate query (or a failed
-                # _last_origin_owner call below) degrades to "recover
-                # nothing this refresh" rather than setting `failed=True` —
-                # deliberately asymmetric with the loop above, since this
-                # whole step is a BEST-EFFORT enrichment on top of an
-                # already-valid `mine`/`gk` count, not a correctness
-                # precondition for it. The footer looks healthy either way;
-                # a transient gh error here just means one refresh cycle
-                # missed a re-attribution, retried automatically next TTL.
-                try:
-                    candidates = json.loads(raw)
-                except (ValueError, TypeError):
-                    candidates = []
-                to_check = []
-                if isinstance(candidates, list):
-                    for x in candidates:
-                        try:
-                            n_num = x["number"]
-                        except (TypeError, KeyError):
-                            continue
-                        if n_num in mine:
-                            continue
-                        if _stream_owner_of(x.get("labels")):
-                            continue  # currently owned by ANOTHER stream
-                        to_check.append(n_num)
-                # #191 m3: bound the GraphQL fan-out — the current-label skip
-                # above already trims most repos to a handful, but nothing
-                # else caps a repo with an unusually large open hand-off
-                # population.
-                to_check = to_check[:50]
-                if to_check:
-                    owners = _last_origin_owner(to_check, cwd=root)
-                    for n_num, owner in owners.items():
-                        if owner == user:
-                            mine.add(n_num)
-                            handed[n_num] = True
-            # #313 pt 2: the `ready-for-review`/`needs-gatekeeper` LABEL alone
-            # is not a reliable hand-off signal -- a fork-no-merge
-            # collaborator's own `gh issue edit --add-label` 403s (no write
-            # access on the upstream fork), and the repo's own
-            # subdev-handoff-label workflow that is SUPPOSED to apply it
-            # instead can itself be broken (live-confirmed for #313:
-            # zbynekdrlik/odoo-erp#3239 carries only `stream:david`, no label
-            # at all, yet has a real, GENUINE `## READY-FOR-REVIEW —` comment
-            # -- tracked as odoo-erp#2584). The hand-off's PRIMARY signal is
-            # that comment (agents/autopilot-worker.md), which is always
-            # postable regardless of write access; a candidate the label
-            # missed is checked directly against its own comments via
-            # `_comment_readiness_signal` -- the SAME precise, line-anchored
-            # matcher this repo's own hand-off-label workflow enforces
-            # (#1500), never a bare substring (which re-introduces THAT
-            # exact over-match incident: a comment merely MENTIONING the
-            # marker, or a GATEKEEPER finding comment quoting it). Bounded so
-            # one large slice can never blow the refresh's own budget; this
-            # is a DISPLAY counter (unlike `core-quals`'s obligation set,
-            # which correctly REFUSES rather than risk over-counting a
-            # stop-proof), so a rare extra match is far less harmful than
-            # showing `gk 0` while tickets sit genuinely handed off.
-            #
-            # `not failed` -- a broken slice query already forces `open`/`gk`
-            # to `None` (below), so spending up to 40 extra `gh api` calls on
-            # a KNOWN gh-outage/rate-limit path only makes that outage worse
-            # for nothing. `sorted()` makes which candidates get checked,
-            # when the slice exceeds the bound, deterministic across
-            # refreshes (mine is an unordered set) and prefers the NEWEST
-            # tickets first (most likely to be a recent hand-off).
-            #
-            # Round-2 adversarial review (F1/F2): a bounced ticket now
-            # reaches `unhandled` naturally too (its own `handed` value is
-            # already False from the label override above) -- round 1's
-            # SEPARATE hard exclusion of bounced tickets here fixed the
-            # stale-comment concern but reintroduced the opposite bug: a
-            # genuine RE-hand-off comment posted after a bounce was then
-            # never seen either. The walk below reads comments in creation
-            # order and keeps the LAST signal (`_comment_readiness_signal`)
-            # instead of breaking on the FIRST match — a stale pre-bounce
-            # hand-off comment is correctly invalidated by a LATER
-            # GATEKEEPER-authored finding/bounce comment, and a genuine
-            # POST-bounce re-submission correctly overrides that again,
-            # with no separate bounce-timestamp lookup needed. The one
-            # residual (documented, deliberately accepted): a bounce
-            # applied as a bare label with NO accompanying comment at all
-            # leaves the stale original comment as the only signal, which
-            # still reads as handed-off -- the same "a rare extra match is
-            # far less harmful than showing gk 0" trade-off already stated
-            # above.
-            if slug and not failed:
-                unhandled = sorted(
-                    (n_num for n_num in mine if not handed.get(n_num)),
-                    reverse=True)
-                for n_num in unhandled[:_HANDOFF_COMMENT_CHECK_LIMIT]:
-                    raw = _out(["gh", "api",
-                                "repos/%s/issues/%d/comments" % (slug, n_num)],
-                               root)
-                    try:
-                        comments = json.loads(raw)
-                    except (ValueError, TypeError):
-                        comments = []
-                    if not isinstance(comments, list):
-                        continue   # e.g. a bare int -- never a real answer
-                    verdict = False
-                    for c in comments:
-                        body = c.get("body") if isinstance(c, dict) else None
-                        sig = _comment_readiness_signal(body)
-                        if sig is not None:
-                            verdict = sig
-                    if verdict:
-                        handed[n_num] = True
-            gk = sum(1 for n_num in mine if handed.get(n_num))
-            # #367: N is the FULL slice (handed-off included) — the SAME
-            # raw union `slice-quals --count` itself prints for the /goal
-            # stop-proof, never a parallel "active-only" derivation. `gk`
-            # stays a SUBSET badge of N (which of my N tickets are already
-            # parked with the gatekeeper), no longer subtracted out of N.
-            entry["open"] = None if failed else len(mine)
+                quals, rows, handed, failed = [], {}, {}, True
+            else:
+                rows, handed, failed = _slice_mine_and_handed(quals, root, slug)
+            gk = sum(1 for n_num in rows if handed.get(n_num))
+            entry["open"] = None if failed else (len(rows) - gk)
             entry["gk"] = None if failed else gk
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
@@ -10902,6 +10737,175 @@ def _last_origin_owner(numbers, cwd=None):
     return owners
 
 
+def _slice_mine_and_handed(quals, root, slug, extra=None):
+    """`(rows, handed, failed)` for a reduced-authority stream's OWN ticket
+    slice — the ONE shared derivation `cmd_tickets_status`'s footer AND
+    `cmd_slice_quals`'s `/goal` stop-proof both consume (#391 consistency
+    guard, mirroring the guard already established for the full-authority
+    obligation set: never two independent derivations of "which of my
+    tickets are still active" that could silently drift apart).
+
+    `rows` is `_union_open_issues`'s own return shape (`{number: {"number",
+    "title", "createdAt", "labels"}}`) — reused directly rather than a
+    second, narrower fetch, so `--list`'s title/createdAt needs no extra gh
+    call. `handed` maps a ticket number to whether it is already parked with
+    the gatekeeper: a label check (`ready-for-review`/`needs-gatekeeper`,
+    overridden by a `prio:bounce` label — #313 pt 2), PLUS — only when
+    `extra` is None, i.e. the plain/unfiltered slice `cmd_tickets_status`
+    always uses and `cmd_slice_quals` uses for its own `--count`/plain
+    `--list` — the shared-account stream-owner recovery (`_last_origin_
+    owner`) and the comment-based fallback (`_comment_readiness_signal`),
+    moved here VERBATIM from `cmd_tickets_status`. `extra` (the bounce-lane
+    seed's `--extra "label:prio:bounce"`) SKIPS that enrichment: the
+    recovery step's own candidate query (`label:needs-gatekeeper,
+    ready-for-review`, deliberately never filtered by `extra`) could recover
+    a ticket that does not itself match `extra`, silently violating the
+    filtered result's own contract — and a genuine `prio:bounce` ticket is
+    already correctly un-handed via the label override alone, so the
+    enrichment buys nothing there anyway.
+
+    #391 adversarial review CRITICAL-1: the comment fallback (below) keeps
+    the LAST comment signal, and a stream's own bounce nudge lane
+    (skills/autopilot/SKILL.md: a BARE `prio:bounce` label + a sub-dev-
+    authored ACK) applies the bounce with NO accompanying gatekeeper-shaped
+    comment at all — so a ticket with a genuine, older READY-FOR-REVIEW
+    comment and an INVISIBLE bounce (label only, no comment) would have its
+    last-and-only comment signal read True, silently re-upgrading it to
+    handed and discarding the label override just computed. `bounce_numbers`
+    tracks every currently-`prio:bounce`-labeled row; the comment-fallback
+    walk below may only upgrade one of THOSE numbers to handed when it also
+    saw a recognised gatekeeper comment (a VISIBLE bounce) somewhere in the
+    thread -- an invisible bounce fails toward "still unhandled", the safe
+    (never-stop) direction for a `/goal` stop-proof. A non-bounce-labeled
+    row is unaffected: the fallback's original "trust the last signal"
+    behaviour is unchanged for it (this is the #313 broken-workflow case the
+    fallback exists for, where no bounce is in play at all).
+
+    `failed` is True on ANY gh query failure in the per-qual fetch — the
+    caller must treat that as "cannot trust an unhandled count of 0", exactly
+    like every other gh-search-derived zero in this file."""
+    base = AUTOPILOT_SKIP_EXCL + ((" " + extra) if extra else "")
+    rows, failed = _union_open_issues(quals, base, cwd=root)
+    handed = {}
+    bounce_numbers = set()
+    for n_num, row in rows.items():
+        labels = {(lb or {}).get("name") for lb in (row.get("labels") or [])}
+        # #191 Part A ("different lane"): needs-gatekeeper is airuleset's OWN
+        # hand-off lane (cmd_gk_request), not just the repo-workflow's
+        # ready-for-review — either equally means "out of my hands, waiting
+        # on someone else" (#223 folded both into the same gk bucket).
+        label_handed = ("ready-for-review" in labels) or \
+            ("needs-gatekeeper" in labels)
+        # #313 pt 2 (F2/F3): `prio:bounce` is the gatekeeper's own "returned
+        # to the sub-dev, not ready" verdict — it overrides a stale/lagged
+        # hand-off LABEL so a bounced ticket reaches `unhandled` naturally;
+        # the comment-fallback walk below is what still recognises a genuine
+        # RE-hand-off after a bounce -- but (#391 CRITICAL-1) only when that
+        # bounce is itself VISIBLE in the comment thread (see the docstring).
+        if "prio:bounce" in labels:
+            label_handed = False
+            bounce_numbers.add(n_num)
+        handed[n_num] = label_handed
+
+    if extra is not None:
+        return rows, handed, failed
+
+    # #191 Part B ("ownership relabel"): a SHARED-account stream's slice is
+    # `label:stream:<user>` ALONE — once a handed-off ticket's stream:<user>
+    # label is removed, it vanishes from `rows` entirely. Own-account streams
+    # (assignee/author quals present) already see this for free via
+    # author:@me. `_last_origin_owner` resolves the TEMPORALLY-LAST
+    # origin-shaped labeled event, settling a competing claim correctly
+    # (#191 adversarial review M3). Deliberately NEVER filtered by `extra`
+    # (see the docstring above) — this branch only runs when extra is None
+    # anyway.
+    #
+    # #391 adversarial review THEORETICAL-6 (accepted residual, no known
+    # reproduction, edge-of-edge): rows recovered here make `rows` non-empty
+    # unconditionally, so `cmd_slice_quals`'s C2 label-existence refusal
+    # (`_refuse_unless_empty_is_trustworthy`) is skipped even if the
+    # `stream:<user>` label itself was deleted from the repo — a shared-
+    # account box could then print a trusted-looking `0` while genuinely
+    # unlabeled, unhandled tickets sit orphaned (recovered-but-not-owned).
+    # Requires repo-label deletion PLUS a prior recovered hand-off PLUS an
+    # orphaned open ticket, simultaneously — not chased.
+    if not failed and len(quals) == 1 and quals[0].startswith("label:stream:"):
+        user = _current_user()
+        raw = _gh_out("issue", "list", "--state", "open", "--search",
+                      AUTOPILOT_SKIP_EXCL +
+                      " label:needs-gatekeeper,ready-for-review",
+                      "-L", "200", "--json", "number,labels,title,createdAt",
+                      cwd=root, timeout=20)
+        try:
+            candidates = json.loads(raw)
+        except (ValueError, TypeError):
+            candidates = []
+        by_num = {}
+        if isinstance(candidates, list):
+            for x in candidates:
+                try:
+                    n_num = x["number"]
+                except (TypeError, KeyError):
+                    continue
+                if n_num in rows:
+                    continue
+                if _stream_owner_of(x.get("labels")):
+                    continue  # currently owned by ANOTHER stream
+                by_num[n_num] = x
+        to_check = list(by_num)[:50]
+        if to_check:
+            owners = _last_origin_owner(to_check, cwd=root)
+            for n_num, owner in owners.items():
+                if owner == user:
+                    rows[n_num] = by_num[n_num]
+                    handed[n_num] = True
+
+    # #313 pt 2: the label alone is not a reliable hand-off signal — the
+    # PRIMARY signal is the READY-FOR-REVIEW comment (agents/autopilot-
+    # worker.md), always postable regardless of write access. A candidate
+    # the label missed is checked directly against its own comments via
+    # `_comment_readiness_signal`, in creation order, keeping the LAST
+    # signal (a stale pre-bounce comment is correctly invalidated by a
+    # later gatekeeper finding/bounce, and a genuine post-bounce
+    # re-submission overrides that again).
+    #
+    # #391 CRITICAL-1: for a row in `bounce_numbers`, an upgrade to handed
+    # additionally requires `saw_gatekeeper_comment` -- a recognised
+    # gatekeeper-authored comment (`_comment_readiness_signal` returning
+    # False) seen SOMEWHERE in the walk, proving the bounce is genuinely
+    # VISIBLE in the thread (a real post-bounce re-hand-off) rather than a
+    # bare-label bounce with no comment at all (which must never re-flip a
+    # stale pre-bounce hand-off comment back to handed).
+    if slug and not failed:
+        unhandled_candidates = sorted(
+            (n_num for n_num in rows if not handed.get(n_num)),
+            reverse=True)
+        for n_num in unhandled_candidates[:_HANDOFF_COMMENT_CHECK_LIMIT]:
+            raw = _gh_out("api",
+                          "repos/%s/issues/%d/comments" % (slug, n_num),
+                          cwd=root, timeout=20)
+            try:
+                comments = json.loads(raw)
+            except (ValueError, TypeError):
+                comments = []
+            if not isinstance(comments, list):
+                continue   # e.g. a bare int -- never a real answer
+            verdict = False
+            saw_gatekeeper_comment = False
+            for c in comments:
+                body = c.get("body") if isinstance(c, dict) else None
+                sig = _comment_readiness_signal(body)
+                if sig is False:
+                    saw_gatekeeper_comment = True
+                if sig is not None:
+                    verdict = sig
+            if verdict and (n_num not in bounce_numbers or
+                            saw_gatekeeper_comment):
+                handed[n_num] = True
+
+    return rows, handed, failed
+
+
 def _row_action(row, own_stream=None):
     """What THIS box may do with an issue row: `action-only` or `implement`.
 
@@ -11153,14 +11157,29 @@ def cmd_slice_quals(args):
     identity/repo, not just silently returning nothing everywhere) —
     refusing rather than trusting an unconfirmed zero.
 
-    --count: prints an integer (0 = slice empty — the /goal stop-proof).
+    --count: prints an integer (0 = own UNHANDLED work is empty — the /goal
+             stop-proof). #391 (2026-08-11): reversed from a raw slice count
+             to own UNHANDLED work (a ticket already handed off to the
+             gatekeeper — `ready-for-review`/`needs-gatekeeper`, unless
+             overridden by `prio:bounce` — no longer counts), via the SAME
+             shared derivation (`_slice_mine_and_handed`) `cmd_tickets_
+             status`'s footer uses — the #367-established consistency guard,
+             so the footer's `I N` and this stop-proof cannot silently
+             drift apart. Only for the PLAIN (no `--extra`) query — see
+             `--extra` below.
     --list:  prints `number<TAB>createdAt<TAB>action<TAB>title`, one per open
-             non-skip issue in the slice, OLDEST first (the bounce lane picks
-             the oldest — no client-side sort needed). `action` is relative to
-             THIS box, so a stream's own `stream:<me>` tickets read
-             `implement` (#181 round 4).
+             non-skip UNHANDLED issue in the slice, OLDEST first (the bounce
+             lane picks the oldest — no client-side sort needed). `action` is
+             relative to THIS box, so a stream's own `stream:<me>` tickets
+             read `implement` (#181 round 4).
     --extra <qual>: ANDs one extra search qualifier onto every per-qual query
-             (e.g. `label:prio:bounce` for the bounce-lane seed).
+             (e.g. `label:prio:bounce` for the bounce-lane seed). The
+             handed-off exclusion still applies via a cheap LABEL-only check
+             (a genuine `prio:bounce` ticket is already un-handed by that
+             label's own override) — the recovery/comment-fallback
+             ENRICHMENT is skipped here, since its own candidate query is
+             never filtered by `extra` and could otherwise leak a ticket
+             into a filtered result that does not itself match `extra`.
     No flag: prints each qual defining this box's slice, one per line
              (informational).
 
@@ -11198,26 +11217,47 @@ def cmd_slice_quals(args):
         return
 
     extra = getattr(args, "extra", None)
-    base = AUTOPILOT_SKIP_EXCL + ((" " + extra) if extra else "")
-    # -L 1000, matching core-quals (#181 M-2): a single population can only
-    # be UNDER-counted by a clamp, never zeroed — but the documented
-    # "0 = slice empty" contract must not silently cap either.
-    seen, failed = _union_open_issues(quals, base, cwd=root)
+    # -L 1000 (via `_union_open_issues`, matching core-quals — #181 M-2): a
+    # single population can only be UNDER-counted by a clamp, never zeroed —
+    # but the documented "0 = own unhandled work is empty" contract must not
+    # silently cap either. `slug` feeds the comment-fallback recovery
+    # (#391) — best-effort, "" on failure just skips that enrichment.
+    slug = _repo_slug(cwd=root)
+    rows, handed, failed = _slice_mine_and_handed(quals, root, slug, extra=extra)
     if failed:
         print("slice-quals: a gh query failed — this is NOT a reliable 0",
               file=sys.stderr)
         sys.exit(1)
-    if not seen:
+    if not rows:
         # Round 4: the validation is no longer nested behind the SHARED-account
         # shape. An own-account stream has THREE quals, so `len(quals) == 1`
         # was False and this command skipped its own guard entirely — a false
         # SLICE EMPTY for david@subdev whenever the search index is not
         # answering. One shared helper, identical contract in both commands.
+        # This checks the RAW slice (`rows`, before subtracting handed-off) —
+        # a non-empty slice that is ENTIRELY handed off is a real, trusted
+        # 0-unhandled result and needs no validation (the search index
+        # already demonstrably answered).
+        #
+        # #391 adversarial review THEORETICAL-5 (accepted residual, no known
+        # reproduction): "non-empty `rows`" proves the index answered
+        # SOMETHING, not that it answered COMPLETELY — a partial index
+        # response returning only the already-handed subset (plausible for
+        # the freshest-changed ticket, e.g. one just bounced) would still
+        # clear this guard and print a clean `0`. Pre-#391 the identical
+        # partial answer produced a non-zero undercount instead (loop stayed
+        # alive). Not chased: moving the guard to check `unhandled` directly
+        # would FALSE-refuse the legitimate all-handed case this branch
+        # exists to accept (verified: `test_count_excludes_a_ready_for_
+        # review_ticket` fails under that change), and no real partial-
+        # index-response has ever been observed (only a full-empty one, the
+        # repo-rename repro this guard was built from).
         _refuse_unless_empty_is_trustworthy("slice-quals", quals, cwd=root)
+    unhandled = {n: v for n, v in rows.items() if not handed.get(n)}
     if want_count:
-        print(len(seen))
+        print(len(unhandled))
         return
-    _print_issue_rows(seen, own_stream=user)
+    _print_issue_rows(unhandled, own_stream=user)
 
 
 def cmd_core_quals(args):

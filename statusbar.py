@@ -101,9 +101,12 @@ def _spawn_refresh(cwd, home=None):
 
 def _stream_split_sfx(cache):
     """The '· gk N' suffix — sub-dev (scope=mine) boxes only: own tickets
-    already handed off to the gatekeeper. A SUBSET of the live 'I N'
-    obligation count (#367) — never subtracted out of N, just a decorator
-    naming which slice of N is already parked with the gatekeeper.
+    already handed off to the gatekeeper. #391 (2026-08-11) REVERSES the
+    prior "subset of I N" relationship for this reduced-authority path: I N
+    now counts own UNHANDLED work (len(mine) - gk), so gk is a SEPARATE
+    parked-count shown alongside I N, no longer a slice carved out of it —
+    a sub-dev's responsibility for a ticket ends the moment it is handed
+    off, so a handed-off ticket stops being part of I N at all.
 
     #313 pt 3 REVERSES #164's "0 still renders" call: the user reads a bare
     '· gk 0' as noise on every repo where it is routinely zero — hidden at
@@ -152,8 +155,13 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     KEPT unchanged: '· skip K' (autopilot-skip-labeled, hidden at 0, #313)
     and the separate 'Q N' question badge — neither was named in any
     complaint. A reduced-authority ('mine') cache still ALSO carries 'gk'
-    (own tickets already handed off to the gatekeeper, a SUBSET of N) —
-    unlike 'gkq' it was never named as redundant, so it stays.
+    (own tickets already handed off to the gatekeeper) — unlike 'gkq' it
+    was never named as redundant, so it stays. #391 (2026-08-11) reverses
+    what 'gk' means RELATIVE to N on this path: N used to be the FULL
+    slice (handed-off included, gk a subset of it); N is now own
+    UNHANDLED work only (len(mine) - gk), so 'gk' is the parked count
+    shown NEXT TO N, no longer a slice carved out of it — see
+    `_stream_split_sfx`'s own docstring for the full reasoning.
 
     Consistency guard: N is computed by `cmd_tickets_status --refresh`
     (airuleset.py) calling the SAME `_obligation_quals()`/`_union_open_issues()`
