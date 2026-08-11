@@ -6127,14 +6127,40 @@ def _goal_autoarm_virgin_candidate(now, run, state, pid, cwd, templates,
         # everyone -- a genuinely ordinary, never-asked interactive session
         # (#320 shape 2's real target) keeps the EXACT existing silent
         # caution, unchanged.
+        # #361-review MAJOR (fresh-context adversarial review) -- an
+        # ALREADY-armed pane is refused a few lines below regardless
+        # (`pane_goal_armed(cap) is not False`), so paying for the
+        # transcript read here would be wasted EVERY sweep for the
+        # steady state of a healthy, long-lived, continuously-busy /goal
+        # loop (bg-agent rows shown for most of its life) -- the single
+        # largest real cost this whole check would otherwise incur, on a
+        # box that runs its own working tree live every 60s. Skip the
+        # read specifically for the CONFIRMED-armed case (`is True`,
+        # zero I/O — `cap` is already captured); an UNDETERMINABLE
+        # footer (`None`) still gets the read, since that state genuinely
+        # does not tell us anything yet.
         recently_asked = False
-        if unique_cwd:
+        if unique_cwd and pane_goal_armed(cap) is not True:
             tr = find_active_transcript(projects_dir, cwd)
             recently_asked = bool(tr) and _transcript_recently_asked_to_arm(tr[0])
         if not recently_asked:
             return logs
         sid = os.path.basename(str(tr[0])).rsplit(".", 1)[0]
         bb = state.setdefault("goalarm_busybg", {})
+        # #361-review MINOR-1 (fresh-context adversarial review, accepted,
+        # disclosed cost, not fixed here) -- this entry is only ever
+        # CLEARED further down, once the session is confirmed genuinely
+        # idle (the same point that also clears `goalarm_busy`). A session
+        # that gets armed BY SOMETHING ELSE while still bg-busy, or whose
+        # footer turns undeterminable, never reaches that clear -- a LATER,
+        # genuinely new busy-then-recently-asked streak for the SAME sid
+        # (after it un-arms and asks again) would then be silently
+        # under-logged once, since `bb.get(sid)` is already stale-True.
+        # Purely diagnostic (nothing here ever consults `bb` to decide
+        # whether to ARM), and clearing it unconditionally would mean
+        # resolving `tr`/`sid` on every sweep regardless of the MAJOR
+        # finding's own armed-pane fast-path just above -- reintroducing
+        # the exact per-sweep transcript-read cost that fix removes.
         if not bb.get(sid):
             bb[sid] = True
             logs.append(
@@ -6160,6 +6186,15 @@ def _goal_autoarm_virgin_candidate(now, run, state, pid, cwd, templates,
         return logs
     sid = os.path.basename(str(tr[0])).rsplit(".", 1)[0]
     state.get("goalarm_busybg", {}).pop(sid, None)
+    # #361-review MINOR-2 -- the SAME pane's `goalarm_busy[pid]` streak (set
+    # by `goal_autoarm`'s own arm-question-branch busy logging, the exact
+    # sequence the reported incident took: busy while the question was
+    # still in the tail, THEN it scrolled off and every later sweep landed
+    # HERE instead) is never popped by that branch once routing changes —
+    # cleared here too, at the SAME "genuinely not busy" confirmation
+    # point, so a later busy streak in this pane is never silently
+    # under-logged because of a stale entry from the OTHER branch.
+    state.get("goalarm_busy", {}).pop(pid, None)
     va = state.setdefault("goalarm_virgin_tried", {})
     if va.get(sid):
         return logs
