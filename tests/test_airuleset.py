@@ -5753,6 +5753,30 @@ class TestClaudeHistoryPopupScript(TestCase):
         content = airuleset.render_claude_history_popup_script()
         self.assertIn('"less" is not installed', content)
 
+    def test_prints_a_loading_message_before_the_slow_transcript_read(self):
+        # ADVERSARIAL-REVIEW FINDING (#376, M1): measured live against this
+        # repo's own real project data, the transcript reconstruction alone
+        # can take ~25s / ~800MB peak RSS -- with nothing printed first, the
+        # popup appears BLANK/frozen for that whole window (a real
+        # regression this ticket's own review demanded be fixed, not just
+        # documented). A stderr line printed BEFORE the slow `CH_OUT=$(...)`
+        # capture starts is the minimal fix the review itself suggested.
+        content = airuleset.render_claude_history_popup_script()
+        self.assertIn("Loading claude-history", content)
+        lines = content.splitlines()
+        loading_idx = next(i for i, ln in enumerate(lines)
+                            if "Loading claude-history" in ln)
+        ch_idx = next(i for i, ln in enumerate(lines) if "CH_OUT=$(" in ln)
+        self.assertLess(loading_idx, ch_idx,
+                         "the loading message must print BEFORE the slow "
+                         "transcript-reconstruction capture starts, or the "
+                         "popup still appears blank/frozen during it")
+        # Printed to STDERR specifically -- never mixed into the `$( )`
+        # command-substitution's own captured stdout, and never into the
+        # final content `less` renders.
+        loading_line = lines[loading_idx]
+        self.assertIn(">&2", loading_line, loading_line)
+
     # -- real execution (genuine `bash` subprocess, not a mock) --
 
     def _deploy(self, home):
@@ -5809,6 +5833,12 @@ class TestClaudeHistoryPopupScript(TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("TRANSCRIPT-PRIMARY-MARKER-376", r.stdout)
         self.assertNotIn("also produced nothing", r.stdout)
+        # #376 M1: the loading message reaches STDERR on a real run, and
+        # never leaks into stdout (which `less` renders as the final
+        # transcript content -- a leaked loading line there would show up
+        # as visible junk at the top of every real popup).
+        self.assertIn("Loading claude-history", r.stderr)
+        self.assertNotIn("Loading claude-history", r.stdout)
 
     def _spawn_isolated_tmux_pane(self, session_argv, scratch):
         """A throwaway tmux server on an isolated TMUX_TMPDIR -- NEVER
