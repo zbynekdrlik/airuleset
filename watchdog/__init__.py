@@ -2190,7 +2190,17 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None):
     captured = capture_pane(pane_id, run, lines=10)
     if _strip_selected(captured):
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
-    run(["tmux", "send-keys", "-t", pane_id, "-l", text])
+    # #372 round-2 adversarial-review MINOR-2 -- `--` (end-of-options) is
+    # required for the SAME reason `_type_literal` already carries it
+    # (#322): real tmux parses a literal argument via getopt, so text
+    # whose first character is `-` (an arbitrary Discord-reply prompt,
+    # never /goal-prefixed, is exactly such a case) is read as an unknown
+    # FLAG and the whole send silently fails -- `_default_run` swallows a
+    # non-zero exit as "" with no exception and no log, leaving the box
+    # bare and every caller's own post-send verify reading a FALSE
+    # "delivered" (the box genuinely is empty, just never received the
+    # text at all).
+    run(["tmux", "send-keys", "-t", pane_id, "-l", "--", text])
     run(["tmux", "send-keys", "-t", pane_id, "Enter"])
 
 

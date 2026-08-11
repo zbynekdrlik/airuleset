@@ -139,6 +139,43 @@ class SendContinueEscapesStripSelectionFirst(unittest.TestCase):
         self.assertTrue(any(a[-1] == "Enter" for a in run.calls))
 
 
+class SendContinueDashLeadingTextIsEndOfOptionsGuarded(unittest.TestCase):
+    """#372 round-2 adversarial-review MINOR-2 — the SAME #322 hazard
+    `_type_literal` already carries a `--` guard for: real tmux parses a
+    literal `send-keys -l` argument via getopt, so text whose first
+    character is `-` (an arbitrary Discord-reply prompt job 7 can type via
+    `send_continue`, never `/goal`-prefixed) is read as an unknown FLAG
+    and the whole send silently fails — the box stays bare, and a
+    caller's own post-send verify (checking only whether the box is
+    empty) reads that as a FALSE "delivered", exactly the trust-breaking
+    class this ticket's dreply fix already targets for a different
+    mechanism. A fake `run` that models real tmux's getopt behavior (the
+    same shape TestTypeLiteralChunking's own tmux_like_run already uses)
+    is the "missing tooth" a plain argv-recording lambda cannot
+    provide."""
+
+    def _tmux_like_run(self, landed):
+        def run(argv, timeout=8):
+            if argv[:2] == ["tmux", "send-keys"] and "-l" in argv:
+                text = argv[-1]
+                guarded = len(argv) >= 2 and argv[-2] == "--"
+                if text.startswith("-") and not guarded:
+                    return None          # real tmux: "unknown flag", rc != 0
+                landed.append(text)
+                return ""
+            return ""
+        return run
+
+    def test_dash_leading_text_still_lands(self):
+        landed = []
+        wd.send_continue("%1", "-1 (a Discord reply starting with a dash)",
+                         self._tmux_like_run(landed))
+        self.assertEqual(
+            landed, ["-1 (a Discord reply starting with a dash)"],
+            "a dash-leading prompt must still land -- real tmux getopt "
+            "silently drops it without the -- end-of-options guard")
+
+
 class NoDoubleEscapeAnywhere(unittest.TestCase):
     """HARD RULE (issue #35 evidence): a rapid double-Escape into a pane with
     a draft PERMANENTLY DELETES it (does not go through the stash). No
