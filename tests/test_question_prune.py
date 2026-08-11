@@ -88,6 +88,50 @@ class PruneAnsweredQuestions(unittest.TestCase):
             _user(self.qts + 600, "<task-notification>\n<task-id>x</task-id>"),
             _user(self.qts + 650, "<command-name>/compact</command-name>"),
             _user(self.qts + 700, [{"type": "tool_result", "content": "ok"}]),
+            # #366 -- GOAL_QUESTION_PARK_TEXT (job 9's own 30-min unanswered-
+            # question backstop) was missing from _MACHINE_PROMPT_PREFIXES.
+            _user(self.qts + 750,
+                 "question-timeout: 30 min bez odpovede na poslednu "
+                 "otazku. Zaparkuj TENTO tiket ..."),
+        ])
+        self.assertEqual(self._prune(), [])
+        self.assertIn("888001", notify.load_questions(self.qpath))
+
+    def test_compact_continuation_summary_never_counts_as_an_answer(self):
+        # #366 -- ask-and-continue (❓ ASKED + ⏳ WORKING) keeps a session
+        # working OTHER tickets; a ticket-boundary /compact (job 14, or the
+        # synchronous #65 path) landing minutes later writes a REAL,
+        # top-level `user`-typed entry (CC's own compact-continuation
+        # summary) that is neither isMeta nor a <system-reminder> block --
+        # _last_human_prompt_ts wrongly read it as "the user answered",
+        # pruning the still-unanswered ❓ entry within minutes (the reported
+        # incident's own timeline: ping delivered, entry gone a few minutes
+        # later, footer shows no Q). Mirrors #350's own two-sided fix for
+        # the sibling _goal_blocked_on_unanswered_question classifier:
+        # the wording prefix AND CC's structural isCompactSummary flag.
+        self._record()
+        self._transcript([
+            {"type": "user", "timestamp": _iso(self.qts + 120),
+             "message": {"content":
+                 "This session is being continued from a previous "
+                 "conversation that ran out of context. The summary below "
+                 "covers the earlier portion of the conversation.\n\n"
+                 "Summary:\n1. Primary Request and Intent:\n..."}},
+        ])
+        self.assertEqual(self._prune(), [])
+        self.assertIn("888001", notify.load_questions(self.qpath))
+
+    def test_compact_continuation_summary_flagged_but_reworded_still_never_counts(self):
+        # #350 round-2's own hardening: a future CC build could reword the
+        # preamble -- the STRUCTURAL isCompactSummary flag must catch it
+        # even when the wording no longer matches the known prefix at all.
+        self._record()
+        self._transcript([
+            {"type": "user", "timestamp": _iso(self.qts + 120),
+             "isCompactSummary": True,
+             "message": {"content":
+                 "A future CC build's totally reworded compact preamble "
+                 "that shares no words with the old prefix at all."}},
         ])
         self.assertEqual(self._prune(), [])
         self.assertIn("888001", notify.load_questions(self.qpath))
