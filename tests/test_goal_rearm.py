@@ -463,8 +463,8 @@ class TestPaneGoalIndicator(unittest.TestCase):
         # the #383 design comment on the issue).
         skill = (Path(__file__).resolve().parent.parent / "skills"
                  / "autopilot" / "SKILL.md").read_text(encoding="utf-8")
-        goal_line = next(l for l in skill.splitlines()
-                          if l.strip().startswith("/goal "))
+        goal_line = next(ln for ln in skill.splitlines()
+                          if ln.strip().startswith("/goal "))
         pane = _giant_draft_no_chrome_captured(goal_line)
         self.assertIsNone(wd.pane_goal_armed(pane))
 
