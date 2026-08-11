@@ -3920,6 +3920,13 @@ class TestStreamNotifyOwnerRouting(TestCase):
         # to zbynek was the #295 bug — this assertion was INVERTED from
         # "zbynek" as the RED half of that fix's regression test.
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "marek")
+        # montalu5/6/7/8 (airuleset#378): owner routing decision 2026-08-11 —
+        # montalu5 is Marek's stream (like montalu4) -> claude-marek; the
+        # other three are zbynek's -> claude-zbynek.
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu5"], "marek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu6"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu7"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu8"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david"], "david")
         # miva1 (airuleset#300): phase-1 isolated stream, same shape as
         # simap -- its own tmux session name carries no Discord identity of
@@ -3964,6 +3971,17 @@ class TestStreamNotifyOwnerRouting(TestCase):
                     m.patch.object(self.notify, "_current_user", return_value=who):
                 self.assertEqual(self.notify.resolve_owner(), "david", who)
 
+    def test_montalu5_8_resolve_per_the_owner_routing_decision(self):
+        # airuleset#378: montalu5 -> marek (Marek's stream, like montalu4),
+        # montalu6/7/8 -> zbynek. Resolved directly inside resolve_owner()
+        # with no TMUX and no env override, exactly like the other stream
+        # personas above.
+        for who, owner in (("montalu5", "marek"), ("montalu6", "zbynek"),
+                           ("montalu7", "zbynek"), ("montalu8", "zbynek")):
+            with m.patch.dict(os.environ, {}, clear=True), \
+                    m.patch.object(self.notify, "_current_user", return_value=who):
+                self.assertEqual(self.notify.resolve_owner(), owner, who)
+
     def test_env_override_still_wins_over_the_stream_map(self):
         # montalu/david keep a redundant hand-added bashrc export from
         # before this fix -- it must still take precedence (same value,
@@ -3974,10 +3992,12 @@ class TestStreamNotifyOwnerRouting(TestCase):
             self.assertEqual(self.notify.resolve_owner(), "someoneelse")
 
     def test_an_unmapped_user_falls_through_to_tmux_resolution(self):
-        # marek, newlevel, gatekeeper, montalu5 (a hypothetical future
-        # account never added to the map): no override at all -> "" when
-        # there's no TMUX either, exactly the pre-existing behavior.
-        for who in ("marek", "newlevel", "gatekeeper", "montalu5", ""):
+        # marek, newlevel, gatekeeper, montalu9 (a hypothetical future
+        # account never added to the map -- montalu5 IS mapped now per
+        # airuleset#378, so montalu9 is the genuinely-unmapped example):
+        # no override at all -> "" when there's no TMUX either, exactly the
+        # pre-existing behavior.
+        for who in ("marek", "newlevel", "gatekeeper", "montalu9", ""):
             with m.patch.dict(os.environ, {}, clear=True), \
                     m.patch.object(self.notify, "_current_user", return_value=who):
                 self.assertEqual(self.notify.resolve_owner(), "", who)

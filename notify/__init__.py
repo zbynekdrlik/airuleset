@@ -73,6 +73,16 @@ STREAM_NOTIFY_OWNER = {
     "montalu2": "zbynek",
     "montalu3": "zbynek",
     "montalu4": "marek",
+    # montalu5/6/7/8 (airuleset#378, odoo-erp#3642): FOUR MORE full parallel
+    # montalu streams. Owner routing decision (2026-08-11): montalu5 is
+    # operated by MAREK (his stream, same as montalu4) -> claude-marek;
+    # montalu6/7/8 are zbynek's -> claude-zbynek. new-subdev.md §0 forbids
+    # guessing this, so it was asked and confirmed; §6a requires verifying
+    # it with a REAL notify-delivery.log ping, not only configuring it.
+    "montalu5": "marek",
+    "montalu6": "zbynek",
+    "montalu7": "zbynek",
+    "montalu8": "zbynek",
     "simap": "zbynek",
     # miva1 (airuleset#300, 2026-08-07): phase-1 isolated stream, same shape
     # as simap/montalu -- its own tmux session name carries no Discord
