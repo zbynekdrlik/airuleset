@@ -139,6 +139,14 @@ MANAGED_MAX_SUBAGENTS_PER_SESSION = "1000"
 # next install, even one already carrying a smaller manual value.
 MANAGED_CLEANUP_PERIOD_DAYS = 3650
 
+# #376: fleet-managed `tui` setting.json pin -- "fullscreen" (alt-screen
+# renderer), confirmed against the installed CC binary and Anthropic's own
+# docs (code.claude.com/docs/en/fullscreen) as one of exactly two accepted
+# values ("classic" | "fullscreen"). See apply_managed_settings_defaults'
+# own docstring bullet for the full history/tradeoff this REVERSES a prior
+# `"default"` (classic) pin for.
+MANAGED_TUI = "fullscreen"
+
 # REVERTED (2026-07-25 correction batch, same day it was added): a managed
 # `MANAGED_AUTOCOMPACT_WINDOW = 300000` ("krok 1c") briefly capped the
 # auto-compact threshold. The user's call, which overrides that decision:
@@ -2837,13 +2845,33 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       autopilot-worker) — those are a separate, session-scoped mechanism that dies
       with the session. Takes effect on the NEXT `claude` launch.
 
-    - `tui = "default"` pins the CLASSIC inline renderer. Without the key an
-      Anthropic A/B gate decides, and the fullscreen-renderer onboarding dialog can
-      set `tui = "fullscreen"` on a fresh account — then output lives in the tmux
-      ALTERNATE screen, nothing reaches scrollback and `Ctrl+B [` history is EMPTY
-      (recurring complaint; hit again on david@gatekeeper 2026-07-09). Deliberately
-      OVERRIDES an existing "fullscreen" value: the user wants keyboard scrollback
-      on every managed box, always. Takes effect on the NEXT `claude` launch.
+    - `tui = "fullscreen"` (#376, REVERSING the earlier `tui = "default"` pin) pins
+      Claude Code's fullscreen (alt-screen) renderer fleet-wide. History: this
+      function used to pin CLASSIC specifically because `Ctrl+B [` tmux-native
+      scrollback goes EMPTY under fullscreen (nothing reaches tmux's own scrollback
+      by design — david@gatekeeper 2026-07-09). But CLASSIC's own failure mode is
+      worse and is what #376 was actually filed about: classic draws into tmux's
+      NATIVE scrollback, which a resize/relayout event duplicates/loses bands of
+      (upstream anthropics/claude-code#84247 + #46834, both confirmed still OPEN
+      2026-08-11) — on tmux <3.6 (no synchronized output; this fleet runs 3.4) this
+      is routine, not rare. Fullscreen keeps the WHOLE conversation in its OWN
+      app-internal message list (`PgUp`/`PgDn` scroll it, `Ctrl+O` opens
+      `/`-searchable transcript mode) — confirmed by Anthropic's own docs
+      (code.claude.com/docs/en/fullscreen) to survive repeated compaction and to
+      need no mouse (`PgUp`/`PgDn` alone reach it), which is what actually answers
+      the complaint this ticket exists for. The `Ctrl+B [` regression is real and
+      EXPECTED, not a bug in this change: `PgUp`/`PgDn` + `Ctrl+O` are fullscreen's
+      documented replacement for it, not merely a workaround — verify this trade
+      lands as intended on gk/david2 post-deploy (their long-running CLASSIC
+      sessions need a relaunch/`/tui fullscreen` to pick this up — see below).
+      Equivalent to env `CLAUDE_CODE_NO_FLICKER=1` (docs: "The `tui` setting and
+      the environment variable are equivalent") — so #253's opt-in
+      `claude-fullscreen` launcher mode is now redundant with this default (kept
+      anyway, harmless, see CLAUDE_LAUNCH_SCRIPT_CONTENT's own comment). Takes
+      effect on the NEXT `claude` launch — an ALREADY-RUNNING session needs a
+      relaunch (or a manual `/tui fullscreen`) to switch, same latching this
+      function's own `promptSuggestionEnabled` bullet documents for a different
+      key.
 
     - `model = MANAGED_MODEL` (Opus 5[1m]) is the default MAIN-session model on
       every managed box (2026-07-25 cost-fix package, #37) — see MANAGED_MODEL's
@@ -2895,14 +2923,14 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     result = dict(settings)
     result["effortLevel"] = MANAGED_EFFORT_LEVEL
     result["disableAgentView"] = True
-    # `tui: "default"` is pinned here, but the opt-in `claude-fullscreen`
-    # launcher mode (#253, CLAUDE_LAUNCH_SCRIPT_CONTENT) overrides it PER
-    # LAUNCH via CLAUDE_CODE_NO_FLICKER=1 -- confirmed against the installed
-    # CC binary that the env var is checked BEFORE this settings key, so the
-    # override wins. If this pin is ever changed to `"tui": "fullscreen"`
-    # (upstream's own settings-level equivalent of the env var), re-check
-    # that ordering still holds before removing #253's env-var mechanism.
-    result["tui"] = "default"
+    # #376: fullscreen is now the pin -- see this function's own docstring
+    # bullet above for the full history/tradeoff/citation. The old ordering
+    # concern ("re-check env-var-vs-setting precedence before changing this
+    # pin") is resolved by Anthropic's own docs, not re-derived here: `tui`
+    # and `CLAUDE_CODE_NO_FLICKER` are stated equivalent, so #253's launcher
+    # mode is redundant-but-harmless post-#376, not removed (see
+    # CLAUDE_LAUNCH_SCRIPT_CONTENT's own comment).
+    result["tui"] = MANAGED_TUI
     result["model"] = MANAGED_MODEL
     result["promptSuggestionEnabled"] = False
     result.pop("autoCompactWindow", None)
