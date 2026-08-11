@@ -7224,6 +7224,44 @@ class TestClaudeHistoryScript(TestCase):
         self.assertIn("q0", r.stdout)
         self.assertIn("q4", r.stdout)
 
+    def test_width_wraps_long_body_text_to_the_given_column_count(self):
+        # #376 real-user report against the popup at 90%/narrow width:
+        # long lines "scroll right instead of wrapping" -- unusable.
+        # `--width` word-wraps body text so no rendered LINE exceeds it.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        long_text = " ".join(f"word{i}" for i in range(40))  # far > 20 cols
+        self._write_transcript(cwd, [
+            self._user("q"),
+            self._assistant(self._text_block(long_text)),
+        ])
+        r = self._run("--cwd", str(cwd), "--full", "--width", "20")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("word0", r.stdout)
+        self.assertIn("word39", r.stdout)
+        # scope the width check to the rendered TURN content -- the "# ..."
+        # header/count lines are metadata, never subject to body wrapping.
+        body_start = r.stdout.index("===== CLAUDE =====")
+        for line in r.stdout[body_start:].splitlines():
+            self.assertLessEqual(len(line), 20, line)
+        # never split IN THE MIDDLE of one word -- word39 stays intact.
+        self.assertIn("word39", r.stdout)
+
+    def test_width_zero_or_omitted_never_wraps(self):
+        # 0/omitted must be byte-for-byte the pre-#376 unwrapped behavior --
+        # regression guard for every OTHER test in this class that never
+        # passes --width at all.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        long_text = " ".join(f"word{i}" for i in range(40))
+        self._write_transcript(cwd, [
+            self._user("q"),
+            self._assistant(self._text_block(long_text)),
+        ])
+        r = self._run("--cwd", str(cwd), "--full")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(long_text, r.stdout)
+
     # -- #376: readable compaction-boundary marker + whole-file completeness
     # (never silently drop pre-compact / orphaned-branch content) + chain
     # every session file for the project, not just the newest -----------
