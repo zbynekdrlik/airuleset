@@ -5617,6 +5617,26 @@ def _transcript_goal_line(path, max_lines=400):
     return best
 
 
+def _transcript_recently_asked_to_arm(path, max_lines=400):
+    """#361 -- True when the ASSISTANT printed the `/autopilot` arm question
+    (`_ARM_QUESTION_RX`, via the already-existing `_entry_asks_to_arm`
+    classifier `scan_goal_markers` itself relies on) somewhere in the SAME
+    bounded tail window `_transcript_goal_line` already reads. A narrower
+    question than that sibling: not "what did it ask to arm", just "did it
+    ask AT ALL, recently" -- the one signal that still finds a printed arm
+    question once it has scrolled out of `goal_autoarm`'s own 1500-char
+    VIEWPORT tail (a session dispatching many subagents does this within a
+    sweep or two of printing it). Never raises; an unreadable transcript
+    answers False, never a guess toward arming."""
+    try:
+        for entry in _iter_jsonl_tail(path, max_lines):
+            if _entry_asks_to_arm(entry):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _foreign_transcript_goal(cwd):
     """Full `/goal ` line from ANOTHER user's newest transcript for `cwd` —
     the generic sudo-hosted stream case: a live pane visible here whose
@@ -6087,8 +6107,46 @@ def _goal_autoarm_virgin_candidate(now, run, state, pid, cwd, templates,
     pre-check inside this hot per-pane sweep, at the cost of at most one
     wasted Stop-hook round-trip."""
     logs = []
+    tr = None
     if _pane_has_bg_agent(cap):
-        return logs
+        # #361 -- `_pane_has_bg_agent` was built for job 20's dead-session
+        # revival caution ("never type into a pane whose background worker
+        # might still need it") and is over-cautious for this path's OTHER
+        # real population: a session that DID explicitly print the
+        # /autopilot arm question -- the arm-question branch's own,
+        # already-proven-safe precedent (restreamer/gk incidents,
+        # `TestBackgroundAgentWaitDoesNotBlock`/`TestAgentStripNeverBlocks`)
+        # explicitly allows arming a bare, idle MAIN turn regardless of
+        # background agents still listed in the footer -- but whose
+        # detection lost sight of the question once it scrolled past
+        # `goal_autoarm`'s own 1500-char tail window (the live incident:
+        # 4+ subagents pushed ~380 lines after the print, and this branch
+        # then silently refused every sweep for 36 minutes). Distinguish
+        # the two POPULATIONS from the transcript (cheap, bounded, paid
+        # only once genuinely busy) rather than relaxing the gate for
+        # everyone -- a genuinely ordinary, never-asked interactive session
+        # (#320 shape 2's real target) keeps the EXACT existing silent
+        # caution, unchanged.
+        recently_asked = False
+        if unique_cwd:
+            tr = find_active_transcript(projects_dir, cwd)
+            recently_asked = bool(tr) and _transcript_recently_asked_to_arm(tr[0])
+        if not recently_asked:
+            return logs
+        sid = os.path.basename(str(tr[0])).rsplit(".", 1)[0]
+        bb = state.setdefault("goalarm_busybg", {})
+        if not bb.get(sid):
+            bb[sid] = True
+            logs.append(
+                "busy (goal-autoarm, virgin) %s (%s) -> the arm question "
+                "was printed and is being tracked here; background agents "
+                "alone do not block arming a genuinely idle main turn -- "
+                "checking that now, will retry every sweep until it "
+                "actually goes idle"
+                % (pid, os.path.basename(cwd.rstrip("/"))))
+        # Falls through -- background-agent presence alone never blocks a
+        # RECENTLY-ASKED candidate; the classify-boundary check right below
+        # decides whether the MAIN turn itself is genuinely free right now.
     kind, draft = _classify_boundary(cap)
     if kind != "input" or draft:
         return logs
@@ -6096,10 +6154,12 @@ def _goal_autoarm_virgin_candidate(now, run, state, pid, cwd, templates,
         return logs
     if not unique_cwd:
         return logs
-    tr = find_active_transcript(projects_dir, cwd)
+    if tr is None:
+        tr = find_active_transcript(projects_dir, cwd)
     if not tr:
         return logs
     sid = os.path.basename(str(tr[0])).rsplit(".", 1)[0]
+    state.get("goalarm_busybg", {}).pop(sid, None)
     va = state.setdefault("goalarm_virgin_tried", {})
     if va.get(sid):
         return logs
@@ -6265,10 +6325,34 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
         # just switched off. That signal is not in the viewport at all — it is
         # the transcript's newest goal marker, read below once the session is
         # resolved. The indicator stays ignored; the marker is the addition.
+        # #361 -- this whole block used to be THREE completely silent
+        # `continue`s. Every pane reaching this point has ALREADY had
+        # `_ARM_QUESTION_RX` match in its tail (a few lines up), so it IS a
+        # genuine, confirmed arm candidate by construction -- logging here
+        # carries no fleet-wide noise risk (unlike the virgin-candidate
+        # path's own busy check, which fires for ANY busy Claude session).
+        # Throttled to once per continuous busy streak, one shared dict for
+        # all three reasons (the exact reason can flip sweep to sweep; it
+        # is still the SAME "not ready yet" streak).
+        loc = os.path.basename(cwd.rstrip("/"))
+        bb = state.setdefault("goalarm_busy", {})
         busy_tail = _BG_AGENTS_WAIT_RX.sub("", tail)
         if "esc to interrupt" in busy_tail or "Waiting for" in busy_tail:
+            if not bb.get(pid):
+                bb[pid] = True
+                logs.append(
+                    "skip busy (goal-autoarm) %s (%s) -> the arm question "
+                    "is on screen but the session is still actively "
+                    "working; will retry every sweep until it goes idle"
+                    % (pid, loc))
             continue                       # live work on screen — not at rest
         if pane_in_mode(pid, run):
+            if not bb.get(pid):
+                bb[pid] = True
+                logs.append(
+                    "skip busy (goal-autoarm) %s (%s) -> pane is in "
+                    "copy-mode or another non-text mode; will retry every "
+                    "sweep until it clears" % (pid, loc))
             continue                       # copy-mode / other non-text mode
         # #100 — a BARE prompt arms directly; a FOREIGN DRAFT (incl. the
         # user's own half-typed /goal paste — the live incident this ticket
@@ -6279,8 +6363,14 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
         # mechanism. Only a genuinely busy/undeterminable boundary skips.
         kind, draft = _classify_boundary(cap)
         if kind != "input":
+            if not bb.get(pid):
+                bb[pid] = True
+                logs.append(
+                    "skip busy (goal-autoarm) %s (%s) -> the boundary "
+                    "does not read as a bare input prompt yet; will retry "
+                    "every sweep" % (pid, loc))
             continue
-        loc = os.path.basename(cwd.rstrip("/"))
+        bb.pop(pid, None)
         # #266 Defect 2: a literal `/goal …` line printed IN THE VIEWPORT
         # used to be a HARD requirement here, enforced BEFORE anything else
         # was even attempted — but the payload is TRANSCRIPT-sourced
