@@ -1487,6 +1487,18 @@ def main(argv=None):
     # --list ordering, unchanged); chaining needs chronological
     # (oldest-first) order so turns from an older session file are never
     # shown AFTER turns from a newer one.
+    #
+    # ACCEPTED RESIDUAL (#376 M5, adversarial review, THEORETICAL --
+    # never observed live, so left undone under this repo's FREEZE
+    # policy rather than chased): this orders files by OS-level MTIME,
+    # not by each file's own SESSION-START timestamp. The two normally
+    # agree, but a file whose transcript stopped being written to long
+    # before a LATER-started sibling file was itself created (e.g. an
+    # abandoned/orphaned chain member) could sort out of true
+    # chronological order. Fixing it would mean reading the first
+    # real entry's `timestamp` out of every candidate file before
+    # sorting -- a real, non-trivial change, not a one-line swap;
+    # documented here rather than implemented pre-emptively.
     paths = list(reversed(paths)) if chain_all else paths[:1]
 
     if not any(p.exists() for p in paths):
@@ -1632,6 +1644,14 @@ printf 'Loading claude-history...\n' >&2
 # regression (anthropics/claude-code #84247/#46834, both still open as
 # of #376) -- word-wrapped to the popup's own live column width so long
 # lines never need horizontal scrolling (#376).
+#
+# `--color` is forced UNCONDITIONALLY here -- a deliberate REVERSAL of
+# #327's own documented popup-neutrality choice (that ticket forced
+# `--plain` specifically so the popup's rendering never impersonated a
+# real terminal's exact colors). #376 no longer needs that neutrality:
+# the popup is now a FALLBACK only (never claiming to mirror the live
+# pane), so real color is a strict readability upgrade with nothing to
+# stay neutral about.
 #
 # `set -e` + `VAR=$(failing_cmd)` would otherwise exit this script BEFORE
 # the next line ever runs (a failing command substitution used in a plain
@@ -2761,8 +2781,11 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       worse and is what #376 was actually filed about: classic draws into tmux's
       NATIVE scrollback, which a resize/relayout event duplicates/loses bands of
       (upstream anthropics/claude-code#84247 + #46834, both confirmed still OPEN
-      2026-08-11) — on tmux <3.6 (no synchronized output; this fleet runs 3.4) this
-      is routine, not rare. Fullscreen keeps the WHOLE conversation in its OWN
+      2026-08-11) — on tmux <3.6 (no synchronized output) this is routine, not
+      rare; the fleet is NOT uniformly on an old build here (dev2/gk/subdev run
+      3.4, but dev1 itself runs 3.7b — the corruption was live-reproduced on
+      dev1's own 3.7b, so this is not purely a pre-3.6 problem, just a WORSE one
+      there). Fullscreen keeps the WHOLE conversation in its OWN
       app-internal message list (`PgUp`/`PgDn` scroll it, `Ctrl+O` opens
       `/`-searchable transcript mode) — confirmed by Anthropic's own docs
       (code.claude.com/docs/en/fullscreen) to survive repeated compaction and to
