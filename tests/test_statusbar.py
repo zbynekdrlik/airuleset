@@ -88,6 +88,27 @@ class TicketsSegment(unittest.TestCase):
         self.assertEqual(self._seg(), no_progress)
         self.assertNotIn("run", no_progress)
 
+    def test_render_never_resurrects_dropped_forms_from_a_legacy_cache(self):
+        # #367 adversarial review: a REAL box carries a cache written by the
+        # PRE-#367 code for up to TTL after deploy — scope=core plus the
+        # legacy `streamy`/`gk_req` fields the refresh no longer writes.
+        # The render must treat every dropped form as fully inert: plain
+        # `I N`, no `core` suffix, no `· str M`, no `· gkq N`. Locks the
+        # drops with real teeth — a mutant re-adding the `core` suffix (or
+        # the `streamy`/`gk_req` reads) passed the whole rewritten suite,
+        # because every other assertion is a one-sided assertIn("I N").
+        d = statusbar.cache_dir(self.home)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / (statusbar.cwd_key(self.cwd) + ".json")).write_text(json.dumps(
+            {"open": 4, "name": "demo", "root": str(self.cwd),
+             "ts": int(time.time()), "scope": "core",
+             "streamy": 5, "gk_req": 3}))
+        seg = self._seg()
+        self.assertIn("I 4", seg)
+        self.assertNotIn("core", seg)
+        self.assertNotIn("str", seg)
+        self.assertNotIn("gkq", seg)
+
     def test_unknown_repo_renders_nothing(self):
         _seed_cache(self.home, self.cwd, open_n=None, name="")   # gh unavailable
         self.assertEqual(self._seg(), "")
@@ -892,6 +913,51 @@ class RefreshCLI(unittest.TestCase):
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache["open"], 10)      # own slice, exclusion applied
             self.assertEqual(cache.get("scope"), "core")
+
+    def test_refresh_full_authority_counts_maintainer_action_tickets_outside_core(self):
+        # #367's actual semantic change (and the stated reason the `gkq`
+        # badge could be dropped at all): the full-authority footer count is
+        # `_obligation_quals()`'s union — the core partition PLUS every open
+        # `needs-gatekeeper`/`ready-for-review` ticket a sub-dev stream owns.
+        # Every other full-authority refresh test returns the SAME array for
+        # all three quals (union invariant to which quals run), so a mutant
+        # reverting to the old core-partition-only query passed the whole
+        # rewritten suite. Here the maintainer-action quals contribute
+        # tickets OUTSIDE the 10-ticket core array (#11, #12; #1 dedups):
+        # obligation union = 12, core alone = 10.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            TEN = "[" + ",".join('{"number":%d}' % n for n in range(1, 11)) + "]"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/demo";;\n'
+                # the POSITIVE skip query ("--search label:autopilot-skip ...")
+                # — must not be swallowed by the stream-exclusion pattern below
+                '  *"--search label:autopilot-skip"*) echo 0;;\n'
+                '  *label:needs-gatekeeper*) echo \'[{"number":11}]\';;\n'
+                '  *label:ready-for-review*) '
+                "echo '[{\"number\":12},{\"number\":1}]';;\n"
+                "  *-label:stream:*) echo '%s';;\n" % TEN +
+                '  *) echo "[]";;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(
+                cache["open"], 12,
+                "full-authority open must be the OBLIGATION union "
+                "(core ∪ needs-gatekeeper ∪ ready-for-review), not the "
+                "core partition alone")
 
     def test_refresh_core_count_excludes_permanent_ops_channel_tickets(self):
         # #362: a self-declared PERMANENT `ops-channel` ticket (odoo-erp
