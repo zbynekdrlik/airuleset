@@ -7430,7 +7430,13 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
     long has THIS pending request specifically been stuck" — and it is
     already bounded by the entry's own lifetime: the moment the request is
     delivered, dropped, or expires, the whole entry (and this field with it)
-    is removed, so there is nothing further to bound."""
+    is removed, so there is nothing further to bound.
+
+    #394 — `not_boundary_since` (job 14's marker-hold grace anchor, set the
+    first sweep a PROVEN-boundary request's marker is observed still
+    blocking) is preserved the SAME way, for the SAME reason, as its own
+    independent field — see `_compact_marker_hold_in_grace`'s own
+    docstring."""
     session = str(session or "").strip()
     if not session:
         return False
@@ -7442,6 +7448,15 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
         entry["msg_hash"] = str(msg_hash)
     if isinstance(prior, dict) and prior.get("deferred_since") is not None:
         entry["deferred_since"] = prior["deferred_since"]
+    # #394 -- `not_boundary_since` (job 14's marker-hold grace anchor, set
+    # the first sweep it observes a PROVEN-boundary request's marker still
+    # blocking) is preserved UNCONDITIONALLY across a re-record, for the
+    # IDENTICAL reason `deferred_since` is: `ts` is overwritten on every
+    # call, so a session completing tickets faster than
+    # `COMPACT_MARKER_HOLD_GRACE_S` would otherwise reset its own anchor on
+    # every re-record and never actually reach it.
+    if isinstance(prior, dict) and prior.get("not_boundary_since") is not None:
+        entry["not_boundary_since"] = prior["not_boundary_since"]
     resolved_origin = str(origin or "").strip()
     if not resolved_origin:
         if isinstance(prior, dict):
@@ -8239,6 +8254,119 @@ def _compact_live_tasks_in_grace(request_ts, now, grace=None):
     except (TypeError, ValueError):
         return True   # unmeasurable age -- stay in-grace, never guess "past"
     return age < _compact_defer_grace(grace)
+
+
+# #394 (2026-08-11, gatekeeper + dev1 live evidence) -- the marker-based
+# not-a-boundary block (#333) has NO grace-elapsed escape for a PROVEN
+# boundary, unlike the sibling live-tasks defer directly above (#250) it
+# otherwise mirrors exactly. A continuously-busy `/goal` loop (job 14's own
+# primary intended consumer, and the entire reason
+# `_COMPACT_PROVEN_BOUNDARY_ORIGIN`/`_COMPACT_SELF_CALLBACK_ORIGIN` exist at
+# all) essentially never produces a genuinely quiet `✅`/no-marker turn for
+# minutes at a stretch -- it keeps producing new `⏳` turns (CI waits, the
+# next dispatch, a sibling worker) far faster than a session ever settles.
+# Measured live on dev1, 2026-08-11: EVERY `origin=subagent-stop` request
+# that day either lapsed at `COMPACT_REQUEST_MAX_AGE_S` with the transcript
+# still reading `⏳` at lapse time, or was still cycling `skip
+# not-a-boundary` -- ZERO `SEND`s all day for that origin. The issue's own
+# gatekeeper journal shows the identical shape: a request "skip
+# not-a-boundary"-looping every ~70s for 22+ continuous minutes after a
+# genuine `## ✅ Work Complete` turn was printed, until the 30-minute lapse
+# silently drops it having delivered nothing.
+#
+# #333's OWN test (`tests/test_compact_request.py::
+# TestCompactRequiresGenuineIdleBoundary::test_job14_holds_a_plain_working_
+# turn_even_for_a_proven_boundary`) is a deliberate, user-directed
+# invariant this fix does NOT reverse: a FRESH marker-hold must still
+# block, exactly as before -- #333's THIRD incident (a plain `⏳ WORKING`
+# turn compacted the moment an UNRELATED grace window elapsed) is precisely
+# what a grace window on THIS gate, timed INDEPENDENTLY of
+# `COMPACT_DEFER_GRACE_S` (its own separate constant/state field, so
+# neither mechanism's bookkeeping can corrupt the other's), keeps closed:
+# the override can only ever engage once the HOLD ITSELF has persisted past
+# its own bound, never on a request that has barely started waiting.
+#
+# Scoped identically to #301's own #99/#48 precedent: PROVEN-boundary
+# origins only (`compact_ticket_boundary` checks `proven_boundary` before
+# consulting this) -- a blank-origin (plain Stop-hook) request carries no
+# independent proof a boundary ever existed, so its `⏳`/`❓` block stays
+# fully unconditional, exactly as before this fix. `❓` is NEVER overridden
+# by this grace, at any age: `_compact_blocked_by_question`'s own separate,
+# unconditional ❓-only gate already runs BEFORE `_compact_not_at_boundary`
+# in both callers (`compact_ticket_boundary`, `deliver_compact_now`), so by
+# construction this override only ever fires against a `⏳` marker -- a
+# pending question is genuinely undurable state regardless of how long the
+# hold has persisted, and this fix does not touch that gate at all.
+#
+# `kind == "busy"` remains fully unconditional (#333's OTHER, still-correct
+# fix, entirely untouched by this ticket) -- this grace can only ever let a
+# request past the MARKER gate; the separate, still-untouched busy-pane
+# check downstream continues to refuse typing into a pane that is not
+# observably at rest RIGHT NOW. `/compact` typed into a genuinely idle pane
+# starts an immediate, standalone new turn -- it is never a keystroke
+# QUEUED behind an in-progress one, so the #84/#166
+# queue-drains-only-at-an-accepted-Stop concern (#333's actual root cause)
+# cannot recur through this path -- see the issue's own Q3 answer for the
+# full trace.
+#
+# `deliver_compact_now` (the synchronous #65 path) is deliberately NOT
+# wired to this grace at all: it is a one-shot call at essentially
+# `ts≈now`, so `not_boundary_since` would never be set for it in practice
+# -- wiring it there would only add surface area for a no-op.
+COMPACT_MARKER_HOLD_GRACE_S = 600   # 10 min; env AIRULESET_COMPACT_MARKER_HOLD_GRACE_S
+
+
+def _compact_marker_hold_grace(grace=None):
+    """An explicit `grace=` (test/caller override) is returned verbatim,
+    unclamped -- every production call site leaves it `None`.
+
+    The CONSTANT/ENV-derived value is clamped to `[1, COMPACT_REQUEST_MAX_
+    AGE_S)`, mirroring `_compact_defer_grace` exactly and for the identical
+    reason: a misconfigured `AIRULESET_COMPACT_MARKER_HOLD_GRACE_S` could
+    otherwise silently disable this override outright (0 or negative --
+    every hold reads as instantly "past grace") or recreate the
+    lapse-before-grace starvation this whole fix exists to close (a value
+    at or above the request TTL)."""
+    if grace is not None:
+        return grace
+    try:
+        raw = int(os.environ.get("AIRULESET_COMPACT_MARKER_HOLD_GRACE_S",
+                                 COMPACT_MARKER_HOLD_GRACE_S))
+    except ValueError:
+        raw = COMPACT_MARKER_HOLD_GRACE_S
+    if raw < 1:
+        return 1
+    if raw >= COMPACT_REQUEST_MAX_AGE_S:
+        return COMPACT_REQUEST_MAX_AGE_S - 1
+    return raw
+
+
+def _compact_marker_hold_in_grace(not_boundary_since, now, grace=None):
+    """#394 -- True while a PROVEN-boundary request's marker-based hold
+    (`_compact_not_at_boundary` returning True) should still block:
+    `now - not_boundary_since` is under the grace window
+    (`_compact_marker_hold_grace`). Once held past this, the caller
+    delivers `/compact` anyway (still subject to the untouched,
+    unconditional `kind == "busy"` check downstream, and to every other
+    gate below it).
+
+    `not_boundary_since` is whichever anchor the CALLER passes -- job 14
+    passes its request's own `not_boundary_since` (the first sweep it
+    observed THIS session's proven-boundary request marker-blocked,
+    preserved by `record_compact_request` across a re-record; mirrors
+    `deferred_since`/#250-review exactly, and for the identical reason: a
+    session completing tickets faster than this window would otherwise
+    reset its own anchor on every re-record and never actually reach it).
+
+    A missing/unreadable `not_boundary_since` is treated as IN-GRACE
+    (True), never as "infinite age" -- guessing "past grace" from an
+    unmeasurable value would defeat the whole point of a grace window, the
+    same fail-safe direction `_compact_live_tasks_in_grace` uses."""
+    try:
+        age = float(now) - float(not_boundary_since)
+    except (TypeError, ValueError):
+        return True   # unmeasurable age -- stay in-grace, never guess "past"
+    return age < _compact_marker_hold_grace(grace)
 
 
 # #238 (2026-08-06) -- same-turn dispatch race. `_session_has_live_bg_tasks`'s
@@ -9098,12 +9226,23 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if pane_waiting_on_user(captured):
             logs.append("skip dialog-open (compact-request) %s" % loc)
             continue
+        # #394 -- moved up from just above the (now REVERSED-by-#333) busy
+        # exemption below, so it is available to the not-a-boundary grace
+        # override right after this line too. Purely a hoist -- the value
+        # and its meaning (an autopilot-worker's own SubagentStop with zero
+        # other live tasks, or a session's own `compact-request --self`
+        # call) are unchanged.
+        proven_boundary = (str(entry.get("origin") or "")
+                           in _COMPACT_PROVEN_BOUNDARY_ORIGINS)
         # #102 -- never deliver while the session's CURRENT last turn is a
         # ❓ block: re-checked HERE (delivery time), not just at record
         # time -- see `_compact_blocked_by_question`'s docstring. Left in
         # place (never consumed) so the next sweep retries once the
         # question resolves (or the entry is superseded by a newer
-        # ticket-boundary report for this same sid).
+        # ticket-boundary report for this same sid). UNCONDITIONAL, no
+        # origin exemption, NO grace override -- #394 does not touch this
+        # gate at all; a pending question is genuinely undurable state
+        # regardless of how long anything has been waiting.
         if _compact_blocked_by_question(cwd, sid, projects_dir=pdir):
             logs.append("skip blocked-question (compact-request) %s" % loc)
             continue
@@ -9118,10 +9257,42 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # REVERSED that -- `⏳` blocks for EVERY origin now, here and in
         # `_compact_blocked_by_question` above (which was never relaxed by
         # #121 in the first place).
+        #
+        # #394 -- for a `proven_boundary` origin ONLY, this hold is bounded
+        # by TIME, exactly like the sibling live-tasks defer below (#250,
+        # `deferred_since`/`_compact_live_tasks_in_grace`) -- a genuinely
+        # SEPARATE anchor/constant pair (`not_boundary_since`/
+        # `COMPACT_MARKER_HOLD_GRACE_S`) so neither mechanism's bookkeeping
+        # can corrupt the other's. The FIRST sweep that observes this
+        # specific request marker-blocked stamps `not_boundary_since` on
+        # the entry (preserved across a re-record the same way
+        # `deferred_since` is -- see `record_compact_request`'s own
+        # docstring); once held past `COMPACT_MARKER_HOLD_GRACE_S`, the
+        # block is overridden and execution falls through to every gate
+        # below, INCLUDING the still fully unconditional `kind == "busy"`
+        # check a few lines down -- see that constant's own section comment
+        # for why this cannot reopen #333's actual incident (a busy-typed
+        # `/compact` draining several turns later at an arbitrary bad
+        # moment). A blank-origin request gets no override at all: it
+        # never reaches the `if proven_boundary:` branch below, so its
+        # `⏳`/`❓` block stays exactly as unconditional as before this fix.
         if _compact_not_at_boundary(cwd, sid, projects_dir=pdir,
                                     origin=str(entry.get("origin") or "")):
-            logs.append("skip not-a-boundary (compact-request) %s" % loc)
-            continue
+            marker_grace_elapsed = False
+            if proven_boundary:
+                not_boundary_since = entry.get("not_boundary_since")
+                if not_boundary_since is None:
+                    not_boundary_since = now
+                    entry["not_boundary_since"] = not_boundary_since
+                    reqs[sid] = entry
+                    changed = True
+                marker_grace_elapsed = not _compact_marker_hold_in_grace(
+                    not_boundary_since, now)
+            if not marker_grace_elapsed:
+                logs.append("skip not-a-boundary (compact-request) %s" % loc)
+                continue
+            logs.append(
+                "OK not-a-boundary-grace-elapsed (compact-request) %s" % loc)
         # #188 — a PROVEN boundary whose result the supervisor demonstrably
         # never consumed (its turn died on an API error). Left in place, never
         # consumed: job 1's `continue` resumes the session, it reads the
@@ -9153,8 +9324,9 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # prevent. So `/compact` is now only ever TYPED when the pane is
         # observably at rest RIGHT NOW, for every origin, with no exemption:
         # `kind == "busy"` always skips, regardless of `proven_boundary`.
-        proven_boundary = (str(entry.get("origin") or "")
-                           in _COMPACT_PROVEN_BOUNDARY_ORIGINS)
+        # `proven_boundary` itself is now computed near the top of this
+        # loop iteration (#394), so it is available to the not-a-boundary
+        # grace check above too -- the value here is unchanged.
         if kind == "busy":
             logs.append("skip busy (compact-request) %s" % loc)
             continue
