@@ -2599,13 +2599,39 @@ _MACHINE_PROMPT_PREFIXES = (
     # (a routine, real transcript entry -- #108/#109 measured thousands of
     # them corpus-wide) counted as a genuine human prompt and could delay
     # a genuinely-headless virgin arm by up to GOAL_AUTOARM_RECENT_HUMAN_S.
-    "Stop hook feedback:")
+    "Stop hook feedback:",
+    # #366 -- GOAL_QUESTION_PARK_TEXT (the "30 min bez odpovede" unanswered-
+    # question backstop, ~8000 lines below) is ALSO a machine-typed nudge,
+    # not a human answer -- without this entry a session whose ❓ went
+    # unanswered 30+ minutes would have that nudge itself misread as "the
+    # user answered", pruning the still-pending question entry.
+    "question-timeout:")
+
+# #366 -- a `/compact` continuation-summary entry (Claude Code's own
+# summarizer output at a ticket-boundary compact) is a REAL, top-level
+# `user`-typed transcript entry -- neither isMeta nor a tool_result -- so it
+# slips past every other transparent check above. It is never a genuine
+# typed answer: a session in ask-and-continue mode (❓ ASKED + ⏳ WORKING)
+# keeps working OTHER tickets in the same /autopilot run, and completing one
+# of them can trigger a compact within minutes of the ❓ ping -- without this
+# check, that landing right after the ping misreads as "the user answered"
+# and prunes the still-unanswered question entry (the live #366 incident:
+# ping delivered, entry gone within minutes, footer shows no Q). Mirrors
+# `_goal_blocked_on_unanswered_question`'s own established two-part fix
+# (wording prefix here, plus the STRUCTURAL `isCompactSummary` flag checked
+# in the loop below so a future summarizer rewording alone can never reopen
+# the gap) -- never back-ported here until now, though `_last_human_
+# prompt_ts` has drifted behind that sibling classifier before (the
+# `"Stop hook feedback:"` gap above).
+_COMPACT_CONTINUATION_PREFIX = (
+    "This session is being continued from a previous conversation")
 
 
 def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
     """Epoch of the NEWEST human-typed prompt in the transcript tail, or None.
-    Machine-typed prompts (the list above), tool_result user entries and meta
-    entries don't count — only something the USER actually wrote."""
+    Machine-typed prompts (the list above), tool_result user entries, meta
+    entries and a /compact continuation summary don't count — only something
+    the USER actually wrote."""
     from datetime import datetime
     try:
         with open(tpath, "rb") as f:
@@ -2624,6 +2650,8 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
             continue
         if not isinstance(e, dict) or e.get("type") != "user" or e.get("isMeta"):
             continue
+        if e.get("isCompactSummary"):
+            continue
         c = (e.get("message") or {}).get("content")
         if isinstance(c, str):
             text = c
@@ -2637,7 +2665,8 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
             continue
         t = text.strip()
         if (not t or t in _MACHINE_PROMPT_EXACT
-                or any(t.startswith(p) for p in _MACHINE_PROMPT_PREFIXES)):
+                or any(t.startswith(p) for p in _MACHINE_PROMPT_PREFIXES)
+                or t.startswith(_COMPACT_CONTINUATION_PREFIX)):
             continue
         try:
             ep = datetime.fromisoformat(
