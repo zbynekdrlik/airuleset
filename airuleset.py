@@ -1124,16 +1124,40 @@ _WRAPPER_NOISE_PREFIXES = (
 )
 
 
-def merge_turns(records):
+def merge_turns(records, seen_uuids=None):
     """Collapse consecutive same-role transcript lines into readable turns:
-    {"role": "user"|"assistant", "text": str, "tools": [str, ...],
+    {"role": "user"|"assistant"|"compact", "text": str, "tools": [str, ...],
     "ts": str|None}. A real assistant API response is written as SEVERAL
     jsonl lines (one per content block) -- this is display grouping, not
     the #131 request-level token dedup (a different, unrelated concern).
     "ts" (#294) is the ISO timestamp of the record that STARTED the turn --
     captured once, at turn creation, never overwritten by later merged
     lines -- or None when the source record carries no "timestamp" field
-    (synthetic test fixtures only; a real transcript always has one)."""
+    (synthetic test fixtures only; a real transcript always has one).
+
+    #376: this is DELIBERATELY a flat, unconditional walk over every
+    record in file order -- it never reads `uuid`/`parentUuid` for branch
+    SELECTION at all. Live-verified against a real 4MB/1757-line david2
+    transcript carrying 5 real compaction boundaries: this shape already
+    renders the file's COMPLETE content (nothing before the first
+    compaction, nothing between any pair of compactions, and nothing after
+    the last one is ever dropped) -- the acceptance is COMPLETENESS
+    (never silently lose data), not picking "the one true branch" out of a
+    retried/interrupted turn's orphaned sibling. `seen_uuids` (default
+    None -> a fresh set, so every pre-#376 single-file call site keeps
+    working unmodified) is a caller-shared set for DEDUPING a `uuid` that
+    could otherwise appear more than once -- either within one corrupted/
+    retried-write file (a real, previously-hit corruption class in this
+    repo, see scripts/repair-session.py) or across several CHAINED session
+    files for one project (main()'s own new multi-file chaining, below) --
+    first occurrence wins, everything after is skipped outright, before
+    any role-specific handling ever runs.
+
+    A `system`/`compact_boundary` record becomes its OWN "compact"-role
+    turn (never silently skipped) so render() can mark it readably instead
+    of the pre-#376 behavior of dropping it with no trace at all."""
+    if seen_uuids is None:
+        seen_uuids = set()
     turns = []
     pending = None
 
@@ -1148,7 +1172,21 @@ def merge_turns(records):
     for rec in records:
         if not isinstance(rec, dict):
             continue
+        uid = rec.get("uuid")
+        if isinstance(uid, str) and uid:
+            if uid in seen_uuids:
+                continue
+            seen_uuids.add(uid)
         rtype = rec.get("type")
+        if rtype == "system" and rec.get("subtype") == "compact_boundary":
+            flush()
+            pending = None
+            meta = rec.get("compactMetadata")
+            pre = meta.get("preTokens") if isinstance(meta, dict) else None
+            post = meta.get("postTokens") if isinstance(meta, dict) else None
+            turns.append({"role": "compact", "text": "", "tools": [],
+                          "ts": rec.get("timestamp"), "pre": pre, "post": post})
+            continue
         if rtype == "user":
             msg = rec.get("message")
             content = msg.get("content") if isinstance(msg, dict) else None
@@ -1239,11 +1277,34 @@ def render(turns, last=None, use_color=False):
     modes. ANSI codes are non-alphanumeric prefixes/suffixes only -- they
     never splice into the middle of a plain-text substring a caller might
     grep for, so every pre-#294 plain-text assertion still holds even when
-    use_color=True."""
+    use_color=True.
+
+    #376: a "compact"-role turn (a real `system`/`compact_boundary` record,
+    see merge_turns) renders as its own distinct, readably-labelled marker
+    -- "----- COMPACTED ... -----", never the "===== USER/CLAUDE ====="
+    shape -- so a reader can tell at a glance where the session's own
+    context got summarized, instead of the pre-#376 silent skip that left
+    no trace of the boundary at all."""
     if last is not None:
         turns = turns[-last:]
     lines = []
     for t in turns:
+        if t["role"] == "compact":
+            pre, post = t.get("pre"), t.get("post")
+            detail = ""
+            if pre is not None or post is not None:
+                detail = " (preTokens=%s, postTokens=%s)" % (pre, post)
+            header = "----- COMPACTED%s -----" % detail
+            if use_color:
+                line = _ANSI_DIM + header + _ANSI_RESET
+                ts_suffix = _turn_time_suffix(t.get("ts"))
+                if ts_suffix:
+                    line += _ANSI_DIM + ts_suffix + _ANSI_RESET
+            else:
+                line = header
+            lines.append(line)
+            lines.append("")
+            continue
         label = "USER" if t["role"] == "user" else "CLAUDE"
         header = "===== %s =====" % label
         if use_color:
@@ -1312,8 +1373,20 @@ def main(argv=None):
 
     projects_dir = Path.home() / ".claude" / "projects"
 
+    # #376: `--transcript` (explicit single-file, human by-path invocation)
+    # keeps its EXACT pre-#376 single-file contract -- never chained. A
+    # cwd/pane-resolved lookup can find MULTIPLE `.jsonl` files for one
+    # project (`claude-new`'s always-fresh mode, or any other reason a
+    # second session id exists) -- under `--full` (the mode S-DC/prefix+h
+    # actually invoke), ALL of them are chained together, oldest-first, so
+    # an older sibling file's own content is never silently dropped just
+    # because a newer one exists. `--last` (the default quick-glance mode)
+    # deliberately keeps the pre-#376 single-newest-file behavior -- see
+    # the #376 design comment on the ticket for why this is scoped to
+    # `--full` only (minimize behavioral change / blast radius).
     if args.transcript:
-        path = Path(args.transcript)
+        paths = [Path(args.transcript)]
+        chain_all = False
     else:
         if args.pane:
             cwd = resolve_pane_cwd(args.pane)
@@ -1337,19 +1410,38 @@ def main(argv=None):
                     when = "?"
                 print("%s  %s" % (when, p))
             return 0
-        path = paths[0]
+        chain_all = args.full
 
-    if not path.exists():
-        print("claude-history: transcript not found: %s" % path, file=sys.stderr)
+    # find_transcripts() returns newest-first (its own established
+    # --list ordering, unchanged); chaining needs chronological
+    # (oldest-first) order so turns from an older session file are never
+    # shown AFTER turns from a newer one.
+    paths = list(reversed(paths)) if chain_all else paths[:1]
+
+    if not any(p.exists() for p in paths):
+        print("claude-history: transcript not found: %s" % paths[0], file=sys.stderr)
         return 1
 
-    turns = merge_turns(_read_jsonl(path))
+    # #376: `seen_uuids` is shared across every chained file so a `uuid`
+    # duplicated across files (or within one corrupted/retried-write file)
+    # is rendered exactly once -- see merge_turns's own docstring.
+    seen_uuids = set()
+    turns = []
+    for p in paths:
+        if not p.exists():
+            continue
+        turns.extend(merge_turns(_read_jsonl(p), seen_uuids))
     if not turns:
-        print("claude-history: transcript has no displayable turns: %s" % path,
+        print("claude-history: transcript has no displayable turns: %s" % paths[-1],
               file=sys.stderr)
         return 1
 
-    print("# %s" % path)
+    if len(paths) == 1:
+        label = str(paths[0])
+    else:
+        label = "%s (+%d earlier session file%s chained)" % (
+            paths[-1], len(paths) - 1, "" if len(paths) == 2 else "s")
+    print("# %s" % label)
     if args.full:
         print("# %d turn(s) total" % len(turns))
     else:
