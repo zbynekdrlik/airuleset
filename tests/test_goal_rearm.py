@@ -447,10 +447,11 @@ class TestPaneGoalIndicator(unittest.TestCase):
         # before this fix.
         payload = "short draft " * 6
         rows = _wrap_at(payload)
-        pane = ("\u25cf hello\n" + "-" * 60 + "\n" + "\n".join(rows) + "\n"
-                + "-" * 60 + "\n"
+        border = "\u2500" * 60
+        pane = ("\u25cf hello\n" + border + "\n" + "\n".join(rows) + "\n"
+                + border + "\n"
                 "  ctx \u2591\u2591  5h 25%  wk 78%  caveman:lite\n"
-                "  \u23ed\u23ed bypass permissions on (shift+tab to cycle)\n")
+                "  \u23f5\u23f5 bypass permissions on (shift+tab to cycle)\n")
         self.assertIs(wd.pane_goal_armed(pane), False)
 
     def test_a_real_shipped_goal_template_wrapped_full_screen_is_undeterminable(self):
@@ -485,6 +486,42 @@ class TestPaneGoalIndicator(unittest.TestCase):
         # must stay undeterminable rather than confidently dark.
         pane = ("● hello\n" + "─" * 60 + "\n"
                 "❯ open issue etc etc\n" + "─" * 60 + "\n")
+        self.assertIsNone(wd.pane_goal_armed(pane))
+
+    def test_trailing_blank_rows_with_no_real_chrome_anywhere_stay_undeterminable(self):
+        # #383-review Finding 1: a blank capture row must never, on its
+        # own, count as chrome evidence -- `_is_bottom_chrome("")` is True
+        # by DESIGN (its own "nothing here" special case), so a backward
+        # walk that forgot to skip blanks before testing them would append
+        # an empty string to the trailing set, and an empty string is not
+        # a border rule either (`_is_border_rule("")` is False) -- silently
+        # manufacturing "real, non-border chrome present" out of pure
+        # whitespace. A viewport that cuts off right after a paragraph
+        # break in a multi-paragraph stuck draft (this repo's own real `?`
+        # question templates have blank lines between paragraphs,
+        # user-questions-slovak.md, 2026-07-18) must stay undeterminable,
+        # never a confident dark.
+        pane = ("● hello\n" + "─" * 60 + "\n"
+                "❯ **Otázka — projekt X:**\n"
+                "  prvý odsek otázky, žiadny chrome riadok tu\n"
+                "\n"
+                "\n")
+        self.assertIsNone(wd.pane_goal_armed(pane))
+
+    def test_a_chrome_shaped_row_buried_mid_draft_stays_undeterminable(self):
+        # #383-review Finding 2 (LIVE-TRIGGERED): a pasted quote of a
+        # rendered statusline (>=2 `_statusline_hits`, verified: 5 here)
+        # sitting PARTWAY through ordinary draft continuation -- with MORE
+        # draft rows still following it before the capture ends -- must
+        # not count as real chrome. Real footer chrome is always the
+        # UNBROKEN tail of the capture; nothing legitimate is ever
+        # rendered below the agent strip/mode hint/statusline, so a
+        # chrome-shaped row with non-chrome content still AFTER it (closer
+        # to the capture's own bottom) cannot be the real thing.
+        pane = ("● hello\n" + "─" * 60 + "\n"
+                "❯ pozri si tento zachytený stav:\n"
+                "  I 41 core · str 12  5h 7%(4h)  wk 63%  caveman:lite  ~$12\n"
+                "  toto bolo len citované, draft pokračuje ďalej tu\n")
         self.assertIsNone(wd.pane_goal_armed(pane))
 
 

@@ -11990,6 +11990,35 @@ def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
     return (new_off, best)
 
 
+def _trailing_bottom_chrome(footer):
+    """#383-review Finding 2 — the trailing run of `footer` rows that are
+    themselves chrome-shaped (`_is_bottom_chrome`), walked BACKWARD from the
+    capture's own last line and stopped the instant a genuinely non-chrome,
+    non-blank row is hit. A blank row is skipped (never breaks the walk):
+    real chrome sometimes has one between the mode hint and the agent strip
+    (see the live `airules`-pane capture cited in the #383 design comment).
+
+    Real footer chrome ALWAYS sits as one uninterrupted block at the very
+    END of a genuine capture — nothing else is ever rendered below the
+    agent strip / mode hint / statusline. A chrome-SHAPED line embedded
+    partway through ordinary draft continuation (e.g. a pasted quote of a
+    rendered statusline row, live-triggered by the #383 adversarial review:
+    `I 41 core · str 12  5h 7%(4h)  wk 63%  caveman:lite  ~$12` scores >=2
+    `_statusline_hits` on its own) is not part of that trailing block —
+    MORE draft rows still follow it before the capture ends — so walking
+    from the bottom excludes it by construction; only a genuinely
+    unbroken tail of chrome counts."""
+    out = []
+    for ln in reversed(footer):
+        s = ln.strip()
+        if not s:
+            continue
+        if not _is_bottom_chrome(s):
+            break
+        out.append(s)
+    return out
+
+
 def pane_goal_armed(captured):
     """`True` / `False` / `None` — is CC's `◎ /goal` footer indicator lit?
 
@@ -12044,7 +12073,29 @@ def pane_goal_armed(captured):
     view. Every other chrome shape (`ctx `, the >=2-segment statusline, the
     mode hint, an agent-strip row, a selected-strip row, the selector hint)
     still counts on its own; none of them can render without the row that
-    would carry the indicator already being on screen."""
+    would carry the indicator already being on screen.
+
+    #383-review Finding 2 — the chrome evidence must additionally be part
+    of an UNBROKEN trailing block ending at the capture's own last line
+    (`_trailing_bottom_chrome`), not merely present SOMEWHERE in `footer`:
+    a chrome-shaped row (e.g. a pasted quote of a rendered statusline,
+    live-triggered — see that helper's own docstring) sitting partway
+    through ordinary draft continuation, with MORE draft rows still
+    following it, must not count. Real chrome never has draft content
+    rendered below it.
+
+    #383-review Finding 3 (theoretical, unconfirmed live) — the trailing
+    walk trusts an agent-strip/selected-strip/selector-hint row ON ITS OWN
+    even without a statusline row also in the walk. This is safe ONLY
+    because `footer` is one CONTIGUOUS suffix of the whole capture (never a
+    subset with a gap) and every real CC render this repo has ever captured
+    puts the statusline row STRICTLY ABOVE (i.e. earlier in) the agent
+    strip — so an agent-strip row reaching the trailing walk structurally
+    implies the statusline row above it is ALSO still inside `footer`
+    (nothing between idx+1 and the strip row is ever skipped). If a future
+    CC layout ever renders the strip BEFORE the statusline, this reasoning
+    — and the population of sessions it protects, autopilot supervisors
+    with visible worker rows — would need re-checking."""
     lines = (captured or "").splitlines()
     idx = None
     for i, ln in enumerate(lines):
@@ -12058,13 +12109,15 @@ def pane_goal_armed(captured):
         return None                        # nothing rendered below it
     if any(GOAL_INDICATOR in ln for ln in footer):
         return True
-    if not any(_is_bottom_chrome(s) and not _is_border_rule(s)
-               for s in (ln.strip() for ln in footer) if s):
-        return None                        # #383: footer is box content
-                                            # (or a bare closing border with
-                                            # nothing past it) -- not real
-                                            # chrome -- real footer is
-                                            # off-screen, "dark" unproven
+    trailing = _trailing_bottom_chrome(footer)
+    if not any(not _is_border_rule(s) for s in trailing):
+        return None                        # #383: footer is box content, a
+                                            # chrome-shaped row buried mid-
+                                            # draft, or a bare closing
+                                            # border with nothing past it --
+                                            # not real trailing chrome --
+                                            # real footer is off-screen,
+                                            # "dark" unproven
     return False
 
 
