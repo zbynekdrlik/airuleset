@@ -6866,6 +6866,34 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
             # key per session forever. The state file is long-lived and this
             # dict would otherwise only ever grow.
             cl.pop(sid, None)
+            # #392 — a hard human-activity gate, checked as soon as a
+            # transcript resolves (so `sid`/`tpath` are in scope), BEFORE
+            # any further resolution work (including the foreign-
+            # transcript sudo fallback below) or either delivery
+            # sub-branch (draft/stash vs plain) is ever attempted. Neither
+            # sub-branch previously checked this at all — the exact gap
+            # behind the live "FAIL (goal-rearm, stash) ... draft left
+            # parked" incident, one function over in job 20. Zero
+            # keystrokes on refusal — an #101/#266 transient skip, never
+            # counted against `ga[pid]`'s per-pane dedup window. A DISTINCT
+            # state key from `_goal_autoarm_virgin_candidate`'s own
+            # `goalarm_recentuser` dict (never shared) — this branch and
+            # that one are mutually exclusive per sweep but a pane CAN
+            # switch between them across sweeps, and two independent
+            # episodes must never share one dedup bookkeeping dict (the
+            # established #176 "distinct state-key prefixes" lesson).
+            rc = state.setdefault("goalarm_recentuser_arm", {})
+            recent, reason = _goal_autoarm_recent_human_activity(sid, tr[0],
+                                                                  now)
+            if recent:
+                if not rc.get(pid):
+                    rc[pid] = True
+                    logs.append(
+                        "goal-autoarm SKIP-TRANSIENT %s (%s) -> %s -- "
+                        "recent human activity, never overwrite a live "
+                        "conversation" % (pid, loc, reason))
+                continue
+            rc.pop(pid, None)
         if tr:
             full = _transcript_goal_line(tr[0])
         if full is None:
@@ -13918,6 +13946,28 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         kind, draft = _classify_boundary(captured)
         if kind != "input":
             logs.append("skip %s (goal-rearm) %s" % (kind, loc))
+            continue
+        # #392 — a hard human-activity gate, checked ONCE here, BEFORE
+        # either delivery sub-branch (draft/stash vs plain) below, and
+        # before `dry_run` (so a diagnostic sweep reports the same
+        # decision a real one would make). `_goal_autoarm_recent_human_
+        # activity` (#339) was previously wired only into job 9's own
+        # virgin-candidate path — job 20's revival delivery had NO such
+        # gate at all, the exact root cause of the live dev1 incident
+        # this ticket was filed from: a `/goal` typed into a pane the
+        # user was actively typing in, which is also what desynced the
+        # stash undo's backspace count (the sibling "draft left parked"
+        # symptom — see this ticket's own design comment). Zero
+        # keystrokes on refusal, never counted against `rec['n']`'s
+        # attempt cap (the #101/#266 transient-skip discipline) — this
+        # repo's OWN established convention throughout `goal_rearm` is to
+        # log every `skip …` line unconditionally, never throttled, so
+        # this mirrors that rather than inventing a new dedup key.
+        recent, reason = _goal_autoarm_recent_human_activity(sid, tpath, now)
+        if recent:
+            logs.append("SKIP-TRANSIENT (goal-rearm) %s -> %s -- recent "
+                        "human activity, never overwrite a live "
+                        "conversation" % (loc, reason))
             continue
         text = "/goal " + payload
         if dry_run:
