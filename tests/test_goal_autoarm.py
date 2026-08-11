@@ -1784,5 +1784,227 @@ class TestGoalNeverArmedReadFailure(unittest.TestCase):
         self.assertTrue(wd._goal_never_armed(str(p)))
 
 
+def _asks_to_arm_entry(ts="2026-08-10T19:17:00.000Z"):
+    """An assistant turn printing the /autopilot arm question — a TOP-LEVEL
+    text block, matching `_entry_asks_to_arm` exactly the way
+    `TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain._asks_again`
+    already does for a sibling test class."""
+    return {
+        "type": "assistant",
+        "timestamp": ts,
+        "message": {"content": [{
+            "type": "text",
+            "text": "Autopilot je pripravený.\n"
+                    "• Vlož /goal riadok vyššie (odporúčam)\n"
+                    "❓ NEEDS YOU: vlož /goal riadok vyššie a autopilot "
+                    "sa rozbehne",
+        }]},
+    }
+
+
+class TestTranscriptRecentlyAskedToArm(unittest.TestCase):
+    """#361 -- unit tests for the new bounded-tail helper, mirroring
+    `_transcript_goal_line`'s own established shape."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, entries):
+        p = Path(self.tmp.name) / "sess.jsonl"
+        with open(p, "w") as f:
+            for e in entries:
+                f.write(_json.dumps(e) + "\n")
+        return str(p)
+
+    def test_a_recent_ask_is_found(self):
+        p = self._write([_asks_to_arm_entry()])
+        self.assertTrue(wd._transcript_recently_asked_to_arm(p))
+
+    def test_ordinary_conversation_with_no_ask_is_not_found(self):
+        p = self._write([{"type": "assistant",
+                          "timestamp": "2026-08-10T19:17:00.000Z",
+                          "message": {"content": "just ordinary work"}}])
+        self.assertFalse(wd._transcript_recently_asked_to_arm(p))
+
+    def test_a_quoted_ask_inside_a_tool_result_is_not_a_real_ask(self):
+        # the SAME structural exclusion `_entry_asks_to_arm` already applies
+        # (#54) -- a session grepping another's transcript must never read
+        # as itself asking.
+        p = self._write([{
+            "type": "user", "timestamp": "2026-08-10T19:17:00.000Z",
+            "message": {"content": [{
+                "type": "tool_result",
+                "content": "❓ NEEDS YOU: vlož /goal riadok vyššie",
+            }]},
+        }])
+        self.assertFalse(wd._transcript_recently_asked_to_arm(p))
+
+    def test_nonexistent_path_is_not_found(self):
+        self.assertFalse(
+            wd._transcript_recently_asked_to_arm("/nonexistent/x.jsonl"))
+
+    def test_empty_transcript_is_not_found(self):
+        p = self._write([])
+        self.assertFalse(wd._transcript_recently_asked_to_arm(p))
+
+
+class TestVirginCandidateBusyBackgroundAgent(unittest.TestCase):
+    """#361 (gk incident, 2026-08-10): the /autopilot skill printed the arm
+    question, the session kept dispatching subagents, and the printed line
+    scrolled off `goal_autoarm`'s own 1500-char tail window within a sweep
+    or two -- every LATER sweep routed into `_goal_autoarm_virgin_candidate`,
+    whose FIRST gate (`_pane_has_bg_agent`) is over-cautious for a session
+    that DID ask (the arm-question branch's own precedent already proves a
+    bare, idle main turn is safe to arm regardless of background agents
+    still listed) -- 36 minutes with zero journal trace, then a correct but
+    very late self-heal once every last subagent finally cleared."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tpl_dir = TemporaryDirectory()
+        self.addCleanup(self.tpl_dir.cleanup)
+        self.templates_path = write_templates(self.tpl_dir.name)
+        self.sid = "gksession"
+
+    def _write(self, entries):
+        return write_transcript(entries, self.tmp.name, VIRGIN_CWD, self.sid)
+
+    BUSY_BG_NO_QUESTION_PANE = (
+        "● Bežná odpoveď bez arm otázky.\n"
+        "✻ Waiting for 1 background agent to finish\n"
+        "❯ \n"
+        "  ctx ███░\n")
+
+    BUSY_MID_TURN_BG_NO_QUESTION_PANE = (
+        "● Bežná odpoveď bez arm otázky.\n"
+        "✻ Waiting for 1 background agent to finish\n"
+        "✳ Baking… (2m · esc to interrupt)\n"
+        "  ctx ███░\n")
+
+    def test_a_recently_asked_session_arms_despite_background_agents(self):
+        # the CORE fix: background-agent presence alone must not block a
+        # genuinely-asked session once its own MAIN turn is idle (matches
+        # the arm-question branch's own already-proven-safe precedent).
+        self._write([_asks_to_arm_entry()])
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="full"):
+            tmux, logs = go(self.BUSY_BG_NO_QUESTION_PANE,
+                            projects_dir=self.tmp.name,
+                            templates_path=self.templates_path)
+        self.assertEqual(tmux.typed(), [TEMPLATE_FULL], logs)
+        self.assertTrue(any("busy" in ln and "virgin" in ln for ln in logs),
+                        logs)
+
+    def test_an_ordinary_never_asked_busy_session_stays_silent(self):
+        # the population `_pane_has_bg_agent` was actually built to guard
+        # (#320 shape 2's real target) is UNTOUCHED -- no ask anywhere in
+        # this session's transcript, so the original silent caution stands
+        # exactly as before this ticket.
+        self._write([{"type": "assistant",
+                     "timestamp": "2026-08-10T19:00:00.000Z",
+                     "message": {"content": "ordinary interactive work"}}])
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="full"):
+            tmux, logs = go(self.BUSY_BG_NO_QUESTION_PANE,
+                            projects_dir=self.tmp.name,
+                            templates_path=self.templates_path)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertEqual(logs, [], "an ordinary busy session unrelated to "
+                         "/autopilot must never be logged about")
+
+    def test_recently_asked_but_main_turn_still_mid_turn_does_not_arm_yet(self):
+        # background agents alone are excused, but a genuinely busy MAIN
+        # turn (esc to interrupt) still refuses -- exactly like the
+        # arm-question branch's own main-loop busy check.
+        self._write([_asks_to_arm_entry()])
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="full"):
+            tmux, logs = go(self.BUSY_MID_TURN_BG_NO_QUESTION_PANE,
+                            projects_dir=self.tmp.name,
+                            templates_path=self.templates_path)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("busy" in ln and "virgin" in ln for ln in logs),
+                        logs)
+
+    def test_the_busy_log_is_throttled_once_per_streak(self):
+        self._write([_asks_to_arm_entry()])
+        state = {}
+        now = time.time()
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="full"):
+            _t1, logs1 = go(self.BUSY_MID_TURN_BG_NO_QUESTION_PANE, state,
+                            now, projects_dir=self.tmp.name,
+                            templates_path=self.templates_path)
+            _t2, logs2 = go(self.BUSY_MID_TURN_BG_NO_QUESTION_PANE, state,
+                            now + 60, projects_dir=self.tmp.name,
+                            templates_path=self.templates_path)
+        self.assertTrue(any("busy" in ln for ln in logs1), logs1)
+        self.assertFalse(any("busy" in ln for ln in logs2),
+                         "the SAME continuous busy streak must not log "
+                         "again every sweep")
+
+    def test_arms_and_clears_the_streak_once_the_main_turn_goes_idle(self):
+        # the same session, tracked as busy across one sweep, then the
+        # SAME sid genuinely goes idle (bg-agent still shown, main turn
+        # bare) on a later sweep -- must arm normally, and the busy-streak
+        # bookkeeping must not leak forever.
+        self._write([_asks_to_arm_entry()])
+        state = {}
+        now = time.time()
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="full"):
+            t1, logs1 = go(self.BUSY_MID_TURN_BG_NO_QUESTION_PANE, state,
+                           now, projects_dir=self.tmp.name,
+                           templates_path=self.templates_path)
+            self.assertFalse(t1.typed())
+            self.assertIn("gksession", state.get("goalarm_busybg", {}))
+            t2, logs2 = go(self.BUSY_BG_NO_QUESTION_PANE, state, now + 60,
+                           projects_dir=self.tmp.name,
+                           templates_path=self.templates_path)
+        self.assertEqual(t2.typed(), [TEMPLATE_FULL], logs2)
+        self.assertNotIn("gksession", state.get("goalarm_busybg", {}),
+                         "the busy streak must clear once the pane is no "
+                         "longer busy, not leak forever")
+
+
+class TestArmQuestionBranchBusySkipIsLoud(unittest.TestCase):
+    """#361 -- the arm-question branch's own three busy `continue`s used to
+    be completely silent. Every pane reaching them has ALREADY had
+    `_ARM_QUESTION_RX` match in its tail, so it IS a confirmed candidate by
+    construction -- logging here carries zero fleet-noise risk, unlike the
+    virgin-candidate path's own `_pane_has_bg_agent` gate."""
+
+    def test_esc_to_interrupt_busy_now_logs(self):
+        tmux, logs = go(BUSY_PANE)
+        self.assertFalse(tmux.typed())
+        self.assertTrue(any("skip busy" in ln and "goal-autoarm" in ln
+                            for ln in logs), logs)
+
+    def test_the_busy_log_is_throttled_once_per_streak(self):
+        state = {}
+        now = time.time()
+        _t1, logs1 = go(BUSY_PANE, state, now)
+        _t2, logs2 = go(BUSY_PANE, state, now + 60)
+        self.assertTrue(any("skip busy" in ln for ln in logs1), logs1)
+        self.assertFalse(any("skip busy" in ln for ln in logs2),
+                         "the SAME continuous busy streak must not log "
+                         "again every sweep")
+
+    def test_clears_and_arms_once_no_longer_busy(self):
+        state = {}
+        now = time.time()
+        pid = "%1"
+        t1, _logs1 = go(BUSY_PANE, state, now)
+        self.assertFalse(t1.typed())
+        self.assertIn(pid, state.get("goalarm_busy", {}))
+        t2, _logs2 = go(ARM_PANE, state, now + wd.GOAL_ARM_WINDOW_S + 5)
+        self.assertTrue(t2.typed())
+        self.assertNotIn(pid, state.get("goalarm_busy", {}),
+                         "the busy streak must clear once the pane is no "
+                         "longer busy, not leak forever")
+
+
 if __name__ == "__main__":
     unittest.main()
