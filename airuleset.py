@@ -920,24 +920,35 @@ CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 # + skip-perms + ultracode + model), `plain` (claude-plain — vanilla, no flags),
 # `fullscreen` (claude-fullscreen — deliberate opt-in: continue-or-new + skip-perms
 # + model, PLUS CLAUDE_CODE_NO_FLICKER=1).
-#   CLAUDE_CODE_NO_FLICKER=1 : the OPT-IN mitigation for a proven upstream Claude
-#       Code renderer defect (#253 — anthropics/claude-code#84247 / #46834, both
-#       open: a SIGWINCH/relayout re-emits a fresh copy of the transcript into the
+#   CLAUDE_CODE_NO_FLICKER=1 : #376 REVERSED the `apply_managed_settings_defaults`
+#       pin from `"tui": "default"` (classic) to `"tui": "fullscreen"` fleet-wide
+#       (see that function's own docstring for the full history/tradeoff/citation)
+#       -- so this launcher mode's env var is now REDUNDANT with the fleet default,
+#       not an opt-in override away from it. Kept, harmless: it is an explicit way
+#       to force fullscreen on a box whose LOCAL settings.json has drifted from the
+#       managed pin (a manual `/tui default` switch, a pre-#376 install not yet
+#       pushed), and it still fixes the SAME proven upstream Claude Code renderer
+#       defect the mode was originally built to bypass (#253 --
+#       anthropics/claude-code#84247 / #46834, both still open 2026-08-11: a
+#       SIGWINCH/relayout re-emits a fresh copy of the transcript into the
 #       terminal's PRIMARY scrollback, corrupting it with duplicate/interleaved
-#       frames; reproduced live on dev1 -- a real 25-line completion-report chunk
-#       found duplicated verbatim in tmux pane history). Switching to the
-#       alternate-screen TUI means Claude Code owns the whole viewport and never
-#       writes into the terminal's native scrollback at all, so the defect class
-#       has nothing to corrupt. It is NEVER the default -- it trades away native
-#       tmux copy-mode (Ctrl+B [) and OS-level scrollback search, a real UX choice
-#       only the user should make, same discipline as ultracode's own opt-in-only
-#       rule two paragraphs up. Wins over the managed `settings.json` "tui":
-#       "default" pin (see render_managed_settings()) -- confirmed against the
-#       installed CC binary that the env var is read before that settings key.
-#       Also overrides upstream's own tmux-control-mode / Windows-over-SSH
-#       auto-disable guards for fullscreen mode, since those check the SAME
-#       env var this mode forces on -- an intentional consequence of opting
-#       in explicitly, not something this mode tries to work around.
+#       frames; reproduced live -- a real 25-line completion-report chunk found
+#       duplicated verbatim in tmux pane history on dev1's own 3.7b tmux, the SAME
+#       version the corruption was reproduced against, NOT the fleet's dev2/gk/
+#       subdev 3.4 build). The alternate-screen TUI means Claude Code owns the
+#       whole viewport and never writes into the terminal's native scrollback at
+#       all, so the defect class has nothing to corrupt -- the same reasoning that
+#       makes `"tui": "fullscreen"` the right managed default. `Ctrl+B [`
+#       tmux-native scrollback going empty under it is real and EXPECTED
+#       (fullscreen's own `PgUp`/`PgDn`/`Ctrl+O` are the documented replacement,
+#       not a bug) -- see the #376 tradeoff discussion on `apply_managed_settings_
+#       defaults`. Wins over any local `settings.json` override the SAME way it
+#       always did -- confirmed against the installed CC binary that the env var
+#       is read before the settings key. Also overrides upstream's own
+#       tmux-control-mode / Windows-over-SSH auto-disable guards for fullscreen
+#       mode, since those check the SAME env var this mode forces on -- an
+#       intentional consequence of opting in explicitly, not something this mode
+#       tries to work around.
 CLAUDE_LAUNCH_SCRIPT_CONTENT = r"""#!/usr/bin/env bash
 # airuleset-managed (do NOT edit) — the claude launcher (#77). Read FRESH from
 # disk on EVERY invocation (unlike a ~/.bashrc function, which is parsed once
@@ -1012,7 +1023,17 @@ def encode_project_dir(cwd):
     return "".join("-" if c in "/._" else c for c in str(cwd))
 
 
-# #267: the "claude-history" companion. Measured live (dev1, two replicates,
+# #267/#376: the "claude-history" companion -- FALLBACK, not primary, since
+# #376. The PRIMARY answer for "what did claude do and write" is now
+# fullscreen's own native scrollback: `PgUp`/`PgDn` scroll the whole session
+# (survives repeated compaction, per Anthropic's own docs), `Ctrl+O` opens
+# transcript-mode search -- see `apply_managed_settings_defaults`'s `tui`
+# bullet and MANAGED_TUI for the full history/citation. This companion keeps
+# a real, still-needed FALLBACK role fullscreen structurally cannot cover:
+# checking a session's history from a DIFFERENT pane, or after the session
+# has already EXITED (fullscreen's scrollback is a live, in-app view -- it
+# is gone once the process is gone; this script instead reads the durable
+# transcript JSONL straight off disk). Measured live (dev1, two replicates,
 # real interactive sessions + real relayout events -- resizes, Ctrl+O,
 # Shift+Tab -- via `scripts/measure_scrollback_holes.py`, results pinned to
 # the ticket): CLAUDE_CODE_NO_FLICKER=1 does NOT fix tmux scrollback holes --
@@ -1020,22 +1041,25 @@ def encode_project_dir(cwd):
 # generated response missing, even with ZERO relayout stress, because
 # alternate-screen mode never writes into tmux's native history buffer at
 # all), categorically WORSE than default mode's real-but-small corruption
-# (0-6% of lines, ONLY after an actual relayout event). So it never becomes
-# the default (CLAUDE_LAUNCH_SCRIPT_CONTENT's `fullscreen` branch stays
-# opt-in), and the honest fix for "what did claude do and write" is this
-# companion: it reads the session's own transcript JSONL -- the API's
-# source of truth, which the upstream renderer defect (#253:
-# anthropics/claude-code#84247/#46834) cannot touch at all, since it never
-# passes through the terminal renderer a second time -- and prints a plain,
-# linear, readable log of every real user prompt / assistant message / tool
-# call. A live key-by-key test on the installed CC 2.1.223 confirmed there
-# is no in-app pager to lean on instead (Ctrl+O is only an inline verbose
-# toggle -- no pager, the documented PgUp/PgDn/{/}/[/] keys inside it do
-# nothing at all); `/export` (a slash command, typed inside a LIVE session)
-# is a validated alternative for a session you're currently in, but this
-# script also covers the common case of checking a session's history AFTER
-# it exited, or from a DIFFERENT pane entirely (`--pane`), with zero risk of
-# ever typing a keystroke into someone else's live session.
+# (0-6% of lines, ONLY after an actual relayout event). That finding is about
+# TRANSIENT ON-SCREEN REDRAW during a live resize -- a different mechanism
+# from the PERSISTENT, app-internal scrollback list `PgUp`/`Ctrl+O` read
+# from (see the #376 design comment on the ticket for why the two don't
+# actually contradict). This companion's own honest fix for "what did claude
+# do and write" is unchanged either way: it reads the session's own
+# transcript JSONL -- the API's source of truth, which the upstream renderer
+# defect (#253: anthropics/claude-code#84247/#46834) cannot touch at all,
+# since it never passes through the terminal renderer a second time -- and
+# prints a plain, linear, readable log of every real user prompt / assistant
+# message / tool call. A live key-by-key test on the installed CC 2.1.223
+# confirmed there is no in-app pager to lean on instead under classic mode
+# (Ctrl+O there is only an inline verbose toggle -- no pager, the documented
+# PgUp/PgDn/{/}/[/] keys inside it do nothing at all); `/export` (a slash
+# command, typed inside a LIVE session) is a validated alternative for a
+# session you're currently in, but this script also covers the common case
+# of checking a session's history AFTER it exited, or from a DIFFERENT pane
+# entirely (`--pane`), with zero risk of ever typing a keystroke into
+# someone else's live session.
 CLAUDE_HISTORY_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history.py"
 CLAUDE_HISTORY_SCRIPT_CONTENT = r'''#!/usr/bin/env python3
 # airuleset-managed (do NOT edit) -- claude-history (#267): a readable,
