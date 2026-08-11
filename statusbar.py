@@ -1,15 +1,22 @@
-"""Statusline ticket segment — autopilot done/total, else open GitHub issues.
+"""Statusline ticket segment — the LIVE obligation-ticket count for this box.
 
 Rendered by the airuleset caveman-statusline shim on EVERY prompt render, so the
-hard rules are: NEVER block, NEVER touch the network inline. The segment is
-composed from two small machine-local caches:
+hard rules are: NEVER block, NEVER touch the network inline. The segment reads
+ONE machine-local cache:
 
-  ~/.claude/tickets-status/<cwd-key>.json   — {open, name, root, ts}; written by
-      `airuleset.py tickets-status --refresh --cwd <dir>` (the only place that
-      calls `gh`), spawned DETACHED by tickets_segment() when the cache is stale.
-  ~/.claude/autopilot-progress/<repo>.json  — {done, remaining, ts}; written by
-      `notify --run-card` each time a ticket's completion card is sent, so during
-      an autopilot run the segment shows done/total instead of the open count.
+  ~/.claude/tickets-status/<cwd-key>.json   — {open, name, root, ts, ...};
+      written by `airuleset.py tickets-status --refresh --cwd <dir>` (the only
+      place that calls `gh`), spawned DETACHED by tickets_segment() when the
+      cache is stale.
+
+#367 (third simplification round, after #307/#313 — "JEDNO číslo, koľko
+ticketov box ešte má"): the segment used to ALSO read
+~/.claude/autopilot-progress/<repo>.json (written by `notify --run-card`) to
+show a `run D/T` progress ratio during an active autopilot run — dropped
+entirely, since it duplicated the SAME live backlog the idle form already
+showed ("dve čísla o tom istom"). That cache is UNCHANGED and still written —
+watchdog job 20 still reads it as goal-armed evidence — only this render
+stopped consuming it.
 
 stdlib only; every function is fail-safe (an error renders as no segment, never
 a broken statusline).
@@ -93,49 +100,67 @@ def _spawn_refresh(cwd, home=None):
 
 
 def _stream_split_sfx(cache):
-    """The '· gk N' (sub-dev: own tickets already handed off to the
-    gatekeeper) or '· str N' (full-authority: open non-skip tickets EXCLUDED
-    from the core slice because a sub-dev stream owns them, #164) suffix —
-    the identity split idle mode already computes from the SAME cache
-    fields. Factored out (#307) so the ACTIVE-RUN render can show the exact
-    same split instead of hiding it behind a combined progress ratio.
+    """The '· gk N' suffix — sub-dev (scope=mine) boxes only: own tickets
+    already handed off to the gatekeeper. A SUBSET of the live 'I N'
+    obligation count (#367) — never subtracted out of N, just a decorator
+    naming which slice of N is already parked with the gatekeeper.
 
     #313 pt 3 REVERSES #164's "0 still renders" call: the user reads a bare
-    '· gk 0'/'· str 0' as noise on every repo where it is routinely zero.
-    Both now hide at 0, exactly like every other zero-value bucket on this
-    line (`skip`, `gkq`) already does — no special case any more."""
+    '· gk 0' as noise on every repo where it is routinely zero — hidden at
+    0, like every other zero-value bucket on this line (`skip`) already
+    does — no special case any more.
+
+    #367 dropped the SIBLING '· str M' branch this function used to also
+    render (full-authority: open non-skip tickets excluded from the core
+    partition because a sub-dev stream owns them, "cudzia práca, nie tohto
+    boxu"). A full-authority cache no longer carries a `streamy` field at
+    all (cmd_tickets_status stopped computing it), so there is nothing left
+    for a second branch here to read."""
     gk = cache.get("gk")
     if isinstance(gk, int) and gk > 0:
         return " \033[38;5;245m· gk %d\033[0m" % gk
-    if cache.get("scope") == "core":
-        streamy = cache.get("streamy")
-        if isinstance(streamy, int) and streamy > 0:
-            return " \033[38;5;245m· str %d\033[0m" % streamy
     return ""
 
 
 def tickets_segment(cwd, now=None, home=None, spawn=True):
     """The GitHub-tickets statusline segment for the session at `cwd`
-    (label shortened 'Issues' -> 'I', #223):
+    (label shortened 'Issues' -> 'I', #223): 'I N' where N is the LIVE
+    obligation-ticket count for THIS box — `core-quals`'s own obligation set
+    on a full-authority box, `slice-quals`'s own slice on a reduced-
+    authority one (#367, third simplification round after #307/#313: "I
+    want to see just how many tickets this box still has left before
+    everything is done" — a single live, decreasing number, never a
+    ratio/total pair and never a badge the user cannot explain).
 
-      - 'run N/T' (N = done, T = done+remaining, THIS run) + the SAME live
-        'I N [core]' (+ '· str M' / '· gk M') form idle mode renders, during
-        an ACTIVE autopilot run for this repo (green once the LIVE backlog
-        is empty). `run` is a DISTINCT label from `I` on purpose (#307): a
-        run's own counter used to render as a combined 'I D/T' ratio —
-        textually and visually identical to the bare live-count form below,
-        and it never showed the core/streamy split — which is how a real
-        'I 41/103' got misread as "103 tickets on me" instead of a progress
-        ratio. #313 pt 1 brought the RATIO form back (the user rejected the
-        #307-era 'run N done' wording as strictly worse: "to bolo 7/14 ovela
-        lepsie a zrozumitelnejsie") while keeping the `run`-vs-`I` label
-        split #307 introduced it for — the word "done" is simply dropped and
-        the total renders instead. Falls back to the SAME 'run D/T' ratio
-        (unchanged) only while the live open count is not yet known (a fresh
-        cache, or a `gh` error).
-      - 'I N' otherwise (open non-autopilot-skip GitHub issues), with the
-        SAME '· str M' / '· gk M' split.
-      - ''  when unknown (not a git/GitHub repo, gh unavailable, no cache yet).
+    #367 DROPPED entirely (all three had accumulated complaints — #307
+    "chaos v cislach", #313 "nechapem na co vidim str 0", this ticket's own
+    "naco stale vidim komplikovane run 5/12 I 12 core"):
+      - the 'run D/T' autopilot-progress ratio (a SEPARATE number for the
+        SAME live backlog the idle form already showed — "dve cisla o tom
+        istom"). ~/.claude/autopilot-progress/<repo>.json is UNCHANGED and
+        still WRITTEN by `notify --run-card` — watchdog job 20 still reads
+        it as goal-armed evidence; only THIS render stopped consuming it.
+      - the 'core' suffix on a full-authority box's number ("mi nic
+        nepomaha").
+      - '· gkq N' (open needs-gatekeeper tickets, whole repo) — these
+        tickets are ALREADY inside a full-authority box's own obligation
+        set (`_obligation_quals()` unions `needs-gatekeeper`), so the badge
+        was duplicate decoration of a number N already includes.
+      - '· str M' (tickets excluded from the core partition because a
+        sub-dev stream owns them) — "cudzia praca, nie tohto boxu".
+
+    KEPT unchanged: '· skip K' (autopilot-skip-labeled, hidden at 0, #313)
+    and the separate 'Q N' question badge — neither was named in any
+    complaint. A reduced-authority ('mine') cache still ALSO carries 'gk'
+    (own tickets already handed off to the gatekeeper, a SUBSET of N) —
+    unlike 'gkq' it was never named as redundant, so it stays.
+
+    Consistency guard: N is computed by `cmd_tickets_status --refresh`
+    (airuleset.py) calling the SAME `_obligation_quals()`/`_union_open_issues()`
+    (full authority) or `_slice_quals()` (reduced authority) that
+    `core-quals`/`slice-quals` themselves call for the `/goal` stop-proof —
+    never a parallel derivation — so the footer and the loop's own stop
+    condition can never disagree about which population is "done".
 
     Reads caches only; a stale/missing tickets cache triggers a detached
     background refresh (unless spawn=False) and renders the stale value
@@ -157,65 +182,10 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     skip_sfx = (" \033[38;5;245m· skip %d\033[0m" % skipped
                 if isinstance(skipped, int) and skipped > 0 else "")
 
-    # gk-req badge (airuleset #30): open needs-gatekeeper stream→supervisor
-    # action requests (full-authority boxes collect the count). Orange —
-    # a stream is BLOCKED waiting on this box's supervisor; hidden at 0.
-    # Label shortened 'gk-req' -> 'gkq' (#223).
-    gk_req = cache.get("gk_req")
-    if isinstance(gk_req, int) and gk_req > 0:
-        skip_sfx += " \033[38;5;208m· gkq %d\033[0m" % gk_req
-
     open_n = cache.get("open")
-    split_sfx = _stream_split_sfx(cache)
-
-    # Active autopilot run for this repo → the `run N done` progress badge.
-    name = cache.get("name") or ""
-    if name:
-        prog = _load(progress_dir(home) / (name + ".json"))
-        if prog and now - (prog.get("ts") or 0) <= AUTOPILOT_RUN_WINDOW_S:
-            done, remaining = prog.get("done"), prog.get("remaining")
-            if isinstance(done, int) and isinstance(remaining, int):
-                if isinstance(open_n, int):
-                    # The LIVE open count (tickets cache, TTL 120 s) is known
-                    # — show it as its OWN 'I N [core]' number (#307), never
-                    # folded into a ratio: `done` is a historical run counter,
-                    # `open_n` is "how many are mine right now" — conflating
-                    # them into one total is the exact confusion reported.
-                    # #313 pt 1: the 'run' segment ITSELF renders as a ratio
-                    # (done/total-this-run), just with the word "done" gone —
-                    # `run` stays textually distinct from `I` regardless.
-                    color = 40 if open_n == 0 else 75
-                    live = "%d core" % open_n if cache.get("scope") == "core" \
-                        else "%d" % open_n
-                    return ("\033[38;5;%dmrun %d/%d\033[0m "
-                            "\033[38;5;75mI %s\033[0m%s%s"
-                            % (color, done, done + remaining, live,
-                               split_sfx, skip_sfx))
-                # No live count yet (fresh cache / gh error) — fall back to
-                # the combined ratio, still labelled 'run', never 'I'.
-                color = 40 if remaining == 0 else 75
-                return "\033[38;5;%dmrun %d/%d\033[0m%s" % (
-                    color, done, done + remaining, skip_sfx)
-
     if isinstance(open_n, int):
-        # Sub-dev slice split (scope=mine): "I <active> · gk <handed-off>" — the
-        # gk bucket is own tickets labeled ready-for-review, i.e. parked with the
-        # gatekeeper. Rendered ALWAYS when the cache carries gk, INCLUDING gk 0: a
-        # hidden zero bucket looks exactly like a broken counter (the user panicked
-        # when the gatekeeper returned tickets and "gk" vanished — 2026-07-11).
-        if isinstance(cache.get("gk"), int):
-            return "\033[38;5;75mI %d\033[0m%s%s" % (open_n, split_sfx, skip_sfx)
-        # Full-authority (scope=core): self-describe the population (#164) —
-        # a bare "I 28" hid the 45 sub-dev-owned tickets excluded from
-        # it, which looks exactly like a broken counter (the same reasoning
-        # that already keeps `gk` visible at 0, just for a bigger number).
-        # split_sfx renders whenever the cache actually carries a streamy
-        # count (label shortened 'streamy' -> 'str', #223); falls back to
-        # the plain form on a stale/older cache.
-        if cache.get("scope") == "core":
-            return "\033[38;5;75mI %d core\033[0m%s%s" % (
-                open_n, split_sfx, skip_sfx)
-        return "\033[38;5;75mI %d\033[0m%s" % (open_n, skip_sfx)
+        return "\033[38;5;75mI %d\033[0m%s%s" % (
+            open_n, _stream_split_sfx(cache), skip_sfx)
     return ""
 
 

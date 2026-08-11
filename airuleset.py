@@ -7158,7 +7158,12 @@ def cmd_tickets_status(args):
                     if verdict:
                         handed[n_num] = True
             gk = sum(1 for n_num in mine if handed.get(n_num))
-            entry["open"] = None if failed else len(mine) - gk
+            # #367: N is the FULL slice (handed-off included) — the SAME
+            # raw union `slice-quals --count` itself prints for the /goal
+            # stop-proof, never a parallel "active-only" derivation. `gk`
+            # stays a SUBSET badge of N (which of my N tickets are already
+            # parked with the gatekeeper), no longer subtracted out of N.
+            entry["open"] = None if failed else len(mine)
             entry["gk"] = None if failed else gk
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
@@ -7176,43 +7181,31 @@ def cmd_tickets_status(args):
                     sfailed = True   # gh error ≠ zero skips — keep skipped=None
             entry["skipped"] = None if sfailed else len(skipped)
         else:
-            # Full-authority (core/gatekeeper) slice: the whole backlog MINUS the
-            # sub-dev-owned stream:<user> tickets (each reduced stream in
-            # AUTHORITY_BY_USER). On repos without stream labels the exclusions
-            # match nothing → the full count, unchanged.
+            # Full-authority (core/gatekeeper) box: N = the LIVE OBLIGATION
+            # set — the SAME `_obligation_quals()` union `core-quals --count`
+            # itself computes for the `/goal` stop-proof (#367 consistency
+            # guard: never a parallel derivation, so the footer and the
+            # loop's own stop condition can never disagree about what "done"
+            # means). `_obligation_quals()` already folds `_core_search_excl()`
+            # (the core partition — the whole backlog MINUS the sub-dev-owned
+            # stream:<user> tickets, each reduced stream in AUTHORITY_BY_USER)
+            # together with every open ticket carrying a MAINTAINER_ACTION_LABELS
+            # label (needs-gatekeeper/ready-for-review, regardless of which
+            # stream owns it) — so the whole-repo `gk-req`/`streamy` queries
+            # #367 dropped from the footer are no longer needed: their
+            # populations are already counted inside N.
             entry["scope"] = "core"
             excl = _core_search_excl()
-            # -L 1000 (#181 I5, round 2): was -L 200 -- above 200 open
-            # non-skip issues this AND the total query below both silently
-            # clamped to the SAME 200, so streamy=0 exactly when the hidden
-            # population was largest. 1000 comfortably exceeds any real
-            # backlog size seen on a managed repo.
-            n = _out(["gh", "issue", "list", "--state", "open", "--search",
-                      AUTOPILOT_SKIP_EXCL + " " + excl, "-L", "1000",
-                      "--json", "number", "-q", "length"], root)
-            try:
-                entry["open"] = int(n)
-            except (TypeError, ValueError):
-                entry["open"] = None
-            # Streamy bucket (#164): open non-skip tickets EXCLUDED from the
-            # core slice because they carry a sub-dev stream:<user> label —
-            # the footer used to hide this population behind a bare "Issues
-            # 28" while 45 more sat unlabeled-visible (the user's own
-            # forensics: 28 core + 45 streamy = 73 repo-wide, non-skip). A
-            # hidden 45 looks exactly like a broken counter — the same
-            # reasoning that already keeps `gk` visible at 0 applies with far
-            # more force here. total(non-skip, whole repo) - core = streamy.
-            t = _out(["gh", "issue", "list", "--state", "open", "--search",
-                      AUTOPILOT_SKIP_EXCL, "-L", "1000",
-                      "--json", "number", "-q", "length"], root)
-            try:
-                total_open = int(t)
-                entry["streamy"] = (total_open - entry["open"]
-                                    if entry["open"] is not None else None)
-            except (TypeError, ValueError):
-                entry["streamy"] = None
+            seen, u_failed = _union_open_issues(_obligation_quals(),
+                                                AUTOPILOT_SKIP_EXCL, cwd=root)
+            entry["open"] = None if u_failed else len(seen)
             # Skipped bucket (2026-07-16): the POSITIVE label query over the
-            # same core slice — how many tickets are excluded from autopilot.
+            # CORE partition — how many tickets are excluded from autopilot.
+            # #367 left this scoped to the core partition (unchanged) rather
+            # than the wider obligation set — never named as needing a
+            # semantic change, and a maintainer-action-labelled ticket owned
+            # by another stream was never something THIS box would
+            # autopilot-skip in the first place.
             s = _out(["gh", "issue", "list", "--state", "open", "--search",
                       "label:autopilot-skip " + excl, "-L", "1000",
                       "--json", "number", "-q", "length"], root)
@@ -7220,16 +7213,6 @@ def cmd_tickets_status(args):
                 entry["skipped"] = int(s)
             except (TypeError, ValueError):
                 entry["skipped"] = None
-            # gk-req badge (#30): open needs-gatekeeper stream→supervisor
-            # action requests — the WHOLE repo (requests carry stream labels;
-            # the supervisor must see them all), full-authority boxes only.
-            g = _out(["gh", "issue", "list", "--state", "open", "--label",
-                      "needs-gatekeeper", "-L", "200",
-                      "--json", "number", "-q", "length"], root)
-            try:
-                entry["gk_req"] = int(g)
-            except (TypeError, ValueError):
-                entry["gk_req"] = None
     cache = statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json")
     cache.parent.mkdir(parents=True, exist_ok=True)
     tmp = str(cache) + ".tmp"
