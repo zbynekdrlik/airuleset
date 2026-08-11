@@ -269,12 +269,13 @@ was cut back; `tests/test_goal_backlog_proof.py` now locks the cap):
   prose guarantee, for a HAND-OFF awaiting review — a bounce still being fixed is the sub-dev's
   ball alone, and the gatekeeper's loop may legitimately stop while it is worked, resuming once
   `ready-for-review` reappears.
-- **`core-quals --count` is deliberately NOT the number the footer renders as `Issues N core`.**
-  The two answer different questions — display vs obligation — exactly as `slice-quals --count`
-  and the footer's `gk` partition do on a reduced-authority box (#181 I3, round 2). The hidden
-  population is not hidden: the footer already discloses it as `· streamy M`. Forcing the two to
-  one number would either hide which stream owns what (what #164 was filed about) or let the
-  proof read 0 with the gatekeeper's own ball still in the air (what #181 is about).
+- **`core-quals --count` IS the number the footer renders as `I N` on a full-authority box** —
+  UPDATED by #367 (2026-08-11, third footer simplification round): the footer's own refresh now
+  calls the SAME `_obligation_quals()`/`_union_open_issues()` derivation this stop-proof uses,
+  never a parallel narrower one, so the two can no longer silently disagree about what "done"
+  means the way #181 documents happening before this fix. (The pre-#367 divergence this bullet
+  used to describe — the footer showing a narrower `core` count plus a separate `· streamy M`
+  badge — is gone; both badges were dropped along with the split.)
 - A hand-off in that obligation set is detected by the **`ready-for-review` LABEL**, the same
   signal the footer's `gk` bucket uses, not by the `READY-FOR-REVIEW:` comment that is its primary
   signal — the only single-query comment form is `"READY-FOR-REVIEW:" in:comments`, and GitHub

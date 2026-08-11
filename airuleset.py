@@ -6734,34 +6734,43 @@ def _gh_out(*gh_args, timeout=8, cwd=None):
 
 
 def _write_autopilot_progress(name, remaining, bump_done=True):
-    """Persist per-repo autopilot run progress for the statusline github-tickets segment
-    (~/.claude/autopilot-progress/<repo>.json). `done` counts the completion
-    cards sent within ONE run window; a card after a ≥6h gap starts a new run.
+    """Persist per-repo autopilot run progress (~/.claude/autopilot-progress/
+    <repo>.json). `done` counts the completion cards sent within ONE run
+    window; a card after a ≥6h gap starts a new run.
+
+    UPDATED (#367, 2026-08-11): this file no longer feeds the statusline
+    footer at all — `tickets_segment()` (statusbar.py) dropped its own read
+    of this cache entirely, along with the `run D/T` render it used to
+    produce, since it duplicated the SAME live backlog the idle `I N` form
+    already showed. The file itself, and everything this function does, is
+    UNCHANGED: it is still written on every completion card, and watchdog
+    job 20 still reads it as goal-armed evidence (a fresh `ts` here is one
+    of the signals it uses to judge whether a session is genuinely still
+    working). The history below (why the write is guarded the way it is)
+    stays accurate — it is about THIS function's own correctness, not about
+    what used to render from its output.
 
     `bump_done=False` (#181 I6, round 2 regression fix) writes the HEARTBEAT
     (`ts`) and `remaining` WITHOUT incrementing `done`. This is the ONLY
     writer of `ts`, which is what keeps the 6h AUTOPILOT_RUN_WINDOW_S run
-    window alive (statusbar.py). #164's original fix SKIPPED CALLING this
-    function entirely for a full-authority box's stream-ticket card, which
-    correctly kept `done` from inflating but ALSO stopped refreshing `ts` —
-    a run that cards only sub-dev stream tickets never opens/refreshes a
-    progress file, so 'Issues D/T' silently reverts to 'Issues N core'
-    mid-run. Always call this function; use `bump_done` to separate the two
-    concerns instead of skipping the call.
+    window alive. #164's original fix SKIPPED CALLING this function entirely
+    for a full-authority box's stream-ticket card, which correctly kept
+    `done` from inflating but ALSO stopped refreshing `ts` — a run that
+    cards only sub-dev stream tickets never opened/refreshed a progress
+    file at all. Always call this function; use `bump_done` to separate the
+    two concerns instead of skipping the call.
 
     A heartbeat-only write REFRESHES an already-live run window; it never
     OPENS one (#164 M-1, round 3). With no prior progress file — or one whose
     `ts` has fallen outside AUTOPILOT_RUN_WINDOW_S, which zeroes `base_done` —
-    an unconditional heartbeat wrote `{"done": 0, "ts": now}`, and statusbar
-    then rendered `Issues 0/40` for a full 6h window: an assertion that a run
-    is active and has achieved nothing, replacing the correct `Issues 40 core`.
-    Round 2 fixed a heartbeat that stopped too early by introducing one that
-    started too eagerly.
+    an unconditional heartbeat wrote `{"done": 0, "ts": now}`: an assertion
+    that a run is active and has achieved nothing. Round 2 fixed a heartbeat
+    that stopped too early by introducing one that started too eagerly.
 
     Round 4 corrects the REASON this docstring used to give for declining that
     write. It used to justify the guard by asserting that the run a heartbeat
     exists to keep alive must already have a progress file inside the window;
-    that is FALSE for a REVIEW-ONLY gatekeeper run,
+    that is FALSE for a review-only gatekeeper run,
     whose cards are all sub-dev stream tickets, so nothing ever sets
     `bump_done` and no file is ever created — a shape the obligation-set
     change makes more common, since a gatekeeper's obligation set is
@@ -6770,14 +6779,10 @@ def _write_autopilot_progress(name, remaining, bump_done=True):
     window on one would assert `0/N` — an active run that has achieved nothing
     — for a full 6h window, which is M-1 verbatim.
 
-    The accepted consequence, deliberately NOT "fixed": a review-only run
-    renders `Issues N core · streamy M` throughout instead of a D/T. That is
-    accurate — actioning a stream ticket genuinely does not change the core
-    count — and the only way to make D/T meaningful for such a run is to scope
-    `remaining` to the OBLIGATION set while the idle render stays core-scoped,
-    i.e. one label over two different populations depending on run state,
-    which is #164's own title. `remaining` is overwritten from the live 120s
-    tickets cache on every render anyway (statusbar.py).
+    The accepted consequence, deliberately NOT "fixed": a review-only run's
+    progress file never opens at all until the first core-scoped card lands —
+    job 20 sees no run-in-progress evidence for such a run until then, which
+    is correct, since a heartbeat alone is not evidence of finished work.
 
     Best-effort — a failure here never blocks the card send."""
     import re
@@ -7914,10 +7919,12 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # box" was not true until all four agreed.
         card_root = _repo_root() or None
         is_full = resolve_authority(cwd=card_root) == "full"
-        # remaining feeds the statusline's D/T — on a reduced-authority box it
-        # must be the STREAM's slice, not the whole repo (david saw 'Issues
-        # 2/26' while his slice was 5 — 2026-07-19). Same quals as
-        # tickets-status; gh error → None, never a wrong number.
+        # `remaining` feeds this card's own 📊 progress line — on a
+        # reduced-authority box it must be the STREAM's slice, not the whole
+        # repo (david saw 'Issues 2/26' while his slice was 5 — 2026-07-19).
+        # #367 removed the statusline's own D/T render, but this card still
+        # shows its own 'ostáva N' line and still needs the correct scope.
+        # Same quals as tickets-status; gh error → None, never a wrong number.
         if not is_full:
             nums, failed = set(), False
             try:
@@ -7937,15 +7944,29 @@ def _notify_run_card(args, compose_autopilot_card, send):
             remaining = None if failed else len(nums)
             scope_label = None
         else:
-            # Full-authority: scope to the CORE slice — the SAME exclusion the
-            # footer uses (#164) — never the whole-repo count. A whole-repo
-            # 'ostáva 72' next to a core 'done' silently divides two
-            # populations; scoping here makes the two agree by construction,
-            # and the 'core' word states which population it is.
+            # Full-authority: scope to the CORE slice — never the whole-repo
+            # count. A whole-repo 'ostáva 72' next to a core 'done' silently
+            # divides two populations; the 'core' word (scope_label below)
+            # states which population it is, so the number is
+            # self-describing regardless of what else counts as "done" on
+            # this box.
+            #
+            # #367 (2026-08-11): the FOOTER's own `I N` now counts the wider
+            # OBLIGATION set (`_obligation_quals()` — core partition UNIONED
+            # with every open needs-gatekeeper/ready-for-review ticket, since
+            # only this box can act on those), while this card's `remaining`
+            # deliberately stays scoped to the narrower CORE partition alone
+            # — the two numbers are NOT the same any more, and the old claim
+            # that scoping here "makes the two agree by construction" no
+            # longer holds. Left this way on purpose rather than widened to
+            # match: #367 was scoped to the statusline footer specifically,
+            # this card already self-labels its own population with the
+            # 'core' word, and widening it would be a separate design call
+            # about what a completion card should report, not a footer fix.
             excl = _core_search_excl()
             # -L 1000, not 200 (#181 I5, round 2): the same clamp-difference
-            # arithmetic that could zero out the footer's `streamy` bucket
-            # also understated `remaining` here.
+            # arithmetic that used to understate the pre-#367 footer's
+            # `streamy` bucket also understated `remaining` here.
             rem_raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
                               "--search", AUTOPILOT_SKIP_EXCL + " " + excl,
                               "-L", "1000", "--json", "number", "-q", "length",
@@ -11002,13 +11023,15 @@ def cmd_core_quals(args):
     `stream:montalu` + `needs-gatekeeper`, which only this box can move) and
     why this is not a revert to the whole-repo count.
 
-    NOTE, deliberately: this is NOT the same number the footer renders as
-    `Issues N core`. The footer answers a DISPLAY question ("which population
-    am I showing, and how much is hidden behind `streamy M`"); this answers an
-    OBLIGATION question ("what must I finish before I may stop"). Round 2's
-    I3 finding settled the same shape for `slice-quals` vs the footer's `gk`
-    partition: document the deliberate difference and lock it with a
-    regression test, never force two different questions to the same number.
+    NOTE: this IS the same number the footer renders as `I N` on a
+    full-authority box (#367, 2026-08-11) — `cmd_tickets_status`'s
+    full-authority branch calls this SAME `_obligation_quals()`/
+    `_union_open_issues()` derivation, never a parallel narrower one, so the
+    footer and this stop-proof cannot silently disagree about what "done"
+    means. (Before #367 they deliberately differed — the footer showed only
+    the narrower core partition plus a separate `· streamy M` badge for the
+    hidden population; both were dropped along with the split, which removed
+    the reason to keep the two numbers apart.)
 
     --count: prints an integer (0 = nothing left for this box to action).
     --list:  prints `number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first —
