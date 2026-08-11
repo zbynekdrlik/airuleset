@@ -652,15 +652,60 @@ class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
             }]},
         })
 
-    def test_the_session_asking_again_releases_the_suppression(self):
+    @staticmethod
+    def _autopilot_prompt(ts="2026-07-31T11:02:03.000Z", text="/autopilot"):
+        """#393 — a GENUINE, human-typed `/autopilot` invocation: a
+        TOP-LEVEL `type=="user"` entry whose `.message.content` is a plain
+        STRING starting `/autopilot` — the only signal `_goal_was_cleared_
+        by_user`'s tightened release condition now accepts."""
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content": text}})
+
+    @staticmethod
+    def _quoted_autopilot_prompt():
+        """The SAME `/autopilot` text arriving as a tool_result — one
+        session grepping ANOTHER session's transcript. Structurally
+        excluded, mirroring `_quoted_ask` above."""
+        return _json.dumps({
+            "type": "user",
+            "timestamp": "2026-07-31T11:02:03.000Z",
+            "message": {"content": [{
+                "type": "tool_result",
+                "content": "/autopilot",
+            }]},
+        })
+
+    def test_a_bare_assistant_reprint_never_releases_the_suppression(self):
+        # #393 (david2 live) — the /goal template's OWN instruction text
+        # ("re-prints this /goal line if issues remain") makes a session
+        # reprint the arm question as ROUTINE, AUTOMATIC behaviour, with
+        # ZERO genuine user request behind it. This is the corrected form
+        # of what used to be `test_the_session_asking_again_releases_the_
+        # suppression` — that fixture modelled ONLY the resulting assistant
+        # reprint and omitted #170's own real antecedent user prompt, which
+        # made a bare, unprompted reprint look sufficient on its own. It is
+        # not: only a genuine user `/autopilot` (below) may release this.
         cwd = "/home/x/devel/demo"
         pd = self._projects(cwd, self._marker("cleared"), self._asks_again())
         tmux = FakeTmux(ARM_PANE)
         logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(
+            tmux.typed(),
+            "an assistant reprint alone, with no genuine user /autopilot "
+            "behind it, must never release a deliberate clear")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
+    def test_a_genuine_autopilot_invocation_releases_the_suppression(self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"),
+                            self._autopilot_prompt())
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
         self.assertTrue(
             tmux.typed(),
-            "the session printed a NEW arm question after the clear — the "
-            "user is being asked again, so the old clear no longer governs")
+            "a genuine user /autopilot invocation after the clear must "
+            "restore auto-arming, even with no assistant reprint at all")
         self.assertFalse([ln for ln in logs if "skip cleared" in ln], logs)
 
     def test_170_stays_fixed_when_the_ask_predates_the_clear(self):
@@ -675,6 +720,18 @@ class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
                          "a goal cleared AFTER the ask must stay off")
         self.assertTrue(any("cleared" in ln for ln in logs), logs)
 
+    def test_an_autopilot_invocation_before_the_clear_does_not_release(self):
+        # #393 — order matters here too: a genuine /autopilot BEFORE a
+        # LATER clear must not somehow pre-emptively excuse that clear.
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._autopilot_prompt(), self._marker(
+            "cleared"))
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(tmux.typed(),
+                         "a goal cleared AFTER the /autopilot must stay off")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
     def test_a_quoted_arm_question_never_releases_the_suppression(self):
         cwd = "/home/x/devel/demo"
         pd = self._projects(cwd, self._marker("cleared"), self._quoted_ask())
@@ -685,16 +742,34 @@ class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
             "a tool_result quoting another session's arm question is not "
             "this session asking for anything")
 
-    def test_the_release_is_readable_from_the_marker_alone(self):
-        """`scan_goal_markers` carries the flag, so any future reader of goal
-        state gets the same answer without re-deriving it."""
+    def test_a_quoted_autopilot_invocation_never_releases_the_suppression(
+            self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"),
+                            self._quoted_autopilot_prompt())
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(
+            tmux.typed(),
+            "a tool_result quoting another session's /autopilot text is "
+            "not this session's own user genuinely invoking it")
+
+    def test_arm_after_alone_is_no_longer_sufficient(self):
+        """`scan_goal_markers`'s own `arm_after` field is UNCHANGED (still
+        computed, still True for a bare assistant reprint) — but it is no
+        longer what `_goal_was_cleared_by_user` consults; only a genuine
+        `/autopilot` release does (#393)."""
         cwd = "/home/x/devel/demo"
         pd = self._projects(cwd, self._marker("cleared"), self._asks_again())
         tr = pd / wd.encode_project_dir(cwd) / "sess-relapse.jsonl"
         _off, mark = wd.scan_goal_markers(tr)
         self.assertEqual(mark["state"], "cleared")
-        self.assertTrue(mark.get("arm_after"))
-        self.assertFalse(wd._goal_was_cleared_by_user(tr))
+        self.assertTrue(mark.get("arm_after"),
+                        "arm_after's own computation must stay unchanged")
+        self.assertTrue(
+            wd._goal_was_cleared_by_user(tr),
+            "arm_after alone (no genuine /autopilot) must not release the "
+            "clear")
 
 
 if __name__ == "__main__":
