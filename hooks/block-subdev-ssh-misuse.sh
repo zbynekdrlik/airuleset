@@ -365,7 +365,7 @@ def check_target(user, host, tokens, label):
         return ("%s as root@subdev without -i .../%s"
                 % (label, SUBDEV_ADMIN_KEY_BASENAME))
     if user in ("montalu", "montalu2", "montalu3", "montalu4",
-               "montalu5", "montalu6", "montalu7", "montalu8"):
+                "montalu5", "montalu6", "montalu7", "montalu8"):
         return None
     if user in ("marek", "david", "david2", "david3", "david4",
                "simap", "miva1"):
