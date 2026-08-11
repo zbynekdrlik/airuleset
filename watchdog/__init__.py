@@ -11990,6 +11990,35 @@ def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
     return (new_off, best)
 
 
+def _trailing_bottom_chrome(footer):
+    """#383-review Finding 2 — the trailing run of `footer` rows that are
+    themselves chrome-shaped (`_is_bottom_chrome`), walked BACKWARD from the
+    capture's own last line and stopped the instant a genuinely non-chrome,
+    non-blank row is hit. A blank row is skipped (never breaks the walk):
+    real chrome sometimes has one between the mode hint and the agent strip
+    (see the live `airules`-pane capture cited in the #383 design comment).
+
+    Real footer chrome ALWAYS sits as one uninterrupted block at the very
+    END of a genuine capture — nothing else is ever rendered below the
+    agent strip / mode hint / statusline. A chrome-SHAPED line embedded
+    partway through ordinary draft continuation (e.g. a pasted quote of a
+    rendered statusline row, live-triggered by the #383 adversarial review:
+    `I 41 core · str 12  5h 7%(4h)  wk 63%  caveman:lite  ~$12` scores >=2
+    `_statusline_hits` on its own) is not part of that trailing block —
+    MORE draft rows still follow it before the capture ends — so walking
+    from the bottom excludes it by construction; only a genuinely
+    unbroken tail of chrome counts."""
+    out = []
+    for ln in reversed(footer):
+        s = ln.strip()
+        if not s:
+            continue
+        if not _is_bottom_chrome(s):
+            break
+        out.append(s)
+    return out
+
+
 def pane_goal_armed(captured):
     """`True` / `False` / `None` — is CC's `◎ /goal` footer indicator lit?
 
@@ -12010,7 +12039,63 @@ def pane_goal_armed(captured):
     classify as chrome at all — so a peel-based read stopped ABOVE the very
     row the indicator sits on, and a `ctx `-prefix guard declared the whole
     pane unreadable. A SELECTED agent-strip row (`❯ ● main`, #36) renders
-    below the box and is excluded from the boundary search."""
+    below the box and is excluded from the boundary search.
+
+    #383 — non-blank `footer` content is NOT by itself proof the real
+    chrome region is even in view. A draft too tall to fit the remaining
+    viewport (job 20's own re-arm delivery left one PARKED, unsent, after a
+    paste-pending failure) renders as `❯ <head>` followed by many more
+    wrapped CONTINUATION rows of the SAME box, filling the capture down to
+    its last line — those rows are more box content, never chrome, and the
+    real closing border + statusline + `◎ /goal` glyph have scrolled off
+    past the bottom of what was captured. Live-confirmed, read-only, on
+    camera-box's own stuck pane (session zbynek-4:0, pane %1, 2026-08-11):
+    the capture's LAST line was still draft text, with a genuinely live,
+    actively-incrementing `◎ /goal active (Nm)` glyph rendered entirely
+    OUTSIDE `footer` (above the box's own top border), and the old body
+    returned a confident `False` on it. So a `footer` with content but with
+    NO row that itself reads as real trailing chrome (`_is_bottom_chrome`,
+    the SAME peel used to find the box's own head) cannot support a `False`
+    verdict either — the indicator's own home row is not provably in view,
+    so the answer is `None`. Verified this reuses `_is_bottom_chrome` (no
+    new pattern) without tripping on the repo's own real `/goal` templates
+    wrapped at 80/120/176 columns, and without disturbing the pre-existing
+    `test_statusline_without_a_ctx_segment_still_reads` case (a mode-hint
+    row alone already counts as chrome, independent of the statusline
+    row's own segment-count threshold).
+
+    A bare BORDER-RULE row alone does NOT count as that chrome evidence,
+    even though `_is_bottom_chrome` itself does classify one: the box's own
+    closing border can be the LAST thing that fit in the capture, with the
+    real statusline/mode-hint/agent-strip rows (and the `◎ /goal` glyph
+    riding on the statusline one) cut off immediately after it — a border
+    alone proves the box CLOSED, never that the indicator's own row is in
+    view. Every other chrome shape (`ctx `, the >=2-segment statusline, the
+    mode hint, an agent-strip row, a selected-strip row, the selector hint)
+    still counts on its own; none of them can render without the row that
+    would carry the indicator already being on screen.
+
+    #383-review Finding 2 — the chrome evidence must additionally be part
+    of an UNBROKEN trailing block ending at the capture's own last line
+    (`_trailing_bottom_chrome`), not merely present SOMEWHERE in `footer`:
+    a chrome-shaped row (e.g. a pasted quote of a rendered statusline,
+    live-triggered — see that helper's own docstring) sitting partway
+    through ordinary draft continuation, with MORE draft rows still
+    following it, must not count. Real chrome never has draft content
+    rendered below it.
+
+    #383-review Finding 3 (theoretical, unconfirmed live) — the trailing
+    walk trusts an agent-strip/selected-strip/selector-hint row ON ITS OWN
+    even without a statusline row also in the walk. This is safe ONLY
+    because `footer` is one CONTIGUOUS suffix of the whole capture (never a
+    subset with a gap) and every real CC render this repo has ever captured
+    puts the statusline row STRICTLY ABOVE (i.e. earlier in) the agent
+    strip — so an agent-strip row reaching the trailing walk structurally
+    implies the statusline row above it is ALSO still inside `footer`
+    (nothing between idx+1 and the strip row is ever skipped). If a future
+    CC layout ever renders the strip BEFORE the statusline, this reasoning
+    — and the population of sessions it protects, autopilot supervisors
+    with visible worker rows — would need re-checking."""
     lines = (captured or "").splitlines()
     idx = None
     for i, ln in enumerate(lines):
@@ -12022,7 +12107,18 @@ def pane_goal_armed(captured):
     footer = lines[idx + 1:]
     if not any(ln.strip() for ln in footer):
         return None                        # nothing rendered below it
-    return any(GOAL_INDICATOR in ln for ln in footer)
+    if any(GOAL_INDICATOR in ln for ln in footer):
+        return True
+    trailing = _trailing_bottom_chrome(footer)
+    if not any(not _is_border_rule(s) for s in trailing):
+        return None                        # #383: footer is box content, a
+                                            # chrome-shaped row buried mid-
+                                            # draft, or a bare closing
+                                            # border with nothing past it --
+                                            # not real trailing chrome --
+                                            # real footer is off-screen,
+                                            # "dark" unproven
+    return False
 
 
 GOAL_TYPE_SETTLE_POLLS = 8          # bounded: CC needs a moment to INGEST a
