@@ -1618,6 +1618,15 @@ set -euo pipefail
 WIDTH="$(tput cols 2>/dev/null)" || WIDTH=0
 [ -n "$WIDTH" ] || WIDTH=0
 
+# #376 M1 (adversarial review, measured live on this repo's own real
+# project data: ~25s wall / ~817MB peak RSS): the transcript
+# reconstruction below can take long enough that, with nothing printed
+# first, the popup appears BLANK/FROZEN for the whole window -- print
+# this BEFORE starting it, to stderr (never stdout, which `less` will
+# render as the final content once the real capture finishes and
+# overwrites this line).
+printf 'Loading claude-history...\n' >&2
+
 # PRIMARY: the complete, hole-free transcript reconstruction, immune to
 # the upstream Claude Code classic-renderer scrollback-duplication
 # regression (anthropics/claude-code #84247/#46834, both still open as
