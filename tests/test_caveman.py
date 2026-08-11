@@ -394,8 +394,8 @@ if __name__ == "__main__":
 
 
 class TestCavemanShimTickets(TestCase):
-    """The shim renders the 🎫 ticket segment (autopilot done/total, else open
-    GitHub issues) via statusbar.py — REPO_DIR is baked in at install time."""
+    """The shim renders the 🎫 ticket segment (the LIVE obligation-ticket
+    count, #367) via statusbar.py — REPO_DIR is baked in at install time."""
 
     def test_render_substitutes_repo_dir(self):
         c = airuleset.render_caveman_shim()
@@ -439,6 +439,9 @@ class TestCavemanShimTickets(TestCase):
             (d / (statusbar.cwd_key(cwd) + ".json")).write_text(_json.dumps(
                 {"open": 14, "name": "demo", "root": cwd,
                  "ts": int(_time.time())}))
+            # #367: a progress-cache file (once the source of the 'run D/T'
+            # badge) must be COMPLETELY INERT to the render now -- seeded
+            # here specifically to prove that, through the REAL shim.
             pd = statusbar.progress_dir(home)
             pd.mkdir(parents=True)
             (pd / "demo.json").write_text(_json.dumps(
@@ -455,10 +458,8 @@ class TestCavemanShimTickets(TestCase):
                 capture_output=True, text=True,
                 env=env)
             self.assertEqual(r.returncode, 0, r.stderr)
-            # #313 pt 1: the run-progress badge is `run <done>/<total>`,
-            # distinct from the `I N` live-count form it shows alongside.
-            self.assertIn("run 3/17", r.stdout)
             self.assertIn("I 14", r.stdout)
+            self.assertNotIn("run", r.stdout)
 
 
 class TestCavemanNewCacheLayout(TestCase):

@@ -1,10 +1,17 @@
-"""Statusline 🎫 ticket segment (statusbar.py + tickets-status CLI + run-card
-progress feed).
+"""Statusline 🎫 ticket segment (statusbar.py + tickets-status CLI).
 
-The user's ask: the bottom status bar (next to the ctx/limit meters) shows
-autopilot progress "done/total" during a run, else the count of open GitHub
-issues. Hard rule: the statusline render NEVER blocks on gh — it reads local
-caches and refreshes them via a detached background command.
+The user's ask (#367, third simplification round after #307/#313): the
+bottom status bar (next to the ctx/limit meters) shows ONE live, decreasing
+number — how many tickets this box still has left before everything is
+done — never a ratio/total pair and never a badge the user cannot explain.
+Hard rule: the statusline render NEVER blocks on gh — it reads local caches
+and refreshes them via a detached background command.
+
+`_seed_progress`/`~/.claude/autopilot-progress/<repo>.json` still exists
+below purely for `AutopilotProgressFeed` (which tests the WRITER,
+`airuleset._write_autopilot_progress` — still used by `notify --run-card`
+and by watchdog job 20's own goal-armed evidence check) and for the
+inertness test in `TicketsSegment` proving the render no longer reads it.
 """
 
 import getpass
@@ -64,31 +71,43 @@ class TicketsSegment(unittest.TestCase):
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
         self.assertIn("I 14", self._seg())
 
-    def test_autopilot_progress_wins_when_fresh(self):
-        # #313 pt 1: `run <done>/<total>` (done/total THIS run) is textually
-        # distinct from the bare `I N` live-count form so a run can never be
-        # misread as the live backlog -- followed by the SAME live `I N`
-        # count the idle render would show (open=14, live).
+    def test_progress_cache_presence_never_affects_render(self):
+        # #367 dropped the whole 'run D/T' branch that used to read
+        # ~/.claude/autopilot-progress/<repo>.json — a fresh, stale, or
+        # absent progress file must all render byte-identically. Locks the
+        # removal with real teeth: a mutant reintroducing the read would
+        # make the fresh-progress case diverge from the other two.
         _seed_cache(self.home, self.cwd, open_n=14, name="demo")
+        no_progress = self._seg()
+        self.assertIn("I 14", no_progress)
+        self.assertNotIn("run", no_progress)
         _seed_progress(self.home, "demo", done=3, remaining=14)
-        seg = self._seg()
-        self.assertIn("run 3/17", seg)
-        self.assertIn("I 14", seg)
-        self.assertNotIn("I 3", seg)   # never a combined ratio using "I"
-
-    def test_stale_progress_falls_back_to_open_count(self):
-        _seed_cache(self.home, self.cwd, open_n=14, name="demo")
+        self.assertEqual(self._seg(), no_progress)
         _seed_progress(self.home, "demo", done=3, remaining=14,
                        ts=time.time() - statusbar.AUTOPILOT_RUN_WINDOW_S - 60)
-        self.assertIn("I 14", self._seg())
+        self.assertEqual(self._seg(), no_progress)
+        self.assertNotIn("run", no_progress)
 
-    def test_backlog_empty_renders_green(self):
-        _seed_cache(self.home, self.cwd, open_n=0, name="demo")
-        _seed_progress(self.home, "demo", done=17, remaining=0)
+    def test_render_never_resurrects_dropped_forms_from_a_legacy_cache(self):
+        # #367 adversarial review: a REAL box carries a cache written by the
+        # PRE-#367 code for up to TTL after deploy — scope=core plus the
+        # legacy `streamy`/`gk_req` fields the refresh no longer writes.
+        # The render must treat every dropped form as fully inert: plain
+        # `I N`, no `core` suffix, no `· str M`, no `· gkq N`. Locks the
+        # drops with real teeth — a mutant re-adding the `core` suffix (or
+        # the `streamy`/`gk_req` reads) passed the whole rewritten suite,
+        # because every other assertion is a one-sided assertIn("I N").
+        d = statusbar.cache_dir(self.home)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / (statusbar.cwd_key(self.cwd) + ".json")).write_text(json.dumps(
+            {"open": 4, "name": "demo", "root": str(self.cwd),
+             "ts": int(time.time()), "scope": "core",
+             "streamy": 5, "gk_req": 3}))
         seg = self._seg()
-        self.assertIn("run 17/17", seg)
-        self.assertIn("I 0", seg)
-        self.assertIn("38;5;40m", seg)          # green
+        self.assertIn("I 4", seg)
+        self.assertNotIn("core", seg)
+        self.assertNotIn("str", seg)
+        self.assertNotIn("gkq", seg)
 
     def test_unknown_repo_renders_nothing(self):
         _seed_cache(self.home, self.cwd, open_n=None, name="")   # gh unavailable
@@ -122,9 +141,17 @@ class RefreshCLI(unittest.TestCase):
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             fake_gh = Path(bindir) / "gh"
+            # #367: the full-authority open-count query now unions
+            # `_obligation_quals()` (3 quals, each a real `gh issue list
+            # --json ...` array call) via `_union_open_issues` -- a bare
+            # count no longer parses. All 3 quals return the SAME 7-item
+            # array here (numbers unify by key, so the union is still 7).
+            SEVEN = '[{"number":1},{"number":2},{"number":3},{"number":4},' \
+                    '{"number":5},{"number":6},{"number":7}]'
             fake_gh.write_text(
                 "#!/usr/bin/env bash\n"
-                'if [ "$1" = repo ]; then echo "zbynekdrlik/demo"; else echo 7; fi\n')
+                'if [ "$1" = repo ]; then echo "zbynekdrlik/demo"; '
+                'else echo \'%s\'; fi\n' % SEVEN)
             fake_gh.chmod(0o755)
             r = subprocess.run(
                 [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
@@ -222,6 +249,9 @@ class RefreshCLI(unittest.TestCase):
     def test_refresh_partitions_slice_by_ready_for_review_label(self):
         # The gk bucket = own-slice tickets carrying the ready-for-review label
         # (auto-labeled at the sub-dev hand-off by subdev-handoff-label.yml, PR #1420).
+        # #367: N (`cache["open"]`) is the FULL slice (handed-off included,
+        # matching `slice-quals --count`'s own raw union) -- `gk` is a
+        # subset badge, no longer subtracted out of N.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -232,7 +262,7 @@ class RefreshCLI(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
-                # union {1 (no label), 2 (r4r), 3 (r4r)} → open=1 active, gk=2
+                # union {1 (no label), 2 (r4r), 3 (r4r)} -> N=3, gk=2
                 '  *assignee:@me*) echo \'[{"number":1,"labels":[]},'
                 '{"number":2,"labels":[{"name":"ready-for-review"}]}]\';;\n'
                 '  *author:@me*)   echo \'[{"number":2,"labels":[{"name":"ready-for-review"}]},'
@@ -250,19 +280,20 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 1)      # active on the sub-dev
+            self.assertEqual(cache["open"], 3)      # the FULL slice (#367)
             self.assertEqual(cache["gk"], 2)        # handed off, waiting on gatekeeper
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("I 1", seg)
+            self.assertIn("I 3", seg)
             self.assertIn("gk 2", seg)
 
     def test_refresh_needs_gatekeeper_lane_also_counts_as_handed_off(self):
         # #191 root cause 1 ("different lane"): needs-gatekeeper is
         # airuleset's OWN hand-off lane (cmd_gk_request) — a ticket carrying
         # it is equally out-of-my-hands as one carrying ready-for-review, so
-        # it must fold into the SAME gk bucket. Against pre-#191 main this
-        # ticket miscounted as ACTIVE (I 1, gk 0) instead of handed-off
-        # (I 0, gk 1).
+        # it must fold into the SAME gk bucket (against pre-#191 main this
+        # ticket miscounted as ACTIVE, gk 0). #367: N is the FULL slice, so
+        # this single handed-off ticket still counts toward N=1 -- gk=1
+        # (a subset of N) is what marks it handed-off, not a hole in N.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -289,10 +320,10 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 0)      # NOT active — handed off
-            self.assertEqual(cache["gk"], 1)
+            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
+            self.assertEqual(cache["gk"], 1)         # ... and it's handed off
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("I 0", seg)
+            self.assertIn("I 1", seg)
             self.assertIn("gk 1", seg)
 
     def test_refresh_skips_the_comment_fallback_entirely_when_the_slice_query_failed(self):
@@ -373,10 +404,10 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 0)      # recovered -- not active
-            self.assertEqual(cache["gk"], 1)
+            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
+            self.assertEqual(cache["gk"], 1)         # recovered -- handed off
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("I 0", seg)
+            self.assertIn("I 1", seg)
             self.assertIn("gk 1", seg)
 
     def test_refresh_does_not_recover_a_ticket_with_no_ready_for_review_comment(self):
@@ -564,8 +595,8 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 0)      # recovered -- re-handed
-            self.assertEqual(cache["gk"], 1)
+            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
+            self.assertEqual(cache["gk"], 1)         # recovered -- re-handed
 
     def test_refresh_rejects_a_bare_mention_or_a_gatekeeper_finding_comment(self):
         # #313 pt 2 adversarial review MAJOR-2: `_is_readiness_comment` is
@@ -658,11 +689,11 @@ class RefreshCLI(unittest.TestCase):
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache.get("scope"), "mine")
-            self.assertEqual(cache["open"], 0)      # not active-on-me
+            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
             self.assertEqual(cache["gk"], 1)        # re-attributed, handed off
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
             self.assertNotEqual(seg, "")
-            self.assertIn("I 0", seg)
+            self.assertIn("I 1", seg)
             self.assertIn("gk 1", seg)
 
     def test_refresh_reattributes_via_the_new_handed_by_marker(self):
@@ -704,7 +735,7 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 0)
+            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
             self.assertEqual(cache["gk"], 1)
 
     def test_refresh_reattribution_uses_the_temporally_last_origin_event(self):
@@ -849,19 +880,26 @@ class RefreshCLI(unittest.TestCase):
     def test_refresh_full_authority_excludes_other_streams_labels(self):
         # Stream-label ownership (odoo-erp PR #1440, 2026-07-11): the FULL box's
         # counter = tickets THIS box should work via /autopilot — open minus
-        # autopilot-skip minus stream:david/montalu/marek (sub-dev-owned). The fake
-        # gh returns 10 ONLY when the search carries the stream exclusions (17
-        # without) — gatekeeper's live numbers.
+        # autopilot-skip minus stream:david/montalu/marek (sub-dev-owned). #367:
+        # N is now `_obligation_quals()`'s own union (`_core_search_excl()` +
+        # needs-gatekeeper + ready-for-review), each a REAL `gh issue list
+        # --json ...` array call. Only the core-partition qual's search string
+        # carries the stream exclusion, so it alone matches the specific
+        # pattern below (a 10-item array); the other two quals fall to the
+        # catch-all (empty) — a mutant dropping the exclusion would make the
+        # core-partition qual ALSO fall to the empty catch-all, open=0.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             fake_gh = Path(bindir) / "gh"
+            TEN = "[" + ",".join('{"number":%d}' % n for n in range(1, 11)) + "]"
             fake_gh.write_text(
                 "#!/usr/bin/env bash\n"
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
-                '  *-label:stream:david*-label:stream:marek*-label:stream:montalu*) echo 10;;\n'
-                '  *) echo 17;;\n'
+                '  *-label:stream:david*-label:stream:marek*-label:stream:montalu*) '
+                "echo '%s';;\n" % TEN +
+                '  *) echo "[]";;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
             r = subprocess.run(
@@ -873,31 +911,37 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 10)      # own slice, NOT the 17 backlog
+            self.assertEqual(cache["open"], 10)      # own slice, exclusion applied
             self.assertEqual(cache.get("scope"), "core")
 
-    def test_refresh_computes_the_streamy_bucket_and_the_footer_self_describes(self):
-        # #164: the footer used to say a bare "Issues 28" while 45 more
-        # tickets sat excluded and invisible (28 core + 45 streamy = 73
-        # repo-wide non-skip — the user's own ground truth). streamy =
-        # total(non-skip, whole repo) - core; the footer must show BOTH
-        # numbers, self-describing the population instead of hiding it.
+    def test_refresh_full_authority_counts_maintainer_action_tickets_outside_core(self):
+        # #367's actual semantic change (and the stated reason the `gkq`
+        # badge could be dropped at all): the full-authority footer count is
+        # `_obligation_quals()`'s union — the core partition PLUS every open
+        # `needs-gatekeeper`/`ready-for-review` ticket a sub-dev stream owns.
+        # Every other full-authority refresh test returns the SAME array for
+        # all three quals (union invariant to which quals run), so a mutant
+        # reverting to the old core-partition-only query passed the whole
+        # rewritten suite. Here the maintainer-action quals contribute
+        # tickets OUTSIDE the 10-ticket core array (#11, #12; #1 dedups):
+        # obligation union = 12, core alone = 10.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             fake_gh = Path(bindir) / "gh"
+            TEN = "[" + ",".join('{"number":%d}' % n for n in range(1, 11)) + "]"
             fake_gh.write_text(
                 "#!/usr/bin/env bash\n"
                 'case "$*" in\n'
-                '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
-                # #362: the base exclusion is now AUTOPILOT_SKIP_EXCL
-                # (autopilot-skip + ops-channel), so the core/total queries'
-                # literal search value grew a `-label:ops-channel` term.
-                '  *"--search -label:autopilot-skip -label:ops-channel '
-                '-label:stream:david"*) echo 28;;\n'
-                '  *"--search -label:autopilot-skip -label:ops-channel '
-                '-L 1000"*) echo 73;;\n'
-                '  *) echo 0;;\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/demo";;\n'
+                # the POSITIVE skip query ("--search label:autopilot-skip ...")
+                # — must not be swallowed by the stream-exclusion pattern below
+                '  *"--search label:autopilot-skip"*) echo 0;;\n'
+                '  *label:needs-gatekeeper*) echo \'[{"number":11}]\';;\n'
+                '  *label:ready-for-review*) '
+                "echo '[{\"number\":12},{\"number\":1}]';;\n"
+                "  *-label:stream:*) echo '%s';;\n" % TEN +
+                '  *) echo "[]";;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
             r = subprocess.run(
@@ -909,11 +953,11 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 28)
-            self.assertEqual(cache["streamy"], 45)      # 73 - 28, locks the identity
-            seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("I 28 core", seg)
-            self.assertIn("str 45", seg)
+            self.assertEqual(
+                cache["open"], 12,
+                "full-authority open must be the OBLIGATION union "
+                "(core ∪ needs-gatekeeper ∪ ready-for-review), not the "
+                "core partition alone")
 
     def test_refresh_core_count_excludes_permanent_ops_channel_tickets(self):
         # #362: a self-declared PERMANENT `ops-channel` ticket (odoo-erp
@@ -921,16 +965,23 @@ class RefreshCLI(unittest.TestCase):
         # must never inflate the footer's own core count either, or the
         # footer and the /goal stop-proof (`core-quals --count`, which
         # already excludes it) would disagree about what "done" means.
+        # #367: AUTOPILOT_SKIP_EXCL (which already carries -label:ops-channel)
+        # is the shared BASE for every one of `_obligation_quals()`'s 3
+        # per-qual queries, so all 3 match the ops-channel pattern below and
+        # return the SAME 5-item array -- a mutant dropping the exclusion
+        # would fall every one of them to the 9-item catch-all instead.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             fake_gh = Path(bindir) / "gh"
+            FIVE = "[" + ",".join('{"number":%d}' % n for n in range(1, 6)) + "]"
+            NINE = "[" + ",".join('{"number":%d}' % n for n in range(1, 10)) + "]"
             fake_gh.write_text(
                 "#!/usr/bin/env bash\n"
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
-                '  *-label:ops-channel*) echo 5;;\n'
-                '  *) echo 9;;\n'
+                "  *-label:ops-channel*) echo '%s';;\n" % FIVE +
+                "  *) echo '%s';;\n" % NINE +
                 'esac\n')
             fake_gh.chmod(0o755)
             r = subprocess.run(
@@ -1040,31 +1091,17 @@ class RefreshCLI(unittest.TestCase):
                     "ops-channel exclusion: %r" % ln)
 
     def test_core_and_total_queries_no_longer_clamp_at_200(self):
-        # #181 I5 (round 2): cmd_tickets_status's core/total queries both
-        # clamped at -L 200 -- above 200 open non-skip issues both return
-        # the IDENTICAL clamped 200, so streamy = 0 exactly when the hidden
-        # population is LARGEST (180 core / 250 total would print
-        # "streamy 20" instead of the real 70). Locks that the full-
-        # authority core/total queries use a higher cap.
+        # #181 I5 (round 2): cmd_tickets_status's own core/total queries used
+        # to clamp at -L 200. #367 replaced that pair with a single call into
+        # the SHARED `_union_open_issues` (used verbatim by `core-quals`
+        # too), which hardcodes -L 1000 -- so this window can no longer
+        # literally contain "-L", "200" for the open-count computation at
+        # all. Kept as a light regression guard against a future re-inlined
+        # per-scope query reintroducing the old clamp.
         src = Path(airuleset.__file__).read_text()
         i = src.index('entry["scope"] = "core"')
         window = src[i:i + 2000]
         self.assertNotIn('"-L", "200"', window)
-
-    def test_streamy_bucket_hidden_at_zero(self):
-        # #313 pt 3 REVERSES the "same reasoning as gk-zero" rule above --
-        # the user now reads a bare '· str 0' as noise too.
-        with TemporaryDirectory() as home:
-            cwd = "/home/x/devel/demo"
-            _seed_cache(home, cwd, open_n=12, name="demo", scope="core")
-            d = json.loads((statusbar.cache_dir(home) /
-                            (statusbar.cwd_key(cwd) + ".json")).read_text())
-            d["streamy"] = 0
-            (statusbar.cache_dir(home) /
-             (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(d))
-            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("I 12 core", seg)
-            self.assertNotIn("str", seg)
 
     def test_refresh_subdev_slice_includes_own_stream_label(self):
         # Consistency with the ownership convention: a ticket labeled
@@ -1126,10 +1163,15 @@ class RefreshCLI(unittest.TestCase):
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             fake_gh = Path(bindir) / "gh"
+            # #367: the open-count query now unions `_obligation_quals()`
+            # (real gh issue-list arrays), so the catch-all must return a
+            # JSON array of the target size, not a bare count.
             fake_gh.write_text(
                 "#!/usr/bin/env bash\n"
                 'if [ -z "$GH_TOKEN" ]; then echo "gh: not authenticated" >&2; exit 1; fi\n'
-                'if [ "$1" = repo ]; then echo "kvaskodev/odoo-erp"; else echo 5; fi\n')
+                'if [ "$1" = repo ]; then echo "kvaskodev/odoo-erp"; else '
+                'echo \'[{"number":1},{"number":2},{"number":3},{"number":4},'
+                '{"number":5}]\'; fi\n')
             fake_gh.chmod(0o755)
             Path(home, ".git-credentials").write_text(
                 "https://kvaskodev:ghp_faketoken123@github.com\n")
@@ -1158,7 +1200,10 @@ class RefreshCLI(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 'if [ "$GH_TOKEN" != "real-token" ]; then '
                 'echo "wrong token" >&2; exit 1; fi\n'
-                'if [ "$1" = repo ]; then echo "zbynekdrlik/demo"; else echo 9; fi\n')
+                'if [ "$1" = repo ]; then echo "zbynekdrlik/demo"; else '
+                'echo \'[{"number":1},{"number":2},{"number":3},{"number":4},'
+                '{"number":5},{"number":6},{"number":7},{"number":8},'
+                '{"number":9}]\'; fi\n')
             fake_gh.chmod(0o755)
             Path(home, ".git-credentials").write_text(
                 "https://someone:stale-token@github.com\n")
@@ -1185,7 +1230,10 @@ class RefreshCLI(unittest.TestCase):
             fake_gh.write_text(
                 "#!/usr/bin/env bash\n"
                 'if [ "$1" = repo ]; then echo "zbynekdrlik/odoo-slovnormal"; '
-                'else echo 12; fi\n')
+                'else echo \'[{"number":1},{"number":2},{"number":3},'
+                '{"number":4},{"number":5},{"number":6},{"number":7},'
+                '{"number":8},{"number":9},{"number":10},{"number":11},'
+                '{"number":12}]\'; fi\n')
             fake_gh.chmod(0o755)
             r = subprocess.run(
                 [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
@@ -1260,16 +1308,17 @@ class SkippedBucket(unittest.TestCase):
             self.assertIn("gk 5", seg)
             self.assertIn("skip 2", seg)
 
-    def test_render_shows_skipped_during_autopilot_run(self):
-        # run-progress mode must not hide the skip info — skips are exactly
-        # the tickets the run will NOT touch.
+    def test_render_shows_skipped_regardless_of_a_stale_progress_cache(self):
+        # #367: the 'run D/T' progress-cache read is GONE -- a progress file
+        # (fresh or stale) must never affect this render at all. Skips are
+        # exactly the tickets a run would NOT touch, so they must still show.
         with TemporaryDirectory() as home:
             cwd = "/home/x/devel/demo"
             _seed_cache(home, cwd, open_n=9, name="demo", skipped=2)
             _seed_progress(home, "demo", done=1, remaining=3)
             seg = self._seg(home, cwd)
-            self.assertIn("run 1/4", seg)
-            self.assertIn("I 9", seg)   # live open count, not the stale 3
+            self.assertNotIn("run", seg)
+            self.assertIn("I 9", seg)
             self.assertIn("skip 2", seg)
 
     def test_refresh_counts_skipped_for_full_authority(self):
@@ -1284,7 +1333,10 @@ class SkippedBucket(unittest.TestCase):
                 # the POSITIVE label query (skip count) — must match before the
                 # open-count query, whose search embeds -label:autopilot-skip
                 '  *"--search label:autopilot-skip"*) echo 2;;\n'
-                '  *) echo 7;;\n'
+                # #367: the open-count query now unions `_obligation_quals()`
+                # (real gh issue-list arrays), not a bare "-q length" count.
+                '  *) echo \'[{"number":1},{"number":2},{"number":3},'
+                '{"number":4},{"number":5},{"number":6},{"number":7}]\';;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
             r = subprocess.run(
@@ -1335,55 +1387,6 @@ class SkippedBucket(unittest.TestCase):
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache["open"], 3)
             self.assertEqual(cache["skipped"], 2)
-
-
-class RunModeShowsTheStreamSplit(unittest.TestCase):
-    """#307 Half B (the PRIMARY fix): the owner read a run's `I 41/103` as
-    "103 tickets on me" — it is really a progress ratio whose total also
-    accumulates historical growth, and it never showed the `core`/`streamy`
-    (or `gk`) split the idle render already computes from the SAME cache. An
-    active run must be UNMISTAKABLE for the live backlog (a distinct `run`
-    label, never `I`) and must show the SAME split idle mode shows, so it
-    never hides how many tickets sit on the other streams."""
-
-    def _seg(self, home, cwd):
-        return statusbar.tickets_segment(cwd, home=home, spawn=False)
-
-    def test_full_authority_run_shows_the_core_and_streamy_split(self):
-        with TemporaryDirectory() as home:
-            cwd = "/home/x/devel/demo"
-            _seed_cache(home, cwd, open_n=63, name="demo", scope="core")
-            (statusbar.cache_dir(home) /
-             (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(
-                {"open": 63, "name": "demo", "root": cwd,
-                 "ts": int(time.time()), "scope": "core", "streamy": 98}))
-            _seed_progress(home, "demo", done=41, remaining=62)
-            seg = self._seg(home, cwd)
-            self.assertIn("run 41/103", seg)
-            self.assertIn("I 63 core", seg)
-            self.assertIn("str 98", seg)
-
-    def test_reduced_authority_run_shows_the_gk_split(self):
-        with TemporaryDirectory() as home:
-            cwd = "/home/x/devel/demo"
-            _seed_cache(home, cwd, open_n=2, name="demo", gk=5, scope="mine")
-            _seed_progress(home, "demo", done=1, remaining=1)
-            seg = self._seg(home, cwd)
-            self.assertIn("run 1/2", seg)
-            self.assertIn("I 2", seg)
-            self.assertIn("gk 5", seg)
-
-    def test_run_label_is_never_the_bare_I_glyph(self):
-        # The whole point: a run's progress badge must be TEXTUALLY distinct
-        # from the live-count "I N" form, so the two can never be confused.
-        with TemporaryDirectory() as home:
-            cwd = "/home/x/devel/demo"
-            _seed_cache(home, cwd, open_n=63, name="demo")
-            _seed_progress(home, "demo", done=41, remaining=62)
-            seg = self._seg(home, cwd)
-            self.assertNotIn("I 41", seg)
-            self.assertNotIn("I 41/103", seg)
-            self.assertIn("run 41/103", seg)
 
 
 class AutopilotProgressFeed(unittest.TestCase):
@@ -1499,44 +1502,6 @@ class SharedAccountSliceScoping(unittest.TestCase):
             cache = self._refresh(home, repo, bindir, "kvaskodev")
             # union {1,2} ∪ {1,50,51} ∪ {60,61,62} = 7
             self.assertEqual(cache["open"], 7)
-
-
-class RunModeTracksLiveOpenCount(unittest.TestCase):
-    """codex-bridge incident 2026-07-20: the session finished the whole backlog
-    (0 open) but the footer kept 'Issues 1/2' for up to 6 h — the progress
-    file's `remaining` freezes at card time. Run-mode now takes the LIVE open
-    count (tickets cache, TTL 120 s) whenever it is known, and (#307) shows
-    it as its OWN `I N` number rather than folding it into a combined ratio."""
-
-    def test_finished_backlog_shows_done_done_green(self):
-        with TemporaryDirectory() as home:
-            cwd = "/home/x/devel/demo"
-            _seed_cache(home, cwd, open_n=0, name="demo")
-            _seed_progress(home, "demo", done=1, remaining=1)   # stale card
-            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("run 1/2", seg)
-            self.assertIn("I 0", seg)
-            self.assertIn("38;5;40m", seg)                      # green
-
-    def test_new_tickets_mid_run_grow_the_total(self):
-        with TemporaryDirectory() as home:
-            cwd = "/home/x/devel/demo"
-            _seed_cache(home, cwd, open_n=5, name="demo")
-            _seed_progress(home, "demo", done=2, remaining=1)   # stale low
-            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            self.assertIn("run 2/3", seg)
-            self.assertIn("I 5", seg)   # the LIVE count, not the stale 1
-
-    def test_unknown_open_falls_back_to_card_remaining(self):
-        with TemporaryDirectory() as home:
-            cwd = "/home/x/devel/demo"
-            _seed_cache(home, cwd, open_n=None, name="demo")    # gh error
-            _seed_progress(home, "demo", done=3, remaining=14)
-            seg = statusbar.tickets_segment(cwd, home=home, spawn=False)
-            # No live count is known -- fall back to the stale combined
-            # ratio (still labelled "run", never "I", so it stays distinct
-            # from the bare backlog form even in this degraded case).
-            self.assertIn("run 3/17", seg)
 
 
 class QuestionsSegment(unittest.TestCase):

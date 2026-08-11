@@ -13,8 +13,11 @@ prostredníka medzi vami"). The canonical mechanism, owned by airuleset
   sweep; IDLE supervisor pane gets a typed nudge, BUSY pane gets NOTHING (the
   label alone queues it for the master loop), no live pane → ONE deduped
   Discord ping. Reduced-stream homes are never nudged.
-- VISIBILITY = `gkq N` statusline badge on full-authority boxes (was `gk-req
-  N` before the footer's labels were shortened, #223).
+- VISIBILITY = counted inside the full-authority box's own live `I N`
+  obligation count (`_obligation_quals()` unions `needs-gatekeeper`
+  regardless of stream) -- #367 dropped the dedicated `gkq N` statusline
+  badge (was `gk-req N` before the footer's labels were shortened, #223) as
+  duplicate decoration of a number `I N` already includes.
 """
 
 import json
@@ -500,31 +503,26 @@ class TestMachinePrefixes(unittest.TestCase):
         self.assertIn("gk_request_backstop(", src[i:])
 
 
-class TestStatuslineBadge(unittest.TestCase):
-    def _segment(self, **extra):
+class TestStatuslineNoLongerHasADedicatedBadge(unittest.TestCase):
+    """#367 (third footer simplification round): the dedicated `gkq N`
+    badge (open needs-gatekeeper tickets, whole repo) was DROPPED as
+    duplicate decoration -- `_obligation_quals()` (the SAME union
+    `core-quals --count` computes for the full-authority box's own `I N`)
+    already folds `needs-gatekeeper` into the live obligation count, so a
+    separate badge repeated a number `I N` already includes."""
+
+    def test_no_gk_req_field_is_computed_any_more(self):
+        src = Path(airuleset.__file__).read_text()
+        i = src.index('entry["scope"] = "core"')
+        self.assertNotIn('entry["gk_req"]', src[i:i + 3000])
+
+    def test_gkq_never_renders(self):
         with TemporaryDirectory() as home:
             root = str(Path(home) / "devel" / "demo")
             Path(root).mkdir(parents=True)
-            seed_repo_cache(home, root, "demo", **extra)
-            return statusbar.tickets_segment(root, home=home, spawn=False)
-
-    def test_badge_renders_when_requests_open(self):
-        # label shortened 'gk-req' -> 'gkq' (#223)
-        seg = self._segment(gk_req=3)
-        self.assertIn("gkq 3", seg)
-
-    def test_badge_hidden_at_zero(self):
-        seg = self._segment(gk_req=0)
-        self.assertNotIn("gkq", seg)
-
-    def test_refresh_collects_the_count_for_full_authority(self):
-        src = Path(airuleset.__file__).read_text()
-        i = src.index('entry["scope"] = "core"')
-        # Window widened for the streamy bucket (#164) that now sits between
-        # the core-count query and the gk_req query, and again for the #181
-        # I5/I6 round-2 comments (-L 1000, _core_search_excl()) between them.
-        self.assertIn("needs-gatekeeper", src[i:i + 3000])
-        self.assertIn('entry["gk_req"]', src[i:i + 3000])
+            seed_repo_cache(home, root, "demo", scope="core")
+            seg = statusbar.tickets_segment(root, home=home, spawn=False)
+            self.assertNotIn("gkq", seg)
 
 
 class TestCmdGkRequest(unittest.TestCase):
@@ -1072,10 +1070,15 @@ class TestProtocolDocs(unittest.TestCase):
         self.assertIn("gk-request", txt)
         self.assertIn("GATEKEEPER-ACTION", txt)
 
-    def test_statusline_vocabulary_documents_the_badge(self):
+    def test_statusline_vocabulary_no_longer_documents_the_gkq_badge(self):
+        # #367 (third footer simplification round): the dedicated `· gkq N`
+        # badge (spoken "gk-req") was dropped as duplicate decoration -- see
+        # TestStatuslineNoLongerHasADedicatedBadge above for why. The doc
+        # must not claim it still exists.
         txt = (Path(airuleset.__file__).parent / "modules" / "core"
                / "statusline-vocabulary.md").read_text()
-        self.assertIn("gk-req", txt)
+        self.assertNotIn("gk-req", txt)
+        self.assertNotIn("gkq", txt)
 
 
 if __name__ == "__main__":
