@@ -3658,6 +3658,62 @@ class TestManagedSubagentCapDefault(TestCase):
             airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION)
 
 
+class TestManagedCleanupPeriodDefault(TestCase):
+    """apply_managed_settings_defaults also sets `cleanupPeriodDays` (#376):
+    the installed CC 2.1.227 binary's own Zod schema documents a NATIVE
+    auto-cleanup of chat transcripts with a default of 30 days when the key
+    is absent ("Number of days to retain chat transcripts before automatic
+    cleanup (default: 30)") -- confirmed live, not guessed. `dev1` already
+    carries a MANUAL (non-airuleset) override of 365 in its real
+    settings.json; `david2` (a fresh sub-dev stream box, gatekeeper-
+    provisioned 2026-08-08) has no override at all and is exposed to the
+    30-day default. Same unconditional-managed-default treatment as
+    effortLevel/disableAgentView/tui/model/promptSuggestionEnabled: never
+    silently lose transcript history to a native default the user never
+    configured. The value itself is CC's own suggested one, quoted verbatim
+    in its cleanupPeriodDays-too-small validation-tip string ("set a large
+    number (e.g. 3650 for ~10 years)") -- not an invented number."""
+
+    def test_sets_cleanup_period_days(self):
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertEqual(out["cleanupPeriodDays"],
+                          airuleset.MANAGED_CLEANUP_PERIOD_DAYS)
+
+    def test_value_is_thirty_six_hundred_fifty_days(self):
+        # CC's own error-message-suggested value for long retention -- see
+        # the class docstring for the exact quoted source string.
+        self.assertEqual(airuleset.MANAGED_CLEANUP_PERIOD_DAYS, 3650)
+
+    def test_value_is_an_int_not_a_string(self):
+        # Unlike the env-block CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION key
+        # (env vars are always strings), cleanupPeriodDays is a top-level
+        # settings.json key with a real Zod `int().positive()` type -- a
+        # string value here would fail CC's own settings validation.
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertIsInstance(out["cleanupPeriodDays"], int)
+        self.assertNotIsInstance(out["cleanupPeriodDays"], bool)
+
+    def test_overrides_a_lower_existing_value(self):
+        # Unconditional, like every other key in this function -- a managed
+        # box always gets the managed default on the next install, even one
+        # already carrying dev1's own manual 365 (or any other value).
+        out = airuleset.apply_managed_settings_defaults({"cleanupPeriodDays": 30})
+        self.assertEqual(out["cleanupPeriodDays"], 3650)
+        out = airuleset.apply_managed_settings_defaults({"cleanupPeriodDays": 365})
+        self.assertEqual(out["cleanupPeriodDays"], 3650)
+
+    def test_idempotent(self):
+        once = airuleset.apply_managed_settings_defaults({})
+        twice = airuleset.apply_managed_settings_defaults(once)
+        self.assertEqual(once["cleanupPeriodDays"], twice["cleanupPeriodDays"])
+
+    def test_preserves_other_keys(self):
+        out = airuleset.apply_managed_settings_defaults(
+            {"hooks": {"Stop": []}, "cleanupPeriodDays": 7})
+        self.assertEqual(out["hooks"], {"Stop": []})
+        self.assertEqual(out["cleanupPeriodDays"], 3650)
+
+
 class TestUltracodeLauncher(TestCase):
     """apply_ultracode_launcher manages the managed claude launcher (#77):
     a thin ~/.bashrc block of one-line functions that just exec a SCRIPT
