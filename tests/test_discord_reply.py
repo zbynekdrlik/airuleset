@@ -215,6 +215,16 @@ class DeliverDiscordReplies(unittest.TestCase):
         j = " ".join(argv)
         if "pane_in_mode" in j:
             return "0"
+        if "capture-pane" in j:
+            # #372 -- a genuinely BARE pane capture (a real `❯` boundary
+            # line with nothing after it), matching what `send_continue`'s
+            # own post-Enter verify actually observes on a successful
+            # delivery. A bare `""` here does NOT model this: `_input_
+            # line_text("")` returns None (no boundary locatable at all --
+            # "capture failed"), which is a DIFFERENT, undeterminable state
+            # this file's own #372 fix now correctly refuses to treat as a
+            # confirmed delivery.
+            return IDLE
         return ""
 
     def _reply_msg(self, rid="rep1", ref="888001", author=None, content="najprv 0.28.0"):
@@ -860,6 +870,37 @@ class WedgeSelfHeal(unittest.TestCase):
         enters = [a for a in run.sent if a[-1] == "Enter"]
         self.assertGreaterEqual(len(enters), 1)
         self.assertIn("repW", state["dreply_done"])
+
+    def test_an_unreadable_verify_capture_is_never_confirmed_delivered(self):
+        """#372 (4th incident, forensically flagged): a false "delivered"
+        confirmation is a trust-breaking defect — the sender legitimately
+        believes their Discord reply reached the session while it never
+        did. `_input_line_text` returns `None` (undeterminable — a dialog,
+        a spinner, a genuinely unreadable capture) as a DISTINCT value from
+        `""` (genuinely bare, confirmed empty) — but the verify loop's
+        `while t2 and tries < 2` / `if t2:` both treat `None` as FALSY,
+        identically to a confirmed-empty box, so an UNREADABLE post-send
+        capture was silently accepted as proof of delivery. This must be
+        treated exactly like "still wedged": not marked delivered, no
+        premature done-state, retried/reported next cycle."""
+        UNREADABLE = "some fullscreen dialog with no boundary at all\n"
+        # captures: [send_continue's own pre-type strip-selected check
+        # (ordinary idle, no escape needed), the verify capture -- made
+        # UNREADABLE, not merely "still shows our text"]
+        run = ScriptedPaneRun([self.IDLE, UNREADABLE])
+        state = {}
+        logs = wd.deliver_discord_replies(
+            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)},
+            dry_run=False, discord_fetch=lambda ch, t: [self._reply()],
+            gh_comment=lambda *a: True)
+        self.assertNotIn("repW", state.get("dreply_done", []),
+                         "an unreadable verify capture must NEVER be "
+                         "treated as a confirmed delivery: %r" % logs)
+        self.assertIn("888001", notify.load_questions(self.qpath),
+                      "the question must stay tracked -- not silently "
+                      "dropped on an unverified 'delivery'")
+        self.assertTrue(any("wedge" in ln.lower() or "unreadable" in ln.lower()
+                            for ln in logs), logs)
 
 
 class ReceiptReaction(unittest.TestCase):
