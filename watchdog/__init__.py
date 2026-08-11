@@ -12118,6 +12118,19 @@ def pane_goal_armed(captured):
                                             # not real trailing chrome --
                                             # real footer is off-screen,
                                             # "dark" unproven
+    # #388: before declaring the goal dark, check the box's HEADER. Current
+    # Claude Code renders `◎ /goal active (Nm)` on a standalone line directly
+    # ABOVE the input box's top-border rule (not on the statusline row in the
+    # footer this function scans). Confirmed live 2026-08-11 on 3 armed panes
+    # (camera-box, airuleset, forestshop). The real indicator line, stripped,
+    # STARTS WITH the indicator (right-aligned, alone on its line); a
+    # conversation MENTION has it embedded mid-prose, so `.startswith` excludes
+    # it, and the 3-line bound keeps the search inside the box header, never
+    # reaching the conversation. Placed here (only when the footer path would
+    # otherwise say False) so every #383 `None` branch above is preserved.
+    header = lines[max(0, idx - 3):idx]
+    if any(ln.strip().startswith(GOAL_INDICATOR) for ln in header):
+        return True
     return False
 
 
