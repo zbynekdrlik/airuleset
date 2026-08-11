@@ -554,7 +554,9 @@ answer to "which issues share one round" — this ticket found no gap in either.
    > **Worktree/fleet mode — the worker's cycle stops at its OWN branch; the supervisor's Step 4
    > integrates.** In `isolation: "worktree"` mode a worker does version bump → per-issue TDD
    > (RED→GREEN, each member committed with its own `Closes #<n>`) → local `/review` +
-   > `/requesting-code-review` + the local test suite, ALL on its OWN worktree branch — then
+   > `/requesting-code-review` + the local test suite, ALL on its OWN worktree branch — via ONE
+   > self-contained fresh-context `general-purpose` review dispatch per `agents/autopilot-worker.md`
+   > CYCLE step 6, NEVER the built-in review/code-review Skill (#363) — then
    > RETURNS (branch name + worktree path in its evidence block). It does **NOT** push, does
    > **NOT** open or merge the PR, does **NOT** deploy, and does **NOT** fire its own run-card —
    > it cannot: it never sees the round's final merged/deployed state, because that only exists
@@ -701,7 +703,8 @@ answer to "which issues share one round" — this ticket found no gap in either.
    0 🔴 0 🟡 0 🔵` and `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵` (you are RELAYING what
    each worker already confirmed locally before its branch was merged (its own PR gate in serial
    mode, its own local run in worktree mode — `agents/autopilot-worker.md`), never re-running the
-   skills yourself), `✅ Deploy: <version>`
+   review yourself — and neither should the worker have, as a literal `Skill({skill: "review"})`/
+   `code-review` invocation either, per #363), `✅ Deploy: <version>`
    — then Goal/What changed in plain language (covering every member of the round, not just one
    worker's batch), the 🌐 URL(s) from the workers' `--url`, and the PR title/link/merge SHA (the
    round's ONE PR, per the repo-flow policy) — terminating in `✅ DONE: <plain outcome, e.g.

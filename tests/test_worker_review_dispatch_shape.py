@@ -105,7 +105,8 @@ class TestAutopilotWorkerForbidsTheBuiltinReviewSkill(unittest.TestCase):
             idx = self.text.index(shape)
             window = _norm(self.text[max(0, idx - 400):idx + 100])
             self.assertRegex(
-                window, r"\b[Nn]ever\b.*\binvoke\b|\b[Nn]ever\b.*" + re.escape(shape[:20]),
+                window,
+                r"(?i)\bnever\b.*\binvoke\b|\bnever\b.*" + re.escape(shape[:20]),
                 "the banned shape %r appears with no clear 'never invoke' "
                 "warning nearby -- it would read as an example to follow" % shape)
 
