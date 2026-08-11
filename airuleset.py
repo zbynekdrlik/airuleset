@@ -246,6 +246,12 @@ SKILLS_EXTRA_BY_USER = {
     "montalu2": {"meeting-analysis"},
     "montalu3": {"meeting-analysis"},
     "montalu4": {"meeting-analysis"},
+    # montalu5/6/7/8 (airuleset#378): four MORE full parallel montalu
+    # streams, same re-grant.
+    "montalu5": {"meeting-analysis"},
+    "montalu6": {"meeting-analysis"},
+    "montalu7": {"meeting-analysis"},
+    "montalu8": {"meeting-analysis"},
 }
 
 
@@ -8472,6 +8478,37 @@ REMOTE_HOSTS = [
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
+    {
+        # montalu5/montalu6/montalu7/montalu8 (airuleset#378,
+        # odoo-erp#3642): FOUR MORE full parallel montalu streams, same
+        # shape as montalu2/3/4 (airuleset#251) -- same subdev box, same
+        # default-key shape (no `identity` entry — the montalu family
+        # authenticates via dev1's own default newlevel key, never
+        # gatekeeper_access_ed25519), same branch-merge authority. Accounts
+        # created by GATEKEEPER, repo side wired per odoo-erp#3642.
+        "name": "montalu5@subdev",
+        "host": "100.118.174.27",
+        "user": "montalu5",
+        "repo_path": "~/devel/airuleset",
+    },
+    {
+        "name": "montalu6@subdev",
+        "host": "100.118.174.27",
+        "user": "montalu6",
+        "repo_path": "~/devel/airuleset",
+    },
+    {
+        "name": "montalu7@subdev",
+        "host": "100.118.174.27",
+        "user": "montalu7",
+        "repo_path": "~/devel/airuleset",
+    },
+    {
+        "name": "montalu8@subdev",
+        "host": "100.118.174.27",
+        "user": "montalu8",
+        "repo_path": "~/devel/airuleset",
+    },
 ]
 
 
@@ -9992,6 +10029,13 @@ AUTHORITY_BY_USER = {
     "david2": "fork-no-merge",
     "david3": "fork-no-merge",
     "david4": "fork-no-merge",
+    # montalu5/montalu6/montalu7/montalu8 (airuleset#378, odoo-erp#3642):
+    # four MORE full parallel montalu streams -- same authority as
+    # montalu/montalu2/montalu3/montalu4.
+    "montalu5": "branch-merge",
+    "montalu6": "branch-merge",
+    "montalu7": "branch-merge",
+    "montalu8": "branch-merge",
 }
 
 
