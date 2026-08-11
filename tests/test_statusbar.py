@@ -249,9 +249,11 @@ class RefreshCLI(unittest.TestCase):
     def test_refresh_partitions_slice_by_ready_for_review_label(self):
         # The gk bucket = own-slice tickets carrying the ready-for-review label
         # (auto-labeled at the sub-dev hand-off by subdev-handoff-label.yml, PR #1420).
-        # #367: N (`cache["open"]`) is the FULL slice (handed-off included,
-        # matching `slice-quals --count`'s own raw union) -- `gk` is a
-        # subset badge, no longer subtracted out of N.
+        # #391 REVERSES #367 for the reduced-authority path: N (`cache["open"]`)
+        # is now own UNHANDLED work (`len(mine) - gk`), never the full slice --
+        # a sub-dev's responsibility is fulfilled once a ticket is handed off,
+        # not once the gatekeeper has also closed it. `gk` is unchanged, an
+        # informational badge of how many are parked with the gatekeeper.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -262,7 +264,8 @@ class RefreshCLI(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
-                # union {1 (no label), 2 (r4r), 3 (r4r)} -> N=3, gk=2
+                # union {1 (no label), 2 (r4r), 3 (r4r)} -> mine=3, gk=2,
+                # N = own UNHANDLED = 3 - 2 = 1 (#391)
                 '  *assignee:@me*) echo \'[{"number":1,"labels":[]},'
                 '{"number":2,"labels":[{"name":"ready-for-review"}]}]\';;\n'
                 '  *author:@me*)   echo \'[{"number":2,"labels":[{"name":"ready-for-review"}]},'
@@ -280,10 +283,10 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 3)      # the FULL slice (#367)
+            self.assertEqual(cache["open"], 1)      # own UNHANDLED (#391): 3 - gk(2)
             self.assertEqual(cache["gk"], 2)        # handed off, waiting on gatekeeper
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("I 3", seg)
+            self.assertIn("I 1", seg)
             self.assertIn("gk 2", seg)
 
     def test_refresh_needs_gatekeeper_lane_also_counts_as_handed_off(self):
@@ -291,9 +294,10 @@ class RefreshCLI(unittest.TestCase):
         # airuleset's OWN hand-off lane (cmd_gk_request) — a ticket carrying
         # it is equally out-of-my-hands as one carrying ready-for-review, so
         # it must fold into the SAME gk bucket (against pre-#191 main this
-        # ticket miscounted as ACTIVE, gk 0). #367: N is the FULL slice, so
-        # this single handed-off ticket still counts toward N=1 -- gk=1
-        # (a subset of N) is what marks it handed-off, not a hole in N.
+        # ticket miscounted as ACTIVE, gk 0). #391 REVERSES #367 for the
+        # reduced-authority path: N is own UNHANDLED work, so this single
+        # handed-off ticket now takes N to 0 (mine=1, gk=1) -- gk=1 is what
+        # marks it handed-off, no longer a subset of N.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -320,10 +324,10 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
+            self.assertEqual(cache["open"], 0)      # own UNHANDLED (#391): 1 - gk(1)
             self.assertEqual(cache["gk"], 1)         # ... and it's handed off
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("I 1", seg)
+            self.assertIn("I 0", seg)
             self.assertIn("gk 1", seg)
 
     def test_refresh_skips_the_comment_fallback_entirely_when_the_slice_query_failed(self):
@@ -404,10 +408,10 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
+            self.assertEqual(cache["open"], 0)      # own UNHANDLED (#391): 1 - gk(1)
             self.assertEqual(cache["gk"], 1)         # recovered -- handed off
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
-            self.assertIn("I 1", seg)
+            self.assertIn("I 0", seg)
             self.assertIn("gk 1", seg)
 
     def test_refresh_does_not_recover_a_ticket_with_no_ready_for_review_comment(self):
@@ -514,6 +518,54 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(cache["open"], 1)      # still active — bounced
             self.assertEqual(cache["gk"], 0)
 
+    def test_refresh_a_bounce_ticket_stays_in_unhandled_count_alongside_real_handoffs(self):
+        # #391's own explicit safety test: a `prio:bounce` ticket must stay
+        # counted in the reduced-authority N (own UNHANDLED work) even when
+        # OTHER tickets in the same slice are genuinely handed off -- the
+        # loop must re-activate on a returned bounce, never read it as done
+        # just because it once carried a hand-off label. mine = {1, 2, 3}:
+        # #1 genuinely handed off (ready-for-review, no bounce), #2 also
+        # genuinely handed off (needs-gatekeeper), #3 carries BOTH
+        # ready-for-review AND prio:bounce -- the bounce override forces it
+        # back to unhandled. gk=2 (#1, #2); N = own UNHANDLED = 3 - 2 = 1
+        # (#3 only).
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,"labels":['
+                '{"name":"ready-for-review"}]},{"number":2,"labels":['
+                '{"name":"needs-gatekeeper"}]},{"number":3,"labels":['
+                '{"name":"ready-for-review"},{"name":"prio:bounce"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *"issues/1/comments"*) echo \'[]\';;\n'
+                '  *"issues/2/comments"*) echo \'[]\';;\n'
+                '  *"issues/3/comments"*) echo \'[]\';;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(
+                cache["open"], 1,
+                "the bounced ticket #3 was not counted back into own "
+                "UNHANDLED work alongside the 2 genuine hand-offs")
+            self.assertEqual(cache["gk"], 2)
+
     def test_refresh_invalidates_a_stale_hand_off_once_a_bounce_finding_follows_it(self):
         # #313 pt 2 adversarial review round 2, F1/F2: a stale, PRE-bounce
         # hand-off comment must not read as still current once a LATER
@@ -595,7 +647,7 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
+            self.assertEqual(cache["open"], 0)      # own UNHANDLED (#391): 1 - gk(1)
             self.assertEqual(cache["gk"], 1)         # recovered -- re-handed
 
     def test_refresh_rejects_a_bare_mention_or_a_gatekeeper_finding_comment(self):
@@ -689,11 +741,11 @@ class RefreshCLI(unittest.TestCase):
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache.get("scope"), "mine")
-            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
+            self.assertEqual(cache["open"], 0)      # own UNHANDLED (#391): 1 - gk(1)
             self.assertEqual(cache["gk"], 1)        # re-attributed, handed off
             seg = statusbar.tickets_segment(repo, home=home, spawn=False)
             self.assertNotEqual(seg, "")
-            self.assertIn("I 1", seg)
+            self.assertIn("I 0", seg)
             self.assertIn("gk 1", seg)
 
     def test_refresh_reattributes_via_the_new_handed_by_marker(self):
@@ -735,7 +787,7 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
-            self.assertEqual(cache["open"], 1)      # N = the full slice (#367)
+            self.assertEqual(cache["open"], 0)      # own UNHANDLED (#391): 1 - gk(1)
             self.assertEqual(cache["gk"], 1)
 
     def test_refresh_reattribution_uses_the_temporally_last_origin_event(self):

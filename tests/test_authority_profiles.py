@@ -924,12 +924,25 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
                             mk.Mock(count=True, list=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "0")
 
-    def test_a_handed_off_ticket_still_counts_until_actually_closed(self):
-        # I3 investigated and found NOT a bug (round 2): the footer's
-        # len(mine)-gk is a DISPLAY partition; slice-quals's raw count must
-        # keep counting a handed-off-but-still-OPEN ticket, or the /goal
-        # proof could read 0 while a ticket the gatekeeper has NOT yet
-        # closed sits open — silently defeating review-watch.
+    def test_a_handed_off_ticket_no_longer_counts_once_handed_off(self):
+        # #391 REVERSES this test's own prior premise for the REDUCED-
+        # authority path only. I3 (round 2) had reasoned the footer's
+        # len(mine)-gk was merely a DISPLAY partition and that slice-quals's
+        # raw count must keep counting a handed-off-but-still-OPEN ticket --
+        # but the SHIPPED #367 footer never actually computed len(mine)-gk
+        # (it computed the FULL len(mine), gk as a subset badge), so that
+        # reasoning rested on a formula the footer didn't implement. #391's
+        # own explicit ask: a sub-dev's responsibility for a ticket is
+        # fulfilled once it is HANDED OFF, not once the gatekeeper has also
+        # closed it -- review-watch (the /goal loop staying alive while a
+        # hand-off is outstanding) is the STOP-CONDITION's own job, checked
+        # separately from this count via the loop's own review-watch clause,
+        # never by keeping a handed-off ticket in the raw count. This is
+        # scoped ONLY to the reduced-authority `slice-quals` path -- the
+        # analogous FULL-authority `core-quals`/`_obligation_quals()` side is
+        # UNCHANGED: a handed-off ticket correctly stays in the
+        # full-authority box's obligation set until the gatekeeper actually
+        # closes it (that box is the one still on the hook for it).
         import contextlib
         import io
         import unittest.mock as mk
@@ -949,7 +962,125 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
                             mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "0")
+
+
+class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
+    """#391: `slice-quals --count`/`--list` (the reduced-authority `/goal`
+    stop-proof) excludes handed-off work IDENTICALLY to `cmd_tickets_status`'s
+    own footer -- the #367 consistency guard, applied to the reduced-
+    authority reversal (own UNHANDLED work, not the raw slice). Both consume
+    the SAME shared derivation, so a future change to one cannot silently
+    diverge from the other. Full-authority `core-quals` is untouched --
+    covered separately by `TestObligationVsDisplayPartition`/
+    `TestCoreQualsCountsTheObligationSet`."""
+
+    def test_count_excludes_a_ready_for_review_ticket(self):
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "label:stream:montalu" in j:
+                return ('[{"number": 5, "title": "t", '
+                        '"createdAt": "2026-07-01T00:00:00Z", '
+                        '"labels": [{"name": "ready-for-review"}]}]')
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user",
+                                 return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "0")
+
+    def test_count_still_includes_a_genuinely_unhandled_ticket(self):
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "label:stream:montalu" in j:
+                return ('[{"number": 5, "title": "t", '
+                        '"createdAt": "2026-07-01T00:00:00Z", '
+                        '"labels": []}]')
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user",
+                                 return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "1")
+
+    def test_list_omits_a_handed_off_ticket_too(self):
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "label:stream:montalu" in j:
+                return ('[{"number": 5, "title": "handed off", '
+                        '"createdAt": "2026-07-01T00:00:00Z", '
+                        '"labels": [{"name": "needs-gatekeeper"}]},'
+                        '{"number": 6, "title": "still mine", '
+                        '"createdAt": "2026-07-02T00:00:00Z", '
+                        '"labels": []}]')
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user",
+                                 return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=False, list=True, extra=None))
+        out = buf.getvalue()
+        self.assertNotIn("5\t", out)
+        self.assertIn("6\t", out)
+
+    def test_a_bounce_ticket_stays_counted_even_though_it_once_was_handed_off(self):
+        # #391's own explicit safety test, at the slice-quals layer: a
+        # `prio:bounce` ticket (also carrying a stale ready-for-review label)
+        # must stay in the UNHANDLED count -- never read as done just
+        # because it once carried a hand-off label. Mirrors
+        # `test_statusbar.py::test_refresh_a_bounce_ticket_stays_in_
+        # unhandled_count_alongside_real_handoffs` for the footer.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "label:stream:montalu" in j:
+                return ('[{"number": 5, "title": "bounced", '
+                        '"createdAt": "2026-07-01T00:00:00Z", '
+                        '"labels": [{"name": "ready-for-review"}, '
+                        '{"name": "prio:bounce"}]}]')
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user",
+                                 return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(
+            buf.getvalue().strip(), "1",
+            "a returned bounce ticket must stay in the stop-proof's own "
+            "count, or the loop reads REVIEW as DONE")
 
 
 class TestRunCardHeartbeatSurvivesStreamCards(TestCase):
