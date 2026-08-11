@@ -13334,28 +13334,38 @@ class TestStatuslineVocabularyModule(TestCase):
 
     def test_module_explains_every_segment_form(self):
         t = self.MODULE.read_text(encoding="utf-8")
-        for phrase in ("Issues N", "Issues D/T", "gk N", "skipped K",
-                       "statusline"):
+        for phrase in ("Issues N", "gk N", "skipped K", "statusline"):
             self.assertIn(phrase, t, phrase)
+
+    def test_module_no_longer_explains_the_removed_ratio_form(self):
+        # #367 (third footer simplification round): the whole `run D/T` /
+        # `Issues D/T` active-run-ratio concept is GONE, not just relabelled
+        # -- the doc must not still teach a spoken form for a shape the
+        # segment can never render any more.
+        t = self.MODULE.read_text(encoding="utf-8")
+        self.assertNotIn("Issues D/T", t)
+        self.assertNotIn("run D/T", t)
+        self.assertNotIn("run N/T", t)
 
     def test_module_documents_the_shortened_render_forms(self):
         # #223 -- every label was abbreviated on the actual footer; the doc
         # must name the CURRENT rendered forms, not just the spoken/historical
-        # ones the test above already locks. #307 replaced `I D/T` with
-        # `run N done`, distinct from the live `I N` form on purpose; #313
-        # then reversed the "done" wording back to a ratio, `run N/T`
-        # (keeping the `run`-vs-`I` label split #307 introduced).
+        # ones the test above already locks. #367 dropped `run N/T`/
+        # `run D/T` (the active-run ratio) and `· gkq N` (duplicate
+        # needs-gatekeeper decoration) entirely -- `I N`/`· gk N`/`· skip K`/
+        # `Q N` are the ONLY rendered forms left.
         t = self.MODULE.read_text(encoding="utf-8")
-        for phrase in ("`I N`", "`run N/T`", "`run D/T`", "`· skip K`",
-                       "`· gkq N`", "`Q N`", "sub <D.M.>"):
+        for phrase in ("`I N`", "`· gk N`", "`· skip K`", "`Q N`",
+                       "sub <D.M.>"):
             self.assertIn(phrase, t, phrase)
 
     def test_module_names_the_backing_caches(self):
-        # The session should read the SAME local caches the segment renders
-        # from (never guess): tickets-status + autopilot-progress.
+        # The session should read the SAME local cache the segment renders
+        # from (never guess): tickets-status. #367 dropped the segment's
+        # own read of autopilot-progress entirely (that cache still exists
+        # for job 20, but the footer no longer consults it).
         t = self.MODULE.read_text(encoding="utf-8")
         self.assertIn("tickets-status", t)
-        self.assertIn("autopilot-progress", t)
 
     def test_module_no_longer_documents_the_removed_inde_bucket(self):
         # #313 pt 5 removed the cross-project '· inde M' form entirely from
