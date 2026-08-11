@@ -4941,7 +4941,6 @@ class TestJanitorDeadlockHasAReachableExit(GoalJanitorBase):
         the generic janitor exists to catch even without understanding
         it)."""
         def __call__(self, argv, timeout=8):
-            j = " ".join(argv)
             self.sent.append(argv)
             if argv[:2] == ["tmux", "send-keys"] and "BSpace" in argv:
                 return ""          # swallow the backspaces -- box unchanged
@@ -5018,6 +5017,7 @@ class TestJanitorRequiresProvenanceNeverContentAlone(GoalJanitorBase):
                          "the janitor must NEVER destructively clear "
                          "content with no provenance signal: %r"
                          % tmux.sent)
+        self.assertFalse(any("janitor" in ln.lower() for ln in logs), logs)
         self.assertIn(
             "[Pasted text #3 +40 lines]", (tmux._box, tmux.stash),
             "the user's own pasted block must be RECOVERABLE somewhere, "
@@ -5032,6 +5032,7 @@ class TestJanitorRequiresProvenanceNeverContentAlone(GoalJanitorBase):
         self.assertEqual(tmux.stash, "unrelated user stash")
         self.assertNotIn("BSpace", [k for a in tmux.sent for k in a])
         self.assertNotIn("C-s", [k for a in tmux.sent for k in a])
+        self.assertFalse(any("janitor" in ln.lower() for ln in logs), logs)
 
     def test_watch_marker_present_still_recovers_normally(self):
         # the positive control -- WITH a genuine provenance signal, the
