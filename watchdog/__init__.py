@@ -6193,6 +6193,83 @@ def _goal_user_exit_ts(tpath, off=None, tail_bytes=None):
     return best
 
 
+# #393 (david2 live) — the `/goal` template's OWN instruction text tells a
+# session to "re-print this /goal line if issues remain" as part of its
+# ordinary STOP-CONDITIONS resolution, so a session can reprint the arm
+# question purely as ROUTINE, AUTOMATIC behaviour, with zero genuine user
+# request behind it. `scan_goal_markers`'s own `arm_after` field (any
+# `type=="assistant"` entry matching the arm-question regex after the
+# marker) cannot tell that apart from a genuine user-driven re-ask — this
+# is the stricter, STRUCTURAL discriminator: only a genuine, human-typed
+# `type=="user"` entry counts, matched by literal position (never a
+# mention nested inside quoted/foreign content), the same "mention vs use"
+# discipline `_EXIT_CMD_MARKER`'s own `.startswith` check already applies.
+_AUTOPILOT_INVOKE_RX = re.compile(r"^/autopilot\b")
+
+
+def _goal_autopilot_reinvoked_after(tpath, cutoff_ts, tail_bytes=2_000_000):
+    """True when a genuine, human-typed `/autopilot` invocation appears in
+    the transcript with a timestamp STRICTLY newer than `cutoff_ts` (#393).
+
+    Reuses the SAME top-level-string / non-meta / non-tool_result / non-
+    compact-summary filter `_last_human_prompt_ts` already applies — an
+    assistant's own reprint of the arm-question text (`type=="assistant"`)
+    is excluded here by CONSTRUCTION, never merely because of what it
+    says, and a QUOTED `/autopilot` (a tool_result, one session pasting
+    another's transcript) is never mistaken for a genuine invocation.
+
+    `cutoff_ts=None` (an unmeasurable clear-marker timestamp) returns
+    False — no anchor to compare against, and the SAFE direction for an
+    unmeasurable ordering is "the clear still governs", matching this
+    file's own established fail-toward-suppression convention for the
+    clear marker itself (`_goal_was_cleared_by_user`'s own `mark_ts is
+    None -> False` rule, one function down).
+
+    Unreadable transcript -> False, never a guess toward re-arming."""
+    if cutoff_ts is None:
+        return False
+    from datetime import datetime
+    try:
+        with open(tpath, "rb") as f:
+            try:
+                f.seek(-tail_bytes, 2)
+            except OSError:
+                f.seek(0)
+            raw = f.read()
+    except OSError:
+        return False
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(e, dict) or e.get("type") != "user" or e.get("isMeta"):
+            continue
+        if e.get("isCompactSummary"):
+            continue
+        c = (e.get("message") or {}).get("content")
+        if isinstance(c, str):
+            text = c
+        elif isinstance(c, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result"
+                   for b in c):
+                continue
+            text = " ".join(b.get("text", "") for b in c
+                            if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            continue
+        if not _AUTOPILOT_INVOKE_RX.match(text.strip()):
+            continue
+        try:
+            ts = datetime.fromisoformat(
+                str(e.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if ts > cutoff_ts:
+            return True
+    return False
+
+
 def _goal_was_cleared_by_user(tpath):
     """True when this session's NEWEST `/goal` marker is a CLEAR (#170), OR
     when an explicit `/exit` postdates the newest goal marker (#335 —
@@ -6268,8 +6345,14 @@ def _goal_was_cleared_by_user(tpath):
         _off, mark = scan_goal_markers(tpath)
     except Exception:
         mark = None
+    # #393 — the release condition is now the STRICT signal
+    # (`_goal_autopilot_reinvoked_after`, a genuine human `/autopilot`),
+    # never the looser `mark.get("arm_after")` (any assistant reprint,
+    # including a purely automatic one — see that helper's own docstring).
+    # `arm_after` is still COMPUTED by `scan_goal_markers` (unchanged,
+    # genuinely useful diagnostic state) but is no longer consulted here.
     cleared = (bool(mark) and mark.get("state") == "cleared"
-               and not mark.get("arm_after"))
+               and not _goal_autopilot_reinvoked_after(tpath, mark.get("ts")))
     if cleared:
         return True
     exit_ts = _goal_user_exit_ts(tpath)

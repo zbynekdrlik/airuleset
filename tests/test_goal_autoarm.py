@@ -723,9 +723,10 @@ class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
     def test_an_autopilot_invocation_before_the_clear_does_not_release(self):
         # #393 — order matters here too: a genuine /autopilot BEFORE a
         # LATER clear must not somehow pre-emptively excuse that clear.
+        # `_marker`'s own hardcoded ts is 09:55:51 -- explicitly earlier.
         cwd = "/home/x/devel/demo"
-        pd = self._projects(cwd, self._autopilot_prompt(), self._marker(
-            "cleared"))
+        pd = self._projects(cwd, self._autopilot_prompt(
+            ts="2026-07-31T08:00:00.000Z"), self._marker("cleared"))
         tmux = FakeTmux(ARM_PANE)
         logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
         self.assertFalse(tmux.typed(),
