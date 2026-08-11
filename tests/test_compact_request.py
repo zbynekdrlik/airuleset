@@ -6216,6 +6216,386 @@ class TestCompactRequiresGenuineIdleBoundary(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# #394 (2026-08-11, gatekeeper + dev1 live evidence) -- #333's own
+# `_compact_not_at_boundary` marker block has NO grace-elapsed escape for a
+# PROVEN-boundary origin, unlike its sibling live-tasks defer (#250) it
+# otherwise mirrors exactly. A continuously-busy `/goal` loop (job 14's own
+# primary intended consumer, and the entire reason the proven-boundary
+# origins exist at all) keeps producing new `⏳` turns (CI waits, the next
+# dispatch, a sibling worker) far faster than a session ever settles on a
+# genuinely quiet `✅`/no-marker one -- measured live on dev1, 2026-08-11:
+# EVERY `origin=subagent-stop` request that day either lapsed at
+# `COMPACT_REQUEST_MAX_AGE_S` with the transcript still reading `⏳` at lapse
+# time, or was still cycling `skip not-a-boundary` -- ZERO `SEND`s all day
+# for that origin, matching the ticket's own gatekeeper journal (a request
+# "skip not-a-boundary"-looping every ~70s for 22+ continuous minutes after
+# a genuine `## ✅ Work Complete` turn was printed, until the 30-minute
+# lapse).
+#
+# #333's OWN test (`TestCompactRequiresGenuineIdleBoundary`, above) is a
+# DELIBERATE, user-directed invariant this fix does NOT reverse: a FRESH
+# marker-hold must still block, exactly as before (a plain `⏳ WORKING`
+# turn is not license to compact just because the origin is proven). This
+# class proves the COMPLEMENT #333 left unfixed: given enough time (past
+# `COMPACT_MARKER_HOLD_GRACE_S`), the SAME shape (proven-boundary, marker
+# stuck on `⏳`, pane genuinely idle RIGHT NOW) eventually delivers instead
+# of just lapsing unfired -- while `kind == "busy"` and the `❓`-only gate
+# both stay fully unconditional, so #333's actual incident (a busy-typed
+# `/compact` draining several turns later at an arbitrary bad moment)
+# cannot recur through this path.
+# --------------------------------------------------------------------------- #
+
+class TestCompactMarkerHoldGraceElapsed(unittest.TestCase):
+    SID = "sess-394"
+    CWD = "/home/x/proj394"
+    PANE = "%39"
+    PROVEN = "subagent-stop"
+    WORKING_NO_ASK = "⏳ WORKING: 5 workerov beží — hlásim sa pri dokončení."
+    ASKED = "❓ NEEDS YOU: mergnem #1 alebo #2?"
+    DONE = "✅ DONE: kolo zmergované, backlog pokračuje."
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def _proj(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_a_proven_boundary_marker_hold_eventually_delivers_once_grace_elapses(self):
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
+                                  origin=self.PROVEN)
+
+        # sweep 1: a FRESH hold -- must still refuse, exactly like #333's
+        # own test (a plain ⏳ WORKING turn, idle pane) -- and must stamp
+        # `not_boundary_since` the first time it observes the block.
+        tmux1 = CompactFakeTmux(CB_IDLE_CAP)
+        logs1 = wd.compact_ticket_boundary(
+            t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux1.typed_texts(), [])
+        self.assertTrue(any("not-a-boundary" in ln for ln in logs1), logs1)
+        d_mid = wd.load_compact_requests(path)
+        self.assertIn("not_boundary_since", d_mid[self.SID])
+        self.assertEqual(d_mid[self.SID]["not_boundary_since"], t0)
+
+        # sweep 2: past COMPACT_MARKER_HOLD_GRACE_S, marker STILL ⏳ (the
+        # loop never went quiet), pane genuinely idle right now -- must
+        # deliver anyway rather than lapsing unfired.
+        t1 = t0 + wd.COMPACT_MARKER_HOLD_GRACE_S + 5
+        tmux2 = CompactFakeTmux(CB_IDLE_CAP)
+        logs2 = wd.compact_ticket_boundary(
+            t1, tmux2, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux2.typed_texts(), logs2)
+        self.assertTrue(any("grace-elapsed" in ln for ln in logs2), logs2)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
+    def test_a_request_recorded_at_a_real_work_complete_boundary_survives_the_loop_moving_on(self):
+        # the ticket's own reported shape, literally: the SubagentStop hook
+        # fires at a GENUINE `## ✅ Work Complete` boundary, but by the time
+        # job 14 EVER polls, the SAME session has already dispatched the
+        # next ticket and its transcript now reads `⏳` -- repeatedly,
+        # every ~70s, exactly like the ticket's own "0:0.0 for 22 minutes"
+        # journal evidence. The request must not simply die at
+        # COMPACT_REQUEST_MAX_AGE_S having delivered nothing.
+        proj = self._proj()
+        path = self._p()
+        work_complete = "## ✅ Work Complete\n\n...\n\n✅ DONE: ticket #41 hotový."
+        _write_marker_transcript(proj, self.CWD, self.SID, work_complete)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
+                                  origin=self.PROVEN)
+
+        # the loop moves on immediately -- before job 14 ever gets to look,
+        # the SAME session's transcript already shows a later, unrelated
+        # ⏳ turn, and stays that way for several sweeps in a row.
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        for i in range(3):
+            tmux = CompactFakeTmux(CB_IDLE_CAP)
+            logs = wd.compact_ticket_boundary(
+                t0 + i * 70, tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+                path=path, projects_dir=proj)
+            self.assertEqual(tmux.typed_texts(), [], logs)
+            self.assertTrue(any("not-a-boundary" in ln for ln in logs), logs)
+
+        # past grace, marker STILL ⏳ -- must deliver rather than lapse.
+        t1 = t0 + wd.COMPACT_MARKER_HOLD_GRACE_S + 5
+        tmux_final = CompactFakeTmux(CB_IDLE_CAP)
+        logs_final = wd.compact_ticket_boundary(
+            t1, tmux_final, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux_final.typed_texts(), logs_final)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
+    def test_marker_hold_grace_elapsed_still_refuses_a_busy_pane(self):
+        # #333's OWN real incident stays closed: the grace can only ever
+        # let a request past the MARKER gate; a busy pane is still
+        # unconditionally refused, for every origin, no exception.
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
+                                  origin=self.PROVEN)
+        tmux1 = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(
+            t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+
+        t1 = t0 + wd.COMPACT_MARKER_HOLD_GRACE_S + 5
+        tmux2 = CompactFakeTmux(CB_BUSY_CAP)
+        logs2 = wd.compact_ticket_boundary(
+            t1, tmux2, {}, {self.SID: (self.PANE, CB_BUSY_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertTrue(any("skip busy" in ln for ln in logs2), logs2)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_marker_hold_grace_never_overrides_a_pending_question(self):
+        # ❓ is a genuinely different marker, unconditional, no grace, at
+        # any age -- it is caught by an EARLIER, separate gate
+        # (`_compact_blocked_by_question`) this fix does not touch at all,
+        # so by construction the marker-hold-grace override can only ever
+        # engage against `⏳`.
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.ASKED)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
+                                  origin=self.PROVEN)
+        t1 = t0 + wd.COMPACT_MARKER_HOLD_GRACE_S + 5
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(
+            t1, tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(any("blocked-question" in ln for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_a_blank_origin_request_gets_no_grace_at_all(self):
+        # only a PROVEN-boundary origin gets this override -- #301's own
+        # precedent for the sibling #99/#48 gates, applied identically
+        # here. A blank-origin (plain Stop-hook) request has no independent
+        # proof a boundary ever existed, so it must STILL refuse at the
+        # exact instant that would deliver a proven-boundary request.
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path)
+        tmux1 = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(
+            t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+
+        t1 = t0 + wd.COMPACT_MARKER_HOLD_GRACE_S + 5
+        tmux2 = CompactFakeTmux(CB_IDLE_CAP)
+        logs2 = wd.compact_ticket_boundary(
+            t1, tmux2, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertTrue(any("not-a-boundary" in ln for ln in logs2), logs2)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_a_new_hold_episode_after_the_marker_recovers_gets_its_own_fresh_grace(self):
+        # #394-review F1 -- `not_boundary_since` must be CLEARED the moment
+        # the block itself clears (the marker genuinely reads a boundary
+        # again), even on a sweep that still doesn't deliver for an
+        # UNRELATED reason (here: the pane happens to be busy). Otherwise a
+        # LATER, genuinely NEW hold (the transcript goes back to ⏳)
+        # silently inherits the OLD, already-elapsed anchor and delivers on
+        # a hold that has barely started -- exactly the "compact a plain ⏳
+        # WORKING turn" shape #333 exists to forbid. Reproduced live against
+        # the pre-fix code by the adversarial review's own repro script
+        # before this test was written.
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
+                                  origin=self.PROVEN)
+
+        # sweep 1: a fresh hold -- refuse, stamp the anchor at t0.
+        tmux1 = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(
+            t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(
+            wd.load_compact_requests(path)[self.SID]["not_boundary_since"], t0)
+
+        # sweep 2: the marker genuinely recovers (a real ✅ boundary again)
+        # but the pane happens to be busy right now -- the request survives
+        # (never consumed by the busy skip), but the STALE anchor must be
+        # cleared, since the hold episode it belonged to just ended.
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        t1 = t0 + wd.COMPACT_MARKER_HOLD_GRACE_S + 100
+        tmux2 = CompactFakeTmux(CB_BUSY_CAP)
+        logs2 = wd.compact_ticket_boundary(
+            t1, tmux2, {}, {self.SID: (self.PANE, CB_BUSY_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertTrue(any("skip busy" in ln for ln in logs2), logs2)
+        self.assertNotIn("not_boundary_since",
+                         wd.load_compact_requests(path)[self.SID])
+
+        # sweep 3: a genuinely NEW hold starts (⏳ again) -- it must get its
+        # OWN fresh grace window, never the stale, already-elapsed one from
+        # sweep 1's episode.
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t2 = t1 + 1
+        tmux3 = CompactFakeTmux(CB_IDLE_CAP)
+        logs3 = wd.compact_ticket_boundary(
+            t2, tmux3, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux3.typed_texts(), [], logs3)
+        self.assertTrue(any("skip not-a-boundary" in ln for ln in logs3), logs3)
+        self.assertEqual(
+            wd.load_compact_requests(path)[self.SID]["not_boundary_since"], t2)
+
+
+class TestCompactMarkerHoldGraceRelationship(unittest.TestCase):
+    """#394 -- mirrors TestCompactDeferGraceRelationship exactly: the grace
+    window MUST stay well under the request TTL, or a request would LAPSE
+    (dropped, unfired) before its own grace window ever has a chance to
+    elapse -- recreating the exact starvation this fix exists to kill."""
+
+    def test_grace_stays_comfortably_under_the_request_ttl(self):
+        self.assertLess(wd.COMPACT_MARKER_HOLD_GRACE_S, wd.COMPACT_REQUEST_MAX_AGE_S)
+
+
+class TestCompactMarkerHoldInGrace(unittest.TestCase):
+    """#394 -- `_compact_marker_hold_in_grace`, mirrors
+    `TestCompactLiveTasksInGrace` exactly (strict `<`, unmeasurable stays
+    in-grace)."""
+
+    def test_within_grace_is_true(self):
+        self.assertTrue(wd._compact_marker_hold_in_grace(
+            1000, 1000 + wd.COMPACT_MARKER_HOLD_GRACE_S - 1))
+
+    def test_exactly_at_grace_is_no_longer_in_grace(self):
+        self.assertFalse(wd._compact_marker_hold_in_grace(
+            1000, 1000 + wd.COMPACT_MARKER_HOLD_GRACE_S))
+
+    def test_past_grace_is_false(self):
+        self.assertFalse(wd._compact_marker_hold_in_grace(
+            1000, 1000 + wd.COMPACT_MARKER_HOLD_GRACE_S + 1))
+
+    def test_unmeasurable_age_stays_in_grace(self):
+        self.assertTrue(wd._compact_marker_hold_in_grace(None, 1000))
+        self.assertTrue(wd._compact_marker_hold_in_grace("garbage", 1000))
+
+    def test_env_override_is_honored(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "10"}):
+            self.assertFalse(wd._compact_marker_hold_in_grace(1000, 1015))
+            self.assertTrue(wd._compact_marker_hold_in_grace(1000, 1005))
+
+    def test_explicit_grace_param_overrides_env_and_default(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "9999"}):
+            self.assertFalse(
+                wd._compact_marker_hold_in_grace(1000, 1050, grace=10))
+
+
+class TestCompactMarkerHoldGraceEnvClamp(unittest.TestCase):
+    """#394-review F2 -- mirrors `TestCompactLiveTasksInGrace`'s own env-clamp
+    tests exactly, for the sibling `_compact_marker_hold_grace`: mutating away
+    its ENTIRE clamp body (`return raw`) passed the whole suite before these
+    existed -- the adversarial review's own mutation. A misconfigured env
+    override must never disable the override outright (0/negative) or
+    recreate the lapse-before-grace starvation (>= the request TTL)."""
+
+    def test_env_override_negative_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "-100"}):
+            self.assertEqual(wd._compact_marker_hold_grace(), 1)
+
+    def test_env_override_zero_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "0"}):
+            self.assertEqual(wd._compact_marker_hold_grace(), 1)
+
+    def test_env_override_non_numeric_falls_back_to_the_default(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "garbage"}):
+            self.assertEqual(wd._compact_marker_hold_grace(), wd.COMPACT_MARKER_HOLD_GRACE_S)
+
+    def test_env_override_at_or_above_ttl_is_clamped_below_it(self):
+        huge = str(wd.COMPACT_REQUEST_MAX_AGE_S + 1000)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": huge}):
+            self.assertLess(
+                wd._compact_marker_hold_grace(), wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_env_override_exactly_at_ttl_is_clamped_below_it(self):
+        at_ttl = str(wd.COMPACT_REQUEST_MAX_AGE_S)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": at_ttl}):
+            self.assertLess(
+                wd._compact_marker_hold_grace(), wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_a_sane_env_override_is_returned_unclamped(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "600"}):
+            self.assertEqual(wd._compact_marker_hold_grace(), 600)
+
+    def test_explicit_grace_param_is_never_clamped(self):
+        # every production call leaves grace=None; an explicit override
+        # (test/caller-only) is returned verbatim, even outside the sane
+        # range -- the clamp protects only the env/const-derived default.
+        self.assertEqual(wd._compact_marker_hold_grace(grace=-5), -5)
+        self.assertEqual(
+            wd._compact_marker_hold_grace(grace=wd.COMPACT_REQUEST_MAX_AGE_S + 5),
+            wd.COMPACT_REQUEST_MAX_AGE_S + 5)
+
+
+class TestNotBoundarySincePreservedAcrossReRecord(unittest.TestCase):
+    """#394 -- mirrors TestDeferredSincePreservedAcrossReRecord exactly:
+    `not_boundary_since` (job 14's marker-hold grace anchor) must survive a
+    re-record for the SAME still-pending session, UNCONDITIONALLY -- a
+    session completing tickets faster than the grace window (the exact
+    population this fix exists for) would otherwise reset its own anchor
+    on every re-record and never actually reach it."""
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_not_boundary_since_survives_a_re_record(self):
+        p = self._p()
+        wd.record_compact_request("n1", "/x", now=100, path=p)
+        d = wd.load_compact_requests(p)
+        d["n1"]["not_boundary_since"] = 50.0   # simulate job 14's own stamp
+        p.write_text(json.dumps(d))
+        wd.record_compact_request("n1", "/y", now=500, path=p)   # re-record
+        d2 = wd.load_compact_requests(p)
+        self.assertEqual(d2["n1"]["not_boundary_since"], 50.0)
+        self.assertEqual(d2["n1"]["ts"], 500)
+        self.assertEqual(d2["n1"]["cwd"], "/y")
+
+    def test_no_prior_not_boundary_since_means_none_is_invented(self):
+        p = self._p()
+        wd.record_compact_request("n2", "/x", now=100, path=p)
+        wd.record_compact_request("n2", "/y", now=200, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertNotIn("not_boundary_since", d["n2"])
+
+    def test_a_fresh_session_never_carries_a_stale_not_boundary_since(self):
+        p = self._p()
+        wd.record_compact_request("n3", "/x", now=100, path=p)
+        d = wd.load_compact_requests(p)
+        d["n3"]["not_boundary_since"] = 50.0
+        p.write_text(json.dumps(d))
+        wd.clear_compact_request("n3", path=p)   # delivered/dropped/expired
+        wd.record_compact_request("n3", "/z", now=9000, path=p)
+        d2 = wd.load_compact_requests(p)
+        self.assertNotIn("not_boundary_since", d2["n3"])
+
+
+# --------------------------------------------------------------------------- #
 # #333-review MAJOR-2 (adversarial review, fable) -- the busy-check above
 # reads a SWEEP-TOP (job 14) or CALL-TOP (deliver_compact_now) snapshot that
 # can be several tmux round-trips stale by the time control actually reaches
