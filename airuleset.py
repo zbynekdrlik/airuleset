@@ -3221,6 +3221,49 @@ def check_runtime_deps(deps=RUNTIME_DEPS):
     return still
 
 
+FLEET_TIMEZONE = "Europe/Bratislava"
+
+
+def ensure_timezone(want=FLEET_TIMEZONE):
+    """Enforce the fleet system timezone on THIS box at install time (#387).
+
+    The user is in Slovakia; a box left on its OS-image default (Hetzner ships
+    Etc/UTC) makes every Claude session and `date` report UTC, which the user
+    has flagged repeatedly as a hard regression (gatekeeper VPS, 2026-08-11).
+    Idempotent + self-healing, run on every box on every `airuleset.py push`:
+    set via `sudo -n timedatectl` where sudo exists, print a LOUD warning
+    (never fatal) where it does not -- exactly like check_runtime_deps. Returns
+    the timezone now in effect (the still-wrong value if it could not be set)."""
+    import subprocess
+
+    def _cur():
+        try:
+            r = subprocess.run(
+                ["timedatectl", "show", "-p", "Timezone", "--value"],
+                capture_output=True, text=True, timeout=15)
+            return (r.stdout or "").strip()
+        except Exception:
+            return ""
+
+    cur = _cur()
+    if cur == want:
+        return cur                        # already correct -- silent no-op
+    try:
+        r = subprocess.run(["sudo", "-n", "timedatectl", "set-timezone", want],
+                           capture_output=True, text=True, timeout=30)
+        set_ok = r.returncode == 0
+    except Exception:
+        set_ok = False
+    if set_ok and _cur() == want:
+        print("  ✓ timezone was '%s' -- set to %s and verified." % (cur or "unknown", want))
+        return want
+    print("  ⚠ TIMEZONE is '%s', not %s -- could not set it automatically "
+          "(no sudo?). This box will report wrong (e.g. UTC) times to Claude "
+          "and `date`. Set it as root: timedatectl set-timezone %s."
+          % (cur or "unknown", want, want))
+    return cur
+
+
 # --- Tier-0 target/ retention (#315) ---------------------------------------
 # Tier 0 (no-local-builds.md's DEFAULT) bans HEAVY local builds but still
 # legitimately fills target/ via the cheap checks it DOES allow (cargo
@@ -5186,6 +5229,7 @@ def cmd_install(args):
     print("airuleset install")
     print("=" * 50)
     check_runtime_deps()
+    ensure_timezone()
 
     # Ensure ~/.claude/ exists
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
