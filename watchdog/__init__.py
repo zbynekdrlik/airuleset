@@ -8633,6 +8633,94 @@ def _compact_session_unresumed(cwd, sid, projects_dir=None, origin=None):
     return bool(transcript_last_error(tpath))
 
 
+# #377 (2026-08-11 live evidence, gk) — never deliver `/compact` while the
+# user is actively engaging with THIS session right now. completion-
+# report.md is explicit that answering a question is NOT a compaction
+# boundary — but neither delivery path ever asked. A supervisor
+# continuously dispatching ~15 batch workers records a `deferred=live-tasks`
+# request at every SubagentStop; once `COMPACT_DEFER_GRACE_S` elapses (#250)
+# the request delivers the FIRST moment `_session_has_live_bg_tasks()`
+# reads False — and that moment is very often exactly when the user's own
+# reply lands (the previous worker has already finished, the next has not
+# yet been dispatched). The live evidence: `OK (compact-request,
+# grace-elapsed)` fired at the precise instant of a user answer, repeatedly,
+# for as long as the user kept answering questions — "nonstop compact"
+# during a Q&A session.
+#
+# Reuses job 9's OWN dual-signal primitive
+# (`_goal_autoarm_recent_human_activity`) rather than duplicating its
+# marker+transcript logic a second time: the `/tmp/claude-user-active-<sid>`
+# presence marker (stamped ONLY on UserPromptSubmit) OR the transcript's own
+# `_last_human_prompt_ts`. Job 9 solves a DIFFERENT problem with a 30-minute
+# window (never paste a fresh `/goal` into a conversation that has been
+# active any time in the last half hour); compact only needs to bridge the
+# brief gap between a reply landing and the session's own next turn
+# resuming dispatch, so it gets its OWN, much shorter, independently
+# tunable window.
+#
+# Self-bounding by construction — a recency check, not a persistent flag —
+# so unlike #250's live-tasks defer, no grace-bound override is needed here:
+# human activity is inherently intermittent, and the moment the user
+# genuinely stops answering for `window_s` seconds the veto clears on its
+# own and the NEXT sweep (or the synchronous retry) delivers normally. A
+# blocked request is LEFT IN PLACE (never consumed), exactly like
+# `_compact_not_at_boundary` — the next attempt re-evaluates fresh.
+#
+# Applied UNCONDITIONALLY, no origin exemption — the ticket's own
+# requirement ("NIKDY nedoručiť compact do okna aktívnej konverzácie") is
+# absolute, matching `_compact_not_at_boundary`'s own post-#333 stance (no
+# per-origin relaxation for a "not safe right now" signal).
+COMPACT_RECENT_HUMAN_ACTIVITY_S = 120   # env AIRULESET_COMPACT_RECENT_HUMAN_S
+
+
+def _compact_recent_human_window(window_s=None):
+    """An explicit `window_s=` (test/caller override) is returned verbatim.
+    The CONSTANT/ENV-derived default is clamped to a small positive floor —
+    the same shape `_compact_defer_grace`/`_compact_min_request_age` already
+    use — so a misconfigured `AIRULESET_COMPACT_RECENT_HUMAN_S` of 0 or
+    negative can never silently disable the veto outright."""
+    if window_s is not None:
+        return window_s
+    try:
+        raw = int(os.environ.get("AIRULESET_COMPACT_RECENT_HUMAN_S",
+                                 COMPACT_RECENT_HUMAN_ACTIVITY_S))
+    except ValueError:
+        raw = COMPACT_RECENT_HUMAN_ACTIVITY_S
+    return raw if raw > 0 else COMPACT_RECENT_HUMAN_ACTIVITY_S
+
+
+def _compact_recent_human_activity(cwd, sid, now, projects_dir=None,
+                                   window_s=None):
+    """True when the user has been active on THIS session within
+    `window_s` seconds (`_compact_recent_human_window`'s resolved default,
+    or an explicit override) — see the section comment above for the full
+    reasoning and the live evidence.
+
+    Delegates entirely to `_goal_autoarm_recent_human_activity` (job 9's own
+    dual-signal primitive: the presence marker, OR the transcript's own
+    `_last_human_prompt_ts` — both already exclude every machine-injected
+    prompt shape via `_MACHINE_PROMPT_PREFIXES`, so a Stop-hook rejection, a
+    `/goal` re-poke, a Discord-reply delivery, etc. never counts as "the
+    user is here"), resolved from a `(cwd, sid)` pair the way every other
+    compact gate in this file is shaped (`_compact_blocked_by_question`,
+    `_compact_not_at_boundary`), rather than a pre-resolved `tpath` the way
+    job 9's own caller already has one in scope.
+
+    Unmeasurable never blocks: no resolvable transcript for this sid+cwd
+    still lets the PRESENCE MARKER alone decide (it never depends on a
+    transcript existing at all — `_goal_autoarm_recent_human_activity`
+    tolerates a `None` `tpath`, wrapping the read in its own broad
+    `except Exception`), and with neither signal available this returns
+    False exactly like the primitive does for a genuinely-headless
+    session."""
+    pdir = projects_dir or PROJECTS_DIR
+    tpath = _transcript_for_session(pdir, sid, cwd)
+    win = _compact_recent_human_window(window_s)
+    recent, _reason = _goal_autoarm_recent_human_activity(
+        sid, tpath, now, window_s=win)
+    return recent
+
+
 # #246 (2026-08-05, live evidence: montalu@subdev) — the live-tasks SAFETY
 # check `notify-compact-subagent-boundary.sh` used to apply at RECORD time
 # (declining outright whenever a sibling worker was still live) now applies
@@ -8871,7 +8959,15 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     delivered anyway. A session shaped like a supervisor that continuously
     dispatches background workers never has a quiet moment, so an
     unconditional defer starves it completely — see that constant's own
-    comment for the live evidence and the bounded-relationship invariant."""
+    comment for the live evidence and the bounded-relationship invariant.
+
+    #377 — exactly that grace-elapsed override is what can discharge a
+    request at the precise instant the user's own reply lands (the live
+    task count dips right as the previous worker finishes and the next has
+    not yet been dispatched). `_compact_recent_human_activity`, checked
+    right before `_classify_boundary` below, refuses delivery whenever the
+    session has seen recent human activity — unconditional, left in place,
+    the next sweep retries."""
     reqs = load_compact_requests(path)
     if not reqs:
         return []
@@ -8975,6 +9071,14 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if _compact_session_unresumed(cwd, sid, projects_dir=pdir,
                                       origin=str(entry.get("origin") or "")):
             logs.append("skip unresumed-session (compact-request) %s" % loc)
+            continue
+        # #377 — never deliver into an active Q&A window: the user recently
+        # answered a question (or is otherwise typing right now) on THIS
+        # session. Unconditional, no origin exemption — see
+        # `_compact_recent_human_activity`'s own section comment for the
+        # live evidence and reasoning. Left in place, never consumed.
+        if _compact_recent_human_activity(cwd, sid, now, projects_dir=pdir):
+            logs.append("skip recent-human (compact-request) %s" % loc)
             continue
         kind, draft = _classify_boundary(captured)
         if kind == "no-input-line":
@@ -9341,8 +9445,10 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     unambiguously, the pane is in copy-mode / showing an open dialog / has
     no locatable boundary at all, the session's CURRENT last turn is a ❓
     OR `⏳` block (#102 — `_compact_blocked_by_question`; #109/#333 —
-    `_compact_not_at_boundary`, unrelaxed for every origin), the pane is
-    currently BUSY (mid-turn — #333 REVERSED this function's own earlier
+    `_compact_not_at_boundary`, unrelaxed for every origin), the user has
+    been recently active on this session (#377 —
+    `_compact_recent_human_activity`, unconditional, no origin exemption),
+    the pane is currently BUSY (mid-turn — #333 REVERSED this function's own earlier
     "busy is safe to type into" premise, see the `kind == "busy"` check's
     own section comment below for the live evidence), the session STILL has
     live background work of its own (#246 —
@@ -9415,6 +9521,17 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     if _compact_session_unresumed(cwd, sid, projects_dir=projects_dir,
                                   origin=origin):
         _log_compact_sync("SKIP unresumed-session sid=%s cwd=%s" % (sid, cwd))
+        return ""
+    # #377 -- never deliver into an active Q&A window: the user recently
+    # answered a question (or is otherwise typing right now) on THIS
+    # session. Unconditional, no origin exemption -- see
+    # `_compact_recent_human_activity`'s own section comment for the live
+    # evidence and reasoning. Falls back to job 14's polled retry, exactly
+    # like every other "unsafe right now" state this function refuses on.
+    if _compact_recent_human_activity(
+            cwd, sid, now if now is not None else time.time(),
+            projects_dir=projects_dir):
+        _log_compact_sync("SKIP recent-human sid=%s cwd=%s" % (sid, cwd))
         return ""
     # #109 -- the ENQUEUE-time gate, and the ONE moment the reported incident
     # is still preventable: this function runs INSIDE the Stop-hook batch, so
