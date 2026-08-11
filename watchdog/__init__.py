@@ -2651,11 +2651,26 @@ _COMPACT_CONTINUATION_PREFIX = (
     "This session is being continued from a previous conversation")
 
 
-def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
+def _last_human_prompt_ts(tpath, tail_bytes=2_000_000, extra_human_prefixes=()):
     """Epoch of the NEWEST human-typed prompt in the transcript tail, or None.
     Machine-typed prompts (the list above), tool_result user entries, meta
     entries and a /compact continuation summary don't count — only something
-    the USER actually wrote."""
+    the USER actually wrote.
+
+    `extra_human_prefixes` (#377-review MINOR-1, optional): every entry in
+    `_MACHINE_PROMPT_PREFIXES` NAMED HERE is treated as human-typed instead
+    of machine-injected for THIS call only — mirrors #350's own established
+    "opposite exclusion set" precedent (`_GOAL_BLOCKED_ANSWER_TRANSPARENT_
+    PREFIXES`, ~8000 lines below) for the identical two Discord-relay
+    prefixes ("Odpoveď z Discordu:"/"Odpoveď užívateľa na tvoju otázku"):
+    this function's OWN default question is "did a human type this
+    DIRECTLY" (job 9's `_goal_autoarm_recent_human_activity` needs exactly
+    that, unchanged, so its own callers never pass this), while a DIFFERENT
+    caller can genuinely need "is the user actively engaging right now" —
+    for which a Discord-relayed answer counts just as much as a directly
+    typed one (`_compact_recent_human_activity`, #377). The default `()`
+    is a complete no-op (`p not in ()` is always True), so every existing
+    caller's behavior is byte-for-byte unchanged."""
     from datetime import datetime
     try:
         with open(tpath, "rb") as f:
@@ -2666,6 +2681,9 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
             raw = f.read()
     except OSError:
         return None
+    machine_prefixes = (_MACHINE_PROMPT_PREFIXES if not extra_human_prefixes
+                        else tuple(p for p in _MACHINE_PROMPT_PREFIXES
+                                  if p not in extra_human_prefixes))
     best = None
     for ln in raw.splitlines():
         try:
@@ -2689,7 +2707,7 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
             continue
         t = text.strip()
         if (not t or t in _MACHINE_PROMPT_EXACT
-                or any(t.startswith(p) for p in _MACHINE_PROMPT_PREFIXES)
+                or any(t.startswith(p) for p in machine_prefixes)
                 or t.startswith(_COMPACT_CONTINUATION_PREFIX)):
             continue
         try:
@@ -6290,7 +6308,8 @@ GOAL_AUTOARM_RECENT_HUMAN_S = 30 * 60
 # reported incident).
 
 
-def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None):
+def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
+                                        extra_human_prefixes=()):
     """#339 -- job 9's virgin-candidate path (`_goal_autoarm_virgin_candidate`)
     had NO discriminator at all for "is a live human using this pane RIGHT
     NOW" -- only whether `/goal` had ever been touched. montalu3's own
@@ -6357,7 +6376,14 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None):
     failure (its own documented contract), which this function treats as
     "no signal, not recent" -- never a manufactured refusal from an
     unmeasurable read, mirroring `_goal_never_armed`'s own adjacent
-    discipline one function down."""
+    discipline one function down.
+
+    `extra_human_prefixes` (#377-review MINOR-1, optional): threaded
+    straight through to `_last_human_prompt_ts` -- see ITS docstring. The
+    default `()` is a no-op, so job 9's own call (which never passes this)
+    keeps its exact reviewed behavior unchanged; a caller that DOES need a
+    Discord-relayed answer to count (`_compact_recent_human_activity`)
+    passes its own prefix set."""
     window_s = GOAL_AUTOARM_RECENT_HUMAN_S if window_s is None else window_s
     try:
         mtime = os.stat("/tmp/claude-user-active-%s" % sid).st_mtime
@@ -6368,7 +6394,7 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None):
         if -window_s <= age < window_s:
             return True, "presence marker %s" % _human_age_desc(age)
     try:
-        hts = _last_human_prompt_ts(tpath)
+        hts = _last_human_prompt_ts(tpath, extra_human_prefixes=extra_human_prefixes)
     except Exception:
         hts = None
     if hts is not None:
@@ -8675,10 +8701,17 @@ COMPACT_RECENT_HUMAN_ACTIVITY_S = 120   # env AIRULESET_COMPACT_RECENT_HUMAN_S
 
 def _compact_recent_human_window(window_s=None):
     """An explicit `window_s=` (test/caller override) is returned verbatim.
-    The CONSTANT/ENV-derived default is clamped to a small positive floor —
-    the same shape `_compact_defer_grace`/`_compact_min_request_age` already
-    use — so a misconfigured `AIRULESET_COMPACT_RECENT_HUMAN_S` of 0 or
-    negative can never silently disable the veto outright."""
+    The CONSTANT/ENV-derived default is clamped to `[1, COMPACT_REQUEST_MAX_
+    AGE_S)` — the SAME shape `_compact_defer_grace` already uses, and for
+    the SAME reason (#377-review MINOR-2/3, fresh-context adversarial
+    review, executed proof): a misconfigured `AIRULESET_COMPACT_RECENT_
+    HUMAN_S` of 0 or negative could otherwise silently disable the veto
+    outright (every request would read as "not recent"), and a value AT OR
+    ABOVE the request TTL would recreate the exact lapse-before-clear
+    starvation `_compact_defer_grace`'s own docstring already forbids for
+    its sibling grace window — a session with any human prompt inside that
+    (now enormous) window would have its request LAPSE via
+    `COMPACT_REQUEST_MAX_AGE_S` before the veto could ever clear."""
     if window_s is not None:
         return window_s
     try:
@@ -8686,7 +8719,29 @@ def _compact_recent_human_window(window_s=None):
                                  COMPACT_RECENT_HUMAN_ACTIVITY_S))
     except ValueError:
         raw = COMPACT_RECENT_HUMAN_ACTIVITY_S
-    return raw if raw > 0 else COMPACT_RECENT_HUMAN_ACTIVITY_S
+    if raw < 1:
+        return 1
+    if raw >= COMPACT_REQUEST_MAX_AGE_S:
+        return COMPACT_REQUEST_MAX_AGE_S - 1
+    return raw
+
+
+# #377-review MINOR-1 (fresh-context adversarial review) -- `_last_human_
+# prompt_ts`'s DEFAULT exclusion set (`_MACHINE_PROMPT_PREFIXES`) treats a
+# Discord-relayed answer as machine-injected, not human-typed -- correct
+# for job 9's OWN question ("did a human type this DIRECTLY into the
+# pane"), but #377's own reported incident IS exactly a Discord-relayed
+# answer, and for THIS gate's question ("is the user actively engaging
+# with this session right now") a Discord answer is just as real as a
+# directly-typed one. Mirrors #350's own established "opposite exclusion
+# set" precedent for the IDENTICAL two prefixes
+# (`_GOAL_BLOCKED_ANSWER_TRANSPARENT_PREFIXES`, ~8000 lines below) -- kept
+# as its OWN small, duplicated literal here rather than importing that
+# tuple or touching `_MACHINE_PROMPT_PREFIXES` itself, matching this
+# file's own established practice of not refactoring already-shipped,
+# reviewed code for a cosmetic dedup.
+_COMPACT_DISCORD_ANSWER_PREFIXES = (
+    "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku")
 
 
 def _compact_recent_human_activity(cwd, sid, now, projects_dir=None,
@@ -8698,13 +8753,15 @@ def _compact_recent_human_activity(cwd, sid, now, projects_dir=None,
 
     Delegates entirely to `_goal_autoarm_recent_human_activity` (job 9's own
     dual-signal primitive: the presence marker, OR the transcript's own
-    `_last_human_prompt_ts` — both already exclude every machine-injected
-    prompt shape via `_MACHINE_PROMPT_PREFIXES`, so a Stop-hook rejection, a
-    `/goal` re-poke, a Discord-reply delivery, etc. never counts as "the
-    user is here"), resolved from a `(cwd, sid)` pair the way every other
-    compact gate in this file is shaped (`_compact_blocked_by_question`,
-    `_compact_not_at_boundary`), rather than a pre-resolved `tpath` the way
-    job 9's own caller already has one in scope.
+    `_last_human_prompt_ts`), resolved from a `(cwd, sid)` pair the way
+    every other compact gate in this file is shaped
+    (`_compact_blocked_by_question`, `_compact_not_at_boundary`), rather
+    than a pre-resolved `tpath` the way job 9's own caller already has one
+    in scope. Passes `_COMPACT_DISCORD_ANSWER_PREFIXES` as `extra_human_
+    prefixes` so a Discord-relayed answer counts as recent human activity
+    HERE (see that constant's own comment) — a Stop-hook rejection, a
+    `/goal` re-poke, and every OTHER machine-injected prompt shape in
+    `_MACHINE_PROMPT_PREFIXES` still never counts.
 
     Unmeasurable never blocks: no resolvable transcript for this sid+cwd
     still lets the PRESENCE MARKER alone decide (it never depends on a
@@ -8717,7 +8774,8 @@ def _compact_recent_human_activity(cwd, sid, now, projects_dir=None,
     tpath = _transcript_for_session(pdir, sid, cwd)
     win = _compact_recent_human_window(window_s)
     recent, _reason = _goal_autoarm_recent_human_activity(
-        sid, tpath, now, window_s=win)
+        sid, tpath, now, window_s=win,
+        extra_human_prefixes=_COMPACT_DISCORD_ANSWER_PREFIXES)
     return recent
 
 
