@@ -861,6 +861,37 @@ class WedgeSelfHeal(unittest.TestCase):
         self.assertGreaterEqual(len(enters), 1)
         self.assertIn("repW", state["dreply_done"])
 
+    def test_an_unreadable_verify_capture_is_never_confirmed_delivered(self):
+        """#372 (4th incident, forensically flagged): a false "delivered"
+        confirmation is a trust-breaking defect — the sender legitimately
+        believes their Discord reply reached the session while it never
+        did. `_input_line_text` returns `None` (undeterminable — a dialog,
+        a spinner, a genuinely unreadable capture) as a DISTINCT value from
+        `""` (genuinely bare, confirmed empty) — but the verify loop's
+        `while t2 and tries < 2` / `if t2:` both treat `None` as FALSY,
+        identically to a confirmed-empty box, so an UNREADABLE post-send
+        capture was silently accepted as proof of delivery. This must be
+        treated exactly like "still wedged": not marked delivered, no
+        premature done-state, retried/reported next cycle."""
+        UNREADABLE = "some fullscreen dialog with no boundary at all\n"
+        # captures: [send_continue's own pre-type strip-selected check
+        # (ordinary idle, no escape needed), the verify capture -- made
+        # UNREADABLE, not merely "still shows our text"]
+        run = ScriptedPaneRun([self.IDLE, UNREADABLE])
+        state = {}
+        logs = wd.deliver_discord_replies(
+            time.time(), run, state, {"sid-abc": ("%1", self.IDLE)},
+            dry_run=False, discord_fetch=lambda ch, t: [self._reply()],
+            gh_comment=lambda *a: True)
+        self.assertNotIn("repW", state.get("dreply_done", []),
+                         "an unreadable verify capture must NEVER be "
+                         "treated as a confirmed delivery: %r" % logs)
+        self.assertIn("888001", notify.load_questions(self.qpath),
+                      "the question must stay tracked -- not silently "
+                      "dropped on an unverified 'delivery'")
+        self.assertTrue(any("wedge" in ln.lower() or "unreadable" in ln.lower()
+                            for ln in logs), logs)
+
 
 class ReceiptReaction(unittest.TestCase):
     """2026-07-20 (3rd user report): the ✅ reaction fired only at DELIVERY —
