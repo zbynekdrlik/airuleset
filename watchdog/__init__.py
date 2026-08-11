@@ -2651,11 +2651,26 @@ _COMPACT_CONTINUATION_PREFIX = (
     "This session is being continued from a previous conversation")
 
 
-def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
+def _last_human_prompt_ts(tpath, tail_bytes=2_000_000, extra_human_prefixes=()):
     """Epoch of the NEWEST human-typed prompt in the transcript tail, or None.
     Machine-typed prompts (the list above), tool_result user entries, meta
     entries and a /compact continuation summary don't count — only something
-    the USER actually wrote."""
+    the USER actually wrote.
+
+    `extra_human_prefixes` (#377-review MINOR-1, optional): every entry in
+    `_MACHINE_PROMPT_PREFIXES` NAMED HERE is treated as human-typed instead
+    of machine-injected for THIS call only — mirrors #350's own established
+    "opposite exclusion set" precedent (`_GOAL_BLOCKED_ANSWER_TRANSPARENT_
+    PREFIXES`, ~8000 lines below) for the identical two Discord-relay
+    prefixes ("Odpoveď z Discordu:"/"Odpoveď užívateľa na tvoju otázku"):
+    this function's OWN default question is "did a human type this
+    DIRECTLY" (job 9's `_goal_autoarm_recent_human_activity` needs exactly
+    that, unchanged, so its own callers never pass this), while a DIFFERENT
+    caller can genuinely need "is the user actively engaging right now" —
+    for which a Discord-relayed answer counts just as much as a directly
+    typed one (`_compact_recent_human_activity`, #377). The default `()`
+    is a complete no-op (`p not in ()` is always True), so every existing
+    caller's behavior is byte-for-byte unchanged."""
     from datetime import datetime
     try:
         with open(tpath, "rb") as f:
@@ -2666,6 +2681,9 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
             raw = f.read()
     except OSError:
         return None
+    machine_prefixes = (_MACHINE_PROMPT_PREFIXES if not extra_human_prefixes
+                        else tuple(p for p in _MACHINE_PROMPT_PREFIXES
+                                  if p not in extra_human_prefixes))
     best = None
     for ln in raw.splitlines():
         try:
@@ -2689,7 +2707,7 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000):
             continue
         t = text.strip()
         if (not t or t in _MACHINE_PROMPT_EXACT
-                or any(t.startswith(p) for p in _MACHINE_PROMPT_PREFIXES)
+                or any(t.startswith(p) for p in machine_prefixes)
                 or t.startswith(_COMPACT_CONTINUATION_PREFIX)):
             continue
         try:
@@ -6290,7 +6308,8 @@ GOAL_AUTOARM_RECENT_HUMAN_S = 30 * 60
 # reported incident).
 
 
-def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None):
+def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
+                                        extra_human_prefixes=()):
     """#339 -- job 9's virgin-candidate path (`_goal_autoarm_virgin_candidate`)
     had NO discriminator at all for "is a live human using this pane RIGHT
     NOW" -- only whether `/goal` had ever been touched. montalu3's own
@@ -6357,7 +6376,14 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None):
     failure (its own documented contract), which this function treats as
     "no signal, not recent" -- never a manufactured refusal from an
     unmeasurable read, mirroring `_goal_never_armed`'s own adjacent
-    discipline one function down."""
+    discipline one function down.
+
+    `extra_human_prefixes` (#377-review MINOR-1, optional): threaded
+    straight through to `_last_human_prompt_ts` -- see ITS docstring. The
+    default `()` is a no-op, so job 9's own call (which never passes this)
+    keeps its exact reviewed behavior unchanged; a caller that DOES need a
+    Discord-relayed answer to count (`_compact_recent_human_activity`)
+    passes its own prefix set."""
     window_s = GOAL_AUTOARM_RECENT_HUMAN_S if window_s is None else window_s
     try:
         mtime = os.stat("/tmp/claude-user-active-%s" % sid).st_mtime
@@ -6368,7 +6394,7 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None):
         if -window_s <= age < window_s:
             return True, "presence marker %s" % _human_age_desc(age)
     try:
-        hts = _last_human_prompt_ts(tpath)
+        hts = _last_human_prompt_ts(tpath, extra_human_prefixes=extra_human_prefixes)
     except Exception:
         hts = None
     if hts is not None:
@@ -8633,6 +8659,126 @@ def _compact_session_unresumed(cwd, sid, projects_dir=None, origin=None):
     return bool(transcript_last_error(tpath))
 
 
+# #377 (2026-08-11 live evidence, gk) — never deliver `/compact` while the
+# user is actively engaging with THIS session right now. completion-
+# report.md is explicit that answering a question is NOT a compaction
+# boundary — but neither delivery path ever asked. A supervisor
+# continuously dispatching ~15 batch workers records a `deferred=live-tasks`
+# request at every SubagentStop; once `COMPACT_DEFER_GRACE_S` elapses (#250)
+# the request delivers the FIRST moment `_session_has_live_bg_tasks()`
+# reads False — and that moment is very often exactly when the user's own
+# reply lands (the previous worker has already finished, the next has not
+# yet been dispatched). The live evidence: `OK (compact-request,
+# grace-elapsed)` fired at the precise instant of a user answer, repeatedly,
+# for as long as the user kept answering questions — "nonstop compact"
+# during a Q&A session.
+#
+# Reuses job 9's OWN dual-signal primitive
+# (`_goal_autoarm_recent_human_activity`) rather than duplicating its
+# marker+transcript logic a second time: the `/tmp/claude-user-active-<sid>`
+# presence marker (stamped ONLY on UserPromptSubmit) OR the transcript's own
+# `_last_human_prompt_ts`. Job 9 solves a DIFFERENT problem with a 30-minute
+# window (never paste a fresh `/goal` into a conversation that has been
+# active any time in the last half hour); compact only needs to bridge the
+# brief gap between a reply landing and the session's own next turn
+# resuming dispatch, so it gets its OWN, much shorter, independently
+# tunable window.
+#
+# Self-bounding by construction — a recency check, not a persistent flag —
+# so unlike #250's live-tasks defer, no grace-bound override is needed here:
+# human activity is inherently intermittent, and the moment the user
+# genuinely stops answering for `window_s` seconds the veto clears on its
+# own and the NEXT sweep (or the synchronous retry) delivers normally. A
+# blocked request is LEFT IN PLACE (never consumed), exactly like
+# `_compact_not_at_boundary` — the next attempt re-evaluates fresh.
+#
+# Applied UNCONDITIONALLY, no origin exemption — the ticket's own
+# requirement ("NIKDY nedoručiť compact do okna aktívnej konverzácie") is
+# absolute, matching `_compact_not_at_boundary`'s own post-#333 stance (no
+# per-origin relaxation for a "not safe right now" signal).
+COMPACT_RECENT_HUMAN_ACTIVITY_S = 120   # env AIRULESET_COMPACT_RECENT_HUMAN_S
+
+
+def _compact_recent_human_window(window_s=None):
+    """An explicit `window_s=` (test/caller override) is returned verbatim.
+    The CONSTANT/ENV-derived default is clamped to `[1, COMPACT_REQUEST_MAX_
+    AGE_S)` — the SAME shape `_compact_defer_grace` already uses, and for
+    the SAME reason (#377-review MINOR-2/3, fresh-context adversarial
+    review, executed proof): a misconfigured `AIRULESET_COMPACT_RECENT_
+    HUMAN_S` of 0 or negative could otherwise silently disable the veto
+    outright (every request would read as "not recent"), and a value AT OR
+    ABOVE the request TTL would recreate the exact lapse-before-clear
+    starvation `_compact_defer_grace`'s own docstring already forbids for
+    its sibling grace window — a session with any human prompt inside that
+    (now enormous) window would have its request LAPSE via
+    `COMPACT_REQUEST_MAX_AGE_S` before the veto could ever clear."""
+    if window_s is not None:
+        return window_s
+    try:
+        raw = int(os.environ.get("AIRULESET_COMPACT_RECENT_HUMAN_S",
+                                 COMPACT_RECENT_HUMAN_ACTIVITY_S))
+    except ValueError:
+        raw = COMPACT_RECENT_HUMAN_ACTIVITY_S
+    if raw < 1:
+        return 1
+    if raw >= COMPACT_REQUEST_MAX_AGE_S:
+        return COMPACT_REQUEST_MAX_AGE_S - 1
+    return raw
+
+
+# #377-review MINOR-1 (fresh-context adversarial review) -- `_last_human_
+# prompt_ts`'s DEFAULT exclusion set (`_MACHINE_PROMPT_PREFIXES`) treats a
+# Discord-relayed answer as machine-injected, not human-typed -- correct
+# for job 9's OWN question ("did a human type this DIRECTLY into the
+# pane"), but #377's own reported incident IS exactly a Discord-relayed
+# answer, and for THIS gate's question ("is the user actively engaging
+# with this session right now") a Discord answer is just as real as a
+# directly-typed one. Mirrors #350's own established "opposite exclusion
+# set" precedent for the IDENTICAL two prefixes
+# (`_GOAL_BLOCKED_ANSWER_TRANSPARENT_PREFIXES`, ~8000 lines below) -- kept
+# as its OWN small, duplicated literal here rather than importing that
+# tuple or touching `_MACHINE_PROMPT_PREFIXES` itself, matching this
+# file's own established practice of not refactoring already-shipped,
+# reviewed code for a cosmetic dedup.
+_COMPACT_DISCORD_ANSWER_PREFIXES = (
+    "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku")
+
+
+def _compact_recent_human_activity(cwd, sid, now, projects_dir=None,
+                                   window_s=None):
+    """True when the user has been active on THIS session within
+    `window_s` seconds (`_compact_recent_human_window`'s resolved default,
+    or an explicit override) — see the section comment above for the full
+    reasoning and the live evidence.
+
+    Delegates entirely to `_goal_autoarm_recent_human_activity` (job 9's own
+    dual-signal primitive: the presence marker, OR the transcript's own
+    `_last_human_prompt_ts`), resolved from a `(cwd, sid)` pair the way
+    every other compact gate in this file is shaped
+    (`_compact_blocked_by_question`, `_compact_not_at_boundary`), rather
+    than a pre-resolved `tpath` the way job 9's own caller already has one
+    in scope. Passes `_COMPACT_DISCORD_ANSWER_PREFIXES` as `extra_human_
+    prefixes` so a Discord-relayed answer counts as recent human activity
+    HERE (see that constant's own comment) — a Stop-hook rejection, a
+    `/goal` re-poke, and every OTHER machine-injected prompt shape in
+    `_MACHINE_PROMPT_PREFIXES` still never counts.
+
+    Unmeasurable never blocks: no resolvable transcript for this sid+cwd
+    still lets the PRESENCE MARKER alone decide (it never depends on a
+    transcript existing at all — `_goal_autoarm_recent_human_activity`
+    tolerates a `None` `tpath`, wrapping the read in its own broad
+    `except Exception`), and with neither signal available this returns
+    False exactly like the primitive does for a genuinely-headless
+    session."""
+    pdir = projects_dir or PROJECTS_DIR
+    tpath = _transcript_for_session(pdir, sid, cwd)
+    win = _compact_recent_human_window(window_s)
+    recent, _reason = _goal_autoarm_recent_human_activity(
+        sid, tpath, now, window_s=win,
+        extra_human_prefixes=_COMPACT_DISCORD_ANSWER_PREFIXES)
+    return recent
+
+
 # #246 (2026-08-05, live evidence: montalu@subdev) — the live-tasks SAFETY
 # check `notify-compact-subagent-boundary.sh` used to apply at RECORD time
 # (declining outright whenever a sibling worker was still live) now applies
@@ -8871,7 +9017,15 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     delivered anyway. A session shaped like a supervisor that continuously
     dispatches background workers never has a quiet moment, so an
     unconditional defer starves it completely — see that constant's own
-    comment for the live evidence and the bounded-relationship invariant."""
+    comment for the live evidence and the bounded-relationship invariant.
+
+    #377 — exactly that grace-elapsed override is what can discharge a
+    request at the precise instant the user's own reply lands (the live
+    task count dips right as the previous worker finishes and the next has
+    not yet been dispatched). `_compact_recent_human_activity`, checked
+    right before `_classify_boundary` below, refuses delivery whenever the
+    session has seen recent human activity — unconditional, left in place,
+    the next sweep retries."""
     reqs = load_compact_requests(path)
     if not reqs:
         return []
@@ -8975,6 +9129,14 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         if _compact_session_unresumed(cwd, sid, projects_dir=pdir,
                                       origin=str(entry.get("origin") or "")):
             logs.append("skip unresumed-session (compact-request) %s" % loc)
+            continue
+        # #377 — never deliver into an active Q&A window: the user recently
+        # answered a question (or is otherwise typing right now) on THIS
+        # session. Unconditional, no origin exemption — see
+        # `_compact_recent_human_activity`'s own section comment for the
+        # live evidence and reasoning. Left in place, never consumed.
+        if _compact_recent_human_activity(cwd, sid, now, projects_dir=pdir):
+            logs.append("skip recent-human (compact-request) %s" % loc)
             continue
         kind, draft = _classify_boundary(captured)
         if kind == "no-input-line":
@@ -9341,8 +9503,10 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     unambiguously, the pane is in copy-mode / showing an open dialog / has
     no locatable boundary at all, the session's CURRENT last turn is a ❓
     OR `⏳` block (#102 — `_compact_blocked_by_question`; #109/#333 —
-    `_compact_not_at_boundary`, unrelaxed for every origin), the pane is
-    currently BUSY (mid-turn — #333 REVERSED this function's own earlier
+    `_compact_not_at_boundary`, unrelaxed for every origin), the user has
+    been recently active on this session (#377 —
+    `_compact_recent_human_activity`, unconditional, no origin exemption),
+    the pane is currently BUSY (mid-turn — #333 REVERSED this function's own earlier
     "busy is safe to type into" premise, see the `kind == "busy"` check's
     own section comment below for the live evidence), the session STILL has
     live background work of its own (#246 —
@@ -9415,6 +9579,17 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     if _compact_session_unresumed(cwd, sid, projects_dir=projects_dir,
                                   origin=origin):
         _log_compact_sync("SKIP unresumed-session sid=%s cwd=%s" % (sid, cwd))
+        return ""
+    # #377 -- never deliver into an active Q&A window: the user recently
+    # answered a question (or is otherwise typing right now) on THIS
+    # session. Unconditional, no origin exemption -- see
+    # `_compact_recent_human_activity`'s own section comment for the live
+    # evidence and reasoning. Falls back to job 14's polled retry, exactly
+    # like every other "unsafe right now" state this function refuses on.
+    if _compact_recent_human_activity(
+            cwd, sid, now if now is not None else time.time(),
+            projects_dir=projects_dir):
+        _log_compact_sync("SKIP recent-human sid=%s cwd=%s" % (sid, cwd))
         return ""
     # #109 -- the ENQUEUE-time gate, and the ONE moment the reported incident
     # is still preventable: this function runs INSIDE the Stop-hook batch, so

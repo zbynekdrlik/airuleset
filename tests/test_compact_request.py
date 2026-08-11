@@ -736,6 +736,41 @@ def _write_marker_transcript(base, cwd, sid, marker_text, ctx_tokens=300_000):
     return p
 
 
+def _write_human_transcript(base, cwd, sid, ts_epoch,
+                            text="text ktorý napísal používateľ"):
+    """Write a minimal real transcript at <base>/<encoded-cwd>/<sid>.jsonl
+    containing a single top-level `type=="user"` entry with genuinely
+    HUMAN-typed content at `ts_epoch` -- #377's `_compact_recent_human_
+    activity` gate needs a REAL transcript for `_last_human_prompt_ts` to
+    read a human prompt timestamp from (one primitive layer below
+    `_write_marker_transcript`, which only ever writes the LAST-turn status
+    marker `transcript_last_marker` reads)."""
+    from datetime import datetime, timezone
+    d = Path(base) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    iso = datetime.fromtimestamp(ts_epoch, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+    entry = {"type": "user", "timestamp": iso, "message": {"content": text}}
+    p.write_text(json.dumps(entry) + "\n")
+    return p
+
+
+def _touch_active_marker(testcase, sid, age=0):
+    """Stamp `/tmp/claude-user-active-<sid>` (the UserPromptSubmit presence
+    marker) at `age` seconds old (0 = now), same shape
+    `tests/test_goal_autoarm.py`'s own `_touch_active` already uses for the
+    IDENTICAL marker -- #377's new compact gate consults it too. Cleaned up
+    on test teardown."""
+    f = "/tmp/claude-user-active-%s" % sid
+    Path(f).write_text("")
+    if age:
+        old = time.time() - age
+        os.utime(f, (old, old))
+    testcase.addCleanup(lambda: os.path.exists(f) and os.remove(f))
+    return f
+
+
 def _spawn_dummy_proc(testcase):
     """A real, short-lived subprocess (`sleep 60`) for #82's process-
     fingerprint tests -- a genuine PID with a genuine `/proc/<pid>/stat`
@@ -1317,6 +1352,164 @@ class TestCompactBlockedByQuestion(unittest.TestCase):
         _write_marker_transcript(proj, self.CWD, self.SID, "plain reply, no marker")
         self.assertFalse(
             wd._compact_blocked_by_question(self.CWD, self.SID, projects_dir=proj))
+
+
+# --------------------------------------------------------------------------- #
+# 2b-2. #377 (2026-08-11 live evidence, gk) — never deliver `/compact` while
+# the user is ACTIVELY ENGAGING with this session right now. Reuses job 9's
+# own `_goal_autoarm_recent_human_activity` dual-signal primitive (the
+# `/tmp/claude-user-active-<sid>` presence marker OR the transcript's own
+# `_last_human_prompt_ts`), just with compact's own much shorter window --
+# see `_compact_recent_human_activity`'s own docstring for the full
+# reasoning.
+# --------------------------------------------------------------------------- #
+
+class TestCompactRecentHumanActivityGate(unittest.TestCase):
+    SID = "sess-human-1"
+    CWD = "/home/x/humanproj"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_no_transcript_no_marker_is_not_blocked(self):
+        proj = self._dir()   # nothing written -> unmeasurable, never blocks
+        now = time.time()
+        self.assertFalse(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+
+    def test_recent_presence_marker_blocks(self):
+        proj = self._dir()
+        now = time.time()
+        _touch_active_marker(self, self.SID, age=5)
+        self.assertTrue(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+
+    def test_recent_transcript_human_prompt_blocks(self):
+        proj = self._dir()
+        now = time.time()
+        _write_human_transcript(proj, self.CWD, self.SID, now - 10)
+        self.assertTrue(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+
+    def test_stale_marker_and_stale_prompt_does_not_block(self):
+        proj = self._dir()
+        now = time.time()
+        win = wd.COMPACT_RECENT_HUMAN_ACTIVITY_S
+        _write_human_transcript(proj, self.CWD, self.SID, now - win - 300)
+        _touch_active_marker(self, self.SID, age=win + 300)
+        self.assertFalse(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+
+    def test_a_stop_hook_feedback_entry_is_never_read_as_human(self):
+        # the SAME machine-injected-prompt exclusion job 9's gate already
+        # relies on (`_MACHINE_PROMPT_PREFIXES`) -- a routine Stop-hook
+        # rejection must never delay a genuinely-idle compact.
+        proj = self._dir()
+        now = time.time()
+        _write_human_transcript(
+            proj, self.CWD, self.SID, now - 5,
+            text="Stop hook feedback: [some-hook.sh] blocked this turn")
+        self.assertFalse(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+
+    def test_explicit_window_s_overrides_the_default(self):
+        proj = self._dir()
+        now = time.time()
+        _write_human_transcript(proj, self.CWD, self.SID, now - 500)
+        # far outside the default window, but INSIDE a widened one passed
+        # explicitly -- proves window_s is genuinely threaded through, not
+        # just accepted and ignored.
+        self.assertFalse(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+        self.assertTrue(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj, window_s=600))
+
+    def test_a_discord_relayed_answer_counts_as_recent_human_activity(self):
+        # #377-review MINOR-1 (fresh-context adversarial review) -- the
+        # incident's own reported shape IS a Discord-relayed answer, which
+        # `_last_human_prompt_ts` deliberately excludes from ITS "human
+        # typed directly" question (`_MACHINE_PROMPT_PREFIXES`, #339). The
+        # compact veto's own question is different: "is the user actively
+        # engaging right now" -- a Discord answer genuinely is, mirroring
+        # #350's own established "opposite exclusion set" precedent for
+        # the identical two prefixes. Must count even with NO presence
+        # marker at all (job 7's delivery never stamps that marker).
+        proj = self._dir()
+        now = time.time()
+        _write_human_transcript(proj, self.CWD, self.SID, now - 5,
+                                text="Odpoveď z Discordu: áno, pokračuj")
+        self.assertTrue(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+
+    def test_the_other_discord_relay_prefix_also_counts(self):
+        proj = self._dir()
+        now = time.time()
+        _write_human_transcript(
+            proj, self.CWD, self.SID, now - 5,
+            text="Odpoveď užívateľa na tvoju otázku: nie, zruš to")
+        self.assertTrue(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+
+
+class TestCompactRecentHumanWindowClamp(unittest.TestCase):
+    """#377-review MINOR-2/3 (fresh-context adversarial review, executed
+    proof) -- `_compact_recent_human_window`'s env/const-derived default
+    was UNCLAMPED: `AIRULESET_COMPACT_RECENT_HUMAN_S=0` silently disabled
+    the veto outright, and a value >= `COMPACT_REQUEST_MAX_AGE_S` recreated
+    the exact lapse-before-clear starvation `_compact_defer_grace`'s own
+    clamp already exists to prevent for its sibling window. Mirrors that
+    function's own test shape exactly (`TestCompactDeferGraceRelationship`
+    et al., above)."""
+
+    def test_env_override_negative_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": "-100"}):
+            self.assertEqual(wd._compact_recent_human_window(), 1)
+
+    def test_env_override_zero_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": "0"}):
+            self.assertEqual(wd._compact_recent_human_window(), 1)
+
+    def test_env_override_non_numeric_falls_back_to_the_default(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": "abc"}):
+            self.assertEqual(wd._compact_recent_human_window(),
+                             wd.COMPACT_RECENT_HUMAN_ACTIVITY_S)
+
+    def test_env_override_at_or_above_ttl_is_clamped_below_it(self):
+        huge = str(wd.COMPACT_REQUEST_MAX_AGE_S + 1000)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": huge}):
+            self.assertLess(wd._compact_recent_human_window(),
+                            wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_env_override_exactly_at_ttl_is_clamped_below_it(self):
+        at_ttl = str(wd.COMPACT_REQUEST_MAX_AGE_S)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": at_ttl}):
+            self.assertLess(wd._compact_recent_human_window(),
+                            wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_a_sane_env_override_is_returned_unclamped(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": "60"}):
+            self.assertEqual(wd._compact_recent_human_window(), 60)
+
+    def test_explicit_window_s_param_is_never_clamped(self):
+        # every production call leaves window_s=None; an explicit override
+        # (test/caller-only) is returned verbatim, even outside the sane
+        # range -- the clamp protects only the env/const-derived default.
+        self.assertEqual(wd._compact_recent_human_window(window_s=-5), -5)
+        self.assertEqual(
+            wd._compact_recent_human_window(
+                window_s=wd.COMPACT_REQUEST_MAX_AGE_S + 5),
+            wd.COMPACT_REQUEST_MAX_AGE_S + 5)
 
 
 # --------------------------------------------------------------------------- #
@@ -2704,6 +2897,103 @@ class TestCompactDeliveryTimeBoundaryGate(unittest.TestCase):
                                          projects_dir=proj, min_context=1)
         self.assertEqual(tmux.typed_texts(), [])
         self.assertFalse(handled)
+
+
+# --------------------------------------------------------------------------- #
+# #377 (2026-08-11 live evidence, gk) — the delivery-time veto for "the user
+# just replied to a question": NEITHER job 14 NOR the synchronous path may
+# type `/compact` while a recent human prompt/presence marker exists for
+# this session, unconditionally (no origin exemption) — see
+# `_compact_recent_human_activity`'s own section comment.
+# --------------------------------------------------------------------------- #
+
+class TestCompactRecentHumanActivityBlocksDelivery(unittest.TestCase):
+    SID = "sess-recent-human-delivery"
+    CWD = "/home/x/recenthumanproj"
+    PANE = "%7"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def _proj(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_job14_does_not_deliver_with_a_recent_presence_marker(self):
+        proj = self._proj()
+        # a real ✅ DONE boundary -- would deliver on its own (see the
+        # positive control below); only the presence marker should block it.
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
+        _touch_active_marker(self, self.SID, age=5)
+        path = self._p()
+        now = time.time()
+        wd.record_compact_request(self.SID, self.CWD, now=now, path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(now, tmux, {},
+                                          {self.SID: (self.PANE, CB_IDLE_CAP)},
+                                          path=path, projects_dir=proj)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("recent-human" in ln for ln in logs), logs)
+        # left in place, never consumed -- the next sweep retries
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_job14_still_delivers_with_no_recent_human_activity(self):
+        # positive control -- proves the new gate does not regress the
+        # existing, already-working ✅-boundary delivery path.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
+        path = self._p()
+        now = time.time()
+        wd.record_compact_request(self.SID, self.CWD, now=now, path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(now, tmux, {},
+                                   {self.SID: (self.PANE, CB_IDLE_CAP)},
+                                   path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_sync_path_does_not_deliver_with_a_recent_transcript_human_prompt(self):
+        proj = self._proj()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo",
+                                 ctx_tokens=300_000)
+        # a HUMAN entry newer than the marker entry -- proves
+        # `_last_human_prompt_ts` (not just `transcript_last_marker`) is
+        # actually consulted by the new gate.
+        d = Path(proj) / wd.encode_project_dir(self.CWD)
+        p = d / (self.SID + ".jsonl")
+        from datetime import datetime, timezone
+        iso = datetime.fromtimestamp(now - 5, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z")
+        with open(p, "a") as f:
+            f.write(json.dumps({"type": "user", "timestamp": iso,
+                                "message": {"content": "odpoveď na otázku"}})
+                    + "\n")
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                         projects_dir=proj, min_context=1,
+                                         now=now)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(handled)
+
+    def test_sync_path_still_delivers_with_no_recent_human_activity(self):
+        proj = self._proj()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo",
+                                 ctx_tokens=300_000)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                         projects_dir=proj, min_context=1,
+                                         now=now)
+        self.assertEqual(handled, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
 
 
 class TestCompactRequestExpiry(unittest.TestCase):
