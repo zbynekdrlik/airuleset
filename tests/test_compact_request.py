@@ -6407,6 +6407,61 @@ class TestCompactMarkerHoldGraceElapsed(unittest.TestCase):
         self.assertTrue(any("not-a-boundary" in ln for ln in logs2), logs2)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
+    def test_a_new_hold_episode_after_the_marker_recovers_gets_its_own_fresh_grace(self):
+        # #394-review F1 -- `not_boundary_since` must be CLEARED the moment
+        # the block itself clears (the marker genuinely reads a boundary
+        # again), even on a sweep that still doesn't deliver for an
+        # UNRELATED reason (here: the pane happens to be busy). Otherwise a
+        # LATER, genuinely NEW hold (the transcript goes back to ⏳)
+        # silently inherits the OLD, already-elapsed anchor and delivers on
+        # a hold that has barely started -- exactly the "compact a plain ⏳
+        # WORKING turn" shape #333 exists to forbid. Reproduced live against
+        # the pre-fix code by the adversarial review's own repro script
+        # before this test was written.
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
+                                  origin=self.PROVEN)
+
+        # sweep 1: a fresh hold -- refuse, stamp the anchor at t0.
+        tmux1 = CompactFakeTmux(CB_IDLE_CAP)
+        wd.compact_ticket_boundary(
+            t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(
+            wd.load_compact_requests(path)[self.SID]["not_boundary_since"], t0)
+
+        # sweep 2: the marker genuinely recovers (a real ✅ boundary again)
+        # but the pane happens to be busy right now -- the request survives
+        # (never consumed by the busy skip), but the STALE anchor must be
+        # cleared, since the hold episode it belonged to just ended.
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        t1 = t0 + wd.COMPACT_MARKER_HOLD_GRACE_S + 100
+        tmux2 = CompactFakeTmux(CB_BUSY_CAP)
+        logs2 = wd.compact_ticket_boundary(
+            t1, tmux2, {}, {self.SID: (self.PANE, CB_BUSY_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertTrue(any("skip busy" in ln for ln in logs2), logs2)
+        self.assertNotIn("not_boundary_since",
+                         wd.load_compact_requests(path)[self.SID])
+
+        # sweep 3: a genuinely NEW hold starts (⏳ again) -- it must get its
+        # OWN fresh grace window, never the stale, already-elapsed one from
+        # sweep 1's episode.
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t2 = t1 + 1
+        tmux3 = CompactFakeTmux(CB_IDLE_CAP)
+        logs3 = wd.compact_ticket_boundary(
+            t2, tmux3, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux3.typed_texts(), [], logs3)
+        self.assertTrue(any("skip not-a-boundary" in ln for ln in logs3), logs3)
+        self.assertEqual(
+            wd.load_compact_requests(path)[self.SID]["not_boundary_since"], t2)
+
 
 class TestCompactMarkerHoldGraceRelationship(unittest.TestCase):
     """#394 -- mirrors TestCompactDeferGraceRelationship exactly: the grace
@@ -6438,6 +6493,62 @@ class TestCompactMarkerHoldInGrace(unittest.TestCase):
     def test_unmeasurable_age_stays_in_grace(self):
         self.assertTrue(wd._compact_marker_hold_in_grace(None, 1000))
         self.assertTrue(wd._compact_marker_hold_in_grace("garbage", 1000))
+
+    def test_env_override_is_honored(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "10"}):
+            self.assertFalse(wd._compact_marker_hold_in_grace(1000, 1015))
+            self.assertTrue(wd._compact_marker_hold_in_grace(1000, 1005))
+
+    def test_explicit_grace_param_overrides_env_and_default(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "9999"}):
+            self.assertFalse(
+                wd._compact_marker_hold_in_grace(1000, 1050, grace=10))
+
+
+class TestCompactMarkerHoldGraceEnvClamp(unittest.TestCase):
+    """#394-review F2 -- mirrors `TestCompactLiveTasksInGrace`'s own env-clamp
+    tests exactly, for the sibling `_compact_marker_hold_grace`: mutating away
+    its ENTIRE clamp body (`return raw`) passed the whole suite before these
+    existed -- the adversarial review's own mutation. A misconfigured env
+    override must never disable the override outright (0/negative) or
+    recreate the lapse-before-grace starvation (>= the request TTL)."""
+
+    def test_env_override_negative_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "-100"}):
+            self.assertEqual(wd._compact_marker_hold_grace(), 1)
+
+    def test_env_override_zero_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "0"}):
+            self.assertEqual(wd._compact_marker_hold_grace(), 1)
+
+    def test_env_override_non_numeric_falls_back_to_the_default(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "garbage"}):
+            self.assertEqual(wd._compact_marker_hold_grace(), wd.COMPACT_MARKER_HOLD_GRACE_S)
+
+    def test_env_override_at_or_above_ttl_is_clamped_below_it(self):
+        huge = str(wd.COMPACT_REQUEST_MAX_AGE_S + 1000)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": huge}):
+            self.assertLess(
+                wd._compact_marker_hold_grace(), wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_env_override_exactly_at_ttl_is_clamped_below_it(self):
+        at_ttl = str(wd.COMPACT_REQUEST_MAX_AGE_S)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": at_ttl}):
+            self.assertLess(
+                wd._compact_marker_hold_grace(), wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_a_sane_env_override_is_returned_unclamped(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_MARKER_HOLD_GRACE_S": "600"}):
+            self.assertEqual(wd._compact_marker_hold_grace(), 600)
+
+    def test_explicit_grace_param_is_never_clamped(self):
+        # every production call leaves grace=None; an explicit override
+        # (test/caller-only) is returned verbatim, even outside the sane
+        # range -- the clamp protects only the env/const-derived default.
+        self.assertEqual(wd._compact_marker_hold_grace(grace=-5), -5)
+        self.assertEqual(
+            wd._compact_marker_hold_grace(grace=wd.COMPACT_REQUEST_MAX_AGE_S + 5),
+            wd.COMPACT_REQUEST_MAX_AGE_S + 5)
 
 
 class TestNotBoundarySincePreservedAcrossReRecord(unittest.TestCase):
