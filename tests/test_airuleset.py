@@ -3496,16 +3496,22 @@ class TestManagedSettingsDefaults(TestCase):
         out = airuleset.apply_managed_settings_defaults({})
         self.assertIs(out["disableAgentView"], True)
 
-    def test_forces_classic_tui_renderer(self):
-        # tui="default" pins the classic inline renderer. Without the key, an
-        # Anthropic A/B gate decides — a fresh account (david@gk, 2026-07-09) got
-        # tui="fullscreen": output stays in the tmux ALTERNATE screen, nothing
-        # lands in scrollback, Ctrl+B [ history is empty (user: "neprijatelne").
-        # Must also OVERRIDE an existing "fullscreen" (the accepted-dialog case).
+    def test_forces_fullscreen_tui_renderer(self):
+        # #376 REVERSES the earlier classic pin: fullscreen keeps the WHOLE
+        # conversation in its OWN app-internal scrollback (PgUp/PgDn, Ctrl+O),
+        # confirmed by Anthropic's own docs to survive repeated compaction —
+        # classic instead draws into tmux's NATIVE scrollback, which a
+        # resize/relayout genuinely duplicates/loses bands of (upstream
+        # anthropics/claude-code#84247 + #46834, both still open). Must also
+        # override an existing "classic"/"default" value (a box that manually
+        # switched back, or a pre-#376 install).
         out = airuleset.apply_managed_settings_defaults({})
-        self.assertEqual(out["tui"], "default")
-        out = airuleset.apply_managed_settings_defaults({"tui": "fullscreen"})
-        self.assertEqual(out["tui"], "default")
+        self.assertEqual(out["tui"], "fullscreen")
+        self.assertEqual(out["tui"], airuleset.MANAGED_TUI)
+        out = airuleset.apply_managed_settings_defaults({"tui": "default"})
+        self.assertEqual(out["tui"], "fullscreen")
+        out = airuleset.apply_managed_settings_defaults({"tui": "classic"})
+        self.assertEqual(out["tui"], "fullscreen")
 
     def test_disables_the_input_box_prompt_suggestion(self):
         # #189: Claude Code renders its predicted-next-prompt suggestion as
