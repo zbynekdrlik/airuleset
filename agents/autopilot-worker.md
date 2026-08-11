@@ -189,7 +189,8 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   or duplicate whatever the other workers in the same round are doing.
 - **Your job stops at a green LOCAL result on your OWN branch**, committed inside your worktree:
   version bump → per-issue TDD (RED→GREEN, each member its own `Closes #<n>` commit) → local
-  `/review` + `/requesting-code-review` clean → the local test suite green. Do NOT wait for CI —
+  `/review` + `/requesting-code-review` clean (via CYCLE step 6's dispatch shape below — never the
+  built-in review/code-review Skill, #363) → the local test suite green. Do NOT wait for CI —
   there is no CI to wait for yet; the supervisor's ONE integration wave triggers it after merging
   every worker's branch.
 - **Return your branch name AND worktree path in your evidence block**, not a PR link or merge
@@ -300,11 +301,12 @@ yourself — just do your work; the lock is the supervisor's concern.
 **Worktree-mode STOP POINT: steps 5–10 below describe the SERIAL-FALLBACK flow (push, PR, merge,
 deploy, your own run-card).** In `isolation: "worktree"` mode (the default — see WORKTREE
 AWARENESS above), you STOP after step 4 once every member is committed on your OWN worktree
-branch and local `/review` + `/requesting-code-review` + the local test suite are clean — do
-NOT push, open a PR, merge, wait for CI, deploy, or fire a run-card yourself. Report your branch
-name + worktree path and RETURN; the supervisor's Step 4 (`skills/autopilot/SKILL.md`) does
-steps 5–10 below ONCE for the whole round. Continue with steps 5–10 yourself ONLY in the
-documented serial fallback (no `isolation:`).
+branch and local `/review` + `/requesting-code-review` + the local test suite are clean — via ONE
+self-contained fresh-context `general-purpose` review dispatch, NEVER the built-in review/
+code-review Skill (#363, CYCLE step 6 below) — do NOT push, open a PR, merge, wait for CI, deploy,
+or fire a run-card yourself. Report your branch name + worktree path and RETURN; the supervisor's
+Step 4 (`skills/autopilot/SKILL.md`) does steps 5–10 below ONCE for the whole round. Continue with
+steps 5–10 yourself ONLY in the documented serial fallback (no `isolation:`).
 
 5. Commit each member on `dev` with its own `Closes #<n>` message. After ALL members are committed,
    push **once** (one push for the whole batch — `ci-push-discipline.md`), then wait for CI.
@@ -326,6 +328,20 @@ documented serial fallback (no `isolation:`).
 6. Open ONE PR `dev`→`main` whose body lists `Closes #<n>` for **EVERY** member (separate lines, so
    GitHub closes them all on merge). Drive EVERY gate green: CI all jobs, `mergeable: true` +
    `mergeable_state: "clean"`, `/review` AND `/requesting-code-review` both 0 🔴 0 🟡 0 🔵.
+   **NEVER invoke the built-in `Skill({skill: "review"})` / `Skill({skill: "code-review"})` tool for
+   either audit line — it is a Claude Code PLATFORM skill this repo does not own and cannot fix, and
+   it has proven to spiral into a disproportionate multi-agent fan-out (10 sub-agents, 780K+ tokens
+   spent before even reaching an interim status), become addressable across UNRELATED tickets/
+   sessions mid-task, and orphan SILENTLY across a session-limit reset with no way to tell "still
+   working" from "dead" (#363 — filed from live experience: exactly this happened on #354's own
+   worktree, alongside a `requesting-code-review`-shaped `general-purpose` dispatch that ALSO
+   orphaned the same way — that half is the SEPARATE, ALREADY-DOCUMENTED async-dispatch fragility
+   class, `ci-monitoring.md`/`verify-launched-work-liveness.md`, never specific to review). Satisfy
+   BOTH audit lines with ONE self-contained, fresh-context `general-purpose` subagent dispatch — root
+   cause + requirements + the exact commit/diff range, digest in, verdict out (the SAME shape a gated
+   hard-task escalation already uses, `model-awareness.md`) — never a background `Skill` call. This
+   is the shape that has reliably worked (#353, #354, #358, #359, #361, #362); the built-in review
+   skill has not.**
    **Record that pass as its own durable comment too (#214) — the supervisor's completion-report
    audit line only relays your CLAIM, it is never a substitute for the review actually having
    happened.** For EACH member, post `gh issue comment <N> --body "<ran /review +
