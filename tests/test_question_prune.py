@@ -88,14 +88,25 @@ class PruneAnsweredQuestions(unittest.TestCase):
             _user(self.qts + 600, "<task-notification>\n<task-id>x</task-id>"),
             _user(self.qts + 650, "<command-name>/compact</command-name>"),
             _user(self.qts + 700, [{"type": "tool_result", "content": "ok"}]),
-            # #366 -- GOAL_QUESTION_PARK_TEXT (job 9's own 30-min unanswered-
-            # question backstop) was missing from _MACHINE_PROMPT_PREFIXES.
-            _user(self.qts + 750,
-                 "question-timeout: 30 min bez odpovede na poslednu "
-                 "otazku. Zaparkuj TENTO tiket ..."),
+            # #366 -- GOAL_QUESTION_PARK_TEXT (the 30-min unanswered-question
+            # backstop) was missing from _MACHINE_PROMPT_PREFIXES. Use the
+            # REAL constant (review MINOR-2), not a hand-copied literal --
+            # a hand-copy stays green forever even if the constant's own
+            # wording later drifts away from the "question-timeout:" prefix
+            # this test exists to lock.
+            _user(self.qts + 750, wd.GOAL_QUESTION_PARK_TEXT),
         ])
         self.assertEqual(self._prune(), [])
         self.assertIn("888001", notify.load_questions(self.qpath))
+
+    def test_the_park_text_constant_still_starts_with_the_locked_prefix(self):
+        # #366 review MINOR-2: nothing else ties GOAL_QUESTION_PARK_TEXT to
+        # the "question-timeout:" entry in _MACHINE_PROMPT_PREFIXES -- a
+        # future rewording of the constant's OWN head could silently
+        # regress production while every other test (which uses the real
+        # constant, per the fix above) stays green for the wrong reason.
+        self.assertTrue(wd.GOAL_QUESTION_PARK_TEXT.startswith("question-timeout:"),
+                        wd.GOAL_QUESTION_PARK_TEXT)
 
     def test_compact_continuation_summary_never_counts_as_an_answer(self):
         # #366 -- ask-and-continue (❓ ASKED + ⏳ WORKING) keeps a session

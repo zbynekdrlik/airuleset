@@ -2604,7 +2604,13 @@ _MACHINE_PROMPT_PREFIXES = (
     # question backstop, ~8000 lines below) is ALSO a machine-typed nudge,
     # not a human answer -- without this entry a session whose ❓ went
     # unanswered 30+ minutes would have that nudge itself misread as "the
-    # user answered", pruning the still-pending question entry.
+    # user answered", pruning the still-pending question entry. #366
+    # review MINOR-1: this entry ALSO propagates into the derived
+    # `_GOAL_BLOCKED_ANSWER_TRANSPARENT_PREFIXES` tuple below (built FROM
+    # this list) -- verified correct for that sibling caller too (a park
+    # nudge landing before the user answers a genuine ❓ NEEDS YOU must
+    # stay BLOCKED, never read as "released"), locked by its own test in
+    # `tests/test_goal_rearm.py`.
     "question-timeout:")
 
 # #366 -- a `/compact` continuation-summary entry (Claude Code's own
@@ -2622,7 +2628,15 @@ _MACHINE_PROMPT_PREFIXES = (
 # in the loop below so a future summarizer rewording alone can never reopen
 # the gap) -- never back-ported here until now, though `_last_human_
 # prompt_ts` has drifted behind that sibling classifier before (the
-# `"Stop hook feedback:"` gap above).
+# `"Stop hook feedback:"` gap above). #366 review MINOR-3: the sibling's
+# own `_GOAL_BLOCKED_ANSWER_TRANSPARENT_PREFIXES` tuple (~8000 lines
+# below) carries the IDENTICAL wording literal inline, defined AFTER this
+# constant -- kept as its own duplicate rather than refactored to
+# reference this one (touching that already-shipped, reviewed #350 code
+# for a purely cosmetic dedup is out of scope here), so it must be kept
+# in sync if the wording ever changes. Mitigated in both directions by
+# the structural `isCompactSummary` flag check next to each, which does
+# not depend on the wording at all.
 _COMPACT_CONTINUATION_PREFIX = (
     "This session is being continued from a previous conversation")
 

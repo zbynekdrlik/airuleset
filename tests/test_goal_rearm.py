@@ -4000,6 +4000,21 @@ class TestGoalBlockedOnUnansweredQuestion(unittest.TestCase):
         self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
                          "❓ NEEDS YOU: schváliš merge PR #5?")
 
+    def test_a_question_timeout_park_nudge_with_no_reply_yet_stays_blocked(self):
+        # #366 review MINOR-1: adding "question-timeout:" to
+        # _MACHINE_PROMPT_PREFIXES (the GOAL_QUESTION_PARK_TEXT unanswered-
+        # question backstop, #366's own primary fix) silently propagates
+        # into _GOAL_BLOCKED_ANSWER_TRANSPARENT_PREFIXES too (it is
+        # derived from the SAME list) -- this was proven correct by the
+        # #366 review but never locked by a test. Uses the real constant,
+        # same discipline as tests/test_question_prune.py's own #366 fix.
+        p = self._write([
+            assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
+            {"type": "user", "timestamp": "2026-08-10T03:46:00.000Z",
+             "message": {"content": wd.GOAL_QUESTION_PARK_TEXT}}])
+        self.assertEqual(wd._goal_blocked_on_unanswered_question(p),
+                         "❓ NEEDS YOU: schváliš merge PR #5?")
+
     def test_a_task_notification_with_no_reply_yet_stays_blocked(self):
         p = self._write([
             assistant_entry("❓ NEEDS YOU: schváliš merge PR #5?"),
