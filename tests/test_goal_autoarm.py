@@ -1722,6 +1722,74 @@ class TestGoalAutoarmVirginCandidateRecentHuman(unittest.TestCase):
         self.assertFalse(any("READY" in ln for ln in logs), logs)
 
 
+class TestArmQuestionBranchRefusesDuringRecentHumanActivity(unittest.TestCase):
+    """#392 -- job 9's MAIN arm-question-visible branch (both the `draft`
+    stash sub-branch and the plain bare-box sub-branch) had NO recent-
+    human-activity hard gate at all, unlike `_goal_autoarm_virgin_
+    candidate` (#339) and job 14's `_compact_recent_human_activity`
+    (#377) -- the exact gap that let a delivery land in a pane the user
+    was ACTIVELY TYPING in (the live dev1 incident this ticket was filed
+    from). Reuses `_goal_autoarm_recent_human_activity`, checked ONCE
+    right after a transcript resolves, before either delivery sub-branch,
+    so a genuine recent human prompt refuses BOTH shapes with zero
+    keystrokes sent."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sid = "armq-recenthuman"
+
+    def _write(self, entries):
+        return write_transcript(entries, self.tmp.name, VIRGIN_CWD, self.sid)
+
+    def test_bare_box_refuses_with_a_recent_human_prompt(self):
+        now = time.time()
+        self._write([human_entry(now - 120)])
+        tmux, logs = go(ARM_PANE, now=now, projects_dir=self.tmp.name)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "recent human" in ln
+               for ln in logs), logs)
+
+    def test_held_draft_refuses_before_the_stash_primitive_is_ever_called(
+            self):
+        now = time.time()
+        self._write([human_entry(now - 120)])
+        calls = []
+
+        def _fake(pid, text, run, captured=None, logs=None, sleep_fn=None):
+            calls.append((pid, text, captured))
+            return True
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_fake):
+            tmux, logs = go(USER_TEXT_PANE, now=now,
+                            projects_dir=self.tmp.name)
+        self.assertEqual(calls, [], "the stash primitive must never be "
+                         "invoked while the user is actively typing")
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "recent human" in ln
+               for ln in logs), logs)
+
+    def test_refusal_does_not_consume_the_dedup_window(self):
+        now = time.time()
+        self._write([human_entry(now)])
+        state = {}
+        go(ARM_PANE, state=state, now=now, projects_dir=self.tmp.name)
+        t2, logs2 = go(ARM_PANE, state=state,
+                       now=now + wd.GOAL_AUTOARM_RECENT_HUMAN_S + 5,
+                       projects_dir=self.tmp.name)
+        self.assertTrue(t2.typed(), logs2)
+
+    def test_no_recent_activity_still_arms_normally(self):
+        # positive control -- must not regress job 9's own existing
+        # feature: a genuinely at-rest arm-question pane keeps arming.
+        now = time.time()
+        self._write([])
+        tmux, logs = go(ARM_PANE, now=now, projects_dir=self.tmp.name)
+        self.assertTrue(tmux.typed(), logs)
+
+
 class TestGoalAutoarmRecentHumanActivityUnit(unittest.TestCase):
     """Direct unit coverage of `_goal_autoarm_recent_human_activity` itself
     -- independent of the whole `goal_autoarm` sweep, so the clamp/fallback
