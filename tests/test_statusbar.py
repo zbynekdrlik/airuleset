@@ -650,6 +650,111 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(cache["open"], 0)      # own UNHANDLED (#391): 1 - gk(1)
             self.assertEqual(cache["gk"], 1)         # recovered -- re-handed
 
+    def test_refresh_an_invisible_bounce_stays_unhandled_despite_a_stale_hand_off_comment(self):
+        # #391 CRITICAL-1 (fresh-context adversarial review): the comment
+        # fallback used to OVERWRITE the label-derived bounce override with
+        # handed=True whenever the LAST (and only) comment signal was a
+        # stale pre-bounce READY-FOR-REVIEW -- reachable through the
+        # sanctioned Discord nudge-lane bounce (a BARE prio:bounce label +
+        # a sub-dev-authored ACK, no gatekeeper-shaped comment at all --
+        # skills/autopilot/SKILL.md). An invisible bounce (no recognised
+        # gatekeeper comment anywhere in the thread) must never re-upgrade
+        # a bounce-labeled ticket back to handed -- the safe (never-stop)
+        # direction for a /goal stop-proof. Distinguishes this from
+        # test_refresh_invalidates_a_stale_hand_off_once_a_bounce_finding_
+        # follows_it above, whose fixture's LAST comment IS a recognised
+        # gatekeeper finding (so it already resolved correctly even before
+        # this fix) -- here there is NO gatekeeper-shaped comment at all.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            comments = json.dumps([
+                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
+            ])
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,'
+                '"labels":[{"name":"ready-for-review"},'
+                '{"name":"prio:bounce"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(
+                cache["open"], 1,
+                "a bounce-labeled ticket must not be flipped back to "
+                "handed by a stale hand-off comment when no gatekeeper "
+                "comment is visible anywhere in the thread")
+            self.assertEqual(cache["gk"], 0)
+
+    def test_footer_refresh_actually_calls_the_shared_handed_derivation(self):
+        # MAJOR-2 (fresh-context adversarial review of #391): mirrors the
+        # sibling cmd_slice_quals sentinel test (#181 I7's own shape) for
+        # the FOOTER'S own --refresh path -- proves it genuinely consumes
+        # `_slice_mine_and_handed`'s own returned `(rows, handed, failed)`
+        # rather than a re-inlined, potentially-drifted derivation. A
+        # reimplementation that re-derives handed status itself instead of
+        # calling the shared function fails this even though every
+        # label-only fixture test above would still pass it.
+        sentinel_rows = {
+            5: {"number": 5, "title": "handed",
+                "createdAt": "2026-07-01T00:00:00Z", "labels": []},
+            6: {"number": 6, "title": "unhandled",
+                "createdAt": "2026-07-02T00:00:00Z", "labels": []},
+        }
+        sentinel_handed = {5: True, 6: False}
+
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *) echo "[]";;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            with unittest.mock.patch.dict(
+                    os.environ,
+                    {"HOME": home,
+                     "PATH": "%s:%s" % (bindir, os.environ["PATH"])}):
+                with unittest.mock.patch.object(
+                        airuleset, "_slice_quals",
+                        return_value=["label:stream:montalu"]):
+                    with unittest.mock.patch.object(
+                            airuleset, "_slice_mine_and_handed",
+                            return_value=(sentinel_rows, sentinel_handed,
+                                          False)) as sm:
+                        airuleset.cmd_tickets_status(
+                            unittest.mock.Mock(cwd=repo, refresh=True))
+            sm.assert_called()
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+        self.assertEqual(
+            cache["open"], 1,
+            "the footer's --refresh did not consume _slice_mine_and_"
+            "handed's own returned handed map")
+        self.assertEqual(cache["gk"], 1)
+
     def test_refresh_rejects_a_bare_mention_or_a_gatekeeper_finding_comment(self):
         # #313 pt 2 adversarial review MAJOR-2: `_is_readiness_comment` is
         # the SAME precise, line-anchored matcher

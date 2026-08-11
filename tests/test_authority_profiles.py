@@ -1082,6 +1082,118 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
             "a returned bounce ticket must stay in the stop-proof's own "
             "count, or the loop reads REVIEW as DONE")
 
+    def test_an_invisible_bounce_stays_unhandled_even_with_a_stale_hand_off_comment(self):
+        # #391 CRITICAL-1 (fresh-context adversarial review): mirrors
+        # test_statusbar.py's own footer-layer pin. A `prio:bounce` ticket
+        # whose comment thread carries ONLY a stale pre-bounce
+        # READY-FOR-REVIEW comment (no gatekeeper-shaped comment anywhere
+        # -- the sanctioned Discord nudge-lane bounce shape,
+        # skills/autopilot/SKILL.md: a bare label + a sub-dev-authored ACK)
+        # must stay in the stop-proof's own UNHANDLED count -- the comment
+        # fallback must not silently overwrite the label-derived bounce
+        # override just because the last (and only) comment signal is True.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "label:stream:montalu" in j:
+                return ('[{"number": 5, "title": "bounced no comment", '
+                        '"createdAt": "2026-07-01T00:00:00Z", '
+                        '"labels": [{"name": "ready-for-review"}, '
+                        '{"name": "prio:bounce"}]}]')
+            if "issues/5/comments" in j:
+                return '[{"body": "READY-FOR-REVIEW: fork pushed, tests green"}]'
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user",
+                                 return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(
+            buf.getvalue().strip(), "1",
+            "a bounce-labeled ticket must not be flipped back to handed "
+            "by a stale hand-off comment when no gatekeeper comment is "
+            "visible anywhere in the thread")
+
+    def test_a_genuine_re_hand_off_visible_in_comments_still_counts_as_handed(self):
+        # The positive control for the test above: a bounce comment IS
+        # visible in the thread, followed by a genuine later re-hand-off --
+        # this must still resolve to handed. Mirrors test_statusbar.py::
+        # test_refresh_recovers_a_genuine_re_hand_off_after_a_bounce_finding
+        # for the footer, at the slice-quals layer.
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "label:stream:montalu" in j:
+                return ('[{"number": 5, "title": "re-handed", '
+                        '"createdAt": "2026-07-01T00:00:00Z", '
+                        '"labels": [{"name": "prio:bounce"}]}]')
+            if "issues/5/comments" in j:
+                return ('[{"body": "READY-FOR-REVIEW: fork pushed, tests green"},'
+                        '{"body": "**GATEKEEPER FINDING:** needs another fix, '
+                        'bouncing back."},'
+                        '{"body": "READY-FOR-REVIEW: addressed the finding, '
+                        're-pushed."}]')
+            return "[]"
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user",
+                                 return_value="montalu"):
+                with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        self.assertEqual(buf.getvalue().strip(), "0")
+
+    def test_slice_quals_actually_calls_the_shared_handed_derivation(self):
+        # MAJOR-2 (fresh-context adversarial review of #391): no test
+        # anywhere in this repo referenced `_slice_mine_and_handed` by name
+        # before this one -- a re-inlined, drifted derivation inside
+        # cmd_slice_quals (e.g. silently dropping the comment-fallback/
+        # recovery enrichment) would pass every pre-existing slice-quals
+        # test above, since all of them are label-only fixtures. Mirrors
+        # #181 I7's own sentinel-mock shape (`test_cmd_slice_quals_
+        # actually_calls_the_shared_slice_quals_function`).
+        import contextlib
+        import io
+        import unittest.mock as mk
+
+        sentinel_rows = {
+            5: {"number": 5, "title": "handed",
+                "createdAt": "2026-07-01T00:00:00Z", "labels": []},
+            6: {"number": 6, "title": "unhandled",
+                "createdAt": "2026-07-02T00:00:00Z", "labels": []},
+        }
+        sentinel_handed = {5: True, 6: False}
+
+        buf = io.StringIO()
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            with mk.patch.object(airuleset, "_current_user",
+                                 return_value="montalu"):
+                with mk.patch.object(
+                        airuleset, "_slice_mine_and_handed",
+                        return_value=(sentinel_rows, sentinel_handed,
+                                      False)) as sm:
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            mk.Mock(count=True, list=False, extra=None))
+        sm.assert_called()
+        self.assertEqual(
+            buf.getvalue().strip(), "1",
+            "cmd_slice_quals did not consume _slice_mine_and_handed's own "
+            "returned handed map -- it may be re-deriving handed status "
+            "itself instead of calling the shared derivation")
+
 
 class TestRunCardHeartbeatSurvivesStreamCards(TestCase):
     """#181 I6 (round 2 regression): _write_autopilot_progress is the ONLY
