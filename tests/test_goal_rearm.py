@@ -4798,10 +4798,23 @@ class GoalJanitorBase(unittest.TestCase):
     def _write_armed_transcript(self):
         write_transcript([marker_entry("set", PAYLOAD)], self.tmp.name)
 
-    def _run(self, tmux, now=None, state=None):
+    def _run(self, tmux, now=None, state=None, watch=True, pid="%1"):
+        """`watch=True` (the default for THIS base's own recovery tests)
+        pre-seeds `state['janitor_watch'][pid]` — a watchdog delivery job's
+        OWN record that IT recently attempted something to this exact pane
+        (#372 adversarial-review CRITICAL-1 fix: the janitor may never act
+        on content-shape alone, since a REAL human produces both
+        recognized shapes in completely ordinary use — typing their own
+        `/goal` line per the documented autopilot arming flow, or pasting
+        a long block that collapses identically). Tests proving the
+        janitor stays silent on genuinely untouched panes pass
+        `watch=False` explicitly."""
         self._write_armed_transcript()
-        return wd.goal_rearm(now or time.time(), tmux,
-                             state if state is not None else {},
+        now = now or time.time()
+        state = state if state is not None else {}
+        if watch:
+            state.setdefault("janitor_watch", {})[pid] = now
+        return wd.goal_rearm(now, tmux, state,
                              send_fn=self._send, dry_run=False,
                              projects_dir=self.tmp.name,
                              sleep_fn=lambda s: None)
@@ -4951,6 +4964,185 @@ class TestJanitorDeadlockHasAReachableExit(GoalJanitorBase):
         self.assertTrue(self.pings, "a genuinely unrecoverable stuck box "
                         "must ping loudly, never fail silently")
         self.assertTrue(any("ESCALATED" in ln for ln in logs), logs)
+
+
+class TestJanitorRequiresProvenanceNeverContentAlone(GoalJanitorBase):
+    """#372 adversarial-review CRITICAL-1: content shape alone (a
+    collapsed-paste placeholder, or a literal `/goal `/`/compact` prefix)
+    is NOT proof of ownership — a real human produces BOTH shapes in
+    completely ordinary use: typing their own `/goal` line to manually arm
+    it (the documented autopilot flow prints exactly this for a human to
+    paste), or pasting a long block that Claude Code collapses identically.
+    Live-reproduced by the review: without a gate, the janitor silently and
+    unrecoverably destroyed both.
+
+    The janitor may act ONLY on a pane where a watchdog delivery job's OWN
+    bookkeeping (`state['janitor_watch']`) proves IT recently attempted
+    something there — never from resemblance alone. These tests drive the
+    exact same two scenarios the review reproduced, with NO watch marker
+    seeded (`watch=False`) — i.e. genuinely nothing was ever attempted by
+    any watchdog job."""
+
+    def test_a_users_own_typed_goal_line_is_never_touched(self):
+        # the EXACT reviewer reproduction: a human manually typing their
+        # own /goal line (the documented arming flow), no watchdog
+        # delivery ever attempted to this pane. The janitor itself must
+        # never destructively clear it (no BSpace, ever) -- the PRE-
+        # EXISTING #100 stash-around-delivery flow may still safely PARK
+        # it (never destroy it) around its own unrelated /goal re-arm,
+        # which is correct, unrelated, non-destructive behavior this test
+        # does not re-assert.
+        tmux = _JanitorFakeTmux(
+            box="/goal drive CI to green ... or stop after 40 turns",
+            stash=None)
+        logs = self._run(tmux, watch=False)
+        self.assertNotIn("BSpace", [k for a in tmux.sent for k in a],
+                         "the janitor must NEVER destructively clear "
+                         "content with no provenance signal: %r"
+                         % tmux.sent)
+        self.assertFalse(any("janitor" in ln.lower() for ln in logs), logs)
+        self.assertIn(
+            "/goal drive CI to green ... or stop after 40 turns",
+            (tmux._box, tmux.stash),
+            "the user's own text must be RECOVERABLE somewhere (either "
+            "still in the box or safely parked in the stash) -- never "
+            "gone entirely: box=%r stash=%r" % (tmux._box, tmux.stash))
+
+    def test_a_users_own_pasted_block_is_never_touched(self):
+        # the reviewer's second reproduction: a human pasting a long
+        # block, which Claude Code collapses to the IDENTICAL placeholder
+        # shape a machine delivery produces.
+        tmux = _JanitorFakeTmux(box="[Pasted text #3 +40 lines]", stash=None)
+        logs = self._run(tmux, watch=False)
+        self.assertNotIn("BSpace", [k for a in tmux.sent for k in a],
+                         "the janitor must NEVER destructively clear "
+                         "content with no provenance signal: %r"
+                         % tmux.sent)
+        self.assertIn(
+            "[Pasted text #3 +40 lines]", (tmux._box, tmux.stash),
+            "the user's own pasted block must be RECOVERABLE somewhere, "
+            "never gone entirely: box=%r stash=%r" % (tmux._box, tmux.stash))
+
+    def test_a_users_own_draft_with_stash_occupied_is_never_touched(self):
+        # even with the stash slot independently occupied by something
+        # else, no watch marker means the janitor must not act.
+        tmux = _JanitorFakeTmux(box="/compact", stash="unrelated user stash")
+        logs = self._run(tmux, watch=False)
+        self.assertEqual(tmux._box, "/compact")
+        self.assertEqual(tmux.stash, "unrelated user stash")
+        self.assertNotIn("BSpace", [k for a in tmux.sent for k in a])
+        self.assertNotIn("C-s", [k for a in tmux.sent for k in a])
+
+    def test_watch_marker_present_still_recovers_normally(self):
+        # the positive control -- WITH a genuine provenance signal, the
+        # exact same content IS recovered (proves the gate is a real
+        # precondition, not a change that silently disabled recovery
+        # altogether).
+        tmux = _JanitorFakeTmux(box="/compact", stash=None)
+        logs = self._run(tmux, watch=True)
+        self.assertEqual(tmux._box, "")
+        self.assertTrue(any("RECOVERED" in ln for ln in logs), logs)
+
+
+class TestJanitorRescuesTheDraftBeforeDestroyingIt(GoalJanitorBase):
+    """#372 adversarial-review CRITICAL-1 (fix direction): even on a
+    pane WITH a genuine provenance signal, the janitor must persist a
+    draft-rescue snapshot before any destructive clear -- the SAME
+    established discipline `deliver_with_stash`/`_send_goal_verified`
+    already follow before risking a box's content."""
+
+    def test_rescue_file_is_written_before_the_clear(self):
+        rescue_dir = TemporaryDirectory()
+        self.addCleanup(rescue_dir.cleanup)
+        with m.patch.object(wd, "draft_rescue_dir",
+                            return_value=Path(rescue_dir.name)):
+            tmux = _JanitorFakeTmux(box="/compact", stash=None)
+            self._run(tmux, watch=True)
+        saved = list(Path(rescue_dir.name).glob("*.txt"))
+        self.assertTrue(saved, "the janitor must persist a rescue snapshot "
+                        "of the box before clearing it, exactly like the "
+                        "sibling delivery primitives already do")
+
+
+class TestJanitorNeverCrashesOnAnUnreadableBox(GoalJanitorBase):
+    """#372 adversarial-review MAJOR-1: `_input_line_text` returns `None`
+    (not `""`) for an unreadable box (a spinner, an open dialog, a
+    transient capture failure) -- `cur == ""` does not catch `None`, so a
+    naive `len(cur)` crashes. The crash must never happen: an unreadable
+    box mid-clear is a SAFE ABORT (never guess), and — critically — must
+    NOT propagate up and abort the rest of goal_rearm's sweep for every
+    OTHER pane."""
+
+    class _GoesUnreadableMidClearTmux(_JanitorFakeTmux):
+        """The Escape and the FIRST clear-loop capture read normally; every
+        capture AFTER that returns something `_input_line_text` cannot
+        parse at all (no boundary line whatsoever) -- modeling a dialog
+        opening mid-recovery."""
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._captures = 0
+
+        def __call__(self, argv, timeout=8):
+            j = " ".join(argv)
+            if "capture-pane" in j:
+                self._captures += 1
+                self.sent.append(argv)
+                if self._captures <= 1:
+                    return self._render()
+                return "some fullscreen dialog with no boundary at all\n"
+            return super().__call__(argv, timeout)
+
+    def test_unreadable_mid_clear_does_not_raise(self):
+        tmux = self._GoesUnreadableMidClearTmux(
+            box="/goal STUCK partial condition", stash=None)
+        try:
+            logs = self._run(tmux, watch=True)
+        except TypeError as exc:
+            self.fail("the janitor must never crash on an unreadable box "
+                      "mid-clear: %r" % exc)
+        self.assertTrue(logs, "an unreadable-mid-clear pane must still "
+                        "produce SOME log line, not vanish silently")
+
+    def test_other_panes_still_get_processed_in_the_same_sweep(self):
+        # the crash's own worst consequence: it propagates through
+        # goal_rearm's job-level exception guard and skips EVERY later
+        # candidate pane in the same sweep. Two panes, only the first is
+        # unreadable mid-clear -- the second must still be swept normally.
+        class _TwoPaneTmux(self._GoesUnreadableMidClearTmux):
+            def __call__(self, argv, timeout=8):
+                j = " ".join(argv)
+                if "list-panes" in j:
+                    self.sent.append(argv)
+                    row1 = "%1\tclaude\t" + self.cwd
+                    row2 = "%2\tclaude\t/home/x/devel/other"
+                    if "pane_pid" in j:
+                        return (row1 + "\t4242\n" + row2 + "\t4243")
+                    return row1 + "\n" + row2
+                if argv[2:3] == ["%2"] or (len(argv) > 3 and argv[3] == "%2"):
+                    self.sent.append(argv)
+                    if "capture-pane" in j:
+                        return CONV + FOOTER_LIT   # pane 2: healthy, armed
+                    if "pane_in_mode" in j:
+                        return "0"
+                    return ""
+                return super().__call__(argv, timeout)
+
+        tmux = _TwoPaneTmux(box="/goal STUCK partial condition", stash=None)
+        other_dir = Path(self.tmp.name) / wd.encode_project_dir(
+            "/home/x/devel/other")
+        other_dir.mkdir(parents=True, exist_ok=True)
+        with open(other_dir / "sess2.jsonl", "a") as f:
+            f.write(json.dumps(marker_entry("set", PAYLOAD)) + "\n")
+        state = {"janitor_watch": {"%1": time.time()}}
+        logs = wd.goal_rearm(time.time(), tmux, state, send_fn=self._send,
+                             dry_run=False, projects_dir=self.tmp.name,
+                             sleep_fn=lambda s: None)
+        self.assertTrue(any("goal-rearm error" not in ln for ln in logs),
+                        logs)
+        # pane %2 must have been reached at all -- proof the crash on %1
+        # did not abort the whole sweep.
+        self.assertTrue(any("%2" in str(a) for a in tmux.sent),
+                        "pane %%2 must still be swept: %r" % tmux.sent)
 
 
 if __name__ == "__main__":
