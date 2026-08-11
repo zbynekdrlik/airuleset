@@ -7189,9 +7189,14 @@ def cmd_tickets_status(args):
             # Full-authority (core/gatekeeper) box: N = the LIVE OBLIGATION
             # set — the SAME `_obligation_quals()` union `core-quals --count`
             # itself computes for the `/goal` stop-proof (#367 consistency
-            # guard: never a parallel derivation, so the footer and the
-            # loop's own stop condition can never disagree about what "done"
-            # means). `_obligation_quals()` already folds `_core_search_excl()`
+            # guard: never a parallel derivation, so an ORDINARY code change
+            # cannot make the footer and the loop's stop condition silently
+            # drift apart the way they used to. Not an infallibility claim:
+            # `core-quals --count` additionally REFUSES an untrustworthy
+            # empty result — a broken search index, #181 round 4 — while
+            # this cache can still record a plain `0` from the same
+            # condition; that gap pre-dates #367 and is unchanged by it.
+            # `_obligation_quals()` already folds `_core_search_excl()`
             # (the core partition — the whole backlog MINUS the sub-dev-owned
             # stream:<user> tickets, each reduced stream in AUTHORITY_BY_USER)
             # together with every open ticket carrying a MAINTAINER_ACTION_LABELS

@@ -159,8 +159,13 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     (airuleset.py) calling the SAME `_obligation_quals()`/`_union_open_issues()`
     (full authority) or `_slice_quals()` (reduced authority) that
     `core-quals`/`slice-quals` themselves call for the `/goal` stop-proof —
-    never a parallel derivation — so the footer and the loop's own stop
-    condition can never disagree about which population is "done".
+    never a parallel derivation, so the two cannot drift apart from an
+    ORDINARY code change the way they used to. (This is about the QUERY
+    being shared, not an infallibility claim: `core-quals`/`slice-quals`
+    additionally REFUSE an untrustworthy empty result — a broken search
+    index, #181 round 4 — while this cache can still record a plain `0`
+    from the same condition; that residual gap is pre-existing, not
+    introduced by #367.)
 
     Reads caches only; a stale/missing tickets cache triggers a detached
     background refresh (unless spawn=False) and renders the stale value
