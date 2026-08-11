@@ -1969,6 +1969,94 @@ class TestVirginCandidateBusyBackgroundAgent(unittest.TestCase):
                          "longer busy, not leak forever")
 
 
+class TestVirginCandidateReviewFixRound(unittest.TestCase):
+    """#361-review (fresh-context adversarial review) -- MAJOR + MINOR-2
+    fixes: an ALREADY-armed pane must never pay the bounded transcript
+    read at all (the steady state of a healthy, long-lived /goal loop,
+    which shows bg-agent rows for most of its life and would otherwise
+    re-pay this every 60s sweep forever), and `goal_autoarm`'s own
+    arm-question-branch busy streak (`goalarm_busy[pid]`) must not
+    outlive a routing change into the virgin-candidate path."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tpl_dir = TemporaryDirectory()
+        self.addCleanup(self.tpl_dir.cleanup)
+        self.templates_path = write_templates(self.tpl_dir.name)
+        self.sid = "reviewfixsess"
+
+    def _write(self, entries):
+        return write_transcript(entries, self.tmp.name, VIRGIN_CWD, self.sid)
+
+    def test_an_already_armed_bg_busy_pane_never_reads_the_transcript(self):
+        self._write([_asks_to_arm_entry()])
+        armed_bg_pane = (
+            "● Bežná odpoveď bez arm otázky.\n"
+            "✻ Waiting for 1 background agent to finish\n"
+            "❯ \n"
+            "  ctx ███░  ◎ /goal active (5m)\n")
+
+        def _boom(_path, max_lines=400):
+            raise AssertionError(
+                "the transcript must never be read for an already-armed "
+                "pane")
+
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="full"), \
+             m.patch.object(wd, "_transcript_recently_asked_to_arm",
+                            side_effect=_boom):
+            tmux, _logs = go(armed_bg_pane, projects_dir=self.tmp.name,
+                             templates_path=self.templates_path)
+        self.assertFalse(tmux.typed())
+
+    def test_undeterminable_footer_still_reads_the_transcript(self):
+        # the companion control -- ONLY the confirmed-True case is fast
+        # -pathed; an undeterminable footer (no bare `❯` at all, so
+        # `pane_goal_armed` is None) must still be allowed to reach the
+        # helper -- proving the fast-path did not over-reach to this
+        # case too.
+        self._write([_asks_to_arm_entry()])
+        calls = []
+        real = wd._transcript_recently_asked_to_arm
+
+        def spy(path, max_lines=400):
+            calls.append(path)
+            return real(path, max_lines)
+
+        undeterminable_bg_pane = (
+            "✻ Waiting for 1 background agent to finish\n"
+            "  ctx ███░\n")
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="full"), \
+             m.patch.object(wd, "_transcript_recently_asked_to_arm",
+                            side_effect=spy):
+            go(undeterminable_bg_pane, projects_dir=self.tmp.name,
+              templates_path=self.templates_path)
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_the_arm_question_branchs_busy_streak_clears_when_routing_changes(
+            self):
+        self._write([_asks_to_arm_entry()])
+        state = {}
+        now = time.time()
+        pid = "%1"
+        t1, _logs1 = go(BUSY_PANE, state, now)
+        self.assertFalse(t1.typed())
+        self.assertIn(pid, state.get("goalarm_busy", {}))
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="full"):
+            t2, logs2 = go(NO_QUESTION_PANE, state,
+                           now + wd.GOAL_ARM_WINDOW_S + 5,
+                           projects_dir=self.tmp.name,
+                           templates_path=self.templates_path)
+        self.assertEqual(t2.typed(), [TEMPLATE_FULL], logs2)
+        self.assertNotIn(pid, state.get("goalarm_busy", {}),
+                         "the arm-question branch's own busy streak must "
+                         "clear once routing changes to the virgin path "
+                         "and it goes genuinely idle")
+
+
 class TestArmQuestionBranchBusySkipIsLoud(unittest.TestCase):
     """#361 -- the arm-question branch's own three busy `continue`s used to
     be completely silent. Every pane reaching them has ALREADY had
