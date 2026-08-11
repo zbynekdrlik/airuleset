@@ -56,6 +56,41 @@ class GoalIndicatorAboveBox(unittest.TestCase):
             "  more draft continuation text with no chrome below it at all"])
         self.assertIsNone(pane_goal_armed(cap))
 
+    def test_wrapped_prose_continuation_starting_with_the_glyph_is_never_armed(
+            self):
+        # #393 -- a bare `.startswith(GOAL_INDICATOR)` prefix check is
+        # defeated by ordinary word-wrapped assistant prose: the block's
+        # own leading indent is stripped along with everything before the
+        # glyph, so a rendered CONTINUATION row that happens to start with
+        # "◎ /goal" still satisfies `.startswith` even though genuine
+        # trailing prose (with real punctuation) follows it -- something
+        # the real indicator's own render ("right-aligned, alone on its
+        # line") never has. NOT a genuinely-armed pane.
+        cap = "\n".join([
+            "  Confirmed the render now shows the indicator on its own line:",
+            "  ◎ /goal active, right where the earlier bug expected only "
+            "chrome.",
+            TOP, "❯ ", BOT, STAT, STRIP])
+        self.assertIs(pane_goal_armed(cap), False)
+
+    def test_short_unpunctuated_continuation_is_also_never_armed(self):
+        # #393-review MINOR-1 (fresh-context adversarial review,
+        # 2026-08-12, executed against the real function) -- the FIRST
+        # cut of this fix bounded the tail to an open allowlist of
+        # spaces/word-chars/parens, which still accepted a wrapped-prose
+        # continuation whose first 40 chars happen to contain NO
+        # punctuation at all ("◎ /goal armed", "◎ /goal active and the
+        # loop keeps going" -- 7 of 8 constructed cases matched). The
+        # closed-form regex must reject the SHORTEST, most dangerous one
+        # of those: a bare "◎ /goal armed" continuation row with nothing
+        # else on the line, which the open allowlist alone could not
+        # distinguish from a genuine (but truncated) render.
+        cap = "\n".join([
+            "  Discussing whether the indicator is lit right now:",
+            "  ◎ /goal armed",
+            TOP, "❯ ", BOT, STAT, STRIP])
+        self.assertIs(pane_goal_armed(cap), False)
+
 
 if __name__ == "__main__":
     unittest.main()

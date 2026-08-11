@@ -6193,6 +6193,113 @@ def _goal_user_exit_ts(tpath, off=None, tail_bytes=None):
     return best
 
 
+# #393 (david2 live) — the `/goal` template's OWN instruction text tells a
+# session to "re-print this /goal line if issues remain" as part of its
+# ordinary STOP-CONDITIONS resolution, so a session can reprint the arm
+# question purely as ROUTINE, AUTOMATIC behaviour, with zero genuine user
+# request behind it. `scan_goal_markers`'s own `arm_after` field (any
+# `type=="assistant"` entry matching the arm-question regex after the
+# marker) cannot tell that apart from a genuine user-driven re-ask — this
+# is the stricter, STRUCTURAL discriminator: only a genuine, human-typed
+# `type=="user"` entry counts, matched by literal position (never a
+# mention nested inside quoted/foreign content), the same "mention vs use"
+# discipline `_EXIT_CMD_MARKER`'s own `.startswith` check already applies.
+#
+# #393-review CRITICAL-1/2 (fresh-context adversarial review,
+# 2026-08-12, executed against 1787 real local transcript files / 1127
+# real occurrences of the substring "/autopilot"): a real, human-typed
+# slash-command invocation is NEVER stored as bare `/autopilot` text —
+# Claude Code writes it as a fixed two-tag sequence, `<command-message>
+# autopilot</command-message>` immediately followed by `<command-name>
+# /autopilot</command-name>` (a SKILL command's own tag ORDER — the
+# OPPOSITE of a BUILTIN command's `<command-name>`-first order this
+# file's `_EXIT_CMD_MARKER` already matches for `/exit`). The original
+# `r"^/autopilot\b"` therefore matched ZERO of the 1127 real occurrences
+# (making the whole release condition dead — a verbatim reintroduction
+# of #170) AND, independently, matched every real prose message merely
+# NAMING the worker (`/autopilot-worker …` — `\b` fires on the hyphen).
+# Anchoring on the CONFIRMED real tag sequence fixes both at once: no
+# genuine human sentence opens with this exact XML-shaped tag pair, and
+# every one of the 1127 real corpus invocations is this exact string.
+_AUTOPILOT_INVOKE_RX = re.compile(
+    r"^" + re.escape("<command-message>autopilot</command-message>")
+    + r"\s*" + re.escape("<command-name>/autopilot</command-name>"))
+
+
+def _goal_autopilot_reinvoked_after(tpath, cutoff_ts):
+    """True when a genuine, human-typed `/autopilot` invocation appears in
+    the transcript with a timestamp STRICTLY newer than `cutoff_ts` (#393).
+
+    Reuses the SAME top-level-string / non-meta / non-tool_result / non-
+    compact-summary filter `_last_human_prompt_ts` already applies — an
+    assistant's own reprint of the arm-question text (`type=="assistant"`)
+    is excluded here by CONSTRUCTION, never merely because of what it
+    says, and a QUOTED `/autopilot` (a tool_result, one session pasting
+    another's transcript) is never mistaken for a genuine invocation.
+
+    `cutoff_ts=None` (an unmeasurable clear-marker timestamp) returns
+    False — no anchor to compare against, and the SAFE direction for an
+    unmeasurable ordering is "the clear still governs", matching this
+    file's own established fail-toward-suppression convention for the
+    clear marker itself (`_goal_was_cleared_by_user`'s own `mark_ts is
+    None -> False` rule, one function down).
+
+    Reads the WHOLE file (no tail window) — #393-review MAJOR-1
+    (executed): the original `tail_bytes=2_000_000` default was SMALLER
+    than `GOAL_MARK_TAIL_BYTES` (4 MB), the window `scan_goal_markers`
+    itself uses to bootstrap the clear marker this function is asked to
+    check release evidence for — so a genuine `/autopilot` invocation
+    sitting between 2 MB and 4 MB from EOF was structurally unreachable
+    even though the marker referencing it was in view, permanently
+    suppressing the loop for exactly the long-lived, continuously-
+    writing population #173 already fixed this identical shape for one
+    function over (`_goal_dark_died_by_outage`'s own `off=0` read). This
+    call fires only for the narrow, already-rare population that is BOTH
+    cleared AND being checked for release — never a healthy sweep — so
+    paying the full-file cost here is deliberate, matching #173's own
+    stated tradeoff.
+
+    Unreadable transcript -> False, never a guess toward re-arming."""
+    if cutoff_ts is None:
+        return False
+    from datetime import datetime
+    try:
+        with open(tpath, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return False
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(e, dict) or e.get("type") != "user" or e.get("isMeta"):
+            continue
+        if e.get("isCompactSummary"):
+            continue
+        c = (e.get("message") or {}).get("content")
+        if isinstance(c, str):
+            text = c
+        elif isinstance(c, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_result"
+                   for b in c):
+                continue
+            text = " ".join(b.get("text", "") for b in c
+                            if isinstance(b, dict) and b.get("type") == "text")
+        else:
+            continue
+        if not _AUTOPILOT_INVOKE_RX.match(text.strip()):
+            continue
+        try:
+            ts = datetime.fromisoformat(
+                str(e.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            continue
+        if ts > cutoff_ts:
+            return True
+    return False
+
+
 def _goal_was_cleared_by_user(tpath):
     """True when this session's NEWEST `/goal` marker is a CLEAR (#170), OR
     when an explicit `/exit` postdates the newest goal marker (#335 —
@@ -6268,8 +6375,19 @@ def _goal_was_cleared_by_user(tpath):
         _off, mark = scan_goal_markers(tpath)
     except Exception:
         mark = None
+    # #393 — the release condition is now the STRICT signal
+    # (`_goal_autopilot_reinvoked_after`, a genuine human `/autopilot`),
+    # never the looser `mark.get("arm_after")` (any assistant reprint,
+    # including a purely automatic one — see that helper's own docstring).
+    # `arm_after` is still COMPUTED by `scan_goal_markers` (unchanged) but
+    # is no longer consulted anywhere in this file (#393-review MINOR-3,
+    # confirmed by grep — no remaining production reader). Left in place
+    # rather than removed: `scan_goal_markers` is a shared, widely-used
+    # marker reader and this repo's own FREEZE discourages touching a
+    # shared function's return shape for a caller-side cleanup with no
+    # behavioural benefit; a future caller MAY still want the signal.
     cleared = (bool(mark) and mark.get("state") == "cleared"
-               and not mark.get("arm_after"))
+               and not _goal_autopilot_reinvoked_after(tpath, mark.get("ts")))
     if cleared:
         return True
     exit_ts = _goal_user_exit_ts(tpath)
@@ -6866,6 +6984,34 @@ def goal_autoarm(now, run, state, dry_run=False, projects_dir=None,
             # key per session forever. The state file is long-lived and this
             # dict would otherwise only ever grow.
             cl.pop(sid, None)
+            # #392 — a hard human-activity gate, checked as soon as a
+            # transcript resolves (so `sid`/`tpath` are in scope), BEFORE
+            # any further resolution work (including the foreign-
+            # transcript sudo fallback below) or either delivery
+            # sub-branch (draft/stash vs plain) is ever attempted. Neither
+            # sub-branch previously checked this at all — the exact gap
+            # behind the live "FAIL (goal-rearm, stash) ... draft left
+            # parked" incident, one function over in job 20. Zero
+            # keystrokes on refusal — an #101/#266 transient skip, never
+            # counted against `ga[pid]`'s per-pane dedup window. A DISTINCT
+            # state key from `_goal_autoarm_virgin_candidate`'s own
+            # `goalarm_recentuser` dict (never shared) — this branch and
+            # that one are mutually exclusive per sweep but a pane CAN
+            # switch between them across sweeps, and two independent
+            # episodes must never share one dedup bookkeeping dict (the
+            # established #176 "distinct state-key prefixes" lesson).
+            rc = state.setdefault("goalarm_recentuser_arm", {})
+            recent, reason = _goal_autoarm_recent_human_activity(sid, tr[0],
+                                                                  now)
+            if recent:
+                if not rc.get(pid):
+                    rc[pid] = True
+                    logs.append(
+                        "goal-autoarm SKIP-TRANSIENT %s (%s) -> %s -- "
+                        "recent human activity, never overwrite a live "
+                        "conversation" % (pid, loc, reason))
+                continue
+            rc.pop(pid, None)
         if tr:
             full = _transcript_goal_line(tr[0])
         if full is None:
@@ -11348,6 +11494,42 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
 # --------------------------------------------------------------------------- #
 
 GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
+# #393 -- the real indicator's own header render is SHORT and CLOSED-
+# FORM: the glyph, "/goal", optionally the word "active", and optionally
+# a single "(Nh)"/"(Nm)" age suffix -- nothing else, ever (every shape
+# observed anywhere in this repo's own tests/dev-notes: "◎ /goal",
+# "◎ /goal active", "◎ /goal active (1m)" through "(58m)", "(2h)",
+# "(3h)"). A bare `.startswith(GOAL_INDICATOR)` check also matches a
+# rendered CONTINUATION row of ordinary word-wrapped assistant prose
+# that happens to start with the same glyph+word (a genuine live
+# incident: "◎ /goal active, right where the earlier bug expected only
+# chrome." wrapped as the SECOND line of a paragraph).
+#
+# #393-review MINOR-1 (fresh-context adversarial review, executed):
+# the FIRST cut of this fix (an open-ended `[ \w()]{0,40}` allowlist,
+# rejecting only PUNCTUATED continuations) still accepted several
+# constructed continuations with no punctuation in their first 40
+# chars ("◎ /goal active and the loop keeps going", "◎ /goal armed",
+# "◎ /goal active (footer) so we know" — live-reproduced, 7 of 8
+# constructed cases). A CLOSED form -- the tail must be EXACTLY
+# " active" or " active (<1-3 digits><h|m>)", nothing between or after
+# -- rejects every one of those while still accepting every real
+# observed shape (verified against the corpus above).
+#
+# #393-review MINOR-2 (theoretical, unobserved): this closed form is
+# strictly NARROWER than the prior allowlist, so any REAL render this
+# repo has never observed (a fractional-hour suffix "(1.5h)", an
+# "(Nh Nm)" combined form, an nbsp U+00A0 separator instead of a plain
+# space -- this file's own `❯\xa0` finding makes an nbsp separator
+# plausible) would now read as a false NEGATIVE (dark, when actually
+# armed) rather than matching. Accepted residual, not fixed
+# speculatively (FREEZE: fix what has failed in production) — every
+# age-suffix shape this repo has ever actually rendered is covered;
+# widen the class only if a real nbsp/fractional-hour render is ever
+# observed live.
+_GOAL_HEADER_INDICATOR_RX = re.compile(
+    r"^" + re.escape(GOAL_INDICATOR)
+    + r"( active(\s\(\d{1,3}[hm]\))?)?$")
 GOAL_ACHIEVED_MARKER = "Goal achieved"   # CC's own completion line, printed
                                     # into the CONVERSATION (never persisted
                                     # to the transcript) when the evaluator
@@ -12321,12 +12503,17 @@ def pane_goal_armed(captured):
     # footer this function scans). Confirmed live 2026-08-11 on 3 armed panes
     # (camera-box, airuleset, forestshop). The real indicator line, stripped,
     # STARTS WITH the indicator (right-aligned, alone on its line); a
-    # conversation MENTION has it embedded mid-prose, so `.startswith` excludes
-    # it, and the 3-line bound keeps the search inside the box header, never
-    # reaching the conversation. Placed here (only when the footer path would
+    # conversation MENTION has it embedded mid-prose. #393 tightened the
+    # match from a bare `.startswith` to `_GOAL_HEADER_INDICATOR_RX` --  a
+    # wrapped-prose CONTINUATION row can also start with the glyph+word
+    # (unlike a mid-prose mention, which never starts a rendered line with
+    # it at all), so the tail must additionally look like the real render
+    # (short, no sentence punctuation) rather than trailing prose. The
+    # 3-line bound keeps the search inside the box header, never reaching
+    # the conversation. Placed here (only when the footer path would
     # otherwise say False) so every #383 `None` branch above is preserved.
     header = lines[max(0, idx - 3):idx]
-    if any(ln.strip().startswith(GOAL_INDICATOR) for ln in header):
+    if any(_GOAL_HEADER_INDICATOR_RX.match(ln.strip()) for ln in header):
         return True
     return False
 
@@ -14115,6 +14302,28 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         kind, draft = _classify_boundary(captured)
         if kind != "input":
             logs.append("skip %s (goal-rearm) %s" % (kind, loc))
+            continue
+        # #392 — a hard human-activity gate, checked ONCE here, BEFORE
+        # either delivery sub-branch (draft/stash vs plain) below, and
+        # before `dry_run` (so a diagnostic sweep reports the same
+        # decision a real one would make). `_goal_autoarm_recent_human_
+        # activity` (#339) was previously wired only into job 9's own
+        # virgin-candidate path — job 20's revival delivery had NO such
+        # gate at all, the exact root cause of the live dev1 incident
+        # this ticket was filed from: a `/goal` typed into a pane the
+        # user was actively typing in, which is also what desynced the
+        # stash undo's backspace count (the sibling "draft left parked"
+        # symptom — see this ticket's own design comment). Zero
+        # keystrokes on refusal, never counted against `rec['n']`'s
+        # attempt cap (the #101/#266 transient-skip discipline) — this
+        # repo's OWN established convention throughout `goal_rearm` is to
+        # log every `skip …` line unconditionally, never throttled, so
+        # this mirrors that rather than inventing a new dedup key.
+        recent, reason = _goal_autoarm_recent_human_activity(sid, tpath, now)
+        if recent:
+            logs.append("SKIP-TRANSIENT (goal-rearm) %s -> %s -- recent "
+                        "human activity, never overwrite a live "
+                        "conversation" % (loc, reason))
             continue
         text = "/goal " + payload
         if dry_run:

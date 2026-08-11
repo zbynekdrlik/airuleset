@@ -596,6 +596,92 @@ class TestGoalRearmDetectsAndArms(GoalRearmBase):
         self.assertTrue(any("READY" in ln for ln in logs), logs)
 
 
+def human_entry(ts_epoch, text="ahoj, este pracujem na tomto"):
+    """A genuine, human-typed transcript prompt -- NOT a `/goal` marker, not
+    matching any of `_MACHINE_PROMPT_PREFIXES` -- for exercising
+    `_goal_autoarm_recent_human_activity`'s transcript signal (#392)."""
+    return {"type": "user", "timestamp": _iso(ts_epoch),
+            "message": {"content": text}}
+
+
+class TestGoalRearmRefusesDuringRecentHumanActivity(GoalRearmBase):
+    """#392 -- job 20's revival delivery (both the `draft` stash sub-branch
+    and the plain bare-box sub-branch) had NO recent-human-activity hard
+    gate at all, unlike `_goal_autoarm_virgin_candidate` (#339) and job
+    14's `_compact_recent_human_activity` (#377). Live incident (dev1,
+    22:27:05): `FAIL (goal-rearm, stash) zbynek-4:2.0 -> delivery not
+    verified (stash-abort: typed-NOT-undone, draft left parked)` -- a
+    delivery landed in a pane the user was ACTIVELY TYPING in. Reuses
+    `_goal_autoarm_recent_human_activity`, checked ONCE before either
+    delivery sub-branch, so a genuine recent human prompt refuses BOTH
+    shapes with zero keystrokes sent, and the refusal never consumes the
+    per-pane attempt count (the #101 transient-refusal discipline)."""
+
+    def test_plain_branch_refuses_with_a_recent_transcript_human_prompt(
+            self):
+        now = time.time()
+        tmux, logs = self._go(
+            PANE_DARK,
+            entries=[marker_entry("set", PAYLOAD), human_entry(now - 120)],
+            now=now)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertFalse(tmux.keys(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "recent human" in ln
+               for ln in logs), logs)
+
+    def test_stash_branch_refuses_before_the_stash_primitive_is_ever_called(
+            self):
+        now = time.time()
+        calls = []
+
+        def _fake(pid, text, run, captured=None, logs=None, sleep_fn=None):
+            calls.append((pid, text, captured))
+            return True
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_fake):
+            tmux, logs = self._go(
+                PANE_DRAFT,
+                entries=[marker_entry("set", PAYLOAD),
+                        human_entry(now - 120)],
+                now=now)
+        self.assertEqual(calls, [], "the stash primitive must never be "
+                         "invoked while the user is actively typing")
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "recent human" in ln
+               for ln in logs), logs)
+
+    def test_a_refusal_never_consumes_the_attempt_count(self):
+        now = time.time()
+        state = {}
+        self._go(PANE_DARK,
+                 entries=[marker_entry("set", PAYLOAD), human_entry(now)],
+                 state=state, now=now)
+        rec = state.get("goal_rearm", {}).get(SID, {})
+        self.assertEqual(rec.get("n", 0), 0,
+                         "a zero-keystroke refusal must never count as a "
+                         "real delivery attempt")
+
+    def test_delivers_normally_once_the_human_leaves(self):
+        now = time.time()
+        state = {}
+        self._go(PANE_DARK,
+                 entries=[marker_entry("set", PAYLOAD), human_entry(now)],
+                 state=state, now=now)
+        tmux2, logs2 = self._go(
+            PANE_DARK, state=state,
+            now=now + wd.GOAL_AUTOARM_RECENT_HUMAN_S + 5,
+            cap_seq=self._typed_seq())
+        self.assertEqual(tmux2.typed()[:1], [GOAL_LINE], logs2)
+
+    def test_no_recent_activity_still_delivers_normally(self):
+        # positive control -- this gate must not regress the job's own
+        # existing feature.
+        tmux, logs = self._go(PANE_DARK, cap_seq=self._typed_seq())
+        self.assertEqual(tmux.typed()[:1], [GOAL_LINE], logs)
+
+
 class TestJanitorWatchClearedOnOrdinarySuccess(GoalRearmBase):
     """#372 round-2 adversarial-review MAJOR-1: the provenance watch mark
     used to be cleared ONLY when the janitor itself recovered a stuck
@@ -1496,6 +1582,53 @@ class TestGoalClearedStaleWhenReallyRearmed(GoalRearmBase):
         self.assertTrue(any("stale-but-outage" in ln for ln in logs), logs)
         self.assertFalse(any("skip stale-goal" in ln for ln in logs), logs)
         self.assertEqual(len(self.pings), 0, self.pings)
+
+
+class TestFalsePositiveHeaderNeverPunchesThroughAClear(GoalRearmBase):
+    """#393 audit — a false-positive #388 header match (ordinary word-
+    wrapped conversation prose that happens to START a rendered row with
+    the indicator glyph, see `tests/test_goal_indicator_above_box.py`'s
+    own dedicated unit coverage) must never stamp `rec['last_armed']` and
+    thereby let `_goal_cleared_stale` punch through a deliberate #170
+    clear. Reproduces the exact mechanism end-to-end: a false `True` from
+    `pane_goal_armed` would flow straight into `rec['last_armed'] = now`
+    (`goal_rearm`'s own REALITY branch) even though the transcript's
+    genuine newest marker is 'cleared' — and a LATER, genuinely-dark
+    sweep would then find `last_armed > mts` and force `rec['mark'] =
+    "set"`, actually re-arming a session the user deliberately turned
+    off."""
+
+    WRAP_FALSE_POSITIVE = (
+        "  Confirmed the render now shows the indicator on its own line:\n"
+        "  ◎ /goal active, right where the earlier bug expected only "
+        "chrome.\n" + FOOTER_DARK)
+
+    def test_wrapped_prose_false_positive_never_stamps_last_armed(self):
+        state = {}
+        now0 = time.time()
+        clear_ts = now0
+        # Step 1: a genuine deliberate clear.
+        self._go(PANE_DARK, entries=[marker_entry("cleared", PAYLOAD,
+                                                   _iso(clear_ts))],
+                state=state, now=clear_ts + 10)
+        self.assertEqual(state["goal_rearm"][SID]["mark"], "cleared")
+        # Step 2: NO new marker at all — the SAME transcript — but the
+        # pane's ordinary conversation happens to word-wrap a line that
+        # starts with the indicator glyph, directly above the box.
+        self._go(self.WRAP_FALSE_POSITIVE, state=state, now=clear_ts + 70)
+        self.assertNotIn(
+            "last_armed", state["goal_rearm"][SID],
+            "a wrapped-prose false positive must never be recorded as a "
+            "genuine footer-lit observation")
+        # Step 3: footer genuinely dark again (no more wrap text) — must
+        # STILL stay cleared; a false last_armed from step 2 would let
+        # _goal_cleared_stale punch through here and actually re-arm.
+        tmux, logs = self._go(PANE_DARK, state=state, now=clear_ts + 130,
+                              cap_seq=self._typed_seq())
+        self.assertFalse(tmux.typed(), logs)
+        self.assertEqual(state["goal_rearm"][SID]["mark"], "cleared")
+        self.assertFalse(
+            any("stale-cleared-but-rearmed" in ln for ln in logs), logs)
 
 
 class TestGoalDarkDiedByOutage(unittest.TestCase):

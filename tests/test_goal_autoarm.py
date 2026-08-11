@@ -652,15 +652,84 @@ class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
             }]},
         })
 
-    def test_the_session_asking_again_releases_the_suppression(self):
+    @staticmethod
+    def _autopilot_prompt(ts="2026-07-31T11:02:03.000Z"):
+        """#393 — a GENUINE, human-typed `/autopilot` invocation: the EXACT
+        wrapped shape Claude Code actually writes for a skill-command
+        invocation. #393-review CRITICAL-1 (fresh-context adversarial
+        review, 2026-08-12, executed against 1787 real local transcript
+        files / 1127 real occurrences of the substring "/autopilot"): a
+        bare `"/autopilot"` string — what this fixture used to build —
+        appeared in ZERO of them; every real invocation is this exact
+        two-tag sequence, a SKILL command's `<command-message>`-first
+        order (the OPPOSITE of a BUILTIN command's `<command-name>`-first
+        order this file's own `_EXIT_CMD_MARKER` matches for `/exit`)."""
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content":
+                        "<command-message>autopilot</command-message>\n"
+                        "<command-name>/autopilot</command-name>"}})
+
+    @staticmethod
+    def _autopilot_lookalike_prose(
+            ts="2026-07-31T11:02:03.000Z",
+            text="/autopilot-worker died mid-run, can you check it?"):
+        """#393-review CRITICAL-2 (fresh-context adversarial review,
+        2026-08-12, executed) — an ORDINARY user message that merely
+        NAMES the worker, not a real slash-command invocation at all.
+        `\\b` fires on the hyphen (a non-word character), so the FIRST
+        shipped regex (`^/autopilot\\b`) wrongly read this as a genuine
+        release too — a real, plausible sentence in this very repo. Must
+        never release the clear."""
+        return _json.dumps({
+            "type": "user", "timestamp": ts,
+            "message": {"content": text}})
+
+    @staticmethod
+    def _quoted_autopilot_prompt():
+        """The SAME real `/autopilot` shape arriving as a tool_result —
+        one session grepping ANOTHER session's transcript. Structurally
+        excluded, mirroring `_quoted_ask` above."""
+        return _json.dumps({
+            "type": "user",
+            "timestamp": "2026-07-31T11:02:03.000Z",
+            "message": {"content": [{
+                "type": "tool_result",
+                "content": "<command-message>autopilot</command-message>\n"
+                            "<command-name>/autopilot</command-name>",
+            }]},
+        })
+
+    def test_a_bare_assistant_reprint_never_releases_the_suppression(self):
+        # #393 (david2 live) — the /goal template's OWN instruction text
+        # ("re-prints this /goal line if issues remain") makes a session
+        # reprint the arm question as ROUTINE, AUTOMATIC behaviour, with
+        # ZERO genuine user request behind it. This is the corrected form
+        # of what used to be `test_the_session_asking_again_releases_the_
+        # suppression` — that fixture modelled ONLY the resulting assistant
+        # reprint and omitted #170's own real antecedent user prompt, which
+        # made a bare, unprompted reprint look sufficient on its own. It is
+        # not: only a genuine user `/autopilot` (below) may release this.
         cwd = "/home/x/devel/demo"
         pd = self._projects(cwd, self._marker("cleared"), self._asks_again())
         tmux = FakeTmux(ARM_PANE)
         logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(
+            tmux.typed(),
+            "an assistant reprint alone, with no genuine user /autopilot "
+            "behind it, must never release a deliberate clear")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
+    def test_a_genuine_autopilot_invocation_releases_the_suppression(self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"),
+                            self._autopilot_prompt())
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
         self.assertTrue(
             tmux.typed(),
-            "the session printed a NEW arm question after the clear — the "
-            "user is being asked again, so the old clear no longer governs")
+            "a genuine user /autopilot invocation after the clear must "
+            "restore auto-arming, even with no assistant reprint at all")
         self.assertFalse([ln for ln in logs if "skip cleared" in ln], logs)
 
     def test_170_stays_fixed_when_the_ask_predates_the_clear(self):
@@ -675,6 +744,19 @@ class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
                          "a goal cleared AFTER the ask must stay off")
         self.assertTrue(any("cleared" in ln for ln in logs), logs)
 
+    def test_an_autopilot_invocation_before_the_clear_does_not_release(self):
+        # #393 — order matters here too: a genuine /autopilot BEFORE a
+        # LATER clear must not somehow pre-emptively excuse that clear.
+        # `_marker`'s own hardcoded ts is 09:55:51 -- explicitly earlier.
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._autopilot_prompt(
+            ts="2026-07-31T08:00:00.000Z"), self._marker("cleared"))
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(tmux.typed(),
+                         "a goal cleared AFTER the /autopilot must stay off")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
     def test_a_quoted_arm_question_never_releases_the_suppression(self):
         cwd = "/home/x/devel/demo"
         pd = self._projects(cwd, self._marker("cleared"), self._quoted_ask())
@@ -685,16 +767,89 @@ class TestAClearedGoalStopsSuppressingOnceTheSessionAsksAgain(
             "a tool_result quoting another session's arm question is not "
             "this session asking for anything")
 
-    def test_the_release_is_readable_from_the_marker_alone(self):
-        """`scan_goal_markers` carries the flag, so any future reader of goal
-        state gets the same answer without re-deriving it."""
+    def test_a_lookalike_autopilot_worker_message_never_releases(self):
+        """#393-review CRITICAL-2 — a plausible, ordinary user message that
+        merely MENTIONS the worker by name (`/autopilot-worker ...`) is
+        NOT a real slash-command invocation and must never release a
+        deliberate clear."""
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"),
+                            self._autopilot_lookalike_prose())
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(
+            tmux.typed(),
+            "a message merely NAMING the autopilot-worker must never be "
+            "mistaken for a genuine /autopilot slash-command invocation")
+        self.assertTrue(any("cleared" in ln for ln in logs), logs)
+
+    def test_autopilot_prompt_fixture_matches_the_real_corpus_shape(self):
+        """Positive control — the fixture's own content must be exactly
+        the real shape #393-review CRITICAL-1 confirmed against 1127 real
+        local transcript occurrences, so a future edit to this fixture
+        cannot silently drift back to the bare (dead) form."""
+        entry = _json.loads(self._autopilot_prompt())
+        self.assertEqual(
+            entry["message"]["content"],
+            "<command-message>autopilot</command-message>\n"
+            "<command-name>/autopilot</command-name>")
+
+    def test_an_autopilot_invocation_buried_past_the_old_tail_window_still_releases(
+            self):
+        """#393-review MAJOR-1 (fresh-context adversarial review, 2026-08-12,
+        executed) — a genuine `/autopilot` invocation followed by enough
+        transcript WRITING to push it past the old 2 MB tail-window
+        default must still be found; `_goal_autopilot_reinvoked_after` now
+        reads the WHOLE file (no tail truncation), mirroring #173's own
+        `_goal_dark_died_by_outage` fix for the identical shape."""
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"),
+                            self._autopilot_prompt())
+        tr = pd / wd.encode_project_dir(cwd) / "sess-relapse.jsonl"
+        with open(tr, "a") as f:
+            filler = _json.dumps({"type": "assistant",
+                                  "message": {"content": "x" * 900}}) + "\n"
+            while f.tell() < 2_200_000:
+                f.write(filler)
+        self.assertGreater(
+            tr.stat().st_size, 2_000_000,
+            "fixture must genuinely exceed the OLD tail-window default")
+        tmux = FakeTmux(ARM_PANE)
+        logs = wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertTrue(
+            tmux.typed(),
+            "a genuine /autopilot invocation buried past the old 2 MB "
+            "tail window must still release the clear")
+        self.assertFalse([ln for ln in logs if "skip cleared" in ln], logs)
+
+    def test_a_quoted_autopilot_invocation_never_releases_the_suppression(
+            self):
+        cwd = "/home/x/devel/demo"
+        pd = self._projects(cwd, self._marker("cleared"),
+                            self._quoted_autopilot_prompt())
+        tmux = FakeTmux(ARM_PANE)
+        wd.goal_autoarm(time.time(), tmux, {}, projects_dir=pd)
+        self.assertFalse(
+            tmux.typed(),
+            "a tool_result quoting another session's /autopilot text is "
+            "not this session's own user genuinely invoking it")
+
+    def test_arm_after_alone_is_no_longer_sufficient(self):
+        """`scan_goal_markers`'s own `arm_after` field is UNCHANGED (still
+        computed, still True for a bare assistant reprint) — but it is no
+        longer what `_goal_was_cleared_by_user` consults; only a genuine
+        `/autopilot` release does (#393)."""
         cwd = "/home/x/devel/demo"
         pd = self._projects(cwd, self._marker("cleared"), self._asks_again())
         tr = pd / wd.encode_project_dir(cwd) / "sess-relapse.jsonl"
         _off, mark = wd.scan_goal_markers(tr)
         self.assertEqual(mark["state"], "cleared")
-        self.assertTrue(mark.get("arm_after"))
-        self.assertFalse(wd._goal_was_cleared_by_user(tr))
+        self.assertTrue(mark.get("arm_after"),
+                        "arm_after's own computation must stay unchanged")
+        self.assertTrue(
+            wd._goal_was_cleared_by_user(tr),
+            "arm_after alone (no genuine /autopilot) must not release the "
+            "clear")
 
 
 if __name__ == "__main__":
@@ -1720,6 +1875,74 @@ class TestGoalAutoarmVirginCandidateRecentHuman(unittest.TestCase):
             tmux, logs = self._go(now=now, dry_run=True)
         self.assertFalse(tmux.typed())
         self.assertFalse(any("READY" in ln for ln in logs), logs)
+
+
+class TestArmQuestionBranchRefusesDuringRecentHumanActivity(unittest.TestCase):
+    """#392 -- job 9's MAIN arm-question-visible branch (both the `draft`
+    stash sub-branch and the plain bare-box sub-branch) had NO recent-
+    human-activity hard gate at all, unlike `_goal_autoarm_virgin_
+    candidate` (#339) and job 14's `_compact_recent_human_activity`
+    (#377) -- the exact gap that let a delivery land in a pane the user
+    was ACTIVELY TYPING in (the live dev1 incident this ticket was filed
+    from). Reuses `_goal_autoarm_recent_human_activity`, checked ONCE
+    right after a transcript resolves, before either delivery sub-branch,
+    so a genuine recent human prompt refuses BOTH shapes with zero
+    keystrokes sent."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sid = "armq-recenthuman"
+
+    def _write(self, entries):
+        return write_transcript(entries, self.tmp.name, VIRGIN_CWD, self.sid)
+
+    def test_bare_box_refuses_with_a_recent_human_prompt(self):
+        now = time.time()
+        self._write([human_entry(now - 120)])
+        tmux, logs = go(ARM_PANE, now=now, projects_dir=self.tmp.name)
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "recent human" in ln
+               for ln in logs), logs)
+
+    def test_held_draft_refuses_before_the_stash_primitive_is_ever_called(
+            self):
+        now = time.time()
+        self._write([human_entry(now - 120)])
+        calls = []
+
+        def _fake(pid, text, run, captured=None, logs=None, sleep_fn=None):
+            calls.append((pid, text, captured))
+            return True
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_fake):
+            tmux, logs = go(USER_TEXT_PANE, now=now,
+                            projects_dir=self.tmp.name)
+        self.assertEqual(calls, [], "the stash primitive must never be "
+                         "invoked while the user is actively typing")
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(
+            any("SKIP-TRANSIENT" in ln and "recent human" in ln
+               for ln in logs), logs)
+
+    def test_refusal_does_not_consume_the_dedup_window(self):
+        now = time.time()
+        self._write([human_entry(now)])
+        state = {}
+        go(ARM_PANE, state=state, now=now, projects_dir=self.tmp.name)
+        t2, logs2 = go(ARM_PANE, state=state,
+                       now=now + wd.GOAL_AUTOARM_RECENT_HUMAN_S + 5,
+                       projects_dir=self.tmp.name)
+        self.assertTrue(t2.typed(), logs2)
+
+    def test_no_recent_activity_still_arms_normally(self):
+        # positive control -- must not regress job 9's own existing
+        # feature: a genuinely at-rest arm-question pane keeps arming.
+        now = time.time()
+        self._write([])
+        tmux, logs = go(ARM_PANE, now=now, projects_dir=self.tmp.name)
+        self.assertTrue(tmux.typed(), logs)
 
 
 class TestGoalAutoarmRecentHumanActivityUnit(unittest.TestCase):
