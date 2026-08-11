@@ -2926,7 +2926,25 @@ STASH_MARKER = "› stashed"          # "› stashed" — CC's stash-slot indica
 # verified delivery here matches the typed text against the boundary line,
 # which can NEVER match that placeholder; the check only ever worked because
 # previous callers all sent short text.
-_PASTED_PLACEHOLDER_RX = re.compile(r"^\[Pasted text #\d+\]$")
+#
+# #372 — CC also renders a SECOND, MULTI-LINE collapse shape for the same
+# kind of long single-line send: `[Pasted text #N +K lines]` (live incident,
+# david2@subdev, 2026-08-11 — even AFTER #354's own settle-poll fix). A
+# single-line-only regex refuses to recognize this as landed, so a
+# GENUINELY SUCCESSFUL delivery gets declared a verify FAILURE, which then
+# triggers a destructive undo (`_undo_typed_text`) against a box its own
+# docstring explicitly assumes it will never have to reason about — the
+# undo backspaces `len(payload)` (~3800) characters against what is really
+# a ~26-char placeholder, sometimes failing to confirm bare within the
+# settle-poll's budget and leaving the box AND the single stash slot stuck.
+# Rather than enumerate this exact second shape as its own alternative (CC
+# has now shown 2 distinct collapse renderings sharing the same `[Pasted
+# text #N` prefix — assume there will be a 3rd), the regex is PREFIX-
+# anchored and suffix-TOLERANT: `[Pasted text #N` followed by anything,
+# closing on `]`. This is deliberately more permissive than enumerating
+# every observed suffix, and is safe: nothing else in a Claude Code pane's
+# input box legitimately renders this literal prefix.
+_PASTED_PLACEHOLDER_RX = re.compile(r"^\[Pasted text #\d+.*\]$")
 
 
 def _typed_landed(text, itext):
