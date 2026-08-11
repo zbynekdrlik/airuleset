@@ -1584,6 +1584,53 @@ class TestGoalClearedStaleWhenReallyRearmed(GoalRearmBase):
         self.assertEqual(len(self.pings), 0, self.pings)
 
 
+class TestFalsePositiveHeaderNeverPunchesThroughAClear(GoalRearmBase):
+    """#393 audit — a false-positive #388 header match (ordinary word-
+    wrapped conversation prose that happens to START a rendered row with
+    the indicator glyph, see `tests/test_goal_indicator_above_box.py`'s
+    own dedicated unit coverage) must never stamp `rec['last_armed']` and
+    thereby let `_goal_cleared_stale` punch through a deliberate #170
+    clear. Reproduces the exact mechanism end-to-end: a false `True` from
+    `pane_goal_armed` would flow straight into `rec['last_armed'] = now`
+    (`goal_rearm`'s own REALITY branch) even though the transcript's
+    genuine newest marker is 'cleared' — and a LATER, genuinely-dark
+    sweep would then find `last_armed > mts` and force `rec['mark'] =
+    "set"`, actually re-arming a session the user deliberately turned
+    off."""
+
+    WRAP_FALSE_POSITIVE = (
+        "  Confirmed the render now shows the indicator on its own line:\n"
+        "  ◎ /goal active, right where the earlier bug expected only "
+        "chrome.\n" + FOOTER_DARK)
+
+    def test_wrapped_prose_false_positive_never_stamps_last_armed(self):
+        state = {}
+        now0 = time.time()
+        clear_ts = now0
+        # Step 1: a genuine deliberate clear.
+        self._go(PANE_DARK, entries=[marker_entry("cleared", PAYLOAD,
+                                                   _iso(clear_ts))],
+                state=state, now=clear_ts + 10)
+        self.assertEqual(state["goal_rearm"][SID]["mark"], "cleared")
+        # Step 2: NO new marker at all — the SAME transcript — but the
+        # pane's ordinary conversation happens to word-wrap a line that
+        # starts with the indicator glyph, directly above the box.
+        self._go(self.WRAP_FALSE_POSITIVE, state=state, now=clear_ts + 70)
+        self.assertNotIn(
+            "last_armed", state["goal_rearm"][SID],
+            "a wrapped-prose false positive must never be recorded as a "
+            "genuine footer-lit observation")
+        # Step 3: footer genuinely dark again (no more wrap text) — must
+        # STILL stay cleared; a false last_armed from step 2 would let
+        # _goal_cleared_stale punch through here and actually re-arm.
+        tmux, logs = self._go(PANE_DARK, state=state, now=clear_ts + 130,
+                              cap_seq=self._typed_seq())
+        self.assertFalse(tmux.typed(), logs)
+        self.assertEqual(state["goal_rearm"][SID]["mark"], "cleared")
+        self.assertFalse(
+            any("stale-cleared-but-rearmed" in ln for ln in logs), logs)
+
+
 class TestGoalDarkDiedByOutage(unittest.TestCase):
     """Direct unit coverage of `_goal_dark_died_by_outage` (#173) — the
     reused #266 transcript mechanism `goal_rearm`'s dark-cap decision now

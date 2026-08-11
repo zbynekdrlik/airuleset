@@ -56,6 +56,23 @@ class GoalIndicatorAboveBox(unittest.TestCase):
             "  more draft continuation text with no chrome below it at all"])
         self.assertIsNone(pane_goal_armed(cap))
 
+    def test_wrapped_prose_continuation_starting_with_the_glyph_is_never_armed(
+            self):
+        # #393 -- a bare `.startswith(GOAL_INDICATOR)` prefix check is
+        # defeated by ordinary word-wrapped assistant prose: the block's
+        # own leading indent is stripped along with everything before the
+        # glyph, so a rendered CONTINUATION row that happens to start with
+        # "◎ /goal" still satisfies `.startswith` even though genuine
+        # trailing prose (with real punctuation) follows it -- something
+        # the real indicator's own render ("right-aligned, alone on its
+        # line") never has. NOT a genuinely-armed pane.
+        cap = "\n".join([
+            "  Confirmed the render now shows the indicator on its own line:",
+            "  ◎ /goal active, right where the earlier bug expected only "
+            "chrome.",
+            TOP, "❯ ", BOT, STAT, STRIP])
+        self.assertIs(pane_goal_armed(cap), False)
+
 
 if __name__ == "__main__":
     unittest.main()
