@@ -880,7 +880,7 @@ class TestGoalRearmTransientRefusalNeverGivesUp(GoalRearmBase):
     to verify is a real attempt."""
 
     def _stub(self, reason):
-        def _fake(pid, text, run, captured=None, logs=None):
+        def _fake(pid, text, run, captured=None, logs=None, sleep_fn=None):
             if isinstance(logs, list):
                 logs.append(reason)
             return False
@@ -3146,6 +3146,30 @@ class TestGoalTemplateDrift(GoalDriftBase):
         self.assertFalse(tmux.typed())
         self.assertTrue(any("READY" in ln and "goal-drift" in ln for ln in logs),
                         logs)
+
+    def test_the_stash_branch_threads_its_own_sleep_fn_too(self):
+        """#354 review — `_goal_template_drift`'s own "goal-drift, stash"
+        branch (a template push landing while the pane holds a draft) was a
+        THIRD `deliver_with_stash` production call site still omitting
+        `sleep_fn`, missed by the review-fix commit's own "both remaining
+        call sites" claim. Spy on the real primitive rather than driving a
+        full render-lag scenario through StashTmux — this proves the ONE
+        thing the finding was about (the kwarg reaches this call site)."""
+        state = {}
+        tp = self._templates(TPL_FULL)
+        self._sweep(TPL_FULL[len("/goal "):], templates_path=tp, state=state)
+        tp = self._templates(TPL_FULL_V2)
+        draft_lit = CONV + FOOTER_LIT.replace("❯ \n", "❯ rozpisany draft\n")
+        with m.patch.object(wd, "deliver_with_stash",
+                            return_value=True) as spy:
+            self._sweep(templates_path=tp, state=state, pane=draft_lit)
+        self.assertTrue(spy.called,
+                        "the stash (draft-holding) branch must be reached")
+        sleep_fn = spy.call_args.kwargs.get("sleep_fn")
+        self.assertIsNotNone(sleep_fn,
+                             "the job's own sleep_fn must reach "
+                             "deliver_with_stash from this call site too, "
+                             "not silently default to real time.sleep")
 
 
 class TestGoalDriftRespectsHandEdits(GoalDriftBase):

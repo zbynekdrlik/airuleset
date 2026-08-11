@@ -715,7 +715,7 @@ class TestDraftGoesThroughStashDelivery(unittest.TestCase):
     def _stub(self, ok, reason=None):
         calls = []
 
-        def _fake(pid, text, run, captured=None, logs=None):
+        def _fake(pid, text, run, captured=None, logs=None, sleep_fn=None):
             calls.append((pid, text, captured))
             if reason and isinstance(logs, list):
                 logs.append(reason)
@@ -1073,7 +1073,7 @@ class TestGoalsOnScreenGateNoLongerPermanentlyVetoes(unittest.TestCase):
             re.findall(r"^\s*(/goal \S.*)$", self.STUCK_DRAFT_PANE, re.M), [])
         calls = []
 
-        def _fake(pid, text, run, captured=None, logs=None):
+        def _fake(pid, text, run, captured=None, logs=None, sleep_fn=None):
             calls.append((pid, text))
             return True
 

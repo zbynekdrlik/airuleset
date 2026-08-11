@@ -195,11 +195,18 @@ class DeliverWithStashAborts(unittest.TestCase):
 
     def test_the_restore_is_withheld_while_our_text_may_still_be_in_the_box(self):
         wrong_boundary = "● x\n❯ totally unrelated text\n  ctx ░░\n"
-        # 3rd capture = the undo's own verify: the box is NOT bare, so we
-        # cannot prove our characters are gone.
-        run = _Recorder([STASHED_BARE, wrong_boundary, DRAFT_IDLE])
+        # 3rd..(2+POLLS)th captures = the undo's own verify -- NEVER bare, so
+        # this must be a GENUINE (not merely a render-lagged) failure: #354
+        # gave this verify its own bounded settle-poll retry
+        # (`STASH_UNDO_SETTLE_POLLS`), so a single non-bare capture is no
+        # longer proof of failure on its own -- the queue must exhaust the
+        # WHOLE settle window before the undo may be declared dead, matching
+        # this test's own intent ("we cannot prove our characters are gone").
+        run = _Recorder([STASHED_BARE, wrong_boundary] +
+                        [wrong_boundary] * wd.STASH_UNDO_SETTLE_POLLS)
         logs = []
-        ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE, logs=logs)
+        ok = wd.deliver_with_stash("%1", TEXT, run, captured=DRAFT_IDLE,
+                                   logs=logs, sleep_fn=lambda s: None)
         self.assertFalse(ok)
         cs_count = sum(1 for a in run.sent if a and a[-1] == "C-s")
         self.assertEqual(cs_count, 1, "the stash toggle only — a restoring "

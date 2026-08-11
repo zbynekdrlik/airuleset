@@ -88,11 +88,23 @@ class FakePane:
         nothing (the hazard #176 R3 was reopened for).
       `lag_captures` — the next N captures render the PRE-toggle screen even
         though the toggle already took effect server-side (#176 F4).
+      `bspace_lag_captures` — the next N captures AFTER a BSpace batch
+        render the PRE-batch screen even though every backspace already
+        landed server-side (#354) — a SEPARATE, independent knob from
+        `lag_captures` (which is scoped to the `C-s` toggle only): a
+        `/goal`-sized undo can flood up to `STASH_UNDO_MAX_BACKSPACES`
+        individual BSpace keystrokes into ONE `send-keys` call, and the
+        render genuinely can lag behind that flood the same way a single
+        `C-s` toggle's render can. `self.draft` itself keeps updating
+        correctly underneath throughout — only the RENDER a capture reads
+        is stale, exactly like the real incident (gk journal: "typed-NOT-
+        undone" although the box was, moments later, provably bare).
     """
 
     def __init__(self, draft="", ghost="", stash=None,
                  ghost_survives_ctrl_s=True, lose_next_ctrl_s=False,
-                 lag_captures=0, busy=False, swallow_enters=0):
+                 lag_captures=0, busy=False, swallow_enters=0,
+                 bspace_lag_captures=0):
         self.draft = draft
         self.ghost = ghost
         self.stash = stash
@@ -107,9 +119,11 @@ class FakePane:
         # models BOTH the original Enter and that one retry being swallowed
         # -- the "swallowed-submit-not-recovered" terminal outcome.
         self.swallow_enters = swallow_enters
+        self.bspace_lag_captures = bspace_lag_captures
         self.submitted = []
         self.sent = []
         self._lagged = None
+        self._bspace_lagged = None
 
     # -- rendering ---------------------------------------------------------
     def _render(self, draft, ghost, stash):
@@ -124,6 +138,9 @@ class FakePane:
 
     def capture(self):
         """One `capture-pane -p` — attributes stripped, exactly like tmux."""
+        if self.bspace_lag_captures > 0 and self._bspace_lagged is not None:
+            self.bspace_lag_captures -= 1
+            return strip_sgr(self._bspace_lagged)
         if self.lag_captures > 0 and self._lagged is not None:
             self.lag_captures -= 1
             return strip_sgr(self._lagged)
@@ -164,6 +181,14 @@ class FakePane:
                 self.submitted.append(self.draft)
                 self.draft = ""
         elif k == "BSpace":
+            if self.bspace_lag_captures and self._bspace_lagged is None:
+                # #354 -- snapshot BEFORE this batch's first backspace takes
+                # visible effect: the whole flood is one synchronous Python
+                # loop (`run()`'s send-keys branch), so this fires once, on
+                # the batch's first key, and holds the PRE-batch render for
+                # `bspace_lag_captures` capture() calls after the batch ends.
+                self._bspace_lagged = self._render(self.draft, self.ghost,
+                                                    self.stash)
             self.draft = self.draft[:-1]
             self.ghost = ""
         elif k == "Escape":
@@ -450,3 +475,135 @@ class SwallowedSubmitRecoversTheBoxAndReleasesTheSlot(unittest.TestCase):
             self.assertFalse(a == "Escape" and b == "Escape",
                              "a rapid double-Escape permanently deletes a "
                              "draft: %r" % pane.sent)
+
+
+class UndoVerifyRaceIsSettledNotLeftHanging(unittest.TestCase):
+    """#354 — gatekeeper live incident: `_undo_typed_text`'s own post-
+    backspace verify did ONE immediate capture, exactly the render-lag class
+    #176 F4 already found and fixed for the STASH TOGGLE's post-`C-s`
+    verify — never extended to the UNDO's own post-backspace verify. A
+    `/goal` payload backspaces up to `STASH_UNDO_MAX_BACKSPACES` individual
+    BSpace keystrokes in ONE `send-keys` call; the render genuinely can lag
+    behind that flood, and the single-shot verify read the box as still
+    holding our text and gave up — logging "stash-abort:
+    typed-NOT-undone, draft left parked" with the user's real draft
+    stranded, invisible, in the single stash slot forever (the exact
+    journal line the ticket's own comment quotes, twice, 3m20s apart).
+
+    Reached here via the ALREADY-established `swallow_enters=2` trigger
+    (#306's own "swallowed-submit-not-recovered" branch, which shares the
+    identical `_undo_and_release_slot` -> `_undo_typed_text` recovery this
+    ticket fixes) — `deliver_with_stash`'s own public signature is
+    UNCHANGED by this fix, so driving it this way (rather than reaching for
+    the private undo helpers directly) proves the fix through the SAME
+    entry point job 7/job 20 actually call, with zero risk of a
+    signature-only false RED."""
+
+    def test_a_lagged_undo_verify_still_recovers_and_pops_the_draft(self):
+        pane = FakePane(draft=DRAFT, swallow_enters=2, bspace_lag_captures=1)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertFalse(ok, logs)             # the delivery itself still failed
+        self.assertEqual(pane.draft, DRAFT,
+                         "the user's original draft must survive "
+                         "byte-identical, popped back out of the slot: %r"
+                         % logs)
+        self.assertIsNone(pane.stash,
+                          "the user's real draft must still be popped back "
+                          "out of the slot — a render-lagged verify must "
+                          "not be treated as a genuine undo failure: %r"
+                          % logs)
+        self.assertTrue(any(ln == "stash-abort: swallowed-submit-not-"
+                            "recovered: typed-undone, parked draft "
+                            "popped back" for ln in logs), logs)
+        self.assertFalse(any("draft left parked" in ln for ln in logs), logs)
+
+    def test_a_genuinely_stuck_undo_still_ends_loud_not_silent(self):
+        # The settle window is BOUNDED (`no-timeout-band-aids.md`) — when
+        # the box NEVER actually clears (a real, non-transient failure, not
+        # a render race), the recovery still gives up — but LOUDLY: the
+        # reason string is never silently dropped.
+        pane = FakePane(draft=DRAFT, swallow_enters=2,
+                        bspace_lag_captures=999999)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertFalse(ok, logs)
+        self.assertTrue(any(ln == "stash-abort: swallowed-submit-not-"
+                            "recovered: typed-NOT-undone, draft left parked"
+                            for ln in logs),
+                        "a genuine double failure must still be logged "
+                        "LOUDLY, never silently: %r" % logs)
+
+
+class AppendUndoVerifyRaceIsSettledToo(unittest.TestCase):
+    """#354 — the SAME render-lag hazard hits `_undo_appended_text`
+    (the UNRESOLVED-box sibling of `_undo_typed_text`, reached when the
+    `C-s` toggle is lost and our type APPENDS to a real draft rather than
+    landing on a bare box) for the identical reason: one immediate capture
+    right after the backspace batch, no settle poll."""
+
+    def test_a_lagged_append_undo_still_verifies_as_recovered(self):
+        pane = FakePane(draft=DRAFT, lose_next_ctrl_s=True,
+                        bspace_lag_captures=1)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertFalse(ok, logs)
+        self.assertEqual(pane.draft, DRAFT,
+                         "the user's draft must survive byte-identical, "
+                         "even when the undo's own verify races: %r" % logs)
+        self.assertIn("stash-abort: append-undone", logs, logs)
+        self.assertNotIn("stash-abort: append-NOT-undone", logs, logs)
+
+    def test_a_genuinely_stuck_append_undo_still_logs_the_reason(self):
+        pane = FakePane(draft=DRAFT, lose_next_ctrl_s=True,
+                        bspace_lag_captures=999999)
+        logs = []
+        ok = deliver(pane, logs=logs)
+        self.assertFalse(ok, logs)
+        self.assertIn("stash-abort: append-NOT-undone", logs,
+                      "a genuine double failure must still be logged "
+                      "LOUDLY, never silently: %r" % logs)
+
+
+class UndoSettlePollHasRealTeeth(unittest.TestCase):
+    """#354 adversarial-review findings 2/3 — the settle loop's own CORE
+    properties (it genuinely waits between polls; it never sleeps after the
+    LAST, already-given-up-on attempt) had no test proving them: a mutant
+    setting `STASH_UNDO_SETTLE_S = 0` or dropping the loop's own
+    `if i < POLLS - 1` guard survived the whole suite untouched, because
+    every existing test injects a no-op `sleep_fn` (via the `deliver()`
+    helper) and none of them ever inspected what it was called WITH."""
+
+    def test_the_settle_interval_is_a_real_positive_wait(self):
+        # No sleep_fn recording needed at all -- a zero-valued settle
+        # interval makes the "bounded settle poll" into 8 back-to-back
+        # captures in milliseconds, i.e. #354's own bug reproduced. This is
+        # a direct, structural check on the constant itself.
+        self.assertGreater(wd.STASH_UNDO_SETTLE_S, 0)
+        self.assertGreater(wd.STASH_UNDO_SETTLE_POLLS, 1)
+
+    def test_it_never_sleeps_after_the_final_failed_attempt(self):
+        # A genuinely-stuck undo (every poll sees the same stale capture)
+        # must sleep EXACTLY `STASH_UNDO_SETTLE_POLLS - 1` times -- between
+        # each pair of attempts, never once more after the last, already-
+        # given-up-on one. Reached via the SAME swallow_enters=2 trigger
+        # the sibling #354 tests above already use.
+        pane = FakePane(draft=DRAFT, swallow_enters=2,
+                        bspace_lag_captures=999999)
+        slept = []
+        ok = wd.deliver_with_stash("%1", TEXT, pane.run, logs=[],
+                                   sleep_fn=slept.append)
+        self.assertFalse(ok)
+        self.assertEqual(len(slept), wd.STASH_UNDO_SETTLE_POLLS - 1,
+                         "the settle loop must sleep BETWEEN attempts, "
+                         "never after the last one: %r" % slept)
+
+    def test_a_single_retry_sleeps_exactly_once(self):
+        pane = FakePane(draft=DRAFT, swallow_enters=2, bspace_lag_captures=1)
+        slept = []
+        ok = wd.deliver_with_stash("%1", TEXT, pane.run, logs=[],
+                                   sleep_fn=slept.append)
+        self.assertFalse(ok)                   # the delivery itself failed
+        self.assertEqual(len(slept), 1,
+                         "converging on the 2nd attempt sleeps exactly "
+                         "once, between attempt 1 and attempt 2: %r" % slept)
