@@ -910,6 +910,37 @@ class RefreshCLI(unittest.TestCase):
             self.assertIn("I 28 core", seg)
             self.assertIn("str 45", seg)
 
+    def test_refresh_core_count_excludes_permanent_ops_channel_tickets(self):
+        # #362: a self-declared PERMANENT `ops-channel` ticket (odoo-erp
+        # #1861/#3037 -- a teardown/refresh channel, an automated alert log)
+        # must never inflate the footer's own core count either, or the
+        # footer and the /goal stop-proof (`core-quals --count`, which
+        # already excludes it) would disagree about what "done" means.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
+                '  *-label:ops-channel*) echo 5;;\n'
+                '  *) echo 9;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(
+                cache["open"], 5,
+                "the core-count query never excludes -label:ops-channel")
+
     def test_core_and_total_queries_no_longer_clamp_at_200(self):
         # #181 I5 (round 2): cmd_tickets_status's core/total queries both
         # clamped at -L 200 -- above 200 open non-skip issues both return

@@ -2361,3 +2361,131 @@ class TestHeartbeatOnAReviewOnlyRun(TestCase):
         doc = " ".join((airuleset._write_autopilot_progress.__doc__ or "").split())
         self.assertIn("review-only", doc)
         self.assertIn("no evidence of CORE progress", doc)
+
+
+def _fake_gh_search_filtered(items):
+    """A `_gh_out` stand-in that evaluates a `gh issue list --search "..."`
+    query against `items` (a list of `{"number", "labels": set(...)}`) with
+    REAL exclusion semantics -- `-label:X` genuinely removes an item
+    carrying X, `label:A,B` matches an item carrying A OR B (gh's own
+    documented comma-OR-within-one-qualifier behaviour, #181 M8/M-6) --
+    unlike `_fake_gh_by_search`'s pure substring-INCLUSION model above,
+    which cannot prove that an EXCLUSION term added to the built query
+    actually removes a ticket (#362): that fake would report a ticket as
+    still present just because SOME population key's substring occurs in
+    the search string, with no regard for whether a `-label:` term should
+    have removed it. `assignee:`/`author:`/`sort:` tokens are accepted but
+    ignored -- this fixture is only ever driven with label-only quals."""
+    searches = []
+
+    def gh(*a, **k):
+        args = [str(x) for x in a]
+        if "--search" not in args:
+            return "[]"
+        search = args[args.index("--search") + 1]
+        searches.append(search)
+        want_length = "-q" in args
+        matched = []
+        for it in items:
+            labels = it.get("labels") or set()
+            ok = True
+            for tok in search.split():
+                if tok.startswith("-label:"):
+                    names = tok[len("-label:"):].split(",")
+                    if any(n in labels for n in names):
+                        ok = False
+                        break
+                elif tok.startswith("label:"):
+                    names = tok[len("label:"):].split(",")
+                    if not any(n in labels for n in names):
+                        ok = False
+                        break
+            if ok:
+                matched.append(it)
+        if want_length:
+            return str(len(matched))
+        import json as _json
+        return _json.dumps([
+            {"number": it["number"],
+             "title": it.get("title", "t%d" % it["number"]),
+             "createdAt": it.get("createdAt", "2026-01-01T00:00:00Z"),
+             "labels": [{"name": n} for n in sorted(it.get("labels") or [])]}
+            for it in matched])
+
+    return gh, searches
+
+
+class TestQualsExcludePermanentOpsChannelTickets(TestCase):
+    """#362: a stream self-declares a ticket PERMANENT via the `ops-channel`
+    label (odoo-erp #1861 -- "[TRVALY OPS KANAL -- NEZATVARAT] erp-test-*
+    teardown/recreate/refresh", and #3037 -- a snapshot-retention alert log)
+    so it deliberately never auto-closes. Before this fix `core-quals`/
+    `slice-quals` treated it as ordinary workable backlog -- the /goal
+    stop-proof's `--count 0` was UNREACHABLE while it stayed open, and the
+    /autopilot loop dispatched a full worker onto it that found "nothing to
+    do -- permanent log ticket" (~220k wasted subagent tokens)."""
+
+    def test_core_quals_count_excludes_a_permanent_ops_channel_ticket(self):
+        import contextlib
+        import io
+
+        items = [
+            {"number": 1, "labels": set()},              # ordinary core work
+            {"number": 2, "labels": {"ops-channel"}},     # permanent channel
+        ]
+        gh, searches = _fake_gh_search_filtered(items)
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with m.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with contextlib.redirect_stdout(buf):
+                    airuleset.cmd_core_quals(
+                        m.Mock(count=True, list=False, extra=None))
+        self.assertEqual(
+            buf.getvalue().strip(), "1",
+            "a permanent ops-channel ticket is still counted as workable "
+            "backlog -- searches issued: %r" % searches)
+
+    def test_core_quals_list_omits_a_permanent_ops_channel_ticket(self):
+        import contextlib
+        import io
+
+        items = [
+            {"number": 1, "labels": set()},
+            {"number": 2, "labels": {"ops-channel"}},
+        ]
+        gh, _ = _fake_gh_search_filtered(items)
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"):
+            with m.patch.object(airuleset, "_gh_out", side_effect=gh):
+                with contextlib.redirect_stdout(buf):
+                    airuleset.cmd_core_quals(
+                        m.Mock(count=False, list=True, extra=None))
+        out = buf.getvalue()
+        self.assertIn("1\t", out)
+        self.assertNotIn("2\t", out)
+
+    def test_slice_quals_count_excludes_a_permanent_ops_channel_ticket(self):
+        import contextlib
+        import io
+
+        # The SHARED-account, single-label slice shape (montalu/marek/simap):
+        # _slice_quals() mocked directly so this test is about cmd_slice_quals'
+        # own query-building, not about resolving gh identity.
+        items = [
+            {"number": 1, "labels": {"stream:montalu"}},
+            {"number": 2, "labels": {"stream:montalu", "ops-channel"}},
+        ]
+        gh, searches = _fake_gh_search_filtered(items)
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="branch-merge"):
+            with m.patch.object(airuleset, "_slice_quals",
+                                return_value=["label:stream:montalu"]):
+                with m.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_slice_quals(
+                            m.Mock(count=True, list=False, extra=None))
+        self.assertEqual(
+            buf.getvalue().strip(), "1",
+            "a permanent ops-channel ticket is still in this stream's own "
+            "slice -- searches issued: %r" % searches)
