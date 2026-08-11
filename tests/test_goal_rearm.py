@@ -352,6 +352,53 @@ class TestGoalMarkerScan(unittest.TestCase):
                         "offset must stop after the last COMPLETE line")
 
 
+# #383 -- a captured pane whose visible region is ENTIRELY box content, the
+# real live shape read off camera-box's own stuck /goal re-arm draft
+# (pane %1, session zbynek-4:0, read-only `tmux capture-pane -p -t %1`,
+# zero keystrokes sent, 2026-08-11). Trimmed to the tail of the real
+# capture (some leading conversation/task-list content the box pushed
+# above it, the goal-indicator row `◎ /goal active (Nm)` -- a genuinely
+# LIVE, actively-incrementing render, NOT frozen scrollback, but sitting
+# ABOVE the box's own top border rather than below a bottom one -- then
+# the top border, the `❯`-prefixed head row, and wrapped continuation
+# all the way to the LAST captured line: no closing border, no
+# statusline row, no mode hint, nothing below the head row that reads as
+# real trailing chrome at all). Pre-#383-fix `pane_goal_armed` on this
+# EXACT text returns `False`; the goal is genuinely still armed.
+REAL_STUCK_DRAFT_CAPTURE_383 = (
+"  ◼ A/V round: #999+#1005 dock bundle, #1014 gate rework, #929 ASRC quality — 3 worktree workers + serial integration\n  ✔ #942 ROOT-CAUSED — two actuators on one knob, live corrector limit-cycles\n  ✔ REGRESSION: SyncNet lipsync Discord message never arrived\n  ✔ REGRESSION: VLC monitoring of stream OBS program broken\n   … +22 completed\n                                                                                                                                                            ◎ /goal active (6m)\n──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ultracode ─\n❯\xa0open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream\n  owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved, and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof\n  commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it, AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'`\n  printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker. HOW TO TELL A REAL COMPLETION\n  FROM A CLAIMED ONE: a real one SHOWS command output in this turn; a claimed one asserts it. `✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even\n  in a turn full of `✅` rows, a merged PR and a verified deploy. IF I CANNOT TELL — no `🏁` line, no pasted output, unreadable or possibly stale output, any doubt — (B) does\n  NOT hold and the answer is CONTINUE. There is no third answer. TO PRODUCE THE PROOF: run both commands, paste each and its output verbatim, then write the `🏁` line — no\n  proof, no stop. Seed EVERY new batch from the open `av`-labeled A/V lane first (oldest-first) while any remains — that lane is the standing absolute priority — then the\n  normal queue. A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code. Also stop when I must approve a\n  genuinely-irreversible action or a CI failure stays unfixable after two real attempts. While NEITHER holds, work the backlog: never gate, classify, skip, or warn based on\n  prod-usage / events / off-air / hardware — I alone guard whether prod is live. When an issue needs my input, ASK the moment it comes up (it ALWAYS pings) — prefer\n  ASK-AND-CONTINUE (`❓ ASKED` + a `needs-answer` comment on the issue, work other tickets, end `⏳ WORKING`); `❓ NEEDS YOU` only when nothing else is workable. NEVER bury a\n  question, NEVER stop blaming my silence. During 00:00–06:00 Europe/Bratislava defer a question ONLY while other tickets are workable; a NECESSARY question is asked even at\n  night. Bounce lane: open tickets labeled prio:bounce jump the queue — every NEW batch seeds from the OLDEST open prio:bounce ticket first (a running batch is never\n  preempted); an injected nudge naming a ticket gets a one-line ACK + the prio:bounce label, taken next turn — never worked inline. Count a ticket done ONLY after verifying\n")
+
+
+def _wrap_at(text, width=176):
+    """Greedy word-wrap, `❯`-prefixed head row then two-space-indented
+    continuation rows -- the same shape `tests/test_wrapped_draft.py`'s own
+    `render_box` already uses for the identical rendering purpose."""
+    rows, cur, prefix = [], "", "❯"
+    for word in text.split(" "):
+        cand = (cur + " " + word) if cur else word
+        if len(prefix) + len(cand) > width:
+            rows.append(prefix + cur)
+            cur, prefix = word, "  "
+        else:
+            cur = cand
+    rows.append(prefix + cur)
+    return rows
+
+
+def _giant_draft_no_chrome_captured(payload, conv_lines=30, width=176):
+    """A captured pane whose visible region is ENTIRELY box content: some
+    leading conversation, the box's own top border + `❯` head row, then
+    wrapped continuation rows all the way to the bottom of the capture --
+    with NO closing border, NO statusline row, and NO mode hint anywhere
+    below the head row. This is #383's own live shape (see
+    `REAL_STUCK_DRAFT_CAPTURE_383` above): a draft too tall for the
+    remaining viewport pushes the real footer chrome (and the `◎ /goal`
+    glyph riding on it) entirely off the captured screen."""
+    rows = _wrap_at(payload, width)
+    conv = ["hello %d" % i for i in range(conv_lines)]
+    return "\n".join(conv + ["-" * 60] + rows) + "\n"
+
+
 class TestPaneGoalIndicator(unittest.TestCase):
     """Source 2 — the pane footer (truth about REALITY)."""
 
@@ -391,6 +438,42 @@ class TestPaneGoalIndicator(unittest.TestCase):
 
     def test_empty_capture_is_undeterminable(self):
         self.assertIsNone(wd.pane_goal_armed(""))
+
+    def test_a_short_wrapped_draft_with_real_footer_still_visible_reads_dark(self):
+        # #383 review-anchor: the fix must NOT overshoot into treating
+        # EVERY wrapped/multi-line box as undeterminable -- a draft short
+        # enough that the closing border + real statusline row are STILL
+        # inside the captured window must keep reading False, exactly as
+        # before this fix.
+        payload = "short draft " * 6
+        rows = _wrap_at(payload)
+        pane = ("\u25cf hello\n" + "-" * 60 + "\n" + "\n".join(rows) + "\n"
+                + "-" * 60 + "\n"
+                "  ctx \u2591\u2591  5h 25%  wk 78%  caveman:lite\n"
+                "  \u23ed\u23ed bypass permissions on (shift+tab to cycle)\n")
+        self.assertIs(wd.pane_goal_armed(pane), False)
+
+    def test_a_real_shipped_goal_template_wrapped_full_screen_is_undeterminable(self):
+        # #383 -- independent of the one live-incident capture below: this
+        # proves the fix generalizes to the repo's OWN real, currently
+        # shipped /goal templates (not just the one fixture that happened
+        # to get captured). None of the three shipped templates' wrapped
+        # lines accidentally trip the chrome/statusline detector at any of
+        # 80/120/176 cols (checked directly before writing this fix, see
+        # the #383 design comment on the issue).
+        skill = (Path(__file__).resolve().parent.parent / "skills"
+                 / "autopilot" / "SKILL.md").read_text(encoding="utf-8")
+        goal_line = next(l for l in skill.splitlines()
+                          if l.strip().startswith("/goal "))
+        pane = _giant_draft_no_chrome_captured(goal_line)
+        self.assertIsNone(wd.pane_goal_armed(pane))
+
+    def test_giant_stuck_draft_pushing_the_footer_off_capture_is_undeterminable(self):
+        # #383 -- LIVE reproduction: camera-box's own actually-stuck /goal
+        # re-arm draft (see REAL_STUCK_DRAFT_CAPTURE_383's own docstring
+        # for the exact live-verification method). Pre-fix this returned
+        # False; the goal was genuinely still armed the whole time.
+        self.assertIsNone(wd.pane_goal_armed(REAL_STUCK_DRAFT_CAPTURE_383))
 
 
 class GoalRearmBase(unittest.TestCase):
