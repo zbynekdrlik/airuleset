@@ -4944,12 +4944,16 @@ class TestTmuxHistoryLimit(TestCase):
         # design comment on #254). #289: the claude-history popup
         # `bind-key` call (prefix-h -- S-F1/S-DC removed by #376, see the
         # module comment on TMUX_POPUP_PREFIX_KEY) is ALSO live-applied,
-        # same safety class. Total: history-limit + destroy-unattached +
-        # 3 scrollback binds + 1 popup bind = 6 calls.
+        # same safety class. #376 CLEANUP: two trailing `unbind-key`
+        # calls remove S-F1/S-DC from an ALREADY-RUNNING server that was
+        # live-bound before this fix deployed -- rewriting the conf file
+        # alone does not retroactively unbind a live key-table entry.
+        # Total: history-limit + destroy-unattached + 3 scrollback binds
+        # + 1 popup bind + 2 unbinds = 8 calls.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(calls), 8)
         self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "destroy-unattached", "keep-last"])
         self.assertEqual(calls[2], [
@@ -4961,6 +4965,8 @@ class TestTmuxHistoryLimit(TestCase):
         self.assertEqual(calls[4], ["tmux", "bind-key", "-T", "copy-mode-vi", "S-PageDown",
                                      "send-keys", "-X", "page-down"])
         self.assertEqual(calls[5], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[0])
+        self.assertEqual(calls[6], ["tmux", "unbind-key", "-n", "S-F1"])
+        self.assertEqual(calls[7], ["tmux", "unbind-key", "-n", "S-DC"])
 
     def test_a_failing_keybind_call_does_not_skip_the_remaining_ones(self):
         # #267: each live-apply call is independently guarded -- a runner
@@ -4976,7 +4982,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(calls), 8)
 
     def test_a_nonzero_rc_keybind_call_does_not_skip_the_remaining_ones(self):
         # ADVERSARIAL-REVIEW FINDING (#267, MAJOR -- F1): the RAISING case
@@ -5003,7 +5009,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(calls), 8)
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
