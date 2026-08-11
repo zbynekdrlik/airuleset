@@ -890,8 +890,13 @@ class RefreshCLI(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
-                '  *"--search -label:autopilot-skip -label:stream:david"*) echo 28;;\n'
-                '  *"--search -label:autopilot-skip -L 1000"*) echo 73;;\n'
+                # #362: the base exclusion is now AUTOPILOT_SKIP_EXCL
+                # (autopilot-skip + ops-channel), so the core/total queries'
+                # literal search value grew a `-label:ops-channel` term.
+                '  *"--search -label:autopilot-skip -label:ops-channel '
+                '-label:stream:david"*) echo 28;;\n'
+                '  *"--search -label:autopilot-skip -label:ops-channel '
+                '-L 1000"*) echo 73;;\n'
                 '  *) echo 0;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)

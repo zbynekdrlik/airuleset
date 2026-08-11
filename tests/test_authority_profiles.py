@@ -1097,8 +1097,11 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
             "label:ready-for-review": set(),
         })
         self.assertEqual(out.strip(), "1")
+        # #362: the "bare" shape is now AUTOPILOT_SKIP_EXCL (autopilot-skip
+        # + ops-channel), never the plain literal alone — checking against
+        # the shared constant keeps this a real (non-vacuous) assertion.
         bare = [s for s in searches
-                if s.strip() == "-label:autopilot-skip"]
+                if s.strip() == airuleset.AUTOPILOT_SKIP_EXCL]
         self.assertEqual(
             bare, [],
             "a bare whole-repo query is back — that is the never-stops "
@@ -1119,15 +1122,17 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
         AND) so that coverage survives the correction."""
         _, searches = self._run(count=False, list=True,
                                 extra="label:prio:bounce")
-        self.assertIn("-label:autopilot-skip label:prio:bounce", searches)
+        self.assertIn(
+            airuleset.AUTOPILOT_SKIP_EXCL + " label:prio:bounce", searches)
 
     def test_whitespace_only_extra_never_leaks_the_bare_whole_repo_query(self):
         """Adversarial review of #307: `extra=" "` is truthy, so an
         unstripped check would still take the bare-extra branch and union in
-        a plain `-label:autopilot-skip` query -- the exact whole-repo
+        a plain AUTOPILOT_SKIP_EXCL query -- the exact whole-repo
         never-stops shape #181 rejected."""
         _, searches = self._run(count=False, list=True, extra="   ")
-        bare = [s for s in searches if s.strip() == "-label:autopilot-skip"]
+        bare = [s for s in searches
+                if s.strip() == airuleset.AUTOPILOT_SKIP_EXCL]
         self.assertEqual(
             bare, [],
             "a whitespace-only --extra leaked the bare whole-repo query")

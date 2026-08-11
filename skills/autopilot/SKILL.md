@@ -102,8 +102,8 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   (subagents load at session start).
 - **Recommended:** run the session with **auto or bypass permissions** (Shift+Tab → auto) so
   routine worker tool-calls don't spam prompts. Genuine clarifying questions still reach you regardless.
-- **Backlog scope = every open issue THIS box is obliged to action, and `autopilot-skip` is the
-  only LABEL that excludes one.** Do **NOT** filter out `needs-design` / `needs-decision` /
+- **Backlog scope = every open issue THIS box is obliged to action, and `autopilot-skip`/`ops-channel` are the
+  only LABELS that exclude one.** Do **NOT** filter out `needs-design` / `needs-decision` /
   `question` / `blocked` — those get worked too; the worker raises the question with you. A
   backlog full of "needs input" issues is **NOT** a reason to refuse — start anyway. Only a
   genuinely empty backlog stops you. The one other carve-out is ownership, not preference: a
@@ -118,7 +118,11 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   `core-quals --count`) can never disagree about what "done" means. **Every row carries that
   distinction in its own third column** (#181 round 4): `action-only` = a sub-dev stream owns it,
   so you action it and NEVER write its code; `implement` = ordinary work. Read the column, not
-  your memory of this paragraph — the column is why it stopped being a prose promise.
+  your memory of this paragraph — the column is why it stopped being a prose promise. A ticket
+  labeled `ops-channel` (a stream's own self-declared PERMANENT never-auto-close channel — a
+  teardown/refresh loop, an automated alert log, e.g. odoo-erp #1861/#3037) is excluded from this
+  set at the SAME tier as `autopilot-skip`, never workable regardless of age (#362; documented in
+  `statusline-vocabulary.md`).
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do
