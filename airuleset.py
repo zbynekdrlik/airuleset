@@ -10720,12 +10720,30 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     already correctly un-handed via the label override alone, so the
     enrichment buys nothing there anyway.
 
+    #391 adversarial review CRITICAL-1: the comment fallback (below) keeps
+    the LAST comment signal, and a stream's own bounce nudge lane
+    (skills/autopilot/SKILL.md: a BARE `prio:bounce` label + a sub-dev-
+    authored ACK) applies the bounce with NO accompanying gatekeeper-shaped
+    comment at all — so a ticket with a genuine, older READY-FOR-REVIEW
+    comment and an INVISIBLE bounce (label only, no comment) would have its
+    last-and-only comment signal read True, silently re-upgrading it to
+    handed and discarding the label override just computed. `bounce_numbers`
+    tracks every currently-`prio:bounce`-labeled row; the comment-fallback
+    walk below may only upgrade one of THOSE numbers to handed when it also
+    saw a recognised gatekeeper comment (a VISIBLE bounce) somewhere in the
+    thread -- an invisible bounce fails toward "still unhandled", the safe
+    (never-stop) direction for a `/goal` stop-proof. A non-bounce-labeled
+    row is unaffected: the fallback's original "trust the last signal"
+    behaviour is unchanged for it (this is the #313 broken-workflow case the
+    fallback exists for, where no bounce is in play at all).
+
     `failed` is True on ANY gh query failure in the per-qual fetch — the
     caller must treat that as "cannot trust an unhandled count of 0", exactly
     like every other gh-search-derived zero in this file."""
     base = AUTOPILOT_SKIP_EXCL + ((" " + extra) if extra else "")
     rows, failed = _union_open_issues(quals, base, cwd=root)
     handed = {}
+    bounce_numbers = set()
     for n_num, row in rows.items():
         labels = {(lb or {}).get("name") for lb in (row.get("labels") or [])}
         # #191 Part A ("different lane"): needs-gatekeeper is airuleset's OWN
@@ -10738,9 +10756,11 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
         # to the sub-dev, not ready" verdict — it overrides a stale/lagged
         # hand-off LABEL so a bounced ticket reaches `unhandled` naturally;
         # the comment-fallback walk below is what still recognises a genuine
-        # RE-hand-off after a bounce.
+        # RE-hand-off after a bounce -- but (#391 CRITICAL-1) only when that
+        # bounce is itself VISIBLE in the comment thread (see the docstring).
         if "prio:bounce" in labels:
             label_handed = False
+            bounce_numbers.add(n_num)
         handed[n_num] = label_handed
 
     if extra is not None:
@@ -10755,6 +10775,16 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     # (#191 adversarial review M3). Deliberately NEVER filtered by `extra`
     # (see the docstring above) — this branch only runs when extra is None
     # anyway.
+    #
+    # #391 adversarial review THEORETICAL-6 (accepted residual, no known
+    # reproduction, edge-of-edge): rows recovered here make `rows` non-empty
+    # unconditionally, so `cmd_slice_quals`'s C2 label-existence refusal
+    # (`_refuse_unless_empty_is_trustworthy`) is skipped even if the
+    # `stream:<user>` label itself was deleted from the repo — a shared-
+    # account box could then print a trusted-looking `0` while genuinely
+    # unlabeled, unhandled tickets sit orphaned (recovered-but-not-owned).
+    # Requires repo-label deletion PLUS a prior recovered hand-off PLUS an
+    # orphaned open ticket, simultaneously — not chased.
     if not failed and len(quals) == 1 and quals[0].startswith("label:stream:"):
         user = _current_user()
         raw = _gh_out("issue", "list", "--state", "open", "--search",
@@ -10794,6 +10824,14 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     # signal (a stale pre-bounce comment is correctly invalidated by a
     # later gatekeeper finding/bounce, and a genuine post-bounce
     # re-submission overrides that again).
+    #
+    # #391 CRITICAL-1: for a row in `bounce_numbers`, an upgrade to handed
+    # additionally requires `saw_gatekeeper_comment` -- a recognised
+    # gatekeeper-authored comment (`_comment_readiness_signal` returning
+    # False) seen SOMEWHERE in the walk, proving the bounce is genuinely
+    # VISIBLE in the thread (a real post-bounce re-hand-off) rather than a
+    # bare-label bounce with no comment at all (which must never re-flip a
+    # stale pre-bounce hand-off comment back to handed).
     if slug and not failed:
         unhandled_candidates = sorted(
             (n_num for n_num in rows if not handed.get(n_num)),
@@ -10809,12 +10847,16 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
             if not isinstance(comments, list):
                 continue   # e.g. a bare int -- never a real answer
             verdict = False
+            saw_gatekeeper_comment = False
             for c in comments:
                 body = c.get("body") if isinstance(c, dict) else None
                 sig = _comment_readiness_signal(body)
+                if sig is False:
+                    saw_gatekeeper_comment = True
                 if sig is not None:
                     verdict = sig
-            if verdict:
+            if verdict and (n_num not in bounce_numbers or
+                            saw_gatekeeper_comment):
                 handed[n_num] = True
 
     return rows, handed, failed
@@ -11152,6 +11194,20 @@ def cmd_slice_quals(args):
         # a non-empty slice that is ENTIRELY handed off is a real, trusted
         # 0-unhandled result and needs no validation (the search index
         # already demonstrably answered).
+        #
+        # #391 adversarial review THEORETICAL-5 (accepted residual, no known
+        # reproduction): "non-empty `rows`" proves the index answered
+        # SOMETHING, not that it answered COMPLETELY — a partial index
+        # response returning only the already-handed subset (plausible for
+        # the freshest-changed ticket, e.g. one just bounced) would still
+        # clear this guard and print a clean `0`. Pre-#391 the identical
+        # partial answer produced a non-zero undercount instead (loop stayed
+        # alive). Not chased: moving the guard to check `unhandled` directly
+        # would FALSE-refuse the legitimate all-handed case this branch
+        # exists to accept (verified: `test_count_excludes_a_ready_for_
+        # review_ticket` fails under that change), and no real partial-
+        # index-response has ever been observed (only a full-empty one, the
+        # repo-rename repro this guard was built from).
         _refuse_unless_empty_is_trustworthy("slice-quals", quals, cwd=root)
     unhandled = {n: v for n, v in rows.items() if not handed.get(n)}
     if want_count:
