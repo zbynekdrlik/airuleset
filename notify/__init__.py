@@ -958,14 +958,25 @@ def _dedup_path(key):
     the filesystem's real NAME_MAX (~255 bytes), and `_dedup_claim`'s own
     deliberate `except OSError: return True` fail-open then turns THAT into
     "first attempt, send it" on EVERY call for that key — the marker never
-    reaches disk, so dedup silently never happens for it. A sha256 hex
-    digest is itself pure `[a-f0-9]`, so it needs no further sanitisation,
-    and the `long-` prefix is never produced by sanitising anything SHORT —
-    so a hashed name can never collide with a real short key's own
-    namespace. Every existing short key (the overwhelming majority — a
-    `<repo>#<issue>` card, a session/pid-keyed watchdog key) resolves to
-    EXACTLY the same path it always has; only a key long enough to be
-    unsafe on disk in the first place is affected."""
+    reaches disk, so dedup silently never happens for it. Confirmed to be a
+    LIVE, currently-reachable trigger, not just a theoretical one:
+    `card-unreported`'s own dedup_key joins the FULL `pingable` list
+    (unlike its `shown`/`more` DISPLAY text, which `CARD_MAX_LISTED`
+    truncates) — a repo with ~40+ unreported closed tickets already crosses
+    this module's own threshold. A sha256 hex digest is itself pure
+    `[a-f0-9]`, so it needs no further sanitisation. The `long-` prefix
+    could in principle collide with a SHORT key that is *itself* literally
+    spelled `long-<64 lowercase hex chars>` — no real caller in this repo
+    composes a key anywhere near that shape, so this is unreachable in
+    practice, not impossible in the abstract. Every existing short key (the
+    overwhelming majority — a `<repo>#<issue>` card, a session/pid-keyed
+    watchdog key) resolves to EXACTLY the same path it always has; only a
+    key long enough to be unsafe on disk in the first place is affected. A
+    key that used to sanitise into the (181..255)-byte window worked fine
+    before this fix (a valid, if fragile, on-disk marker) and gets a NEW
+    hashed path after it — the old marker is orphaned, costing at most one
+    duplicate notification within its dedup window before the new hashed
+    marker takes over; self-healing, never a permanent loss of dedup."""
     safe = re.sub(r"[^A-Za-z0-9._#-]", "_", str(key))
     if len(safe) > _DEDUP_NAME_MAX:
         digest = hashlib.sha256(str(key).encode("utf-8", "replace")).hexdigest()

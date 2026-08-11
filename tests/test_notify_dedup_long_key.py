@@ -104,6 +104,25 @@ class TestDedupPathStaysWithinAFilesystemSafeLength(_HomeIsolated):
         path = notify._dedup_path(key)
         self.assertEqual(os.path.basename(path), "airuleset#41")
 
+    def test_the_boundary_is_exact_not_off_by_one(self):
+        # A mutant swapping `>` for `>=` in _dedup_path survives every OTHER
+        # test in this file (a fresh-context adversarial review found this,
+        # #359) — nothing else pins the exact edge. A key whose SANITISED
+        # form is exactly _DEDUP_NAME_MAX bytes must keep its literal name;
+        # one byte longer must switch to the hashed form.
+        at_limit = "a" * notify._DEDUP_NAME_MAX
+        over_limit = "a" * (notify._DEDUP_NAME_MAX + 1)
+        self.assertEqual(len(at_limit), notify._DEDUP_NAME_MAX)
+        name_at = os.path.basename(notify._dedup_path(at_limit))
+        name_over = os.path.basename(notify._dedup_path(over_limit))
+        self.assertEqual(
+            name_at, at_limit,
+            "a key sanitising to EXACTLY the limit must keep its literal, "
+            "un-hashed name")
+        self.assertTrue(
+            name_over.startswith("long-"),
+            "a key ONE byte over the limit must already be hashed")
+
 
 class TestSendEndToEndWithALongDedupKey(_HomeIsolated):
     """The real consumer-facing behaviour: `notify.send()` itself must
