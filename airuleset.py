@@ -1040,6 +1040,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -1268,7 +1269,36 @@ def _turn_time_suffix(ts):
     return " %sZ" % m.group(1) if m else ""
 
 
-def render(turns, last=None, use_color=False):
+def _wrap_plain(text, width):
+    """Word-wrap TEXT to WIDTH columns, one PHYSICAL line at a time -- a
+    literal "\\n" already in the source is a real paragraph break and is
+    never merged into the wrap. `width` <=0 or None is a no-op (matches
+    every pre-#376 caller's own behavior unchanged, width-independent).
+    `break_long_words=False`/`break_on_hyphens=False`: a single long token
+    (a URL, a hash, a path) is never chopped mid-word -- it simply
+    overflows that one line rather than being silently corrupted, the same
+    "never mangle a token" spirit `_tool_summary`'s own 100-char
+    truncation already follows. #376: fixes the popup's own reported
+    "scrolls right instead of wrapping" complaint for the TRANSCRIPT-
+    reconstruction content -- applied here, to the PLAIN text, BEFORE any
+    ANSI color codes are added, so a fold point can never land inside an
+    escape sequence (the well-documented `less -R` limitation this
+    sidesteps entirely: multiple embedded escape sequences on one line can
+    defeat `less`'s own wrap-column tracking)."""
+    if not width or width <= 0:
+        return text
+    out_lines = []
+    for line in text.split("\n"):
+        if not line:
+            out_lines.append(line)
+            continue
+        wrapped = textwrap.wrap(line, width, break_long_words=False,
+                                 break_on_hyphens=False)
+        out_lines.extend(wrapped if wrapped else [line])
+    return "\n".join(out_lines)
+
+
+def render(turns, last=None, use_color=False, width=None):
     """#294: colors ADD to the existing plain layout, they never replace
     it -- the "===== USER =====" / "===== CLAUDE =====" header (the clear
     turn separator that pre-dates #294) is wrapped whole-line in the role
@@ -1284,7 +1314,12 @@ def render(turns, last=None, use_color=False):
     -- "----- COMPACTED ... -----", never the "===== USER/CLAUDE ====="
     shape -- so a reader can tell at a glance where the session's own
     context got summarized, instead of the pre-#376 silent skip that left
-    no trace of the boundary at all."""
+    no trace of the boundary at all.
+
+    `width` (#376, default None -- no wrap, byte-for-byte the pre-#376
+    behavior): word-wraps body TEXT and tool-summary lines to that many
+    columns via `_wrap_plain`, applied to the PLAIN string BEFORE any ANSI
+    color code is appended -- see `_wrap_plain`'s own docstring for why."""
     if last is not None:
         turns = turns[-last:]
     lines = []
@@ -1317,9 +1352,9 @@ def render(turns, last=None, use_color=False):
             line = header
         lines.append(line)
         if t["text"]:
-            lines.append(t["text"])
+            lines.append(_wrap_plain(t["text"], width))
         for tool in t["tools"]:
-            tool_line = "  -> %s" % tool
+            tool_line = _wrap_plain("  -> %s" % tool, width)
             if use_color:
                 tool_line = _ANSI_DIM + tool_line + _ANSI_RESET
             lines.append(tool_line)
@@ -1345,6 +1380,10 @@ def main(argv=None):
                      help="show the whole session (overrides --last)")
     ap.add_argument("--list", action="store_true",
                      help="list available transcripts for this project and exit")
+    ap.add_argument("--width", type=int, default=0,
+                     help="word-wrap body text/tool lines to this many "
+                          "columns (#376); 0 or omitted = no wrap, the "
+                          "pre-#376 default")
     color_group = ap.add_mutually_exclusive_group()
     color_group.add_argument("--color", action="store_true",
                               help="force ANSI colors ON even when stdout is "
@@ -1447,7 +1486,8 @@ def main(argv=None):
     else:
         print("# %d turn(s) total -- showing last %d" % (len(turns), args.last))
     print("")
-    print(render(turns, None if args.full else args.last, use_color=use_color))
+    print(render(turns, None if args.full else args.last, use_color=use_color,
+                 width=args.width))
     return 0
 
 
