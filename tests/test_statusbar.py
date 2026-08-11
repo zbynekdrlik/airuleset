@@ -946,6 +946,99 @@ class RefreshCLI(unittest.TestCase):
                 cache["open"], 5,
                 "the core-count query never excludes -label:ops-channel")
 
+    def test_reduced_authority_mine_slice_excludes_ops_channel(self):
+        # #362 review: the reduced-authority "mine" slice loop
+        # (cmd_tickets_status, own-account 3-qual shape: assignee/author/
+        # stream) must ALSO AND -label:ops-channel onto every per-qual
+        # search -- the SAME exclusion the full-authority core query above
+        # already has. Own-account shape (assignee:@me/author:@me present)
+        # mirrors test_refresh_scopes_count_to_own_slice_for_reduced_
+        # authority's own established fixture shape.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *-label:ops-channel*assignee:@me*)'
+                ' echo \'[{"number":1}]\';;\n'
+                '  *assignee:@me*) echo \'[{"number":1},{"number":4}]\';;\n'
+                '  *-label:ops-channel*author:@me*)'
+                ' echo \'[{"number":2}]\';;\n'
+                '  *author:@me*) echo \'[{"number":2},{"number":4}]\';;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            # {1} ∪ {2} = 2, ticket #4 (ops-channel, assigned+authored to
+            # me) must NOT leak in -- a mutant reverting AUTOPILOT_SKIP_EXCL
+            # back to the bare "-label:autopilot-skip" literal at this call
+            # site loses the "-label:ops-channel" branch of the fake
+            # entirely and reads 3.
+            self.assertEqual(
+                cache["open"], 2,
+                "ops-channel ticket #4 leaked into the reduced-authority "
+                "mine-slice footer count")
+
+    def test_reduced_authority_origin_recovery_candidates_exclude_ops_channel(self):
+        # #362 review: the ORIGIN-RECOVERY candidates query (the SHARED-
+        # account, single-qual `label:stream:<user>` shape only -- the one
+        # branch that finds a ticket relabelled away from stream:<user> via
+        # `_last_origin_owner`) must also AND -label:ops-channel onto its
+        # own search. This test captures the literal search string sent for
+        # THAT specific query (rather than driving the whole GraphQL
+        # recovery pipeline to a final count) -- a mutant reverting the
+        # AUTOPILOT_SKIP_EXCL usage at this call site changes the captured
+        # string and fails the assertion.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            log_path = Path(home) / "gh-calls.log"
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "$*" >> "%s"\n'
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
+                '  *"api user"*) echo "zbynekdrlik";;\n'
+                '  *) echo "[]";;\n'
+                'esac\n' % log_path)
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            log = log_path.read_text() if log_path.exists() else ""
+            candidate_lines = [ln for ln in log.splitlines()
+                               if "needs-gatekeeper,ready-for-review" in ln]
+            self.assertTrue(
+                candidate_lines,
+                "the origin-recovery candidates query never ran -- "
+                "log:\n%s" % log)
+            for ln in candidate_lines:
+                self.assertIn(
+                    "-label:ops-channel", ln,
+                    "origin-recovery candidates query missing the "
+                    "ops-channel exclusion: %r" % ln)
+
     def test_core_and_total_queries_no_longer_clamp_at_200(self):
         # #181 I5 (round 2): cmd_tickets_status's core/total queries both
         # clamped at -L 200 -- above 200 open non-skip issues both return

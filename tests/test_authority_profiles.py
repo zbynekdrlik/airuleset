@@ -543,6 +543,84 @@ class TestRunCardRemainingScopedToStream(TestCase):
         self.assertIsNotNone(m, captured["b"])
         self.assertEqual(m.group(1), "2", captured["b"])   # slice, NOT 26
 
+    def test_reduced_authority_remaining_excludes_ops_channel(self):
+        # #362 review: the reduced-authority "remaining" queries (both the
+        # per-qual slice loop and the origin-recovery candidates query, one
+        # frame up in cmd_tickets_status) must AND -label:ops-channel onto
+        # the same base as -label:autopilot-skip. #4 below carries BOTH
+        # assignee:@me and author:@me AND ops-channel -- if the exclusion is
+        # ever dropped from the search string the fake reverts to the
+        # inflated (assignee/author-only) population, so this fails against
+        # a mutant that removes AUTOPILOT_SKIP_EXCL's ops-channel half.
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "view" in j:
+                return "T"
+            if "-label:ops-channel" in j and "assignee:@me" in j:
+                return '[{"number":1}]'
+            if "assignee:@me" in j:
+                return '[{"number":1},{"number":4}]'
+            if "-label:ops-channel" in j and "author:@me" in j:
+                return '[{"number":2}]'
+            if "author:@me" in j:
+                return '[{"number":2},{"number":4}]'
+            if "label:stream:" in j:
+                return "[]"
+            return "26"
+
+        captured = {}
+        with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+            with mk.patch.object(airuleset, "resolve_authority",
+                                 return_value="fork-no-merge"):
+                with mk.patch.object(airuleset, "_gh_login",
+                                     return_value="kvaskodev"):
+                    with mk.patch("notify.send",
+                                  side_effect=lambda body, **k: (
+                                      captured.setdefault("b", body),
+                                      "sent")[1]):
+                        airuleset.cmd_notify(self._args())
+        import re
+        m = re.search(r"ostáva (\d+)", captured["b"])
+        self.assertIsNotNone(m, captured["b"])
+        self.assertEqual(
+            m.group(1), "2",
+            "ops-channel ticket #4 leaked into the reduced-authority "
+            "'remaining' count -- body: %r" % captured["b"])
+
+    def test_full_authority_remaining_excludes_ops_channel(self):
+        # #362 review: the full-authority "remaining" (core-scoped) query
+        # must ALSO AND -label:ops-channel onto its search. Without it, the
+        # count would read the inflated whole-core figure (5 here); with it,
+        # the correctly-scoped 2.
+        import unittest.mock as mk
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "view" in j:
+                return "T"
+            if "-label:ops-channel" in j:
+                return "2"
+            return "5"
+
+        captured = {}
+        with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+            with mk.patch.object(airuleset, "resolve_authority",
+                                 return_value="full"):
+                with mk.patch("notify.send",
+                              side_effect=lambda body, **k: (
+                                  captured.setdefault("b", body),
+                                  "sent")[1]):
+                    airuleset.cmd_notify(self._args())
+        import re
+        m = re.search(r"ostáva (\d+)", captured["b"])
+        self.assertIsNotNone(m, captured["b"])
+        self.assertEqual(
+            m.group(1), "2",
+            "the full-authority core-scoped 'remaining' count did not "
+            "exclude ops-channel -- body: %r" % captured["b"])
+
 
 class TestSliceQualsIsTheOneSliceDefinition(TestCase):
     """#181: montalu@subdev's armed /goal declared the backlog EMPTY (its own
