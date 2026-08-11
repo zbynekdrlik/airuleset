@@ -12010,7 +12010,30 @@ def pane_goal_armed(captured):
     classify as chrome at all — so a peel-based read stopped ABOVE the very
     row the indicator sits on, and a `ctx `-prefix guard declared the whole
     pane unreadable. A SELECTED agent-strip row (`❯ ● main`, #36) renders
-    below the box and is excluded from the boundary search."""
+    below the box and is excluded from the boundary search.
+
+    #383 — non-blank `footer` content is NOT by itself proof the real
+    chrome region is even in view. A draft too tall to fit the remaining
+    viewport (job 20's own re-arm delivery left one PARKED, unsent, after a
+    paste-pending failure) renders as `❯ <head>` followed by many more
+    wrapped CONTINUATION rows of the SAME box, filling the capture down to
+    its last line — those rows are more box content, never chrome, and the
+    real closing border + statusline + `◎ /goal` glyph have scrolled off
+    past the bottom of what was captured. Live-confirmed, read-only, on
+    camera-box's own stuck pane (session zbynek-4:0, pane %1, 2026-08-11):
+    the capture's LAST line was still draft text, with a genuinely live,
+    actively-incrementing `◎ /goal active (Nm)` glyph rendered entirely
+    OUTSIDE `footer` (above the box's own top border), and the old body
+    returned a confident `False` on it. So a `footer` with content but with
+    NO row that itself reads as real trailing chrome (`_is_bottom_chrome`,
+    the SAME peel used to find the box's own head) cannot support a `False`
+    verdict either — the indicator's own home row is not provably in view,
+    so the answer is `None`. Verified this reuses `_is_bottom_chrome` (no
+    new pattern) without tripping on the repo's own real `/goal` templates
+    wrapped at 80/120/176 columns, and without disturbing the pre-existing
+    `test_statusline_without_a_ctx_segment_still_reads` case (a mode-hint
+    row alone already counts as chrome, independent of the statusline
+    row's own segment-count threshold)."""
     lines = (captured or "").splitlines()
     idx = None
     for i, ln in enumerate(lines):
@@ -12022,7 +12045,13 @@ def pane_goal_armed(captured):
     footer = lines[idx + 1:]
     if not any(ln.strip() for ln in footer):
         return None                        # nothing rendered below it
-    return any(GOAL_INDICATOR in ln for ln in footer)
+    if any(GOAL_INDICATOR in ln for ln in footer):
+        return True
+    if not any(_is_bottom_chrome(ln.strip()) for ln in footer if ln.strip()):
+        return None                        # #383: footer is box content,
+                                            # not chrome -- real footer is
+                                            # off-screen, "dark" unproven
+    return False
 
 
 GOAL_TYPE_SETTLE_POLLS = 8          # bounded: CC needs a moment to INGEST a
