@@ -11609,7 +11609,8 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
         return logs
     if draft:
         dlogs = []
-        ok = deliver_with_stash(pid, target, run, captured=fresh, logs=dlogs)
+        ok = deliver_with_stash(pid, target, run, captured=fresh, logs=dlogs,
+                                sleep_fn=sleep_fn)
         tag = "goal-drift, stash"
     else:
         if not pane_at_idle_prompt(fresh):
