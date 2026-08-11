@@ -111,16 +111,19 @@ class TestPromptWedgeIdleFromContentNotMtime(unittest.TestCase):
         os.utime(p, (now, now))
         return p
 
-    def _run(self, now, tmux):
+    def _run(self, now, tmux, **kw):
         # #293 finding A: pending_prefix MUST be scoped to this test's own
         # scratch dir -- job 5 (deliver_pending_done) is unconditional and
         # otherwise sweeps the REAL /tmp/claude-discord-pending-* glob,
         # which this live box's own concurrent sessions genuinely write to.
+        # (**kw lets the decoy test below inject done_grace while still
+        # exercising THIS scoped call path -- the thing under test.)
         return wd.run_once(now=now, dry_run=False, run=tmux,
                            send_fn=self._send,
                            projects_dir=self.projects,
                            state_path=self.state_path,
-                           pending_prefix=str(Path(self.tmp.name) / "pending-"))
+                           pending_prefix=str(Path(self.tmp.name) / "pending-"),
+                           **kw)
 
     def test_a_stable_draft_over_a_stale_real_turn_pings_despite_fresh_mtime(self):
         now = time.time()
@@ -189,17 +192,40 @@ class TestPromptWedgeIdleFromContentNotMtime(unittest.TestCase):
         # sees it. Every sibling wedge test in tests/test_prompt_wedge.py
         # already scopes `pending_prefix` to a tmp dir; this file was the
         # one outlier (#177, the newest of the pwedge test files).
+        #
+        # 2026-08-11 race addendum: this decoy USED to be planted with an
+        # mtime aged past PENDING_DONE_GRACE via os.utime -- which handed
+        # the REAL systemd api-watchdog (a SEPARATE process running run_once
+        # every 60s, job 5 unconditional) a genuine, deliverable orphan
+        # ✅-pending at the REAL glob for the few seconds the decoy existed.
+        # Twice it won that race, DELIVERED "✅ nasadené v1.2.3, CI zelené"
+        # to the user's real Discord phone and unlinked the decoy, failing
+        # the decoy.exists() assertion below (~/.claude/notify-delivery.log:
+        # "2026-08-08T21:27:04 sent kind=python key=done:test-pwedge-decoy-
+        # 3484583" and "2026-08-11T16:20:08 ... key=done:test-pwedge-decoy-
+        # 3658490" -- the second one failed the full-suite run inside
+        # `airuleset.py push`).  The decoy is now planted with a FRESH mtime
+        # (idle < the real watchdog's own def-time-default grace for far
+        # longer than this test lives -- `idle < done_grace` -> continue),
+        # while THIS test's own in-process run_once gets done_grace=-60 so
+        # the fresh decoy still reads as aged here.  Note run_once/
+        # deliver_pending_done bind done_grace=PENDING_DONE_GRACE at IMPORT
+        # (def-time default), so monkeypatching wd.PENDING_DONE_GRACE could
+        # never reach them -- the explicit kwarg is the only real seam.
+        # RED power for finding A is preserved: done_grace travels
+        # independently of pending_prefix, so a regressed run_once that
+        # ignores the scoping and sweeps the real glob still receives
+        # done_grace=-60, delivers the fresh decoy into self.pings AND
+        # unlinks it -- failing BOTH assertions below.
         decoy = Path(wd.PENDING_PREFIX + ("test-pwedge-decoy-%d" % os.getpid()))
         self.addCleanup(lambda: decoy.exists() and decoy.unlink())
         decoy.write_text("✅ nasadené v1.2.3, CI zelené")
-        stale = time.time() - wd.PENDING_DONE_GRACE - 60
-        os.utime(decoy, (stale, stale))
 
         now = time.time()
         self._write_transcript(now, real_turn_age_s=wd.PWEDGE_MIN_IDLE_S + 300)
         tmux = _Tmux("%1\tclaude\t" + CWD + "\n", WEDGE_PANE)
-        self._run(now, tmux)
-        self._run(now + 70, tmux)
+        self._run(now, tmux, done_grace=-60)
+        self._run(now + 70, tmux, done_grace=-60)
         self.assertEqual(
             len(self.pings), 1,
             "a real /tmp/claude-discord-pending-* file leaked into this "
