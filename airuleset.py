@@ -1424,8 +1424,8 @@ def main(argv=None):
     # keeps its EXACT pre-#376 single-file contract -- never chained. A
     # cwd/pane-resolved lookup can find MULTIPLE `.jsonl` files for one
     # project (`claude-new`'s always-fresh mode, or any other reason a
-    # second session id exists) -- under `--full` (the mode S-DC/prefix+h
-    # actually invoke), ALL of them are chained together, oldest-first, so
+    # second session id exists) -- under `--full` (the mode prefix+h
+    # invokes), ALL of them are chained together, oldest-first, so
     # an older sibling file's own content is never silently dropped just
     # because a newer one exists. `--last` (the default quick-glance mode)
     # deliberately keeps the pre-#376 single-newest-file behavior -- see
@@ -1534,177 +1534,115 @@ def render_claude_history_script():
 # `Path.home()`, correct for the user `install`/`push` runs as) -- no
 # `$VAR` of any kind needs to survive the conf-parser at all.
 CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.sh"
-# #327: PRIMARY source flipped from the transcript reconstruction to a
-# real `tmux capture-pane` -- see the module comment above TMUX_POPUP_KEY
-# (#289) for the mechanism this relies on: a BARE `tmux capture-pane`/
-# `display-message` call with NO explicit `-t`, issued from WITHIN THIS
-# popup's own shell, resolves against the ORIGINATING pane (the one the
-# popup key was pressed in) -- confirmed live TWICE, independently: once
-# via an isolated `-L` socket with a real attached pty client switched
-# across THREE windows (a decoy window's content never leaked into the
-# capture), and again via a fresh-context adversarial review's own,
-# stronger repro -- a genuine 2-SESSION/2-CLIENT server with the raw
-# popup-key bytes injected into each client's own pty, confirming the
-# resolution follows the PRESSING client correctly in both directions.
-# ADVERSARIAL-REVIEW FINDING (#327): the mechanism is `display-popup`
-# setting the popup job's own `$TMUX` to the PRESSING client's target
-# session -- never rely on `$TMUX_PANE` inside a popup as a shortcut for
-# this (its value is unreliable/environment-dependent, not a documented
-# tmux guarantee); the bare-target resolution above is the only proven
-# path. The ONE proven way to break this: adding `-c <client>` to
+# HISTORY (kept for the still-relevant TECHNICAL FACTS the current
+# fallback below depends on, not because the design they describe is
+# still current -- #327 made `tmux capture-pane` this popup's PRIMARY
+# source, #337 then split that behavior per-binding, and #376 REVERSES
+# both: the transcript reconstruction is unconditionally primary again,
+# see the module comment above CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT for
+# the current design):
+#
+# A BARE `tmux capture-pane`/`display-message` call with NO explicit
+# `-t`, issued from WITHIN this popup's own shell, resolves against the
+# ORIGINATING pane (the one the popup key was pressed in) -- confirmed
+# live TWICE, independently: once via an isolated `-L` socket with a real
+# attached pty client switched across THREE windows (a decoy window's
+# content never leaked into the capture), and again via a fresh-context
+# adversarial review's own, stronger repro -- a genuine 2-SESSION/2-CLIENT
+# server with the raw popup-key bytes injected into each client's own
+# pty, confirming the resolution follows the PRESSING client correctly in
+# both directions (#327). The mechanism is `display-popup` setting the
+# popup job's own `$TMUX` to the PRESSING client's target session --
+# never rely on `$TMUX_PANE` inside a popup as a shortcut for this (its
+# value is unreliable/environment-dependent, not a documented tmux
+# guarantee); the bare-target resolution above is the only proven path.
+# The ONE proven way to break this: adding `-c <client>` to
 # `display-popup`, or invoking this script via `run-shell` instead of as
 # the popup's own shell-command -- NEVER do either; both were shown live
-# to route the capture to the WRONG session's pane.
-# `-e` preserves the pane's own real SGR/ANSI
-# bytes (same colors CC's TUI actually painted); `-S -{{TMUX_HISTORY_LIMIT}}`
-# matches TMUX_HISTORY_LIMIT (#235's own scrollback-retention mitigation)
-# so this reaches everything tmux's own history buffer could possibly
-# hold. This is a genuine CAPTURE (same wrapping, same colors, same
-# typography, zero custom structure) -- the ONLY thing that can satisfy
-# "vizuálna identita s tým, čo bolo na obrazovke" (#327's own wording);
-# a reconstruction, however undecorated, structurally cannot.
+# to route the capture to the WRONG session's pane. `-e` preserves the
+# pane's own real SGR/ANSI bytes; `-S -{{TMUX_HISTORY_LIMIT}}` matches
+# TMUX_HISTORY_LIMIT (#235's own scrollback-retention mitigation) so this
+# reaches everything tmux's own history buffer could possibly hold --
+# still the exact fallback wired into CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT
+# below, just no longer the PRIMARY path.
 #
-# claude-history (the transcript reconstruction, #267/#289/#294) is kept
-# as the FALLBACK for when capture-pane genuinely produces nothing (the
-# tmux call itself fails, or the pane's own scrollback is empty/blank) --
-# and per #327 that fallback now renders NEUTRAL by default: --plain is
-# passed explicitly (never the forced --color #289/#294 shipped), so
-# claude-history's own pre-existing --color/--plain flags remain the ONLY
-# opt-in path back to #294's colored rendering (typed by hand, never the
-# popup's own default). This is the S-F1/prefix-h (non-mode) shape below.
-#
-# #337: the ONE value AIRULESET_POPUP_MODE ever carries today -- set via
-# `-e AIRULESET_POPUP_MODE=<this>` on S-DC's OWN bind-key argv only (see
-# TMUX_POPUP_BIND_ARGVS below), read back inside the popup script via a
-# TEMPLATE-SUBSTITUTED literal (never a second, hand-typed copy that could
-# silently drift out of sync with the argv side -- see
-# render_claude_history_popup_script). S-F1/prefix-h get no `-e` flag at
-# all -- their BIND-KEY ARGV is unchanged byte-for-byte -- so MODE is
-# empty for them and they take the ELSE branch, whose STATEMENTS are
-# #327's own capture-pane-primary code (re-indented one level inside the
-# new `if`/`else`) -- #337's original text described this branch as
-# carrying "the pre-#337 code verbatim"; that claim predates the #327
-# merge and is no longer accurate now that #327's capture-pane-primary
-# logic has landed in it, so the branch's own STATEMENTS above are #327's,
-# not #337's pre-merge legacy shape.
-TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY = "transcript-primary"
+# #376: fullscreen is now the
+# PRIMARY way to view history (PgUp/PgDn + Ctrl+O, app-internal, survives
+# compaction -- see apply_managed_settings_defaults' own docstring). This
+# popup is a FALLBACK ONLY, for cross-session / already-closed-pane
+# history a live fullscreen scrollback cannot show -- so it no longer
+# needs to impersonate the live terminal (#327's whole reason for
+# existing) or juggle multiple bind-specific behaviors (#337's MODE
+# branching): ONE binding (prefix-h, the only one the user personally
+# confirmed opens -- see the module comment above TMUX_POPUP_PREFIX_KEY),
+# ALWAYS the complete, hole-free transcript reconstruction, with a real
+# `tmux capture-pane` as ITS OWN fallback only when the reconstruction
+# itself resolves nothing.
 CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT = r'''#!/usr/bin/env bash
 # airuleset-managed (do NOT edit) -- claude-history popup companion
-# (#289, primary source flipped to capture-pane by #327). Invoked from
-# the managed tmux S-F1 / S-DC / prefix-h display-popup bind
-# (TMUX_POPUP_BIND_ARGVS in airuleset.py). FAILS LOUDLY, never silently:
-# on total failure (every source this branch tries) the last error is
-# shown and the popup waits for a keypress before closing, rather than
-# handing `less` empty stdin (which can close instantly with nothing to
-# read).
-#
-# #337: S-DC alone (via `AIRULESET_POPUP_MODE={{POPUP_MODE_TRANSCRIPT_PRIMARY}}`,
-# set ONLY on ITS OWN bind-key argv -- see TMUX_POPUP_BIND_ARGVS in
-# airuleset.py) flips the SOURCE PRIORITY: claude-history's transcript-
-# JSONL reconstruction goes FIRST (complete, hole-free history, immune to
-# the upstream Claude Code TUI's scrollback-duplication regression --
-# anthropics/claude-code #84247/#46834, still open as of this ticket),
-# with a real `tmux capture-pane` of the ORIGINATING pane as ITS OWN
-# fallback for when the transcript resolves nothing at all. S-F1 and
-# prefix-h receive NO `-e AIRULESET_POPUP_MODE=` flag whatsoever -- their
-# argv stays byte-for-byte unchanged, so MODE is empty for them and they
-# take the ELSE branch below, which carries #327's own capture-pane-
-# primary code (re-indented one level inside this `if`/`else`) -- see the
-# module comment above CLAUDE_HISTORY_POPUP_SCRIPT_DEST in airuleset.py
-# for the full capture-pane-resolution mechanism this relies on.
+# (#289, unconditional transcript-primary fallback by #376). Invoked from
+# the managed tmux prefix-h display-popup bind (TMUX_POPUP_BIND_ARGVS in
+# airuleset.py) -- fullscreen rendering (PgUp/PgDn, Ctrl+O) is the
+# PRIMARY way to view history; this popup is a fallback for cross-session
+# history a live fullscreen scrollback can't show. FAILS LOUDLY, never
+# silently: on total failure (every source this script tries) the last
+# error is shown and the popup waits for a keypress before closing,
+# rather than handing `less` empty stdin (which can close instantly with
+# nothing to read).
 set -euo pipefail
 
-MODE="${AIRULESET_POPUP_MODE:-}"
+WIDTH="$(tput cols 2>/dev/null)" || WIDTH=0
+[ -n "$WIDTH" ] || WIDTH=0
 
-if [ "$MODE" = "{{POPUP_MODE_TRANSCRIPT_PRIMARY}}" ]; then
-  # `set -e` + `VAR=$(failing_cmd)` would otherwise exit this script
-  # BEFORE the next line ever runs -- see the ELSE branch's own comment
-  # below for the full explanation; the identical `|| <NAME>_RC=$?` guard
-  # is used on every command-substitution assignment in THIS branch too.
-  CH_OUT=$(python3 "$HOME/.claude/airuleset-claude-history.py" --full --color 2>&1) || CH_RC=$?
-  CH_RC="${CH_RC:-0}"
-  # The fallback triggers on EITHER a nonzero exit OR an empty result --
-  # RC alone would miss the real "rc=0 but $(...) stripped the whole
-  # output to an empty string" case (claude-history returning nothing
-  # displayable), the exact mirror of a finding this repo's own playbook
-  # already records for the sibling #327 ticket's capture-pane-blank-pane
-  # case.
-  if [ "$CH_RC" -ne 0 ] || [ -z "$CH_OUT" ]; then
-    TRANSCRIPT_OUT="$CH_OUT"
-    # Fallback: a real tmux capture-pane of the ORIGINATING pane. A bare
-    # (no `-t`) capture-pane call issued from WITHIN a display-popup's
-    # own shell-command resolves against the pane the popup key was
-    # pressed in, never the popup's own new pseudo-pane -- verified live,
-    # twice, independently (see the module comment above TMUX_POPUP_KEY
-    # in airuleset.py). `-e` preserves the real colors/escape sequences
-    # the pane actually rendered; `-p` prints to stdout for this
-    # command-substitution capture; `-S -{{TMUX_HISTORY_LIMIT}}` reaches
-    # back across the FULL configured scrollback -- the SAME value as the
-    # managed history-limit itself (never a second hardcoded literal that
-    # could silently drift shorter than what tmux actually retains).
-    CP_OUT=$(tmux capture-pane -e -p -S -{{TMUX_HISTORY_LIMIT}} 2>&1) || CP_RC=$?
-    CP_RC="${CP_RC:-0}"
-    if [ "$CP_RC" -eq 0 ] && [ -n "$CP_OUT" ]; then
-      CH_OUT="$CP_OUT"
-      CH_RC=0
-    else
-      # M5 guard: BOTH sources genuinely failed/produced nothing -- fail
-      # loudly with both diagnostics shown, never a silent instant-close.
-      CH_OUT="claude-history (transcript, primary) produced nothing:
+# PRIMARY: the complete, hole-free transcript reconstruction, immune to
+# the upstream Claude Code classic-renderer scrollback-duplication
+# regression (anthropics/claude-code #84247/#46834, both still open as
+# of #376) -- word-wrapped to the popup's own live column width so long
+# lines never need horizontal scrolling (#376).
+#
+# `set -e` + `VAR=$(failing_cmd)` would otherwise exit this script BEFORE
+# the next line ever runs (a failing command substitution used in a plain
+# assignment is an unhandled failure under -e) -- the `|| <NAME>_RC=$?`
+# form is the established fix: it captures the real exit code without
+# tripping -e, and each RC stays unset (defaulted to 0 below) on its own
+# success path.
+CH_OUT=$(python3 "$HOME/.claude/airuleset-claude-history.py" --full --color --width "$WIDTH" 2>&1) || CH_RC=$?
+CH_RC="${CH_RC:-0}"
+# The fallback triggers on EITHER a nonzero exit OR an empty result -- RC
+# alone would miss the real "rc=0 but $(...) stripped the whole output to
+# an empty string" case (claude-history returning nothing displayable),
+# the exact mirror of a finding this repo's own playbook already records
+# for the sibling #327 ticket's capture-pane-blank-pane case.
+if [ "$CH_RC" -ne 0 ] || [ -z "$CH_OUT" ]; then
+  TRANSCRIPT_OUT="$CH_OUT"
+  # FALLBACK: a real tmux capture-pane of the ORIGINATING pane, for the
+  # rare case the transcript reconstruction itself produces nothing at
+  # all (no readable transcript file, e.g. a genuinely empty project). A
+  # bare (no `-t`) capture-pane call issued from WITHIN a display-popup's
+  # own shell-command resolves against the pane the popup key was
+  # pressed in, never the popup's own new pseudo-pane -- verified live,
+  # twice, independently (see the module comment above TMUX_POPUP_PREFIX_KEY in
+  # airuleset.py). `-e` preserves the real colors/escape sequences the
+  # pane actually rendered; `-p` prints to stdout for this command-
+  # substitution capture; `-S -{{TMUX_HISTORY_LIMIT}}` reaches back
+  # across the FULL configured scrollback -- the SAME value as the
+  # managed history-limit itself (never a second hardcoded literal that
+  # could silently drift shorter than what tmux actually retains).
+  CP_OUT=$(tmux capture-pane -e -p -S -{{TMUX_HISTORY_LIMIT}} 2>&1) || CP_RC=$?
+  CP_RC="${CP_RC:-0}"
+  if [ "$CP_RC" -eq 0 ] && [ -n "$CP_OUT" ]; then
+    CH_OUT="$CP_OUT"
+    CH_RC=0
+  else
+    # M5 guard: BOTH sources genuinely failed/produced nothing -- fail
+    # loudly with both diagnostics shown, never a silent instant-close.
+    CH_OUT="claude-history (transcript, primary) produced nothing:
 ${TRANSCRIPT_OUT}
 
 tmux capture-pane (fallback) also produced nothing:
 ${CP_OUT}"
-      CH_RC=1
-    fi
+    CH_RC=1
   fi
-else
-  # ELSE (S-F1 / prefix-h): carries #327's own capture-pane-primary code,
-  # re-indented one level inside this `if`/`else` -- see the module
-  # comment above CLAUDE_HISTORY_POPUP_SCRIPT_DEST in airuleset.py for
-  # the full capture-pane-resolution mechanism this relies on.
-  #
-  # `set -e` + `VAR=$(failing_cmd)` would otherwise exit this script
-  # BEFORE the next line ever runs (a failing command substitution used
-  # in a plain assignment is an unhandled failure under -e) -- the
-  # `|| CP_RC=$?` / `|| CH_RC=$?` form is the established fix: it
-  # captures the real exit code without tripping -e, and each RC stays
-  # unset (defaulted to 0 below) on its own success path.
-  #
-  # PRIMARY (#327): a real tmux capture -- see the module comment above
-  # CLAUDE_HISTORY_POPUP_SCRIPT_DEST in airuleset.py for why NO explicit
-  # -t is needed here (resolves against the ORIGINATING pane by design).
-  CP_OUT=$(tmux capture-pane -e -p -S -{{TMUX_HISTORY_LIMIT}} 2>&1) || CP_RC=$?
-  CP_RC="${CP_RC:-0}"
-
-  if [ "$CP_RC" -eq 0 ] && [ -n "$CP_OUT" ]; then
-    # #294: -R makes `less` render raw ANSI color bytes as color instead of
-    # visibly escaping them; +G (jump to end) and less's own default
-    # incremental search are both unaffected by -R. `less`'s own documented
-    # "acts like cat when its output isn't a terminal" fallback (relied on
-    # by the real-execution tests below) means -R is a no-op for a
-    # captured/non-interactive `less`.
-    if command -v less >/dev/null 2>&1; then
-      printf '%s\n' "$CP_OUT" | less -R +G
-    else
-      # ADVERSARIAL-REVIEW-CLASS FINDING (#289, M5), same guard reapplied
-      # to the new primary path: a box genuinely missing `less` must still
-      # SHOW the captured content and wait for a keypress, never instant-
-      # close by handing a nonexistent command a byte it can't render.
-      printf '%s\n\nclaude-history: "less" is not installed on this box.\n\npress any key to close.\n' "$CP_OUT"
-      read -n 1 -r -s _dummy || true
-    fi
-    exit 0
-  fi
-
-  # FALLBACK (#267/#289, neutral-by-default per #327): capture-pane failed
-  # or produced nothing -- fall back to the transcript reconstruction.
-  # --plain is explicit and never --color: the popup's OWN default render
-  # must be neutral (no custom bold/colors) per #327's own acceptance;
-  # claude-history's pre-existing --color flag (run BY HAND, never from
-  # here) is the only opt-in path left to #294's colored rendering.
-  CH_OUT=$(python3 "$HOME/.claude/airuleset-claude-history.py" --full --plain 2>&1) || CH_RC=$?
-  CH_RC="${CH_RC:-0}"
 fi
 
 if [ "$CH_RC" -ne 0 ]; then
@@ -1720,33 +1658,28 @@ elif ! command -v less >/dev/null 2>&1; then
   printf '%s\n\nclaude-history: "less" is not installed on this box.\n\npress any key to close.\n' "$CH_OUT"
   read -n 1 -r -s _dummy || true
 else
+  # #294: -R makes `less` render raw ANSI color bytes as color instead of
+  # visibly escaping them; +G (jump to end) and less's own default
+  # incremental search are both unaffected by -R.
   printf '%s\n' "$CH_OUT" | less -R +G
 fi
 '''
 
 
-def render_claude_history_popup_script(limit=None, mode_transcript_primary=None):
-    """The popup-script content, with the `{{TMUX_HISTORY_LIMIT}}` /
-    `{{POPUP_MODE_TRANSCRIPT_PRIMARY}}` placeholders substituted -- #337
-    added these so S-DC's capture-pane fallback window tracks the SAME
-    configured history-limit the managed tmux conf itself sets (never a
-    second hardcoded literal that could silently drift out of sync), and
-    so its mode-comparison literal is provably the SAME value
-    TMUX_POPUP_BIND_ARGVS builds the `-e` flag from (never a second,
-    hand-typed copy). Neither placeholder is a substring of the other, so
-    replacement order does not matter here (unlike e.g. `{{HOST_IP}}` /
-    `{{HOST_IPS}}` elsewhere in this file, which DO need longest-first).
-    Defaults resolved INSIDE the body (never as parameter defaults) since
-    TMUX_HISTORY_LIMIT is defined LATER in this module than this
-    function -- a parameter default is evaluated at function-DEFINITION
-    time, which would raise NameError at import time."""
+def render_claude_history_popup_script(limit=None):
+    """The popup-script content, with the `{{TMUX_HISTORY_LIMIT}}`
+    placeholder substituted. Default resolved INSIDE the body (never as a
+    parameter default) since TMUX_HISTORY_LIMIT is defined LATER in this
+    module than this function -- a parameter default is evaluated at
+    function-DEFINITION time, which would raise NameError at import time.
+    #376 dropped the `mode_transcript_primary` param/placeholder entirely
+    -- the script is now unconditionally transcript-primary (see the
+    module comment above CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT), so there
+    is nothing left to select between."""
     if limit is None:
         limit = TMUX_HISTORY_LIMIT
-    if mode_transcript_primary is None:
-        mode_transcript_primary = TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY
-    return (CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT
-            .replace("{{TMUX_HISTORY_LIMIT}}", str(limit))
-            .replace("{{POPUP_MODE_TRANSCRIPT_PRIMARY}}", mode_transcript_primary))
+    return CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT.replace(
+        "{{TMUX_HISTORY_LIMIT}}", str(limit))
 
 
 # .bashrc holds ONLY thin one-line functions -- no flag literal survives here,
@@ -2215,17 +2148,13 @@ TMUX_SCROLLBACK_KEYBINDS = [
 # command.
 #
 # KEY CHOICE (engineer's call, ask-before-assuming.md -- an internal/
-# diagnostic element's placement has no user stake): Shift+F1 (`S-F1`),
-# root table, no prefix. Neither stock tmux nor this repo's own managed
-# conf binds F1/S-F1 anywhere (verified live, `-f /dev/null` throwaway
-# socket for the stock case, the real `~/.tmux.conf` for the managed
-# case -- both `list-keys -T root | grep -i F1` empty). F-keys carry no
-# printable-character meaning, so Claude Code's own text-input handling
-# has nothing to intercept; Shift (not bare F1) avoids the narrower risk
-# of a terminal EMULATOR reserving bare F1 for its own "help" binding.
-# `prefix + h` (mnemonic: history) is the documented fallback -- also
-# unbound in stock tmux's prefix table (verified the same way) -- for an
-# ssh client/terminal that eats Shift+F-keys.
+# diagnostic element's placement has no user stake): originally Shift+F1
+# (`S-F1`), root table, no prefix -- REMOVED by #376 (never confirmed to
+# reach the user's real terminal/ssh client; see the module comment above
+# TMUX_POPUP_PREFIX_KEY). `prefix + h` (mnemonic: history) -- unbound in
+# stock tmux's prefix table (verified live, `-f /dev/null` throwaway
+# socket) -- is the ONE surviving binding: the only one the user
+# personally confirmed opens.
 #
 # MECHANISM: `display-popup`'s own SHELL-COMMAND argument is NOT format-
 # expanded by tmux (verified live, tmux 3.7b: a literal `#{pane_id}`
@@ -2240,8 +2169,9 @@ TMUX_SCROLLBACK_KEYBINDS = [
 # since `display-popup` runs its shell-command non-interactively and
 # `~/.bashrc` (where the function lives) is never sourced.
 #
-# CAPTURE-PANE RESOLUTION (#337, used by S-DC's own capture-pane
-# fallback -- see CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT below): a bare
+# CAPTURE-PANE RESOLUTION (#337, used by the popup's own capture-pane
+# fallback -- the ONLY consumer as of #376, since S-DC's mode-only path is
+# gone -- see CLAUDE_HISTORY_POPUP_SCRIPT_CONTENT below): a bare
 # (no `-t`) `tmux capture-pane` call issued from WITHIN a display-popup
 # job's own shell-command resolves against the ORIGINATING pane -- the
 # one the popup key was actually pressed in -- never the popup's own
@@ -2295,70 +2225,26 @@ TMUX_SCROLLBACK_KEYBINDS = [
 # (see the #267 comment above `TMUX_SCROLLBACK_KEYBINDS` for the full
 # argument -- no window geometry read or written, nothing already
 # rendered by the CC TUI touched) -- identical safety class to the
-# S-PageUp/PageDown binds, so both popup binds are live-applied the same
+# S-PageUp/PageDown binds, so the popup bind is live-applied the same
 # way, never conf-only.
-TMUX_POPUP_KEY = "S-F1"
-
-# #294 addendum (mid-run, real user-blocking report): the user connects
-# from a Windows notebook over ssh (Windows Terminal or PuTTY, exact
-# client unknown) and reported Shift+F1 "nefunguje vobec". Their own
-# S-PageUp/S-PageDown bind (above, #267) DOES traverse their real client+
-# ssh path today (they scroll copy-mode with it) -- the ONE proven fact
-# available -- so this addendum picks a SECOND root-table key from the
-# SAME proven wire-format family rather than guessing blind.
 #
-# RESEARCH (WebSearch/WebFetch, since no real Windows Terminal/PuTTY is
-# available to run here -- see the design comment on issue #294 for
-# sources): PuTTY's F1-F12 "Function keys and keypad" mode is a SEPARATE,
-# user-configurable setting from its Home/End/PageUp/PageDown handling --
-# xterm mode DOES encode a Shift modifier for F-keys (CSI <n>;2<letter>),
-# but the encoding is mode-dependent and historically finicky, which is
-# exactly the kind of client-configuration variance that could explain
-# "nefunguje vobec" even on a genuinely deployed binding. S-F1 is kept
-# (unchanged) since it costs nothing and works for many xterm-family
-# clients -- this addendum ADDS a second, more robust key rather than
-# replacing it.
-#
-# CANDIDATES CONSIDERED AND REJECTED:
-#   - Shift+Insert: ruled out outright -- BOTH PuTTY (its own documented
-#     paste-key list: mouse paste, Ctrl+Insert, Shift+Insert, Ctrl+Shift+
-#     C, Ctrl+Shift+V) and Windows Terminal (its official default
-#     actions.json: `{"keys": "shift+insert", "id":
-#     "Terminal.PasteFromClipboard"}`) intercept it CLIENT-SIDE for paste
-#     -- the keystroke would never even reach ssh/tmux.
-#   - Shift+Home / Shift+End: ruled out -- empirically verified LIVE
-#     against this box's own real tmux 3.7b binary (isolated `-L` socket,
-#     no real server touched) that tmux's OWN key table only recognizes
-#     the LETTER-terminated modified form (`\x1b[1;2H` / `\x1b[1;2F`) for
-#     S-Home/S-End, NOT the tilde-modifier form (`\x1b[1;2~` /
-#     `\x1b[4;2~`) -- while PuTTY's own documented Home/End behavior is
-#     TILDE-based (`ESC[1~` / `ESC[4~` unmodified), a real mismatch risk
-#     no live PuTTY was available to rule out.
-#   - Any Ctrl+Shift combo: excluded per the addendum's own instruction
-#     (Windows Terminal owns many of these as tab/pane-management
-#     defaults, e.g. Ctrl+Shift+C/V/T/W/F, Ctrl+Shift+<digit>).
-#   - Ctrl+PageUp/PageDown: excluded per the addendum's own instruction
-#     (tab-switching semantics in some Windows terminal clients).
-#
-# CHOSEN: Shift+Delete (`S-DC` in tmux's own key-name table). Delete is
-# CODE 3 in the same uniform VT220 "6-key editing keypad" numeric family
-# PageUp (5) and PageDown (6) belong to -- every xterm-descended terminal
-# (PuTTY's xterm mode included) encodes this whole family with the
-# IDENTICAL `CSI <code>;2~` template, so if a client's real path already
-# encodes Shift+PageUp/PageDown correctly (PROVEN for this user, above),
-# it is very likely to encode Shift+Delete the same way -- unlike the
-# Home/End "letter vs tilde" ambiguity above, there is no competing
-# encoding form for this family at all. Confirmed NOT reserved as a
-# clipboard shortcut in EITHER client's own documented/default keybinding
-# list (searched specifically for `shift+delete`/`shift+del` in both --
-# absent from both). Confirmed LIVE against this box's own real tmux
-# 3.7b: `bind-key -n S-DC ...` fires correctly on the real byte sequence
-# `\x1b[3;2~`.
-TMUX_POPUP_KEY_ALT = "S-DC"
+# #376 CLEANUP: `S-F1` (root-table, never confirmed to reach the user's
+# actual terminal/ssh client -- #294's own Windows-notebook report) and
+# `S-DC` (root-table, confirmed delivered but explicitly downgraded by
+# the user's own binding correction: "garantovaná skratka = výhradne
+# prefix trieda; žiadna nová skratka bez potvrdeného doručenia") are
+# REMOVED. `prefix+h` below is the ONE surviving binding -- the only one
+# the user personally confirmed opens -- and this popup is now a FALLBACK
+# for cross-session/closed-pane history only, not the primary answer
+# (fullscreen rendering is -- see apply_managed_settings_defaults). The
+# `#294`/`#337` research that picked S-F1/S-DC (candidate keys
+# considered, Windows-client encoding evidence) is preserved in this
+# ticket's own history/playbook, not repeated here since neither key
+# survives to be re-derived from it.
 TMUX_POPUP_PREFIX_KEY = "h"
 
 
-def _tmux_popup_bind_argv(key, in_prefix_table, mode=None):
+def _tmux_popup_bind_argv(key, in_prefix_table):
     """The `bind-key ... display-popup ...` argv for `key` -- `-n` (root
     table, no prefix) when `in_prefix_table` is False, omitted (default
     "prefix" table) otherwise. Shared verbatim between the live-apply
@@ -2370,41 +2256,22 @@ def _tmux_popup_bind_argv(key, in_prefix_table, mode=None):
     tmux COMMENT if left unquoted at the start of a conf line -- the
     quoting here is load-bearing for THAT character, not for whitespace).
     The invoked command is the POPUP SCRIPT's own ABSOLUTE PATH (baked in
-    at Python render time -- see the module comment above TMUX_POPUP_KEY
-    for why this, not an inline shell command, is the safe shape).
-
-    `mode` (#337, default None -- omitted from the argv entirely, so a
-    caller passing nothing produces the EXACT pre-#337 argv shape, byte
-    for byte): when set, adds `-e AIRULESET_POPUP_MODE=<mode>` to the
-    display-popup argv -- `display-popup`'s own `-e` flag does NOT
-    format-expand `#{...}` tokens (irrelevant here, `mode` never contains
-    one), and the value is read back INSIDE the popup script via a real
-    bash `${AIRULESET_POPUP_MODE:-}` runtime expansion -- never on the
-    tmux conf line itself, so none of `_tmux_conf_quote`'s own `$`-gets-
-    expanded-at-bind-time landmine applies to it."""
+    at Python render time -- see the module comment above
+    TMUX_POPUP_PREFIX_KEY for why this, not an inline shell command, is
+    the safe shape). #376 dropped the `mode` parameter this function used
+    to take (#337) -- the popup script is unconditional now, so there is
+    nothing left to select between and no `-e AIRULESET_POPUP_MODE=`
+    flag to build."""
     argv = ["bind-key"]
     if not in_prefix_table:
         argv.append("-n")
-    argv += [key, "display-popup", "-E", "-w", "90%", "-h", "90%"]
-    if mode:
-        argv += ["-e", "AIRULESET_POPUP_MODE=" + mode]
+    argv += [key, "display-popup", "-E", "-w", "96%", "-h", "96%"]
     argv += ["-d", "#{pane_current_path}", "-T", "claude-history",
              str(CLAUDE_HISTORY_POPUP_SCRIPT_DEST)]
     return argv
 
 
 TMUX_POPUP_BIND_ARGVS = [
-    _tmux_popup_bind_argv(TMUX_POPUP_KEY, in_prefix_table=False),
-    # #294 addendum: a second root-table key -- see the module comment
-    # above TMUX_POPUP_KEY_ALT for the Windows-ssh-client research and
-    # live evidence behind this specific choice.
-    # #337: S-DC ALONE carries the transcript-primary mode flag -- see the
-    # module comment above TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY and the
-    # popup script's own mode-branching logic. S-F1 (above) and prefix-h
-    # (below) pass no `mode=` at all, so their argv stays the pre-#337
-    # shape exactly.
-    _tmux_popup_bind_argv(TMUX_POPUP_KEY_ALT, in_prefix_table=False,
-                          mode=TMUX_POPUP_MODE_TRANSCRIPT_PRIMARY),
     _tmux_popup_bind_argv(TMUX_POPUP_PREFIX_KEY, in_prefix_table=True),
 ]
 
@@ -2416,7 +2283,7 @@ def _tmux_conf_quote(word):
     tmux's OWN conf-parser at conf-parse/bind time -- using tmux's OWN
     process environment, NOT the shell's -- both INSIDE a tmux double-
     quoted string AND when left bare/unquoted (verified live; this is the
-    exact landmine the module comment above TMUX_POPUP_KEY documents this
+    exact landmine the module comment above TMUX_POPUP_PREFIX_KEY documents this
     ticket self-finding and fixing by moving shell logic into its own
     script file). No quoting form in THIS function protects a literal `$`
     from that expansion, so a word containing one is REFUSED outright
@@ -2567,13 +2434,12 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     picks up the keyboard scrollback shortcut immediately, with no
     restart and no keystroke sent to any pane.
 
-    #289: the `TMUX_POPUP_BIND_ARGVS` (S-F1 root-table + prefix-h
-    fallback -- see the module comment above `TMUX_POPUP_KEY`) are live-
-    applied the SAME way, for the SAME reason -- a `bind-key` call is a
-    pure key-table registration, independent of and no riskier than the
-    scrollback keybinds it sits alongside. #294 addendum: a second
-    root-table key, S-DC (see the module comment above
-    `TMUX_POPUP_KEY_ALT`), was added between them -- now three entries.
+    #289: the `TMUX_POPUP_BIND_ARGVS` (prefix-h, the one surviving popup
+    fallback binding as of #376 -- see the module comment above
+    `TMUX_POPUP_PREFIX_KEY`) is live-applied the SAME way, for the SAME
+    reason -- a `bind-key` call is a pure key-table registration,
+    independent of and no riskier than the scrollback keybinds it sits
+    alongside.
 
     `run` defaults to a real `tmux` invocation and is injectable so tests
     never touch a real tmux server. A missing server / a nonzero exit
