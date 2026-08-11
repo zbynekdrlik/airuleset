@@ -1751,6 +1751,20 @@ class TestGoalAutoarmRecentHumanActivityUnit(unittest.TestCase):
             self.sid, "/nonexistent/path-339.jsonl", time.time())
         self.assertFalse(recent)
 
+    def test_a_discord_relayed_answer_is_still_not_recent_by_default(self):
+        # #377-review MINOR-1 -- `_last_human_prompt_ts` gained an OPT-IN
+        # `extra_human_prefixes=` parameter so compact's own gate can treat
+        # a Discord-relayed answer as recent (mirrors #350's own "opposite
+        # exclusion set" for the identical two prefixes) -- but job 9's OWN
+        # call here passes NOTHING, so its existing, reviewed "did a human
+        # type this DIRECTLY" semantics must stay byte-for-byte unchanged:
+        # a Discord relay must NOT count as recent for THIS gate.
+        p = self._write([human_entry(
+            time.time() - 5, text="Odpoveď z Discordu: áno")])
+        recent, _reason = wd._goal_autoarm_recent_human_activity(
+            self.sid, p, time.time())
+        self.assertFalse(recent)
+
 
 class TestGoalNeverArmedReadFailure(unittest.TestCase):
     """#320-review MAJOR-1 (fresh-context adversarial review, executed

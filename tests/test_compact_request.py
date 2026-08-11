@@ -1433,6 +1433,84 @@ class TestCompactRecentHumanActivityGate(unittest.TestCase):
             wd._compact_recent_human_activity(self.CWD, self.SID, now,
                                               projects_dir=proj, window_s=600))
 
+    def test_a_discord_relayed_answer_counts_as_recent_human_activity(self):
+        # #377-review MINOR-1 (fresh-context adversarial review) -- the
+        # incident's own reported shape IS a Discord-relayed answer, which
+        # `_last_human_prompt_ts` deliberately excludes from ITS "human
+        # typed directly" question (`_MACHINE_PROMPT_PREFIXES`, #339). The
+        # compact veto's own question is different: "is the user actively
+        # engaging right now" -- a Discord answer genuinely is, mirroring
+        # #350's own established "opposite exclusion set" precedent for
+        # the identical two prefixes. Must count even with NO presence
+        # marker at all (job 7's delivery never stamps that marker).
+        proj = self._dir()
+        now = time.time()
+        _write_human_transcript(proj, self.CWD, self.SID, now - 5,
+                                text="Odpoveď z Discordu: áno, pokračuj")
+        self.assertTrue(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+
+    def test_the_other_discord_relay_prefix_also_counts(self):
+        proj = self._dir()
+        now = time.time()
+        _write_human_transcript(
+            proj, self.CWD, self.SID, now - 5,
+            text="Odpoveď užívateľa na tvoju otázku: nie, zruš to")
+        self.assertTrue(
+            wd._compact_recent_human_activity(self.CWD, self.SID, now,
+                                              projects_dir=proj))
+
+
+class TestCompactRecentHumanWindowClamp(unittest.TestCase):
+    """#377-review MINOR-2/3 (fresh-context adversarial review, executed
+    proof) -- `_compact_recent_human_window`'s env/const-derived default
+    was UNCLAMPED: `AIRULESET_COMPACT_RECENT_HUMAN_S=0` silently disabled
+    the veto outright, and a value >= `COMPACT_REQUEST_MAX_AGE_S` recreated
+    the exact lapse-before-clear starvation `_compact_defer_grace`'s own
+    clamp already exists to prevent for its sibling window. Mirrors that
+    function's own test shape exactly (`TestCompactDeferGraceRelationship`
+    et al., above)."""
+
+    def test_env_override_negative_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": "-100"}):
+            self.assertEqual(wd._compact_recent_human_window(), 1)
+
+    def test_env_override_zero_is_clamped_to_a_minimum(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": "0"}):
+            self.assertEqual(wd._compact_recent_human_window(), 1)
+
+    def test_env_override_non_numeric_falls_back_to_the_default(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": "abc"}):
+            self.assertEqual(wd._compact_recent_human_window(),
+                             wd.COMPACT_RECENT_HUMAN_ACTIVITY_S)
+
+    def test_env_override_at_or_above_ttl_is_clamped_below_it(self):
+        huge = str(wd.COMPACT_REQUEST_MAX_AGE_S + 1000)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": huge}):
+            self.assertLess(wd._compact_recent_human_window(),
+                            wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_env_override_exactly_at_ttl_is_clamped_below_it(self):
+        at_ttl = str(wd.COMPACT_REQUEST_MAX_AGE_S)
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": at_ttl}):
+            self.assertLess(wd._compact_recent_human_window(),
+                            wd.COMPACT_REQUEST_MAX_AGE_S)
+
+    def test_a_sane_env_override_is_returned_unclamped(self):
+        with m.patch.dict(os.environ, {"AIRULESET_COMPACT_RECENT_HUMAN_S": "60"}):
+            self.assertEqual(wd._compact_recent_human_window(), 60)
+
+    def test_explicit_window_s_param_is_never_clamped(self):
+        # every production call leaves window_s=None; an explicit override
+        # (test/caller-only) is returned verbatim, even outside the sane
+        # range -- the clamp protects only the env/const-derived default.
+        self.assertEqual(wd._compact_recent_human_window(window_s=-5), -5)
+        self.assertEqual(
+            wd._compact_recent_human_window(
+                window_s=wd.COMPACT_REQUEST_MAX_AGE_S + 5),
+            wd.COMPACT_REQUEST_MAX_AGE_S + 5)
+
 
 # --------------------------------------------------------------------------- #
 # 2c. run_once wiring — job 14 fires ONLY when compact_requests_path is given
