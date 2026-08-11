@@ -6204,10 +6204,29 @@ def _goal_user_exit_ts(tpath, off=None, tail_bytes=None):
 # `type=="user"` entry counts, matched by literal position (never a
 # mention nested inside quoted/foreign content), the same "mention vs use"
 # discipline `_EXIT_CMD_MARKER`'s own `.startswith` check already applies.
-_AUTOPILOT_INVOKE_RX = re.compile(r"^/autopilot\b")
+#
+# #393-review CRITICAL-1/2 (fresh-context adversarial review,
+# 2026-08-12, executed against 1787 real local transcript files / 1127
+# real occurrences of the substring "/autopilot"): a real, human-typed
+# slash-command invocation is NEVER stored as bare `/autopilot` text —
+# Claude Code writes it as a fixed two-tag sequence, `<command-message>
+# autopilot</command-message>` immediately followed by `<command-name>
+# /autopilot</command-name>` (a SKILL command's own tag ORDER — the
+# OPPOSITE of a BUILTIN command's `<command-name>`-first order this
+# file's `_EXIT_CMD_MARKER` already matches for `/exit`). The original
+# `r"^/autopilot\b"` therefore matched ZERO of the 1127 real occurrences
+# (making the whole release condition dead — a verbatim reintroduction
+# of #170) AND, independently, matched every real prose message merely
+# NAMING the worker (`/autopilot-worker …` — `\b` fires on the hyphen).
+# Anchoring on the CONFIRMED real tag sequence fixes both at once: no
+# genuine human sentence opens with this exact XML-shaped tag pair, and
+# every one of the 1127 real corpus invocations is this exact string.
+_AUTOPILOT_INVOKE_RX = re.compile(
+    r"^" + re.escape("<command-message>autopilot</command-message>")
+    + r"\s*" + re.escape("<command-name>/autopilot</command-name>"))
 
 
-def _goal_autopilot_reinvoked_after(tpath, cutoff_ts, tail_bytes=2_000_000):
+def _goal_autopilot_reinvoked_after(tpath, cutoff_ts):
     """True when a genuine, human-typed `/autopilot` invocation appears in
     the transcript with a timestamp STRICTLY newer than `cutoff_ts` (#393).
 
@@ -6225,16 +6244,27 @@ def _goal_autopilot_reinvoked_after(tpath, cutoff_ts, tail_bytes=2_000_000):
     clear marker itself (`_goal_was_cleared_by_user`'s own `mark_ts is
     None -> False` rule, one function down).
 
+    Reads the WHOLE file (no tail window) — #393-review MAJOR-1
+    (executed): the original `tail_bytes=2_000_000` default was SMALLER
+    than `GOAL_MARK_TAIL_BYTES` (4 MB), the window `scan_goal_markers`
+    itself uses to bootstrap the clear marker this function is asked to
+    check release evidence for — so a genuine `/autopilot` invocation
+    sitting between 2 MB and 4 MB from EOF was structurally unreachable
+    even though the marker referencing it was in view, permanently
+    suppressing the loop for exactly the long-lived, continuously-
+    writing population #173 already fixed this identical shape for one
+    function over (`_goal_dark_died_by_outage`'s own `off=0` read). This
+    call fires only for the narrow, already-rare population that is BOTH
+    cleared AND being checked for release — never a healthy sweep — so
+    paying the full-file cost here is deliberate, matching #173's own
+    stated tradeoff.
+
     Unreadable transcript -> False, never a guess toward re-arming."""
     if cutoff_ts is None:
         return False
     from datetime import datetime
     try:
         with open(tpath, "rb") as f:
-            try:
-                f.seek(-tail_bytes, 2)
-            except OSError:
-                f.seek(0)
             raw = f.read()
     except OSError:
         return False
@@ -6349,8 +6379,13 @@ def _goal_was_cleared_by_user(tpath):
     # (`_goal_autopilot_reinvoked_after`, a genuine human `/autopilot`),
     # never the looser `mark.get("arm_after")` (any assistant reprint,
     # including a purely automatic one — see that helper's own docstring).
-    # `arm_after` is still COMPUTED by `scan_goal_markers` (unchanged,
-    # genuinely useful diagnostic state) but is no longer consulted here.
+    # `arm_after` is still COMPUTED by `scan_goal_markers` (unchanged) but
+    # is no longer consulted anywhere in this file (#393-review MINOR-3,
+    # confirmed by grep — no remaining production reader). Left in place
+    # rather than removed: `scan_goal_markers` is a shared, widely-used
+    # marker reader and this repo's own FREEZE discourages touching a
+    # shared function's return shape for a caller-side cleanup with no
+    # behavioural benefit; a future caller MAY still want the signal.
     cleared = (bool(mark) and mark.get("state") == "cleared"
                and not _goal_autopilot_reinvoked_after(tpath, mark.get("ts")))
     if cleared:
@@ -11262,20 +11297,42 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
 # --------------------------------------------------------------------------- #
 
 GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
-# #393 -- the real indicator's own header render is SHORT and TIGHT: the
-# glyph, "/goal", the word "active", and an optional "(Nh)"/"(Nm)" age
-# suffix, nothing else. A bare `.startswith(GOAL_INDICATOR)` check also
-# matches a rendered CONTINUATION row of ordinary word-wrapped assistant
-# prose that happens to start with the same glyph+word followed by real
-# trailing sentence text (a genuine live incident: "◎ /goal active, right
-# where the earlier bug expected only chrome." wrapped as the SECOND line
-# of a paragraph). Bounding the tail to a short run of spaces/word chars/
-# parens (no `,`/`.`/other punctuation) accepts every real render
-# ("active", "active (2h)") while rejecting a wrapped-prose continuation,
-# whose very next character after the glyph+word is genuine sentence
-# punctuation.
+# #393 -- the real indicator's own header render is SHORT and CLOSED-
+# FORM: the glyph, "/goal", optionally the word "active", and optionally
+# a single "(Nh)"/"(Nm)" age suffix -- nothing else, ever (every shape
+# observed anywhere in this repo's own tests/dev-notes: "◎ /goal",
+# "◎ /goal active", "◎ /goal active (1m)" through "(58m)", "(2h)",
+# "(3h)"). A bare `.startswith(GOAL_INDICATOR)` check also matches a
+# rendered CONTINUATION row of ordinary word-wrapped assistant prose
+# that happens to start with the same glyph+word (a genuine live
+# incident: "◎ /goal active, right where the earlier bug expected only
+# chrome." wrapped as the SECOND line of a paragraph).
+#
+# #393-review MINOR-1 (fresh-context adversarial review, executed):
+# the FIRST cut of this fix (an open-ended `[ \w()]{0,40}` allowlist,
+# rejecting only PUNCTUATED continuations) still accepted several
+# constructed continuations with no punctuation in their first 40
+# chars ("◎ /goal active and the loop keeps going", "◎ /goal armed",
+# "◎ /goal active (footer) so we know" — live-reproduced, 7 of 8
+# constructed cases). A CLOSED form -- the tail must be EXACTLY
+# " active" or " active (<1-3 digits><h|m>)", nothing between or after
+# -- rejects every one of those while still accepting every real
+# observed shape (verified against the corpus above).
+#
+# #393-review MINOR-2 (theoretical, unobserved): this closed form is
+# strictly NARROWER than the prior allowlist, so any REAL render this
+# repo has never observed (a fractional-hour suffix "(1.5h)", an
+# "(Nh Nm)" combined form, an nbsp U+00A0 separator instead of a plain
+# space -- this file's own `❯\xa0` finding makes an nbsp separator
+# plausible) would now read as a false NEGATIVE (dark, when actually
+# armed) rather than matching. Accepted residual, not fixed
+# speculatively (FREEZE: fix what has failed in production) — every
+# age-suffix shape this repo has ever actually rendered is covered;
+# widen the class only if a real nbsp/fractional-hour render is ever
+# observed live.
 _GOAL_HEADER_INDICATOR_RX = re.compile(
-    r"^" + re.escape(GOAL_INDICATOR) + r"[ \w()]{0,40}$")
+    r"^" + re.escape(GOAL_INDICATOR)
+    + r"( active(\s\(\d{1,3}[hm]\))?)?$")
 GOAL_ACHIEVED_MARKER = "Goal achieved"   # CC's own completion line, printed
                                     # into the CONVERSATION (never persisted
                                     # to the transcript) when the evaluator
