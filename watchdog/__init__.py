@@ -9276,8 +9276,14 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # moment). A blank-origin request gets no override at all: it
         # never reaches the `if proven_boundary:` branch below, so its
         # `⏳`/`❓` block stays exactly as unconditional as before this fix.
-        if _compact_not_at_boundary(cwd, sid, projects_dir=pdir,
-                                    origin=str(entry.get("origin") or "")):
+        # The anchor tracks a single HOLD EPISODE, not "this request has
+        # ever been blocked once" -- see the `elif` branch right below,
+        # which clears it the moment the block itself lifts, so a LATER,
+        # genuinely new hold always starts its own fresh grace window
+        # (#394-review F1).
+        not_at_boundary = _compact_not_at_boundary(
+            cwd, sid, projects_dir=pdir, origin=str(entry.get("origin") or ""))
+        if not_at_boundary:
             marker_grace_elapsed = False
             if proven_boundary:
                 not_boundary_since = entry.get("not_boundary_since")
@@ -9293,6 +9299,25 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 continue
             logs.append(
                 "OK not-a-boundary-grace-elapsed (compact-request) %s" % loc)
+        elif entry.get("not_boundary_since") is not None:
+            # #394-review F1 -- the hold EPISODE the anchor belongs to just
+            # ended (this sweep's marker genuinely reads a boundary again),
+            # even on a sweep that does not itself deliver for an unrelated
+            # reason below (e.g. `kind == "busy"` still `continue`s further
+            # down). Clear the anchor here so a LATER, genuinely NEW hold
+            # (the transcript goes back to `⏳`) starts its own fresh grace
+            # window rather than silently inheriting an already-elapsed one
+            # from this now-closed episode -- the exact interleaving the
+            # review reproduced (idle-hold -> busy-skip -> a brand-new hold,
+            # all under one un-reset anchor, delivering on a hold that had
+            # barely started). Reachable for a blank-origin entry too (it
+            # can never SET this key itself, but `record_compact_request`'s
+            # unconditional preservation can hand it one via a re-record
+            # inside `COMPACT_ORIGIN_PRESERVE_WINDOW_S`) -- clearing it here
+            # is always correct regardless of origin.
+            del entry["not_boundary_since"]
+            reqs[sid] = entry
+            changed = True
         # #188 — a PROVEN boundary whose result the supervisor demonstrably
         # never consumed (its turn died on an API error). Left in place, never
         # consumed: job 1's `continue` resumes the session, it reads the
