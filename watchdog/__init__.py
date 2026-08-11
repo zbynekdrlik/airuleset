@@ -3855,6 +3855,24 @@ def _janitor_mark_watch(state, pid, now):
     state.setdefault("janitor_watch", {})[pid] = now
 
 
+def _janitor_clear_watch(state, pid):
+    """#372 round-2 adversarial-review MAJOR-1 — the release half of the
+    provenance gate. An ORDINARY, VERIFIED-SUCCESSFUL delivery (the box
+    ended up genuinely empty/submitted, confirmed by the primitive's own
+    return value) proves nothing is left stuck for this pane FROM THIS
+    ATTEMPT — call this right after such a success so the watch mark does
+    not linger for the rest of `JANITOR_WATCH_MAX_AGE_S` (up to 6h) doing
+    nothing except widening the window in which a LATER, completely
+    unrelated pane content (a human's own typed `/goal` line, a pasted
+    block) could satisfy the provenance gate purely by coincidence of
+    timing. Never called for a FAILED/unverified delivery — that is
+    exactly the case the mark must keep proving. A no-op when `state` is
+    `None`, mirroring `_janitor_mark_watch`."""
+    if state is None:
+        return
+    state.get("janitor_watch", {}).pop(pid, None)
+
+
 def _goal_janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
                           dry_run, sleep_fn, state=None, now=None):
     """#372 — job 20's GENERIC janitor (see the section comment above).
@@ -12204,6 +12222,8 @@ def _goal_template_drift(now, run, rec, sid, cwd, pid, captured, loc, templates,
     rec["dn"] = rec.get("dn", 0) + 1
     if ok:
         rec["dq"] = now
+        _janitor_clear_watch(state, pid)   # #372 round-2 -- verified
+                                            # success, nothing left stuck
         logs.append("OK (%s) %s -> /goal updated to the current template "
                     "(%d chars), variant %d" % (tag, loc, len(target), tvar))
     else:
@@ -13635,6 +13655,8 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
         rec["n"] = rec.get("n", 0) + 1
         if ok:
             rec["queued_at"] = now
+            _janitor_clear_watch(state, pid)   # #372 round-2 -- verified
+                                                # success, nothing left stuck
             _save()
             logs.append("OK (%s) %s -> /goal re-armed (%d chars), awaiting ◎"
                         % (tag, loc, len(text)))

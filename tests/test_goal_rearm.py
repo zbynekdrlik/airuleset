@@ -464,6 +464,27 @@ class TestGoalRearmDetectsAndArms(GoalRearmBase):
         self.assertTrue(any("READY" in ln for ln in logs), logs)
 
 
+class TestJanitorWatchClearedOnOrdinarySuccess(GoalRearmBase):
+    """#372 round-2 adversarial-review MAJOR-1: the provenance watch mark
+    used to be cleared ONLY when the janitor itself recovered a stuck
+    pane — an ORDINARY successful delivery (the common case, nothing
+    stuck at all) left the mark lingering for up to
+    `JANITOR_WATCH_MAX_AGE_S` (6h), widening the window in which
+    unrelated LATER content on that same pane (a human's own typed
+    `/goal` line, a pasted block) could satisfy the janitor's provenance
+    gate purely by timing coincidence. A verified-successful delivery
+    must clear its own mark immediately."""
+
+    def test_ordinary_successful_rearm_clears_its_own_watch_mark(self):
+        state = {}
+        self._go(PANE_DARK, state=state, cap_seq=self._typed_seq())
+        self.assertNotIn(
+            "%1", state.get("janitor_watch", {}),
+            "a verified-successful /goal delivery must clear its own "
+            "provenance mark, not leave it to linger: %r"
+            % state.get("janitor_watch"))
+
+
 class TestGoalRearmRefusals(GoalRearmBase):
     def test_cleared_marker_is_left_alone(self):
         tmux, _logs = self._go(PANE_DARK,
@@ -5129,6 +5150,14 @@ class TestJanitorNeverCrashesOnAnUnreadableBox(GoalJanitorBase):
                 return super().__call__(argv, timeout)
 
         tmux = _TwoPaneTmux(box="/goal STUCK partial condition", stash=None)
+        # #372 round-2 adversarial-review MINOR-2: this test calls
+        # wd.goal_rearm(...) directly (never through self._run/_go), so
+        # pane %1's OWN transcript must be written explicitly here -- a
+        # missing one made find_active_transcript(..., CWD) return None
+        # for %1, which `continue`s BEFORE the janitor is ever reached,
+        # making the crash path on %1 unreachable and this test pass
+        # regardless of whether the None-crash fix is even present.
+        self._write_armed_transcript()
         other_dir = Path(self.tmp.name) / wd.encode_project_dir(
             "/home/x/devel/other")
         other_dir.mkdir(parents=True, exist_ok=True)
