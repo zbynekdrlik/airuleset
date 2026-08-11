@@ -48,6 +48,17 @@ class TestAuthorityResolution(TestCase):
         for u in ("david2", "david3", "david4"):
             self.assertEqual(airuleset.AUTHORITY_BY_USER[u], "fork-no-merge", u)
 
+    def test_montalu5_8_streams_map_to_branch_merge(self):
+        # airuleset#378, odoo-erp#3642: montalu5/6/7/8 are FOUR MORE full
+        # parallel montalu streams — same authority as montalu/montalu2/3/4.
+        for u in ("montalu5", "montalu6", "montalu7", "montalu8"):
+            self.assertEqual(airuleset.AUTHORITY_BY_USER[u], "branch-merge", u)
+
+    def test_resolve_uses_the_map_for_montalu5_8(self):
+        for u in ("montalu5", "montalu6", "montalu7", "montalu8"):
+            with m.patch.object(airuleset, "_current_user", return_value=u):
+                self.assertEqual(airuleset.resolve_authority(), "branch-merge", u)
+
     def test_resolve_uses_the_map_for_simap(self):
         with m.patch.object(airuleset, "_current_user", return_value="simap"):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
@@ -444,7 +455,8 @@ class TestPerBoxSkillScoping(TestCase):
 
     def test_subdev_also_loses_deploy_ssh(self):
         for user in ("david", "marek", "montalu", "montalu2", "montalu3",
-                     "montalu4"):
+                     "montalu4", "montalu5", "montalu6", "montalu7",
+                     "montalu8"):
             names = airuleset.skill_names_for_user(user)
             self.assertNotIn("deploy-ssh", names, user)
             self.assertNotIn("mdreview", names, user)
@@ -476,7 +488,9 @@ class TestPerBoxSkillScoping(TestCase):
                       airuleset.skill_names_for_user("montalu"))
         # airuleset#251: montalu2/3/4 are full parallel montalu streams —
         # same working style, same meeting-recordings-in-session rationale.
-        for user in ("montalu2", "montalu3", "montalu4"):
+        # airuleset#378: montalu5/6/7/8 are FOUR MORE, same rationale.
+        for user in ("montalu2", "montalu3", "montalu4", "montalu5",
+                     "montalu6", "montalu7", "montalu8"):
             self.assertIn("meeting-analysis",
                           airuleset.skill_names_for_user(user), user)
         for user in ("david", "marek", "gatekeeper"):
@@ -1370,6 +1384,22 @@ class TestSliceQualsRefusesAnUnresolvableIdentity(TestCase):
                              ["label:stream:montalu"])
         with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
             self.assertEqual(len(airuleset._slice_quals("david")), 3)
+
+    def test_montalu5_8_slice_quals_derive_generically_no_new_map_needed(self):
+        # airuleset#378: statusline/`/goal` stop-proof scoping for
+        # montalu5..montalu8 needs NO dedicated map -- `_slice_quals()`
+        # already derives a shared-account stream's slice generically from
+        # ANY user string once `_gh_login()` resolves to the maintainer
+        # login (the exact branch montalu/montalu2/3/4 already take). This
+        # PINS that genericity for the new accounts, per the ticket's own
+        # explicit "derived automatically ... just PIN it with a test"
+        # instruction.
+        import unittest.mock as mk
+
+        with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            for user in ("montalu5", "montalu6", "montalu7", "montalu8"):
+                self.assertEqual(airuleset._slice_quals(user),
+                                 ["label:stream:%s" % user], user)
 
 
 class TestSliceQualsHandlesAppTokenBoxes(TestCase):

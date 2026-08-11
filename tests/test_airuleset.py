@@ -10454,7 +10454,9 @@ class TestRemoteHosts(TestCase):
                          "marek@subdev", "david@subdev", "simap@subdev",
                          "montalu2@subdev", "montalu3@subdev",
                          "montalu4@subdev", "miva1@subdev",
-                         "david2@subdev", "david3@subdev", "david4@subdev"):
+                         "david2@subdev", "david3@subdev", "david4@subdev",
+                         "montalu5@subdev", "montalu6@subdev",
+                         "montalu7@subdev", "montalu8@subdev"):
             self.assertIn(expected, names)
         self.assertNotIn("montalu@dev1", names,
                          "montalu migrated to subdev (airuleset#33, "
@@ -10539,6 +10541,22 @@ class TestRemoteHosts(TestCase):
             self.assertEqual(e["user"], user)
             self.assertEqual(e.get("identity"),
                              "~/.secrets/gatekeeper_access_ed25519")
+
+    def test_montalu5_8_subdev_target_shape(self):
+        # montalu5/6/7/8 (airuleset#378, odoo-erp#3642): four MORE full
+        # parallel montalu streams, same shape as montalu2/3/4 (airuleset#251)
+        # -- accounts created by gatekeeper on the SAME subdev box, SAME
+        # default-key shape as montalu (never gatekeeper_access).
+        for user in ("montalu5", "montalu6", "montalu7", "montalu8"):
+            name = "%s@subdev" % user
+            entries = [r for r in airuleset.REMOTE_HOSTS if r["name"] == name]
+            self.assertEqual(len(entries), 1, "%s target missing" % name)
+            e = entries[0]
+            self.assertEqual(e["host"], "100.118.174.27")
+            self.assertEqual(e["user"], user)
+            self.assertNotIn("identity", e,
+                             "%s authorizes the DEFAULT newlevel key, "
+                             "same as montalu" % user)
 
     def test_subdev_users_share_one_host_and_identity(self):
         entries = self._subdev_entries()
@@ -12631,6 +12649,24 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         for user in ("montalu2", "montalu3", "montalu4"):
             r = self._run('ssh %s@subdev "ls"' % user)
             self.assertEqual(r.returncode, 0, user + " " + r.stdout + r.stderr)
+
+    def test_allows_montalu5_8_default_key(self):
+        # airuleset#378, odoo-erp#3642: montalu5/6/7/8 share montalu's own
+        # no-identity-required shape (four MORE full parallel montalu
+        # streams).
+        for user in ("montalu5", "montalu6", "montalu7", "montalu8"):
+            r = self._run('ssh %s@subdev "ls"' % user)
+            self.assertEqual(r.returncode, 0, user + " " + r.stdout + r.stderr)
+
+    def test_blocks_unknown_montalu9_at_subdev(self):
+        # #378: widening the montalu[2345678] allow-list must NOT widen it
+        # into an open-ended prefix match -- an unregistered sibling
+        # (montalu9) stays blocked as an unauthorized user, the same
+        # discipline the miva1/david-family tests already assert.
+        r = self._run('ssh montalu9@subdev "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("unauthorized user", r.stderr)
+        self.assertIn("montalu9", r.stderr)
 
     def test_allows_montalu_via_sshpass(self):
         r = self._run(
