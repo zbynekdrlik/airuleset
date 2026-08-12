@@ -5780,6 +5780,32 @@ class TestGoalLaneOccupancyNudge(GoalRearmBase):
                 backlog_fetch=lambda cwd: 4, state={})
         self.assertFalse(tmux.typed(), tmux.sent)
 
+    def test_M3b_recaptures_and_refuses_if_the_goal_disarmed_during_the_fetch(
+            self):
+        # (round-2 adversarial review MINOR) the backlog fetch can span a
+        # whole final turn -- if the loop finished and disarmed WHILE it
+        # ran, the pane returns to a BARE, at-rest prompt (passes
+        # `_boundary_ok`) but the `◎ /goal` footer indicator is gone.
+        # Boundary-at-rest alone can't see that; the fresh recapture must
+        # also re-check `pane_goal_armed`, not just at-rest-ness.
+        now = time.time()
+        entries = [marker_entry("set", PAYLOAD),
+                  {"type": "assistant", "timestamp": "2026-07-26T15:00:00.000Z",
+                   "message": {"content": "Hotovo.\n\n✅ DONE: hotovo"}}]
+        p = self._write(entries)
+        self._wrote = True
+        mt = now - self.IDLE
+        os.utime(p, (mt, mt))
+        tmux = FakeTmux(PANE_LIT, cap_seq=[PANE_DARK])
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value="full"):
+            logs, owns = wd._goal_lane_occupancy_nudge(
+                now, tmux, {}, SID, CWD, "%1", PANE_LIT, str(p), mt, "loc",
+                None, False, None, self.tmp.name,
+                backlog_fetch=lambda cwd: 4, state={})
+        self.assertFalse(tmux.typed(), tmux.sent)
+        self.assertTrue(any("skip raced" in ln for ln in logs), logs)
+
     def test_m3_dry_run_at_giveup_never_burns_the_real_escalation_ping(self):
         # m3 -- `rec["lpinged"]` must never be set True in dry-run (state
         # is persisted unconditionally by run_once) -- a diagnostic sweep
