@@ -602,7 +602,23 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
     applies to the `⏳` marker — see `_compact_self_reported_complete`'s
     own docstring for the full reasoning. The exemption check is
     deliberately consulted ONLY once a live task is already found (never
-    up front) so the common no-live-tasks case pays nothing extra."""
+    up front) so the common no-live-tasks case pays nothing extra.
+
+    COST FOR A NON-SELF-CALLBACK ORIGIN (#402-review MINOR-3, corrected).
+    `_compact_self_reported_complete` itself never reads the transcript
+    TEXT for a non-self-callback origin (its own `origin` check short-
+    circuits first) — but a docstring HERE used to overstate that as "the
+    caller never even pays" for anything, which was false: when signal
+    (a) (the pane-text row) already made `live` True, `tpath` was still
+    resolved via `_transcript_for_session` (a filesystem walk to LOCATE
+    the file, cheaper than reading its text but not free) purely so the
+    exemption check COULD run, even though that check was always going
+    to return False immediately for a non-self-callback origin. The
+    resolve below is now origin-gated too, so a subagent-stop/blank-
+    origin caller genuinely skips it in the pane-positive path — the
+    ONE case signal (b)'s own resolve (line ~631, needed unconditionally
+    to compute `live` itself, never origin-gated) does not already
+    cover."""
     pdir = projects_dir or watchdog.PROJECTS_DIR
 
     def _resolve_tpath():
@@ -637,7 +653,7 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
     if not live:
         return False
 
-    if tpath is None:
+    if tpath is None and origin == _COMPACT_SELF_CALLBACK_ORIGIN:
         tpath = _resolve_tpath()
     if tpath is not None and _compact_self_reported_complete(origin, tpath):
         return False
