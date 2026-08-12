@@ -500,65 +500,134 @@ fi
 # proven English-only (#95/#316's own audit criterion) — a genuinely
 # natural Slovak rendering of the SAME banned intent, verified LIVE against
 # the un-patched hook (see #424's own STEP 0 comment), was not blocked by
-# it. Four word-family shapes (deliberately families, never literal
-# strings), mirroring #319's own established pattern shape verbatim:
-# bounded `.{0,N}` windows, `\b` anchors on plain diacritic alternation
-# inside bracket classes (never embedded lookaheads — ERE has none), and
-# LC_ALL=C.UTF-8 forced on the one grep call that needs it (`\b` next to a
-# diacritic is itself locale-dependent under a bare C/POSIX locale —
-# #316-review's own CRITICAL finding, reproduced and forced here the same
-# way). Newlines are flattened to a single space first, so a hard-wrapped
-# rendering of the same banned intent cannot escape via a line break.
+# it. Word-family shapes (deliberately families, never literal strings),
+# mirroring #319's own established pattern shape verbatim: bounded `.{0,N}`
+# windows, `\b` anchors on plain diacritic alternation inside bracket
+# classes (never embedded lookaheads — ERE has none), and LC_ALL=C.UTF-8
+# forced on the one grep call that needs it (`\b` next to a diacritic is
+# itself locale-dependent under a bare C/POSIX locale — #316-review's own
+# CRITICAL finding, reproduced and forced here the same way). Newlines are
+# flattened to a single space first, so a hard-wrapped rendering of the
+# same banned intent cannot escape via a line break.
 #
 #   1. install(+confirm/works): nainštaluj(eš)?/inštaluj(eš)? near a
 #      confirm-verb (potvrď/potvrdíš/povedz/povieš/napíš/napíšeš/
-#      daj vedieť/daš vedieť/over(íš)?) — OR the confirm-verb standing
-#      ALONE near an outcome word (funguje/ide), with no install context
-#      required. This second, install-free trigger is what catches the
-#      incident's OWN literal quote "over či ti to ide", which names no
-#      install verb at all — it is the direct Slovak counterpart of the
-#      English hook's own install-free "let me know if...works" pattern,
-#      not new scope.
+#      daj/dáš (mi) vedieť/overíš) — OR the confirm-verb standing ALONE
+#      near an outcome word (funguje/ "či...ide"), with no install context
+#      required. This second, install-free trigger is the direct Slovak
+#      counterpart of the English hook's own install-free "let me know
+#      if...works" pattern, not new scope.
+#   1b. over-či (#424-review C1/C2): "over(,)? (si)? či ..." — a STANDALONE
+#      trigger, no WORKS word required — this is what catches the
+#      incident's OWN literal quote "over či ti to ide" (which names no
+#      install verb AND no unambiguous outcome word). Deliberately does
+#      NOT accept bare "over" or 3rd-person "overí" anywhere else (see the
+#      #424-review note below — both are common false-positive magnets:
+#      bare "over" collides with the English word "over" and with
+#      "Coverage je over 90%"; 3rd-person "overí" is how an agent
+#      routinely describes ITS OWN verification, e.g. "test overí, že X
+#      funguje", which must never block).
 #   2. try-on-device: vyskúšaj/vyskúšaš/otestuj/otestuješ near
 #      telefón/mobil/zariaden- (either order).
+#   2b. modal-request (#424-review M2 — the direct Slovak counterpart of
+#      the English hook's OWN primary "(can|could|would) you...test"
+#      shape, not new scope): môžeš/vieš near an install/try infinitive
+#      (vyskúšať/otestovať/nainštalovať/inštalovať) — either order.
 #   3. write-what-you-see: napíš/napíšeš/povedz/povieš near "čo vidíš"
 #      (either order).
-#   4. when-you-verify-continue: over/overíš/vyskúšaj/vyskúšaš near a
-#      1st-person continue-verb (pokračuj-/spravím/urobím).
+#   4. when-you-verify-continue: overíš/vyskúšaj/vyskúšaš near a
+#      1st-person continue-verb (pokračuj-/spravím/urobím). Deliberately
+#      2nd-person-future "overíš" only (not bare "over"/"overí" — same
+#      C1 reasoning as shape 1b).
 #
 # The imperative/2nd-person-future stems this keys on (nainštaluj-,
-# otestuj-, over[íi]?[šs]?, nap[íi][šs](e[šs])?, ...) are grammatically
-# DISTINCT Slovak stems from the 1st-person PAST-TENSE reporting forms
-# (nainštalova-l, otestova-l, overi-l, napísa-l) — not merely a different
-# suffix on the identical stem — so the trailing `\b` boundary check
-# structurally excludes "nainštaloval som APK na emulátore a otestoval"
-# (the agent's own past-tense report of testing on the emulator ITSELF)
-# with no special-casing needed: the past-tense forms simply never satisfy
-# the boundary the imperative/future alternatives require. Same mechanism
-# separates a genuine 2nd-person nudge ("napíšeš") from the agent's own
-# 1st-person offer ("napíšem") — Slovak's 1st/2nd-person present-tense
-# endings diverge in exactly the way this regex's optional suffix groups
-# require. Escape is IDENTICAL to the English branch above, reused
-# verbatim (never duplicated): an explicit `UNVERIFIED:` line disarms it.
+# otestuj-, overíš, nap[íi][šs](e[šs])?, ...) are grammatically DISTINCT
+# Slovak stems from the 1st-person PAST-TENSE reporting forms (nainštalova
+# -l, otestova-l, overi-l, napísa-l) — not merely a different suffix on
+# the identical stem — so the trailing `\b` boundary check structurally
+# excludes "nainštaloval som APK na emulátore a otestoval" (the agent's
+# own past-tense report of testing on the emulator ITSELF) with no
+# special-casing needed. Same mechanism separates a genuine 2nd-person
+# nudge ("napíšeš") from the agent's own 1st-person offer ("napíšem") —
+# Slovak's 1st/2nd-person present-tense endings diverge in exactly the
+# way this regex's optional suffix groups require, and separates 3rd-
+# person "overí"/"potvrdí" (the agent describing what a TEST/CI/watchdog
+# does) from 2nd-person "overíš"/"potvrdíš" (a direct nudge to the human).
+# Escape is IDENTICAL to the English branch above, reused verbatim (never
+# duplicated): an explicit `UNVERIFIED:` line disarms it.
+#
+# #424-review (adversarial, CRITICAL x2 + MAJOR x2): the FIRST cut let
+# bare "over"/3rd-person "overí" stand for both CONFIRM and VERIFY, and
+# let bare `\bide\b` stand for WORKS with no anchor — both are real,
+# live-triggered false-positive magnets (English "over", "Coverage …
+# over 90%", "test overí, že X funguje" — the repo's OWN mandated design-
+# comment phrasing, and the "IDE" acronym matching `\bide\b`
+# case-insensitively). Fixed by (a) restricting OVER/VERIFY to the
+# unambiguous 2nd-person-future "overíš" plus the standalone "over(,)?
+# (si)? či" idiom (shape 1b, above) — bare "over" alone, or "overí" with
+# no following "či", is REFUSED; (b) requiring "ide" (as a WORKS word,
+# never bare `\bide\b`) to sit in the fixed phrase "či (ti)? to ide" —
+# "to" MANDATORY, not merely "či...ide" within a window, since "ide o X"
+# (an unrelated, extremely common idiom meaning "this concerns/is about
+# X" — this repo's own mandated Slovak question template routinely says
+# "napíš/povedz mi, či ide o produkčnú databázu") has NOTHING between
+# "ide" and "o" and would otherwise collide; genuine "does it work"
+# phrasing always includes "to" ("či to ide"/"či ti to ide"), so requiring
+# it closes the idiom collision without narrowing real coverage, and
+# spelling "či"/"ci" WITHOUT the usual ASCII-fallback alternation for
+# THIS one word specifically — `či`, never `[čc]i` — because the bare-c
+# fallback collides with this repo's own extremely common "CI"
+# (continuous-integration) acronym under case-insensitive matching
+# ("CI teraz ide zelené" must never block); (c) the real 2nd-person-
+# future "dáš (mi) vedieť" (long á) was missing — only the ASCII-degraded
+# hybrid "daš" matched, so the incident's own most natural confirm idiom
+# escaped; fixed by accepting daj/dáš/daš uniformly. Also added the
+# modal-request shape (2b) the review flagged as materially defeating the
+# ticket's real-world purpose by omission.
 #
 # Accepted residuals (documented, not chased, per #319's own precedent —
 # this is a covered WORD-FAMILY, never a claim of blanket Slovak
 # coverage): a decoy mention inside an INTERPRETER heredoc body still
 # executes (the same residual already documented for this whole file); a
 # genuinely exotic synonym verb outside this word-family list (e.g. "skús"
-# for "try") can still slip through.
+# for "try", or an outcome word other than funguje/ide such as "beží",
+# "padá", "dopadlo") can still slip through; the formal register (vykanie
+# — "Nainštalujte si...", "Dajte mi vedieť...") is not covered, only the
+# informal 2nd-person-singular this repo's own real prose exclusively
+# uses; a 2nd-person-PAST interrogative ("Nainštaloval si už...?") is not
+# covered; a genuinely-sanctioned FINAL-acceptance nudge sent only AFTER
+# a real green agent-side/emulator verification (#424-review M3) still
+# trips this detector exactly like a premature one would — the message
+# text tells the agent to word such a nudge so it does not name a
+# device/try-verb pair at all (e.g. state the emulator result plainly,
+# without also asking the human to "vyskúšaj to na telefóne" as
+# redundant final confirmation) rather than reach for `UNVERIFIED:`,
+# which would misstate a genuinely-verified result; this is the SAME
+# structural tension the pre-existing English branch above already has,
+# not a new one #424 introduces. Proximity-only matching (no real
+# grammatical parsing — ERE cannot do that) can, rarely, pair two
+# unrelated clauses that happen to share window-adjacent trigger words
+# (e.g. a conditional "ak povieš áno, nasadím verziu, ktorá funguje aj
+# offline" is not tester-handoff at all) or match an imperative verb
+# quoted inside this repo's OWN documentation/playbook prose describing a
+# verification STEP rather than addressing a human — both are the same
+# known limitation #319's own detectors already carry.
 SK_TH_INSTALL_RX="\b(nain[šs]taluj|in[šs]taluj)(e[šs])?\b"
-SK_TH_CONFIRM_RX="\b(potvr[ďd]|potvrd[íi][šs]|povedz|povie[šs]|nap[íi][šs](e[šs])?|da[jš][[:space:]]+(mi[[:space:]]+)?vedie[ťt]|over[íi]?[šs]?)\b"
-SK_TH_WORKS_RX="(\bfunguj|\bide\b)"
+SK_TH_CI_RX="či"
+SK_TH_OVER_CI_RX="\bover,?[[:space:]]+(si[[:space:]]+)?${SK_TH_CI_RX}\b"
+SK_TH_CONFIRM_RX="\b(potvr[ďd]|potvrd[íi][šs]|povedz|povie[šs]|nap[íi][šs](e[šs])?|(daj|d[aá][šs])[[:space:]]+(mi[[:space:]]+)?vedie[ťt]|over[íi][šs])\b"
+SK_TH_WORKS_RX="(\bfunguj|\b${SK_TH_CI_RX}\b[[:space:]]+(ti[[:space:]]+)?to[[:space:]]+ide\b)"
 SK_TH_TRY_RX="\b(vysk[úu][šs]a[jš]|otestuj(e[šs])?)\b"
 SK_TH_DEVICE_RX="(telef[óo]n|mobil|zariaden)"
+SK_TH_MODAL_RX="\b(m[ôo][žz]e[šs]|vie[šs])\b"
+SK_TH_MODALVERB_RX="\b(vysk[úu][šs]a[ťt]|otestova[ťt]|nain[šs]talova[ťt]|in[šs]talova[ťt])\b"
 SK_TH_WRITESAY_RX="\b(nap[íi][šs](e[šs])?|povedz|povie[šs])\b"
 SK_TH_SEE_RX="čo[[:space:]]+vid[íi][šs]"
-SK_TH_VERIFY_RX="\b(over[íi]?[šs]?|vysk[úu][šs]a[jš])\b"
+SK_TH_VERIFY_RX="\b(over[íi][šs]|vysk[úu][šs]a[jš])\b"
 SK_TH_CONTINUE_RX="\b(pokra[čc]uj|sprav[íi]m|urob[íi]m)"
 SK_TH_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || SK_TH_FLAT="$MSG_MENTION"
 if LC_ALL=C.UTF-8 msg_has "$SK_TH_FLAT" -qiE \
-    "(${SK_TH_INSTALL_RX}.{0,100}${SK_TH_CONFIRM_RX})|(${SK_TH_CONFIRM_RX}.{0,50}${SK_TH_WORKS_RX}|${SK_TH_WORKS_RX}.{0,50}${SK_TH_CONFIRM_RX})|(${SK_TH_TRY_RX}.{0,40}${SK_TH_DEVICE_RX}|${SK_TH_DEVICE_RX}.{0,40}${SK_TH_TRY_RX})|(${SK_TH_WRITESAY_RX}.{0,30}${SK_TH_SEE_RX}|${SK_TH_SEE_RX}.{0,30}${SK_TH_WRITESAY_RX})|(${SK_TH_VERIFY_RX}.{0,60}${SK_TH_CONTINUE_RX})"; then
+    "(${SK_TH_INSTALL_RX}.{0,100}${SK_TH_CONFIRM_RX})|(${SK_TH_CONFIRM_RX}.{0,50}${SK_TH_WORKS_RX}|${SK_TH_WORKS_RX}.{0,50}${SK_TH_CONFIRM_RX})|${SK_TH_OVER_CI_RX}|(${SK_TH_TRY_RX}.{0,40}${SK_TH_DEVICE_RX}|${SK_TH_DEVICE_RX}.{0,40}${SK_TH_TRY_RX})|(${SK_TH_MODAL_RX}.{0,40}${SK_TH_MODALVERB_RX}|${SK_TH_MODALVERB_RX}.{0,40}${SK_TH_MODAL_RX})|(${SK_TH_WRITESAY_RX}.{0,30}${SK_TH_SEE_RX}|${SK_TH_SEE_RX}.{0,30}${SK_TH_WRITESAY_RX})|(${SK_TH_VERIFY_RX}.{0,60}${SK_TH_CONTINUE_RX})"; then
     if msg_missing "$MSG" -qE "UNVERIFIED:"; then
         echo "VIOLATION: Odovzdal si verifikáciu človeku po slovensky ('nainštaluj si APK a potvrď, či funguje', 'vyskúšaj to na telefóne', 'napíš, čo vidíš', 'over či ti to ide') — presne trieda 'tester-handoff' z autonomous-verification.md, len v jazyku ktorý anglický regex nezachytáva. Používateľ NIKDY nie je tvoj tester. Pre mobilné-appky projekty je emulátor/adb ekvivalent Playwrightu — over si to SÁM na emulátore, zabuduj si diagnostické zasielanie sám. Používateľovo zariadenie smie prísť najviac ako FINÁLNA akceptácia PO zelenej agent-side verifikácii, NIKDY ako iteratívny debug kanál ('skús to znova, nová verzia'). Ak si toto naozaj nevieš overiť sám (chýba ti nástroj/prístup), najprv o ten nástroj POŽIADAJ (nikdy o test) — a až potom, ak naozaj neexistuje, napíš 'UNVERIFIED: <čo nejde overiť> — <prečo>'." >&2
         echo "" >&2
