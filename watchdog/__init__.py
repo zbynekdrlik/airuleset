@@ -7711,6 +7711,36 @@ def _save_compact_delivered(d, path=None):
         return False
 
 
+def _compact_delivered_hash(entry):
+    """Extract the `msg_hash` half of a `compact-delivered.json` VALUE,
+    accepting BOTH the legacy bare-string shape (pre-#400 FIX 4:
+    `d[session] = msg_hash`) and the current dict shape (`d[session] =
+    {"hash": ..., "ts": ...}`, #400) -- so an on-disk file written by the
+    OLD code keeps working unmodified through one full migration cycle,
+    the same shape `record_compact_request`'s own `first_ts` migration
+    used (see that function's docstring)."""
+    if isinstance(entry, dict):
+        return str(entry.get("hash") or "")
+    return str(entry or "")
+
+
+def _compact_delivered_ts(entry):
+    """Extract the last-REAL-SEND timestamp half of a `compact-
+    delivered.json` VALUE -- `None` for a legacy bare-string entry (no
+    `ts` was ever recorded under the old shape) or for an entry that has
+    never had a genuine send recorded via `mark_compact_delivery_ts`
+    (every drop/dedup-only `mark_compact_delivered` call leaves `ts`
+    alone -- see that function's own docstring). `None` means
+    UNMEASURABLE, never "very long ago"."""
+    if isinstance(entry, dict):
+        ts = entry.get("ts")
+        try:
+            return float(ts) if ts is not None else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def compact_already_delivered(session, msg_hash, path=None):
     """#71 — True iff `msg_hash` matches the LAST hash actually handled for
     `session`. A blank `session` or `msg_hash` never matches — callers with
@@ -7721,7 +7751,8 @@ def compact_already_delivered(session, msg_hash, path=None):
     msg_hash = str(msg_hash or "").strip()
     if not session or not msg_hash:
         return False
-    return _load_compact_delivered(path).get(session) == msg_hash
+    entry = _load_compact_delivered(path).get(session)
+    return _compact_delivered_hash(entry) == msg_hash
 
 
 def mark_compact_delivered(session, msg_hash, path=None):
@@ -7729,14 +7760,138 @@ def mark_compact_delivered(session, msg_hash, path=None):
     LATER request reporting the SAME (unchanged) completion — from EITHER
     channel — is recognized as a duplicate and skipped. A blank `session`
     or `msg_hash` is a no-op (nothing to key the dedup on, and never even
-    touches disk). Fail-safe (never raises). Returns True on success."""
+    touches disk). Fail-safe (never raises). Returns True on success.
+
+    #400 FIX 4 — this call is made on EVERY handled disposition (a real
+    send, or a #99/#48/thin-context/queued-compact DROP that never typed
+    anything), so it must NEVER touch the entry's own `ts` (the last-REAL-
+    SEND instant `compact_delivery_in_cooldown` measures against) —
+    only `mark_compact_delivery_ts`, called ONLY at an actual send point,
+    may set/advance it. Whatever `ts` is already on file (if any) is
+    preserved verbatim across this call, mirroring `mark_compact_delivery_
+    ts`'s own preserve-the-other-field shape in reverse."""
     session = str(session or "").strip()
     msg_hash = str(msg_hash or "").strip()
     if not session or not msg_hash:
         return False
     d = _load_compact_delivered(path)
-    d[session] = msg_hash
+    ts = _compact_delivered_ts(d.get(session))
+    entry = {"hash": msg_hash}
+    if ts is not None:
+        entry["ts"] = ts
+    d[session] = entry
     return _save_compact_delivered(d, path)
+
+
+def mark_compact_delivery_ts(session, now=None, path=None):
+    """#400 FIX 4 — record the WALL-CLOCK instant a REAL `/compact` send
+    happened for `session` -- called from EVERY path that actually types
+    `/compact` (job 14's idle send, job 14's stash send, and
+    `deliver_compact_now`'s own send), right alongside that same send's
+    `_log_compact_sync("SEND...")` call (FIX 6). Never called from a
+    drop/dedup-only disposition -- `mark_compact_delivered` owns those,
+    and deliberately never touches `ts` itself (see its own docstring).
+
+    Preserves whatever `hash` is already on file for this session (this
+    call never touches dedup identity). A blank `session` is a no-op.
+    Fail-safe (never raises); returns True on success."""
+    session = str(session or "").strip()
+    if not session:
+        return False
+    now = now if now is not None else time.time()
+    d = _load_compact_delivered(path)
+    h = _compact_delivered_hash(d.get(session))
+    entry = {"ts": float(now)}
+    if h:
+        entry["hash"] = h
+    d[session] = entry
+    return _save_compact_delivered(d, path)
+
+
+# --------------------------------------------------------------------------- #
+# #400 FIX 4 (2026-08-12, coordinator directive) — a HARD, per-session
+# MINIMUM INTERVAL between two REAL `/compact` deliveries, enforced at
+# EVERY delivery point, for EVERY origin, with no exemption -- distinct
+# from every OTHER gate in this file, which all answer "is it SAFE to
+# type right now" (busy pane, live tasks, a ❓/⏳ marker...). This one
+# answers a different question entirely: even when everything else says
+# yes, has `/compact` ALREADY fired for this session too recently to fire
+# again? A session whose ticket boundaries land close together (a fast
+# `/autopilot` batch, or several independent proven-boundary origins
+# firing within the same few minutes) would otherwise compact on EVERY
+# one of them, which is wasted cost for no benefit -- there is nothing
+# meaningfully MORE to discard a few minutes after the last compaction
+# than there was right after it.
+#
+# A request caught in cooldown is DROPPED (consumed, `mark_compact_
+# delivered` called so a repeat report of the SAME boundary does not
+# re-attempt), never held for retry -- unlike the live-tasks/marker-hold
+# gates above, which all leave the request in place because the blocking
+# CONDITION is expected to clear on its own. A cooldown is not a
+# condition that "clears" in the same sense; it simply expires, and by
+# the time it does, either this exact request has long since gone stale
+# (COMPACT_REQUEST_MAX_AGE_S) or a NEWER boundary has already superseded
+# it (a fresh completed ticket, its own fresh request). Holding this one
+# specific request queued for up to 30 minutes would only ever produce a
+# STALE compaction, firing well after the boundary that justified it --
+# exactly the class of defect #400's OTHER fixes exist to prevent.
+# --------------------------------------------------------------------------- #
+
+COMPACT_MIN_DELIVERY_INTERVAL_S = 1800   # 30 min; env AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S
+COMPACT_MIN_DELIVERY_INTERVAL_MAX_S = 6 * 3600   # clamp ceiling; see below
+
+
+def _compact_min_delivery_interval(interval=None):
+    """An explicit `interval=` (test/caller override) is returned verbatim,
+    unclamped -- every production call site leaves it `None`.
+
+    The CONSTANT/ENV-derived value is clamped to `[1,
+    COMPACT_MIN_DELIVERY_INTERVAL_MAX_S]`, the same shape every other
+    `_compact_*_grace`/`_compact_*_interval` resolver in this file uses
+    (`_compact_defer_grace`, `_compact_marker_hold_grace`) and for the
+    identical reason: a misconfigured `AIRULESET_COMPACT_MIN_DELIVERY_
+    INTERVAL_S` could otherwise silently disable the throttle outright (0
+    or negative) or make it so long that a genuinely busy, fast-completing
+    session never compacts again for hours."""
+    if interval is not None:
+        return interval
+    try:
+        raw = int(os.environ.get("AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S",
+                                 COMPACT_MIN_DELIVERY_INTERVAL_S))
+    except ValueError:
+        raw = COMPACT_MIN_DELIVERY_INTERVAL_S
+    if raw < 1:
+        return 1
+    if raw > COMPACT_MIN_DELIVERY_INTERVAL_MAX_S:
+        return COMPACT_MIN_DELIVERY_INTERVAL_MAX_S
+    return raw
+
+
+def compact_delivery_in_cooldown(session, now, path=None, interval=None):
+    """#400 FIX 4 — True while `session`'s LAST REAL `/compact` send
+    (`mark_compact_delivery_ts`'s own `ts`, read via `_compact_delivered_
+    ts` -- NEVER a drop/dedup-only mark, which never touches `ts`) is
+    still within `_compact_min_delivery_interval(interval)` of `now`.
+
+    A session with NO recorded delivery `ts` at all -- never delivered
+    before, or only ever hit a drop/dedup disposition, or the on-disk
+    entry is the pre-#400 legacy bare-string shape -- reads as
+    UNMEASURABLE, and this returns False: the throttle only ever engages
+    once a REAL send has genuinely been observed, never as a guess. This
+    is the same fail-safe direction every other gate in this file uses
+    for an unmeasurable input."""
+    session = str(session or "").strip()
+    if not session:
+        return False
+    entry = _load_compact_delivered(path).get(session)
+    ts = _compact_delivered_ts(entry)
+    if ts is None:
+        return False
+    try:
+        age = float(now) - ts
+    except (TypeError, ValueError):
+        return False
+    return age < _compact_min_delivery_interval(interval)
 
 
 # --------------------------------------------------------------------------- #
@@ -9751,6 +9906,21 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 logs.append("skip live-tasks (compact-request, past-grace) %s"
                             % loc)
             continue
+        # #400 FIX 4 -- a hard per-session minimum interval between two
+        # REAL /compact deliveries, unconditional, every origin, no
+        # exemption -- see the section comment above `compact_delivery_
+        # in_cooldown`'s own definition for the full reasoning. DROPPED
+        # (consumed), never held for retry -- a queued cooldown request
+        # can only ever fire stale, well after the boundary that
+        # justified it.
+        if compact_delivery_in_cooldown(sid, now, path=delivered_path):
+            logs.append("skip cooldown (compact-request) %s" % loc)
+            if not dry_run:
+                reqs.pop(sid, None)
+                changed = True
+                if mhash:
+                    mark_compact_delivered(sid, mhash, path=delivered_path)
+            continue
         grace_tag = ""
         if draft:
             # #67 — a forgotten draft must not permanently block compaction:
@@ -9774,6 +9944,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     mark_compact_delivered(sid, mhash, path=delivered_path)
                 compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
                 mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
+                mark_compact_delivery_ts(sid, now=now, path=delivered_path)  # #400 FIX 4
                 # #400 FIX 6 -- this job's own send paths used to be
                 # SILENT to compact-sync.log (only `deliver_compact_now`
                 # logged there) -- the exact gap that made the gatekeeper
@@ -9843,6 +10014,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             mark_compact_delivered(sid, mhash, path=delivered_path)
         compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
         mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
+        mark_compact_delivery_ts(sid, now=now, path=delivered_path)  # #400 FIX 4
         logs.append("OK (compact-request%s) %s" % (grace_tag, loc))
     if changed:
         _save_compact_requests(reqs, path)
@@ -9930,7 +10102,8 @@ def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
 
 
 def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
-                        git_run=None, origin=None, request_ts=None, now=None):
+                        git_run=None, origin=None, request_ts=None, now=None,
+                        delivered_path=None):
     """#65 — attempt to deliver `/compact` for `sid` SYNCHRONOUSLY, right when
     the ticket-boundary request is recorded (see the section comment above).
 
@@ -9963,6 +10136,11 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     `"queued-compact"` — the pane already holds an unexecuted `/compact`.
     `"dropped-no-work"` — the #99 gate: zero commits since the anchor.
     `"dropped-small-context"` — the #48 gate: context too small to bother.
+    `"dropped-cooldown"` — #400 FIX 4: a REAL `/compact` already fired for
+    this session inside `COMPACT_MIN_DELIVERY_INTERVAL_S` — never held for
+    retry (a delayed send would only ever fire STALE), always CONSUMED so a
+    repeated report of the same already-handled boundary does not
+    re-attempt every sweep.
     Returns `""` (falsy) when the caller should fall back to
     `record_compact_request` for job 14's polled retry: no pane resolves
     unambiguously, the pane is in copy-mode / showing an open dialog / has
@@ -10220,6 +10398,16 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         # needed. One gate, every origin, no prose to keep correct.
         _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
         return ""
+    # #400 FIX 4 -- the hard per-session minimum interval between two REAL
+    # /compact deliveries, checked last (every other "is it safe right
+    # now" gate above has already passed) so it never masks a genuine
+    # earlier refusal reason. Unlike every gate above, a cooldown hit is
+    # DROPPED (consumed), never left for job 14's polled retry -- see
+    # compact_delivery_in_cooldown's own section comment for why holding
+    # it would only ever produce a stale send.
+    if compact_delivery_in_cooldown(sid, now_ts, path=delivered_path):
+        _log_compact_sync("DROP cooldown sid=%s cwd=%s" % (sid, cwd))
+        return "dropped-cooldown"
     # #333-review MAJOR-2 -- `captured` was resolved once, near the top of
     # this call, before every check above (the marker re-read, the #238/
     # #99/#48 gates, and the `_session_has_live_bg_tasks` subprocess check
@@ -10239,6 +10427,7 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     send_continue(pid, COMPACT_TEXT, run)
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
     mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
+    mark_compact_delivery_ts(sid, now=now_ts, path=delivered_path)  # #400 FIX 4
     # #400 FIX 6 -- name BOTH the request's own origin (blank / subagent-
     # stop / self-callback -- what proved the boundary) and the delivery
     # PATH (`via=sync`, vs job 14's `via=job14`) so a later forensic read
