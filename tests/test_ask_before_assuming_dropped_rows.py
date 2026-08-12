@@ -390,11 +390,16 @@ class TestNewSlovakDetectorsSurviveABareLocale(TestCase):
 
 
 class TestRevertedRowsNoLongerClaimedAsHookCovered(TestCase):
-    """The 14 rows reverted back into the table by #316 — their Slovak
+    """The rows reverted back into the table by #316 — their Slovak
     rendering is NOT blocked by any of the 3 hooks. This is not a bug: it
     is exactly WHY they were reverted (prose-only guidance now, no hook
     claim behind them). Locked here so a future re-trim of the table
-    cannot silently drop them again without re-proving Slovak coverage."""
+    cannot silently drop them again without re-proving Slovak coverage.
+
+    Started at 17 (the ticket's original count); #319 removed rows 7-9
+    (dedicated Slovak coverage shipped for them, leaving 14); #424
+    removed row 15 ("can you test it on your end" — now genuinely covered
+    by the SK tester-handoff family). 13 remain."""
 
     REVERTED_SLOVAK_PHRASES = [
         # row 1 — subagent-vs-inline
@@ -438,20 +443,22 @@ class TestRevertedRowsNoLongerClaimedAsHookCovered(TestCase):
         # row 14 — give the word, create the issues
         "Daj mi znamenie a vytvorím tie issues. Si pripravený "
         "schváliť ten backlog?",
-        # row 15 — can you test it on your end. #424: the ORIGINAL
-        # fixture here ("...Daj mi vedieť, či to funguje.") now genuinely
-        # IS blocked — by stop-check-prose-violations.sh's own NEW
-        # Slovak tester-handoff family (autonomous-verification.md), not
-        # by the pre-answered-table mechanism this test class audits. A
-        # genuine, welcome overlap (the SAME banned intent, just enforced
-        # via a different family in the SAME hook) — not a bug in the new
-        # detector, but it makes the original wording a bad negative-
-        # control fixture for THIS test's specific claim. Mirrors #319's
-        # own row-10 handling: reworded to keep row 15's real intent
-        # (can-you-test-it, informed-of-result) while avoiding the new
-        # detector's own trigger words (no funguje/ide, no daj/daš
-        # vedieť, no telefón/mobil/zariadenie, no čo vidíš).
-        "Môžeš mi to otestovať na svojej strane? Informuj ma o výsledku.",
+        # row 15 — can you test it on your end. #424 (adversarial-review
+        # round, MAJOR M2): REMOVED from this list, same shape as #319's
+        # own removal of rows 7-9 when it shipped dedicated coverage for
+        # them. ANY natural Slovak rendering of "can you test it on your
+        # end" — the bare imperative ("otestuj/vyskúšaj to na svojej
+        # strane"), the modal-request form ("môžeš/vieš to otestovať"),
+        # or the "let me know if it works" confirm tail — is now
+        # genuinely blocked by stop-check-prose-violations.sh's Slovak
+        # tester-handoff family (autonomous-verification.md), a
+        # completely different, unrelated mechanism from the pre-
+        # answered-table one this test class audits — but the underlying
+        # BANNED INTENT is identical, so there is no natural rendering of
+        # row 15 left that stays a valid "not hook covered" negative
+        # control. See tests/test_tester_handoff_slovak.py's own
+        # `test_modal_request_can_you_test_it_blocked` for the positive
+        # coverage proof (the row 15 shape, in Slovak, IS blocked).
         # row 16 — fix locally before next user test
         "Opravím to lokálne pred ďalším user testom. Prestávam ťa "
         "používať ako testera.",
