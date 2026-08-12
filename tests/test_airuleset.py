@@ -13550,31 +13550,56 @@ class TestCiMonitoringPollSnippetSelfBounds(TestCase):
                               capture_output=True, text=True, env=env, cwd=root)
 
     def test_never_reaches_terminal_exits_on_own_budget_before_external_kill(self):
-        # gh always reports "queued" (never completed) -- the stub mimics
-        # what `gh ... --jq '.status+" "+(.conclusion//"")'` itself already
-        # prints (gh applies --jq internally; there is no separate `jq`
-        # call to fake). The loop must give up on its OWN budget and print
-        # the last-known status, never rely on the external `timeout`
-        # wrapper to kill it.
+        # gh always reports "queued" (never completed, never a job failure)
+        # -- the stub mimics what `gh ... --jq '<the 3-way TERMINAL/JOBFAIL/
+        # PENDING filter>'` itself already prints (gh applies --jq internally;
+        # there is no separate `jq` call to fake). The loop must give up on
+        # its OWN budget and print the last-known status, never rely on the
+        # external `timeout` wrapper to kill it.
         r = self._run_snippet(
-            "echo 'queued '",
+            "echo 'PENDING queued'",
             extra_env={"AIRULESET_POLL_BUDGET_S": "1"},
         )
         self.assertNotEqual(r.returncode, 124,
                             "external timeout fired -- snippet did not self-bound: "
                             + r.stdout + r.stderr)
         self.assertIn("POLL BUDGET REACHED", r.stdout, r.stdout + r.stderr)
+        self.assertIn("queued", r.stdout, r.stdout + r.stderr)
         self.assertNotIn("TERMINAL", r.stdout)
+        self.assertNotIn("JOB FAILED", r.stdout)
 
     def test_terminal_state_still_breaks_immediately(self):
         # regression guard: a genuinely completed run must still short-circuit
-        # via the TERMINAL branch, not wait out the whole budget.
+        # via the TERMINAL branch, not wait out the whole budget -- even when
+        # a job inside it also failed (the ordinary "run finished, one job
+        # red" case), TERMINAL still wins over JOBFAIL (see the jq filter's
+        # own if/elif order: .status=="completed" is checked FIRST).
         r = self._run_snippet(
-            "echo 'completed success'",
+            "echo 'TERMINAL completed success'",
             extra_env={"AIRULESET_POLL_BUDGET_S": "100"},
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("TERMINAL: completed success", r.stdout)
+        self.assertNotIn("POLL BUDGET REACHED", r.stdout)
+        self.assertNotIn("JOB FAILED", r.stdout)
+
+    def test_job_level_failure_wakes_before_run_level_terminal(self):
+        # #405: a job inside a STILL-RUNNING multi-job run has already
+        # concluded failure -- the waiter must wake immediately with the
+        # failed job's name, never wait for the whole run to reach a
+        # terminal state (a large budget proves this isn't just the budget
+        # expiring), and it must exit cleanly (break, not an external kill).
+        r = self._run_snippet(
+            "echo 'JOBFAIL E2E Tests (slovnormal)'",
+            extra_env={"AIRULESET_POLL_BUDGET_S": "100"},
+        )
+        self.assertNotEqual(r.returncode, 124,
+                            "external timeout fired -- snippet did not wake on "
+                            "job failure: " + r.stdout + r.stderr)
+        self.assertIn(
+            "JOB FAILED (run still in progress): E2E Tests (slovnormal)",
+            r.stdout, r.stdout + r.stderr)
+        self.assertNotIn("TERMINAL", r.stdout)
         self.assertNotIn("POLL BUDGET REACHED", r.stdout)
 
     def test_default_budget_is_under_the_observed_harness_timeout(self):
