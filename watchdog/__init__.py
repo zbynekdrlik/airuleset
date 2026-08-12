@@ -8249,8 +8249,16 @@ def compact_sync_log_path():
 
 
 def _log_compact_sync(line, path=None):
-    """Best-effort append-only log line for the synchronous delivery path
-    (`deliver_compact_now`). Never raises — a logging failure must never
+    """Best-effort append-only log line for EVERY `/compact`
+    delivery/skip decision — `deliver_compact_now` (the synchronous
+    path), AND (#400 FIX 6) job 14's own two send branches
+    (`compact_ticket_boundary`'s idle send and its stash-around-a-draft
+    send), which used to be completely silent to this log: the exact gap
+    that made a live gatekeeper incident (2026-08-12, a `/compact` fired
+    into a session mid-work with 6+ background agents running)
+    undebuggable from this log alone — every send/skip line names its
+    delivery path via a `via=job14|sync` field. Never raises — a logging
+    failure must never
     break delivery (returns False instead, same fail-safe shape as every
     other `_save_*` helper in this module). Bounded: trims to the last
     `COMPACT_SYNC_LOG_LINES_MAX` lines on every write so this can never
@@ -9494,8 +9502,28 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     entry["not_boundary_since"] = not_boundary_since
                     reqs[sid] = entry
                     changed = True
-                marker_grace_elapsed = not _compact_marker_hold_in_grace(
-                    not_boundary_since, now)
+                # #400 FIX 5 -- the marker-hold grace may ONLY override a
+                # stale `⏳`/`❓` marker for a session that ALREADY has ZERO
+                # live background tasks right now -- never while sibling
+                # work is still running. A `⏳`/`❓` marker alongside live
+                # tasks is not "merely stale", it is genuinely still
+                # mid-work (the exact live incident this fix responds to:
+                # the marker read `⏳` because the session really was
+                # mid-work, not because it happened to be idle with a
+                # stale render). The later unconditional live-tasks skip
+                # (below) would refuse the send either way, but this
+                # override must never even TAG the request as
+                # grace-elapsed while live tasks exist, or the
+                # `not-a-boundary-grace-elapsed` log line stops meaning
+                # what it says. If this makes the grace effectively
+                # unreachable on a continuously-busy supervisor box, that
+                # is the correct trade: a missed compact is recoverable, a
+                # compact fired mid-work is not.
+                if not _session_has_live_bg_tasks(
+                        pid, sid, cwd, run, projects_dir=pdir, now=now,
+                        captured=captured):
+                    marker_grace_elapsed = not _compact_marker_hold_in_grace(
+                        not_boundary_since, now)
             if not marker_grace_elapsed:
                 logs.append("skip not-a-boundary (compact-request) %s" % loc)
                 continue
@@ -9659,16 +9687,19 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # own #78 lesson, a new cross-cutting gate belongs at the send
         # point, never at the top of the loop.
         #
-        # #250 — bounded by TIME: the defer applies only while this
-        # request is still within COMPACT_DEFER_GRACE_S of the FIRST sweep
-        # that observed it deferred (`deferred_since`, stamped below the
-        # first time this branch fires for a given pending request, and
+        # #250 — ORIGINALLY bounded by TIME: the defer used to apply only
+        # while this request was within COMPACT_DEFER_GRACE_S of the FIRST
+        # sweep that observed it deferred (`deferred_since`, stamped below
+        # the first time this branch fires for a given pending request, and
         # PRESERVED across a re-record by `record_compact_request` — see
-        # its own #250-review docstring). Still in grace -> left in place,
-        # retried next sweep, exactly like every other "not safe RIGHT NOW"
-        # skip in this loop. Past grace -> `grace_elapsed` marks every
-        # OK/READY line below so a field audit of journalctl can tell a
-        # genuinely-clear delivery apart from one that fired anyway.
+        # its own #250-review docstring), after which it delivered anyway.
+        # #400 FIX 5 REMOVED that override entirely (see the section
+        # comment right below `_session_has_live_bg_tasks` below): live
+        # background tasks are now an unconditional skip regardless of how
+        # long the defer has run. `deferred_since` is kept purely so the
+        # skip log line can distinguish "still within the nominal grace
+        # window" from "genuinely stuck past it" — never again as license
+        # to send.
         #
         # #250-review (MAJOR) — this must NOT anchor on the entry's own
         # `ts` field: `ts` is overwritten on EVERY re-record (only the
@@ -9687,7 +9718,25 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # no-op in production while still coupling this job's tests to a
         # timing assumption ("evaluated long after recording") that a fast
         # unit test cannot cheaply reproduce.
-        grace_elapsed = False
+        # #400 FIX 5 -- live background tasks are now an UNCONDITIONAL skip,
+        # with NO time-based override, at EVERY delivery point (this job,
+        # `deliver_compact_now`, and the marker-hold-grace check above --
+        # see that check's own #400 FIX 5 comment). #250's original
+        # "deliver anyway once the defer has run past COMPACT_DEFER_GRACE_S"
+        # escape is REMOVED: a live gatekeeper incident (2026-08-12) showed
+        # exactly this branch firing a `/compact` into a session mid-work
+        # with 6+ background agents still running (compact-decisions.log:
+        # `RECORD deferred=live-tasks n=11 ... result=recorded` at record
+        # time, then a silent delivery a few minutes later with no
+        # `deliver_compact_now` SEND anywhere in compact-sync.log -- this
+        # job's own two send branches never logged there at all, see FIX 6
+        # below). A missed compact is recoverable (it retries next sweep,
+        # or lapses harmlessly per COMPACT_REQUEST_MAX_AGE_S); a compact
+        # fired mid-work is not (it drops a sibling worker's own task
+        # linkage -- the exact safety property #246 exists to protect).
+        # `deferred_since`/`COMPACT_DEFER_GRACE_S` are kept as a PURE
+        # observability tag on the skip line (still-within-grace vs
+        # genuinely-stuck-past-grace) -- never again as license to send.
         if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=pdir,
                                       now=now, captured=captured):
             deferred_since = entry.get("deferred_since")
@@ -9698,9 +9747,11 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 changed = True
             if _compact_live_tasks_in_grace(deferred_since, now):
                 logs.append("skip live-tasks (compact-request) %s" % loc)
-                continue
-            grace_elapsed = True
-        grace_tag = ", grace-elapsed" if grace_elapsed else ""
+            else:
+                logs.append("skip live-tasks (compact-request, past-grace) %s"
+                            % loc)
+            continue
+        grace_tag = ""
         if draft:
             # #67 — a forgotten draft must not permanently block compaction:
             # stash it around the /compact delivery instead of skipping
@@ -9723,6 +9774,16 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     mark_compact_delivered(sid, mhash, path=delivered_path)
                 compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
                 mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
+                # #400 FIX 6 -- this job's own send paths used to be
+                # SILENT to compact-sync.log (only `deliver_compact_now`
+                # logged there) -- the exact gap that made the gatekeeper
+                # incident undebuggable: no `SEND` line anywhere for the
+                # delivery the user actually received. Every path that
+                # types `/compact` now writes one, BEFORE any of it can
+                # be skipped by a later exception.
+                _log_compact_sync(
+                    "SEND (stash) sid=%s cwd=%s origin=%s via=job14"
+                    % (sid, cwd, entry.get("origin") or "-"))
                 logs.append("OK (compact-request, stash%s) %s"
                             % (grace_tag, loc))
             else:
@@ -9769,6 +9830,11 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                                                 # way a stuck /compact here
                                                 # is ever recovered
         send_continue(pid, COMPACT_TEXT, run)
+        # #400 FIX 6 -- see the stash branch's own comment above: this is
+        # the OTHER job-14 send path that used to write nothing to
+        # compact-sync.log at all.
+        _log_compact_sync("SEND sid=%s cwd=%s origin=%s via=job14"
+                          % (sid, cwd, entry.get("origin") or "-"))
         reqs.pop(sid, None)
         changed = True
         if handled is not None:
@@ -10117,17 +10183,22 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # #250 — bounded by TIME, the identical check job 14 applies
     # (`_compact_live_tasks_in_grace`), using `request_ts` (see this
     # function's own docstring for why it is always in-grace in practice).
-    grace_elapsed = False
+    # #400 FIX 5 -- live background tasks are now an UNCONDITIONAL skip
+    # here too, with NO time-based override -- see job 14's own identical
+    # fix for the full incident/reasoning (a live gatekeeper /compact fired
+    # mid-work with 6+ agents still running). #250's "deliver anyway once
+    # past COMPACT_DEFER_GRACE_S" escape is removed from this function as
+    # well; the request simply falls back to job 14's own polled retry
+    # (unchanged -- that has always been this function's fallback on ANY
+    # "not safe right now" state).
     now_ts = now if now is not None else time.time()
     has_live = _session_has_live_bg_tasks(pid, sid, cwd, run,
                                           projects_dir=projects_dir,
                                           captured=captured)
     if has_live:
-        if _compact_live_tasks_in_grace(request_ts, now_ts):
-            _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
-            return ""
-        grace_elapsed = True
-    elif _compact_request_too_young(request_ts, now_ts):
+        _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
+        return ""
+    if _compact_request_too_young(request_ts, now_ts):
         # #238 -- close the same-turn dispatch race: a "no live tasks"
         # verdict this fresh is not yet trustworthy (see
         # `_compact_request_too_young`'s own docstring). Left in place —
@@ -10168,8 +10239,13 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     send_continue(pid, COMPACT_TEXT, run)
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
     mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
-    _log_compact_sync("SEND%s sid=%s cwd=%s"
-                      % (" grace-elapsed" if grace_elapsed else "", sid, cwd))
+    # #400 FIX 6 -- name BOTH the request's own origin (blank / subagent-
+    # stop / self-callback -- what proved the boundary) and the delivery
+    # PATH (`via=sync`, vs job 14's `via=job14`) so a later forensic read
+    # of compact-sync.log can tell which of the two senders actually fired
+    # without cross-referencing a second log.
+    _log_compact_sync("SEND sid=%s cwd=%s origin=%s via=sync"
+                      % (sid, cwd, origin or "-"))
     return "sent"
 
 
