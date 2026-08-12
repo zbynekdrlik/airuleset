@@ -900,9 +900,20 @@ def _pthread_spawn_guard_path(owner, project_label):
     """Per (owner, project) spawn-throttle marker — a SEPARATE namespace
     from `_qthread_spawn_guard_path` (the questions-thread guard), so a
     burst of BOTH kinds of missing thread never shares one throttle window
-    and one kind's self-heal cannot silently suppress the other's."""
+    and one kind's self-heal cannot silently suppress the other's.
+
+    #369 review m8 (TRIGGERED): `owner` reaches here from `send()`'s own
+    per-TARGET loop, which includes MIRROR recipients
+    (`DISCORD_MIRROR_<OWNER>`) — a locally-owner-controlled `.env` value
+    `mirror_owners()` only lowercases, never path-sanitises. Unlike the
+    questions-thread guard (never called with a mirror owner), this is a
+    genuine new path-traversal-shaped surface: an owner value like
+    `../../../tmp/x` would otherwise land outside `notify-pthread-spawn/`
+    entirely. Sanitised the SAME way `_project_env_slug` already sanitises
+    the project half, so both path components are safe."""
+    safe_owner = re.sub(r"[^A-Za-z0-9_-]+", "_", str(owner or "")).strip("_") or "owner"
     return os.path.join(_claude_dir(), "notify-pthread-spawn",
-                        str(owner), _project_env_slug(project_label) or "project")
+                        safe_owner, _project_env_slug(project_label) or "project")
 
 
 def _spawn_provision_project_thread(owner, project_label):

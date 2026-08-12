@@ -51,9 +51,18 @@ KIND="default"
 # below (in `emit_one`) can never disagree about which project a message
 # is for.
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
+# #369 review m3 (TRIGGERED): the OLD git-toplevel-basename recipe this
+# call replaced was NEVER re-added as a fallback, so any --project-label
+# failure (python3 missing, airuleset.py unreadable) silently collapsed
+# PROJECT to the literal "unknown" for this repo's own HIGHEST-traffic
+# notification path — mirrors notify-api-error.sh's own fallback.
 PROJECT=""
 if [ -n "$CWD" ]; then
     PROJECT=$(python3 "$AIRULESET_PY" notify --project-label --cwd "$CWD" 2>/dev/null || echo "")
+    if [ -z "$PROJECT" ]; then
+        PROJECT=$(cd "$CWD" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null \
+                  | xargs basename 2>/dev/null || basename "$CWD")
+    fi
 fi
 [ -z "$PROJECT" ] && PROJECT="unknown"
 
@@ -148,10 +157,17 @@ emit_one() {
     # in the SHELL matching the KNOWN, tested design instead of relying on
     # the Python side's own defensive ignore).
     # --dry-run (a preview call, DISCORD_NOTIFY_DRYRUN=1) is forwarded so
-    # --channel-id resolves the project channel via the plain, side-effect-
+    # --channel-id resolves the PROJECT channel via the plain, side-effect-
     # free notification_channel() instead of resolve_project_channel()
     # (which writes a delivery-log "fallback" line and may spawn a
-    # background self-heal) — a mere PREVIEW must never do either.
+    # background self-heal) — a mere PREVIEW must never do either. This
+    # covers ONLY the default-kind (project) branch below — the KIND
+    # "questions" branch's own resolve_questions_channel() has the
+    # IDENTICAL pre-existing dry-run-unawareness gap (#330, predates #369)
+    # and is unaffected by --dry-run being forwarded here; #369's own
+    # adversarial review confirmed it is not reachable in production
+    # today (needs a token present AND an unprovisioned -q thread AND a
+    # genuine dry-run call simultaneously — no real caller combines those).
     local CID_DRYRUN=()
     [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ] && CID_DRYRUN=(--dry-run)
     if [ "$KIND" = "questions" ]; then

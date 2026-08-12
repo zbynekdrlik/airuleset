@@ -6891,7 +6891,14 @@ def cmd_notify(args):
         dedup = args.dedup_key
         if dedup is None and args.repo and args.pr:
             dedup = "%s#%s" % (args.repo, args.pr)
-        print(send(body, dedup_key=dedup, dry_run=args.dry_run))
+        # #369 review M1 (TRIGGERED): same ticket-work-scoped traffic as
+        # --run-card's own project=stream_qualified(name) — a multi-ticket
+        # completion card belongs on the project thread too.
+        project = None
+        if args.repo:
+            from notify import stream_qualified
+            project = stream_qualified(str(args.repo).rstrip("/").split("/")[-1])
+        print(send(body, dedup_key=dedup, dry_run=args.dry_run, project=project))
         return
 
     if args.body is not None:
@@ -7778,9 +7785,15 @@ def _notify_backfill_digest(args, send):
               % (stated, derived, derived, derived), file=sys.stderr)
         sys.exit(1)
     body = compose_backfill_digest(name, tickets, since[:10])
+    # #369 review M1 (TRIGGERED): "N finished tickets you never heard
+    # about" is exactly the ticket-work-scoped traffic #369 exists to
+    # split out of the shared owner pile — mirrors _notify_run_card's own
+    # `project=stream_qualified(name)`.
+    from notify import stream_qualified
     status = send(body, owner=derived or stated or None,
                   dedup_key="backfill:%s:%s" % (name, since[:10]),
-                  dry_run=getattr(args, "dry_run", False))
+                  dry_run=getattr(args, "dry_run", False),
+                  project=stream_qualified(name))
     print("%s (%d tickets)" % (status, len(tickets)))
     # Record what this digest reported, so watchdog job 25 stops re-flagging
     # tickets the user has already heard about — but ONLY the tickets the
@@ -8126,11 +8139,23 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # (newlevel/root) stays unqualified. `notification_channel` is called
         # a SECOND time (for `record_card_message`) with the SAME `project`
         # so the stored channel always matches where the card actually posted.
-        from notify import (notification_channel, record_card_message,
-                            resolve_owner, stream_qualified)
+        # #369 review M5 (TRIGGERED — mechanism proven, race THEORETICAL):
+        # `notification_channel()` with `env=None` re-reads .env from DISK,
+        # while `send()` resolves its own channel from a snapshot taken
+        # earlier — a concurrent self-heal (`resolve_project_channel`'s
+        # background provision writing the newly-provisioned key) landing
+        # in that window would make the two calls disagree about which
+        # channel the card actually posted to, and `record_card_message`
+        # would store the WRONG one (job 7's later reply/reaction routing
+        # would poll a channel the card never reached). Reading ONE env
+        # snapshot and passing it to BOTH calls closes the window.
+        from notify import (_read_env, notification_channel,
+                            record_card_message, resolve_owner,
+                            stream_qualified)
+        env = _read_env()
         owner = resolve_owner()
         project = stream_qualified(name)
-        result = send(body, owner=owner, dedup_key=dedup,
+        result = send(body, env=env, owner=owner, dedup_key=dedup,
                       dry_run=getattr(args, "dry_run", False),
                       return_message_id=True, project=project)
         status, message_id = result if isinstance(result, tuple) else (result, None)
@@ -8139,7 +8164,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
             if message_id:
                 record_card_message(
                     message_id,
-                    notification_channel(owner=owner, project=project),
+                    notification_channel(env=env, owner=owner, project=project),
                     repo, issue)
             # Feed the statusline github done/total segment — a card that actually
             # went out counts one ticket done in this run (dedup re-sends don't).

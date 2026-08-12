@@ -8,16 +8,20 @@ remaining two: `_notify_run_card` and `notify --api-error`, plus the SHELL
 hook wiring (`notify-discord-send.sh` / `notify-api-error.sh`).
 """
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock as m
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import notify                                              # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 AIRULESET = ROOT / "airuleset.py"
@@ -193,13 +197,24 @@ def _path_with_fake_curl_capturing_channel(log_path, http_code="200"):
 class TestSendHookProjectRouting(_HomeIsolated):
 
     def _write_env(self, project_channel=None, q_channel=None):
+        # #369 review m7 (TRIGGERED): the project env KEY must be derived
+        # via the SAME functions the hook itself calls
+        # (`project_label_for`/`_owner_project_key`) rather than the
+        # hardcoded literal "AIRULESET" — that literal is only correct
+        # when the box's REAL unix user is newlevel/root (stream_qualified
+        # leaves it unqualified); on a stream box (marek/david/...) running
+        # this suite, `project_label_for(ROOT)` returns "airuleset-<user>"
+        # and the hardcoded key would never match, silently falling
+        # through to the shared channel and looking like project routing
+        # was broken.
         d = self.home / ".claude" / "channels" / "discord"
         d.mkdir(parents=True, exist_ok=True)
         lines = ["DISCORD_BOT_TOKEN=xxtokenxx",
                 "DISCORD_NOTIFICATION_CHANNEL_ID=100"]
+        label = notify.project_label_for(str(ROOT))
         if project_channel:
-            lines.append("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_P_AIRULESET=%s"
-                         % project_channel)
+            lines.append("%s=%s" % (notify._owner_project_key("zbynek", label),
+                                    project_channel))
         if q_channel:
             lines.append("DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q=%s" % q_channel)
         (d / ".env").write_text("\n".join(lines) + "\n")
@@ -268,6 +283,150 @@ class TestApiErrorHookProjectLabel(unittest.TestCase):
         # fails/returns empty -- PROJECT must never end up unset.
         src = API_ERROR_HOOK.read_text()
         self.assertIn("basename", src)
+
+    def _run_with_fake_python(self, cwd, log_path, project_label_ok=True):
+        """A fake `python3` earlier on PATH: a `notify --project-label`
+        invocation is faithfully DELEGATED to the REAL python3 (so the
+        canonical value is genuine) unless `project_label_ok` is False (in
+        which case it fails, forcing the hook's own basename fallback); a
+        `notify --api-error` invocation is never actually run (no network,
+        no real send) -- its full argv is logged instead, so the test can
+        assert on the EXACT --project value the hook passed. Anything else
+        delegates to the real python3 untouched (#369 review m6 -- the
+        pre-existing tests only asserted the hook's SOURCE mentions
+        `--project-label`/`basename`, which a mutant deleting the whole
+        PROJECT-computation block still satisfied via the surrounding
+        comments)."""
+        real_python3 = shutil.which("python3")
+
+        def q(s):
+            # single-quote a value for literal bash embedding
+            return "'" + str(s).replace("'", "'\\''") + "'"
+
+        project_label_branch = (
+            "exec %s \"$@\"" % q(real_python3) if project_label_ok
+            else "exit 1")
+        d = Path(tempfile.mkdtemp(prefix="airuleset-fakepy3-"))
+        self.addCleanup(shutil.rmtree, d, True)
+        fake = d / "python3"
+        fake.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "if printf '%s\\n' \"$*\" | grep -q -- '--api-error'; then\n"
+            "    printf '%s\\n' \"$*\" >> " + q(log_path) + "\n"
+            "    exit 0\n"
+            "fi\n"
+            "if printf '%s\\n' \"$*\" | grep -q -- '--project-label'; then\n"
+            "    " + project_label_branch + "\n"
+            "fi\n"
+            "exec " + q(real_python3) + " \"$@\"\n")
+        fake.chmod(0o755)
+        env = {**os.environ, "PATH": str(d) + os.pathsep + os.environ.get("PATH", "")}
+        payload = json.dumps({
+            "last_assistant_message": "API Error: Server is temporarily "
+                                       "limiting requests · Rate limited",
+            "session_id": "s1", "cwd": str(cwd)})
+        return subprocess.run(["bash", str(API_ERROR_HOOK)], input=payload,
+                              capture_output=True, text=True, env=env)
+
+    def test_hook_passes_the_canonical_project_label_to_api_error(self):
+        log = Path(tempfile.mkdtemp(prefix="airuleset-apierr-log-")) / "argv.log"
+        self.addCleanup(shutil.rmtree, log.parent, True)
+        expected = subprocess.run(
+            [sys.executable, str(AIRULESET), "notify", "--project-label",
+             "--cwd", str(ROOT)], capture_output=True, text=True).stdout.strip()
+        self.assertTrue(expected)
+        r = self._run_with_fake_python(ROOT, log)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # the background `( ... ) &` job may still be finishing when the
+        # hook itself has already exited -- poll briefly for its log line.
+        deadline = time.time() + 5
+        logged = ""
+        while time.time() < deadline:
+            if log.exists():
+                logged = log.read_text()
+                if logged.strip():
+                    break
+            time.sleep(0.1)
+        self.assertIn("--project %s" % expected, logged, logged)
+
+    def test_hook_falls_back_to_basename_when_project_label_fails(self):
+        log = Path(tempfile.mkdtemp(prefix="airuleset-apierr-log2-")) / "argv.log"
+        self.addCleanup(shutil.rmtree, log.parent, True)
+        r = self._run_with_fake_python(ROOT, log, project_label_ok=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        deadline = time.time() + 5
+        logged = ""
+        while time.time() < deadline:
+            if log.exists():
+                logged = log.read_text()
+                if logged.strip():
+                    break
+            time.sleep(0.1)
+        # the fallback recipe (git-toplevel-basename) — computed the SAME
+        # way the hook itself computes it, never hardcoded: in a plain
+        # checkout that is "airuleset", but from inside a WORKTREE checkout
+        # (as THIS test suite may itself be running) `git rev-parse
+        # --show-toplevel` resolves to the WORKTREE's own root, so the
+        # fallback's basename is the worktree dir name, not "airuleset" —
+        # a genuine, real divergence from the canonical --project-label
+        # value that PRE-DATES #369 (the fallback recipe was the OLD code's
+        # ONLY mechanism, so it was always "wrong" in a worktree; #369
+        # merely demoted it to a rarely-hit fallback, per review m4). What
+        # this test asserts is narrower and still meaningful: the fallback
+        # actually RAN and produced ITS OWN real value — never the literal
+        # "unknown" the pre-fallback code used to collapse to.
+        expected_fallback = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True).stdout.strip()
+        expected_fallback = os.path.basename(expected_fallback.rstrip("/"))
+        self.assertIn("--project %s" % expected_fallback, logged, logged)
+        self.assertNotIn("--project unknown", logged, logged)
+
+
+# --------------------------------------------------------------------------- #
+# 5. notify --autopilot-done (#369 review M1) also passes project=
+# --------------------------------------------------------------------------- #
+
+class TestAutopilotDonePassesProject(unittest.TestCase):
+
+    def _args(self, **over):
+        base = dict(run_card=False, autopilot_done=True, mention_prefix=False,
+                    repo_name=False, newest_card=False, backfill_digest=False,
+                    provision_question_thread=False, provision_project_thread=False,
+                    project_label=False, record_question=False,
+                    edit_question=False, channel_id=False, owner=False,
+                    mirror_owners=False, api_error=False, body=None, run=None,
+                    repo="zbynekdrlik/odoo-erp", pr=None, tickets_json="[]",
+                    version="v1", merge_sha=None, review="ok",
+                    done=None, remaining=None, dedup_key=None, dry_run=False)
+        base.update(over)
+        return m.Mock(**base)
+
+    def test_send_receives_the_stream_qualified_project(self):
+        import airuleset
+        captured = {}
+
+        def fake_send(body, **k):
+            captured.update(k)
+            return "sent"
+
+        with m.patch("notify.send", side_effect=fake_send):
+            with m.patch("getpass.getuser", return_value="david2"):
+                airuleset.cmd_notify(self._args())
+        self.assertEqual(captured.get("project"), "odoo-erp-david2")
+
+    def test_no_repo_means_no_project_guessed(self):
+        import airuleset
+        captured = {}
+
+        def fake_send(body, **k):
+            captured.update(k)
+            return "sent"
+
+        with m.patch("notify.send", side_effect=fake_send):
+            airuleset.cmd_notify(self._args(repo=None))
+        self.assertIsNone(captured.get("project"))
 
 
 if __name__ == "__main__":

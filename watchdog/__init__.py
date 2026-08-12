@@ -11422,6 +11422,12 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         shown = ", ".join("#%d" % n for n in pingable[:CARD_MAX_LISTED])
         more = ("" if len(pingable) <= CARD_MAX_LISTED
                 else " a ďalších %d" % (len(pingable) - CARD_MAX_LISTED))
+        # #369 review M1 (TRIGGERED): a per-repo "finished tickets never
+        # reported" nag is exactly the ticket-work-scoped traffic #369's own
+        # design comment (item 7) says belongs on the PROJECT thread, not
+        # the shared owner pile — the same one-liner every other wired call
+        # site already uses.
+        from notify import stream_qualified
         status = send_fn(
             "\U0001f4ee **%s** — %d hotových ticketov bez hlásenia\n"
             "> Tieto tickety sa dokončili a zavreli, ale na telefón o nich "
@@ -11431,7 +11437,7 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             owner=owner_by_sid.get(sid) or None,
             dedup_key="card-unreported:%s:%s"
                       % (name, "-".join(str(n) for n in pingable)),
-            dry_run=dry_run)
+            dry_run=dry_run, project=stream_qualified(name))
         logs.append("card-unreported PING %s -> %s" % (name, status))
         for n in pingable:
             pinged[str(n)] = now
