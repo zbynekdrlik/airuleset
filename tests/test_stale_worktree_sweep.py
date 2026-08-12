@@ -270,8 +270,8 @@ class TestDiscoverStaleWorktrees(unittest.TestCase):
         _git(["checkout", "-q", "-b", "dev"], repo)
         _git(["checkout", "-q", "main"], repo)
         # Worker forks from main's current tip and does its own real work...
-        wt = _add_worktree(repo, "worktree-agent-mergedtomain", base_ref="main",
-                           commits=2)
+        _add_worktree(repo, "worktree-agent-mergedtomain", base_ref="main",
+                      commits=2)
         # ...then that work is merged straight back into `main` (this
         # repo's own fleet-dispatch convention — never through `dev`), so
         # `dev` never advances and falls behind.
