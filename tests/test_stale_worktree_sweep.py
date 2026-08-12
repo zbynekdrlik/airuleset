@@ -251,6 +251,74 @@ class TestDiscoverStaleWorktrees(unittest.TestCase):
                           "must be a candidate when compared against dev "
                           "(its real fork base), not bare main")
 
+    def test_main_is_preferred_over_dev_when_dev_has_gone_stale(self):
+        """#380 — the live airuleset-repo regression: a worker-worktree
+        branch is forked from `main`'s tip (this repo's own fleet-dispatch
+        convention — `airuleset.py push` pushes straight to `origin main`,
+        and round-integration merges every worktree branch directly onto
+        `main`, never through `dev`), and its work is later merged
+        straight back into `main`. `dev` itself never advances past an
+        earlier point and falls BEHIND main. Comparing the worktree
+        branch against `dev` (the old hardcoded preference) counts every
+        commit main has gained since dev's last update as "the worker's
+        own real work" and wrongly excludes an already-fully-merged
+        worktree from cleanup forever — live-confirmed on dev1: 10
+        already-merged `.claude/worktrees/agent-*` directories, all
+        showing "N commits ahead of dev" in the sweep's own log despite
+        being 0 commits ahead of main."""
+        repo = _mkrepo(self.root, "proj", base_branch="main")
+        _git(["checkout", "-q", "-b", "dev"], repo)
+        _git(["checkout", "-q", "main"], repo)
+        # Worker forks from main's current tip and does its own real work...
+        _add_worktree(repo, "worktree-agent-mergedtomain", base_ref="main",
+                      commits=2)
+        # ...then that work is merged straight back into `main` (this
+        # repo's own fleet-dispatch convention — never through `dev`), so
+        # `dev` never advances and falls behind.
+        _git(["merge", "--no-ff", "-q", "-m", "merge worker branch",
+             "worktree-agent-mergedtomain"], repo)
+        cands = airuleset.discover_stale_worktrees(home=self.root)
+        row = self._by_branch(cands, "worktree-agent-mergedtomain")
+        self.assertIsNotNone(row)
+        self.assertIsNone(row["reason"],
+                          "must be a candidate when compared against main "
+                          "(its real fork+merge base), not stale dev — "
+                          "reason: %r" % (row.get("reason"),))
+
+    def test_diverged_dev_and_main_falls_back_to_dev_preference(self):
+        """When dev and main have genuinely DIVERGED (both carry unique
+        commits, neither is a superset of the other) the base-branch
+        resolution is ambiguous — fall back to the ORIGINAL dev-preferred
+        order rather than guessing, exactly matching the pre-#380
+        behaviour for this specific (unresolvable) case."""
+        repo = _mkrepo(self.root, "proj", base_branch="main")
+        _git(["checkout", "-q", "-b", "dev"], repo)
+        (repo / "dev-only.txt").write_text("dev's own unique work\n")
+        _git(["add", "."], repo)
+        _git(["commit", "-q", "-m", "dev-only commit"], repo)
+        _git(["checkout", "-q", "main"], repo)
+        (repo / "main-only.txt").write_text("main's own unique work\n")
+        _git(["add", "."], repo)
+        _git(["commit", "-q", "-m", "main-only commit"], repo)
+        # Worker's worktree forked from dev, with its own real work — must
+        # be excluded, matching the ORIGINAL two-branch-repo safety
+        # property (dev is still the resolved base in the ambiguous case).
+        _add_worktree(repo, "worktree-agent-fromdev", base_ref="dev", commits=1)
+        cands = airuleset.discover_stale_worktrees(home=self.root)
+        row = self._by_branch(cands, "worktree-agent-fromdev")
+        self.assertIsNotNone(row)
+        self.assertIsNotNone(row["reason"], "diverged dev/main must fall back "
+                             "to dev preference, never silently guess")
+        # Lock the ACTUAL fallback value, not just "excluded for some
+        # reason" -- a mutant that falls back to "main" instead of "dev"
+        # (candidates[0] under a wrong preference order) would still leave
+        # this row excluded (2 commits ahead of main vs 1 ahead of dev),
+        # so the weaker assertIsNotNone check alone cannot distinguish the
+        # two (adversarial review, #380).
+        self.assertIn("ahead of dev", row["reason"],
+                      "diverged fallback must resolve to the ORIGINAL "
+                      "dev-preferred order -- reason: %r" % (row.get("reason"),))
+
     def test_no_base_branch_available_never_guesses(self):
         repo = _mkrepo(self.root, "proj", base_branch="trunk")
         _add_worktree(repo, "worktree-agent-orphanbase")

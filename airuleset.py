@@ -3302,6 +3302,20 @@ def _human_size(n) -> str:
     return "%.1fTB" % n
 
 
+def _disk_usage_summary_line(path) -> str:
+    """One-line disk-usage summary for `path`'s own filesystem -- #380
+    point 4 (visibility): "97% full" must never be a surprise the next
+    time someone reads a live box's own `install`/`push` console output.
+    Extends the SAME print block every sweep step in `cmd_install()`
+    already writes summaries into -- no new mechanism, no new state/log
+    file, stdlib `shutil.disk_usage` only. `total == 0` (an unmeasurable
+    or genuinely empty filesystem) never divides by zero."""
+    du = shutil.disk_usage(str(path))
+    pct_used = (100.0 * du.used / du.total) if du.total else 0.0
+    return "Disk usage (%s): %.0f%% used, %s free" % (
+        path, pct_used, _human_size(du.free))
+
+
 def discover_target_purge_candidates(home=None, max_depth: int = 4):
     """Every `target/` directory that is a genuine cargo build artefact --
     its PARENT holds a `Cargo.toml` -- sitting inside a real checkout root
@@ -3817,8 +3831,12 @@ def _worktree_porcelain_entries(repo_root, git_run=None):
 
 
 def _worktree_sweep_base_branch(repo_root, git_run=None):
-    """`dev` if a LOCAL `dev` branch exists, else `main`, else `master`;
-    `None` if none of the three exist (caller skips the whole repo).
+    """The MOST-ADVANCED of `dev`/`main`/`master` that exists locally
+    (a strict superset of every OTHER existing one of the three) --
+    falling back to the fixed preference order `dev`, `main`, `master`
+    ONLY when the existing candidates have genuinely DIVERGED (neither is
+    a superset of the other, so there is no safe single answer). `None`
+    if none of the three exist (caller skips the whole repo).
 
     Deliberately NOT the ticket's own literal "ahead of main" wording --
     `skills/autopilot/SKILL.md`'s ROUND INTEGRATION step 2 documents a
@@ -3828,15 +3846,37 @@ def _worktree_sweep_base_branch(repo_root, git_run=None):
     normally AHEAD of main by whatever unreleased work is in flight.
     Comparing against bare main would count every one of those in-flight
     dev commits as "the worker's own real work" and permanently skip
-    cleanup on every such repo. Preferring dev when present is strictly
-    SAFER, never less safe, than bare main (dev >= main in a well-behaved
-    two-branch repo, so 0-ahead-of-dev implies 0-ahead-of-main too, never
-    the reverse) -- it only makes the sweep MORE conservative where it
-    matters. For a single-branch repo (airuleset itself -- no local
-    `dev`) this resolves to plain `main`, matching the ticket's literal
-    wording and the one-off cleanup's own already-used criterion exactly.
+    cleanup on every such repo.
+
+    #380 CORRECTION: the ORIGINAL version of this function unconditionally
+    preferred `dev` whenever it existed, reasoning "dev >= main in a
+    well-behaved two-branch repo, so 0-ahead-of-dev implies 0-ahead-of-main
+    too, never the reverse". That invariant is FALSE for airuleset's own
+    repo -- `isolation: "worktree"` fleet-dispatch workers (#317) fork from
+    and merge straight back into `main` (`cmd_push`'s `git push origin
+    main`, round-integration's own merge commits), never through `dev`, so
+    `dev` sits permanently BEHIND `main` here (live-measured: `dev..main`
+    89 commits, `main..dev` 0). Under the old code, EVERY worktree branch
+    forked from main's tip -- fully merged into main, genuinely 0 commits
+    ahead of it -- still read as "N commits ahead of dev" forever, since
+    dev never caught up, and was NEVER reclaimed: 10 already-merged
+    `.claude/worktrees/agent-*` directories sitting on dev1 at the moment
+    this was found. The fix: when MORE THAN ONE of dev/main/master exists,
+    pick whichever one is not BEHIND any of the others (a real superset) --
+    this is STRICTLY MORE conservative than the old dev-preferred pick in
+    every case the old reasoning covered (a traditional repo where dev is
+    genuinely ahead of main still resolves to dev, since dev is then the
+    superset), and it additionally self-heals the airuleset-shaped case
+    (main is the superset there) with no separate carve-out needed. When
+    the existing candidates have genuinely DIVERGED (both carry unique
+    commits -- a real, if rarer, shape: a hotfix landed on main directly
+    while dev separately advanced), there is no safe single answer, so
+    this falls back to the ORIGINAL fixed preference order (dev, main,
+    master) rather than guessing -- identical to the pre-#380 behaviour
+    for that one ambiguous case.
     """
     git_run = git_run or _worktree_git
+    candidates = []
     for name in ("dev", "main", "master"):
         # #345 adversarial-review MINOR-1: `rev-parse --verify` resolves a
         # TAG named dev/main/master just as happily as a branch -- fully
@@ -3844,8 +3884,26 @@ def _worktree_sweep_base_branch(repo_root, git_run=None):
         # genuine local branch, never a same-named tag.
         if git_run(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % name],
                    repo_root) is not None:
+            candidates.append(name)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    for name in candidates:
+        others = [c for c in candidates if c != name]
+        # `name` is the most-advanced candidate iff EVERY other candidate
+        # has zero commits ahead of it -- i.e. `name` already contains
+        # every other candidate's own history.
+        if all(
+            (git_run(["rev-list", "--count",
+                     "refs/heads/%s..refs/heads/%s" % (name, other)],
+                    repo_root) or "").strip() == "0"
+            for other in others
+        ):
             return name
-    return None
+    # Diverged -- no candidate is a superset of every other. Ambiguous;
+    # fall back to the original fixed preference order rather than guess.
+    return candidates[0]
 
 
 _WORKTREE_LOCK_PID_RX = re.compile(r"claude agent \S+ \(pid (\d+) start (\d+)\)")
@@ -5030,46 +5088,112 @@ def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
     out = []
     for name in names:
         p = root / name
-        entry = {"path": str(p), "reason": None}
-        if p.is_symlink():
-            entry["reason"] = "symlink entry -- never followed, never deleted through"
-            out.append(entry)
-            continue
+        out.append(_classify_scratch_entry(p, now, min_age_days, proc_dir))
+
+    return out
+
+
+def _classify_scratch_entry(p, now, min_age_days, proc_dir):
+    """Shared per-entry safety classification for `discover_claude_scratch_
+    candidates` (#355) AND `discover_stray_worktree_tmp_candidates` (#380) --
+    the TWO discovery functions share this ONE implementation of every
+    safety rule (symlink-never-followed, empty-tree mtime fallback,
+    age-floor, live-process guard) so a future safety fix in one applies
+    to both automatically; only the ROOT GLOB differs between the two
+    callers, never the per-entry logic. Returns `{"path", "reason", ...}`,
+    `reason` is `None` for a genuine candidate."""
+    entry = {"path": str(p), "reason": None}
+    if p.is_symlink():
+        entry["reason"] = "symlink entry -- never followed, never deleted through"
+        return entry
+    try:
+        if p.is_dir():
+            size_bytes, newest_mtime = _dir_stats(p)
+            if newest_mtime is None:
+                # #355 adversarial-review finding 1 (MAJOR, live-
+                # confirmed on dev1): the harness pre-creates
+                # <cwd>/<session>/scratchpad EMPTY at session start,
+                # before a live session has written anything -- an
+                # empty tree must NEVER read as "infinitely stale"
+                # (unlike #315's target/ purge, where an empty
+                # target/ genuinely has zero bytes to protect and
+                # "always reclaimable" is correct there). Fall back
+                # to the DIRECTORY's OWN mtime so a tree created
+                # seconds ago stays protected by the age floor
+                # exactly like a non-empty one would.
+                newest_mtime = os.lstat(p).st_mtime
+        else:
+            st = os.lstat(p)
+            size_bytes, newest_mtime = st.st_size, st.st_mtime
+    except OSError as e:
+        entry["reason"] = "could not stat: %s" % e
+        return entry
+    entry["size"] = size_bytes
+    age_days = (now - newest_mtime) / 86400.0
+    entry["age_days"] = age_days
+    if age_days < min_age_days:
+        entry["reason"] = "too recent (%.1fd < %sd)" % (age_days, min_age_days)
+        return entry
+    if _target_in_live_use(p, proc_dir=proc_dir):
+        entry["reason"] = "in live use (or undeterminable) -- skipped"
+        return entry
+    return entry   # reason stays None -- genuine candidate
+
+
+# --- Stray worktree tmp sweep (#380) -----------------------------------
+# The ticket names `/tmp/wt-*` as a litter shape observed on gk/subdev
+# (~1GB gk, 6x per subdev account) alongside .claude/worktrees leaks -- a
+# DIFFERENT root than #355's own `/tmp/claude-<uid>/` scope
+# (`_claude_scratch_root`), which never lists a bare top-level `/tmp/wt-*`
+# entry at all. What genuinely GENERATES this shape on gk/subdev could
+# NOT be confirmed from dev1 alone (no ssh access; dev1 itself has zero
+# `/tmp/wt-*` entries right now -- see the #380 design comment for what
+# was and was not confirmed, incl. a grep of this repo's own code and the
+# installed Claude Code binary's strings, neither of which found a
+# `wt-`-prefixed tmpdir generator). Rather than wait on an unconfirmed
+# origin, this sweep is GENERIC by PATTERN (not by origin): any top-level
+# `<tmp_dir>/wt-*` entry owned by the current uid is classified with the
+# EXACT SAME safety criteria #355's own scratch sweep already uses
+# (`_classify_scratch_entry`) -- symlink-never-followed, empty-tree
+# mtime fallback, age floor, live-process guard. An empty match on dev1
+# costs nothing; if the shape is confirmed live on gk/subdev at the next
+# push, this genuinely reclaims it there.
+
+def discover_stray_worktree_tmp_candidates(tmp_dir=None, uid=None, now=None,
+                                           min_age_days=None, proc_dir=None):
+    """Every top-level `<tmp_dir>/wt-*` entry OWNED by THIS account --
+    #380. Same shape/return as `discover_claude_scratch_candidates`, same
+    safety rules via the shared `_classify_scratch_entry` helper -- this
+    function supplies only a DIFFERENT glob root, never different safety
+    logic. Ownership is checked via `os.lstat` (never following a
+    symlink) BEFORE classification, so a foreign-uid `wt-*` entry is
+    never even listed, let alone touched -- mirrors #355's own
+    `_claude_scratch_root` double-check (name AND ownership), just with
+    no fixed name to check since `wt-*` is a bare prefix any user on a
+    shared box could create."""
+    import time as _time
+    now = _time.time() if now is None else now
+    min_age_days = _min_age_days_env(min_age_days, "AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS",
+                                     CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT)
+    uid = os.getuid() if uid is None else uid
+    root = Path(tmp_dir) if tmp_dir else Path("/tmp")
+
+    if not root.is_dir():
+        return []
+    try:
+        candidates = sorted(root.glob("wt-*"))
+    except OSError as e:
+        return [{"path": None, "reason": "could not list %s: %s" % (root, e)}]
+
+    out = []
+    for p in candidates:
         try:
-            if p.is_dir():
-                size_bytes, newest_mtime = _dir_stats(p)
-                if newest_mtime is None:
-                    # #355 adversarial-review finding 1 (MAJOR, live-
-                    # confirmed on dev1): the harness pre-creates
-                    # <cwd>/<session>/scratchpad EMPTY at session start,
-                    # before a live session has written anything -- an
-                    # empty tree must NEVER read as "infinitely stale"
-                    # (unlike #315's target/ purge, where an empty
-                    # target/ genuinely has zero bytes to protect and
-                    # "always reclaimable" is correct there). Fall back
-                    # to the DIRECTORY's OWN mtime so a tree created
-                    # seconds ago stays protected by the age floor
-                    # exactly like a non-empty one would.
-                    newest_mtime = os.lstat(p).st_mtime
-            else:
-                st = os.lstat(p)
-                size_bytes, newest_mtime = st.st_size, st.st_mtime
-        except OSError as e:
-            entry["reason"] = "could not stat: %s" % e
-            out.append(entry)
-            continue
-        entry["size"] = size_bytes
-        age_days = (now - newest_mtime) / 86400.0
-        entry["age_days"] = age_days
-        if age_days < min_age_days:
-            entry["reason"] = "too recent (%.1fd < %sd)" % (age_days, min_age_days)
-            out.append(entry)
-            continue
-        if _target_in_live_use(p, proc_dir=proc_dir):
-            entry["reason"] = "in live use (or undeterminable) -- skipped"
-            out.append(entry)
-            continue
-        out.append(entry)   # reason stays None -- genuine candidate
+            lst = os.lstat(str(p))
+        except OSError:
+            continue   # gone between glob and lstat -- nothing to report
+        if lst.st_uid != uid:
+            continue   # never even classify a foreign-owned wt-* entry
+        out.append(_classify_scratch_entry(p, now, min_age_days, proc_dir))
 
     return out
 
@@ -5104,11 +5228,21 @@ def sweep_claude_scratch(tmp_dir=None, uid=None, dry_run: bool = False,
                          now=None, log_path=None, state_path=None,
                          force: bool = False, min_age_days=None,
                          candidates=None, proc_dir=None):
-    """Reclaim every stale claude scratch/tmp path
-    `discover_claude_scratch_candidates` classifies as a genuine candidate
-    (`reason is None`) -- #355. Re-verifies "still not a symlink, still
-    exists, still not in live use" immediately before EACH delete (a
-    TOCTOU re-check), rather than trusting discovery-time state.
+    """Reclaim every stale claude scratch/tmp path EITHER
+    `discover_claude_scratch_candidates` (#355, `/tmp/claude-<uid>/*`) OR
+    `discover_stray_worktree_tmp_candidates` (#380, top-level `/tmp/wt-*`)
+    classifies as a genuine candidate (`reason is None`). Re-verifies
+    "still not a symlink, still exists, still not in live use"
+    immediately before EACH delete (a TOCTOU re-check), rather than
+    trusting discovery-time state.
+
+    #380: the two discovery sources are combined the SAME way
+    `sweep_stale_worktrees` already combines `discover_stale_worktrees` +
+    `discover_orphaned_worktree_branches` -- if EITHER raises, nothing
+    from EITHER source is trusted (a partial discovery is not safer than
+    none at all); this ships the /tmp/wt-* litter shape to every managed
+    box through the SAME cadence gate, log, and state file, no new
+    mechanism.
 
     Cadence-gated via its own state file, mirroring #315/#345/the CLI-
     version sweep exactly -- never leans on the 60s watchdog timer
@@ -5140,6 +5274,8 @@ def sweep_claude_scratch(tmp_dir=None, uid=None, dry_run: bool = False,
     if candidates is None:
         try:
             candidates = discover_claude_scratch_candidates(
+                tmp_dir, uid=uid, now=now, min_age_days=min_age_days, proc_dir=proc_dir)
+            candidates = candidates + discover_stray_worktree_tmp_candidates(
                 tmp_dir, uid=uid, now=now, min_age_days=min_age_days, proc_dir=proc_dir)
         except Exception as e:
             candidates = []
@@ -5581,6 +5717,15 @@ def cmd_install(args):
                   f"{_human_size(total)} reclaimed (log: {CLAUDE_SCRATCH_LOG_PATH})")
     except Exception as e:
         print(f"  claude-scratch sweep error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 12. Disk-usage visibility (#380 point 4) -- one more line in the
+    # SAME print block every sweep step above already writes summaries
+    # into. No new mechanism, no new state/log file -- best-effort, never
+    # fails install on a measurement error.
+    try:
+        print(f"  {_disk_usage_summary_line(CLAUDE_DIR)}")
+    except OSError as e:
+        print(f"  disk-usage check error (non-fatal): {e}", file=sys.stderr)
 
     print()
     if install_failed:
