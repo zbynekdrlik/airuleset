@@ -635,6 +635,66 @@ class TestRunCardRemainingScopedToStream(TestCase):
             "the full-authority core-scoped 'remaining' count did not "
             "exclude ops-channel -- body: %r" % captured["b"])
 
+    def test_full_authority_remaining_matches_the_obligation_set_not_core_alone(self):
+        # #382: #367's own adversarial review (F4) found the card's
+        # `remaining` still uses the NARROWER core-only derivation while the
+        # footer's `I N` (and the `/goal` stop-proof, `core-quals --count`)
+        # already widened to the OBLIGATION set (`_obligation_quals()` --
+        # core partition UNION needs-gatekeeper/ready-for-review, regardless
+        # of which stream owns the ticket). #10 is a plain core ticket; #20
+        # is a STREAM-OWNED ticket that ALSO carries needs-gatekeeper --
+        # outside the core partition, but part of the obligation set. The
+        # pre-#382 code queried ONLY the core partition (a single `-q
+        # length` count) and would report "1", missing #20 entirely; the
+        # fix must union in the maintainer-action-labelled tickets too and
+        # report "2" -- the SAME number the footer's I N would show for
+        # this repo.
+        import unittest.mock as mk
+
+        core_excl = airuleset._core_search_excl()
+
+        def gh(*a, **k):
+            j = " ".join(str(x) for x in a)
+            if "view" in j:
+                return "T"
+            if "length" in j:
+                # pre-#382 shape: a single core-only "-q length" count --
+                # never fired by the fixed code, since it never asks for
+                # length any more, but kept here so this fixture would
+                # correctly reproduce the OLD (narrower) behaviour too.
+                return "1"
+            if "label:needs-gatekeeper" in j:
+                return '[{"number":20}]'
+            if "label:ready-for-review" in j:
+                return "[]"
+            if core_excl in j:
+                return '[{"number":10}]'
+            return "[]"
+
+        captured = {}
+        with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+            with mk.patch.object(airuleset, "resolve_authority",
+                                 return_value="full"):
+                with mk.patch("notify.send",
+                              side_effect=lambda body, **k: (
+                                  captured.setdefault("b", body),
+                                  "sent")[1]):
+                    airuleset.cmd_notify(self._args())
+        import re
+        m = re.search(r"ostáva (\d+)(?:\s+(\S+))?", captured["b"])
+        self.assertIsNotNone(m, captured["b"])
+        self.assertEqual(
+            m.group(1), "2",
+            "full-authority 'remaining' still counts only the core "
+            "partition (missed the needs-gatekeeper-labelled #20 outside "
+            "it) -- body: %r" % captured["b"])
+        self.assertIsNone(
+            m.group(2),
+            "'remaining' now counts the SAME obligation set the footer's "
+            "unlabeled I N shows -- a 'core' scope_label next to it would "
+            "misrepresent the count as narrower than it actually is -- "
+            "body: %r" % captured["b"])
+
 
 class TestSliceQualsIsTheOneSliceDefinition(TestCase):
     """#181: montalu@subdev's armed /goal declared the backlog EMPTY (its own
