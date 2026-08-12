@@ -447,6 +447,77 @@ class ModulePointerTest(unittest.TestCase):
         self.assertIn("nudge-poll-loop-timeout.sh", head[-600:])
 
 
+class JobLevelFailFastTest(unittest.TestCase):
+    """#405: the canonical waiter now requests `,jobs` alongside
+    `status,conclusion` and branches TERMINAL/JOBFAIL/PENDING in its own
+    `--jq` filter — this must NOT change how #118's digit-blind loop
+    detector classifies a repeated poll (the extra JSON field is content,
+    not shape), and the printed compliant background waiter (both the
+    loop-repeat MAINMSG and the oneshot-repeat ONESHOT_MAINMSG) must carry
+    the SAME job-fail-fast branch as the canonical doc snippet — an
+    inconsistent copy is exactly the rot #405 was filed to prevent."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def run_hook(self, command, **kw):
+        env = dict(os.environ)
+        env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
+        return subprocess.run(
+            ["bash", str(HOOK)],
+            input=payload(command, **kw), text=True, env=env,
+            capture_output=True, timeout=30)
+
+    def job_aware_poll_loop(self, run_id):
+        # the SAME shape poll_loop() builds, except the --json value also
+        # carries ,jobs and the --jq filter is the new 3-way branch — proves
+        # the loop-repeat detector still recognises this as the identical
+        # loop SHAPE (do...sleep...done), regardless of the JSON field list.
+        return (
+            'DEADLINE=$((SECONDS + ${AIRULESET_POLL_BUDGET_S:-540}))\n'
+            'for i in $(seq 1 18); do\n'
+            "  s=$(gh run view %s --json status,conclusion,jobs --jq "
+            "'if .status==\"completed\" then \"TERMINAL \"+.status else "
+            '"PENDING" end\')\n'
+            '  case "$s" in "TERMINAL "*) break;; esac\n'
+            '  sleep 30\n'
+            'done' % run_id
+        )
+
+    def test_job_aware_loop_still_gets_its_free_first_pass(self):
+        out = self.run_hook(self.job_aware_poll_loop(RUN_A))
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_job_aware_loop_repeat_is_still_blocked_same_as_plain(self):
+        self.run_hook(self.job_aware_poll_loop(RUN_A))
+        out = self.run_hook(self.job_aware_poll_loop(RUN_A))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#118", out.stderr)
+
+    def test_loop_repeat_block_message_carries_the_jobfail_branch(self):
+        # MAINMSG's printed background waiter (the compliant command handed
+        # to the model after a loop-repeat block) must stay in sync with
+        # ci-monitoring.md's own canonical shape.
+        self.run_hook(poll_loop(RUN_A))
+        err = self.run_hook(poll_loop(RUN_A)).stderr
+        self.assertIn("JOBFAIL", err)
+        self.assertIn("JOB FAILED (run still in progress)", err)
+        self.assertIn(",jobs", err)
+
+    def test_oneshot_repeat_block_message_carries_the_jobfail_branch(self):
+        # ONESHOT_MAINMSG prints BOTH the foreground loop and the background
+        # waiter — both copies must carry the same branch.
+        cmd = "gh run view %s --json status,conclusion" % RUN_B
+        self.run_hook(cmd)
+        self.run_hook(cmd)
+        err = self.run_hook(cmd).stderr
+        self.assertIn("JOBFAIL", err)
+        self.assertIn("JOB FAILED (run still in progress)", err)
+        self.assertIn(",jobs", err)
+
+
 class OneShotStatusPollBlockTest(unittest.TestCase):
     """#210: a bare, non-loop `gh run view <run-id>` status poll — no sleep,
     no `do...done` — is invisible to #118's loop detector, but production
