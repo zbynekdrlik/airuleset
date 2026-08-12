@@ -13,13 +13,23 @@ Context is bounded at TICKET BOUNDARIES instead (piece 2, kept):
 
   2. Ticket-boundary /compact — a completed-ticket report is a SAFE
      compaction boundary (the ticket's durable state already lives in git /
-     GitHub / the issue). A Stop hook (notify-compact-request.sh) records a
-     request the MOMENT a turn's final message is a completed-ticket report;
-     watchdog job 14 (compact_ticket_boundary) types `/compact` into that
-     session's pane once it goes genuinely idle, reusing job 12's (model
-     reconcile) exact idle guards. Since the 2026-07-25 correction batch, a
-     per-BATCH ✅ DONE inside an `/autopilot` loop (not just the whole
-     backlog) is a real completion report, so this fires once per batch.
+     GitHub / the issue). watchdog job 14 (compact_ticket_boundary) types
+     `/compact` into that session's pane once it goes genuinely idle,
+     reusing job 12's (model reconcile) exact idle guards.
+
+     #400 (2026-08-12) — the ORIGINAL trigger for this, a Stop hook
+     (notify-compact-request.sh) sniffing the turn's final message for a
+     completed-ticket shape, is REMOVED: a bare `✅ DONE:` one-liner is
+     indistinguishable from a genuine ticket boundary by text alone, and
+     that hook's repeated re-fire on every ordinary turn is what let a
+     stale request keep looking "fresh" for 11.2+ hours in a live
+     incident. `notify-compact-request.sh` is now a PERMANENT NO-OP (kept
+     registered as an inert placeholder — see its own header). Every
+     `/compact` request now originates from a STRUCTURAL proof instead:
+     the SubagentStop event hook (notify-compact-subagent-boundary.sh,
+     origin=subagent-stop, reading the harness's own background_tasks
+     registry directly) or a session's own explicit
+     `compact-request --self` callback (origin=self-callback).
 """
 
 import contextlib
@@ -1304,10 +1314,13 @@ class TestCompactTicketBoundaryContextThreshold(unittest.TestCase):
 # 2b-1d. #102 (2026-07-27 live incident, camera-box) — never deliver `/compact`
 # while the session's CURRENT last real turn is blocked on the user (`❓`).
 #
-# The record-time gate (notify-compact-request.sh) already refuses to RECORD
-# a request for a turn that itself ends `❓` — but a request recorded for an
-# earlier ✅ boundary can still be sitting in compact-requests.json once the
-# session has since moved on to a NEW `❓` turn (a `/compact` queued behind a
+# #400 update: `notify-compact-request.sh` (the record-time gate this
+# comment originally named) is now a PERMANENT NO-OP -- it never records
+# anything, so it cannot be the thing refusing a `❓`-ending turn any more.
+# The reasoning below is unchanged regardless of WHICH origin recorded the
+# request: a request recorded for an earlier ✅ boundary can still be
+# sitting in compact-requests.json once the session has since moved on to
+# a NEW `❓` turn (a `/compact` queued behind a
 # goal-loop-continued turn is only drained at the NEXT accepted Stop, which
 # can be exactly the turn that asks the question). `_compact_blocked_by_
 # question` re-reads the CURRENT last marker right before every send.
@@ -2566,10 +2579,19 @@ class TestSubagentStopOriginExemptFromSubstantialityGates(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 2e. notify-compact-request.sh — the Stop hook that records the request
+# 2e. notify-compact-request.sh — the Stop hook, now a PERMANENT NO-OP (#400)
 # --------------------------------------------------------------------------- #
 
 class TestCompactRequestHook(unittest.TestCase):
+    """#400 (2026-08-12) — this hook is now a PERMANENT NO-OP: the passive
+    text-sniffing `/compact` channel is removed entirely, in both
+    directions. Every test below proves TEXT ALONE (whatever the message
+    says, however shaped) never records anything, ever — the exact
+    opposite of what this class asserted before #400. The only two
+    surviving origins (`compact-request --self`,
+    `notify-compact-subagent-boundary.sh`'s SubagentStop event hook) are
+    covered by their own dedicated test classes, not this one."""
+
     HOOK = airuleset.REPO_DIR / "hooks" / "notify-compact-request.sh"
 
     def _run(self, sid, msg, cwd=""):
@@ -2577,7 +2599,7 @@ class TestCompactRequestHook(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
                               "cwd": cwd})
-        env = {**os.environ, "HOME": home, "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}
+        env = {**os.environ, "HOME": home}
         r = subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
                            capture_output=True, env=env,
                            cwd=str(airuleset.REPO_DIR))
@@ -2586,24 +2608,25 @@ class TestCompactRequestHook(unittest.TestCase):
     def test_hook_exists_and_is_executable_bash(self):
         self.assertTrue(self.HOOK.exists())
 
-    def test_work_complete_heading_records_a_request(self):
+    def test_work_complete_heading_never_records(self):
+        # #400 — inverted: this exact message used to record a request
+        # (it is a genuine `## ✅ Work Complete` heading followed by a
+        # terminal `✅ DONE:`). It must now do NOTHING.
         r, reqfile = self._run(
             "sid-1", "## ✅ Work Complete\n\nfoo bar\n✅ DONE: hotovo", cwd="/x")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(reqfile.exists())
-        d = json.loads(reqfile.read_text())
-        self.assertIn("sid-1", d)
-        self.assertEqual(d["sid-1"]["cwd"], "/x")
+        self.assertFalse(reqfile.exists())
 
-    def test_terminal_done_marker_alone_records_a_request(self):
+    def test_terminal_done_marker_alone_never_records(self):
+        # #400 — inverted: a bare terminal `✅ DONE:` with no heading used
+        # to record too (this is the EXACT trigger shape whose repeated
+        # refresh let a stale request keep looking "fresh" for 11.2+ hours
+        # in the live incident #400 responds to). Must now do NOTHING.
         r, reqfile = self._run("sid-2", "no heading here\n✅ DONE: hotovo", cwd="/y")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(reqfile.exists())
-        self.assertIn("sid-2", json.loads(reqfile.read_text()))
+        self.assertFalse(reqfile.exists())
 
     def test_blocked_on_user_never_records_even_with_the_heading(self):
-        # manual-merge report: heading present, but the LAST line is ❓ — the
-        # decision is still pending, this is NOT a safe compaction boundary.
         r, reqfile = self._run(
             "sid-3", "## ✅ Work Complete\n\n❓ NEEDS YOU: schváliš merge PR #5?")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -2629,47 +2652,46 @@ class TestCompactRequestHook(unittest.TestCase):
         r, reqfile = self._run("sid-6", "## ✅ Work Complete\n✅ DONE: x")
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "")
+        self.assertFalse(reqfile.exists())
 
     def test_wired_into_stop_hooks_json(self):
+        # #400 — the file + its Stop registration are KEPT (a
+        # permanently-neutered placeholder, not a silent removal from the
+        # chain) — see the hook's own header for why.
         cfg = airuleset.load_hooks_json()
         cmds = [h.get("command", "")
                for entry in cfg.get("hooks", {}).get("Stop", [])
                for h in entry.get("hooks", [])]
         self.assertTrue(any("notify-compact-request.sh" in c for c in cmds), cmds)
 
-    # ----------------------------------------------------------------- #
-    # #71 — the hook fingerprints `last_assistant_message` (sha256) and
-    # passes it through as `--msg-hash`, so a REPEATED Stop-hook fire for
-    # the SAME (unchanged) message can be recognized as a duplicate one
-    # level down (cmd_compact_request / compact_already_delivered).
-    # ----------------------------------------------------------------- #
-
-    def test_msg_hash_is_recorded_and_non_empty(self):
-        r, reqfile = self._run(
-            "sid-hash-1", "## ✅ Work Complete\n✅ DONE: hotovo", cwd="/x")
+    def test_no_decision_log_line_either(self):
+        # #400 — the pre-#400 hook also appended a RECORD/type=stop-hook
+        # line to ~/.claude/compact-decisions.log on every fire (#125).
+        # That whole write path is gone too — no compact-decisions.log at
+        # all is created by this hook any more.
+        home = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
+        payload = json.dumps({"session_id": "sid-nolog",
+                              "last_assistant_message":
+                              "## ✅ Work Complete\n✅ DONE: x", "cwd": "/z"})
+        env = {**os.environ, "HOME": home}
+        r = subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                           capture_output=True, env=env,
+                           cwd=str(airuleset.REPO_DIR))
         self.assertEqual(r.returncode, 0, r.stderr)
-        d = json.loads(reqfile.read_text())
-        self.assertTrue(d["sid-hash-1"].get("msg_hash"))
+        self.assertFalse((Path(home) / ".claude" / "compact-decisions.log")
+                         .exists())
 
-    def test_msg_hash_is_deterministic_for_the_same_message(self):
-        r1, reqfile1 = self._run(
-            "sid-hash-2", "## ✅ Work Complete\n✅ DONE: hotovo", cwd="/x")
-        r2, reqfile2 = self._run(
-            "sid-hash-3", "## ✅ Work Complete\n✅ DONE: hotovo", cwd="/y")
-        self.assertEqual(r1.returncode, 0, r1.stderr)
-        self.assertEqual(r2.returncode, 0, r2.stderr)
-        d1 = json.loads(reqfile1.read_text())
-        d2 = json.loads(reqfile2.read_text())
-        self.assertEqual(d1["sid-hash-2"]["msg_hash"], d2["sid-hash-3"]["msg_hash"])
-
-    def test_msg_hash_differs_for_a_different_message(self):
-        r1, reqfile1 = self._run(
-            "sid-hash-4", "## ✅ Work Complete\n✅ DONE: hotovo A", cwd="/x")
-        r2, reqfile2 = self._run(
-            "sid-hash-5", "## ✅ Work Complete\n✅ DONE: hotovo B", cwd="/x")
-        d1 = json.loads(reqfile1.read_text())
-        d2 = json.loads(reqfile2.read_text())
-        self.assertNotEqual(d1["sid-hash-4"]["msg_hash"], d2["sid-hash-5"]["msg_hash"])
+    def test_arbitrarily_large_message_still_never_records(self):
+        # #400 — the pre-#400 hook had argv-size-hazard hardening for a
+        # huge message elsewhere in this repo's own hook family. This hook
+        # no longer parses the message AT ALL, so a message well past any
+        # prior size concern is simply discarded like every other one —
+        # no crash, no record, exit 0.
+        big = "## ✅ Work Complete\n" + ("x" * 200_000) + "\n✅ DONE: hotovo"
+        r, reqfile = self._run("sid-big", big, cwd="/x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
 
 
 # --------------------------------------------------------------------------- #
@@ -3135,9 +3157,13 @@ class TestLogCompactSyncDedup(unittest.TestCase):
 
 
 class TestCompactHookRunsAfterTheStopGates(unittest.TestCase):
-    """#109 — the enqueue-time gate can only SEE a rejection that an earlier
-    hook has already produced, so `notify-compact-request.sh` must stay ordered
-    AFTER every `stop-check-*.sh` gate in the managed Stop chain."""
+    """#109 (historical) — the enqueue-time gate could only SEE a rejection
+    that an earlier hook had already produced, so `notify-compact-
+    request.sh` had to stay ordered AFTER every `stop-check-*.sh` gate in
+    the managed Stop chain. #400: the hook is now a permanent no-op with
+    no enqueue-time gate left to protect -- this test is kept as a
+    harmless ordering lock on the registered-but-inert placeholder, not
+    because the ordering still matters functionally."""
 
     def test_notify_compact_request_is_ordered_after_every_stop_check_gate(self):
         cfg = json.loads((Path(__file__).resolve().parent.parent
@@ -3451,9 +3477,16 @@ class TestWorkingMarkerNoLongerVetoesAProvenBoundary(unittest.TestCase):
 
 
 class TestSupervisorStopVetoIsNoLongerTheOnlyChannel(unittest.TestCase):
-    """The Stop hook's `⏳` veto stays (removing it reinstates #109 for every
-    NON-autopilot session, which has no worker-registry evidence to stand on)
-    — it simply stops being the only way a request can ever be created."""
+    """#400 update: the Stop hook (notify-compact-request.sh) is now a
+    permanent no-op -- it no longer "vetoes" anything because it no longer
+    records anything AT ALL, for any message shape, `⏳`-ending or not.
+    `test_stop_hook_still_refuses_a_working_turn` is kept as a trivial
+    subset of that broader guarantee (this specific historical shape
+    still produces no record, same as every other shape now does). The
+    class's original point survives in spirit: the SubagentStop channel
+    (`notify-compact-subagent-boundary.sh`) is the real source of
+    `/compact` requests for an autopilot session now, never the
+    supervisor's own turn-ending marker."""
 
     def test_stop_hook_still_refuses_a_working_turn(self):
         home = tempfile.mkdtemp()
