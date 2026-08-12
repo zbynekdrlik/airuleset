@@ -311,8 +311,20 @@ class TestDestinationlessVerbNounProximityStaysWelcome(TestCase):
         """#152-review: 'daj mi vedieť' ('let me know') is an extremely
         common Slovak idiom that pairs 'daj' with the dative 'mi' for a
         reason that has nothing to do with a credential. 'daj' was
-        DROPPED from the Slovak verb list specifically for this."""
-        msg = "Daj mi vedieť, či token funguje."
+        DROPPED from the Slovak verb list specifically for this.
+
+        #424: the ORIGINAL fixture here ("...či token funguje.") now
+        genuinely IS blocked -- by stop-check-prose-violations.sh's own
+        NEW Slovak tester-handoff family (autonomous-verification.md),
+        which keys on exactly "daj (mi) vedieť" near an outcome word like
+        "funguje" -- a completely different, unrelated gate from the
+        credential-request check this test is actually about. A genuine,
+        welcome overlap (this really would be a tester-handoff nudge if
+        an agent said it), not a bug -- but a bad negative-control
+        fixture for THIS test's specific claim. Reworded to keep "daj mi
+        vedieť" near "token" (this test's own point) while dropping the
+        outcome word ("funguje"/"ide") the new detector needs."""
+        msg = "Daj mi vedieť, či máš ešte ten token."
         self.assertFalse(
             _blocked(_run(msg)),
             "the 'daj mi vedieť' (let me know) idiom, merely co-occurring "

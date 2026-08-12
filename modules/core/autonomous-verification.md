@@ -75,6 +75,12 @@ All mean "user, you are my tester now" and are FORBIDDEN — shifting verificati
 
 The hook is a backstop, not the whole rule — these semantic variants it does NOT reliably catch are equally banned and must be self-policed: "Try it and tell me what happens", "Run it and confirm", "Test it in your browser / on your machine", a bare "On your end" / "in your environment" (when about testing). The intent — not the exact wording — is banned; applies to all rewordings and semantic equivalents.
 
+#### Mobile-app projects — the emulator/adb IS your Playwright
+
+For a mobile-app project (Android/iOS), the tester-handoff ban above applies EXACTLY as written — the user's own phone is never the verification tool, an emulator is. For a mobile-app project, an Android emulator (`adb`) or iOS simulator **IS the Playwright-equivalent**: verify ON THE EMULATOR yourself, and build your own diagnostic telemetry (logcat, a debug overlay, an in-app log screen) the same way you'd read a DOM or a console. A real montalu3 incident (odoo-erp, #424): the agent made the user hand-install an APK on their OWN phone 10x over 2 hours, with an agreed emulator sitting unused the whole time — the agent later admitted it never needed the human at all.
+
+The user's real device may appear ONLY as a FINAL ACCEPTANCE step, once your OWN emulator-side verification is already green — never as an iterative debug channel. "Install the new build and tell me if it crashes now" / "try again on your phone" / any rewording asking the user to run a NOT-YET-verified build so YOU can see the result is banned in all rewordings — it is the same tester-handoff violation this whole module bans, just wearing a mobile-specific disguise.
+
 #### A missing UTILITY is YOURS to INSTALL — immediately, never worked around
 
 When work hits a missing locally-installable dependency — `command not found`, `ModuleNotFoundError` / `ImportError`, a tool erroring because its library is absent — the FIRST reflex is: **INSTALL it NOW** (`sudo -n apt-get install -y <pkg>`, `pip install`, `npm i -g`, whatever the box uses), then re-run the original command. The user's standing directive (2026-07-24, after repeated incidents): *"ak ti niečo chýba, máš to doinštalovať — mína hrozne veľa času a energie, keď sa stále rieši, že niečo nefunguje, lebo chýba nejaká utilita."*
