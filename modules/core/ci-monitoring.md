@@ -20,10 +20,13 @@
   ```bash
   DEADLINE=$((SECONDS + ${AIRULESET_POLL_BUDGET_S:-100}))
   for i in $(seq 1 18); do
-    s=$(gh run view <id> --json status,conclusion --jq '.status+" "+(.conclusion//"")')
-    case "$s" in completed*) echo "TERMINAL: $s"; break;; esac
+    s=$(gh run view <id> --json status,conclusion,jobs --jq 'if .status=="completed" then "TERMINAL "+.status+" "+(.conclusion//"") elif ([.jobs[]?|select(.conclusion=="failure")]|length)>0 then "JOBFAIL "+([.jobs[]?|select(.conclusion=="failure")]|map(.name)|join(", ")) else "PENDING "+.status end')
+    case "$s" in
+      "TERMINAL "*) echo "TERMINAL: ${s#TERMINAL }"; break;;
+      "JOBFAIL "*) echo "JOB FAILED (run still in progress): ${s#JOBFAIL }"; break;;
+    esac
     if [ "$SECONDS" -ge "$DEADLINE" ]; then
-      echo "POLL BUDGET REACHED (not yet terminal): $s"; break
+      echo "POLL BUDGET REACHED (not yet terminal): ${s#PENDING }"; break
     fi
     sleep 30
   done
@@ -35,13 +38,18 @@
 
   ```
   timeout "${AIRULESET_LONG_POLL_BUDGET_S:-10800}" bash -c 'while :; do
-    s=$(gh run view <id> --json status,conclusion --jq ".status+\" \"+(.conclusion//\"\")" 2>/dev/null) || s="ERROR"
-    case "$s" in completed*) echo "TERMINAL: $s"; exit 0 ;; esac
+    s=$(gh run view <id> --json status,conclusion,jobs --jq "if .status==\"completed\" then \"TERMINAL \"+.status+\" \"+(.conclusion//\"\") elif ([.jobs[]?|select(.conclusion==\"failure\")]|length)>0 then \"JOBFAIL \"+([.jobs[]?|select(.conclusion==\"failure\")]|map(.name)|join(\", \")) else \"PENDING \"+.status end" 2>/dev/null) || s="ERROR"
+    case "$s" in
+      "TERMINAL "*) echo "TERMINAL: ${s#TERMINAL }"; exit 0 ;;
+      "JOBFAIL "*) echo "JOB FAILED (run still in progress): ${s#JOBFAIL }"; exit 0 ;;
+    esac
     sleep 60
   done'
   ```
 
   **Recovery is not optional.** The notification linkage may not survive a compaction boundary: across compaction the OS process usually keeps running but the session's task-handle registry is dropped and recreated (anthropics/claude-code **#29193**, "has repro"). The two issues this rule used to cite described the OPPOSITE failure mode and were wrong — the archaeology is in the playbook, not here. Either way no notification arrives, so on your NEXT turn re-derive from the DURABLE resource (`gh run view <id>` again) rather than trusting that silence means nothing happened, and relaunch ONE fresh waiter if the old one is gone. Never sit on a blind indefinite wait, and never fall back to chunked foreground polling once a long wait is already the right call.
+
+  **Fail-fast on job-level failure, inside the SAME poll.** Both shapes above wake the moment ANY job in a still-running multi-job run reports `conclusion=="failure"` — not just when the whole run reaches `completed` — via the SAME single `gh run view` call (`,jobs` added to `--json`, no second call), branching in `--jq` before bash ever sees the JSON. A run-level-only wait misses this: a 50+-job shadow-gate run whose critical E2E job already failed can stay `in_progress` for hours before anyone notices (#365, 2026-08-12). `gh run view --json jobs` returns only the LATEST attempt, so a superseded pre-rerun failure never re-fires the wake. API cost, measured via `GH_DEBUG=api`: the run-level-only call already costs 2 HTTP requests (run + workflow name); adding `,jobs` makes 3 (one more, for the jobs list — a single page covers today's largest known runs). A separate second `gh run view --json jobs` call, which this deliberately avoids, would cost 5.
 
 - **`Monitor` / `/loop` / Cloud Routines** where they fit — `Monitor` streams output live (still session-scoped); Cloud Routines run on Anthropic infra (survive everything) when configured.
 
