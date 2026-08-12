@@ -425,7 +425,17 @@ try:
                     parts = [r for ok2, r in
                              ((arch_ok, arch_reason), (triage_ok, triage_reason))
                              if not ok2]
-                    ok, reason = False, "; ".join(parts)
+                    dg.write_reject_reason(repo_key, issue, "; ".join(parts), kind=kind)
+                    # #414-review MINOR-2 -- this text IS design-shaped
+                    # (classify_design_comment already said so); it only
+                    # failed the ADDED Architektúra:/Triage: requirement.
+                    # Do not let it fall through and be silently absorbed
+                    # as a DIFFERENT kind's marker just because the SAME
+                    # prose also happens to carry e.g. validation-sounding
+                    # language -- the worker's fix is to REPOST the design
+                    # comment with the missing piece, never to have this
+                    # rejected attempt quietly satisfy another kind.
+                    break
             if ok:
                 dg.write_marker(repo_key, issue, url, reason, kind=kind)
                 break
