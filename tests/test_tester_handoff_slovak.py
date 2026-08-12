@@ -72,6 +72,25 @@ Row 15 of `test_ask_before_assuming_dropped_rows.py`'s
 `REVERTED_SLOVAK_PHRASES` ("can you test it on your end") was REMOVED —
 mirroring #319's own removal of rows 7-9 — because every natural Slovak
 rendering of that intent is now genuinely covered here.
+
+#424-review round 2 (adversarial, fresh context, MAJOR x2 + MINOR x3,
+all fixed): MAJOR-1 — the CI-acronym negative-control test was mutation-
+invisible against a mutant reintroducing the `č -> c` ASCII fallback;
+two new fixtures kill it (see the test's own comment). MAJOR-2 — "či to
+UŽ ide"/"...TERAZ ide" (the incident's own iterative-retry idiom)
+escaped the WORKS phrase, since "to" had to sit immediately before
+"ide" with no adverb allowed between them; fixed and covered by
+test_confirm_ci_to_uz_ide_adverb_variant_blocked. MINOR-1 — the modal
+shape (2b) false-positived on an epistemic "vieš, že..." clause and on
+"netreba <infinitive>" ("X is not needed"); the hook now evaluates the
+modal shape as its own separate check with an explicit AND-NOT
+exclusion, covered by the two new modal-safe negative controls. MINOR-3
+— shape 2's try/device window (40 chars) missed a relative clause;
+widened to 60, covered by test_try_on_phone_relative_clause_window_
+blocked. MINOR-2 (a hook-comment-only correction, no test) — the
+"Accepted residuals" comment overclaimed a rewording mitigation for the
+M3 final-acceptance tension that the stderr message text does not
+actually contain; corrected to state the tension plainly instead.
 """
 
 import json
@@ -142,6 +161,17 @@ class TestSlovakTesterHandoffTruePositives(TestCase):
         self.assertTrue(_run_stop_prose(
             "Napíš mi, či to ide na telefóne."))
 
+    def test_confirm_ci_to_uz_ide_adverb_variant_blocked(self):
+        # #424-review round 2 MAJOR-2: "či to UŽ ide" ("does it work
+        # NOW") is the incident's own iterative-retry idiom — an adverb
+        # ("už"/"teraz") between "to" and "ide" must not defeat the
+        # match. "to" itself stays mandatory (the C2 "ide o X" idiom
+        # discriminator is unaffected).
+        self.assertTrue(_run_stop_prose(
+            "Napíš mi, či to už ide na telefóne."))
+        self.assertTrue(_run_stop_prose(
+            "Preinštaluj si appku a napíš mi, či to teraz ide."))
+
     def test_daj_vediet_confirm_variant_blocked(self):
         self.assertTrue(_run_stop_prose(
             "Nainštaluj si build a daj vedieť, či funguje."))
@@ -176,6 +206,15 @@ class TestSlovakTesterHandoffTruePositives(TestCase):
     def test_otestujes_on_device_blocked(self):
         self.assertTrue(_run_stop_prose(
             "Otestuješ appku na svojom zariadení?"))
+
+    def test_try_on_phone_relative_clause_window_blocked(self):
+        # #424-review round 2 MINOR-3: a relative clause between the
+        # try-verb and the device word pushed shape 2's original 40-char
+        # window past the real distance — widened to 60 (matching shape
+        # 4's own window).
+        self.assertTrue(_run_stop_prose(
+            "Vyskúšaj tú novú verziu, ktorú som ti práve poslal, na "
+            "svojom telefóne."))
 
     def test_modal_request_can_you_test_it_blocked(self):
         # #424-review MAJOR M2: the modal+infinitive polite-request form
@@ -281,6 +320,23 @@ class TestSlovakTesterHandoffFalsePositiveControls(TestCase):
         self.assertFalse(_run_stop_prose(
             "Čakám na potvrdenie, že deploy prebehol."))
 
+    # --- #424-review round 2 MINOR-1: modal (2b) false positives ---
+
+    def test_modal_epistemic_vies_ze_not_blocked(self):
+        # "vieš, že..." ("do you know that...") is an epistemic clause,
+        # not a request — must not be mistaken for the modal-request
+        # shape just because "vieš"/"môžeš" sits near an infinitive.
+        self.assertFalse(_run_stop_prose(
+            "Vieš, že otestovať celú sadu trvá 40 minút? Preto som "
+            "spustil len časť."))
+
+    def test_modal_netreba_infinitive_not_blocked(self):
+        # "netreba <infinitive>" ("X is NOT needed") is structurally the
+        # opposite of a request — must never block regardless of what
+        # OTHER modal word sits nearby in the same sentence.
+        self.assertFalse(_run_stop_prose(
+            "Môžeš pokračovať, appku netreba nainštalovať znova."))
+
     # --- #424-review CRITICAL C1: bare "over" / 3rd-person "overí" ---
 
     def test_third_person_overi_describing_own_test_not_blocked(self):
@@ -348,6 +404,18 @@ class TestSlovakTesterHandoffFalsePositiveControls(TestCase):
         # this reason.
         self.assertFalse(_run_stop_prose(
             "CI teraz ide zelené, pokračujem ďalším ticketom."))
+        # #424-review round 2 MAJOR-1 (mutation-kill fixtures): the first
+        # fixture above never completes the SK_TH_OVER_CI_RX pattern
+        # ("over[,]? (si)? či"), so a mutant re-adding the `č -> c`
+        # ASCII-fallback alternation (SK_TH_CI_RX="[čc]i") survived the
+        # whole suite untouched. These two DO complete it under the
+        # mutant ("...over, CI..."/"over CI...") while staying genuinely
+        # safe under the real "či"-only spelling.
+        self.assertFalse(_run_stop_prose(
+            "Please hand this one over, CI is still red on the deploy "
+            "job."))
+        self.assertFalse(_run_stop_prose(
+            "Skontroluj logy a over CI pipeline pred merge."))
 
     # --- proximity/window controls ---
 
