@@ -147,10 +147,17 @@ emit_one() {
     # --project under --kind questions too, but this keeps the two clauses
     # in the SHELL matching the KNOWN, tested design instead of relying on
     # the Python side's own defensive ignore).
+    # --dry-run (a preview call, DISCORD_NOTIFY_DRYRUN=1) is forwarded so
+    # --channel-id resolves the project channel via the plain, side-effect-
+    # free notification_channel() instead of resolve_project_channel()
+    # (which writes a delivery-log "fallback" line and may spawn a
+    # background self-heal) — a mere PREVIEW must never do either.
+    local CID_DRYRUN=()
+    [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ] && CID_DRYRUN=(--dry-run)
     if [ "$KIND" = "questions" ]; then
-        CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id --kind "$KIND" 2>/dev/null | tr -d '\r\n' || echo "")
+        CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id --kind "$KIND" "${CID_DRYRUN[@]}" 2>/dev/null | tr -d '\r\n' || echo "")
     else
-        CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id --kind "$KIND" --project "$PROJECT" 2>/dev/null | tr -d '\r\n' || echo "")
+        CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id --kind "$KIND" --project "$PROJECT" "${CID_DRYRUN[@]}" 2>/dev/null | tr -d '\r\n' || echo "")
     fi
     # Skip a target whose (non-empty) thread was already emitted to — no double-post.
     if [ -n "$CH" ]; then

@@ -6730,13 +6730,24 @@ def cmd_notify(args):
         # way — but ONLY under --kind default; a project flag alongside
         # --kind questions is deliberately IGNORED (the questions thread
         # stays centralized, by design — see the ticket's own design
-        # comment).
+        # comment). `resolve_project_channel` is NOT side-effect-free (it
+        # writes a "fallback" delivery-log line and may spawn a background
+        # self-heal) — mirroring `send()`'s own documented split, a
+        # --dry-run preview (the shell hook's DISCORD_NOTIFY_DRYRUN path)
+        # must resolve via the plain, side-effect-free `notification_channel`
+        # instead, or a mere PREVIEW call silently pollutes the delivery
+        # log / spawns a real background process (regression caught by
+        # test_notify_delivery_log.py's pre-existing
+        # test_dry_run_is_not_a_failure_and_logs_nothing).
         kind = getattr(args, "kind", None) or "default"
         project = getattr(args, "project", None)
+        dry_run = getattr(args, "dry_run", False)
         if kind == "questions":
             sys.stdout.write(resolve_questions_channel())
-        elif project:
+        elif project and not dry_run:
             sys.stdout.write(resolve_project_channel(project=project))
+        elif project:
+            sys.stdout.write(notification_channel(kind=kind, project=project))
         else:
             sys.stdout.write(notification_channel(kind=kind))
         return
