@@ -491,6 +491,87 @@ if msg_has "$MSG_MENTION" -qiE "(can|could|would) you (please )?(test|verify|con
     fi
 fi
 
+# Slovak tester-handoff family (autonomous-verification.md, #424 — the
+# mobile-app case: montalu3 was made to hand-install an APK on their OWN
+# phone 10x over 2h, while an agreed emulator sat unused the whole time;
+# the agent later admitted it never needed the human at all). SAME
+# recurrence chain as #319 (dispatch-now-or-hold, admin-merge,
+# merge-despite): the English tester-handoff block right above this one is
+# proven English-only (#95/#316's own audit criterion) — a genuinely
+# natural Slovak rendering of the SAME banned intent, verified LIVE against
+# the un-patched hook (see #424's own STEP 0 comment), was not blocked by
+# it. Four word-family shapes (deliberately families, never literal
+# strings), mirroring #319's own established pattern shape verbatim:
+# bounded `.{0,N}` windows, `\b` anchors on plain diacritic alternation
+# inside bracket classes (never embedded lookaheads — ERE has none), and
+# LC_ALL=C.UTF-8 forced on the one grep call that needs it (`\b` next to a
+# diacritic is itself locale-dependent under a bare C/POSIX locale —
+# #316-review's own CRITICAL finding, reproduced and forced here the same
+# way). Newlines are flattened to a single space first, so a hard-wrapped
+# rendering of the same banned intent cannot escape via a line break.
+#
+#   1. install(+confirm/works): nainštaluj(eš)?/inštaluj(eš)? near a
+#      confirm-verb (potvrď/potvrdíš/povedz/povieš/napíš/napíšeš/
+#      daj vedieť/daš vedieť/over(íš)?) — OR the confirm-verb standing
+#      ALONE near an outcome word (funguje/ide), with no install context
+#      required. This second, install-free trigger is what catches the
+#      incident's OWN literal quote "over či ti to ide", which names no
+#      install verb at all — it is the direct Slovak counterpart of the
+#      English hook's own install-free "let me know if...works" pattern,
+#      not new scope.
+#   2. try-on-device: vyskúšaj/vyskúšaš/otestuj/otestuješ near
+#      telefón/mobil/zariaden- (either order).
+#   3. write-what-you-see: napíš/napíšeš/povedz/povieš near "čo vidíš"
+#      (either order).
+#   4. when-you-verify-continue: over/overíš/vyskúšaj/vyskúšaš near a
+#      1st-person continue-verb (pokračuj-/spravím/urobím).
+#
+# The imperative/2nd-person-future stems this keys on (nainštaluj-,
+# otestuj-, over[íi]?[šs]?, nap[íi][šs](e[šs])?, ...) are grammatically
+# DISTINCT Slovak stems from the 1st-person PAST-TENSE reporting forms
+# (nainštalova-l, otestova-l, overi-l, napísa-l) — not merely a different
+# suffix on the identical stem — so the trailing `\b` boundary check
+# structurally excludes "nainštaloval som APK na emulátore a otestoval"
+# (the agent's own past-tense report of testing on the emulator ITSELF)
+# with no special-casing needed: the past-tense forms simply never satisfy
+# the boundary the imperative/future alternatives require. Same mechanism
+# separates a genuine 2nd-person nudge ("napíšeš") from the agent's own
+# 1st-person offer ("napíšem") — Slovak's 1st/2nd-person present-tense
+# endings diverge in exactly the way this regex's optional suffix groups
+# require. Escape is IDENTICAL to the English branch above, reused
+# verbatim (never duplicated): an explicit `UNVERIFIED:` line disarms it.
+#
+# Accepted residuals (documented, not chased, per #319's own precedent —
+# this is a covered WORD-FAMILY, never a claim of blanket Slovak
+# coverage): a decoy mention inside an INTERPRETER heredoc body still
+# executes (the same residual already documented for this whole file); a
+# genuinely exotic synonym verb outside this word-family list (e.g. "skús"
+# for "try") can still slip through.
+SK_TH_INSTALL_RX="\b(nain[šs]taluj|in[šs]taluj)(e[šs])?\b"
+SK_TH_CONFIRM_RX="\b(potvr[ďd]|potvrd[íi][šs]|povedz|povie[šs]|nap[íi][šs](e[šs])?|da[jš][[:space:]]+(mi[[:space:]]+)?vedie[ťt]|over[íi]?[šs]?)\b"
+SK_TH_WORKS_RX="(\bfunguj|\bide\b)"
+SK_TH_TRY_RX="\b(vysk[úu][šs]a[jš]|otestuj(e[šs])?)\b"
+SK_TH_DEVICE_RX="(telef[óo]n|mobil|zariaden)"
+SK_TH_WRITESAY_RX="\b(nap[íi][šs](e[šs])?|povedz|povie[šs])\b"
+SK_TH_SEE_RX="čo[[:space:]]+vid[íi][šs]"
+SK_TH_VERIFY_RX="\b(over[íi]?[šs]?|vysk[úu][šs]a[jš])\b"
+SK_TH_CONTINUE_RX="\b(pokra[čc]uj|sprav[íi]m|urob[íi]m)"
+SK_TH_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || SK_TH_FLAT="$MSG_MENTION"
+if LC_ALL=C.UTF-8 msg_has "$SK_TH_FLAT" -qiE \
+    "(${SK_TH_INSTALL_RX}.{0,100}${SK_TH_CONFIRM_RX})|(${SK_TH_CONFIRM_RX}.{0,50}${SK_TH_WORKS_RX}|${SK_TH_WORKS_RX}.{0,50}${SK_TH_CONFIRM_RX})|(${SK_TH_TRY_RX}.{0,40}${SK_TH_DEVICE_RX}|${SK_TH_DEVICE_RX}.{0,40}${SK_TH_TRY_RX})|(${SK_TH_WRITESAY_RX}.{0,30}${SK_TH_SEE_RX}|${SK_TH_SEE_RX}.{0,30}${SK_TH_WRITESAY_RX})|(${SK_TH_VERIFY_RX}.{0,60}${SK_TH_CONTINUE_RX})"; then
+    if msg_missing "$MSG" -qE "UNVERIFIED:"; then
+        echo "VIOLATION: Odovzdal si verifikáciu človeku po slovensky ('nainštaluj si APK a potvrď, či funguje', 'vyskúšaj to na telefóne', 'napíš, čo vidíš', 'over či ti to ide') — presne trieda 'tester-handoff' z autonomous-verification.md, len v jazyku ktorý anglický regex nezachytáva. Používateľ NIKDY nie je tvoj tester. Pre mobilné-appky projekty je emulátor/adb ekvivalent Playwrightu — over si to SÁM na emulátore, zabuduj si diagnostické zasielanie sám. Používateľovo zariadenie smie prísť najviac ako FINÁLNA akceptácia PO zelenej agent-side verifikácii, NIKDY ako iteratívny debug kanál ('skús to znova, nová verzia'). Ak si toto naozaj nevieš overiť sám (chýba ti nástroj/prístup), najprv o ten nástroj POŽIADAJ (nikdy o test) — a až potom, ak naozaj neexistuje, napíš 'UNVERIFIED: <čo nejde overiť> — <prečo>'." >&2
+        echo "" >&2
+        echo "  Decision tree (rovnaký ako anglická vetva vyššie):" >&2
+        echo "    1. Vieš to overiť existujúcimi nástrojmi (emulátor/adb, curl, MCP)? → OVER TO SÁM." >&2
+        echo "    2. Chýba ti nástroj/prístup? → POŽIADAJ O NÁSTROJ, nie o test." >&2
+        echo "    3. Je to naozaj len na fyzickom zariadení používateľa? → AŽ POTOM: UNVERIFIED: <čo> — <prečo>." >&2
+        echo "" >&2
+        echo "  See autonomous-verification.md → 'Nainštaluj si APK a povedz či funguje' (mobile-app anti-pattern)." >&2
+        add_hard "Slovak tester-handoff phrase (mobile-app user-as-tester) — over si to sám na emulátore, alebo si vypýtaj nástroj. Or write 'UNVERIFIED:' after attempting tool-request."
+    fi
+fi
+
 # Check for a DIRECT request that the user PASTE a credential VALUE into chat
 # (#152 point 3, user-decided 2026-08-08: mechanically enforce via THIS
 # existing hook — FREEZE forbids a new hook file). receive-files-via-upload-

@@ -438,9 +438,20 @@ class TestRevertedRowsNoLongerClaimedAsHookCovered(TestCase):
         # row 14 — give the word, create the issues
         "Daj mi znamenie a vytvorím tie issues. Si pripravený "
         "schváliť ten backlog?",
-        # row 15 — can you test it on your end
-        "Môžeš mi to otestovať na svojej strane? Daj mi vedieť, "
-        "či to funguje.",
+        # row 15 — can you test it on your end. #424: the ORIGINAL
+        # fixture here ("...Daj mi vedieť, či to funguje.") now genuinely
+        # IS blocked — by stop-check-prose-violations.sh's own NEW
+        # Slovak tester-handoff family (autonomous-verification.md), not
+        # by the pre-answered-table mechanism this test class audits. A
+        # genuine, welcome overlap (the SAME banned intent, just enforced
+        # via a different family in the SAME hook) — not a bug in the new
+        # detector, but it makes the original wording a bad negative-
+        # control fixture for THIS test's specific claim. Mirrors #319's
+        # own row-10 handling: reworded to keep row 15's real intent
+        # (can-you-test-it, informed-of-result) while avoiding the new
+        # detector's own trigger words (no funguje/ide, no daj/daš
+        # vedieť, no telefón/mobil/zariadenie, no čo vidíš).
+        "Môžeš mi to otestovať na svojej strane? Informuj ma o výsledku.",
         # row 16 — fix locally before next user test
         "Opravím to lokálne pred ďalším user testom. Prestávam ťa "
         "používať ako testera.",
