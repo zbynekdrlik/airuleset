@@ -85,12 +85,50 @@ set -euo pipefail
 # (never just the first), mirroring the chain-depth cap's own "every
 # candidate is tried" discipline.
 #
+# STREAM ROUTING GATE (#390, a real incident — odoo-erp#3549/#3651: a
+# sub-dev stream box (david2) mislabeled its OWN self-authored tickets with
+# a FOREIGN stream's label (`stream:david`), landing them in the wrong
+# stream's /goal slice before anyone noticed. Every odoo-erp stream shares
+# ONE GitHub App token, so GitHub-side author detection is blind here — the
+# LINUX USER running this hook (known, reliable) is the only place this can
+# be caught, at filing time). Scoped narrowly to the exact reported failure:
+#   - Only engages on a STREAM-AWARE repo (>=1 real `stream:*` label exists,
+#     `gh label list`, degrading to "cannot verify" on any lookup failure —
+#     never blocks on its own, same bias as the near-dup check above).
+#   - Only engages when the LINUX USER running this hook is itself a known
+#     sub-dev stream account (`airuleset.resolve_authority(cwd) != "full"`,
+#     imported directly from the sibling airuleset.py — single source of
+#     truth for AUTHORITY_BY_USER, never a duplicated user list, matching
+#     the issue's own "rovnako, ako to už robí airuleset.py authority"). A
+#     full-authority filer (the maintainer/gatekeeper doing triage, or any
+#     box not in AUTHORITY_BY_USER) has NO "own" stream to compare against
+#     and is trusted to route deliberately — ordinary core-ticket filing
+#     carries NO stream label by design (`_core_search_excl()`'s whole
+#     mechanism is "absence of a stream label = core"), so gating every
+#     filer here would be a wide-blast-radius regression on the DOMINANT
+#     filing pattern, not a narrow fix for the reported incident.
+#   - When both engage: the filing must carry an explicit `stream:<x>`
+#     label (`-l`/`--label`, comma-list aware, any repetition) — none at
+#     all -> BLOCKED `missing-stream-label`. One or more IS present but
+#     NONE matches the filer's OWN (`stream:<their-linux-username>` —
+#     every current AUTHORITY_BY_USER key already doubles as its own
+#     stream-label suffix, verified across all 15 entries) -> a
+#     `Stream-routing: <reason>` body line is required (same logged-claim
+#     shape as `Scope-gate:`/`Dedup-checked:` — an affirmative, auditable
+#     claim; does not verify truth, matches this hook's own documented
+#     limit) -> missing -> BLOCKED `stream-routing-unjustified`.
+#   - `gh api .../issues POST` labeling is OUT OF SCOPE — an accepted
+#     residual, same shape as the near-dup check's own `--limit 200`
+#     residual above (`gh issue create` is this repo's dominant,
+#     documented filing recipe; API-POST labeling is rare and awkward).
+#
 # Both new caps, and the near-dup check, are computed against a single
 # TARGET REPO resolved consistently per filing (explicit `-R`/`--repo`, else
 # parsed from a `gh api repos/<owner>/<repo>/issues` path, else the cwd's own
 # git remote) — the SAME value is what gets logged, so a future invocation's
 # cap count is never checked against a different repo than the one a past
-# filing was actually logged under.
+# filing was actually logged under. The stream-routing gate reuses the SAME
+# `target_repo` value for its own `gh label list` lookup.
 #
 # Both new caps are logged through the SAME scope-gate.log mechanism
 # (extended with `parents=`/`dedup=` fields, never a second log) and honour
@@ -164,10 +202,21 @@ case "$CMD" in *"airuleset:scope-gate-ok"*) exit 0 ;; esac
 LOG="$HOME/.claude/scope-gate.log"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 
+# #390 -- this hook's own checkout root (the airuleset repo containing this
+# script's sibling airuleset.py), resolved the same way hooks/lib-*.sh
+# source their own libraries elsewhere in this repo: `${BASH_SOURCE[0]}`'s
+# directory, one level up. Passed into the python heredoc below so the new
+# stream-routing gate can import airuleset.py directly (single source of
+# truth for AUTHORITY_BY_USER) without a duplicated user list. Empty on any
+# resolution failure -- the gate degrades to "cannot verify", never blocks.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || HOOK_DIR=""
+REPO_ROOT_DIR=""
+[ -n "$HOOK_DIR" ] && REPO_ROOT_DIR="$(dirname "$HOOK_DIR")"
+
 # python3 - "$CMD" <<'PYEOF' (argv, never a pipe into the heredoc's own
 # stdin — see the repo's own #96 gotcha).
 RC=0
-OUT=$(python3 - "$CMD" "$SID" "$(pwd)" "$LOG" <<'PYEOF' 2>/dev/null
+OUT=$(python3 - "$CMD" "$SID" "$(pwd)" "$LOG" "$REPO_ROOT_DIR" <<'PYEOF' 2>/dev/null
 import json
 import os
 import re
@@ -180,6 +229,7 @@ cmd = sys.argv[1]
 sid = sys.argv[2]
 cwd = sys.argv[3]
 log_path = sys.argv[4]
+repo_dir = sys.argv[5] if len(sys.argv) > 5 else ""
 
 ALLOWED = {
     ">300-loc", "schema-migration", "api-break", "security-boundary",
@@ -697,6 +747,162 @@ def _target_repo_for_segment(tk, api_call, cwd_repo):
     return cwd_repo
 
 
+# #390 -- STREAM ROUTING GATE. See this file's own header comment for the
+# full design; the code below implements exactly what it describes.
+STREAM_LABEL_RE = re.compile(r'^stream:([A-Za-z0-9_-]+)$', re.I)
+STREAM_ROUTING_RE = re.compile(r'(?m)^\s*Stream-routing:\s*(\S.*)$')
+
+# Cached per (cwd, repo) / (cwd, repo_dir) WITHIN THIS ONE hook invocation,
+# same shape as `_issue_list_cache` above -- a batch filing several issues
+# in one command must not repeat the identical `gh label list` call or the
+# identical authority resolution per item.
+_label_list_cache = {}
+_authority_cache = {}
+
+
+def _repo_stream_labels(cwd, repo):
+    """Real label NAMES for `repo` (bounded, cached), or None on ANY
+    failure (offline, unauthenticated, `gh` missing, malformed JSON) --
+    degrades the stream-routing gate to "cannot verify", never blocks on
+    its own. Never touches the real network more than once per (cwd, repo)
+    in this invocation."""
+    key = (cwd, repo)
+    if key in _label_list_cache:
+        return _label_list_cache[key]
+    result = None
+    try:
+        argv = ["gh", "label", "list", "--json", "name", "-L", "200"]
+        if repo:
+            argv += ["-R", repo]
+        out = subprocess.run(argv, capture_output=True, text=True,
+                              timeout=8, cwd=cwd)
+        if out.returncode == 0:
+            data = json.loads(out.stdout or "[]")
+            if isinstance(data, list):
+                result = [str((it or {}).get("name") or "") for it in data
+                          if isinstance(it, dict)]
+    except Exception:
+        result = None
+    _label_list_cache[key] = result
+    return result
+
+
+def _repo_is_stream_aware(cwd, repo):
+    """True/False, or None when unmeasurable (see `_repo_stream_labels`)."""
+    names = _repo_stream_labels(cwd, repo)
+    if names is None:
+        return None
+    return any(STREAM_LABEL_RE.match(n) for n in names)
+
+
+def _filer_authority_and_own_stream(cwd, repo_dir):
+    """(authority_profile, own_stream_label) for the LINUX USER running
+    this hook -- imports airuleset.py directly (from `repo_dir`, the
+    hook's own checkout root, passed in from bash via BASH_SOURCE) rather
+    than duplicating AUTHORITY_BY_USER's key list -- `resolve_authority()`
+    is the SAME function `airuleset.py authority` itself calls, matching
+    the issue's own "rovnako, ako to už robí airuleset.py authority".
+    `(None, None)` on ANY failure (import, resolve) -- the caller must
+    treat that as "cannot verify a stream identity" and skip the gate,
+    never guess. Every current AUTHORITY_BY_USER key doubles as its own
+    stream-label suffix (`label:stream:%s % u for u in AUTHORITY_BY_USER`
+    is how every existing consumer already reads it), so the filer's own
+    stream is simply `stream:<their-linux-username>`."""
+    key = (cwd, repo_dir)
+    if key in _authority_cache:
+        return _authority_cache[key]
+    result = (None, None)
+    try:
+        import getpass
+        if repo_dir and repo_dir not in sys.path:
+            sys.path.insert(0, repo_dir)
+        import airuleset as _ar
+        profile = _ar.resolve_authority(cwd)
+        user = getpass.getuser()
+        result = (profile, ("stream:%s" % user).lower())
+    except Exception:
+        result = (None, None)
+    _authority_cache[key] = result
+    return result
+
+
+def _explicit_stream_labels(tk, is_api):
+    """Every `stream:<x>` value named via -l/--label in THIS segment's own
+    tokens, lowercase, deduped, in order of appearance -- comma-list
+    aware (`-l bug,stream:david2`), any repetition (`-l a -l b`), and
+    every genuine `gh`-accepted spelling of the short flag: separate-token
+    (`-l stream:x`), ATTACHED (`-lstream:x`), and attached-with-equals
+    (`-l=stream:x`) -- #390 adversarial-review MAJOR-2, verified live
+    against the real `gh` binary (a truly unknown flag is rejected by gh
+    itself with "unknown shorthand flag", distinct from these three
+    accepted forms). A compliant filer using the attached spelling must
+    never be FALSE-BLOCKED for a label the hook simply failed to see --
+    this hook's own stated bias is to degrade toward allowing, never
+    toward a false block. Only `gh issue create` is scanned -- `gh api
+    ... POST` labeling is deliberately out of scope (see this file's
+    header)."""
+    if is_api:
+        return []
+    found = []
+    for idx, t in enumerate(tk):
+        val = None
+        if t in ("-l", "--label") and idx + 1 < len(tk):
+            val = tk[idx + 1]
+        elif t.startswith("--label="):
+            val = t[len("--label="):]
+        elif t.startswith("-l") and len(t) > 2 and not t.startswith("--"):
+            val = t[2:]
+            if val.startswith("="):
+                val = val[1:]
+        if val is None:
+            continue
+        for piece in val.split(","):
+            piece = piece.strip().lower()
+            if STREAM_LABEL_RE.match(piece) and piece not in found:
+                found.append(piece)
+    return found
+
+
+def _stream_routing_block_reason(tk, is_api, body, cwd, target_repo, repo_dir):
+    """#390 -- a block-reason string, or None (nothing to block -- covers
+    every degrade-to-unmeasurable case too, per this hook's own
+    established bias: never manufacture a block from state that could not
+    be measured).
+
+    #390 adversarial-review MAJOR-1: the cheap, LOCAL authority check runs
+    FIRST, before the network `gh label list` call -- a full-authority
+    filer (never gated by this gate at all) must never pay that round-trip
+    on every single filing fleet-wide. This mirrors the hook's own #329
+    "cheap local checks before the network call" discipline elsewhere in
+    this file.
+
+    #390 adversarial-review MINOR-1 (documented, not a code change): a
+    filing that carries BOTH the filer's own stream label AND a foreign
+    one (e.g. `-l stream:david2 -l stream:david`) needs no
+    `Stream-routing:` justification -- `own_label in applied` accepts it
+    the moment the filer's own label is present, regardless of what else
+    rides alongside it. This is deliberate: the filer's own label already
+    proves the filing is (at least in part) that filer's own work: routing
+    it under an ADDITIONAL, foreign label as well is a normal
+    cross-stream-relevance tag, not a mis-file."""
+    if is_api:
+        return None
+    profile, own_label = _filer_authority_and_own_stream(cwd, repo_dir)
+    if profile is None or profile == "full":
+        return None             # no known "own" stream -- not gated
+    aware = _repo_is_stream_aware(cwd, target_repo)
+    if not aware:              # False, or None (unmeasurable) -- never blocks
+        return None
+    applied = _explicit_stream_labels(tk, is_api)
+    if not applied:
+        return "missing-stream-label"
+    if own_label in applied:
+        return None
+    if body and STREAM_ROUTING_RE.search(body):
+        return None
+    return "stream-routing-unjustified"
+
+
 results = []  # (verdict, title, criterion_or_none, parents_str, target_repo, dedup_claim)
 
 # #329 -- resolve the cwd-derived repo BEFORE the per-segment loop (moved
@@ -781,6 +987,13 @@ for seg in split_top_level(skeleton):
         if nums and max(nums) <= 300:
             loc_mismatch = True
 
+    # #390 -- computed unconditionally per segment, same tier as
+    # chain_capped/loc_mismatch above (a routing-correctness question, not
+    # a scope-gate-criterion one) -- see this file's header for the full
+    # design and scoping.
+    stream_reason = _stream_routing_block_reason(
+        tk, api_call, body, cwd, target_repo, repo_dir)
+
     clean_title = _clean_field(title)
 
     if chain_capped:
@@ -788,6 +1001,9 @@ for seg in split_top_level(skeleton):
                          target_repo, ""))
     elif loc_mismatch:
         results.append(("BLOCK", clean_title, "loc-mismatch", parents_str,
+                         target_repo, ""))
+    elif stream_reason:
+        results.append(("BLOCK", clean_title, stream_reason, parents_str,
                          target_repo, ""))
     elif not (crit and crit.lower() in ALLOWED):
         # unchanged from before #329 -- missing/invalid Scope-gate blocks
@@ -914,8 +1130,12 @@ batch) has a near-duplicate title and this one does not reference the
 existing issue by `#N` (#329), (f) this repo already has 2 other
 non-exempt findings filed today off the SAME parent ticket -- the
 chain-width cap (#329: a 3rd+ finding off one review belongs in that
-branch, not a new ticket), or (g) this repo has already reached today's
-soft filing cap of 8 non-exempt issues (#329).
+branch, not a new ticket), (g) this repo has already reached today's
+soft filing cap of 8 non-exempt issues (#329), (h) this repo is
+stream-aware and this filing (from a known sub-dev stream account) carries
+no explicit `stream:<x>` label at all (#390), or (i) it carries a
+`stream:<x>` label naming a DIFFERENT stream than your own, with no
+`Stream-routing: <reason>` line justifying the hand-off (#390).
 
 Per complete-planned-work.md's Follow-up gate: a discovered cleanup under
 ~100 LoC in a file your current work already touches gets FIXED NOW in this
@@ -938,7 +1158,12 @@ Fix NOW — one of:
        >300-loc | schema-migration | api-break | security-boundary |
        cross-cutting | needs-user-decision | planned-work | user-request
      (only `planned-work`/`user-request` are exempt from the daily and
-     chain-width caps).
+     chain-width caps), OR
+  5. Add an explicit `-l stream:<your-own-stream>` label matching YOUR OWN
+     stream (#390) -- or, when this ticket genuinely belongs to a
+     DIFFERENT stream, keep that stream's label and add a
+     `Stream-routing: <reason>` line to the body naming why it belongs to
+     them, not you.
 
 This is a LOGGED, falsifiable claim (~/.claude/scope-gate.log) — it does not
 verify the criterion is true, only that you affirmatively claimed one instead
