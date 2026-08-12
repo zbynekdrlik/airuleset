@@ -108,9 +108,19 @@ class TestReviewWatchLifecycle(TestCase):
         self._asserts_release_containment(bm)
 
     def test_fork_holds_until_maintainer_closes(self):
+        # #395 (2026-08-12): the old wording said the ticket "is CLOSED by
+        # the maintainer" as the (B) precondition -- but neither proof
+        # command in this template ever checked GitHub's closed state, so
+        # the phrase was an unproven claim, not a fact. Replaced with the
+        # honest statement: hand-off is genuinely MINE-done; closing the
+        # ticket afterward is the maintainer's job, never proven from here.
+        # The REVIEW-WATCH lifecycle this class exists to lock is unchanged
+        # -- an open ticket still carrying my hand-off comment is still
+        # "NOT done" and still holds the loop alive hourly.
         _, fk = self.reduced_goal_lines()
         self.assertIn("REVIEW-WATCH", fk)
-        self.assertIn("CLOSED by the maintainer", fk)
+        self.assertIn("closing it after is the maintainer's job", fk)
+        self.assertNotIn("CLOSED by the maintainer", fk)
 
     def test_fork_holds_until_released_too(self):
         # 2026-07-20 morning incident: david's loop ended when the maintainer
