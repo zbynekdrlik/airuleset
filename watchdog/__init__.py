@@ -3005,11 +3005,24 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
                     % (str(qid)[-6:], status, project_label(cwd)))
         if dry_run or status != "sent":
             continue
+        # Adversarial review (#368): drop the OLD key ONLY once the fresh
+        # message id is genuinely re-tracked. "sent" with no usable id
+        # (Discord 2xx with an unparseable body -> _post_discord's bare
+        # True), or a record_question refusal / failed save (no resolvable
+        # questions channel on THIS box, a non-numeric id, a disk error)
+        # used to fall through to drop_question anyway -- re-asking ONCE
+        # and then silently UN-TRACKING the question forever, the exact
+        # silent-loss failure mode this function exists to kill. Keeping
+        # the entry is spam-safe: the day-bucketed dedup key above already
+        # caps this qid at one genuine send per bucket, so a kept entry
+        # only retries the re-tracking on a later sweep/bucket.
+        retracked = False
         if new_mid:
             ch = notification_channel(owner=owner, kind="questions") or ""
-            record_question(new_mid, ch, sid, cwd, now=now, path=path,
-                            question=block)
-        drop_question(qid, path)
+            retracked = record_question(new_mid, ch, sid, cwd, now=now,
+                                        path=path, question=block)
+        if retracked:
+            drop_question(qid, path)
     return logs
 
 
