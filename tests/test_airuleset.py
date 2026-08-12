@@ -13738,6 +13738,27 @@ class TestCiMonitoringJqFilterHasRealTeeth(TestCase):
             '[{"name":"Lint","conclusion":"success"}]}',
             "TERMINAL completed success",
         ),
+        (
+            # #405 adversarial-review MINOR-4: a job hitting its own
+            # `timeout-minutes` is arguably the LIKELIEST real way the
+            # ticket's own scenario (a long-running multi-job matrix, one
+            # job in trouble while the run stays in_progress) materializes
+            # -- must fail-fast exactly like a hard `failure`, never sit
+            # invisible as PENDING for the rest of the run.
+            '{"status":"in_progress","jobs":[{"name":"Slow Job",'
+            '"conclusion":"timed_out"},{"name":"Lint","conclusion":"success"}]}',
+            "JOBFAIL Slow Job",
+        ),
+        (
+            # a CANCELLED job must NOT fail-fast -- either it's a cascade
+            # from a sibling `failure` (which that sibling's own conclusion
+            # already reports), or the whole run was deliberately cancelled
+            # by a human (`gh run cancel`), in which case "JOB FAILED" would
+            # be an actively misleading wake for a choice, not a defect.
+            '{"status":"in_progress","jobs":[{"name":"Dependent",'
+            '"conclusion":"cancelled"},{"name":"Lint","conclusion":"success"}]}',
+            "PENDING in_progress",
+        ),
     ]
 
     def test_foreground_loop_jq_filter(self):
