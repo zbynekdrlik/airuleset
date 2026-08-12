@@ -1171,3 +1171,104 @@ rather than one that silently doubled underneath it.
 - **A ticket's own explicit design mandate ("no retry loop") and a genuinely load-bearing correctness gate the DELETED retry loop used to enforce (the #238 same-turn-dispatch race, via `COMPACT_MIN_REQUEST_AGE_S`) can look mutually exclusive at first read — they are not, once the deleted loop's OWN behaviour is measured rather than assumed.** #402-review MAJOR-1: `deliver_compact`'s too-young floor compares the request's `ts` against `now` at the exact instant `deliver_compact` runs; when the record and the synchronous delivery-check happen in the SAME call (`cmd_compact_request --self`/`--record`, both new #402 entry points), that delta is provably ~0, so the floor refused EVERY fresh request unconditionally — silently reverting a previously-fixed, previously-MEASURED #238 regression ("18 of 87 real sends... took the slow path"). The fix, `_compact_sync_attempt` (`watchdog/compact.py`): record, then ONE bounded one-shot `time.sleep()` sized to just clear the floor (computed from the REQUEST's own recorded `ts`, so a re-record whose anchor is already old enough sleeps zero), then ONE `deliver_compact` call — reading the OLD (deleted) `_compact_retry_until`'s own code comment first ("attempt 1 always fails too-young at t=0, attempt 2 [after one sleep] succeeds") showed the retry loop's REAL behaviour was ALSO never a zero-latency first attempt; it just achieved the same 2s+ wait via a generic retry-until helper instead of one explicit sleep. Reproducing the OLD MECHANISM's real observable effect with the NEW design's simpler primitive (no loop, no six tuning constants) satisfies both the deletion mandate and the correctness guarantee — read a deleted mechanism's OWN comments for what it ACTUALLY did before assuming its removal is safe just because the removal was explicitly requested.
 - **A "fix a MINOR review finding" pass must be checked against ANY existing test that ALREADY locks a stricter, opposite-direction invariant in the SAME function — a fix that reads cleanly in isolation can directly violate a #400-class ("never refresh a stale anchor") lock the reviewer never saw because it wasn't in their digest.** #402-review MINOR-2 proposed resetting `record_compact_request`'s preserved `ts` when the PRIOR entry was already past the age cap (so a genuinely fresh boundary doesn't inherit a corpse) — implementing it broke `test_ts_is_never_refreshed_across_a_re_record` (a PRE-EXISTING, deliberately-locked #400 regression test asserting the anchor is NEVER refreshed "no matter how stale it genuinely is"). Tracing the actual failure mode showed the "gated" reset was a WEAKER form of the exact #400 bug it risked reintroducing: a session producing genuine boundary events more often than `COMPACT_REQUEST_MAX_AGE_S` apart, forever, would keep resetting the anchor just past each expiry and never let the hard age cap fire — an 11-hour-stale request surviving via periodic auto-reset instead of continuous refresh, same shape, slower cadence. REJECTED the fix, reverted the code, and — because `deliver_compact`'s condition (e) is checked FIRST and unconditionally on EVERY sweep (~60s cadence, no pane resolution needed) — the real residual is only a narrow, self-healing window (<=60s) rather than a structural gap: the NEXT genuine boundary event after the sweep clears the dead entry gets a fully fresh `ts` regardless. **When a proposed MINOR fix conflicts with an existing locked test, don't just delete or weaken the test to make the fix pass — trace whether the fix's OWN failure mode reproduces the exact incident the locked test protects against, at a different frequency; if so, keep the lock and document the REJECTED fix's reasoning at the point a future reader would otherwise re-propose it.**
 - **A test-class-wide `time.sleep` no-op patch (added so unrelated tests in that class don't pay a real multi-second wait) will ALSO silently defeat the ONE test in that same class whose entire point is proving a real sleep genuinely elapses wall-clock time — the test passes/fails for the WRONG reason either way, since a no-op'd sleep leaves `now_fn()` reading the same instant before and after.** Capture the real function BEFORE any test patches it (`_REAL_SLEEP = time.sleep`, at MODULE level, right after the imports — capturing it inside a test method is too late if an EARLIER test in the same run already patched it) and, for the one test that needs genuine elapsed time, nest `with m.patch("time.sleep", _REAL_SLEEP):` INSIDE the class-wide no-op patch — `unittest.mock.patch` restores to whatever value was current at `__enter__` (the outer no-op) once the inner `with` exits, so only that one test pays the real (short, bounded) wait. Used for `#402-review`'s own `test_self_on_a_genuinely_idle_pane_actually_sends_end_to_end`, proving `_compact_sync_attempt`'s fix end-to-end through the REAL (unmocked) `deliver_compact`, not a canned return value.
+
+## Size ratchet — growth-only file/function size cap on airuleset's own source (#404 point 1)
+
+airuleset enforces a ~1000-line/file cap on TARGET repos (`architecture-first.md`) but
+had nothing enforcing it on itself — `watchdog/__init__.py` and `airuleset.py` grew
+unboundedly across every ticket, with no mechanical stop. `scripts/size_ratchet.py` +
+`tests/size_ratchet.json` + `tests/test_size_ratchet.py` (#404) close that gap, narrowly:
+a GROWTH-ONLY cap, "the same discipline we require of targets, applied to ourselves."
+
+**What it does.** `tests/size_ratchet.json` snapshots TODAY's exact line count for every
+tracked file (repo-root `*.py`, `watchdog/**/*.py`, `notify/**/*.py`, `filedrop/**/*.py`,
+`burn/**/*.py`, `tests/*.py` — deliberately NOT `hooks/*.py`/`scripts/*.py`, out of the
+ticket's own explicit scope) and every function currently >=200 lines (via `ast`, keyed on
+a stable qualname like `Class.method`/`outer.<locals>.inner`, never `path:lineno` — an
+unrelated edit shifting a function's start line elsewhere in the file must never look like
+growth). `tests/test_size_ratchet.py::TestCurrentTreePassesTheShippedSnapshot` — a
+`unittest.TestCase`, genuinely collected by `cmd_push`'s `unittest discover -s tests` gate
+(unlike a bare pytest-function file) — is the actual gate: it is PURE READ, comparing a
+fresh `measure()` against the committed JSON; growth past a stored ceiling (or past the
+flat default for a brand-new, untracked item — `FILE_DEFAULT_CEILING=1000`,
+`FUNC_DEFAULT_CEILING=300`) fails with an actionable "split before it lands" message.
+
+**This is DELIBERATELY strict, by the ticket's own literal wording** ("kazdy subor a
+kazda funkcia moze len klesat alebo stagnovat" — every file/function may only decrease or
+stagnate): once tracked, an item has ZERO headroom even if it is well under the default
+cap — not "may grow up to 1000 lines like a target repo's file would", but frozen at
+EXACTLY today's size. A fresh-context adversarial review flagged this as a CRITICAL
+finding ("blocks ordinary development on day two — adding one test to any existing
+`tests/*.py` file is enough") and it is a correct, deliberately-accepted characterization
+of the design, not a bug: the whole point of "okamzita zastava rastu" (immediate growth
+stop) is that further growth in an ALREADY-oversized file requires either shrinking
+elsewhere in the same commit, or a HUMAN hand-editing one number in the JSON with the
+reason stated in the commit/PR message (JSON has no comment syntax) — a visible,
+reviewable diff, never a silent default. Loosening a ceiling through any automated path
+(the test itself, `--update`) is structurally impossible.
+
+**Tightening is an EXPLICIT command, never a test side-effect.** The dispatch instructions
+for #404 offered two equally-valid designs — "the test itself auto-rewrites the JSON on
+every run when it improves" vs "an explicit regeneration path" — and the SECOND was
+chosen: a test silently mutating committed source as a side effect of an ordinary
+`pytest`/`unittest discover` run (including inside `cmd_push`'s OWN fail-closed gate,
+which runs against the exact working-tree state about to be pushed) was judged too
+surprising and blurs "did the suite pass" with "did it also rewrite a file." Tightening
+after a genuine shrink:
+```
+python3 scripts/size_ratchet.py --check    # read-only, same comparison the test runs
+python3 scripts/size_ratchet.py --update   # min(stored, current) per item — tightens on
+                                            # shrink, NEVER raises an existing ceiling
+                                            # even if current > stored (a violation is
+                                            # never silently "fixed" by loosening); refuses
+                                            # (no write) a brand-new item already over its
+                                            # own default cap
+```
+
+**`--bootstrap` (only with `--update`) is the ONE-TIME seed-from-scratch act** — every
+tracked item captured at TODAY's real size VERBATIM, with NO default-cap refusal (the
+default-cap refusal is a GOING-FORWARD policy for a genuinely new item appearing AFTER a
+real baseline already exists, never the baseline itself). A fresh-context adversarial
+review live-reproduced that the FIRST shipped version was not actually one-time at all —
+re-running `--update --bootstrap` against an already-seeded snapshot silently blessed a
+brand-new 9000-line file at full size with zero refusal, since bootstrap mode's own
+per-item loop never checked whether the snapshot already had anything in it. Fixed by
+refusing the WHOLE operation outright (nothing written at all) whenever `--bootstrap` is
+combined with a non-empty stored snapshot, enforced at BOTH `regen()` (so a direct/test
+caller is protected too, not just the CLI) and `main()` (so the CLI never even attempts a
+write) — the general lesson: a flag whose docstring/help-text calls itself "one-time" is
+not actually one-time unless something checks the PRECONDITION "is this genuinely the
+first time", not just the flag's own presence.
+
+**Known, deliberately-accepted residual: a same-commit rename+grow can regain headroom.**
+Because the snapshot is keyed by path/qualname (not content or git rename-tracking),
+renaming a tracked file/function in the same commit it grows lets the growth land as a
+"brand-new item" governed by the flat default cap, rather than by the old, possibly-much-
+tighter ceiling — an inherent limitation of any name-keyed ratchet without semantic rename
+detection. Flagged as a MAJOR finding by the same adversarial review; deliberately left
+unfixed as out-of-scope for this narrow, mechanical point-1 test (semantic rename-tracking
+is real complexity that belongs to a separate, bigger investment) — grep this file's own
+existing "accepted residual" precedents (#124, #331 F3/F4) for the established shape of
+documenting rather than chasing a low-practical-severity gap in a trusted-developer
+environment.
+
+**How a TARGET repo adopts the same template.** The mechanism has no airuleset-specific
+dependency beyond stdlib (`ast`/`json`/`argparse`/`tempfile`) — copy `scripts/size_ratchet.py`
+verbatim, adjust `TRACKED_DIRS` (and the repo-root/`tests/*.py` glob shape in
+`tracked_files()`) to that repo's own module layout, copy the `unittest.TestCase`-based
+gating class from `tests/test_size_ratchet.py` (`TestCurrentTreePassesTheShippedSnapshot`
+is the load-bearing part; the rest of that file is testing the MECHANISM itself and only
+needs porting if the target wants the same depth of self-test), then run
+`python3 scripts/size_ratchet.py --update --bootstrap` ONCE to cut the day-one snapshot
+and commit it. `FILE_DEFAULT_CEILING`/`FUNC_DEFAULT_CEILING`/`FUNC_TRACK_THRESHOLD` are
+free to retune per target (this repo's own 1000/300/200 mirror the standard already
+enforced fleet-wide, e.g. camera-box #234's own driver.rs cap) — the assert pinning
+`FUNC_TRACK_THRESHOLD <= FUNC_DEFAULT_CEILING` must hold or a freshly-bootstrapped
+function between the two values would fail check() on day one, which a ratchet must never
+do.
+
+**The module split this ratchet exists to eventually force** (points 3-4 of #404 —
+`watchdog/__init__.py` → per-service modules, `airuleset.py` → per-CLI-area modules,
+`run_once()` → a job-registry dispatch) is explicitly OUT of this ratchet's own scope and
+lands separately, after #403 (goal-machinery collapse) shrinks the file further first. The
+ratchet's whole job until then is simply: stop the wound from getting deeper.
