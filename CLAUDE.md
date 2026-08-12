@@ -18,6 +18,7 @@ that never goes near them.
 - **Playbook system** — per-project knowledge capture after every ticket: `project-playbook-maintenance.md` + the `playbook-review` / `playbook-cleanup` skills + the `stop-check-playbook-review.sh` Stop gate. Content lives per-repo in `.claude/rules/<area>.md`, never in airuleset.
 - **api-watchdog** (`watchdog/`) — systemd `--user` timer, every 60 s, on every managed box. `run_once()`'s docstring in `watchdog/__init__.py` is the SINGLE SOURCE OF TRUTH for what each numbered job does. `python3 airuleset.py watchdog --once [--dry-run --verbose]`.
 - **Discord notify** (`notify/` + `hooks/notify-discord*.sh`) — the single device-ping path (❓ ask / ✅ done / api-error / autopilot card), per-owner thread routing + mirrors. Governs `milestone-notifications.md`.
+- **Transcript retention** (`discover_old_transcript_candidates`/`sweep_old_transcripts`/`_compress_transcript_file`, #410) — gzip-at-rest for old (30d+) MAIN session transcripts, NEVER deletes; wired report-only into `cmd_install()` step 12 everywhere until the user signs off on live compression. `python3 airuleset.py sweep-transcripts [--dry-run]`.
 
 ## Structure
 
