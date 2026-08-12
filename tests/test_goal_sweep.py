@@ -6,8 +6,6 @@ docstring `test_goal_arm.py`'s own header cites.
 """
 
 import json
-import os
-import time
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -16,19 +14,15 @@ from tempfile import TemporaryDirectory
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import airuleset
 import watchdog as wd
 from watchdog import goal
 
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
     GOAL_BUSY_CAP,
-    GOAL_DIALOG_CAP,
-    GOAL_DRAFT_CAP,
     GOAL_IDLE_CAP,
     _encode,
     DeliverGoalFakeTmux,
-    _isolate_goal_state,
     _write_goal_marker,
     _write_marker_transcript,
 )

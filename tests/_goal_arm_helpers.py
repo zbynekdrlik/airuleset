@@ -10,13 +10,11 @@ into this split).
 """
 
 import json
-import os
 import time
 import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import airuleset
 import watchdog as wd
 from watchdog import goal
 
