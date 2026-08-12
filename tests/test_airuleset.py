@@ -12639,6 +12639,162 @@ class TestBlockDestructiveRemoteWinSshHazard(TestCase):
         self.assertIn("NEVER ssh", t)
 
 
+class TestBlockDestructiveRemoteSecretReadHook(TestCase):
+    """hooks/block-destructive-remote.sh's secret-bearing-read extension
+    (issue #373) — the odoo-erp#3161 + odoo-erp#3493 incident shape: an ssh
+    remote command that cat/less/head/tail/greps a secret-pattern file, or
+    bare-dumps printenv/env, whose stdout reaches the transcript. Scoped to
+    ssh-remote-command text only (both real incidents are ssh-shaped) — a
+    bare LOCAL `cat ~/.env` is deliberately out of scope, see the design
+    comment on #373."""
+
+    HOOK = "block-destructive-remote.sh"
+
+    def _run(self, command, cwd=None, env_extra=None):
+        import shutil
+        d = cwd or tempfile.mkdtemp()
+        if cwd is None:
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        payload = json.dumps({"tool_input": {"command": command}})
+        env = dict(os.environ)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
+                              input=payload, text=True, capture_output=True,
+                              cwd=d, timeout=30, env=env)
+
+    # --- true positives — real incident shapes --------------------------
+
+    def test_blocks_cat_of_secret_file_over_ssh(self):
+        r = self._run('ssh gk "cat /opt/odoo/mcp.env"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("leaks into the transcript", r.stderr)
+
+    def test_blocks_cat_of_discord_env_over_ssh(self):
+        r = self._run('ssh gk "cat ~/.claude/channels/discord/.env"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_the_exact_odoo_erp_3493_incident_shape(self):
+        r = self._run(
+            "ssh gk \"docker compose exec -T mcp printenv | grep -E '^MCP_'\""
+        )
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("leaks into the transcript", r.stderr)
+
+    def test_blocks_bare_printenv_over_ssh(self):
+        r = self._run('ssh gk "printenv"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_bare_env_over_ssh(self):
+        r = self._run('ssh gk "env"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_grep_against_a_credentials_file_over_ssh(self):
+        r = self._run('ssh gk "grep MCP_KMS /opt/app/credentials.json"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_tail_of_env_file_over_ssh(self):
+        r = self._run('ssh gk "tail -f /opt/app/.env"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_cat_of_pem_file_over_ssh(self):
+        r = self._run('ssh gk "cat /etc/ssl/private/server.pem"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_blocks_secret_file_read_wrapped_in_docker_exec(self):
+        r = self._run('ssh gk "docker compose exec -T mcp cat /app/mcp.env"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    # --- allowed — the sanctioned pipe-to-remote provisioning flow ------
+
+    def test_allows_pipe_local_secret_file_to_remote_write(self):
+        r = self._run(
+            'cat /home/user/mcp.env | ssh gk "cat > /opt/odoo/mcp.env"'
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_stdout_redirected_cat_of_secret_file(self):
+        r = self._run('ssh gk "cat /opt/odoo/mcp.env > /tmp/copy"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_remote_write_via_redirect_named_env(self):
+        r = self._run('ssh gk "cat > ~/.env"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    # --- allowed — narrow / template exemptions --------------------------
+
+    def test_allows_env_template_file(self):
+        r = self._run('ssh gk "cat /opt/odoo/mcp.env.example"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_named_single_var_printenv(self):
+        r = self._run('ssh gk "printenv PATH"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_env_used_as_command_prefix(self):
+        r = self._run('ssh gk "env FOO=bar mycommand"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_awk_narrowed_env_dump(self):
+        r = self._run(
+            "ssh gk \"docker compose exec -T mcp printenv | "
+            "awk -F= '{print \\$1\": len=\"length(\\$2)}'\""
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_grep_count_only_against_secret_file(self):
+        r = self._run('ssh gk "grep -c MCP_KMS /opt/app/credentials.json"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_sha256sum_of_secret_file(self):
+        r = self._run('ssh gk "sha256sum /opt/odoo/mcp.env"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_secret_exec_flow(self):
+        r = self._run("python3 airuleset.py secret exec DB -- env")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_allows_cat_of_non_secret_file_over_ssh(self):
+        r = self._run('ssh gk "cat /opt/odoo/README.md"')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    # --- scope: a bare local (non-ssh) read is deliberately NOT covered --
+
+    def test_local_cat_of_dotenv_is_untouched_by_this_extension(self):
+        r = self._run('cat ~/.env')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    # --- bypass ------------------------------------------------------------
+
+    def test_bypass_secret_read_marker_allows_and_logs(self):
+        import shutil
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        r = self._run(
+            'ssh gk "cat /opt/odoo/mcp.env"  '
+            '# airuleset:secret-read-ok tested, user approved',
+            env_extra={"HOME": home},
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+        log = os.path.join(home, "devel", "airuleset", "audits",
+                           "destructive-remote-bypasses.log")
+        self.assertTrue(os.path.exists(log), "bypass must be logged")
+        self.assertIn("secret-read-bypass", open(log).read())
+
+    def test_secret_read_bypass_does_not_suppress_unrelated_violations(self):
+        # the narrower secret-read bypass must NOT silence a genuinely
+        # different category (host power-off) in the same command.
+        import shutil
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        r = self._run(
+            'ssh gk "shutdown -h now"  '
+            '# airuleset:secret-read-ok this only covers secret reads',
+            env_extra={"HOME": home},
+        )
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+
 class TestBlockSubdevSshMisuseHook(TestCase):
     """hooks/block-subdev-ssh-misuse.sh (issue #51) — the subdev VPS was
     fail2ban-banned TWICE in one day (2026-07-25) by ad-hoc ssh probes with
