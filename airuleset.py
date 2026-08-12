@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import sys
+import zlib
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -1082,6 +1083,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import zlib
 from pathlib import Path
 
 
@@ -1134,7 +1136,18 @@ def _read_jsonl(path):
     too, not just the open() call, or a corrupted/truncated `.jsonl.gz`
     would silently look like an EMPTY transcript instead of failing
     loudly (test-strictness.md: a broken dependency must fail, never
-    silently succeed)."""
+    silently succeed).
+
+    #410 review F3 (MAJOR, live-triggered): a truncated or corrupt
+    `.jsonl.gz` raises EOFError (compressed file ended before the
+    end-of-stream marker) or zlib.error (corrupt stream), NEITHER of
+    which is an OSError -- catching only OSError let the exception
+    ESCAPE this function uncaught, crashing the whole claude-history
+    invocation on ONE bad old transcript (including, under `--full`,
+    aborting the render of every OTHER, perfectly healthy chained
+    file). Both are caught alongside OSError so a bad file is skipped
+    (empty records, a loud stderr line) and the caller's own
+    per-file loop continues to the rest."""
     records = []
     is_gz = str(path).endswith(".gz")
     opener = gzip.open if is_gz else open
@@ -1153,7 +1166,7 @@ def _read_jsonl(path):
                     records.append(json.loads(raw))
                 except json.JSONDecodeError:
                     continue
-    except OSError as e:
+    except (OSError, EOFError, zlib.error) as e:
         print("claude-history: cannot read %s: %s" % (path, e), file=sys.stderr)
         return []
     return records
@@ -5383,10 +5396,18 @@ def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
         if not rows:
             continue
         rows.sort(key=lambda t: t[0], reverse=True)
-        newest_path = rows[0][1]
+        # #410 review F5: exclude by MTIME, not by object identity --
+        # `p == newest_path` only ever protects the ONE row that
+        # happened to sort first; a genuine mtime TIE (two files last
+        # written in the same wall-clock second, with nothing newer in
+        # the dir) left the other tied file eligible, contradicting this
+        # function's own docstring ("the NEWEST... is NEVER a
+        # candidate"). Comparing against the newest mtime VALUE excludes
+        # every row that ties for newest, not just the first one found.
+        newest_mtime = rows[0][0]
         for mtime, p, size, is_link in rows:
-            if p == newest_path:
-                continue   # the newest in its own dir -- never a candidate, regardless of age
+            if mtime == newest_mtime:
+                continue   # newest (or tied-for-newest) in its own dir -- never a candidate
             entry = {"path": str(p), "reason": None,
                     "age_days": (now - mtime) / 86400.0, "size": size}
             if is_link:
@@ -5439,6 +5460,7 @@ def _compress_transcript_file(path, now=None):
     the original `.jsonl` was safely replaced by a verified `.jsonl.gz`.
     """
     import hashlib
+    import tempfile
     import time as _time
     now = _time.time() if now is None else now
     p = Path(path)
@@ -5454,7 +5476,25 @@ def _compress_transcript_file(path, now=None):
         return entry
     orig_size, orig_mtime = orig_st.st_size, orig_st.st_mtime
 
-    tmp_path = p.with_name(p.name + ".gz.tmp")
+    # #410 review F1 (CRITICAL once live): a PREDICTABLE tmp name
+    # (`<name>.gz.tmp`) collides across concurrent sweeps of the SAME
+    # file -- a second writer truncates the first's still-being-hashed
+    # tmp file, and the first's own verify-hash can then match the
+    # SECOND writer's (also in-progress) bytes, reporting "compressed"
+    # for a `.gz` that does not actually round-trip. `tempfile.mkstemp`
+    # gives every call a UNIQUE name in the SAME directory (same
+    # filesystem, so the later `os.replace()` swap stays a true atomic
+    # rename) -- each concurrent writer then verifies only its OWN
+    # bytes, collapsing the race to a harmless double-compress (the
+    # second writer's later TOCTOU re-stat of the ORIGINAL, once the
+    # first writer has already unlinked it, correctly refuses).
+    try:
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=str(p.parent), prefix=p.name + ".", suffix=".gz.tmp")
+    except OSError as e:
+        entry["reason"] = "could not create unique tmp file: %s" % e
+        return entry
+    tmp_path = Path(tmp_name)
     final_path = p.with_name(p.name + ".gz")
 
     def _cleanup_tmp():
@@ -5467,7 +5507,7 @@ def _compress_transcript_file(path, now=None):
 
     orig_hash = hashlib.sha256()
     try:
-        with open(tmp_path, "wb") as raw:
+        with os.fdopen(tmp_fd, "wb") as raw:
             with gzip.GzipFile(fileobj=raw, mode="wb", mtime=orig_mtime) as gz:
                 with open(p, "rb") as src:
                     while True:
@@ -5485,6 +5525,16 @@ def _compress_transcript_file(path, now=None):
 
     # Independent decompress-verify: a FRESH read pass off disk -- proves
     # the bytes ON DISK round-trip, never merely trusting the writer.
+    # #410 review F4: a truncated/corrupt tmp (a torn write, a concurrent
+    # writer's clobber -- see the F1 fix above) raises EOFError or
+    # zlib.error from inside gzip's own decompressor, NEITHER of which is
+    # an OSError -- catching only OSError let that exception ESCAPE this
+    # function uncaught (a genuine correctness bug, not just an
+    # unhandled edge case: this function's own docstring promises "ANY
+    # failure at ANY step... returns the reason", and an uncaught raise
+    # here also aborts the WHOLE sweep loop in sweep_old_transcripts,
+    # never reaching later candidates -- see the per-candidate try/except
+    # added there for the matching fix).
     verify_hash = hashlib.sha256()
     try:
         with gzip.open(tmp_path, "rb") as f:
@@ -5493,7 +5543,7 @@ def _compress_transcript_file(path, now=None):
                 if not chunk:
                     break
                 verify_hash.update(chunk)
-    except OSError as e:
+    except (OSError, EOFError, zlib.error) as e:
         entry["reason"] = "verify-decompress failed: %s" % e
         _cleanup_tmp()
         return entry
@@ -5654,7 +5704,18 @@ def sweep_old_transcripts(home=None, projects_dir=None, dry_run: bool = True,
             results.append(entry)
             continue
 
-        compressed = _compress_transcript_file(p, now=now)
+        # #410 review F4: a per-candidate backstop -- _compress_transcript_
+        # file()'s own internal try/except already covers every
+        # documented failure mode (including EOFError/zlib.error, per
+        # the F3/F4 fix above), but ANY unexpected exception escaping it
+        # must still never abort the WHOLE sweep loop -- that would
+        # leave the log/cadence state unwritten and every remaining
+        # candidate in this sweep silently unprocessed with no record.
+        try:
+            compressed = _compress_transcript_file(p, now=now)
+        except Exception as e:
+            compressed = {"removed": False,
+                         "reason": "unexpected error during compress: %s" % e}
         entry.update(compressed)
         results.append(entry)
 
@@ -5711,6 +5772,39 @@ def cmd_sweep_transcripts(args):
     print("%d transcript(s) %scompressed, %s %sreclaimed (never deleted -- gzip-at-rest)." % (
         len(acted_rows), verb, _human_size(total), verb))
     print("Log: %s" % TRANSCRIPT_COMPRESS_LOG_PATH)
+
+
+def _run_transcript_compress_step(sweep_fn=None):
+    """`cmd_install()`'s step 12 body, factored OUT of that function so a
+    test can call this directly (with `sweep_fn` mocked) and assert the
+    REAL `dry_run` kwarg the wiring passes under each env state -- #410
+    review F2. The pre-fix test re-implemented these same two gating
+    lines INSIDE itself and called the mock directly, which is
+    tautological (it proves the test's OWN copy of the logic works, not
+    that `cmd_install()` actually calls it that way); calling this exact
+    function is what makes the assertion about the real wiring. Report-
+    only (`AIRULESET_TRANSCRIPT_COMPRESS_LIVE` unset/not "1") is the
+    default in every real deployment -- see the module comment + the
+    #410 design comment for why."""
+    sweep_fn = sweep_fn or sweep_old_transcripts
+    live_compress = os.environ.get("AIRULESET_TRANSCRIPT_COMPRESS_LIVE") == "1"
+    tc_results = sweep_fn(dry_run=not live_compress)
+    if live_compress:
+        tc_removed = [r for r in tc_results if r.get("removed")]
+        if tc_removed:
+            total = sum(r.get("size", 0) or 0 for r in tc_removed)
+            print(f"  Compressed {len(tc_removed)} old transcript(s), "
+                  f"{_human_size(total)} reclaimed (never deleted -- gzip-at-rest; "
+                  f"log: {TRANSCRIPT_COMPRESS_LOG_PATH})")
+    else:
+        tc_candidates = [r for r in tc_results
+                         if str(r.get("reason", "")).startswith("would compress")]
+        if tc_candidates:
+            total = sum(r.get("size", 0) or 0 for r in tc_candidates)
+            print(f"  Transcript compression: REPORT-ONLY -- found "
+                  f"{len(tc_candidates)} candidate(s), {_human_size(total)} "
+                  f"reclaimable. Set AIRULESET_TRANSCRIPT_COMPRESS_LIVE=1 to "
+                  f"enable live compression, after user sign-off (#410).")
 
 
 def cmd_install(args):
@@ -6073,26 +6167,11 @@ def cmd_install(args):
     # following /resume + history-browsing verification (see the #410
     # design comment). This env var is never set anywhere by this PR, on
     # any box. Cadence-gated the same way as every step above once live
-    # -- non-fatal, best-effort.
+    # -- non-fatal, best-effort. The actual gate+call is factored into
+    # `_run_transcript_compress_step()` so it can be tested directly
+    # (#410 review F2) -- this step is just that call, non-fatal.
     try:
-        live_compress = os.environ.get("AIRULESET_TRANSCRIPT_COMPRESS_LIVE") == "1"
-        tc_results = sweep_old_transcripts(dry_run=not live_compress)
-        if live_compress:
-            tc_removed = [r for r in tc_results if r.get("removed")]
-            if tc_removed:
-                total = sum(r.get("size", 0) or 0 for r in tc_removed)
-                print(f"  Compressed {len(tc_removed)} old transcript(s), "
-                      f"{_human_size(total)} reclaimed (never deleted -- gzip-at-rest; "
-                      f"log: {TRANSCRIPT_COMPRESS_LOG_PATH})")
-        else:
-            tc_candidates = [r for r in tc_results
-                             if str(r.get("reason", "")).startswith("would compress")]
-            if tc_candidates:
-                total = sum(r.get("size", 0) or 0 for r in tc_candidates)
-                print(f"  Transcript compression: REPORT-ONLY -- found "
-                      f"{len(tc_candidates)} candidate(s), {_human_size(total)} "
-                      f"reclaimable. Set AIRULESET_TRANSCRIPT_COMPRESS_LIVE=1 to "
-                      f"enable live compression, after user sign-off (#410).")
+        _run_transcript_compress_step()
     except Exception as e:
         print(f"  transcript-compress sweep error (non-fatal): {e}", file=sys.stderr)
 

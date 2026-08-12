@@ -7339,6 +7339,36 @@ class TestClaudeHistoryScript(TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertTrue(r.stderr.strip(), "a corrupted .gz must report an error on stderr")
 
+    def test_truncated_gz_stream_raises_eoferror_not_oserror_still_fails_loudly(self):
+        # #410 review F3 (MAJOR, live-triggered): a `.jsonl.gz` with a
+        # VALID header but an INCOMPLETE compressed body raises EOFError
+        # from inside gzip's own decompressor -- never an OSError -- so
+        # the pre-fix `except OSError` let it escape UNCAUGHT, crashing
+        # the whole invocation with a raw Python traceback instead of
+        # the same controlled "cannot read" stderr message every other
+        # broken-transcript case produces (and, under --full, aborting
+        # the render of every OTHER healthy chained file too). The
+        # bogus-bytes sibling test above only ever reaches
+        # BadGzipFile, which IS an OSError subtype the pre-fix code
+        # already caught fine -- this needs a REAL, valid gzip stream,
+        # truncated mid-body, to reach the actual gap.
+        import gzip
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        d = self.projects_dir / enc
+        d.mkdir(parents=True)
+        real = gzip.compress(
+            ("\n".join(json.dumps(self._user("line %d" % i)) for i in range(200)) + "\n")
+            .encode("utf-8"))
+        truncated = d / "broken.jsonl.gz"
+        truncated.write_bytes(real[: len(real) // 2])
+        r = self._run("--transcript", str(truncated))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertTrue(r.stderr.strip(), "a truncated .gz must report an error on stderr")
+        self.assertNotIn("Traceback", r.stderr,
+                         "must be a CONTROLLED failure, never an uncaught-exception crash")
+
 
 class TestDiscordAutopilotNotify(TestCase):
     """`airuleset.py notify` — the single Discord send path: tmux-owner @mention,

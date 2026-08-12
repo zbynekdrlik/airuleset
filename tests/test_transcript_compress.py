@@ -118,6 +118,24 @@ class TestDiscoverOldTranscriptCandidates(unittest.TestCase):
             projects_dir=self.pdir, now=NOW, min_age_days=30, min_size_bytes=100)
         self.assertEqual(found, [])
 
+    def test_mtime_tie_for_newest_protects_both_not_just_the_first_sorted(self):
+        # #410 review F5: the exclusion used to compare by OBJECT
+        # IDENTITY (`p == newest_path`) after sorting -- a genuine mtime
+        # TIE for newest (two files last written in the same wall-clock
+        # second, nothing newer in the dir) only protected the ONE row
+        # `sort()` happened to place first, contradicting this
+        # function's own docstring ("the NEWEST... is NEVER a
+        # candidate" -- a tie means BOTH are equally "the newest").
+        # Comparing by mtime VALUE excludes every row tied for newest.
+        d = self._proj()
+        _mkfile(d / "tie-a.jsonl", age_days=40)
+        _mkfile(d / "tie-b.jsonl", age_days=40)   # identical age -> identical mtime
+        found = airuleset.discover_old_transcript_candidates(
+            projects_dir=self.pdir, now=NOW, min_age_days=30, min_size_bytes=100)
+        genuine = {Path(r["path"]).name for r in found if r["reason"] is None}
+        self.assertEqual(genuine, set(),
+                         "a genuine mtime tie for newest must protect BOTH files")
+
     def test_second_newest_in_a_three_file_dir_is_still_protected_by_recency_only(self):
         d = self._proj()
         _mkfile(d / "oldest.jsonl", age_days=100)
@@ -252,7 +270,12 @@ class TestCompressTranscriptFile(unittest.TestCase):
     def test_no_tmp_file_left_behind_on_success(self):
         p = _mkfile(self.root / "s1.jsonl", age_days=40)
         airuleset._compress_transcript_file(p, now=NOW)
-        self.assertFalse((self.root / "s1.jsonl.gz.tmp").exists())
+        # #410 review F1: the tmp name is now UNIQUE (tempfile.mkstemp,
+        # not the literal "<name>.gz.tmp") -- glob for the whole family
+        # rather than one hardcoded literal name, which the fix means
+        # never existed to begin with (a vacuous pass otherwise).
+        self.assertEqual(list(self.root.glob("*.gz.tmp")), [],
+                         "no tmp file of any name should survive a successful compress")
 
     def test_original_mtime_is_preserved_on_the_compressed_file(self):
         old_mtime = NOW - 40 * DAY
@@ -301,13 +324,62 @@ class TestCompressTranscriptFile(unittest.TestCase):
         self.assertTrue(p.exists(), "the original must be left untouched on a detected race")
         self.assertEqual(p.read_bytes(), content)
         self.assertFalse((self.root / "s1.jsonl.gz").exists())
-        self.assertFalse((self.root / "s1.jsonl.gz.tmp").exists())
+        self.assertEqual(list(self.root.glob("*.gz.tmp")), [])
 
     def test_source_disappearing_before_compress_is_refused_not_a_crash(self):
         p = self.root / "gone.jsonl"
         result = airuleset._compress_transcript_file(p, now=NOW)
         self.assertFalse(result["removed"])
         self.assertIsNotNone(result["reason"])
+
+    def test_hash_mismatch_between_write_and_verify_is_caught_and_refused(self):
+        """#410 review F6: mutation-tested `verify_hash != orig_hash` had
+        ZERO test coverage -- flipping the comparison to `==` (a no-op
+        "verify") survived the whole suite unnoticed. A REAL corrupted
+        byte in the tmp file is the WRONG fault to inject here: gzip's
+        own internal CRC32 validation (`gzip.py`'s `read()`) catches
+        almost any real corruption FIRST and raises before the hash
+        comparison is even reached, which means such a test cannot
+        actually isolate the comparison logic itself from the F3/F4
+        exception-widening fix immediately above it. Instead this
+        patches `gzip.open` (the verify pass's ONLY caller of it in
+        this function) to return VALID, cleanly-readable but DIFFERENT
+        bytes than what was actually compressed -- no exception raised
+        anywhere, so the ONLY thing that can catch it is the hash
+        comparison itself."""
+        content = _transcript_bytes(80)
+        p = _mkfile(self.root / "s1.jsonl", age_days=40, content=content)
+        wrong_bytes = bytearray(content)
+        wrong_bytes[-1] ^= 0xFF
+
+        class _FakeDecompressedRead:
+            def __init__(self, data):
+                self._data = data
+                self._pos = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n):
+                chunk = self._data[self._pos:self._pos + n]
+                self._pos += len(chunk)
+                return chunk
+
+        def _fake_gzip_open(path, mode):
+            return _FakeDecompressedRead(bytes(wrong_bytes))
+
+        with m.patch("airuleset.gzip.open", side_effect=_fake_gzip_open):
+            result = airuleset._compress_transcript_file(p, now=NOW)
+
+        self.assertFalse(result["removed"])
+        self.assertIn("hash mismatch", result["reason"])
+        self.assertTrue(p.exists(), "a caught mismatch must leave the original untouched")
+        self.assertEqual(p.read_bytes(), content)
+        self.assertFalse((self.root / "s1.jsonl.gz").exists())
+        self.assertEqual(list(self.root.glob("*.gz.tmp")), [])
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +467,43 @@ class TestSweepOldTranscripts(unittest.TestCase):
         self.assertEqual((d / "old.jsonl.gz").stat().st_mtime, gz_mtime_before,
                          "an already-compressed file must not be touched again")
 
+    def test_one_candidates_unexpected_exception_does_not_abort_the_whole_sweep(self):
+        """#410 review F4: an UNEXPECTED exception escaping
+        _compress_transcript_file() for ONE candidate (a per-candidate
+        backstop, defense-in-depth on top of that function's own
+        internal try/except, which already covers every documented
+        failure mode) must never abort the REST of the sweep -- a
+        genuine sibling candidate later in the SAME sweep must still be
+        processed, and the log/cadence state must still be written."""
+        d = self.pdir / "-home-user-proj"
+        _mkfile(d / "bad.jsonl", age_days=40)
+        _mkfile(d / "good.jsonl", age_days=41)
+        _mkfile(d / "newer.jsonl", age_days=1)   # protects both from being "newest"
+        real_compress = airuleset._compress_transcript_file
+
+        def flaky_compress(path, now=None):
+            if "bad.jsonl" in str(path):
+                raise RuntimeError("boom -- simulated unexpected failure")
+            return real_compress(path, now=now)
+
+        with m.patch.object(airuleset, "_compress_transcript_file", side_effect=flaky_compress):
+            results = airuleset.sweep_old_transcripts(
+                projects_dir=self.pdir, dry_run=False, force=True, now=NOW,
+                min_age_days=30, min_size_bytes=100,
+                log_path=self.log_path, state_path=self.state_path)
+
+        self.assertTrue((d / "good.jsonl.gz").exists(),
+                        "the sibling candidate must still be compressed despite the earlier crash")
+        self.assertFalse((d / "bad.jsonl.gz").exists())
+        self.assertTrue((d / "bad.jsonl").exists(),
+                        "the failing candidate's own original must stay untouched")
+        bad_rows = [r for r in results if str(r.get("path", "")).endswith("bad.jsonl")]
+        self.assertEqual(len(bad_rows), 1)
+        self.assertFalse(bad_rows[0]["removed"])
+        self.assertIn("unexpected error", bad_rows[0]["reason"])
+        self.assertTrue(self.log_path.exists())
+        self.assertTrue(self.state_path.exists())
+
     def test_cadence_gate_skips_without_force(self):
         import json as _json
         d = self._setup()
@@ -466,37 +575,49 @@ class TestSweepTranscriptsCLICommand(unittest.TestCase):
 
 class TestCmdInstallTranscriptWiring(unittest.TestCase):
     """`cmd_install` is large and touches real system state -- rather than
-    running it wholesale, this asserts the ONE load-bearing invariant
-    directly against its source: the transcript-sweep call it makes is
-    gated on AIRULESET_TRANSCRIPT_COMPRESS_LIVE, defaulting to
-    dry_run=True. A full cmd_install() integration run is out of scope for
-    a unit test (it touches CLAUDE.md, skills, hooks, plugins, ...)."""
+    running it wholesale, this drives the ACTUAL wiring function it calls
+    (`_run_transcript_compress_step`, #410 review F2) with `sweep_fn`
+    mocked, so the assertion is about the REAL call cmd_install() makes,
+    not a copy of the same two lines re-implemented inside the test
+    itself (the pre-fix version's own tautology -- it could never fail
+    regardless of what cmd_install() actually does)."""
 
     def test_install_wiring_calls_dry_run_true_when_env_unset(self):
         import inspect
         src = inspect.getsource(airuleset.cmd_install)
-        self.assertIn("AIRULESET_TRANSCRIPT_COMPRESS_LIVE", src,
-                      "cmd_install must gate transcript compression on this env var")
-        self.assertIn("sweep_old_transcripts", src)
+        self.assertIn("_run_transcript_compress_step", src,
+                      "cmd_install must call the extracted, testable wiring step")
 
     def test_env_var_flip_actually_changes_the_dry_run_argument(self):
-        """A behavioural proof, not just a source-text grep: with the env
-        var UNSET, sweep_old_transcripts() must be called with
-        dry_run=True; with it set to "1", dry_run=False."""
-        with m.patch.object(airuleset, "sweep_old_transcripts", return_value=[]) as fake:
-            with m.patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("AIRULESET_TRANSCRIPT_COMPRESS_LIVE", None)
-                live_compress = os.environ.get("AIRULESET_TRANSCRIPT_COMPRESS_LIVE") == "1"
-                airuleset.sweep_old_transcripts(dry_run=not live_compress)
+        """A behavioural proof against the REAL wiring function
+        (`_run_transcript_compress_step`, which is exactly what
+        `cmd_install()`'s own step 12 calls) -- with the env var UNSET,
+        the sweep must be called with dry_run=True; with it set to "1",
+        dry_run=False. A mutant that hardcodes `dry_run=False` in
+        `_run_transcript_compress_step()` fails THIS test (unlike the
+        pre-fix self-referential version)."""
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_TRANSCRIPT_COMPRESS_LIVE", None)
+            fake = m.Mock(return_value=[])
+            airuleset._run_transcript_compress_step(sweep_fn=fake)
             self.assertTrue(fake.call_args.kwargs.get("dry_run"),
                             "env var unset -> dry_run=True")
 
-        with m.patch.object(airuleset, "sweep_old_transcripts", return_value=[]) as fake:
-            with m.patch.dict(os.environ, {"AIRULESET_TRANSCRIPT_COMPRESS_LIVE": "1"}):
-                live_compress = os.environ.get("AIRULESET_TRANSCRIPT_COMPRESS_LIVE") == "1"
-                airuleset.sweep_old_transcripts(dry_run=not live_compress)
+        with m.patch.dict(os.environ, {"AIRULESET_TRANSCRIPT_COMPRESS_LIVE": "1"}):
+            fake = m.Mock(return_value=[])
+            airuleset._run_transcript_compress_step(sweep_fn=fake)
             self.assertFalse(fake.call_args.kwargs.get("dry_run"),
                              "env var set to '1' -> dry_run=False")
+
+    def test_default_sweep_fn_is_the_real_sweep_old_transcripts(self):
+        """Without an injected sweep_fn, the step must call the REAL
+        production sweep -- not silently no-op."""
+        with m.patch.object(airuleset, "sweep_old_transcripts", return_value=[]) as fake:
+            with m.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("AIRULESET_TRANSCRIPT_COMPRESS_LIVE", None)
+                airuleset._run_transcript_compress_step()
+            fake.assert_called_once()
+            self.assertTrue(fake.call_args.kwargs.get("dry_run"))
 
 
 class TestSubcommandRegistration(unittest.TestCase):
