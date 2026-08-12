@@ -600,6 +600,21 @@ class OneShotStatusPollBlockTest(unittest.TestCase):
         out = self.run_hook(self.oneshot(RUN_A, json_val="status,conclusion"))
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
+    def test_status_conclusion_jobs_still_counts_as_a_status_poll(self):
+        # #405 made `status,conclusion,jobs` the CANONICAL one-shot field
+        # list (ci-monitoring.md's own snippets, and this hook's own printed
+        # "compliant" templates) — a repeated one-shot in that exact shape is
+        # still just the same "re-send the whole context for one status
+        # line" burn #210 exists to throttle; the extra `,jobs` field must
+        # not exempt it from the count the way a genuine `--json jobs`-only
+        # debugging read (test_json_jobs_field_reads_are_never_counted,
+        # below) correctly stays exempt.
+        self.run_hook(self.oneshot(RUN_A, json_val="status,conclusion,jobs"))
+        self.run_hook(self.oneshot(RUN_A, json_val="status,conclusion,jobs"))
+        out = self.run_hook(self.oneshot(RUN_A, json_val="status,conclusion,jobs"))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#210", out.stderr)
+
     # ---- state keying, mirrors the loop mechanism -------------------------
     def test_a_second_run_id_gets_its_own_free_first_two(self):
         for _ in range(3):
