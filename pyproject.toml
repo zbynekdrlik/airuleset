@@ -7,3 +7,13 @@ license = "MIT"
 
 [project.scripts]
 airuleset = "airuleset:main"
+
+[tool.ruff.lint]
+# #429: ruff's built-in default rule selection drifts across ruff versions (a
+# box-level 0.16.x upgrade widened it to UP/PL/BLE/SIM/I/RUF/... and turned a
+# clean tree into ~3000 "errors" with zero code change, blocking cmd_push's
+# fail-closed gate). Pin the selection this repo was always held to — ruff's
+# long-standing documented default — so the gate's meaning is repo-controlled,
+# never tool-version-controlled. Widening this list is a deliberate decision
+# with its own cleanup commit, never a side effect of a tool upgrade.
+select = ["E4", "E7", "E9", "F"]
