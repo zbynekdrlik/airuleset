@@ -12774,10 +12774,24 @@ def _goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                                tmtime, loc, send_fn, dry_run, handled,
                                projects_dir, backlog_fetch=None, state=None):
     """The lane-occupancy branch of job 20 (#365) — see the section comment
-    above. Mutates `rec` (the caller persists it); returns log lines.
-    Best-effort: `backlog_fetch`/`state` both required (mirrors every other
-    "wired = on" optional network call in this file) — either missing means
-    this branch is a pure no-op, unchanged from before this ticket.
+    above. Mutates `rec` (the caller persists it); returns `(logs, owns)`.
+
+    `owns` is the caller's own explicit signal for whether THIS shape's
+    diagnosis ("0 live dispatched workers AND a measured open backlog")
+    genuinely applies to this sweep — True from the moment `live_workers`
+    and `backlog_n` are both known and NEITHER escape ("occupied" / "no
+    measurable backlog") fired, regardless of what happens next (nudge,
+    rate-limited, gave up — even a REPEAT give-up sweep with nothing new
+    to log). Round-1 adversarial review (#365, finding M2): the caller
+    used to INFER ownership from whether this function appended any log
+    line at all, which silently flipped to "not owned" on every SECOND-
+    and-later give-up sweep (the give-up branch only logs ONCE, on its own
+    dedup) — letting the sibling `_goal_stall_nudge`, which has neither
+    this shape's subagent-transcript liveness check nor its recent-human-
+    activity gate, resume typing "continue" into a session already
+    correctly diagnosed and escalated on. `owns` is now the SAME explicit
+    boolean on every return path, so the caller never re-derives it from
+    prose.
 
     Self-verification (#365 point 4, the owner's own explicit ask): every
     time this function reaches the point of KNOWING all three counts (live
@@ -12793,18 +12807,41 @@ def _goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     `core-quals`/`slice-quals` count every other backlog-aware job in this
     file already trusts.
 
-    A genuine unanswered `❓ NEEDS YOU` or a `⏳ WORKING` marker is never
-    overridden here (job 4 and the question-timeout branch own those
-    respectively) — this function's own marker gate mirrors
-    `_goal_stall_nudge`'s exactly, deliberately, so the two stay consistent
-    about what "the loop looks idle" means.
+    The marker gate (round-1 finding C1): an unanswered `❓ NEEDS YOU` is
+    NEVER overridden — the loop's own valid stop condition, unconditional.
+    A `⏳ WORKING` marker is the EXACT reported incident (a legitimate
+    `message-status-marker.md` marker while a `run_in_background: true`
+    Bash CI-wait is in flight, job 4's own stall detection already defers
+    while the pane's live-shell badge shows) — before this fix, this
+    shape ALSO refused unconditionally on `⏳`, so the exact incident
+    produced NO mechanical signal from EITHER shape. `⏳` is now admitted
+    into this shape's own diagnosis whenever the pane's live background-
+    waiter badge shows at least one task; a BARE `⏳` (zero waiters) stays
+    job 4's own territory, unchanged, and a genuine dispatched AGENT
+    (`_pane_has_bg_agent`) still refuses this shape outright regardless of
+    the waiter badge — a waiter-only pane is not the same as an occupied
+    one.
+
+    Cost ordering (round-1 finding M3): the cheap local checks — marker,
+    background-agent/compacting/handled, the waiter badge, and whether the
+    pane is even AT REST (`_classify_boundary`/`pane_at_idle_prompt`
+    against the sweep's own STALE `captured` snapshot) — all run BEFORE
+    the one genuinely expensive step, `_cached_backlog_count` (a cached
+    but still real `gh`-backed subprocess call): a pane already known to
+    be undeliverable (busy, holding a draft) must never pay for it. And
+    because that fetch is a blocking call sitting between the stale
+    `captured` snapshot and the keystroke send, the pane can genuinely
+    change state WHILE it runs (the #271/#392 race class) — so, exactly
+    like `_goal_template_drift`'s own established re-capture-right-
+    before-send pattern (#176-F3), this function takes a SECOND, FRESH
+    capture immediately before typing and re-verifies the pane is still
+    at rest against THAT, never the stale one, refusing with no
+    keystrokes sent if the pane moved.
 
     An EXTRA, defence-in-depth gate this shape carries that its sibling
     `_goal_stall_nudge` does not: `_goal_autoarm_recent_human_activity`
     (#392/#393) immediately before any keystroke, so a nudge can never land
-    on a pane the user started typing into moments ago — applied even
-    though `_goal_stall_nudge`'s own 15-minute idle gate already makes the
-    same race very unlikely by construction.
+    on a pane the user started typing into moments ago.
 
     Delivery uses `send_continue` — the SAME simple, established primitive
     `_goal_stall_nudge`/`_goal_question_park_nudge` (this exact job's own
@@ -12813,48 +12850,74 @@ def _goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     payload. "Did the nudge land" is verified the SAME way the sibling
     shapes already do it — the transcript idle counter resets on the next
     sweep once real progress resumes, this job's own established
-    "delivery confirmed" signal, never a bespoke new one."""
+    "delivery confirmed" signal, never a bespoke new one.
+
+    The give-up escalation ping (round-1 finding m3) is only marked SENT
+    (`rec["lpinged"] = True`) inside the real-send branch (`send_fn is not
+    None and not dry_run`) — mirroring `_goal_dark_died_by_outage`'s OWN
+    already-fixed shape, never `_goal_stall_nudge`'s own `spinged` (which
+    still has this exact bug and is left unfixed under FREEZE unless it
+    independently misbehaves): a `--dry-run` diagnostic sweep that reaches
+    give-up must never silently consume the one real escalation ping."""
     logs = []
     if backlog_fetch is None or state is None:
-        return logs
+        return logs, False
     try:
         import airuleset
         authority = airuleset.resolve_authority(cwd)
     except Exception:
         authority = None
     if authority != "full":
-        return logs
+        return logs, False
     idle = now - (tmtime or now)
     if idle < GOAL_LANE_IDLE_S:
         if rec.get("ln"):
             rec.update({"ln": 0, "lpinged": False})
-        return logs
+        return logs, False
     marker = transcript_last_marker(tpath)
-    if marker in ("⏳", "❓"):
-        return logs
+    if marker == "❓":
+        return logs, False
     if _pane_has_bg_agent(captured) or pane_waiting_on_user(captured):
-        return logs
+        return logs, False
     if _pane_compacting(captured):
-        return logs
+        return logs, False
     if handled is not None and sid in handled:
-        return logs
-    live_workers = _count_live_subagents(tpath, now, GOAL_LANE_LIVE_WINDOW_S)
+        return logs, False
     waiters = _pane_live_task_count(captured)
+    if marker == "⏳" and waiters <= 0:
+        return logs, False
+
+    def _boundary_ok(cap):
+        kind, draft = _classify_boundary(cap)
+        if kind != "input" or draft:
+            return False, kind, draft
+        return pane_at_idle_prompt(cap), kind, draft
+
+    ok, kind, draft = _boundary_ok(captured)
+    if not ok:
+        if kind != "input" or draft:
+            logs.append("skip %s (lane-occupancy) %s"
+                        % (draft and "draft" or kind, loc))
+        return logs, False
+    live_workers = _count_live_subagents(tpath, now, GOAL_LANE_LIVE_WINDOW_S)
     if live_workers > 0:
         logs.append("lane-occupancy %s workers=%d waiters=%d -> occupied, "
                     "skip" % (loc, live_workers, waiters))
-        return logs
+        return logs, False
     backlog_n = _cached_backlog_count(cwd, backlog_fetch, state, now)
     if not isinstance(backlog_n, int) or backlog_n <= 0:
         logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%r -> "
                     "no measurable open backlog, skip"
                     % (loc, waiters, backlog_n))
-        return logs
+        return logs, False
+    # `owns` is True on every return path from here on — the diagnosis
+    # ("0 workers, a measured backlog") genuinely applies to this sweep,
+    # regardless of what happens next (see the docstring's M2 note).
     n = rec.get("ln", 0)
     if n >= GOAL_LANE_MAX_NUDGES:
         if not rec.get("lpinged"):
-            rec["lpinged"] = True
             if send_fn is not None and not dry_run:
+                rec["lpinged"] = True
                 from notify import stream_redirect
                 send_fn("⚠️ **%s** — backlog=%d otvorených, `/goal` armovaný, "
                         "ale %d min nebeží ani jeden worker (waiterov: %d) a "
@@ -12869,32 +12932,31 @@ def _goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                         "idle=%dm -> GAVE UP after %d nudges"
                         % (loc, waiters, backlog_n, idle // 60,
                            GOAL_LANE_MAX_NUDGES))
-        return logs
+        return logs, True
     last = rec.get("llast")
     if last is not None and (now - last) < GOAL_LANE_INTERVAL_S:
         logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%d -> "
                     "rate-limited, skip" % (loc, waiters, backlog_n))
-        return logs
+        return logs, True
     if compact_claim_active(sid, cwd, projects_dir=projects_dir):
-        return logs
-    kind, draft = _classify_boundary(captured)
-    if kind != "input" or draft:
-        logs.append("skip %s (lane-occupancy) %s"
-                    % (draft and "draft" or kind, loc))
-        return logs
-    if not pane_at_idle_prompt(captured):
-        return logs
+        return logs, True
     recent, reason = _goal_autoarm_recent_human_activity(sid, tpath, now)
     if recent:
         logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> %s -- recent "
                     "human activity, never overwrite a live conversation"
                     % (loc, reason))
-        return logs
+        return logs, True
     if dry_run:
         logs.append("READY (lane-occupancy) %s workers=0 waiters=%d "
                     "backlog=%d idle=%dm" % (loc, waiters, backlog_n,
                                              idle // 60))
-        return logs
+        return logs, True
+    fresh = capture_pane(pid, run, lines=40)
+    ok, kind, draft = _boundary_ok(fresh)
+    if not ok:
+        logs.append("skip raced (lane-occupancy) %s -> pane moved since "
+                    "the sweep" % loc)
+        return logs, True
     text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
     send_continue(pid, text, run)
     rec["ln"] = n + 1
@@ -12902,9 +12964,7 @@ def _goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     logs.append("lane-occupancy nudge %s workers=0 waiters=%d backlog=%d "
                 "idle=%dm (%d/%d)" % (loc, waiters, backlog_n, idle // 60,
                                       n + 1, GOAL_LANE_MAX_NUDGES))
-    return logs
-
-
+    return logs, True
 def _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured, tpath, tmtime,
                       loc, send_fn, dry_run, handled, projects_dir):
     """The ARMED-but-silent branch of job 20 — see the `GOAL_STALL_*` section
@@ -13907,32 +13967,34 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
             # the other from ALSO typing into the same stale `captured` —
             # see `_goal_lane_occupancy_nudge`'s own section comment)
             #
-            # `lane_owns_sweep` is true whenever the lane-occupancy shape
+            # `lane_owns_sweep` is the SECOND tuple element
+            # `_goal_lane_occupancy_nudge` itself returns (round-1 review
+            # finding M2 — an earlier version INFERRED it from whether any
+            # log line was appended, which silently went wrong on a REPEAT
+            # give-up sweep). It is true whenever the lane-occupancy shape
             # got far enough to conclude "0 workers AND a measured open
             # backlog" applies to THIS session — regardless of what it did
-            # next (nudged, rate-limited, gave up, or refused on recent
-            # human activity). Every one of those outcomes must suppress
+            # next (nudged, rate-limited, gave up — even a repeat give-up
+            # with nothing new to log — or refused on recent human
+            # activity). Every one of those outcomes must suppress
             # `_goal_stall_nudge` too: it has NO subagent-transcript
             # liveness check and NO recent-human-activity gate of its own,
             # so letting it fall through on a "rate-limited"/"recent human
-            # activity" outcome would either double-nudge the same stall
-            # or — worse — type blindly into a pane a human just used,
-            # exactly the hazard the extra defence-in-depth gate exists to
-            # prevent. Only "occupied" (a live worker exists) and "no
+            # activity"/"already gave up" outcome would either double-nudge
+            # the same stall or — worse — resume typing "continue" into a
+            # pane a human just used, or into one this shape already
+            # escalated on. Only "occupied" (a live worker exists) and "no
             # measurable open backlog" genuinely mean lane-occupancy does
-            # NOT apply here, so those two — and an EMPTY log (not wired,
-            # reduced authority, or a precondition `_goal_stall_nudge`
-            # independently re-checks anyway: marker/bg-agent/compacting/
-            # handled/idle-threshold) — are the only cases that fall
-            # through.
-            lane_logs = _goal_lane_occupancy_nudge(
+            # NOT apply here, so those two — and a precondition
+            # `_goal_stall_nudge` independently re-checks anyway (not
+            # wired, reduced authority, marker/bg-agent/compacting/
+            # handled/idle-threshold/not-at-rest) — are the only cases
+            # `owns` comes back False for.
+            lane_logs, lane_owns_sweep = _goal_lane_occupancy_nudge(
                 now, run, rec, sid, cwd, pid, captured, tpath, tmtime, loc,
                 send_fn, dry_run, handled, projects_dir,
                 backlog_fetch=backlog_fetch, state=state)
             logs += lane_logs
-            lane_owns_sweep = bool(lane_logs) and not any(
-                "-> occupied" in ln or "no measurable open backlog" in ln
-                for ln in lane_logs)
             # ARMED for real — but is the loop actually FIRING? (the second
             # shape, and the one the forensics points at)
             if not lane_owns_sweep:
