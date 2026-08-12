@@ -38,6 +38,7 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import airuleset
 import watchdog as wd
 
 CWD = "/home/x/devel/demo"
@@ -5453,6 +5454,202 @@ class TestJanitorNeverCrashesOnAnUnreadableBox(GoalJanitorBase):
         # did not abort the whole sweep.
         self.assertTrue(any("%2" in str(a) for a in tmux.sent),
                         "pane %%2 must still be swept: %r" % tmux.sent)
+
+
+# --------------------------------------------------------------------------- #
+# #365 (owner directive 2026-08-11, "ak to nevies prirodzene zabezpecit, das
+# ulohu airulesetu nech sa postara o watcher") -- job 20's FIFTH shape.
+#
+# `_goal_stall_nudge` (above) already covers "the loop looks armed but the
+# transcript has gone completely silent" -- but its generic `continue` names
+# nothing and carries no diagnosis. The incident this ticket was filed from
+# was NOT a dead loop: a background CI-wait ran all night while a non-empty
+# backlog sat untouched and zero OTHER lanes were ever dispatched ("cela noc
+# kriticka cesta = cakanie na CI a implementacne lany stali" -- the owner's
+# own words). This shape adds the missing, ACTIONABLE diagnosis: genuinely 0
+# live dispatched workers + a MEASURED open backlog + genuinely at rest ->
+# a nudge that NAMES the backlog count and instructs refilling the lanes,
+# distinguishable from the generic stall text and gated SEPARATELY (its own
+# bounded nudge count, escalation ping, and dedicated log tag).
+#
+# Scoped to full-authority (gatekeeper) sessions only, per the ticket's own
+# text -- a reduced-authority stream falls through to the pre-existing
+# generic stall nudge unchanged.
+# --------------------------------------------------------------------------- #
+
+def subagent_transcript(tmp_root, cwd, sid, worker_id, age_s, now):
+    """Write a DISPATCHED-WORKER subagent transcript `age_s` seconds old
+    under this session's own `subagents/` dir -- the on-disk ground truth
+    `_count_live_subagents` reads (mirrors `subagent_active`'s own
+    convention, confirmed live at `<session-dir>/<session-id>/subagents/
+    **/*.jsonl`)."""
+    d = Path(tmp_root) / wd.encode_project_dir(cwd) / sid / "subagents"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (worker_id + ".jsonl")
+    p.write_text(json.dumps({"type": "assistant"}) + "\n")
+    mt = now - age_s
+    os.utime(p, (mt, mt))
+    return p
+
+
+class TestGoalLaneOccupancyNudge(GoalRearmBase):
+    IDLE = 40 * 60
+
+    def _sweep(self, marker="✅ DONE: ticket #12 hotový", idle=None,
+              captured=PANE_LIT, state=None, now=None, extra=None,
+              backlog_fetch=None, authority="full"):
+        now = now or time.time()
+        entries = [marker_entry("set", PAYLOAD),
+                  {"type": "assistant", "timestamp": "2026-07-26T15:00:00.000Z",
+                   "message": {"content": "Hotovo.\n\n" + marker}}]
+        p = self._write(entries + (extra or []))
+        self._wrote = True
+        mt = now - (self.IDLE if idle is None else idle)
+        os.utime(p, (mt, mt))
+        tmux = FakeTmux(captured)
+        with m.patch.object(airuleset, "resolve_authority",
+                            return_value=authority):
+            logs = wd.goal_rearm(now, tmux, state if state is not None else {},
+                                 send_fn=self._send, projects_dir=self.tmp.name,
+                                 sleep_fn=lambda s: None,
+                                 backlog_fetch=backlog_fetch)
+        return tmux, logs
+
+    def test_zero_workers_plus_open_backlog_gets_the_lane_nudge(self):
+        tmux, logs = self._sweep(backlog_fetch=lambda cwd: 4)
+        typed = tmux.typed()
+        self.assertTrue(typed, tmux.sent)
+        self.assertIn("lane-check", typed[0])
+        self.assertIn("4", typed[0])
+        self.assertTrue(any(ln.startswith("lane-occupancy nudge")
+                            for ln in logs), logs)
+
+    def test_generic_stall_nudge_is_suppressed_same_sweep(self):
+        # the acute hazard the design comment names: two shapes sharing the
+        # identical armed+idle+marker precondition must never BOTH type
+        # into the same stale `captured` in one sweep.
+        tmux, _logs = self._sweep(backlog_fetch=lambda cwd: 4)
+        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed())
+        self.assertEqual(len(tmux.typed()), 1, tmux.typed())
+
+    def test_empty_backlog_falls_back_to_the_generic_stall_nudge(self):
+        tmux, logs = self._sweep(backlog_fetch=lambda cwd: 0)
+        self.assertIn(wd.GOAL_STALL_TEXT, tmux.typed())
+        self.assertFalse(any(ln.startswith("lane-occupancy nudge")
+                             for ln in logs), logs)
+
+    def test_unmeasurable_backlog_never_guesses_and_falls_back(self):
+        def _boom(cwd):
+            raise OSError("no gh")
+        tmux, logs = self._sweep(backlog_fetch=_boom)
+        self.assertIn(wd.GOAL_STALL_TEXT, tmux.typed())
+        self.assertFalse(any(ln.startswith("lane-occupancy nudge")
+                             for ln in logs), logs)
+
+    def test_unwired_backlog_fetch_is_a_pure_noop(self):
+        tmux, logs = self._sweep(backlog_fetch=None)
+        self.assertIn(wd.GOAL_STALL_TEXT, tmux.typed())
+        self.assertFalse(any("lane-occupancy" in ln for ln in logs), logs)
+
+    def test_a_live_dispatched_worker_means_lanes_are_occupied(self):
+        state, now = {}, time.time()
+        subagent_transcript(self.tmp.name, CWD, SID, "worker1", 30, now)
+        tmux, logs = self._sweep(backlog_fetch=lambda cwd: 4, state=state,
+                                 now=now)
+        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed())
+        self.assertFalse(any(ln.startswith("lane-occupancy nudge")
+                             for ln in logs), logs)
+        self.assertTrue(any("occupied" in ln for ln in logs), logs)
+
+    def test_a_stale_worker_transcript_does_not_count_as_live(self):
+        state, now = {}, time.time()
+        subagent_transcript(self.tmp.name, CWD, SID, "worker1",
+                            wd.GOAL_LANE_LIVE_WINDOW_S + 60, now)
+        tmux, logs = self._sweep(backlog_fetch=lambda cwd: 4, state=state,
+                                 now=now)
+        self.assertTrue(any(ln.startswith("lane-occupancy nudge")
+                            for ln in logs), logs)
+
+    def test_reduced_authority_stream_is_never_lane_nudged(self):
+        tmux, logs = self._sweep(backlog_fetch=lambda cwd: 4,
+                                 authority="fork-no-merge")
+        self.assertFalse(any("lane-occupancy" in ln for ln in logs), logs)
+        self.assertIn(wd.GOAL_STALL_TEXT, tmux.typed())
+
+    def test_working_marker_belongs_to_job4_not_this_shape(self):
+        tmux, logs = self._sweep(marker="⏳ WORKING: worker beží",
+                                 backlog_fetch=lambda cwd: 4)
+        self.assertFalse(any(ln.startswith("lane-occupancy nudge")
+                             for ln in logs), logs)
+
+    def test_question_marker_is_never_nudged_past(self):
+        tmux, logs = self._sweep(marker="❓ NEEDS YOU: schváliš to?",
+                                 backlog_fetch=lambda cwd: 4)
+        self.assertFalse(any(ln.startswith("lane-occupancy nudge")
+                             for ln in logs), logs)
+
+    def test_fresh_transcript_is_not_a_stall(self):
+        tmux, logs = self._sweep(idle=60, backlog_fetch=lambda cwd: 4)
+        self.assertFalse(any(ln.startswith("lane-occupancy nudge")
+                             for ln in logs), logs)
+
+    def test_busy_pane_is_never_nudged(self):
+        busy = CONV + FOOTER_LIT.replace("❯ \n",
+                                         "✳ Baking… (esc to interrupt)\n")
+        tmux, logs = self._sweep(captured=busy, backlog_fetch=lambda cwd: 4)
+        self.assertFalse(tmux.typed())
+
+    def test_draft_is_never_typed_over(self):
+        draft = CONV + FOOTER_LIT.replace("❯ \n", "❯ rozpisany draft\n")
+        tmux, logs = self._sweep(captured=draft, backlog_fetch=lambda cwd: 4)
+        self.assertFalse(tmux.typed())
+
+    def test_unarmed_session_is_not_this_branch(self):
+        tmux, logs = self._sweep(captured=PANE_DARK,
+                                 backlog_fetch=lambda cwd: 4)
+        self.assertFalse(any(ln.startswith("lane-occupancy nudge")
+                             for ln in logs), logs)
+
+    def test_waiter_count_is_reported_in_the_nudge(self):
+        pane = PANE_LIT.replace(
+            "⏵⏵ bypass permissions on (shift+tab to cycle)",
+            "⏵⏵ bypass permissions on · 2 shells")
+        tmux, logs = self._sweep(captured=pane, backlog_fetch=lambda cwd: 4)
+        typed = tmux.typed()
+        self.assertTrue(typed, tmux.sent)
+        self.assertIn("waiterov: 2", typed[0])
+        self.assertTrue(any("waiters=2" in ln for ln in logs), logs)
+
+    def test_nudge_is_spaced_not_every_sweep(self):
+        state, now = {}, time.time()
+        t1, _ = self._sweep(state=state, now=now, backlog_fetch=lambda cwd: 4)
+        self.assertIn("lane-check", " ".join(t1.typed()))
+        t2, _ = self._sweep(state=state, now=now + 90, backlog_fetch=lambda cwd: 4)
+        self.assertFalse(t2.typed())
+
+    def test_bounded_then_one_escalation_ping(self):
+        state, now = {}, time.time()
+        for i in range(wd.GOAL_LANE_MAX_NUDGES):
+            t, _ = self._sweep(state=state, backlog_fetch=lambda cwd: 4,
+                               now=now + i * (wd.GOAL_LANE_INTERVAL_S + 30))
+            self.assertIn("lane-check", " ".join(t.typed()), "nudge %d" % i)
+        late = now + wd.GOAL_LANE_MAX_NUDGES * (wd.GOAL_LANE_INTERVAL_S + 30)
+        t, logs = self._sweep(state=state, backlog_fetch=lambda cwd: 4,
+                              now=late)
+        self.assertFalse(t.typed())
+        self.assertEqual(len(self.pings), 1, self.pings)
+        self.assertTrue(any("GAVE UP" in ln.upper() for ln in logs), logs)
+        t2, _ = self._sweep(state=state, backlog_fetch=lambda cwd: 4,
+                            now=late + wd.GOAL_LANE_INTERVAL_S + 30)
+        self.assertEqual(len(self.pings), 1, "one ping per stall, not per sweep")
+
+    def test_recent_human_activity_refuses_the_nudge(self):
+        now = time.time()
+        tmux, logs = self._sweep(now=now, backlog_fetch=lambda cwd: 4,
+                                 extra=[human_entry(now - 120)])
+        self.assertFalse(tmux.typed(), tmux.sent)
+        self.assertTrue(any("SKIP-TRANSIENT" in ln and "lane-occupancy" in ln
+                            for ln in logs), logs)
 
 
 if __name__ == "__main__":
