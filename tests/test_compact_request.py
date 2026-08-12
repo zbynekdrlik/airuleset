@@ -3036,9 +3036,22 @@ class TestCompactRequestExpiry(unittest.TestCase):
                                           path=path)
         self.assertFalse(any("expired" in ln for ln in logs), logs)
         # #122 negative control — a fresh (never-expired) request must NOT
-        # produce a LAPSE record; the sync log stays untouched by this run.
+        # produce a LAPSE record.
+        #
+        # #400 FIX 6 (inverted from the pre-FIX-6 assertion that the sync
+        # log stayed untouched by a real delivery) — job 14's own send
+        # paths now ALSO write to compact-sync.log (they used to be
+        # completely silent to it, the exact gap that made a live
+        # gatekeeper /compact-fired-mid-work incident undebuggable). A
+        # genuine delivery — CB_IDLE_CAP has no live-tasks row, so this
+        # request really is sent — now DOES create the file, with a SEND
+        # line naming this job as the sender.
+        self.assertIn("/compact", tmux.typed_texts(), logs)
         sync_log = wd.compact_sync_log_path()
-        self.assertFalse(Path(sync_log).exists())
+        self.assertTrue(Path(sync_log).exists())
+        log_text = Path(sync_log).read_text()
+        self.assertIn("SEND sid=%s" % self.SID, log_text)
+        self.assertIn("via=job14", log_text)
 
     # ------------------------------------------------------------------- #
     # #122 — "a silent 30-minute lapse with no signal is a defect in its own
@@ -5320,17 +5333,26 @@ class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
         self.assertFalse(any("grace-elapsed" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
-    def test_live_tasks_true_past_grace_delivers_and_marks_grace_elapsed(self):
+    def test_live_tasks_true_past_grace_still_defers_never_sends(self):
+        # #400 FIX 5 (inverted from the pre-fix name/assertion, which
+        # required this to DELIVER once grace elapsed) — a live gatekeeper
+        # incident (2026-08-12) showed exactly this branch firing
+        # `/compact` into a session mid-work with 6+ background agents
+        # still running. Live background tasks are now an UNCONDITIONAL
+        # skip with NO time-based override, at every delivery point: a
+        # missed compact is recoverable, a compact fired mid-work is not
+        # (it drops a sibling worker's own task linkage — #246's own
+        # safety property). `deferred_since`/`COMPACT_DEFER_GRACE_S` are
+        # kept ONLY as an observability tag on the skip line.
         old_ts = 1_000_000.0
         boundary_now = old_ts + wd.COMPACT_DEFER_GRACE_S + 1
         tmux, logs, path = self._go_with_ts(CB_IDLE_WAITING_CAP, old_ts,
                                             boundary_now)
-        self.assertIn("/compact", tmux.typed_texts(), logs)
-        self.assertTrue(any("grace-elapsed" in ln for ln in logs), logs)
-        # the pre-#250 skip line must NOT also appear for the same request
-        self.assertFalse(any("skip live-tasks (compact-request)" in ln
-                             for ln in logs), logs)
-        self.assertEqual(wd.load_compact_requests(path), {})
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(any(
+            "skip live-tasks (compact-request, past-grace)" in ln
+            for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
 
     def test_malformed_ts_stays_in_grace_and_is_kept(self):
         # a legacy/corrupted entry with no readable `ts` at all -- unmeasurable
@@ -5385,38 +5407,53 @@ class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
         self.assertEqual(d_mid[self.SID]["deferred_since"], t0)
 
         # A sweep run PAST the ORIGINAL deferred_since + grace (but well
-        # within grace of the SECOND record's own `ts`) must still deliver
-        # -- an anchor keyed on `ts` would have read "fresh" here and
-        # deferred forever.
+        # within grace of the SECOND record's own `ts`) must still SKIP --
+        # #400 FIX 5 removed the "deliver once grace elapses" escape
+        # entirely (see the sibling grace test above), so this now proves
+        # the anchor-preservation property a different way: the skip
+        # line's own "past-grace" tag can ONLY be correct if `deferred_since`
+        # really did stay `t0` (not reset to `t1`/`t2` by the re-record) --
+        # an anchor keyed on `ts` would still read "within grace" here
+        # (`t2 - t1 == 15`, well under `COMPACT_DEFER_GRACE_S`) and the
+        # log line would say so instead.
         t2 = t0 + wd.COMPACT_DEFER_GRACE_S + 5
         tmux2 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
         logs2 = wd.compact_ticket_boundary(
             t2, tmux2, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
             path=path, projects_dir=proj)
-        self.assertIn("/compact", tmux2.typed_texts(), logs2)
-        self.assertTrue(any("grace-elapsed" in ln for ln in logs2), logs2)
-        self.assertEqual(wd.load_compact_requests(path), {})
+        self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertTrue(any(
+            "skip live-tasks (compact-request, past-grace)" in ln
+            for ln in logs2), logs2)
+        self.assertEqual(
+            wd.load_compact_requests(path)[self.SID]["deferred_since"], t0)
 
-    def test_past_grace_draft_branch_also_marks_grace_elapsed(self):
-        # the stash-delivery branch (a draft-holding pane) gets the same
-        # marker on its own OK line. Live-tasks is checked ONCE, before the
-        # draft branch -- the scripted cap_seq below (the standard
-        # bare -> typed -> submitted stash sequence, #67) is unrelated to
-        # the waiting row and needs none of it.
+    def test_past_grace_draft_branch_also_stays_deferred(self):
+        # #400 FIX 5 (inverted, same reasoning as the idle-branch sibling
+        # test above) -- the DRAFT/stash branch gets the SAME unconditional
+        # live-tasks skip, checked ONCE before the draft branch is ever
+        # reached: a genuinely-live sibling worker must defer this delivery
+        # regardless of how long it has been deferred, and regardless of
+        # whether the pane happens to be holding an unsent draft. No
+        # cap_seq is scripted here on purpose (an empty cap_seq just
+        # returns the SAME static `draft_cap` for every capture-pane
+        # call, per `CompactFakeTmux`'s own docstring) -- if the stash
+        # dance (`_compact_stash_attempt`) were ever reached despite the
+        # live-tasks skip, it would misread the unchanging static
+        # capture as its own bare/typed/submitted sequence; the empty
+        # `tmux.typed_texts()` assertion below is the direct proof it
+        # was never entered.
         old_ts = 1_000_000.0
         boundary_now = old_ts + wd.COMPACT_DEFER_GRACE_S + 1
         draft_cap = ("● Predošlá práca hotová.\n"
                     "✻ Waiting for 1 background agent to finish\n"
                     "❯ nedokončená veta\n")
-        tmux, logs, path = self._go_with_ts(
-            draft_cap, old_ts, boundary_now,
-            cap_seq=[CB_STASH_BARE_CAP, CB_STASH_TYPED_CAP,
-                    CB_STASH_SUBMITTED_CAP])
-        self.assertIn("/compact", tmux.typed_texts(), logs)
-        self.assertTrue(
-            any(ln.startswith("OK (compact-request, stash") and
-               "grace-elapsed" in ln for ln in logs), logs)
-        self.assertEqual(wd.load_compact_requests(path), {})
+        tmux, logs, path = self._go_with_ts(draft_cap, old_ts, boundary_now)
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(any(
+            "skip live-tasks (compact-request, past-grace)" in ln
+            for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
 
 
 class TestCompactDeferGraceRelationship(unittest.TestCase):
@@ -5566,15 +5603,23 @@ class TestDeliverCompactNowLiveTasksDefer(unittest.TestCase):
         self.assertIn("SKIP live-tasks", log_text)
         self.assertNotIn("grace-elapsed", log_text)
 
-    def test_live_tasks_true_past_grace_delivers_with_marker(self):
+    def test_live_tasks_true_past_grace_still_falls_back(self):
+        # #400 FIX 5 (inverted, same reasoning as job 14's own sibling
+        # test) -- this synchronous path also LOSES its "deliver anyway
+        # once past COMPACT_DEFER_GRACE_S" escape. Live background tasks
+        # are now an unconditional SKIP here too, with no time-based
+        # override; the request falls back to job 14's polled retry
+        # exactly like every other "not safe right now" state this
+        # function refuses on.
         old_ts = 1_000_000.0
         now = old_ts + wd.COMPACT_DEFER_GRACE_S + 1
         ok, tmux = self._go_with_ts(CB_IDLE_WAITING_CAP, request_ts=old_ts,
                                     now=now)
-        self.assertEqual(ok, "sent")
-        self.assertIn("/compact", tmux.typed_texts())
+        self.assertFalse(ok)
+        self.assertEqual(tmux.typed_texts(), [])
         log_text = wd.compact_sync_log_path().read_text()
-        self.assertIn("SEND grace-elapsed", log_text)
+        self.assertIn("SKIP live-tasks sid=%s cwd=%s" % (self.SID, self.CWD),
+                      log_text)
 
     def test_no_request_ts_defaults_to_in_grace_even_with_a_far_future_now(self):
         # #250 -- documents the deliberate default: this function runs
@@ -6389,7 +6434,60 @@ class TestCompactMarkerHoldGraceElapsed(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
+    def test_marker_hold_grace_never_overrides_while_live_tasks_exist(self):
+        # #400 FIX 5(b) -- live gatekeeper incident, 2026-08-12: the
+        # marker-hold grace (#394) must NOT deliver a `⏳`-blocked,
+        # proven-boundary request once past COMPACT_MARKER_HOLD_GRACE_S if
+        # the session STILL has live background tasks -- that is not "a
+        # stale marker on an otherwise-idle session", it is genuinely
+        # still mid-work. CB_IDLE_WAITING_CAP carries the same
+        # "Waiting for N background agents" row `_session_has_live_bg_
+        # tasks` signal (a) reads.
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
+                                  origin=self.PROVEN)
+
+        # sweep 1: fresh hold, live tasks -- refuses (unchanged), stamps
+        # not_boundary_since.
+        tmux1 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
+        logs1 = wd.compact_ticket_boundary(
+            t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux1.typed_texts(), [])
+        d_mid = wd.load_compact_requests(path)
+        self.assertEqual(d_mid[self.SID].get("not_boundary_since"), t0)
+
+        # sweep 2: PAST COMPACT_MARKER_HOLD_GRACE_S, marker still ⏳, and
+        # STILL live tasks -- before FIX 5 this delivered anyway
+        # ("OK not-a-boundary-grace-elapsed"); now it must keep refusing.
+        t1 = t0 + wd.COMPACT_MARKER_HOLD_GRACE_S + 5
+        tmux2 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
+        logs2 = wd.compact_ticket_boundary(
+            t1, tmux2, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertTrue(any("skip not-a-boundary" in ln for ln in logs2),
+                        logs2)
+        self.assertFalse(any("grace-elapsed" in ln for ln in logs2), logs2)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+        # sweep 3: live tasks finally clear (a plain CB_IDLE_CAP, no
+        # waiting row) -- the SAME already-elapsed grace now genuinely
+        # applies and delivers, proving the narrowing gates delivery, not
+        # the grace mechanism itself.
+        tmux3 = CompactFakeTmux(CB_IDLE_CAP)
+        logs3 = wd.compact_ticket_boundary(
+            t1 + 1, tmux3, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux3.typed_texts(), logs3)
+        self.assertTrue(any("grace-elapsed" in ln for ln in logs3), logs3)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
     def test_a_proven_boundary_marker_hold_eventually_delivers_once_grace_elapses(self):
+
         proj = self._proj()
         path = self._p()
         _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
