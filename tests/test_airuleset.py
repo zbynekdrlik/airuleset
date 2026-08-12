@@ -13539,9 +13539,12 @@ class TestCiMonitoringPollSnippetSelfBounds(TestCase):
         if extra_env:
             env.update(extra_env)
 
-        # `jq` is still the REAL jq — only `gh` is stubbed, and the stub
-        # prints JSON so the snippet's own `--jq` post-processing runs for
-        # real, exactly as in production.
+        # NOTE: unlike an earlier (pre-#405) version of this method, the
+        # `gh_stub_body` each test below passes in is ALREADY the filtered
+        # TERMINAL/JOBFAIL/PENDING text -- the stub never prints raw JSON,
+        # and jq's OWN `--jq` filter is never actually invoked by this
+        # helper (see TestCiMonitoringJqFilterHasRealTeeth below for tests
+        # that DO execute the real filter against real jq).
         script = "set -uo pipefail\n" + snippet
         # An external timeout MUCH larger than the loop's own configured
         # budget: if the snippet did NOT self-bound, it would run until this
@@ -13619,6 +13622,139 @@ class TestCiMonitoringPollSnippetSelfBounds(TestCase):
         self.assertLess(default_budget, 120,
                         "default poll budget (%ds) is not safely under the "
                         "harness's observed 120s default timeout" % default_budget)
+
+
+class TestCiMonitoringJqFilterHasRealTeeth(TestCase):
+    """#405 adversarial-review MINOR-1: every test in the sibling class above
+    stubs `gh` to echo the ALREADY-FILTERED text (TERMINAL/JOBFAIL/PENDING)
+    directly -- the real `--jq` filter text in ci-monitoring.md is never
+    actually executed by jq anywhere in the suite, for EITHER shape (the
+    foreground loop, single-quoted `--jq '...'`, or the background waiter,
+    double-quoted `--jq "..."` nested inside a `bash -c '...'`). A
+    syntactically broken filter, or a swapped if/elif branch order, would
+    ship green.
+
+    This class extracts the REAL, bash-quote-RESOLVED `--jq` argument value
+    for each shape (a stub `gh` on PATH captures whatever bash actually
+    handed it as argv, sidestepping any need to hand-parse the doc's own
+    quoting) and feeds it to a REAL `jq` binary against crafted JSON
+    payloads via stdin -- proving both branch selection AND branch order.
+    """
+
+    def _extract_block(self, index):
+        # ci-monitoring.md has exactly two fenced blocks: the first tagged
+        # ```bash (the foreground loop), the second bare ``` (the
+        # background waiter). Splitting on the literal fence marker avoids
+        # the "bare fence" ambiguity a single non-greedy regex would hit
+        # (the FIRST block's own CLOSING fence is bare too).
+        text = (airuleset.REPO_DIR / "modules" / "core" / "ci-monitoring.md").read_text()
+        parts = text.split("```")
+        self.assertEqual(len(parts), 5,
+                          "expected exactly two fenced blocks in ci-monitoring.md")
+        code = parts[1 + index * 2]
+        if code.startswith("bash\n"):
+            code = code[len("bash\n"):]
+        return code.strip("\n")
+
+    def _extract_real_jq_filter(self, snippet):
+        """Runs `snippet` with a stub `gh` on PATH that captures the REAL
+        argv value bash resolved for --jq (whatever quoting the doc used),
+        then returns that captured text -- the exact bytes a real `gh`
+        would hand to its own internal jq evaluator."""
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        binroot = os.path.join(root, "bin")
+        os.makedirs(binroot)
+        capture_path = os.path.join(root, "captured-jq-filter")
+        gh_path = os.path.join(binroot, "gh")
+        with open(gh_path, "w") as fh:
+            fh.write(
+                "#!/usr/bin/env bash\n"
+                "prev=\"\"\n"
+                "for a in \"$@\"; do\n"
+                "  if [ \"$prev\" = \"--jq\" ]; then\n"
+                "    printf '%s' \"$a\" > \"$CAPTURE_FILE\"\n"
+                "  fi\n"
+                "  prev=\"$a\"\n"
+                "done\n"
+                "echo 'TERMINAL completed success'\n")
+        os.chmod(gh_path, 0o755)
+
+        snippet = snippet.replace("<id>", "12345")
+        env = dict(os.environ)
+        env["PATH"] = binroot + os.pathsep + env.get("PATH", "")
+        env["CAPTURE_FILE"] = capture_path
+        r = subprocess.run(
+            ["timeout", "20", "bash", "-c", "set -uo pipefail\n" + snippet],
+            capture_output=True, text=True, env=env, cwd=root)
+        self.assertNotEqual(r.returncode, 124,
+                             "snippet did not terminate on the stub's "
+                             "TERMINAL response: " + r.stdout + r.stderr)
+        self.assertTrue(os.path.isfile(capture_path),
+                         "stub gh never saw a --jq flag at all: "
+                         + r.stdout + r.stderr)
+        with open(capture_path) as fh:
+            return fh.read()
+
+    def _run_jq(self, filter_text, json_payload):
+        # `-r` (raw output, no surrounding quotes on a string result) --
+        # confirmed live against a real GitHub Actions run that `gh`'s own
+        # `--jq` flag behaves this way by default (`gh run view <id> --json
+        # status,conclusion --jq '.status+" "+(.conclusion//"")'` prints
+        # `completed success`, unquoted); the bash `case "$s" in "TERMINAL
+        # "*)` match in the shipped snippet only works against unquoted
+        # output, so this must mirror `gh`'s real behavior, not bare `jq`'s.
+        r = subprocess.run(["jq", "-r", filter_text], input=json_payload,
+                            capture_output=True, text=True, timeout=10)
+        self.assertEqual(r.returncode, 0,
+                          "jq failed to even parse/run the filter -- "
+                          "filter: %r\nstderr: %s" % (filter_text, r.stderr))
+        return r.stdout.strip()
+
+    # ---- shared branch-correctness cases, run against BOTH shapes --------
+    CASES = [
+        ('{"status":"queued","jobs":[]}', "PENDING queued"),
+        ('{"status":"in_progress","jobs":null}', "PENDING in_progress"),
+        (
+            '{"status":"in_progress","jobs":[{"name":"E2E Tests (slovnormal)",'
+            '"conclusion":"failure"},{"name":"Lint","conclusion":"success"}]}',
+            'JOBFAIL E2E Tests (slovnormal)',
+        ),
+        (
+            '{"status":"in_progress","jobs":[{"name":"A","conclusion":"failure"},'
+            '{"name":"B","conclusion":"failure"}]}',
+            "JOBFAIL A, B",
+        ),
+        (
+            # a run that legitimately COMPLETES with a failed job -- TERMINAL
+            # must win (checked FIRST in the if/elif), never JOBFAIL, so the
+            # if/elif ORDER is what this case actually locks.
+            '{"status":"completed","conclusion":"failure","jobs":'
+            '[{"name":"E2E","conclusion":"failure"}]}',
+            "TERMINAL completed failure",
+        ),
+        (
+            '{"status":"completed","conclusion":"success","jobs":'
+            '[{"name":"Lint","conclusion":"success"}]}',
+            "TERMINAL completed success",
+        ),
+    ]
+
+    def test_foreground_loop_jq_filter(self):
+        snippet = self._extract_block(0)
+        self.assertIn("--jq", snippet)
+        filt = self._extract_real_jq_filter(snippet)
+        for payload, expected in self.CASES:
+            self.assertEqual(self._run_jq(filt, payload), expected,
+                              "payload: " + payload)
+
+    def test_background_waiter_jq_filter(self):
+        snippet = self._extract_block(1)
+        self.assertIn("--jq", snippet)
+        filt = self._extract_real_jq_filter(snippet)
+        for payload, expected in self.CASES:
+            self.assertEqual(self._run_jq(filt, payload), expected,
+                              "payload: " + payload)
 
 
 class TestNudgePollLoopTimeoutHook(TestCase):
