@@ -3817,8 +3817,12 @@ def _worktree_porcelain_entries(repo_root, git_run=None):
 
 
 def _worktree_sweep_base_branch(repo_root, git_run=None):
-    """`dev` if a LOCAL `dev` branch exists, else `main`, else `master`;
-    `None` if none of the three exist (caller skips the whole repo).
+    """The MOST-ADVANCED of `dev`/`main`/`master` that exists locally
+    (a strict superset of every OTHER existing one of the three) --
+    falling back to the fixed preference order `dev`, `main`, `master`
+    ONLY when the existing candidates have genuinely DIVERGED (neither is
+    a superset of the other, so there is no safe single answer). `None`
+    if none of the three exist (caller skips the whole repo).
 
     Deliberately NOT the ticket's own literal "ahead of main" wording --
     `skills/autopilot/SKILL.md`'s ROUND INTEGRATION step 2 documents a
@@ -3828,15 +3832,37 @@ def _worktree_sweep_base_branch(repo_root, git_run=None):
     normally AHEAD of main by whatever unreleased work is in flight.
     Comparing against bare main would count every one of those in-flight
     dev commits as "the worker's own real work" and permanently skip
-    cleanup on every such repo. Preferring dev when present is strictly
-    SAFER, never less safe, than bare main (dev >= main in a well-behaved
-    two-branch repo, so 0-ahead-of-dev implies 0-ahead-of-main too, never
-    the reverse) -- it only makes the sweep MORE conservative where it
-    matters. For a single-branch repo (airuleset itself -- no local
-    `dev`) this resolves to plain `main`, matching the ticket's literal
-    wording and the one-off cleanup's own already-used criterion exactly.
+    cleanup on every such repo.
+
+    #380 CORRECTION: the ORIGINAL version of this function unconditionally
+    preferred `dev` whenever it existed, reasoning "dev >= main in a
+    well-behaved two-branch repo, so 0-ahead-of-dev implies 0-ahead-of-main
+    too, never the reverse". That invariant is FALSE for airuleset's own
+    repo -- `isolation: "worktree"` fleet-dispatch workers (#317) fork from
+    and merge straight back into `main` (`cmd_push`'s `git push origin
+    main`, round-integration's own merge commits), never through `dev`, so
+    `dev` sits permanently BEHIND `main` here (live-measured: `dev..main`
+    89 commits, `main..dev` 0). Under the old code, EVERY worktree branch
+    forked from main's tip -- fully merged into main, genuinely 0 commits
+    ahead of it -- still read as "N commits ahead of dev" forever, since
+    dev never caught up, and was NEVER reclaimed: 10 already-merged
+    `.claude/worktrees/agent-*` directories sitting on dev1 at the moment
+    this was found. The fix: when MORE THAN ONE of dev/main/master exists,
+    pick whichever one is not BEHIND any of the others (a real superset) --
+    this is STRICTLY MORE conservative than the old dev-preferred pick in
+    every case the old reasoning covered (a traditional repo where dev is
+    genuinely ahead of main still resolves to dev, since dev is then the
+    superset), and it additionally self-heals the airuleset-shaped case
+    (main is the superset there) with no separate carve-out needed. When
+    the existing candidates have genuinely DIVERGED (both carry unique
+    commits -- a real, if rarer, shape: a hotfix landed on main directly
+    while dev separately advanced), there is no safe single answer, so
+    this falls back to the ORIGINAL fixed preference order (dev, main,
+    master) rather than guessing -- identical to the pre-#380 behaviour
+    for that one ambiguous case.
     """
     git_run = git_run or _worktree_git
+    candidates = []
     for name in ("dev", "main", "master"):
         # #345 adversarial-review MINOR-1: `rev-parse --verify` resolves a
         # TAG named dev/main/master just as happily as a branch -- fully
@@ -3844,8 +3870,26 @@ def _worktree_sweep_base_branch(repo_root, git_run=None):
         # genuine local branch, never a same-named tag.
         if git_run(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % name],
                    repo_root) is not None:
+            candidates.append(name)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    for name in candidates:
+        others = [c for c in candidates if c != name]
+        # `name` is the most-advanced candidate iff EVERY other candidate
+        # has zero commits ahead of it -- i.e. `name` already contains
+        # every other candidate's own history.
+        if all(
+            (git_run(["rev-list", "--count",
+                     "refs/heads/%s..refs/heads/%s" % (name, other)],
+                    repo_root) or "").strip() == "0"
+            for other in others
+        ):
             return name
-    return None
+    # Diverged -- no candidate is a superset of every other. Ambiguous;
+    # fall back to the original fixed preference order rather than guess.
+    return candidates[0]
 
 
 _WORKTREE_LOCK_PID_RX = re.compile(r"claude agent \S+ \(pid (\d+) start (\d+)\)")
