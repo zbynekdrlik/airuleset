@@ -112,7 +112,7 @@ set -euo pipefail
 #     all -> BLOCKED `missing-stream-label`. One or more IS present but
 #     NONE matches the filer's OWN (`stream:<their-linux-username>` —
 #     every current AUTHORITY_BY_USER key already doubles as its own
-#     stream-label suffix, verified across all 14 entries) -> a
+#     stream-label suffix, verified across all 15 entries) -> a
 #     `Stream-routing: <reason>` body line is required (same logged-claim
 #     shape as `Scope-gate:`/`Dedup-checked:` — an affirmative, auditable
 #     claim; does not verify truth, matches this hook's own documented
@@ -209,7 +209,7 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 # stream-routing gate can import airuleset.py directly (single source of
 # truth for AUTHORITY_BY_USER) without a duplicated user list. Empty on any
 # resolution failure -- the gate degrades to "cannot verify", never blocks.
-HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || HOOK_DIR=""
 REPO_ROOT_DIR=""
 [ -n "$HOOK_DIR" ] && REPO_ROOT_DIR="$(dirname "$HOOK_DIR")"
 
@@ -829,9 +829,18 @@ def _filer_authority_and_own_stream(cwd, repo_dir):
 def _explicit_stream_labels(tk, is_api):
     """Every `stream:<x>` value named via -l/--label in THIS segment's own
     tokens, lowercase, deduped, in order of appearance -- comma-list
-    aware (`-l bug,stream:david2`), any repetition (`-l a -l b`). Only
-    `gh issue create` is scanned -- `gh api ... POST` labeling is
-    deliberately out of scope (see this file's header)."""
+    aware (`-l bug,stream:david2`), any repetition (`-l a -l b`), and
+    every genuine `gh`-accepted spelling of the short flag: separate-token
+    (`-l stream:x`), ATTACHED (`-lstream:x`), and attached-with-equals
+    (`-l=stream:x`) -- #390 adversarial-review MAJOR-2, verified live
+    against the real `gh` binary (a truly unknown flag is rejected by gh
+    itself with "unknown shorthand flag", distinct from these three
+    accepted forms). A compliant filer using the attached spelling must
+    never be FALSE-BLOCKED for a label the hook simply failed to see --
+    this hook's own stated bias is to degrade toward allowing, never
+    toward a false block. Only `gh issue create` is scanned -- `gh api
+    ... POST` labeling is deliberately out of scope (see this file's
+    header)."""
     if is_api:
         return []
     found = []
@@ -841,6 +850,10 @@ def _explicit_stream_labels(tk, is_api):
             val = tk[idx + 1]
         elif t.startswith("--label="):
             val = t[len("--label="):]
+        elif t.startswith("-l") and len(t) > 2 and not t.startswith("--"):
+            val = t[2:]
+            if val.startswith("="):
+                val = val[1:]
         if val is None:
             continue
         for piece in val.split(","):
@@ -854,15 +867,32 @@ def _stream_routing_block_reason(tk, is_api, body, cwd, target_repo, repo_dir):
     """#390 -- a block-reason string, or None (nothing to block -- covers
     every degrade-to-unmeasurable case too, per this hook's own
     established bias: never manufacture a block from state that could not
-    be measured)."""
+    be measured).
+
+    #390 adversarial-review MAJOR-1: the cheap, LOCAL authority check runs
+    FIRST, before the network `gh label list` call -- a full-authority
+    filer (never gated by this gate at all) must never pay that round-trip
+    on every single filing fleet-wide. This mirrors the hook's own #329
+    "cheap local checks before the network call" discipline elsewhere in
+    this file.
+
+    #390 adversarial-review MINOR-1 (documented, not a code change): a
+    filing that carries BOTH the filer's own stream label AND a foreign
+    one (e.g. `-l stream:david2 -l stream:david`) needs no
+    `Stream-routing:` justification -- `own_label in applied` accepts it
+    the moment the filer's own label is present, regardless of what else
+    rides alongside it. This is deliberate: the filer's own label already
+    proves the filing is (at least in part) that filer's own work: routing
+    it under an ADDITIONAL, foreign label as well is a normal
+    cross-stream-relevance tag, not a mis-file."""
     if is_api:
-        return None
-    aware = _repo_is_stream_aware(cwd, target_repo)
-    if not aware:              # False, or None (unmeasurable) -- never blocks
         return None
     profile, own_label = _filer_authority_and_own_stream(cwd, repo_dir)
     if profile is None or profile == "full":
         return None             # no known "own" stream -- not gated
+    aware = _repo_is_stream_aware(cwd, target_repo)
+    if not aware:              # False, or None (unmeasurable) -- never blocks
+        return None
     applied = _explicit_stream_labels(tk, is_api)
     if not applied:
         return "missing-stream-label"
