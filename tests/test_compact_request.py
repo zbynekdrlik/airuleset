@@ -13,13 +13,23 @@ Context is bounded at TICKET BOUNDARIES instead (piece 2, kept):
 
   2. Ticket-boundary /compact — a completed-ticket report is a SAFE
      compaction boundary (the ticket's durable state already lives in git /
-     GitHub / the issue). A Stop hook (notify-compact-request.sh) records a
-     request the MOMENT a turn's final message is a completed-ticket report;
-     watchdog job 14 (compact_ticket_boundary) types `/compact` into that
-     session's pane once it goes genuinely idle, reusing job 12's (model
-     reconcile) exact idle guards. Since the 2026-07-25 correction batch, a
-     per-BATCH ✅ DONE inside an `/autopilot` loop (not just the whole
-     backlog) is a real completion report, so this fires once per batch.
+     GitHub / the issue). watchdog job 14 (compact_ticket_boundary) types
+     `/compact` into that session's pane once it goes genuinely idle,
+     reusing job 12's (model reconcile) exact idle guards.
+
+     #400 (2026-08-12) — the ORIGINAL trigger for this, a Stop hook
+     (notify-compact-request.sh) sniffing the turn's final message for a
+     completed-ticket shape, is REMOVED: a bare `✅ DONE:` one-liner is
+     indistinguishable from a genuine ticket boundary by text alone, and
+     that hook's repeated re-fire on every ordinary turn is what let a
+     stale request keep looking "fresh" for 11.2+ hours in a live
+     incident. `notify-compact-request.sh` is now a PERMANENT NO-OP (kept
+     registered as an inert placeholder — see its own header). Every
+     `/compact` request now originates from a STRUCTURAL proof instead:
+     the SubagentStop event hook (notify-compact-subagent-boundary.sh,
+     origin=subagent-stop, reading the harness's own background_tasks
+     registry directly) or a session's own explicit
+     `compact-request --self` callback (origin=self-callback).
 """
 
 import contextlib
@@ -72,6 +82,20 @@ def _isolate_compact_claims(testcase):
     sub_patcher = m.patch.object(wd, "compact_substantiality_path", return_value=subp)
     sub_patcher.start()
     testcase.addCleanup(sub_patcher.stop)
+    # #400 FIX 4 -- the new min-delivery-interval cooldown gate is
+    # UNCONDITIONAL at every send point (job 14's idle/stash sends,
+    # deliver_compact_now's own sync send), never guarded behind a
+    # msg_hash the way the pre-existing delivered-dedup calls are (those
+    # short-circuit on a blank hash BEFORE ever touching disk -- see
+    # compact_already_delivered/mark_compact_delivered's own guards). A
+    # test driving any of those three send points without an explicit
+    # delivered_path= would otherwise read/write the REAL
+    # ~/.claude/compact-delivered.json during the test run, racing the
+    # live systemd watchdog exactly like the claims file above.
+    dp = Path(d.name) / "compact-delivered-test.json"
+    dp_patcher = m.patch.object(wd, "compact_delivered_path", return_value=dp)
+    dp_patcher.start()
+    testcase.addCleanup(dp_patcher.stop)
     return p
 
 
@@ -692,6 +716,338 @@ class TestCompactDeliveredDedup(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# #400 FIX 4 (2026-08-12) — a hard, per-session MINIMUM INTERVAL between two
+# REAL `/compact` deliveries, enforced at EVERY delivery point (job 14's
+# idle send, job 14's stash send, `deliver_compact_now`'s own sync send),
+# for EVERY origin, no exemption. See `compact_delivery_in_cooldown`'s own
+# section comment in watchdog/__init__.py for the full reasoning.
+# --------------------------------------------------------------------------- #
+
+class TestCompactMinDeliveryInterval(unittest.TestCase):
+    """Unit-level: `_compact_min_delivery_interval` /
+    `compact_delivery_in_cooldown` / `mark_compact_delivery_ts` in
+    isolation, no pane/job involved."""
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return str(Path(d.name) / "compact-delivered.json")
+
+    # -- _compact_min_delivery_interval ---------------------------------- #
+
+    def test_default_is_the_documented_1800s(self):
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S", None)
+            self.assertEqual(wd._compact_min_delivery_interval(),
+                             wd.COMPACT_MIN_DELIVERY_INTERVAL_S)
+
+    def test_explicit_interval_is_returned_verbatim_unclamped(self):
+        self.assertEqual(wd._compact_min_delivery_interval(99999999), 99999999)
+        self.assertEqual(wd._compact_min_delivery_interval(0), 0)
+
+    def test_env_override_is_honoured(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S": "42"}):
+            self.assertEqual(wd._compact_min_delivery_interval(), 42)
+
+    def test_env_override_is_clamped_to_the_max(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S": "999999999"}):
+            self.assertEqual(wd._compact_min_delivery_interval(),
+                             wd.COMPACT_MIN_DELIVERY_INTERVAL_MAX_S)
+
+    def test_env_override_is_floored_at_1(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S": "-5"}):
+            self.assertEqual(wd._compact_min_delivery_interval(), 1)
+
+    def test_non_numeric_env_falls_back_to_the_default(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S": "banana"}):
+            self.assertEqual(wd._compact_min_delivery_interval(),
+                             wd.COMPACT_MIN_DELIVERY_INTERVAL_S)
+
+    # -- compact_delivery_in_cooldown ------------------------------------- #
+
+    def test_blank_session_is_never_in_cooldown(self):
+        p = self._p()
+        self.assertFalse(wd.compact_delivery_in_cooldown("", time.time(), path=p))
+
+    def test_no_recorded_delivery_at_all_is_never_in_cooldown(self):
+        # #400 -- unmeasurable ("never delivered before") must read False,
+        # never a guess -- the same fail-safe direction every other gate in
+        # this file uses for an unmeasurable input.
+        p = self._p()
+        self.assertFalse(wd.compact_delivery_in_cooldown("sid-1", time.time(), path=p))
+
+    def test_a_delivery_5_minutes_ago_is_still_in_cooldown(self):
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertTrue(wd.compact_delivery_in_cooldown("sid-1", now + 300, path=p))
+
+    def test_a_delivery_35_minutes_ago_is_no_longer_in_cooldown(self):
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown("sid-1", now + 2100, path=p))
+
+    def test_exactly_at_the_boundary_is_no_longer_in_cooldown(self):
+        # strict "<" -- age == interval clears it, matching the docstring's
+        # own "still within" (a half-open window).
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown(
+            "sid-1", now + wd.COMPACT_MIN_DELIVERY_INTERVAL_S, path=p))
+
+    def test_a_legacy_bare_string_entry_with_no_ts_is_never_in_cooldown(self):
+        # a pre-#400 compact-delivered.json entry (mark_compact_delivered's
+        # old bare-string shape, before #400's dict migration) carries no
+        # ts at all -- unmeasurable, never guessed as "recent".
+        p = self._p()
+        wd.mark_compact_delivered("sid-1", "some-hash", path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown("sid-1", time.time(), path=p))
+
+    def test_a_different_session_is_unaffected(self):
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown("sid-2", now + 60, path=p))
+
+    def test_explicit_interval_overrides_the_default(self):
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown(
+            "sid-1", now + 10, path=p, interval=5))
+        self.assertTrue(wd.compact_delivery_in_cooldown(
+            "sid-1", now + 10, path=p, interval=20))
+
+    # -- mark_compact_delivery_ts ----------------------------------------- #
+
+    def test_mark_sets_a_readable_ts(self):
+        p = self._p()
+        now = time.time()
+        self.assertTrue(wd.mark_compact_delivery_ts("sid-1", now=now, path=p))
+        self.assertTrue(wd.compact_delivery_in_cooldown("sid-1", now + 1, path=p))
+
+    def test_mark_preserves_an_existing_hash(self):
+        p = self._p()
+        wd.mark_compact_delivered("sid-1", "hash-a", path=p)
+        wd.mark_compact_delivery_ts("sid-1", now=time.time(), path=p)
+        self.assertTrue(wd.compact_already_delivered("sid-1", "hash-a", path=p))
+
+    def test_a_dedup_mark_never_advances_the_delivery_ts(self):
+        # #400 -- mark_compact_delivered (the pre-existing dedup mark, fired
+        # on EVERY handled disposition including a drop that never typed
+        # anything) must NEVER set/refresh ts -- only mark_compact_delivery_
+        # ts, called ONLY at an actual send point, may do that.
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        wd.mark_compact_delivered("sid-1", "some-later-hash", path=p)
+        self.assertTrue(wd.compact_delivery_in_cooldown("sid-1", now + 300, path=p))
+        self.assertFalse(wd.compact_delivery_in_cooldown(
+            "sid-1", now + wd.COMPACT_MIN_DELIVERY_INTERVAL_S + 1, path=p))
+
+    def test_blank_session_mark_is_a_noop(self):
+        p = self._p()
+        self.assertFalse(wd.mark_compact_delivery_ts("", now=time.time(), path=p))
+        self.assertFalse(Path(p).exists())
+
+
+# --------------------------------------------------------------------------- #
+# #400 FIX 4 — the SAME cooldown, exercised end-to-end through job 14's
+# `compact_ticket_boundary` (the idle-send path) and through
+# `deliver_compact_now` (the synchronous path) — the two required test
+# shapes from the ticket itself: two deliveries 5 min apart -> only the
+# first delivers; two deliveries 35 min apart -> both deliver.
+# --------------------------------------------------------------------------- #
+
+class TestCompactMinDeliveryInterval_InJob14(unittest.TestCase):
+    SID = "sess-cooldown-job14"
+    PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _paths(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        req = str(Path(d.name) / "compact-requests.json")
+        dp = str(Path(d.name) / "compact-delivered.json")
+        return req, dp
+
+    def _deliver(self, req_path, dp_path, now):
+        wd.record_compact_request(self.SID, "/home/x/proj", now=now, path=req_path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_IDLE_CAP)}
+        logs = wd.compact_ticket_boundary(now, tmux, {}, panes_by_sid,
+                                          path=req_path, delivered_path=dp_path)
+        return tmux, logs
+
+    def test_two_deliveries_5_min_apart_only_the_first_delivers(self):
+        req_path, dp_path = self._paths()
+        base = time.time()
+        tmux1, logs1 = self._deliver(req_path, dp_path, base)
+        self.assertIn("/compact", tmux1.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs1), logs1)
+
+        tmux2, logs2 = self._deliver(req_path, dp_path, base + 300)   # 5 min
+        self.assertEqual(tmux2.sent, [])
+        self.assertTrue(any("cooldown" in ln for ln in logs2), logs2)
+        # dropped (consumed), never left for a further retry
+        self.assertNotIn(self.SID, wd.load_compact_requests(req_path))
+
+    def test_two_deliveries_35_min_apart_both_deliver(self):
+        req_path, dp_path = self._paths()
+        base = time.time()
+        tmux1, logs1 = self._deliver(req_path, dp_path, base)
+        self.assertIn("/compact", tmux1.typed_texts())
+
+        tmux2, logs2 = self._deliver(req_path, dp_path, base + 2100)  # 35 min
+        self.assertIn("/compact", tmux2.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs2), logs2)
+
+
+# --------------------------------------------------------------------------- #
+# #400-review MAJOR-2 (fresh-context adversarial review, TRIGGERED — two
+# surviving mutants) — job 14's STASH send branch (`if draft:` ->
+# `_compact_stash_attempt`) had ZERO coverage for two of #400's own claims
+# on THAT specific branch: that a real delivery through it also marks the
+# cooldown ts (Fix 4), and that it also writes a SEND line to
+# compact-sync.log (Fix 6). Proven live by the reviewer: removing
+# `mark_compact_delivery_ts(...)` from the stash branch, and separately
+# removing its `_log_compact_sync("SEND (stash)...")` call, each left
+# EVERY existing test in this file (plus the sibling long-turn/served-
+# boundary files) green. The idle-send branch already had both properties
+# locked (`TestCompactMinDeliveryInterval_InJob14` above, and
+# `test_a_fresh_request_is_not_expired`'s `via=job14` assertion) — this
+# class gives the stash branch the SAME two locks.
+# --------------------------------------------------------------------------- #
+
+class TestCompactMinDeliveryInterval_InJob14StashBranch(unittest.TestCase):
+    SID = "sess-cooldown-stash"
+    PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _paths(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        req = str(Path(d.name) / "compact-requests.json")
+        dp = str(Path(d.name) / "compact-delivered.json")
+        return req, dp
+
+    def _deliver_via_stash(self, req_path, dp_path, now):
+        wd.record_compact_request(self.SID, "/home/x/proj", now=now, path=req_path)
+        tmux = CompactFakeTmux(
+            CB_DRAFT_CAP,
+            cap_seq=(CB_STASH_BARE_CAP, CB_STASH_TYPED_CAP, CB_STASH_SUBMITTED_CAP))
+        panes_by_sid = {self.SID: (self.PANE, CB_DRAFT_CAP)}
+        logs = wd.compact_ticket_boundary(now, tmux, {}, panes_by_sid,
+                                          path=req_path, delivered_path=dp_path)
+        return tmux, logs
+
+    def test_stash_send_writes_a_send_line_to_the_sync_log(self):
+        req_path, dp_path = self._paths()
+        tmux, logs = self._deliver_via_stash(req_path, dp_path, time.time())
+        self.assertTrue(any(ln.startswith("OK (compact-request, stash")
+                            for ln in logs), logs)
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SEND (stash) sid=%s" % self.SID, log_text)
+        self.assertIn("via=job14", log_text)
+
+    def test_two_stash_deliveries_5_min_apart_only_the_first_delivers(self):
+        req_path, dp_path = self._paths()
+        base = time.time()
+        tmux1, logs1 = self._deliver_via_stash(req_path, dp_path, base)
+        self.assertTrue(any(ln.startswith("OK (compact-request, stash")
+                            for ln in logs1), logs1)
+
+        # the second delivery must be refused by the cooldown gate BEFORE
+        # it ever reaches the stash toggle sequence -- an EMPTY cap_seq
+        # proves no stash keystrokes are attempted at all (a non-empty
+        # cap_seq is only ever consumed once the toggle sequence actually
+        # runs, per CompactFakeTmux's own fallback-to-`captured` shape).
+        wd.record_compact_request(self.SID, "/home/x/proj", now=base + 300,
+                                  path=req_path)
+        tmux2 = CompactFakeTmux(CB_DRAFT_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_DRAFT_CAP)}
+        logs2 = wd.compact_ticket_boundary(
+            base + 300, tmux2, {}, panes_by_sid, path=req_path,
+            delivered_path=dp_path)
+        self.assertEqual(tmux2.sent, [])
+        self.assertTrue(any("cooldown" in ln for ln in logs2), logs2)
+
+    def test_two_stash_deliveries_35_min_apart_both_deliver(self):
+        req_path, dp_path = self._paths()
+        base = time.time()
+        tmux1, logs1 = self._deliver_via_stash(req_path, dp_path, base)
+        self.assertTrue(any(ln.startswith("OK (compact-request, stash")
+                            for ln in logs1), logs1)
+
+        tmux2, logs2 = self._deliver_via_stash(req_path, dp_path, base + 2100)
+        self.assertTrue(any(ln.startswith("OK (compact-request, stash")
+                            for ln in logs2), logs2)
+
+
+class TestCompactMinDeliveryIntervalInDeliverCompactNow(unittest.TestCase):
+    SID = "sess-cooldown-sync"
+    CWD = "/home/newlevel/devel/cooldownproj"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _dp(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return str(Path(d.name) / "compact-delivered.json")
+
+    def _deliver(self, proj, dp_path, now):
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, now=now,
+                                      delivered_path=dp_path)
+        return word, tmux
+
+    def test_two_deliveries_5_min_apart_only_the_first_sends(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        dp_path = self._dp()
+        base = time.time()
+
+        word1, tmux1 = self._deliver(proj, dp_path, base)
+        self.assertEqual(word1, "sent")
+        self.assertIn("/compact", tmux1.typed_texts())
+
+        word2, tmux2 = self._deliver(proj, dp_path, base + 300)   # 5 min
+        self.assertEqual(word2, "dropped-cooldown")
+        self.assertEqual(tmux2.sent, [])
+
+    def test_two_deliveries_35_min_apart_both_send(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        dp_path = self._dp()
+        base = time.time()
+
+        word1, tmux1 = self._deliver(proj, dp_path, base)
+        self.assertEqual(word1, "sent")
+
+        word2, tmux2 = self._deliver(proj, dp_path, base + 2100)  # 35 min
+        self.assertEqual(word2, "sent")
+        self.assertIn("/compact", tmux2.typed_texts())
+
+
+# --------------------------------------------------------------------------- #
 # 2b-2. Job 14 — COMPACT_BOUNDARY_MIN_CONTEXT gate (#48, 2026-07-25)
 #
 # Job 14 used to fire `/compact` after EVERY completed-ticket report, even a
@@ -1304,10 +1660,13 @@ class TestCompactTicketBoundaryContextThreshold(unittest.TestCase):
 # 2b-1d. #102 (2026-07-27 live incident, camera-box) — never deliver `/compact`
 # while the session's CURRENT last real turn is blocked on the user (`❓`).
 #
-# The record-time gate (notify-compact-request.sh) already refuses to RECORD
-# a request for a turn that itself ends `❓` — but a request recorded for an
-# earlier ✅ boundary can still be sitting in compact-requests.json once the
-# session has since moved on to a NEW `❓` turn (a `/compact` queued behind a
+# #400 update: `notify-compact-request.sh` (the record-time gate this
+# comment originally named) is now a PERMANENT NO-OP -- it never records
+# anything, so it cannot be the thing refusing a `❓`-ending turn any more.
+# The reasoning below is unchanged regardless of WHICH origin recorded the
+# request: a request recorded for an earlier ✅ boundary can still be
+# sitting in compact-requests.json once the session has since moved on to
+# a NEW `❓` turn (a `/compact` queued behind a
 # goal-loop-continued turn is only drained at the NEXT accepted Stop, which
 # can be exactly the turn that asks the question). `_compact_blocked_by_
 # question` re-reads the CURRENT last marker right before every send.
@@ -2566,10 +2925,19 @@ class TestSubagentStopOriginExemptFromSubstantialityGates(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 2e. notify-compact-request.sh — the Stop hook that records the request
+# 2e. notify-compact-request.sh — the Stop hook, now a PERMANENT NO-OP (#400)
 # --------------------------------------------------------------------------- #
 
 class TestCompactRequestHook(unittest.TestCase):
+    """#400 (2026-08-12) — this hook is now a PERMANENT NO-OP: the passive
+    text-sniffing `/compact` channel is removed entirely, in both
+    directions. Every test below proves TEXT ALONE (whatever the message
+    says, however shaped) never records anything, ever — the exact
+    opposite of what this class asserted before #400. The only two
+    surviving origins (`compact-request --self`,
+    `notify-compact-subagent-boundary.sh`'s SubagentStop event hook) are
+    covered by their own dedicated test classes, not this one."""
+
     HOOK = airuleset.REPO_DIR / "hooks" / "notify-compact-request.sh"
 
     def _run(self, sid, msg, cwd=""):
@@ -2577,7 +2945,7 @@ class TestCompactRequestHook(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
                               "cwd": cwd})
-        env = {**os.environ, "HOME": home, "AIRULESET_COMPACT_RECORD_HOLD_S": "0"}
+        env = {**os.environ, "HOME": home}
         r = subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
                            capture_output=True, env=env,
                            cwd=str(airuleset.REPO_DIR))
@@ -2586,24 +2954,25 @@ class TestCompactRequestHook(unittest.TestCase):
     def test_hook_exists_and_is_executable_bash(self):
         self.assertTrue(self.HOOK.exists())
 
-    def test_work_complete_heading_records_a_request(self):
+    def test_work_complete_heading_never_records(self):
+        # #400 — inverted: this exact message used to record a request
+        # (it is a genuine `## ✅ Work Complete` heading followed by a
+        # terminal `✅ DONE:`). It must now do NOTHING.
         r, reqfile = self._run(
             "sid-1", "## ✅ Work Complete\n\nfoo bar\n✅ DONE: hotovo", cwd="/x")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(reqfile.exists())
-        d = json.loads(reqfile.read_text())
-        self.assertIn("sid-1", d)
-        self.assertEqual(d["sid-1"]["cwd"], "/x")
+        self.assertFalse(reqfile.exists())
 
-    def test_terminal_done_marker_alone_records_a_request(self):
+    def test_terminal_done_marker_alone_never_records(self):
+        # #400 — inverted: a bare terminal `✅ DONE:` with no heading used
+        # to record too (this is the EXACT trigger shape whose repeated
+        # refresh let a stale request keep looking "fresh" for 11.2+ hours
+        # in the live incident #400 responds to). Must now do NOTHING.
         r, reqfile = self._run("sid-2", "no heading here\n✅ DONE: hotovo", cwd="/y")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(reqfile.exists())
-        self.assertIn("sid-2", json.loads(reqfile.read_text()))
+        self.assertFalse(reqfile.exists())
 
     def test_blocked_on_user_never_records_even_with_the_heading(self):
-        # manual-merge report: heading present, but the LAST line is ❓ — the
-        # decision is still pending, this is NOT a safe compaction boundary.
         r, reqfile = self._run(
             "sid-3", "## ✅ Work Complete\n\n❓ NEEDS YOU: schváliš merge PR #5?")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -2629,47 +2998,46 @@ class TestCompactRequestHook(unittest.TestCase):
         r, reqfile = self._run("sid-6", "## ✅ Work Complete\n✅ DONE: x")
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stdout.strip(), "")
+        self.assertFalse(reqfile.exists())
 
     def test_wired_into_stop_hooks_json(self):
+        # #400 — the file + its Stop registration are KEPT (a
+        # permanently-neutered placeholder, not a silent removal from the
+        # chain) — see the hook's own header for why.
         cfg = airuleset.load_hooks_json()
         cmds = [h.get("command", "")
                for entry in cfg.get("hooks", {}).get("Stop", [])
                for h in entry.get("hooks", [])]
         self.assertTrue(any("notify-compact-request.sh" in c for c in cmds), cmds)
 
-    # ----------------------------------------------------------------- #
-    # #71 — the hook fingerprints `last_assistant_message` (sha256) and
-    # passes it through as `--msg-hash`, so a REPEATED Stop-hook fire for
-    # the SAME (unchanged) message can be recognized as a duplicate one
-    # level down (cmd_compact_request / compact_already_delivered).
-    # ----------------------------------------------------------------- #
-
-    def test_msg_hash_is_recorded_and_non_empty(self):
-        r, reqfile = self._run(
-            "sid-hash-1", "## ✅ Work Complete\n✅ DONE: hotovo", cwd="/x")
+    def test_no_decision_log_line_either(self):
+        # #400 — the pre-#400 hook also appended a RECORD/type=stop-hook
+        # line to ~/.claude/compact-decisions.log on every fire (#125).
+        # That whole write path is gone too — no compact-decisions.log at
+        # all is created by this hook any more.
+        home = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(home, ignore_errors=True))
+        payload = json.dumps({"session_id": "sid-nolog",
+                              "last_assistant_message":
+                              "## ✅ Work Complete\n✅ DONE: x", "cwd": "/z"})
+        env = {**os.environ, "HOME": home}
+        r = subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
+                           capture_output=True, env=env,
+                           cwd=str(airuleset.REPO_DIR))
         self.assertEqual(r.returncode, 0, r.stderr)
-        d = json.loads(reqfile.read_text())
-        self.assertTrue(d["sid-hash-1"].get("msg_hash"))
+        self.assertFalse((Path(home) / ".claude" / "compact-decisions.log")
+                         .exists())
 
-    def test_msg_hash_is_deterministic_for_the_same_message(self):
-        r1, reqfile1 = self._run(
-            "sid-hash-2", "## ✅ Work Complete\n✅ DONE: hotovo", cwd="/x")
-        r2, reqfile2 = self._run(
-            "sid-hash-3", "## ✅ Work Complete\n✅ DONE: hotovo", cwd="/y")
-        self.assertEqual(r1.returncode, 0, r1.stderr)
-        self.assertEqual(r2.returncode, 0, r2.stderr)
-        d1 = json.loads(reqfile1.read_text())
-        d2 = json.loads(reqfile2.read_text())
-        self.assertEqual(d1["sid-hash-2"]["msg_hash"], d2["sid-hash-3"]["msg_hash"])
-
-    def test_msg_hash_differs_for_a_different_message(self):
-        r1, reqfile1 = self._run(
-            "sid-hash-4", "## ✅ Work Complete\n✅ DONE: hotovo A", cwd="/x")
-        r2, reqfile2 = self._run(
-            "sid-hash-5", "## ✅ Work Complete\n✅ DONE: hotovo B", cwd="/x")
-        d1 = json.loads(reqfile1.read_text())
-        d2 = json.loads(reqfile2.read_text())
-        self.assertNotEqual(d1["sid-hash-4"]["msg_hash"], d2["sid-hash-5"]["msg_hash"])
+    def test_arbitrarily_large_message_still_never_records(self):
+        # #400 — the pre-#400 hook had argv-size-hazard hardening for a
+        # huge message elsewhere in this repo's own hook family. This hook
+        # no longer parses the message AT ALL, so a message well past any
+        # prior size concern is simply discarded like every other one —
+        # no crash, no record, exit 0.
+        big = "## ✅ Work Complete\n" + ("x" * 200_000) + "\n✅ DONE: hotovo"
+        r, reqfile = self._run("sid-big", big, cwd="/x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(reqfile.exists())
 
 
 # --------------------------------------------------------------------------- #
@@ -3036,9 +3404,22 @@ class TestCompactRequestExpiry(unittest.TestCase):
                                           path=path)
         self.assertFalse(any("expired" in ln for ln in logs), logs)
         # #122 negative control — a fresh (never-expired) request must NOT
-        # produce a LAPSE record; the sync log stays untouched by this run.
+        # produce a LAPSE record.
+        #
+        # #400 FIX 6 (inverted from the pre-FIX-6 assertion that the sync
+        # log stayed untouched by a real delivery) — job 14's own send
+        # paths now ALSO write to compact-sync.log (they used to be
+        # completely silent to it, the exact gap that made a live
+        # gatekeeper /compact-fired-mid-work incident undebuggable). A
+        # genuine delivery — CB_IDLE_CAP has no live-tasks row, so this
+        # request really is sent — now DOES create the file, with a SEND
+        # line naming this job as the sender.
+        self.assertIn("/compact", tmux.typed_texts(), logs)
         sync_log = wd.compact_sync_log_path()
-        self.assertFalse(Path(sync_log).exists())
+        self.assertTrue(Path(sync_log).exists())
+        log_text = Path(sync_log).read_text()
+        self.assertIn("SEND sid=%s" % self.SID, log_text)
+        self.assertIn("via=job14", log_text)
 
     # ------------------------------------------------------------------- #
     # #122 — "a silent 30-minute lapse with no signal is a defect in its own
@@ -3122,9 +3503,13 @@ class TestLogCompactSyncDedup(unittest.TestCase):
 
 
 class TestCompactHookRunsAfterTheStopGates(unittest.TestCase):
-    """#109 — the enqueue-time gate can only SEE a rejection that an earlier
-    hook has already produced, so `notify-compact-request.sh` must stay ordered
-    AFTER every `stop-check-*.sh` gate in the managed Stop chain."""
+    """#109 (historical) — the enqueue-time gate could only SEE a rejection
+    that an earlier hook had already produced, so `notify-compact-
+    request.sh` had to stay ordered AFTER every `stop-check-*.sh` gate in
+    the managed Stop chain. #400: the hook is now a permanent no-op with
+    no enqueue-time gate left to protect -- this test is kept as a
+    harmless ordering lock on the registered-but-inert placeholder, not
+    because the ordering still matters functionally."""
 
     def test_notify_compact_request_is_ordered_after_every_stop_check_gate(self):
         cfg = json.loads((Path(__file__).resolve().parent.parent
@@ -3438,9 +3823,16 @@ class TestWorkingMarkerNoLongerVetoesAProvenBoundary(unittest.TestCase):
 
 
 class TestSupervisorStopVetoIsNoLongerTheOnlyChannel(unittest.TestCase):
-    """The Stop hook's `⏳` veto stays (removing it reinstates #109 for every
-    NON-autopilot session, which has no worker-registry evidence to stand on)
-    — it simply stops being the only way a request can ever be created."""
+    """#400 update: the Stop hook (notify-compact-request.sh) is now a
+    permanent no-op -- it no longer "vetoes" anything because it no longer
+    records anything AT ALL, for any message shape, `⏳`-ending or not.
+    `test_stop_hook_still_refuses_a_working_turn` is kept as a trivial
+    subset of that broader guarantee (this specific historical shape
+    still produces no record, same as every other shape now does). The
+    class's original point survives in spirit: the SubagentStop channel
+    (`notify-compact-subagent-boundary.sh`) is the real source of
+    `/compact` requests for an autopilot session now, never the
+    supervisor's own turn-ending marker."""
 
     def test_stop_hook_still_refuses_a_working_turn(self):
         home = tempfile.mkdtemp()
@@ -4002,10 +4394,11 @@ class TestUnresumedSessionDefersAProvenBoundary(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(f.name) and os.unlink(f.name))
         return f.name
 
-    def _deliver(self, proj, origin="subagent-stop"):
+    def _deliver(self, proj, origin="subagent-stop", sid=None):
+        sid = sid or self.SID
         tmux = DeliverCompactNowFakeTmux(
             [(self.PANE, "claude", self.CWD, "111")], CB_IDLE_CAP)
-        out = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+        out = wd.deliver_compact_now(sid, self.CWD, run=tmux,
                                      projects_dir=proj, origin=origin)
         return out, tmux
 
@@ -4065,14 +4458,24 @@ class TestUnresumedSessionDefersAProvenBoundary(unittest.TestCase):
         """A plain Stop-hook request was justified by the supervisor OWN
         `✅ DONE` turn, so its work was already consumed and reported; a later
         529 does not retroactively invalidate that boundary. Such a request is
-        governed by the #99/#48 gates exactly as before."""
+        governed by the #99/#48 gates exactly as before.
+
+        #400 FIX 4 -- each subTest iteration gets its OWN sid (a fresh
+        transcript per origin) rather than sharing `self.SID` across both:
+        the two deliveries below land moments apart in real wall-clock time,
+        which is exactly what the NEW min-delivery-interval cooldown gate
+        (#400) now refuses for a REPEATED sid -- correctly so, but that is
+        a different invariant than the one THIS test is about (origin
+        exemption from the #188 unresumed-session gate), so it must not
+        collide with it."""
         proj = self._dir()
-        _write_api_error_transcript(proj, self.CWD, self.SID)
         for origin in ("", None):
+            sid = "%s-origin-%r" % (self.SID, origin)
+            _write_api_error_transcript(proj, self.CWD, sid)
             with self.subTest(origin=origin):
                 with m.patch.object(wd, "compact_boundary_substantial",
                                     return_value=True):
-                    out, tmux = self._deliver(proj, origin=origin)
+                    out, tmux = self._deliver(proj, origin=origin, sid=sid)
                 self.assertEqual(out, "sent")
                 self.assertIn("/compact", tmux.typed_texts())
 
@@ -4942,6 +5345,128 @@ class TestDeferredSincePreservedAcrossReRecord(unittest.TestCase):
         self.assertNotIn("deferred_since", d2["d3"])
 
 
+class TestFirstTsPreservedAcrossReRecord(unittest.TestCase):
+    """#400 -- `first_ts` (the ORIGINAL boundary this pending episode was
+    first observed at) must survive every re-record for the SAME
+    still-pending session, mirroring `deferred_since`/`not_boundary_since`'s
+    own unconditional-preservation shape exactly -- `ts` still takes the
+    newer call's value (only the LATEST boundary matters for delivery
+    TARGETING), but `first_ts` never moves once set."""
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_first_ts_is_stamped_on_the_first_record(self):
+        p = self._p()
+        wd.record_compact_request("f1", "/x", now=100, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["f1"]["first_ts"], 100)
+
+    def test_first_ts_survives_a_re_record_unconditionally(self):
+        p = self._p()
+        wd.record_compact_request("f1", "/x", now=100, path=p)
+        wd.record_compact_request("f1", "/y", now=500, path=p)   # re-record
+        wd.record_compact_request("f1", "/z", now=1200, path=p)  # a second re-record
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["f1"]["first_ts"], 100)     # never moves
+        self.assertEqual(d["f1"]["ts"], 1200)           # ts DOES take the newest value
+        self.assertEqual(d["f1"]["cwd"], "/z")           # cwd DOES take the newest value
+
+    def test_a_fresh_session_never_carries_a_stale_first_ts(self):
+        # once an entry is fully delivered/dropped/expired it is removed
+        # from the file, so a BRAND NEW request for the SAME sid, recorded
+        # afresh later, starts with its OWN fresh first_ts -- never
+        # resurrecting an old episode's anchor.
+        p = self._p()
+        wd.record_compact_request("f2", "/x", now=100, path=p)
+        wd.clear_compact_request("f2", path=p)
+        wd.record_compact_request("f2", "/z", now=9000, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["f2"]["first_ts"], 9000)
+
+    def test_a_legacy_entry_with_no_first_ts_gets_one_stamped_fresh(self):
+        # migration safety: an entry written by a pre-#400 caller (or a
+        # hand-constructed fixture) has no first_ts key at all -- the very
+        # NEXT re-record must stamp one (from `now`, never invented from
+        # the legacy `ts`), rather than raising or leaving it permanently
+        # absent.
+        p = self._p()
+        wd.record_compact_request("f3", "/x", now=100, path=p)
+        d = wd.load_compact_requests(p)
+        del d["f3"]["first_ts"]
+        p.write_text(json.dumps(d))
+        wd.record_compact_request("f3", "/y", now=777, path=p)
+        d2 = wd.load_compact_requests(p)
+        self.assertEqual(d2["f3"]["first_ts"], 777)
+
+
+class TestFirstTsCannotResurrectAnExpiredBoundary(unittest.TestCase):
+    """#400 -- the whole point of `first_ts`: a session whose EVERY turn
+    keeps re-recording the SAME still-pending request (the pre-#400
+    bare-`✅ DONE:` trigger this ticket also removes, or any other repeat
+    caller) must NOT be able to keep the request perpetually "fresh" by
+    refreshing `ts` -- `compact_ticket_boundary`'s own expiry check reads
+    `first_ts`, so the TRUE age (since the ORIGINAL boundary) is what
+    decides expiry, regardless of how many times the entry was re-recorded
+    in between."""
+
+    SID = "sess-firstts-expiry"
+    CWD = "/home/x/firstts"
+    PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_repeated_re_record_cannot_keep_an_old_boundary_alive(self):
+        path = self._p()
+        origin_ts = time.time() - wd.COMPACT_REQUEST_MAX_AGE_S - 60
+        now = time.time()
+        # the ORIGINAL boundary, long expired --
+        wd.record_compact_request(self.SID, self.CWD, now=origin_ts, path=path)
+        # -- but re-recorded (ts refreshed) every few "minutes" all the way
+        # up to just before `now`, exactly like a repeatedly-firing passive
+        # trigger would.
+        step = wd.COMPACT_REQUEST_MAX_AGE_S // 4
+        t = origin_ts
+        while t < now - 1:
+            t += step
+            wd.record_compact_request(self.SID, self.CWD, now=t, path=path)
+        d = wd.load_compact_requests(path)
+        self.assertEqual(d[self.SID]["first_ts"], int(origin_ts),
+                         "first_ts must still be the ORIGINAL boundary")
+        self.assertGreater(d[self.SID]["ts"], origin_ts,
+                           "ts is refreshed by every re-record, as designed")
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(
+            now, tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)}, path=path)
+        self.assertEqual(tmux.typed_texts(), [],
+                         "a repeatedly re-recorded but truly-old boundary "
+                         "must never be delivered")
+        self.assertTrue(any("expired" in ln for ln in logs), logs)
+        self.assertNotIn(self.SID, wd.load_compact_requests(path))
+
+    def test_a_genuinely_fresh_repeated_boundary_still_delivers(self):
+        # the control -- a session whose repeated re-records are all
+        # genuinely RECENT (first_ts itself is fresh) must be completely
+        # unaffected by this change.
+        path = self._p()
+        now = time.time()
+        wd.record_compact_request(self.SID, self.CWD, now=now - 120, path=path)
+        wd.record_compact_request(self.SID, self.CWD, now=now - 30, path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(
+            now, tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)}, path=path)
+        self.assertFalse(any("expired" in ln for ln in logs), logs)
+        self.assertIn("/compact", tmux.typed_texts())
+
+
 class TestCompactRequestSelfCli(unittest.TestCase):
     """`airuleset.py compact-request --self` wiring."""
 
@@ -5198,17 +5723,26 @@ class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
         self.assertFalse(any("grace-elapsed" in ln for ln in logs), logs)
         self.assertIn(self.SID, wd.load_compact_requests(path))
 
-    def test_live_tasks_true_past_grace_delivers_and_marks_grace_elapsed(self):
+    def test_live_tasks_true_past_grace_still_defers_never_sends(self):
+        # #400 FIX 5 (inverted from the pre-fix name/assertion, which
+        # required this to DELIVER once grace elapsed) — a live gatekeeper
+        # incident (2026-08-12) showed exactly this branch firing
+        # `/compact` into a session mid-work with 6+ background agents
+        # still running. Live background tasks are now an UNCONDITIONAL
+        # skip with NO time-based override, at every delivery point: a
+        # missed compact is recoverable, a compact fired mid-work is not
+        # (it drops a sibling worker's own task linkage — #246's own
+        # safety property). `deferred_since`/`COMPACT_DEFER_GRACE_S` are
+        # kept ONLY as an observability tag on the skip line.
         old_ts = 1_000_000.0
         boundary_now = old_ts + wd.COMPACT_DEFER_GRACE_S + 1
         tmux, logs, path = self._go_with_ts(CB_IDLE_WAITING_CAP, old_ts,
                                             boundary_now)
-        self.assertIn("/compact", tmux.typed_texts(), logs)
-        self.assertTrue(any("grace-elapsed" in ln for ln in logs), logs)
-        # the pre-#250 skip line must NOT also appear for the same request
-        self.assertFalse(any("skip live-tasks (compact-request)" in ln
-                             for ln in logs), logs)
-        self.assertEqual(wd.load_compact_requests(path), {})
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(any(
+            "skip live-tasks (compact-request, past-grace)" in ln
+            for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
 
     def test_malformed_ts_stays_in_grace_and_is_kept(self):
         # a legacy/corrupted entry with no readable `ts` at all -- unmeasurable
@@ -5263,38 +5797,53 @@ class TestCompactTicketBoundaryLiveTasksDefer(unittest.TestCase):
         self.assertEqual(d_mid[self.SID]["deferred_since"], t0)
 
         # A sweep run PAST the ORIGINAL deferred_since + grace (but well
-        # within grace of the SECOND record's own `ts`) must still deliver
-        # -- an anchor keyed on `ts` would have read "fresh" here and
-        # deferred forever.
+        # within grace of the SECOND record's own `ts`) must still SKIP --
+        # #400 FIX 5 removed the "deliver once grace elapses" escape
+        # entirely (see the sibling grace test above), so this now proves
+        # the anchor-preservation property a different way: the skip
+        # line's own "past-grace" tag can ONLY be correct if `deferred_since`
+        # really did stay `t0` (not reset to `t1`/`t2` by the re-record) --
+        # an anchor keyed on `ts` would still read "within grace" here
+        # (`t2 - t1 == 15`, well under `COMPACT_DEFER_GRACE_S`) and the
+        # log line would say so instead.
         t2 = t0 + wd.COMPACT_DEFER_GRACE_S + 5
         tmux2 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
         logs2 = wd.compact_ticket_boundary(
             t2, tmux2, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
             path=path, projects_dir=proj)
-        self.assertIn("/compact", tmux2.typed_texts(), logs2)
-        self.assertTrue(any("grace-elapsed" in ln for ln in logs2), logs2)
-        self.assertEqual(wd.load_compact_requests(path), {})
+        self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertTrue(any(
+            "skip live-tasks (compact-request, past-grace)" in ln
+            for ln in logs2), logs2)
+        self.assertEqual(
+            wd.load_compact_requests(path)[self.SID]["deferred_since"], t0)
 
-    def test_past_grace_draft_branch_also_marks_grace_elapsed(self):
-        # the stash-delivery branch (a draft-holding pane) gets the same
-        # marker on its own OK line. Live-tasks is checked ONCE, before the
-        # draft branch -- the scripted cap_seq below (the standard
-        # bare -> typed -> submitted stash sequence, #67) is unrelated to
-        # the waiting row and needs none of it.
+    def test_past_grace_draft_branch_also_stays_deferred(self):
+        # #400 FIX 5 (inverted, same reasoning as the idle-branch sibling
+        # test above) -- the DRAFT/stash branch gets the SAME unconditional
+        # live-tasks skip, checked ONCE before the draft branch is ever
+        # reached: a genuinely-live sibling worker must defer this delivery
+        # regardless of how long it has been deferred, and regardless of
+        # whether the pane happens to be holding an unsent draft. No
+        # cap_seq is scripted here on purpose (an empty cap_seq just
+        # returns the SAME static `draft_cap` for every capture-pane
+        # call, per `CompactFakeTmux`'s own docstring) -- if the stash
+        # dance (`_compact_stash_attempt`) were ever reached despite the
+        # live-tasks skip, it would misread the unchanging static
+        # capture as its own bare/typed/submitted sequence; the empty
+        # `tmux.typed_texts()` assertion below is the direct proof it
+        # was never entered.
         old_ts = 1_000_000.0
         boundary_now = old_ts + wd.COMPACT_DEFER_GRACE_S + 1
         draft_cap = ("● Predošlá práca hotová.\n"
                     "✻ Waiting for 1 background agent to finish\n"
                     "❯ nedokončená veta\n")
-        tmux, logs, path = self._go_with_ts(
-            draft_cap, old_ts, boundary_now,
-            cap_seq=[CB_STASH_BARE_CAP, CB_STASH_TYPED_CAP,
-                    CB_STASH_SUBMITTED_CAP])
-        self.assertIn("/compact", tmux.typed_texts(), logs)
-        self.assertTrue(
-            any(ln.startswith("OK (compact-request, stash") and
-               "grace-elapsed" in ln for ln in logs), logs)
-        self.assertEqual(wd.load_compact_requests(path), {})
+        tmux, logs, path = self._go_with_ts(draft_cap, old_ts, boundary_now)
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(any(
+            "skip live-tasks (compact-request, past-grace)" in ln
+            for ln in logs), logs)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
 
 
 class TestCompactDeferGraceRelationship(unittest.TestCase):
@@ -5444,15 +5993,23 @@ class TestDeliverCompactNowLiveTasksDefer(unittest.TestCase):
         self.assertIn("SKIP live-tasks", log_text)
         self.assertNotIn("grace-elapsed", log_text)
 
-    def test_live_tasks_true_past_grace_delivers_with_marker(self):
+    def test_live_tasks_true_past_grace_still_falls_back(self):
+        # #400 FIX 5 (inverted, same reasoning as job 14's own sibling
+        # test) -- this synchronous path also LOSES its "deliver anyway
+        # once past COMPACT_DEFER_GRACE_S" escape. Live background tasks
+        # are now an unconditional SKIP here too, with no time-based
+        # override; the request falls back to job 14's polled retry
+        # exactly like every other "not safe right now" state this
+        # function refuses on.
         old_ts = 1_000_000.0
         now = old_ts + wd.COMPACT_DEFER_GRACE_S + 1
         ok, tmux = self._go_with_ts(CB_IDLE_WAITING_CAP, request_ts=old_ts,
                                     now=now)
-        self.assertEqual(ok, "sent")
-        self.assertIn("/compact", tmux.typed_texts())
+        self.assertFalse(ok)
+        self.assertEqual(tmux.typed_texts(), [])
         log_text = wd.compact_sync_log_path().read_text()
-        self.assertIn("SEND grace-elapsed", log_text)
+        self.assertIn("SKIP live-tasks sid=%s cwd=%s" % (self.SID, self.CWD),
+                      log_text)
 
     def test_no_request_ts_defaults_to_in_grace_even_with_a_far_future_now(self):
         # #250 -- documents the deliberate default: this function runs
@@ -6267,7 +6824,60 @@ class TestCompactMarkerHoldGraceElapsed(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
+    def test_marker_hold_grace_never_overrides_while_live_tasks_exist(self):
+        # #400 FIX 5(b) -- live gatekeeper incident, 2026-08-12: the
+        # marker-hold grace (#394) must NOT deliver a `⏳`-blocked,
+        # proven-boundary request once past COMPACT_MARKER_HOLD_GRACE_S if
+        # the session STILL has live background tasks -- that is not "a
+        # stale marker on an otherwise-idle session", it is genuinely
+        # still mid-work. CB_IDLE_WAITING_CAP carries the same
+        # "Waiting for N background agents" row `_session_has_live_bg_
+        # tasks` signal (a) reads.
+        proj = self._proj()
+        path = self._p()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
+        t0 = 1_000_000.0
+        wd.record_compact_request(self.SID, self.CWD, now=t0, path=path,
+                                  origin=self.PROVEN)
+
+        # sweep 1: fresh hold, live tasks -- refuses (unchanged), stamps
+        # not_boundary_since.
+        tmux1 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
+        wd.compact_ticket_boundary(
+            t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux1.typed_texts(), [])
+        d_mid = wd.load_compact_requests(path)
+        self.assertEqual(d_mid[self.SID].get("not_boundary_since"), t0)
+
+        # sweep 2: PAST COMPACT_MARKER_HOLD_GRACE_S, marker still ⏳, and
+        # STILL live tasks -- before FIX 5 this delivered anyway
+        # ("OK not-a-boundary-grace-elapsed"); now it must keep refusing.
+        t1 = t0 + wd.COMPACT_MARKER_HOLD_GRACE_S + 5
+        tmux2 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
+        logs2 = wd.compact_ticket_boundary(
+            t1, tmux2, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux2.typed_texts(), [], logs2)
+        self.assertTrue(any("skip not-a-boundary" in ln for ln in logs2),
+                        logs2)
+        self.assertFalse(any("grace-elapsed" in ln for ln in logs2), logs2)
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+        # sweep 3: live tasks finally clear (a plain CB_IDLE_CAP, no
+        # waiting row) -- the SAME already-elapsed grace now genuinely
+        # applies and delivers, proving the narrowing gates delivery, not
+        # the grace mechanism itself.
+        tmux3 = CompactFakeTmux(CB_IDLE_CAP)
+        logs3 = wd.compact_ticket_boundary(
+            t1 + 1, tmux3, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertIn("/compact", tmux3.typed_texts(), logs3)
+        self.assertTrue(any("grace-elapsed" in ln for ln in logs3), logs3)
+        self.assertEqual(wd.load_compact_requests(path), {})
+
     def test_a_proven_boundary_marker_hold_eventually_delivers_once_grace_elapses(self):
+
         proj = self._proj()
         path = self._p()
         _write_marker_transcript(proj, self.CWD, self.SID, self.WORKING_NO_ASK)
@@ -6684,6 +7294,56 @@ class TestCompactRefusesAPaneThatRacedSinceTheSweep(unittest.TestCase):
                                       origin=self.PROVEN)
         self.assertEqual(word, "sent")
         self.assertIn("/compact", tmux.typed_texts())
+
+    # ----------------------------------------------------------------- #
+    # #400-review MAJOR-1 (fresh-context adversarial review, live-
+    # triggered by the reviewer's own repro script) — the SAME staleness
+    # this class already covers for the BOUNDARY (kind/draft) re-check
+    # exists one gate up, for LIVE TASKS: FIX 5's unconditional live-tasks
+    # skip (both job 14 and the sync path) is evaluated against a capture
+    # taken BEFORE this exact instant — a worker dispatched into that gap
+    # is invisible to the stale verdict but fully visible to a capture
+    # taken NOW. The fresh re-verify these two functions already have
+    # (for boundary kind) must ALSO be checked for live tasks, reusing
+    # the SAME fresh capture — no extra tmux round-trip.
+    # ----------------------------------------------------------------- #
+
+    RACED_LIVE_TASKS_CAP = ("● Hotovo.\n✻ Waiting for 2 background agents "
+                            "to finish\n❯ \n  ctx ███░  caveman:lite\n")
+
+    def test_job14_refuses_when_the_fresh_recapture_shows_live_bg_tasks(self):
+        # sweep-top `captured` (CB_IDLE_CAP) is clean — the live-tasks
+        # gate at the top of the loop passes fine — but the job's OWN
+        # first real capture-pane call (this fix's fresh pre-send
+        # re-verify) now shows a worker dispatched into the gap.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        path = _write_request(self._p(), self.SID, self.CWD, origin=self.PROVEN)
+        tmux = CompactFakeTmux(CB_IDLE_CAP, cap_seq=[self.RACED_LIVE_TASKS_CAP])
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(
+            any("live-tasks" in ln and "raced" in ln for ln in logs), logs)
+        # a pre-send refusal is never consumed -- the next sweep retries
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_sync_path_refuses_when_the_fresh_recapture_shows_live_bg_tasks(self):
+        # cap_seq[0] serves deliver_compact_now's OWN top-of-call resolve
+        # (idle, no live tasks — the FIRST live-tasks check passes);
+        # cap_seq[1] serves the fresh pre-send re-verify, now showing a
+        # worker dispatched into the gap.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP,
+            cap_seq=[CB_IDLE_CAP, self.RACED_LIVE_TASKS_CAP])
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, min_context=1,
+                                      origin=self.PROVEN)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(word)
 
 
 if __name__ == "__main__":

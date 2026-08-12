@@ -1475,6 +1475,95 @@ class TestGoalRearmStaleMarkerIsNeverRevived(GoalRearmBase):
                          "is not even candidate-dark")
 
 
+class TestGoalRearmAbsoluteDarkCeiling(GoalRearmBase):
+    """#400 FIX 3 -- `_goal_dark_died_by_outage`'s own revival path (#173)
+    re-arms an outage-presumed session forever if nothing ever clears it or
+    reads it. Live evidence, dev1: a pane 69,000s (19h) dark with zero
+    activity re-armed on every ~60s sweep for hours, ending with a real
+    "OK (goal-rearm) ... /goal re-armed (16 chars)" -- the SAME defect
+    shape as #170 (a guard with no reachable exit condition), recurring one
+    mechanism over. `GOAL_REARM_ABSOLUTE_DARK_S` (4x
+    `GOAL_REARM_MAX_DARK_S`, 24h) gives the outage-revival branch a
+    REACHABLE exit: past 24h of total confirmed darkness with no achieved
+    banner ever shown, this session is never auto-re-armed again -- a
+    human must re-arm it by hand."""
+
+    def test_past_absolute_ceiling_never_types_pings_once(self):
+        base = time.time()
+        old_ts = _iso(base - wd.GOAL_REARM_ABSOLUTE_DARK_S - 3600)
+        tmux, logs = self._go(PANE_DARK,
+                              entries=[marker_entry("set", PAYLOAD, old_ts)],
+                              now=base, cap_seq=self._typed_seq())
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any(
+            "skip stale-goal (goal-rearm)" in ln
+            and "absolute darkness ceiling" in ln for ln in logs), logs)
+        self.assertEqual(len(self.pings), 1, self.pings)
+        self.assertTrue(self.pings[0][0].startswith("⚠️"), self.pings)
+
+    def test_just_under_the_ceiling_still_rearms_normally(self):
+        # positive control -- one hour SHORT of the absolute ceiling: still
+        # past GOAL_REARM_MAX_DARK_S (so "stale-but-outage" applies), but
+        # NOT past the absolute ceiling -- must type exactly like the
+        # pre-#400 outage-revival path always has.
+        base = time.time()
+        old_ts = _iso(base - wd.GOAL_REARM_ABSOLUTE_DARK_S + 3600)
+        tmux, logs = self._go(PANE_DARK,
+                              entries=[marker_entry("set", PAYLOAD, old_ts)],
+                              now=base, cap_seq=self._typed_seq())
+        self.assertTrue(tmux.typed(), logs)
+        self.assertFalse(any("absolute darkness ceiling" in ln
+                             for ln in logs), logs)
+        self.assertEqual(self.pings, [])
+
+    def test_ping_fires_exactly_once_across_repeated_sweeps(self):
+        base = time.time()
+        old_ts = _iso(base - wd.GOAL_REARM_ABSOLUTE_DARK_S - 3600)
+        state = {}
+        self._go(PANE_DARK, entries=[marker_entry("set", PAYLOAD, old_ts)],
+                 state=state, now=base)
+        self.assertEqual(len(self.pings), 1, self.pings)
+        # a LATER sweep against the SAME still-dark session must NOT
+        # re-ping -- the dedicated `absdark_pinged` one-shot flag.
+        self._go(PANE_DARK, state=state, now=base + 300)
+        self.assertEqual(len(self.pings), 1, self.pings)
+
+
+class TestGoalRearmMinPayloadFloor(GoalRearmBase):
+    """#400 FIX 3 -- the sibling floor to `GOAL_REARM_MAX_PAYLOAD`: a
+    TRUNCATED/implausibly short payload must be refused, never typed as if
+    it were a real `/goal` line. Live evidence, dev1: a real re-arm of a
+    16-character fragment ("OK (goal-rearm) ... /goal re-armed
+    (16 chars)")."""
+
+    def test_a_short_payload_is_refused_never_typed(self):
+        tmux, logs = self._go(PANE_DARK,
+                              entries=[marker_entry("set", "short")],
+                              cap_seq=self._typed_seq())
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("skip unusable-payload (goal-rearm)" in ln
+                            for ln in logs), logs)
+
+    def test_a_payload_one_char_under_the_floor_is_refused(self):
+        payload = "x" * (wd.GOAL_REARM_MIN_PAYLOAD - 1)
+        tmux, logs = self._go(PANE_DARK,
+                              entries=[marker_entry("set", payload)],
+                              cap_seq=self._typed_seq())
+        self.assertFalse(tmux.typed(), logs)
+        self.assertTrue(any("skip unusable-payload (goal-rearm)" in ln
+                            for ln in logs), logs)
+
+    def test_a_payload_right_at_the_floor_still_types(self):
+        # positive control -- exactly GOAL_REARM_MIN_PAYLOAD chars, no
+        # newline, well under GOAL_REARM_MAX_PAYLOAD -- must be accepted
+        # like any real payload.
+        payload = "x" * wd.GOAL_REARM_MIN_PAYLOAD
+        tmux, logs = self._go(PANE_DARK, entries=[marker_entry("set", payload)],
+                              cap_seq=self._typed_seq(text="/goal " + payload))
+        self.assertTrue(tmux.typed(), logs)
+        self.assertEqual(tmux.typed()[0], "/goal " + payload)
+
+
 class TestGoalClearedStaleWhenReallyRearmed(GoalRearmBase):
     """#320 — dev1 live incident, sid `2d02a127-...`: `rec['last_armed']`
     (job 20's own DIRECT footer-lit observation, independent of the

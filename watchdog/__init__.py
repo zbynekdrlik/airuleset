@@ -7582,7 +7582,24 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
     first sweep a PROVEN-boundary request's marker is observed still
     blocking) is preserved the SAME way, for the SAME reason, as its own
     independent field — see `_compact_marker_hold_in_grace`'s own
-    docstring."""
+    docstring.
+
+    #400 — `first_ts` is the ORIGINAL boundary this pending episode was
+    FIRST observed at: set once, on the call that creates the entry (no
+    `prior`, or a `prior` that itself has no `first_ts` yet — a
+    migration-safe fallback for an entry written before this field
+    existed), then preserved UNCONDITIONALLY across every later
+    re-record for the SAME still-pending session — the identical
+    episode-anchor shape `deferred_since`/`not_boundary_since` already
+    use above, for the SAME reason: `ts` is deliberately overwritten on
+    every call (only the LATEST boundary matters for delivery
+    decisions), which a repeatedly-re-recorded request would otherwise
+    exploit to keep `ts` — and so its measured age — perpetually "just
+    now". `compact_ticket_boundary`'s own expiry check reads THIS field
+    (falling back to `ts` only for a legacy entry with no `first_ts` at
+    all) precisely so a re-record can never resurrect an already-expired
+    boundary — see that check's own comment for the live incident
+    (#400) this closes."""
     session = str(session or "").strip()
     if not session:
         return False
@@ -7590,6 +7607,10 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
     d = load_compact_requests(path)
     prior = d.get(session)
     entry = {"cwd": str(cwd or ""), "ts": int(now)}
+    if isinstance(prior, dict) and prior.get("first_ts") is not None:
+        entry["first_ts"] = prior["first_ts"]
+    else:
+        entry["first_ts"] = int(now)
     if msg_hash:
         entry["msg_hash"] = str(msg_hash)
     if isinstance(prior, dict) and prior.get("deferred_since") is not None:
@@ -7690,6 +7711,36 @@ def _save_compact_delivered(d, path=None):
         return False
 
 
+def _compact_delivered_hash(entry):
+    """Extract the `msg_hash` half of a `compact-delivered.json` VALUE,
+    accepting BOTH the legacy bare-string shape (pre-#400 FIX 4:
+    `d[session] = msg_hash`) and the current dict shape (`d[session] =
+    {"hash": ..., "ts": ...}`, #400) -- so an on-disk file written by the
+    OLD code keeps working unmodified through one full migration cycle,
+    the same shape `record_compact_request`'s own `first_ts` migration
+    used (see that function's docstring)."""
+    if isinstance(entry, dict):
+        return str(entry.get("hash") or "")
+    return str(entry or "")
+
+
+def _compact_delivered_ts(entry):
+    """Extract the last-REAL-SEND timestamp half of a `compact-
+    delivered.json` VALUE -- `None` for a legacy bare-string entry (no
+    `ts` was ever recorded under the old shape) or for an entry that has
+    never had a genuine send recorded via `mark_compact_delivery_ts`
+    (every drop/dedup-only `mark_compact_delivered` call leaves `ts`
+    alone -- see that function's own docstring). `None` means
+    UNMEASURABLE, never "very long ago"."""
+    if isinstance(entry, dict):
+        ts = entry.get("ts")
+        try:
+            return float(ts) if ts is not None else None
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def compact_already_delivered(session, msg_hash, path=None):
     """#71 — True iff `msg_hash` matches the LAST hash actually handled for
     `session`. A blank `session` or `msg_hash` never matches — callers with
@@ -7700,7 +7751,8 @@ def compact_already_delivered(session, msg_hash, path=None):
     msg_hash = str(msg_hash or "").strip()
     if not session or not msg_hash:
         return False
-    return _load_compact_delivered(path).get(session) == msg_hash
+    entry = _load_compact_delivered(path).get(session)
+    return _compact_delivered_hash(entry) == msg_hash
 
 
 def mark_compact_delivered(session, msg_hash, path=None):
@@ -7708,14 +7760,138 @@ def mark_compact_delivered(session, msg_hash, path=None):
     LATER request reporting the SAME (unchanged) completion — from EITHER
     channel — is recognized as a duplicate and skipped. A blank `session`
     or `msg_hash` is a no-op (nothing to key the dedup on, and never even
-    touches disk). Fail-safe (never raises). Returns True on success."""
+    touches disk). Fail-safe (never raises). Returns True on success.
+
+    #400 FIX 4 — this call is made on EVERY handled disposition (a real
+    send, or a #99/#48/thin-context/queued-compact DROP that never typed
+    anything), so it must NEVER touch the entry's own `ts` (the last-REAL-
+    SEND instant `compact_delivery_in_cooldown` measures against) —
+    only `mark_compact_delivery_ts`, called ONLY at an actual send point,
+    may set/advance it. Whatever `ts` is already on file (if any) is
+    preserved verbatim across this call, mirroring `mark_compact_delivery_
+    ts`'s own preserve-the-other-field shape in reverse."""
     session = str(session or "").strip()
     msg_hash = str(msg_hash or "").strip()
     if not session or not msg_hash:
         return False
     d = _load_compact_delivered(path)
-    d[session] = msg_hash
+    ts = _compact_delivered_ts(d.get(session))
+    entry = {"hash": msg_hash}
+    if ts is not None:
+        entry["ts"] = ts
+    d[session] = entry
     return _save_compact_delivered(d, path)
+
+
+def mark_compact_delivery_ts(session, now=None, path=None):
+    """#400 FIX 4 — record the WALL-CLOCK instant a REAL `/compact` send
+    happened for `session` -- called from EVERY path that actually types
+    `/compact` (job 14's idle send, job 14's stash send, and
+    `deliver_compact_now`'s own send), right alongside that same send's
+    `_log_compact_sync("SEND...")` call (FIX 6). Never called from a
+    drop/dedup-only disposition -- `mark_compact_delivered` owns those,
+    and deliberately never touches `ts` itself (see its own docstring).
+
+    Preserves whatever `hash` is already on file for this session (this
+    call never touches dedup identity). A blank `session` is a no-op.
+    Fail-safe (never raises); returns True on success."""
+    session = str(session or "").strip()
+    if not session:
+        return False
+    now = now if now is not None else time.time()
+    d = _load_compact_delivered(path)
+    h = _compact_delivered_hash(d.get(session))
+    entry = {"ts": float(now)}
+    if h:
+        entry["hash"] = h
+    d[session] = entry
+    return _save_compact_delivered(d, path)
+
+
+# --------------------------------------------------------------------------- #
+# #400 FIX 4 (2026-08-12, coordinator directive) — a HARD, per-session
+# MINIMUM INTERVAL between two REAL `/compact` deliveries, enforced at
+# EVERY delivery point, for EVERY origin, with no exemption -- distinct
+# from every OTHER gate in this file, which all answer "is it SAFE to
+# type right now" (busy pane, live tasks, a ❓/⏳ marker...). This one
+# answers a different question entirely: even when everything else says
+# yes, has `/compact` ALREADY fired for this session too recently to fire
+# again? A session whose ticket boundaries land close together (a fast
+# `/autopilot` batch, or several independent proven-boundary origins
+# firing within the same few minutes) would otherwise compact on EVERY
+# one of them, which is wasted cost for no benefit -- there is nothing
+# meaningfully MORE to discard a few minutes after the last compaction
+# than there was right after it.
+#
+# A request caught in cooldown is DROPPED (consumed, `mark_compact_
+# delivered` called so a repeat report of the SAME boundary does not
+# re-attempt), never held for retry -- unlike the live-tasks/marker-hold
+# gates above, which all leave the request in place because the blocking
+# CONDITION is expected to clear on its own. A cooldown is not a
+# condition that "clears" in the same sense; it simply expires, and by
+# the time it does, either this exact request has long since gone stale
+# (COMPACT_REQUEST_MAX_AGE_S) or a NEWER boundary has already superseded
+# it (a fresh completed ticket, its own fresh request). Holding this one
+# specific request queued for up to 30 minutes would only ever produce a
+# STALE compaction, firing well after the boundary that justified it --
+# exactly the class of defect #400's OTHER fixes exist to prevent.
+# --------------------------------------------------------------------------- #
+
+COMPACT_MIN_DELIVERY_INTERVAL_S = 1800   # 30 min; env AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S
+COMPACT_MIN_DELIVERY_INTERVAL_MAX_S = 6 * 3600   # clamp ceiling; see below
+
+
+def _compact_min_delivery_interval(interval=None):
+    """An explicit `interval=` (test/caller override) is returned verbatim,
+    unclamped -- every production call site leaves it `None`.
+
+    The CONSTANT/ENV-derived value is clamped to `[1,
+    COMPACT_MIN_DELIVERY_INTERVAL_MAX_S]`, the same shape every other
+    `_compact_*_grace`/`_compact_*_interval` resolver in this file uses
+    (`_compact_defer_grace`, `_compact_marker_hold_grace`) and for the
+    identical reason: a misconfigured `AIRULESET_COMPACT_MIN_DELIVERY_
+    INTERVAL_S` could otherwise silently disable the throttle outright (0
+    or negative) or make it so long that a genuinely busy, fast-completing
+    session never compacts again for hours."""
+    if interval is not None:
+        return interval
+    try:
+        raw = int(os.environ.get("AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S",
+                                 COMPACT_MIN_DELIVERY_INTERVAL_S))
+    except ValueError:
+        raw = COMPACT_MIN_DELIVERY_INTERVAL_S
+    if raw < 1:
+        return 1
+    if raw > COMPACT_MIN_DELIVERY_INTERVAL_MAX_S:
+        return COMPACT_MIN_DELIVERY_INTERVAL_MAX_S
+    return raw
+
+
+def compact_delivery_in_cooldown(session, now, path=None, interval=None):
+    """#400 FIX 4 — True while `session`'s LAST REAL `/compact` send
+    (`mark_compact_delivery_ts`'s own `ts`, read via `_compact_delivered_
+    ts` -- NEVER a drop/dedup-only mark, which never touches `ts`) is
+    still within `_compact_min_delivery_interval(interval)` of `now`.
+
+    A session with NO recorded delivery `ts` at all -- never delivered
+    before, or only ever hit a drop/dedup disposition, or the on-disk
+    entry is the pre-#400 legacy bare-string shape -- reads as
+    UNMEASURABLE, and this returns False: the throttle only ever engages
+    once a REAL send has genuinely been observed, never as a guess. This
+    is the same fail-safe direction every other gate in this file uses
+    for an unmeasurable input."""
+    session = str(session or "").strip()
+    if not session:
+        return False
+    entry = _load_compact_delivered(path).get(session)
+    ts = _compact_delivered_ts(entry)
+    if ts is None:
+        return False
+    try:
+        age = float(now) - ts
+    except (TypeError, ValueError):
+        return False
+    return age < _compact_min_delivery_interval(interval)
 
 
 # --------------------------------------------------------------------------- #
@@ -8228,8 +8404,16 @@ def compact_sync_log_path():
 
 
 def _log_compact_sync(line, path=None):
-    """Best-effort append-only log line for the synchronous delivery path
-    (`deliver_compact_now`). Never raises — a logging failure must never
+    """Best-effort append-only log line for EVERY `/compact`
+    delivery/skip decision — `deliver_compact_now` (the synchronous
+    path), AND (#400 FIX 6) job 14's own two send branches
+    (`compact_ticket_boundary`'s idle send and its stash-around-a-draft
+    send), which used to be completely silent to this log: the exact gap
+    that made a live gatekeeper incident (2026-08-12, a `/compact` fired
+    into a session mid-work with 6+ background agents running)
+    undebuggable from this log alone — every send/skip line names its
+    delivery path via a `via=job14|sync` field. Never raises — a logging
+    failure must never
     break delivery (returns False instead, same fail-safe shape as every
     other `_save_*` helper in this module). Bounded: trims to the last
     `COMPACT_SYNC_LOG_LINES_MAX` lines on every write so this can never
@@ -9317,11 +9501,27 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     for sid in list(reqs.keys()):
         entry = reqs.get(sid) or {}
         cwd = entry.get("cwd", "")
-        # #109 -- EXPIRY, checked before any tmux work: a request older than
-        # COMPACT_REQUEST_MAX_AGE_S no longer describes the session's present,
-        # so it lapses instead of firing at some unrelated later moment.
+        # #400 -- EXPIRY is measured from `first_ts` (the ORIGINAL boundary
+        # this episode was first observed at, preserved unconditionally
+        # across every re-record by `record_compact_request` -- see that
+        # function's own docstring), never the re-record-refreshed `ts`.
+        # Before this fix, a session whose every ordinary turn re-recorded
+        # the SAME pending request (the exact pre-#400 bare-`✅ DONE:`
+        # trigger this ticket also removes) kept `ts` perpetually "now",
+        # so `age` could never cross COMPACT_REQUEST_MAX_AGE_S and the
+        # request never lapsed -- live evidence, #400: a request still
+        # cycling after 11.2h. `first_ts` cannot be refreshed this way, so
+        # the true 30-minute ceiling is now reachable regardless of how
+        # many times the entry is re-recorded in between. A legacy entry
+        # written before this fix (no `first_ts` at all) falls back to its
+        # own `ts` -- the same, unchanged pre-#400 behaviour for exactly
+        # one migration cycle, after which every entry carries its own
+        # anchor.
         try:
-            age = float(now) - float(entry.get("ts") or 0)
+            boundary_ts = float(entry.get("first_ts")
+                                if entry.get("first_ts") is not None
+                                else entry.get("ts") or 0)
+            age = float(now) - boundary_ts
         except (TypeError, ValueError):
             age = 0.0
         if entry.get("ts") and age > COMPACT_REQUEST_MAX_AGE_S:
@@ -9338,6 +9538,25 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     % (sid, cwd, int(age), entry.get("origin") or "-"))
                 reqs.pop(sid, None)
                 changed = True
+                # #400 -- once the REQUEST that would have justified a
+                # `/compact` claim is gone, nothing else in this job ever
+                # revisits the associated CLAIM (`compact-claims.json`) for
+                # this sid again -- the live incident this ticket was filed
+                # from (`compact-stall ... age=40458s`, job 26's own
+                # 1-hour-stall watch) is precisely a claim that outlived
+                # the request it was set under, because no later sweep
+                # ever called the ONE function that can resolve it.
+                # `compact_claim_active` is the shared resolver every real
+                # sender already consults before a send (#78) -- it is
+                # SAFE to call here purely for its side effect (CONSUMED /
+                # FAILED / EXPIRED resolution, #72/#140), since this job
+                # never types a keystroke as a result of its return value
+                # at this call site. A claim genuinely still queued and
+                # provably still safe stays queued (returns True,
+                # unresolved) -- this call can only ever RELEASE a claim
+                # that has already become resolvable on its own terms,
+                # never invent a resolution.
+                compact_claim_active(sid, cwd, projects_dir=pdir, now=now)
             continue
         # #78 -- the SHARED claim gate, checked FIRST and unconditionally:
         # if ANY sender (this job, or the synchronous #65 path) already has
@@ -9438,8 +9657,28 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     entry["not_boundary_since"] = not_boundary_since
                     reqs[sid] = entry
                     changed = True
-                marker_grace_elapsed = not _compact_marker_hold_in_grace(
-                    not_boundary_since, now)
+                # #400 FIX 5 -- the marker-hold grace may ONLY override a
+                # stale `⏳`/`❓` marker for a session that ALREADY has ZERO
+                # live background tasks right now -- never while sibling
+                # work is still running. A `⏳`/`❓` marker alongside live
+                # tasks is not "merely stale", it is genuinely still
+                # mid-work (the exact live incident this fix responds to:
+                # the marker read `⏳` because the session really was
+                # mid-work, not because it happened to be idle with a
+                # stale render). The later unconditional live-tasks skip
+                # (below) would refuse the send either way, but this
+                # override must never even TAG the request as
+                # grace-elapsed while live tasks exist, or the
+                # `not-a-boundary-grace-elapsed` log line stops meaning
+                # what it says. If this makes the grace effectively
+                # unreachable on a continuously-busy supervisor box, that
+                # is the correct trade: a missed compact is recoverable, a
+                # compact fired mid-work is not.
+                if not _session_has_live_bg_tasks(
+                        pid, sid, cwd, run, projects_dir=pdir, now=now,
+                        captured=captured):
+                    marker_grace_elapsed = not _compact_marker_hold_in_grace(
+                        not_boundary_since, now)
             if not marker_grace_elapsed:
                 logs.append("skip not-a-boundary (compact-request) %s" % loc)
                 continue
@@ -9603,16 +9842,19 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # own #78 lesson, a new cross-cutting gate belongs at the send
         # point, never at the top of the loop.
         #
-        # #250 — bounded by TIME: the defer applies only while this
-        # request is still within COMPACT_DEFER_GRACE_S of the FIRST sweep
-        # that observed it deferred (`deferred_since`, stamped below the
-        # first time this branch fires for a given pending request, and
+        # #250 — ORIGINALLY bounded by TIME: the defer used to apply only
+        # while this request was within COMPACT_DEFER_GRACE_S of the FIRST
+        # sweep that observed it deferred (`deferred_since`, stamped below
+        # the first time this branch fires for a given pending request, and
         # PRESERVED across a re-record by `record_compact_request` — see
-        # its own #250-review docstring). Still in grace -> left in place,
-        # retried next sweep, exactly like every other "not safe RIGHT NOW"
-        # skip in this loop. Past grace -> `grace_elapsed` marks every
-        # OK/READY line below so a field audit of journalctl can tell a
-        # genuinely-clear delivery apart from one that fired anyway.
+        # its own #250-review docstring), after which it delivered anyway.
+        # #400 FIX 5 REMOVED that override entirely (see the section
+        # comment right below `_session_has_live_bg_tasks` below): live
+        # background tasks are now an unconditional skip regardless of how
+        # long the defer has run. `deferred_since` is kept purely so the
+        # skip log line can distinguish "still within the nominal grace
+        # window" from "genuinely stuck past it" — never again as license
+        # to send.
         #
         # #250-review (MAJOR) — this must NOT anchor on the entry's own
         # `ts` field: `ts` is overwritten on EVERY re-record (only the
@@ -9631,7 +9873,25 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
         # no-op in production while still coupling this job's tests to a
         # timing assumption ("evaluated long after recording") that a fast
         # unit test cannot cheaply reproduce.
-        grace_elapsed = False
+        # #400 FIX 5 -- live background tasks are now an UNCONDITIONAL skip,
+        # with NO time-based override, at EVERY delivery point (this job,
+        # `deliver_compact_now`, and the marker-hold-grace check above --
+        # see that check's own #400 FIX 5 comment). #250's original
+        # "deliver anyway once the defer has run past COMPACT_DEFER_GRACE_S"
+        # escape is REMOVED: a live gatekeeper incident (2026-08-12) showed
+        # exactly this branch firing a `/compact` into a session mid-work
+        # with 6+ background agents still running (compact-decisions.log:
+        # `RECORD deferred=live-tasks n=11 ... result=recorded` at record
+        # time, then a silent delivery a few minutes later with no
+        # `deliver_compact_now` SEND anywhere in compact-sync.log -- this
+        # job's own two send branches never logged there at all, see FIX 6
+        # below). A missed compact is recoverable (it retries next sweep,
+        # or lapses harmlessly per COMPACT_REQUEST_MAX_AGE_S); a compact
+        # fired mid-work is not (it drops a sibling worker's own task
+        # linkage -- the exact safety property #246 exists to protect).
+        # `deferred_since`/`COMPACT_DEFER_GRACE_S` are kept as a PURE
+        # observability tag on the skip line (still-within-grace vs
+        # genuinely-stuck-past-grace) -- never again as license to send.
         if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=pdir,
                                       now=now, captured=captured):
             deferred_since = entry.get("deferred_since")
@@ -9642,9 +9902,26 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 changed = True
             if _compact_live_tasks_in_grace(deferred_since, now):
                 logs.append("skip live-tasks (compact-request) %s" % loc)
-                continue
-            grace_elapsed = True
-        grace_tag = ", grace-elapsed" if grace_elapsed else ""
+            else:
+                logs.append("skip live-tasks (compact-request, past-grace) %s"
+                            % loc)
+            continue
+        # #400 FIX 4 -- a hard per-session minimum interval between two
+        # REAL /compact deliveries, unconditional, every origin, no
+        # exemption -- see the section comment above `compact_delivery_
+        # in_cooldown`'s own definition for the full reasoning. DROPPED
+        # (consumed), never held for retry -- a queued cooldown request
+        # can only ever fire stale, well after the boundary that
+        # justified it.
+        if compact_delivery_in_cooldown(sid, now, path=delivered_path):
+            logs.append("skip cooldown (compact-request) %s" % loc)
+            if not dry_run:
+                reqs.pop(sid, None)
+                changed = True
+                if mhash:
+                    mark_compact_delivered(sid, mhash, path=delivered_path)
+            continue
+        grace_tag = ""
         if draft:
             # #67 — a forgotten draft must not permanently block compaction:
             # stash it around the /compact delivery instead of skipping
@@ -9659,6 +9936,21 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             if _compact_stash_attempt(pid, run, captured, state, sid, loc,
                                       project, owner=owner, ctx=ctx,
                                       send_fn=send_fn, logs=logs):
+                # #400-review MINOR-6 (fresh-context adversarial review) --
+                # this SEND line's own comment always claimed "before any
+                # of it can be skipped by a later exception", but it used
+                # to be written AFTER five other calls below (reqs.pop,
+                # mark_compact_delivered, compact_claim_set,
+                # mark_compact_boundary, mark_compact_delivery_ts) -- the
+                # real keystrokes are already typed and submitted the
+                # instant `_compact_stash_attempt` returns True, so an
+                # exception raised by any ONE of those five would have
+                # left a genuine send silently unlogged, exactly the class
+                # of gap FIX 6 exists to close. Log FIRST, matching the
+                # comment's own claim, so it is true.
+                _log_compact_sync(
+                    "SEND (stash) sid=%s cwd=%s origin=%s via=job14"
+                    % (sid, cwd, entry.get("origin") or "-"))
                 reqs.pop(sid, None)
                 changed = True
                 if handled is not None:
@@ -9667,6 +9959,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     mark_compact_delivered(sid, mhash, path=delivered_path)
                 compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
                 mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
+                mark_compact_delivery_ts(sid, now=now, path=delivered_path)  # #400 FIX 4
                 logs.append("OK (compact-request, stash%s) %s"
                             % (grace_tag, loc))
             else:
@@ -9704,6 +9997,24 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             logs.append("skip raced (compact-request) %s -> pane moved "
                         "since the sweep" % loc)
             continue
+        # #400-review MAJOR-1 (fresh-context adversarial review, live-
+        # triggered by the reviewer's own repro) -- the SAME staleness the
+        # boundary re-check right above this comment already exists to
+        # close applies one gate up: FIX 5's live-tasks check (the block
+        # near the top of this loop) was evaluated against the SWEEP-TOP
+        # `captured` -- taken before this job even ran, and by now several
+        # tmux round-trips plus this request's own git/substantiality work
+        # stale. A worker dispatched into this exact gap is invisible to
+        # that stale verdict but fully visible to a capture taken NOW --
+        # reuse the SAME `fresh` capture the boundary check above already
+        # paid for (no extra tmux round-trip) rather than trusting a
+        # verdict that predates it. A pane that gained live work in the
+        # interim is a PRE-SEND refusal (zero keystrokes), never a drop --
+        # the next sweep re-evaluates from scratch.
+        if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=pdir,
+                                      now=now, captured=fresh):
+            logs.append("skip live-tasks (compact-request, raced) %s" % loc)
+            continue
         _janitor_mark_watch(state, pid, now)   # #372 -- this no-draft path
                                                 # never touches the stash
                                                 # slot and never verifies
@@ -9713,6 +10024,11 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                                                 # way a stuck /compact here
                                                 # is ever recovered
         send_continue(pid, COMPACT_TEXT, run)
+        # #400 FIX 6 -- see the stash branch's own comment above: this is
+        # the OTHER job-14 send path that used to write nothing to
+        # compact-sync.log at all.
+        _log_compact_sync("SEND sid=%s cwd=%s origin=%s via=job14"
+                          % (sid, cwd, entry.get("origin") or "-"))
         reqs.pop(sid, None)
         changed = True
         if handled is not None:
@@ -9721,6 +10037,7 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             mark_compact_delivered(sid, mhash, path=delivered_path)
         compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
         mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
+        mark_compact_delivery_ts(sid, now=now, path=delivered_path)  # #400 FIX 4
         logs.append("OK (compact-request%s) %s" % (grace_tag, loc))
     if changed:
         _save_compact_requests(reqs, path)
@@ -9808,7 +10125,8 @@ def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
 
 
 def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
-                        git_run=None, origin=None, request_ts=None, now=None):
+                        git_run=None, origin=None, request_ts=None, now=None,
+                        delivered_path=None):
     """#65 — attempt to deliver `/compact` for `sid` SYNCHRONOUSLY, right when
     the ticket-boundary request is recorded (see the section comment above).
 
@@ -9841,6 +10159,11 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     `"queued-compact"` — the pane already holds an unexecuted `/compact`.
     `"dropped-no-work"` — the #99 gate: zero commits since the anchor.
     `"dropped-small-context"` — the #48 gate: context too small to bother.
+    `"dropped-cooldown"` — #400 FIX 4: a REAL `/compact` already fired for
+    this session inside `COMPACT_MIN_DELIVERY_INTERVAL_S` — never held for
+    retry (a delayed send would only ever fire STALE), always CONSUMED so a
+    repeated report of the same already-handled boundary does not
+    re-attempt every sweep.
     Returns `""` (falsy) when the caller should fall back to
     `record_compact_request` for job 14's polled retry: no pane resolves
     unambiguously, the pane is in copy-mode / showing an open dialog / has
@@ -10067,17 +10390,22 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # #250 — bounded by TIME, the identical check job 14 applies
     # (`_compact_live_tasks_in_grace`), using `request_ts` (see this
     # function's own docstring for why it is always in-grace in practice).
-    grace_elapsed = False
+    # #400 FIX 5 -- live background tasks are now an UNCONDITIONAL skip
+    # here too, with NO time-based override -- see job 14's own identical
+    # fix for the full incident/reasoning (a live gatekeeper /compact fired
+    # mid-work with 6+ agents still running). #250's "deliver anyway once
+    # past COMPACT_DEFER_GRACE_S" escape is removed from this function as
+    # well; the request simply falls back to job 14's own polled retry
+    # (unchanged -- that has always been this function's fallback on ANY
+    # "not safe right now" state).
     now_ts = now if now is not None else time.time()
     has_live = _session_has_live_bg_tasks(pid, sid, cwd, run,
                                           projects_dir=projects_dir,
                                           captured=captured)
     if has_live:
-        if _compact_live_tasks_in_grace(request_ts, now_ts):
-            _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
-            return ""
-        grace_elapsed = True
-    elif _compact_request_too_young(request_ts, now_ts):
+        _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
+        return ""
+    if _compact_request_too_young(request_ts, now_ts):
         # #238 -- close the same-turn dispatch race: a "no live tasks"
         # verdict this fresh is not yet trustworthy (see
         # `_compact_request_too_young`'s own docstring). Left in place —
@@ -10099,6 +10427,16 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         # needed. One gate, every origin, no prose to keep correct.
         _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
         return ""
+    # #400 FIX 4 -- the hard per-session minimum interval between two REAL
+    # /compact deliveries, checked last (every other "is it safe right
+    # now" gate above has already passed) so it never masks a genuine
+    # earlier refusal reason. Unlike every gate above, a cooldown hit is
+    # DROPPED (consumed), never left for job 14's polled retry -- see
+    # compact_delivery_in_cooldown's own section comment for why holding
+    # it would only ever produce a stale send.
+    if compact_delivery_in_cooldown(sid, now_ts, path=delivered_path):
+        _log_compact_sync("DROP cooldown sid=%s cwd=%s" % (sid, cwd))
+        return "dropped-cooldown"
     # #333-review MAJOR-2 -- `captured` was resolved once, near the top of
     # this call, before every check above (the marker re-read, the #238/
     # #99/#48 gates, and the `_session_has_live_bg_tasks` subprocess check
@@ -10115,11 +10453,38 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     if fresh_kind != "input" or fresh_draft:
         _log_compact_sync("SKIP raced sid=%s cwd=%s" % (sid, cwd))
         return ""
+    # #400-review MAJOR-1 (fresh-context adversarial review, live-triggered
+    # by the reviewer's own repro) -- identically to job 14's own sibling
+    # fix (see its section comment): the live-tasks check above (FIX 5,
+    # unconditional) read the CALL-ENTRY `captured`, stale by the time
+    # every other gate above has run. Re-verify against the SAME `fresh`
+    # capture the boundary re-check right above already paid for -- a
+    # worker dispatched into this exact gap is invisible to the stale
+    # verdict but fully visible now. Falls back to job 14's polled retry,
+    # exactly like every other "not safe right now" state this function
+    # already returns "" for.
+    if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
+                                  captured=fresh):
+        _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s" % (sid, cwd))
+        return ""
     send_continue(pid, COMPACT_TEXT, run)
+    # #400-review MINOR-6 (fresh-context adversarial review) -- log
+    # IMMEDIATELY after the real send, matching job 14's own two send
+    # points (both already ordered this way) and fixing the SAME
+    # log-comes-after-other-calls gap the review found in job 14's stash
+    # branch: the keystrokes are already typed the instant `send_continue`
+    # returns, so an exception raised by claim-set/boundary-mark/ts-mark
+    # below must never leave a genuine send unlogged. Names BOTH the
+    # request's own origin (blank / subagent-stop / self-callback -- what
+    # proved the boundary) and the delivery PATH (`via=sync`, vs job 14's
+    # `via=job14`) so a later forensic read of compact-sync.log can tell
+    # which of the two senders actually fired without cross-referencing a
+    # second log.
+    _log_compact_sync("SEND sid=%s cwd=%s origin=%s via=sync"
+                      % (sid, cwd, origin or "-"))
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
     mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
-    _log_compact_sync("SEND%s sid=%s cwd=%s"
-                      % (" grace-elapsed" if grace_elapsed else "", sid, cwd))
+    mark_compact_delivery_ts(sid, now=now_ts, path=delivered_path)  # #400 FIX 4
     return "sent"
 
 
@@ -11557,6 +11922,18 @@ GOAL_REARM_MAX_ATTEMPTS = 2         # deliveries per streak window (the
                                     # keystroke, then stop)
 GOAL_REARM_STREAK_S = 2 * 3600      # streak window; resets by TIME only
 GOAL_REARM_MAX_PAYLOAD = 12_000     # refuse to type anything larger
+# #400 -- the sibling floor `GOAL_REARM_MAX_PAYLOAD` never had: the
+# unusable-payload check below only ever rejected `not payload`/too-LONG,
+# so a genuinely TRUNCATED parse of `rec['payload']` (a live incident: a
+# 10-char payload, "/goal " + it logged as "16 chars") sailed straight
+# through and got typed into a pane every re-arm attempt. No real shipped
+# `/goal` condition -- this repo's own three templates, or any plausible
+# hand-typed one -- is anywhere near this short; this is a floor against
+# a parse artifact, not a claim about what a legitimate minimum condition
+# looks like. Refuse-rather-than-guess: an implausibly short payload is
+# logged and skipped, never typed, exactly like the existing too-long/
+# empty/multi-line cases it now sits beside.
+GOAL_REARM_MIN_PAYLOAD = 20         # refuse to type anything shorter
 
 # --- the FOURTH shape (same job, refining the FIRST): #101 -----------------
 # Two gaps in the original bounded-retry design, both from the same live
@@ -11610,6 +11987,32 @@ GOAL_REARM_MAX_DARK_S = 6 * 3600    # a `set` marker (or the last sweep that
                                     # already resolved and is never revived —
                                     # generous past any normal watchdog-state
                                     # gap, far short of the incident's 3 days
+
+# #400 -- the "stale-but-outage" branch's own accepted cost ((b) in its own
+# comment, #173) was that a session which keeps reviving-and-failing gets a
+# GAVE UP ping roughly every GOAL_REARM_STREAK_S (2h) "instead of exactly
+# once" -- but nothing ever stopped the CYCLE itself: `hash`/`n`/`pinged`
+# reset on every streak boundary, so a session that is genuinely,
+# permanently dark (no explicit clear, no activity of any kind) kept being
+# typed into forever, once per streak, with no terminal state at all. Live,
+# #400: a pane 19.2h dark, re-armed every minute, still being typed into
+# with no end in sight -- a guard with no reachable exit condition (#170's
+# own defect shape, recurring here one level up). Past this ceiling of
+# TOTAL elapsed darkness (checked at the delivery decision itself, never at
+# `_goal_dark_died_by_outage`'s own achieved-banner-adjacent call site --
+# see that check's own comment for why the achieved-banner branch needs no
+# separate gate at all: it already never types when
+# `revived_from_dark_outage` is True), the pane is folded into the SAME
+# permanent "skip stale-goal" one-shot-ping terminal state an explicit
+# `/goal clear` already reaches -- genuinely reachable, and it stays
+# reached: nothing on the outage path ever resets it back to "still
+# reviving", unlike the streak/attempt counters above. Set well above
+# `GOAL_REARM_MAX_DARK_S` (4x) so it only ever engages for a session that
+# has ALREADY exhausted several full streak-reset cycles of genuine
+# outage-revival attempts with zero result -- never for a session merely
+# past the base cap once.
+GOAL_REARM_ABSOLUTE_DARK_S = 4 * GOAL_REARM_MAX_DARK_S  # 24h
+
 GOAL_REARM_GIVEUP_RESET_S = 15 * 60  # #322 — a reachable exit condition for
                                     # the give-up state: once GAVE UP has held
                                     # this long AND the pane is PROVABLY idle
@@ -13618,6 +14021,18 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 # otherwise silently re-arm this ping's one-shot dedup
                 # every single sweep).
                 rec["stale_achieved_pinged"] = False
+            if rec.get("absdark_pinged"):
+                # #400 -- the SAME "genuinely alive again, a future episode
+                # gets its own fresh ping" reset, for the absolute-
+                # darkness-ceiling ping's own DEDICATED flag. Deliberately
+                # NOT `dark_pinged`: that flag is reset every single sweep
+                # BY the "stale-but-outage" branch itself (while this
+                # session stays dark-and-outage-presumed) — sharing it here
+                # would re-arm THIS ping's one-shot dedup on every sweep
+                # past the ceiling instead of firing exactly once, the
+                # identical trap `stale_achieved_pinged` was split out to
+                # avoid one field above.
+                rec["absdark_pinged"] = False
             if state is not None:
                 # #324 — the footer is proof of REALITY that is stronger
                 # than anything `_goal_recover_untracked` itself could ever
@@ -14128,8 +14543,61 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 logs.append("skip goal-achieved (goal-rearm) %s -> loop finished "
                             "legitimately (%s)" % (loc, reason))
                 continue
+        if revived_from_dark_outage and last_seen_alive is not None:
+            # #400 -- a REACHABLE exit condition for the outage-revival
+            # branch above (`GOAL_REARM_ABSOLUTE_DARK_S`'s own comment has
+            # the full incident + design). Scoped to ONLY this fall-
+            # through-to-generic-delivery point (never the
+            # `_goal_dark_died_by_outage` call site itself, above) so the
+            # achieved-banner branch's own #335 P0 messaging (which
+            # already never types when `revived_from_dark_outage` is True
+            # — see `if backlog_open is True and revived_from_dark_outage`
+            # above) is completely unaffected by this ceiling; it only
+            # closes the gap for a session with NO achieved banner ever
+            # shown, the exact population that was genuinely re-arming
+            # forever.
+            total_dark_s = now - last_seen_alive
+            if total_dark_s > GOAL_REARM_ABSOLUTE_DARK_S:
+                logs.append(
+                    "skip stale-goal (goal-rearm) %s (%d s since last "
+                    "confirmed armed, past the %d s absolute darkness "
+                    "ceiling -> never re-arming this session again)"
+                    % (loc, int(total_dark_s), GOAL_REARM_ABSOLUTE_DARK_S))
+                # #400 -- a DEDICATED one-shot flag (`absdark_pinged`),
+                # never `dark_pinged`: the "stale-but-outage" branch just
+                # above resets `dark_pinged` to False on EVERY sweep this
+                # session stays dark-and-outage-presumed (by design, so a
+                # LATER genuinely-different revival attempt still gets its
+                # own give-up ping) — reusing it here would re-send this
+                # permanent-give-up ping every single sweep past the
+                # ceiling instead of exactly once (mirrors
+                # `stale_achieved_pinged`'s own reasoning, one field over).
+                if not rec.get("absdark_pinged"):
+                    if send_fn is not None and not dry_run:
+                        from notify import stream_redirect  # #212
+                        rec["absdark_pinged"] = True
+                        _save()
+                        send_fn(
+                            "⚠️ **%s** — `/goal` slučka je úplne ticho už "
+                            "vyše %d hodín (žiadna aktivita, žiadny "
+                            "explicitný `/goal clear`) a automatické "
+                            "preármovanie sa vzdalo definitívne — presiahlo "
+                            "to hranicu, po ktorej sa už nikdy samo "
+                            "neskúsi znovu (%s). Prearmuj ju prosím ručne, "
+                            "ak má pokračovať."
+                            % (project_label(cwd),
+                               GOAL_REARM_ABSOLUTE_DARK_S // 3600, loc),
+                            owner=stream_redirect(pane_owner(pid, run))
+                                or None,
+                            dedup_key="goaldark:%s:%s:%d"
+                                      % (sid, rec.get("hash") or rec.get("mts"),
+                                         int(last_seen_alive or 0)),
+                            dry_run=dry_run)
+                continue
         payload = rec.get("payload") or ""
-        if not payload or "\n" in payload or len(payload) > GOAL_REARM_MAX_PAYLOAD:
+        if (not payload or "\n" in payload
+                or len(payload) > GOAL_REARM_MAX_PAYLOAD
+                or len(payload) < GOAL_REARM_MIN_PAYLOAD):
             logs.append("skip unusable-payload (goal-rearm) %s (%d chars)"
                         % (loc, len(payload)))
             continue

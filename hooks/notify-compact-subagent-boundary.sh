@@ -8,8 +8,17 @@ set -euo pipefail
 # kazdom tickete ma prebehnut compact." Ticket done -> compact runs. Always.
 #
 # WHY A SECOND CHANNEL EXISTS AT ALL. The Stop hook next door
-# (notify-compact-request.sh) keys the boundary to the SUPERVISOR'S OWN
-# MESSAGE: it refuses any turn whose last line is `⏳`. For a supervisor whose
+# (notify-compact-request.sh) USED TO key the boundary to the SUPERVISOR'S
+# OWN MESSAGE: it refused any turn whose last line was `⏳`. (#400,
+# 2026-08-12: that hook is now a PERMANENT NO-OP -- its whole text-sniffing
+# channel is removed, in both directions, because repeated re-firing on
+# every ordinary turn is what let a stale request keep looking "fresh" for
+# 11+ hours in a live incident. THIS hook -- the SubagentStop channel
+# described below -- is now the ONLY structural way an autopilot-worker's
+# own ticket boundary creates a `/compact` request; the reasoning below for
+# why a message-shaped Stop-hook trigger was structurally unreachable for a
+# supervisor is kept verbatim as the historical justification for why this
+# channel had to exist in the first place.) For a supervisor whose
 # work is performed by DISPATCHED workers that is structurally unreachable —
 # it reports batch N and dispatches batch N+1 in the SAME turn, so the turn
 # carrying the completed-ticket report ALWAYS ends `⏳`. Measured
@@ -122,7 +131,7 @@ set -euo pipefail
 # in a session started 36 h earlier. No operator restart is needed for #121.)
 #
 # Every decision now appends ONE line naming the predicate that failed:
-#   <iso8601> RECORD  result=<recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dup|skip|error> type=… agent=… sid=… cwd=…
+#   <iso8601> RECORD  result=<recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dropped-cooldown|dup|skip|error> type=… agent=… sid=… cwd=…
 #   <iso8601> DECLINE reason=<predicate> [n=<live>] type=… agent=… sid=… cwd=…
 # `result=` is the word `cmd_compact_request` already printed and this hook
 # used to discard with `>/dev/null 2>&1` — an accepted boundary that was then
@@ -298,7 +307,13 @@ RESULT=$(python3 "$AIRULESET_PY" compact-request --record --session "$SID" \
     --cwd "$CWD" --msg-hash "$MSG_HASH" --origin "subagent-stop" 2>/dev/null) \
     || RESULT=""
 case "$RESULT" in
-    recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dup|skip) ;;
+    # #400-review MINOR-3 (fresh-context adversarial review, TRIGGERED) --
+    # this allowlist predates #400 FIX 4's new "dropped-cooldown" word,
+    # which `cmd_compact_request` already prints verbatim -- without this
+    # entry a genuine cooldown drop fell through to the `*) RESULT="error"`
+    # branch below and corrupted exactly the forensic log (#123/#125) this
+    # ticket's own incident analysis leaned on.
+    recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dropped-cooldown|dup|skip) ;;
     *) RESULT="error" ;;
 esac
 _decide_log RECORD "${DEFERRED}result=$RESULT"
