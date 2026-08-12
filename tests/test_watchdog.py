@@ -2097,19 +2097,27 @@ class RunOnceSweepWallClockBudget(unittest.TestCase):
                     "default budget, got: %r" % logs)
 
 
-class RunOnceTailBudgetForJobs89(unittest.TestCase):
-    """#255 (adversarial review, MAJOR finding): jobs 8/9 must NOT receive
-    the bare `sweep_deadline` used by the per-transcript pane loop -- that
-    deadline is scoped to the pane loop alone (which runs BEFORE jobs 8/9)
-    and can legitimately already be exhausted by the time jobs 8/9 run,
-    silently zeroing their entire ~30s margin (the docstring above the
-    90/120 split already says "the remaining lightweight jobs still run
-    afterward") exactly when a real backlog is most likely to exist
+class RunOnceTailBudgetForJobs8And20(unittest.TestCase):
+    """#255 (adversarial review, MAJOR finding), re-verified for the #403
+    goal.py collapse: jobs 8/20 must NOT receive the bare `sweep_deadline`
+    used by the per-transcript pane loop -- that deadline is scoped to the
+    pane loop alone (which runs BEFORE jobs 8/20) and can legitimately
+    already be exhausted by the time jobs 8/20 run, silently zeroing their
+    entire ~30s margin exactly when a real backlog is most likely to exist
     (measured live: 26 of 3837 sweeps over 3 days exceeded the pane loop's
     own 90s budget). They get `sweep_deadline + TAIL_BUDGET_S` instead,
-    still comfortably under the 120s systemd hard kill."""
+    still comfortably under the 120s systemd hard kill.
 
-    def test_bounce_backstop_and_goal_autoarm_get_the_extended_tail_deadline(self):
+    #403 STEP 0 explicitly required this collapse's own timing plumbing to
+    respect #172's sweep_deadline/tail_deadline mechanism -- job 9's own
+    `goal_sweep` is bounded by the tiny pending-arm-request count (not by
+    the box's pane count) and does not need it, but job 20's TWO halves
+    (`goal_dark_watch`, `goal_lane_sweep`) both walk EVERY live candidate
+    pane, the identical unbounded-by-repo-count shape `bounce_backstop`
+    already guards -- so both get the SAME `time_fn`/`sweep_deadline`
+    contract `bounce_backstop` has carried since #255."""
+
+    def test_bounce_backstop_and_job20_both_halves_get_the_extended_tail_deadline(self):
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         proj = Path(tmp.name) / "projects"
@@ -2122,39 +2130,53 @@ class RunOnceTailBudgetForJobs89(unittest.TestCase):
             captured["bounce_deadline"] = kw.get("sweep_deadline")
             return []
 
-        def goal_probe(*a, **kw):
-            captured["goal_deadline"] = kw.get("sweep_deadline")
+        def dark_watch_probe(*a, **kw):
+            captured["dark_watch_deadline"] = kw.get("sweep_deadline")
             return []
+
+        def lane_sweep_probe(*a, **kw):
+            captured["lane_sweep_deadline"] = kw.get("sweep_deadline")
+            return []
+
+        from watchdog import goal as _goal_mod
 
         budget = 10
         with unittest.mock.patch.object(wd, "bounce_backstop",
                                         side_effect=bounce_probe), \
-             unittest.mock.patch.object(wd, "goal_autoarm",
-                                        side_effect=goal_probe):
+             unittest.mock.patch.object(_goal_mod, "goal_dark_watch",
+                                        side_effect=dark_watch_probe), \
+             unittest.mock.patch.object(_goal_mod, "goal_lane_sweep",
+                                        side_effect=lane_sweep_probe):
             wd.run_once(now=time.time(), dry_run=False,
                        run=lambda *a, **k: "",
                        send_fn=lambda *a, **k: None, projects_dir=proj,
                        state_path=state_path,
                        pending_prefix=str(Path(tmp.name) / "pending-"),
                        time_fn=lambda: 0.0, sweep_budget_s=budget,
-                       bounce_fetch=lambda root: [])
+                       bounce_fetch=lambda root: [],
+                       goal_jobs_enabled=True)
 
         expected = 0.0 + budget + wd.TAIL_BUDGET_S
         self.assertEqual(captured.get("bounce_deadline"), expected,
                          "bounce_backstop must get the EXTENDED tail "
                          "deadline, not the bare pane-loop sweep_deadline")
-        self.assertEqual(captured.get("goal_deadline"), expected,
-                         "goal_autoarm must get the EXTENDED tail "
+        self.assertEqual(captured.get("dark_watch_deadline"), expected,
+                         "goal_dark_watch must get the EXTENDED tail "
+                         "deadline, not the bare pane-loop sweep_deadline")
+        self.assertEqual(captured.get("lane_sweep_deadline"), expected,
+                         "goal_lane_sweep must get the EXTENDED tail "
                          "deadline, not the bare pane-loop sweep_deadline")
         self.assertLess(expected, 120,
                         "the tail deadline must stay comfortably under "
                         "the 120s systemd hard kill")
 
-    def test_goal_templates_path_reaches_job_9_too(self):
-        # #320 shape 2 — job 9's virgin-candidate branch needs the SAME
-        # `goal_templates_path` job 20 already receives; `cmd_watchdog`
-        # already wires the real path unconditionally, so this only needs
-        # to prove `run_once` threads it through to `goal_autoarm`.
+    def test_goal_requests_path_reaches_job_9(self):
+        # #403 (successor to the deleted #320 shape 2 — job 9 no longer
+        # resolves templates during a sweep at all; the SKILL.md text is
+        # resolved once, at `goal-arm --self` CLI time). What still needs
+        # threading through `run_once` is the PENDING-REQUESTS store path
+        # (`goal_requests_path`, the renamed run_once param) reaching
+        # `goal_sweep`'s own `requests_path` kwarg.
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         proj = Path(tmp.name) / "projects"
@@ -2162,19 +2184,23 @@ class RunOnceTailBudgetForJobs89(unittest.TestCase):
         state_path = Path(tmp.name) / "state.json"
         captured = {}
 
-        def goal_probe(*a, **kw):
-            captured["templates_path"] = kw.get("templates_path")
+        def goal_sweep_probe(*a, **kw):
+            captured["requests_path"] = kw.get("requests_path")
             return []
 
-        with unittest.mock.patch.object(wd, "goal_autoarm",
-                                        side_effect=goal_probe):
+        from watchdog import goal as _goal_mod
+
+        with unittest.mock.patch.object(_goal_mod, "goal_sweep",
+                                        side_effect=goal_sweep_probe):
             wd.run_once(now=time.time(), dry_run=False,
                        run=lambda *a, **k: "",
                        send_fn=lambda *a, **k: None, projects_dir=proj,
                        state_path=state_path,
                        pending_prefix=str(Path(tmp.name) / "pending-"),
-                       goal_templates_path="/tmp/SKILL.md")
-        self.assertEqual(captured.get("templates_path"), "/tmp/SKILL.md")
+                       goal_jobs_enabled=True,
+                       goal_requests_path="/tmp/goal-requests.json")
+        self.assertEqual(captured.get("requests_path"),
+                         "/tmp/goal-requests.json")
 
 
 class RunOnceSubagentVisibility(unittest.TestCase):

@@ -37,8 +37,6 @@ from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import watchdog as wd                                     # noqa: E402
-
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = "skills/autopilot/SKILL.md"
 SKILL_MASTER = "skills/autopilot-master/SKILL.md"
@@ -528,17 +526,16 @@ class TheTemplatesDeclareTheQuestionTimeoutEscapeHatch(TestCase):
                 if len(line) > 4000]
         self.assertEqual(over, [])
 
-    def test_the_stated_minutes_matches_the_real_constant(self):
-        # #161-review MINOR m4: the templates hardcode the literal "(30m)"
-        # while the code reads GOAL_QUESTION_TIMEOUT_S — nothing tied the
-        # two before this test, so tuning the constant would silently make
-        # every template lie about how long the wait actually is.
-        minutes = wd.GOAL_QUESTION_TIMEOUT_S // 60
-        needle = "(%dm)" % minutes
-        for i, line in enumerate(goal_lines()):
-            self.assertIn(needle, line,
-                          "template %d states a stale minute count "
-                          "(expected %r)" % (i, needle))
+    # test_the_stated_minutes_matches_the_real_constant (#161-review MINOR
+    # m4) removed by #403: `GOAL_QUESTION_TIMEOUT_S` and the whole
+    # `_goal_question_park_nudge` mechanism it tuned are deleted wholesale
+    # (nothing auto-produces the "question-timeout:" text into a pane any
+    # more, per #403's own design comment item 8) — the templates' literal
+    # "(30m)" is no longer tied to any live constant to drift against. The
+    # SKILL.md templates themselves are deliberately left UNCHANGED by
+    # #403 (a design-comment-stated scope boundary): the escape-hatch
+    # clause stays documented prose describing what a session should do IF
+    # that text ever appears, even though nothing currently produces it.
 
 
 if __name__ == "__main__":

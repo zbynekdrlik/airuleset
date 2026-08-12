@@ -10596,9 +10596,9 @@ def cmd_watchdog(args):
     the instant it is logged, not merely "printed" into a buffer a kill can
     still erase."""
     import burn
-    from watchdog import (run_once, fetch_usage, fetch_channel_messages,
-                          goal_templates_path)
+    from watchdog import run_once, fetch_usage, fetch_channel_messages
     from watchdog import compact as _compact_mod
+    from watchdog import goal as _goal_mod
     # Job 16 (#55) is coordinator-only: every OTHER managed box already writes
     # its own local hourly row via job 13, so only dev1 fans out over ssh to
     # merge them. `os.uname().nodename` is the same "which host am I" check
@@ -10636,16 +10636,16 @@ def cmd_watchdog(args):
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
                     fleet_path=burn.fleet_path(),
                     burn_alert_enabled=burn_alert_enabled,
-                    # Job 20 (#76) runs on EVERY managed box — a silently
-                    # dead /goal is a per-session failure, not a
-                    # coordinator-only one (it was montalu's stream that
-                    # lost its loop twice in a day).
-                    goal_rearm_enabled=True,
-                    # …and its STALE-TEMPLATE shape (#64) reads the skill
-                    # `install` actually deployed on THIS box — the sub-dev
-                    # users have no repo checkout, and the installed copy is
-                    # by definition the text their own /autopilot prints.
-                    goal_templates_path=str(goal_templates_path()),
+                    # Jobs 9/20 (#403, collapsing #76) run on EVERY managed
+                    # box — a silently dead /goal, or a still-pending arm
+                    # request nothing has re-evaluated yet, is a per-session
+                    # failure, not a coordinator-only one (it was montalu's
+                    # stream that lost its loop twice in a day). Templates
+                    # are resolved ONCE, at `goal-arm` record time (never
+                    # per-sweep any more) — see `watchdog/goal.py`'s own
+                    # module docstring.
+                    goal_jobs_enabled=True,
+                    goal_requests_path=_goal_mod.goal_requests_path(),
                     # Job 21 (#84) likewise runs on EVERY managed box — a
                     # multi-hour turn starves compaction, question delivery
                     # and the keystroke queue of THAT session, wherever it
@@ -10736,6 +10736,54 @@ def cmd_compact_request(args):
     print("compact-request: nothing to do (use --record --session <sid> --cwd <cwd>)",
           file=sys.stderr)
     sys.exit(1)
+
+
+def cmd_goal_arm(args):
+    """The ONE proven entry point for the collapsed `/goal` arming model
+    (#403 -- see `watchdog/goal.py`'s own module docstring for the full
+    design). Called by the `/autopilot` skill's Step 2, as the session's
+    OWN last tool call right after PRINTING the `/goal` line -- that print
+    IS the callback moment.
+
+    `--self`: resolves the calling SESSION's own pane/cwd/sid via
+    `$TMUX_PANE` (the SAME `compact.resolve_self_pane()` job 14 already
+    uses -- a `/goal` session and a `/compact` session are the identical
+    kind of caller, so nothing new is needed here). The authority profile
+    is `--template` if given, else `resolve_authority(cwd)` -- matching
+    exactly what the skill's own printed `/goal` line was computed from,
+    so the two can never disagree. The exact shipped template text for
+    that profile is resolved fresh (`goal.goal_template_for_authority`,
+    never a stale copy), the request is recorded, and ONE immediate
+    synchronous delivery attempt is made. Prints the disposition word
+    verbatim (mirrors `compact-request`'s own contract: `sent` / `expired`
+    / `skip:<reason>`) so the calling turn's own decision log stays
+    honest -- though the REAL delivery path is the periodic sweep (job 9,
+    `goal.goal_sweep`) picking the still-pending request back up once the
+    pane genuinely goes idle."""
+    from watchdog import goal as _goal_mod
+    from watchdog import compact as _compact_mod
+    if not getattr(args, "self", False):
+        print("goal-arm: nothing to do (only --self is supported)",
+              file=sys.stderr)
+        sys.exit(1)
+    pane_id, cwd, sid = _compact_mod.resolve_self_pane()
+    if not sid:
+        print("goal-arm --self: could not resolve this session's own "
+              "pane/transcript (not running inside a recognized tmux "
+              "Claude Code pane, or $TMUX_PANE unset) -- nothing "
+              "recorded", file=sys.stderr)
+        sys.exit(1)
+    authority = (getattr(args, "template", "") or "").strip() or resolve_authority(cwd)
+    text = _goal_mod.goal_template_for_authority(authority)
+    if not text:
+        print("goal-arm --self: could not resolve a /goal template for "
+              "authority=%r (unreadable SKILL.md, no matching block, or "
+              "over Claude Code's 4000-char cap) -- nothing recorded"
+              % authority, file=sys.stderr)
+        sys.exit(1)
+    word = _goal_mod._goal_sync_attempt(sid, cwd, text, authority,
+                                        "self-callback")
+    sys.stdout.write(word)
 
 
 # Autopilot authority profiles (issue #16, 2026-07-09). A stream's authority is a
@@ -14193,6 +14241,27 @@ def main():
                              "right after finishing a ticket, before "
                              "dispatching anything else.")
 
+    p_garm = sub.add_parser(
+        "goal-arm",
+        help="Record + attempt one /goal arm for a session (#403) -- the "
+             "/autopilot skill's own Step 2 callback, consumed by watchdog "
+             "job 9 (watchdog.goal.goal_sweep)")
+    p_garm.add_argument("--self", action="store_true",
+                        help="Resolve THIS session's own pane via "
+                             "$TMUX_PANE, resolve the authority profile "
+                             "and its shipped /goal template, record the "
+                             "request, and attempt ONE immediate "
+                             "synchronous delivery. The ONLY supported "
+                             "mode -- goal-arming has exactly one proven "
+                             "origin, unlike compact's two.")
+    p_garm.add_argument("--template", default="",
+                        help="Authority profile to arm (full / "
+                             "branch-merge / fork-no-merge). Defaults to "
+                             "resolve_authority(cwd) -- the same "
+                             "resolution the /autopilot skill's own "
+                             "printed line already used, so they can "
+                             "never disagree.")
+
     p_tickets = sub.add_parser(
         "tickets-status",
         help="Statusline github-tickets segment — autopilot done/total or open issues")
@@ -14402,6 +14471,7 @@ SUBCOMMANDS = {
     "notify": cmd_notify,
     "watchdog": cmd_watchdog,
     "compact-request": cmd_compact_request,
+    "goal-arm": cmd_goal_arm,
     "fable-gate": cmd_fable_gate,
     "burn": cmd_burn,
     "delegation": cmd_delegation,

@@ -4,14 +4,26 @@
 runs INSIDE newlevel's tmux via `sudo su - montalu`, so montalu's own watchdog
 cannot see the pane (foreign tmux) and newlevel's watchdog SKIPPED it because
 pane_current_command is 'sudo', not 'claude'. Auto-arm for the montalu stream
-was structurally impossible; the user had to arm by hand. Fixes locked here:
-list_claude_panes includes a sudo/su pane whose process tree hosts a claude;
-goal_autoarm reads the FOREIGN user's transcript (sudo -n) for the full goal
-bytes when the local projects dir has none.
+was structurally impossible; the user had to arm by hand. Fix locked here:
+list_claude_panes includes a sudo/su pane whose process tree hosts a claude,
+reporting the hosted claude's REAL cwd (`_pane_hosted_claude_pid`/
+`_hosted_claude_cwd`) — this half is generic pane-discovery infra, untouched
+by #403.
+
+The OLD second half — `goal_autoarm` reading the FOREIGN user's transcript
+(sudo -n, via `_foreign_transcript_goal`) to reconstruct a `/goal` line the
+pane's own viewport showed only WRAPPED/truncated — is REMOVED by #403,
+along with both functions: the new callback-model arm delivery
+(`watchdog/goal.py`'s `goal_sweep`/`deliver_goal`) never reads its payload
+from the pane's viewport at all — the exact text is resolved once, at
+`goal-arm --self` CLI time (`goal_template_for_authority`), and delivered
+from the persisted `goal-requests.json` store. A wrapped/truncated fragment
+in the viewport is therefore structurally impossible to arm FROM any more,
+for a sudo-hosted pane or a plain one alike — there is nothing left for a
+foreign-transcript reconstruction to recover.
 """
 
 import sys
-import time
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -66,43 +78,13 @@ class TestSudoPaneVisibility(unittest.TestCase):
         self.assertEqual(res, [("%1", "/home/x/devel/demo")])
 
 
-class TestForeignTranscriptGoal(unittest.TestCase):
-    FULL_GOAL = ("/goal STOP CONDITIONS — the loop is DONE ... montalu backlog "
-                 "empty AND main green ... never park silently.")
-    FRAG = "/goal STOP CONDITIONS — the loop is DONE ... montalu"
-    WRAPPED_PANE = (
-        "● autopilot pripravený.\n"
-        + FRAG + "\n"
-        "  backlog empty AND main green ... continuation line\n"
-        "**Otázka — projekt odoo (Money→Odoo):** autopilot pripravený.\n"
-        "• Vlož /goal riadok vyššie (odporúčam) — loop sa rozbehne\n"
-        "❓ NEEDS YOU: vlož /goal riadok vyššie a autopilot sa rozbehne\n"
-        "❯ \n  ctx ███░  caveman\n")
-
-    def test_wrapped_goal_on_foreign_cwd_arms_from_sudo_transcript(self):
-        tmux = FakeTmux("%7\tsudo\t/home/newlevel/devel/odoo\t8901",
-                        self.WRAPPED_PANE)
-        with m.patch.object(wd, "_pane_hosted_claude_pid", return_value="999"), \
-             m.patch.object(wd, "_hosted_claude_cwd",
-                            return_value="/home/montalu/devel/odoo"), \
-             m.patch.object(wd, "_foreign_transcript_goal",
-                            return_value=self.FULL_GOAL) as fg:
-            wd.goal_autoarm(time.time(), tmux, {},
-                            projects_dir="/nonexistent-projects")
-        self.assertEqual(tmux.typed(), [self.FULL_GOAL])
-        fg.assert_called_once_with("/home/montalu/devel/odoo")
-
-    def test_wrapped_goal_foreign_lookup_fails_never_arms_fragment(self):
-        tmux = FakeTmux("%7\tsudo\t/home/newlevel/devel/odoo\t8901",
-                        self.WRAPPED_PANE)
-        with m.patch.object(wd, "_pane_hosted_claude_pid", return_value="999"), \
-             m.patch.object(wd, "_hosted_claude_cwd",
-                            return_value="/home/montalu/devel/odoo"), \
-             m.patch.object(wd, "_foreign_transcript_goal", return_value=None):
-            logs = wd.goal_autoarm(time.time(), tmux, {},
-                                   projects_dir="/nonexistent-projects")
-        self.assertFalse(tmux.typed())
-        self.assertTrue(any("wrap" in ln.lower() for ln in logs), logs)
+# TestForeignTranscriptGoal (`goal_autoarm` + `_foreign_transcript_goal`)
+# REMOVED by #403 -- both functions are deleted wholesale (design comment
+# item 8). The scenario it locked (a wrapped/truncated `/goal` fragment
+# visible in a sudo-hosted pane's viewport, recovered via a sudo -n read of
+# the foreign user's own transcript) cannot occur any more for ANY pane,
+# hosted or not: the new callback-model arm delivery never reads its
+# payload from a pane's viewport at all -- see the module docstring above.
 
 
 if __name__ == "__main__":

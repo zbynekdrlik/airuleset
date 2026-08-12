@@ -412,9 +412,23 @@ class TestRunOnceDocstringIsAccurate(unittest.TestCase):
         implementation is gone. Any function a LIVE entry names must still be
         defined and still be called somewhere in the module (a job's entry
         often names its helpers, which `goal_rearm` and friends call rather
-        than `run_once` directly, so "called by run_once" is too strict)."""
+        than `run_once` directly, so "called by run_once" is too strict).
+
+        #403: `src` is the WHOLE `watchdog` package, not just `__init__.py`
+        alone — the #402/#403 collapses moved several shared helpers'
+        REAL call sites into `watchdog/goal.py`/`watchdog/compact.py`
+        (`watchdog._janitor_clear_watch(...)`, module-qualified), while
+        the function DEFINITIONS themselves stay in `__init__.py`. A
+        same-file-only count reads such a helper as "defined but never
+        called" the moment its only real caller lives in a sibling
+        module — a false positive, not evidence of dead code (live-
+        reproduced: `_janitor_clear_watch` is genuinely called from
+        `goal.py`'s `deliver_goal`, invisible to a `__init__.py`-only
+        scan)."""
         doc = wd.run_once.__doc__ or ""
-        src = (REPO / "watchdog" / "__init__.py").read_text(encoding="utf-8")
+        src = "\n".join(
+            (REPO / "watchdog" / name).read_text(encoding="utf-8")
+            for name in ("__init__.py", "goal.py", "compact.py"))
         for num in sorted(self._documented(), key=int):
             entry = re.search(r"^\s*\(%s\)(.{0,600})" % num, doc,
                               re.M | re.S).group(1)

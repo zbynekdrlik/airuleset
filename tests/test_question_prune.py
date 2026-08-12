@@ -88,25 +88,23 @@ class PruneAnsweredQuestions(unittest.TestCase):
             _user(self.qts + 600, "<task-notification>\n<task-id>x</task-id>"),
             _user(self.qts + 650, "<command-name>/compact</command-name>"),
             _user(self.qts + 700, [{"type": "tool_result", "content": "ok"}]),
-            # #366 -- GOAL_QUESTION_PARK_TEXT (the 30-min unanswered-question
-            # backstop) was missing from _MACHINE_PROMPT_PREFIXES. Use the
-            # REAL constant (review MINOR-2), not a hand-copied literal --
-            # a hand-copy stays green forever even if the constant's own
-            # wording later drifts away from the "question-timeout:" prefix
-            # this test exists to lock.
-            _user(self.qts + 750, wd.GOAL_QUESTION_PARK_TEXT),
+            # #366 -- a "question-timeout:"-prefixed nudge is machine-typed,
+            # not a human answer. #403 deleted `GOAL_QUESTION_PARK_TEXT`
+            # (and the whole `_goal_question_park_nudge` mechanism that used
+            # to produce it) wholesale -- nothing in the new callback-model
+            # `watchdog/goal.py` ever types this text into a pane any more.
+            # The literal "question-timeout:" prefix stays a real,
+            # deliberately-kept entry in `_MACHINE_PROMPT_PREFIXES` (it
+            # costs nothing to leave and is harmless if some future/manual
+            # source ever produces it again), so this fixture is now a
+            # hand-typed literal — a historically faithful reconstruction
+            # of the deleted constant's own text, not a live reference.
+            _user(self.qts + 750,
+                 "question-timeout: 30 min bez odpovede na poslednu "
+                 "otazku. Zaparkuj TENTO tiket a pokracuj na iny."),
         ])
         self.assertEqual(self._prune(), [])
         self.assertIn("888001", notify.load_questions(self.qpath))
-
-    def test_the_park_text_constant_still_starts_with_the_locked_prefix(self):
-        # #366 review MINOR-2: nothing else ties GOAL_QUESTION_PARK_TEXT to
-        # the "question-timeout:" entry in _MACHINE_PROMPT_PREFIXES -- a
-        # future rewording of the constant's OWN head could silently
-        # regress production while every other test (which uses the real
-        # constant, per the fix above) stays green for the wrong reason.
-        self.assertTrue(wd.GOAL_QUESTION_PARK_TEXT.startswith("question-timeout:"),
-                        wd.GOAL_QUESTION_PARK_TEXT)
 
     def test_compact_continuation_summary_never_counts_as_an_answer(self):
         # #366 -- ask-and-continue (❓ ASKED + ⏳ WORKING) keeps a session
