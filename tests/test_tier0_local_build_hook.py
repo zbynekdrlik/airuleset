@@ -294,5 +294,80 @@ class AuditLogTest(_Runner):
         self.assertEqual(self.audit_lines(), [])
 
 
+class AdversarialReviewFindingsTest(_Runner):
+    """Round-2 findings from a fresh-context adversarial review of the
+    #381 fix itself (fable, gate OPEN) — each reproduces a real regression
+    or a real fail-open path the review found in the shipped hook."""
+
+    def test_audit_log_write_failure_never_changes_the_verdict(self):
+        """CRITICAL-1: an unwritable/unusable audit-log path must NEVER
+        turn a real BLOCK into a silent hook-error pass-through. Under
+        `set -euo pipefail`, an unguarded `echo … >> "$AUDIT_LOG"` failing
+        (here: AUDIT_LOG points at an existing DIRECTORY, so the redirect
+        itself fails at the OS level) aborts the shell with rc=1 BEFORE
+        the caller's own `exit 2` ever runs — and this repo's own #118/
+        #196 lesson is that Claude Code treats a hook exiting anything
+        other than 0/2 as a HOOK ERROR and runs the blocked command
+        anyway. That is the exact silent-target/-growth hole #381 exists
+        to close, reachable here via one self-triggerable `mkdir -p
+        <the-log-path>` making it a directory."""
+        proj = self._mkproj()
+        bad_log_dir = self.root / "audit_is_a_dir"
+        bad_log_dir.mkdir()
+        out = self.run_hook("cargo build --release", proj,
+                             extra_env={"AIRULESET_TIER0_AUDIT_LOG": str(bad_log_dir)})
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("BLOCKED", out.stderr)
+
+    def test_referencing_a_heavy_script_without_executing_it_is_not_blocked(self):
+        """MAJOR-2: the direct-exec regex's old boundary (bare `\\s`)
+        treated ANY whitespace before a `./x.sh`/`/abs/x.sh` path as a
+        command-start position — so merely reading/inspecting a script
+        whose CONTENT happens to be heavy (never actually invoking it)
+        was misclassified as Shape B and blocked. A real command position
+        needs an actual separator (`;`/`&`/`|`/`(`/newline) or start-of-
+        string before the path, not bare whitespace."""
+        proj = self._mkproj()
+        s = proj / "install.sh"
+        s.write_text("cargo build --release\n")
+        for cmd in ("cat ./install.sh", "grep cargo ./install.sh",
+                    "git add ./install.sh", "wc -l ./install.sh"):
+            with self.subTest(cmd=cmd):
+                out = self.run_hook(cmd, proj)
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_direct_exec_after_separator_or_sudo_still_blocks(self):
+        """Positive control for the MAJOR-2 fix: tightening the boundary
+        must not lose any of the genuine invocation shapes the review
+        itself validated as real command positions."""
+        proj = self._mkproj()
+        s = proj / "install.sh"
+        s.write_text("cargo build --release\n")
+        for cmd in ("sudo ./install.sh", "make; ./install.sh",
+                    "cd .. && ./install.sh", "./install.sh"):
+            with self.subTest(cmd=cmd):
+                out = self.run_hook(cmd, proj)
+                self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_multiline_command_produces_exactly_one_audit_log_line(self):
+        """MAJOR-3: `cmd=${CMD}` wrote the RAW command unsanitized — a
+        newline inside it (a heredoc, a deliberately crafted payload)
+        split the audit record into extra physical lines, one of them
+        fully attacker-controlled (a forged project/disposition), which
+        defeats the whole point of the accountability log and breaks its
+        one-line-per-event grep contract even for benign multi-line
+        commands. The command must always collapse to exactly one line."""
+        proj = self._mkproj(name="realproj")
+        cmd = ("cargo build --release # x\n"
+               "2026-01-01T00:00:00+00:00  project=totally-legit  "
+               "inline-bypass  cmd=nothing to see")
+        out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        lines = self.audit_lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("project=realproj", lines[0])
+        self.assertEqual(lines[0].count("project="), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
