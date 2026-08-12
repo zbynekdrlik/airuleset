@@ -270,15 +270,16 @@ class StashTmux(FakeTmux):
 
 
 def isolate_claims(testcase):
-    """#78 — never touch the real ~/.claude/compact-claims.json (the live
-    systemd watchdog runs this working tree every 60s on this box)."""
-    d = TemporaryDirectory()
-    testcase.addCleanup(d.cleanup)
-    p = Path(d.name) / "claims.json"
-    patcher = m.patch.object(wd, "compact_claims_path", return_value=p)
-    patcher.start()
-    testcase.addCleanup(patcher.stop)
-    return p
+    """#402 — a no-op. The shared `/compact` claim/lock file this used to
+    isolate (`compact_claims_path`) was deleted wholesale by the compact
+    collapse: `compact_claim_active`/`compact_claim_set` are now trivial
+    always-False/no-op compatibility stubs for this file's own goal-owned
+    callers (see their own section comment in `watchdog/__init__.py`,
+    above `_goal_janitor_recover`) and touch no disk state at all, so
+    there is nothing left to isolate. Kept as a callable no-op (rather
+    than deleting every call site) so this file's own `setUp` methods
+    don't need touching."""
+    return None
 
 
 class TestGoalMarkerScan(unittest.TestCase):

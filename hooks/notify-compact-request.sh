@@ -29,9 +29,11 @@ set -euo pipefail
 # marker-hold grace) actually hold: none of them can protect a request that
 # should never have existed in the first place.
 #
-# The two remaining origins are UNCHANGED by this removal:
+# The two remaining origins are UNCHANGED by this removal (their
+# implementation collapsed into `watchdog/compact.py` by #402, 2026-08-12
+# — the two ORIGINS themselves did not change):
 #   - `compact-request --self` (a session's own mid-turn Bash tool call,
-#     `deliver_compact_self` in watchdog/__init__.py) — origin
+#     `watchdog.compact.resolve_self_pane` + `deliver_compact`) — origin
 #     `self-callback`.
 #   - `notify-compact-subagent-boundary.sh` (the SubagentStop EVENT hook,
 #     gated on `agent_type == "autopilot-worker"`, reads

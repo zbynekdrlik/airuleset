@@ -93,9 +93,11 @@ set -euo pipefail
 # while leaving #102's `❓` gate and #109's gate for every other origin
 # untouched.
 #
-# Dedup: the worker's own `agent_id` is fingerprinted into the existing #71
-# `--msg-hash` channel, so a REPEATED SubagentStop for the SAME worker is a
-# no-op while every ticket keeps its own slot.
+# Dedup (#402 — the msg-hash layer this used to describe is retired):
+# `record_compact_request`'s own overwrite-per-session semantics already
+# make a REPEATED SubagentStop for the SAME worker a no-op (it just
+# re-records the same still-pending entry), and the 30-min per-session
+# cooldown blocks a double-SEND regardless.
 #
 # Silent + non-blocking: never writes to stdout, always exits 0 — a
 # SubagentStop hook that emitted anything could interfere with the worker's
@@ -131,8 +133,11 @@ set -euo pipefail
 # in a session started 36 h earlier. No operator restart is needed for #121.)
 #
 # Every decision now appends ONE line naming the predicate that failed:
-#   <iso8601> RECORD  result=<recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dropped-cooldown|dup|skip|error> type=… agent=… sid=… cwd=…
+#   <iso8601> RECORD  result=<sent|expired|already-queued|cooldown|skip:<reason>|error> type=… agent=… sid=… cwd=…
 #   <iso8601> DECLINE reason=<predicate> [n=<live>] type=… agent=… sid=… cwd=…
+# (#402 — the word vocabulary is the collapsed `deliver_compact`'s own,
+# watchdog/compact.py; the old five-way dropped-*/claim-queued/dup/skip
+# set it replaces belonged to machinery this same ticket removed.)
 # `result=` is the word `cmd_compact_request` already printed and this hook
 # used to discard with `>/dev/null 2>&1` — an accepted boundary that was then
 # dropped downstream used to be untraceable from here too. #125 (2026-07-28):
@@ -296,24 +301,23 @@ OTHERS=$(printf '%s' "$INPUT" | jq -r --arg a "$AGENT_ID" \
 DEFERRED=""
 [ "$OTHERS" = "0" ] || DEFERRED="deferred=live-tasks n=$OTHERS "
 
-# #71 dedup key = this worker, so a repeat SubagentStop for the SAME worker is
-# a no-op. Never let a failing sha256sum kill this `set -e` script (the repo's
-# documented `VAR=$(failing_cmd)` gotcha) — the `||` fallback keeps it safe.
-MSG_HASH=$(printf 'subagent:%s' "$AGENT_ID" | sha256sum 2>/dev/null | cut -d' ' -f1) \
-    || MSG_HASH=""
-
+# #402 — the msg-hash dedup layer this used to feed (#71) is RETIRED: it
+# only ever deduped repeated fires of the now-gone TEXT-SNIFFED Stop-hook
+# channel. `record_compact_request`'s own overwrite-per-session semantics
+# (watchdog/compact.py) already collapse an accidental double-record for
+# this same worker for free, and the 30-min per-session cooldown blocks a
+# double-SEND — no separate hash needed any more.
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
 RESULT=$(python3 "$AIRULESET_PY" compact-request --record --session "$SID" \
-    --cwd "$CWD" --msg-hash "$MSG_HASH" --origin "subagent-stop" 2>/dev/null) \
+    --cwd "$CWD" --origin "subagent-stop" 2>/dev/null) \
     || RESULT=""
 case "$RESULT" in
-    # #400-review MINOR-3 (fresh-context adversarial review, TRIGGERED) --
-    # this allowlist predates #400 FIX 4's new "dropped-cooldown" word,
-    # which `cmd_compact_request` already prints verbatim -- without this
-    # entry a genuine cooldown drop fell through to the `*) RESULT="error"`
-    # branch below and corrupted exactly the forensic log (#123/#125) this
-    # ticket's own incident analysis leaned on.
-    recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dropped-cooldown|dup|skip) ;;
+    # #402 — the outcome-word vocabulary the collapsed `deliver_compact`
+    # prints (watchdog/compact.py): `sent` (typed), `expired` (age cap),
+    # `already-queued`/`cooldown` (fully handled, nothing new sent), or
+    # `skip:<reason>` (left pending for the next periodic sweep — the
+    # glob covers every reason word without needing its own line here).
+    sent|expired|already-queued|cooldown|skip:*) ;;
     *) RESULT="error" ;;
 esac
 _decide_log RECORD "${DEFERRED}result=$RESULT"

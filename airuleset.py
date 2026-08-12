@@ -9775,7 +9775,8 @@ def cmd_watchdog(args):
     still erase."""
     import burn
     from watchdog import (run_once, fetch_usage, fetch_channel_messages,
-                          compact_requests_path, goal_templates_path)
+                          goal_templates_path)
+    from watchdog import compact as _compact_mod
     # Job 16 (#55) is coordinator-only: every OTHER managed box already writes
     # its own local hourly row via job 13, so only dev1 fans out over ssh to
     # merge them. `os.uname().nodename` is the same "which host am I" check
@@ -9809,7 +9810,7 @@ def cmd_watchdog(args):
                     # the existing <repo>#<issue> key format.
                     reopen_fetch=_watchdog_reopened_fetch,
                     burn_snapshot_path=burn.snapshots_path(),
-                    compact_requests_path=compact_requests_path(),
+                    compact_requests_path=_compact_mod.compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
                     fleet_path=burn.fleet_path(),
                     burn_alert_enabled=burn_alert_enabled,
@@ -9828,12 +9829,10 @@ def cmd_watchdog(args):
                     # and the keystroke queue of THAT session, wherever it
                     # runs. Detection only, so it never types into a pane.
                     long_turn_enabled=True,
-                    # Job 26 (#140) runs on EVERY managed box: a session that
-                    # asked for compaction and never got it is a per-session
-                    # failure, and both measured incidents were on DIFFERENT
-                    # boxes (forestshop@dev1, montalu@subdev) on the same day.
-                    # Detection only, so it never types into a pane.
-                    compact_stall_enabled=True,
+                    # Job 26 (#140) — REMOVED (#402, 2026-08-12). Used to
+                    # watch the shared /compact claim file for a stuck
+                    # entry; that whole claim system was retired by the
+                    # compact collapse. See run_once's own docstring.
                     # Jobs 27/28 (#137) run on EVERY managed box — both are
                     # per-repo local/gh reads, and each box holds the
                     # checkouts it can actually measure. Self-gated hourly
@@ -9864,124 +9863,63 @@ def cmd_watchdog(args):
 
 
 def cmd_compact_request(args):
-    """Record a `/compact` request for a session at a safe ticket boundary
-    ("krok 1c — ohraničenie kontextu", #39 follow-up), and ALSO attempt to
-    DELIVER it SYNCHRONOUSLY in this SAME process (#65, 2026-07-26). Called
-    by the Stop hook `notify-compact-request.sh` the MOMENT a turn's final
-    message is a completed-ticket report.
+    """The two proven-origin entry points for the collapsed `/compact`
+    delivery model (#402 — see `watchdog/compact.py`'s own module
+    docstring for the full design).
 
-    #65: waiting for watchdog job 14's next ~60s poll loses the race with an
-    armed `/goal` loop, which can dispatch the next ticket within seconds —
-    long before that poll ever sees the pane idle. So this command records
-    the request FIRST (never lost, even if the immediate attempt below
-    raises) and then calls `deliver_compact_now`, which resolves the pane
-    hosting this EXACT session and, when safe, types `/compact` right now
-    (a short send-keys reliably queues even into a BUSY pane, so this does
-    not need to wait for idle the way job 14's poll does). On success the
-    just-recorded request is cleared immediately — job 14 never needs to
-    act on it. On any failure/exception the request stays recorded, exactly
-    as before #65, for job 14's polled retry (its own draft-handling,
-    #67, covers the one case this synchronous path stays conservative on:
-    a genuine unsent draft).
+    `--self`: the calling SESSION's own explicit callback ("I am at a safe
+    boundary right now") — resolves the calling pane via `$TMUX_PANE`
+    (`resolve_self_pane`), records the request under the `self-callback`
+    proven-boundary origin, and attempts ONE immediate synchronous
+    delivery. No retry/hold loop any more (#402 removed that machinery
+    wholesale): if the immediate attempt is not safe right now (a live
+    sibling task, a busy pane, the #238 same-turn-dispatch race), the
+    request is simply LEFT PENDING for the periodic sweep (job 14,
+    ~60s cadence) to pick up — bounded, eventually, by the hard age cap.
 
-    #71 (2026-07-26 live incident): a REPEAT `--record` for a boundary
-    ALREADY delivered — live-observed as the armed goal loop's own
-    re-evaluation re-running the Stop hook chain against an UNCHANGED
-    `last_assistant_message` several times right after a compaction
-    finishes, each fire independently reaching this exact code path — must
-    be a complete no-op: no re-record, no second `deliver_compact_now`
-    attempt. `--msg-hash` (from the hook, a fingerprint of the triggering
-    message) is checked against `compact_already_delivered` BEFORE doing
-    anything; on a match, this call returns immediately. On a genuine
-    delivery, `mark_compact_delivered` records the hash so any LATER repeat
-    (from this same synchronous path, or from job 14) is recognized. A
-    blank/absent `--msg-hash` (every pre-#71 caller) never dedupes this
-    way — the check and the mark are both no-ops on a blank hash.
+    `--record --session <sid> --cwd <cwd> --origin <origin>`: the
+    SubagentStop hook's entry point (`hooks/notify-compact-subagent-
+    boundary.sh`, `--origin subagent-stop`) — records the request, then
+    the SAME ONE immediate synchronous attempt.
 
-    #121 (2026-07-28): `--origin` records WHAT proved the boundary. The Stop
-    hook passes nothing (unchanged behavior); the SubagentStop hook
-    `notify-compact-subagent-boundary.sh` passes `subagent-stop`, meaning an
-    autopilot-worker concluded with zero other live tasks in the session's
-    own task registry. That is the durable ticket boundary for a supervisor
-    whose work is done by dispatched workers — its own turn ALWAYS ends `⏳`
-    (it reports batch N and dispatches batch N+1 in the same turn), so the
-    Stop-shaped boundary is structurally unreachable for it.
-
-    #125 (2026-07-28): the printed word on a HANDLED request is whatever
-    `deliver_compact_now` itself returns (see its own docstring) --
-    "sent"/"claim-queued"/"queued-compact"/"dropped-no-work"/
-    "dropped-small-context" -- never the single generic "delivered" this
-    command used to print for all five dispositions regardless of what
-    actually happened downstream.
-
-    #225 -- `--self` is a SEPARATE mode, checked first: the SESSION itself
-    calling this to ask "deliver /compact into MY OWN pane, right now, and
-    hold (bounded) until it lands" -- no --session/--cwd/--origin needed at
-    all, resolved from the calling pane via `$TMUX_PANE`. See
-    `watchdog.deliver_compact_self`'s own docstring for the full mechanism
-    (the primary fix for the ticket's "boundary window closes before the
-    sweep looks" race).
-
-    #250 -- the `req_now` captured right before `record_compact_request` is
-    threaded into `deliver_compact_now` as `request_ts=` (and `now=`), so
-    its live-tasks defer (#246) is bounded by the SAME grace window job 14
-    applies -- see `watchdog.COMPACT_DEFER_GRACE_S`'s own comment."""
+    Prints the disposition word verbatim (`sent` / `expired` /
+    `already-queued` / `cooldown` / `skip:<reason>`) so the calling hook's
+    own decision log stays a faithful trace of what actually happened."""
+    import time
+    from watchdog import compact
     if getattr(args, "self", False):
-        from watchdog import deliver_compact_self
-        word, sid = deliver_compact_self(hold_s=getattr(args, "hold", None))
+        pane_id, cwd, sid = compact.resolve_self_pane()
         if not sid:
             print("compact-request --self: could not resolve this session's "
                   "own pane/transcript (not running inside a recognized "
                   "tmux Claude Code pane, or $TMUX_PANE unset) -- nothing "
                   "recorded", file=sys.stderr)
             sys.exit(1)
+        now = time.time()
+        compact.record_compact_request(sid, cwd, now=now,
+                                       origin=compact._COMPACT_SELF_CALLBACK_ORIGIN)
+        word = compact.deliver_compact(sid, cwd,
+                                       origin=compact._COMPACT_SELF_CALLBACK_ORIGIN,
+                                       now=now, request_ts=now)
+        if word in compact._COMPACT_TERMINAL_WORDS:
+            compact.clear_compact_request(sid)
         sys.stdout.write(word)
         return
-    from watchdog import (record_compact_request, deliver_compact_record,
-                          clear_compact_request, compact_already_delivered,
-                          mark_compact_delivered)
     if getattr(args, "record", False):
-        import time
-        msg_hash = (getattr(args, "msg_hash", "") or "").strip()
+        session = (getattr(args, "session", "") or "").strip()
         origin = (getattr(args, "origin", "") or "").strip()
-        if compact_already_delivered(args.session, msg_hash):
-            sys.stdout.write("dup")
-            return
-        # #250 -- capture the SAME `ts` used for the record call and thread
-        # it into `deliver_compact_record` as `request_ts=`, so its own
-        # grace-bound live-tasks check (`_compact_live_tasks_in_grace`)
-        # measures age from the request this exact call just recorded.
-        #
-        # #238 adversarial review 🔴1 -- this used to call
-        # `deliver_compact_now` ONCE with `now=req_now` (the SAME instant
-        # `request_ts` was captured at), which made the min-request-age
-        # gate an unconditional off-switch for every real call (age was
-        # always exactly 0.0). `deliver_compact_record` retries with a
-        # FRESH `now` for a few real seconds instead.
-        req_now = time.time()
-        ok = record_compact_request(args.session, args.cwd, now=req_now,
-                                    msg_hash=msg_hash, origin=origin)
+        now = time.time()
+        ok = compact.record_compact_request(session, args.cwd, now=now, origin=origin)
         if not ok:
-            sys.stdout.write("skip")
+            sys.stdout.write("skip:no-session")
             return
-        delivered = deliver_compact_record(args.session, args.cwd, origin=origin,
-                                           request_ts=req_now)
-        if delivered:
-            clear_compact_request(args.session)
-            if msg_hash:
-                mark_compact_delivered(args.session, msg_hash)
-            # #125 -- `deliver_compact_now` now returns the REASON word
-            # itself (e.g. "sent"/"claim-queued"/"queued-compact"/
-            # "dropped-no-work"/"dropped-small-context") instead of a bare
-            # `True` that this command used to collapse into one generic
-            # "delivered" for every disposition -- print it verbatim. A
-            # caller (or test double) that still returns a bare truthy
-            # non-string value is treated as the legacy generic "sent",
-            # never a crash.
-            word = delivered if isinstance(delivered, str) else "sent"
-            sys.stdout.write(word)
-        else:
-            sys.stdout.write("recorded")
+        entry = compact.load_compact_requests().get(session) or {}
+        req_ts = entry.get("ts", now)
+        word = compact.deliver_compact(session, args.cwd, origin=origin,
+                                       now=now, request_ts=req_ts)
+        if word in compact._COMPACT_TERMINAL_WORDS:
+            compact.clear_compact_request(session)
+        sys.stdout.write(word)
         return
     print("compact-request: nothing to do (use --record --session <sid> --cwd <cwd>)",
           file=sys.stderr)
@@ -13058,7 +12996,7 @@ def watchdog_disable_marker():
     `systemctl --user stop api-watchdog.timer` SURVIVE a deploy (#132).
 
     Resolved at CALL time, never frozen at import (same reasoning as
-    `watchdog.compact_requests_path()`).
+    `watchdog.compact.compact_requests_path()`).
 
     Why this exists: on 2026-07-28 the watchdog typed `/exit` into a live
     session, the timer was stopped fleet-wide as the mitigation — and was found
@@ -13374,40 +13312,32 @@ def main():
     p_creq = sub.add_parser(
         "compact-request",
         help="Record a /compact request for a session at a safe ticket "
-             "boundary (#39 krok 1c) — consumed by watchdog job 14")
+             "boundary (#39 krok 1c, collapsed by #402) — consumed by "
+             "watchdog job 14 (watchdog.compact.compact_sweep)")
     p_creq.add_argument("--record", action="store_true",
-                        help="Record the request (called by the Stop hook)")
+                        help="Record the request (called by the SubagentStop "
+                             "hook, --origin subagent-stop)")
     p_creq.add_argument("--session", default="", help="Session id (transcript stem)")
     p_creq.add_argument("--cwd", default="", help="Session cwd")
-    p_creq.add_argument("--msg-hash", dest="msg_hash", default="",
-                        help="Fingerprint (e.g. sha256) of the triggering "
-                             "last_assistant_message (#71 delivered-dedup — "
-                             "a repeat with the SAME hash after a delivered "
-                             "compact is a no-op)")
     p_creq.add_argument("--origin", default="",
-                        help="What PROVED this is a ticket boundary (#121). "
+                        help="What PROVED this is a ticket boundary. "
                              "'subagent-stop' = an autopilot-worker concluded "
                              "with zero other live tasks in the session's task "
-                             "registry; for such a request a `⏳` last line is "
-                             "not evidence of anything and never holds the "
-                             "delivery (a `❓` still does). Empty = the Stop-hook "
-                             "origin, whose gate is unchanged.")
+                             "registry. Required for --record; --self supplies "
+                             "'self-callback' itself.")
     p_creq.add_argument("--self", action="store_true",
                         help="#225 -- explicit self-callback: resolve THIS "
-                             "session's own pane via $TMUX_PANE and attempt "
-                             "synchronous /compact delivery under a proven "
-                             "boundary origin, holding (bounded, default "
-                             "60s) if the first attempt can't land yet. "
+                             "session's own pane via $TMUX_PANE, record the "
+                             "request under the self-callback proven-boundary "
+                             "origin, and attempt ONE immediate synchronous "
+                             "/compact delivery (#402 -- no retry/hold loop "
+                             "any more; an attempt that isn't safe right now "
+                             "is simply left for the periodic sweep). "
                              "Ignores --record/--session/--cwd/--origin -- "
                              "everything is resolved from the calling pane "
                              "itself. Call this as your OWN last tool call "
                              "right after finishing a ticket, before "
                              "dispatching anything else.")
-    p_creq.add_argument("--hold", type=float, default=None,
-                        help="--self only: seconds to keep retrying before "
-                             "giving up and leaving the request for job "
-                             "14's later sweep (default "
-                             "AIRULESET_COMPACT_SELF_HOLD_S or 60)")
 
     p_tickets = sub.add_parser(
         "tickets-status",
