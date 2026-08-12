@@ -597,14 +597,15 @@ fi
 # uses; a 2nd-person-PAST interrogative ("Nainštaloval si už...?") is not
 # covered; a genuinely-sanctioned FINAL-acceptance nudge sent only AFTER
 # a real green agent-side/emulator verification (#424-review M3) still
-# trips this detector exactly like a premature one would — the message
-# text tells the agent to word such a nudge so it does not name a
-# device/try-verb pair at all (e.g. state the emulator result plainly,
-# without also asking the human to "vyskúšaj to na telefóne" as
-# redundant final confirmation) rather than reach for `UNVERIFIED:`,
-# which would misstate a genuinely-verified result; this is the SAME
-# structural tension the pre-existing English branch above already has,
-# not a new one #424 introduces. Proximity-only matching (no real
+# trips this detector exactly like a premature one would — the stderr
+# message below gives NO rewording escape for this specific case (its
+# only named exit is `UNVERIFIED:`, which would MISSTATE an already-
+# verified result, so it is not the right escape either); this is the
+# SAME structural tension the pre-existing English branch above already
+# has, not a new one #424 introduces, and it is left unresolved here
+# for the identical reason (round-2 review MINOR-2: corrected this
+# paragraph, which previously overclaimed a rewording mitigation the
+# message text does not actually contain). Proximity-only matching (no real
 # grammatical parsing — ERE cannot do that) can, rarely, pair two
 # unrelated clauses that happen to share window-adjacent trigger words
 # (e.g. a conditional "ak povieš áno, nasadím verziu, ktorá funguje aj
@@ -612,22 +613,49 @@ fi
 # quoted inside this repo's OWN documentation/playbook prose describing a
 # verification STEP rather than addressing a human — both are the same
 # known limitation #319's own detectors already carry.
+#
+# #424-review round 2 (adversarial, MAJOR x1 + MINOR x2, fixed here):
+#   - MAJOR-2: SK_TH_WORKS_RX required "to" immediately before "ide" with
+#     no room for an adverb — "či to UŽ ide"/"...TERAZ ide" ("does it
+#     work NOW", the incident's own iterative-retry idiom) escaped.
+#     Fixed by allowing an optional "už"/"teraz" between "to" and "ide";
+#     "to" itself stays mandatory, so the C2 "ide o X" idiom discriminator
+#     is untouched.
+#   - MINOR-1: the modal+infinitive shape (2b) live-false-positived on an
+#     epistemic "vieš, že..." ("do you know that...", not a request) and
+#     on "netreba <infinitive>" ("X is not needed", the opposite of a
+#     request). Since ERE has no lookaround, the modal shape is now
+#     evaluated as its OWN separate check (SK_TH_MODAL_ALT below) with an
+#     explicit AND-NOT exclusion (SK_TH_MODAL_SAFE_ALT) — scoped so it can
+#     only ever suppress the MODAL branch itself, never a genuine
+#     violation from one of the other shapes (those are still checked by
+#     the unmodified SK_TH_MAIN_ALT, independent of this exclusion).
+#   - MINOR-3: shape 2's try/device window (40 chars) missed a relative
+#     clause between the two words ("vyskúšaj tú novú verziu, ktorú som ti
+#     práve poslal, na telefóne") — widened to 60, matching the window
+#     size shape 4 already uses.
 SK_TH_INSTALL_RX="\b(nain[šs]taluj|in[šs]taluj)(e[šs])?\b"
 SK_TH_CI_RX="či"
 SK_TH_OVER_CI_RX="\bover,?[[:space:]]+(si[[:space:]]+)?${SK_TH_CI_RX}\b"
 SK_TH_CONFIRM_RX="\b(potvr[ďd]|potvrd[íi][šs]|povedz|povie[šs]|nap[íi][šs](e[šs])?|(daj|d[aá][šs])[[:space:]]+(mi[[:space:]]+)?vedie[ťt]|over[íi][šs])\b"
-SK_TH_WORKS_RX="(\bfunguj|\b${SK_TH_CI_RX}\b[[:space:]]+(ti[[:space:]]+)?to[[:space:]]+ide\b)"
+SK_TH_WORKS_RX="(\bfunguj|\b${SK_TH_CI_RX}\b[[:space:]]+(ti[[:space:]]+)?to([[:space:]]+(u[žz]|teraz))?[[:space:]]+ide\b)"
 SK_TH_TRY_RX="\b(vysk[úu][šs]a[jš]|otestuj(e[šs])?)\b"
 SK_TH_DEVICE_RX="(telef[óo]n|mobil|zariaden)"
 SK_TH_MODAL_RX="\b(m[ôo][žz]e[šs]|vie[šs])\b"
 SK_TH_MODALVERB_RX="\b(vysk[úu][šs]a[ťt]|otestova[ťt]|nain[šs]talova[ťt]|in[šs]talova[ťt])\b"
+SK_TH_MODAL_EPISTEMIC_RX="\b(m[ôo][žz]e[šs]|vie[šs]),?[[:space:]]+[žz]e\b"
+SK_TH_MODALVERB_UNNEEDED_RX="netreba[[:space:]]+(vysk[úu][šs]a[ťt]|otestova[ťt]|nain[šs]talova[ťt]|in[šs]talova[ťt])\b"
 SK_TH_WRITESAY_RX="\b(nap[íi][šs](e[šs])?|povedz|povie[šs])\b"
 SK_TH_SEE_RX="čo[[:space:]]+vid[íi][šs]"
 SK_TH_VERIFY_RX="\b(over[íi][šs]|vysk[úu][šs]a[jš])\b"
 SK_TH_CONTINUE_RX="\b(pokra[čc]uj|sprav[íi]m|urob[íi]m)"
 SK_TH_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || SK_TH_FLAT="$MSG_MENTION"
-if LC_ALL=C.UTF-8 msg_has "$SK_TH_FLAT" -qiE \
-    "(${SK_TH_INSTALL_RX}.{0,100}${SK_TH_CONFIRM_RX})|(${SK_TH_CONFIRM_RX}.{0,50}${SK_TH_WORKS_RX}|${SK_TH_WORKS_RX}.{0,50}${SK_TH_CONFIRM_RX})|${SK_TH_OVER_CI_RX}|(${SK_TH_TRY_RX}.{0,40}${SK_TH_DEVICE_RX}|${SK_TH_DEVICE_RX}.{0,40}${SK_TH_TRY_RX})|(${SK_TH_MODAL_RX}.{0,40}${SK_TH_MODALVERB_RX}|${SK_TH_MODALVERB_RX}.{0,40}${SK_TH_MODAL_RX})|(${SK_TH_WRITESAY_RX}.{0,30}${SK_TH_SEE_RX}|${SK_TH_SEE_RX}.{0,30}${SK_TH_WRITESAY_RX})|(${SK_TH_VERIFY_RX}.{0,60}${SK_TH_CONTINUE_RX})"; then
+SK_TH_MAIN_ALT="(${SK_TH_INSTALL_RX}.{0,100}${SK_TH_CONFIRM_RX})|(${SK_TH_CONFIRM_RX}.{0,50}${SK_TH_WORKS_RX}|${SK_TH_WORKS_RX}.{0,50}${SK_TH_CONFIRM_RX})|${SK_TH_OVER_CI_RX}|(${SK_TH_TRY_RX}.{0,60}${SK_TH_DEVICE_RX}|${SK_TH_DEVICE_RX}.{0,60}${SK_TH_TRY_RX})|(${SK_TH_WRITESAY_RX}.{0,30}${SK_TH_SEE_RX}|${SK_TH_SEE_RX}.{0,30}${SK_TH_WRITESAY_RX})|(${SK_TH_VERIFY_RX}.{0,60}${SK_TH_CONTINUE_RX})"
+SK_TH_MODAL_ALT="(${SK_TH_MODAL_RX}.{0,40}${SK_TH_MODALVERB_RX}|${SK_TH_MODALVERB_RX}.{0,40}${SK_TH_MODAL_RX})"
+SK_TH_MODAL_SAFE_ALT="${SK_TH_MODAL_EPISTEMIC_RX}|${SK_TH_MODALVERB_UNNEEDED_RX}"
+if LC_ALL=C.UTF-8 msg_has "$SK_TH_FLAT" -qiE "$SK_TH_MAIN_ALT" || \
+    { LC_ALL=C.UTF-8 msg_has "$SK_TH_FLAT" -qiE "$SK_TH_MODAL_ALT" && \
+      LC_ALL=C.UTF-8 msg_missing "$SK_TH_FLAT" -qiE "$SK_TH_MODAL_SAFE_ALT"; }; then
     if msg_missing "$MSG" -qE "UNVERIFIED:"; then
         echo "VIOLATION: Odovzdal si verifikáciu človeku po slovensky ('nainštaluj si APK a potvrď, či funguje', 'vyskúšaj to na telefóne', 'napíš, čo vidíš', 'over či ti to ide') — presne trieda 'tester-handoff' z autonomous-verification.md, len v jazyku ktorý anglický regex nezachytáva. Používateľ NIKDY nie je tvoj tester. Pre mobilné-appky projekty je emulátor/adb ekvivalent Playwrightu — over si to SÁM na emulátore, zabuduj si diagnostické zasielanie sám. Používateľovo zariadenie smie prísť najviac ako FINÁLNA akceptácia PO zelenej agent-side verifikácii, NIKDY ako iteratívny debug kanál ('skús to znova, nová verzia'). Ak si toto naozaj nevieš overiť sám (chýba ti nástroj/prístup), najprv o ten nástroj POŽIADAJ (nikdy o test) — a až potom, ak naozaj neexistuje, napíš 'UNVERIFIED: <čo nejde overiť> — <prečo>'." >&2
         echo "" >&2
