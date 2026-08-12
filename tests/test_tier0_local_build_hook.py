@@ -356,7 +356,20 @@ class AdversarialReviewFindingsTest(_Runner):
         fully attacker-controlled (a forged project/disposition), which
         defeats the whole point of the accountability log and breaks its
         one-line-per-event grep contract even for benign multi-line
-        commands. The command must always collapse to exactly one line."""
+        commands. The command must always collapse to exactly one line.
+
+        #381-review discovery (not part of the original finding): the
+        adversarial payload embeds the literal text "project=totally-legit"
+        inside what becomes the `cmd=` field's OWN value — a raw
+        `.count("project=")` over the whole line would therefore never be
+        able to reach 1, for ANY command containing that substring
+        (including, ordinarily, a commit fixing "project= handling", or
+        this very payload). That is not a forgeable SEPARATE entry (already
+        ruled out by `len(lines) == 1`) — it is text sitting inside the
+        one genuine field that legitimately holds arbitrary content. The
+        real, achievable security property is that the REAL project field
+        (positionally right after the timestamp, which is what any correct
+        parser reads first) names the real project, not a forged one."""
         proj = self._mkproj(name="realproj")
         cmd = ("cargo build --release # x\n"
                "2026-01-01T00:00:00+00:00  project=totally-legit  "
@@ -366,7 +379,7 @@ class AdversarialReviewFindingsTest(_Runner):
         lines = self.audit_lines()
         self.assertEqual(len(lines), 1, lines)
         self.assertIn("project=realproj", lines[0])
-        self.assertEqual(lines[0].count("project="), 1)
+        self.assertRegex(lines[0], r"^\S+\s+project=realproj\s")
 
 
 if __name__ == "__main__":
