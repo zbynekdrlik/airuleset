@@ -911,6 +911,89 @@ class TestCompactMinDeliveryInterval_InJob14(unittest.TestCase):
         self.assertTrue(any(ln.startswith("OK") for ln in logs2), logs2)
 
 
+# --------------------------------------------------------------------------- #
+# #400-review MAJOR-2 (fresh-context adversarial review, TRIGGERED — two
+# surviving mutants) — job 14's STASH send branch (`if draft:` ->
+# `_compact_stash_attempt`) had ZERO coverage for two of #400's own claims
+# on THAT specific branch: that a real delivery through it also marks the
+# cooldown ts (Fix 4), and that it also writes a SEND line to
+# compact-sync.log (Fix 6). Proven live by the reviewer: removing
+# `mark_compact_delivery_ts(...)` from the stash branch, and separately
+# removing its `_log_compact_sync("SEND (stash)...")` call, each left
+# EVERY existing test in this file (plus the sibling long-turn/served-
+# boundary files) green. The idle-send branch already had both properties
+# locked (`TestCompactMinDeliveryInterval_InJob14` above, and
+# `test_a_fresh_request_is_not_expired`'s `via=job14` assertion) — this
+# class gives the stash branch the SAME two locks.
+# --------------------------------------------------------------------------- #
+
+class TestCompactMinDeliveryInterval_InJob14StashBranch(unittest.TestCase):
+    SID = "sess-cooldown-stash"
+    PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _paths(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        req = str(Path(d.name) / "compact-requests.json")
+        dp = str(Path(d.name) / "compact-delivered.json")
+        return req, dp
+
+    def _deliver_via_stash(self, req_path, dp_path, now):
+        wd.record_compact_request(self.SID, "/home/x/proj", now=now, path=req_path)
+        tmux = CompactFakeTmux(
+            CB_DRAFT_CAP,
+            cap_seq=(CB_STASH_BARE_CAP, CB_STASH_TYPED_CAP, CB_STASH_SUBMITTED_CAP))
+        panes_by_sid = {self.SID: (self.PANE, CB_DRAFT_CAP)}
+        logs = wd.compact_ticket_boundary(now, tmux, {}, panes_by_sid,
+                                          path=req_path, delivered_path=dp_path)
+        return tmux, logs
+
+    def test_stash_send_writes_a_send_line_to_the_sync_log(self):
+        req_path, dp_path = self._paths()
+        tmux, logs = self._deliver_via_stash(req_path, dp_path, time.time())
+        self.assertTrue(any(ln.startswith("OK (compact-request, stash")
+                            for ln in logs), logs)
+        log_text = wd.compact_sync_log_path().read_text()
+        self.assertIn("SEND (stash) sid=%s" % self.SID, log_text)
+        self.assertIn("via=job14", log_text)
+
+    def test_two_stash_deliveries_5_min_apart_only_the_first_delivers(self):
+        req_path, dp_path = self._paths()
+        base = time.time()
+        tmux1, logs1 = self._deliver_via_stash(req_path, dp_path, base)
+        self.assertTrue(any(ln.startswith("OK (compact-request, stash")
+                            for ln in logs1), logs1)
+
+        # the second delivery must be refused by the cooldown gate BEFORE
+        # it ever reaches the stash toggle sequence -- an EMPTY cap_seq
+        # proves no stash keystrokes are attempted at all (a non-empty
+        # cap_seq is only ever consumed once the toggle sequence actually
+        # runs, per CompactFakeTmux's own fallback-to-`captured` shape).
+        wd.record_compact_request(self.SID, "/home/x/proj", now=base + 300,
+                                  path=req_path)
+        tmux2 = CompactFakeTmux(CB_DRAFT_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_DRAFT_CAP)}
+        logs2 = wd.compact_ticket_boundary(
+            base + 300, tmux2, {}, panes_by_sid, path=req_path,
+            delivered_path=dp_path)
+        self.assertEqual(tmux2.sent, [])
+        self.assertTrue(any("cooldown" in ln for ln in logs2), logs2)
+
+    def test_two_stash_deliveries_35_min_apart_both_deliver(self):
+        req_path, dp_path = self._paths()
+        base = time.time()
+        tmux1, logs1 = self._deliver_via_stash(req_path, dp_path, base)
+        self.assertTrue(any(ln.startswith("OK (compact-request, stash")
+                            for ln in logs1), logs1)
+
+        tmux2, logs2 = self._deliver_via_stash(req_path, dp_path, base + 2100)
+        self.assertTrue(any(ln.startswith("OK (compact-request, stash")
+                            for ln in logs2), logs2)
+
+
 class TestCompactMinDeliveryIntervalInDeliverCompactNow(unittest.TestCase):
     SID = "sess-cooldown-sync"
     CWD = "/home/newlevel/devel/cooldownproj"
@@ -7211,6 +7294,56 @@ class TestCompactRefusesAPaneThatRacedSinceTheSweep(unittest.TestCase):
                                       origin=self.PROVEN)
         self.assertEqual(word, "sent")
         self.assertIn("/compact", tmux.typed_texts())
+
+    # ----------------------------------------------------------------- #
+    # #400-review MAJOR-1 (fresh-context adversarial review, live-
+    # triggered by the reviewer's own repro script) — the SAME staleness
+    # this class already covers for the BOUNDARY (kind/draft) re-check
+    # exists one gate up, for LIVE TASKS: FIX 5's unconditional live-tasks
+    # skip (both job 14 and the sync path) is evaluated against a capture
+    # taken BEFORE this exact instant — a worker dispatched into that gap
+    # is invisible to the stale verdict but fully visible to a capture
+    # taken NOW. The fresh re-verify these two functions already have
+    # (for boundary kind) must ALSO be checked for live tasks, reusing
+    # the SAME fresh capture — no extra tmux round-trip.
+    # ----------------------------------------------------------------- #
+
+    RACED_LIVE_TASKS_CAP = ("● Hotovo.\n✻ Waiting for 2 background agents "
+                            "to finish\n❯ \n  ctx ███░  caveman:lite\n")
+
+    def test_job14_refuses_when_the_fresh_recapture_shows_live_bg_tasks(self):
+        # sweep-top `captured` (CB_IDLE_CAP) is clean — the live-tasks
+        # gate at the top of the loop passes fine — but the job's OWN
+        # first real capture-pane call (this fix's fresh pre-send
+        # re-verify) now shows a worker dispatched into the gap.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        path = _write_request(self._p(), self.SID, self.CWD, origin=self.PROVEN)
+        tmux = CompactFakeTmux(CB_IDLE_CAP, cap_seq=[self.RACED_LIVE_TASKS_CAP])
+        logs = wd.compact_ticket_boundary(
+            time.time(), tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)},
+            path=path, projects_dir=proj)
+        self.assertEqual(tmux.typed_texts(), [], logs)
+        self.assertTrue(
+            any("live-tasks" in ln and "raced" in ln for ln in logs), logs)
+        # a pre-send refusal is never consumed -- the next sweep retries
+        self.assertIn(self.SID, wd.load_compact_requests(path))
+
+    def test_sync_path_refuses_when_the_fresh_recapture_shows_live_bg_tasks(self):
+        # cap_seq[0] serves deliver_compact_now's OWN top-of-call resolve
+        # (idle, no live tasks — the FIRST live-tasks check passes);
+        # cap_seq[1] serves the fresh pre-send re-verify, now showing a
+        # worker dispatched into the gap.
+        proj = self._proj()
+        _write_marker_transcript(proj, self.CWD, self.SID, self.DONE)
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP,
+            cap_seq=[CB_IDLE_CAP, self.RACED_LIVE_TASKS_CAP])
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, min_context=1,
+                                      origin=self.PROVEN)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertFalse(word)
 
 
 if __name__ == "__main__":

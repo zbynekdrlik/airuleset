@@ -131,7 +131,7 @@ set -euo pipefail
 # in a session started 36 h earlier. No operator restart is needed for #121.)
 #
 # Every decision now appends ONE line naming the predicate that failed:
-#   <iso8601> RECORD  result=<recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dup|skip|error> type=… agent=… sid=… cwd=…
+#   <iso8601> RECORD  result=<recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dropped-cooldown|dup|skip|error> type=… agent=… sid=… cwd=…
 #   <iso8601> DECLINE reason=<predicate> [n=<live>] type=… agent=… sid=… cwd=…
 # `result=` is the word `cmd_compact_request` already printed and this hook
 # used to discard with `>/dev/null 2>&1` — an accepted boundary that was then
@@ -307,7 +307,13 @@ RESULT=$(python3 "$AIRULESET_PY" compact-request --record --session "$SID" \
     --cwd "$CWD" --msg-hash "$MSG_HASH" --origin "subagent-stop" 2>/dev/null) \
     || RESULT=""
 case "$RESULT" in
-    recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dup|skip) ;;
+    # #400-review MINOR-3 (fresh-context adversarial review, TRIGGERED) --
+    # this allowlist predates #400 FIX 4's new "dropped-cooldown" word,
+    # which `cmd_compact_request` already prints verbatim -- without this
+    # entry a genuine cooldown drop fell through to the `*) RESULT="error"`
+    # branch below and corrupted exactly the forensic log (#123/#125) this
+    # ticket's own incident analysis leaned on.
+    recorded|sent|claim-queued|queued-compact|dropped-no-work|dropped-small-context|dropped-cooldown|dup|skip) ;;
     *) RESULT="error" ;;
 esac
 _decide_log RECORD "${DEFERRED}result=$RESULT"

@@ -9992,6 +9992,24 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             logs.append("skip raced (compact-request) %s -> pane moved "
                         "since the sweep" % loc)
             continue
+        # #400-review MAJOR-1 (fresh-context adversarial review, live-
+        # triggered by the reviewer's own repro) -- the SAME staleness the
+        # boundary re-check right above this comment already exists to
+        # close applies one gate up: FIX 5's live-tasks check (the block
+        # near the top of this loop) was evaluated against the SWEEP-TOP
+        # `captured` -- taken before this job even ran, and by now several
+        # tmux round-trips plus this request's own git/substantiality work
+        # stale. A worker dispatched into this exact gap is invisible to
+        # that stale verdict but fully visible to a capture taken NOW --
+        # reuse the SAME `fresh` capture the boundary check above already
+        # paid for (no extra tmux round-trip) rather than trusting a
+        # verdict that predates it. A pane that gained live work in the
+        # interim is a PRE-SEND refusal (zero keystrokes), never a drop --
+        # the next sweep re-evaluates from scratch.
+        if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=pdir,
+                                      now=now, captured=fresh):
+            logs.append("skip live-tasks (compact-request, raced) %s" % loc)
+            continue
         _janitor_mark_watch(state, pid, now)   # #372 -- this no-draft path
                                                 # never touches the stash
                                                 # slot and never verifies
@@ -10423,6 +10441,20 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     fresh_kind, fresh_draft = _classify_boundary(fresh)
     if fresh_kind != "input" or fresh_draft:
         _log_compact_sync("SKIP raced sid=%s cwd=%s" % (sid, cwd))
+        return ""
+    # #400-review MAJOR-1 (fresh-context adversarial review, live-triggered
+    # by the reviewer's own repro) -- identically to job 14's own sibling
+    # fix (see its section comment): the live-tasks check above (FIX 5,
+    # unconditional) read the CALL-ENTRY `captured`, stale by the time
+    # every other gate above has run. Re-verify against the SAME `fresh`
+    # capture the boundary re-check right above already paid for -- a
+    # worker dispatched into this exact gap is invisible to the stale
+    # verdict but fully visible now. Falls back to job 14's polled retry,
+    # exactly like every other "not safe right now" state this function
+    # already returns "" for.
+    if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
+                                  captured=fresh):
+        _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s" % (sid, cwd))
         return ""
     send_continue(pid, COMPACT_TEXT, run)
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
