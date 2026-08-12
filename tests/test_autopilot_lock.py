@@ -17,6 +17,7 @@ a brief `fcntl.flock` on a sibling `.mutex` file so two concurrent
 `acquire` calls on the SAME repo can't both win a stale-steal race.
 """
 
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -213,7 +214,9 @@ class TestLockDirEnvOverride(TestCase):
         import airuleset
         import os as _os
         override = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, override, ignore_errors=True)
         repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
         old = _os.environ.get("AIRULESET_AUTOPILOT_LOCK_DIR")
         _os.environ["AIRULESET_AUTOPILOT_LOCK_DIR"] = override
         try:
@@ -232,6 +235,7 @@ class TestLockDirEnvOverride(TestCase):
         import os as _os
         import tempfile as _tempfile
         repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
         old = _os.environ.pop("AIRULESET_AUTOPILOT_LOCK_DIR", None)
         try:
             lp = airuleset._autopilot_lock_path(repo)
@@ -253,6 +257,7 @@ class TestLockDirEnvOverride(TestCase):
         import hashlib
         import tempfile as _tempfile
         repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
         real_hash = hashlib.sha1(str(Path(repo).resolve()).encode()).hexdigest()
         would_be_real_path = (Path(_tempfile.gettempdir())
                                / f"airuleset-autopilot-{real_hash}.lock")
@@ -260,6 +265,7 @@ class TestLockDirEnvOverride(TestCase):
                           "fixture must start from a never-before-seen repo "
                           "path, or this test could pass by luck")
         override = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, override, ignore_errors=True)
         r = run(["acquire", "--repo", repo, "--pid", "999999999"],
                 extra_env={"AIRULESET_AUTOPILOT_LOCK_DIR": override})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
