@@ -6672,7 +6672,8 @@ def cmd_notify(args):
                            to pin the real owner explicitly (#334).
     """
     from notify import (compose_autopilot_card, mention_prefix, mirror_owners,
-                        notification_channel, resolve_owner, resolve_questions_channel,
+                        notification_channel, resolve_owner,
+                        resolve_project_channel, resolve_questions_channel,
                         send)
 
     if getattr(args, "record_question", False):
@@ -6725,9 +6726,17 @@ def cmd_notify(args):
         # and SELF-HEALING (a guarded background provision attempt) instead
         # of silently falling back forever — the exact gap that let
         # gatekeeper's ❓ history route to the wrong thread with zero trace.
+        # #369: --project resolves the owner's PER-PROJECT thread the SAME
+        # way — but ONLY under --kind default; a project flag alongside
+        # --kind questions is deliberately IGNORED (the questions thread
+        # stays centralized, by design — see the ticket's own design
+        # comment).
         kind = getattr(args, "kind", None) or "default"
+        project = getattr(args, "project", None)
         if kind == "questions":
             sys.stdout.write(resolve_questions_channel())
+        elif project:
+            sys.stdout.write(resolve_project_channel(project=project))
         else:
             sys.stdout.write(notification_channel(kind=kind))
         return
@@ -6772,6 +6781,42 @@ def cmd_notify(args):
         print("notify: could not provision the questions thread for owner=%r"
              % owner, file=sys.stderr)
         sys.exit(1)
+
+    if getattr(args, "provision_project_thread", False):
+        # #369: one-time setup — create (if missing) + persist the owner's
+        # PROJECT thread claude-<owner>-<project-slug> into the local .env.
+        # Mirrors --provision-question-thread verbatim, including the SAME
+        # --owner-name normalization (a typo must never silently create a
+        # real Discord thread under a dead .env key) and the SAME
+        # --find-only find-only mode.
+        from notify import log_delivery, provision_project_thread, resolve_owner
+        owner_name = getattr(args, "owner_name", None)
+        owner = (re.sub(r"[^a-z0-9]", "", owner_name.strip().lower())
+                if owner_name else resolve_owner())
+        project = getattr(args, "project", None) or ""
+        find_only = bool(getattr(args, "find_only", False))
+        tid = (provision_project_thread(owner, project, create=False) if find_only
+              else provision_project_thread(owner, project))
+        if tid:
+            sys.stdout.write(tid)
+            return
+        log_delivery("provision-failed", kind="project",
+                     key="%s:%s" % (owner, project),
+                     reason=("find-only, none visible" if find_only
+                             else "find-and-create both failed"))
+        print("notify: could not provision the project thread for "
+             "owner=%r project=%r" % (owner, project), file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "project_label", False):
+        # #369: the per-project routing/display LABEL for --cwd — the SAME
+        # value used to route --channel-id --project and to name a
+        # project's own Discord thread, so a hook computing this ONCE and
+        # reusing it for both the header text and the routing call can
+        # never have the two disagree.
+        from notify import project_label_for
+        sys.stdout.write(project_label_for(getattr(args, "cwd", "") or "."))
+        return
 
     if getattr(args, "repo_name", False):
         # The GitHub repo NAME for a cwd, from its `origin` remote — never the
@@ -13065,13 +13110,29 @@ def main():
                                "the owner's questions thread claude-<owner>-q into "
                                "the local .env; prints the thread id. Owner from "
                                "--owner-name or the resolved tmux owner")
+    p_notify.add_argument("--provision-project-thread",
+                          dest="provision_project_thread", action="store_true",
+                          help="One-time setup (#369): create (if missing) + persist "
+                               "the owner+project thread claude-<owner>-<project-slug> "
+                               "into the local .env; prints the thread id. Owner from "
+                               "--owner-name or the resolved tmux owner. Requires "
+                               "--project (the project LABEL, e.g. from "
+                               "--project-label)")
+    p_notify.add_argument("--project-label", dest="project_label",
+                          action="store_true",
+                          help="Print the per-project routing/display LABEL for "
+                               "--cwd (#369): the origin-derived repo name, "
+                               "stream-qualified — the SAME label used to route "
+                               "--channel-id --project and to name a project's "
+                               "own Discord thread")
     p_notify.add_argument("--find-only", dest="find_only", action="store_true",
-                          help="With --provision-question-thread (#330): only FIND "
-                               "an existing claude-<owner>-q thread, never CREATE "
-                               "one. The AUTOMATIC background self-heal's own mode "
-                               "(never wielded unattended) — the explicit, "
-                               "human-typed CLI action stays find-then-CREATE "
-                               "unless this flag is also given.")
+                          help="With --provision-question-thread / "
+                               "--provision-project-thread (#330/#369): only FIND "
+                               "an existing thread, never CREATE one. The "
+                               "AUTOMATIC background self-heal's own mode (never "
+                               "wielded unattended) — the explicit, human-typed "
+                               "CLI action stays find-then-CREATE unless this "
+                               "flag is also given.")
     p_notify.add_argument("--autopilot-done", dest="autopilot_done",
                           action="store_true",
                           help="Compose + send the per-ticket completion card from fields")
@@ -13146,7 +13207,13 @@ def main():
     p_notify.add_argument("--cwd", help="Project cwd of the asking session (--record-question)")
     p_notify.add_argument("--text", help="The turn's last assistant message (API-error check)")
     p_notify.add_argument("--session", help="Session id (API-error dedup scope / --record-question)")
-    p_notify.add_argument("--project", help="Project name for the API-error ping")
+    p_notify.add_argument("--project",
+                          help="Project LABEL (#369) — used for the API-error "
+                               "ping's message text, and (with --channel-id or "
+                               "--provision-project-thread) to route/provision "
+                               "the owner's PER-PROJECT thread. Ignored by "
+                               "--channel-id when --kind is 'questions' (the "
+                               "questions thread stays centralized, by design)")
     p_notify.add_argument("--issue", type=int, help="Issue number (for --run-card)")
     p_notify.add_argument("--achieved", help="What landed (card 'Dosiahnuté') — plain language")
     p_notify.add_argument("--goal", help="Plain-language ticket goal (card 'Cieľ') — "

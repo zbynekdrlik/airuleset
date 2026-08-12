@@ -282,7 +282,7 @@ def stream_redirect(raw_owner):
     return STREAM_NOTIFY_OWNER.get(raw_owner, raw_owner)
 
 
-def notification_channel(env=None, owner=None, kind="default"):
+def notification_channel(env=None, owner=None, kind="default", project=None):
     """Resolve the Discord channel/THREAD id to POST to for the current owner.
 
     Per-owner routing: each person gets their OWN thread so notifications don't
@@ -305,7 +305,17 @@ def notification_channel(env=None, owner=None, kind="default"):
     (questions land in their normal thread) instead of silently losing them to
     the shared channel. `kind="default"` (the parameter's default) is
     byte-for-byte the pre-#296 behaviour — every EXISTING caller (`send()`, the
-    run-card, api-error) never passes `kind=` at all and is unaffected."""
+    run-card, api-error) never passes `kind=` at all and is unaffected.
+
+    `project` (#369) resolves the owner's PER-PROJECT thread
+    (`DISCORD_NOTIFICATION_CHANNEL_<OWNER>_P_<SLUG>`) — checked ONLY under
+    `kind="default"` (the parameter's own default), FIRST, before the owner's
+    normal thread. It is DELIBERATELY IGNORED when `kind == "questions"` —
+    #369's own design decision keeps the questions thread CENTRALIZED, never
+    project-split (see the ticket's design comment for the full rationale:
+    job 7's Discord-reply routing is a security-critical mechanism this
+    ticket does not touch). `project=None` (the default) is byte-for-byte
+    the pre-#369 behaviour for every existing caller."""
     env = _read_env() if env is None else env
     owner = resolve_owner() if owner is None else owner
     if owner:
@@ -314,6 +324,10 @@ def notification_channel(env=None, owner=None, kind="default"):
                     or "").strip()
             if perq:
                 return perq
+        elif project:
+            perp = (env.get(_owner_project_key(owner, project)) or "").strip()
+            if perp:
+                return perp
         per = (env.get("DISCORD_NOTIFICATION_CHANNEL_" + owner.upper()) or "").strip()
         if per:
             return per
@@ -726,6 +740,227 @@ def provision_question_thread(owner, env=None, env_path=None, http=None,
     _env_upsert(path, "DISCORD_NOTIFICATION_CHANNEL_" + owner.upper() + "_Q",
                new_id)
     return new_id
+
+
+# --------------------------------------------------------------------------- #
+# #369 -- per-PROJECT threads, generalizing #296's per-owner QUESTIONS
+# thread to "one thread per project/subdev-stream, per owner". Mirrors the
+# question-thread trio above (find/create/provision) as closely as
+# possible, verbatim in shape, parametrized by a PROJECT LABEL instead of
+# the fixed "questions" concept — see the ticket's own design comment for
+# the full rationale (why the questions thread itself stays centralized and
+# is NOT part of this split; why a handful of watchdog "session/pane
+# health" alerts also stay on the owner's plain thread by design).
+# --------------------------------------------------------------------------- #
+
+_PROJECT_KEY_MAX = 60           # cap on the SLUG portion of an env-key suffix
+_PROJECT_THREAD_NAME_MAX = 80   # cap on the slug portion of a Discord thread
+                                # name (Discord's own hard cap is 100 chars;
+                                # this leaves headroom for "claude-<owner>-")
+
+
+def _project_env_slug(label):
+    """ENV-KEY-safe suffix for a project LABEL: `[A-Z0-9_]+`, capped. Distinct
+    from `project_thread_slug()` (the Discord THREAD-NAME form) because a
+    `.env` key and a Discord channel name have different charsets. "" for an
+    empty/unusable label (a caller must treat "" as "no usable project")."""
+    s = re.sub(r"[^A-Za-z0-9]+", "_", str(label or "").strip()).strip("_").upper()
+    return s[:_PROJECT_KEY_MAX]
+
+
+def _owner_project_key(owner, project_label):
+    """The `.env` KEY for owner+project's channel id. The `_P_` separator
+    (never a bare `_`) keeps this namespace DISTINCT from the questions
+    thread's own `_Q` suffix — without it, a project literally named "q"
+    would collide with `DISCORD_NOTIFICATION_CHANNEL_<OWNER>_Q`, silently
+    routing a project's traffic into the SHARED questions thread."""
+    return ("DISCORD_NOTIFICATION_CHANNEL_" + str(owner).upper() + "_P_"
+           + _project_env_slug(project_label))
+
+
+def project_thread_slug(label):
+    """Discord thread-NAME suffix for a project label — lowercase,
+    dash-separated, ASCII alnum only, capped well under Discord's 100-char
+    channel-name limit. "project" for an empty/unusable label (a thread name
+    must never be empty)."""
+    s = re.sub(r"[^A-Za-z0-9]+", "-", str(label or "").strip()).strip("-").lower()
+    return (s or "project")[:_PROJECT_THREAD_NAME_MAX]
+
+
+def project_label_for(cwd, run=None):
+    """The per-project routing/display LABEL for `cwd` (#369): the
+    canonical, ORIGIN-derived repo name (`repo_name_for` — never a
+    checkout-directory basename, which this repo's own history has shown
+    can diverge from the real repo name, e.g. a local `odoo-slovnormal`
+    checkout of the real `odoo-erp`), STREAM-QUALIFIED (`stream_qualified`)
+    so a sub-dev stream's own checkout of the SAME repo gets its own
+    distinguishable label ("odoo-erp-david2") instead of colliding with the
+    maintainer's own thread. Falls back to the cwd's own basename when no
+    git repo / no origin can be resolved (a bare directory, a repo with no
+    remote) — never empty for a real cwd, so a hook computing a routing key
+    always has SOMETHING stable to key on. This is the SAME label already
+    used for run-card headers (`compose_autopilot_card`'s own
+    `stream_qualified(repo_name)`), so a project's thread name and its own
+    card header text always agree."""
+    name = repo_name_for(cwd, run=run)
+    if not name:
+        name = os.path.basename(str(cwd or "").rstrip("/")) or "unknown"
+    return stream_qualified(name)
+
+
+def find_owner_project_thread(env, owner, project_label, http=None):
+    """FIND an existing `claude-<owner>-<project-slug>` thread (#369) — the
+    "find" half of `provision_project_thread`'s idempotent find-then-create,
+    mirroring `find_owner_question_thread` verbatim (see its own docstring
+    for the full duplicate-thread-across-boxes rationale this closes:
+    provisioning the SAME owner+project from a SECOND box must reuse the
+    first box's thread, never fork a duplicate one). Searches the owner's
+    anchor channel's ACTIVE guild threads first, then its ARCHIVED PUBLIC
+    threads. Returns the existing thread id, or "" on any lookup
+    failure/genuine absence — never guesses, never raises."""
+    token = bot_token(env)
+    if not token or not owner or not project_label:
+        return ""
+    parent_ch = _owner_anchor_channel(env, owner)
+    if not parent_ch:
+        return ""
+    api = http or _discord_api
+    info = api(token, "GET", "channels/%s" % parent_ch)
+    if not isinstance(info, dict):
+        return ""
+    parent_id = info.get("parent_id")
+    guild_id = info.get("guild_id")
+    if not parent_id:
+        return ""
+    name = "claude-%s-%s" % (owner, project_thread_slug(project_label))
+    if guild_id:
+        active = api(token, "GET", "guilds/%s/threads/active" % guild_id)
+        for t in _threads_of(active):
+            if t.get("parent_id") == parent_id and t.get("name") == name:
+                return t.get("id") or ""
+    archived = api(token, "GET",
+                   "channels/%s/threads/archived/public" % parent_id)
+    for t in _threads_of(archived):
+        if t.get("name") == name:
+            return t.get("id") or ""
+    return ""
+
+
+def create_owner_project_thread(env, owner, project_label, http=None):
+    """Create the PROJECT thread `claude-<owner>-<project-slug>` — a sibling
+    of the owner's EXISTING normal thread (same parent channel), mirroring
+    `create_owner_question_thread` verbatim. Returns the new thread id, or ""
+    on any failure — never raises. Does NOT persist the result, and does NOT
+    search for an existing thread first; see `provision_project_thread` for
+    the idempotent find-then-create-and-save action."""
+    token = bot_token(env)
+    if not token or not owner or not project_label:
+        return ""
+    parent_ch = _owner_anchor_channel(env, owner)
+    if not parent_ch:
+        return ""
+    api = http or _discord_api
+    parent_id = _channel_parent_id(token, parent_ch, http=api)
+    if not parent_id:
+        return ""
+    resp = api(token, "POST", "channels/%s/threads" % parent_id,
+              {"name": "claude-%s-%s" % (owner, project_thread_slug(project_label)),
+               "type": 11, "auto_archive_duration": 10080})
+    return (resp.get("id") if isinstance(resp, dict) else "") or ""
+
+
+def provision_project_thread(owner, project_label, env=None, env_path=None,
+                             http=None, create=True):
+    """Idempotently ENSURE the owner+project channel key is configured
+    (#369): returns the EXISTING id unchanged (zero network calls) when
+    already set; otherwise FINDS an existing `claude-<owner>-<slug>` thread
+    on Discord itself before falling back to creating one, then appends the
+    key to the local `.env`. Mirrors `provision_question_thread` verbatim,
+    including its `create=False` find-only mode (the AUTOMATIC background
+    self-heal's own mode — never auto-CREATE unattended). Returns the id on
+    success, "" on any failure/missing owner-or-project — never raises."""
+    if not owner or not project_label:
+        return ""
+    path = env_path if env_path is not None else _env_path()
+    env = _read_env() if env is None else env
+    key = _owner_project_key(owner, project_label)
+    existing = (env.get(key) or "").strip()
+    if existing:
+        return existing
+    new_id = find_owner_project_thread(env, owner, project_label, http=http)
+    if not new_id and create:
+        new_id = create_owner_project_thread(env, owner, project_label, http=http)
+    if not new_id:
+        return ""
+    _env_upsert(path, key, new_id)
+    return new_id
+
+
+def _pthread_spawn_guard_path(owner, project_label):
+    """Per (owner, project) spawn-throttle marker — a SEPARATE namespace
+    from `_qthread_spawn_guard_path` (the questions-thread guard), so a
+    burst of BOTH kinds of missing thread never shares one throttle window
+    and one kind's self-heal cannot silently suppress the other's."""
+    return os.path.join(_claude_dir(), "notify-pthread-spawn",
+                        str(owner), _project_env_slug(project_label) or "project")
+
+
+def _spawn_provision_project_thread(owner, project_label):
+    """Kick a DETACHED, background `notify --provision-project-thread
+    --find-only` for (owner, project) (#369) — mirrors
+    `_spawn_provision_question_thread` verbatim: guarded by the SAME atomic
+    `_qthread_spawn_claim` primitive (generic over its own guard PATH, so
+    reusing it here needs no changes to it at all), find-only (never
+    auto-CREATE unattended), and never raises into the live delivery path
+    it rides alongside."""
+    if not _qthread_spawn_claim(_pthread_spawn_guard_path(owner, project_label)):
+        return
+    script = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+        "airuleset.py")
+    try:
+        subprocess.Popen(
+            [sys.executable, script, "notify", "--provision-project-thread",
+             "--owner-name", owner, "--project", project_label, "--find-only"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+    except Exception as exc:
+        log_delivery("spawn-error", kind="project",
+                     key="%s:%s" % (owner, project_label), reason=repr(exc))
+
+
+def resolve_project_channel(env=None, owner=None, project=None, spawn=None):
+    """The channel id a REAL delivery for `project` should POST to (#369) —
+    mirrors `resolve_questions_channel` verbatim, one level over (a
+    caller-supplied `project` instead of the fixed "questions" kind).
+
+    Returns `notification_channel(..., project=project)`'s own value
+    unconditionally — this never changes WHICH channel a fallback delivery
+    lands in, only whether the fallback is silent. Only when the owner's
+    per-project key is genuinely ABSENT does it additionally (1) write a
+    LOUD, distinguishable delivery-log line (`status="fallback"`) and
+    (2) kick a GUARDED, DETACHED, find-only background attempt to provision
+    it — so the NEXT notification for this (owner, project) self-heals with
+    no manual per-box step. `project` falsy (None/"") is a pure no-op: no
+    log, no spawn, identical to `notification_channel()` with no project.
+    Gated on `bot_token(env)` being present, exactly like
+    `resolve_questions_channel`."""
+    env = _read_env() if env is None else env
+    owner = resolve_owner() if owner is None else owner
+    chan = notification_channel(env=env, owner=owner, project=project)
+    try:
+        if owner and project and bot_token(env):
+            configured = (env.get(_owner_project_key(owner, project)) or "").strip()
+            if not configured:
+                log_delivery("fallback", kind="project",
+                             key="%s:%s" % (owner, project),
+                             reason="p-thread-not-provisioned-on-this-host")
+                (spawn if spawn is not None
+                 else _spawn_provision_project_thread)(owner, project)
+    except Exception as exc:
+        print("resolve_project_channel: self-heal side effect failed: %r"
+             % exc, file=sys.stderr)
+    return chan
 
 
 def mention_prefix(env=None, owner=None):
@@ -1731,7 +1966,7 @@ def _post_discord(token, channel, content):
 
 
 def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
-        return_message_id=False):
+        return_message_id=False, project=None):
     """Prepend the owner @mention to `body` and POST it to the Discord notification
     channel — AND, in parallel, to every mirror owner's own thread with their own
     @mention (DISCORD_MIRROR_<OWNER>, e.g. david → also zbynek). Deduped on
@@ -1742,7 +1977,16 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     `message_id` is the PRIMARY send's Discord message id (a string) when
     `status == "sent"` and `_post_discord` returned a real id, else None. Every
     EXISTING caller passes nothing here and keeps the plain-string contract
-    unchanged."""
+    unchanged.
+
+    `project` (#369) routes EVERY target (primary + each mirror) to THEIR OWN
+    per-project thread — `resolve_project_channel`, which self-heals a
+    missing thread — but ONLY on a REAL send (`not dry_run`); a preview call
+    resolves via the plain, side-effect-free `notification_channel(...,
+    project=project)` instead, so repeatedly previewing/testing a send can
+    never spawn background self-heal processes or write fallback log lines.
+    `project=None` (the default) is byte-for-byte the pre-#369 behaviour for
+    every existing caller."""
     env = _read_env() if env is None else env
     # Resolve the owner ONCE so the @mention and the per-owner thread target agree
     # (a tmux re-query between them could otherwise disagree).
@@ -1758,7 +2002,8 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     # real delivery iterate this SAME list, so the preview is faithful.
     targets, seen_channels = [], set()      # targets: list of (owner, channel)
     for i, t in enumerate([owner] + mirror_owners(env, owner)):
-        ch = notification_channel(env, t)
+        ch = (resolve_project_channel(env, t, project) if (project and not dry_run)
+             else notification_channel(env, t, project=project))
         if i == 0:                          # primary: always included
             targets.append((t, ch))
             if ch:

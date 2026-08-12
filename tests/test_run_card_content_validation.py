@@ -51,7 +51,7 @@ def _run_card_args(**overrides):
     note in `tests/test_airuleset.py`)."""
     base = dict(
         run_card=True, autopilot_done=False, mention_prefix=False,
-        repo_name=False, newest_card=False, backfill_digest=False, provision_question_thread=False,
+        repo_name=False, newest_card=False, backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
         record_question=False, edit_question=False, channel_id=False,
         owner=False, mirror_owners=False, body=None, run=None,
         repo="o/x", issue=457, pr=None, achieved="Oprava nasadená a overená",

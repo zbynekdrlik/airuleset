@@ -190,7 +190,7 @@ class TestForkNoMergeHandoffCard(TestCase):
         import unittest.mock as mk
         args = mk.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
                        repo_name=False, newest_card=False,
-                       backfill_digest=False, provision_question_thread=False,
+                       backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                        record_question=False, edit_question=False, channel_id=False,
                        owner=False, mirror_owners=False, body=None, run=None,
                        repo="kvaskodev/odoo-erp", issue=1408, pr=None,
@@ -516,7 +516,7 @@ class TestRunCardRemainingScopedToStream(TestCase):
         import unittest.mock as mk
         base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
                        repo_name=False, newest_card=False,
-                       backfill_digest=False, provision_question_thread=False,
+                       backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                     record_question=False, edit_question=False, channel_id=False,
                     owner=False, mirror_owners=False, body=None, run=None,
                     repo="kvaskodev/odoo-erp", issue=1408, pr=None,
@@ -1222,7 +1222,7 @@ class TestRunCardHeartbeatSurvivesStreamCards(TestCase):
         import unittest.mock as mk
         base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
                     repo_name=False, newest_card=False,
-                    backfill_digest=False, provision_question_thread=False,
+                    backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                     record_question=False, edit_question=False, channel_id=False,
                     owner=False, mirror_owners=False, body=None, run=None,
                     repo="o/r", issue=5, pr=None,
@@ -2606,7 +2606,7 @@ class TestRunCardResolvesIdentityAgainstTheRepoRoot(TestCase):
     def _args(self, **over):
         import unittest.mock as mk
         base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
-                    repo_name=False, newest_card=False, backfill_digest=False, provision_question_thread=False,
+                    repo_name=False, newest_card=False, backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                     record_question=False, edit_question=False,
                     channel_id=False, owner=False, mirror_owners=False,
                     body=None, run=None, repo="kvaskodev/odoo-erp", issue=1408,
