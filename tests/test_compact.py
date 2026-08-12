@@ -837,6 +837,23 @@ class TestCompactSelfReportedCompleteExemption(unittest.TestCase):
         self.assertFalse(compact._compact_transcript_completion_heading(p))
         self.assertFalse(compact._compact_self_reported_complete("self-callback", p))
 
+    def test_heading_mentioned_mid_line_is_not_a_genuine_heading(self):
+        # #402-review MINOR-1: a surviving mutant (dropping the `^`
+        # anchor from _COMPACT_COMPLETION_HEADING_RX) passed all 101
+        # pre-existing tests -- none of them locked the anchor's real
+        # job, which is refusing a MID-LINE mention of the heading text
+        # (a session merely quoting/discussing "✅ Work Complete" inline,
+        # not genuinely opening a turn with it). Mirrors the same
+        # mention-vs-use discriminator this repo's own command-matching
+        # hooks already rely on (never a bare substring scan).
+        proj = self._dir()
+        mid_line = ("Poznamka: predchadzajuce sedenie skoncilo textom "
+                    "'✅ Work Complete' vnutri vety, nie ako vlastny "
+                    "nadpis riadku.\n⏳ WORKING: stale prebieha")
+        p = _write_marker_transcript(proj, self.CWD, self.SID, mid_line)
+        self.assertFalse(compact._compact_transcript_completion_heading(p))
+        self.assertFalse(compact._compact_self_reported_complete("self-callback", p))
+
     def test_false_for_subagent_stop_origin_even_with_heading(self):
         proj = self._dir()
         p = _write_marker_transcript(proj, self.CWD, self.SID,
@@ -900,6 +917,38 @@ class TestCompactSelfReportedCompleteExemption(unittest.TestCase):
         self.assertTrue(compact._session_has_live_bg_tasks(
             None, self.SID, self.CWD, None, projects_dir=proj, now=now,
             origin="subagent-stop"))
+
+    def test_live_bg_tasks_pane_signal_skips_the_tpath_resolve_for_non_self_callback(self):
+        # #402-review MINOR-3: once `live=True` via the PANE-TEXT signal
+        # alone (no subagent transcript needed to establish it), a
+        # non-self-callback origin must not pay for LOCATING the
+        # transcript either -- `_compact_self_reported_complete` was
+        # always going to refuse it on origin alone, and the docstring
+        # here used to (wrongly) claim the caller "never even pays" for
+        # anything in that case.
+        proj = self._dir()
+        run = DeliverCompactFakeTmux([("%1", "claude", self.CWD, "111")],
+                                     CB_BG_AGENT_CAP)
+        with m.patch.object(wd, "_transcript_for_session") as spy:
+            result = compact._session_has_live_bg_tasks(
+                "%1", self.SID, self.CWD, run, projects_dir=proj,
+                origin="subagent-stop")
+        self.assertTrue(result)
+        spy.assert_not_called()
+
+    def test_live_bg_tasks_pane_signal_still_resolves_and_exempts_self_callback(self):
+        # The positive control for the test above: a self-callback origin
+        # DOES still need (and get) the resolve, and is correctly
+        # exempted once the transcript backs the claim.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 _WORK_COMPLETE_PLUS_TAIL)
+        run = DeliverCompactFakeTmux([("%1", "claude", self.CWD, "111")],
+                                     CB_BG_AGENT_CAP)
+        result = compact._session_has_live_bg_tasks(
+            "%1", self.SID, self.CWD, run, projects_dir=proj,
+            origin="self-callback")
+        self.assertFalse(result)
 
     def test_live_bg_tasks_not_exempted_when_no_live_task_present_anyway(self):
         # the exemption is only ever CONSULTED once a live task is already
