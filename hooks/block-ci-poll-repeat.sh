@@ -311,7 +311,7 @@ if [ "$IS_LOOP" = "0" ]; then
     fi
     JSON_STATUS_OK=0
     if grep -qE -- \
-        '--json[[:space:]]+"?(status,conclusion|conclusion,status|status)"?([[:space:]"'"'"'|]|$)' \
+        '--json[[:space:]]+"?(status,conclusion|conclusion,status|status)(,jobs)?"?([[:space:]"'"'"'|]|$)' \
         <<<"$FLAT"; then
         JSON_STATUS_OK=1
     fi
