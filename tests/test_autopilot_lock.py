@@ -17,6 +17,7 @@ a brief `fcntl.flock` on a sibling `.mutex` file so two concurrent
 `acquire` calls on the SAME repo can't both win a stale-steal race.
 """
 
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,11 +27,13 @@ from unittest import TestCase, main
 REPO = Path(__file__).resolve().parent.parent
 
 
-def run(args, home=None):
+def run(args, home=None, extra_env=None):
     import os
     env = dict(os.environ)
     if home:
         env["HOME"] = home
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [sys.executable, str(REPO / "airuleset.py"), "autopilot-lock"] + args,
         capture_output=True, text=True, timeout=30, env=env,
@@ -193,6 +196,86 @@ class TestDirectoryShapedLockPath(TestCase):
         r = run(["status", "--repo", self.repo])
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("Traceback", r.stdout + r.stderr)
+
+
+class TestLockDirEnvOverride(TestCase):
+    """(#385) `_autopilot_lock_path()` hardcodes the REAL system tempdir with
+    no override. Every test in `TestAcquireRelease`/`TestDirectoryShapedLockPath`
+    above spawns a REAL `autopilot-lock acquire` subprocess against a fresh
+    `tempfile.mkdtemp()` repo path — since the lock path is a hash of that
+    (never-reused) repo path and nothing ever deletes it, each test run leaves
+    a permanent, un-owned lock/mutex/symlink/directory artifact in production
+    `/tmp` (thousands measured live, see the issue). `AIRULESET_AUTOPILOT_LOCK_DIR`
+    redirects the lock DIRECTORY itself; unset (production) is byte-for-byte
+    unchanged."""
+
+    def test_env_override_redirects_the_lock_path(self):
+        sys.path.insert(0, str(REPO))
+        import airuleset
+        import os as _os
+        override = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, override, ignore_errors=True)
+        repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        old = _os.environ.get("AIRULESET_AUTOPILOT_LOCK_DIR")
+        _os.environ["AIRULESET_AUTOPILOT_LOCK_DIR"] = override
+        try:
+            lp = airuleset._autopilot_lock_path(repo)
+        finally:
+            if old is None:
+                _os.environ.pop("AIRULESET_AUTOPILOT_LOCK_DIR", None)
+            else:
+                _os.environ["AIRULESET_AUTOPILOT_LOCK_DIR"] = old
+        self.assertEqual(str(lp.parent), override,
+                          "the env override must redirect the lock DIRECTORY")
+
+    def test_no_override_falls_back_to_system_tempdir_unchanged(self):
+        sys.path.insert(0, str(REPO))
+        import airuleset
+        import os as _os
+        import tempfile as _tempfile
+        repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        old = _os.environ.pop("AIRULESET_AUTOPILOT_LOCK_DIR", None)
+        try:
+            lp = airuleset._autopilot_lock_path(repo)
+        finally:
+            if old is not None:
+                _os.environ["AIRULESET_AUTOPILOT_LOCK_DIR"] = old
+        self.assertEqual(str(lp.parent), _tempfile.gettempdir(),
+                          "production (no override set) must be unchanged")
+
+    def test_a_real_acquire_subprocess_writes_nothing_into_the_real_tempdir(self):
+        """The actual anti-litter proof: run the REAL CLI subprocess (the
+        exact shape every other test in this file uses) with the override
+        env var set, and assert the artifact NEVER appears at the exact path
+        it would have used under the REAL system tempdir. Uses a FRESH
+        `mkdtemp()` repo path (never seen before) and asserts the would-be
+        real path does NOT already exist before running — so this can never
+        pass by silently hiding inside years of pre-existing litter
+        (playbook #115 — the exact trap this ticket names)."""
+        import hashlib
+        import tempfile as _tempfile
+        repo = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        real_hash = hashlib.sha1(str(Path(repo).resolve()).encode()).hexdigest()
+        would_be_real_path = (Path(_tempfile.gettempdir())
+                               / f"airuleset-autopilot-{real_hash}.lock")
+        self.assertFalse(would_be_real_path.exists(),
+                          "fixture must start from a never-before-seen repo "
+                          "path, or this test could pass by luck")
+        override = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, override, ignore_errors=True)
+        r = run(["acquire", "--repo", repo, "--pid", "999999999"],
+                extra_env={"AIRULESET_AUTOPILOT_LOCK_DIR": override})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(
+            would_be_real_path.exists(),
+            "must NEVER write into the real system tempdir when the "
+            "override is set — this is the litter this ticket exists to stop")
+        self.assertTrue(
+            (Path(override) / f"airuleset-autopilot-{real_hash}.lock").exists(),
+            "the lock must actually land under the override directory")
 
 
 class TestWiring(TestCase):

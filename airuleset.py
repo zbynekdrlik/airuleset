@@ -9038,7 +9038,8 @@ def cmd_push(args):
     # subprocess at one throwaway directory here — `AIRULESET_DRAFT_RESCUE_DIR`
     # is `draft_rescue_dir()`'s own env-override, so this is the single
     # place that has to know it exists.
-    with tempfile.TemporaryDirectory() as _rescue_tmp:
+    with tempfile.TemporaryDirectory() as _rescue_tmp, \
+            tempfile.TemporaryDirectory() as _lock_tmp:
         test_env = dict(os.environ)
         test_env["AIRULESET_DRAFT_RESCUE_DIR"] = str(
             Path(_rescue_tmp) / "draft-rescue")
@@ -9046,6 +9047,16 @@ def cmd_push(args):
         # box whose owner has genuinely disabled the compact/goal jobs --
         # the flag files are production state, not test state.
         test_env["AIRULESET_TEST_IGNORE_DISABLE"] = "1"
+        # #385: `tests/test_autopilot_lock.py` spawns a REAL `autopilot-lock`
+        # CLI subprocess on every test, against a fresh never-reused repo
+        # path — without this, every push leaves a permanent orphaned lock
+        # (plus `.mutex`/symlink/directory artifacts) in the REAL system
+        # `/tmp`. `tests/conftest.py`'s `_isolate_autopilot_lock_dir` covers
+        # a `pytest`-direct run; `conftest.py` is NOT read by `unittest
+        # discover` at all, so this is the single place that has to know
+        # `AIRULESET_AUTOPILOT_LOCK_DIR` exists for THIS subprocess.
+        test_env["AIRULESET_AUTOPILOT_LOCK_DIR"] = str(
+            Path(_lock_tmp) / "autopilot-lock")
         test_result = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
             cwd=str(REPO_DIR), env=test_env,
@@ -12817,12 +12828,29 @@ def cmd_delegation(args):
 def _autopilot_lock_path(repo):
     """Repo-path-keyed lockfile under the system tempdir. Resolved (realpath)
     so relative paths, symlinks, and a trailing slash all hash to the SAME
-    lock — a real cross-session lock must not fork on cosmetic path forms."""
+    lock — a real cross-session lock must not fork on cosmetic path forms.
+
+    `AIRULESET_AUTOPILOT_LOCK_DIR`, when set, overrides the lock DIRECTORY
+    (same shape as `watchdog.draft_rescue_dir()`'s `AIRULESET_DRAFT_RESCUE_DIR`
+    and `_is_gh_app_token_box()`'s `GH_APP_TOKEN_DIR` — #385). It exists
+    because `tests/test_autopilot_lock.py` genuinely needs to exercise the
+    REAL `autopilot-lock` CLI subprocess end-to-end (real `fcntl.flock`, real
+    PID liveness via `os.kill`, a real steal race — none of which an
+    in-process call could faithfully test), and every one of those subprocess
+    runs is keyed on a FRESH `tempfile.mkdtemp()` repo path that is never
+    reused and never cleaned up — leaving a permanent, un-owned lock (or
+    `.mutex` sibling, or symlink, or directory-shaped artifact) in the REAL
+    system `/tmp` on every single test run. Thousands of these accumulated in
+    production over weeks (measured live: 8350 `.lock` + 6329 `.lock.mutex` +
+    1009 `.lock-real-target` symlinks + 1027 directory-shaped locks on this
+    box alone) before this override existed. Unset (real `/autopilot`
+    dispatch, and every OTHER caller) is byte-for-byte unchanged."""
     import hashlib
     import tempfile as _tempfile
     real = str(Path(repo).resolve())
     h = hashlib.sha1(real.encode()).hexdigest()
-    return Path(_tempfile.gettempdir()) / f"airuleset-autopilot-{h}.lock"
+    lock_dir = os.environ.get("AIRULESET_AUTOPILOT_LOCK_DIR") or _tempfile.gettempdir()
+    return Path(lock_dir) / f"airuleset-autopilot-{h}.lock"
 
 
 def _proc_parent_pid(pid):

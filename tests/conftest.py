@@ -82,3 +82,29 @@ def _ignore_owner_kill_switch(monkeypatch):
     production state; a direct pytest run on a box with them set must not
     have watchdog compact/goal jobs read as disabled."""
     monkeypatch.setenv("AIRULESET_TEST_IGNORE_DISABLE", "1")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_autopilot_lock_dir(monkeypatch):
+    """(#385) `airuleset._autopilot_lock_path()` reads
+    `AIRULESET_AUTOPILOT_LOCK_DIR` (falling back to the real system tempdir)
+    with no other test-only bypass. `tests/test_autopilot_lock.py`'s own
+    `TestAcquireRelease`/`TestDirectoryShapedLockPath` classes spawn a REAL
+    `autopilot-lock` CLI SUBPROCESS on every test — never an in-process call
+    — against a fresh `tempfile.mkdtemp()` repo path that is never reused, so
+    without this the lock (plus its `.mutex` sibling, plus any symlink or
+    directory-shaped artifact the directory-shaped tests create) lands in the
+    REAL system `/tmp` on every single test run, forever (measured live:
+    thousands of leaked artifacts accumulated over weeks before this
+    existed). `monkeypatch.setenv` (not `mock.patch.dict`) is required here,
+    not merely conventional — the value must be a REAL `os.environ` entry so
+    a SUBPROCESS spawned via `subprocess.run(..., env=dict(os.environ))`
+    (exactly what `test_autopilot_lock.py`'s own `run()` helper does) sees
+    it; `cmd_push`'s own pre-push `unittest discover` subprocess (which this
+    `conftest.py` is NOT read by — pytest-only) gets the identical env var
+    injected directly in `cmd_push` itself, mirroring `_isolate_draft_rescue`
+    above."""
+    with TemporaryDirectory() as d:
+        lock_dir = Path(d) / "autopilot-lock"
+        monkeypatch.setenv("AIRULESET_AUTOPILOT_LOCK_DIR", str(lock_dir))
+        yield lock_dir
