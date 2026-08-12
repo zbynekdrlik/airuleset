@@ -4942,6 +4942,128 @@ class TestDeferredSincePreservedAcrossReRecord(unittest.TestCase):
         self.assertNotIn("deferred_since", d2["d3"])
 
 
+class TestFirstTsPreservedAcrossReRecord(unittest.TestCase):
+    """#400 -- `first_ts` (the ORIGINAL boundary this pending episode was
+    first observed at) must survive every re-record for the SAME
+    still-pending session, mirroring `deferred_since`/`not_boundary_since`'s
+    own unconditional-preservation shape exactly -- `ts` still takes the
+    newer call's value (only the LATEST boundary matters for delivery
+    TARGETING), but `first_ts` never moves once set."""
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_first_ts_is_stamped_on_the_first_record(self):
+        p = self._p()
+        wd.record_compact_request("f1", "/x", now=100, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["f1"]["first_ts"], 100)
+
+    def test_first_ts_survives_a_re_record_unconditionally(self):
+        p = self._p()
+        wd.record_compact_request("f1", "/x", now=100, path=p)
+        wd.record_compact_request("f1", "/y", now=500, path=p)   # re-record
+        wd.record_compact_request("f1", "/z", now=1200, path=p)  # a second re-record
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["f1"]["first_ts"], 100)     # never moves
+        self.assertEqual(d["f1"]["ts"], 1200)           # ts DOES take the newest value
+        self.assertEqual(d["f1"]["cwd"], "/z")           # cwd DOES take the newest value
+
+    def test_a_fresh_session_never_carries_a_stale_first_ts(self):
+        # once an entry is fully delivered/dropped/expired it is removed
+        # from the file, so a BRAND NEW request for the SAME sid, recorded
+        # afresh later, starts with its OWN fresh first_ts -- never
+        # resurrecting an old episode's anchor.
+        p = self._p()
+        wd.record_compact_request("f2", "/x", now=100, path=p)
+        wd.clear_compact_request("f2", path=p)
+        wd.record_compact_request("f2", "/z", now=9000, path=p)
+        d = wd.load_compact_requests(p)
+        self.assertEqual(d["f2"]["first_ts"], 9000)
+
+    def test_a_legacy_entry_with_no_first_ts_gets_one_stamped_fresh(self):
+        # migration safety: an entry written by a pre-#400 caller (or a
+        # hand-constructed fixture) has no first_ts key at all -- the very
+        # NEXT re-record must stamp one (from `now`, never invented from
+        # the legacy `ts`), rather than raising or leaving it permanently
+        # absent.
+        p = self._p()
+        wd.record_compact_request("f3", "/x", now=100, path=p)
+        d = wd.load_compact_requests(p)
+        del d["f3"]["first_ts"]
+        p.write_text(json.dumps(d))
+        wd.record_compact_request("f3", "/y", now=777, path=p)
+        d2 = wd.load_compact_requests(p)
+        self.assertEqual(d2["f3"]["first_ts"], 777)
+
+
+class TestFirstTsCannotResurrectAnExpiredBoundary(unittest.TestCase):
+    """#400 -- the whole point of `first_ts`: a session whose EVERY turn
+    keeps re-recording the SAME still-pending request (the pre-#400
+    bare-`✅ DONE:` trigger this ticket also removes, or any other repeat
+    caller) must NOT be able to keep the request perpetually "fresh" by
+    refreshing `ts` -- `compact_ticket_boundary`'s own expiry check reads
+    `first_ts`, so the TRUE age (since the ORIGINAL boundary) is what
+    decides expiry, regardless of how many times the entry was re-recorded
+    in between."""
+
+    SID = "sess-firstts-expiry"
+    CWD = "/home/x/firstts"
+    PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name) / "compact-requests.json"
+
+    def test_repeated_re_record_cannot_keep_an_old_boundary_alive(self):
+        path = self._p()
+        origin_ts = time.time() - wd.COMPACT_REQUEST_MAX_AGE_S - 60
+        now = time.time()
+        # the ORIGINAL boundary, long expired --
+        wd.record_compact_request(self.SID, self.CWD, now=origin_ts, path=path)
+        # -- but re-recorded (ts refreshed) every few "minutes" all the way
+        # up to just before `now`, exactly like a repeatedly-firing passive
+        # trigger would.
+        step = wd.COMPACT_REQUEST_MAX_AGE_S // 4
+        t = origin_ts
+        while t < now - 1:
+            t += step
+            wd.record_compact_request(self.SID, self.CWD, now=t, path=path)
+        d = wd.load_compact_requests(path)
+        self.assertEqual(d[self.SID]["first_ts"], origin_ts,
+                         "first_ts must still be the ORIGINAL boundary")
+        self.assertGreater(d[self.SID]["ts"], origin_ts,
+                           "ts is refreshed by every re-record, as designed")
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(
+            now, tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)}, path=path)
+        self.assertEqual(tmux.typed_texts(), [],
+                         "a repeatedly re-recorded but truly-old boundary "
+                         "must never be delivered")
+        self.assertTrue(any("expired" in ln for ln in logs), logs)
+        self.assertNotIn(self.SID, wd.load_compact_requests(path))
+
+    def test_a_genuinely_fresh_repeated_boundary_still_delivers(self):
+        # the control -- a session whose repeated re-records are all
+        # genuinely RECENT (first_ts itself is fresh) must be completely
+        # unaffected by this change.
+        path = self._p()
+        now = time.time()
+        wd.record_compact_request(self.SID, self.CWD, now=now - 120, path=path)
+        wd.record_compact_request(self.SID, self.CWD, now=now - 30, path=path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        logs = wd.compact_ticket_boundary(
+            now, tmux, {}, {self.SID: (self.PANE, CB_IDLE_CAP)}, path=path)
+        self.assertFalse(any("expired" in ln for ln in logs), logs)
+        self.assertIn("/compact", tmux.typed_texts())
+
+
 class TestCompactRequestSelfCli(unittest.TestCase):
     """`airuleset.py compact-request --self` wiring."""
 
