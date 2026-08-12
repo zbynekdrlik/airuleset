@@ -12,7 +12,6 @@ import datetime
 import hashlib
 import json
 import os
-import subprocess
 import time
 import unittest
 import unittest.mock
@@ -21,44 +20,6 @@ from tempfile import TemporaryDirectory
 
 import burn
 import watchdog as wd
-
-
-def _spawn_dummy_proc(testcase):
-    """A real, short-lived subprocess (`sleep 60`) for #82's process-
-    fingerprint tests — mirrors the identical helper in
-    tests/test_compact_request.py (kept local rather than cross-imported,
-    same convention this file already uses for its own transcript-seeding
-    helpers). Always killed in cleanup, even if the test already
-    terminated it.
-    # airuleset:script-ok best-effort test cleanup of a process the test
-    # may have already killed itself -- nothing left to log or handle.
-    """
-    p = subprocess.Popen(["sleep", "60"])
-
-    def _cleanup():
-        try:
-            p.terminate()
-            p.wait(timeout=5)
-        except Exception:
-            pass
-    testcase.addCleanup(_cleanup)
-    return p
-
-
-def _alive_proc_fingerprint(testcase):
-    """#83 -- a genuine, currently-alive process fingerprint (the
-    `_proc_fingerprint` `{"pid", "starttime"}` shape) for tests that need a
-    `/compact` claim to PERSIST across multiple evaluations, exactly like a
-    real production send does (there, `_pane_claude_proc_fingerprint`
-    resolves a REAL running `claude` process, so the claim always carries a
-    "proc" key). The fake tmux `run`s in this file can never walk a real
-    /proc tree (their `display-message` fakes return a bogus pane pid), so
-    without this helper a claim they set always ends up "proc"-less --
-    and, per #83, a proc-less entry is now (correctly) dropped and made
-    eligible again on its very NEXT evaluation, breaking any test that
-    expects persistence across sweeps."""
-    p = _spawn_dummy_proc(testcase)
-    return wd._proc_fingerprint(p.pid)
 
 
 def _write_jsonl(path, entries):
@@ -2604,30 +2565,6 @@ def tempfile_mkdtemp_cleanup(testcase):
     tmp = TemporaryDirectory()
     testcase.addCleanup(tmp.cleanup)
     return tmp.name
-
-
-def _isolate_compact_claims(testcase):
-    """#78 — give this test its OWN isolated compact-claims.json AND
-    compact-sync.log instead of the real `~/.claude/` copies. Unlike the
-    pre-#78 compact-delivered.json dedup (only touched when a msg_hash is
-    present), the shared claim gate is consulted UNCONDITIONALLY on every
-    `/compact` send attempt — so any test exercising job 14/15/17 or the
-    synchronous #65 path would otherwise read/write the REAL files. The
-    live systemd watchdog executes this repo's WORKING TREE every 60s on
-    THIS box (this repo's own CLAUDE.md) — a test process touching the
-    real files would race a live production job. Call from `setUp` in any
-    test class that exercises those code paths."""
-    tmp = tempfile_mkdtemp_cleanup(testcase)
-    p = Path(tmp) / "compact-claims-test.json"
-    patcher = unittest.mock.patch.object(wd, "compact_claims_path", return_value=p)
-    patcher.start()
-    testcase.addCleanup(patcher.stop)
-    logp = Path(tmp) / "compact-sync-test.log"
-    log_patcher = unittest.mock.patch.object(wd, "compact_sync_log_path",
-                                             return_value=logp)
-    log_patcher.start()
-    testcase.addCleanup(log_patcher.stop)
-    return p
 
 
 # --------------------------------------------------------------------------- #

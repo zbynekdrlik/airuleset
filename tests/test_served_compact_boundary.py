@@ -171,14 +171,22 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
 class TestSelfCallbackStaysAgentTypeAgnostic(TestCase):
     """Structural lock on the fact the whole #228 design depends on: no
     part of the `--self` call chain may grow an `agent_type`/
-    `subagent_type` check. Scoped to the THREE functions that make up the
-    chain (never the whole file, which would be defeated by an unrelated
+    `subagent_type` check. Scoped to the functions that make up the chain
+    (never the whole file, which would be defeated by an unrelated
     docstring mentioning those words elsewhere), and NOT just the CLI
     entry point -- a fresh-context adversarial review demonstrated that a
-    gate inserted inside `deliver_compact_self` or `resolve_self_pane`
+    gate inserted inside the delivery function or `resolve_self_pane`
     (where a future editor would most naturally add "only for the
     autopilot-worker" logic, since that is where the session is actually
-    resolved) was invisible to a scan bounded to the CLI branch alone."""
+    resolved) was invisible to a scan bounded to the CLI branch alone.
+
+    #402 (2026-08-12) collapsed the standalone `deliver_compact_self`
+    retry/hold wrapper into `cmd_compact_request`'s own `--self` branch
+    calling the single unified `watchdog.compact.deliver_compact` — the
+    STRUCTURAL invariant this class locks (no agent_type check anywhere
+    in the chain) is unchanged, only which function embodies "the
+    delivery attempt" moved (`watchdog.compact.deliver_compact`, not a
+    dedicated `deliver_compact_self`)."""
 
     GATE_WORDS = ("agent_type", "subagent_type")
 
@@ -199,20 +207,20 @@ class TestSelfCallbackStaysAgentTypeAgnostic(TestCase):
         self.assertGreater(end, start)
         self._assert_clean(src[start:end], "cmd_compact_request's --self branch")
 
-    def test_deliver_compact_self_has_no_agent_type_gate(self):
-        import watchdog
+    def test_deliver_compact_has_no_agent_type_gate(self):
+        from watchdog import compact
 
         self._assert_clean(
-            inspect.getsource(watchdog.deliver_compact_self),
-            "deliver_compact_self",
+            inspect.getsource(compact.deliver_compact),
+            "watchdog.compact.deliver_compact",
         )
 
     def test_resolve_self_pane_has_no_agent_type_gate(self):
-        import watchdog
+        from watchdog import compact
 
         self._assert_clean(
-            inspect.getsource(watchdog.resolve_self_pane),
-            "resolve_self_pane",
+            inspect.getsource(compact.resolve_self_pane),
+            "watchdog.compact.resolve_self_pane",
         )
 
 

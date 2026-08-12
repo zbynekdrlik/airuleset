@@ -137,37 +137,6 @@ LT_OTHER_QUEUED_CAP = (
     "  ctx ███░\n")
 
 
-def _isolate_compact_state(testcase):
-    """#78 — every `/compact` sender consults the SHARED claims file
-    unconditionally, and the live systemd watchdog runs this repo's WORKING
-    TREE every 60s on this box, so a test touching the real
-    `~/.claude/compact-claims.json` would race a production job. Returns the
-    temp dir so a caller can put its own fixtures beside it."""
-    d = TemporaryDirectory()
-    testcase.addCleanup(d.cleanup)
-    for name, fname in (("compact_claims_path", "claims.json"),
-                        ("compact_sync_log_path", "sync.log"),
-                        # #400-review MINOR-7 (fresh-context adversarial
-                        # review) -- #400 FIX 4's cooldown gate is
-                        # UNCONDITIONAL at every send point, unlike the
-                        # pre-existing delivered-dedup calls (which
-                        # short-circuit on a blank msg_hash before ever
-                        # touching disk). A test in this file that reaches
-                        # a real send point without this isolation would
-                        # write a real delivery timestamp into the
-                        # developer's ACTUAL ~/.claude/compact-
-                        # delivered.json, racing the live systemd watchdog
-                        # exactly like the two paths above already guard
-                        # against -- see test_compact_request.py's own
-                        # sibling fix (_isolate_compact_claims) for the
-                        # identical reasoning.
-                        ("compact_delivered_path", "delivered.json")):
-        p = m.patch.object(wd, name, return_value=Path(d.name) / fname)
-        p.start()
-        testcase.addCleanup(p.stop)
-    return Path(d.name)
-
-
 class LTFakeTmux:
     """Minimal `run` fake — same shape as CompactFakeTmux (test_compact_request)
     but for a job that is handed `panes_by_sid` directly and never captures on
@@ -231,65 +200,17 @@ class TestPaneHasQueuedCompact(unittest.TestCase):
         self.assertFalse(wd._pane_has_queued_compact(LT_OTHER_QUEUED_CAP))
 
 
-# --------------------------------------------------------------------------- #
-# 2. Every /compact sender honours the guard
-# --------------------------------------------------------------------------- #
-
-class TestQueuedCompactGuardJob14(unittest.TestCase):
-    """Job 14 — compact_ticket_boundary."""
-
-    PANE = "%9"
-    SID = "sess-lt14"
-
-    def setUp(self):
-        d = _isolate_compact_state(self)
-        self.reqs = str(d / "compact-requests.json")
-
-    def _go(self, captured):
-        wd.record_compact_request(self.SID, "/home/x/proj", path=self.reqs)
-        tmux = LTFakeTmux(captured)
-        logs = wd.compact_ticket_boundary(
-            time.time(), tmux, {}, {self.SID: (self.PANE, captured)},
-            path=self.reqs)
-        return tmux, logs
-
-    def test_pane_with_a_queued_compact_gets_no_second_one(self):
-        tmux, logs = self._go(LT_LIVE_QUEUED_CAP)
-        self.assertEqual(tmux.sent, [], "must not type a second /compact")
-        self.assertTrue(any("queued-compact" in ln for ln in logs), logs)
-
-    def test_the_request_is_not_left_pending_forever(self):
-        # the already-queued /compact IS what satisfies this boundary request
-        self._go(LT_LIVE_QUEUED_CAP)
-        self.assertEqual(wd.load_compact_requests(self.reqs), {})
-
-
-class TestQueuedCompactGuardDeliverNow(unittest.TestCase):
-    """#65's synchronous Stop-hook-time delivery."""
-
-    SID = "sess-ltnow"
-    CWD = "/home/x/proj"
-
-    def setUp(self):
-        self.log = _isolate_compact_state(self) / "sync.log"
-
-    def _go(self, captured):
-        tmux = LTFakeTmux(captured)
-        with m.patch.object(wd, "_find_pane_for_session", return_value="%9"):
-            handled = wd.deliver_compact_now(self.SID, self.CWD, run=tmux)
-        return tmux, handled
-
-    def test_queued_compact_sends_nothing_and_reports_handled(self):
-        tmux, handled = self._go(LT_LIVE_QUEUED_CAP)
-        self.assertEqual(tmux.sent, [])
-        self.assertTrue(handled, "an already-queued /compact IS the handling")
-        self.assertIn("queued-compact", self.log.read_text())
-
-
-# Jobs 15 and 17 are exercised against their OWN established harness
-# (RestartFakeTmux + _seed_context_transcript) in test_watchdog.py — see
-# TestCompactStaleContext / TestCompactHardCeiling there — rather than a
-# second, divergent fake being invented here.
+# The old "2. Every /compact sender honours the guard" section
+# (TestQueuedCompactGuardJob14 / TestQueuedCompactGuardDeliverNow, driving
+# job 14's `compact_ticket_boundary` and the synchronous `deliver_compact_
+# now`) is SUPERSEDED by #402's compact collapse — both functions are gone,
+# replaced by one `watchdog.compact.deliver_compact`. The identical
+# already-queued-compact behaviour is now locked directly against that
+# function in `tests/test_compact.py::TestDeliverCompact.
+# test_already_queued_compact_is_handled_not_resent` (and the periodic-sweep
+# equivalent, `TestCompactSweep`) — `_pane_has_queued_compact` itself (the
+# primitive `TestPaneHasQueuedCompact` above locks) is UNCHANGED and still
+# lives in `watchdog/__init__.py`, reused verbatim by the new module.
 
 
 # --------------------------------------------------------------------------- #
