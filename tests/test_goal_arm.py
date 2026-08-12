@@ -874,6 +874,24 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertIn("C-s" not in tmux.keys() and True, [True])  # no stash needed
         self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
+    def test_goal_disarmed_between_sweep_and_send_is_never_typed(self):
+        # #403-review m2: the FRESH re-verify right before the send
+        # (`pane_goal_armed(fresh) is not True`) had no test coverage in
+        # this file at all -- dropping it left every existing test green.
+        # Model a session whose goal got CLEARED while this sweep's own
+        # earlier checks were still running: the sweep started with an
+        # armed pane, but the capture taken immediately before typing
+        # (`fresh`) shows a bare, unarmed one -- the nudge must refuse,
+        # never type into a session that stopped being armed underneath
+        # it.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "capture_pane", return_value=GOAL_IDLE_CAP):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("skip raced" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
     def test_recent_human_activity_refuses_the_nudge(self):
         # Unlike arm delivery, the lane-occupancy nudge IS a genuinely
         # watchdog-INITIATED action, so it keeps the recent-human-activity
