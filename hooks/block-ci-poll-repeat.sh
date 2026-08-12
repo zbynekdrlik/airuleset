@@ -494,7 +494,7 @@ Pick ONE of these and stick to it — never keep issuing bare one-shot polls:
 
   DEADLINE=$((SECONDS + ${AIRULESET_POLL_BUDGET_S:-540}))
   for i in $(seq 1 18); do
-    s=$(gh run view __RUNID__ --json status,conclusion,jobs --jq 'if .status=="completed" then "TERMINAL "+.status+" "+(.conclusion//"") elif ([.jobs[]?|select(.conclusion=="failure")]|length)>0 then "JOBFAIL "+([.jobs[]?|select(.conclusion=="failure")]|map(.name)|join(", ")) else "PENDING "+.status end')
+    s=$(gh run view __RUNID__ --json status,conclusion,jobs --jq 'if .status=="completed" then "TERMINAL "+.status+" "+(.conclusion//"") elif ([.jobs[]?|select(.conclusion=="failure" or .conclusion=="timed_out")]|length)>0 then "JOBFAIL "+([.jobs[]?|select(.conclusion=="failure" or .conclusion=="timed_out")]|map(.name)|join(", ")) else "PENDING "+.status end')
     case "$s" in
       "TERMINAL "*) echo "TERMINAL: ${s#TERMINAL }"; break;;
       "JOBFAIL "*) echo "JOB FAILED (run still in progress): ${s#JOBFAIL }"; break;;
@@ -506,7 +506,7 @@ Pick ONE of these and stick to it — never keep issuing bare one-shot polls:
   • LONG wait — ONE background waiter, `run_in_background: true`:
 
   timeout "${AIRULESET_LONG_POLL_BUDGET_S:-10800}" bash -c 'while :; do
-    s=$(gh run view __TARGET__ --json status,conclusion,jobs --jq "if .status==\"completed\" then \"TERMINAL \"+.status+\" \"+(.conclusion//\"\") elif ([.jobs[]?|select(.conclusion==\"failure\")]|length)>0 then \"JOBFAIL \"+([.jobs[]?|select(.conclusion==\"failure\")]|map(.name)|join(\", \")) else \"PENDING \"+.status end" 2>/dev/null) || s="ERROR"
+    s=$(gh run view __TARGET__ --json status,conclusion,jobs --jq "if .status==\"completed\" then \"TERMINAL \"+.status+\" \"+(.conclusion//\"\") elif ([.jobs[]?|select(.conclusion==\"failure\" or .conclusion==\"timed_out\")]|length)>0 then \"JOBFAIL \"+([.jobs[]?|select(.conclusion==\"failure\" or .conclusion==\"timed_out\")]|map(.name)|join(\", \")) else \"PENDING \"+.status end" 2>/dev/null) || s="ERROR"
     case "$s" in
       "TERMINAL "*) echo "TERMINAL: ${s#TERMINAL }"; exit 0 ;;
       "JOBFAIL "*) echo "JOB FAILED (run still in progress): ${s#JOBFAIL }"; exit 0 ;;
@@ -564,7 +564,7 @@ Run THIS instead — ONE background waiter, `run_in_background: true`, which
 blocks to a terminal state and wakes you exactly once:
 
   __PRELUDE__timeout "${AIRULESET_LONG_POLL_BUDGET_S:-10800}" bash -c 'while :; do
-    s=$(gh run view __TARGET__ --json status,conclusion,jobs --jq "if .status==\"completed\" then \"TERMINAL \"+.status+\" \"+(.conclusion//\"\") elif ([.jobs[]?|select(.conclusion==\"failure\")]|length)>0 then \"JOBFAIL \"+([.jobs[]?|select(.conclusion==\"failure\")]|map(.name)|join(\", \")) else \"PENDING \"+.status end" 2>/dev/null) || s="ERROR"
+    s=$(gh run view __TARGET__ --json status,conclusion,jobs --jq "if .status==\"completed\" then \"TERMINAL \"+.status+\" \"+(.conclusion//\"\") elif ([.jobs[]?|select(.conclusion==\"failure\" or .conclusion==\"timed_out\")]|length)>0 then \"JOBFAIL \"+([.jobs[]?|select(.conclusion==\"failure\" or .conclusion==\"timed_out\")]|map(.name)|join(\", \")) else \"PENDING \"+.status end" 2>/dev/null) || s="ERROR"
     case "$s" in
       "TERMINAL "*) echo "TERMINAL: ${s#TERMINAL }"; exit 0 ;;
       "JOBFAIL "*) echo "JOB FAILED (run still in progress): ${s#JOBFAIL }"; exit 0 ;;
