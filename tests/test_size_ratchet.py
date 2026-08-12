@@ -16,7 +16,6 @@ see test_rules_ab_experiment.py for the sibling case).
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import json
 import sys
@@ -276,6 +275,58 @@ class TestRegen(unittest.TestCase):
         self.assertEqual(refusals, [])
 
 
+class TestRegenBootstrap(unittest.TestCase):
+    """bootstrap=True is the one-time, explicit "seed from today's reality"
+    act — the exact opposite bias from ordinary --update: no default-cap
+    refusal, everything captured verbatim, however large it already is."""
+
+    def test_bootstrap_seeds_an_oversized_file_verbatim_with_no_refusal(self):
+        huge = sr.FILE_DEFAULT_CEILING * 10
+        measured = {"files": {"watchdog/__init__.py": huge}, "functions": {}}
+        stored = {"files": {}, "functions": {}}
+        new_snapshot, refusals = sr.regen(measured, stored, bootstrap=True)
+        self.assertEqual(new_snapshot["files"]["watchdog/__init__.py"], huge)
+        self.assertEqual(refusals, [])
+
+    def test_bootstrap_seeds_an_oversized_function_at_or_above_threshold(self):
+        huge = sr.FUNC_DEFAULT_CEILING * 5
+        measured = {"files": {}, "functions": {"watchdog/__init__.py::run_once": huge}}
+        stored = {"files": {}, "functions": {}}
+        new_snapshot, refusals = sr.regen(measured, stored, bootstrap=True)
+        self.assertEqual(
+            new_snapshot["functions"]["watchdog/__init__.py::run_once"], huge
+        )
+        self.assertEqual(refusals, [])
+
+    def test_bootstrap_still_skips_a_function_under_the_track_threshold(self):
+        measured = {"files": {}, "functions": {"a.py::tiny": sr.FUNC_TRACK_THRESHOLD - 1}}
+        stored = {"files": {}, "functions": {}}
+        new_snapshot, refusals = sr.regen(measured, stored, bootstrap=True)
+        self.assertEqual(new_snapshot["functions"], {})
+        self.assertEqual(refusals, [])
+
+    def test_bootstrap_result_passes_check_immediately(self):
+        """The whole point: a bootstrapped snapshot must make check() clean
+        on the SAME tree it was cut from — a ratchet must never fail on day
+        one."""
+        measured = {
+            "files": {"huge.py": 20000},
+            "functions": {"huge.py::big": 5000, "huge.py::small": 10},
+        }
+        stored = {"files": {}, "functions": {}}
+        new_snapshot, refusals = sr.regen(measured, stored, bootstrap=True)
+        self.assertEqual(refusals, [])
+        self.assertEqual(sr.check(measured, new_snapshot), [])
+
+    def test_bootstrap_does_not_loosen_an_already_tracked_item(self):
+        """bootstrap only changes how a brand-new (untracked) item is
+        handled — an item already in stored still only ever tightens."""
+        measured = {"files": {"a.py": 150}, "functions": {}}
+        stored = {"files": {"a.py": 100}, "functions": {}}
+        new_snapshot, _ = sr.regen(measured, stored, bootstrap=True)
+        self.assertEqual(new_snapshot["files"]["a.py"], 100)
+
+
 # --- exemption mechanism (empty in production, proven via monkeypatch) -----
 
 
@@ -284,8 +335,6 @@ class TestExemptions(unittest.TestCase):
         orig = sr.EXEMPT_FILES
         try:
             sr.EXEMPT_FILES = {"exempt.py"}
-            measured = {"files": {"exempt.py": 99999}, "functions": {}}
-            stored = {"files": {}, "functions": {}}
             # check() itself doesn't consult EXEMPT_FILES directly (that's a
             # measurement-time concern in tracked_files()); prove the real
             # exclusion point instead: tracked_files() never returns an
@@ -406,6 +455,31 @@ class TestCurrentTreePassesTheShippedSnapshot(unittest.TestCase):
         self.assertEqual(
             stale_funcs, set(), f"stale function entries: {stale_funcs}"
         )
+
+
+class TestCliBootstrapFlagRequiresUpdate(unittest.TestCase):
+    def test_bootstrap_with_check_instead_of_update_is_rejected(self):
+        import subprocess
+
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--check", "--bootstrap"],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO),
+        )
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--bootstrap only makes sense together with --update", r.stderr)
+
+    def test_bootstrap_with_no_mode_at_all_is_rejected_by_argparse(self):
+        import subprocess
+
+        r = subprocess.run(
+            [sys.executable, str(SCRIPT), "--bootstrap"],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO),
+        )
+        self.assertNotEqual(r.returncode, 0)
 
 
 if __name__ == "__main__":
