@@ -470,6 +470,28 @@ answer to "which issues share one round" — this ticket found no gap in either.
    (Hybrid close policy: auto-close ONLY clear-cut hard-overcome; everything uncertain goes to the user.)
    After validation, the batch = the surviving STILL_VALID / PARTIAL members. This stops the recurring
    failure (working / re-asking on an already-overcome ticket).
+1c. **DESIGN-TRIAGE — classify each surviving batch member BEFORE any worker sees it** (#414, SOTA
+   architecture: restores the whole-repo, multi-approach design depth the owner reported degrading
+   to a per-ticket, one-paragraph tunnel once autopilot took over — "nikto nedržal celok"). For
+   every member that passed 1b, classify trivial vs design-heavy by REUSING `model-awareness.md`'s
+   own HARD-task criteria (architectural / cross-cutting / ambiguous-design / a prior worker
+   already failed on it) PLUS the ONE framework-first trigger `architecture-first.md` names (a NEW
+   service, CLI, daemon, or long-lived component) — extending that single taxonomy, never
+   inventing a second, parallel one. TRIVIAL members skip this sub-step entirely — no
+   `Plan` dispatch, no extra cost, same one-paragraph design comment as today. For each
+   DESIGN-HEAVY member: run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE for the whole
+   batch (the same gate the HARD-task escalation runs — OPEN → `model: "fable"`, CLOSED →
+   `model: "opus"`), then dispatch ONE read-only `subagent_type: "Plan"` agent per member asking
+   for 2-3 candidate architectural approaches with trade-offs and a recommendation, grounded in a
+   WHOLE-REPO view. Post the `Plan` agent's synthesis to the ticket via `gh issue comment <N>`
+   IMMEDIATELY (`durable-decisions-to-tickets.md` — a design living only in this session dies at the
+   next compaction), and embed a tight summary of it in that member's worker dispatch prompt as
+   grounding. The worker's own CYCLE step 2 design comment (`agents/autopilot-worker.md`) still
+   writes the final `Triage:` line + `Architektúra:` section + (for non-trivial) the 2-3 approaches
+   itself — now grounded in the supervisor's synthesis instead of inventing the architecture solo
+   mid-implementation. A genuine design FORK the synthesis cannot settle goes to the user as a
+   `❓ ASKED` ask-and-continue question the moment it surfaces — never a silent pick, in either
+   direction.
 2. **Dispatch the ROUND — one in-session BACKGROUND `autopilot-worker` PER assembled batch, each
    `isolation: "worktree"`, all fired in the SAME message (multiple Agent tool_use blocks — this
    is what makes them run concurrently rather than one-after-another).** For each batch:

@@ -56,11 +56,28 @@ def _git(repo, *args):
                           capture_output=True, text=True, env=env)
 
 
-GOOD_BODY = (
+# #414's old shape (root cause + approach + alternative only, no
+# Architektúra:/Triage:) -- still classifies fine under the UNCHANGED
+# classify_design_comment(), but a "design" marker requires MORE than this
+# since #414's design-gate extension. Kept under its own name so the #414
+# gate tests below can prove it specifically no longer grants a marker.
+GOOD_BODY_NO_ARCH = (
     "Root cause: the retry loop never reset its backoff counter after a "
     "successful call. Chosen approach: reset the counter on the first "
     "success after any failure. Rejected alternative: replacing the whole "
     "backoff strategy with a token bucket -- too big a change for this bug."
+)
+
+# #414 -- same content, PLUS the Triage:/Architektúra: shape now ALSO
+# required for a "design" marker (design_gate.classify_architecture_section
+# + classify_triage_and_approaches, ANDed into the design-kind check by
+# THIS hook only).
+GOOD_BODY = (
+    GOOD_BODY_NO_ARCH +
+    "\n\nTriage: trivial\n\n"
+    "Architektúra: structure -- a single retry-loop function, no new "
+    "process or service. Framework: reused the existing retry module "
+    "directly, no new machinery needed."
 )
 BAD_BODY = "still looking into this, will update soon"
 
@@ -89,7 +106,11 @@ ALL_THREE_SHAPES_BODY = (
     "any failure, confirming this still happens on the current code after "
     "reviewing the retry path closely, similar to the earlier regression "
     "fixed in a1b2c3d. Rejected alternative: replacing the whole backoff "
-    "strategy with a token bucket -- too big a change for this bug."
+    "strategy with a token bucket -- too big a change for this bug.\n\n"
+    "Triage: trivial\n\n"
+    "Architektúra: structure -- a single retry-loop function, no new "
+    "process or service. Framework: reused the existing retry module "
+    "directly, no new machinery needed."
 )
 
 
@@ -1046,6 +1067,138 @@ class TestShellWordEndStopsAtUnquotedMetachars(_Base):
         self.assertIsNotNone(self.marker(99),
                              "issue #99, chained via ; with NO space after "
                              "the closing quote, must still be recorded")
+
+
+# --------------------------------------------------------------------------- #
+# #414 -- SOTA architecture: a "design" marker now ALSO requires
+# design_gate.classify_architecture_section() AND
+# classify_triage_and_approaches() to pass -- ANDed into the design-kind
+# branch of THIS hook only, never inside classify_design_comment() itself.
+# --------------------------------------------------------------------------- #
+
+class TestArchitectureTriageGate(_Base):
+
+    def reject(self, issue, kind="design"):
+        os.environ["HOME"] = str(self.home)
+        return dg.read_reject_reason("airuleset", issue, kind)
+
+    def test_old_shape_body_without_architektura_grants_no_design_marker(self):
+        # GOOD_BODY_NO_ARCH still classifies clean under the UNCHANGED
+        # classify_design_comment() -- the #414 extension is what now
+        # refuses it a marker.
+        self.assertTrue(dg.classify_design_comment(GOOD_BODY_NO_ARCH)[0])
+        comments = _comments_json([{
+            "body": GOOD_BODY_NO_ARCH, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-50",
+        }])
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(41, "design"))
+
+    def test_old_shape_body_records_a_reject_reason_mentioning_architektura(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY_NO_ARCH, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-51",
+        }])
+        self.run_hook('gh issue comment 41 --body "x"', comments)
+        reason = self.reject(41, "design")
+        self.assertIsNotNone(reason)
+        self.assertIn("Architekt", reason)
+
+    def test_full_shape_with_architektura_and_triage_grants_design_marker(self):
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-52",
+        }])
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41, "design"))
+
+    def test_missing_triage_line_alone_still_refuses_the_marker(self):
+        # Architektúra: present, Triage: absent -- must still fail.
+        body = (
+            GOOD_BODY_NO_ARCH +
+            "\n\nArchitektúra: structure -- a single function, no new "
+            "process. Framework: reused the existing module directly."
+        )
+        ok, _ = dg.classify_design_comment(body)
+        self.assertTrue(ok)
+        comments = _comments_json([{
+            "body": body, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-53",
+        }])
+        self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertIsNone(self.marker(41, "design"))
+        reason = self.reject(41, "design")
+        self.assertIsNotNone(reason)
+        self.assertIn("Triage", reason)
+
+    def test_validated_and_reviewed_kinds_are_entirely_unaffected(self):
+        # the #414 extension is scoped to kind=="design" ONLY -- a
+        # validation-shaped or review-shaped comment (neither carries
+        # Architektúra:/Triage: at all) must keep working exactly as
+        # before.
+        comments = _comments_json([{
+            "body": GOOD_VALIDATED_BODY, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-54",
+        }])
+        self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertIsNotNone(self.marker(41, "validated"))
+
+        comments2 = _comments_json([{
+            "body": GOOD_REVIEWED_BODY, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/42#issuecomment-55",
+        }])
+        self.run_hook('gh issue comment 42 --body "x"', comments2)
+        self.assertIsNotNone(self.marker(42, "reviewed"))
+
+    def test_design_shaped_but_rejected_comment_does_not_fall_through_to_validated(self):
+        # #414-review MINOR-2: a comment that IS design-shaped (root cause +
+        # approach + alternative, classify_design_comment() == True) but
+        # fails ONLY the new Architektúra:/Triage: requirement must not be
+        # silently absorbed as a DIFFERENT kind's marker just because its
+        # prose also happens to carry validation-sounding language -- the
+        # worker's fix is to REPOST with the missing piece, never to have a
+        # rejected design attempt quietly satisfy "validated" instead.
+        body = (
+            GOOD_BODY_NO_ARCH +
+            " Reproduced the bug live against current HEAD and confirmed "
+            "it still happens exactly as described."
+        )
+        self.assertTrue(dg.classify_design_comment(body)[0])
+        self.assertTrue(dg.classify_validation_comment(body)[0])
+        comments = _comments_json([{
+            "body": body, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-60",
+        }])
+        self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertIsNone(self.marker(41, "design"))
+        self.assertIsNone(self.marker(41, "validated"))
+
+    def test_an_already_written_marker_from_before_414_is_never_retro_invalidated(self):
+        # Simulates a marker written by an OLDER version of this hook
+        # (before the Architektúra:/Triage: checks existed) -- #414's own
+        # explicit requirement: never retro-invalidate it. Nothing in this
+        # hook ever re-classifies an existing marker; a bare "gh issue
+        # comment" call for the SAME issue with fresh (but now-insufficient)
+        # content must leave the pre-existing marker alone.
+        os.environ["HOME"] = str(self.home)
+        dg.write_marker("airuleset", 41, "https://example.invalid/pre-414-comment",
+                        "ok", kind="design")
+        self.assertIsNotNone(self.marker(41, "design"))
+        comments = _comments_json([{
+            "body": GOOD_BODY_NO_ARCH, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-56",
+        }])
+        self.run_hook('gh issue comment 41 --body "x"', comments)
+        info = self.marker(41, "design")
+        self.assertIsNotNone(info)
+        self.assertIn("pre-414-comment", info["url"])
 
 
 if __name__ == "__main__":

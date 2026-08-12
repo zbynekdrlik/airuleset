@@ -515,5 +515,67 @@ class TestBypass(_Base):
         self.assertIn("gh unreachable", log.read_text())
 
 
+class TestRejectReasonSurfacedInBlockMessage(_Base):
+    """#414 -- fail LOUD: when design_gate.write_reject_reason() recorded
+    WHY the worker's last posted comment didn't classify (from
+    hooks/post-record-design-comment.sh), the block message here surfaces
+    it, instead of the bare "no design comment posted yet"."""
+
+    def reject(self, issue, reason, repo="airuleset"):
+        os.environ["HOME"] = str(self.home)
+        dg.write_reject_reason(repo, issue, reason, kind="design")
+
+    def test_reject_reason_is_included_in_the_block_message(self):
+        # #414-review MAJOR-2: the standing guidance ALSO mentions
+        # "Architektúra" unconditionally now (locked below by
+        # test_the_general_guidance_now_mentions_architektura_and_triage),
+        # so asserting only that bare word proved nothing — a mutant that
+        # disables reject-reason surfacing entirely still passed. Assert
+        # the PER-REASON section header and the exact reason text instead,
+        # neither of which the standing guidance ever produces on its own.
+        self.reject(41, "Architektúra: section missing: structure/topology")
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("was rejected", r.stderr)
+        self.assertIn("#41: Architektúra: section missing: structure/topology", r.stderr)
+
+    def test_no_reject_reason_still_blocks_with_the_generic_message(self):
+        # never crashes / never omits the block when no reject reason
+        # exists yet (e.g. no comment was posted at all).
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("41", r.stderr)
+
+    def test_a_marked_issue_never_surfaces_a_stale_reject_reason(self):
+        # a reject reason from an EARLIER failed attempt must not leak into
+        # a block message for an issue that is now actually marked (i.e.
+        # the commit passes cleanly, no reject text anywhere in stdout).
+        self.reject(41, "Architektúra: section missing: structure/topology")
+        self.mark(41)
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_reject_reason_for_a_different_issue_is_not_cross_reported(self):
+        # #99's reject reason must never leak into #41's block message --
+        # the STANDING guidance mentions "Architektúra" unconditionally
+        # (locked by test_the_general_guidance_now_mentions_architektura_
+        # and_triage below), so the discriminator here is the PER-REASON
+        # section header, not the bare word.
+        self.reject(99, "Architektúra: section missing: structure/topology")
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("was rejected", r.stderr)
+        self.assertNotIn("#99", r.stderr)
+
+    def test_the_general_guidance_now_mentions_architektura_and_triage(self):
+        # the STANDING guidance text (shown even with no reject reason
+        # recorded yet) must mention the #414 requirement, not just the
+        # pre-#414 root-cause/approach/alternative wording.
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("Triage", r.stderr)
+        self.assertIn("Architekt", r.stderr)
+
+
 if __name__ == "__main__":
     main()

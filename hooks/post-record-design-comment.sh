@@ -409,9 +409,38 @@ try:
             if dg.marker_exists(repo_key, issue, kind):
                 continue
             ok, reason = classifiers[kind](body)
+            if ok and kind == "design":
+                # #414 -- SOTA architecture: a "design" marker ALSO
+                # requires the Architektúra:/Triage: shape. ANDed here,
+                # NEVER inside classify_design_comment() itself -- that
+                # function has three OTHER independent consumers that
+                # depend on its stable, unchanged meaning (see
+                # design_gate.py's own #414 section). Checking BOTH even
+                # when the first already failed gives a complete "what's
+                # missing" picture in one shot instead of a multi-round
+                # discovery.
+                arch_ok, arch_reason = dg.classify_architecture_section(body)
+                triage_ok, triage_reason = dg.classify_triage_and_approaches(body)
+                if not (arch_ok and triage_ok):
+                    parts = [r for ok2, r in
+                             ((arch_ok, arch_reason), (triage_ok, triage_reason))
+                             if not ok2]
+                    dg.write_reject_reason(repo_key, issue, "; ".join(parts), kind=kind)
+                    # #414-review MINOR-2 -- this text IS design-shaped
+                    # (classify_design_comment already said so); it only
+                    # failed the ADDED Architektúra:/Triage: requirement.
+                    # Do not let it fall through and be silently absorbed
+                    # as a DIFFERENT kind's marker just because the SAME
+                    # prose also happens to carry e.g. validation-sounding
+                    # language -- the worker's fix is to REPOST the design
+                    # comment with the missing piece, never to have this
+                    # rejected attempt quietly satisfy another kind.
+                    break
             if ok:
                 dg.write_marker(repo_key, issue, url, reason, kind=kind)
                 break
+            else:
+                dg.write_reject_reason(repo_key, issue, reason, kind=kind)
 except SystemExit:
     raise
 except Exception as exc:

@@ -12,6 +12,9 @@ user-invocable: false
 - `autonomous-quality-discipline.md` — keep working until ALL bundled issues green
 - `pr-merge-policy.md` / `two-branch-workflow.md` — exactly ONE PR (dev→main) per batch
 - `ci-push-discipline.md` — one push per batch, not one push per issue
+- `architecture-first.md` — production-by-default + framework-first apply to EVERY bundled
+  member, batched or not; bundling small issues never licenses skipping structure on a member that
+  is actually production-classified
 
 **The user runs agentic development. Most GitHub issues are small, well-scoped, and solvable without user input. Bundle them. Iterate. Push once. ONE PR per batch — not one PR per issue.**
 
@@ -46,10 +49,19 @@ If ANY selected issue fails the gate (or the ceiling is hit) → that issue gets
 For each selected issue, run the full development cycle, but DO NOT pause between issues:
 
 1. Read issue body + comments (`gh issue view <N>`)
-2. Brainstorm approach (use `superpowers:brainstorming` if non-trivial)
+2. Brainstorm approach (use `superpowers:brainstorming` if non-trivial). Open with a `Triage:`
+   line (trivial / non-trivial, #414) — trivial stays one honest paragraph; non-trivial (a new
+   service/CLI/daemon/long-lived component, several valid approaches, an unclear root cause)
+   needs 2-3 considered approaches with trade-offs PLUS an `Architektúra:` section
+   (structure/topology + framework used or an evidenced why-none-fits) before implementation
+   starts — a genuine fork goes to the user as a `❓` ask-and-continue question, never a silent pick.
 3. Write plan (use `superpowers:writing-plans` if multi-step)
 4. Implement + write tests (TDD per `tdd-workflow.md`)
-5. Verify locally (lint, type-check; CI handles compilation per `no-local-builds.md`)
+5. Verify locally (lint, type-check; CI handles compilation per `no-local-builds.md`). Any review
+   pass on this member — self-applied or dispatched — MUST additionally REFUTE it on structural
+   grounds (#414): structureless script growth on production-classified code, duplicating a
+   framework the repo already has, or breaking the ~1000-line/~300-line-function budgets; an "it's
+   just a script/MVP" excuse is itself a finding, never a mitigation.
 6. Commit with `Closes #<N>` in the message
 7. **Immediately start the next issue.** No "ready for #N+1?" prompt. No "should I continue?" message. No completion summary between issues.
 

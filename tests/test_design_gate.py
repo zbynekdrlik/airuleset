@@ -1029,5 +1029,313 @@ class TestGhIssueState(unittest.TestCase):
             self.assertIsNotNone(kwargs.get("timeout"))
 
 
+# --------------------------------------------------------------------------- #
+# #414 -- SOTA architecture: the design-posted machinery now ALSO requires an
+# `Architektúra:` section (structure/topology + framework used OR an
+# evidenced why-none-fits) for a "design" marker. Kept as a SEPARATE
+# classifier from `classify_design_comment` (never folded in) so that
+# function's three OTHER independent consumers (the historical
+# `measure_design_compliance.py` Deliverable-1 corpus measurement,
+# `replay_design_gate_commit_corpus.py`, and this file's own pre-existing
+# ~30 tests) keep their stable, unchanged meaning -- only
+# `hooks/post-record-design-comment.sh` combines both, and only for
+# kind=="design". This is also what makes "never retro-invalidate an
+# already-written marker" trivially true: existing marker FILES are never
+# re-classified by anything, and `classify_design_comment` itself never
+# changed.
+# --------------------------------------------------------------------------- #
+
+GOOD_ARCH_SECTION_EN = (
+    "\n\n**Architektúra:** structure/topology -- a single new module function, "
+    "no new process or service. Framework: reused the existing design_gate.py "
+    "classifier structure directly, no new machinery."
+)
+
+GOOD_ARCH_SECTION_SK = (
+    "\n\nArchitektúra: štruktúra -- rozšírenie existujúceho modulu, žiadna "
+    "nová služba. Framework: znovupoužitý existujúci klasifikátor, žiadny "
+    "nový kód netreba."
+)
+
+
+class TestClassifyArchitectureSection(unittest.TestCase):
+
+    def test_full_english_section_passes(self):
+        ok, reason = dg.classify_architecture_section(
+            GOOD_SCOPED + GOOD_ARCH_SECTION_EN)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "ok")
+
+    def test_full_slovak_section_passes(self):
+        ok, reason = dg.classify_architecture_section(
+            GOOD_SLOVAK + GOOD_ARCH_SECTION_SK)
+        self.assertTrue(ok, reason)
+
+    def test_missing_header_entirely_fails(self):
+        ok, reason = dg.classify_architecture_section(GOOD_SCOPED)
+        self.assertFalse(ok)
+        self.assertIn("Architekt", reason)
+
+    def test_header_present_but_no_structure_keyword_fails(self):
+        body = (
+            GOOD_SCOPED + "\n\n**Architektúra:** we will use the existing "
+            "framework here, nothing else to say about it."
+        )
+        ok, reason = dg.classify_architecture_section(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("structure", reason.lower())
+
+    def test_header_present_but_no_framework_or_whynot_fails(self):
+        body = (
+            GOOD_SCOPED + "\n\n**Architektúra:** the structure/topology here "
+            "is a single function, that's all."
+        )
+        ok, reason = dg.classify_architecture_section(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("framework", reason.lower())
+
+    def test_why_none_fits_language_counts_instead_of_framework_name(self):
+        body = (
+            GOOD_SCOPED + "\n\n**Architektúra:** structure -- a single "
+            "function extension. No framework fits this scope; investigated "
+            "the existing solution and it already covers this need."
+        )
+        ok, reason = dg.classify_architecture_section(body)
+        self.assertTrue(ok, reason)
+
+    def test_markdown_heading_form_is_recognized(self):
+        body = GOOD_SCOPED + "\n\n## Architektúra\nstructure: existing module. framework: none new."
+        ok, reason = dg.classify_architecture_section(body)
+        self.assertTrue(ok, reason)
+
+    def test_dash_bullet_prefixed_header_is_recognized(self):
+        # #414-review MINOR-3: this fleet's dominant bullet style is a
+        # leading "- " (not just "*"/"#") -- a design comment writing
+        # "- **Architektúra:** ..." must not be false-rejected.
+        body = (
+            GOOD_SCOPED + "\n\n- **Architektúra:** structure -- a single "
+            "function extension, no new process. Framework: reused the "
+            "existing module directly."
+        )
+        ok, reason = dg.classify_architecture_section(body)
+        self.assertTrue(ok, reason)
+
+    def test_english_architecture_spelling_is_recognized(self):
+        body = GOOD_SCOPED + "\n\nArchitecture: structure -- one module. Framework: none new."
+        ok, reason = dg.classify_architecture_section(body)
+        self.assertTrue(ok, reason)
+
+    def test_diacritic_free_slovak_spelling_is_recognized(self):
+        body = GOOD_SCOPED + "\n\nArchitektura: struktura -- existujuci modul. Framework: ziadny novy."
+        ok, reason = dg.classify_architecture_section(body)
+        self.assertTrue(ok, reason)
+
+    def test_empty_body_fails(self):
+        ok, reason = dg.classify_architecture_section("")
+        self.assertFalse(ok)
+
+    def test_none_body_fails(self):
+        ok, reason = dg.classify_architecture_section(None)
+        self.assertFalse(ok)
+
+
+# --------------------------------------------------------------------------- #
+# #414 -- Triage: line + (for a non-trivial ticket) 2-3 considered approaches
+# with trade-offs, restoring the interactive-brainstorming-era design depth
+# the owner reported losing once autopilot took over ("per-ticket tunel --
+# nikto nedržal celok"). Also a SEPARATE classifier, same reasoning as above.
+# --------------------------------------------------------------------------- #
+
+TRIVIAL_TRIAGE_BODY = GOOD_SCOPED + "\n\nTriage: trivial"
+
+NONTRIVIAL_GOOD_BODY = (
+    "Triage: non-trivial -- this introduces a new long-lived daemon.\n\n"
+    "Root cause: no existing process watches this queue, so items rot "
+    "silently until someone happens to look. Approach 1: a new systemd timer "
+    "polling the queue every 60s, reusing the existing watchdog job runner "
+    "-- trade-off: adds one more job to an already-large run_once(), but "
+    "zero new infrastructure. Approach 2: a dedicated long-lived daemon "
+    "process -- trade-off: cleaner separation, but a whole new supervised "
+    "process to deploy/monitor/restart, more moving parts for a queue this "
+    "small. Chosen approach: Approach 1, the polling timer -- the queue "
+    "volume does not justify a dedicated process yet. Rejected alternative: "
+    "Approach 2, the dedicated daemon -- too much operational overhead for "
+    "the current volume."
+)
+
+
+class TestClassifyTriageAndApproaches(unittest.TestCase):
+
+    def test_trivial_triage_passes_without_multiple_approaches(self):
+        ok, reason = dg.classify_triage_and_approaches(TRIVIAL_TRIAGE_BODY)
+        self.assertTrue(ok, reason)
+
+    def test_dash_bullet_prefixed_triage_line_is_recognized(self):
+        # #414-review MINOR-3: this fleet's dominant bullet style is a
+        # leading "- " -- "- Triage: trivial" must not be false-rejected.
+        body = GOOD_SCOPED + "\n\n- Triage: trivial"
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertTrue(ok, reason)
+
+    def test_nontrivial_with_two_approaches_and_tradeoffs_passes(self):
+        ok, reason = dg.classify_triage_and_approaches(NONTRIVIAL_GOOD_BODY)
+        self.assertTrue(ok, reason)
+
+    def test_missing_triage_line_fails(self):
+        ok, reason = dg.classify_triage_and_approaches(GOOD_SCOPED)
+        self.assertFalse(ok)
+        self.assertIn("Triage", reason)
+
+    def test_triage_value_naming_neither_class_fails(self):
+        body = GOOD_SCOPED + "\n\nTriage: unsure"
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertFalse(ok, reason)
+
+    def test_nontrivial_netrivialne_is_recognized_not_confused_with_trivial(self):
+        # "netriviálne" CONTAINS the substring "trivi" -- must classify as
+        # non-trivial, never fall through to the trivial (single-paragraph)
+        # branch just because "trivi" matched somewhere.
+        body = GOOD_SCOPED + "\n\nTriage: netriviálne"
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertFalse(ok, reason)  # only one approach in GOOD_SCOPED -> fails on approach count
+        self.assertNotIn("Triage", reason)  # the Triage: line itself WAS found and classified
+
+    def test_nontrivial_not_trivial_negation_is_recognized_not_confused_with_trivial(self):
+        # #414-review MAJOR-1: "not trivial" / Slovak "nie (je to) trivialne"
+        # each CONTAIN the bare word "trivial"/"trivialne" -- a naive
+        # trivial-branch match on that substring would classify a NEGATED
+        # (i.e. non-trivial) declaration as trivial, silently waiving the
+        # whole 2-3-approaches depth requirement on natural phrasing.
+        for body in (
+            GOOD_SCOPED + "\n\nTriage: not trivial -- new daemon",
+            GOOD_SCOPED + "\n\nTriage: nie je to triviálne — nový daemon",
+            GOOD_SCOPED + "\n\nTriage: nie triviálne",
+        ):
+            ok, reason = dg.classify_triage_and_approaches(body)
+            # must NOT be waved through as trivial -- only one approach in
+            # GOOD_SCOPED, so a correctly-non-trivial classification fails
+            # on approach count, never silently succeeds as "ok (trivial)".
+            self.assertFalse(ok, "wrongly classified as trivial: %r -> %r" % (body, reason))
+            self.assertNotEqual(reason, "ok (trivial)", body)
+
+    def test_nontrivial_with_only_one_approach_fails(self):
+        body = (
+            "Triage: non-trivial -- new component.\n\n" + GOOD_SCOPED +
+            " Trade-off: considered vs the alternative above."
+        )
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("approach", reason.lower())
+
+    def test_nontrivial_with_two_approaches_but_no_tradeoff_language_fails(self):
+        body = (
+            "Triage: non-trivial -- new component.\n\n"
+            "Approach 1: do it with a dedicated systemd timer polling the "
+            "queue every 60 seconds, reusing the existing watchdog job "
+            "runner infrastructure that already exists on every managed "
+            "box. Approach 2: do it with a brand new standalone daemon "
+            "process that stays resident and watches the queue directly "
+            "without any polling interval at all. Chosen: Approach 1, "
+            "because it is simpler and I looked carefully at both options "
+            "and honestly they both work fine either way in the end for "
+            "this particular use case as far as I can tell right now."
+        )
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("trade", reason.lower())
+
+    def test_nontrivial_short_body_fails_on_length_even_with_triage_line(self):
+        body = "Triage: non-trivial\n\nApproach 1: x. Approach 2: y. Trade-off: z."
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertFalse(ok, reason)
+
+    def test_slovak_pristup_markers_are_recognized(self):
+        body = (
+            "Triage: netriviálne -- nová dlhožijúca komponenta.\n\n"
+            "Koreň/kontext: fronta nemá žiadny proces, ktorý by ju "
+            "sledoval, položky ticho hnijú. Prístup 1: nový systemd timer, "
+            "ktorý pollne frontu každých 60s, znovupoužije existujúci "
+            "watchdog runner -- kompromis: pridáva ďalší job do už veľkého "
+            "run_once(), ale žiadna nová infraštruktúra. Prístup 2: "
+            "samostatný dlhožijúci proces -- kompromis: čistejšie "
+            "oddelenie, ale nová supervidovaná služba na nasadenie a "
+            "monitorovanie, viac pohyblivých častí pre takto malú frontu. "
+            "Zvolený prístup: Prístup 1, polling timer -- objem fronty "
+            "zatiaľ neopodstatňuje samostatný proces. Zamietnutá "
+            "alternatíva: Prístup 2, samostatný proces -- zbytočná "
+            "prevádzková réžia pre súčasný objem."
+        )
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertTrue(ok, reason)
+
+    def test_empty_body_fails(self):
+        ok, reason = dg.classify_triage_and_approaches("")
+        self.assertFalse(ok)
+
+    def test_none_body_fails(self):
+        ok, reason = dg.classify_triage_and_approaches(None)
+        self.assertFalse(ok)
+
+
+# --------------------------------------------------------------------------- #
+# #414 -- reject-reason I/O: purely diagnostic, never gates anything itself.
+# Lets block-commit-without-design.sh surface WHY the worker's last posted
+# comment did not classify, instead of the bare "no design comment posted
+# yet". Same file-per-key convention as marker I/O, a SIBLING directory
+# (never mixed into design-posted/) so a reject can never be mistaken for a
+# delivered marker.
+# --------------------------------------------------------------------------- #
+
+class TestRejectReasonIO(unittest.TestCase):
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="airuleset-designgate-reject-"))
+        self.addCleanup(shutil.rmtree, self.home, True)
+        os.environ["HOME"] = str(self.home)
+
+    def test_no_reject_reason_by_default(self):
+        self.assertIsNone(dg.read_reject_reason("airuleset", 999))
+
+    def test_write_then_read_round_trips(self):
+        dg.write_reject_reason("airuleset", 999, "missing: Architektúra: section")
+        self.assertEqual(dg.read_reject_reason("airuleset", 999),
+                         "missing: Architektúra: section")
+
+    def test_later_write_overwrites_the_earlier_reason(self):
+        dg.write_reject_reason("airuleset", 999, "first reason")
+        dg.write_reject_reason("airuleset", 999, "second reason")
+        self.assertEqual(dg.read_reject_reason("airuleset", 999), "second reason")
+
+    def test_distinct_kinds_are_isolated(self):
+        dg.write_reject_reason("airuleset", 999, "design reason", kind="design")
+        dg.write_reject_reason("airuleset", 999, "validated reason", kind="validated")
+        self.assertEqual(dg.read_reject_reason("airuleset", 999, "design"), "design reason")
+        self.assertEqual(dg.read_reject_reason("airuleset", 999, "validated"), "validated reason")
+
+    def test_no_repo_key_never_writes(self):
+        self.assertFalse(dg.write_reject_reason("", 999, "x"))
+        self.assertFalse(dg.write_reject_reason(None, 999, "x"))
+
+    def test_reject_reason_never_collides_with_a_real_marker(self):
+        # writing a reject reason must NEVER cause marker_exists() to see a
+        # marker where none was ever granted.
+        dg.write_reject_reason("airuleset", 999, "missing: Architektúra: section")
+        self.assertFalse(dg.marker_exists("airuleset", 999, "design"))
+
+    def test_an_existing_marker_written_before_this_change_is_never_touched(self):
+        # #414's own explicit requirement: never retro-invalidate an
+        # already-posted design marker. A marker written directly (as if by
+        # an OLDER version of post-record-design-comment.sh, before the
+        # Architektúra:/Triage: checks existed) must stay valid regardless
+        # of anything the new classifiers would now require.
+        dg.write_marker("airuleset", 41, "https://example.invalid/old-comment", "ok", kind="design")
+        self.assertTrue(dg.marker_exists("airuleset", 41, "design"))
+        # the new classifiers exist and would reject a bare "ok" body, but
+        # nothing ever re-runs them against an already-written marker.
+        ok, _ = dg.classify_architecture_section("ok")
+        self.assertFalse(ok)
+        self.assertTrue(dg.marker_exists("airuleset", 41, "design"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -155,6 +155,15 @@ missing = dg.required_refs(missing, work_cwd)
 if missing:
     print(repo_key)
     print(" ".join(str(n) for n in missing))
+    # #414 -- surface WHAT the worker's last posted comment was missing
+    # (design_gate.write_reject_reason, written by post-record-design-
+    # comment.sh on a failed classification), instead of the bare "no
+    # design comment posted yet". Purely diagnostic -- absence of a reject
+    # reason (no comment posted at all yet) changes nothing here.
+    for n in missing:
+        reject_reason = dg.read_reject_reason(repo_key, n, kind="design")
+        if reject_reason:
+            print("REJECT\t%d\t%s" % (n, reject_reason))
     # #310 -- quarantine every write-then-consume target THIS command tried
     # to touch, now that we know for certain the block prevents the whole
     # compound (including any `cat >`) from ever executing. Adversarial-
@@ -184,15 +193,23 @@ NUMS=$(printf '%s\n' "$OUT" | sed -n '2p')
 
 LIST=$(printf '%s' "$NUMS" | sed 's/\([0-9][0-9]*\)/#\1/g')
 
-# #310 -- lines 3+ of $OUT are "STALE\t<original>\t<quarantine-path>"
-# entries (see the embedded Python above). Process substitution (never
-# `cmd | while read`) so STALE_NOTE survives past the loop instead of
-# being scoped to a lost subshell.
+# #310/#414 -- lines 3+ of $OUT are "STALE\t<original>\t<quarantine-path>"
+# or "REJECT\t<issue>\t<reason>" entries (see the embedded Python above).
+# Process substitution (never `cmd | while read`) so the accumulated notes
+# survive past the loop instead of being scoped to a lost subshell.
 STALE_NOTE=""
-while IFS=$'\t' read -r _TAG _ORIG _DEST; do
-    [ "$_TAG" = "STALE" ] || continue
-    STALE_NOTE="${STALE_NOTE}
-  ${_ORIG} -> ${_DEST}"
+REJECT_NOTE=""
+while IFS=$'\t' read -r _TAG _A _B; do
+    case "$_TAG" in
+        STALE)
+            STALE_NOTE="${STALE_NOTE}
+  ${_A} -> ${_B}"
+            ;;
+        REJECT)
+            [ -n "$_B" ] && REJECT_NOTE="${REJECT_NOTE}
+  #${_A}: ${_B}"
+            ;;
+    esac
 done < <(printf '%s\n' "$OUT" | sed -n '3,$p')
 
 STALE_SECTION=""
@@ -206,20 +223,35 @@ ${STALE_NOTE}
 "
 fi
 
+# #414 -- fail LOUD: WHAT the last posted comment was missing, straight
+# from design_gate.write_reject_reason (never guessed, never re-derived --
+# post-record-design-comment.sh already ran the real classifiers).
+REJECT_SECTION=""
+if [ -n "$REJECT_NOTE" ]; then
+    REJECT_SECTION="
+Your last posted comment was rejected — here's specifically what's still
+missing:
+${REJECT_NOTE}
+"
+fi
+
 cat >&2 <<MSG
 
 🚫 BLOCKED: no design comment posted yet for ${LIST} (repo ${REPO}).
-${STALE_SECTION}
+${STALE_SECTION}${REJECT_SECTION}
 Per autonomous-batch-issue-development.md's design-before-code step, post
 root cause + chosen approach + rejected alternative to the ticket BEFORE
-this commit:
+this commit. #414 (SOTA architecture) additionally requires a \`Triage:\`
+line (trivial / non-trivial — non-trivial needs 2-3 considered approaches
+with trade-offs, not one) and an \`Architektúra:\` section (structure/
+topology + the framework used, or an evidenced why-none-fits):
 
-  gh issue comment <N> --body "<root cause> ... <chosen approach> ... <rejected alternative> ..."
+  gh issue comment <N> --body "<root cause> ... <chosen approach> ... <rejected alternative> ... Triage: trivial ... Architektúra: <structure> + <framework or why-none-fits> ..."
 
-(or -F a body file). One honest paragraph is enough for a scoped fix — it
-just has to exist, and it has to come before this commit. Once it posts,
-hooks/post-record-design-comment.sh records it automatically and this
-commit will go through.
+(or -F a body file). One honest paragraph is enough for a TRIVIAL scoped
+fix — it just has to exist, and it has to come before this commit. Once it
+posts, hooks/post-record-design-comment.sh records it automatically and
+this commit will go through.
 
 Bypass (rare, logged): add [no-design: <reason>] to this commit's message
 — never for a real feature/fix with a genuine design decision behind it.
