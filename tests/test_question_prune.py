@@ -226,7 +226,17 @@ class RepingStaleQuestions(unittest.TestCase):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.qpath = str(Path(self.tmp.name) / "q.json")
-        self.now = time.time()
+        # Pinned to LOCAL NOON of the current day, never bare time.time():
+        # reping_stale_questions defers inside the 00:00-05:59 local sleep
+        # window by design, so a wall-clock `now` made this whole class
+        # time-of-day dependent -- green all day, 6 failures in the first
+        # after-midnight gate run (found live 2026-08-13 00:04 CEST).
+        # Noon is deterministically outside the window in every timezone
+        # offset this fleet runs. The sleep-window branch itself is
+        # covered by its own explicit night-timestamp test.
+        _lt = time.localtime()
+        self.now = time.mktime(
+            (_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))
 
     def _record(self, mid, ts, block=None, sid=SID, cwd=CWD, chan="777001"):
         notify.record_question(mid, chan, sid, cwd, now=ts, path=self.qpath,
