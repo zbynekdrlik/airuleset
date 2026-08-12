@@ -1198,3 +1198,104 @@ rather than one that silently doubled underneath it.
 - **`deliver_goal()`'s condition ORDER means `pane_goal_armed()` (the tri-state already-armed check) runs BEFORE `_classify_boundary()` (busy/input/no-input-line) — a genuinely BUSY pane (a spinner, no `❯` visible anywhere) is therefore UNDETERMINABLE for the armed check FIRST (no box to read at all), so it resolves to `"skip:undeterminable"`, never `"skip:busy"`, even though `"skip:busy"` is a real, separately-reachable branch in the same function.** #403: a first-draft test asserted a plain busy-spinner fixture reaches `"skip:busy"` and got `"skip:undeterminable"` instead — not a bug, the correct consequence of the documented check ordering (armed-status is resolved before boundary classification, since dropping an already-armed request is cheaper and safer to decide first). To exercise the busy-KIND branch in isolation, mock `pane_goal_armed` to return a determinable `False` directly rather than trying to construct an organic fixture where BOTH `pane_goal_armed`'s whole-capture "❯" scan and `_classify_boundary`'s bottom-up chrome-peel-based box search would need to disagree in exactly the right way (they usually agree, since both ultimately look for the same glyph) — that combination is real but genuinely hard to construct honestly, and mocking the earlier check is the honest way to test the later one in isolation.
 
 - **`ruff check .`'s OWN default rule selection is NOT stable across `ruff` versions — the tool has no `[tool.ruff]` pin in this repo's `pyproject.toml`, so a plain box-level `ruff` upgrade (via `pipx`/`pip`, entirely independent of any git commit) can silently widen the default rule set the whole-repo `cmd_push()` gate depends on, turning a previously-clean tree into thousands of "errors" with zero code change.** Live-caught finishing #403's own report: re-running `ruff check .` reported ~2992 errors on that ticket's branch, contradicting an earlier-session claim of "clean at every commit" — but running the SAME command against the shared, untouched, already-on-`main` checkout independently found ~3217 errors (MORE than the ticket's own branch, which had net-deleted code). Confirmed by reproducing the SAME broad default ruleset (e.g. `UP031`, percent-format-to-str-format) in a completely bare scratch directory with zero config files anywhere nearby — proof it is `ruff`'s OWN built-in default drifting on this box (version 0.16.2 here), not a leaked/discovered repo config. **Before ever concluding "my diff broke the lint gate", run the identical `ruff check .` against an UNMODIFIED copy of `main` (a sibling worktree, or `ruff check <path-to-the-shared-checkout>` without `cd`-ing into it) — if the unmodified tree ALSO fails, the cause is environmental drift, not your diff, and belongs in its own filed issue (here: pin `ruff` or add an explicit `[tool.ruff] select`), never absorbed into the ticket that happened to notice it.** Filed as #429.
+
+## Size ratchet — growth-only file/function size cap on airuleset's own source (#404 point 1)
+
+airuleset enforces a ~1000-line/file cap on TARGET repos (`architecture-first.md`) but
+had nothing enforcing it on itself — `watchdog/__init__.py` and `airuleset.py` grew
+unboundedly across every ticket, with no mechanical stop. `scripts/size_ratchet.py` +
+`tests/size_ratchet.json` + `tests/test_size_ratchet.py` (#404) close that gap, narrowly:
+a GROWTH-ONLY cap, "the same discipline we require of targets, applied to ourselves."
+
+**What it does.** `tests/size_ratchet.json` snapshots TODAY's exact line count for every
+tracked file (repo-root `*.py`, `watchdog/**/*.py`, `notify/**/*.py`, `filedrop/**/*.py`,
+`burn/**/*.py`, `tests/*.py` — deliberately NOT `hooks/*.py`/`scripts/*.py`, out of the
+ticket's own explicit scope) and every function currently >=200 lines (via `ast`, keyed on
+a stable qualname like `Class.method`/`outer.<locals>.inner`, never `path:lineno` — an
+unrelated edit shifting a function's start line elsewhere in the file must never look like
+growth). `tests/test_size_ratchet.py::TestCurrentTreePassesTheShippedSnapshot` — a
+`unittest.TestCase`, genuinely collected by `cmd_push`'s `unittest discover -s tests` gate
+(unlike a bare pytest-function file) — is the actual gate: it is PURE READ, comparing a
+fresh `measure()` against the committed JSON; growth past a stored ceiling (or past the
+flat default for a brand-new, untracked item — `FILE_DEFAULT_CEILING=1000`,
+`FUNC_DEFAULT_CEILING=300`) fails with an actionable "split before it lands" message.
+
+**This is DELIBERATELY strict, by the ticket's own literal wording** ("kazdy subor a
+kazda funkcia moze len klesat alebo stagnovat" — every file/function may only decrease or
+stagnate): once tracked, an item has ZERO headroom even if it is well under the default
+cap — not "may grow up to 1000 lines like a target repo's file would", but frozen at
+EXACTLY today's size. A fresh-context adversarial review flagged this as a CRITICAL
+finding ("blocks ordinary development on day two — adding one test to any existing
+`tests/*.py` file is enough") and it is a correct, deliberately-accepted characterization
+of the design, not a bug: the whole point of "okamzita zastava rastu" (immediate growth
+stop) is that further growth in an ALREADY-oversized file requires either shrinking
+elsewhere in the same commit, or a HUMAN hand-editing one number in the JSON with the
+reason stated in the commit/PR message (JSON has no comment syntax) — a visible,
+reviewable diff, never a silent default. Loosening a ceiling through any automated path
+(the test itself, `--update`) is structurally impossible.
+
+**Tightening is an EXPLICIT command, never a test side-effect.** The dispatch instructions
+for #404 offered two equally-valid designs — "the test itself auto-rewrites the JSON on
+every run when it improves" vs "an explicit regeneration path" — and the SECOND was
+chosen: a test silently mutating committed source as a side effect of an ordinary
+`pytest`/`unittest discover` run (including inside `cmd_push`'s OWN fail-closed gate,
+which runs against the exact working-tree state about to be pushed) was judged too
+surprising and blurs "did the suite pass" with "did it also rewrite a file." Tightening
+after a genuine shrink:
+```
+python3 scripts/size_ratchet.py --check    # read-only, same comparison the test runs
+python3 scripts/size_ratchet.py --update   # min(stored, current) per item — tightens on
+                                            # shrink, NEVER raises an existing ceiling
+                                            # even if current > stored (a violation is
+                                            # never silently "fixed" by loosening); refuses
+                                            # (no write) a brand-new item already over its
+                                            # own default cap
+```
+
+**`--bootstrap` (only with `--update`) is the ONE-TIME seed-from-scratch act** — every
+tracked item captured at TODAY's real size VERBATIM, with NO default-cap refusal (the
+default-cap refusal is a GOING-FORWARD policy for a genuinely new item appearing AFTER a
+real baseline already exists, never the baseline itself). A fresh-context adversarial
+review live-reproduced that the FIRST shipped version was not actually one-time at all —
+re-running `--update --bootstrap` against an already-seeded snapshot silently blessed a
+brand-new 9000-line file at full size with zero refusal, since bootstrap mode's own
+per-item loop never checked whether the snapshot already had anything in it. Fixed by
+refusing the WHOLE operation outright (nothing written at all) whenever `--bootstrap` is
+combined with a non-empty stored snapshot, enforced at BOTH `regen()` (so a direct/test
+caller is protected too, not just the CLI) and `main()` (so the CLI never even attempts a
+write) — the general lesson: a flag whose docstring/help-text calls itself "one-time" is
+not actually one-time unless something checks the PRECONDITION "is this genuinely the
+first time", not just the flag's own presence.
+
+**Known, deliberately-accepted residual: a same-commit rename+grow can regain headroom.**
+Because the snapshot is keyed by path/qualname (not content or git rename-tracking),
+renaming a tracked file/function in the same commit it grows lets the growth land as a
+"brand-new item" governed by the flat default cap, rather than by the old, possibly-much-
+tighter ceiling — an inherent limitation of any name-keyed ratchet without semantic rename
+detection. Flagged as a MAJOR finding by the same adversarial review; deliberately left
+unfixed as out-of-scope for this narrow, mechanical point-1 test (semantic rename-tracking
+is real complexity that belongs to a separate, bigger investment) — grep this file's own
+existing "accepted residual" precedents (#124, #331 F3/F4) for the established shape of
+documenting rather than chasing a low-practical-severity gap in a trusted-developer
+environment.
+
+**How a TARGET repo adopts the same template.** The mechanism has no airuleset-specific
+dependency beyond stdlib (`ast`/`json`/`argparse`/`tempfile`) — copy `scripts/size_ratchet.py`
+verbatim, adjust `TRACKED_DIRS` (and the repo-root/`tests/*.py` glob shape in
+`tracked_files()`) to that repo's own module layout, copy the `unittest.TestCase`-based
+gating class from `tests/test_size_ratchet.py` (`TestCurrentTreePassesTheShippedSnapshot`
+is the load-bearing part; the rest of that file is testing the MECHANISM itself and only
+needs porting if the target wants the same depth of self-test), then run
+`python3 scripts/size_ratchet.py --update --bootstrap` ONCE to cut the day-one snapshot
+and commit it. `FILE_DEFAULT_CEILING`/`FUNC_DEFAULT_CEILING`/`FUNC_TRACK_THRESHOLD` are
+free to retune per target (this repo's own 1000/300/200 mirror the standard already
+enforced fleet-wide, e.g. camera-box #234's own driver.rs cap) — the assert pinning
+`FUNC_TRACK_THRESHOLD <= FUNC_DEFAULT_CEILING` must hold or a freshly-bootstrapped
+function between the two values would fail check() on day one, which a ratchet must never
+do.
+
+**The module split this ratchet exists to eventually force** (points 3-4 of #404 —
+`watchdog/__init__.py` → per-service modules, `airuleset.py` → per-CLI-area modules,
+`run_once()` → a job-registry dispatch) is explicitly OUT of this ratchet's own scope and
+lands separately, after #403 (goal-machinery collapse) shrinks the file further first. The
+ratchet's whole job until then is simply: stop the wound from getting deeper.
