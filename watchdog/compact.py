@@ -413,7 +413,29 @@ def _compact_transcript_completion_heading(tpath):
     lines `transcript_last_marker_line` trims to, since the heading sits
     at the TOP of a real completion report while the `⏳` tail this
     function is paired against sits at the BOTTOM of the SAME turn.
-    Unreadable/missing transcript -> False, never guessed positive."""
+    Unreadable/missing transcript -> False, never guessed positive.
+
+    KNOWN, ACCEPTED RESIDUAL (#402-review MINOR-2, probe-confirmed, never
+    observed in production). `_COMPACT_COMPLETION_HEADING_RX`'s `^`
+    anchor (per #402-review MINOR-1, locked by
+    `test_heading_mentioned_mid_line_is_not_a_genuine_heading`) refuses a
+    MID-LINE mention, but not a genuine LINE-START quote inside a fenced
+    code block (e.g. the same turn's OWN prose citing a worked example
+    that happens to open a fenced line with the literal heading text).
+    Closing this needs a fence-aware scan (track ``` open/close state
+    across the whole text before matching), which was DELIBERATELY not
+    added: `_compact_self_reported_complete`'s own docstring already
+    rejects free-prose content-sniffing on the grounds that it is BOTH
+    unnecessary (the montalu3-class gap it would also need to solve has
+    an already-accepted recovery path) and unreliable — the SAME
+    reasoning applies one level up here. The exposure is narrow by
+    construction: it needs `origin == self-callback` AND the session's
+    OWN current last real turn to independently end on a genuine
+    unresolved `⏳`/live-task signal AND ALSO quote the heading at a true
+    line start earlier in that SAME turn — matching this repo's own
+    established "document as an accepted residual, don't chase it
+    pre-emptively" precedent (see #331's F3/F4) rather than expanding
+    scope on a shape the corpus has never actually produced."""
     text = watchdog.transcript_last_assistant_text(str(tpath))
     return bool(_COMPACT_COMPLETION_HEADING_RX.search(text))
 
