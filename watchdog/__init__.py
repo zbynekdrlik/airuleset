@@ -9882,6 +9882,12 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     wanted for it (see the inline comment at the gates for the full
     reasoning, and the #126 issue comment for why NEITHER gate survives
     for that origin, not just the small-context one)."""
+    # OWNER KILL-SWITCH (2026-08-12): the passive/synchronous delivery path is
+    # disabled by the same flag file as job 14 — only the session's own explicit
+    # `compact-request --self` callback (deliver_compact_self) stays active.
+    if os.path.exists(os.path.expanduser("~/.claude/watchdog-disable-compact")):
+        _log_compact_sync("SKIP disabled-by-owner sid=%s cwd=%s" % (sid, cwd))
+        return False
     run = run or _default_run
     projects_dir = projects_dir or PROJECTS_DIR
     if compact_claim_active(sid, cwd, projects_dir=projects_dir):
@@ -17216,12 +17222,30 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # no network). Best-effort. `templates_path=goal_templates_path` (#320
     # shape 2) — wired = on, like job 20's own identical param; without it
     # this job's new virgin-candidate branch is a guaranteed no-op.
-    try:
-        logs += goal_autoarm(now, run, state, dry_run=dry_run,
-                             time_fn=time_fn, sweep_deadline=tail_deadline,
-                             templates_path=goal_templates_path)
-    except Exception as e:
-        logs.append("goal-autoarm error: %r" % (e,))
+    # OWNER KILL-SWITCH (2026-08-12, direct order: "vypni compact watcher a aj
+    # goal watcher lebo stale si ich neopravil zato mi stale promptuju kde
+    # nemaju"): a flag file disables the compact / goal delivery jobs on this
+    # box until the owner (or a fix he approves) removes it. Checked fresh
+    # every sweep; every skip logs LOUDLY so a disabled job can never be
+    # mistaken for a healthy-but-silent one. rm the file to re-enable.
+    _goal_jobs_disabled = os.path.exists(
+        os.path.expanduser("~/.claude/watchdog-disable-goal"))
+    _compact_jobs_disabled = os.path.exists(
+        os.path.expanduser("~/.claude/watchdog-disable-compact"))
+    if _goal_jobs_disabled:
+        logs.append("goal jobs DISABLED by owner flag "
+                    "~/.claude/watchdog-disable-goal (rm to re-enable)")
+    if _compact_jobs_disabled:
+        logs.append("compact jobs DISABLED by owner flag "
+                    "~/.claude/watchdog-disable-compact (rm to re-enable)")
+
+    if not _goal_jobs_disabled:
+        try:
+            logs += goal_autoarm(now, run, state, dry_run=dry_run,
+                                 time_fn=time_fn, sweep_deadline=tail_deadline,
+                                 templates_path=goal_templates_path)
+        except Exception as e:
+            logs.append("goal-autoarm error: %r" % (e,))
 
     # Jobs 12 / 18 / 23 — REMOVED (#132, 2026-07-28). All three drove the
     # same `_restart_pane` helper, which typed `/exit` into a live pane and
@@ -17266,7 +17290,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # jobs 3/7/8/11/13, so an existing caller of run_once() that knows
     # nothing about this job sees NO behavior change. Uses the SAME
     # `panes_by_sid` map built above for job 7. Best-effort.
-    if compact_requests_path:
+    if compact_requests_path and not _compact_jobs_disabled:
         try:
             logs += compact_ticket_boundary(now, run, state, panes_by_sid,
                                             dry_run=dry_run,
@@ -17322,7 +17346,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # shared `compact_handled_this_sweep` set is fully populated before this
     # job decides whether the pane is safe for a ~2 KB keystroke burst.
     # Best-effort.
-    if goal_rearm_enabled:
+    if goal_rearm_enabled and not _goal_jobs_disabled:
         try:
             # #160-review 🟡F2 — the SAME `tail_deadline` jobs 8/9 already
             # share (never the bare per-transcript-loop `sweep_deadline`,
@@ -17397,7 +17421,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # box writes every 60s. Detection only, no tmux round-trip: it reads the
     # claims file and the transcripts, and the cwd map came from the pane
     # sweep above. Best-effort — a failure here must never cost a sweep.
-    if compact_stall_enabled:
+    if compact_stall_enabled and not _compact_jobs_disabled:
         try:
             logs += compact_stall_watch(now, state, cwd_by_sid,
                                         send_fn=send_fn, dry_run=dry_run,
