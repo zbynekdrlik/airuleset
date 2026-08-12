@@ -7485,7 +7485,15 @@ class TestDiscordAutopilotNotify(TestCase):
         captured = {}
 
         def fake_gh(*a, **k):
-            return "Real Issue Title" if "view" in a else "7"
+            # #382: full-authority `remaining` now unions THREE per-qual
+            # `gh issue list --search ... --json number,...` queries
+            # (`_obligation_quals()`), each returning a JSON array, not a
+            # single `-q length` count string — every one of the three
+            # returns the SAME 7-number array here, so the union still
+            # dedupes to exactly 7 (matching the pre-#382 expectation).
+            if "view" in a:
+                return "Real Issue Title"
+            return json.dumps([{"number": n} for n in range(1, 8)])
 
         def fake_send(body, **k):
             captured["body"] = body

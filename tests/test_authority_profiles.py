@@ -604,19 +604,28 @@ class TestRunCardRemainingScopedToStream(TestCase):
             "'remaining' count -- body: %r" % captured["b"])
 
     def test_full_authority_remaining_excludes_ops_channel(self):
-        # #362 review: the full-authority "remaining" (core-scoped) query
-        # must ALSO AND -label:ops-channel onto its search. Without it, the
-        # count would read the inflated whole-core figure (5 here); with it,
-        # the correctly-scoped 2.
+        # #362 review: the full-authority "remaining" query must AND
+        # -label:ops-channel onto EVERY per-qual search string -- #382
+        # widened this from a single core-only query to a union of core +
+        # needs-gatekeeper + ready-for-review, and the exclusion must
+        # survive onto each of the three new queries too, not just the
+        # original core one. Without it, a query would read the inflated
+        # whole-population figure (5 items); with it, the correctly-scoped
+        # 2 -- and since AUTOPILOT_SKIP_EXCL is the shared `base` for every
+        # qual, all three per-qual queries below see the exclusion and
+        # union to the SAME 2 numbers, never accumulating to 5.
         import unittest.mock as mk
 
         def gh(*a, **k):
-            j = " ".join(str(x) for x in a)
-            if "view" in j:
+            # Argv-position match for "issue view", never a substring on
+            # the joined text -- "label:ready-for-review" itself contains
+            # the literal substring "view" ("re-VIEW").
+            if len(a) > 1 and a[0] == "issue" and a[1] == "view":
                 return "T"
+            j = " ".join(str(x) for x in a)
             if "-label:ops-channel" in j:
-                return "2"
-            return "5"
+                return '[{"number":1},{"number":2}]'
+            return '[{"number":1},{"number":2},{"number":3},{"number":4},{"number":5}]'
 
         captured = {}
         with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
@@ -632,8 +641,8 @@ class TestRunCardRemainingScopedToStream(TestCase):
         self.assertIsNotNone(m, captured["b"])
         self.assertEqual(
             m.group(1), "2",
-            "the full-authority core-scoped 'remaining' count did not "
-            "exclude ops-channel -- body: %r" % captured["b"])
+            "the full-authority obligation-scoped 'remaining' count did "
+            "not exclude ops-channel -- body: %r" % captured["b"])
 
     def test_full_authority_remaining_matches_the_obligation_set_not_core_alone(self):
         # #382: #367's own adversarial review (F4) found the card's
@@ -654,9 +663,14 @@ class TestRunCardRemainingScopedToStream(TestCase):
         core_excl = airuleset._core_search_excl()
 
         def gh(*a, **k):
-            j = " ".join(str(x) for x in a)
-            if "view" in j:
+            # Match "issue view" by ARGV POSITION, never by substring on
+            # the joined command text -- "label:ready-for-review" itself
+            # contains the literal substring "view" ("re-VIEW"), so a bare
+            # `"view" in j` check would misclassify that qual's own query
+            # as the title/labels lookup and return the wrong shape.
+            if len(a) > 1 and a[0] == "issue" and a[1] == "view":
                 return "T"
+            j = " ".join(str(x) for x in a)
             if "length" in j:
                 # pre-#382 shape: a single core-only "-q length" count --
                 # never fired by the fixed code, since it never asks for
