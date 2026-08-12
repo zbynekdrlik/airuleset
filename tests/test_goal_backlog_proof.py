@@ -755,3 +755,135 @@ class TestConditionAIsNeverFalselyHeldOrFalselyReleased(TestCase):
 
     def test_empty_turn_never_holds(self):
         self.assertFalse(condition_a_holds(""))
+
+
+class TheTemplatesHaveHealthyCapHeadroom(TestCase):
+    """#384 (2026-08-12): two of three templates measured 17-24 chars of
+    headroom against the 4000-char cap -- close enough that a routine
+    one-line wording fix (even a typo correction) could tip either one over
+    and silently disable /goal fleet-wide again (the exact #169 shape). The
+    prior lock (`TheTemplatesMustFitClaudeCodesGoalCap` above) only fires
+    AFTER the cap is breached; this fires while there is still real margin
+    left, so a future edit that erodes it gets caught long before the wall.
+
+    MIN_HEADROOM is deliberately below what this pass actually achieves
+    (measured: 232/264/231 chars for full/branch-merge/fork-no-merge) --
+    the floor is a warning rail, not a target to shave back down to.
+    """
+
+    CAP = 4000
+    MIN_HEADROOM = 150
+
+    def test_every_template_keeps_healthy_headroom(self):
+        short = [(i, self.CAP - len(line)) for i, line in enumerate(goal_lines())
+                  if self.CAP - len(line) < self.MIN_HEADROOM]
+        self.assertEqual(
+            short, [],
+            "templates with headroom under %d chars (index, headroom): %r"
+            % (self.MIN_HEADROOM, short))
+
+    def test_there_are_still_three_templates_to_check(self):
+        """Guards the assertion above against silently measuring nothing."""
+        self.assertEqual(len(goal_lines()), 3)
+
+
+class TestReducedAuthorityTemplatesSurfaceParkedWork(TestCase):
+    """#395: after #391, `slice-quals --count == 0` on a reduced-authority
+    box means "own UNHANDLED work is empty" -- a ticket already handed off
+    to the gatekeeper (ready-for-review/needs-gatekeeper) is EXCLUDED from
+    the count even though it may still be OPEN on GitHub (branch-merge:
+    GitHub's Closes #N never auto-fires off a non-default branch, #349).
+    So the (B) proof triple could be fully satisfied -- and the loop
+    terminate via BACKLOG EMPTY + DONE -- while a ticket sits handed-off-
+    but-not-closed, with the template's own English precondition ("the
+    gatekeeper has finished with my slice") never actually machine-checked.
+
+    Design decision (Opus consult, recorded on #395): SURFACE, don't
+    BLOCK. #391's "my work ends at hand-off" semantics stay authoritative
+    for slice-quals/footer/card/dispatch decisions -- this fix does not
+    reintroduce a "wait for real closure" requirement (that would contradict
+    the templates' own stated authority boundary, "My authority ENDS at the
+    integration branch / at the hand-off", and risks an unbounded review-
+    watch loop with no reachable exit -- the #170 guard-with-no-exit shape
+    the FREEZE exists to prevent). Instead the parked (`gk`) count must be
+    PASTED as evidence every time (B) is claimed, and the stop text states
+    plainly that a nonzero count is gatekeeper-owned, not something this
+    loop waits on -- turning a previously silent assumption into a provable
+    fact without changing when the loop is allowed to stop.
+    """
+
+    TICKETS_STATUS_REFRESH = "python3 ~/devel/airuleset/airuleset.py tickets-status --refresh"
+
+    def test_both_reduced_templates_declare_the_tickets_status_surfacing_proof(self):
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            cmds = declared_commands(goal_lines()[profile], self.TICKETS_STATUS_REFRESH)
+            self.assertTrue(cmds, "profile %d names no tickets-status surfacing command" % profile)
+
+    def test_the_surfacing_command_comes_after_slice_quals_count(self):
+        # test_reduced_templates_still_scope_the_count_to_my_own_slice above
+        # already locks slice-quals --count as the FIRST "python3" command;
+        # this locks that the NEW command is a SECOND, later one -- never
+        # accidentally displacing it.
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            line = goal_lines()[profile]
+            self.assertLess(line.index("slice-quals --count"),
+                             line.index(self.TICKETS_STATUS_REFRESH))
+
+    def test_the_stop_text_states_parked_tickets_are_gatekeeper_owned(self):
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            self.assertIn("gatekeeper-owned", goal_lines()[profile])
+
+    def test_the_surfacing_proof_never_blocks_termination(self):
+        # the presence of the evidence is required (declared_commands above);
+        # its VALUE is explicitly NOT gated -- distinguishing this from a
+        # PROOF_SPEC entry (which WOULD require an exact token).
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            self.assertIn("never blocks", goal_lines()[profile])
+
+    def test_the_surfacing_proof_is_not_wired_into_the_strict_decision_function(self):
+        # PROOF_SPEC is the exhaustive list backlog_empty_holds() checks
+        # value-for-value; a NEW entry there would make deriving the exact
+        # gk token load-bearing, which is exactly the "wait for closure"
+        # shape design decision (B) rejected. Locks the counts so a future
+        # add cannot happen silently.
+        self.assertEqual(len(PROOF_SPEC[BRANCH_MERGE]), 3)
+        self.assertEqual(len(PROOF_SPEC[FORK_NO_MERGE]), 2)
+
+    def test_the_false_gatekeeper_finished_claim_is_gone_from_branch_merge(self):
+        # the old wording claimed the gatekeeper "has finished with my
+        # slice" -- never machine-checked, and false the moment a ticket is
+        # merged+released but still awaiting gatekeeper review/close.
+        self.assertNotIn("the gatekeeper has finished with my slice",
+                          goal_lines()[BRANCH_MERGE])
+
+    def test_the_false_closed_by_maintainer_precondition_is_gone_from_fork_no_merge(self):
+        # the old wording said the ticket "is CLOSED by the maintainer" as
+        # the (B) precondition, but neither proof command ever checked
+        # GitHub's closed state -- same unproven-English-precondition gap.
+        self.assertNotIn("is CLOSED by the maintainer",
+                          goal_lines()[FORK_NO_MERGE])
+
+    def test_both_reduced_templates_still_fit_the_cap_with_the_new_proof(self):
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            self.assertLessEqual(len(goal_lines()[profile]), 4000)
+
+
+class TestParkedWorkNeverBlocksTermination(TestCase):
+    """Acceptance: (B) still holds even when the surfacing proof's OWN
+    printed line shows a nonzero `gk N` -- demonstrating design decision
+    (B) SURFACE-ONLY (#395) rather than arguing it. `backlog_empty_holds`
+    only checks PROOF_SPEC value-for-value (unchanged, still 2/3 entries),
+    so a message carrying the tickets-status line with any value at all is
+    exactly as valid a proof as one carrying no such line -- the presence
+    requirement is a template-text obligation, not a decision-function one.
+    """
+
+    def test_a_nonzero_gk_count_in_the_pasted_evidence_still_lets_B_hold(self):
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            turn = (_proof_block(profile)
+                    + "$ python3 ~/devel/airuleset/airuleset.py tickets-status --refresh ...\n"
+                    + "I 0 · gk 3\n"
+                    + MARKER + " 0 open, released\n"
+                    + "✅ DONE: hotovo\n")
+            holds, reason = backlog_empty_holds(turn, profile)
+            self.assertTrue(holds, reason)
