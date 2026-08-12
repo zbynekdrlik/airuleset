@@ -1420,12 +1420,26 @@ def _prune_dedup(d):
 # Discord; the watchdog looks the referenced message id up here and types the
 # answer into that exact session's tmux pane. Machine-LOCAL (each machine only
 # answers questions IT asked): the file lives in ~/.claude, never git, never a
-# secret. Bounded + self-pruning so a never-answered question can't accumulate.
+# secret. Bounded (the hard cap below) so a never-answered question can't
+# accumulate without limit — but #368 (2026-08-12): an entry is NO LONGER
+# deleted merely for being OLD. A still-unanswered question must survive
+# until it is genuinely resolved (a routed Discord reply, or a HUMAN prompt
+# at the terminal — job 7 / prune_answered_questions) so that
+# watchdog.reping_stale_questions() has something to keep RE-ASKING daily —
+# the user's own directive (2026-08-11): "ak sa claude rozhodne ich skryt tak
+# ich aj tyzdne nepolozi. Chcem aby kazdy claude ak eviduje otazku minimalne
+# raz denne ju nanovo polozil." Silently DELETING an unanswered entry after
+# 24h was the exact inversion of that.
 _QUESTIONS_REL = "discord-questions.json"
-_QUESTIONS_TTL_S = 24 * 3600          # an unanswered question older than this is stale
 _QUESTIONS_MAX = 200                  # hard cap on tracked questions (newest kept)
-_QUESTION_TEXT_MAX = 1200             # stored question text cap (codepoints — the
-                                      # delivery wraps it into ONE typed prompt line)
+_QUESTION_TEXT_MAX = 1200             # stored (collapsed, single-line) question
+                                      # text cap (codepoints) — compose_reply_prompt
+                                      # types this as ONE typed prompt line
+_QUESTION_BLOCK_MAX = 1800            # stored RAW block cap (codepoints, #368) — the
+                                      # newline-preserving posted content, resent
+                                      # VERBATIM by a daily re-ask; comfortably under
+                                      # `_MAX_CONTENT` (1900) so a fresh mention prefix
+                                      # still fits when send() re-composes it
 
 
 def _questions_path():
@@ -1459,14 +1473,29 @@ def _save_questions(d, path=None):
 def record_question(message_id, channel, session, cwd, now=None, path=None,
                     question=""):
     """Record that Discord message `message_id` (in `channel`) is the ❓ ping for
-    `session` (transcript stem = CC session id) in `cwd`. Prunes stale + over-cap
-    entries in the same write. Returns True on success. Fail-safe (never raises).
+    `session` (transcript stem = CC session id) in `cwd`. Prunes malformed +
+    over-cap entries in the same write (#368: no longer AGE — see the module
+    comment above the map's own constants). Returns True on success.
+    Fail-safe (never raises).
 
-    `question` = the posted ❓ text: stored single-line (collapsed whitespace,
-    leading @mentions stripped, codepoint-capped) so the watchdog's reply
-    delivery can wrap the user's answer with the question it answers — a bare
-    '1' typed hours/days later is meaningless once the session's context no
-    longer holds the question (user ask, 2026-07-17).
+    `question` = the posted ❓ text, stored TWO ways:
+      - `question`: single-line (collapsed whitespace, leading @mentions
+        stripped, codepoint-capped) so the watchdog's reply delivery can wrap
+        the user's answer with the question it answers — a bare '1' typed
+        hours/days later is meaningless once the session's context no longer
+        holds the question (user ask, 2026-07-17). This is a ONE-LINE value
+        BY DESIGN: `compose_reply_prompt` types it as a single typed prompt
+        line, where a stray newline would submit early.
+      - `block` (#368): the SAME text, mention-stripped and codepoint-capped,
+        but with its ORIGINAL newlines PRESERVED — the full posted CONTENT
+        already reaches here via stdin (hooks/notify-discord-send.sh pipes
+        the exact `$CONTENT` it POSTed), so this is genuinely the whole
+        rendered block (bold headers, numbered options, blank-line
+        paragraphs), not a reconstruction. `watchdog.reping_stale_questions()`
+        reposts THIS verbatim for the daily re-ask, never the flattened
+        `question` — resending a wall of prose with no formatting would
+        reintroduce the exact "ziadne odrazky, ziadne zvyraznenia" complaint
+        `clean_q` was built to fix.
 
     `message_id` and `channel` must be NUMERIC Discord snowflakes — anything else
     (a Mock repr from a mis-wired test, a mangled shell var) is refused so garbage
@@ -1480,18 +1509,21 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     now = time.time() if now is None else now
     q = " ".join(str(question or "").split())
     q = re.sub(r"^(?:<@[!&]?\d+>\s*)+", "", q)[:_QUESTION_TEXT_MAX]
+    block = re.sub(r"^(?:<@[!&]?\d+>\s*)+", "",
+                   str(question or "").strip())[:_QUESTION_BLOCK_MAX]
     d = load_questions(path)
     d[message_id] = {"session": session, "cwd": str(cwd or ""),
                      "channel": str(channel or ""), "ts": int(now),
-                     "question": q}
-    # prune stale — a malformed/legacy entry (not a dict) is immediately
-    # prunable rather than crashing the write (mirrors the identical fix in
+                     "question": q, "block": block}
+    # prune malformed — a legacy entry that isn't a dict (never one this
+    # function itself could have written) is immediately prunable rather
+    # than crashing the write (mirrors the identical fix in
     # `record_card_message`, #297/#298 review MINOR-7 — same pre-existing
     # exposure, same-file, fixed in the same pass rather than filed
-    # separately).
-    for mid in [m for m, v in d.items()
-                if not isinstance(v, dict)
-                or now - (v.get("ts") or 0) > _QUESTIONS_TTL_S]:
+    # separately). No age-based prune any more (#368) — an entry now lives
+    # until job 7 / prune_answered_questions genuinely resolves it, bounded
+    # only by the hard cap below.
+    for mid in [m for m, v in d.items() if not isinstance(v, dict)]:
         d.pop(mid, None)
     # hard cap — keep the newest by ts
     if len(d) > _QUESTIONS_MAX:
@@ -1731,12 +1763,21 @@ def _post_discord(token, channel, content):
 
 
 def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
-        return_message_id=False):
+        return_message_id=False, kind="default"):
     """Prepend the owner @mention to `body` and POST it to the Discord notification
     channel — AND, in parallel, to every mirror owner's own thread with their own
     @mention (DISCORD_MIRROR_<OWNER>, e.g. david → also zbynek). Deduped on
     `dedup_key`. Returns a short status string ('sent' / 'dedup' / 'dry-run' /
     'no-config' / 'error') reflecting the PRIMARY send. Never raises.
+
+    `kind="questions"` (#368): routes every target (primary + mirrors) through
+    `notification_channel(env, t, kind="questions")` instead of the default
+    thread — the SAME per-owner `-q` questions-thread cascade
+    `hooks/notify-discord-send.sh` already applies to every interactive ❓
+    ping, now reachable from a Python-side sender too (watchdog's daily
+    question re-ask). `kind="default"` (the parameter's own default) is
+    byte-for-byte the pre-#368 behaviour — every EXISTING caller passes
+    nothing and is unaffected.
 
     `return_message_id=True` (#298) returns `(status, message_id)` instead —
     `message_id` is the PRIMARY send's Discord message id (a string) when
@@ -1758,7 +1799,7 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     # real delivery iterate this SAME list, so the preview is faithful.
     targets, seen_channels = [], set()      # targets: list of (owner, channel)
     for i, t in enumerate([owner] + mirror_owners(env, owner)):
-        ch = notification_channel(env, t)
+        ch = notification_channel(env, t, kind=kind)
         if i == 0:                          # primary: always included
             targets.append((t, ch))
             if ch:
