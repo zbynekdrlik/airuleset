@@ -1156,6 +1156,29 @@ class TestArchitectureTriageGate(_Base):
         self.run_hook('gh issue comment 42 --body "x"', comments2)
         self.assertIsNotNone(self.marker(42, "reviewed"))
 
+    def test_design_shaped_but_rejected_comment_does_not_fall_through_to_validated(self):
+        # #414-review MINOR-2: a comment that IS design-shaped (root cause +
+        # approach + alternative, classify_design_comment() == True) but
+        # fails ONLY the new Architektúra:/Triage: requirement must not be
+        # silently absorbed as a DIFFERENT kind's marker just because its
+        # prose also happens to carry validation-sounding language -- the
+        # worker's fix is to REPOST with the missing piece, never to have a
+        # rejected design attempt quietly satisfy "validated" instead.
+        body = (
+            GOOD_BODY_NO_ARCH +
+            " Reproduced the bug live against current HEAD and confirmed "
+            "it still happens exactly as described."
+        )
+        self.assertTrue(dg.classify_design_comment(body)[0])
+        self.assertTrue(dg.classify_validation_comment(body)[0])
+        comments = _comments_json([{
+            "body": body, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-60",
+        }])
+        self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertIsNone(self.marker(41, "design"))
+        self.assertIsNone(self.marker(41, "validated"))
+
     def test_an_already_written_marker_from_before_414_is_never_retro_invalidated(self):
         # Simulates a marker written by an OLDER version of this hook
         # (before the Architektúra:/Triage: checks existed) -- #414's own
