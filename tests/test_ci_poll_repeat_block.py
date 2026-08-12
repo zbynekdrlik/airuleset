@@ -447,6 +447,101 @@ class ModulePointerTest(unittest.TestCase):
         self.assertIn("nudge-poll-loop-timeout.sh", head[-600:])
 
 
+class JobLevelFailFastTest(unittest.TestCase):
+    """#405: the canonical waiter now requests `,jobs` alongside
+    `status,conclusion` and branches TERMINAL/JOBFAIL/PENDING in its own
+    `--jq` filter — this must NOT change how #118's digit-blind loop
+    detector classifies a repeated poll (the extra JSON field is content,
+    not shape), and the printed compliant background waiter (both the
+    loop-repeat MAINMSG and the oneshot-repeat ONESHOT_MAINMSG) must carry
+    the SAME job-fail-fast branch as the canonical doc snippet — an
+    inconsistent copy is exactly the rot #405 was filed to prevent."""
+
+    def setUp(self):
+        self._tmp = TemporaryDirectory()
+        self.state = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def run_hook(self, command, **kw):
+        env = dict(os.environ)
+        env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
+        return subprocess.run(
+            ["bash", str(HOOK)],
+            input=payload(command, **kw), text=True, env=env,
+            capture_output=True, timeout=30)
+
+    def job_aware_poll_loop(self, run_id):
+        # the SAME shape poll_loop() builds, except the --json value also
+        # carries ,jobs and the --jq filter is the new 3-way branch — proves
+        # the loop-repeat detector still recognises this as the identical
+        # loop SHAPE (do...sleep...done), regardless of the JSON field list.
+        return (
+            'DEADLINE=$((SECONDS + ${AIRULESET_POLL_BUDGET_S:-540}))\n'
+            'for i in $(seq 1 18); do\n'
+            "  s=$(gh run view %s --json status,conclusion,jobs --jq "
+            "'if .status==\"completed\" then \"TERMINAL \"+.status else "
+            '"PENDING" end\')\n'
+            '  case "$s" in "TERMINAL "*) break;; esac\n'
+            '  sleep 30\n'
+            'done' % run_id
+        )
+
+    def test_job_aware_loop_still_gets_its_free_first_pass(self):
+        out = self.run_hook(self.job_aware_poll_loop(RUN_A))
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def test_job_aware_loop_repeat_is_still_blocked_same_as_plain(self):
+        self.run_hook(self.job_aware_poll_loop(RUN_A))
+        out = self.run_hook(self.job_aware_poll_loop(RUN_A))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#118", out.stderr)
+
+    def test_loop_repeat_block_message_carries_the_jobfail_branch(self):
+        # MAINMSG's printed background waiter (the compliant command handed
+        # to the model after a loop-repeat block) must stay in sync with
+        # ci-monitoring.md's own canonical shape.
+        self.run_hook(poll_loop(RUN_A))
+        err = self.run_hook(poll_loop(RUN_A)).stderr
+        self.assertIn("JOBFAIL", err)
+        self.assertIn("JOB FAILED (run still in progress)", err)
+        self.assertIn(",jobs", err)
+
+    def test_oneshot_repeat_block_message_carries_the_jobfail_branch(self):
+        # ONESHOT_MAINMSG prints BOTH the foreground loop and the background
+        # waiter — both copies must carry the same branch.
+        cmd = "gh run view %s --json status,conclusion" % RUN_B
+        self.run_hook(cmd)
+        self.run_hook(cmd)
+        err = self.run_hook(cmd).stderr
+        self.assertIn("JOBFAIL", err)
+        self.assertIn("JOB FAILED (run still in progress)", err)
+        self.assertIn(",jobs", err)
+
+    def test_oneshot_repeat_block_message_each_template_independently_carries_it(self):
+        # #405 adversarial-review MINOR-3: the assertion above checks the
+        # branch text appears SOMEWHERE in stderr — a mutant reverting only
+        # ONE of ONESHOT_MAINMSG's two templates (the SHORT-wait foreground
+        # loop, or the LONG-wait background waiter) still satisfies it,
+        # since the OTHER, untouched template's own copy carries the
+        # substring. This test SCOPES the check to each template's own
+        # segment (split on the printed "LONG wait" bullet, which separates
+        # the two templates in the message) so a one-sided regression can't
+        # hide behind its sibling.
+        cmd = "gh run view %s --json status,conclusion" % RUN_B
+        self.run_hook(cmd)
+        self.run_hook(cmd)
+        err = self.run_hook(cmd).stderr
+        self.assertIn("LONG wait", err, err)
+        short_wait, _, long_wait = err.partition("LONG wait")
+        self.assertNotEqual(long_wait, "", "split found no LONG-wait segment: " + err)
+        for label, segment in (("SHORT-wait template", short_wait),
+                                ("LONG-wait template", long_wait)):
+            self.assertIn("JOBFAIL", segment, label + " missing JOBFAIL: " + err)
+            self.assertIn("JOB FAILED (run still in progress)", segment,
+                          label + " missing the JOB FAILED message: " + err)
+            self.assertIn(",jobs", segment, label + " missing ,jobs: " + err)
+
+
 class OneShotStatusPollBlockTest(unittest.TestCase):
     """#210: a bare, non-loop `gh run view <run-id>` status poll — no sleep,
     no `do...done` — is invisible to #118's loop detector, but production
@@ -528,6 +623,21 @@ class OneShotStatusPollBlockTest(unittest.TestCase):
         self.run_hook(self.oneshot(RUN_A, json_val="conclusion,status"))
         out = self.run_hook(self.oneshot(RUN_A, json_val="status,conclusion"))
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_status_conclusion_jobs_still_counts_as_a_status_poll(self):
+        # #405 made `status,conclusion,jobs` the CANONICAL one-shot field
+        # list (ci-monitoring.md's own snippets, and this hook's own printed
+        # "compliant" templates) — a repeated one-shot in that exact shape is
+        # still just the same "re-send the whole context for one status
+        # line" burn #210 exists to throttle; the extra `,jobs` field must
+        # not exempt it from the count the way a genuine `--json jobs`-only
+        # debugging read (test_json_jobs_field_reads_are_never_counted,
+        # below) correctly stays exempt.
+        self.run_hook(self.oneshot(RUN_A, json_val="status,conclusion,jobs"))
+        self.run_hook(self.oneshot(RUN_A, json_val="status,conclusion,jobs"))
+        out = self.run_hook(self.oneshot(RUN_A, json_val="status,conclusion,jobs"))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("#210", out.stderr)
 
     # ---- state keying, mirrors the loop mechanism -------------------------
     def test_a_second_run_id_gets_its_own_free_first_two(self):
