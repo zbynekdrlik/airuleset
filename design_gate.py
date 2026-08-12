@@ -522,6 +522,209 @@ def ensure_stale_pattern_excluded(cwd):
         return
 
 
+# --------------------------------------------------------------------------- #
+# #414 -- SOTA architecture: tightened design-gate. TWO NEW, DELIBERATELY
+# SEPARATE classifiers -- never folded into `classify_design_comment` above.
+# That function has THREE independent consumers besides the live gate
+# (`scripts/measure_design_compliance.py`'s historical Deliverable-1 corpus
+# measurement, `scripts/replay_design_gate_commit_corpus.py`, and this
+# module's own pre-existing ~30 tests), all of which depend on its CURRENT,
+# STABLE meaning -- retroactively tightening it would silently change what a
+# measurement over comments posted long before this ticket existed means.
+# `hooks/post-record-design-comment.sh` is the ONLY call site that combines
+# either of these with `classify_design_comment`, and only for kind=="design"
+# -- so an already-written marker file is NEVER retro-invalidated (nothing
+# ever re-classifies it) and every OTHER consumer of `classify_design_comment`
+# is entirely unaffected by either function below existing. See the #414
+# design comment on the issue for the full rationale + rejected alternatives.
+# --------------------------------------------------------------------------- #
+
+MIN_LEN_ARCH = 40
+
+_ARCH_HEADER_RE = re.compile(
+    r"(?m)^[ \t]*(?:"
+    r"#{1,6}[ \t]*\**[ \t]*(?:Architekt(?:[uú]ra)|Architecture)\**[ \t]*:?"
+    r"|"
+    r"\**[ \t]*(?:Architekt(?:[uú]ra)|Architecture)[ \t]*\**[ \t]*:"
+    r")",
+    re.IGNORECASE,
+)
+_ARCH_STRUCTURE_RE = re.compile(
+    r"\b(?:[šs]trukt[uú]r\w*|struktur\w*|topol[oó]gi\w*|structure\w*|topology\w*)\b",
+    re.IGNORECASE,
+)
+_ARCH_FRAMEWORK_OR_WHYNOT_RE = re.compile(
+    r"\bframework\w*|\br[áa]mec\w*|kni[žz]nic\w*|\blibrar(?:y|ies)\b|"
+    r"nesed[íi]\w*|nehod[íi]\w*|nevhod\w*|no\s+framework|none\s+fit|doesn'?t\s+fit|"
+    r"existuj[uú]c\w*\s+(?:rie[šs]enie|n[áa]stroj|framework)|"
+    r"existing\s+(?:solution|tool|framework)",
+    re.IGNORECASE,
+)
+
+
+def classify_architecture_section(body):
+    """Heuristic verdict for #414: does `body` carry an `Architektúra:` (or
+    `Architecture:`) section that plausibly names STRUCTURE/topology AND
+    EITHER the framework used OR an evidenced why-none-fits reasoning?
+    Returns `(ok: bool, reason: str)`, same contract as the classifiers
+    above. A SHAPE check, same documented limitation as the rest of this
+    module: it can judge that the right CONCEPTS were named, never that the
+    engineering judgment behind them is actually correct."""
+    text = (body or "").strip()
+    if len(text) < MIN_LEN_ARCH:
+        return False, "too short for an architecture section (%d chars, need >= %d)" % (
+            len(text), MIN_LEN_ARCH)
+    if not _ARCH_HEADER_RE.search(text):
+        return False, "missing: Architektúra: (or Architecture:) section header"
+    missing = []
+    if not _ARCH_STRUCTURE_RE.search(text):
+        missing.append("structure/topology")
+    if not _ARCH_FRAMEWORK_OR_WHYNOT_RE.search(text):
+        missing.append("framework used or why-none-fits")
+    if missing:
+        return False, "Architektúra: section missing: " + ", ".join(missing)
+    return True, "ok"
+
+
+# --------------------------------------------------------------------------- #
+# #414 -- Triage: line + (for a non-trivial ticket) 2-3 considered
+# approaches with trade-offs. Restores the interactive-`/brainstorming`-era
+# design depth the owner reported degrading to a single paragraph once
+# autopilot took over ("per-ticket tunel -- nikto nedržal celok"). A
+# TRIVIAL ticket needs nothing beyond the Triage: line itself -- CYCLE step
+# 2's own already-settled "depth scales with the problem" principle, which
+# this extends rather than replaces.
+# --------------------------------------------------------------------------- #
+
+MIN_LEN_TRIAGE_TRIVIAL = MIN_LEN            # same floor as classify_design_comment
+MIN_LEN_TRIAGE_NONTRIVIAL = 400             # 2-3 approaches + trade-offs cannot honestly
+                                             # fit under ~400 chars; a genuinely terse
+                                             # trivial write-up clears the lower floor easily
+
+_TRIAGE_LINE_RE = re.compile(
+    r"(?m)^[ \t>*#]*\**[ \t]*Triage\**[ \t]*:[ \t]*(?P<cls>.+?)[ \t]*$",
+    re.IGNORECASE,
+)
+# Non-trivial checked FIRST -- "netriviálne"/"non-trivial" both CONTAIN the
+# substring "trivi(al)", so classifying trivial-first would misread them.
+_TRIAGE_NONTRIVIAL_RE = re.compile(
+    r"non-?\s?trivial|netrivi[aá]ln\w*|design-?heavy|designov[ýy]\w*|"
+    r"architektonick\w*|komplexn\w*|cross-?cutting|kr[íi][žz]ov\w*|zlo[žz]it\w*",
+    re.IGNORECASE,
+)
+_TRIAGE_TRIVIAL_RE = re.compile(
+    r"\btrivial\b|trivi[aá]ln\w*|jednoduch\w*|\bscoped\b|drobn\w*",
+    re.IGNORECASE,
+)
+_APPROACH_MARKER_RE = re.compile(
+    r"\b(?:Approach|Option|Variant|Pr[íi]stup|Mo[žz]nos[ťt]\w*)\s*#?\s*([1-3])\b",
+    re.IGNORECASE,
+)
+_TRADEOFF_RE = re.compile(
+    r"trade-?\s?off\w*|kompromis\w*|nev[ýy]hod\w*|v[ýy]hod\w*|\bpros\b|\bcons\b|"
+    r"za a proti|oproti|on the other hand|na druhej strane",
+    re.IGNORECASE,
+)
+
+
+def classify_triage_and_approaches(body):
+    """Heuristic verdict for #414: does `body` carry a `Triage:` line
+    naming trivial/non-trivial and -- ONLY for the non-trivial class -- at
+    least 2 DISTINCT numbered approaches (Approach/Option/Variant/Prístup/
+    Možnosť 1-3) plus trade-off language? Returns `(ok, reason)`, same
+    contract as the other classifiers in this module. Fails CLOSED on a
+    `Triage:` value that names neither class -- the fix (reword one line)
+    is cheap, and guessing which class was meant is not this gate's job."""
+    text = (body or "").strip()
+    m = _TRIAGE_LINE_RE.search(text)
+    if not m:
+        if len(text) < MIN_LEN_TRIAGE_TRIVIAL:
+            return False, "too short (%d chars, need >= %d)" % (
+                len(text), MIN_LEN_TRIAGE_TRIVIAL)
+        return False, "missing: Triage: line (trivial / non-trivial)"
+
+    value = m.group("cls")
+    if _TRIAGE_NONTRIVIAL_RE.search(value):
+        cls = "non-trivial"
+    elif _TRIAGE_TRIVIAL_RE.search(value):
+        cls = "trivial"
+    else:
+        return False, "Triage: value %r names neither trivial nor non-trivial" % value
+
+    if cls == "trivial":
+        if len(text) < MIN_LEN_TRIAGE_TRIVIAL:
+            return False, "too short (%d chars, need >= %d)" % (
+                len(text), MIN_LEN_TRIAGE_TRIVIAL)
+        return True, "ok (trivial)"
+
+    # non-trivial -- needs the fuller depth.
+    if len(text) < MIN_LEN_TRIAGE_NONTRIVIAL:
+        return False, "non-trivial design comment too short (%d chars, need >= %d)" % (
+            len(text), MIN_LEN_TRIAGE_NONTRIVIAL)
+    nums = set(mm.group(1) for mm in _APPROACH_MARKER_RE.finditer(text))
+    missing = []
+    if len(nums) < 2:
+        missing.append("2-3 distinct numbered approaches (Approach/Prístup/Možnosť/Variant 1-3)")
+    if not _TRADEOFF_RE.search(text):
+        missing.append("trade-off comparison")
+    if missing:
+        return False, "non-trivial ticket missing: " + ", ".join(missing)
+    return True, "ok (non-trivial, %d approaches)" % len(nums)
+
+
+# --------------------------------------------------------------------------- #
+# #414 -- reject-reason I/O: purely diagnostic, NEVER gates anything by
+# itself. Lets `hooks/block-commit-without-design.sh` tell a blocked worker
+# WHAT is still missing from its last posted comment, instead of the bare
+# "no design comment posted yet". A SIBLING directory to `design-posted/`
+# (never mixed in) so a reject can never be mistaken for a delivered
+# marker, and `marker_exists`/`read_marker` never need to learn about it.
+# --------------------------------------------------------------------------- #
+
+_REJECT_DIRNAME = "design-rejected"
+
+
+def reject_dir():
+    return os.path.join(_claude_dir(), _REJECT_DIRNAME)
+
+
+def reject_path(repo_key, issue, kind="design"):
+    safe = re.sub(r"[^A-Za-z0-9._#-]", "_", kind + ":" + marker_key(repo_key, issue))
+    return os.path.join(reject_dir(), safe)
+
+
+def write_reject_reason(repo_key, issue, reason, kind="design"):
+    """Best-effort record of the MOST RECENT classification failure for
+    `<repo_key>#<issue>` / `kind` -- overwritten on every failed attempt
+    (only the latest matters). Never speculative about anything a caller
+    hasn't just observed; never raises; an unwritable ~/.claude just means
+    the diagnostic stays unavailable, the gate itself is unaffected."""
+    if not repo_key or issue in (None, ""):
+        return False
+    d = reject_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+        with open(reject_path(repo_key, issue, kind), "w", encoding="utf-8") as fh:
+            fh.write("%s\t%s\n" % (time.time(), reason or ""))
+        return True
+    except OSError:
+        return False
+
+
+def read_reject_reason(repo_key, issue, kind="design"):
+    """The most recently recorded reject reason for `<repo_key>#<issue>` /
+    `kind`, or None. Tolerates a malformed/empty file rather than raising."""
+    try:
+        with open(reject_path(repo_key, issue, kind), encoding="utf-8") as fh:
+            body = fh.read(2000).rstrip("\n")
+    except OSError:
+        return None
+    if "\t" not in body:
+        return None
+    _, _, reason = body.partition("\t")
+    return reason if reason else None
+
+
 def required_refs(refs, cwd, state_of=None):
     """Filter `refs` (issue numbers with no marker yet) down to the ones
     that STILL require a design-comment marker: drop any that are already
