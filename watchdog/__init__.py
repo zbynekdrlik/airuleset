@@ -12953,7 +12953,15 @@ def _goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         return logs, True
     fresh = capture_pane(pid, run, lines=40)
     ok, kind, draft = _boundary_ok(fresh)
-    if not ok:
+    if not ok or pane_goal_armed(fresh) is not True:
+        # (round-2 adversarial review MINOR) mirrors `_goal_template_drift`'s
+        # own #176-F3 recapture exactly: the fetch that separates the stale
+        # `captured` snapshot from this send can legitimately span a whole
+        # final turn -- if the loop finished and disarmed WHILE it ran, the
+        # pane returns to a bare, idle prompt (still "at rest")
+        # but the goal itself is gone, and typing a TURBO nudge there is a
+        # keystroke into a session that should never receive one. Boundary-
+        # at-rest alone can't see that; the footer indicator can.
         logs.append("skip raced (lane-occupancy) %s -> pane moved since "
                     "the sweep" % loc)
         return logs, True
@@ -12965,6 +12973,8 @@ def _goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                 "idle=%dm (%d/%d)" % (loc, waiters, backlog_n, idle // 60,
                                       n + 1, GOAL_LANE_MAX_NUDGES))
     return logs, True
+
+
 def _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured, tpath, tmtime,
                       loc, send_fn, dry_run, handled, projects_dir):
     """The ARMED-but-silent branch of job 20 — see the `GOAL_STALL_*` section
