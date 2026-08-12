@@ -145,9 +145,27 @@ class TestCompletionReportTeachesServedSelfCompact(TestCase):
         t = read(self.MOD)
         self.assertTrue("#225" in t or "#228" in t)
 
-    def test_fallback_hook_still_documented_as_the_safety_net(self):
+    def test_retired_fallback_hook_is_named_not_silently_dropped(self):
+        # #400 (2026-08-12) -- inverted: `notify-compact-request.sh` used
+        # to be documented as a passive Stop-hook SAFETY NET covering a
+        # skipped/failed `--self` call. It is now a permanent no-op (its
+        # text-sniffing channel removed entirely -- repeated re-firing on
+        # every ordinary turn was what let a stale compact request keep
+        # looking "fresh" for 11+ hours in a live incident), so there is
+        # NO fallback left: if `--self` is skipped or fails, this turn is
+        # simply not compacted at a boundary. The module must still NAME
+        # the hook (so a reader knows what happened to it, rather than
+        # the reference silently vanishing) and must NOT still claim it
+        # "covers you" -- both checked here.
         t = read(self.MOD)
         self.assertIn("notify-compact-request.sh", t)
+        self.assertNotRegex(t, r"still covers you")
+        low = t.lower()
+        self.assertTrue(
+            "no passive fallback" in low or "permanent no-op" in low,
+            "must state plainly that the old fallback is retired, not "
+            "merely mention the hook's name in passing",
+        )
 
 
 class TestSelfCallbackStaysAgentTypeAgnostic(TestCase):

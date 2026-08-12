@@ -8,8 +8,17 @@ set -euo pipefail
 # kazdom tickete ma prebehnut compact." Ticket done -> compact runs. Always.
 #
 # WHY A SECOND CHANNEL EXISTS AT ALL. The Stop hook next door
-# (notify-compact-request.sh) keys the boundary to the SUPERVISOR'S OWN
-# MESSAGE: it refuses any turn whose last line is `⏳`. For a supervisor whose
+# (notify-compact-request.sh) USED TO key the boundary to the SUPERVISOR'S
+# OWN MESSAGE: it refused any turn whose last line was `⏳`. (#400,
+# 2026-08-12: that hook is now a PERMANENT NO-OP -- its whole text-sniffing
+# channel is removed, in both directions, because repeated re-firing on
+# every ordinary turn is what let a stale request keep looking "fresh" for
+# 11+ hours in a live incident. THIS hook -- the SubagentStop channel
+# described below -- is now the ONLY structural way an autopilot-worker's
+# own ticket boundary creates a `/compact` request; the reasoning below for
+# why a message-shaped Stop-hook trigger was structurally unreachable for a
+# supervisor is kept verbatim as the historical justification for why this
+# channel had to exist in the first place.) For a supervisor whose
 # work is performed by DISPATCHED workers that is structurally unreachable —
 # it reports batch N and dispatches batch N+1 in the SAME turn, so the turn
 # carrying the completed-ticket report ALWAYS ends `⏳`. Measured

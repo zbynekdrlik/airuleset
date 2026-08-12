@@ -717,10 +717,15 @@ answer to "which issues share one round" — this ticket found no gap in either.
    (every worker already returned, nothing is in flight at that instant) — not a lie, and NOT the
    general "something will wake me up" case (`message-status-marker.md`): the signal that MORE work
    follows is the **ARMED GOAL** Claude Code shows in its footer (`◎ /goal`), never a `⏳ WORKING`
-   tail bolted onto an already-finished round. This is also what lets the ticket-boundary `/compact`
-   (job 14, `notify-compact-request.sh`) fire PER ROUND instead of once for the whole backlog — a
+   tail bolted onto an already-finished round. This genuine `## ✅ Work Complete` boundary is also
+   where the supervisor itself should call `airuleset.py compact-request --self` FIRST (before
+   writing the report — see `completion-report.md`'s own "Compact at your own boundary" section),
+   so the ticket-boundary `/compact` fires PER ROUND instead of once for the whole backlog — a
    completed round's durable state already lives in git/GitHub, so it is a safe compaction boundary
-   every time. The idle Discord ping is separately guarded while the goal stays armed
+   every time. (#400, 2026-08-12: `notify-compact-request.sh`, the old passive Stop-hook text-sniff
+   this used to describe, is now a permanent no-op — `compact-request --self` is the only mechanism
+   left for the supervisor's own turn boundary.) The idle Discord ping is separately guarded while
+   the goal stays armed
    (`milestone-notifications.md`) — the run-cards already gave phone visibility for this round, so
    nothing double-pings.
    **Reduced-authority streams (branch-merge / fork-no-merge) carry the SAME Step 5 mandate — never

@@ -6486,7 +6486,7 @@ class TestCompactMarkerHoldGraceElapsed(unittest.TestCase):
         # sweep 1: fresh hold, live tasks -- refuses (unchanged), stamps
         # not_boundary_since.
         tmux1 = CompactFakeTmux(CB_IDLE_WAITING_CAP)
-        logs1 = wd.compact_ticket_boundary(
+        wd.compact_ticket_boundary(
             t0, tmux1, {}, {self.SID: (self.PANE, CB_IDLE_WAITING_CAP)},
             path=path, projects_dir=proj)
         self.assertEqual(tmux1.typed_texts(), [])
