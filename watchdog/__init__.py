@@ -3945,9 +3945,12 @@ def _janitor_watch_seen(state, pid, now, max_age_s=None):
     produces. Without this gate the janitor silently and unrecoverably
     destroyed both.
 
-    Callers that attempt a delivery mark this (job 20's own call sites in
-    `goal_rearm`/`_goal_template_drift`; job 14's own send point,
-    `watchdog.compact.deliver_compact`) — never the janitor itself. Bounded by
+    Callers that attempt a delivery mark this (job 9/20's own call sites
+    in `watchdog.goal.deliver_goal` -- the two GOAL_REARM-era functions
+    that used to hold these call sites, `goal_rearm`/`_goal_template_
+    drift`, were deleted wholesale by #403's collapse; job 14's own send
+    point, `watchdog.compact.deliver_compact`) — never the janitor
+    itself. Bounded by
     `max_age_s` (default `JANITOR_WATCH_MAX_AGE_S`) so a stale mark from
     long ago (the delivering job's own state got wedged, or this pane was
     genuinely never revisited) cannot license acting on unrelated LATER

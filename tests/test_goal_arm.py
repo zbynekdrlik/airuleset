@@ -473,6 +473,28 @@ class TestDeliverGoal(unittest.TestCase):
         self.assertEqual(word, "skip:stash-abort")
         self.assertIn("%9", state.get("janitor_watch", {}))
 
+    def test_stash_attempt_is_marked_before_the_call_not_just_after(self):
+        # #403-review round-2 MINOR 1: the two janitor-watch tests above
+        # only assert END states (marked-after-failure, cleared-after-
+        # success) -- a mutant that moves the mark to AFTER
+        # deliver_with_stash (failure-only, mirroring the pre-fix bug's
+        # own shape) reaches the IDENTICAL end states and survives both.
+        # Assert the mark is ALREADY present the moment deliver_with_stash
+        # is entered -- the actual property "mark BEFORE the attempt"
+        # exists to guarantee (a crash/hang mid-call must still be
+        # recoverable, which an after-the-fact mark cannot provide).
+        state = {}
+        seen_marked_at_call_time = []
+
+        def _fake_stash(pid, text, run, **kw):
+            seen_marked_at_call_time.append(pid in state.get("janitor_watch", {}))
+            return True
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_fake_stash):
+            word, tmux, _ = self._go(GOAL_DRAFT_CAP, state=state)
+        self.assertEqual(word, "sent")
+        self.assertEqual(seen_marked_at_call_time, [True])
+
     def test_hard_age_cap_expires_and_pings_once(self):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
@@ -1078,27 +1100,38 @@ class TestGoalArmCli(unittest.TestCase):
     def test_self_on_a_genuinely_idle_pane_actually_sends_end_to_end(self):
         # Not a mocked `deliver_goal` here -- a real call, through the
         # real CLI entry point, against a real (fake-tmux) idle pane, all
-        # the way down.
+        # the way down. `goal_templates_path` is pinned to an isolated
+        # fixture (#403-review round-2 MINOR 2: this was the ONLY test in
+        # the file reading the box's REAL installed skills/autopilot/
+        # SKILL.md via the default resolver -- non-hermetic, passes only
+        # on a provisioned box, the same class of gap #368-review MAJOR-3
+        # already fixed one day earlier in this repo).
         proj = TemporaryDirectory()
         self.addCleanup(proj.cleanup)
         cwd = "/home/newlevel/devel/goal-cli-e2e"
         sid = "sess-cli-e2e"
         _write_marker_transcript(proj.name, cwd, sid)
+        skill_md = Path(proj.name) / "SKILL.md"
+        skill_md.write_text(_skill_md(("full", "/goal STOP CONDITIONS "
+                                       "isolated test fixture")),
+                            encoding="utf-8")
         tmux = DeliverGoalFakeTmux([("%9", "claude", cwd, "111")],
                                    GOAL_IDLE_CAP, model_type=True)
         with m.patch.object(goal._compact, "resolve_self_pane",
                             return_value=("%9", cwd, sid)):
             with m.patch.object(wd, "_default_run", tmux):
                 with m.patch.object(wd, "PROJECTS_DIR", proj.name):
-                    with m.patch("airuleset.resolve_authority",
-                                return_value="full"):
-                        buf = []
-                        with m.patch("sys.stdout") as out:
-                            out.write = lambda s: buf.append(s)
-                            airuleset.cmd_goal_arm(_garm_args(self=True))
+                    with m.patch.object(wd, "goal_templates_path",
+                                        return_value=str(skill_md)):
+                        with m.patch("airuleset.resolve_authority",
+                                    return_value="full"):
+                            buf = []
+                            with m.patch("sys.stdout") as out:
+                                out.write = lambda s: buf.append(s)
+                                airuleset.cmd_goal_arm(_garm_args(self=True))
         self.assertEqual("".join(buf), "sent")
-        self.assertTrue(any("/goal" in t for t in tmux.typed_texts()),
-                        tmux.typed_texts())
+        self.assertIn("/goal STOP CONDITIONS isolated test fixture",
+                      tmux.typed_texts())
         # Cleared on the terminal word -- nothing left pending.
         self.assertEqual(goal.load_goal_requests(self.reqp), {})
 
