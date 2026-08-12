@@ -709,6 +709,55 @@ class TestRunCardRemainingScopedToStream(TestCase):
             "misrepresent the count as narrower than it actually is -- "
             "body: %r" % captured["b"])
 
+    def test_full_authority_remaining_targets_the_explicit_repo_not_cwd(self):
+        # #382 adversarial-review MAJOR: `_union_open_issues(quals, base,
+        # repo=repo)` threads `--repo` through as `-R <repo>` on EVERY
+        # per-qual query -- dropping that kwarg silently falls back to gh's
+        # own cwd-resolved repo, which is WRONG for the run-card: it fires
+        # from an arbitrary worker cwd (a worktree, a subdev checkout, a
+        # cross-project process-subdev fire) that need not match the
+        # `--repo` it was explicitly given. The two sibling tests above
+        # only ever assert on the RETURNED counts, so a mutant dropping
+        # `repo=repo` from the call is invisible to them (the fake `gh`
+        # ignores argv entirely) -- this test asserts on the argv ITSELF:
+        # `-R <repo>` must be present on every one of the three per-qual
+        # union queries the full-authority branch issues.
+        import unittest.mock as mk
+
+        seen_argvs = []
+
+        def gh(*a, **k):
+            if len(a) > 1 and a[0] == "issue" and a[1] == "view":
+                return "T"
+            seen_argvs.append(a)
+            return "[]"
+
+        with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
+            with mk.patch.object(airuleset, "resolve_authority",
+                                 return_value="full"):
+                with mk.patch("notify.send",
+                              side_effect=lambda body, **k: "sent"):
+                    airuleset.cmd_notify(self._args())
+
+        union_calls = [a for a in seen_argvs
+                      if len(a) > 1 and a[0] == "issue" and a[1] == "list"]
+        self.assertEqual(
+            len(union_calls), 3,
+            "expected exactly 3 per-qual union queries (core, "
+            "needs-gatekeeper, ready-for-review) -- got %r" % (union_calls,))
+        for a in union_calls:
+            self.assertIn(
+                "-R", a,
+                "a full-authority union query did not target an explicit "
+                "repo via -R -- it would silently fall back to gh's own "
+                "cwd-resolved repo instead of the --repo the card was "
+                "given -- argv: %r" % (a,))
+            r_idx = a.index("-R")
+            self.assertEqual(
+                a[r_idx + 1], "kvaskodev/odoo-erp",
+                "the union query's -R value did not match the card's own "
+                "--repo -- argv: %r" % (a,))
+
 
 class TestSliceQualsIsTheOneSliceDefinition(TestCase):
     """#181: montalu@subdev's armed /goal declared the backlog EMPTY (its own
