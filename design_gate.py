@@ -607,7 +607,13 @@ _TRIAGE_LINE_RE = re.compile(
 )
 # Non-trivial checked FIRST -- "netriviálne"/"non-trivial" both CONTAIN the
 # substring "trivi(al)", so classifying trivial-first would misread them.
+# #414-review MAJOR-1: a NEGATED trivial declaration ("not trivial", "nie
+# (je to) triviálne") ALSO contains that same bare substring -- without an
+# explicit negation alternative here, it would fall through and match
+# _TRIAGE_TRIVIAL_RE instead, silently waiving the whole 2-3-approaches
+# depth requirement on entirely natural phrasing in both languages.
 _TRIAGE_NONTRIVIAL_RE = re.compile(
+    r"not\s+trivial|nie\s+(?:je\s+(?:to\s+)?)?trivi[aá]ln\w*|"
     r"non-?\s?trivial|netrivi[aá]ln\w*|design-?heavy|designov[ýy]\w*|"
     r"architektonick\w*|komplexn\w*|cross-?cutting|kr[íi][žz]ov\w*|zlo[žz]it\w*",
     re.IGNORECASE,
