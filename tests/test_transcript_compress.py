@@ -165,7 +165,13 @@ class TestDiscoverOldTranscriptCandidates(unittest.TestCase):
         target_dir = self.root / "elsewhere"
         target_dir.mkdir()
         _mkfile(target_dir / "real.jsonl", age_days=90)
-        (d / "linked.jsonl").symlink_to(target_dir / "real.jsonl")
+        link = d / "linked.jsonl"
+        link.symlink_to(target_dir / "real.jsonl")
+        # os.lstat() reports the LINK's own mtime, never the target's --
+        # back-date it explicitly (follow_symlinks=False) so it isn't
+        # accidentally "the newest in its own dir" just because the
+        # symlink itself was freshly created a moment ago.
+        os.utime(link, (NOW - 60 * DAY, NOW - 60 * DAY), follow_symlinks=False)
         _mkfile(d / "newer.jsonl", age_days=1)
         found = airuleset.discover_old_transcript_candidates(
             projects_dir=self.pdir, now=NOW, min_age_days=30, min_size_bytes=100)

@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import difflib
+import gzip
 import json
 import os
 import re
@@ -5251,6 +5252,467 @@ def cmd_sweep_claude_scratch(args):
     print("Log: %s" % CLAUDE_SCRATCH_LOG_PATH)
 
 
+# --- Transcript gzip-at-rest retention (#410, split from #380 point 3) -----
+# #376 force-set `cleanupPeriodDays=3650` fleet-wide, disabling Claude
+# Code's own native transcript auto-delete (the previous 30-day default)
+# with NOTHING wired in to replace what it used to (silently) do --
+# ~/.claude/projects/**/*.jsonl now grows completely unbounded. This is
+# the size-aware retention layer: gzip-at-rest for OLD top-level session
+# transcripts -- NEVER deletes, fully reversible via a plain `gunzip`
+# ("história nesmie miznúť" -- the user's own explicit requirement,
+# 2026-08-11). Same sweep shape as #315/#345/#355 above (discovery
+# separated from action, own log+state file, cadence-gated -- FREEZE: no
+# new watchdog job, no new hook), wired as a non-fatal cmd_install() step
+# plus a manual/testable CLI entry point.
+#
+# SCOPE (v1, deliberate -- see the #410 design comment on the ticket):
+# MAIN (top-level, per-project) transcripts ONLY -- the direct *.jsonl
+# children of a `~/.claude/projects/<encoded-cwd>/` directory, the exact
+# population `/resume`/`claude --continue`/claude-history ever read.
+# Anything under a `subagents/` component is NEVER touched here: it costs
+# zero real disk reclamation today (live census on dev1, 2026-08-12: 0
+# reclaimable bytes -- every subagent transcript on this box is under 30
+# days old), and this repo's own playbook documents numerous ad-hoc
+# forensic/corpus-scanning scripts that glob `**/*.jsonl` recursively
+# with no time-window bound, none of which have been audited here for
+# `.gz`-awareness. Revisit once real subagent-transcript disk pressure
+# exists.
+#
+# claude-history's own `.jsonl.gz` READ support (find_transcripts/
+# _read_jsonl, above in this file's CLAUDE_HISTORY_SCRIPT_CONTENT) landed
+# in an EARLIER, standalone commit -- history-browsing of a compressed
+# file was never in a broken state at any point in this ticket's history.
+#
+# `/resume`'s own horizon: Claude Code's native /resume command lists
+# `~/.claude/projects/<key>/*.jsonl` directly -- a compressed OLD
+# transcript disappears from that listing (claude-history remains the
+# fallback that CAN still read it). Accepted per the approved design:
+# a 30+-day-old session is already well beyond /resume's own practical
+# use window in this repo's real usage pattern.
+
+TRANSCRIPT_COMPRESS_LOG_PATH = CLAUDE_DIR / "transcript-compress-sweep.log"
+TRANSCRIPT_COMPRESS_STATE_PATH = CLAUDE_DIR / "transcript-compress-sweep-state.json"
+TRANSCRIPT_COMPRESS_MIN_INTERVAL_S = 24 * 3600   # env AIRULESET_TRANSCRIPT_COMPRESS_SWEEP_INTERVAL_S
+# Matches CC's own FORMER native default (30 days) -- this sweep is
+# provably gentler than stock cleanup once was.
+TRANSCRIPT_COMPRESS_MIN_AGE_DAYS_DEFAULT = 30    # env AIRULESET_TRANSCRIPT_MIN_AGE_DAYS
+TRANSCRIPT_COMPRESS_MIN_SIZE_BYTES_DEFAULT = 100 * 1024   # env AIRULESET_TRANSCRIPT_MIN_SIZE_BYTES
+
+
+def _claude_projects_dir(home=None) -> Path:
+    """`~/.claude/projects/` -- every Claude Code session transcript
+    directory, one per encoded cwd (matches `encode_project_dir`)."""
+    home = Path(home or os.environ.get("HOME") or os.path.expanduser("~"))
+    return home / ".claude" / "projects"
+
+
+def _min_size_bytes_env(explicit, env_key, default):
+    """Same shape as `_min_age_days_env` (above), for a byte-count floor
+    -- an unparseable or negative override falls back to `default` rather
+    than silently disabling the floor."""
+    if explicit is not None:
+        return explicit
+    try:
+        v = int(os.environ.get(env_key, default))
+    except (TypeError, ValueError):
+        return default
+    return default if v < 0 else v
+
+
+def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
+                                       min_age_days=None, min_size_bytes=None,
+                                       proc_dir=None):
+    """Every MAIN (top-level, per-project) `.jsonl` transcript that is
+    safe to gzip-at-rest -- #410. A list of dicts `{"path", "reason",
+    "size"?, "age_days"?}` -- `reason` is `None` for a genuine candidate,
+    else WHY it was excluded (same discovery-shape contract as
+    `discover_cli_version_candidates`/`discover_stale_worktrees` above).
+
+    Safety criteria (NON-NEGOTIABLE):
+      - only a `.jsonl` file DIRECTLY inside a project directory is ever
+        considered -- an already-compressed `.jsonl.gz` sibling is never
+        re-matched by the glob at all, and a `subagents/` descendant is
+        never walked into (v1 scope, see the module comment above);
+      - the NEWEST `.jsonl` file in its OWN project directory is NEVER a
+        candidate, regardless of age (protects `/resume`/`claude
+        --continue` in a dormant project) -- computed per-directory, so a
+        genuinely old but still-newest-in-its-dir file is always excluded;
+      - a symlink entry is refused individually, never followed;
+      - `mtime` age >= `min_age_days` (default 30, env
+        AIRULESET_TRANSCRIPT_MIN_AGE_DAYS);
+      - `size` >= `min_size_bytes` (default 100KB, env
+        AIRULESET_TRANSCRIPT_MIN_SIZE_BYTES);
+      - a surviving candidate still needs a live-process check
+        (`_target_in_live_use`, #315's own /proc exe/cwd/fd scan, REUSED
+        VERBATIM -- never a new mechanism) before being genuine.
+    """
+    import time as _time
+    now = _time.time() if now is None else now
+    min_age_days = _min_age_days_env(min_age_days, "AIRULESET_TRANSCRIPT_MIN_AGE_DAYS",
+                                     TRANSCRIPT_COMPRESS_MIN_AGE_DAYS_DEFAULT)
+    min_size_bytes = _min_size_bytes_env(min_size_bytes, "AIRULESET_TRANSCRIPT_MIN_SIZE_BYTES",
+                                         TRANSCRIPT_COMPRESS_MIN_SIZE_BYTES_DEFAULT)
+    pdir = Path(projects_dir) if projects_dir else _claude_projects_dir(home)
+
+    if not pdir.is_dir():
+        return []
+
+    try:
+        names = sorted(os.listdir(pdir))
+    except OSError as e:
+        return [{"path": None, "reason": "could not list %s: %s" % (pdir, e)}]
+
+    out = []
+    for name in names:
+        d = pdir / name
+        if not d.is_dir():
+            continue
+        try:
+            paths = sorted(d.glob("*.jsonl"))
+        except OSError:
+            continue
+        rows = []   # (mtime, path, size, is_symlink)
+        for p in paths:
+            is_link = p.is_symlink()
+            try:
+                st = os.lstat(p)   # never follow -- report the LINK's own metadata
+            except OSError as e:
+                out.append({"path": str(p), "reason": "could not stat: %s" % e})
+                continue
+            rows.append((st.st_mtime, p, st.st_size, is_link))
+        if not rows:
+            continue
+        rows.sort(key=lambda t: t[0], reverse=True)
+        newest_path = rows[0][1]
+        for mtime, p, size, is_link in rows:
+            if p == newest_path:
+                continue   # the newest in its own dir -- never a candidate, regardless of age
+            entry = {"path": str(p), "reason": None,
+                    "age_days": (now - mtime) / 86400.0, "size": size}
+            if is_link:
+                entry["reason"] = "symlink entry -- never followed, never compressed"
+                out.append(entry)
+                continue
+            if entry["age_days"] < min_age_days:
+                entry["reason"] = "too recent (%.1fd < %sd)" % (entry["age_days"], min_age_days)
+                out.append(entry)
+                continue
+            if size < min_size_bytes:
+                entry["reason"] = "below size floor (%d B < %d B)" % (size, min_size_bytes)
+                out.append(entry)
+                continue
+            if _target_in_live_use(p, proc_dir=proc_dir):
+                entry["reason"] = "in live use (or undeterminable) -- skipped"
+                out.append(entry)
+                continue
+            out.append(entry)   # reason stays None -- genuine candidate
+
+    return out
+
+
+def _compress_transcript_file(path, now=None):
+    """Compress ONE transcript `path` (a plain `.jsonl` file) to
+    `<path>.gz`, following the approved design's compress-verify-swap
+    protocol -- #410. NEVER deletes the original until a fully
+    independent decompress+hash verification confirms the bytes actually
+    ON DISK round-trip exactly to the source.
+
+    Steps: re-stat the source and capture (size, mtime); refuse a
+    symlink outright; stream-read the source ONCE into BOTH a gzip
+    writer (targeting `<name>.jsonl.gz.tmp` in the SAME directory -- same
+    filesystem, so the later swap is a true atomic rename) and a running
+    SHA-256; close both, then re-open the just-written `.tmp` file FRESH
+    (a completely separate read pass off disk) and stream-hash the
+    DEcompressed output -- the two digests must match exactly, or nothing
+    proceeds; re-`stat()` the source and refuse if its (size, mtime)
+    changed since step 1 (a TOCTOU race -- a resumed session writing to
+    it mid-sweep); fsync + `os.replace()` (atomic rename) the tmp onto
+    the final `.jsonl.gz` path, `os.utime()`-stamped to the ORIGINAL's
+    mtime; only THEN `os.unlink()` the original.
+
+    ANY failure at ANY step removes the `.tmp` (if it exists), leaves the
+    original COMPLETELY untouched, and returns the reason -- the caller
+    is expected to continue to its next candidate, never abort the whole
+    sweep on one file's failure.
+
+    Returns `{"path", "removed": bool, "reason"}` -- `removed=True` means
+    the original `.jsonl` was safely replaced by a verified `.jsonl.gz`.
+    """
+    import hashlib
+    import time as _time
+    now = _time.time() if now is None else now
+    p = Path(path)
+    entry = {"path": str(p), "removed": False, "reason": None}
+
+    if p.is_symlink():
+        entry["reason"] = "symlink -- refused (re-checked before compress)"
+        return entry
+    try:
+        orig_st = os.stat(p)
+    except OSError as e:
+        entry["reason"] = "could not stat before compress: %s" % e
+        return entry
+    orig_size, orig_mtime = orig_st.st_size, orig_st.st_mtime
+
+    tmp_path = p.with_name(p.name + ".gz.tmp")
+    final_path = p.with_name(p.name + ".gz")
+
+    def _cleanup_tmp():
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError as e:
+            print("  transcript-compress: could not remove leftover tmp %s: %s"
+                  % (tmp_path, e), file=sys.stderr)
+
+    orig_hash = hashlib.sha256()
+    try:
+        with open(tmp_path, "wb") as raw:
+            with gzip.GzipFile(fileobj=raw, mode="wb", mtime=orig_mtime) as gz:
+                with open(p, "rb") as src:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        orig_hash.update(chunk)
+                        gz.write(chunk)
+            raw.flush()
+            os.fsync(raw.fileno())
+    except OSError as e:
+        entry["reason"] = "compress failed: %s" % e
+        _cleanup_tmp()
+        return entry
+
+    # Independent decompress-verify: a FRESH read pass off disk -- proves
+    # the bytes ON DISK round-trip, never merely trusting the writer.
+    verify_hash = hashlib.sha256()
+    try:
+        with gzip.open(tmp_path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                verify_hash.update(chunk)
+    except OSError as e:
+        entry["reason"] = "verify-decompress failed: %s" % e
+        _cleanup_tmp()
+        return entry
+
+    if orig_hash.digest() != verify_hash.digest():
+        entry["reason"] = "hash mismatch after decompress -- refusing to touch the original"
+        _cleanup_tmp()
+        return entry
+
+    # TOCTOU re-check -- has the source changed since we started reading it?
+    try:
+        recheck_st = os.stat(p)
+    except OSError as e:
+        entry["reason"] = "could not re-stat before swap: %s" % e
+        _cleanup_tmp()
+        return entry
+    if recheck_st.st_size != orig_size or recheck_st.st_mtime != orig_mtime:
+        entry["reason"] = "source changed during compression (resumed session?) -- refused"
+        _cleanup_tmp()
+        return entry
+
+    try:
+        os.replace(str(tmp_path), str(final_path))
+        os.utime(str(final_path), (now, orig_mtime))
+    except OSError as e:
+        entry["reason"] = "atomic swap failed: %s" % e
+        _cleanup_tmp()
+        return entry
+
+    try:
+        p.unlink()
+    except OSError as e:
+        # The verified .gz already exists on disk at this point -- only
+        # the original's own unlink failed (race/permissions). Report it
+        # honestly rather than claim success.
+        entry["reason"] = "compressed .gz written but original unlink failed: %s" % e
+        return entry
+
+    entry["removed"] = True
+    entry["reason"] = "compressed"
+    return entry
+
+
+def _log_transcript_compress_results(results, log_path, now, dry_run: bool):
+    import time as _time
+    lines = []
+    ts = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(now))
+    for r in results:
+        if r.get("path") is None:
+            lines.append("%s ERROR %s" % (ts, r.get("reason", "")))
+            continue
+        if dry_run:
+            tag = "WOULD-COMPRESS" if str(r.get("reason", "")).startswith("would compress") else "SKIP"
+        else:
+            tag = "COMPRESSED" if r.get("removed") else "SKIP"
+        size = r.get("size")
+        size_txt = " size=%s" % _human_size(size) if size is not None else ""
+        lines.append("%s %s %s%s -- %s" % (
+            ts, tag, r.get("path"), size_txt, r.get("reason", "")))
+    if not lines:
+        return
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        print("  transcript-compress: could not write log %s: %s" % (log_path, e), file=sys.stderr)
+
+
+def sweep_old_transcripts(home=None, projects_dir=None, dry_run: bool = True,
+                          now=None, log_path=None, state_path=None,
+                          force: bool = False, min_age_days=None,
+                          min_size_bytes=None, candidates=None, proc_dir=None):
+    """Compress every stale MAIN transcript `discover_old_transcript_
+    candidates` classifies as a genuine candidate (`reason is None`) --
+    #410. NEVER DELETES anything -- gzip-at-rest only, per the approved
+    design's own non-negotiable ("história nesmie miznúť"). Re-verifies
+    "still a plain regular file, not in live use" immediately before EACH
+    compress attempt (a TOCTOU re-check, mirroring #315/#355's own
+    re-verify-before-act pattern) on top of `_compress_transcript_file`'s
+    OWN internal re-stat/hash verification.
+
+    `dry_run` DEFAULTS TO `True` -- unlike its #355 sibling sweeps
+    (which default to live) -- belt-and-suspenders on top of
+    `cmd_install()`'s own env-var gate: #410's hard constraint is that
+    live compression must never happen by accident anywhere in this PR,
+    so even a caller that forgets to pass `dry_run=` explicitly stays
+    safe by construction. A caller must explicitly pass `dry_run=False`
+    to ever touch a real file.
+
+    Cadence-gated via its own state file, mirroring #315/#345/#355
+    exactly -- never leans on the 60s watchdog timer (FREEZE: no new
+    job). `force=True` (the CLI's own manual invocation) or `dry_run=True`
+    always bypasses the gate."""
+    import time as _time
+    now = _time.time() if now is None else now
+    log_path = Path(log_path) if log_path else TRANSCRIPT_COMPRESS_LOG_PATH
+    state_path = Path(state_path) if state_path else TRANSCRIPT_COMPRESS_STATE_PATH
+
+    if not force and not dry_run:
+        try:
+            st = json.loads(state_path.read_text())
+            last = float(st.get("last_run", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            last = 0
+        if last > now:
+            last = 0            # a future-dated stamp must not wedge the gate forever
+        interval = TRANSCRIPT_COMPRESS_MIN_INTERVAL_S
+        try:
+            interval = int(os.environ.get("AIRULESET_TRANSCRIPT_COMPRESS_SWEEP_INTERVAL_S", interval))
+        except ValueError:
+            interval = TRANSCRIPT_COMPRESS_MIN_INTERVAL_S
+        if now - last < interval:
+            return []
+
+    results = []
+    discovery_failed = False
+    if candidates is None:
+        try:
+            candidates = discover_old_transcript_candidates(
+                home, projects_dir=projects_dir, now=now,
+                min_age_days=min_age_days, min_size_bytes=min_size_bytes,
+                proc_dir=proc_dir)
+        except Exception as e:
+            candidates = []
+            discovery_failed = True
+            results.append({"path": None, "removed": False,
+                            "reason": "discovery error: %s" % e})
+
+    for c in candidates:
+        entry = dict(c)
+        entry["removed"] = False
+        if c.get("path") is None:
+            results.append(entry)
+            continue
+        if c.get("reason"):
+            results.append(entry)
+            continue
+        if dry_run:
+            entry["reason"] = "would compress (dry-run)"
+            results.append(entry)
+            continue
+
+        p = Path(c["path"])
+        try:
+            if p.is_symlink() or not p.is_file():
+                entry["reason"] = ("no longer a plain regular file -- refused "
+                                   "(re-checked before compress)")
+                results.append(entry)
+                continue
+            if _target_in_live_use(p, proc_dir=proc_dir):
+                entry["reason"] = ("in live use (or undeterminable) -- refused "
+                                   "(re-checked before compress)")
+                results.append(entry)
+                continue
+        except OSError as e:
+            entry["reason"] = "re-check failed: %s" % e
+            results.append(entry)
+            continue
+
+        compressed = _compress_transcript_file(p, now=now)
+        entry.update(compressed)
+        results.append(entry)
+
+    _log_transcript_compress_results(results, log_path, now, dry_run)
+
+    if not dry_run and not discovery_failed:
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"last_run": now}))
+        except OSError as e:
+            print("  transcript-compress: could not write state %s: %s" % (state_path, e), file=sys.stderr)
+
+    return results
+
+
+def cmd_sweep_transcripts(args):
+    """`airuleset.py sweep-transcripts [--dry-run] [--min-age-days N]
+    [--min-size-bytes N]` -- manual/testable entry point for the #410
+    gzip-at-rest transcript-compression sweep. Always `force=True`
+    (bypasses the cadence gate that guards the automatic install/push
+    wiring -- a deliberate manual call should never be silently skipped).
+
+    `--dry-run` is OPT-IN here (default False -- LIVE), matching #355's
+    own sibling sweep commands' established convention exactly: an
+    explicit, human-typed subcommand NAME is the real "opt-in" signal for
+    a manual invocation, `--dry-run` is the safety escape hatch on top of
+    it -- unlike `cmd_install()`'s own AUTOMATIC wiring, which stays
+    report-only by default (see the module comment above)."""
+    print("airuleset sweep-transcripts")
+    print("=" * 50)
+    dry_run = bool(getattr(args, "dry_run", False))
+    min_age_days = getattr(args, "min_age_days", None)
+    min_size_bytes = getattr(args, "min_size_bytes", None)
+    results = sweep_old_transcripts(dry_run=dry_run, force=True,
+                                    min_age_days=min_age_days,
+                                    min_size_bytes=min_size_bytes)
+    for r in results:
+        if r.get("path") is None:
+            print("  ERROR: %s" % r.get("reason", ""))
+            continue
+        acted = (str(r.get("reason", "")).startswith("would compress")
+                if dry_run else bool(r.get("removed")))
+        if acted:
+            tag = "WOULD COMPRESS" if dry_run else "COMPRESSED"
+        else:
+            tag = "skip"
+        print("  %s: %s -- %s" % (tag, r["path"], r.get("reason", "")))
+    acted_rows = [r for r in results
+                 if (str(r.get("reason", "")).startswith("would compress")
+                     if dry_run else r.get("removed"))]
+    total = sum(r.get("size", 0) or 0 for r in acted_rows)
+    print()
+    verb = "would be " if dry_run else ""
+    print("%d transcript(s) %scompressed, %s %sreclaimed (never deleted -- gzip-at-rest)." % (
+        len(acted_rows), verb, _human_size(total), verb))
+    print("Log: %s" % TRANSCRIPT_COMPRESS_LOG_PATH)
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     print("airuleset install")
@@ -5602,6 +6064,37 @@ def cmd_install(args):
                   f"{_human_size(total)} reclaimed (log: {CLAUDE_SCRATCH_LOG_PATH})")
     except Exception as e:
         print(f"  claude-scratch sweep error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 12. Transcript gzip-at-rest sweep: size-aware retention for
+    # unbounded chat history (#410, #376's own missing half). REPORT-ONLY
+    # is the wired DEFAULT everywhere -- set
+    # AIRULESET_TRANSCRIPT_COMPRESS_LIVE=1 to enable LIVE compression on
+    # THIS box, and only after the user has personally signed off
+    # following /resume + history-browsing verification (see the #410
+    # design comment). This env var is never set anywhere by this PR, on
+    # any box. Cadence-gated the same way as every step above once live
+    # -- non-fatal, best-effort.
+    try:
+        live_compress = os.environ.get("AIRULESET_TRANSCRIPT_COMPRESS_LIVE") == "1"
+        tc_results = sweep_old_transcripts(dry_run=not live_compress)
+        if live_compress:
+            tc_removed = [r for r in tc_results if r.get("removed")]
+            if tc_removed:
+                total = sum(r.get("size", 0) or 0 for r in tc_removed)
+                print(f"  Compressed {len(tc_removed)} old transcript(s), "
+                      f"{_human_size(total)} reclaimed (never deleted -- gzip-at-rest; "
+                      f"log: {TRANSCRIPT_COMPRESS_LOG_PATH})")
+        else:
+            tc_candidates = [r for r in tc_results
+                             if str(r.get("reason", "")).startswith("would compress")]
+            if tc_candidates:
+                total = sum(r.get("size", 0) or 0 for r in tc_candidates)
+                print(f"  Transcript compression: REPORT-ONLY -- found "
+                      f"{len(tc_candidates)} candidate(s), {_human_size(total)} "
+                      f"reclaimable. Set AIRULESET_TRANSCRIPT_COMPRESS_LIVE=1 to "
+                      f"enable live compression, after user sign-off (#410).")
+    except Exception as e:
+        print(f"  transcript-compress sweep error (non-fatal): {e}", file=sys.stderr)
 
     print()
     if install_failed:
@@ -13250,6 +13743,20 @@ def main():
                                  help=f"Age threshold in days "
                                       f"(default {CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT})")
 
+    # --- Transcript gzip-at-rest sweep: manual/testable entry point (#410) --
+    p_sweep_transcripts = sub.add_parser(
+        "sweep-transcripts",
+        help="Gzip-at-rest old session transcripts under ~/.claude/projects/ "
+             "-- NEVER deletes, top-level transcripts only (#410)")
+    p_sweep_transcripts.add_argument("--dry-run", dest="dry_run", action="store_true",
+                                     help="Report what would be compressed without touching anything")
+    p_sweep_transcripts.add_argument("--min-age-days", dest="min_age_days", type=int, default=None,
+                                     help=f"Age threshold in days "
+                                          f"(default {TRANSCRIPT_COMPRESS_MIN_AGE_DAYS_DEFAULT})")
+    p_sweep_transcripts.add_argument("--min-size-bytes", dest="min_size_bytes", type=int, default=None,
+                                     help=f"Size floor in bytes "
+                                          f"(default {TRANSCRIPT_COMPRESS_MIN_SIZE_BYTES_DEFAULT})")
+
     # --- File-Drop: share (give the user a clickable LAN URL) + filedrop (control)
     p_share = sub.add_parser(
         "share", help="Copy a file into the file-drop server and print its LAN URL")
@@ -13675,6 +14182,7 @@ SUBCOMMANDS = {
     "sweep-worktrees": cmd_sweep_worktrees,
     "sweep-cli-versions": cmd_sweep_cli_versions,
     "sweep-claude-scratch": cmd_sweep_claude_scratch,
+    "sweep-transcripts": cmd_sweep_transcripts,
     "share": cmd_share,
     "filedrop": cmd_filedrop,
     "notify": cmd_notify,
