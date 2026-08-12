@@ -309,6 +309,15 @@ class TestDiscoverStaleWorktrees(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertIsNotNone(row["reason"], "diverged dev/main must fall back "
                              "to dev preference, never silently guess")
+        # Lock the ACTUAL fallback value, not just "excluded for some
+        # reason" -- a mutant that falls back to "main" instead of "dev"
+        # (candidates[0] under a wrong preference order) would still leave
+        # this row excluded (2 commits ahead of main vs 1 ahead of dev),
+        # so the weaker assertIsNotNone check alone cannot distinguish the
+        # two (adversarial review, #380).
+        self.assertIn("ahead of dev", row["reason"],
+                      "diverged fallback must resolve to the ORIGINAL "
+                      "dev-preferred order -- reason: %r" % (row.get("reason"),))
 
     def test_no_base_branch_available_never_guesses(self):
         repo = _mkrepo(self.root, "proj", base_branch="trunk")
