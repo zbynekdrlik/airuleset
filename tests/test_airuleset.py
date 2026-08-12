@@ -12644,9 +12644,14 @@ class TestBlockDestructiveRemoteWinSshHazard(TestCase):
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         os.symlink("/dev/zero", os.path.join(d, ".mcp.json"))
         payload = json.dumps({"tool_input": {"command": "echo hi"}})
+        # timeout derated 10->30s (2026-08-12): the hook measures 0.135s solo,
+        # but a 10s bound was hit once by pure CPU starvation while several
+        # full suites ran concurrently on this box. A genuine /dev/zero
+        # unbounded-read hang is infinite -- 30s still proves "never hangs"
+        # while tolerating measured fleet-load scheduling delay.
         r = subprocess.run(
             ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
-            input=payload, text=True, capture_output=True, cwd=d, timeout=10,
+            input=payload, text=True, capture_output=True, cwd=d, timeout=30,
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
