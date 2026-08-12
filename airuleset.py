@@ -5896,18 +5896,26 @@ def setup_filedrop_service():
 def _current_remote_host_entry():
     """Best-effort match of "the box currently running install" to its own
     REMOTE_HOSTS deploy-target entry (#151) -- keyed on the LOCAL system
-    username via the existing `_whoami()` helper. Usernames are unique across
-    every REMOTE_HOSTS entry today (newlevel/gatekeeper/montalu/marek/david/
-    simap), so this needs no new per-entry data and can't confuse the four
-    subdev-VPS users (montalu/marek/david/simap), which all share the SAME
-    physical hostname and would be indistinguishable by a hostname-only match.
+    username via the existing `_whoami()` helper. This needs no new
+    per-entry data and can't confuse the four subdev-VPS users (montalu/
+    marek/david/simap), which all share the SAME physical hostname and
+    would be indistinguishable by a hostname-only match.
 
     Returns None when no entry's `user` matches -- expected on dev1 itself
     (the deploy SOURCE, never listed in REMOTE_HOSTS, and always the primary
     already-configured host in practice, so it essentially never reaches the
-    caller's warning branch). Known edge case: dev1's local user is also
-    `newlevel`, same as the `dev2` entry -- a mismatch there is harmless
-    since dev2 pins no identity either."""
+    caller's warning branch). Known edge case, NOT actually unique any more
+    (airuleset#408, 2026-08-12): `user: "newlevel"` is now shared by THREE
+    entries -- the implicit dev1 identity, `dev2` (no identity pinned), and
+    `spinbike-vps` (identity pinned, list order AFTER dev2). A mismatch on
+    dev2 is harmless (neither dev1 nor dev2 pins an identity, so the printed
+    hint is right either way); a mismatch on spinbike-vps is NOT -- running
+    `install` there as `newlevel` would resolve to dev2's entry first and
+    print a hint missing spinbike's required `-i ~/.ssh/spinbike_vps` flag.
+    Cosmetic (this only affects a print-only Discord-config hint on a box
+    that has not yet wired its own local `.env`), left as a documented
+    residual per the FREEZE rather than redesigned (see airuleset#408's own
+    review discussion)."""
     me = _whoami()
     if not me:
         return None
@@ -8504,6 +8512,69 @@ REMOTE_HOSTS = [
         "host": "100.118.174.27",
         "user": "montalu8",
         "repo_path": "~/devel/airuleset",
+    },
+    {
+        # forestshop-dev (airuleset#406, 2026-08-12): owner-dedicated Hetzner
+        # Nbg1 cx23 box for zbynekdrlik/forestshop-app. No tailscale -- the
+        # owner explicitly declined it -- so it is addressed by its own
+        # public DNS name (the ticket's own literal ssh address for BOTH
+        # accounts), not the raw IP 178.105.89.168; the DNS name is already
+        # the address used everywhere (the ticket text, and
+        # forestshop_app's own .claude/rules/deploy.md, which shows
+        # `ssh admin@forestshop-dev.newlevel.media` in routine use). No
+        # `identity` pinned: that same deploy.md file shows the ssh command
+        # already working with NO -i flag from dev1 -- i.e. dev1's own
+        # default key (~/.ssh/id_ed25519) is already authorized there, the
+        # same "default newlevel key, no identity" shape montalu@subdev
+        # already uses. Deliberately NOT the ~/.ssh/forestshop_dev_backup_pull
+        # key found on dev1's disk -- its own comment
+        # (forestshop-dev-backup-pull@dev1) marks it single-purpose for a
+        # backup-pull flow, never general shell access. Full authority
+        # (not registered in AUTHORITY_BY_USER below) per the ticket's own
+        # explicit ask -- this is the owner's own trusted box, not an
+        # external sub-dev stream.
+        "name": "admin@forestshop-dev",
+        "host": "forestshop-dev.newlevel.media",
+        "user": "admin",
+        "repo_path": "~/devel/airuleset",
+    },
+    {
+        # stepan@forestshop-dev -- StepanDK's own isolated dev account on
+        # the SAME box (see the admin@forestshop-dev entry above for the
+        # host/identity rationale -- same shape). No independent evidence
+        # was found confirming this SPECIFIC account's default-key auth
+        # (the deploy.md evidence only ever shows the admin@ account) -- the
+        # supervisor's first live push is the first real proof this
+        # account's default-key auth actually works; a failure here is a
+        # one-line fix (add "identity": "<path>") once the correct key is
+        # known, not a redesign.
+        "name": "stepan@forestshop-dev",
+        "host": "forestshop-dev.newlevel.media",
+        "user": "stepan",
+        "repo_path": "~/devel/airuleset",
+    },
+    {
+        # SpinBike Hetzner VPS (airuleset#408, 2026-08-12): no tailscale --
+        # the owner explicitly declined it (spinbike#350) -- so this is
+        # addressed by its raw public IPv4 with an explicit pinned
+        # identity, the first managed target that cannot use a MagicDNS
+        # name. Shape given verbatim by the maintainer's own comment on the
+        # ticket (issuecomment-5268350062): REMOTE_HOSTS already supports a
+        # keyed public-IP target (see the gatekeeper entry above), no push
+        # code change needed. `identity` is REQUIRED here (unlike
+        # forestshop-dev) because there is no derivable evidence of a
+        # working default-key path, and the ticket explicitly states this
+        # key was freshly generated "for this box only, not shared" --
+        # falling back to no-identity here would silently attempt the
+        # shared dev1/dev2 sshpass password against an account that is NOT
+        # part of that shared-password convention. Full authority (not
+        # registered in AUTHORITY_BY_USER below), same reasoning as
+        # forestshop-dev.
+        "name": "spinbike-vps",
+        "host": "167.233.245.147",
+        "user": "newlevel",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.ssh/spinbike_vps",
     },
 ]
 
