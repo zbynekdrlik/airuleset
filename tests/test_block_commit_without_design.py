@@ -548,10 +548,16 @@ class TestRejectReasonSurfacedInBlockMessage(_Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_reject_reason_for_a_different_issue_is_not_cross_reported(self):
+        # #99's reject reason must never leak into #41's block message --
+        # the STANDING guidance mentions "Architektúra" unconditionally
+        # (locked by test_the_general_guidance_now_mentions_architektura_
+        # and_triage below), so the discriminator here is the PER-REASON
+        # section header, not the bare word.
         self.reject(99, "Architektúra: section missing: structure/topology")
         r = self.run_hook(COMMIT_41)
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertNotIn("Architektúra", r.stderr)
+        self.assertNotIn("was rejected", r.stderr)
+        self.assertNotIn("#99", r.stderr)
 
     def test_the_general_guidance_now_mentions_architektura_and_triage(self):
         # the STANDING guidance text (shown even with no reject reason
