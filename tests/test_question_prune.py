@@ -159,10 +159,6 @@ class PruneAnsweredQuestions(unittest.TestCase):
         self.assertIn("888001", notify.load_questions(self.qpath))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TranscriptFoundBySessionId(unittest.TestCase):
     """2026-07-22 montalu: the ❓ hook records the session's CURRENT dir
     (…/odoo/odoo-slovnormal) but CC keys the transcript by the LAUNCH dir
@@ -279,7 +275,21 @@ class RepingStaleQuestions(unittest.TestCase):
         self.assertTrue(any("deferred sleep-window" in ln for ln in logs), logs)
         self.assertIn("888001", notify.load_questions(self.qpath))
 
+    def _patch_channel(self, value="777001"):
+        # reping re-resolves notification_channel(env=None) itself, which
+        # reads the LIVE ~/.claude/.env (and tmux, via resolve_owner) -- an
+        # unpatched test only passes on a box that HAS a configured Discord
+        # questions channel (adversarial review #368: the retrack assertion
+        # was green here purely because this dev box is provisioned; on a
+        # clean box record_question refuses the empty channel and the test
+        # fails). Patch it to a fixed snowflake so the test is hermetic.
+        p = m.patch.object(notify, "notification_channel",
+                           lambda env=None, owner=None, kind="default": value)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_successful_send_retracks_the_new_message_id_and_drops_the_old(self):
+        self._patch_channel()
         self._record("888001", self._due_ts(), sid="sid-x", cwd=CWD)
         send_fn, calls = self._fake_send(status="sent", mid="999001")
         wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
@@ -289,6 +299,38 @@ class RepingStaleQuestions(unittest.TestCase):
         self.assertEqual(q["999001"]["session"], "sid-x")
         self.assertEqual(q["999001"]["cwd"], CWD)
         self.assertEqual(q["999001"]["ts"], int(self.now))
+
+    def test_sent_without_a_message_id_keeps_the_old_entry(self):
+        # Adversarial review (#368): a genuine POST whose response body did
+        # not parse to an id (_post_discord returns bare True -> send() says
+        # ("sent", None)) must NOT drop the old key -- that re-asked ONCE
+        # and then silently un-tracked the question forever, the exact
+        # silent-loss failure mode #368 exists to kill. The day-bucketed
+        # dedup key caps the same-day retry, so keeping it is spam-safe.
+        self._patch_channel()
+        old_ts = self._due_ts()
+        self._record("888001", old_ts)
+        send_fn, calls = self._fake_send(status="sent", mid=None)
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        q = notify.load_questions(self.qpath)
+        self.assertIn("888001", q)
+        self.assertEqual(q["888001"]["ts"], int(old_ts))
+
+    def test_unresolvable_questions_channel_keeps_the_old_entry(self):
+        # Same review finding, the other reachable leg: record_question
+        # REFUSES a non-numeric/empty channel, so on a box where the
+        # Python-side channel resolution comes up empty the retrack fails
+        # -- the old entry must survive for a later retry, never be
+        # dropped after a single re-ask.
+        self._patch_channel("")
+        old_ts = self._due_ts()
+        self._record("888001", old_ts)
+        send_fn, calls = self._fake_send(status="sent", mid="999001")
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        q = notify.load_questions(self.qpath)
+        self.assertIn("888001", q)
+        self.assertNotIn("999001", q)
+        self.assertEqual(q["888001"]["ts"], int(old_ts))
 
     def test_failed_send_leaves_the_old_entry_untouched_for_a_retry(self):
         old_ts = self._due_ts()
@@ -333,3 +375,7 @@ class RepingStaleQuestions(unittest.TestCase):
         q = notify.load_questions(self.qpath)
         self.assertIn("888001", q)
         self.assertEqual(q["888001"]["ts"], int(old_ts))
+
+
+if __name__ == "__main__":
+    unittest.main()
