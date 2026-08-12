@@ -65,14 +65,21 @@ def _default_gh_stub():
     return _DEFAULT_EMPTY_GH_DIR
 
 
-def run(cmd, home=None, cwd=None, gh_bin=None, user=None):
+def run(cmd, home=None, cwd=None, gh_bin=None, user=None, hook_path=None):
     """`user` (#390): overrides `getpass.getuser()` for the whole hook
     subprocess by setting LOGNAME (checked FIRST by getpass.getuser(),
     before USER/LNAME/USERNAME) -- lets a test simulate filing from a
     specific sub-dev stream account's linux identity without needing a
     real system user. `None` (the default) leaves the real invoking
     session's identity untouched, exactly like every pre-existing test in
-    this file already assumes."""
+    this file already assumes.
+
+    `hook_path` (#390 adversarial-review MINOR-2): run a DIFFERENT copy of
+    the hook script (e.g. one deliberately isolated under a directory with
+    no sibling `airuleset.py`, to prove the import-failure degrade path
+    genuinely skips the gate rather than blocking). `None` (the default)
+    runs the real `HOOK` in this checkout, exactly like every pre-existing
+    test."""
     payload = json.dumps({"tool_input": {"command": cmd}, "session_id": "test-scope-gate"})
     env = dict(os.environ)
     env["HOME"] = home or tempfile.mkdtemp(prefix="airuleset-scopegate-test-")
@@ -81,7 +88,7 @@ def run(cmd, home=None, cwd=None, gh_bin=None, user=None):
         env["LOGNAME"] = user
         env["USER"] = user
     return subprocess.run(
-        ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
+        ["bash", str(hook_path or HOOK)], input=payload, capture_output=True, text=True,
         env=env, cwd=cwd or str(REPO_ROOT),
     )
 
@@ -153,7 +160,7 @@ def _fake_gh_list(tmpdir, issues):
     return str(bin_dir)
 
 
-def _fake_gh_stream(tmpdir, labels, issues=()):
+def _fake_gh_stream(tmpdir, labels, issues=(), call_log=None):
     """A minimal `gh` stub for the #390 stream-routing gate: `gh label list
     --json name ...` prints `labels` (a list of NAME strings) as
     `[{"name": ...}, ...]` JSON when `labels` is not None, else exits 1
@@ -162,7 +169,12 @@ def _fake_gh_stream(tmpdir, labels, issues=()):
     failure, never block on its own. `gh issue list ...` (the #329 near-dup
     check, reached once a filing passes the stream-routing gate) answers
     `issues` (default empty, so near-dup never fires). Never touches the
-    real network."""
+    real network.
+
+    `call_log` (#390 adversarial-review MAJOR-1): when given, EVERY
+    invocation's argv is appended as one line -- lets a test prove a
+    network call (`gh label list`) was, or was NOT, made at all (e.g. for
+    a full-authority filer, which must never pay it)."""
     bin_dir = Path(tmpdir) / "fakebin"
     bin_dir.mkdir(exist_ok=True)
     script = bin_dir / "gh"
@@ -171,6 +183,10 @@ def _fake_gh_stream(tmpdir, labels, issues=()):
         "#!/usr/bin/env python3\n"
         "import sys, json\n"
         "argv = sys.argv[1:]\n"
+        "call_log = %r\n"
+        "if call_log:\n"
+        "    with open(call_log, 'a', encoding='utf-8') as fh:\n"
+        "        fh.write(' '.join(argv) + chr(10))\n"
         "label_rows = %r\n"
         "issues = %r\n"
         "if len(argv) >= 2 and argv[0] == 'label' and argv[1] == 'list':\n"
@@ -181,7 +197,7 @@ def _fake_gh_stream(tmpdir, labels, issues=()):
         "if len(argv) >= 2 and argv[0] == 'issue' and argv[1] == 'list':\n"
         "    print(json.dumps(list(issues)))\n"
         "    sys.exit(0)\n"
-        "sys.exit(1)\n" % (label_rows, issues)
+        "sys.exit(1)\n" % (call_log, label_rows, issues)
     )
     script.chmod(0o755)
     return str(bin_dir)
@@ -1187,6 +1203,127 @@ class TestStreamRoutingGate(TestCase):
         r = run("gh api repos/o/r/issues -X POST -f title=x "
                 "-f body='Dedup-checked: searched, found none\nScope-gate: cross-cutting'",
                 gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestStreamRoutingGateReviewFixes(TestCase):
+    """#390 adversarial-review findings (fresh-context fable review of the
+    already-shipped GREEN commit) -- each proven live against the real
+    shipped hook before being fixed here."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="airuleset-streamroute-review-test-")
+
+    def test_full_authority_filer_never_pays_the_network_label_lookup(self):
+        # MAJOR-1: `_stream_routing_block_reason` used to call the network
+        # `gh label list` BEFORE the cheap, local authority check -- so a
+        # full-authority filer (never gated by this new check at all) paid
+        # a real network round-trip on EVERY filing, fleet-wide, violating
+        # this hook's own #329 "cheap local checks before the network call"
+        # discipline. The authority check must run FIRST.
+        call_log = str(Path(self.tmp) / "gh-calls.log")
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"],
+                                  call_log=call_log)
+        r = run(body_cmd("core ticket", "ordinary core work, no stream label",
+                          scope_gate="cross-cutting"),
+                gh_bin=gh_bin, user="not-a-known-stream-account")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log_text = Path(call_log).read_text() if Path(call_log).exists() else ""
+        self.assertNotIn(
+            "label list", log_text,
+            "a full-authority filer must never pay the network gh label "
+            "list call (#390 adversarial-review MAJOR-1); calls made: %r"
+            % log_text)
+
+    def test_blocked_segment_also_never_pays_the_network_label_lookup(self):
+        # MAJOR-1 companion: a segment that already blocks for a DIFFERENT
+        # reason (here, a full-authority filer with no Scope-gate line at
+        # all) must not pay the network call either -- it never reaches
+        # the crit-validity branch either way, but the ordering fix must
+        # hold regardless of WHICH other branch ultimately wins.
+        call_log = str(Path(self.tmp) / "gh-calls.log")
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"],
+                                  call_log=call_log)
+        r = run(body_cmd("no scope gate", "missing the scope-gate line entirely"),
+                gh_bin=gh_bin, user="not-a-known-stream-account")
+        self.assertEqual(r.returncode, 2, r.stderr)  # blocks on missing Scope-gate
+        log_text = Path(call_log).read_text() if Path(call_log).exists() else ""
+        self.assertNotIn("label list", log_text)
+
+    def test_attached_short_flag_own_label_is_recognized(self):
+        # MAJOR-2: `-lstream:david2` (no space, no `=`) is genuine, real
+        # `gh` syntax (verified live against the real `gh` binary: it
+        # parses identically to `-l stream:david2`, distinct from a truly
+        # unknown flag like `-zstream:david2` which `gh` itself rejects
+        # with "unknown shorthand flag") -- the hook's own label extractor
+        # only recognized the spaced/`=` forms and FALSE-BLOCKED this
+        # compliant, own-label filing.
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        body = ("Dedup-checked: searched, found none\n"
+                "filed for our own work\nScope-gate: cross-cutting\n")
+        cmd = ("cat > body.md <<'EOF'\n%s\nEOF\n"
+               "gh issue create -lstream:david2 -t 'attached form' -F body.md" % body)
+        r = run(cmd, gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_attached_short_flag_with_equals_own_label_is_recognized(self):
+        # MAJOR-2 companion: `-l=stream:david2` -- the other real attached
+        # form (verified live the same way).
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        body = ("Dedup-checked: searched, found none\n"
+                "filed for our own work\nScope-gate: cross-cutting\n")
+        cmd = ("cat > body.md <<'EOF'\n%s\nEOF\n"
+               "gh issue create -l=stream:david2 -t 'attached equals form' -F body.md" % body)
+        r = run(cmd, gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_own_plus_foreign_label_together_needs_no_justification(self):
+        # MINOR-1: a documented, intentional residual -- when the filer's
+        # OWN label is present ALONGSIDE a foreign one, no
+        # Stream-routing: line is required (their own ticket, possibly
+        # cross-tagging a second stream too). Pinned here explicitly so a
+        # future change to `_stream_routing_block_reason`'s `own_label in
+        # applied` check is a deliberate decision, not a silent drift.
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run(body_cmd("both labels", "our own work, also relevant to david's module",
+                          scope_gate="cross-cutting",
+                          labels=["stream:david2", "stream:david"]),
+                gh_bin=gh_bin, user="david2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_authority_import_failure_degrades_never_blocks_on_its_own(self):
+        # MINOR-2: `_filer_authority_and_own_stream`'s `except Exception:
+        # (None, None)` fallback already existed and already worked
+        # functionally -- but had ZERO test coverage (a mutant narrowing
+        # the guard to `if profile == "full":` survived the whole suite).
+        # Run an ISOLATED copy of the hook under a directory with NO
+        # sibling airuleset.py, so `import airuleset` genuinely fails --
+        # the gate must degrade to "cannot verify a stream identity",
+        # never block.
+        #
+        # `cwd` is ALSO pointed at the isolated dir, not just `repo_dir`
+        # (via `hook_path`'s own directory) -- `python3 -` (reading its
+        # script from stdin) implicitly prepends "" (the process's OWN
+        # CURRENT WORKING DIRECTORY) to `sys.path`, so leaving `cwd` at
+        # this checkout's real root would let `import airuleset` silently
+        # succeed via THAT fallback regardless of what `repo_dir` says --
+        # verified live: the first draft of this test (cwd left at
+        # REPO_ROOT) reproduced exactly that false pass. In real
+        # production the hook's `cwd` is always the PROJECT being worked
+        # (never airuleset's own checkout), so this fallback never rescues
+        # it there -- only this test's OWN harness needed the extra
+        # isolation to reproduce the same absence.
+        isolated_repo = Path(self.tmp) / "isolated-repo"
+        isolated_hooks = isolated_repo / "hooks"
+        isolated_hooks.mkdir(parents=True)
+        isolated_hook = isolated_hooks / "block-ungated-issue-filing.sh"
+        isolated_hook.write_text(HOOK.read_text())
+        isolated_hook.chmod(0o755)
+        gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
+        r = run(body_cmd("isolated import failure", "no label at all",
+                          scope_gate="cross-cutting"),
+                gh_bin=gh_bin, user="david2", hook_path=str(isolated_hook),
+                cwd=str(isolated_repo))
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
