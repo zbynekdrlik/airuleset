@@ -31,6 +31,7 @@ import json
 import os
 import sys
 import time
+import types
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -38,6 +39,7 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import airuleset
 import watchdog as wd
 from watchdog import goal
 
@@ -999,6 +1001,106 @@ class TestScanGoalMarkersSimplified(unittest.TestCase):
         _off, mark = wd.scan_goal_markers(tpath, off=0)
         self.assertIsNotNone(mark)
         self.assertEqual(mark.get("state"), "set")
+
+
+# --------------------------------------------------------------------------- #
+# X. CLI wiring — `airuleset.py goal-arm --self` (#403-review MAJOR M3): the
+#    model's ONE proven origin had zero test coverage anywhere. Mirrors
+#    test_compact.py's own `TestCompactRequestCli` shape.
+# --------------------------------------------------------------------------- #
+
+def _garm_args(**kw):
+    kw.setdefault("self", False)
+    kw.setdefault("template", "")
+    return types.SimpleNamespace(**kw)
+
+
+class TestGoalArmCli(unittest.TestCase):
+    def setUp(self):
+        self.reqp, self.syncp = _isolate_goal_state(self)
+
+    def test_no_self_flag_exits_nonzero(self):
+        with m.patch("sys.stderr"):
+            with self.assertRaises(SystemExit) as cm:
+                airuleset.cmd_goal_arm(_garm_args())
+        self.assertNotEqual(cm.exception.code, 0)
+
+    def test_unresolvable_pane_exits_nonzero(self):
+        with m.patch.object(goal._compact, "resolve_self_pane",
+                            return_value=("", "", "")):
+            with m.patch("sys.stderr"):
+                with self.assertRaises(SystemExit) as cm:
+                    airuleset.cmd_goal_arm(_garm_args(self=True))
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(goal.load_goal_requests(self.reqp), {})
+
+    def test_unresolvable_template_exits_nonzero(self):
+        with m.patch.object(goal._compact, "resolve_self_pane",
+                            return_value=("%3", "/somewhere", "sess-a")):
+            with m.patch.object(goal, "goal_template_for_authority",
+                                return_value=""):
+                with m.patch("sys.stderr"):
+                    with self.assertRaises(SystemExit) as cm:
+                        airuleset.cmd_goal_arm(_garm_args(self=True))
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(goal.load_goal_requests(self.reqp), {})
+
+    def test_self_records_under_resolved_authority_and_prints_disposition(self):
+        with m.patch.object(goal._compact, "resolve_self_pane",
+                            return_value=("%3", "/somewhere", "sess-b")):
+            with m.patch("airuleset.resolve_authority", return_value="full"):
+                with m.patch.object(goal, "deliver_goal",
+                                    return_value="skip:no-pane"):
+                    buf = []
+                    with m.patch("sys.stdout") as out:
+                        out.write = lambda s: buf.append(s)
+                        airuleset.cmd_goal_arm(_garm_args(self=True))
+        self.assertEqual("".join(buf), "skip:no-pane")
+        entry = goal.load_goal_requests(self.reqp).get("sess-b")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["authority"], "full")
+        self.assertEqual(entry["origin"], "self-callback")
+
+    def test_explicit_template_overrides_resolve_authority(self):
+        with m.patch.object(goal._compact, "resolve_self_pane",
+                            return_value=("%3", "/somewhere", "sess-c")):
+            with m.patch("airuleset.resolve_authority",
+                        side_effect=AssertionError("must not be called "
+                                                    "when --template is given")):
+                with m.patch.object(goal, "deliver_goal",
+                                    return_value="skip:no-pane"):
+                    with m.patch("sys.stdout"):
+                        airuleset.cmd_goal_arm(
+                            _garm_args(self=True, template="fork-no-merge"))
+        entry = goal.load_goal_requests(self.reqp).get("sess-c")
+        self.assertEqual(entry["authority"], "fork-no-merge")
+
+    def test_self_on_a_genuinely_idle_pane_actually_sends_end_to_end(self):
+        # Not a mocked `deliver_goal` here -- a real call, through the
+        # real CLI entry point, against a real (fake-tmux) idle pane, all
+        # the way down.
+        proj = TemporaryDirectory()
+        self.addCleanup(proj.cleanup)
+        cwd = "/home/newlevel/devel/goal-cli-e2e"
+        sid = "sess-cli-e2e"
+        _write_marker_transcript(proj.name, cwd, sid)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", cwd, "111")],
+                                   GOAL_IDLE_CAP, model_type=True)
+        with m.patch.object(goal._compact, "resolve_self_pane",
+                            return_value=("%9", cwd, sid)):
+            with m.patch.object(wd, "_default_run", tmux):
+                with m.patch.object(wd, "PROJECTS_DIR", proj.name):
+                    with m.patch("airuleset.resolve_authority",
+                                return_value="full"):
+                        buf = []
+                        with m.patch("sys.stdout") as out:
+                            out.write = lambda s: buf.append(s)
+                            airuleset.cmd_goal_arm(_garm_args(self=True))
+        self.assertEqual("".join(buf), "sent")
+        self.assertTrue(any("/goal" in t for t in tmux.typed_texts()),
+                        tmux.typed_texts())
+        # Cleared on the terminal word -- nothing left pending.
+        self.assertEqual(goal.load_goal_requests(self.reqp), {})
 
 
 if __name__ == "__main__":
