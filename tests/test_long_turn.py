@@ -146,7 +146,22 @@ def _isolate_compact_state(testcase):
     d = TemporaryDirectory()
     testcase.addCleanup(d.cleanup)
     for name, fname in (("compact_claims_path", "claims.json"),
-                        ("compact_sync_log_path", "sync.log")):
+                        ("compact_sync_log_path", "sync.log"),
+                        # #400-review MINOR-7 (fresh-context adversarial
+                        # review) -- #400 FIX 4's cooldown gate is
+                        # UNCONDITIONAL at every send point, unlike the
+                        # pre-existing delivered-dedup calls (which
+                        # short-circuit on a blank msg_hash before ever
+                        # touching disk). A test in this file that reaches
+                        # a real send point without this isolation would
+                        # write a real delivery timestamp into the
+                        # developer's ACTUAL ~/.claude/compact-
+                        # delivered.json, racing the live systemd watchdog
+                        # exactly like the two paths above already guard
+                        # against -- see test_compact_request.py's own
+                        # sibling fix (_isolate_compact_claims) for the
+                        # identical reasoning.
+                        ("compact_delivered_path", "delivered.json")):
         p = m.patch.object(wd, name, return_value=Path(d.name) / fname)
         p.start()
         testcase.addCleanup(p.stop)
