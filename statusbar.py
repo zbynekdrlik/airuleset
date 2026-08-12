@@ -37,7 +37,6 @@ import burn
 TICKETS_TTL_S = 120                 # refresh the open-issues count at most this often
 SPAWN_GUARD_S = 30                  # min seconds between background refresh spawns
 AUTOPILOT_RUN_WINDOW_S = 6 * 3600   # a run-card younger than this = active run
-QUESTIONS_TTL_S = 24 * 3600         # mirror notify._QUESTIONS_TTL_S (map prune TTL)
 CTX_GREEN_MAX = 150_000             # context-cost segment colour thresholds
 CTX_YELLOW_MAX = 400_000            # (raw token count, not %)
 
@@ -398,10 +397,15 @@ def questions_segment(cwd, now=None, home=None):
 
     Source: ~/.claude/discord-questions.json — notify.record_question adds an
     entry per ❓ ping; the watchdog drops it when the user's reply is routed
-    into the asking session (job 7) or when the session got a later HUMAN
-    prompt (answered at the terminal — prune_answered_questions). Entries past
-    QUESTIONS_TTL_S are ignored to match the map's own prune TTL."""
-    now = time.time() if now is None else now
+    into the asking session (job 7), when the session got a later HUMAN
+    prompt (answered at the terminal — prune_answered_questions), or once the
+    hard cap trims the oldest. #368: the map no longer age-prunes an
+    unanswered entry (the watchdog RE-ASKS it daily instead of letting it
+    expire), so anything still IN the map is by definition still open — no
+    age filter here any more either; showing 'Q 0' while Discord is actively
+    re-pinging about an open question would be actively misleading. `now` is
+    kept as a parameter for call-site/test-signature compatibility (no age
+    comparison is left to need it any more)."""
     d = _load(_claude_dir(home) / "discord-questions.json")
     if not d:
         return ""
@@ -417,8 +421,7 @@ def questions_segment(cwd, now=None, home=None):
 
     local = 0
     for v in d.values():
-        if not (isinstance(v, dict)
-                and now - (v.get("ts") or 0) <= QUESTIONS_TTL_S):
+        if not isinstance(v, dict):
             continue
         if _same_project(v.get("cwd")):
             local += 1

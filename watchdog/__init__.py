@@ -2928,11 +2928,14 @@ def _transcript_for_session(projects_dir, sid, cwd):
 def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
     """Drop question-map entries whose asking session received a HUMAN prompt
     AFTER the ❓ was pinged — the question was answered at the terminal, so
-    the entry would otherwise linger until the 24h TTL and inflate the
-    statusline 'otazky' badge (user complaint 2026-07-22: 14 stale questions
-    shown in a project with zero). Safe by design: if the question is somehow
-    still pending after a human prompt, the loop re-asks (the prompt cleared
-    the ping dedup) and re-records a fresh entry."""
+    the entry would otherwise linger and inflate the statusline 'otazky'
+    badge (user complaint 2026-07-22: 14 stale questions shown in a project
+    with zero). #368: the map no longer has an AGE-based TTL to fall back on
+    either — an entry only ever leaves the map here (answered in-session), on
+    a routed Discord reply (job 7), or the hard cap — so this is now the
+    ONLY terminal-answer detection there is. Safe by design: if the question
+    is somehow still pending after a human prompt, the loop re-asks (the
+    prompt cleared the ping dedup) and re-records a fresh entry."""
     from notify import load_questions, drop_question
     logs = []
     try:
@@ -2956,6 +2959,121 @@ def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
                 drop_question(qid)
             logs.append("question answered in-session — pruned %s [%s]"
                         % (str(qid)[-6:], project_label(cwd)))
+    return logs
+
+
+# #368 -- an unanswered ❓ is re-asked FRESH AND WHOLE at least once a day
+# instead of the map's old age-based TTL silently deleting it (see the
+# module comment above notify's own question-map constants for the user's
+# own directive this responds to). One question per QUESTION_REPING_S
+# window, via the SAME bucketed-dedup-key shape every other daily-reping
+# job in this file already uses (`delivery_stall_watch`/
+# `compact_stall_watch`/the net-drift alarm/the gk-request backstop's own
+# staged schedule): `dedup_key="...:%d" % (now // reping)` — a retry within
+# the SAME day-bucket is deduped by notify.send()'s own marker (the "at
+# most ONE sanctioned daily re-ask" cap, with zero new bookkeeping needed),
+# while a genuinely NEW day always gets a fresh key. This is a completely
+# different, session-turn-scoped dedup layer than LASTQ (the "verbatim
+# repeat within one still-blocked turn" mechanism) — untouched by any of
+# this.
+QUESTION_REPING_S = 24 * 3600
+
+
+def _in_sleep_window(now, tz="Europe/Bratislava"):
+    """True during the 00:00-05:59 Europe/Bratislava sleep window a question
+    re-ask must defer past (message-status-marker.md's night-question
+    policy — applied here in code because nothing SESSION-side enforces it
+    for a question the session itself may never revisit, #368). Fail-safe:
+    an unresolvable clock/tz never blocks a re-ask forever, it just answers
+    "not asleep" — a question must still eventually be asked, never
+    silently parked on a tz error."""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        hour = datetime.fromtimestamp(now, ZoneInfo(tz)).hour
+    except Exception:
+        return False
+    return 0 <= hour < 6
+
+
+def reping_stale_questions(now, send_fn, dry_run=False, path=None,
+                           owner_by_sid=None, owner_by_cwd=None,
+                           owners_seen=None, account_owner="",
+                           reping=None):
+    """#368 -- see the section comment above QUESTION_REPING_S. For every
+    question-map entry whose `ts` is >= `reping` old: skip it (leaving `ts`
+    untouched, so the SAME entry is re-evaluated -- and fires -- on the very
+    next sweep) while inside the 00:00-05:59 sleep window; otherwise repost
+    the WHOLE stored block VERBATIM (`rec["block"]`, falling back to the
+    collapsed `rec["question"]` for a pre-#368 legacy entry with no `block`
+    field -- never a shortened/summarised form, the same "nanovo a cela"
+    discipline a session's own re-ask already follows). Only on a CONFIRMED
+    `"sent"` status does the map get touched at all: the freshly-posted
+    message id is re-tracked (so a reply to the just-re-asked, phone-visible
+    message still routes to the session like job 7 already does for the
+    original) and the old map key is dropped. Any other status ("dedup",
+    "error", "no-config") leaves the entry exactly as it was, so the next
+    sweep retries -- a transient failure must never silently defer a whole
+    day's worth of "ask again"."""
+    from notify import (load_questions, drop_question, record_question,
+                        notification_channel)
+    reping = QUESTION_REPING_S if reping is None else reping
+    owner_by_sid = owner_by_sid or {}
+    owner_by_cwd = owner_by_cwd or {}
+    ambiguous = len(set(owners_seen or ())) > 1
+    logs = []
+    if send_fn is None:
+        return logs
+    try:
+        qmap = load_questions(path)
+    except Exception:
+        return logs
+    night = _in_sleep_window(now)
+    for qid, rec in sorted(qmap.items()):
+        if not isinstance(rec, dict):
+            continue
+        ts = rec.get("ts") or 0
+        if now - ts < reping:
+            continue                            # not due yet
+        block = str(rec.get("block") or rec.get("question") or "").strip()
+        if not block:
+            continue
+        sid = str(rec.get("session") or "")
+        cwd = str(rec.get("cwd") or "")
+        if night:
+            logs.append("question-reping deferred sleep-window %s"
+                        % str(qid)[-6:])
+            continue
+        owner = (owner_by_sid.get(sid)
+                or (owner_by_cwd.get(cwd) if cwd else None)
+                or ("" if ambiguous else account_owner)
+                or None)
+        status, new_mid = send_fn(
+            block, owner=owner, kind="questions",
+            dedup_key="question-reping:%s:%d" % (qid, int(now // reping)),
+            dry_run=dry_run, return_message_id=True)
+        logs.append("question-reping %s -> %s [%s]"
+                    % (str(qid)[-6:], status, project_label(cwd)))
+        if dry_run or status != "sent":
+            continue
+        # Adversarial review (#368): drop the OLD key ONLY once the fresh
+        # message id is genuinely re-tracked. "sent" with no usable id
+        # (Discord 2xx with an unparseable body -> _post_discord's bare
+        # True), or a record_question refusal / failed save (no resolvable
+        # questions channel on THIS box, a non-numeric id, a disk error)
+        # used to fall through to drop_question anyway -- re-asking ONCE
+        # and then silently UN-TRACKING the question forever, the exact
+        # silent-loss failure mode this function exists to kill. Keeping
+        # the entry is spam-safe: the day-bucketed dedup key above already
+        # caps this qid at one genuine send per bucket, so a kept entry
+        # only retries the re-tracking on a later sweep/bucket.
+        retracked = False
+        if new_mid:
+            ch = notification_channel(owner=owner, kind="questions") or ""
+            retracked = record_question(new_mid, ch, sid, cwd, now=now,
+                                        path=path, question=block)
+        if retracked:
+            drop_question(qid, path)
     return logs
 
 
@@ -16468,7 +16586,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           that repo. Both dedup on their own bounded state lists
           (`dreact_done`/`dcard_done`, mirroring `dreply_done`) and never guess a
           delivery target — an untracked flagged message, or one with no live
-          session/repo pane anywhere, is silently skipped and retried next sweep;
+          session/repo pane anywhere, is silently skipped and retried next sweep.
+          A THIRD extension, always-on (#368, no `discord_fetch` needed — it
+          only posts, it never reads Discord): any question left in the map
+          once the terminal-answer prune above has run is a genuinely still-
+          unanswered ❓, and `reping_stale_questions` re-asks it FRESH AND
+          WHOLE once every `QUESTION_REPING_S` (24h) instead of the map's old
+          age-based TTL silently deleting it — deferred, never cancelled,
+          during the 00:00-05:59 Europe/Bratislava sleep window;
 
       (8) (only when `bounce_fetch` is given) BOUNCE BACKSTOP — open `prio:bounce`
           (gatekeeper-returned) tickets for a repo this box touches → nudge the
@@ -18037,13 +18162,29 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs.append("discord-reply error: %r" % (e,))
 
     # Terminal-answered ❓ cleanup — a question answered by a HUMAN prompt in
-    # the asking session leaves the map NOW, not at the 24h TTL (it feeds the
-    # statusline 'otazky' badge, which must be trustworthy per stream).
+    # the asking session leaves the map NOW, not on some later timer (it
+    # feeds the statusline 'otazky' badge, which must be trustworthy per
+    # stream).
     try:
         logs += prune_answered_questions(now, projects_dir=projects_dir,
                                          dry_run=dry_run)
     except Exception as e:
         logs.append("question-prune error: %r" % (e,))
+
+    # #368 -- an unanswered ❓ that survives the pruning above (nobody
+    # answered it, at the terminal or on Discord) is now re-asked FRESH AND
+    # WHOLE once a day instead of quietly expiring — an extension of job 7's
+    # own question-tracking mechanism (never a new job, per the FREEZE).
+    # Needs only `send_fn` (always resolved by now), not `discord_fetch` —
+    # it posts, it never reads Discord.
+    try:
+        logs += reping_stale_questions(now, send_fn, dry_run=dry_run,
+                                       owner_by_sid=owner_by_sid,
+                                       owner_by_cwd=owner_by_cwd,
+                                       owners_seen=owners_seen,
+                                       account_owner=account_owner)
+    except Exception as e:
+        logs.append("question-reping error: %r" % (e,))
 
     # #255 (adversarial review, MAJOR finding): jobs 8/9 must NOT reuse the
     # bare `sweep_deadline` above -- that deadline is scoped to the

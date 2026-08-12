@@ -1664,10 +1664,13 @@ class SharedAccountSliceScoping(unittest.TestCase):
 class QuestionsSegment(unittest.TestCase):
     """'Q N' badge — unanswered ❓ pings SCOPED to the session's project
     (2026-07-22 complaint: a machine-global count showed 14 questions in a
-    project that had zero). Hidden at 0, TTL-matched to the map's own prune
-    window. #313 pt 5 REMOVED the cross-project '· inde M' form entirely —
-    a pending question anywhere already pings the phone via Discord
-    regardless of which project's footer is on screen."""
+    project that had zero). Hidden at 0. #368: no age filter any more —
+    the map itself no longer age-prunes an unanswered entry (it is
+    re-asked daily instead of expiring), so anything still in the map is
+    still open and must still be counted, however old. #313 pt 5 REMOVED
+    the cross-project '· inde M' form entirely — a pending question
+    anywhere already pings the phone via Discord regardless of which
+    project's footer is on screen."""
 
     CWD = "/home/x/devel/demo"
 
@@ -1710,12 +1713,14 @@ class QuestionsSegment(unittest.TestCase):
         self._seed({"1": {"cwd": self.CWD + "/", "ts": now - 60}})
         self.assertIn("Q 1", self._seg(cwd=self.CWD + "/", now=now))
 
-    def test_stale_entries_past_ttl_not_counted(self):
+    def test_old_entries_still_pending_daily_reping_are_still_counted(self):
+        # #368: an entry the map still tracks is by definition still open
+        # (it is being re-asked daily, never silently expired) — an old
+        # `ts` must NOT drop it from the badge any more.
         now = time.time()
-        self._seed({"1": {"cwd": self.CWD,
-                          "ts": now - statusbar.QUESTIONS_TTL_S - 5},
+        self._seed({"1": {"cwd": self.CWD, "ts": now - 30 * 24 * 3600},
                     "2": {"cwd": self.CWD, "ts": now - 60}})
-        self.assertIn("Q 1", self._seg(now=now))
+        self.assertIn("Q 2", self._seg(now=now))
 
     def test_hidden_at_zero_and_when_map_missing(self):
         self.assertEqual(self._seg(), "")
@@ -1727,10 +1732,10 @@ class QuestionsSegment(unittest.TestCase):
         self._seed({"1": "not-a-dict", "2": {"cwd": self.CWD, "ts": now}})
         self.assertIn("Q 1", self._seg(now=now))
 
-    def test_ttl_mirrors_notify_prune_ttl(self):
-        # the badge must age out exactly when the map itself prunes
-        import notify
-        self.assertEqual(statusbar.QUESTIONS_TTL_S, notify._QUESTIONS_TTL_S)
+    def test_no_ttl_constant_survives_the_368_removal(self):
+        # #368: the badge's own age filter (and its mirrored TTL constant)
+        # is gone — nothing left to keep in sync with notify's own map.
+        self.assertFalse(hasattr(statusbar, "QUESTIONS_TTL_S"))
 
     def test_shim_renders_the_badge(self):
         import airuleset
