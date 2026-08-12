@@ -52,10 +52,19 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             worker dispatched in the very same turn can be briefly
             invisible to the live-tasks signals.
             Every condition above is an UNCONDITIONAL hard skip — none of
-            them has a time-boxed override any more (the #400 fix this
+            them has a TIME-BOXED override any more (the #400 fix this
             collapse builds on removed the two that used to: the
             live-tasks defer's "deliver anyway past grace" escape, and the
-            `⏳`/`❓` marker's "hold-grace" escape). All pass → type
+            `⏳`/`❓` marker's "hold-grace" escape). Conditions (b) and (c)
+            DO carry one narrow, EVIDENCE-based (never time-boxed)
+            exemption (#425): when `origin` is `self-callback` AND the
+            SAME last-real-turn text that carries the `⏳` marker ALSO
+            contains the canonical `## ✅ Work Complete` heading, both
+            checks stand down for THAT evaluation — see
+            `_compact_self_reported_complete`'s own docstring for the full
+            reasoning (a fable-advisor-reviewed decision) and its
+            deliberately-accepted residual. `❓` is NEVER exempted, under
+            any origin or any content, ever (#333). All pass → type
             `/compact`, log `SEND`, clear the request. Any check fails →
             log `SKIP reason=<x>`, and the request is LEFT PENDING for the
             next periodic sweep (`compact_sweep`, below) to re-evaluate —
@@ -112,6 +121,7 @@ would silently stop seeing such a patch.
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -165,11 +175,27 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
     earlier pending request for the SAME session, except its `ts`: `ts` is
     set ONCE, on the call that CREATES the entry, and preserved
     UNCONDITIONALLY on every later re-record for the same still-pending
-    session (`cwd`/`origin` always take the newest call's values). This is
+    session (`cwd` always takes the newest call's value). This is
     the #400 non-refreshable age-cap invariant — a request whose anchor
     can be refreshed by an ordinary re-record never actually ages out, no
     matter how stale it genuinely is. Fail-safe (never raises). Returns
     True on success.
+
+    ORIGIN NEVER DOWNGRADES FROM `self-callback` (#402-review MAJOR-1).
+    The SubagentStop hook fires under the SUPERVISOR's own sid on every
+    worker return — routine in #317's parallel-round shape — and can
+    re-record a STILL-PENDING self-callback request with
+    origin="subagent-stop" (or a blank/None origin) before it is ever
+    delivered. `origin` otherwise "always takes the newest call's value"
+    (per the paragraph above, unchanged for every OTHER pairing), which
+    would silently strip the #425 exemption from a turn that genuinely
+    earned it (own "## Work Complete" heading + trailing "more workers
+    still dispatched" tail) — live-confirmed on this box's own real
+    `~/.claude/compact-requests.json`. A later self-callback re-record
+    still correctly UPGRADES a pending subagent-stop/blank origin (this
+    is unaffected — the newest-value rule still applies in that
+    direction); only a self-callback -> anything-else transition on an
+    ALREADY-pending entry is refused.
 
     #402-review MINOR-2 was CONSIDERED and REJECTED here, deliberately: a
     re-record landing on an already-EXPIRED prior entry (>
@@ -201,8 +227,12 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
     prior = d.get(session)
     ts = prior.get("ts") if isinstance(prior, dict) and prior.get("ts") is not None \
         else int(now)
-    d[session] = {"cwd": str(cwd or ""), "ts": ts,
-                 "origin": str(origin or "").strip()}
+    new_origin = str(origin or "").strip()
+    prior_origin = prior.get("origin") if isinstance(prior, dict) else None
+    if prior_origin == _COMPACT_SELF_CALLBACK_ORIGIN \
+            and new_origin != _COMPACT_SELF_CALLBACK_ORIGIN:
+        new_origin = prior_origin
+    d[session] = {"cwd": str(cwd or ""), "ts": ts, "origin": new_origin}
     return _save_compact_requests(d, path)
 
 
@@ -360,22 +390,154 @@ _COMPACT_PROVEN_BOUNDARY_ORIGINS = frozenset(
     (_COMPACT_PROVEN_BOUNDARY_ORIGIN, _COMPACT_SELF_CALLBACK_ORIGIN))
 
 # `⏳` (still working) and `❓` (blocked on the user) both positively say
-# "this is not a completed-ticket boundary" — neither is relaxed for
-# either origin (a supervisor's `⏳` refers to the NEXT batch, and a `❓`
-# is genuinely undurable state either way; see #333's own live forensic
-# evidence for why an earlier per-origin relaxation was reversed).
+# "this is not a completed-ticket boundary" — `❓` is NEVER relaxed for
+# either origin, at any content, ever (genuinely undurable state either
+# way; see #333's own live forensic evidence for why an earlier per-origin
+# relaxation was reversed). `⏳` gets exactly ONE narrow, evidence-based
+# exemption — see `_compact_self_reported_complete` below (#425).
 _COMPACT_NON_BOUNDARY_MARKERS = ("❓", "⏳")
 
+# The SAME canonical heading `hooks/stop-check-prose-violations.sh`'s own
+# `IS_COMPLETION_HEADING` classifier anchors on (`^## ✅ Work Complete|^✅
+# Work Complete`) — reused here so a session's own report is read by the
+# identical rule that enforces it must be genuine, never a parallel,
+# independently-drifting spelling.
+_COMPACT_COMPLETION_HEADING_RX = re.compile(
+    r"(?m)^(?:## )?✅ Work Complete\b")
 
-def _compact_not_at_boundary(cwd, sid, projects_dir=None):
+
+def _compact_transcript_completion_heading(tpath):
+    """True when `tpath`'s own LAST REAL assistant turn (the same walk
+    `transcript_last_marker` uses) carries the canonical `## ✅ Work
+    Complete` heading anywhere in its full text — not just the tail 1-3
+    lines `transcript_last_marker_line` trims to, since the heading sits
+    at the TOP of a real completion report while the `⏳` tail this
+    function is paired against sits at the BOTTOM of the SAME turn.
+    Unreadable/missing transcript -> False, never guessed positive.
+
+    KNOWN, ACCEPTED RESIDUAL (#402-review MINOR-2, probe-confirmed, never
+    observed in production). `_COMPACT_COMPLETION_HEADING_RX`'s `^`
+    anchor (per #402-review MINOR-1, locked by
+    `test_heading_mentioned_mid_line_is_not_a_genuine_heading`) refuses a
+    MID-LINE mention, but not a genuine LINE-START quote inside a fenced
+    code block (e.g. the same turn's OWN prose citing a worked example
+    that happens to open a fenced line with the literal heading text).
+    Closing this needs a fence-aware scan (track ``` open/close state
+    across the whole text before matching), which was DELIBERATELY not
+    added: `_compact_self_reported_complete`'s own docstring already
+    rejects free-prose content-sniffing on the grounds that it is BOTH
+    unnecessary (the montalu3-class gap it would also need to solve has
+    an already-accepted recovery path) and unreliable — the SAME
+    reasoning applies one level up here. The exposure is narrow by
+    construction: it needs `origin == self-callback` AND the session's
+    OWN current last real turn to independently end on a genuine
+    unresolved `⏳`/live-task signal AND ALSO quote the heading at a true
+    line start earlier in that SAME turn — matching this repo's own
+    established "document as an accepted residual, don't chase it
+    pre-emptively" precedent (see #331's F3/F4) rather than expanding
+    scope on a shape the corpus has never actually produced."""
+    text = watchdog.transcript_last_assistant_text(str(tpath))
+    return bool(_COMPACT_COMPLETION_HEADING_RX.search(text))
+
+
+def _compact_self_reported_complete(origin, tpath):
+    """The #425 exemption gate, shared by BOTH condition (c)'s `⏳` veto
+    and condition (b)'s live-tasks veto (never condition (c)'s `❓` veto,
+    which this function is never even consulted for — see
+    `_compact_not_at_boundary` below).
+
+    ROOT CAUSE. A supervisor session legitimately, per
+    `message-status-marker.md`'s own contract, ends a turn with BOTH the
+    canonical `## ✅ Work Complete` heading for a ticket that just
+    genuinely finished (its own state already durable — a merged PR, a
+    closed issue, nothing living only in this session's context) AND a
+    trailing `⏳ WORKING: <N more workers still dispatched>` tail, because
+    OTHER, INDEPENDENT parallel `autopilot-worker` subagents — each its
+    own worktree, its own transcript, its own context that survives this
+    session's own compaction untouched — are still running (#317's
+    worktree-isolation model). The pre-#425 unconditional `⏳` veto
+    (#333) could not tell that turn apart from a genuinely-unfinished
+    mid-work `⏳` and deferred it FOREVER (repeated `SKIP not-a-boundary`
+    every ~60s sweep until the 30-min request-age cap silently discarded
+    it) — reproduced live on two boxes, 8x each.
+
+    CHOSEN APPROACH (fable-advisor-reviewed, gate OPEN, #425): exempt
+    BOTH condition (b) and condition (c) together, under the SAME single,
+    narrow, EVIDENCE-based boolean — `origin == self-callback` AND the
+    transcript's own LAST REAL turn (the exact turn carrying the `⏳`
+    being evaluated) ALSO contains the completion heading. This is
+    deliberately NOT the #394-style time-boxed "hold-grace, then deliver
+    anyway" escape #402 removed — every operand is a byte-level fact of
+    the transcript AS IT EXISTS at evaluation time, so the exemption is
+    self-deactivating the moment the session's last real turn moves on to
+    something without the heading. `origin` is checked FIRST (a cheap
+    comparison) so a non-self-callback caller (`subagent-stop`, or the
+    periodic sweep's own blank/`None` origin) never even pays for the
+    transcript-text read — the exemption is trusted ONLY for the one
+    caller whose own durability claim it is built to honour; a
+    `subagent-stop` boundary is proven a completely different, unrelated
+    way and never reads this narrow trust.
+
+    Condition (b)'s two live-task signals (CC's own "Waiting for N
+    background agents" pane text; a dispatched sibling's own
+    `subagents/*.jsonl` freshness) are agent-dispatch SPECIFIC — they
+    structurally cannot see, and never could, a generic background Bash
+    job (e.g. a `run_in_background` CI-wait). So relaxing (b) here does
+    not weaken any protection against that shape; it was never provided.
+    The always-unconditional ~2s `COMPACT_MIN_REQUEST_AGE_S` floor against
+    the #238 same-turn-dispatch race is UNTOUCHED by this exemption.
+
+    REJECTED ALTERNATIVE: a content classifier trying to additionally
+    distinguish "the ⏳ narrates an INDEPENDENT worker" from "the ⏳
+    narrates THIS SAME reported ticket's own still-running work" (the
+    "montalu3-class" case named in #425's own mandate) — e.g. sniffing
+    the `⏳` text for a matching ticket number or words like "CI"/
+    "verify". Rejected because it is BOTH unnecessary and unreliable: (a)
+    that bad shape can only ever arise from a genuinely-BACKGROUNDED wait
+    (a foreground poll could not have finished generating the report text
+    at all, since the turn would not yet have ended), and for exactly
+    that shape `ci-monitoring.md`'s own already-accepted doctrine already
+    states the notification linkage MAY be lost across a compaction
+    boundary and the established recovery is a routine re-derivation from
+    the durable resource (e.g. `gh run view`) on the next turn — a known,
+    bounded, ALREADY-accepted risk this repo treats as normal elsewhere,
+    never as something needing new prevention machinery; (b) condition
+    (b) never protected this specific sub-shape ANYWAY (agent-dispatch
+    specific, as above), so the blanket pre-#425 `⏳` veto that DID defend
+    it was a side effect of the very bug being fixed here, not a
+    deliberate policy; and (c) free-prose keyword-sniffing (Slovak or
+    English, arbitrary phrasing) is exactly the guessing-era scaffolding
+    #402 deliberately removed — a sniff's false negatives would silently
+    reopen #425 for real completed-ticket-with-parallel-workers turns,
+    while its true positives buy nothing the existing recovery path
+    doesn't already provide. So this fix DELIBERATELY delivers on the
+    montalu3-class shape too — an explicit, test-locked, ACCEPTED
+    trade-off, not an oversight (see
+    `test_montalu3_class_same_ticket_background_wait_still_delivers_by_
+    design` in `tests/test_compact.py`)."""
+    if origin != _COMPACT_SELF_CALLBACK_ORIGIN:
+        return False
+    if tpath is None:
+        return False
+    return _compact_transcript_completion_heading(tpath)
+
+
+def _compact_not_at_boundary(cwd, sid, projects_dir=None, origin=None):
     """Condition (c), first half — True when the session's CURRENT last
     real turn carries a `⏳`/`❓` marker. Unmeasurable (no transcript)
-    never blocks."""
+    never blocks. `❓` is UNCONDITIONAL — the #425 exemption below is
+    never even consulted for it. `⏳` gets the narrow #425 exemption via
+    `_compact_self_reported_complete` (see its own docstring)."""
     pdir = projects_dir or watchdog.PROJECTS_DIR
     tpath = watchdog._transcript_for_session(pdir, sid, cwd)
     if tpath is None:
         return False
-    return watchdog.transcript_last_marker(tpath) in _COMPACT_NON_BOUNDARY_MARKERS
+    marker = watchdog.transcript_last_marker(tpath)
+    if marker not in _COMPACT_NON_BOUNDARY_MARKERS:
+        return False
+    if marker == "⏳" and _compact_self_reported_complete(origin, tpath):
+        return False
+    return True
 
 
 def _compact_session_unresumed(cwd, sid, projects_dir=None, origin=None):
@@ -446,7 +608,7 @@ _LIVE_BG_TASK_WINDOW_S = 120
 
 
 def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
-                               captured=None):
+                               captured=None, origin=None):
     """True when EITHER of two independent signals says this session
     still has background work in flight: (a) the pane's own capture shows
     CC's ambient "Waiting for N background agents" row, or (b) a sibling
@@ -455,7 +617,41 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
     (deferral is an optimization of an already-real safety property,
     never itself a new way to block on "we don't know"). `captured`
     (optional): reuse an already-known capture rather than issuing a
-    fresh tmux round-trip."""
+    fresh tmux round-trip.
+
+    #425: a genuine positive from EITHER signal is still subject to the
+    SAME narrow, evidence-based exemption `_compact_not_at_boundary`
+    applies to the `⏳` marker — see `_compact_self_reported_complete`'s
+    own docstring for the full reasoning. The exemption check is
+    deliberately consulted ONLY once a live task is already found (never
+    up front) so the common no-live-tasks case pays nothing extra.
+
+    COST FOR A NON-SELF-CALLBACK ORIGIN (#402-review MINOR-3, corrected).
+    `_compact_self_reported_complete` itself never reads the transcript
+    TEXT for a non-self-callback origin (its own `origin` check short-
+    circuits first) — but a docstring HERE used to overstate that as "the
+    caller never even pays" for anything, which was false: when signal
+    (a) (the pane-text row) already made `live` True, `tpath` was still
+    resolved via `_transcript_for_session` (a filesystem walk to LOCATE
+    the file, cheaper than reading its text but not free) purely so the
+    exemption check COULD run, even though that check was always going
+    to return False immediately for a non-self-callback origin. The
+    resolve below is now origin-gated too, so a subagent-stop/blank-
+    origin caller genuinely skips it in the pane-positive path — the
+    ONE case signal (b)'s own resolve (line ~631, needed unconditionally
+    to compute `live` itself, never origin-gated) does not already
+    cover."""
+    pdir = projects_dir or watchdog.PROJECTS_DIR
+
+    def _resolve_tpath():
+        try:
+            return watchdog._transcript_for_session(pdir, sid, cwd)
+        except Exception:
+            _log.debug("compact: _transcript_for_session failed for sid %s", sid,
+                      exc_info=True)
+            return None
+
+    live = False
     if pid:
         cap = captured
         if cap is None:
@@ -466,18 +662,24 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
                           exc_info=True)
                 cap = None
         if cap and watchdog._BG_AGENTS_WAIT_RX.search(cap):
-            return True
-    pdir = projects_dir or watchdog.PROJECTS_DIR
-    try:
-        tpath = watchdog._transcript_for_session(pdir, sid, cwd)
-    except Exception:
-        _log.debug("compact: _transcript_for_session failed for sid %s", sid,
-                  exc_info=True)
-        tpath = None
-    if tpath is None:
+            live = True
+
+    tpath = None
+    if not live:
+        tpath = _resolve_tpath()
+        if tpath is not None:
+            now_ts = now if now is not None else time.time()
+            live = bool(watchdog.subagent_active(str(tpath), now_ts,
+                                                 _LIVE_BG_TASK_WINDOW_S))
+
+    if not live:
         return False
-    now_ts = now if now is not None else time.time()
-    return bool(watchdog.subagent_active(str(tpath), now_ts, _LIVE_BG_TASK_WINDOW_S))
+
+    if tpath is None and origin == _COMPACT_SELF_CALLBACK_ORIGIN:
+        tpath = _resolve_tpath()
+    if tpath is not None and _compact_self_reported_complete(origin, tpath):
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -642,7 +844,7 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         return "skip:dialog-open"
 
     # Condition (c) — not a safe boundary right now.
-    if _compact_not_at_boundary(cwd, sid, projects_dir=projects_dir):
+    if _compact_not_at_boundary(cwd, sid, projects_dir=projects_dir, origin=origin):
         _log_compact_sync("SKIP not-a-boundary sid=%s cwd=%s" % (sid, cwd))
         return "skip:not-a-boundary"
     if _compact_session_unresumed(cwd, sid, projects_dir=projects_dir, origin=origin):
@@ -673,7 +875,7 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 
     # Condition (b) — no live background tasks of this session's own.
     if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
-                                  captured=captured):
+                                  captured=captured, origin=origin):
         _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
         return "skip:live-tasks"
     if _compact_request_too_young(request_ts, now):
@@ -696,7 +898,7 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("SKIP raced sid=%s cwd=%s" % (sid, cwd))
         return "skip:raced"
     if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
-                                  captured=fresh):
+                                  captured=fresh, origin=origin):
         _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s" % (sid, cwd))
         return "skip:live-tasks-raced"
 

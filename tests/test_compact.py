@@ -163,6 +163,24 @@ CB_QUEUED_COMPACT_CAP = "● Hotovo.\n❯ /compact\n❯ \n  ctx ███░  ca
 CB_BG_AGENT_CAP = ("● Working…\nWaiting for 1 background agent to finish\n"
                    "❯ \n  ctx ███░\n")
 
+# #425: a real supervisor's own turn -- a genuine `## ✅ Work Complete`
+# heading for the ticket that just finished, trailing `⏳ WORKING` for
+# UNRELATED, independent, still-running parallel workers in the SAME
+# round. This is the exact live-incident shape (dev1 sid 2d02a127, and a
+# sibling project box) that used to loop `SKIP not-a-boundary` until the
+# 30-min request expired.
+_WORK_COMPLETE_PLUS_TAIL = (
+    "## ✅ Work Complete\n\n"
+    "**Audits & deploy:**\n"
+    "✅ CI: green\n\n"
+    "---\n\n"
+    "**Goal:** oprava chyby v X\n"
+    "**What changed:** X je teraz opravené\n\n"
+    "**[repo] PR #41: fix X**\n"
+    "https://github.com/o/r/pull/41 — merged abc123\n\n"
+    "⏳ WORKING: 3 more workers still dispatched in this round"
+)
+
 
 class DeliverCompactFakeTmux:
     """Fake `run` for the compact module — resolves panes via list-panes
@@ -244,6 +262,45 @@ class CompactRequestState(unittest.TestCase):
         self.assertEqual(d["sess-1"]["ts"], 1000)      # frozen at first-seen
         self.assertEqual(d["sess-1"]["cwd"], "/y")      # latest cwd wins
         self.assertEqual(d["sess-1"]["origin"], "self-callback")  # latest origin
+
+    def test_a_pending_self_callback_origin_is_never_downgraded(self):
+        # #402-review MAJOR-1: the SubagentStop hook fires under the
+        # SUPERVISOR's own sid on every worker return (#317's parallel-
+        # round shape), which can re-record a still-pending self-callback
+        # request with origin="subagent-stop" before it is ever
+        # delivered -- silently losing the #425 exemption for a turn that
+        # genuinely earned it (its own "## Work Complete" heading +
+        # trailing "more workers still dispatched" tail). A re-record
+        # from the WEAKER (subagent-stop) or UNKNOWN (blank/None) origin
+        # must never overwrite an already-recorded self-callback claim.
+        p = self._p()
+        compact.record_compact_request("sess-1", "/x", now=1000, path=p,
+                                       origin="self-callback")
+        compact.record_compact_request("sess-1", "/x", now=1001, path=p,
+                                       origin="subagent-stop")
+        d = compact.load_compact_requests(p)
+        self.assertEqual(d["sess-1"]["origin"], "self-callback")
+
+    def test_a_pending_self_callback_origin_is_never_downgraded_to_blank(self):
+        p = self._p()
+        compact.record_compact_request("sess-1", "/x", now=1000, path=p,
+                                       origin="self-callback")
+        compact.record_compact_request("sess-1", "/x", now=1001, path=p,
+                                       origin=None)
+        d = compact.load_compact_requests(p)
+        self.assertEqual(d["sess-1"]["origin"], "self-callback")
+
+    def test_a_pending_subagent_stop_origin_is_still_upgraded_by_self_callback(self):
+        # The OPPOSITE direction stays exactly as before (and is already
+        # locked by test_ts_is_never_refreshed_across_a_re_record above,
+        # restated here so the two directions are visible side by side).
+        p = self._p()
+        compact.record_compact_request("sess-1", "/x", now=1000, path=p,
+                                       origin="subagent-stop")
+        compact.record_compact_request("sess-1", "/x", now=1001, path=p,
+                                       origin="self-callback")
+        d = compact.load_compact_requests(p)
+        self.assertEqual(d["sess-1"]["origin"], "self-callback")
 
     def test_ts_is_preserved_even_when_the_prior_anchor_is_already_expired(self):
         # #402-review MINOR-2 was CONSIDERED (reset ts when the prior
@@ -445,6 +502,44 @@ class TestDeliverCompact(unittest.TestCase):
                                        now=now)
         self.assertEqual(word, "sent")
 
+    # -- #425: self-callback + a genuine `## ✅ Work Complete` heading
+    #    exempts BOTH live-task signals too, not just the marker check -- #
+
+    def test_heading_plus_tail_exempts_the_pane_text_live_task_signal(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")],
+                                      CB_BG_AGENT_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "sent")
+
+    def test_heading_plus_tail_exempts_the_subagent_transcript_live_task_signal(self):
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp, now=now)
+        self.assertEqual(word, "sent")
+
+    def test_heading_plus_tail_live_task_exemption_honoured_at_the_raced_recheck(self):
+        # the #333 fresh-recapture-before-typing re-check ALSO consults the
+        # exemption -- the SAME live-tasks call, the SAME origin, the SAME
+        # tpath, so a mutant that only exempted the FIRST live-tasks call
+        # site would still be caught here.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP,
+                                      cap_seq=[CB_IDLE_CAP, CB_BG_AGENT_CAP])
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "sent")
+
     # -- condition (c): not on a ⏳/❓ marker; not an unresumed API error - #
 
     def test_blocked_on_a_question_skips(self):
@@ -474,6 +569,104 @@ class TestDeliverCompact(unittest.TestCase):
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
                                        projects_dir=proj, delivered_path=self.delp)
+        self.assertEqual(word, "sent")
+
+    # -- #425: the ⏳ marker exemption (mandate items (a)/(b)/(c)) -------- #
+
+    def test_work_complete_heading_with_parallel_tail_delivers(self):
+        # (a) of the #425 mandate -- the reported live-incident shape.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_plain_working_marker_with_no_heading_still_skips_even_self_callback(self):
+        # (b) of the #425 mandate -- a genuinely mid-work ⏳ with NO
+        # completion heading defers regardless of origin: the exemption
+        # requires BOTH self-callback AND the heading, never origin alone.
+        proj = self._dir()
+        _write_marker_transcript(
+            proj, self.CWD, self.SID,
+            "⏳ WORKING: still figuring out the next step")
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "skip:not-a-boundary")
+
+    def test_question_marker_never_exempted_even_with_heading(self):
+        # (c) of the #425 mandate -- ❓ is NEVER exempted (#333), even
+        # with a completion heading earlier in the same turn.
+        proj = self._dir()
+        text = "## ✅ Work Complete\n\n...\n\n❓ NEEDS YOU: schváliš merge PR #41?"
+        _write_marker_transcript(proj, self.CWD, self.SID, text)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "skip:not-a-boundary")
+        self.assertEqual(tmux.sent, [])
+
+    def test_heading_plus_tail_not_exempted_for_subagent_stop_origin(self):
+        # the exemption is scoped ONLY to self-callback -- a subagent-stop
+        # boundary is proven a completely different way and never reads
+        # this narrow trust.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="subagent-stop",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "skip:not-a-boundary")
+
+    def test_heading_plus_tail_not_exempted_for_blank_origin(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin=None,
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "skip:not-a-boundary")
+
+    def test_montalu3_class_same_ticket_background_wait_still_delivers_by_design(self):
+        """(d) of the #425 mandate, decided + locked with justification
+        (see `_compact_self_reported_complete`'s own docstring for the
+        full reasoning): a message that -- against
+        `message-status-marker.md`'s OWN contract, which forbids it --
+        claims `## ✅ Work Complete` while its trailing ⏳ actually
+        narrates a background wait for THE SAME just-reported ticket
+        (e.g. a still-running CI/verify for the very PR just claimed
+        complete) is structurally INDISTINGUISHABLE, from transcript text
+        alone, from the safe "independent parallel worker" shape this
+        exemption exists to unblock. This fix deliberately does NOT
+        attempt a content classifier to tell them apart (a keyword-sniff
+        for "CI"/"verify"/a matching ticket number is exactly the
+        guessing-era scaffolding #402 removed, and any such sniff has
+        real false negatives that would silently reopen #425). This case
+        therefore ALSO delivers -- an accepted, explicitly documented
+        trade-off, not an oversight: the worst case (a background Bash
+        CI-wait job's own notification linkage lost across the
+        compaction boundary) is already a known, bounded, ACCEPTED risk
+        per `ci-monitoring.md`'s own established doctrine (re-derive from
+        the durable resource on the next turn), and condition (b)'s own
+        two signals are agent-dispatch SPECIFIC -- they structurally
+        cannot see a generic background Bash CI-wait job at all, so the
+        pre-#425 blanket ⏳ veto never actually protected this specific
+        sub-shape either; it was a side effect of the bug being fixed
+        here, not a deliberate policy."""
+        proj = self._dir()
+        text = ("## ✅ Work Complete\n\n...PR #41 merged...\n\n"
+               "⏳ WORKING: waiting for CI on PR #41 to go green before "
+               "declaring #41 truly done")
+        _write_marker_transcript(proj, self.CWD, self.SID, text)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
         self.assertEqual(word, "sent")
 
     def test_unresumed_api_error_skips_for_proven_origin(self):
@@ -609,6 +802,192 @@ class TestDeliverCompact(unittest.TestCase):
                                        now=time.time())
         self.assertEqual(word, "sent")
         self.assertIn("%9", state.get("janitor_watch", {}))
+
+
+# --------------------------------------------------------------------------- #
+# 4b. #425 — the shared exemption predicate + its two consumers' origin
+#     scoping, tested DIRECTLY (isolated from each other) -- the end-to-end
+#     `deliver_compact` tests above conflate both checks (condition (c)
+#     always runs before condition (b)), so a live-tasks-scoping
+#     regression on a non-⏳-marker path would be invisible there.
+# --------------------------------------------------------------------------- #
+
+class TestCompactSelfReportedCompleteExemption(unittest.TestCase):
+    SID = "sess-exempt-1"
+    CWD = "/home/newlevel/devel/exempttest"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    # -- _compact_transcript_completion_heading / _compact_self_reported_complete
+
+    def test_true_only_with_both_self_callback_and_heading(self):
+        proj = self._dir()
+        p = _write_marker_transcript(proj, self.CWD, self.SID,
+                                     _WORK_COMPLETE_PLUS_TAIL)
+        self.assertTrue(compact._compact_transcript_completion_heading(p))
+        self.assertTrue(compact._compact_self_reported_complete("self-callback", p))
+
+    def test_false_without_heading(self):
+        proj = self._dir()
+        p = _write_marker_transcript(proj, self.CWD, self.SID,
+                                     "⏳ WORKING: still busy")
+        self.assertFalse(compact._compact_transcript_completion_heading(p))
+        self.assertFalse(compact._compact_self_reported_complete("self-callback", p))
+
+    def test_heading_mentioned_mid_line_is_not_a_genuine_heading(self):
+        # #402-review MINOR-1: a surviving mutant (dropping the `^`
+        # anchor from _COMPACT_COMPLETION_HEADING_RX) passed all 101
+        # pre-existing tests -- none of them locked the anchor's real
+        # job, which is refusing a MID-LINE mention of the heading text
+        # (a session merely quoting/discussing "✅ Work Complete" inline,
+        # not genuinely opening a turn with it). Mirrors the same
+        # mention-vs-use discriminator this repo's own command-matching
+        # hooks already rely on (never a bare substring scan).
+        proj = self._dir()
+        mid_line = ("Poznamka: predchadzajuce sedenie skoncilo textom "
+                    "'✅ Work Complete' vnutri vety, nie ako vlastny "
+                    "nadpis riadku.\n⏳ WORKING: stale prebieha")
+        p = _write_marker_transcript(proj, self.CWD, self.SID, mid_line)
+        self.assertFalse(compact._compact_transcript_completion_heading(p))
+        self.assertFalse(compact._compact_self_reported_complete("self-callback", p))
+
+    def test_false_for_subagent_stop_origin_even_with_heading(self):
+        proj = self._dir()
+        p = _write_marker_transcript(proj, self.CWD, self.SID,
+                                     _WORK_COMPLETE_PLUS_TAIL)
+        self.assertFalse(compact._compact_self_reported_complete("subagent-stop", p))
+
+    def test_false_for_blank_origin_even_with_heading(self):
+        proj = self._dir()
+        p = _write_marker_transcript(proj, self.CWD, self.SID,
+                                     _WORK_COMPLETE_PLUS_TAIL)
+        self.assertFalse(compact._compact_self_reported_complete(None, p))
+
+    def test_false_for_none_tpath(self):
+        self.assertFalse(compact._compact_self_reported_complete("self-callback", None))
+
+    def test_bare_heading_without_hash_prefix_also_matches(self):
+        # the SAME two shapes stop-check-prose-violations.sh's own
+        # IS_COMPLETION_HEADING classifier accepts:
+        # "^## ✅ Work Complete" OR "^✅ Work Complete".
+        proj = self._dir()
+        p = _write_marker_transcript(
+            proj, self.CWD, self.SID,
+            "✅ Work Complete\n\n...\n\n⏳ WORKING: more")
+        self.assertTrue(compact._compact_self_reported_complete("self-callback", p))
+
+    def test_heading_must_be_in_the_last_real_turn_not_an_earlier_one(self):
+        # a Work Complete heading from an EARLIER turn does not leak
+        # forward into a LATER, genuinely-still-working turn that has no
+        # heading of its own -- transcript_last_assistant_text only ever
+        # reads the LAST real turn.
+        proj = self._dir()
+        d = Path(proj) / _encode(self.CWD)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / (self.SID + ".jsonl")
+        lines = [
+            json.dumps({"type": "assistant",
+                       "message": {"id": "m1", "content": _WORK_COMPLETE_PLUS_TAIL}}),
+            json.dumps({"type": "assistant",
+                       "message": {"id": "m2",
+                                  "content": "⏳ WORKING: a fresh, unrelated turn"}}),
+        ]
+        p.write_text("\n".join(lines) + "\n")
+        self.assertFalse(compact._compact_self_reported_complete("self-callback", p))
+
+    # -- _session_has_live_bg_tasks origin scoping ------------------------ #
+
+    def test_live_bg_tasks_exempted_when_predicate_true(self):
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now)
+        self.assertFalse(compact._session_has_live_bg_tasks(
+            None, self.SID, self.CWD, None, projects_dir=proj, now=now,
+            origin="self-callback"))
+
+    def test_live_bg_tasks_not_exempted_for_subagent_stop(self):
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now)
+        self.assertTrue(compact._session_has_live_bg_tasks(
+            None, self.SID, self.CWD, None, projects_dir=proj, now=now,
+            origin="subagent-stop"))
+
+    def test_live_bg_tasks_pane_signal_skips_the_tpath_resolve_for_non_self_callback(self):
+        # #402-review MINOR-3: once `live=True` via the PANE-TEXT signal
+        # alone (no subagent transcript needed to establish it), a
+        # non-self-callback origin must not pay for LOCATING the
+        # transcript either -- `_compact_self_reported_complete` was
+        # always going to refuse it on origin alone, and the docstring
+        # here used to (wrongly) claim the caller "never even pays" for
+        # anything in that case.
+        proj = self._dir()
+        run = DeliverCompactFakeTmux([("%1", "claude", self.CWD, "111")],
+                                     CB_BG_AGENT_CAP)
+        with m.patch.object(wd, "_transcript_for_session") as spy:
+            result = compact._session_has_live_bg_tasks(
+                "%1", self.SID, self.CWD, run, projects_dir=proj,
+                origin="subagent-stop")
+        self.assertTrue(result)
+        spy.assert_not_called()
+
+    def test_live_bg_tasks_pane_signal_still_resolves_and_exempts_self_callback(self):
+        # The positive control for the test above: a self-callback origin
+        # DOES still need (and get) the resolve, and is correctly
+        # exempted once the transcript backs the claim.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 _WORK_COMPLETE_PLUS_TAIL)
+        run = DeliverCompactFakeTmux([("%1", "claude", self.CWD, "111")],
+                                     CB_BG_AGENT_CAP)
+        result = compact._session_has_live_bg_tasks(
+            "%1", self.SID, self.CWD, run, projects_dir=proj,
+            origin="self-callback")
+        self.assertFalse(result)
+
+    def test_live_bg_tasks_not_exempted_when_no_live_task_present_anyway(self):
+        # the exemption is only ever CONSULTED once a live task is already
+        # detected -- with none present at all, the answer is False
+        # regardless of origin, and no transcript-text read is spent.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        self.assertFalse(compact._session_has_live_bg_tasks(
+            None, self.SID, self.CWD, None, projects_dir=proj,
+            origin="self-callback"))
+
+    # -- _compact_not_at_boundary origin scoping -------------------------- #
+
+    def test_not_at_boundary_exempted_when_predicate_true(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        self.assertFalse(compact._compact_not_at_boundary(
+            self.CWD, self.SID, projects_dir=proj, origin="self-callback"))
+
+    def test_not_at_boundary_still_blocks_plain_working(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 "⏳ WORKING: no heading here")
+        self.assertTrue(compact._compact_not_at_boundary(
+            self.CWD, self.SID, projects_dir=proj, origin="self-callback"))
+
+    def test_not_at_boundary_never_exempts_question_marker(self):
+        proj = self._dir()
+        _write_marker_transcript(
+            proj, self.CWD, self.SID,
+            "## ✅ Work Complete\n\n...\n\n❓ NEEDS YOU: schváliš?")
+        self.assertTrue(compact._compact_not_at_boundary(
+            self.CWD, self.SID, projects_dir=proj, origin="self-callback"))
+
+    def test_not_at_boundary_unaffected_when_marker_is_not_non_boundary_at_all(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
+        self.assertFalse(compact._compact_not_at_boundary(
+            self.CWD, self.SID, projects_dir=proj, origin="self-callback"))
 
 
 # --------------------------------------------------------------------------- #
