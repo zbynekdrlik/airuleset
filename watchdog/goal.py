@@ -38,9 +38,7 @@ through a callback in the /autopilot command." Concretely:
              check (the newest transcript marker is `cleared` with a
              timestamp NEWER than this request -- drop, never retry: #170's
              guard, now trivial because there is no heuristic re-arm left
-             to fight); the session's last real-turn marker must not be
-             `⏳`/`❓` (mid-work / blocked-on-question -- a genuinely
-             unsafe moment to inject a new command); a TRI-STATE
+             to fight); a TRI-STATE
              already-armed check (`True` -> nothing to do, drop; `None` ->
              undeterminable, leave pending; `False` -> proceed -- this is
              what makes a race between the callback and the user's own
@@ -335,7 +333,20 @@ GOAL_REQUEST_MAX_AGE_S = 30 * 60   # a request older than this is DISCARDED
                                    # an undeliverable arm request is a
                                    # silent-dead-autopilot failure class.
 
-_GOAL_NON_BOUNDARY_MARKERS = ("❓", "⏳")   # ❓=❓ ⏳=⏳
+# REMOVED (#403-review CRITICAL C1): `_GOAL_NON_BOUNDARY_MARKERS` used to
+# refuse to arm while the session's last transcript marker was a question
+# or working marker. But the /autopilot bootstrap turn that RECORDS the
+# arm request is itself what SETS that marker -- a real-corpus scan found
+# it lands on one of those two shapes 98% of the time -- and the session
+# then sits idle at that exact marker forever, so the gate refused its own
+# trigger permanently: goal_sweep's periodic re-evaluation saw the SAME
+# stale marker on every later sweep too, never just once. The gate
+# protected nothing real: `_classify_boundary`/`pane_waiting_on_user`/
+# `pane_in_mode` (below) already cover every genuinely unsafe pane state
+# (can't locate the input box, an open dialog, copy-mode), and the
+# template's own condition (A) already refuses to let the loop proceed
+# past an unanswered ❓ regardless of whether it's armed -- so arming
+# during ❓/⏳ is harmless, never unsafe.
 
 
 def _safe_age(now, ts):
@@ -525,10 +536,6 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                 _log_goal_sync("DROP cleared-after-request sid=%s cwd=%s"
                                % (sid, cwd))
                 return "drop:cleared-after-request"
-        last_marker = watchdog.transcript_last_marker(tpath)
-        if last_marker in _GOAL_NON_BOUNDARY_MARKERS:
-            _log_goal_sync("SKIP not-a-boundary sid=%s cwd=%s" % (sid, cwd))
-            return "skip:not-a-boundary"
 
     # Tri-state already-armed check.
     armed = watchdog.pane_goal_armed(captured)
@@ -548,10 +555,16 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         return "skip:busy"
 
     if draft:
+        # Mark provenance BEFORE the attempt (regardless of outcome) so
+        # the shared janitor (#372) can recover a stuck stash send for
+        # THIS pane -- mirrors the bare-box branch immediately below
+        # (#403-review MAJOR M1: this branch used to mark only on success
+        # and never clear, exactly backwards).
+        watchdog._janitor_mark_watch(state, pid, now)
         ok = watchdog.deliver_with_stash(pid, text, run, captured=captured,
                                          logs=logs, sleep_fn=sleep_fn)
         if ok:
-            watchdog._janitor_mark_watch(state, pid, now)
+            watchdog._janitor_clear_watch(state, pid)
             _log_goal_sync("SEND stash sid=%s cwd=%s" % (sid, cwd))
             return "sent"
         _log_goal_sync("SKIP stash-abort sid=%s cwd=%s" % (sid, cwd))
