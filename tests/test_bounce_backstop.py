@@ -153,6 +153,17 @@ class TestBounceBackstop(unittest.TestCase):
         self._go(state, [1705, 1434], panes=[])
         self.assertEqual(len(self.pings), 1)
 
+    def test_no_pane_ping_carries_the_stream_qualified_project_label(self):
+        # #369: the no-pane Discord fallback must route via `send_fn`'s new
+        # `project=` kwarg, so it lands in the project's own thread instead
+        # of the owner's plain pile -- stream-qualified the SAME way a
+        # run-card / idle ping for the SAME repo checkout on THIS box would.
+        import unittest.mock as m
+        state = {}
+        with m.patch("getpass.getuser", return_value="david2"):
+            self._go(state, [1705], panes=[])
+        self.assertEqual(self.pings[0][1].get("project"), "demo-david2")
+
     def test_worktree_root_covered_by_main_checkout_pane(self):
         # 2026-07-23 false ping: David's claude ran in the MAIN checkout while
         # the cached bounce root was the repo's .claude/worktrees/<agent> path
