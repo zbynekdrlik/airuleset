@@ -1108,6 +1108,18 @@ class TestClassifyArchitectureSection(unittest.TestCase):
         ok, reason = dg.classify_architecture_section(body)
         self.assertTrue(ok, reason)
 
+    def test_dash_bullet_prefixed_header_is_recognized(self):
+        # #414-review MINOR-3: this fleet's dominant bullet style is a
+        # leading "- " (not just "*"/"#") -- a design comment writing
+        # "- **Architektúra:** ..." must not be false-rejected.
+        body = (
+            GOOD_SCOPED + "\n\n- **Architektúra:** structure -- a single "
+            "function extension, no new process. Framework: reused the "
+            "existing module directly."
+        )
+        ok, reason = dg.classify_architecture_section(body)
+        self.assertTrue(ok, reason)
+
     def test_english_architecture_spelling_is_recognized(self):
         body = GOOD_SCOPED + "\n\nArchitecture: structure -- one module. Framework: none new."
         ok, reason = dg.classify_architecture_section(body)
@@ -1156,6 +1168,13 @@ class TestClassifyTriageAndApproaches(unittest.TestCase):
 
     def test_trivial_triage_passes_without_multiple_approaches(self):
         ok, reason = dg.classify_triage_and_approaches(TRIVIAL_TRIAGE_BODY)
+        self.assertTrue(ok, reason)
+
+    def test_dash_bullet_prefixed_triage_line_is_recognized(self):
+        # #414-review MINOR-3: this fleet's dominant bullet style is a
+        # leading "- " -- "- Triage: trivial" must not be false-rejected.
+        body = GOOD_SCOPED + "\n\n- Triage: trivial"
+        ok, reason = dg.classify_triage_and_approaches(body)
         self.assertTrue(ok, reason)
 
     def test_nontrivial_with_two_approaches_and_tradeoffs_passes(self):
