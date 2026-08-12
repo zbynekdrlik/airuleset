@@ -517,6 +517,30 @@ class JobLevelFailFastTest(unittest.TestCase):
         self.assertIn("JOB FAILED (run still in progress)", err)
         self.assertIn(",jobs", err)
 
+    def test_oneshot_repeat_block_message_each_template_independently_carries_it(self):
+        # #405 adversarial-review MINOR-3: the assertion above checks the
+        # branch text appears SOMEWHERE in stderr — a mutant reverting only
+        # ONE of ONESHOT_MAINMSG's two templates (the SHORT-wait foreground
+        # loop, or the LONG-wait background waiter) still satisfies it,
+        # since the OTHER, untouched template's own copy carries the
+        # substring. This test SCOPES the check to each template's own
+        # segment (split on the printed "LONG wait" bullet, which separates
+        # the two templates in the message) so a one-sided regression can't
+        # hide behind its sibling.
+        cmd = "gh run view %s --json status,conclusion" % RUN_B
+        self.run_hook(cmd)
+        self.run_hook(cmd)
+        err = self.run_hook(cmd).stderr
+        self.assertIn("LONG wait", err, err)
+        short_wait, _, long_wait = err.partition("LONG wait")
+        self.assertNotEqual(long_wait, "", "split found no LONG-wait segment: " + err)
+        for label, segment in (("SHORT-wait template", short_wait),
+                                ("LONG-wait template", long_wait)):
+            self.assertIn("JOBFAIL", segment, label + " missing JOBFAIL: " + err)
+            self.assertIn("JOB FAILED (run still in progress)", segment,
+                          label + " missing the JOB FAILED message: " + err)
+            self.assertIn(",jobs", segment, label + " missing ,jobs: " + err)
+
 
 class OneShotStatusPollBlockTest(unittest.TestCase):
     """#210: a bare, non-loop `gh run view <run-id>` status poll — no sleep,
