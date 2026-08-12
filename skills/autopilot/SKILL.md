@@ -473,10 +473,11 @@ answer to "which issues share one round" — this ticket found no gap in either.
 1c. **DESIGN-TRIAGE — classify each surviving batch member BEFORE any worker sees it** (#414, SOTA
    architecture: restores the whole-repo, multi-approach design depth the owner reported degrading
    to a per-ticket, one-paragraph tunnel once autopilot took over — "nikto nedržal celok"). For
-   every member that passed 1b, classify trivial vs design-heavy using the SAME HARD-task criteria
-   `model-awareness.md` already defines (architectural / cross-cutting / ambiguous-design / a NEW
-   service, CLI, daemon or long-lived component / a prior worker already failed on it) — one
-   discriminator, never a parallel derivation. TRIVIAL members skip this sub-step entirely — no
+   every member that passed 1b, classify trivial vs design-heavy by REUSING `model-awareness.md`'s
+   own HARD-task criteria (architectural / cross-cutting / ambiguous-design / a prior worker
+   already failed on it) PLUS the ONE framework-first trigger `architecture-first.md` names (a NEW
+   service, CLI, daemon, or long-lived component) — extending that single taxonomy, never
+   inventing a second, parallel one. TRIVIAL members skip this sub-step entirely — no
    `Plan` dispatch, no extra cost, same one-paragraph design comment as today. For each
    DESIGN-HEAVY member: run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE for the whole
    batch (the same gate the HARD-task escalation runs — OPEN → `model: "fable"`, CLOSED →
