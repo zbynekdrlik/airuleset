@@ -526,10 +526,18 @@ class TestRejectReasonSurfacedInBlockMessage(_Base):
         dg.write_reject_reason(repo, issue, reason, kind="design")
 
     def test_reject_reason_is_included_in_the_block_message(self):
+        # #414-review MAJOR-2: the standing guidance ALSO mentions
+        # "Architektúra" unconditionally now (locked below by
+        # test_the_general_guidance_now_mentions_architektura_and_triage),
+        # so asserting only that bare word proved nothing — a mutant that
+        # disables reject-reason surfacing entirely still passed. Assert
+        # the PER-REASON section header and the exact reason text instead,
+        # neither of which the standing guidance ever produces on its own.
         self.reject(41, "Architektúra: section missing: structure/topology")
         r = self.run_hook(COMMIT_41)
         self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("Architektúra", r.stderr)
+        self.assertIn("was rejected", r.stderr)
+        self.assertIn("#41: Architektúra: section missing: structure/topology", r.stderr)
 
     def test_no_reject_reason_still_blocks_with_the_generic_message(self):
         # never crashes / never omits the block when no reject reason
