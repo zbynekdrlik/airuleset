@@ -433,19 +433,43 @@ class TestDeliverGoal(unittest.TestCase):
 
     def test_draft_pane_delivers_via_stash(self):
         # A draft in the box must be delivered through deliver_with_stash,
-        # never a raw overwrite -- verified via the real primitive (a
-        # non-empty box, no "› stashed" marker present -> park succeeds).
-        word, tmux, _ = self._go(GOAL_DRAFT_CAP,
-                                 cap_seq=[GOAL_DRAFT_CAP, "", "", ""])
-        self.assertIn(word, ("sent", "skip:stash-abort"))
-        # Either outcome is a legitimate stash-path result depending on the
-        # exact scripted capture sequence -- the invariant under test is
-        # that the draft text is NEVER silently overwritten with a raw
-        # (non-stash) type, which a "sent" outcome via the wrong path
-        # would risk. Assert the stash primitive's own signature keystroke
-        # (Ctrl-S) appears whenever anything was typed at all.
-        if tmux.sent:
-            self.assertIn("C-s", tmux.keys())
+        # never a raw overwrite -- asserted against the REAL call this
+        # time (#403-review m1: the original version accepted EITHER
+        # "sent" or "skip:stash-abort" with no keystrokes at all,  so
+        # neutering the whole draft branch to an unconditional no-op still
+        # passed it -- the primitive was never actually proven to run).
+        calls = []
+
+        def _fake_stash(pid, text, run, **kw):
+            calls.append((pid, text, kw.get("captured")))
+            return True
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_fake_stash):
+            word, tmux, _ = self._go(GOAL_DRAFT_CAP)
+        self.assertEqual(word, "sent")
+        self.assertEqual(len(calls), 1)
+        pid, text, captured = calls[0]
+        self.assertEqual(text, self.TEXT)
+        self.assertEqual(captured, GOAL_DRAFT_CAP)
+
+    def test_stash_send_marks_janitor_watch_before_attempt_and_clears_on_success(self):
+        # #403-review MAJOR M1: the stash branch used to mark provenance
+        # only AFTER a successful send and never clear it -- backwards vs.
+        # the bare-box branch just below, which marks BEFORE attempting
+        # (so a stuck send stays recoverable by the shared #372 janitor)
+        # and clears only once success is verified.
+        state = {}
+        with m.patch.object(wd, "deliver_with_stash", return_value=True):
+            word, tmux, _ = self._go(GOAL_DRAFT_CAP, state=state)
+        self.assertEqual(word, "sent")
+        self.assertNotIn("%9", state.get("janitor_watch", {}))
+
+    def test_stash_abort_leaves_janitor_watch_marked_for_recovery(self):
+        state = {}
+        with m.patch.object(wd, "deliver_with_stash", return_value=False):
+            word, tmux, _ = self._go(GOAL_DRAFT_CAP, state=state)
+        self.assertEqual(word, "skip:stash-abort")
+        self.assertIn("%9", state.get("janitor_watch", {}))
 
     def test_hard_age_cap_expires_and_pings_once(self):
         proj = self._dir()
