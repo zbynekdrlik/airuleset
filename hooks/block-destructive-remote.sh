@@ -73,6 +73,89 @@ set -euo pipefail
 #     `start-process-manager`) — `\b` anchors on the hyphen. Implausible
 #     over ssh to a Windows box; not worth a narrower pattern.
 #
+# --- secret-bearing file / process-environment reads over ssh (#373) ------
+# ALSO blocks a HIGH-CONFIDENCE transcript-leak shape inside the remote
+# command string: cat/less/head/tail/grep of a secret-pattern file
+# (.env / mcp.env / *.env.<suffix> minus .example|.sample|.template|.dist,
+# a /secrets/ path component, *credential*/*secret* in the basename,
+# *token* as a name component, *.pem/*.key) whose stdout is NOT redirected
+# away with `>`/`>>`/`&>`; or a BARE printenv/env dump (no specific var
+# name — a genuine full-environment dump, however wrapped, e.g. `docker
+# compose exec -T svc printenv`). This is the exact odoo-erp#3161 +
+# odoo-erp#3493 incident shape (`ssh box "cat mcp.env"`,
+# `ssh box "docker compose exec -T mcp printenv | grep -E '^MCP_'"` — a
+# PREFIX grep still prints full KEY=value lines, not narrow enough).
+#
+# ALLOWED (deliberately, not gaps):
+#   - the sanctioned pipe-to-remote provisioning flow, `cat <secretfile> |
+#     ssh host "cat > remote-path"` — the local cat is outside the ssh
+#     wrapper entirely (untouched by this check); the remote side is a
+#     stdout-REDIRECTED write, never a read whose output prints.
+#   - a `> file`/`>> file`/`&> file` redirect on ANY of the above — stdout
+#     never reaches the transcript regardless of content.
+#   - a named single var (`printenv PATH`) or `env` used as the standard
+#     "run with this var set" prefix (`env FOO=bar cmd`) — neither is a
+#     full-environment dump.
+#   - a `.env.example`/`.sample`/`.template`/`.dist` template file (mirrors
+#     block-sensitive-staging.sh's Gate 1 allowlist).
+#   - a `grep -c/-q/-l/-L` against a secret file — never prints matched
+#     content.
+#   - anything narrowed to presence/length only — `awk`/`wc`/`sha1sum`/
+#     `sha256sum`/`sha512sum`/`md5sum` appearing in the SAME pipeline
+#     sub-segment as a Category-A read (`cat file | sha256sum`), or
+#     ANYWHERE in the whole remote command for Category B (a bare env
+#     dump — needed so the gatekeeper-session-ops skill's own recommended
+#     `... printenv | awk -F= '{print $1": len="length($2)}'` pattern,
+#     which spans two pipeline sub-segments, still allows).
+#   - `airuleset.py secret exec ...` — not cat/printenv/grep-shaped at all.
+#
+# Scoped to ssh-remote-command text ONLY (both real incidents are ssh-
+# shaped) — a bare LOCAL `cat ~/.env` with no ssh wrapper is NOT covered;
+# see the #373 design comment for why (a materially larger FP surface,
+# not the incident class this ticket documents).
+#
+# KNOWN GAPS (adversarial review, #373 — same best-effort rigor as the
+# rest of this hook, not a full shell parser):
+#   - `docker compose exec -T svc cat/printenv` detection searches for the
+#     command name ANYWHERE in the segment's tokens, so a flag VALUE that
+#     happens to equal a bare `cat`/`printenv` token could theoretically
+#     false-positive (contrived, not observed).
+#   - Category B's (bare env dump) narrowing exemption is still WHOLE-
+#     command-scoped (see above) — unlike Category A, which was tightened
+#     to per-segment after live-reproducing that a benign `wc`/`awk`
+#     ANYWHERE in an &&/;-joined command exempted an unrelated genuine
+#     `cat mcp.env` read (#373-review MINOR). Category B keeps the wider
+#     scope because its own legitimate flow needs it (see above); a
+#     `wc -l x && printenv` would still slip Category B. Not a security
+#     boundary; a mechanical backstop against the reflexive, ordinary-
+#     looking shape that caused both real incidents.
+#   - a hostile `awk '{print}'` that just echoes everything would still be
+#     exempted by the narrowing check either way — it keys on the LITERAL
+#     word, not on what the command actually does.
+#   - `is_secret_path()`'s `credential`/`secret`/`token` substring/name-
+#     component match (mirrors block-sensitive-staging.sh's own already-
+#     accepted Gate-1 convention) over-blocks a genuinely non-secret file
+#     whose name merely CONTAINS one of those words (e.g. a source file
+#     `secrets_manager.py`, a log `token-service.log`, an AWS IAM
+#     `credential-report.csv`) — loud (exit 2), one-step recoverable via
+#     `# airuleset:secret-read-ok`, not tightened further per FREEZE
+#     (no live incident of this specific false positive).
+#   - grep's PATTERN argument (first non-flag token) is assumed to be a
+#     search pattern, not a file — `grep -f patternfile secretfile` is not
+#     specially handled.
+#   - alternative read commands not in the enumerated set (od/xxd/base64/
+#     dd/strings/hexdump/perl/python3 -c/`$(cat file)` substitution/
+#     `find -exec cat {} \;`/`export -p`/`set`/`declare -x`/
+#     `/proc/*/environ`) are NOT detected — a different, non-reflexive
+#     habit than the cat/printenv incident class this ticket documents,
+#     deliberately out of scope (this hook has never claimed to be a full
+#     shell-semantics parser).
+#
+# Bypass (rare, user-instructed only, logged), NARROWER than the bypass
+# below — suppresses ONLY this category, never the host-power-off/root-
+# wipe/SQL-drop/GUI-hazard checks above: append
+# '# airuleset:secret-read-ok <reason>' to the command.
+#
 # Bypass (rare, user-instructed only, logged): append
 # '# airuleset:destructive-ok <reason>' to the command, or set
 # AIRULESET_ALLOW_DESTRUCTIVE_REMOTE=1.
@@ -134,7 +217,34 @@ if [ -n "$BYPASS_REASON" ]; then
     exit 0
 fi
 
-VIOLATION=$(python3 - "$INPUT" "${HOOK_CWD:-$PWD}" <<'PYEOF'
+# Bypass 3: inline '# airuleset:secret-read-ok <reason>' (#373) — NARROWER
+# than Bypass 2 above: this only suppresses the secret-bearing-file-read /
+# bare-env-dump checks below, never the host-power-off/root-wipe/SQL-drop/
+# GUI-hazard checks — so it does NOT exit 0 here; it only sets a flag the
+# python check reads. Same quote-stripping discipline as Bypass 2 (the
+# marker must be OUTSIDE any quoted string).
+SECRET_READ_BYPASS_REASON=$(printf '%s' "$INPUT" | python3 -c 'import re,sys
+cmd=sys.stdin.read()
+SQ=chr(39)
+DQ=chr(34)
+unquoted=re.sub(SQ+"[^"+SQ+"]*"+SQ, "", cmd)     # strip '"'"'...'"'"' spans
+unquoted=re.sub(DQ+"[^"+DQ+"]*"+DQ, "", unquoted)  # strip "..." spans
+m=None
+for mm in re.finditer(r"#[ \t]*airuleset:secret-read-ok[ \t]+([^\n]+)", unquoted):
+    m=mm
+if m:
+    print(m.group(1).rstrip())
+' 2>/dev/null || echo "")
+
+SECRET_READ_BYPASS=0
+if [ -n "$SECRET_READ_BYPASS_REASON" ]; then
+    SECRET_READ_BYPASS=1
+    PROJECT=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")
+    mkdir -p "$(dirname "$AUDIT_LOG")"
+    echo "$(date -Iseconds)  project=$PROJECT  secret-read-bypass  # airuleset:secret-read-ok $SECRET_READ_BYPASS_REASON" >> "$AUDIT_LOG"
+fi
+
+VIOLATION=$(python3 - "$INPUT" "${HOOK_CWD:-$PWD}" "$SECRET_READ_BYPASS" <<'PYEOF'
 import json
 import os
 import re
@@ -142,6 +252,7 @@ import shlex
 import sys
 
 cmd = sys.argv[1]
+SECRET_READ_BYPASS = len(sys.argv) > 3 and sys.argv[3] == "1"
 
 # --- win-* MCP vs ssh (issue #249): project-scoped GUI-hazard gate --------
 GUI_HAZARD_RE = re.compile(
@@ -387,9 +498,160 @@ def has_remote_db_host(tokens):
     return False
 
 
+# --- secret-bearing file / process-environment reads over ssh (#373) ------
+ENV_TEMPLATE_SUFFIXES = ('.example', '.sample', '.template', '.dist')
+TOKEN_NAME_RE = re.compile(r'(?i)(^|[_.\-])token([_.\-]|$)')
+SECRETS_DIR_RE = re.compile(r'(?i)(^|/)\.?secrets?(/|$)')
+
+
+def is_secret_path(token):
+    """High-confidence secret-bearing-file heuristic — basename/path match
+    only (there is no file to read from a PreToolUse hook). Mirrors
+    block-sensitive-staging.sh's Gate 1 filename patterns (same repo,
+    already-vetted convention), generalized from leading-dot-only (.env)
+    to basename-anywhere (mcp.env) per #373's own real incident filename."""
+    p = token.strip("'\"")
+    if not p or p.startswith('-'):
+        return False
+    p = p.rstrip('/')
+    if not p:
+        return False
+    base = p.rsplit('/', 1)[-1].lower()
+    if not base:
+        return False
+    if base.endswith(ENV_TEMPLATE_SUFFIXES):
+        return False
+    if base == '.env' or base.endswith('.env') or re.search(r'\.env\.[^./]+$', base):
+        return True
+    if SECRETS_DIR_RE.search(p):
+        return True
+    if 'credential' in base or 'secret' in base:
+        return True
+    if TOKEN_NAME_RE.search(base):
+        return True
+    if base.endswith('.pem') or base.endswith('.key'):
+        return True
+    return False
+
+
+STDOUT_REDIRECT_TOKENS = {'>', '1>', '>>', '1>>', '&>', '&>>', '>&'}
+READ_FILE_CMDS = {'cat', 'less', 'more', 'head', 'tail'}
+GREP_CMDS = {'grep', 'egrep', 'fgrep', 'zgrep'}
+GREP_SAFE_FLAGS = {'-c', '--count', '-q', '--quiet', '-l', '--files-with-matches',
+                    '-L', '--files-without-match'}
+SAFE_NARROW_RE = re.compile(r'\b(?:awk|wc|sha1sum|sha256sum|sha512sum|md5sum)\b')
+
+
+def _cmd_read_targets(args):
+    """args = tokens AFTER a command name. Returns (read_targets,
+    stdout_redirected). read_targets are files the command actually reads
+    (positional args, plus a `<` input-redirect target); stdout_redirected
+    means a `>`/`>>`/`&>` sent stdout to a file — nothing reaches the
+    transcript regardless of content, so callers must skip flagging then."""
+    targets = []
+    redirected = False
+    i, n = 0, len(args)
+    while i < n:
+        t = args[i]
+        if t in STDOUT_REDIRECT_TOKENS:
+            redirected = True
+            i += 2
+            continue
+        if t == '<':
+            if i + 1 < n:
+                targets.append(args[i + 1])
+            i += 2
+            continue
+        if re.match(r'^2>>?$', t):
+            i += 2
+            continue
+        if not t.startswith('-'):
+            targets.append(t)
+        i += 1
+    return targets, redirected
+
+
+def _leaky_file_reads(tokens):
+    """Scan one pipeline sub-segment's tokens for a cat/less/head/tail/grep
+    call whose FILE argument matches a secret-file pattern with nothing
+    redirecting its stdout away from the transcript. Searches for the
+    command name ANYWHERE in tokens (not just position 0) so a wrapper
+    like `docker compose exec -T svc cat file` is still caught — the
+    gatekeeper/subdev flows #373 documents routinely wrap reads this way."""
+    hits = []
+    for i, t in enumerate(tokens):
+        name = t.rsplit('/', 1)[-1].lower()
+        if name in READ_FILE_CMDS:
+            targets, redirected = _cmd_read_targets(tokens[i + 1:])
+            if redirected:
+                continue
+            for tgt in targets:
+                if is_secret_path(tgt):
+                    hits.append(
+                        name + " of a secret-bearing file over ssh — its "
+                        "content leaks into the transcript: "
+                        + " ".join(tokens[i:])[:120]
+                    )
+                    break
+        elif name in GREP_CMDS:
+            rest = tokens[i + 1:]
+            if any(f in GREP_SAFE_FLAGS for f in rest):
+                continue
+            targets, redirected = _cmd_read_targets(rest)
+            if redirected or not targets:
+                continue
+            # first non-flag positional arg is the PATTERN, not a file —
+            # only the remaining ones are files grep will actually read.
+            for tgt in targets[1:]:
+                if is_secret_path(tgt):
+                    hits.append(
+                        name + " against a secret-bearing file over ssh — "
+                        "the matching line (incl. its value) leaks into "
+                        "the transcript: " + " ".join(tokens[i:])[:120]
+                    )
+                    break
+    return hits
+
+
+def _bare_env_dump(seg_text):
+    """Category B: a BARE printenv/env invocation (no specific var-name
+    argument — a genuine full-environment dump), e.g. wrapped in `docker
+    compose exec -T svc printenv`. A named var (`printenv PATH`) or `env`
+    used as a command-prefix (`env FOO=bar cmd`) is NOT a dump and is left
+    alone — this is #373's own incident shape (`docker compose exec -T mcp
+    printenv | grep -E '^MCP_'`): even a downstream grep still prints full
+    KEY=value lines (still a leak) unless narrowed to presence/length only,
+    so ANY bare dump is flagged regardless of what follows it (narrowing
+    is checked once, by the caller, over the whole seg_text)."""
+    for inner in split_segments(seg_text):
+        tk = tokens_of(inner)
+        for i, t in enumerate(tk):
+            name = t.rsplit('/', 1)[-1].lower()
+            if name in ('printenv', 'env'):
+                rest = tk[i + 1:]
+                # any NON-flag token after the command name means a
+                # specific var name (printenv PATH) or a command to run
+                # under a modified env (env FOO=bar cmd) — not a bare dump.
+                if any(not r.startswith('-') for r in rest):
+                    continue
+                return True
+    return False
+
+
 def check_remote_segment(seg_text):
     """Checks that ONLY apply once we know we're inside a remote (ssh) context."""
     hits = []
+    # #373-review MINOR: Category A's narrowing is scoped to THIS
+    # pipeline sub-segment only, never the whole remote command — a
+    # benign `wc`/`awk` in an UNRELATED &&/;-joined segment (e.g.
+    # `wc -l mcp.env && cat mcp.env`) must never exempt a genuine `cat
+    # mcp.env` read elsewhere in the same command; that would defeat the
+    # exact incident shape this ticket exists to block. A real narrowing
+    # consumer for a direct read (`cat file | sha256sum`) sits in the
+    # SAME segment text as the read (awk operating on the file directly
+    # isn't in READ_FILE_CMDS/GREP_CMDS at all, so it never needed the
+    # wider scope). Category B keeps whole-command narrowing — see below.
+    narrowed_whole = bool(SAFE_NARROW_RE.search(seg_text))
     for inner in split_segments(seg_text):
         tk = strip_prefix(tokens_of(inner))
         if not tk:
@@ -402,6 +664,21 @@ def check_remote_segment(seg_text):
         if has_db_client(tk) and SQL_DROP_RE.search(inner):
             hits.append("SQL DROP/TRUNCATE against a DB client over ssh: "
                         + inner.strip()[:120])
+        if not SECRET_READ_BYPASS and not SAFE_NARROW_RE.search(inner):
+            hits.extend(_leaky_file_reads(tk))
+    # Category B (bare env dump) keeps WHOLE-command narrowing, on
+    # purpose: its own legitimate narrow flow (`printenv | awk ...`,
+    # tested) spans TWO pipeline sub-segments — narrowing this per-
+    # segment would false-block that documented ALLOW case. KNOWN GAP
+    # (same #373-review finding, deliberately left open here): an
+    # unrelated wc/awk/sha*sum ANYWHERE in the remote command still
+    # exempts a genuine bare env dump too — a mechanical backstop, not a
+    # security boundary (this file's own long-standing framing).
+    if not SECRET_READ_BYPASS and not narrowed_whole and _bare_env_dump(seg_text):
+        hits.append(
+            "bare printenv/env dump over ssh — every var VALUE leaks into "
+            "the transcript: " + seg_text.strip()[:120]
+        )
     if is_win_root_wipe(seg_text):
         hits.append("Windows drive-root wipe over ssh: " + seg_text.strip()[:120])
     if WIN_MCP_ACTIVE:
@@ -488,10 +765,27 @@ if [ "$RC" -eq 2 ]; then
             echo "  bridge for a genuine GUI launch) — never an ssh probe." >&2
             echo "" >&2
             ;;
+        # matches the FIXED phrase every secret-read/env-dump hit shares
+        # (#373) — never a bare "leaks" substring a decoy comment could
+        # coincidentally embed.
+        *"leaks into the transcript"*)
+            echo "  Secret-bearing read over ssh (#373): a Bash tool call's" >&2
+            echo "  stdout is captured VERBATIM into the session transcript —" >&2
+            echo "  it survives compaction and cannot be revoked. Use a" >&2
+            echo '  presence/length-only check instead, e.g.:' >&2
+            echo '    ssh host "awk -F= '"'"'{print \$1\": len=\"length(\$2)}'"'"' <file>"' >&2
+            echo "  or a single named var via 'airuleset.py secret exec'." >&2
+            echo "  Writing content INTO a remote destination (\`cat" >&2
+            echo "  secretfile | ssh host \"cat > remote-file\"\`) is NOT" >&2
+            echo "  blocked — only a read whose output would print." >&2
+            echo "" >&2
+            ;;
     esac
     echo "  Bypass (rare, user-instructed only, logged): append" >&2
     echo "  '# airuleset:destructive-ok <reason>' to the command, or set" >&2
-    echo "  AIRULESET_ALLOW_DESTRUCTIVE_REMOTE=1." >&2
+    echo "  AIRULESET_ALLOW_DESTRUCTIVE_REMOTE=1. For the secret-read" >&2
+    echo "  category ONLY, the narrower '# airuleset:secret-read-ok" >&2
+    echo "  <reason>' marker also works." >&2
     echo "" >&2
     exit 2
 elif [ "$RC" -ne 0 ]; then
