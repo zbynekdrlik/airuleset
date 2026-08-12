@@ -120,7 +120,7 @@
     "tests/test_scope_gate.py": 1388,
     "tests/test_served_compact_boundary.py": 228,
     "tests/test_situational_injection.py": 490,
-    "tests/test_size_ratchet.py": 486,
+    "tests/test_size_ratchet.py": 723,
     "tests/test_soniox_provisioning.py": 678,
     "tests/test_stale_worktree_sweep.py": 1364,
     "tests/test_stash_delivery.py": 650,

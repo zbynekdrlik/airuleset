@@ -9,6 +9,28 @@ the flat default for a brand-new file/function) fails. See
 design rationale (chosen approach + the rejected "test auto-writes on every
 run" alternative).
 
+This is DELIBERATELY strict: every currently-tracked file/function is frozen
+at its EXACT current size on the day it is (re)bootstrapped — there is no
+headroom up to the default cap for an already-tracked item, even one well
+under the default. That is the ticket's own literal wording ("kazdy subor a
+kazda funkcia moze len klesat alebo stagnovat") and the whole point of an
+"immediate growth stop": genuinely deliberate growth is still possible, via
+a human hand-editing tests/size_ratchet.json (raising ONE number) in the
+same commit, with the reason stated in the commit/PR — a visible, reviewable
+diff, never a silent default. JSON itself has no comment syntax, so that
+justification belongs in the commit message, not in the JSON file.
+
+Known, deliberately-accepted residual: because the snapshot is keyed by
+PATH/qualname (not by content or git rename-tracking), renaming a tracked
+file/function in the same commit it grows lets the growth land as a
+"brand-new item" governed by the flat default cap rather than by the old,
+possibly-tighter ceiling — i.e. a rename can incidentally regain headroom a
+same-named edit would not have. This is an inherent limitation of any
+name-keyed ratchet without semantic rename detection, considered out of
+scope for this narrow, mechanical point-1 test (see the #404 design
+comment); real semantic rename-tracking is real complexity that belongs to
+a bigger structural investment, not this ticket.
+
 CLI:
     python3 scripts/size_ratchet.py --check    # same comparison the test
                                                 # runs; read-only, prints
@@ -24,6 +46,14 @@ CLI:
                                                 # that already exceeds its
                                                 # own default cap — split it
                                                 # before it is ever tracked.
+    python3 scripts/size_ratchet.py --update --bootstrap
+                                                # the ONE-TIME act of seeding
+                                                # the ratchet from scratch;
+                                                # refuses outright (no write
+                                                # at all) unless the snapshot
+                                                # is currently empty/missing
+                                                # — never a repeatable way to
+                                                # bless an oversized new item.
 """
 
 from __future__ import annotations
@@ -31,7 +61,9 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -52,6 +84,15 @@ FUNC_DEFAULT_CEILING = 300
 # threshold and someone runs --update — this keeps the JSON scoped to "the
 # offenders" rather than every function in a ~50k-line tree.
 FUNC_TRACK_THRESHOLD = 200
+
+# A freshly-bootstrapped snapshot must pass check() immediately (day one can
+# never itself be a violation) — that only holds if every untracked function
+# under the threshold is also under the flat default it falls back to.
+assert FUNC_TRACK_THRESHOLD <= FUNC_DEFAULT_CEILING, (
+    "FUNC_TRACK_THRESHOLD must not exceed FUNC_DEFAULT_CEILING, or a "
+    "freshly-bootstrapped function between the two would fail check() the "
+    "moment it is measured, even though nothing has grown since bootstrap."
+)
 
 # Tracked path set — deliberately EXACTLY the ticket's own "at minimum"
 # list. hooks/*.py and scripts/*.py (this file included) are NOT tracked:
@@ -117,6 +158,14 @@ def function_line_counts(path: Path) -> dict:
     Uses ``ast``, never regex — a string literal or comment containing the
     text "def " (a docstring, an embedded script) can never be mistaken for
     a real function definition.
+
+    A qualname can legitimately be defined more than once in real Python
+    (a @property getter/setter pair, an @overload group, a try/except
+    ImportError fallback def, a conditional def) — when that happens, the
+    LARGEST of the colliding definitions' line counts is kept, never
+    whichever happened to be textually last. This is deliberately
+    conservative: it can only make the ratchet MORE sensitive to growth in
+    that qualname, never less.
     """
     with path.open("r", encoding="utf-8", errors="replace") as f:
         src = f.read()
@@ -129,7 +178,8 @@ def function_line_counts(path: Path) -> dict:
         end = getattr(node, "end_lineno", None)
         if end is None:
             continue
-        out[qual] = end - node.lineno + 1
+        size = end - node.lineno + 1
+        out[qual] = max(out.get(qual, 0), size)
     return out
 
 
@@ -148,24 +198,78 @@ def measure(repo: Path = REPO) -> dict:
     return {"files": files, "functions": functions}
 
 
+def _validate_snapshot_shape(data: dict, source: str = "the snapshot") -> None:
+    """Raise ValueError with an ACTIONABLE message on malformed snapshot
+    data — the sanctioned way to raise a ceiling is a human hand-editing
+    tests/size_ratchet.json, and a typo there (a quoted number, a null,
+    a wrong-shaped value) must fail loudly and clearly, not as a raw
+    TypeError three call-frames deep inside check()."""
+    for kind in ("files", "functions"):
+        items = data.get(kind, {})
+        if not isinstance(items, dict):
+            raise ValueError(
+                f"{source}: {kind!r} must be an object of {{path: ceiling}}, "
+                f"got {type(items).__name__}"
+            )
+        for key, ceiling in items.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{source}: {kind!r} key {key!r} is not a string")
+            if isinstance(ceiling, bool) or not isinstance(ceiling, int):
+                raise ValueError(
+                    f"{source}: {kind}[{key!r}] must be a plain integer line "
+                    f"count, got {ceiling!r} ({type(ceiling).__name__})"
+                )
+            if ceiling < 0:
+                raise ValueError(
+                    f"{source}: {kind}[{key!r}] = {ceiling} — a ceiling cannot "
+                    f"be negative"
+                )
+
+
 def load_snapshot(path: Path = SNAPSHOT_PATH) -> dict:
     if not path.exists():
         return {"files": {}, "functions": {}}
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: top level must be a JSON object")
     data.setdefault("files", {})
     data.setdefault("functions", {})
+    _validate_snapshot_shape(data, source=str(path))
     return data
 
 
 def save_snapshot(data: dict, path: Path = SNAPSHOT_PATH) -> None:
+    """Atomically write *data* to *path* — a killed/interrupted write must
+    never leave the sole source of truth truncated or half-written."""
     ordered = {
         "files": dict(sorted(data.get("files", {}).items())),
         "functions": dict(sorted(data.get("functions", {}).items())),
     }
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(ordered, f, indent=2, sort_keys=True)
-        f.write("\n")
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(ordered, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError as cleanup_err:
+            print(
+                f"size_ratchet: could not remove leftover tmp file "
+                f"{tmp_name!r} after a failed write: {cleanup_err}",
+                file=sys.stderr,
+            )
+        raise
+
+
+def snapshot_is_empty(stored: dict) -> bool:
+    """True when *stored* tracks nothing at all — the only state --bootstrap
+    is ever allowed to act on."""
+    return not stored.get("files") and not stored.get("functions")
 
 
 def _violation(kind: str, key: str, current: int, ceiling: int, is_new: bool) -> str:
@@ -185,7 +289,8 @@ def _violation(kind: str, key: str, current: int, ceiling: int, is_new: bool) ->
         f"{'Split this file into smaller per-service modules' if kind == 'files' else 'Extract new logic into a smaller helper function instead of growing this one further'} "
         f"(architecture-first.md) — or, if this growth is genuinely "
         f"deliberate and reviewed, raise the ceiling by hand in "
-        f"tests/size_ratchet.json with a comment explaining why."
+        f"tests/size_ratchet.json (JSON has no comments — explain why in "
+        f"the commit/PR message instead)."
     )
 
 
@@ -223,7 +328,7 @@ def regen(measured: dict, stored: dict, bootstrap: bool = False):
     *stored* but no longer found in *measured* (deleted or renamed) is
     pruned from the returned snapshot.
 
-    *bootstrap* is the explicit, one-time, deliberate act of seeding the
+    *bootstrap* is the explicit, ONE-TIME, deliberate act of seeding the
     ratchet from scratch: every currently-tracked file (and every function
     at/above FUNC_TRACK_THRESHOLD) is captured at TODAY's real size
     VERBATIM, with NO default-cap refusal — the whole point of a ratchet is
@@ -231,10 +336,31 @@ def regen(measured: dict, stored: dict, bootstrap: bool = False):
     already is, rather than demanding an instant split before it can even
     be tracked. The default-cap refusal is a GOING-FORWARD policy for a
     genuinely new file/function that appears AFTER a real baseline already
-    exists; it does not apply to the baseline itself. Never inferred from
-    an empty *stored* dict — always explicit, so a corrupted/emptied JSON
-    can never silently re-bootstrap with lenient defaults.
+    exists; it does not apply to the baseline itself.
+
+    bootstrap=True is REFUSED OUTRIGHT (nothing written, *stored* returned
+    unchanged) unless *stored* is currently empty — this is what makes it
+    genuinely one-time rather than a repeatable way to silently bless an
+    oversized new item into the snapshot. Re-tightening an already-seeded
+    ratchet is plain --update (bootstrap=False); a genuine deliberate
+    re-bootstrap needs the snapshot emptied first, which is itself a
+    visible, reviewable diff.
     """
+    if bootstrap and not snapshot_is_empty(stored):
+        return (
+            {
+                "files": dict(stored.get("files", {})),
+                "functions": dict(stored.get("functions", {})),
+            },
+            [
+                "REFUSED: --bootstrap requires an empty/missing snapshot "
+                f"({len(stored.get('files', {}))} file(s) + "
+                f"{len(stored.get('functions', {}))} function(s) already "
+                "tracked). Bootstrap is a ONE-TIME act, not a repeatable way "
+                "to add new items without the default-cap check — use plain "
+                "--update to tighten an already-seeded ratchet."
+            ],
+        )
     new_snapshot = {"files": {}, "functions": {}}
     refusals = []
     for kind, default_ceiling, track_threshold in (
@@ -280,10 +406,10 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--bootstrap",
         action="store_true",
-        help="Only with --update: the one-time, explicit act of seeding the "
-        "ratchet from scratch — every tracked item is captured at TODAY's "
-        "real size verbatim, with no default-cap refusal. Never inferred "
-        "automatically; must be passed by hand.",
+        help="Only with --update, and only on an empty/missing snapshot: the "
+        "ONE-TIME act of seeding the ratchet from scratch — every tracked "
+        "item captured at TODAY's real size verbatim, with no default-cap "
+        "refusal. Refused outright on an already-seeded snapshot.",
     )
     args = parser.parse_args(argv)
 
@@ -302,16 +428,28 @@ def main(argv=None) -> int:
         print("size ratchet: clean — nothing exceeds its ceiling.")
         return 0
 
-    new_snapshot, refusals = regen(measured, stored, bootstrap=args.bootstrap)
-    if refusals:
-        for r in refusals:
-            print(r)
+    if args.bootstrap and not snapshot_is_empty(stored):
+        n_files = len(stored.get("files", {}))
+        n_funcs = len(stored.get("functions", {}))
         print(
-            "size_ratchet.json NOT updated for the refused item(s) above — "
+            f"REFUSED: --bootstrap requires an empty/missing {SNAPSHOT_PATH}"
+            f" ({n_files} file(s) + {n_funcs} function(s) already tracked). "
+            f"Bootstrap is a ONE-TIME act — run plain --update to tighten an "
+            f"already-seeded ratchet, or deliberately empty the snapshot "
+            f"first if a genuine re-bootstrap is truly intended."
+        )
+        return 1
+
+    new_snapshot, refusals = regen(measured, stored, bootstrap=args.bootstrap)
+    for r in refusals:
+        print(r)
+    if refusals:
+        print(
+            "The refused item(s) above were NOT added to the snapshot; "
             "split them first, then re-run --update."
         )
     save_snapshot(new_snapshot)
-    print(f"size ratchet updated: {SNAPSHOT_PATH}")
+    print(f"size ratchet written: {SNAPSHOT_PATH}")
     return 1 if refusals else 0
 
 
