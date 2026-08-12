@@ -987,5 +987,34 @@ class TestSubcommandRegistration(unittest.TestCase):
                       airuleset.cmd_sweep_claude_scratch)
 
 
+# ---------------------------------------------------------------------------
+# Disk-usage visibility (#380 point 4) -- extending cmd_install()'s own
+# existing print block, never a new mechanism/log/state file.
+# ---------------------------------------------------------------------------
+
+class TestDiskUsageSummaryLine(unittest.TestCase):
+    def test_formats_percent_used_and_free_space(self):
+        fake = SimpleNamespace(total=200 * 1024**3, used=194 * 1024**3,
+                               free=6 * 1024**3)
+        with m.patch.object(airuleset.shutil, "disk_usage", return_value=fake):
+            line = airuleset._disk_usage_summary_line("/some/path")
+        self.assertIn("97%", line)
+        self.assertIn("/some/path", line)
+        self.assertIn("6.0", line)  # 6 GiB free, human-readable
+
+    def test_zero_total_never_divides_by_zero(self):
+        fake = SimpleNamespace(total=0, used=0, free=0)
+        with m.patch.object(airuleset.shutil, "disk_usage", return_value=fake):
+            line = airuleset._disk_usage_summary_line("/nowhere")
+        self.assertIn("0%", line)
+
+    def test_a_real_path_on_this_box_returns_a_genuine_line(self):
+        """No mocking -- proves the function works against the REAL
+        stdlib call on this actual box, not just a fixture."""
+        line = airuleset._disk_usage_summary_line("/tmp")
+        self.assertIn("used", line)
+        self.assertIn("free", line)
+
+
 if __name__ == "__main__":
     unittest.main()
