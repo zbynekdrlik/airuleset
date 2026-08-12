@@ -1619,11 +1619,12 @@ def parse_reset_epoch_from_error_text(text, now):
 def session_user_stopped(tpath, since_ts=None):
     """True if the user explicitly told THIS session to stop (`/exit`) at
     or after `since_ts`. The narrow, session-limit-scoped counterpart of
-    #335's own (not-yet-landed at the time this was written) general
-    user-stop invariant, expected to be reconciled into #335's own
-    `_goal_user_exit_ts` once it ships — a one-point integration, not a
-    permanent second implementation; #336's own auto-resume mechanism does
-    not need to wait on that landing.
+    #335's own general user-stop invariant (`_goal_was_cleared_by_user`,
+    itself deleted along with the rest of the heuristic re-arm machinery
+    by #403 rather than ever reconciled with this function — the two
+    stayed independent implementations of a similar idea for their whole
+    overlapping lifetime; #336's own auto-resume mechanism never depended
+    on that reconciliation landing).
 
     A session the user deliberately exited must NEVER be auto-resumed by
     delivering `continue`, even once its parked reset time has passed and
@@ -2768,75 +2769,6 @@ def _last_real_turn_ts(tpath, tail_bytes=2_000_000):
         except Exception:
             continue
         if not isinstance(e, dict) or e.get("type") not in _REAL_TURN_TYPES:
-            continue
-        try:
-            ep = datetime.fromisoformat(
-                str(e.get("timestamp")).replace("Z", "+00:00")).timestamp()
-        except Exception:
-            continue
-        if best is None or ep > best:
-            best = ep
-    return best
-
-
-_LOCAL_COMMAND_BOOKKEEPING_PREFIXES = ("<local-command-caveat>",
-                                       "<local-command-stdout>")
-
-
-def _last_real_turn_ts_excluding_command_bookkeeping(tpath, tail_bytes=None):
-    """#335-review F1, ROUND 2 (fresh-context adversarial review, executed
-    proof over the real transcript corpus): a genuine `/exit` is NOT one
-    transcript entry — it is a TRIPLE, all `type=="user"`: a
-    `<local-command-caveat>` entry, the `<command-name>/exit</command-name>`
-    entry `_goal_user_exit_ts` matches, and a
-    `<local-command-stdout>Bye!</local-command-stdout>` entry. The caveat
-    and stdout companions routinely carry a timestamp a few MILLISECONDS
-    NEWER than the exit command entry itself (same command batch, written
-    microseconds apart) — so `_last_real_turn_ts` (which deliberately
-    counts ANY real turn, by design, for job 10's own #177 purpose) reads
-    the exit's own bookkeeping as "activity postdating the exit" and
-    releases `_goal_was_cleared_by_user`'s round-1 suppression the instant
-    it is written. Measured against the real corpus: 13 of 15
-    genuinely-exited-and-never-resumed sessions read as released through
-    this exact defect — the protection was a millisecond-timestamp-
-    coincidence lottery, not a real release condition.
-
-    This is a SEPARATE reader, never a change to `_last_real_turn_ts`
-    itself — job 10 genuinely wants those companion entries counted as
-    activity for ITS OWN, different purpose (idle-clock staleness), and
-    widening the shared function would silently change job 10's own
-    behaviour for a reason job 10 has nothing to do with.
-
-    Same read-window contract as `_last_real_turn_ts` (mirrors it exactly,
-    including the tail-bootstrap default), so any caller pays the
-    identical cost profile. A REAL user turn (a fresh chat message, an
-    assistant reply, a genuinely different slash command) still releases
-    the suppression normally — only the two named bookkeeping prefixes are
-    excluded, never anything else."""
-    if tail_bytes is None:
-        tail_bytes = 2_000_000
-    from datetime import datetime
-    try:
-        with open(tpath, "rb") as f:
-            try:
-                f.seek(-tail_bytes, 2)
-            except OSError:
-                f.seek(0)
-            raw = f.read()
-    except OSError:
-        return None
-    best = None
-    for ln in raw.splitlines():
-        try:
-            e = json.loads(ln)
-        except Exception:
-            continue
-        if not isinstance(e, dict) or e.get("type") not in _REAL_TURN_TYPES:
-            continue
-        msg = e.get("message")
-        content = msg.get("content") if isinstance(msg, dict) else None
-        if (isinstance(content, str)
-                and content.startswith(_LOCAL_COMMAND_BOOKKEEPING_PREFIXES)):
             continue
         try:
             ep = datetime.fromisoformat(
@@ -5815,22 +5747,14 @@ def _cached_backlog_count(cwd, backlog_fetch, state, now, ttl=None):
 
 
 # --------------------------------------------------------------------------- #
-# /goal auto-arm (job 9, 2026-07-20) — the printed template pastes itself.
-# /autopilot and /process-subdev end by PRINTING the /goal template and asking
-# the user to paste it — the one manual step left in every stream ("dost mi
-# vadi ze musim pracne vsade chodit a zadavat goal — malo by sa to samo").
-# The watchdog performs the paste: an IDLE pane whose tail asks to paste a
-# /goal and carries the printed line gets it typed + submitted — the exact
-# keystrokes the user would make. Safety: bare empty prompt only (never over
-# user text), never when a goal is already armed (◎ /goal), never into a busy
-# pane, one arm per pane per window.
+# /goal arming — collapsed (#403, 2026-08-12) to a callback model,
+# `watchdog/goal.py` (its own module docstring is the single source of
+# truth). Job 9's OLD viewport-scan/paste-the-printed-line heuristic
+# (`_ARM_QUESTION_RX`/`GOAL_ARM_WINDOW_S`, described here through
+# 2026-08-12) is GONE — arming now happens ONLY via an explicit
+# `goal-arm --self` callback from the /autopilot skill's own Step 2,
+# never a guess reconstructed from a pane's rendered viewport.
 # --------------------------------------------------------------------------- #
-
-GOAL_ARM_WINDOW_S = 10 * 60          # one auto-arm per pane per this window
-_ARM_QUESTION_RX = re.compile(
-    r"❓[^\n]*NEEDS YOU[^\n]*/goal|"          # vlož /goal riadok / pastni /goal
-    r"(vlo\S|pastni|paste)[^\n]{0,40}/goal", re.I)
-
 
 PWEDGE_MIN_IDLE_S = 30 * 60      # transcript must be this stale before a wedge ping
 PWEDGE_SWEEPS = 2                # identical box text across this many sweeps
@@ -6225,8 +6149,9 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
     gates it); `_last_human_prompt_ts` itself returns `None` on any read
     failure (its own documented contract), which this function treats as
     "no signal, not recent" -- never a manufactured refusal from an
-    unmeasurable read, mirroring `_goal_never_armed`'s own adjacent
-    discipline one function down.
+    unmeasurable read (`_goal_never_armed`, the sibling this used to sit
+    adjacent to, was deleted along with the rest of job 9's old guessing
+    machinery by #403 -- this discipline now stands on its own).
 
     `extra_human_prefixes` (#377-review MINOR-1, optional): threaded
     straight through to `_last_human_prompt_ts` -- see ITS docstring. The

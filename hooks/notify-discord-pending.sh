@@ -67,8 +67,9 @@ goal_armed() {
     # (milestone-notifications.md).
     #
     # Reuses the EXACT SAME signal the watchdog's own goal jobs key on
-    # (`"◎ /goal" in captured` — _safe_to_bounce_nudge / goal_autoarm,
-    # watchdog/__init__.py) — never a second, invented detector. This hook
+    # (`"◎ /goal" in captured` — _safe_to_bounce_nudge in
+    # watchdog/__init__.py; pane_goal_armed, used by deliver_goal, in
+    # watchdog/goal.py) — never a second, invented detector. This hook
     # runs as a child of the live Claude Code process; when that session
     # runs inside tmux (the standing setup on every managed box) it
     # inherits tmux's own $TMUX_PANE env var, so THIS pane can be captured
