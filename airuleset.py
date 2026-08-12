@@ -7019,23 +7019,39 @@ def _gh_env():
     Detected via `_is_gh_app_token_box()` (#356's existing, local/static
     directory-presence signal `_slice_quals()` already uses — no network
     call), such a box reads the FRESH per-call token file instead of the
-    corpse .git-credentials snapshot — and, critically, does NOT fall
-    through to .git-credentials even when no fresh token has been delivered
-    yet (timer lag / mid-provisioning): it leaves GH_TOKEN unset so the box
-    fails LOUD via gh's/git's own "not authenticated" signal (the existing
-    "a gh query failed — NOT a reliable 0" semantics in `_gh_login()`/
-    `_gh_out()`/`SliceUnresolved` already treat that correctly as unknown,
-    never a false 0) rather than silently resurrecting a token already
-    proven dead.
+    corpse .git-credentials snapshot. When no fresh token has been
+    delivered yet (timer lag / mid-provisioning), this deliberately does
+    NOT `return` early — it FALLS THROUGH to the same .git-credentials
+    logic every other box uses (adversarial review of this fix, MAJOR-1):
+    `_is_gh_app_token_box()`'s own docstring already documents a known
+    residual — a STRAY/leftover App-token dir can exist on a genuine
+    own-account PAT box (a misdirected delivery, or an App->PAT migration
+    leftover) — and an unconditional early-return there would silently kill
+    that box's real, working PAT auth the moment such a stray dir appears.
+    The x-access-token belt below still refuses a genuine App-token corpse
+    either way, so falling through never resurrects the #401 bug — it only
+    ever additionally *finds* a real credential when one legitimately
+    exists.
 
-    As a second, independent belt: even OUTSIDE the App-token-box branch, a
-    .git-credentials line whose username is literally `x-access-token` is
-    never treated as authoritative — that username is the FIXED value
-    GitHub requires for an App installation token (confirmed against the
-    real `git-credential-gh-app.sh` in zbynekdrlik/odoo-erp) and can
-    therefore never be a genuine durable PAT, so it is refused even if the
-    directory-presence detector somehow disagrees (a relocated/renamed
-    GH_APP_TOKEN_DIR, a box mid-migration)."""
+    As a second, independent belt — reached on EVERY box, App-token or
+    not — a .git-credentials line whose username is literally
+    `x-access-token` is never treated as authoritative: on these managed
+    boxes that username is the FIXED placeholder the App-token mechanism
+    always uses (confirmed against the real `git-credential-gh-app.sh` in
+    zbynekdrlik/odoo-erp) and is therefore always a corpse snapshot of an
+    App installation token here, never a genuine hand-issued PAT — refused
+    even if the directory-presence detector somehow disagrees (a
+    relocated/renamed GH_APP_TOKEN_DIR, a box mid-migration). The scan
+    tries every github.com credential line in the file (not just the
+    first), so an x-access-token corpse earlier in the file can never hide
+    a genuine PAT recorded later in it.
+
+    `primary`'s own freshness is deliberately NOT re-checked here (no mtime
+    gate) — this mirrors the real, deployed `gh-app-token.sh`'s own stance
+    that expiry is "advisory only ... there to make a stale-token failure
+    diagnosable, rather than to gate the read"; a dead `primary` still
+    surfaces as a real, loud auth failure downstream, never a silent false
+    0 (same "not a reliable 0" contract as everywhere else in this file)."""
     import re
 
     env = os.environ.copy()
@@ -7044,25 +7060,27 @@ def _gh_env():
     if _is_gh_app_token_box():
         try:
             token = (_gh_app_token_dir() / "primary").read_text().strip()
-        except OSError:
+        except (OSError, ValueError):
+            # ValueError also catches UnicodeDecodeError -- a `primary` a
+            # timer is rewriting mid-read (or a genuinely corrupt file)
+            # must degrade to "no token found", never crash the caller.
             token = ""
         if token:
+            token = token.splitlines()[0]      # never smuggle a 2nd line
+        if token:
             env["GH_TOKEN"] = token
-        # No token file yet (timer down, box mid-provisioning) — deliberately
-        # do NOT fall through to .git-credentials below: an App-token box's
-        # .git-credentials entry, if any, is stale by construction (this
-        # mechanism never writes/refreshes it) and would silently
-        # resurrect the #401 corpse-token bug. Leave GH_TOKEN unset so a
-        # genuinely broken box fails LOUD via gh's own "not authenticated"
-        # error instead of a misleading stale-401.
-        return env
+            return env
+        # No usable token file yet -- fall through to .git-credentials
+        # below rather than unconditionally disabling auth (see docstring).
     try:
         text = (Path.home() / ".git-credentials").read_text()
     except OSError:
         return env
-    m = re.search(r"https://([^:/@\s]+):([^@\s]+)@github\.com", text)
-    if m and m.group(1) != "x-access-token":
-        env["GH_TOKEN"] = m.group(2)
+    for m in re.finditer(r"https://([^:/@\s]+):([^@\s]+)@github\.com(?:[/\s]|$)",
+                         text):
+        if m.group(1) != "x-access-token":
+            env["GH_TOKEN"] = m.group(2)
+            break
     return env
 
 

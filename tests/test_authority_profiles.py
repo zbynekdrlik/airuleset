@@ -2017,11 +2017,42 @@ class TestGhEnvPrefersFreshMintOverGitCredentialsCorpse(TestCase):
                 env = airuleset._gh_env()
         self.assertEqual(env.get("GH_TOKEN"), "fresh-app-token")
 
-    def test_app_token_box_with_no_delivered_token_yet_leaves_gh_token_unset(self):
-        # timer hasn't delivered yet / box mid-provisioning -- must NOT
-        # silently fall through to the corpse .git-credentials value; leave
-        # GH_TOKEN unset so the box fails LOUD (gh's own "not authenticated")
-        # rather than resurrecting a token proven dead.
+    def test_app_token_box_with_no_delivered_token_yet_falls_through_to_a_real_pat(self):
+        # Adversarial-review MAJOR-1: `_is_gh_app_token_box()`'s own
+        # docstring already documents a known residual -- a STRAY App-token
+        # dir can exist on a genuine own-account PAT box (a misdirected
+        # delivery, or an App->PAT migration leftover). An unconditional
+        # early-return here (no fall-through) would silently kill that
+        # box's real, working PAT auth the moment such a stray dir shows
+        # up -- a new, mirror-image regression of #401 itself. The box's
+        # own timer not having delivered a token YET must fall through to
+        # the same .git-credentials logic every other box uses.
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            token_dir = Path(home) / "gh-app-tokens"
+            token_dir.mkdir()          # provisioned, but no "primary" file yet
+            Path(home, ".git-credentials").write_text(
+                "https://montalu3:ghp_realpattoken@github.com\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(token_dir)},
+                               clear=False):
+                os.environ.pop("GH_TOKEN", None)
+                os.environ.pop("GITHUB_TOKEN", None)
+                env = airuleset._gh_env()
+        self.assertEqual(env.get("GH_TOKEN"), "ghp_realpattoken")
+
+    def test_app_token_box_with_only_a_corpse_credential_still_leaves_gh_token_unset(self):
+        # The fall-through above must NEVER resurrect the #401 corpse: when
+        # the ONLY thing .git-credentials holds is an x-access-token line
+        # (the App mechanism's own fixed placeholder username), the second
+        # belt still refuses it even though the App branch fell through to
+        # reach it. This is the precise, un-masked version of the old
+        # (adversarial-review MAJOR-2) test -- that one used an
+        # x-access-token fixture too, which made it pass for EITHER "no
+        # fall-through" or "fall through but still refuse", so it never
+        # actually distinguished the two designs from each other.
         import tempfile
         import unittest.mock as mk
 
@@ -2032,6 +2063,87 @@ class TestGhEnvPrefersFreshMintOverGitCredentialsCorpse(TestCase):
                 "https://x-access-token:corpse-token-dead@github.com\n")
             with mk.patch.dict(os.environ,
                                {"HOME": home, "GH_APP_TOKEN_DIR": str(token_dir)},
+                               clear=False):
+                os.environ.pop("GH_TOKEN", None)
+                os.environ.pop("GITHUB_TOKEN", None)
+                env = airuleset._gh_env()
+        self.assertNotIn("GH_TOKEN", env)
+
+    def test_an_earlier_corpse_line_never_hides_a_genuine_pat_recorded_later(self):
+        # Adversarial-review MINOR-2: the old `re.search` took the FIRST
+        # github.com match only, so an x-access-token line appearing BEFORE
+        # a real PAT line in .git-credentials would refuse the whole file
+        # even though a genuine, usable credential sat right below it --
+        # reachable on a box mid-migration where both lines coexist. The
+        # scan must try every match, not just the first.
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            missing = Path(home) / "gh-app-tokens"      # never created
+            Path(home, ".git-credentials").write_text(
+                "https://x-access-token:corpse-token-dead@github.com\n"
+                "https://montalu3:ghp_realpattoken@github.com\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(missing),
+                                "GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+                env = airuleset._gh_env()
+        self.assertEqual(env.get("GH_TOKEN"), "ghp_realpattoken")
+
+    def test_a_malformed_token_file_degrades_to_no_token_never_crashes(self):
+        # Adversarial-review MINOR-4/5: `primary` may be caught mid-write by
+        # its own 45-min refresh timer, or otherwise corrupt -- a
+        # UnicodeDecodeError (a ValueError subclass, NOT caught by a bare
+        # `except OSError`) must degrade to "no token found", never
+        # propagate and crash the caller. A multi-line file (e.g. a stray
+        # trailing metadata line) must also never smuggle a 2nd line into
+        # the token value -- only the first line is ever used.
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            token_dir = Path(home) / "gh-app-tokens"
+            token_dir.mkdir()
+            (token_dir / "primary").write_bytes(b"\xff\xfe not valid utf-8")
+            Path(home, ".git-credentials").write_text(
+                "https://montalu3:ghp_realpattoken@github.com\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(token_dir)},
+                               clear=False):
+                os.environ.pop("GH_TOKEN", None)
+                os.environ.pop("GITHUB_TOKEN", None)
+                env = airuleset._gh_env()      # must not raise
+        self.assertEqual(env.get("GH_TOKEN"), "ghp_realpattoken")
+
+    def test_multi_line_token_file_only_ever_uses_the_first_line(self):
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            token_dir = Path(home) / "gh-app-tokens"
+            token_dir.mkdir()
+            (token_dir / "primary").write_text("fresh-app-token\nexpires=soon\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(token_dir),
+                                "GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+                env = airuleset._gh_env()
+        self.assertEqual(env.get("GH_TOKEN"), "fresh-app-token")
+
+    def test_a_spoofed_subdomain_host_is_never_matched(self):
+        # Adversarial-review THEORETICAL-3: the host match had no trailing
+        # anchor, so a credentials line for a LOOKALIKE host
+        # (github.com.evil.example) would match "github.com" as a mere
+        # substring and hand that unrelated token to gh, which would then
+        # send it to the real github.com in an Authorization header.
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            missing = Path(home) / "gh-app-tokens"      # never created
+            Path(home, ".git-credentials").write_text(
+                "https://someone:gitlab-secret@github.com.evil.example\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(missing)},
                                clear=False):
                 os.environ.pop("GH_TOKEN", None)
                 os.environ.pop("GITHUB_TOKEN", None)
