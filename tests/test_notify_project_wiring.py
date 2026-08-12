@@ -19,8 +19,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import notify                                              # noqa: E402
-
 ROOT = Path(__file__).resolve().parent.parent
 AIRULESET = ROOT / "airuleset.py"
 SEND_HOOK = ROOT / "hooks" / "notify-discord-send.sh"

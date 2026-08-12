@@ -81,21 +81,24 @@ class TestProjectLabelFor(unittest.TestCase):
     def test_origin_derived_name_wins_over_directory_basename(self):
         # The exact bug class this repo's own history documents repeatedly:
         # a local checkout dir named differently from the real repo.
-        run = lambda argv: "git@github.com:zbynekdrlik/odoo-erp.git\n"
+        def run(argv):
+            return "git@github.com:zbynekdrlik/odoo-erp.git\n"
         with m.patch("getpass.getuser", return_value="newlevel"):
             self.assertEqual(
                 notify.project_label_for("/home/x/devel/odoo-slovnormal", run=run),
                 "odoo-erp")
 
     def test_stream_qualified_for_a_stream_persona(self):
-        run = lambda argv: "git@github.com:zbynekdrlik/odoo-erp.git\n"
+        def run(argv):
+            return "git@github.com:zbynekdrlik/odoo-erp.git\n"
         with m.patch("getpass.getuser", return_value="david2"):
             self.assertEqual(
                 notify.project_label_for("/home/david2/devel/odoo-erp", run=run),
                 "odoo-erp-david2")
 
     def test_personal_box_stays_plain(self):
-        run = lambda argv: "git@github.com:zbynekdrlik/airuleset.git\n"
+        def run(argv):
+            return "git@github.com:zbynekdrlik/airuleset.git\n"
         with m.patch("getpass.getuser", return_value="newlevel"):
             self.assertEqual(
                 notify.project_label_for("/home/newlevel/devel/airuleset", run=run),
@@ -104,14 +107,16 @@ class TestProjectLabelFor(unittest.TestCase):
     def test_no_origin_falls_back_to_basename(self):
         # A bare directory (no git repo / no origin) must still resolve to
         # SOMETHING stable -- never empty for a real cwd.
-        run = lambda argv: ""
+        def run(argv):
+            return ""
         with m.patch("getpass.getuser", return_value="newlevel"):
             self.assertEqual(
                 notify.project_label_for("/home/x/some-random-dir", run=run),
                 "some-random-dir")
 
     def test_never_empty_for_an_empty_cwd(self):
-        run = lambda argv: ""
+        def run(argv):
+            return ""
         with m.patch("getpass.getuser", return_value="newlevel"):
             label = notify.project_label_for("", run=run)
         self.assertTrue(label)

@@ -6859,7 +6859,11 @@ def cmd_notify(args):
         # the same error across Stop events pings once, not every turn).
         dedup = args.dedup_key or ("apierr:%s:%s" % (sess, h))
         body = compose_api_error_alert(project, text)
-        print(send(body, dedup_key=dedup, dry_run=args.dry_run))
+        # #369: route via the SAME --project the caller already computed for
+        # the alert body's own label — routes this alert to its per-project
+        # Discord thread instead of the shared owner channel.
+        print(send(body, dedup_key=dedup, dry_run=args.dry_run,
+                   project=project or None))
         return
 
     if getattr(args, "autopilot_done", False):
@@ -8103,17 +8107,29 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # internally and `notification_channel()` re-resolve it a second
         # time right after -- the two calls must always agree on WHICH
         # owner's thread the card actually posted to.
-        from notify import notification_channel, record_card_message, resolve_owner
+        # #369: `project` routes this card to its OWN per-project Discord
+        # thread (never the shared owner channel) — stream-qualified so a
+        # sub-dev stream box's project label matches the SAME rule the
+        # watchdog/shell-hook project labels already use (`stream_qualified`),
+        # and computed from `name` (the bare repo NAME) so a personal box
+        # (newlevel/root) stays unqualified. `notification_channel` is called
+        # a SECOND time (for `record_card_message`) with the SAME `project`
+        # so the stored channel always matches where the card actually posted.
+        from notify import (notification_channel, record_card_message,
+                            resolve_owner, stream_qualified)
         owner = resolve_owner()
+        project = stream_qualified(name)
         result = send(body, owner=owner, dedup_key=dedup,
                       dry_run=getattr(args, "dry_run", False),
-                      return_message_id=True)
+                      return_message_id=True, project=project)
         status, message_id = result if isinstance(result, tuple) else (result, None)
         print(status)
         if status == "sent":
             if message_id:
-                record_card_message(message_id, notification_channel(owner=owner),
-                                     repo, issue)
+                record_card_message(
+                    message_id,
+                    notification_channel(owner=owner, project=project),
+                    repo, issue)
             # Feed the statusline github done/total segment — a card that actually
             # went out counts one ticket done in this run (dedup re-sends don't).
             # On a full-authority box a STREAM ticket's card must NOT advance

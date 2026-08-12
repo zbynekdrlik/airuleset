@@ -5274,8 +5274,14 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     "cez prio:bounce)." % (name, len(tickets), tick_str, root))
             seen[name] = {"tickets": tickets, "ts": int(now)}
             persist()                          # dedup memory BEFORE the ping
+            # #369: routes to the repo's own project thread — mirrors the
+            # SAME stream-qualified label a run-card / idle ping for the
+            # SAME repo checkout on this box would carry, so the phone can
+            # tell which project (and which stream box) this bounce-backlog
+            # ping is about.
+            from notify import stream_qualified
             send_fn(body, dedup_key="bounce:%s:%s" % (name, tick_str),
-                    dry_run=dry_run)
+                    dry_run=dry_run, project=stream_qualified(name))
             logs.append("bounce-ping %s %s" % (name, tick_str))
     return logs
 
@@ -5590,8 +5596,12 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
             # notify's own dedup fail OPEN — out of this lane's scope to
             # fix in notify.py itself, but this function no longer builds
             # a key that can trigger it).
+            # #369: routes to the repo's own project thread — mirrors the
+            # SAME stream-qualified label a run-card / idle ping for the
+            # SAME repo checkout on this box would carry.
+            from notify import stream_qualified
             result = send_fn(body, dedup_key="gkreq:%s:%d" % (name, int(now)),
-                             dry_run=dry_run)
+                             dry_run=dry_run, project=stream_qualified(name))
             logs.append("gkreq-ping %s %s (send=%r)" % (name, tick_str, result))
     return logs
 
