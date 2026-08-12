@@ -566,7 +566,7 @@ class TestGoalSweep(unittest.TestCase):
     def test_malformed_entry_with_no_text_is_dropped_not_retried_forever(self):
         reqp = self._reqp()
         Path(reqp).write_text(json.dumps({"sess-x": {"cwd": "/x"}}))
-        logs = goal.goal_sweep(1000, requests_path=reqp, run=lambda *a, **k: "")
+        goal.goal_sweep(1000, requests_path=reqp, run=lambda *a, **k: "")
         self.assertEqual(goal.load_goal_requests(reqp), {})
 
     def test_already_handled_this_sweep_is_skipped(self):
@@ -649,7 +649,10 @@ class TestGoalDarkWatch(unittest.TestCase):
         _write_goal_marker(proj, self.CWD, sid, "Goal set: /goal x", ts_epoch=500)
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
         sent = []
-        send_fn = lambda m, **k: sent.append(m)
+
+        def send_fn(m, **k):
+            sent.append(m)
+
         state = {}
         goal.goal_dark_watch(1000, run=tmux, send_fn=send_fn, projects_dir=proj,
                              state=state, sleep_fn=lambda s: None)

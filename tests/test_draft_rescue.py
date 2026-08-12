@@ -35,6 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
 import watchdog as wd
+from watchdog import goal as wdgoal  # #403 -- _send_goal_verified/_await_typed
+                                     # moved here verbatim, off wd itself
 
 # Captured at IMPORT time — before `tests/conftest.py`'s autouse
 # `_isolate_draft_rescue` fixture (a pytest-only mechanism, invisible to
@@ -321,7 +323,7 @@ class TestSendGoalVerifiedRescue(_RescueIsolated):
     def test_a_non_bare_box_is_rescued_before_the_refusal(self):
         run = _Recorder([])
         logs = []
-        ok = wd._send_goal_verified("%9", GOAL_TEXT, run, captured=DRAFT_CAP,
+        ok = wdgoal._send_goal_verified("%9", GOAL_TEXT, run, captured=DRAFT_CAP,
                                     logs=logs)
         self.assertFalse(ok, "must never type over a non-empty box")
         self.assertEqual(run.sent, [], "must not send a single keystroke")
@@ -333,7 +335,7 @@ class TestSendGoalVerifiedRescue(_RescueIsolated):
         # the first queued capture answers THAT re-check (still bare), the
         # rest serve the type/submit verify polls as before.
         run = _Recorder([BARE_CAP, _typed_boundary(GOAL_TEXT), BARE_AFTER_SUBMIT])
-        ok = wd._send_goal_verified("%9", GOAL_TEXT, run, captured=BARE_CAP,
+        ok = wdgoal._send_goal_verified("%9", GOAL_TEXT, run, captured=BARE_CAP,
                                     sleep_fn=lambda s: None)
         self.assertTrue(ok)
         self.assertEqual(self.rescued_files(), [])
@@ -346,7 +348,7 @@ class TestSendGoalVerifiedRescue(_RescueIsolated):
         # passes the first check; the fresh re-capture then shows content.
         run = _Recorder([DRAFT_CAP])
         logs = []
-        ok = wd._send_goal_verified("%9", GOAL_TEXT, run, captured=BARE_CAP,
+        ok = wdgoal._send_goal_verified("%9", GOAL_TEXT, run, captured=BARE_CAP,
                                     logs=logs, sleep_fn=lambda s: None)
         self.assertFalse(ok, "must never type over content that appeared")
         self.assertFalse(any("-l" in a for a in run.sent),
