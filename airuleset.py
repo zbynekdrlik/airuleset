@@ -6303,7 +6303,7 @@ def cmd_install(args):
         print(f"  {_disk_usage_summary_line(CLAUDE_DIR)}")
     except OSError as e:
         print(f"  disk-usage check error (non-fatal): {e}", file=sys.stderr)
-    # --- 12. Transcript gzip-at-rest sweep: size-aware retention for
+    # --- 13. Transcript gzip-at-rest sweep: size-aware retention for
     # unbounded chat history (#410, #376's own missing half). REPORT-ONLY
     # is the wired DEFAULT everywhere -- set
     # AIRULESET_TRANSCRIPT_COMPRESS_LIVE=1 to enable LIVE compression on
