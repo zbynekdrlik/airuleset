@@ -487,6 +487,33 @@ class TestDeliverGoal(unittest.TestCase):
                                  proj=proj)
         self.assertEqual(word, "sent")
 
+    def test_bootstrap_turn_ending_needs_you_still_arms(self):
+        # #403-review CRITICAL C1: the /autopilot bootstrap turn that
+        # RECORDS this very request typically ends its OWN turn on a ❓/⏳
+        # status marker (measured against the real corpus: 98% of real
+        # bootstrap turns do). The session then sits idle at that exact
+        # marker forever, so a gate refusing to arm while the transcript's
+        # last marker is ❓/⏳ would refuse nearly every real arm,
+        # PERMANENTLY -- goal_sweep re-evaluates the SAME stale marker on
+        # every later sweep too, never just once. Arming here is safe: the
+        # downstream boundary/dialog/copy-mode checks already cover the
+        # only genuinely unsafe pane states, and the template's own
+        # condition (A) already refuses to let the loop proceed past an
+        # unanswered ❓ regardless of whether it's armed.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 marker_text="❓ NEEDS YOU: some question")
+        word, tmux, _ = self._go(GOAL_IDLE_CAP, proj=proj)
+        self.assertEqual(word, "sent")
+        self.assertIn(self.TEXT, tmux.typed_texts())
+
+    def test_bootstrap_turn_ending_working_still_arms(self):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 marker_text="⏳ WORKING: still going")
+        word, tmux, _ = self._go(GOAL_IDLE_CAP, proj=proj)
+        self.assertEqual(word, "sent")
+
     def test_kill_switch_disables_delivery(self):
         with m.patch.object(wd, "_owner_disabled", return_value=True):
             word, tmux, _ = self._go(GOAL_IDLE_CAP)
