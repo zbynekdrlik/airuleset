@@ -39,6 +39,13 @@ import airuleset
 import watchdog as wd
 from watchdog import compact
 
+# Captured BEFORE any test patches `time.sleep` -- `TestCompactRequestCli`'s
+# own class-wide no-op patch (see its `setUp`) would otherwise defeat the
+# ONE test that specifically needs a REAL, if short, sleep to genuinely
+# prove the MAJOR-1 fix (`test_self_on_a_genuinely_idle_pane_actually_
+# sends_end_to_end`).
+_REAL_SLEEP = time.sleep
+
 
 # --------------------------------------------------------------------------- #
 # 1. MANAGED_AUTOCOMPACT_WINDOW — unrelated to #402, carried over verbatim.
@@ -237,6 +244,27 @@ class CompactRequestState(unittest.TestCase):
         self.assertEqual(d["sess-1"]["ts"], 1000)      # frozen at first-seen
         self.assertEqual(d["sess-1"]["cwd"], "/y")      # latest cwd wins
         self.assertEqual(d["sess-1"]["origin"], "self-callback")  # latest origin
+
+    def test_ts_is_preserved_even_when_the_prior_anchor_is_already_expired(self):
+        # #402-review MINOR-2 was CONSIDERED (reset ts when the prior
+        # entry is already past the age cap, so a genuinely fresh
+        # boundary doesn't inherit a corpse) and REJECTED: it directly
+        # reproduces a weaker form of the #400 bug this test locks (a
+        # session producing boundary events more often than
+        # COMPACT_REQUEST_MAX_AGE_S apart, forever, could keep resetting
+        # the anchor just past each expiry and never let condition (e)
+        # fire). The narrower residual (deliver_compact's OWN condition
+        # (e), checked unconditionally FIRST, clears an expired entry
+        # within one sweep cadence regardless) is documented on
+        # `record_compact_request`'s own docstring.
+        p = self._p()
+        compact.record_compact_request("sess-1", "/x", now=1000, path=p,
+                                       origin="self-callback")
+        way_past_the_cap = 1000 + compact.COMPACT_REQUEST_MAX_AGE_S + 1
+        compact.record_compact_request("sess-1", "/y", now=way_past_the_cap, path=p,
+                                       origin="self-callback")
+        d = compact.load_compact_requests(p)
+        self.assertEqual(d["sess-1"]["ts"], 1000)
 
     def test_clear_removes_one_request_only(self):
         p = self._p()
@@ -755,6 +783,15 @@ def _args(**kw):
 class TestCompactRequestCli(unittest.TestCase):
     def setUp(self):
         self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+        # `cmd_compact_request` now goes through `_compact_sync_attempt`,
+        # which sleeps a small BOUNDED margin (~2.1s) on a genuinely fresh
+        # record (#402-review MAJOR-1's own fix) -- these tests don't care
+        # about the wait's real wall-clock duration, only the disposition,
+        # so patch it away module-wide (mirrors the established
+        # `test_goal_autoarm.py`/`test_goal_rearm.py` pattern).
+        sp = m.patch("time.sleep", lambda s: None)
+        sp.start()
+        self.addCleanup(sp.stop)
 
     def test_record_with_no_session_prints_skip(self):
         buf = []
@@ -796,6 +833,31 @@ class TestCompactRequestCli(unittest.TestCase):
         self.assertIsNotNone(entry)
         self.assertEqual(entry["origin"], "self-callback")
 
+    def test_self_on_a_genuinely_idle_pane_actually_sends_end_to_end(self):
+        # #402-review MAJOR-1's own live reproduction: "a perfectly idle
+        # pane, zero live tasks -- word = skip:too-young, zero keystrokes."
+        # `deliver_compact` is NOT mocked here -- a real call, through the
+        # REAL `_compact_sync_attempt`, against a real (fake-tmux) idle
+        # pane, is the only thing that actually proves the fix: a fresh
+        # `--self` call must be able to send, not just always defer.
+        proj = TemporaryDirectory()
+        self.addCleanup(proj.cleanup)
+        cwd = "/home/newlevel/devel/synctest-cli"
+        sid = "sess-cli-sync"
+        _write_marker_transcript(proj.name, cwd, sid)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", cwd, "111")], CB_IDLE_CAP)
+        with m.patch("time.sleep", _REAL_SLEEP):    # a REAL, short sleep here
+            with m.patch.object(compact, "resolve_self_pane",
+                                return_value=("%9", cwd, sid)):
+                with m.patch.object(compact.watchdog, "_default_run", tmux):
+                    with m.patch.object(compact.watchdog, "PROJECTS_DIR", proj.name):
+                        buf = []
+                        with m.patch("sys.stdout") as out:
+                            out.write = lambda s: buf.append(s)
+                            airuleset.cmd_compact_request(_args(self=True))
+        self.assertEqual("".join(buf), "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
     def test_terminal_word_clears_the_request(self):
         with m.patch.object(compact, "resolve_self_pane",
                             return_value=("%3", "/somewhere", "sess-z")):
@@ -809,6 +871,122 @@ class TestCompactRequestCli(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 airuleset.cmd_compact_request(_args())
         self.assertNotEqual(cm.exception.code, 0)
+
+
+# --------------------------------------------------------------------------- #
+# 7b. `_compact_sync_attempt` — #402-review MAJOR-1's own fix: the ONE
+#     synchronous attempt must not be structurally dead for a FRESH
+#     request just because it was recorded in the same call.
+# --------------------------------------------------------------------------- #
+
+class TestCompactSyncAttempt(unittest.TestCase):
+    SID = "sess-sync-1"
+    CWD = "/home/newlevel/devel/synctest"
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+        self.proj = TemporaryDirectory()
+        self.addCleanup(self.proj.cleanup)
+        _write_marker_transcript(self.proj.name, self.CWD, self.SID)
+
+    def _tmux(self, captured=CB_IDLE_CAP):
+        return DeliverCompactFakeTmux(
+            [("%9", "claude", self.CWD, "111")], captured)
+
+    def test_a_fresh_request_still_sends_end_to_end(self):
+        # THE bug: request_ts == now (same call) used to make
+        # `_compact_request_too_young` refuse EVERY fresh request
+        # unconditionally. A fake `sleep_fn` that just advances a
+        # deterministic fake clock (never a real sleep) proves the wait
+        # genuinely clears the floor and the REAL `deliver_compact` call
+        # then sends -- no mocking of `deliver_compact` itself.
+        clock = [1_000_000.0]
+
+        def now_fn():
+            return clock[0]
+
+        def sleep_fn(s):
+            clock[0] += s
+
+        tmux = self._tmux(CB_IDLE_CAP)
+        word = compact._compact_sync_attempt(
+            self.SID, self.CWD, "self-callback", run=tmux,
+            projects_dir=self.proj.name, delivered_path=self.delp,
+            requests_path=self.reqp, now_fn=now_fn, sleep_fn=sleep_fn)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+        # the sleep genuinely ran (clock advanced by roughly the floor)
+        self.assertGreaterEqual(clock[0] - 1_000_000.0,
+                                compact.COMPACT_MIN_REQUEST_AGE_S)
+        # terminal word -> the request is cleared, not left pending
+        self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
+
+    def test_the_sleep_is_a_single_bounded_call_never_a_loop(self):
+        clock = [2_000_000.0]
+        calls = []
+
+        def now_fn():
+            return clock[0]
+
+        def sleep_fn(s):
+            calls.append(s)
+            clock[0] += s
+
+        tmux = self._tmux(CB_IDLE_CAP)
+        compact._compact_sync_attempt(
+            self.SID, self.CWD, "self-callback", run=tmux,
+            projects_dir=self.proj.name, delivered_path=self.delp,
+            requests_path=self.reqp, now_fn=now_fn, sleep_fn=sleep_fn)
+        self.assertEqual(len(calls), 1)
+        self.assertAlmostEqual(
+            calls[0],
+            compact.COMPACT_MIN_REQUEST_AGE_S + compact.COMPACT_SYNC_ATTEMPT_MARGIN_S,
+            places=6)
+
+    def test_a_re_record_whose_anchor_is_already_old_enough_sleeps_zero(self):
+        # A re-record within the SAME still-pending window preserves the
+        # ORIGINAL ts (#400) -- if that original ts is already >= the
+        # floor, the wait must be a genuine no-op, not a second sleep.
+        compact.record_compact_request(self.SID, self.CWD, now=3_000_000.0,
+                                       path=self.reqp, origin="self-callback")
+        clock = [3_000_000.0 + compact.COMPACT_MIN_REQUEST_AGE_S + 10]
+        calls = []
+
+        def now_fn():
+            return clock[0]
+
+        def sleep_fn(s):
+            calls.append(s)
+
+        tmux = self._tmux(CB_IDLE_CAP)
+        word = compact._compact_sync_attempt(
+            self.SID, self.CWD, "self-callback", run=tmux,
+            projects_dir=self.proj.name, delivered_path=self.delp,
+            requests_path=self.reqp, now_fn=now_fn, sleep_fn=sleep_fn)
+        self.assertEqual(word, "sent")
+        self.assertEqual(calls, [])
+
+    def test_record_failure_reports_skip_no_session_and_never_sleeps(self):
+        calls = []
+        with m.patch.object(compact, "record_compact_request", return_value=False):
+            word = compact._compact_sync_attempt(
+                self.SID, self.CWD, "self-callback",
+                requests_path=self.reqp, delivered_path=self.delp,
+                now_fn=lambda: 4_000_000.0, sleep_fn=lambda s: calls.append(s))
+        self.assertEqual(word, "skip:no-session")
+        self.assertEqual(calls, [])
+
+    def test_a_not_yet_safe_pane_still_leaves_the_request_pending(self):
+        # A skip word must NOT clear the request -- the periodic sweep
+        # still needs to see it.
+        tmux = self._tmux(CB_DRAFT_CAP)
+        word = compact._compact_sync_attempt(
+            self.SID, self.CWD, "self-callback", run=tmux,
+            projects_dir=self.proj.name, delivered_path=self.delp,
+            requests_path=self.reqp, now_fn=lambda: 5_000_000.0,
+            sleep_fn=lambda s: None)
+        self.assertEqual(word, "skip:draft")
+        self.assertIn(self.SID, compact.load_compact_requests(self.reqp))
 
 
 # --------------------------------------------------------------------------- #
