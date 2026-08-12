@@ -169,7 +169,30 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
     the #400 non-refreshable age-cap invariant — a request whose anchor
     can be refreshed by an ordinary re-record never actually ages out, no
     matter how stale it genuinely is. Fail-safe (never raises). Returns
-    True on success."""
+    True on success.
+
+    #402-review MINOR-2 was CONSIDERED and REJECTED here, deliberately: a
+    re-record landing on an already-EXPIRED prior entry (>
+    `COMPACT_REQUEST_MAX_AGE_S` old) does briefly inherit that dead
+    anchor and get discarded on its OWN synchronous evaluation without
+    ever really being evaluated — but only within the narrow window
+    before `deliver_compact`'s condition (e) is next checked (a hard,
+    unconditional, no-pane-resolution-needed FIRST check, in both the
+    synchronous attempt and `compact_sweep`'s own ~60s cadence), which
+    clears the stale entry outright. The NEXT genuine boundary event
+    after that lands on a cleared entry and gets a genuinely fresh `ts`.
+    A gated "reset ts when the prior entry is already expired" fix was
+    drafted and then reverted: it directly reproduces a WEAKER form of
+    the #400 bug it was meant to avoid (a session producing boundary
+    events more often than `COMPACT_REQUEST_MAX_AGE_S` apart, forever,
+    can keep resetting the anchor just past each expiry and never let
+    condition (e) actually fire) and collides with this function's own
+    pre-existing, deliberately-locked #400 regression test
+    (`test_ts_is_never_refreshed_across_a_re_record`, which the fix
+    cannot pass without weakening). The residual (a single record call's
+    own synchronous attempt occasionally reporting a spurious "expired"
+    inside that <=60s window) is self-healing and narrower than the
+    reset would have been unsafe."""
     session = str(session or "").strip()
     if not session:
         return False
@@ -693,6 +716,69 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 # The dispositions that fully HANDLE a request — the caller clears it
 # rather than leaving it pending for the next sweep.
 _COMPACT_TERMINAL_WORDS = frozenset(("sent", "expired", "already-queued", "cooldown"))
+
+# A small margin over `COMPACT_MIN_REQUEST_AGE_S` so a `time.sleep()` that
+# very slightly undershoots its requested duration (never observed on this
+# stack, but no reason to shave it exactly to the boundary) still clears
+# the floor on the very next `deliver_compact` check.
+COMPACT_SYNC_ATTEMPT_MARGIN_S = 0.1
+
+
+def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
+                          requests_path=None, delivered_path=None,
+                          state=None, now_fn=None, sleep_fn=None,
+                          min_age=None):
+    """The ONE synchronous delivery attempt BOTH `compact-request --self`
+    and `--record` make, right after recording — records the request,
+    then a single BOUNDED one-shot wait (never a retry loop; #402's
+    collapse deliberately deleted the six-constant `_compact_retry_until`
+    machinery), sized to just clear `deliver_compact`'s own
+    `COMPACT_MIN_REQUEST_AGE_S` floor, then ONE call to `deliver_compact`.
+
+    WHY THE WAIT EXISTS AT ALL (#402-review MAJOR-1). The record and this
+    attempt happen in the SAME call, so a request's age is provably ~0 at
+    the instant `deliver_compact` would check it — without the wait, the
+    min-age floor refuses EVERY fresh request unconditionally, silently
+    deferring it to job 14's ~60s poll and reverting a previously-fixed,
+    previously-MEASURED regression: the pre-#402 code's own
+    `deliver_compact_record` docstring records "18 of 87 real sends on
+    this box alone" took that slow path for want of exactly this (#238's
+    own adversarial review, finding 🔴1). The floor's OWN purpose is real
+    — a same-turn-dispatched sibling worker can be briefly invisible to
+    `_session_has_live_bg_tasks` — and this wait is what gives that
+    signal a genuine chance to catch up, exactly like the old retry loop
+    did, without resurrecting the loop itself: the wait is computed from
+    the REQUEST's own recorded `ts` (via a fresh `load_compact_requests`
+    read, since a re-record may have preserved an already-old-enough
+    anchor), so a re-record whose anchor already clears the floor sleeps
+    zero.
+
+    Returns the disposition word `deliver_compact` returns (or
+    `"skip:no-session"` if recording itself failed — a disk-write
+    failure, not a blank session, which the caller has already refused
+    before ever reaching here). Clears the request on any TERMINAL word.
+    Prints nothing — the caller owns stdout."""
+    now_fn = now_fn or time.time
+    sleep_fn = sleep_fn or time.sleep
+    ok = record_compact_request(sid, cwd, now=now_fn(), path=requests_path,
+                                origin=origin)
+    if not ok:
+        return "skip:no-session"
+    entry = load_compact_requests(requests_path).get(sid) or {}
+    req_ts = entry.get("ts")
+    if req_ts is None:
+        req_ts = now_fn()
+    floor = _compact_min_request_age(min_age) + COMPACT_SYNC_ATTEMPT_MARGIN_S
+    age = _safe_age(now_fn(), req_ts)
+    if age is not None and age < floor:
+        sleep_fn(floor - age)
+    word = deliver_compact(sid, cwd, origin=origin, run=run,
+                           projects_dir=projects_dir,
+                           delivered_path=delivered_path, now=now_fn(),
+                           state=state, request_ts=req_ts)
+    if word in _COMPACT_TERMINAL_WORDS:
+        clear_compact_request(sid, path=requests_path)
+    return word
 
 
 def compact_sweep(now, run=None, dry_run=False, projects_dir=None,

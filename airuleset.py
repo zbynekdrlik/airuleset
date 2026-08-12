@@ -9869,23 +9869,26 @@ def cmd_compact_request(args):
 
     `--self`: the calling SESSION's own explicit callback ("I am at a safe
     boundary right now") — resolves the calling pane via `$TMUX_PANE`
-    (`resolve_self_pane`), records the request under the `self-callback`
-    proven-boundary origin, and attempts ONE immediate synchronous
-    delivery. No retry/hold loop any more (#402 removed that machinery
-    wholesale): if the immediate attempt is not safe right now (a live
-    sibling task, a busy pane, the #238 same-turn-dispatch race), the
-    request is simply LEFT PENDING for the periodic sweep (job 14,
-    ~60s cadence) to pick up — bounded, eventually, by the hard age cap.
+    (`resolve_self_pane`), then makes ONE immediate synchronous delivery
+    attempt via `compact._compact_sync_attempt` (records the request under
+    the `self-callback` proven-boundary origin, waits at most a small
+    bounded margin over `COMPACT_MIN_REQUEST_AGE_S` — never a multi-second
+    hold, never a retry loop — then evaluates once). If the attempt is not
+    safe right now (a live sibling task, a busy pane, ...), the request is
+    simply LEFT PENDING for the periodic sweep (job 14, ~60s cadence) to
+    pick up — bounded, eventually, by the hard age cap.
 
     `--record --session <sid> --cwd <cwd> --origin <origin>`: the
     SubagentStop hook's entry point (`hooks/notify-compact-subagent-
-    boundary.sh`, `--origin subagent-stop`) — records the request, then
-    the SAME ONE immediate synchronous attempt.
+    boundary.sh`, `--origin subagent-stop`) — the SAME ONE synchronous
+    attempt via the SAME shared helper.
 
     Prints the disposition word verbatim (`sent` / `expired` /
-    `already-queued` / `cooldown` / `skip:<reason>`) so the calling hook's
-    own decision log stays a faithful trace of what actually happened."""
-    import time
+    `already-queued` / `cooldown` / `skip:<reason>` — `skip:no-session`
+    covers BOTH a blank session id and a genuine record-time disk-write
+    failure, since neither can be told apart from the caller's side) so
+    the calling hook's own decision log stays a faithful trace of what
+    actually happened."""
     from watchdog import compact
     if getattr(args, "self", False):
         pane_id, cwd, sid = compact.resolve_self_pane()
@@ -9895,30 +9898,17 @@ def cmd_compact_request(args):
                   "tmux Claude Code pane, or $TMUX_PANE unset) -- nothing "
                   "recorded", file=sys.stderr)
             sys.exit(1)
-        now = time.time()
-        compact.record_compact_request(sid, cwd, now=now,
-                                       origin=compact._COMPACT_SELF_CALLBACK_ORIGIN)
-        word = compact.deliver_compact(sid, cwd,
-                                       origin=compact._COMPACT_SELF_CALLBACK_ORIGIN,
-                                       now=now, request_ts=now)
-        if word in compact._COMPACT_TERMINAL_WORDS:
-            compact.clear_compact_request(sid)
+        word = compact._compact_sync_attempt(
+            sid, cwd, compact._COMPACT_SELF_CALLBACK_ORIGIN)
         sys.stdout.write(word)
         return
     if getattr(args, "record", False):
         session = (getattr(args, "session", "") or "").strip()
         origin = (getattr(args, "origin", "") or "").strip()
-        now = time.time()
-        ok = compact.record_compact_request(session, args.cwd, now=now, origin=origin)
-        if not ok:
+        if not session:
             sys.stdout.write("skip:no-session")
             return
-        entry = compact.load_compact_requests().get(session) or {}
-        req_ts = entry.get("ts", now)
-        word = compact.deliver_compact(session, args.cwd, origin=origin,
-                                       now=now, request_ts=req_ts)
-        if word in compact._COMPACT_TERMINAL_WORDS:
-            compact.clear_compact_request(session)
+        word = compact._compact_sync_attempt(session, args.cwd, origin)
         sys.stdout.write(word)
         return
     print("compact-request: nothing to do (use --record --session <sid> --cwd <cwd>)",
