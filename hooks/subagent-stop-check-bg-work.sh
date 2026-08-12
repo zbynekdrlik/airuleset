@@ -172,7 +172,7 @@ exact odoo-erp incident airuleset #343 documents: a lane agent's last words \
 were 'monitoring shadow E2E to terminal', the run failed 20 minutes later, \
 and nothing woke the coordinator. Pick ONE: (1) if the resource genuinely \
 has not resolved yet, hold this turn with a real bounded FOREGROUND poll \
-(e.g. 'sleep 300 && gh run view <id> --json status,conclusion', repeated \
+(e.g. 'sleep 300 && gh run view <id> --json status,conclusion,jobs', repeated \
 until terminal) and report the ACTUAL outcome, never a promise to keep \
 checking; (2) launch genuinely trackable background work (Bash \
 run_in_background / Monitor / an async Agent dispatch) so this SAME hook's \
@@ -341,7 +341,7 @@ completion notification fires to your PARENT, not to you (ci-monitoring.md; \
 this killed ~40% of autopilot workers). Finish the work FIRST, then clean \
 up, then end: (1) wait FOREGROUND until the underlying work is done — a \
 bounded poll loop of plain foreground Bash calls (e.g. 'sleep 300 && gh run \
-view <id> --json status,conclusion', repeated until terminal), NEVER \
+view <id> --json status,conclusion,jobs', repeated until terminal), NEVER \
 run_in_background; (2) then TaskStop EVERY task listed above that has not \
 itself finished (fetch any output you need via TaskOutput first) — you own \
 these tasks, TaskStop works, and a TaskStop'd task no longer blocks you; \
