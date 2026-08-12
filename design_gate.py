@@ -542,7 +542,9 @@ def ensure_stale_pattern_excluded(cwd):
 MIN_LEN_ARCH = 40
 
 _ARCH_HEADER_RE = re.compile(
-    r"(?m)^[ \t]*(?:"
+    # #414-review MINOR-3: an optional leading "-" bullet (this fleet's
+    # dominant markdown style) before either header form.
+    r"(?m)^[ \t]*-?[ \t]*(?:"
     r"#{1,6}[ \t]*\**[ \t]*(?:Architekt(?:[uú]ra)|Architecture)\**[ \t]*:?"
     r"|"
     r"\**[ \t]*(?:Architekt(?:[uú]ra)|Architecture)[ \t]*\**[ \t]*:"
@@ -602,7 +604,9 @@ MIN_LEN_TRIAGE_NONTRIVIAL = 400             # 2-3 approaches + trade-offs cannot
                                              # trivial write-up clears the lower floor easily
 
 _TRIAGE_LINE_RE = re.compile(
-    r"(?m)^[ \t>*#]*\**[ \t]*Triage\**[ \t]*:[ \t]*(?P<cls>.+?)[ \t]*$",
+    # #414-review MINOR-3: "-" added to the prefix class for the same
+    # leading-bullet reason as _ARCH_HEADER_RE above.
+    r"(?m)^[ \t>*#-]*\**[ \t]*Triage\**[ \t]*:[ \t]*(?P<cls>.+?)[ \t]*$",
     re.IGNORECASE,
 )
 # Non-trivial checked FIRST -- "netriviálne"/"non-trivial" both CONTAIN the
