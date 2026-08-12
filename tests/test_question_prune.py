@@ -195,3 +195,141 @@ class TranscriptFoundBySessionId(unittest.TestCase):
                                            projects_dir=str(self.projects))
         self.assertTrue(any("pruned" in ln for ln in logs), logs)
         self.assertNotIn("888001", notify.load_questions(self.qpath))
+
+
+# --------------------------------------------------------------------------- #
+# #368 -- an unanswered ❓ is re-asked FRESH AND WHOLE at least once a day,
+# never silently dropped. The map no longer age-prunes (see notify's own
+# QuestionMap tests); THIS is what turns an old, still-unanswered `ts` into
+# a fresh re-post instead of a no-op.
+# --------------------------------------------------------------------------- #
+class InSleepWindow(unittest.TestCase):
+    def _at(self, hh, mm=0):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        return datetime.now(tz).replace(hour=hh, minute=mm, second=0,
+                                        microsecond=0).timestamp()
+
+    def test_midnight_through_559_is_asleep(self):
+        self.assertTrue(wd._in_sleep_window(self._at(0, 0)))
+        self.assertTrue(wd._in_sleep_window(self._at(3, 30)))
+        self.assertTrue(wd._in_sleep_window(self._at(5, 59)))
+
+    def test_six_and_later_is_awake(self):
+        self.assertFalse(wd._in_sleep_window(self._at(6, 0)))
+        self.assertFalse(wd._in_sleep_window(self._at(12, 0)))
+        self.assertFalse(wd._in_sleep_window(self._at(23, 59)))
+
+
+class RepingStaleQuestions(unittest.TestCase):
+    BLOCK = ("**Otázka — projekt demo:** ktorú verziu nasadiť?\n"
+            "1. najprv 0.28.0\n2. rovno 0.29.0\n\n❓ **rozhodnutie**")
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        self.now = time.time()
+
+    def _record(self, mid, ts, block=None, sid=SID, cwd=CWD, chan="777001"):
+        notify.record_question(mid, chan, sid, cwd, now=ts, path=self.qpath,
+                               question=block if block is not None else self.BLOCK)
+
+    def _fake_send(self, status="sent", mid="999001"):
+        calls = []
+
+        def fn(body, owner=None, dedup_key=None, dry_run=False,
+               kind="default", return_message_id=False):
+            calls.append({"body": body, "owner": owner,
+                          "dedup_key": dedup_key, "kind": kind,
+                          "dry_run": dry_run})
+            return (status, mid) if return_message_id else status
+        return fn, calls
+
+    def _due_ts(self):
+        return self.now - wd.QUESTION_REPING_S - 10
+
+    def test_due_question_is_reposted_verbatim_with_the_questions_kind(self):
+        self._record("888001", self._due_ts())
+        send_fn, calls = self._fake_send()
+        logs = wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["body"], self.BLOCK)      # verbatim, never shortened
+        self.assertEqual(calls[0]["kind"], "questions")
+        self.assertTrue(any("->" in ln for ln in logs), logs)
+
+    def test_not_yet_due_question_is_left_alone(self):
+        self._record("888001", self.now - 60)
+        send_fn, calls = self._fake_send()
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        self.assertEqual(calls, [])
+        self.assertIn("888001", notify.load_questions(self.qpath))
+
+    def test_sleep_window_defers_without_touching_ts_or_sending(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        night_now = datetime.now(ZoneInfo("Europe/Bratislava")).replace(
+            hour=3, minute=0, second=0, microsecond=0).timestamp()
+        old_ts = night_now - wd.QUESTION_REPING_S - 10
+        self._record("888001", old_ts)
+        send_fn, calls = self._fake_send()
+        logs = wd.reping_stale_questions(night_now, send_fn, path=self.qpath)
+        self.assertEqual(calls, [])
+        self.assertTrue(any("deferred sleep-window" in ln for ln in logs), logs)
+        self.assertIn("888001", notify.load_questions(self.qpath))
+
+    def test_successful_send_retracks_the_new_message_id_and_drops_the_old(self):
+        self._record("888001", self._due_ts(), sid="sid-x", cwd=CWD)
+        send_fn, calls = self._fake_send(status="sent", mid="999001")
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        q = notify.load_questions(self.qpath)
+        self.assertNotIn("888001", q)
+        self.assertIn("999001", q)
+        self.assertEqual(q["999001"]["session"], "sid-x")
+        self.assertEqual(q["999001"]["cwd"], CWD)
+        self.assertEqual(q["999001"]["ts"], int(self.now))
+
+    def test_failed_send_leaves_the_old_entry_untouched_for_a_retry(self):
+        old_ts = self._due_ts()
+        self._record("888001", old_ts)
+        send_fn, calls = self._fake_send(status="error", mid=None)
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        q = notify.load_questions(self.qpath)
+        self.assertIn("888001", q)
+        self.assertEqual(q["888001"]["ts"], int(old_ts))
+
+    def test_legacy_entry_without_block_falls_back_to_the_collapsed_question(self):
+        d = {"888001": {"session": SID, "cwd": CWD, "channel": "777001",
+                        "ts": self._due_ts(), "question": "legacy collapsed text"}}
+        Path(self.qpath).write_text(json.dumps(d))
+        send_fn, calls = self._fake_send()
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        self.assertEqual(calls[0]["body"], "legacy collapsed text")
+
+    def test_dedup_key_is_bucketed_by_day_not_by_instant(self):
+        self._record("888001", self._due_ts())
+        send_fn, calls = self._fake_send()
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        self.assertEqual(
+            calls[0]["dedup_key"],
+            "question-reping:888001:%d" % int(self.now // wd.QUESTION_REPING_S))
+
+    def test_owner_by_sid_is_passed_through_to_the_send(self):
+        self._record("888001", self._due_ts(), sid="sid-marek")
+        send_fn, calls = self._fake_send()
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath,
+                                  owner_by_sid={"sid-marek": "marek"})
+        self.assertEqual(calls[0]["owner"], "marek")
+
+    def test_dry_run_never_touches_the_map(self):
+        old_ts = self._due_ts()
+        self._record("888001", old_ts)
+        send_fn, calls = self._fake_send()
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath,
+                                  dry_run=True)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["dry_run"])
+        q = notify.load_questions(self.qpath)
+        self.assertIn("888001", q)
+        self.assertEqual(q["888001"]["ts"], int(old_ts))

@@ -59,15 +59,42 @@ class QuestionMap(unittest.TestCase):
         self.assertIn("222", q)
         self.assertFalse(notify.drop_question("nope", path=p))     # absent → False
 
-    def test_stale_entries_pruned_on_write(self):
+    def test_stale_entries_are_never_pruned_by_age_on_write(self):
+        # #368: an unanswered entry must survive past 24h+ so
+        # watchdog.reping_stale_questions() has something to keep re-asking
+        # daily — the old age-based prune (deleting it outright the moment
+        # ANY later write swept the map) was the exact inversion of "ask at
+        # least once a day, never silently drop" (the user's own directive,
+        # 2026-08-11). Only a MALFORMED entry (not a dict) is still pruned.
         p = self._p()
         notify.record_question("100", "900", "s", "/x", now=0, path=p)
-        # a new write far in the future prunes the >24h-old entry
-        notify.record_question("200", "900", "s", "/x",
-                               now=notify._QUESTIONS_TTL_S + 100, path=p)
+        notify.record_question("200", "900", "s", "/x", now=100_000, path=p)
         q = notify.load_questions(p)
-        self.assertNotIn("100", q)
+        self.assertIn("100", q)                # still there, far past 24h old
         self.assertIn("200", q)
+
+    def test_block_field_stores_the_raw_newline_preserving_block(self):
+        # #368: `question` stays the single-line-collapsed value
+        # (compose_reply_prompt still needs it), but `block` keeps the
+        # ORIGINAL structure — a daily re-ask reposts THIS verbatim, never
+        # a flattened wall of prose.
+        p = self._p()
+        block = ("<@773451844110385193> **Otázka — projekt demo:** ktorú?\n"
+                "1. a\n2. b\n\n❓ **rozhodnutie**")
+        notify.record_question("111", "900", "sid", "/x", now=1000, path=p,
+                               question=block)
+        rec = notify.load_questions(p)["111"]
+        self.assertIn("\n", rec["block"])                 # newlines preserved
+        self.assertFalse(rec["block"].startswith("<@"))   # mention stripped
+        self.assertIn("1. a\n2. b", rec["block"])
+        self.assertNotIn("\n", rec["question"])            # unchanged, still one line
+
+    def test_block_field_truncates_codepoint_safe(self):
+        p = self._p()
+        notify.record_question("111", "900", "sid", "/x", now=1000, path=p,
+                               question="š" * 5000)
+        rec = notify.load_questions(p)["111"]
+        self.assertLessEqual(len(rec["block"]), notify._QUESTION_BLOCK_MAX)
 
     def test_hard_cap_keeps_newest(self):
         p = self._p()
@@ -1243,6 +1270,50 @@ class SendReturnMessageId(unittest.TestCase):
     def test_dry_run_returns_a_none_id_pair(self):
         got = notify.send("hi", dry_run=True, return_message_id=True)
         self.assertEqual(got, ("dry-run", None))
+
+
+class SendKindRouting(unittest.TestCase):
+    """#368: send(kind="questions") must route through the SAME per-owner
+    `-q` questions-thread cascade `notification_channel(kind="questions")`
+    already provides — needed so a Python-side daily re-ask (watchdog) lands
+    in the owner's separate questions thread, not mixed into their normal
+    ✅/card thread, mirroring what hooks/notify-discord-send.sh already does
+    for every interactive ❓ ping."""
+
+    def setUp(self):
+        import unittest.mock as m
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": "773451844110385193",
+                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001",
+                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q": "777099"}
+        p = m.patch.object(notify, "_read_env", lambda: dict(self.env))
+        p.start()
+        self.addCleanup(p.stop)
+        self.posted = []
+
+    def _post(self, token, channel, content):
+        self.posted.append(channel)
+        return "555666"
+
+    def test_kind_questions_routes_to_the_dedicated_thread(self):
+        import unittest.mock as m
+        with m.patch.object(notify, "_post_discord", self._post):
+            status = notify.send("hi", owner="zbynek", kind="questions")
+        self.assertEqual(status, "sent")
+        self.assertEqual(self.posted, ["777099"])
+
+    def test_kind_default_stays_on_the_normal_thread(self):
+        import unittest.mock as m
+        with m.patch.object(notify, "_post_discord", self._post):
+            notify.send("hi", owner="zbynek")
+        self.assertEqual(self.posted, ["777001"])
+
+    def test_kind_questions_falls_back_to_the_normal_thread_when_unconfigured(self):
+        del self.env["DISCORD_NOTIFICATION_CHANNEL_ZBYNEK_Q"]
+        import unittest.mock as m
+        with m.patch.object(notify, "_post_discord", self._post):
+            notify.send("hi", owner="zbynek", kind="questions")
+        self.assertEqual(self.posted, ["777001"])
 
 
 class ParseDiscordCardReply(unittest.TestCase):
