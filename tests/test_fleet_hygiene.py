@@ -785,7 +785,7 @@ class TestDiscoverStrayWorktreeTmpCandidates(unittest.TestCase):
         real `wt-*` entry -- this sweep must never touch anything outside
         its own `wt-*` glob."""
         self._mkfile(self.root / "wt-real", age_days=30)
-        self._mkfile(self.root / "claude-%d" % self.uid / "unrelated.txt", age_days=30)
+        self._mkfile(self.root / ("claude-%d" % self.uid) / "unrelated.txt", age_days=30)
         found = airuleset.discover_stray_worktree_tmp_candidates(
             tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=7)
         names = [Path(r_["path"]).name for r_ in found]
