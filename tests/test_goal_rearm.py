@@ -5552,11 +5552,15 @@ class TestGoalLaneOccupancyNudge(GoalRearmBase):
         self.assertFalse(any("lane-occupancy" in ln for ln in logs), logs)
 
     def test_a_live_dispatched_worker_means_lanes_are_occupied(self):
+        # "occupied" means lane-occupancy genuinely does NOT apply here --
+        # it defers the sweep back to the generic stall nudge (which has
+        # no subagent-transcript awareness of its own and may still fire
+        # on its own gates), it just never sends ITS OWN lane-tagged text.
         state, now = {}, time.time()
         subagent_transcript(self.tmp.name, CWD, SID, "worker1", 30, now)
         tmux, logs = self._sweep(backlog_fetch=lambda cwd: 4, state=state,
                                  now=now)
-        self.assertNotIn(wd.GOAL_STALL_TEXT, tmux.typed())
+        self.assertNotIn("lane-check", " ".join(tmux.typed()))
         self.assertFalse(any(ln.startswith("lane-occupancy nudge")
                              for ln in logs), logs)
         self.assertTrue(any("occupied" in ln for ln in logs), logs)
@@ -5617,7 +5621,7 @@ class TestGoalLaneOccupancyNudge(GoalRearmBase):
         tmux, logs = self._sweep(captured=pane, backlog_fetch=lambda cwd: 4)
         typed = tmux.typed()
         self.assertTrue(typed, tmux.sent)
-        self.assertIn("waiterov: 2", typed[0])
+        self.assertIn("waiterov beží: 2", typed[0])
         self.assertTrue(any("waiters=2" in ln for ln in logs), logs)
 
     def test_nudge_is_spaced_not_every_sweep(self):

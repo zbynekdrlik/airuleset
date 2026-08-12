@@ -282,6 +282,32 @@ def _pane_live_shell_evidence(captured):
     return False
 
 
+def _pane_live_task_count(captured):
+    """Sum of CC's own live background-shell/monitor badge counts (`⏵⏵ … ·
+    N shells` / `· M monitors`) read from the pane's CURRENT trailing chrome
+    (#365) -- the counting sibling of `_pane_live_shell_evidence` above:
+    that function only answers "is the badge showing at all", this answers
+    "how many background Bash tasks does it claim". Reuses the IDENTICAL
+    bounded peel-walk (never scans quoted scrollback above the chrome
+    boundary -- the same #352 F1 lesson). Returns 0 when the badge is
+    absent or unparseable -- never a guess, and never negative."""
+    lines = str(captured or "").splitlines()
+    i = len(lines)
+    n = 0
+    total = 0
+    while i > 0 and _is_bottom_chrome(lines[i - 1].strip()) and n < 40:
+        i -= 1
+        n += 1
+        s = lines[i].strip()
+        if s.startswith("⏵⏵"):
+            for m in _LIVE_BG_TASK_RX.finditer(s):
+                try:
+                    total += int(m.group(0).split()[0])
+                except (ValueError, IndexError):
+                    continue
+    return total
+
+
 # (#352 F3, adversarial review round 1) The skip above trusts whatever the
 # pane's LAST RENDER shows — that is sound for a HEALTHY session (the render
 # is only ever as old as the last screen update), but if Claude Code's own
@@ -568,6 +594,31 @@ def subagent_active(transcript_path, now, window):
         return False
     except Exception:
         return False
+
+
+def _count_live_subagents(transcript_path, now, window):
+    """Count of this session's DISPATCHED SUBAGENT transcripts written
+    within `window` seconds (#365) -- the counting sibling of
+    `subagent_active` above: that function only answers "is at least one
+    alive", this answers "how many". Same directory convention
+    (`<session-dir>/<session-id>/subagents/**/*.jsonl`), same fail-safe
+    direction -- a missing/unreadable dir returns 0 (never a guess), which
+    only ever ALLOWS a lane-occupancy nudge to fire, never blocks it on a
+    filesystem hiccup."""
+    try:
+        d = Path(transcript_path).parent / Path(transcript_path).stem / "subagents"
+        if not d.is_dir():
+            return 0
+        n = 0
+        for p in d.rglob("*.jsonl"):
+            try:
+                if (now - p.stat().st_mtime) <= window:
+                    n += 1
+            except OSError:
+                continue
+        return n
+    except Exception:
+        return 0
 
 
 def newest_subagent_transcript(transcript_path):
@@ -5659,8 +5710,31 @@ def _cached_backlog_open(cwd, backlog_fetch, state, now, ttl=None):
     except Exception:
         count = None
     open_ = (count > 0) if isinstance(count, int) else None
-    cache[cwd] = {"ts": now, "open": open_}
+    # #365 -- also keep the RAW COUNT alongside the boolean, in the SAME
+    # cache entry, so `_cached_backlog_count` below never needs a second
+    # `gh` round trip: one fetch already produced both facts, this just
+    # stops throwing the number away.
+    cache[cwd] = {"ts": now, "open": open_, "count": count}
     return open_
+
+
+def _cached_backlog_count(cwd, backlog_fetch, state, now, ttl=None):
+    """The raw open-issue COUNT behind `_cached_backlog_open`'s own
+    True/False/None verdict (#365) -- reuses the IDENTICAL cache entry
+    (calling `_cached_backlog_open` first to guarantee it is fresh/warm),
+    never a second `gh` round trip. Returns the cached int, or None when
+    the fetch was never wired, never warmed, or itself returned None
+    (unmeasurable), OR the cached entry predates this field being added
+    (a legacy entry with no `count` key at all, until it next expires and
+    refreshes) -- same fail-safe direction as its sibling: an unmeasurable
+    count must never be guessed as 0."""
+    _cached_backlog_open(cwd, backlog_fetch, state, now, ttl=ttl)
+    cache = state.get("backlog_cache") or {}
+    entry = cache.get(cwd)
+    if not isinstance(entry, dict):
+        return None
+    count = entry.get("count")
+    return count if isinstance(count, int) else None
 
 
 # --------------------------------------------------------------------------- #
@@ -12629,6 +12703,208 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
     return True
 
 
+# --------------------------------------------------------------------------- #
+# LANE-OCCUPANCY NUDGE (#365, owner directive 2026-08-11 — "ak to nevies
+# prirodzene zabezpecit, das ulohu airulesetu nech sa postara o watcher").
+#
+# The FIFTH shape of job 20. `_goal_stall_nudge` (below) already covers "the
+# loop looks armed but the transcript has gone completely silent" with a
+# generic `continue` — but the incident this exists for was NOT a dead loop:
+# a background CI-wait Bash task ran all night while a non-empty backlog sat
+# untouched and ZERO other lanes were ever dispatched ("cela noc kriticka
+# cesta = cakanie na CI a implementacne lany stali" — the owner's own
+# words). `_goal_stall_nudge`'s own liveness signal, `_pane_has_bg_agent`,
+# recognises a dispatched AGENT (agent-strip row / "Waiting for N background
+# agents"), never a plain `run_in_background: true` Bash task — so that
+# exact scenario produced no mechanical signal at all.
+#
+# This shape adds the missing, ACTIONABLE diagnosis: genuinely 0 live
+# dispatched workers + a MEASURED open backlog (reusing the SAME
+# `_cached_backlog_open`/`backlog_fetch` machinery every other backlog-aware
+# job in this file already trusts — never a second `gh` round trip) +
+# genuinely at rest -> a nudge that NAMES the backlog count and instructs
+# refilling the lanes, distinguishable from the generic stall text and
+# gated SEPARATELY (its own bounded nudge count, its own escalation ping,
+# its own dedicated log tag).
+#
+# Scoped to FULL-AUTHORITY (gatekeeper) sessions only, per the ticket's own
+# text — a reduced-authority stream falls straight through to the
+# pre-existing, unchanged `_goal_stall_nudge` behaviour.
+#
+# Runs BEFORE `_goal_stall_nudge` in the caller (see the call site inside
+# `goal_rearm`) on purpose: both share the IDENTICAL armed+idle+marker-not-
+# working-or-question+not-bg-agent+not-compacting+not-handled precondition,
+# so they are mutually reachable on the SAME sweep for the SAME pane —
+# letting BOTH type into the SAME stale `captured` snapshot in one
+# iteration would race two keystroke bursts into one turn (the exact
+# hazard #392/#393 just hardened this file against). The caller detects
+# whether THIS function actually sent (or, dry-run, would send) a
+# keystroke and skips the sibling call when it did.
+# --------------------------------------------------------------------------- #
+
+GOAL_LANE_IDLE_S = 15 * 60          # matches GOAL_STALL_IDLE_S's cadence
+GOAL_LANE_INTERVAL_S = 15 * 60      # min spacing between nudges
+GOAL_LANE_MAX_NUDGES = 2            # then ONE escalation ping, then silence
+                                     # -- deliberately LOWER than
+                                     # GOAL_STALL_MAX_NUDGES's 3, per the
+                                     # ticket's own "eskalacia az po 2
+                                     # ignorovanych sweepoch": this is a
+                                     # MORE actionable diagnosis (a concrete
+                                     # backlog count + 0 workers) than the
+                                     # generic stall nudge, so it escalates
+                                     # to a human faster.
+GOAL_LANE_LIVE_WINDOW_S = 15 * 60   # a subagent transcript written within
+                                     # this long still counts as "alive" --
+                                     # matched to GOAL_LANE_IDLE_S so a
+                                     # worker writing at roughly the same
+                                     # cadence the outer stall check already
+                                     # tolerates is never wrongly read as
+                                     # dead.
+
+GOAL_LANE_NUDGE_TEXT = (
+    "lane-check: backlog=%d otvorených tiketov, no BEŽÍ 0 dispatched "
+    "workerov (žiadny live subagent transcript), waiterov beží: %d. "
+    "Prázdne implementačné lány nie sú dôvod na nečinnosť ani počas "
+    "čakania na CI/waiter — dispatchni TERAZ ďalších paralelných "
+    "workerov na zvyšný backlog (TURBO)."
+)
+
+
+def _goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
+                               tmtime, loc, send_fn, dry_run, handled,
+                               projects_dir, backlog_fetch=None, state=None):
+    """The lane-occupancy branch of job 20 (#365) — see the section comment
+    above. Mutates `rec` (the caller persists it); returns log lines.
+    Best-effort: `backlog_fetch`/`state` both required (mirrors every other
+    "wired = on" optional network call in this file) — either missing means
+    this branch is a pure no-op, unchanged from before this ticket.
+
+    Self-verification (#365 point 4, the owner's own explicit ask): every
+    time this function reaches the point of KNOWING all three counts (live
+    dispatched workers, live background waiters, backlog size) it appends
+    ONE log line recording them plus its decision — occupied / no
+    measurable backlog / rate-limited / nudge / give-up — regardless of
+    whether it goes on to nudge. The counts themselves come from
+    ground-truth sources already used elsewhere in this file, never
+    re-derived: `_count_live_subagents` (subagent transcript mtimes — the
+    counting sibling of job 4's own `subagent_active`), `_pane_live_task_
+    count` (CC's own `⏵⏵ … · N shells` footer badge — the counting sibling
+    of job 4's own `_pane_live_shell_evidence`), and the SAME cached
+    `core-quals`/`slice-quals` count every other backlog-aware job in this
+    file already trusts.
+
+    A genuine unanswered `❓ NEEDS YOU` or a `⏳ WORKING` marker is never
+    overridden here (job 4 and the question-timeout branch own those
+    respectively) — this function's own marker gate mirrors
+    `_goal_stall_nudge`'s exactly, deliberately, so the two stay consistent
+    about what "the loop looks idle" means.
+
+    An EXTRA, defence-in-depth gate this shape carries that its sibling
+    `_goal_stall_nudge` does not: `_goal_autoarm_recent_human_activity`
+    (#392/#393) immediately before any keystroke, so a nudge can never land
+    on a pane the user started typing into moments ago — applied even
+    though `_goal_stall_nudge`'s own 15-minute idle gate already makes the
+    same race very unlikely by construction.
+
+    Delivery uses `send_continue` — the SAME simple, established primitive
+    `_goal_stall_nudge`/`_goal_question_park_nudge` (this exact job's own
+    siblings) already use for their own short nudge texts, never the
+    heavier `_send_goal_verified` reserved for the full multi-KB `/goal`
+    payload. "Did the nudge land" is verified the SAME way the sibling
+    shapes already do it — the transcript idle counter resets on the next
+    sweep once real progress resumes, this job's own established
+    "delivery confirmed" signal, never a bespoke new one."""
+    logs = []
+    if backlog_fetch is None or state is None:
+        return logs
+    try:
+        import airuleset
+        authority = airuleset.resolve_authority(cwd)
+    except Exception:
+        authority = None
+    if authority != "full":
+        return logs
+    idle = now - (tmtime or now)
+    if idle < GOAL_LANE_IDLE_S:
+        if rec.get("ln"):
+            rec.update({"ln": 0, "lpinged": False})
+        return logs
+    marker = transcript_last_marker(tpath)
+    if marker in ("⏳", "❓"):
+        return logs
+    if _pane_has_bg_agent(captured) or pane_waiting_on_user(captured):
+        return logs
+    if _pane_compacting(captured):
+        return logs
+    if handled is not None and sid in handled:
+        return logs
+    live_workers = _count_live_subagents(tpath, now, GOAL_LANE_LIVE_WINDOW_S)
+    waiters = _pane_live_task_count(captured)
+    if live_workers > 0:
+        logs.append("lane-occupancy %s workers=%d waiters=%d -> occupied, "
+                    "skip" % (loc, live_workers, waiters))
+        return logs
+    backlog_n = _cached_backlog_count(cwd, backlog_fetch, state, now)
+    if not isinstance(backlog_n, int) or backlog_n <= 0:
+        logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%r -> "
+                    "no measurable open backlog, skip"
+                    % (loc, waiters, backlog_n))
+        return logs
+    n = rec.get("ln", 0)
+    if n >= GOAL_LANE_MAX_NUDGES:
+        if not rec.get("lpinged"):
+            rec["lpinged"] = True
+            if send_fn is not None and not dry_run:
+                from notify import stream_redirect
+                send_fn("⚠️ **%s** — backlog=%d otvorených, `/goal` armovaný, "
+                        "ale %d min nebeží ani jeden worker (waiterov: %d) a "
+                        "ani po %d šťuchnutiach sa lány nezaplnili (%s). "
+                        "Pozri sa na reláciu, prosím."
+                        % (project_label(cwd), backlog_n, int(idle // 60),
+                           waiters, GOAL_LANE_MAX_NUDGES, loc),
+                        owner=stream_redirect(pane_owner(pid, run)) or None,
+                        dedup_key="lanestall:%s:%d" % (sid, int(tmtime or 0)),
+                        dry_run=dry_run)
+            logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%d "
+                        "idle=%dm -> GAVE UP after %d nudges"
+                        % (loc, waiters, backlog_n, idle // 60,
+                           GOAL_LANE_MAX_NUDGES))
+        return logs
+    last = rec.get("llast")
+    if last is not None and (now - last) < GOAL_LANE_INTERVAL_S:
+        logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%d -> "
+                    "rate-limited, skip" % (loc, waiters, backlog_n))
+        return logs
+    if compact_claim_active(sid, cwd, projects_dir=projects_dir):
+        return logs
+    kind, draft = _classify_boundary(captured)
+    if kind != "input" or draft:
+        logs.append("skip %s (lane-occupancy) %s"
+                    % (draft and "draft" or kind, loc))
+        return logs
+    if not pane_at_idle_prompt(captured):
+        return logs
+    recent, reason = _goal_autoarm_recent_human_activity(sid, tpath, now)
+    if recent:
+        logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> %s -- recent "
+                    "human activity, never overwrite a live conversation"
+                    % (loc, reason))
+        return logs
+    if dry_run:
+        logs.append("READY (lane-occupancy) %s workers=0 waiters=%d "
+                    "backlog=%d idle=%dm" % (loc, waiters, backlog_n,
+                                             idle // 60))
+        return logs
+    text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
+    send_continue(pid, text, run)
+    rec["ln"] = n + 1
+    rec["llast"] = now
+    logs.append("lane-occupancy nudge %s workers=0 waiters=%d backlog=%d "
+                "idle=%dm (%d/%d)" % (loc, waiters, backlog_n, idle // 60,
+                                      n + 1, GOAL_LANE_MAX_NUDGES))
+    return logs
+
+
 def _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured, tpath, tmtime,
                       loc, send_fn, dry_run, handled, projects_dir):
     """The ARMED-but-silent branch of job 20 — see the `GOAL_STALL_*` section
@@ -13624,11 +13900,46 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 rec["queued_at"] = None
                 logs.append("CONFIRMED (goal-rearm) %s -> ◎ /goal lit again"
                             % loc)
+            # …or is the loop alive but under-using its own parallel lanes
+            # while a non-empty backlog sits untouched? (#365 — runs FIRST:
+            # it shares `_goal_stall_nudge`'s exact armed+idle+marker
+            # precondition, so whichever of the two fires first must stop
+            # the other from ALSO typing into the same stale `captured` —
+            # see `_goal_lane_occupancy_nudge`'s own section comment)
+            #
+            # `lane_owns_sweep` is true whenever the lane-occupancy shape
+            # got far enough to conclude "0 workers AND a measured open
+            # backlog" applies to THIS session — regardless of what it did
+            # next (nudged, rate-limited, gave up, or refused on recent
+            # human activity). Every one of those outcomes must suppress
+            # `_goal_stall_nudge` too: it has NO subagent-transcript
+            # liveness check and NO recent-human-activity gate of its own,
+            # so letting it fall through on a "rate-limited"/"recent human
+            # activity" outcome would either double-nudge the same stall
+            # or — worse — type blindly into a pane a human just used,
+            # exactly the hazard the extra defence-in-depth gate exists to
+            # prevent. Only "occupied" (a live worker exists) and "no
+            # measurable open backlog" genuinely mean lane-occupancy does
+            # NOT apply here, so those two — and an EMPTY log (not wired,
+            # reduced authority, or a precondition `_goal_stall_nudge`
+            # independently re-checks anyway: marker/bg-agent/compacting/
+            # handled/idle-threshold) — are the only cases that fall
+            # through.
+            lane_logs = _goal_lane_occupancy_nudge(
+                now, run, rec, sid, cwd, pid, captured, tpath, tmtime, loc,
+                send_fn, dry_run, handled, projects_dir,
+                backlog_fetch=backlog_fetch, state=state)
+            logs += lane_logs
+            lane_owns_sweep = bool(lane_logs) and not any(
+                "-> occupied" in ln or "no measurable open backlog" in ln
+                for ln in lane_logs)
             # ARMED for real — but is the loop actually FIRING? (the second
             # shape, and the one the forensics points at)
-            logs += _goal_stall_nudge(now, run, rec, sid, cwd, pid, captured,
-                                      tpath, tmtime, loc, send_fn, dry_run,
-                                      handled, projects_dir)
+            if not lane_owns_sweep:
+                logs += _goal_stall_nudge(now, run, rec, sid, cwd, pid,
+                                          captured, tpath, tmtime, loc,
+                                          send_fn, dry_run, handled,
+                                          projects_dir)
             # …or is it genuinely STOPPED on an unanswered `❓ NEEDS YOU`
             # past the bounded wait? (#161 — independent of the stall
             # nudge above, which correctly never touches a `❓` marker)
