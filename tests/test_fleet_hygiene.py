@@ -727,6 +727,95 @@ class TestDiscoverClaudeScratchCandidates(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# discover_stray_worktree_tmp_candidates (#380)
+# ---------------------------------------------------------------------------
+
+class TestDiscoverStrayWorktreeTmpCandidates(unittest.TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-wttmp-discover-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.uid = os.getuid()
+
+    def _mkfile(self, path, age_days, now=NOW):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * 2048)
+        mtime = now - age_days * DAY
+        os.utime(path, (mtime, mtime))
+
+    def test_finds_old_top_level_wt_entry(self):
+        self._mkfile(self.root / "wt-abc123", age_days=30)
+        found = airuleset.discover_stray_worktree_tmp_candidates(
+            tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=7)
+        row = [r_ for r_ in found if Path(r_["path"]).name == "wt-abc123"][0]
+        self.assertIsNone(row["reason"])
+
+    def test_young_entry_kept_not_swept(self):
+        self._mkfile(self.root / "wt-fresh", age_days=1)
+        found = airuleset.discover_stray_worktree_tmp_candidates(
+            tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=7)
+        row = found[0]
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("too recent", row["reason"])
+
+    def test_symlink_entry_never_followed_never_deleted_through(self):
+        target = self.root / "elsewhere"
+        target.mkdir()
+        self._mkfile(target / "f.txt", age_days=30)
+        (self.root / "wt-linked").symlink_to(target)
+        found = airuleset.discover_stray_worktree_tmp_candidates(
+            tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=7)
+        row = [r_ for r_ in found if Path(r_["path"]).name == "wt-linked"][0]
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("symlink", row["reason"])
+
+    def test_live_process_guard_skips_old_but_in_use_dir(self):
+        d = self.root / "wt-inuse"
+        self._mkfile(d / "f.txt", age_days=30)
+        proc = _mkfakeproc(self.root, [
+            {"pid": "333", "cwd": str(d.resolve())}])
+        found = airuleset.discover_stray_worktree_tmp_candidates(
+            tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=7, proc_dir=proc)
+        row = [r_ for r_ in found if Path(r_["path"]).name == "wt-inuse"][0]
+        self.assertIsNotNone(row["reason"])
+        self.assertIn("in live use", row["reason"])
+
+    def test_a_non_wt_prefixed_sibling_is_never_even_listed(self):
+        """`/tmp/claude-<uid>` (#355's own scope) sits right next to a
+        real `wt-*` entry -- this sweep must never touch anything outside
+        its own `wt-*` glob."""
+        self._mkfile(self.root / "wt-real", age_days=30)
+        self._mkfile(self.root / "claude-%d" % self.uid / "unrelated.txt", age_days=30)
+        found = airuleset.discover_stray_worktree_tmp_candidates(
+            tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=7)
+        names = [Path(r_["path"]).name for r_ in found]
+        self.assertEqual(names, ["wt-real"])
+
+    def test_foreign_owned_wt_entry_is_never_even_classified(self):
+        """A `wt-*` entry belonging to a DIFFERENT uid must never be
+        listed, let alone touched -- these boxes host foreign uids by
+        design on a shared /tmp."""
+        p = self.root / "wt-foreign"
+        self._mkfile(p, age_days=30)
+        found = airuleset.discover_stray_worktree_tmp_candidates(
+            tmp_dir=self.root, uid=self.uid + 987654, now=NOW, min_age_days=7)
+        self.assertEqual(found, [])
+
+    def test_root_missing_returns_empty(self):
+        found = airuleset.discover_stray_worktree_tmp_candidates(
+            tmp_dir=self.root / "does-not-exist", uid=self.uid, now=NOW)
+        self.assertEqual(found, [])
+
+    def test_min_age_days_env_override_is_actually_read(self):
+        self._mkfile(self.root / "wt-x", age_days=3)
+        with m.patch.dict(os.environ, {"AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS": "1"}):
+            found = airuleset.discover_stray_worktree_tmp_candidates(
+                tmp_dir=self.root, uid=self.uid, now=NOW, min_age_days=None)
+        row = found[0]
+        self.assertIsNone(row["reason"], "env override to 1 day must admit a 3-day-old file")
+
+
+# ---------------------------------------------------------------------------
 # sweep_claude_scratch
 # ---------------------------------------------------------------------------
 
@@ -793,6 +882,23 @@ class TestSweepClaudeScratch(unittest.TestCase):
             tmp_dir=self.root, uid=self.uid, dry_run=False, force=True, now=NOW,
             log_path=self.log_path, state_path=self.state_path, min_age_days=7)
         self.assertTrue((foreign / "not-mine.txt").exists())
+
+    def test_a_real_sweep_also_reclaims_stray_top_level_wt_entries(self):
+        """#380 -- when `candidates` is not injected, `sweep_claude_scratch`
+        must combine BOTH #355's own `/tmp/claude-<uid>/*` discovery AND
+        the new top-level `/tmp/wt-*` discovery into one sweep -- the same
+        cadence gate, same log, same state file, no new mechanism."""
+        r = self._setup()
+        wt = self.root / "wt-stray"
+        self._mkfile(wt, age_days=30)
+        results = airuleset.sweep_claude_scratch(
+            tmp_dir=self.root, uid=self.uid, dry_run=False, force=True, now=NOW,
+            log_path=self.log_path, state_path=self.state_path, min_age_days=7)
+        self.assertFalse(wt.exists(), "the stray wt-* entry must also be reclaimed")
+        self.assertFalse((r / "old.txt").exists())
+        removed_names = {Path(x["path"]).name for x in results if x.get("removed")}
+        self.assertIn("wt-stray", removed_names)
+        self.assertIn("old.txt", removed_names)
 
     def test_dry_run_never_writes_cadence_state(self):
         """#355 adversarial-review finding 3a."""
