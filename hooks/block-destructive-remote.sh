@@ -98,12 +98,15 @@ set -euo pipefail
 #     full-environment dump.
 #   - a `.env.example`/`.sample`/`.template`/`.dist` template file (mirrors
 #     block-sensitive-staging.sh's Gate 1 allowlist).
+#   - a `grep -c/-q/-l/-L` against a secret file — never prints matched
+#     content.
 #   - anything narrowed to presence/length only — `awk`/`wc`/`sha1sum`/
-#     `sha256sum`/`sha512sum`/`md5sum` appearing anywhere in the same
-#     remote command (the gatekeeper-session-ops skill's own recommended
-#     `awk -F= '{print $1": len="length($2)}'` pattern) exempts the WHOLE
-#     remote command from this category — same for a `grep -c/-q/-l/-L`
-#     that never prints matched content.
+#     `sha256sum`/`sha512sum`/`md5sum` appearing in the SAME pipeline
+#     sub-segment as a Category-A read (`cat file | sha256sum`), or
+#     ANYWHERE in the whole remote command for Category B (a bare env
+#     dump — needed so the gatekeeper-session-ops skill's own recommended
+#     `... printenv | awk -F= '{print $1": len="length($2)}'` pattern,
+#     which spans two pipeline sub-segments, still allows).
 #   - `airuleset.py secret exec ...` — not cat/printenv/grep-shaped at all.
 #
 # Scoped to ssh-remote-command text ONLY (both real incidents are ssh-
@@ -111,19 +114,42 @@ set -euo pipefail
 # see the #373 design comment for why (a materially larger FP surface,
 # not the incident class this ticket documents).
 #
-# KNOWN GAPS (same best-effort rigor as the rest of this hook):
+# KNOWN GAPS (adversarial review, #373 — same best-effort rigor as the
+# rest of this hook, not a full shell parser):
 #   - `docker compose exec -T svc cat/printenv` detection searches for the
 #     command name ANYWHERE in the segment's tokens, so a flag VALUE that
 #     happens to equal a bare `cat`/`printenv` token could theoretically
 #     false-positive (contrived, not observed).
-#   - the presence/length "narrowed" exemption keys on the LITERAL word
-#     awk/wc/sha*sum/md5sum appearing anywhere in the remote command — a
-#     hostile `awk '{print}'` that just echoes everything would still be
-#     exempted. Not a security boundary; a mechanical backstop against the
-#     reflexive, ordinary-looking shape that caused both real incidents.
+#   - Category B's (bare env dump) narrowing exemption is still WHOLE-
+#     command-scoped (see above) — unlike Category A, which was tightened
+#     to per-segment after live-reproducing that a benign `wc`/`awk`
+#     ANYWHERE in an &&/;-joined command exempted an unrelated genuine
+#     `cat mcp.env` read (#373-review MINOR). Category B keeps the wider
+#     scope because its own legitimate flow needs it (see above); a
+#     `wc -l x && printenv` would still slip Category B. Not a security
+#     boundary; a mechanical backstop against the reflexive, ordinary-
+#     looking shape that caused both real incidents.
+#   - a hostile `awk '{print}'` that just echoes everything would still be
+#     exempted by the narrowing check either way — it keys on the LITERAL
+#     word, not on what the command actually does.
+#   - `is_secret_path()`'s `credential`/`secret`/`token` substring/name-
+#     component match (mirrors block-sensitive-staging.sh's own already-
+#     accepted Gate-1 convention) over-blocks a genuinely non-secret file
+#     whose name merely CONTAINS one of those words (e.g. a source file
+#     `secrets_manager.py`, a log `token-service.log`, an AWS IAM
+#     `credential-report.csv`) — loud (exit 2), one-step recoverable via
+#     `# airuleset:secret-read-ok`, not tightened further per FREEZE
+#     (no live incident of this specific false positive).
 #   - grep's PATTERN argument (first non-flag token) is assumed to be a
 #     search pattern, not a file — `grep -f patternfile secretfile` is not
 #     specially handled.
+#   - alternative read commands not in the enumerated set (od/xxd/base64/
+#     dd/strings/hexdump/perl/python3 -c/`$(cat file)` substitution/
+#     `find -exec cat {} \;`/`export -p`/`set`/`declare -x`/
+#     `/proc/*/environ`) are NOT detected — a different, non-reflexive
+#     habit than the cat/printenv incident class this ticket documents,
+#     deliberately out of scope (this hook has never claimed to be a full
+#     shell-semantics parser).
 #
 # Bypass (rare, user-instructed only, logged), NARROWER than the bypass
 # below — suppresses ONLY this category, never the host-power-off/root-
@@ -615,7 +641,17 @@ def _bare_env_dump(seg_text):
 def check_remote_segment(seg_text):
     """Checks that ONLY apply once we know we're inside a remote (ssh) context."""
     hits = []
-    narrowed = bool(SAFE_NARROW_RE.search(seg_text))
+    # #373-review MINOR: Category A's narrowing is scoped to THIS
+    # pipeline sub-segment only, never the whole remote command — a
+    # benign `wc`/`awk` in an UNRELATED &&/;-joined segment (e.g.
+    # `wc -l mcp.env && cat mcp.env`) must never exempt a genuine `cat
+    # mcp.env` read elsewhere in the same command; that would defeat the
+    # exact incident shape this ticket exists to block. A real narrowing
+    # consumer for a direct read (`cat file | sha256sum`) sits in the
+    # SAME segment text as the read (awk operating on the file directly
+    # isn't in READ_FILE_CMDS/GREP_CMDS at all, so it never needed the
+    # wider scope). Category B keeps whole-command narrowing — see below.
+    narrowed_whole = bool(SAFE_NARROW_RE.search(seg_text))
     for inner in split_segments(seg_text):
         tk = strip_prefix(tokens_of(inner))
         if not tk:
@@ -628,9 +664,17 @@ def check_remote_segment(seg_text):
         if has_db_client(tk) and SQL_DROP_RE.search(inner):
             hits.append("SQL DROP/TRUNCATE against a DB client over ssh: "
                         + inner.strip()[:120])
-        if not SECRET_READ_BYPASS and not narrowed:
+        if not SECRET_READ_BYPASS and not SAFE_NARROW_RE.search(inner):
             hits.extend(_leaky_file_reads(tk))
-    if not SECRET_READ_BYPASS and not narrowed and _bare_env_dump(seg_text):
+    # Category B (bare env dump) keeps WHOLE-command narrowing, on
+    # purpose: its own legitimate narrow flow (`printenv | awk ...`,
+    # tested) spans TWO pipeline sub-segments — narrowing this per-
+    # segment would false-block that documented ALLOW case. KNOWN GAP
+    # (same #373-review finding, deliberately left open here): an
+    # unrelated wc/awk/sha*sum ANYWHERE in the remote command still
+    # exempts a genuine bare env dump too — a mechanical backstop, not a
+    # security boundary (this file's own long-standing framing).
+    if not SECRET_READ_BYPASS and not narrowed_whole and _bare_env_dump(seg_text):
         hits.append(
             "bare printenv/env dump over ssh — every var VALUE leaks into "
             "the transcript: " + seg_text.strip()[:120]
