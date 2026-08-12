@@ -263,6 +263,45 @@ class CompactRequestState(unittest.TestCase):
         self.assertEqual(d["sess-1"]["cwd"], "/y")      # latest cwd wins
         self.assertEqual(d["sess-1"]["origin"], "self-callback")  # latest origin
 
+    def test_a_pending_self_callback_origin_is_never_downgraded(self):
+        # #402-review MAJOR-1: the SubagentStop hook fires under the
+        # SUPERVISOR's own sid on every worker return (#317's parallel-
+        # round shape), which can re-record a still-pending self-callback
+        # request with origin="subagent-stop" before it is ever
+        # delivered -- silently losing the #425 exemption for a turn that
+        # genuinely earned it (its own "## Work Complete" heading +
+        # trailing "more workers still dispatched" tail). A re-record
+        # from the WEAKER (subagent-stop) or UNKNOWN (blank/None) origin
+        # must never overwrite an already-recorded self-callback claim.
+        p = self._p()
+        compact.record_compact_request("sess-1", "/x", now=1000, path=p,
+                                       origin="self-callback")
+        compact.record_compact_request("sess-1", "/x", now=1001, path=p,
+                                       origin="subagent-stop")
+        d = compact.load_compact_requests(p)
+        self.assertEqual(d["sess-1"]["origin"], "self-callback")
+
+    def test_a_pending_self_callback_origin_is_never_downgraded_to_blank(self):
+        p = self._p()
+        compact.record_compact_request("sess-1", "/x", now=1000, path=p,
+                                       origin="self-callback")
+        compact.record_compact_request("sess-1", "/x", now=1001, path=p,
+                                       origin=None)
+        d = compact.load_compact_requests(p)
+        self.assertEqual(d["sess-1"]["origin"], "self-callback")
+
+    def test_a_pending_subagent_stop_origin_is_still_upgraded_by_self_callback(self):
+        # The OPPOSITE direction stays exactly as before (and is already
+        # locked by test_ts_is_never_refreshed_across_a_re_record above,
+        # restated here so the two directions are visible side by side).
+        p = self._p()
+        compact.record_compact_request("sess-1", "/x", now=1000, path=p,
+                                       origin="subagent-stop")
+        compact.record_compact_request("sess-1", "/x", now=1001, path=p,
+                                       origin="self-callback")
+        d = compact.load_compact_requests(p)
+        self.assertEqual(d["sess-1"]["origin"], "self-callback")
+
     def test_ts_is_preserved_even_when_the_prior_anchor_is_already_expired(self):
         # #402-review MINOR-2 was CONSIDERED (reset ts when the prior
         # entry is already past the age cap, so a genuinely fresh
