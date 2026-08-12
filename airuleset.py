@@ -3302,6 +3302,20 @@ def _human_size(n) -> str:
     return "%.1fTB" % n
 
 
+def _disk_usage_summary_line(path) -> str:
+    """One-line disk-usage summary for `path`'s own filesystem -- #380
+    point 4 (visibility): "97% full" must never be a surprise the next
+    time someone reads a live box's own `install`/`push` console output.
+    Extends the SAME print block every sweep step in `cmd_install()`
+    already writes summaries into -- no new mechanism, no new state/log
+    file, stdlib `shutil.disk_usage` only. `total == 0` (an unmeasurable
+    or genuinely empty filesystem) never divides by zero."""
+    du = shutil.disk_usage(str(path))
+    pct_used = (100.0 * du.used / du.total) if du.total else 0.0
+    return "Disk usage (%s): %.0f%% used, %s free" % (
+        path, pct_used, _human_size(du.free))
+
+
 def discover_target_purge_candidates(home=None, max_depth: int = 4):
     """Every `target/` directory that is a genuine cargo build artefact --
     its PARENT holds a `Cargo.toml` -- sitting inside a real checkout root
@@ -5703,6 +5717,15 @@ def cmd_install(args):
                   f"{_human_size(total)} reclaimed (log: {CLAUDE_SCRATCH_LOG_PATH})")
     except Exception as e:
         print(f"  claude-scratch sweep error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 12. Disk-usage visibility (#380 point 4) -- one more line in the
+    # SAME print block every sweep step above already writes summaries
+    # into. No new mechanism, no new state/log file -- best-effort, never
+    # fails install on a measurement error.
+    try:
+        print(f"  {_disk_usage_summary_line(CLAUDE_DIR)}")
+    except OSError as e:
+        print(f"  disk-usage check error (non-fatal): {e}", file=sys.stderr)
 
     print()
     if install_failed:
