@@ -116,6 +116,16 @@ class TestGkRequestBackstop(unittest.TestCase):
                                gh_fetch=lambda root: [7], user="gatekeeper")
         self.assertEqual(len(self.pings), 1)
 
+    def test_no_pane_ping_carries_the_stream_qualified_project_label(self):
+        # #369: mirrors the identical bounce_backstop fix -- the no-pane
+        # Discord fallback routes to the project's own thread, never the
+        # owner's plain pile.
+        import unittest.mock as m
+        state = {}
+        with m.patch("getpass.getuser", return_value="david2"):
+            self._go(state, [7], panes=[])
+        self.assertEqual(self.pings[0][1].get("project"), "demo-david2")
+
     def test_stale_cache_root_never_pings(self):
         # LIVE false positive (2026-07-24): the no-pane Discord fallback fired
         # for a checkout untouched for 16 DAYS whose supervisor session lives

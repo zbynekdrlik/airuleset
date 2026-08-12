@@ -6672,7 +6672,8 @@ def cmd_notify(args):
                            to pin the real owner explicitly (#334).
     """
     from notify import (compose_autopilot_card, mention_prefix, mirror_owners,
-                        notification_channel, resolve_owner, resolve_questions_channel,
+                        notification_channel, resolve_owner,
+                        resolve_project_channel, resolve_questions_channel,
                         send)
 
     if getattr(args, "record_question", False):
@@ -6725,9 +6726,28 @@ def cmd_notify(args):
         # and SELF-HEALING (a guarded background provision attempt) instead
         # of silently falling back forever — the exact gap that let
         # gatekeeper's ❓ history route to the wrong thread with zero trace.
+        # #369: --project resolves the owner's PER-PROJECT thread the SAME
+        # way — but ONLY under --kind default; a project flag alongside
+        # --kind questions is deliberately IGNORED (the questions thread
+        # stays centralized, by design — see the ticket's own design
+        # comment). `resolve_project_channel` is NOT side-effect-free (it
+        # writes a "fallback" delivery-log line and may spawn a background
+        # self-heal) — mirroring `send()`'s own documented split, a
+        # --dry-run preview (the shell hook's DISCORD_NOTIFY_DRYRUN path)
+        # must resolve via the plain, side-effect-free `notification_channel`
+        # instead, or a mere PREVIEW call silently pollutes the delivery
+        # log / spawns a real background process (regression caught by
+        # test_notify_delivery_log.py's pre-existing
+        # test_dry_run_is_not_a_failure_and_logs_nothing).
         kind = getattr(args, "kind", None) or "default"
+        project = getattr(args, "project", None)
+        dry_run = getattr(args, "dry_run", False)
         if kind == "questions":
             sys.stdout.write(resolve_questions_channel())
+        elif project and not dry_run:
+            sys.stdout.write(resolve_project_channel(project=project))
+        elif project:
+            sys.stdout.write(notification_channel(kind=kind, project=project))
         else:
             sys.stdout.write(notification_channel(kind=kind))
         return
@@ -6773,6 +6793,42 @@ def cmd_notify(args):
              % owner, file=sys.stderr)
         sys.exit(1)
 
+    if getattr(args, "provision_project_thread", False):
+        # #369: one-time setup — create (if missing) + persist the owner's
+        # PROJECT thread claude-<owner>-<project-slug> into the local .env.
+        # Mirrors --provision-question-thread verbatim, including the SAME
+        # --owner-name normalization (a typo must never silently create a
+        # real Discord thread under a dead .env key) and the SAME
+        # --find-only find-only mode.
+        from notify import log_delivery, provision_project_thread, resolve_owner
+        owner_name = getattr(args, "owner_name", None)
+        owner = (re.sub(r"[^a-z0-9]", "", owner_name.strip().lower())
+                if owner_name else resolve_owner())
+        project = getattr(args, "project", None) or ""
+        find_only = bool(getattr(args, "find_only", False))
+        tid = (provision_project_thread(owner, project, create=False) if find_only
+              else provision_project_thread(owner, project))
+        if tid:
+            sys.stdout.write(tid)
+            return
+        log_delivery("provision-failed", kind="project",
+                     key="%s:%s" % (owner, project),
+                     reason=("find-only, none visible" if find_only
+                             else "find-and-create both failed"))
+        print("notify: could not provision the project thread for "
+             "owner=%r project=%r" % (owner, project), file=sys.stderr)
+        sys.exit(1)
+
+    if getattr(args, "project_label", False):
+        # #369: the per-project routing/display LABEL for --cwd — the SAME
+        # value used to route --channel-id --project and to name a
+        # project's own Discord thread, so a hook computing this ONCE and
+        # reusing it for both the header text and the routing call can
+        # never have the two disagree.
+        from notify import project_label_for
+        sys.stdout.write(project_label_for(getattr(args, "cwd", "") or "."))
+        return
+
     if getattr(args, "repo_name", False):
         # The GitHub repo NAME for a cwd, from its `origin` remote — never the
         # directory basename (marek's checkout is `parovanie_produktov` while
@@ -6814,7 +6870,11 @@ def cmd_notify(args):
         # the same error across Stop events pings once, not every turn).
         dedup = args.dedup_key or ("apierr:%s:%s" % (sess, h))
         body = compose_api_error_alert(project, text)
-        print(send(body, dedup_key=dedup, dry_run=args.dry_run))
+        # #369: route via the SAME --project the caller already computed for
+        # the alert body's own label — routes this alert to its per-project
+        # Discord thread instead of the shared owner channel.
+        print(send(body, dedup_key=dedup, dry_run=args.dry_run,
+                   project=project or None))
         return
 
     if getattr(args, "autopilot_done", False):
@@ -6831,7 +6891,14 @@ def cmd_notify(args):
         dedup = args.dedup_key
         if dedup is None and args.repo and args.pr:
             dedup = "%s#%s" % (args.repo, args.pr)
-        print(send(body, dedup_key=dedup, dry_run=args.dry_run))
+        # #369 review M1 (TRIGGERED): same ticket-work-scoped traffic as
+        # --run-card's own project=stream_qualified(name) — a multi-ticket
+        # completion card belongs on the project thread too.
+        project = None
+        if args.repo:
+            from notify import stream_qualified
+            project = stream_qualified(str(args.repo).rstrip("/").split("/")[-1])
+        print(send(body, dedup_key=dedup, dry_run=args.dry_run, project=project))
         return
 
     if args.body is not None:
@@ -7782,9 +7849,15 @@ def _notify_backfill_digest(args, send):
               % (stated, derived, derived, derived), file=sys.stderr)
         sys.exit(1)
     body = compose_backfill_digest(name, tickets, since[:10])
+    # #369 review M1 (TRIGGERED): "N finished tickets you never heard
+    # about" is exactly the ticket-work-scoped traffic #369 exists to
+    # split out of the shared owner pile — mirrors _notify_run_card's own
+    # `project=stream_qualified(name)`.
+    from notify import stream_qualified
     status = send(body, owner=derived or stated or None,
                   dedup_key="backfill:%s:%s" % (name, since[:10]),
-                  dry_run=getattr(args, "dry_run", False))
+                  dry_run=getattr(args, "dry_run", False),
+                  project=stream_qualified(name))
     print("%s (%d tickets)" % (status, len(tickets)))
     # Record what this digest reported, so watchdog job 25 stops re-flagging
     # tickets the user has already heard about — but ONLY the tickets the
@@ -8122,17 +8195,41 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # internally and `notification_channel()` re-resolve it a second
         # time right after -- the two calls must always agree on WHICH
         # owner's thread the card actually posted to.
-        from notify import notification_channel, record_card_message, resolve_owner
+        # #369: `project` routes this card to its OWN per-project Discord
+        # thread (never the shared owner channel) — stream-qualified so a
+        # sub-dev stream box's project label matches the SAME rule the
+        # watchdog/shell-hook project labels already use (`stream_qualified`),
+        # and computed from `name` (the bare repo NAME) so a personal box
+        # (newlevel/root) stays unqualified. `notification_channel` is called
+        # a SECOND time (for `record_card_message`) with the SAME `project`
+        # so the stored channel always matches where the card actually posted.
+        # #369 review M5 (TRIGGERED — mechanism proven, race THEORETICAL):
+        # `notification_channel()` with `env=None` re-reads .env from DISK,
+        # while `send()` resolves its own channel from a snapshot taken
+        # earlier — a concurrent self-heal (`resolve_project_channel`'s
+        # background provision writing the newly-provisioned key) landing
+        # in that window would make the two calls disagree about which
+        # channel the card actually posted to, and `record_card_message`
+        # would store the WRONG one (job 7's later reply/reaction routing
+        # would poll a channel the card never reached). Reading ONE env
+        # snapshot and passing it to BOTH calls closes the window.
+        from notify import (_read_env, notification_channel,
+                            record_card_message, resolve_owner,
+                            stream_qualified)
+        env = _read_env()
         owner = resolve_owner()
-        result = send(body, owner=owner, dedup_key=dedup,
+        project = stream_qualified(name)
+        result = send(body, env=env, owner=owner, dedup_key=dedup,
                       dry_run=getattr(args, "dry_run", False),
-                      return_message_id=True)
+                      return_message_id=True, project=project)
         status, message_id = result if isinstance(result, tuple) else (result, None)
         print(status)
         if status == "sent":
             if message_id:
-                record_card_message(message_id, notification_channel(owner=owner),
-                                     repo, issue)
+                record_card_message(
+                    message_id,
+                    notification_channel(env=env, owner=owner, project=project),
+                    repo, issue)
             # Feed the statusline github done/total segment — a card that actually
             # went out counts one ticket done in this run (dedup re-sends don't).
             # On a full-authority box a STREAM ticket's card must NOT advance
@@ -13133,13 +13230,29 @@ def main():
                                "the owner's questions thread claude-<owner>-q into "
                                "the local .env; prints the thread id. Owner from "
                                "--owner-name or the resolved tmux owner")
+    p_notify.add_argument("--provision-project-thread",
+                          dest="provision_project_thread", action="store_true",
+                          help="One-time setup (#369): create (if missing) + persist "
+                               "the owner+project thread claude-<owner>-<project-slug> "
+                               "into the local .env; prints the thread id. Owner from "
+                               "--owner-name or the resolved tmux owner. Requires "
+                               "--project (the project LABEL, e.g. from "
+                               "--project-label)")
+    p_notify.add_argument("--project-label", dest="project_label",
+                          action="store_true",
+                          help="Print the per-project routing/display LABEL for "
+                               "--cwd (#369): the origin-derived repo name, "
+                               "stream-qualified — the SAME label used to route "
+                               "--channel-id --project and to name a project's "
+                               "own Discord thread")
     p_notify.add_argument("--find-only", dest="find_only", action="store_true",
-                          help="With --provision-question-thread (#330): only FIND "
-                               "an existing claude-<owner>-q thread, never CREATE "
-                               "one. The AUTOMATIC background self-heal's own mode "
-                               "(never wielded unattended) — the explicit, "
-                               "human-typed CLI action stays find-then-CREATE "
-                               "unless this flag is also given.")
+                          help="With --provision-question-thread / "
+                               "--provision-project-thread (#330/#369): only FIND "
+                               "an existing thread, never CREATE one. The "
+                               "AUTOMATIC background self-heal's own mode (never "
+                               "wielded unattended) — the explicit, human-typed "
+                               "CLI action stays find-then-CREATE unless this "
+                               "flag is also given.")
     p_notify.add_argument("--autopilot-done", dest="autopilot_done",
                           action="store_true",
                           help="Compose + send the per-ticket completion card from fields")
@@ -13214,7 +13327,13 @@ def main():
     p_notify.add_argument("--cwd", help="Project cwd of the asking session (--record-question)")
     p_notify.add_argument("--text", help="The turn's last assistant message (API-error check)")
     p_notify.add_argument("--session", help="Session id (API-error dedup scope / --record-question)")
-    p_notify.add_argument("--project", help="Project name for the API-error ping")
+    p_notify.add_argument("--project",
+                          help="Project LABEL (#369) — used for the API-error "
+                               "ping's message text, and (with --channel-id or "
+                               "--provision-project-thread) to route/provision "
+                               "the owner's PER-PROJECT thread. Ignored by "
+                               "--channel-id when --kind is 'questions' (the "
+                               "questions thread stays centralized, by design)")
     p_notify.add_argument("--issue", type=int, help="Issue number (for --run-card)")
     p_notify.add_argument("--achieved", help="What landed (card 'Dosiahnuté') — plain language")
     p_notify.add_argument("--goal", help="Plain-language ticket goal (card 'Cieľ') — "

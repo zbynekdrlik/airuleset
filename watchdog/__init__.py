@@ -5443,8 +5443,14 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     "cez prio:bounce)." % (name, len(tickets), tick_str, root))
             seen[name] = {"tickets": tickets, "ts": int(now)}
             persist()                          # dedup memory BEFORE the ping
+            # #369: routes to the repo's own project thread — mirrors the
+            # SAME stream-qualified label a run-card / idle ping for the
+            # SAME repo checkout on this box would carry, so the phone can
+            # tell which project (and which stream box) this bounce-backlog
+            # ping is about.
+            from notify import stream_qualified
             send_fn(body, dedup_key="bounce:%s:%s" % (name, tick_str),
-                    dry_run=dry_run)
+                    dry_run=dry_run, project=stream_qualified(name))
             logs.append("bounce-ping %s %s" % (name, tick_str))
     return logs
 
@@ -5759,8 +5765,12 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
             # notify's own dedup fail OPEN — out of this lane's scope to
             # fix in notify.py itself, but this function no longer builds
             # a key that can trigger it).
+            # #369: routes to the repo's own project thread — mirrors the
+            # SAME stream-qualified label a run-card / idle ping for the
+            # SAME repo checkout on this box would carry.
+            from notify import stream_qualified
             result = send_fn(body, dedup_key="gkreq:%s:%d" % (name, int(now)),
-                             dry_run=dry_run)
+                             dry_run=dry_run, project=stream_qualified(name))
             logs.append("gkreq-ping %s %s (send=%r)" % (name, tick_str, result))
     return logs
 
@@ -11975,6 +11985,12 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         shown = ", ".join("#%d" % n for n in pingable[:CARD_MAX_LISTED])
         more = ("" if len(pingable) <= CARD_MAX_LISTED
                 else " a ďalších %d" % (len(pingable) - CARD_MAX_LISTED))
+        # #369 review M1 (TRIGGERED): a per-repo "finished tickets never
+        # reported" nag is exactly the ticket-work-scoped traffic #369's own
+        # design comment (item 7) says belongs on the PROJECT thread, not
+        # the shared owner pile — the same one-liner every other wired call
+        # site already uses.
+        from notify import stream_qualified
         status = send_fn(
             "\U0001f4ee **%s** — %d hotových ticketov bez hlásenia\n"
             "> Tieto tickety sa dokončili a zavreli, ale na telefón o nich "
@@ -11984,7 +12000,7 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             owner=owner_by_sid.get(sid) or None,
             dedup_key="card-unreported:%s:%s"
                       % (name, "-".join(str(n) for n in pingable)),
-            dry_run=dry_run)
+            dry_run=dry_run, project=stream_qualified(name))
         logs.append("card-unreported PING %s -> %s" % (name, status))
         for n in pingable:
             pinged[str(n)] = now

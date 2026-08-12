@@ -26,16 +26,27 @@ MSG=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/nul
 SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 
-# Project name from the repo root (or cwd basename) — for the ping header.
-PROJECT="unknown"
-if [ -n "$CWD" ]; then
-    PROJECT=$(cd "$CWD" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null \
-              | xargs basename 2>/dev/null || basename "$CWD")
-fi
-
 # airuleset.py is found relative to THIS hook (hooks/..), not via $HOME, so it
 # works regardless of where the repo lives.
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
+
+# Project label (#369): the SAME canonical, origin-derived + stream-qualified
+# label `notify --project-label` computes for a run-card header and for the
+# project Discord thread's own name — routes this alert to the correct
+# per-project thread AND keeps the ping header's project name consistent
+# with every other notification for the same repo. Falls back to the OLD
+# git-toplevel-basename (never bare `basename "$CWD"` alone, which would
+# collapse to "unknown" only when CWD itself is empty) if the python call
+# ever yields nothing — PROJECT must never end up unset.
+PROJECT="unknown"
+if [ -n "$CWD" ]; then
+    PROJECT=$(python3 "$AIRULESET_PY" notify --project-label --cwd "$CWD" 2>/dev/null || echo "")
+    if [ -z "$PROJECT" ]; then
+        PROJECT=$(cd "$CWD" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null \
+                  | xargs basename 2>/dev/null || basename "$CWD")
+    fi
+fi
+[ -z "$PROJECT" ] && PROJECT="unknown"
 
 # Fire-and-forget: notify --api-error decides if it's really an API error, composes
 # the Slovak ping, @mentions the owner, dedups, and sends. Backgrounded so the Stop

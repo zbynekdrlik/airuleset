@@ -5,6 +5,8 @@ identity: the box's unix user is appended for sub-dev/gatekeeper stream users
 (gatekeeper → odoo-erp-gatekeeper, montalu → odoo-montalu, david →
 odoo-erp-david); the personal `newlevel` boxes keep the plain label."""
 
+import os
+import subprocess
 import sys
 import unittest
 import unittest.mock as m
@@ -15,6 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import watchdog as wd
 
 ROOT = Path(__file__).resolve().parent.parent
+AIRULESET = ROOT / "airuleset.py"
+SEND_HOOK = ROOT / "hooks" / "notify-discord-send.sh"
 
 
 class TestWatchdogProjectLabel(unittest.TestCase):
@@ -42,12 +46,48 @@ class TestWatchdogProjectLabel(unittest.TestCase):
 
 
 class TestSendHookAppendsStreamUser(unittest.TestCase):
-    def test_hook_qualifies_project_with_unix_user(self):
-        src = (ROOT / "hooks" / "notify-discord-send.sh").read_text()
-        # the stream-qualifier block: id -un, newlevel/root excluded, appended
-        self.assertIn("id -un", src)
-        self.assertIn('PROJECT="${PROJECT}-${STREAM_USER}"', src)
-        self.assertIn("newlevel|root", src)
+    """#369 superseded the hook's OWN inline `id -un` stream-qualifier block —
+    PROJECT is now resolved via `notify --project-label --cwd`, the SAME
+    canonical, single-source-of-truth call the run-card header and the
+    per-project Discord thread routing already use (so a hook computing
+    this once and reusing it for both the header text and the routing call
+    can never disagree). The stream-qualification BEHAVIOR itself (unix
+    user appended for gatekeeper/montalu/david, personal boxes stay plain)
+    is unit-tested directly against `notify.project_label_for` in
+    tests/test_notify_project_channel.py::TestProjectLabelFor — this class
+    only proves the SHELL hook delegates to that canonical mechanism rather
+    than re-deriving its own copy."""
+
+    def test_hook_delegates_to_the_canonical_project_label_cli_mode(self):
+        src = SEND_HOOK.read_text()
+        self.assertIn("--project-label", src)
+        self.assertIn("--cwd \"$CWD\"", src)
+        # the OLD duplicate mechanism this ticket removed must be genuinely
+        # gone, not merely supplemented — a hook that kept BOTH would have
+        # two sources of truth that could silently disagree again.
+        self.assertNotIn("id -un", src)
+        self.assertNotIn('PROJECT="${PROJECT}-${STREAM_USER}"', src)
+
+    def test_hook_header_project_matches_the_canonical_cli_output(self):
+        # Functional proof: the hook's rendered header carries EXACTLY the
+        # value `notify --project-label --cwd ROOT` itself returns for
+        # this box's real unix user — not a value the hook derived on its
+        # own. Runs the REAL `notify --project-label` (the same call the
+        # hook makes), so this holds for whichever real user runs the
+        # suite (a personal box or a stream box), without needing to fake
+        # the OS-level identity `getpass.getuser()` resolves.
+        expected = subprocess.run(
+            [sys.executable, str(AIRULESET), "notify", "--project-label",
+             "--cwd", str(ROOT)],
+            capture_output=True, text=True).stdout.strip()
+        self.assertTrue(expected, "notify --project-label produced nothing")
+        env = {**os.environ, "ND_EMOJI": "✅", "ND_TEXT": "hotovo",
+              "ND_CWD": str(ROOT), "DISCORD_NOTIFY_DRYRUN": "1"}
+        env.pop("ND_DRYRUN_FILE", None)
+        r = subprocess.run(["bash", str(SEND_HOOK)], input="",
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("**✅ %s**" % expected, r.stdout, r.stdout)
 
 
 if __name__ == "__main__":

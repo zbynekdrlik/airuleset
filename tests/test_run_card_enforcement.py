@@ -421,8 +421,9 @@ class TestCardReconcile(unittest.TestCase):
         self.state = {}
         self.delivered = set()
 
-    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
-        self.sent.append({"msg": msg, "owner": owner, "dedup": dedup_key})
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False, project=None):
+        self.sent.append({"msg": msg, "owner": owner, "dedup": dedup_key,
+                          "project": project})
         return "sent"
 
     def repo(self, name="proj", closes=(3, 4), age=3600, base="main"):
@@ -477,6 +478,17 @@ class TestCardReconcile(unittest.TestCase):
         self.assertTrue(self.sent, logs)
         self.assertIn("#3", self.sent[0]["msg"])
         self.assertIn("#4", self.sent[0]["msg"])
+
+    def test_unreported_ping_carries_the_stream_qualified_project_label(self):
+        # #369 review M1 (TRIGGERED): "N finished tickets never reported" is
+        # ticket-work-scoped traffic per the ticket's own design criterion —
+        # must route to the project thread, mirroring _notify_run_card's own
+        # project=stream_qualified(name).
+        r = self.repo(name="proj", closes=(3, 4))
+        with m.patch("getpass.getuser", return_value="david2"):
+            self.reconcile([r])
+        self.assertTrue(self.sent)
+        self.assertEqual(self.sent[0]["project"], "proj-david2")
 
     def test_a_reported_ticket_is_silent(self):
         r = self.repo(closes=(3,))
@@ -909,7 +921,7 @@ class TestCardReconcileReopenClear(unittest.TestCase):
         self._post_patcher.start()
         self.addCleanup(self._post_patcher.stop)
 
-    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False, project=None):
         self.sent.append({"msg": msg, "dedup": dedup_key})
         return "sent"
 
@@ -1223,7 +1235,7 @@ class TestBackfillDigestNeedsALocalCheckout(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def send(self, body, owner=None, dedup_key=None, dry_run=False):
+    def send(self, body, owner=None, dedup_key=None, dry_run=False, project=None):
         self.sent.append(body)
         self.sent_owners.append(owner)
         return "dry-run" if dry_run else "sent"
@@ -1653,11 +1665,13 @@ class TestBackfillDigestRecordsWhatItReported(unittest.TestCase):
         self.addCleanup(p.stop)
         self.status = "sent"
         self.sent = []
+        self.sent_projects = []
 
-    def send(self, body, owner=None, dedup_key=None, dry_run=False):
+    def send(self, body, owner=None, dedup_key=None, dry_run=False, project=None):
         if dry_run:
             return "dry-run"
         self.sent.append(body)
+        self.sent_projects.append(project)
         return self.status
 
     def run_digest(self, since="2026-07-20T00:00:00Z", dry_run=False):
@@ -1683,6 +1697,13 @@ class TestBackfillDigestRecordsWhatItReported(unittest.TestCase):
         self.assertEqual(len(self.sent), 1, "still ONE message, not N cards")
         self.assertTrue(notify.marker_delivered(self.key(7)))
         self.assertTrue(notify.marker_delivered(self.key(8)))
+
+    def test_digest_carries_the_stream_qualified_project_label(self):
+        # #369 review M1 (TRIGGERED): the SAME ticket-work-scoped routing
+        # every other wired call site now uses.
+        with m.patch("getpass.getuser", return_value="david2"):
+            self.run_digest()
+        self.assertEqual(self.sent_projects, ["proj-david2"])
 
     def test_a_digest_that_failed_to_send_marks_nothing(self):
         self.status = "error"
@@ -1924,7 +1945,7 @@ class TestWatchdogClosedFetchEndToEndThroughCardReconcile(unittest.TestCase):
         self.sent = []
         self.state = {}
 
-    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False, project=None):
         self.sent.append(msg)
         return "sent"
 
@@ -2013,7 +2034,7 @@ class TestMergedClosesCandidatesEndToEndVerifiedAgainstGitHub(unittest.TestCase)
         self.sent = []
         self.state = {}
 
-    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False, project=None):
         self.sent.append(msg)
         return "sent"
 

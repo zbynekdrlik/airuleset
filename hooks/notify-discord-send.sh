@@ -44,20 +44,27 @@ DELIVERY_FAILED=0
 KIND="default"
 [ "$EMOJI" = "❓" ] && KIND="questions"
 
-# Project name for the header: git toplevel basename, else cwd basename.
+# AIRULESET_PY resolved EARLY (moved up from below `emit_one`) — --project-
+# label (#369) is the SAME canonical, origin-derived + stream-qualified
+# label `project_label_for()` computes for a run-card header and for the
+# project Discord thread's own name, so this header and the routing call
+# below (in `emit_one`) can never disagree about which project a message
+# is for.
+AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
+# #369 review m3 (TRIGGERED): the OLD git-toplevel-basename recipe this
+# call replaced was NEVER re-added as a fallback, so any --project-label
+# failure (python3 missing, airuleset.py unreadable) silently collapsed
+# PROJECT to the literal "unknown" for this repo's own HIGHEST-traffic
+# notification path — mirrors notify-api-error.sh's own fallback.
 PROJECT=""
 if [ -n "$CWD" ]; then
-    PROJECT=$(cd "$CWD" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null || basename "$CWD")
+    PROJECT=$(python3 "$AIRULESET_PY" notify --project-label --cwd "$CWD" 2>/dev/null || echo "")
+    if [ -z "$PROJECT" ]; then
+        PROJECT=$(cd "$CWD" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null \
+                  | xargs basename 2>/dev/null || basename "$CWD")
+    fi
 fi
 [ -z "$PROJECT" ] && PROJECT="unknown"
-# Stream identity in the label (user, 2026-07-20): gatekeeper/montalu/david all
-# pinged as bare "odoo-erp" — append the box's unix user for stream users so
-# the phone can tell WHICH stream speaks; personal boxes (newlevel) stay plain.
-STREAM_USER=$(id -un 2>/dev/null)
-case "$STREAM_USER" in
-    newlevel|root|"") ;;
-    *) PROJECT="${PROJECT}-${STREAM_USER}" ;;
-esac
 
 case "$EMOJI" in
     "❓") STATUS="otázka" ;;
@@ -81,9 +88,8 @@ else
 fi
 
 # @mention + thread routing via `airuleset.py notify` (single source of truth: it
-# reads the owner from the tmux session group + the channel .env). Path is relative
-# to THIS file.
-AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
+# reads the owner from the tmux session group + the channel .env). AIRULESET_PY
+# was already resolved above (needed early for --project-label).
 # Resolve the PRIMARY owner ONCE, then its parallel mirror recipients
 # (DISCORD_MIRROR_<OWNER> — e.g. david → also zbynek, so a persona's notifications
 # ALSO ping a real person). For a normal single-owner box (zbynek / marek) the mirror
@@ -144,7 +150,31 @@ emit_one() {
     local T="$1"
     local MENTION CH CONTENT
     MENTION=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --mention-prefix 2>/dev/null || echo "")
-    CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id --kind "$KIND" 2>/dev/null | tr -d '\r\n' || echo "")
+    # #369: route via the project thread ONLY on the default kind — a ❓
+    # question stays on the CENTRALIZED questions thread by design (job 7's
+    # Discord-reply routing lives there; --channel-id already ignores
+    # --project under --kind questions too, but this keeps the two clauses
+    # in the SHELL matching the KNOWN, tested design instead of relying on
+    # the Python side's own defensive ignore).
+    # --dry-run (a preview call, DISCORD_NOTIFY_DRYRUN=1) is forwarded so
+    # --channel-id resolves the PROJECT channel via the plain, side-effect-
+    # free notification_channel() instead of resolve_project_channel()
+    # (which writes a delivery-log "fallback" line and may spawn a
+    # background self-heal) — a mere PREVIEW must never do either. This
+    # covers ONLY the default-kind (project) branch below — the KIND
+    # "questions" branch's own resolve_questions_channel() has the
+    # IDENTICAL pre-existing dry-run-unawareness gap (#330, predates #369)
+    # and is unaffected by --dry-run being forwarded here; #369's own
+    # adversarial review confirmed it is not reachable in production
+    # today (needs a token present AND an unprovisioned -q thread AND a
+    # genuine dry-run call simultaneously — no real caller combines those).
+    local CID_DRYRUN=()
+    [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ] && CID_DRYRUN=(--dry-run)
+    if [ "$KIND" = "questions" ]; then
+        CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id --kind "$KIND" "${CID_DRYRUN[@]}" 2>/dev/null | tr -d '\r\n' || echo "")
+    else
+        CH=$(AIRULESET_NOTIFY_OWNER="$T" python3 "$AIRULESET_PY" notify --channel-id --kind "$KIND" --project "$PROJECT" "${CID_DRYRUN[@]}" 2>/dev/null | tr -d '\r\n' || echo "")
+    fi
     # Skip a target whose (non-empty) thread was already emitted to — no double-post.
     if [ -n "$CH" ]; then
         case "$POSTED_CHANNELS" in *" $CH "*) return 0;; esac
