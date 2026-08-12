@@ -758,7 +758,7 @@ class TestConditionAIsNeverFalselyHeldOrFalselyReleased(TestCase):
 
 
 class TheTemplatesHaveHealthyCapHeadroom(TestCase):
-    """#384 (2026-08-12): two of three templates measured 17-24 chars of
+    """#384 (2026-08-12): two of three templates measured 11-18 chars of
     headroom against the 4000-char cap -- close enough that a routine
     one-line wording fix (even a typo correction) could tip either one over
     and silently disable /goal fleet-wide again (the exact #169 shape). The
@@ -767,7 +767,8 @@ class TheTemplatesHaveHealthyCapHeadroom(TestCase):
     left, so a future edit that erodes it gets caught long before the wall.
 
     MIN_HEADROOM is deliberately below what this pass actually achieves
-    (measured: 232/264/231 chars for full/branch-merge/fork-no-merge) --
+    (measured: 232/224/164 chars for full/branch-merge/fork-no-merge, after
+    the #395 adversarial-review fixes on top of the original #384 trim) --
     the floor is a warning rail, not a target to shave back down to.
     """
 
@@ -844,10 +845,21 @@ class TestReducedAuthorityTemplatesSurfaceParkedWork(TestCase):
         # PROOF_SPEC is the exhaustive list backlog_empty_holds() checks
         # value-for-value; a NEW entry there would make deriving the exact
         # gk token load-bearing, which is exactly the "wait for closure"
-        # shape design decision (B) rejected. Locks the counts so a future
-        # add cannot happen silently.
-        self.assertEqual(len(PROOF_SPEC[BRANCH_MERGE]), 3)
-        self.assertEqual(len(PROOF_SPEC[FORK_NO_MERGE]), 2)
+        # shape design decision (B) rejected. Full-VALUE equality, never a
+        # bare len() count -- a mutation that SWAPS an existing entry for a
+        # count-preserving tickets-status one (e.g. replacing the branch-
+        # merge "gh run list" check with the tickets-status surfacing
+        # command) silently keeps the length the same and would slip past a
+        # length-only lock; live-verified during adversarial review, #395.
+        self.assertEqual(
+            PROOF_SPEC[BRANCH_MERGE],
+            [(SLICE_QUALS_COUNT, "0"), ("gh run list", "success"),
+             ("git merge-base", "RELEASED")],
+        )
+        self.assertEqual(
+            PROOF_SPEC[FORK_NO_MERGE],
+            [(SLICE_QUALS_COUNT, "0"), ("git merge-base", "RELEASED")],
+        )
 
     def test_the_false_gatekeeper_finished_claim_is_gone_from_branch_merge(self):
         # the old wording claimed the gatekeeper "has finished with my
