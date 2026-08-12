@@ -82,6 +82,20 @@ def _isolate_compact_claims(testcase):
     sub_patcher = m.patch.object(wd, "compact_substantiality_path", return_value=subp)
     sub_patcher.start()
     testcase.addCleanup(sub_patcher.stop)
+    # #400 FIX 4 -- the new min-delivery-interval cooldown gate is
+    # UNCONDITIONAL at every send point (job 14's idle/stash sends,
+    # deliver_compact_now's own sync send), never guarded behind a
+    # msg_hash the way the pre-existing delivered-dedup calls are (those
+    # short-circuit on a blank hash BEFORE ever touching disk -- see
+    # compact_already_delivered/mark_compact_delivered's own guards). A
+    # test driving any of those three send points without an explicit
+    # delivered_path= would otherwise read/write the REAL
+    # ~/.claude/compact-delivered.json during the test run, racing the
+    # live systemd watchdog exactly like the claims file above.
+    dp = Path(d.name) / "compact-delivered-test.json"
+    dp_patcher = m.patch.object(wd, "compact_delivered_path", return_value=dp)
+    dp_patcher.start()
+    testcase.addCleanup(dp_patcher.stop)
     return p
 
 
@@ -699,6 +713,255 @@ class TestCompactDeliveredDedup(unittest.TestCase):
                 wd.compact_delivered_path(),
                 Path("/tmp/fake-home-compact-delivered") / ".claude" /
                 "compact-delivered.json")
+
+
+# --------------------------------------------------------------------------- #
+# #400 FIX 4 (2026-08-12) — a hard, per-session MINIMUM INTERVAL between two
+# REAL `/compact` deliveries, enforced at EVERY delivery point (job 14's
+# idle send, job 14's stash send, `deliver_compact_now`'s own sync send),
+# for EVERY origin, no exemption. See `compact_delivery_in_cooldown`'s own
+# section comment in watchdog/__init__.py for the full reasoning.
+# --------------------------------------------------------------------------- #
+
+class TestCompactMinDeliveryInterval(unittest.TestCase):
+    """Unit-level: `_compact_min_delivery_interval` /
+    `compact_delivery_in_cooldown` / `mark_compact_delivery_ts` in
+    isolation, no pane/job involved."""
+
+    def _p(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return str(Path(d.name) / "compact-delivered.json")
+
+    # -- _compact_min_delivery_interval ---------------------------------- #
+
+    def test_default_is_the_documented_1800s(self):
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S", None)
+            self.assertEqual(wd._compact_min_delivery_interval(),
+                             wd.COMPACT_MIN_DELIVERY_INTERVAL_S)
+
+    def test_explicit_interval_is_returned_verbatim_unclamped(self):
+        self.assertEqual(wd._compact_min_delivery_interval(99999999), 99999999)
+        self.assertEqual(wd._compact_min_delivery_interval(0), 0)
+
+    def test_env_override_is_honoured(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S": "42"}):
+            self.assertEqual(wd._compact_min_delivery_interval(), 42)
+
+    def test_env_override_is_clamped_to_the_max(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S": "999999999"}):
+            self.assertEqual(wd._compact_min_delivery_interval(),
+                             wd.COMPACT_MIN_DELIVERY_INTERVAL_MAX_S)
+
+    def test_env_override_is_floored_at_1(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S": "-5"}):
+            self.assertEqual(wd._compact_min_delivery_interval(), 1)
+
+    def test_non_numeric_env_falls_back_to_the_default(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_MIN_DELIVERY_INTERVAL_S": "banana"}):
+            self.assertEqual(wd._compact_min_delivery_interval(),
+                             wd.COMPACT_MIN_DELIVERY_INTERVAL_S)
+
+    # -- compact_delivery_in_cooldown ------------------------------------- #
+
+    def test_blank_session_is_never_in_cooldown(self):
+        p = self._p()
+        self.assertFalse(wd.compact_delivery_in_cooldown("", time.time(), path=p))
+
+    def test_no_recorded_delivery_at_all_is_never_in_cooldown(self):
+        # #400 -- unmeasurable ("never delivered before") must read False,
+        # never a guess -- the same fail-safe direction every other gate in
+        # this file uses for an unmeasurable input.
+        p = self._p()
+        self.assertFalse(wd.compact_delivery_in_cooldown("sid-1", time.time(), path=p))
+
+    def test_a_delivery_5_minutes_ago_is_still_in_cooldown(self):
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertTrue(wd.compact_delivery_in_cooldown("sid-1", now + 300, path=p))
+
+    def test_a_delivery_35_minutes_ago_is_no_longer_in_cooldown(self):
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown("sid-1", now + 2100, path=p))
+
+    def test_exactly_at_the_boundary_is_no_longer_in_cooldown(self):
+        # strict "<" -- age == interval clears it, matching the docstring's
+        # own "still within" (a half-open window).
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown(
+            "sid-1", now + wd.COMPACT_MIN_DELIVERY_INTERVAL_S, path=p))
+
+    def test_a_legacy_bare_string_entry_with_no_ts_is_never_in_cooldown(self):
+        # a pre-#400 compact-delivered.json entry (mark_compact_delivered's
+        # old bare-string shape, before #400's dict migration) carries no
+        # ts at all -- unmeasurable, never guessed as "recent".
+        p = self._p()
+        wd.mark_compact_delivered("sid-1", "some-hash", path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown("sid-1", time.time(), path=p))
+
+    def test_a_different_session_is_unaffected(self):
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown("sid-2", now + 60, path=p))
+
+    def test_explicit_interval_overrides_the_default(self):
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        self.assertFalse(wd.compact_delivery_in_cooldown(
+            "sid-1", now + 10, path=p, interval=5))
+        self.assertTrue(wd.compact_delivery_in_cooldown(
+            "sid-1", now + 10, path=p, interval=20))
+
+    # -- mark_compact_delivery_ts ----------------------------------------- #
+
+    def test_mark_sets_a_readable_ts(self):
+        p = self._p()
+        now = time.time()
+        self.assertTrue(wd.mark_compact_delivery_ts("sid-1", now=now, path=p))
+        self.assertTrue(wd.compact_delivery_in_cooldown("sid-1", now + 1, path=p))
+
+    def test_mark_preserves_an_existing_hash(self):
+        p = self._p()
+        wd.mark_compact_delivered("sid-1", "hash-a", path=p)
+        wd.mark_compact_delivery_ts("sid-1", now=time.time(), path=p)
+        self.assertTrue(wd.compact_already_delivered("sid-1", "hash-a", path=p))
+
+    def test_a_dedup_mark_never_advances_the_delivery_ts(self):
+        # #400 -- mark_compact_delivered (the pre-existing dedup mark, fired
+        # on EVERY handled disposition including a drop that never typed
+        # anything) must NEVER set/refresh ts -- only mark_compact_delivery_
+        # ts, called ONLY at an actual send point, may do that.
+        p = self._p()
+        now = time.time()
+        wd.mark_compact_delivery_ts("sid-1", now=now, path=p)
+        wd.mark_compact_delivered("sid-1", "some-later-hash", path=p)
+        self.assertTrue(wd.compact_delivery_in_cooldown("sid-1", now + 300, path=p))
+        self.assertFalse(wd.compact_delivery_in_cooldown(
+            "sid-1", now + wd.COMPACT_MIN_DELIVERY_INTERVAL_S + 1, path=p))
+
+    def test_blank_session_mark_is_a_noop(self):
+        p = self._p()
+        self.assertFalse(wd.mark_compact_delivery_ts("", now=time.time(), path=p))
+        self.assertFalse(Path(p).exists())
+
+
+# --------------------------------------------------------------------------- #
+# #400 FIX 4 — the SAME cooldown, exercised end-to-end through job 14's
+# `compact_ticket_boundary` (the idle-send path) and through
+# `deliver_compact_now` (the synchronous path) — the two required test
+# shapes from the ticket itself: two deliveries 5 min apart -> only the
+# first delivers; two deliveries 35 min apart -> both deliver.
+# --------------------------------------------------------------------------- #
+
+class TestCompactMinDeliveryInterval_InJob14(unittest.TestCase):
+    SID = "sess-cooldown-job14"
+    PANE = "%9"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _paths(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        req = str(Path(d.name) / "compact-requests.json")
+        dp = str(Path(d.name) / "compact-delivered.json")
+        return req, dp
+
+    def _deliver(self, req_path, dp_path, now):
+        wd.record_compact_request(self.SID, "/home/x/proj", now=now, path=req_path)
+        tmux = CompactFakeTmux(CB_IDLE_CAP)
+        panes_by_sid = {self.SID: (self.PANE, CB_IDLE_CAP)}
+        logs = wd.compact_ticket_boundary(now, tmux, {}, panes_by_sid,
+                                          path=req_path, delivered_path=dp_path)
+        return tmux, logs
+
+    def test_two_deliveries_5_min_apart_only_the_first_delivers(self):
+        req_path, dp_path = self._paths()
+        base = time.time()
+        tmux1, logs1 = self._deliver(req_path, dp_path, base)
+        self.assertIn("/compact", tmux1.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs1), logs1)
+
+        tmux2, logs2 = self._deliver(req_path, dp_path, base + 300)   # 5 min
+        self.assertEqual(tmux2.sent, [])
+        self.assertTrue(any("cooldown" in ln for ln in logs2), logs2)
+        # dropped (consumed), never left for a further retry
+        self.assertNotIn(self.SID, wd.load_compact_requests(req_path))
+
+    def test_two_deliveries_35_min_apart_both_deliver(self):
+        req_path, dp_path = self._paths()
+        base = time.time()
+        tmux1, logs1 = self._deliver(req_path, dp_path, base)
+        self.assertIn("/compact", tmux1.typed_texts())
+
+        tmux2, logs2 = self._deliver(req_path, dp_path, base + 2100)  # 35 min
+        self.assertIn("/compact", tmux2.typed_texts())
+        self.assertTrue(any(ln.startswith("OK") for ln in logs2), logs2)
+
+
+class TestCompactMinDeliveryIntervalInDeliverCompactNow(unittest.TestCase):
+    SID = "sess-cooldown-sync"
+    CWD = "/home/newlevel/devel/cooldownproj"
+
+    def setUp(self):
+        _isolate_compact_claims(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _dp(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return str(Path(d.name) / "compact-delivered.json")
+
+    def _deliver(self, proj, dp_path, now):
+        tmux = DeliverCompactNowFakeTmux(
+            [("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+                                      projects_dir=proj, now=now,
+                                      delivered_path=dp_path)
+        return word, tmux
+
+    def test_two_deliveries_5_min_apart_only_the_first_sends(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        dp_path = self._dp()
+        base = time.time()
+
+        word1, tmux1 = self._deliver(proj, dp_path, base)
+        self.assertEqual(word1, "sent")
+        self.assertIn("/compact", tmux1.typed_texts())
+
+        word2, tmux2 = self._deliver(proj, dp_path, base + 300)   # 5 min
+        self.assertEqual(word2, "dropped-cooldown")
+        self.assertEqual(tmux2.sent, [])
+
+    def test_two_deliveries_35_min_apart_both_send(self):
+        proj = self._dir()
+        _write_ctx_transcript(proj, self.CWD, self.SID, 300_000)
+        dp_path = self._dp()
+        base = time.time()
+
+        word1, tmux1 = self._deliver(proj, dp_path, base)
+        self.assertEqual(word1, "sent")
+
+        word2, tmux2 = self._deliver(proj, dp_path, base + 2100)  # 35 min
+        self.assertEqual(word2, "sent")
+        self.assertIn("/compact", tmux2.typed_texts())
 
 
 # --------------------------------------------------------------------------- #
@@ -4048,10 +4311,11 @@ class TestUnresumedSessionDefersAProvenBoundary(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(f.name) and os.unlink(f.name))
         return f.name
 
-    def _deliver(self, proj, origin="subagent-stop"):
+    def _deliver(self, proj, origin="subagent-stop", sid=None):
+        sid = sid or self.SID
         tmux = DeliverCompactNowFakeTmux(
             [(self.PANE, "claude", self.CWD, "111")], CB_IDLE_CAP)
-        out = wd.deliver_compact_now(self.SID, self.CWD, run=tmux,
+        out = wd.deliver_compact_now(sid, self.CWD, run=tmux,
                                      projects_dir=proj, origin=origin)
         return out, tmux
 
@@ -4111,14 +4375,24 @@ class TestUnresumedSessionDefersAProvenBoundary(unittest.TestCase):
         """A plain Stop-hook request was justified by the supervisor OWN
         `✅ DONE` turn, so its work was already consumed and reported; a later
         529 does not retroactively invalidate that boundary. Such a request is
-        governed by the #99/#48 gates exactly as before."""
+        governed by the #99/#48 gates exactly as before.
+
+        #400 FIX 4 -- each subTest iteration gets its OWN sid (a fresh
+        transcript per origin) rather than sharing `self.SID` across both:
+        the two deliveries below land moments apart in real wall-clock time,
+        which is exactly what the NEW min-delivery-interval cooldown gate
+        (#400) now refuses for a REPEATED sid -- correctly so, but that is
+        a different invariant than the one THIS test is about (origin
+        exemption from the #188 unresumed-session gate), so it must not
+        collide with it."""
         proj = self._dir()
-        _write_api_error_transcript(proj, self.CWD, self.SID)
         for origin in ("", None):
+            sid = "%s-origin-%r" % (self.SID, origin)
+            _write_api_error_transcript(proj, self.CWD, sid)
             with self.subTest(origin=origin):
                 with m.patch.object(wd, "compact_boundary_substantial",
                                     return_value=True):
-                    out, tmux = self._deliver(proj, origin=origin)
+                    out, tmux = self._deliver(proj, origin=origin, sid=sid)
                 self.assertEqual(out, "sent")
                 self.assertIn("/compact", tmux.typed_texts())
 
