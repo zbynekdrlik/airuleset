@@ -12721,6 +12721,22 @@ class TestBlockDestructiveRemoteSecretReadHook(TestCase):
         r = self._run('ssh gk "cat > ~/.env"')
         self.assertEqual(r.returncode, 0, r.stdout)
 
+    # --- adversarial-review finding (#373-review MINOR): Category A's -----
+    # --- narrowing must be PER PIPELINE SUB-SEGMENT, not whole-command -----
+
+    def test_unrelated_wc_in_an_earlier_segment_does_not_exempt_a_real_cat_leak(self):
+        # the exact review repro: a benign `wc -l` of the SAME file,
+        # joined by &&, must never exempt the genuine `cat` read that
+        # follows — that would defeat the incident shape this ticket
+        # exists to block.
+        r = self._run('ssh gk "wc -l /opt/odoo/mcp.env && cat /opt/odoo/mcp.env"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("leaks into the transcript", r.stderr)
+
+    def test_unrelated_awk_in_an_earlier_segment_does_not_exempt_a_real_cat_leak(self):
+        r = self._run('ssh gk "awk --version; cat /opt/odoo/mcp.env"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+
     # --- allowed — narrow / template exemptions --------------------------
 
     def test_allows_env_template_file(self):
