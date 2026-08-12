@@ -7239,6 +7239,106 @@ class TestClaudeHistoryScript(TestCase):
         out = self._run_pty("--cwd", str(cwd), "--plain")
         self.assertNotIn("\x1b[", out)
 
+    # -- #410: claude-history must READ a gzip-compressed `.jsonl.gz`
+    # transcript exactly like a plain `.jsonl` one -- landing BEFORE any
+    # compression code exists anywhere, so history-browsing of a
+    # compressed file is never broken by a later commit.
+
+    def _write_transcript_gz(self, cwd, lines, sid="s1"):
+        """Same shape as _write_transcript, but writes a REAL gzip-
+        compressed `<sid>.jsonl.gz` -- never a plain file with a renamed
+        extension, so a test proves the actual gzip decode path."""
+        import gzip
+        enc = airuleset.encode_project_dir(str(cwd))
+        d = self.projects_dir / enc
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / f"{sid}.jsonl.gz"
+        content = "\n".join(json.dumps(ln) for ln in lines) + "\n"
+        with gzip.open(p, "wt", encoding="utf-8") as f:
+            f.write(content)
+        return p
+
+    def test_reads_a_compressed_transcript_via_explicit_path(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        gz_path = self._write_transcript_gz(cwd, [
+            self._user("what is 2+2?"),
+            self._assistant(self._text_block("2+2 is 4.")),
+        ])
+        r = self._run("--transcript", str(gz_path))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("===== USER =====", r.stdout)
+        self.assertIn("what is 2+2?", r.stdout)
+        self.assertIn("===== CLAUDE =====", r.stdout)
+        self.assertIn("2+2 is 4.", r.stdout)
+
+    def test_cwd_resolution_finds_a_compressed_transcript_with_no_plain_sibling(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript_gz(cwd, [self._user("only a gz session exists")])
+        r = self._run("--cwd", str(cwd))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("only a gz session exists", r.stdout)
+
+    def test_cwd_resolution_picks_the_newest_across_mixed_plain_and_gz(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript_gz(cwd, [self._user("old compressed session")], sid="old")
+        old_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "old.jsonl.gz"
+        os.utime(old_path, (1000, 1000))
+        self._write_transcript(cwd, [self._user("new plain session")], sid="new")
+        new_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "new.jsonl"
+        os.utime(new_path, (2000, 2000))
+        r = self._run("--cwd", str(cwd))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("new plain session", r.stdout)
+        self.assertNotIn("old compressed session", r.stdout)
+
+    def test_list_shows_both_plain_and_compressed_transcripts(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript(cwd, [self._user("a")], sid="plain-one")
+        self._write_transcript_gz(cwd, [self._user("b")], sid="gz-one")
+        r = self._run("--cwd", str(cwd), "--list")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("plain-one.jsonl", r.stdout)
+        self.assertIn("gz-one.jsonl.gz", r.stdout)
+
+    def test_full_chains_a_compressed_older_file_with_a_plain_newer_one(self):
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        self._write_transcript_gz(cwd, [self._user("older, compressed")], sid="a")
+        old_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "a.jsonl.gz"
+        os.utime(old_path, (1000, 1000))
+        self._write_transcript(cwd, [self._user("newer, plain")], sid="b")
+        new_path = self.projects_dir / airuleset.encode_project_dir(str(cwd)) / "b.jsonl"
+        os.utime(new_path, (2000, 2000))
+        r = self._run("--cwd", str(cwd), "--full")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("older, compressed", r.stdout)
+        self.assertIn("newer, plain", r.stdout)
+        # oldest-first chaining -- the compressed turn must render BEFORE
+        # the plain one, not merely be present somewhere.
+        self.assertLess(r.stdout.index("older, compressed"),
+                        r.stdout.index("newer, plain"))
+
+    def test_corrupted_gz_file_fails_loudly_never_silently(self):
+        # test-strictness.md: a broken dependency must FAIL, never silently
+        # succeed with no output -- a `.jsonl.gz` extension whose bytes are
+        # NOT a real gzip stream (e.g. a half-written/corrupted compress
+        # attempt) must be reported as an error, never rendered as if it
+        # were empty or valid.
+        cwd = self.home / "proj"
+        cwd.mkdir()
+        enc = airuleset.encode_project_dir(str(cwd))
+        d = self.projects_dir / enc
+        d.mkdir(parents=True)
+        bad = d / "broken.jsonl.gz"
+        bad.write_bytes(b"this is not a real gzip stream at all")
+        r = self._run("--transcript", str(bad))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertTrue(r.stderr.strip(), "a corrupted .gz must report an error on stderr")
+
 
 class TestDiscordAutopilotNotify(TestCase):
     """`airuleset.py notify` — the single Discord send path: tmux-owner @mention,
