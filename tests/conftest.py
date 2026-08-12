@@ -74,3 +74,11 @@ def _isolate_gh_app_token_dir():
         missing = Path(d) / "gh-app-tokens"    # never .mkdir()'d — the point
         with mock.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": str(missing)}):
             yield missing
+
+
+@pytest.fixture(autouse=True)
+def _ignore_owner_kill_switch(monkeypatch):
+    """#400: the owner kill-switch flag files under the REAL ~/.claude are
+    production state; a direct pytest run on a box with them set must not
+    have watchdog compact/goal jobs read as disabled."""
+    monkeypatch.setenv("AIRULESET_TEST_IGNORE_DISABLE", "1")

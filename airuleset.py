@@ -8945,6 +8945,10 @@ def cmd_push(args):
         test_env = dict(os.environ)
         test_env["AIRULESET_DRAFT_RESCUE_DIR"] = str(
             Path(_rescue_tmp) / "draft-rescue")
+        # #400 owner kill-switch: the pre-push suite must stay green on a
+        # box whose owner has genuinely disabled the compact/goal jobs --
+        # the flag files are production state, not test state.
+        test_env["AIRULESET_TEST_IGNORE_DISABLE"] = "1"
         test_result = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
             cwd=str(REPO_DIR), env=test_env,

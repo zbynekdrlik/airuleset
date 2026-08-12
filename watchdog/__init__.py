@@ -9885,7 +9885,7 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
     # OWNER KILL-SWITCH (2026-08-12): the passive/synchronous delivery path is
     # disabled by the same flag file as job 14 — only the session's own explicit
     # `compact-request --self` callback (deliver_compact_self) stays active.
-    if os.path.exists(os.path.expanduser("~/.claude/watchdog-disable-compact")):
+    if _owner_disabled("compact"):
         _log_compact_sync("SKIP disabled-by-owner sid=%s cwd=%s" % (sid, cwd))
         return False
     run = run or _default_run
@@ -15513,6 +15513,19 @@ SWEEP_WALL_CLOCK_BUDGET_S = 90    # env AIRULESET_SWEEP_BUDGET_S
 # kill (90 + 20 = 110s, 10s of slack left for jobs 1-7/11 in between).
 TAIL_BUDGET_S = 20                # extra seconds for jobs 8/9 past sweep_deadline
 
+
+def _owner_disabled(kind):
+    """#400 owner kill-switch read: True when the owner's flag file for
+    `kind` ("goal"/"compact") exists. The test suite sets
+    AIRULESET_TEST_IGNORE_DISABLE=1 (cmd_push injects it for the pre-push
+    gate subprocess, tests/conftest.py for direct pytest runs) so a box
+    whose OWNER has genuinely disabled the jobs can still run its own
+    green suite -- production sweeps never set the var."""
+    if os.environ.get("AIRULESET_TEST_IGNORE_DISABLE"):
+        return False
+    return os.path.exists(
+        os.path.expanduser("~/.claude/watchdog-disable-%s" % kind))
+
 def run_once(now=None, dry_run=False, run=None, send_fn=None,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
@@ -17228,10 +17241,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # box until the owner (or a fix he approves) removes it. Checked fresh
     # every sweep; every skip logs LOUDLY so a disabled job can never be
     # mistaken for a healthy-but-silent one. rm the file to re-enable.
-    _goal_jobs_disabled = os.path.exists(
-        os.path.expanduser("~/.claude/watchdog-disable-goal"))
-    _compact_jobs_disabled = os.path.exists(
-        os.path.expanduser("~/.claude/watchdog-disable-compact"))
+    _goal_jobs_disabled = _owner_disabled("goal")
+    _compact_jobs_disabled = _owner_disabled("compact")
     if _goal_jobs_disabled:
         logs.append("goal jobs DISABLED by owner flag "
                     "~/.claude/watchdog-disable-goal (rm to re-enable)")
