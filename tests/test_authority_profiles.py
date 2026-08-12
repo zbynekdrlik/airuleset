@@ -1983,6 +1983,110 @@ class TestGhCallsCarryTheCredentialsFileToken(TestCase):
             self.assertEqual(r.stdout.strip(), "1")
 
 
+class TestGhEnvPrefersFreshMintOverGitCredentialsCorpse(TestCase):
+    """#401: on an App-token box (odoo-erp#3281's gh-app-stream-tokens
+    mechanism -- david2-4, marek, montalu/2/3/4) ~/.git-credentials can
+    independently hold a ONE-SHOT snapshot of a 60-minute App installation
+    token, written once by whatever process last wrote it and NEVER
+    refreshed -- while the box's real live-refresh path
+    (~/.config/gh-app-tokens/, refreshed every 45 min by a gatekeeper timer)
+    sits right next to it. `_gh_env()` used to always prefer the static
+    .git-credentials snapshot -- once that corpse token expired, EVERY gh
+    call this file makes failed 401 forever, even though a live token sat
+    right next to it (live-diagnosed on montalu3@subdev, 2026-08-12: the
+    .git-credentials line was ~11.5h stale -- App tokens live 60 min --
+    while ~/.config/gh-app-tokens/primary was ~31 min old and fully live).
+    Fix: an App-token box (directory-presence detected via
+    `_is_gh_app_token_box()`, #356's existing, local/static signal
+    `_slice_quals()` already uses -- no network call) reads the fresh
+    per-call token file instead of the git-credentials snapshot."""
+
+    def test_app_token_box_uses_the_fresh_token_file_not_git_credentials(self):
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            token_dir = Path(home) / "gh-app-tokens"
+            token_dir.mkdir()
+            (token_dir / "primary").write_text("fresh-app-token\n")
+            Path(home, ".git-credentials").write_text(
+                "https://x-access-token:corpse-token-dead@github.com\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(token_dir),
+                                "GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+                env = airuleset._gh_env()
+        self.assertEqual(env.get("GH_TOKEN"), "fresh-app-token")
+
+    def test_app_token_box_with_no_delivered_token_yet_leaves_gh_token_unset(self):
+        # timer hasn't delivered yet / box mid-provisioning -- must NOT
+        # silently fall through to the corpse .git-credentials value; leave
+        # GH_TOKEN unset so the box fails LOUD (gh's own "not authenticated")
+        # rather than resurrecting a token proven dead.
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            token_dir = Path(home) / "gh-app-tokens"
+            token_dir.mkdir()          # provisioned, but no "primary" file yet
+            Path(home, ".git-credentials").write_text(
+                "https://x-access-token:corpse-token-dead@github.com\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(token_dir),
+                                "GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+                env = airuleset._gh_env()
+        self.assertNotIn("GH_TOKEN", env)
+
+    def test_real_env_token_still_wins_on_an_app_token_box(self):
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            token_dir = Path(home) / "gh-app-tokens"
+            token_dir.mkdir()
+            (token_dir / "primary").write_text("fresh-app-token\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(token_dir),
+                                "GH_TOKEN": "explicit-real-token"}):
+                env = airuleset._gh_env()
+        self.assertEqual(env.get("GH_TOKEN"), "explicit-real-token")
+
+    def test_x_access_token_credential_is_never_authoritative_even_without_app_dir(self):
+        # A stray x-access-token: line in .git-credentials structurally can
+        # only be an App installation-token corpse (it's the FIXED username
+        # GitHub requires for one) -- never a valid durable PAT, so it must
+        # never be fed to gh even on a box _is_gh_app_token_box() doesn't
+        # currently recognize (dir missing/relocated).
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            missing = Path(home) / "gh-app-tokens"      # never created
+            Path(home, ".git-credentials").write_text(
+                "https://x-access-token:corpse-token-dead@github.com\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(missing),
+                                "GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+                env = airuleset._gh_env()
+        self.assertNotIn("GH_TOKEN", env)
+
+    def test_pat_box_git_credentials_fallback_is_completely_unaffected(self):
+        # False-positive control: a genuine PAT box (david-style, no
+        # App-token dir, non-x-access-token username) must behave BYTE-
+        # IDENTICAL to before this fix.
+        import tempfile
+        import unittest.mock as mk
+
+        with tempfile.TemporaryDirectory() as home:
+            missing = Path(home) / "gh-app-tokens"      # never created
+            Path(home, ".git-credentials").write_text(
+                "https://kvaskodev:ghp_realpattoken@github.com\n")
+            with mk.patch.dict(os.environ,
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(missing),
+                                "GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+                env = airuleset._gh_env()
+        self.assertEqual(env.get("GH_TOKEN"), "ghp_realpattoken")
+
+
 class TestSliceQualsDoesNotSilentlyCapItsOwnCount(TestCase):
     """M-2: `slice-quals` still asked for `-L 200` while `core-quals` asked
     for 1000. A single population can only be UNDER-counted by a clamp, never
