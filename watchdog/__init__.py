@@ -9936,6 +9936,21 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
             if _compact_stash_attempt(pid, run, captured, state, sid, loc,
                                       project, owner=owner, ctx=ctx,
                                       send_fn=send_fn, logs=logs):
+                # #400-review MINOR-6 (fresh-context adversarial review) --
+                # this SEND line's own comment always claimed "before any
+                # of it can be skipped by a later exception", but it used
+                # to be written AFTER five other calls below (reqs.pop,
+                # mark_compact_delivered, compact_claim_set,
+                # mark_compact_boundary, mark_compact_delivery_ts) -- the
+                # real keystrokes are already typed and submitted the
+                # instant `_compact_stash_attempt` returns True, so an
+                # exception raised by any ONE of those five would have
+                # left a genuine send silently unlogged, exactly the class
+                # of gap FIX 6 exists to close. Log FIRST, matching the
+                # comment's own claim, so it is true.
+                _log_compact_sync(
+                    "SEND (stash) sid=%s cwd=%s origin=%s via=job14"
+                    % (sid, cwd, entry.get("origin") or "-"))
                 reqs.pop(sid, None)
                 changed = True
                 if handled is not None:
@@ -9945,16 +9960,6 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                 compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
                 mark_compact_boundary(cwd)  # #99 — reset substantiality anchor
                 mark_compact_delivery_ts(sid, now=now, path=delivered_path)  # #400 FIX 4
-                # #400 FIX 6 -- this job's own send paths used to be
-                # SILENT to compact-sync.log (only `deliver_compact_now`
-                # logged there) -- the exact gap that made the gatekeeper
-                # incident undebuggable: no `SEND` line anywhere for the
-                # delivery the user actually received. Every path that
-                # types `/compact` now writes one, BEFORE any of it can
-                # be skipped by a later exception.
-                _log_compact_sync(
-                    "SEND (stash) sid=%s cwd=%s origin=%s via=job14"
-                    % (sid, cwd, entry.get("origin") or "-"))
                 logs.append("OK (compact-request, stash%s) %s"
                             % (grace_tag, loc))
             else:
@@ -10457,16 +10462,23 @@ def deliver_compact_now(sid, cwd, run=None, projects_dir=None, min_context=None,
         _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s" % (sid, cwd))
         return ""
     send_continue(pid, COMPACT_TEXT, run)
+    # #400-review MINOR-6 (fresh-context adversarial review) -- log
+    # IMMEDIATELY after the real send, matching job 14's own two send
+    # points (both already ordered this way) and fixing the SAME
+    # log-comes-after-other-calls gap the review found in job 14's stash
+    # branch: the keystrokes are already typed the instant `send_continue`
+    # returns, so an exception raised by claim-set/boundary-mark/ts-mark
+    # below must never leave a genuine send unlogged. Names BOTH the
+    # request's own origin (blank / subagent-stop / self-callback -- what
+    # proved the boundary) and the delivery PATH (`via=sync`, vs job 14's
+    # `via=job14`) so a later forensic read of compact-sync.log can tell
+    # which of the two senders actually fired without cross-referencing a
+    # second log.
+    _log_compact_sync("SEND sid=%s cwd=%s origin=%s via=sync"
+                      % (sid, cwd, origin or "-"))
     compact_claim_set(sid, cwd, pane_id=pid, run=run)  # #78/#82
     mark_compact_boundary(cwd)  # #99 — reset the substantiality anchor
     mark_compact_delivery_ts(sid, now=now_ts, path=delivered_path)  # #400 FIX 4
-    # #400 FIX 6 -- name BOTH the request's own origin (blank / subagent-
-    # stop / self-callback -- what proved the boundary) and the delivery
-    # PATH (`via=sync`, vs job 14's `via=job14`) so a later forensic read
-    # of compact-sync.log can tell which of the two senders actually fired
-    # without cross-referencing a second log.
-    _log_compact_sync("SEND sid=%s cwd=%s origin=%s via=sync"
-                      % (sid, cwd, origin or "-"))
     return "sent"
 
 
