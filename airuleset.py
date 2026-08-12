@@ -1073,6 +1073,7 @@ CLAUDE_HISTORY_SCRIPT_CONTENT = r'''#!/usr/bin/env python3
 # straight from its own transcript JSONL -- the source of truth, immune to
 # the upstream TUI renderer's tmux-scrollback corruption (#253/#267).
 import argparse
+import gzip
 import json
 import os
 import re
@@ -1090,17 +1091,23 @@ def encode_project_dir(cwd):
 
 
 def find_transcripts(projects_dir, cwd):
-    """Every *.jsonl transcript for `cwd`, newest first."""
+    """Every transcript for `cwd`, newest first -- BOTH plain `*.jsonl`
+    and gzip-compressed `*.jsonl.gz` (#410: an old, gzip-at-rest
+    transcript stays fully discoverable/readable, just smaller on disk),
+    sorted TOGETHER by mtime so a mixed set (some compressed, some not)
+    still resolves the genuinely newest one regardless of which form it
+    is in."""
     d = Path(projects_dir) / encode_project_dir(cwd)
     if not d.is_dir():
         return []
     rows = []
-    for p in d.glob("*.jsonl"):
-        try:
-            m = p.stat().st_mtime
-        except OSError:
-            continue
-        rows.append((m, p))
+    for pattern in ("*.jsonl", "*.jsonl.gz"):
+        for p in d.glob(pattern):
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            rows.append((m, p))
     rows.sort(reverse=True)
     return [p for _m, p in rows]
 
@@ -1119,21 +1126,35 @@ def resolve_pane_cwd(pane_id):
 
 
 def _read_jsonl(path):
+    """Read every JSONL record from `path` -- transparently gunzips when
+    the name ends in ".gz" (#410), otherwise the pre-#410 plain-text path
+    unchanged. A gzip stream is only validated LAZILY, on its first real
+    read -- not at open() time -- so the error catch wraps the iteration
+    too, not just the open() call, or a corrupted/truncated `.jsonl.gz`
+    would silently look like an EMPTY transcript instead of failing
+    loudly (test-strictness.md: a broken dependency must fail, never
+    silently succeed)."""
     records = []
+    is_gz = str(path).endswith(".gz")
+    opener = gzip.open if is_gz else open
     try:
-        f = open(path, "r", encoding="utf-8", errors="replace")
+        f = opener(path, "rt", encoding="utf-8", errors="replace")
     except OSError as e:
         print("claude-history: cannot read %s: %s" % (path, e), file=sys.stderr)
         return records
-    with f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                records.append(json.loads(raw))
-            except json.JSONDecodeError:
-                continue
+    try:
+        with f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    records.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+    except OSError as e:
+        print("claude-history: cannot read %s: %s" % (path, e), file=sys.stderr)
+        return []
     return records
 
 
