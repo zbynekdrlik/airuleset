@@ -175,11 +175,27 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
     earlier pending request for the SAME session, except its `ts`: `ts` is
     set ONCE, on the call that CREATES the entry, and preserved
     UNCONDITIONALLY on every later re-record for the same still-pending
-    session (`cwd`/`origin` always take the newest call's values). This is
+    session (`cwd` always takes the newest call's value). This is
     the #400 non-refreshable age-cap invariant — a request whose anchor
     can be refreshed by an ordinary re-record never actually ages out, no
     matter how stale it genuinely is. Fail-safe (never raises). Returns
     True on success.
+
+    ORIGIN NEVER DOWNGRADES FROM `self-callback` (#402-review MAJOR-1).
+    The SubagentStop hook fires under the SUPERVISOR's own sid on every
+    worker return — routine in #317's parallel-round shape — and can
+    re-record a STILL-PENDING self-callback request with
+    origin="subagent-stop" (or a blank/None origin) before it is ever
+    delivered. `origin` otherwise "always takes the newest call's value"
+    (per the paragraph above, unchanged for every OTHER pairing), which
+    would silently strip the #425 exemption from a turn that genuinely
+    earned it (own "## Work Complete" heading + trailing "more workers
+    still dispatched" tail) — live-confirmed on this box's own real
+    `~/.claude/compact-requests.json`. A later self-callback re-record
+    still correctly UPGRADES a pending subagent-stop/blank origin (this
+    is unaffected — the newest-value rule still applies in that
+    direction); only a self-callback -> anything-else transition on an
+    ALREADY-pending entry is refused.
 
     #402-review MINOR-2 was CONSIDERED and REJECTED here, deliberately: a
     re-record landing on an already-EXPIRED prior entry (>
@@ -211,8 +227,12 @@ def record_compact_request(session, cwd, now=None, path=None, origin=None):
     prior = d.get(session)
     ts = prior.get("ts") if isinstance(prior, dict) and prior.get("ts") is not None \
         else int(now)
-    d[session] = {"cwd": str(cwd or ""), "ts": ts,
-                 "origin": str(origin or "").strip()}
+    new_origin = str(origin or "").strip()
+    prior_origin = prior.get("origin") if isinstance(prior, dict) else None
+    if prior_origin == _COMPACT_SELF_CALLBACK_ORIGIN \
+            and new_origin != _COMPACT_SELF_CALLBACK_ORIGIN:
+        new_origin = prior_origin
+    d[session] = {"cwd": str(cwd or ""), "ts": ts, "origin": new_origin}
     return _save_compact_requests(d, path)
 
 
