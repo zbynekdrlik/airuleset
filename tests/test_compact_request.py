@@ -5036,7 +5036,7 @@ class TestFirstTsCannotResurrectAnExpiredBoundary(unittest.TestCase):
             t += step
             wd.record_compact_request(self.SID, self.CWD, now=t, path=path)
         d = wd.load_compact_requests(path)
-        self.assertEqual(d[self.SID]["first_ts"], origin_ts,
+        self.assertEqual(d[self.SID]["first_ts"], int(origin_ts),
                          "first_ts must still be the ORIGINAL boundary")
         self.assertGreater(d[self.SID]["ts"], origin_ts,
                            "ts is refreshed by every re-record, as designed")

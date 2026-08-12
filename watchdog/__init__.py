@@ -7582,7 +7582,24 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
     first sweep a PROVEN-boundary request's marker is observed still
     blocking) is preserved the SAME way, for the SAME reason, as its own
     independent field — see `_compact_marker_hold_in_grace`'s own
-    docstring."""
+    docstring.
+
+    #400 — `first_ts` is the ORIGINAL boundary this pending episode was
+    FIRST observed at: set once, on the call that creates the entry (no
+    `prior`, or a `prior` that itself has no `first_ts` yet — a
+    migration-safe fallback for an entry written before this field
+    existed), then preserved UNCONDITIONALLY across every later
+    re-record for the SAME still-pending session — the identical
+    episode-anchor shape `deferred_since`/`not_boundary_since` already
+    use above, for the SAME reason: `ts` is deliberately overwritten on
+    every call (only the LATEST boundary matters for delivery
+    decisions), which a repeatedly-re-recorded request would otherwise
+    exploit to keep `ts` — and so its measured age — perpetually "just
+    now". `compact_ticket_boundary`'s own expiry check reads THIS field
+    (falling back to `ts` only for a legacy entry with no `first_ts` at
+    all) precisely so a re-record can never resurrect an already-expired
+    boundary — see that check's own comment for the live incident
+    (#400) this closes."""
     session = str(session or "").strip()
     if not session:
         return False
@@ -7590,6 +7607,10 @@ def record_compact_request(session, cwd, now=None, path=None, msg_hash=None,
     d = load_compact_requests(path)
     prior = d.get(session)
     entry = {"cwd": str(cwd or ""), "ts": int(now)}
+    if isinstance(prior, dict) and prior.get("first_ts") is not None:
+        entry["first_ts"] = prior["first_ts"]
+    else:
+        entry["first_ts"] = int(now)
     if msg_hash:
         entry["msg_hash"] = str(msg_hash)
     if isinstance(prior, dict) and prior.get("deferred_since") is not None:
@@ -9317,11 +9338,27 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
     for sid in list(reqs.keys()):
         entry = reqs.get(sid) or {}
         cwd = entry.get("cwd", "")
-        # #109 -- EXPIRY, checked before any tmux work: a request older than
-        # COMPACT_REQUEST_MAX_AGE_S no longer describes the session's present,
-        # so it lapses instead of firing at some unrelated later moment.
+        # #400 -- EXPIRY is measured from `first_ts` (the ORIGINAL boundary
+        # this episode was first observed at, preserved unconditionally
+        # across every re-record by `record_compact_request` -- see that
+        # function's own docstring), never the re-record-refreshed `ts`.
+        # Before this fix, a session whose every ordinary turn re-recorded
+        # the SAME pending request (the exact pre-#400 bare-`✅ DONE:`
+        # trigger this ticket also removes) kept `ts` perpetually "now",
+        # so `age` could never cross COMPACT_REQUEST_MAX_AGE_S and the
+        # request never lapsed -- live evidence, #400: a request still
+        # cycling after 11.2h. `first_ts` cannot be refreshed this way, so
+        # the true 30-minute ceiling is now reachable regardless of how
+        # many times the entry is re-recorded in between. A legacy entry
+        # written before this fix (no `first_ts` at all) falls back to its
+        # own `ts` -- the same, unchanged pre-#400 behaviour for exactly
+        # one migration cycle, after which every entry carries its own
+        # anchor.
         try:
-            age = float(now) - float(entry.get("ts") or 0)
+            boundary_ts = float(entry.get("first_ts")
+                                if entry.get("first_ts") is not None
+                                else entry.get("ts") or 0)
+            age = float(now) - boundary_ts
         except (TypeError, ValueError):
             age = 0.0
         if entry.get("ts") and age > COMPACT_REQUEST_MAX_AGE_S:
@@ -9338,6 +9375,25 @@ def compact_ticket_boundary(now, run, state, panes_by_sid, dry_run=False,
                     % (sid, cwd, int(age), entry.get("origin") or "-"))
                 reqs.pop(sid, None)
                 changed = True
+                # #400 -- once the REQUEST that would have justified a
+                # `/compact` claim is gone, nothing else in this job ever
+                # revisits the associated CLAIM (`compact-claims.json`) for
+                # this sid again -- the live incident this ticket was filed
+                # from (`compact-stall ... age=40458s`, job 26's own
+                # 1-hour-stall watch) is precisely a claim that outlived
+                # the request it was set under, because no later sweep
+                # ever called the ONE function that can resolve it.
+                # `compact_claim_active` is the shared resolver every real
+                # sender already consults before a send (#78) -- it is
+                # SAFE to call here purely for its side effect (CONSUMED /
+                # FAILED / EXPIRED resolution, #72/#140), since this job
+                # never types a keystroke as a result of its return value
+                # at this call site. A claim genuinely still queued and
+                # provably still safe stays queued (returns True,
+                # unresolved) -- this call can only ever RELEASE a claim
+                # that has already become resolvable on its own terms,
+                # never invent a resolution.
+                compact_claim_active(sid, cwd, projects_dir=pdir, now=now)
             continue
         # #78 -- the SHARED claim gate, checked FIRST and unconditionally:
         # if ANY sender (this job, or the synchronous #65 path) already has
@@ -11551,6 +11607,18 @@ GOAL_REARM_MAX_ATTEMPTS = 2         # deliveries per streak window (the
                                     # keystroke, then stop)
 GOAL_REARM_STREAK_S = 2 * 3600      # streak window; resets by TIME only
 GOAL_REARM_MAX_PAYLOAD = 12_000     # refuse to type anything larger
+# #400 -- the sibling floor `GOAL_REARM_MAX_PAYLOAD` never had: the
+# unusable-payload check below only ever rejected `not payload`/too-LONG,
+# so a genuinely TRUNCATED parse of `rec['payload']` (a live incident: a
+# 10-char payload, "/goal " + it logged as "16 chars") sailed straight
+# through and got typed into a pane every re-arm attempt. No real shipped
+# `/goal` condition -- this repo's own three templates, or any plausible
+# hand-typed one -- is anywhere near this short; this is a floor against
+# a parse artifact, not a claim about what a legitimate minimum condition
+# looks like. Refuse-rather-than-guess: an implausibly short payload is
+# logged and skipped, never typed, exactly like the existing too-long/
+# empty/multi-line cases it now sits beside.
+GOAL_REARM_MIN_PAYLOAD = 20         # refuse to type anything shorter
 
 # --- the FOURTH shape (same job, refining the FIRST): #101 -----------------
 # Two gaps in the original bounded-retry design, both from the same live
@@ -11604,6 +11672,32 @@ GOAL_REARM_MAX_DARK_S = 6 * 3600    # a `set` marker (or the last sweep that
                                     # already resolved and is never revived —
                                     # generous past any normal watchdog-state
                                     # gap, far short of the incident's 3 days
+
+# #400 -- the "stale-but-outage" branch's own accepted cost ((b) in its own
+# comment, #173) was that a session which keeps reviving-and-failing gets a
+# GAVE UP ping roughly every GOAL_REARM_STREAK_S (2h) "instead of exactly
+# once" -- but nothing ever stopped the CYCLE itself: `hash`/`n`/`pinged`
+# reset on every streak boundary, so a session that is genuinely,
+# permanently dark (no explicit clear, no activity of any kind) kept being
+# typed into forever, once per streak, with no terminal state at all. Live,
+# #400: a pane 19.2h dark, re-armed every minute, still being typed into
+# with no end in sight -- a guard with no reachable exit condition (#170's
+# own defect shape, recurring here one level up). Past this ceiling of
+# TOTAL elapsed darkness (checked at the delivery decision itself, never at
+# `_goal_dark_died_by_outage`'s own achieved-banner-adjacent call site --
+# see that check's own comment for why the achieved-banner branch needs no
+# separate gate at all: it already never types when
+# `revived_from_dark_outage` is True), the pane is folded into the SAME
+# permanent "skip stale-goal" one-shot-ping terminal state an explicit
+# `/goal clear` already reaches -- genuinely reachable, and it stays
+# reached: nothing on the outage path ever resets it back to "still
+# reviving", unlike the streak/attempt counters above. Set well above
+# `GOAL_REARM_MAX_DARK_S` (4x) so it only ever engages for a session that
+# has ALREADY exhausted several full streak-reset cycles of genuine
+# outage-revival attempts with zero result -- never for a session merely
+# past the base cap once.
+GOAL_REARM_ABSOLUTE_DARK_S = 4 * GOAL_REARM_MAX_DARK_S  # 24h
+
 GOAL_REARM_GIVEUP_RESET_S = 15 * 60  # #322 — a reachable exit condition for
                                     # the give-up state: once GAVE UP has held
                                     # this long AND the pane is PROVABLY idle
@@ -13612,6 +13706,18 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 # otherwise silently re-arm this ping's one-shot dedup
                 # every single sweep).
                 rec["stale_achieved_pinged"] = False
+            if rec.get("absdark_pinged"):
+                # #400 -- the SAME "genuinely alive again, a future episode
+                # gets its own fresh ping" reset, for the absolute-
+                # darkness-ceiling ping's own DEDICATED flag. Deliberately
+                # NOT `dark_pinged`: that flag is reset every single sweep
+                # BY the "stale-but-outage" branch itself (while this
+                # session stays dark-and-outage-presumed) — sharing it here
+                # would re-arm THIS ping's one-shot dedup on every sweep
+                # past the ceiling instead of firing exactly once, the
+                # identical trap `stale_achieved_pinged` was split out to
+                # avoid one field above.
+                rec["absdark_pinged"] = False
             if state is not None:
                 # #324 — the footer is proof of REALITY that is stronger
                 # than anything `_goal_recover_untracked` itself could ever
@@ -14122,8 +14228,61 @@ def goal_rearm(now, run, state, send_fn=None, dry_run=False, projects_dir=None,
                 logs.append("skip goal-achieved (goal-rearm) %s -> loop finished "
                             "legitimately (%s)" % (loc, reason))
                 continue
+        if revived_from_dark_outage and last_seen_alive is not None:
+            # #400 -- a REACHABLE exit condition for the outage-revival
+            # branch above (`GOAL_REARM_ABSOLUTE_DARK_S`'s own comment has
+            # the full incident + design). Scoped to ONLY this fall-
+            # through-to-generic-delivery point (never the
+            # `_goal_dark_died_by_outage` call site itself, above) so the
+            # achieved-banner branch's own #335 P0 messaging (which
+            # already never types when `revived_from_dark_outage` is True
+            # — see `if backlog_open is True and revived_from_dark_outage`
+            # above) is completely unaffected by this ceiling; it only
+            # closes the gap for a session with NO achieved banner ever
+            # shown, the exact population that was genuinely re-arming
+            # forever.
+            total_dark_s = now - last_seen_alive
+            if total_dark_s > GOAL_REARM_ABSOLUTE_DARK_S:
+                logs.append(
+                    "skip stale-goal (goal-rearm) %s (%d s since last "
+                    "confirmed armed, past the %d s absolute darkness "
+                    "ceiling -> never re-arming this session again)"
+                    % (loc, int(total_dark_s), GOAL_REARM_ABSOLUTE_DARK_S))
+                # #400 -- a DEDICATED one-shot flag (`absdark_pinged`),
+                # never `dark_pinged`: the "stale-but-outage" branch just
+                # above resets `dark_pinged` to False on EVERY sweep this
+                # session stays dark-and-outage-presumed (by design, so a
+                # LATER genuinely-different revival attempt still gets its
+                # own give-up ping) — reusing it here would re-send this
+                # permanent-give-up ping every single sweep past the
+                # ceiling instead of exactly once (mirrors
+                # `stale_achieved_pinged`'s own reasoning, one field over).
+                if not rec.get("absdark_pinged"):
+                    if send_fn is not None and not dry_run:
+                        from notify import stream_redirect  # #212
+                        rec["absdark_pinged"] = True
+                        _save()
+                        send_fn(
+                            "⚠️ **%s** — `/goal` slučka je úplne ticho už "
+                            "vyše %d hodín (žiadna aktivita, žiadny "
+                            "explicitný `/goal clear`) a automatické "
+                            "preármovanie sa vzdalo definitívne — presiahlo "
+                            "to hranicu, po ktorej sa už nikdy samo "
+                            "neskúsi znovu (%s). Prearmuj ju prosím ručne, "
+                            "ak má pokračovať."
+                            % (project_label(cwd),
+                               GOAL_REARM_ABSOLUTE_DARK_S // 3600, loc),
+                            owner=stream_redirect(pane_owner(pid, run))
+                                or None,
+                            dedup_key="goaldark:%s:%s:%d"
+                                      % (sid, rec.get("hash") or rec.get("mts"),
+                                         int(last_seen_alive or 0)),
+                            dry_run=dry_run)
+                continue
         payload = rec.get("payload") or ""
-        if not payload or "\n" in payload or len(payload) > GOAL_REARM_MAX_PAYLOAD:
+        if (not payload or "\n" in payload
+                or len(payload) > GOAL_REARM_MAX_PAYLOAD
+                or len(payload) < GOAL_REARM_MIN_PAYLOAD):
             logs.append("skip unusable-payload (goal-rearm) %s (%d chars)"
                         % (loc, len(payload)))
             continue
