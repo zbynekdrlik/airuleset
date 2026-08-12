@@ -8088,38 +8088,41 @@ def _notify_run_card(args, compose_autopilot_card, send):
             remaining = None if failed else len(nums)
             scope_label = None
         else:
-            # Full-authority: scope to the CORE slice — never the whole-repo
-            # count. A whole-repo 'ostáva 72' next to a core 'done' silently
-            # divides two populations; the 'core' word (scope_label below)
-            # states which population it is, so the number is
-            # self-describing regardless of what else counts as "done" on
-            # this box.
+            # Full-authority: `remaining` is the SAME OBLIGATION set the
+            # footer's `I N` (`cmd_tickets_status`) and the `/goal`
+            # stop-proof (`core-quals --count`) already compute —
+            # `_obligation_quals()` unioned via `_union_open_issues()`, the
+            # SAME shared derivation, never a parallel one (the #367
+            # consistency guard: "an ORDINARY code change cannot make the
+            # footer and the loop's stop condition silently drift apart the
+            # way they used to" — extended here to the card, the THIRD
+            # consumer of that derivation).
             #
-            # #367 (2026-08-11): the FOOTER's own `I N` now counts the wider
-            # OBLIGATION set (`_obligation_quals()` — core partition UNIONED
-            # with every open needs-gatekeeper/ready-for-review ticket, since
-            # only this box can act on those), while this card's `remaining`
-            # deliberately stays scoped to the narrower CORE partition alone
-            # — the two numbers are NOT the same any more, and the old claim
-            # that scoping here "makes the two agree by construction" no
-            # longer holds. Left this way on purpose rather than widened to
-            # match: #367 was scoped to the statusline footer specifically,
-            # this card already self-labels its own population with the
-            # 'core' word, and widening it would be a separate design call
-            # about what a completion card should report, not a footer fix.
-            excl = _core_search_excl()
-            # -L 1000, not 200 (#181 I5, round 2): the same clamp-difference
-            # arithmetic that used to understate the pre-#367 footer's
-            # `streamy` bucket also understated `remaining` here.
-            rem_raw = _gh_out("issue", "list", "-R", repo, "--state", "open",
-                              "--search", AUTOPILOT_SKIP_EXCL + " " + excl,
-                              "-L", "1000", "--json", "number", "-q", "length",
-                              timeout=20)
-            try:
-                remaining = int(rem_raw)
-            except (TypeError, ValueError):
-                remaining = None
-            scope_label = "core"
+            # #382 (2026-08-12): before this, the card computed a NARROWER
+            # count here — the core partition alone (`_core_search_excl()`,
+            # a single `-q length` query) — and self-labelled it "core".
+            # #367's own adversarial review (F4) found the two had already
+            # drifted: a repo with a stream-owned needs-gatekeeper/
+            # ready-for-review ticket showed a DIFFERENT number on the card
+            # than on the footer for the exact same box, even though #164's
+            # original comment claimed scoping to core here "makes the two
+            # agree by construction" — that claim stopped being true the
+            # moment #367 widened the footer alone. Recurrence chain: #164
+            # -> #181 -> #307 -> #362 -> #367 all hit this SAME "two counts,
+            # two populations" shape; the fix each time was to collapse to
+            # ONE shared derivation, never to add a documented exception.
+            # Doing that again here — reusing `_obligation_quals()`/
+            # `_union_open_issues()` instead of adding a third parallel
+            # count — is the same fix, applied to the third caller.
+            #
+            # scope_label drops to None (not "core"): the card's `remaining`
+            # now IS the same population the footer's unlabeled `I N`
+            # already shows, so a "core" word next to it would claim a
+            # narrower scope than the number actually has.
+            seen, u_failed = _union_open_issues(_obligation_quals(),
+                                                AUTOPILOT_SKIP_EXCL, repo=repo)
+            remaining = None if u_failed else len(seen)
+            scope_label = None
 
         # Dedup / log key = the bare repo NAME (the LAST path segment of
         # `--repo`) — computed here (moved up from just before the send()
@@ -10755,7 +10758,7 @@ def _search_index_healthy(cwd=None):
     return None if not rest_rows else False
 
 
-def _union_open_issues(quals, base, cwd=None):
+def _union_open_issues(quals, base, cwd=None, repo=None):
     """Run ONE `gh issue list --search` per qual and union the rows by issue
     number, returning `(rows_by_number, failed)`.
 
@@ -10772,13 +10775,24 @@ def _union_open_issues(quals, base, cwd=None):
     the only thing between the FULL template's bounce-lane seed ("the OLDEST
     open prio:bounce ticket" — live on odoo-erp that is #2150, `stream:david`)
     and a gatekeeper writing code on a sub-dev's ticket was a prose clause the
-    worker may never have loaded."""
+    worker may never have loaded.
+
+    `repo` (#382): when given, added as `-R <repo>` to each query so it
+    targets that explicit repo regardless of `cwd`'s git remote — the
+    Discord run-card fires from an arbitrary worker cwd (a worktree, a
+    subdev checkout) and must target the `--repo` it was given, never
+    "whatever repo `cwd` happens to resolve to". None (default) is
+    unchanged for every existing caller (`cmd_tickets_status`,
+    `cmd_core_quals`, `_print_issue_rows`), which all resolve the repo from
+    `cwd`'s git remote instead."""
     seen, failed = {}, False
     for qual in quals:
         search = (base + " " + qual).strip() if qual else base
-        raw = _gh_out("issue", "list", "--state", "open", "--search", search,
-                      "-L", "1000", "--json", "number,title,createdAt,labels",
-                      cwd=cwd, timeout=20)
+        gh_args = ["issue", "list", "--state", "open", "--search", search]
+        if repo:
+            gh_args += ["-R", repo]
+        gh_args += ["-L", "1000", "--json", "number,title,createdAt,labels"]
+        raw = _gh_out(*gh_args, cwd=cwd, timeout=20)
         try:
             for x in json.loads(raw):
                 seen[x["number"]] = x
