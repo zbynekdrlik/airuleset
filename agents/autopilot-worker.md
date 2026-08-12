@@ -277,15 +277,26 @@ yourself — just do your work; the lock is the supervisor's concern.
    `gh issue comment <N>` **BEFORE the first code commit** for that member — that comment is the
    step's durable artifact and the proof it happened, readable forever from `gh issue view` and
    provably earlier than the code in `git log`.
-   **The step is unconditional; its DEPTH scales with the problem.** A scoped fix with one obvious
-   cause = one honest paragraph — that is complete, not a shortcut. A genuine design fork (several
-   valid approaches with different consequences, an unclear root cause, a cross-cutting change)
-   = go deeper BEFORE coding: dispatch your own design/hard-debug consult (`model: "opus"` first,
-   per the escalation ladder above), or — when the fork is the USER's call, not yours
-   (`ask-before-assuming.md`) — ask them via the `❓` marker. What is banned is skipping straight
-   to edits and discovering the design through a stream of corrections; the user's report of that
-   failure is exactly what this step exists to prevent ("len sa strieľa ako príde, náhodné
-   riešenie, následne milión opráv", #104). Never satisfy this step by naming a skill — a skill
+   **The step is unconditional; its DEPTH scales with the problem — and #414 makes that scaling
+   MECHANICAL, not just prose.** Open with a `Triage:` line naming the class. **TRIVIAL** (a scoped
+   fix with one obvious cause) stays exactly what it always was: one honest paragraph — that is
+   complete, not a shortcut. **NON-TRIVIAL** (a new service/CLI/daemon/long-lived component,
+   several valid approaches with different consequences, an unclear root cause, a cross-cutting
+   change) requires the fuller depth #414 restored: **2-3 considered approaches with their
+   trade-offs**, not one, PLUS an `Architektúra:` section (structure/topology + the framework used,
+   OR an evidenced why-none-fits from an actually-read source — `architecture-first.md`'s
+   framework-first rule). `hooks/block-commit-without-design.sh` mechanically checks BOTH
+   (`design_gate.classify_triage_and_approaches`/`classify_architecture_section`) before your first
+   commit for that member goes through, and tells you exactly what's missing if it doesn't. For a
+   genuinely NON-TRIVIAL member, go deeper BEFORE coding: dispatch your own design/hard-debug
+   consult (`model: "opus"` first, per the escalation ladder above) to work out the 2-3 candidate
+   approaches, or — when the fork is the USER's call, not yours (`ask-before-assuming.md`) — **ask
+   them via the `❓` marker (ask-and-continue): a genuine design fork is NEVER a silent pick, in
+   either direction.** What is banned is skipping straight to edits and discovering the design
+   through a stream of corrections; the user's report of that failure is exactly what this step
+   exists to prevent ("len sa strieľa ako príde, náhodné riešenie, následne milión opráv", #104;
+   restated even more directly on #414: "od vtedy čo som to odovzdal vôbec nemám pocit že prebieha
+   tá špeciálna precízna dizajnová časť"). Never satisfy this step by naming a skill — a skill
    body does NOT reach a dispatched worker (probes, 2026-07-27); the thinking has to be yours.
 3. Implement **the named issue(s) ONLY** — the whole batch, nothing beyond the named set, no scope
    creep. Do each member in sequence on the SAME `dev` branch. Per-issue calibrated TDD
@@ -342,6 +353,15 @@ steps 5–10 yourself ONLY in the documented serial fallback (no `isolation:`).
    hard-task escalation already uses, `model-awareness.md`) — never a background `Skill` call. This
    is the shape that has reliably worked (#353, #354, #358, #359, #361, #362); the built-in review
    skill has not.**
+   **The reviewer's brief MUST additionally REFUTE the diff on STRUCTURAL grounds (#414 — SOTA
+   architecture).** Does it grow a structureless script where `architecture-first.md`'s
+   production-by-default rule classifies the code as production (unattended timer/service/hook,
+   prod data/boxes, or another component's dependency)? Does it re-implement machinery the repo
+   already has a framework or module for instead of using it? Does it push any touched file past
+   ~1000 lines or any function past ~300 — or pile onto one already over budget — without a split?
+   An "it's just a script / MVP" justification for missing structure, error paths, or tests on
+   production-classified code is itself a FINDING, never a mitigation — a YES to any of these
+   blocks the verdict at the same severity as a correctness bug.
    **Record that pass as its own durable comment too (#214) — the supervisor's completion-report
    audit line only relays your CLAIM, it is never a substitute for the review actually having
    happened.** For EACH member, post `gh issue comment <N> --body "<ran /review +
