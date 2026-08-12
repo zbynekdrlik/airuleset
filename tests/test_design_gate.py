@@ -1181,6 +1181,24 @@ class TestClassifyTriageAndApproaches(unittest.TestCase):
         self.assertFalse(ok, reason)  # only one approach in GOOD_SCOPED -> fails on approach count
         self.assertNotIn("Triage", reason)  # the Triage: line itself WAS found and classified
 
+    def test_nontrivial_not_trivial_negation_is_recognized_not_confused_with_trivial(self):
+        # #414-review MAJOR-1: "not trivial" / Slovak "nie (je to) trivialne"
+        # each CONTAIN the bare word "trivial"/"trivialne" -- a naive
+        # trivial-branch match on that substring would classify a NEGATED
+        # (i.e. non-trivial) declaration as trivial, silently waiving the
+        # whole 2-3-approaches depth requirement on natural phrasing.
+        for body in (
+            GOOD_SCOPED + "\n\nTriage: not trivial -- new daemon",
+            GOOD_SCOPED + "\n\nTriage: nie je to triviálne — nový daemon",
+            GOOD_SCOPED + "\n\nTriage: nie triviálne",
+        ):
+            ok, reason = dg.classify_triage_and_approaches(body)
+            # must NOT be waved through as trivial -- only one approach in
+            # GOOD_SCOPED, so a correctly-non-trivial classification fails
+            # on approach count, never silently succeeds as "ok (trivial)".
+            self.assertFalse(ok, "wrongly classified as trivial: %r -> %r" % (body, reason))
+            self.assertNotEqual(reason, "ok (trivial)", body)
+
     def test_nontrivial_with_only_one_approach_fails(self):
         body = (
             "Triage: non-trivial -- new component.\n\n" + GOOD_SCOPED +
