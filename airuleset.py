@@ -7004,19 +7004,65 @@ def _gh_env():
     per-command by extracting the token from ~/.git-credentials instead. Without
     this, every `gh` call in that shell fails silently and the cache is stuck
     at open=None forever. A real GH_TOKEN/GITHUB_TOKEN already in the env
-    always wins — never overridden by a stale credentials-file token."""
+    always wins — never overridden by a stale credentials-file token.
+
+    #401: on an App-token box (odoo-erp#3281's gh-app-stream-tokens mechanism
+    — david2-4, marek, montalu/2/3/4) ~/.git-credentials can INDEPENDENTLY
+    hold a one-shot snapshot of a 60-minute App installation token, written
+    once by whatever process last wrote it and never refreshed — while the
+    box's real live-refresh path (~/.config/gh-app-tokens/, refreshed every
+    45 min by a gatekeeper timer) sits right next to it. Live-diagnosed on
+    montalu3@subdev 2026-08-12: the .git-credentials line was ~11.5h stale
+    (App tokens live 60 min — unconditionally dead) while
+    ~/.config/gh-app-tokens/primary was ~31 min old and fully live.
+
+    Detected via `_is_gh_app_token_box()` (#356's existing, local/static
+    directory-presence signal `_slice_quals()` already uses — no network
+    call), such a box reads the FRESH per-call token file instead of the
+    corpse .git-credentials snapshot — and, critically, does NOT fall
+    through to .git-credentials even when no fresh token has been delivered
+    yet (timer lag / mid-provisioning): it leaves GH_TOKEN unset so the box
+    fails LOUD via gh's/git's own "not authenticated" signal (the existing
+    "a gh query failed — NOT a reliable 0" semantics in `_gh_login()`/
+    `_gh_out()`/`SliceUnresolved` already treat that correctly as unknown,
+    never a false 0) rather than silently resurrecting a token already
+    proven dead.
+
+    As a second, independent belt: even OUTSIDE the App-token-box branch, a
+    .git-credentials line whose username is literally `x-access-token` is
+    never treated as authoritative — that username is the FIXED value
+    GitHub requires for an App installation token (confirmed against the
+    real `git-credential-gh-app.sh` in zbynekdrlik/odoo-erp) and can
+    therefore never be a genuine durable PAT, so it is refused even if the
+    directory-presence detector somehow disagrees (a relocated/renamed
+    GH_APP_TOKEN_DIR, a box mid-migration)."""
     import re
 
     env = os.environ.copy()
     if env.get("GH_TOKEN") or env.get("GITHUB_TOKEN"):
         return env
+    if _is_gh_app_token_box():
+        try:
+            token = (_gh_app_token_dir() / "primary").read_text().strip()
+        except OSError:
+            token = ""
+        if token:
+            env["GH_TOKEN"] = token
+        # No token file yet (timer down, box mid-provisioning) — deliberately
+        # do NOT fall through to .git-credentials below: an App-token box's
+        # .git-credentials entry, if any, is stale by construction (this
+        # mechanism never writes/refreshes it) and would silently
+        # resurrect the #401 corpse-token bug. Leave GH_TOKEN unset so a
+        # genuinely broken box fails LOUD via gh's own "not authenticated"
+        # error instead of a misleading stale-401.
+        return env
     try:
         text = (Path.home() / ".git-credentials").read_text()
     except OSError:
         return env
-    m = re.search(r"https://[^:/@\s]+:([^@\s]+)@github\.com", text)
-    if m:
-        env["GH_TOKEN"] = m.group(1)
+    m = re.search(r"https://([^:/@\s]+):([^@\s]+)@github\.com", text)
+    if m and m.group(1) != "x-access-token":
+        env["GH_TOKEN"] = m.group(2)
     return env
 
 

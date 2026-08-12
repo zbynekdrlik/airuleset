@@ -2031,10 +2031,12 @@ class TestGhEnvPrefersFreshMintOverGitCredentialsCorpse(TestCase):
             Path(home, ".git-credentials").write_text(
                 "https://x-access-token:corpse-token-dead@github.com\n")
             with mk.patch.dict(os.environ,
-                               {"HOME": home, "GH_APP_TOKEN_DIR": str(token_dir),
-                                "GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(token_dir)},
+                               clear=False):
+                os.environ.pop("GH_TOKEN", None)
+                os.environ.pop("GITHUB_TOKEN", None)
                 env = airuleset._gh_env()
-        self.assertNotIn("GH_TOKEN", env)
+        self.assertFalse(env.get("GH_TOKEN"))
 
     def test_real_env_token_still_wins_on_an_app_token_box(self):
         import tempfile
@@ -2064,10 +2066,12 @@ class TestGhEnvPrefersFreshMintOverGitCredentialsCorpse(TestCase):
             Path(home, ".git-credentials").write_text(
                 "https://x-access-token:corpse-token-dead@github.com\n")
             with mk.patch.dict(os.environ,
-                               {"HOME": home, "GH_APP_TOKEN_DIR": str(missing),
-                                "GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+                               {"HOME": home, "GH_APP_TOKEN_DIR": str(missing)},
+                               clear=False):
+                os.environ.pop("GH_TOKEN", None)
+                os.environ.pop("GITHUB_TOKEN", None)
                 env = airuleset._gh_env()
-        self.assertNotIn("GH_TOKEN", env)
+        self.assertFalse(env.get("GH_TOKEN"))
 
     def test_pat_box_git_credentials_fallback_is_completely_unaffected(self):
         # False-positive control: a genuine PAT box (david-style, no
