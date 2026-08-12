@@ -10476,12 +10476,101 @@ class TestRemoteHosts(TestCase):
                          "montalu4@subdev", "miva1@subdev",
                          "david2@subdev", "david3@subdev", "david4@subdev",
                          "montalu5@subdev", "montalu6@subdev",
-                         "montalu7@subdev", "montalu8@subdev"):
+                         "montalu7@subdev", "montalu8@subdev",
+                         "admin@forestshop-dev", "stepan@forestshop-dev",
+                         "spinbike-vps"):
             self.assertIn(expected, names)
         self.assertNotIn("montalu@dev1", names,
                          "montalu migrated to subdev (airuleset#33, "
                          "odoo-erp#1895) — the dev1 account is "
                          "ForceCommand-blocked, pushing there would fail")
+
+    def test_forestshop_dev_target_shape(self):
+        # airuleset#406 (2026-08-12): forestshop-dev, owner-dedicated Hetzner
+        # box for zbynekdrlik/forestshop-app. No tailscale (owner explicitly
+        # declined it) — addressed by its own public DNS name (the ticket's
+        # own literal ssh address for BOTH accounts), never a raw IP; the raw
+        # IP is only a fallback candidate if the DNS name ever stopped
+        # resolving, and no evidence of that exists. No `identity` pinned:
+        # forestshop_app's own .claude/rules/deploy.md shows
+        # `ssh admin@forestshop-dev.newlevel.media` already working with no
+        # -i flag from dev1 — i.e. dev1's default key is already authorized,
+        # the same "default newlevel key, no identity" shape montalu@subdev
+        # already uses.
+        entries = {r["name"]: r for r in airuleset.REMOTE_HOSTS
+                   if r["name"] in ("admin@forestshop-dev",
+                                    "stepan@forestshop-dev")}
+        self.assertEqual(len(entries), 2,
+                         "both forestshop-dev accounts must be registered")
+        for name, user in (("admin@forestshop-dev", "admin"),
+                            ("stepan@forestshop-dev", "stepan")):
+            e = entries[name]
+            self.assertEqual(e["host"], "forestshop-dev.newlevel.media")
+            self.assertEqual(e["user"], user)
+            self.assertEqual(e["repo_path"], "~/devel/airuleset")
+            self.assertNotIn("identity", e,
+                             "%s authorizes dev1's default key (live evidence "
+                             "in forestshop_app's own deploy.md) — no "
+                             "identity pinned, matching montalu@subdev's "
+                             "shape" % name)
+
+    def test_forestshop_dev_accounts_share_one_host(self):
+        # Both accounts live on the SAME box — sharing a host is exactly the
+        # shape #347's shared-host registration-gap audit exists to catch,
+        # so this must register as a genuinely shared host too.
+        hosts = {r["host"] for r in airuleset.REMOTE_HOSTS
+                 if r["name"] in ("admin@forestshop-dev",
+                                  "stepan@forestshop-dev")}
+        self.assertEqual(hosts, {"forestshop-dev.newlevel.media"})
+
+    def test_forestshop_dev_full_authority_by_default(self):
+        # The ticket's own explicit ask: both accounts get FULL autopilot
+        # authority (this is the owner's own trusted box, not an external
+        # sub-dev contractor stream) — achieved by NOT registering them in
+        # AUTHORITY_BY_USER at all, since resolve_authority()/
+        # AUTHORITY_BY_USER.get(user, "full") already defaults an
+        # unregistered user to "full".
+        self.assertNotIn("admin", airuleset.AUTHORITY_BY_USER)
+        self.assertNotIn("stepan", airuleset.AUTHORITY_BY_USER)
+        self.assertEqual(airuleset.AUTHORITY_BY_USER.get("admin", "full"),
+                         "full")
+        self.assertEqual(airuleset.AUTHORITY_BY_USER.get("stepan", "full"),
+                         "full")
+
+    def test_spinbike_vps_target_shape(self):
+        # airuleset#408 (2026-08-12): the SpinBike Hetzner VPS — the first
+        # managed target with NO tailscale at all (owner explicitly declined
+        # it, spinbike#350). Shape given VERBATIM by the maintainer's own
+        # comment on the ticket (issuecomment-5268350062): a keyed public-IP
+        # entry, the same shape the pre-existing `gatekeeper` entry already
+        # proves REMOTE_HOSTS supports with no code change.
+        entries = [r for r in airuleset.REMOTE_HOSTS
+                  if r["name"] == "spinbike-vps"]
+        self.assertEqual(len(entries), 1, "spinbike-vps target missing")
+        e = entries[0]
+        self.assertEqual(e["host"], "167.233.245.147")
+        self.assertEqual(e["user"], "newlevel")
+        self.assertEqual(e["repo_path"], "~/devel/airuleset")
+        self.assertEqual(e.get("identity"), "~/.ssh/spinbike_vps")
+
+    def test_spinbike_vps_is_not_tailscale_addressed(self):
+        # The whole point of this ticket: unlike every other keyed target in
+        # this file (gatekeeper, marek/david/simap/... on subdev, all of
+        # which pin an identity AND use a 100.x tailscale IP), spinbike-vps
+        # is reached by its raw PUBLIC IPv4 — no MagicDNS name exists for it.
+        e = next(r for r in airuleset.REMOTE_HOSTS
+                if r["name"] == "spinbike-vps")
+        self.assertNotRegex(e["host"], r"^100\.",
+                            "spinbike-vps has no tailscale IP by design — "
+                            "a 100.x match here would mean the wrong "
+                            "(tailscale) address was used instead of the "
+                            "documented public IP")
+
+    def test_spinbike_vps_full_authority_by_default(self):
+        # Same default-full-authority shape as forestshop-dev — spinbike-vps
+        # is not a reduced-authority sub-dev stream, so it must NOT appear
+        # in AUTHORITY_BY_USER either.
+        self.assertNotIn("newlevel", airuleset.AUTHORITY_BY_USER)
 
     def test_montalu_subdev_target_shape(self):
         # montalu MIGRATED off dev1 to the subdev VPS (airuleset#33 +
