@@ -60,8 +60,9 @@ set -euo pipefail
 # THE FIX: record the proven boundary UNCONDITIONALLY — this hook's whole job
 # is proving the boundary exists, not deciding whether it is safe to act on
 # it RIGHT NOW. The live-tasks safety check MOVES to the two DELIVERY points
-# (`deliver_compact_now` / job 14's `compact_ticket_boundary`,
-# `_session_has_live_bg_tasks` in watchdog/__init__.py) — every other "is it
+# (job 14's real code, `watchdog/compact.py`'s `deliver_compact`/
+# `_session_has_live_bg_tasks` -- both since #402 collapsed the code these
+# comments originally named) -- every other "is it
 # safe to type into this pane right now" gate already lives at delivery time
 # for exactly this reason (`_compact_blocked_by_question`,
 # `_compact_not_at_boundary`, `_compact_session_unresumed`), and this is the
@@ -294,7 +295,8 @@ fi
 # too. #246 — this NO LONGER declines: it carries the fact forward
 # (`DEFERRED`) into a RECORD line below. The live-tasks SAFETY property
 # still applies, just at the two DELIVERY points
-# (`_session_has_live_bg_tasks`, watchdog/__init__.py), not here.
+# (`_session_has_live_bg_tasks`, now `watchdog/compact.py` -- #402 moved it
+# out of watchdog/__init__.py), not here.
 OTHERS=$(printf '%s' "$INPUT" | jq -r --arg a "$AGENT_ID" \
     '[.background_tasks[]? | select(((.id // "") | tostring) != $a)] | length' \
     2>/dev/null || echo "1")

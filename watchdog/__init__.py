@@ -7658,8 +7658,15 @@ def burn_alert_job(now, state, send_fn, fleet_path=None, owner=None,
 # (COMPACT_HARD_CEILING/COMPACT_CEILING_QUEUED/COMPACT_CEILING_STUCK_CYCLES)
 # were private to its own delivery and are removed with it. The SHARED
 # helpers it also used (`_pane_compacting`/COMPACTING_MARKER,
-# `_reconcile_candidate_panes`, `_pane_has_queued_compact`) are KEPT --
-# still used by job 14/21. `_proc_fingerprint_alive`/
+# `_reconcile_candidate_panes`) are KEPT -- but AFTER the #402 compact
+# collapse (below) neither is job 14's or job 21's own any more: job 14's
+# real code now lives in `watchdog/compact.py`, which never calls either
+# (it uses only `_pane_has_queued_compact`, which DOES survive as a
+# genuine job-14 dependency via `watchdog._pane_has_queued_compact`); job
+# 21 (`pane_turn_elapsed`/`long_turn_watch`) never called either to begin
+# with. Both remaining callers are GOAL-owned (job 20's `_goal_*_nudge`
+# family and `goal_rearm` itself) -- kept for THAT reason, not the one
+# this comment originally gave. `_proc_fingerprint_alive`/
 # `_pane_claude_proc_fingerprint` and the real `/compact` claim/lock
 # system were LATER removed too, by the #402 compact collapse --
 # `compact_claim_active`/`compact_claim_set` survive only as trivial
@@ -7747,9 +7754,14 @@ def _above_box_scan(captured, max_rows=25):
 def _pane_has_queued_compact(captured):
     """True if the pane ALREADY holds a `/compact` waiting to execute (#84).
     Every `/compact` sender consults this immediately before its own send —
-    it composes with, never replaces, the shared claim (#78) and the
-    proc fingerprint (#82/#83): those track what THIS watchdog typed, while
-    this reads what the PANE actually shows, whoever put it there."""
+    it composes with, never replaces, whatever ELSE a sender uses to track
+    its own prior sends: originally the shared claim (#78) + the proc
+    fingerprint (#82/#83), both DELETED by the #402 compact collapse (the
+    two proven origins make a multi-sender race structurally impossible);
+    job 14's real code (`watchdog/compact.py`) now composes this with its
+    own `compact-requests.json`/`compact-delivered.json` pair instead.
+    Either way this reads what the PANE actually shows, whoever put it
+    there, which no in-process bookkeeping alone can prove."""
     queued, _spinner = _above_box_scan(captured)
     return any(_QUEUED_COMPACT_RX.match(ln) for ln in queued)
 
