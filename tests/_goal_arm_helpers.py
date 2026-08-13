@@ -65,6 +65,10 @@ GOAL_DIALOG_CAP = ("● Claude asked:\n  · Ktorá možnosť?\n     1. A\n     2
 GOAL_DRAFT_CAP = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  caveman:lite\n"
 GOAL_ARMED_CAP = ("● Predošlá práca hotová.\n❯ \n"
                   "  ctx ███░  caveman:lite  ◎ /goal active\n")
+# #442 — an ARMED pane whose input box holds an at-rest draft: the lane
+# nudge must deliver into it via deliver_with_stash, never "skip draft".
+GOAL_ARMED_DRAFT_CAP = ("● Hotovo.\n❯ rozpisany draft\n"
+                        "  ctx ███░  caveman:lite  ◎ /goal active\n")
 
 
 class DeliverGoalFakeTmux:

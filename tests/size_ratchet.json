@@ -12,7 +12,7 @@
   "filedrop/vault_server.py": 385,
   "notify/__init__.py": 2143,
   "statusbar.py": 604,
-  "tests/_goal_arm_helpers.py": 176,
+  "tests/_goal_arm_helpers.py": 180,
   "tests/_hook_state_cleanup.py": 42,
   "tests/conftest.py": 110,
   "tests/test_airuleset.py": 14256,
@@ -62,7 +62,7 @@
   "tests/test_goal_backlog_proof.py": 902,
   "tests/test_goal_indicator_above_box.py": 96,
   "tests/test_goal_strictness_clause.py": 51,
-  "tests/test_goal_sweep.py": 450,
+  "tests/test_goal_sweep.py": 672,
   "tests/test_goal_turn_boundary.py": 112,
   "tests/test_hook_state_cleanup.py": 67,
   "tests/test_hosted_reply_delivery.py": 268,
@@ -157,7 +157,7 @@
   "tests/test_wrapped_draft.py": 619,
   "watchdog/__init__.py": 10984,
   "watchdog/compact.py": 1037,
-  "watchdog/goal.py": 998
+  "watchdog/goal.py": 1103
  },
  "functions": {
   "airuleset.py::_notify_run_card": 266,
