@@ -10,7 +10,7 @@
   "filedrop/upload_server.py": 309,
   "filedrop/vault.py": 664,
   "filedrop/vault_server.py": 385,
-  "notify/__init__.py": 2206,
+  "notify/__init__.py": 2322,
   "statusbar.py": 604,
   "tests/_goal_arm_helpers.py": 180,
   "tests/_hook_state_cleanup.py": 42,
@@ -166,7 +166,7 @@
   "airuleset.py::cmd_push": 356,
   "airuleset.py::cmd_secret": 300,
   "airuleset.py::main": 503,
-  "watchdog/__init__.py::deliver_discord_replies": 423,
+  "watchdog/__init__.py::deliver_discord_replies": 459,
   "watchdog/__init__.py::prompt_wedge_check": 235,
   "watchdog/__init__.py::run_once": 1992,
   "watchdog/cards.py::card_reconcile": 260
