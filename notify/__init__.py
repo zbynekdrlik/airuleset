@@ -1855,7 +1855,9 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
                 and str(v.get("session") or "") == session
                 and str(v.get("channel") or "") == channel
                 and ask_generation(v) <= asked]:
-        _grace_put(mid, d.get(mid), now=now, path=grace_path)
+        _grace_put(mid, d.get(mid), now=now,
+                   path=grace_path if grace_path is not None
+                   else _grace_path_for(path))
         d.pop(mid, None)
     # prune malformed — a legacy entry that isn't a dict (never one this
     # function itself could have written) is immediately prunable rather
@@ -1914,11 +1916,25 @@ QUESTION_GRACE_S = 24 * 3600
 
 def _grace_path():
     # DERIVED from the main map's directory, never _claude_dir() directly:
-    # every existing test that sandboxes _questions_path (the established
-    # per-class patch across the whole suite) automatically sandboxes the
-    # grace store too — hermetic under pytest AND unittest discover with
-    # zero per-file changes (the #437 isolation shape).
+    # a test that sandboxes _questions_path (the established per-class
+    # patch) automatically sandboxes the grace store too. NOT sufficient
+    # alone (#449-review F1): callers passing an EXPLICIT `path=` never
+    # consult this function, so record_question/grace_question derive
+    # their grace path from that explicit path themselves — see
+    # _grace_path_for(). Both halves together are what keep the store
+    # hermetic under pytest AND unittest discover.
     return os.path.join(os.path.dirname(_questions_path()), _GRACE_REL)
+
+
+def _grace_path_for(path):
+    """The grace path belonging BESIDE an explicit main-map `path` (#449-
+    review F1: the pre-existing test population sandboxes via the `path=`
+    PARAMETER, not by patching _questions_path — deriving from the global
+    resolver alone silently wrote grace entries into the REAL ~/.claude on
+    every suite run). None/empty path → the global _grace_path()."""
+    if not path:
+        return _grace_path()
+    return os.path.join(os.path.dirname(os.path.abspath(path)), _GRACE_REL)
 
 
 def load_grace_questions(path=None):
@@ -1981,6 +1997,8 @@ def grace_question(message_id, now=None, path=None, grace_path=None):
     rec = load_questions(path).get(message_id)
     if not isinstance(rec, dict):
         return False
+    if grace_path is None:
+        grace_path = _grace_path_for(path)     # #449-review F1
     if not _grace_put(message_id, rec, now=now, path=grace_path):
         return False
     return drop_question(message_id, path)

@@ -2477,8 +2477,16 @@ def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
     if ref in qmap or ref in cardmap:
         return None                    # tracked — the normal flows own it
     rm = msg.get("referenced_message")
-    if isinstance(rm, dict) and not (rm.get("author") or {}).get("bot"):
-        return None                    # human-to-human chatter, not an answer
+    if isinstance(rm, dict):
+        rauthor = rm.get("author")
+        # Only a GENUINELY human-shaped author (a real id, bot falsy) reads
+        # as chatter (#449-review F5: an author-less/degenerate dict must
+        # fail toward the orphan ping, per the never-silent mandate — the
+        # opposite of what a bare `(rm.get("author") or {}).get("bot")`
+        # falsy-check gives).
+        if (isinstance(rauthor, dict) and rauthor.get("id")
+                and not rauthor.get("bot")):
+            return None                # human-to-human chatter, not an answer
     return "untracked-ref"
 
 
@@ -2578,15 +2586,28 @@ def _orphan_floor(msg, ch, allowed, qmap, cardmap, q_channels, now, env,
     if not reason:
         return
     logs.append("reply orphaned (%s) %s [%s]" % (reason, mid_o[-8:], ch))
-    from notify import send as _send
+    from notify import forget_marker, marker_delivered, send as _send
+    dkey = "dorphan:%s" % mid_o
     st_o = _send(_orphan_ping_text(msg, reason), env=env,
-                 dedup_key="dorphan:%s" % mid_o,
-                 dry_run=dry_run, kind="questions")
-    if not dry_run and st_o in ("sent", "dedup"):
+                 dedup_key=dkey, dry_run=dry_run, kind="questions")
+    # #449-review F2: "dedup" alone is NOT confirmation — notify.send's
+    # dedup CLAIM marker is written BEFORE the POST, so a retry after one
+    # transient POST failure short-circuits to "dedup" with zero further
+    # POSTs. Only marker_delivered (the status recorded AFTER the POST,
+    # #135) is the honest read — the #134 marker-presence-vs-delivery
+    # trap, avoided at this call site. An undelivered "dedup" claim is
+    # additionally RELEASED so the NEXT sweep's send genuinely re-POSTs
+    # instead of short-circuiting at the stale claim forever (worst case
+    # of the release: one duplicate ⚠️ ping under a rare cross-process
+    # race — strictly better than a permanently silent one).
+    if not dry_run and (st_o == "sent"
+                        or (st_o == "dedup" and marker_delivered(dkey))):
         orphan_done_set.add(mid_o)
         orphan_done.append(mid_o)
         state["dorphan_done"] = orphan_done[-_DREPLY_DONE_CAP:]
         persist()
+    elif not dry_run and st_o == "dedup":
+        forget_marker(dkey)
 
 
 def _input_line_text(captured):
@@ -3131,7 +3152,7 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
     "error", "no-config") leaves the entry exactly as it was, so the next
     sweep retries -- a transient failure must never silently defer a whole
     day's worth of "ask again"."""
-    from notify import (ask_generation, load_questions, drop_question,
+    from notify import (ask_generation, grace_question, load_questions,
                         record_question, notification_channel)
     reping = QUESTION_REPING_S if reping is None else reping
     owner_by_sid = owner_by_sid or {}
@@ -3196,7 +3217,14 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
                                         path=path, question=block,
                                         asked_ts=ask_generation(rec))
         if retracked:
-            drop_question(qid, path)
+            # #449-review F4: GRACE the old entry, never hard-delete it.
+            # Same-channel re-tracks are usually already graced by
+            # record_question's own supersede (this is then a no-op), but
+            # a CROSS-channel re-track (a freshly provisioned -q thread,
+            # owner-resolution drift) misses the channel-scoped supersede
+            # — and the user's reply to YESTERDAY's still-visible card
+            # must keep routing for the grace window, not vanish.
+            grace_question(qid, path=path)
     return logs
 
 
