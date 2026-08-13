@@ -5060,6 +5060,29 @@ def _gh_env(home=None, base=None):
     return env
 
 
+# The qualifying-set EXCLUSION fragment for every open-issue search in THIS
+# MODULE that builds job 8/11's "workable nudge candidate" set (#364, a
+# #362 follow-up). #362 fixed the `/autopilot` `/goal` stop-proof
+# (`core-quals`/`slice-quals` in airuleset.py) via its own
+# `AUTOPILOT_SKIP_EXCL` constant there, but that diff never reached the two
+# backstop queries in THIS file — a PERMANENT ops-channel ticket (a
+# stream's own self-declared "never auto-closes" channel — odoo-erp
+# #1861/#3037) that also happened to carry `prio:bounce` or
+# `needs-gatekeeper` would still surface here as a nudge candidate.
+#
+# Deliberately an INDEPENDENT literal, same name/value as airuleset.py's
+# own constant, rather than `from airuleset import AUTOPILOT_SKIP_EXCL`:
+# airuleset.py imports FROM this module (every `from watchdog import ...`
+# call site is local/deferred, inside function bodies -- see
+# cmd_gk_request/cmd_core_quals/etc.), so a module-level import in the
+# reverse direction here would invert that layering and risk a real
+# circular import the moment both modules are imported together (as
+# several test files already do: `import airuleset` + `import watchdog as
+# wd` side by side). If the label ever changes, both copies must be
+# updated together -- `grep -rn ops-channel` finds both.
+AUTOPILOT_SKIP_EXCL = "-label:autopilot-skip -label:ops-channel"
+
+
 def _fetch_bounce_tickets(root, home=None):
     """Open prio:bounce ticket numbers for the repo at `root`, scoped to the
     root's stream. None on any error (fail-safe — an auth/network hiccup must
@@ -5071,7 +5094,7 @@ def _fetch_bounce_tickets(root, home=None):
             r = subprocess.run(
                 ["gh", "issue", "list", "--state", "open", "--label",
                  "prio:bounce", "--search",
-                 ("-label:autopilot-skip " + qual).strip(), "-L", "100",
+                 (AUTOPILOT_SKIP_EXCL + " " + qual).strip(), "-L", "100",
                  "--json", "number"],
                 cwd=root, env=env, capture_output=True, text=True, timeout=8)
             if r.returncode != 0:
@@ -5444,10 +5467,10 @@ def _fetch_gkreq_tickets(root, home=None):
     # fallback fetches titles and keeps only the LITERAL marker client-side.
     queries = (
         (["gh", "issue", "list", "--state", "open", "--label",
-          "needs-gatekeeper", "--search", "-label:autopilot-skip",
+          "needs-gatekeeper", "--search", AUTOPILOT_SKIP_EXCL,
           "-L", "100", "--json", "number"], None),
         (["gh", "issue", "list", "--state", "open", "--search",
-          '"GATEKEEPER-ACTION:" in:title -label:autopilot-skip',
+          '"GATEKEEPER-ACTION:" in:title ' + AUTOPILOT_SKIP_EXCL,
           "-L", "100", "--json", "number,title"],
          lambda x: str(x.get("title", "")).startswith("GATEKEEPER-ACTION:")),
     )
