@@ -268,6 +268,28 @@ class TestCleanupIsScopedToOwnSession(HookBase):
             if foreign_file.exists():
                 foreign_file.unlink()
 
+    def test_own_retry_file_is_actually_removed_by_cleanup(self):
+        # #427-review F5: the sibling test above proves a FOREIGN file
+        # survives, but never that this test's OWN file is genuinely
+        # swept -- a mutant registering NO cleanup at all (reintroducing
+        # the #202-shaped litter regression, ~2418 leftover
+        # /tmp/airuleset-*-block-* files measured in one real day) would
+        # still pass it. Assert the positive half explicitly.
+        own_sid = "t-" + uuid.uuid4().hex[:10]
+        own_file = Path("/tmp/airuleset-working-liveness-block-" + own_sid)
+        out = self._run("⏳ WORKING: niečo beží", background_tasks=[],
+                         session_id=own_sid)
+        self.assertIn('"decision": "block"', out.stdout)
+        self.assertTrue(
+            own_file.exists(),
+            "the hook itself must have written a retry-state file for "
+            "this sid before cleanup can be meaningfully tested")
+        self.doCleanups()
+        self.assertFalse(
+            own_file.exists(),
+            "cleanup must actually REMOVE the file THIS test's own "
+            "session created, not merely spare foreign ones")
+
 
 if __name__ == "__main__":
     unittest.main()

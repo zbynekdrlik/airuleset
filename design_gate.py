@@ -471,10 +471,22 @@ def is_git_tracked(path, cwd):
     THAT repo and fail toward TRACKED on anything but a confirmed rc==1
     (mirrors the original outer check's own fail-safe direction one level
     down, rather than inventing a new one)."""
+    # #431-review F2: "is outside repository" is one of git's own
+    # gettext-translated messages -- on a box whose git has NLS catalogs
+    # installed AND runs under a non-English locale, the substring match
+    # below would silently miss and this whole rc=128 branch would revert
+    # to the pre-#431 "assume tracked, never quarantine" behaviour with NO
+    # signal that the feature had disappeared. Force the untranslated
+    # (POSIX "C") locale on the ONE call whose stderr text this function
+    # actually parses -- the two calls below only ever read a returncode
+    # or a raw path from stdout, never a translated message.
+    git_env = dict(os.environ)
+    git_env["LC_ALL"] = "C"
+    git_env["LANGUAGE"] = ""
     try:
         out = subprocess.run(
             ["git", "ls-files", "--error-unmatch", "--", path],
-            cwd=cwd, capture_output=True, text=True, timeout=8,
+            cwd=cwd, capture_output=True, text=True, timeout=8, env=git_env,
         )
     except (OSError, subprocess.SubprocessError):
         return True

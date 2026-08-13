@@ -486,6 +486,14 @@ class TestUploadPortRaceRetry(TestCase):
         with m.patch("airuleset.cmd_upload", side_effect=fake_cmd_upload):
             out, port = _cmd_upload_output(self, dest)
         self.assertEqual(2, len(calls), "must retry exactly once past the collision")
+        # #427-review F3: a mutant that probes ONCE outside the loop and
+        # reuses the SAME (already-lost) port on every retry is a
+        # production no-op -- it leaves the real TOCTOU flake exactly as
+        # it was, yet the pre-fix assertions above pass unchanged. Each
+        # retry attempt must probe a genuinely FRESH port.
+        self.assertNotEqual(calls[0], calls[1],
+                             "each retry must probe a FRESH port, not "
+                             "reuse the one that just lost the race")
         self.assertIn("http://127.0.0.1:%d/" % port, out)
 
     def test_gives_up_after_max_attempts_with_a_clear_message(self):
