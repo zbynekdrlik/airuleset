@@ -66,7 +66,11 @@ class TestReconcileManagedPlugins(TestCase):
         # server, and what a per-project opt-in resolves ABOVE.
         out = airuleset.reconcile_managed_plugins({})
         for key in airuleset.OPTIONAL_PLUGINS:
-            self.assertFalse(out["enabledPlugins"][key])
+            # assertIs(..., False), not assertFalse (#415 review F5): a mutant
+            # writing None/0/"" would pass assertFalse but produce an
+            # enabledPlugins value CC's docs don't define — the value must be
+            # the JSON literal false.
+            self.assertIs(out["enabledPlugins"][key], False)
 
     def test_reconcile_flips_a_stale_optional_true(self):
         # #415 headline acceptance: every already-pushed box carries a stale
@@ -75,15 +79,20 @@ class TestReconcileManagedPlugins(TestCase):
         # inversion never takes effect on the exact fleet it exists to fix.
         pw = "playwright@claude-plugins-official"
         out = airuleset.reconcile_managed_plugins({"enabledPlugins": {pw: True}})
-        self.assertFalse(out["enabledPlugins"][pw])
+        self.assertIs(out["enabledPlugins"][pw], False)
 
-    def test_optional_plugins_never_overlap_the_baseline(self):
-        # #415 sanity: a key cannot be both force-enabled (MANAGED_PLUGINS)
-        # and force-disabled (OPTIONAL_PLUGINS) — the same invariant
-        # test_does_not_disable_the_managed_baseline pins for
-        # MANAGED_DISABLED_PLUGINS.
+    def test_optional_plugins_never_overlap_either_disabled_set(self):
+        # #415 sanity (review F5/F6): a key cannot be both force-enabled
+        # (MANAGED_PLUGINS) and force-disabled (OPTIONAL_PLUGINS) — the same
+        # invariant test_does_not_disable_the_managed_baseline pins for
+        # MANAGED_DISABLED_PLUGINS. OPTIONAL must ALSO be disjoint from
+        # MANAGED_DISABLED_PLUGINS: both force false, but an OPTIONAL plugin
+        # IS installed (ready for a project opt-in) while a MANAGED_DISABLED
+        # one is not — overlap would be semantically confused.
         self.assertEqual(set(airuleset.OPTIONAL_PLUGINS)
                          & set(airuleset.MANAGED_PLUGINS), set())
+        self.assertEqual(set(airuleset.OPTIONAL_PLUGINS)
+                         & set(airuleset.MANAGED_DISABLED_PLUGINS), set())
 
     def test_preserves_unrelated_keys_and_plugins(self):
         settings = {"model": "sonnet",
@@ -579,6 +588,37 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         installed = {c[3] for c in calls if c[:3] == ["claude", "plugin", "install"]}
         for key in airuleset.OPTIONAL_PLUGINS:
             self.assertIn(key, installed)
+
+    def test_a_fresh_install_reasserts_optional_disabled_after_plugin_install(self):
+        # #415 review F1 (the MAJOR the adversarial review found): a real
+        # `claude plugin install <key>` writes enabledPlugins[<key>]=true into
+        # settings.json, OVERWRITING the reconcile's force-disabled OPTIONAL
+        # keys. On a fresh box (registry absent -> install runs) that would
+        # leave playwright RE-ENABLED — the exact pre-#415 regime. This
+        # simulates that side effect with a fake `claude plugin install` that
+        # flips the key true, and asserts setup re-asserts it back to false.
+        d = self._empty_claude_dir()
+        settings_path = d / "settings.json"
+        pw = "playwright@claude-plugins-official"
+
+        def fake_run(argv, **kwargs):
+            argv = list(argv)
+            if argv[:3] == ["claude", "plugin", "install"]:
+                # Mimic real CC: installing a key writes enabledPlugins[key]=true.
+                cur = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+                cur.setdefault("enabledPlugins", {})[argv[3]] = True
+                settings_path.write_text(json.dumps(cur))
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch("subprocess.run", side_effect=fake_run):
+            airuleset.setup_managed_plugins()
+        final = json.loads(settings_path.read_text())
+        # The install flipped playwright true; setup must have flipped it back.
+        self.assertIs(final["enabledPlugins"][pw], False)
+        # superpowers is meant to stay enabled through the same sequence.
+        self.assertIs(final["enabledPlugins"]["superpowers@claude-plugins-official"], True)
 
     def test_a_failed_marketplace_registration_skips_the_install_and_fails(self):
         calls = []
