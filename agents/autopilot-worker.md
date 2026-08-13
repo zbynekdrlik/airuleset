@@ -189,8 +189,13 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   named scratch file (`gh-cli-recipes.md` itself recommends generic names like `body.md` /
   `red-commit-msg.txt`) is a live collision hazard: two siblings writing-then-consuming the same
   filename can silently clobber each other (real incident, presenter #683: one worker's commit
-  shipped under a sibling's unrelated message text). Before writing ANY temp/body/commit-message
-  file, create your OWN uniquely-namespaced subdirectory first — e.g. `mkdir -p
+  shipped under a sibling's unrelated message text). **Check your dispatch prompt FIRST (#435):
+  if it already states your scratchpad subdirectory for this dispatch (the supervisor now
+  computes AND CREATES a per-batch, issue-number-namespaced one before dispatching you — never
+  private, but collision-free by construction across this round's siblings), use THAT path
+  verbatim — do not compute your own.** Otherwise (an older dispatch, or the documented serial
+  fallback with no `isolation:`), before writing ANY temp/body/commit-message file, create your
+  OWN uniquely-namespaced subdirectory first — e.g. `mkdir -p
   <scratchpad>/agent-<your-worktree-id>` (skip the extra `agent-` prefix if your worktree's own
   directory name already starts with it) — and put every transient file for this dispatch under
   it, never at the scratchpad's top level. This is the SAME-ROUND SIBLING half of a wider hazard
