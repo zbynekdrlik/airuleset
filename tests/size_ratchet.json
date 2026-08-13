@@ -1,8 +1,9 @@
 {
   "files": {
-    "airuleset.py": 14458,
+    "airuleset.py": 13725,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
+    "cli_autopilot_lock.py": 785,
     "cli_vault.py": 663,
     "design_gate.py": 834,
     "filedrop/__init__.py": 254,
@@ -23,7 +24,7 @@
     "tests/test_authority_profiles.py": 3190,
     "tests/test_autopilot_ci_resilience.py": 71,
     "tests/test_autopilot_dialog_default.py": 144,
-    "tests/test_autopilot_lock.py": 790,
+    "tests/test_autopilot_lock.py": 798,
     "tests/test_autopilot_master_skill.py": 227,
     "tests/test_backlog_marker_gate.py": 129,
     "tests/test_block_commit_without_design.py": 659,
