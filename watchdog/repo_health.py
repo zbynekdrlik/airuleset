@@ -347,7 +347,14 @@ def _repo_is_fork(root, git_run=None):
     EXPECTED steady state -- integration goes UPSTREAM (for the sub-dev streams,
     the gatekeeper does it) -- so job 28's stuck-main heuristic must never
     measure it (#441: kvaskodev/odoo-erp pinged David daily). Purely local git,
-    no network / no auth -- job 28's own invariant is preserved."""
+    no network / no auth -- job 28's own invariant is preserved.
+
+    Accepted residual: a NON-fork primary repo carrying a stray `upstream`
+    remote (a leftover mirror-push target, a one-off `git remote add upstream`)
+    is treated as a fork and dropped from stuck-main alerts -- there is no
+    opt-IN override, only the `AIRULESET_STUCK_MAIN_SKIP` opt-out. A real
+    `$HOME` corpus scan (all 41 repos) found the only `upstream`-carrying repo
+    is a genuine fork, so this residual is theoretical on the fleet today."""
     up = _git_first_line(root, ["remote", "get-url", "upstream"], git_run)
     if not up:
         return False

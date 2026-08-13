@@ -168,7 +168,7 @@
     "watchdog/cards.py": 481,
     "watchdog/compact.py": 1037,
     "watchdog/goal.py": 1103,
-    "watchdog/repo_health.py": 751,
+    "watchdog/repo_health.py": 758,
     "watchdog/usage.py": 380
   },
   "functions": {
