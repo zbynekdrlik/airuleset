@@ -29,6 +29,7 @@ are patched, the Discord fetch is injected. Nothing touches the real
 """
 
 import json
+import os
 import sys
 import time
 import unittest
@@ -294,6 +295,214 @@ class NeverSilentFloor(_Base):
             discord_fetch=self._fetch([msg]))
         self.assertFalse(any("orphan" in ln for ln in logs), logs)
         self.assertEqual(self.pings, [])
+
+
+class ExplicitPathSandboxesGrace(unittest.TestCase):
+    """#449-review F1: callers passing an EXPLICIT `path=` (the pre-existing
+    test population's own sandboxing convention) never consult the patched
+    _questions_path — the grace write must land BESIDE that explicit path,
+    never in the real ~/.claude (live-caught: the supersede fixture from
+    test_question_prune.py materialised in the box's actual home store on
+    every suite run)."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name) / "home"
+        (self.home / ".claude").mkdir(parents=True)
+        p = m.patch.dict(os.environ, {"HOME": str(self.home)})
+        p.start()
+        self.addCleanup(p.stop)
+        self.store = Path(self.tmp.name) / "store"
+        self.store.mkdir()
+        self.qpath = str(self.store / "q.json")
+
+    def test_supersede_with_explicit_path_graces_beside_it(self):
+        notify.record_question("111000", "900100", "sid-x", "/p",
+                               now=1000, path=self.qpath)
+        notify.record_question("222000", "900100", "sid-x", "/p",
+                               now=2000, path=self.qpath)
+        beside = self.store / "discord-questions-grace.json"
+        self.assertTrue(beside.is_file(),
+                        "the graced supersedee must land beside the "
+                        "explicit map path")
+        self.assertIn("111000", json.loads(beside.read_text()))
+        self.assertFalse(
+            (self.home / ".claude" / "discord-questions-grace.json").exists(),
+            "the REAL home store must never be touched")
+
+    def test_grace_question_with_explicit_path_graces_beside_it(self):
+        notify.record_question("333000", "900100", "sid-x", "/p",
+                               now=1000, path=self.qpath)
+        self.assertTrue(notify.grace_question("333000", path=self.qpath))
+        beside = self.store / "discord-questions-grace.json"
+        self.assertIn("333000", json.loads(beside.read_text()))
+        self.assertFalse(
+            (self.home / ".claude" / "discord-questions-grace.json").exists())
+
+
+class GraceWriteFailureKeepsMain(unittest.TestCase):
+    """#449-review F3/M1 teeth: 'a grace write failure keeps the main
+    entry' is the fix's own headline safety sentence — force the failure
+    and prove the ordering (grace-put FIRST, only then drop from main)."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        p = m.patch.object(notify, "_questions_path", lambda: self.qpath)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_failed_grace_write_never_drops_the_main_entry(self):
+        notify.record_question("444000", "900100", "sid-x", "/p",
+                               now=1000, path=self.qpath)
+        with m.patch.object(notify, "_save_grace_questions",
+                            return_value=False):
+            self.assertFalse(notify.grace_question("444000", path=self.qpath))
+        self.assertIn("444000", notify.load_questions(self.qpath),
+                      "losing the answer is the one failure the store "
+                      "exists to prevent — a failed grace write must keep "
+                      "the entry routable in the MAIN map")
+
+
+class OrphanPingConfirmation(_Base):
+    """#449-review F2/M4: dorphan_done may be marked only on a CONFIRMED
+    delivery — 'sent', or 'dedup' whose marker genuinely recorded a
+    delivery (notify.marker_delivered). A bare claim ('dedup' after a
+    failed POST) must not suppress the ping forever; the stale claim is
+    released so the next sweep re-POSTs."""
+
+    def _msg(self):
+        return {"id": _snow(self.now), "author": {"id": OWNER},
+                "content": "mozes pouzit moznost 2"}
+
+    def test_error_send_is_retried_and_never_marked(self):
+        self._record()
+        state = {}
+        with m.patch.object(notify, "send",
+                            lambda *a, **k: "error"):
+            wd.deliver_discord_replies(
+                self.now, self._run, state, {SID: ("%1", IDLE)},
+                dry_run=False, discord_fetch=self._fetch([self._msg()]))
+            logs2 = wd.deliver_discord_replies(
+                self.now + 60, self._run, state, {SID: ("%1", IDLE)},
+                dry_run=False, discord_fetch=self._fetch([self._msg()]))
+        self.assertNotIn("dorphan_done", state)
+        self.assertTrue(any("orphan" in ln for ln in logs2),
+                        "an unconfirmed ping is retried next sweep")
+
+    def test_bare_dedup_claim_is_not_confirmation_and_gets_released(self):
+        self._record()
+        state = {}
+        released = []
+        with m.patch.object(notify, "send", lambda *a, **k: "dedup"), \
+                m.patch.object(notify, "marker_delivered",
+                               lambda key: False), \
+                m.patch.object(notify, "forget_marker", released.append):
+            wd.deliver_discord_replies(
+                self.now, self._run, state, {SID: ("%1", IDLE)},
+                dry_run=False, discord_fetch=self._fetch([self._msg()]))
+        self.assertNotIn("dorphan_done", state,
+                         "a claim written before a failed POST is not a "
+                         "delivery — never mark on it")
+        self.assertEqual(len(released), 1,
+                         "the stale claim must be released so the next "
+                         "sweep genuinely re-POSTs: %r" % released)
+
+    def test_dedup_with_recorded_delivery_marks_done(self):
+        self._record()
+        state = {}
+        with m.patch.object(notify, "send", lambda *a, **k: "dedup"), \
+                m.patch.object(notify, "marker_delivered",
+                               lambda key: True):
+            wd.deliver_discord_replies(
+                self.now, self._run, state, {SID: ("%1", IDLE)},
+                dry_run=False, discord_fetch=self._fetch([self._msg()]))
+        self.assertIn(str(self._msg()["id"]),
+                      state.get("dorphan_done", []))
+
+
+class NonQuestionChannelStaysQuiet(_Base):
+    """#449-review F3/M3 teeth: the orphan floor is deliberately scoped to
+    QUESTION channels — an owner reply-to-untracked in a channel that only
+    ever carried CARDS (the main claude-<owner> thread) must stay silent
+    (✅/card chatter is not an answer attempt)."""
+
+    def test_reply_to_untracked_in_a_cards_only_channel_is_silent(self):
+        Path(self.cpath).write_text(json.dumps(
+            {"555777": {"repo": "o/r", "issue": 7, "channel": "888999",
+                        "ts": self.now}}))
+        msg = {"id": _snow(self.now), "author": {"id": OWNER},
+               "message_reference": {"message_id": "444333"},
+               "content": "ok super", "_channel": "888999"}
+        logs = wd.deliver_discord_replies(
+            self.now, self._run, {}, {}, dry_run=False,
+            discord_fetch=self._fetch([msg]))
+        self.assertFalse(any("orphan" in ln for ln in logs), logs)
+        self.assertEqual(self.pings, [])
+
+
+class AuthorlessReferenceIsNeverSilent(_Base):
+    """#449-review F5: a referenced_message dict WITHOUT a genuinely
+    human-shaped author (author-less, degenerate) must fail toward the
+    orphan ping — the never-silent mandate's own fail direction."""
+
+    def test_authorless_referenced_message_still_pings(self):
+        self._record()
+        msg = {"id": _snow(self.now), "author": {"id": OWNER},
+               "message_reference": {"message_id": "999888"},
+               "referenced_message": {},
+               "content": "odpoved na staru otazku"}
+        logs = wd.deliver_discord_replies(
+            self.now, self._run, {}, {SID: ("%1", IDLE)}, dry_run=False,
+            discord_fetch=self._fetch([msg]))
+        self.assertTrue(any("orphan" in ln for ln in logs), logs)
+        self.assertTrue(self.pings)
+
+
+class RepingCrossChannelGrace(unittest.TestCase):
+    """#449-review F4: a daily re-track whose freshly-resolved questions
+    channel DIFFERS from the old entry's recorded channel misses
+    record_question's channel-scoped supersede — the old entry must be
+    GRACED (routable for the window), never hard-deleted."""
+
+    # fixed epoch, daytime Europe/Bratislava (never the sleep window)
+    NOW = 1750000000.0
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": OWNER,
+                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_cross_channel_retrack_graces_the_old_entry(self):
+        notify.record_question("666001", "666000", SID, CWD,
+                               now=self.NOW - 25 * 3600, path=self.qpath,
+                               question="stara otazka")
+
+        def send_fn(block, owner=None, kind=None, dedup_key=None,
+                    dry_run=False, return_message_id=False):
+            return ("sent", "999002")
+
+        wd.reping_stale_questions(self.NOW, send_fn, path=self.qpath,
+                                  owner_by_sid={SID: "zbynek"})
+        main = notify.load_questions(self.qpath)
+        self.assertNotIn("666001", main)          # old key re-tracked away
+        self.assertIn("999002", main)             # fresh id tracked
+        grace = json.loads(
+            (Path(self.tmp.name) / "discord-questions-grace.json")
+            .read_text())
+        self.assertIn("666001", grace,
+                      "the old still-visible card must stay routable via "
+                      "grace, never hard-deleted")
 
 
 if __name__ == "__main__":
