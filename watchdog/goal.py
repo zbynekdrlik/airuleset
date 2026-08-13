@@ -823,13 +823,32 @@ GOAL_LANE_LIVE_WINDOW_S = 15 * 60
 # made the nudge structurally self-suppressing on any box the owner merely
 # GLANCES at every ~20-30 min (gk journal: "SKIP-TRANSIENT ... presence
 # marker 1331-1628s old" on every single attempt). The lane nudge is a
-# rate-limited reminder into an ALREADY-armed session, so it only needs to
-# avoid typing into an exchange a human is actively MID-SENTENCE in: live
-# typing stamps the presence marker every minute or two, so ~3 min covers
-# "typing right now" while a periodic glance no longer suppresses it.
-# Worst-case annoyance stays bounded by GOAL_LANE_INTERVAL_S +
-# GOAL_LANE_MAX_NUDGES regardless.
+# rate-limited reminder into an ALREADY-armed session, so a much shorter
+# window suffices -- with its meaning stated honestly (#442-review F1):
+# the presence marker is stamped ONLY on UserPromptSubmit
+# (`clear-question-dedup.sh`), i.e. a prompt SUBMIT, never composition
+# keystrokes -- so this window means "a prompt was SUBMITTED within the
+# last ~3 min = a genuinely live exchange" (and it comfortably covers the
+# mid-sweep race where a submit lands after the sweep's own `now` was
+# captured, via the shared check's symmetric clamp). Un-submitted
+# COMPOSITION stamps neither signal and is caught separately, by the
+# two-capture draft-diff check at the send point below. Worst-case
+# annoyance stays bounded by GOAL_LANE_INTERVAL_S + GOAL_LANE_MAX_NUDGES
+# regardless.
 GOAL_LANE_LIVE_CONVO_S = 3 * 60
+
+# #442-review F2 -- bound on CONSECUTIVE zero-progress stash aborts. A
+# "transient, retry next sweep" abort that recurs every ~60s forever (the
+# classic shape: the stash slot is occupied by the user's OWN parked
+# draft, which no janitor provenance will ever clear) is the repo's
+# known bounded-consecutive-occurrence class: without a bound, the
+# give-up ping is structurally unreachable (the nudge counter only
+# advances on SUCCESS), so a permanently-aborting lane would silently
+# retry -- and for keystroke-bearing abort shapes, retype -- forever.
+# Past this many consecutive aborts the existing give-up branch fires
+# its one-shot ping and stops attempting; the counter clears on any
+# successful delivery and on the session-active idle reset.
+GOAL_LANE_MAX_STASH_ABORTS = 5
 
 # #442 -- the text TEACHES the fleet-dispatch doctrine
 # (skills/autopilot/SKILL.md: parallel worktree workers, the account-wide
@@ -871,8 +890,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         return logs, False
     idle = now - (tmtime or now)
     if idle < GOAL_LANE_IDLE_S:
-        if rec.get("ln"):
-            rec.update({"ln": 0, "lpinged": False})
+        if rec.get("ln") or rec.get("lna"):
+            rec.update({"ln": 0, "lpinged": False, "lna": 0})
         return logs, False
     marker = watchdog.transcript_last_marker(tpath)
     if marker == "❓":
@@ -919,25 +938,36 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     % (loc, waiters, backlog_n))
         return logs, False
     n = rec.get("ln", 0)
-    if n >= GOAL_LANE_MAX_NUDGES:
+    aborts = rec.get("lna", 0)
+    if n >= GOAL_LANE_MAX_NUDGES or aborts >= GOAL_LANE_MAX_STASH_ABORTS:
+        # #442-review F2: a lane whose delivery ABORTS consecutively
+        # reaches this give-up (and its one-shot ping) too -- previously
+        # only landed nudges could, so a permanently-aborting lane
+        # retried silently forever with the escalation unreachable.
+        if n >= GOAL_LANE_MAX_NUDGES:
+            why = ("ani po %d štúchnutiach sa lány nezaplnili"
+                   % GOAL_LANE_MAX_NUDGES)
+            gave = "GAVE UP after %d nudges" % GOAL_LANE_MAX_NUDGES
+        else:
+            why = ("%d pokusov o doručenie štuchnutia za sebou zlyhalo "
+                   "(stash abort)" % aborts)
+            gave = "GAVE UP after %d consecutive stash aborts" % aborts
         if not rec.get("lpinged"):
             if send_fn is not None and not dry_run:
                 rec["lpinged"] = True
                 from notify import stream_redirect
                 send_fn("⚠️ **%s** — backlog=%d otvorených, "
                         "`/goal` armovaný, ale %d min nebeží ani "
-                        "jeden worker (waiterov: %d) a ani po %d "
-                        "štúchnutiach sa lány nezaplnili (%s). "
+                        "jeden worker (waiterov: %d) a %s (%s). "
                         "Pozri sa na reláciu, prosím."
                         % (watchdog.project_label(cwd), backlog_n,
-                           int(idle // 60), waiters, GOAL_LANE_MAX_NUDGES, loc),
+                           int(idle // 60), waiters, why, loc),
                         owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
                         dedup_key="lanestall:%s:%d" % (sid, int(tmtime or 0)),
                         dry_run=dry_run)
             logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%d "
-                        "idle=%dm -> GAVE UP after %d nudges"
-                        % (loc, waiters, backlog_n, idle // 60,
-                           GOAL_LANE_MAX_NUDGES))
+                        "idle=%dm -> %s"
+                        % (loc, waiters, backlog_n, idle // 60, gave))
         return logs, True
     last = rec.get("llast")
     if last is not None and (now - last) < GOAL_LANE_INTERVAL_S:
@@ -962,13 +992,24 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                                              idle // 60))
         return logs, True
     fresh = watchdog.capture_pane(pid, run, lines=40)
-    ok, kind, draft = _boundary_ok(fresh)
+    ok, kind, fresh_draft = _boundary_ok(fresh)
     if not ok or watchdog.pane_goal_armed(fresh) is not True:
         logs.append("skip raced (lane-occupancy) %s -> pane moved since "
                     "the sweep" % loc)
         return logs, True
+    if fresh_draft != draft:
+        # #442-review F1: the box CONTENT changed between the sweep-top
+        # capture and this pre-send one -- someone is COMPOSING right
+        # now. Un-submitted typing stamps NEITHER recent-activity signal
+        # (the presence marker only ever gets stamped on a prompt
+        # SUBMIT), so this two-capture diff is the one direct evidence
+        # of live composition this function can get -- refuse while it
+        # is still free to refuse, consume nothing, retry next sweep.
+        logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> draft changed "
+                    "between captures -- human composing right now" % loc)
+        return logs, True
     text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
-    if draft:
+    if fresh_draft:
         # #442 -- deliver INTO the held draft via the stash protocol (the
         # primitive re-verifies idle-with-draft itself and undoes its own
         # keystrokes on any failed verify). Provenance is marked BEFORE
@@ -980,15 +1021,21 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                                            logs=logs, sleep_fn=sleep_fn):
             # The abort typed nothing (or provably undid itself) --
             # transient, retried next sweep, and it must NOT consume the
-            # ln/llast budget (a refused attempt is not a nudge).
-            logs.append("lane-occupancy %s stash-abort -> transient, "
-                        "retry next sweep" % loc)
+            # ln/llast budget (a refused attempt is not a nudge). It DOES
+            # advance the consecutive-abort streak, so a permanently-
+            # aborting lane eventually reaches the give-up ping above
+            # (#442-review F2) instead of retrying silently forever.
+            rec["lna"] = rec.get("lna", 0) + 1
+            logs.append("lane-occupancy %s stash-abort (%d/%d) -> "
+                        "transient, retry next sweep"
+                        % (loc, rec["lna"], GOAL_LANE_MAX_STASH_ABORTS))
             return logs, True
         watchdog._janitor_clear_watch(state, pid)
         mode = "stash"
     else:
         watchdog.send_continue(pid, text, run)
         mode = "typed"
+    rec.pop("lna", None)
     rec["ln"] = n + 1
     rec["llast"] = now
     logs.append("lane-occupancy nudge (%s) %s workers=0 waiters=%d backlog=%d "
