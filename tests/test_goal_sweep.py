@@ -6,8 +6,10 @@ docstring `test_goal_arm.py`'s own header cites.
 """
 
 import json
+import os
 import unittest
 import unittest.mock as m
+import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -19,6 +21,7 @@ from watchdog import goal
 
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
+    GOAL_ARMED_DRAFT_CAP,
     GOAL_BUSY_CAP,
     GOAL_IDLE_CAP,
     _encode,
@@ -423,6 +426,128 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(owns)
         self.assertTrue(any("GAVE UP" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
+
+    # ---------------------------------------------------------------- #
+    # #442 — the lane-fill path gets its OWN, much shorter "live
+    # conversation" definition. The shared 30-min blanket window made the
+    # nudge structurally self-suppressing on a box the owner glances at
+    # every ~20-30 min (gk journal: presence marker 1331-1628s old on
+    # every single attempt).
+    # ---------------------------------------------------------------- #
+
+    def _glance_call(self, marker_age_s, now=100000):
+        """Drive the nudge through the REAL recent-human-activity check
+        with a REAL presence marker aged `marker_age_s` — a unique sid so
+        the /tmp marker can never collide with a live session's own, and
+        removed again via addCleanup."""
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        sid = "sess-lane-glance-" + uuid.uuid4().hex[:10]
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid)
+        tpath = proj / _encode(self.CWD) / (sid + ".jsonl")
+        marker = Path("/tmp/claude-user-active-%s" % sid)
+        marker.write_text("")
+        self.addCleanup(lambda: marker.unlink(missing_ok=True))
+        t = now - marker_age_s
+        os.utime(marker, (t, t))
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP)
+        with m.patch("airuleset.resolve_authority", return_value="full"):
+            logs, owns = goal.goal_lane_occupancy_nudge(
+                now, tmux, {}, sid, self.CWD, "111", GOAL_ARMED_CAP,
+                tpath, tmtime, "loc", None, False, None, proj,
+                backlog_fetch=lambda cwd: 5, state={},
+                sleep_fn=lambda s: None)
+        return logs, owns, tmux
+
+    def test_owner_glance_20_minutes_ago_does_not_suppress_the_nudge(self):
+        # #442 RED: a presence marker 20 minutes old is an owner GLANCE,
+        # not a live conversation — under the old blanket 30-min window it
+        # suppressed every nudge forever; the lane path's own short window
+        # must let this one through.
+        logs, owns, tmux = self._glance_call(20 * 60)
+        self.assertTrue(owns)
+        self.assertFalse(any("SKIP-TRANSIENT" in ln for ln in logs), logs)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+
+    def test_presence_marker_seconds_old_still_refuses_the_nudge(self):
+        # Control: a GENUINELY live conversation (marker seconds old) must
+        # still refuse — the guard is narrowed, never deleted.
+        logs, owns, tmux = self._glance_call(60)
+        self.assertTrue(owns)
+        self.assertTrue(any("SKIP-TRANSIENT" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
+    # ---------------------------------------------------------------- #
+    # #442 — an at-rest draft is DELIVERABLE via deliver_with_stash (the
+    # primitive exists for exactly this), never a "skip draft" dead end.
+    # ---------------------------------------------------------------- #
+
+    def test_at_rest_draft_delivers_via_stash_instead_of_skipping(self):
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        calls = []
+
+        def fake_stash(pid, text, run, captured=None, logs=None,
+                       sleep_fn=None):
+            calls.append((pid, text))
+            return True
+
+        rec = {}
+        with m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
+            logs, owns, tmux = self._call(GOAL_ARMED_DRAFT_CAP,
+                                          lambda cwd: 5, now, tmtime, rec=rec)
+        self.assertTrue(owns)
+        self.assertFalse(any("skip draft" in ln for ln in logs), logs)
+        self.assertEqual(len(calls), 1, logs)
+        self.assertEqual(calls[0][0], "111")
+        self.assertEqual(rec.get("ln"), 1)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_draft_stash_abort_never_consumes_the_nudge_budget(self):
+        # An aborted verified delivery typed nothing (or undid itself) —
+        # transient, retried next sweep, and it must NOT advance the
+        # ln/llast budget (the #176 verified-and-fallible-path lesson).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        calls = []
+
+        def fake_stash(pid, text, run, captured=None, logs=None,
+                       sleep_fn=None):
+            calls.append((pid, text))
+            return False
+
+        rec = {}
+        with m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
+            logs, owns, tmux = self._call(GOAL_ARMED_DRAFT_CAP,
+                                          lambda cwd: 5, now, tmtime, rec=rec)
+        self.assertTrue(owns)
+        self.assertEqual(len(calls), 1, logs)
+        self.assertNotIn("ln", rec)
+        self.assertNotIn("llast", rec)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs),
+                         logs)
+
+
+class TestGoalLaneNudgeDoctrine(unittest.TestCase):
+    """#442 — the nudge TEXT must teach the fleet-dispatch doctrine
+    (skills/autopilot SKILL.md), not just poke: parallel worktree worker
+    dispatch, the account-wide concurrent-agent cap of 8, and
+    serialize-only integration."""
+
+    def test_nudge_text_commands_fleet_dispatch_doctrine(self):
+        rendered = goal.GOAL_LANE_NUDGE_TEXT % (7, 2)
+        low = rendered.lower()
+        self.assertIn("worktree", low)
+        self.assertIn("paraleln", low)
+        self.assertIn("8", rendered)
+        self.assertIn("sériovo", low)
+
+    def test_lane_live_convo_window_is_minutes_not_the_30min_blanket(self):
+        self.assertLessEqual(goal.GOAL_LANE_LIVE_CONVO_S, 5 * 60)
+        self.assertLess(goal.GOAL_LANE_LIVE_CONVO_S,
+                        wd.GOAL_AUTOARM_RECENT_HUMAN_S)
 
 
 # --------------------------------------------------------------------------- #
