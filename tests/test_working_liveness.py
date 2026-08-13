@@ -230,5 +230,37 @@ class TestRetryCapNeverWedgesASession(HookBase):
         self.assertIn('"decision": "block"', r3.stdout)
 
 
+class TestCleanupIsScopedToOwnSession(HookBase):
+    """#427: `HookBase.setUp()` used to register ONE cleanup per test —
+    `glob.glob("/tmp/airuleset-working-liveness-block-t-*")` — a
+    FIXED-PREFIX wildcard that matches EVERY session's retry-counter file,
+    not just the one(s) THIS test/process created (every generated sid
+    shares the literal "t-" prefix, see `payload()` above). Harmless in a
+    solo run (no sibling process has a live retry file at teardown time —
+    "green standalone 22/22"), but under the fleet-dispatch architecture
+    this repo runs (#317 — several worktree workers executing this SAME
+    suite concurrently on the SAME shared /tmp, e.g. wave7gate3), one
+    worker's own test cleanup could delete a DIFFERENT worker's in-flight
+    counter file mid-sequence. Locks the fix: cleanup must only ever touch
+    the retry file(s) this test's own process actually created — same
+    scoped-sid idiom #202 already established (`_hook_state_cleanup.py`)."""
+
+    def test_cleanup_never_touches_a_different_sessions_retry_file(self):
+        foreign_sid = "t-" + uuid.uuid4().hex[:10]
+        foreign_file = Path("/tmp/airuleset-working-liveness-block-" + foreign_sid)
+        foreign_file.write_text("1")
+        try:
+            out = self._run("⏳ WORKING: niečo beží", background_tasks=[])
+            self.assertIn('"decision": "block"', out.stdout)
+            self.doCleanups()   # run only what THIS test registered so far
+            self.assertTrue(
+                foreign_file.exists(),
+                "a DIFFERENT session's retry file must survive this test's "
+                "own teardown -- #427 cross-session wildcard-cleanup bug")
+        finally:
+            if foreign_file.exists():
+                foreign_file.unlink()
+
+
 if __name__ == "__main__":
     unittest.main()

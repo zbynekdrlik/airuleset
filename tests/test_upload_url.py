@@ -430,6 +430,49 @@ class TestMultiInterfaceUrls(TestCase):
         self.assertIn("http://10.77.9.21:8788/tok/f.bin", out)
 
 
+# --------------------------------------------------------------------------- #
+# #427: `test_cmd_upload_prints_a_url_per_interface` probes a "free" port via
+# `sk.bind(("127.0.0.1", 0)); ...; sk.close()` and hands that exact number to
+# `airuleset.cmd_upload()` — a genuine TOCTOU race under real box contention
+# (a sibling worktree worker's own suite run competing for the same ephemeral
+# port range; #405's own closing evidence: "1 nesúvisiaci load-flake,
+# samostatne 44/44" — deterministic solo, flaky only under load).
+# `_cmd_upload_output()` (below `TestUploadPortRaceRetry`, wired into the
+# call site once it exists) retries with a FRESH probe whenever `cmd_upload`
+# gives up (its own SystemExit after a 5s bind-nothing timeout) — the same
+# poll/retry-beats-a-fixed-guess idiom this file's own #113 fix already
+# established for the analogous startup-timing race, applied here to the
+# port-pick race instead. Locked with a deterministic mock so the retry
+# MECHANISM is hermetic and never depends on reproducing a live collision.
+# --------------------------------------------------------------------------- #
+
+class TestUploadPortRaceRetry(TestCase):
+
+    def test_retries_past_a_transient_bind_collision(self):
+        dest = Path(tempfile.mkdtemp())
+        _log_dir(self)
+        calls = []
+
+        def fake_cmd_upload(args):
+            calls.append(args.port)
+            if len(calls) == 1:
+                sys.exit(1)          # simulate the stolen-port collision
+            print("http://127.0.0.1:%d/tok/" % args.port)
+
+        with m.patch("airuleset.cmd_upload", side_effect=fake_cmd_upload):
+            out, port = _cmd_upload_output(self, dest)
+        self.assertEqual(2, len(calls), "must retry exactly once past the collision")
+        self.assertIn("http://127.0.0.1:%d/" % port, out)
+
+    def test_gives_up_after_max_attempts_with_a_clear_message(self):
+        dest = Path(tempfile.mkdtemp())
+        _log_dir(self)
+        with m.patch("airuleset.cmd_upload", side_effect=SystemExit(1)):
+            with self.assertRaises(AssertionError) as ctx:
+                _cmd_upload_output(self, dest, max_attempts=3)
+        self.assertIn("3 port-race retries", str(ctx.exception))
+
+
 class TestTotalBindFailureIsFatal(TestCase):
     """#114 (measured while fixing #113): a server that can bind NOTHING must
     end as a FAILURE, immediately.
