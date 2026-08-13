@@ -520,9 +520,14 @@ class TestGoalArmCli(unittest.TestCase):
         self.assertEqual(goal.load_goal_requests(self.reqp), {})
 
     def test_self_records_under_resolved_authority_and_prints_disposition(self):
+        # Hermetic: never read the box's REAL installed SKILL.md (the same
+        # #403-review round-2 MINOR-2 gap as the e2e test below — this test
+        # only cares about the recorded entry + printed disposition).
         with m.patch.object(goal._compact, "resolve_self_pane",
                             return_value=("%3", "/somewhere", "sess-b")):
-            with m.patch("airuleset.resolve_authority", return_value="full"):
+            with m.patch("airuleset.resolve_authority", return_value="full"), \
+                    m.patch.object(goal, "goal_template_for_authority",
+                                   return_value="/goal test-template"):
                 with m.patch.object(goal, "deliver_goal",
                                     return_value="skip:no-pane"):
                     buf = []
@@ -540,7 +545,9 @@ class TestGoalArmCli(unittest.TestCase):
                             return_value=("%3", "/somewhere", "sess-c")):
             with m.patch("airuleset.resolve_authority",
                         side_effect=AssertionError("must not be called "
-                                                    "when --template is given")):
+                                                    "when --template is given")), \
+                    m.patch.object(goal, "goal_template_for_authority",
+                                   return_value="/goal test-template"):
                 with m.patch.object(goal, "deliver_goal",
                                     return_value="skip:no-pane"):
                     with m.patch("sys.stdout"):
