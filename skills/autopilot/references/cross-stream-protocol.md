@@ -75,8 +75,9 @@ re-review and no pickup).
    round 2's core-only proof dropped it, and a gatekeeper could have stopped with a re-handed-off
    ticket's ball in its own court.
 5. **Machine-local backstop:** the api-watchdog (job 8) independently sweeps every ~30 min — an
-   idle claude pane in a repo with open `prio:bounce` gets a nudge (the nudge-ack above handles
-   it, loop or no loop); a repo with NO live session pings the owner's Discord once. The
+   idle claude pane in a repo with open `prio:bounce` gets a nudge (the nudge-ack step — part of
+   SKILL.md's own Step 3, not this reference file — handles it, loop or no loop); a repo with NO
+   live session pings the owner's Discord once. The
    gatekeeper's own ssh/tmux nudge is best-effort delivery, never the guarantee.
 6. **Nudge text shape (canonical, MANDATORY):** an injected cross-stream nudge MUST start with the
    exact prefix `Priorita: prio:bounce` — the api-watchdog auto-submits a frozen input-box draft
