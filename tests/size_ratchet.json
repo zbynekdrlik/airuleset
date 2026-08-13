@@ -62,7 +62,7 @@
   "tests/test_goal_backlog_proof.py": 898,
   "tests/test_goal_indicator_above_box.py": 96,
   "tests/test_goal_strictness_clause.py": 51,
-  "tests/test_goal_sweep.py": 433,
+  "tests/test_goal_sweep.py": 445,
   "tests/test_goal_turn_boundary.py": 112,
   "tests/test_hook_state_cleanup.py": 67,
   "tests/test_hosted_reply_delivery.py": 268,
