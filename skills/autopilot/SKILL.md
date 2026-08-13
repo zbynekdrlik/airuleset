@@ -727,6 +727,16 @@ answer to "which issues share one round" — this ticket found no gap in either.
    > round), `airuleset.py sweep-worktrees [--dry-run]` bypasses the cadence gate on demand.
    > Then run the SAME per-member verification bullets as the serial-fallback box above, against
    > the ONE round PR/push instead of a per-worker one, before writing `docs/autopilot-log.md`.
+   > **Read back each surviving member's OUTPUT artifact BEFORE firing its card (#450).** When
+   > the ticket produced or changed a user-facing output (email content from the DB, a rendered
+   > document, live UI values), open the ACTUAL artifact and record CONCRETE observed values —
+   > price, currency, order number, heading — never send/delivery/liveness alone (the montalu3
+   > 0 € email class: emails "verified" delivered while every price rendered 0 €). This is the
+   > worktree-fleet sibling of CYCLE step 8's own read-back: on the DEFAULT dispatch YOU (the
+   > supervisor) compose the cards, not the worker, so the observed values must exist HERE. They
+   > feed the round report's mandatory `✅ Výstup:` line (`completion-report.md` — an explicit
+   > `n/a — <prečo>` when a member truly has no user-facing output), and each card fires only
+   > AFTER this read-back.
    > **Fire the per-ticket run-card yourself, for EACH surviving member, right after this ONE
    > integration lands** — `airuleset.py notify --run-card --repo <owner/name> --issue <N> --goal
    > "<plain goal>" --achieved "<plain what landed>" --version "<deployed version read from the
