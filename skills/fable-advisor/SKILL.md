@@ -40,7 +40,9 @@ current tier and do not consult.
    skip the gate, never re-poll it within the task.
 
 2. **Ground the problem into a TIGHT digest — in THIS session, or via one
-   cheap `sonnet` read stage.** The digest carries: the facts (measured, not
+   cheap read stage (`claude-opus-4-8` low where a surface names it;
+   `sonnet` only for genuinely trivial collection).** The digest carries:
+   the facts (measured, not
    assumed), the constraints, what was already tried and how it failed, and
    the ONE concrete question. No file dumps, no repo tours — the advisor
    never re-reads sources (that is the burn shape this skill exists to
@@ -55,10 +57,15 @@ current tier and do not consult.
 
 4. **Execute via an Opus 4.8 worker.** The master receives the decision,
    records it durably (ticket comment — `durable-decisions-to-tickets.md`),
-   and dispatches execution on the Opus 4.8 tier (the autopilot-worker /
-   subagent-driven-development implementer definitions pin
-   `claude-opus-4-8`; never sonnet for anything complex). The master
-   reviews the worker's diff — that is the oversight role.
+   and dispatches execution on the Opus 4.8 tier — the repo's two pinned
+   definitions are `agents/autopilot-worker.md` and
+   `agents/ticket-validator.md` (`model: claude-opus-4-8` frontmatter); a
+   `subagent-driven-development` implementer or other ad-hoc execution
+   dispatch has NO repo pin and inherits the session's model — from a
+   worker that is 4.8, from a Fable main it stays Fable, so prefer the
+   pinned worker for issue-shaped execution (never sonnet for anything
+   complex). The master reviews the worker's diff — that is the oversight
+   role.
 
 ## Anti-patterns (all rewordings)
 

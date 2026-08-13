@@ -260,7 +260,18 @@ class TestOpus5GrepGate(TestCase):
     (lines carrying BANNED/banned/zakazan), and the dated benchmark URL in
     the advisor's history section. Historical narrative homes (docs/,
     .claude/, watchdog/'s REMOVED-jobs incident notes) and tests/ (this
-    gate's own home + fixtures) are outside the scanned dispatch set."""
+    gate's own home + fixtures) are outside the scanned dispatch set.
+
+    Honestly-stated residuals (adversarial review, #440): (a) the
+    ban-prose exemption is LINE-scoped — a code line whose trailing
+    comment merely mentions "banned" would pass; accepted, the gate locks
+    against DRIFT, not adversaries. (b) `.claude/` is excluded as a
+    historical-narrative home, but `.claude/rules/` also holds REACHABLE
+    path-scoped rules — those were swept and fixed manually in #440's
+    review pass; a future reintroduction there is not mechanically
+    caught. (c) the CLOSED-fallback patterns cover the lowercase alias
+    and the capitalized bare "Opus" (not followed by "4"); an exotic
+    rendering (e.g. "Opus five") is out of scope."""
 
     SCAN = ("airuleset.py", "statusbar.py", "burn", "notify", "filedrop",
             "agents", "skills", "modules", "hooks", "rules", "profiles",
@@ -308,6 +319,10 @@ class TestOpus5GrepGate(TestCase):
         # the boundary), and ban prose avoids the literal shapes.
         alias = re.compile(r"""model:\s*["']?opus["']?(?![\w-])""")
         closed_fallback = re.compile(r"CLOSED[^\n]{0,60}(?<![\w-])`?opus`?(?![\w-])")
+        # capitalized bare-"Opus" fallback ("CLOSED → Opus") — the exact OLD
+        # model-awareness wording; "Opus 4.8"/"Opus 4" stays legal via the
+        # negative lookahead, and `claude-opus-4-8` never matches \bOpus\b.
+        closed_capital = re.compile(r"CLOSED[^\n]{0,60}\bOpus\b(?!\s*4)")
         violations = []
         for f in self._files():
             try:
@@ -315,7 +330,8 @@ class TestOpus5GrepGate(TestCase):
             except OSError:
                 continue
             for i, line in enumerate(text.splitlines(), 1):
-                if alias.search(line) or closed_fallback.search(line):
+                if (alias.search(line) or closed_fallback.search(line)
+                        or closed_capital.search(line)):
                     if self._line_is_ban_prose(line):
                         continue
                     violations.append(

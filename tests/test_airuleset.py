@@ -6577,7 +6577,9 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         # 2026-08-13: ultracode is the standing default in every mode but plain
         self.assertIn('--settings {"ultracode":true}', out)
 
-    def test_claude_ultracode_is_the_deliberate_opt_in_escape_hatch(self):
+    def test_claude_ultracode_is_an_alias_of_the_default_mode(self):
+        # (was ...the_deliberate_opt_in_escape_hatch — renamed for #445: the
+        # mode now matches the default's behavior and is kept as an alias)
         home = tempfile.mkdtemp()
         cwd = Path(home) / "proj"
         cwd.mkdir()

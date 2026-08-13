@@ -922,12 +922,13 @@ CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 # encodes cwd by turning / . _ into dashes; a project dir holding only memory/ (no
 # transcript) means nothing to continue. Unknown encoding chars fail toward the
 # FRESH branch (worse case: a new session instead of a cryptic error).
-# Modes: `default` (claude — continue-or-new, skip-perms, model, NO ultracode),
-# `new` (claude-new — always FRESH, skip-perms, model, NO ultracode — force a
-# clean start), `ultracode` (claude-ultracode — deliberate opt-in: continue-or-new
-# + skip-perms + ultracode + model), `plain` (claude-plain — vanilla, no flags),
-# `fullscreen` (claude-fullscreen — deliberate opt-in: continue-or-new + skip-perms
-# + model, PLUS CLAUDE_CODE_NO_FLICKER=1).
+# Modes: `default` (claude — continue-or-new, skip-perms, model, ultracode),
+# `new` (claude-new — always FRESH, skip-perms, model, ultracode — force a
+# clean start), `ultracode` (claude-ultracode — alias of the default mode, kept
+# for muscle memory: continue-or-new + skip-perms + ultracode + model), `plain`
+# (claude-plain — vanilla, no flags — the ONLY ultracode-free launch, #445),
+# `fullscreen` (claude-fullscreen — continue-or-new + skip-perms + model +
+# ultracode, PLUS CLAUDE_CODE_NO_FLICKER=1).
 #   CLAUDE_CODE_NO_FLICKER=1 : #376 REVERSED the `apply_managed_settings_defaults`
 #       pin from `"tui": "default"` (classic) to `"tui": "fullscreen"` fleet-wide
 #       (see that function's own docstring for the full history/tradeoff/citation)
@@ -6085,9 +6086,9 @@ def cmd_install(args):
     # ~/.bashrc`, no relaunch, no restart (a bashrc FUNCTION, by contrast, is
     # frozen in a shell's memory at startup forever, which is exactly how
     # ultracode kept resurrecting after #53). Ultracode can't live in
-    # settings.json (session-only, GH #64817) — only the `ultracode` mode
-    # (claude-ultracode) passes it, deliberate opt-in only (#53). effortLevel
-    # above is the persistent fallback for reasoning depth regardless of mode.
+    # settings.json (session-only, GH #64817) — the script passes it in every
+    # mode except `plain` (standing default, directive 2026-08-13, #445 —
+    # reversing #53); effortLevel above is the settings half of that default.
     try:
         changed = apply_ultracode_launcher()
         print(f"  Updated:   {CLAUDE_LAUNCH_SCRIPT_DEST} (claude launcher script — "

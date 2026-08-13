@@ -480,10 +480,13 @@ answer to "which issues share one round" — this ticket found no gap in either.
    inventing a second, parallel one. TRIVIAL members skip this sub-step entirely — no
    `Plan` dispatch, no extra cost, same one-paragraph design comment as today. For each
    DESIGN-HEAVY member: run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE for the whole
-   batch (the same gate every judgment dispatch runs — OPEN → `model: "fable"`; CLOSED → dispatch
-   the same `Plan` agent with the `model` override OMITTED, so it inherits the session's model —
-   never the banned `opus` alias, never sonnet for judgment), then dispatch ONE read-only
-   `subagent_type: "Plan"` agent per member asking
+   batch (the same gate every judgment dispatch runs). Gate OPEN → dispatch ONE read-only
+   `subagent_type: "Plan"` agent per member at `model: "fable"`; gate CLOSED → do NOT spend a new
+   gated dispatch (omitting the override would inherit the Fable main — exactly what a CLOSED gate
+   says there is no headroom for): hold the design synthesis in the main session itself (the
+   Fable-MAIN-at-CLOSED carve-out, `model-awareness.md`), grounding it via cheap read-only
+   collection — never the banned `opus` alias, never sonnet for judgment. The (gate-OPEN) `Plan`
+   dispatch asks
    for 2-3 candidate architectural approaches with trade-offs and a recommendation, grounded in a
    WHOLE-REPO view. Post the `Plan` agent's synthesis to the ticket via `gh issue comment <N>`
    IMMEDIATELY (`durable-decisions-to-tickets.md` — a design living only in this session dies at the

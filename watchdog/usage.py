@@ -242,14 +242,15 @@ def _human_reset(iso):
 
 
 # --------------------------------------------------------------------------- #
-# Fable budget gate — `airuleset.py fable-gate`. The 2026-07-03 model-tiering
-# policy escalates genuinely HARD judgment work to Fable 5 AUTOMATICALLY — but
-# the 2026-07-01 Fable-everywhere incident (limits tripped mid-work, user's work
-# stopped) must never repeat, so every automatic escalation is BUDGET-GATED:
-# Fable fires only while its weekly window (and the shared weekly) has headroom.
-# Reads the same usage cache the watchdog writes every ~15 min (never hits the
-# 429-prone endpoint). FAIL-SAFE: missing/stale/empty cache → CLOSED (Opus),
-# never a blind Fable burn.
+# Fable budget gate — `airuleset.py fable-gate`. Under the 2026-08-13
+# model-tiering policy (Opus 5 banned, #440) the gate guards the DEFAULT
+# judgment layer: every automatic Fable judgment dispatch is BUDGET-GATED so
+# the 2026-07-01 Fable-everywhere incident (limits tripped mid-work, user's
+# work stopped) can never repeat — Fable fires only while its weekly window
+# (and the shared weekly) has headroom. Reads the same usage cache the
+# watchdog writes every ~15 min (never hits the 429-prone endpoint).
+# FAIL-SAFE: missing/stale/empty cache → CLOSED (the work runs on Opus 4.8,
+# claude-opus-4-8), never a blind Fable burn.
 # --------------------------------------------------------------------------- #
 
 FABLE_GATE_PCT = 80            # default: escalate only below 80% used (leaves the
