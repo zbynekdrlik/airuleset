@@ -47,13 +47,43 @@ class TestReconcileManagedPlugins(TestCase):
         self.assertIn("superpowers@claude-plugins-official",
                       airuleset.MANAGED_PLUGINS)
 
-    def test_playwright_is_in_the_baseline(self):
-        # #158: Playwright is MANDATED by the rules (autonomous-verification,
-        # e2e-real-user-testing, post-deploy-verification, version-on-
-        # dashboard) as the browser-driving verification tool, but was only
-        # ever installed by hand — david@subdev had none at all.
+    def test_playwright_is_optional_not_baseline(self):
+        # #415 INVERTS #158: Playwright is no longer a force-enabled baseline
+        # plugin — it force-enabled a resident ~144MB headless Chrome on every
+        # box in every project. It moved to OPTIONAL_PLUGINS: installed +
+        # marketplace-registered everywhere, force-DISABLED in user scope,
+        # opted-in per-project via that project's own settings.json. The old
+        # `test_playwright_is_in_the_baseline` asserted the opposite; this is
+        # a deliberate policy inversion, justified in this test's own body.
+        self.assertNotIn("playwright@claude-plugins-official",
+                         airuleset.MANAGED_PLUGINS)
         self.assertIn("playwright@claude-plugins-official",
-                      airuleset.MANAGED_PLUGINS)
+                      airuleset.OPTIONAL_PLUGINS)
+
+    def test_optional_plugins_are_force_disabled_in_user_scope(self):
+        # #415: reconcile writes every OPTIONAL_PLUGINS key False (off by
+        # default) — this is what makes a fresh box start no playwright-mcp
+        # server, and what a per-project opt-in resolves ABOVE.
+        out = airuleset.reconcile_managed_plugins({})
+        for key in airuleset.OPTIONAL_PLUGINS:
+            self.assertFalse(out["enabledPlugins"][key])
+
+    def test_reconcile_flips_a_stale_optional_true(self):
+        # #415 headline acceptance: every already-pushed box carries a stale
+        # `playwright: true` from the pre-#415 force-enable regime. reconcile
+        # must actively FLIP it to False, not merely leave it — otherwise the
+        # inversion never takes effect on the exact fleet it exists to fix.
+        pw = "playwright@claude-plugins-official"
+        out = airuleset.reconcile_managed_plugins({"enabledPlugins": {pw: True}})
+        self.assertFalse(out["enabledPlugins"][pw])
+
+    def test_optional_plugins_never_overlap_the_baseline(self):
+        # #415 sanity: a key cannot be both force-enabled (MANAGED_PLUGINS)
+        # and force-disabled (OPTIONAL_PLUGINS) — the same invariant
+        # test_does_not_disable_the_managed_baseline pins for
+        # MANAGED_DISABLED_PLUGINS.
+        self.assertEqual(set(airuleset.OPTIONAL_PLUGINS)
+                         & set(airuleset.MANAGED_PLUGINS), set())
 
     def test_preserves_unrelated_keys_and_plugins(self):
         settings = {"model": "sonnet",
@@ -344,11 +374,23 @@ class TestPlaywrightBrowsers(TestCase):
     def test_populated_cache_dir_is_installed(self):
         self.assertTrue(airuleset._playwright_browsers_installed(self._populated_dir()))
 
-    def test_no_op_when_playwright_not_in_the_baseline(self):
+    def test_no_op_when_playwright_in_neither_tier(self):
+        # #415: the guard now keys on MANAGED_PLUGINS + OPTIONAL_PLUGINS, so
+        # a genuine no-op needs playwright absent from BOTH tiers.
         with m.patch.object(airuleset, "MANAGED_PLUGINS", ("superpowers@claude-plugins-official",)), \
+                m.patch.object(airuleset, "OPTIONAL_PLUGINS", ()), \
                 m.patch("subprocess.run") as run:
             airuleset.ensure_playwright_browsers(self._empty_dir())
         run.assert_not_called()
+
+    def test_installs_when_playwright_only_in_the_optional_tier(self):
+        # #415: playwright's real home is OPTIONAL now — the browser cache
+        # must still be provisioned so a project's one-line opt-in works.
+        with m.patch.object(airuleset, "MANAGED_PLUGINS", ("superpowers@claude-plugins-official",)), \
+                m.patch.object(airuleset, "OPTIONAL_PLUGINS", ("playwright@claude-plugins-official",)), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=0)) as run:
+            airuleset.ensure_playwright_browsers(self._empty_dir())
+        run.assert_called_once()
 
     def test_no_op_when_already_populated(self):
         with m.patch("subprocess.run") as run:
@@ -389,6 +431,12 @@ class TestMarketplaceSources(TestCase):
 
     def test_every_marketplace_used_by_the_baseline_has_a_known_source(self):
         for name in airuleset._marketplace_names_for(airuleset.MANAGED_PLUGINS):
+            self.assertIn(name, airuleset.MARKETPLACE_SOURCES)
+
+    def test_every_optional_marketplace_has_a_known_source(self):
+        # #415: reconcile registers marketplaces for OPTIONAL_PLUGINS too, so
+        # each optional plugin's marketplace must resolve to a real source.
+        for name in airuleset._marketplace_names_for(airuleset.OPTIONAL_PLUGINS):
             self.assertIn(name, airuleset.MARKETPLACE_SOURCES)
 
     def test_caveman_marketplace_also_has_a_known_source(self):
@@ -512,6 +560,26 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         self.assertLess(calls.index(add_calls[0]), calls.index(install_calls[0]),
                          "marketplace add must run BEFORE the first install attempt")
 
+    def test_optional_plugins_are_still_installed(self):
+        # #415: an OPTIONAL plugin is force-disabled in user scope but MUST
+        # still be installed (so a project's one-line opt-in needs no install
+        # step). A fresh box with no registry installs every OPTIONAL key.
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stdout="", stderr="")
+
+        d = self._empty_claude_dir()
+        settings_path = d / "settings.json"
+        with m.patch.object(airuleset, "CLAUDE_DIR", d), \
+                m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
+                m.patch("subprocess.run", side_effect=fake_run):
+            airuleset.setup_managed_plugins()
+        installed = {c[3] for c in calls if c[:3] == ["claude", "plugin", "install"]}
+        for key in airuleset.OPTIONAL_PLUGINS:
+            self.assertIn(key, installed)
+
     def test_a_failed_marketplace_registration_skips_the_install_and_fails(self):
         calls = []
 
@@ -537,7 +605,9 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
 
     def test_already_built_plugins_never_call_marketplace_add(self):
         d = Path(tempfile.mkdtemp())
-        _write_plugin_registry(d, airuleset.MANAGED_PLUGINS)
+        # #415: setup installs BOTH tiers, so both must be registry-built for
+        # the no-marketplace-add fast path.
+        _write_plugin_registry(d, airuleset.MANAGED_PLUGINS + airuleset.OPTIONAL_PLUGINS)
         settings_path = d / "settings.json"
         playwright_cache = Path(tempfile.mkdtemp())
         (playwright_cache / "chromium-1234").mkdir()
@@ -612,7 +682,9 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         # is never called, matching the sibling
         # test_already_built_plugins_never_call_marketplace_add.
         d = Path(tempfile.mkdtemp())
-        _write_plugin_registry(d, airuleset.MANAGED_PLUGINS)
+        # #415: both tiers must be registry-built to reach the no-subprocess
+        # fast path this test asserts.
+        _write_plugin_registry(d, airuleset.MANAGED_PLUGINS + airuleset.OPTIONAL_PLUGINS)
         settings_path = d / "settings.json"
         settings_path.write_text("{not valid json")
         playwright_cache = Path(tempfile.mkdtemp())
@@ -657,10 +729,11 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         install_calls = [c for c in calls if c[:3] == ["claude", "plugin", "install"]]
         installed_keys = {c[3] for c in install_calls}
         self.assertEqual(
-            installed_keys, set(airuleset.MANAGED_PLUGINS),
+            installed_keys,
+            set(airuleset.MANAGED_PLUGINS) | set(airuleset.OPTIONAL_PLUGINS),
             "a settings-enabled + registry-absent plugin must trigger a "
             "real install, even with a stale cache on disk and settings."
-            "json already saying enabled")
+            "json already saying enabled (#415: both tiers are installed)")
 
 
 class TestCmdInstallFailsLoudlyOnPluginFailure(TestCase):
