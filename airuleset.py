@@ -208,7 +208,7 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
                "subagent-type-discipline", "verify-issue-still-valid", "investigate-existing-first",
                "post-deploy-verification", "regression-test-first", "ci-push-discipline",
                "comprehensive-logging", "verify-launched-work-liveness", "pr-merge-policy",
-               "deliver-files-as-urls", "notification-mechanics",
+               "deliver-files-as-urls", "notification-mechanics", "cloudflare-api-tokens",
                # #95 item 9 (2026-08-09) — the STREDNÁ CESTA split of
                # user-questions-slovak.md: long template/examples moved
                # VERBATIM to this hidden, on-demand skill, auto-loaded via

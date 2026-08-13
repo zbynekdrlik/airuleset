@@ -71,8 +71,8 @@ class TestLoadBearingIncidentKnowledge(TestCase):
 
     def test_persist_to_secrets_via_secret_channel(self):
         t = read(SKILL)
-        self.assertIn("~/.secrets/cloudflare-", t)
-        self.assertIn("secret request cloudflare-", t)
+        self.assertIn("~/.secrets/cloudflare-", t)   # on-disk file keeps hyphens
+        self.assertIn("secret request cloudflare_", t)  # vault NAME is underscore-only
 
 
 if __name__ == "__main__":
