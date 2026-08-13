@@ -61,7 +61,7 @@
     "tests/test_gk_request.py": 1442,
     "tests/test_global_rules_symlink.py": 129,
     "tests/test_goal_arm.py": 599,
-    "tests/test_goal_backlog_proof.py": 902,
+    "tests/test_goal_backlog_proof.py": 953,
     "tests/test_goal_indicator_above_box.py": 96,
     "tests/test_goal_strictness_clause.py": 51,
     "tests/test_goal_sweep.py": 672,
