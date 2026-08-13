@@ -3572,28 +3572,35 @@ class TestManagedSettingsDefaults(TestCase):
 
 
 class TestManagedModelDefault(TestCase):
-    """apply_managed_settings_defaults also sets `model = MANAGED_MODEL`
-    (2026-07-25 cost-fix package, #37): Opus 5 is the default main + judgment
-    tier (model-awareness.md); this is the SAME unconditional-managed-default
-    treatment already applied to effortLevel/disableAgentView/tui, so every
-    managed user on every box gets it on the next install."""
+    """apply_managed_settings_defaults also sets `model = MANAGED_MODEL`:
+    since the 2026-08-13 user directive Opus 5 is BANNED everywhere and the
+    managed MAIN default is Fable 5 (model-awareness.md ACTIVE policy);
+    this is the SAME unconditional-managed-default treatment already
+    applied to effortLevel/disableAgentView/tui, so every managed user on
+    every box gets it on the next install — which is exactly what makes the
+    ban self-healing (a stale Opus 5 leftover in settings.json is
+    overwritten on the next push, the live dev1 regression the ticket's
+    STEP 0 validation observed)."""
 
     def test_sets_managed_model(self):
         out = airuleset.apply_managed_settings_defaults({})
         self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
 
-    def test_managed_model_is_opus_5_with_1m_suffix(self):
+    def test_managed_model_is_fable_5_with_1m_suffix(self):
         # the `[1m]` suffix is a DELIBERATE part of the managed id — it keeps
         # the 1M context window (verified against real `lastModelUsage`
         # entries in ~/.claude.json, which key the 1M variant as a distinct
-        # `<model>[1m]` id, e.g. `claude-opus-4-8[1m]`) so this change never
-        # also shrinks context and re-triggers context-loss regressions.
-        self.assertEqual(airuleset.MANAGED_MODEL, "claude-opus-5[1m]")
+        # `<model>[1m]` id) so this change never also shrinks context and
+        # re-triggers context-loss regressions.
+        self.assertEqual(airuleset.MANAGED_MODEL, "claude-fable-5[1m]")
 
     def test_overrides_an_existing_model_choice(self):
         # unconditional, like effortLevel/disableAgentView/tui — a managed
-        # box always gets the managed default on the next install.
-        out = airuleset.apply_managed_settings_defaults({"model": "claude-fable-5"})
+        # box always gets the managed default on the next install. The input
+        # here is the BANNED Opus 5 id deliberately: a box a prior session
+        # left parked on it must self-heal to the managed Fable default.
+        out = airuleset.apply_managed_settings_defaults(
+            {"model": "claude-opus-5[1m]"})
         self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
 
     def test_idempotent(self):
