@@ -312,8 +312,14 @@ class TestCampaignPidAncestryWalk(TestCase):
 
     def setUp(self):
         sys.path.insert(0, str(REPO))
-        import airuleset
-        self.airuleset = airuleset
+        # #433 cluster K: the lock cluster lives in cli_autopilot_lock.py now.
+        # `self.airuleset` binds the NEW module so mock.patch.object on the
+        # cluster's own internals (_proc_parent_pid/_proc_comm/_pid_alive/
+        # _autopilot_lock_read) intercepts the bare-name calls inside the
+        # moved functions — patching the airuleset facade attr would no
+        # longer reach them (the moved bodies resolve in their own globals).
+        import cli_autopilot_lock
+        self.airuleset = cli_autopilot_lock
 
     def test_single_shell_layer_still_returns_grandparent(self):
         # the common case (unchanged from before): one ephemeral shell
@@ -367,8 +373,9 @@ class TestDiscoverAutopilotLockLitter(TestCase):
 
     def setUp(self):
         sys.path.insert(0, str(REPO))
-        import airuleset
-        self.airuleset = airuleset
+        # #433: patch target = the moved module (see TestCampaignPidAncestryWalk.setUp).
+        import cli_autopilot_lock
+        self.airuleset = cli_autopilot_lock
         self.scratch = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.scratch, ignore_errors=True)
 
@@ -584,8 +591,9 @@ class TestSweepAutopilotLockLitter(TestCase):
 
     def setUp(self):
         sys.path.insert(0, str(REPO))
-        import airuleset
-        self.airuleset = airuleset
+        # #433: patch target = the moved module (see TestCampaignPidAncestryWalk.setUp).
+        import cli_autopilot_lock
+        self.airuleset = cli_autopilot_lock
         self.scratch = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.scratch, ignore_errors=True)
         self.log_path = Path(self.scratch) / "sweep.log"
