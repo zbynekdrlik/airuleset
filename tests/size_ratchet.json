@@ -109,7 +109,7 @@
   "tests/test_question_footer_e2e.py": 198,
   "tests/test_question_gate_pipeline_race.py": 556,
   "tests/test_question_policy.py": 193,
-  "tests/test_question_prune.py": 389,
+  "tests/test_question_prune.py": 575,
   "tests/test_replay_backlog_marker_corpus.py": 60,
   "tests/test_replay_design_gate_commit_corpus.py": 109,
   "tests/test_review_dispatch_authority.py": 119,
