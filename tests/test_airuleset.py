@@ -3335,7 +3335,11 @@ class TestProseViolationsPrlessCompletion(TestCase):
                "✅ /review: clean — 0 🔴 0 🟡 0 🔵\n"
                "✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵\n"
                "✅ Lokálne overenie: testy + lint zelené (fork vetva david/kiosk)\n"
-               "✅ Hand-off: READY-FOR-REVIEW komentár na #1393 (dochádzkový kiosk) + karta\n\n"
+               "✅ Hand-off: READY-FOR-REVIEW komentár na #1393 (dochádzkový kiosk) + karta\n"
+               # The '✅ Výstup:' content-verification line became MANDATORY for
+               # every completion report (montalu3 0 € email incident) — a
+               # "genuinely clean" report now carries it by definition.
+               "✅ Výstup: kiosk obrazovka zobrazuje meno zamestnanca a čas 07:45\n\n"
                "---\n\n"
                "**Goal:** Dochádzkový kiosk pre výrobu.\n"
                "**What changed:** Kiosk beží na erp-test-david, odovzdané gatekeeperovi.\n\n"
