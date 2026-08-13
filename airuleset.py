@@ -6326,8 +6326,16 @@ def cmd_install(args):
     # willing to disturb a lock than cmd_autopilot_lock's own already-
     # shipped acquire() self-heal logic already is), not a human sign-off
     # gate. Cadence-gated the same way as every step above -- non-fatal,
-    # best-effort. Naturally idempotent -- becomes a permanent no-op once
-    # the backlog is cleared, since nothing new leaks after #385.
+    # best-effort. Idempotent for its ACTIONS (never re-removes what is
+    # already gone), but NOT a full no-op even once the reclaimable
+    # backlog is cleared -- a real fraction of pre-#385 rows is
+    # PERMANENTLY unreclaimable by this discriminator (a lock file whose
+    # recorded holder pid coincides with a long-lived system pid like 1,
+    # or a legacy directory-shaped lock that is not empty) and keeps
+    # getting re-discovered and re-skipped every 24h forever; the sweep's
+    # own logger (#409 review finding 2) deliberately does NOT write a
+    # line for those routine skips, so this residual cost stays a cheap,
+    # silent re-scan rather than an unbounded log.
     try:
         lock_sweep_results = sweep_autopilot_lock_litter()
         lock_removed = [r for r in lock_sweep_results if r.get("removed")]
@@ -13926,6 +13934,19 @@ def cmd_autopilot_lock(args):
 # read as "alive" (a false negative, i.e. a harmless skip), never the
 # reverse (a truly-alive holder's pid cannot spontaneously read as dead via
 # os.kill(pid, 0) unless it has genuinely exited).
+#
+# One honest caveat on that "never the reverse" claim (#409 review finding
+# 8): `acquire()` holds an flock on the `.mutex` sibling across its whole
+# check-then-write critical section; this sweep is serialized against
+# NOTHING, and `Path.write_text()` (acquire's own write) is non-atomic
+# (truncate-then-write) -- so a truly-alive holder mid-write could in
+# principle be caught with an EMPTY or partially-written lock file, which
+# `_autopilot_lock_read` reads as `{}` and `_pid_alive(None)` reads as
+# dead. The window is a handful of microseconds and needs a genuinely
+# concurrent acquire on the EXACT same repo; the `min_age_s` floor above
+# (default 1h) makes it vanishingly unlikely in practice, but the
+# invariant is "PID reuse is the only false-negative source" for the
+# STEADY-STATE case, not an absolute guarantee against every race.
 
 AUTOPILOT_LOCK_LITTER_LOG_PATH = CLAUDE_DIR / "autopilot-lock-litter-sweep.log"
 AUTOPILOT_LOCK_LITTER_STATE_PATH = CLAUDE_DIR / "autopilot-lock-litter-sweep-state.json"
@@ -13991,6 +14012,7 @@ def discover_autopilot_lock_litter(lock_dir=None, now=None, min_age_s=None):
         (default 3600s, env AIRULESET_AUTOPILOT_LOCK_LITTER_MIN_AGE_S) --
         pure defense-in-depth on top of the discriminators above.
     """
+    import stat
     import tempfile as _tempfile
     import time as _time
     now = _time.time() if now is None else now
@@ -14045,7 +14067,16 @@ def discover_autopilot_lock_litter(lock_dir=None, now=None, min_age_s=None):
             continue
         age_s = now - st.st_mtime
         reason = None
-        if os.path.islink(p):
+        if st.st_uid != os.getuid():
+            # #409 review finding 6: /tmp is sticky-bit -- a foreign-owned
+            # artifact can never be unlinked by us anyway; refusing it here
+            # (instead of attempting-and-failing every sweep, forever) avoids
+            # permanent, unactionable "delete failed: Errno 1" churn on the
+            # shared subdev/gk boxes (3 managed users each).
+            kind = ("lock-symlink" if os.path.islink(p) else
+                   "lock-dir" if p.is_dir() else "lock")
+            reason = "owned by another user -- refused"
+        elif os.path.islink(p):
             kind = "lock-symlink"
             target = ldir / (name + "-real-target")
             if _too_recent(age_s):
@@ -14073,6 +14104,16 @@ def discover_autopilot_lock_litter(lock_dir=None, now=None, min_age_s=None):
             kind = "lock"
             if _too_recent(age_s):
                 reason = _age_msg(age_s)
+            elif not stat.S_ISREG(st.st_mode):
+                # #409 review finding 1: a FIFO/socket/device node matching
+                # this name pattern would hang _autopilot_lock_read()'s
+                # open()/read() FOREVER (a FIFO blocks waiting for a writer
+                # that never comes) -- proven live via an alarm-guarded
+                # probe. /tmp is world-writable+sticky, this sweep matches
+                # by NAME PREFIX ONLY, and cmd_install() runs it LIVE on
+                # every push -- refuse anything not a plain regular file
+                # before ever trying to read it.
+                reason = "not a regular file -- refused"
             else:
                 holder = _autopilot_lock_read(p)
                 if _pid_alive(holder.get("pid")):
@@ -14090,7 +14131,9 @@ def discover_autopilot_lock_litter(lock_dir=None, now=None, min_age_s=None):
             continue
         age_s = now - st.st_mtime
         reason = None
-        if _too_recent(age_s):
+        if st.st_uid != os.getuid():
+            reason = "owned by another user -- refused"
+        elif _too_recent(age_s):
             reason = _age_msg(age_s)
         elif lock_litter.get(stem) is False:
             reason = "base .lock still present and not litter -- refused"
@@ -14106,7 +14149,9 @@ def discover_autopilot_lock_litter(lock_dir=None, now=None, min_age_s=None):
             continue
         age_s = now - st.st_mtime
         reason = None
-        if _too_recent(age_s):
+        if st.st_uid != os.getuid():
+            reason = "owned by another user -- refused"
+        elif _too_recent(age_s):
             reason = _age_msg(age_s)
         elif p.is_symlink() or not p.is_dir():
             reason = "not a plain directory -- refused"
@@ -14124,6 +14169,19 @@ def discover_autopilot_lock_litter(lock_dir=None, now=None, min_age_s=None):
 
 
 def _log_autopilot_lock_litter_sweep_results(results, log_path, now, dry_run: bool):
+    """Append one line per row that ACTUALLY MATTERS -- #409 review finding
+    2: the pre-#385 backlog on a real box is DOMINATED by rows that are
+    permanently unreclaimable (a pid-1/agetty-pinned lock that can never
+    die, a non-empty legacy directory) -- measured live, ~2800 of ~14000
+    real rows on one box alone. Logging every routine "not litter, refused"
+    SKIP would re-write the IDENTICAL line for those rows every 24h sweep,
+    forever, on every managed box, growing this file without bound (the
+    module's own claim that the sweep "becomes a permanent no-op" is true
+    only of its ACTIONS, never of a naive unbounded log). A genuine ERROR
+    (could not stat/list the directory) and a delete that discovery
+    cleared but the delete call itself then failed on ARE still logged --
+    those are the only two shapes worth a human ever reading this file
+    for."""
     import time as _time
     lines = []
     ts = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(now))
@@ -14131,10 +14189,14 @@ def _log_autopilot_lock_litter_sweep_results(results, log_path, now, dry_run: bo
         if r.get("path") is None:
             lines.append("%s ERROR %s" % (ts, r.get("reason", "")))
             continue
-        if dry_run:
-            tag = "WOULD-REMOVE" if not r.get("reason") or "dry" in r.get("reason", "") else "SKIP"
-        else:
-            tag = "REMOVED" if r.get("removed") else "SKIP"
+        acted = (str(r.get("reason", "")).startswith("would remove")
+                if dry_run else bool(r.get("removed")))
+        failed_delete = (not dry_run and not r.get("removed")
+                        and str(r.get("reason", "")).startswith("delete failed"))
+        if not acted and not failed_delete:
+            continue
+        tag = ("WOULD-REMOVE" if dry_run else
+              ("REMOVED" if r.get("removed") else "SKIP"))
         lines.append("%s %s %s kind=%s -- %s" % (
             ts, tag, r.get("path"), r.get("kind"), r.get("reason", "")))
     if not lines:
@@ -14165,9 +14227,14 @@ def sweep_autopilot_lock_litter(lock_dir=None, dry_run: bool = False, now=None,
     Cadence-gated via its own state file, mirroring #315/#345/#355 exactly
     -- never leans on the 60s watchdog timer (FREEZE: no new job).
     `force=True` (the CLI's own manual invocation) or `dry_run=True`
-    always bypasses the gate. Naturally idempotent -- becomes a permanent
-    no-op once the pre-#385 backlog is cleared, since nothing new leaks
-    into the real system tempdir after #385."""
+    always bypasses the gate. Idempotent for its ACTIONS (never re-removes
+    what a prior sweep already removed); NOT a full no-op even once the
+    reclaimable backlog is cleared, since a real fraction of pre-#385 rows
+    (a pid-1-pinned lock, a non-empty legacy directory) is permanently
+    unreclaimable and keeps getting re-discovered -- see `_log_
+    autopilot_lock_litter_sweep_results` for how that residual stays a
+    cheap, silent re-scan instead of an unbounded log."""
+    import stat
     import time as _time
     now = _time.time() if now is None else now
     log_path = Path(log_path) if log_path else AUTOPILOT_LOCK_LITTER_LOG_PATH
@@ -14234,6 +14301,19 @@ def sweep_autopilot_lock_litter(lock_dir=None, dry_run: bool = False, now=None,
                     entry["reason"] = "no longer a symlink -- refused (re-checked)"
                     results.append(entry)
                     continue
+                # #409 review finding 7: re-verify the TARGET's emptiness too,
+                # not just symlink-ness -- a fresh writer could have started
+                # populating it since discovery.
+                target = Path(str(p) + "-real-target")
+                if target.is_dir():
+                    try:
+                        target_non_empty = any(target.iterdir())
+                    except OSError:
+                        target_non_empty = True   # can't confirm empty -- refuse
+                    if target_non_empty:
+                        entry["reason"] = "symlink target became non-empty -- refused (re-checked)"
+                        results.append(entry)
+                        continue
                 p.unlink()
             elif kind in ("lock-dir", "real-target"):
                 if p.is_symlink() or not p.is_dir():
@@ -14242,6 +14322,29 @@ def sweep_autopilot_lock_litter(lock_dir=None, dry_run: bool = False, now=None,
                     continue
                 p.rmdir()   # POSIX-atomic: raises on its own if non-empty
             elif kind == "mutex":
+                # #409 review finding 7: re-verify the base .lock's state
+                # too, not just delete unconditionally -- a fresh acquire()
+                # could have re-created the base lock (as a regular file
+                # with a live holder, the common shape) since discovery.
+                base = p.parent / p.name[: -len(".mutex")]
+                try:
+                    bst = os.lstat(base)
+                except OSError:
+                    bst = None
+                if bst is not None:
+                    if stat.S_ISREG(bst.st_mode):
+                        bholder = _autopilot_lock_read(base)
+                        if _pid_alive(bholder.get("pid")):
+                            entry["reason"] = "base .lock became alive -- refused (re-checked)"
+                            results.append(entry)
+                            continue
+                    else:
+                        # re-created as a symlink/directory shape -- a fresh
+                        # acquire raced in since discovery; refuse rather
+                        # than re-run the full classification here.
+                        entry["reason"] = "base .lock reappeared -- refused (re-checked)"
+                        results.append(entry)
+                        continue
                 p.unlink()
             else:
                 entry["reason"] = "unknown kind -- refused"

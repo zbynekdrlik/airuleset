@@ -1,6 +1,6 @@
 {
  "files": {
-  "airuleset.py": 14926,
+  "airuleset.py": 15029,
   "backlog_marker_gate.py": 90,
   "burn/__init__.py": 2339,
   "design_gate.py": 834,
@@ -22,7 +22,7 @@
   "tests/test_authority_profiles.py": 3190,
   "tests/test_autopilot_ci_resilience.py": 71,
   "tests/test_autopilot_dialog_default.py": 144,
-  "tests/test_autopilot_lock.py": 635,
+  "tests/test_autopilot_lock.py": 790,
   "tests/test_autopilot_master_skill.py": 202,
   "tests/test_backlog_marker_gate.py": 129,
   "tests/test_block_commit_without_design.py": 659,
@@ -161,7 +161,7 @@
  },
  "functions": {
   "airuleset.py::_notify_run_card": 266,
-  "airuleset.py::cmd_install": 401,
+  "airuleset.py::cmd_install": 409,
   "airuleset.py::cmd_notify": 292,
   "airuleset.py::cmd_push": 356,
   "airuleset.py::cmd_secret": 300,

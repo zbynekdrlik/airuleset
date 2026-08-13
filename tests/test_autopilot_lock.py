@@ -502,6 +502,80 @@ class TestDiscoverAutopilotLockLitter(TestCase):
         (Path(self.scratch) / "airuleset-something-else.lock").write_text("x")
         self.assertEqual(self._discover(), [])
 
+    def test_a_fifo_shaped_lock_is_refused_not_hung(self):
+        # #409 review finding 1: a FIFO/socket/device node matching this
+        # name pattern used to HANG FOREVER inside _autopilot_lock_read()'s
+        # open()/read() (a FIFO blocks waiting for a writer that never
+        # comes) -- proven live via a REAL SEPARATE subprocess with a hard
+        # wall-clock timeout (a `subprocess.run(..., timeout=8)` against the
+        # pre-fix code genuinely raised TimeoutExpired and had to be killed
+        # -- confirmed live during review, not merely reasoned about).
+        #
+        # An in-process SIGALRM guard was tried FIRST and rejected: a
+        # blocked open()/read() interrupted by SIGALRM raises
+        # InterruptedError/OSError from INSIDE _autopilot_lock_read()'s own
+        # `except Exception: return {}` -- so the alarm's own exception is
+        # SWALLOWED there, and the caller sees a fast, clean "not alive"
+        # result indistinguishable from "never hung at all". Assert
+        # STRUCTURALLY instead: the S_ISREG guard must short-circuit BEFORE
+        # _autopilot_lock_read is ever called on a non-regular-file path --
+        # this has zero timing dependency and cannot itself hang.
+        import os as _os
+        import time as _time
+        import unittest.mock as mock
+        fifo_path = Path(self.scratch) / "airuleset-autopilot-mmm.lock"
+        _os.mkfifo(str(fifo_path))
+        stamp = _time.time() - 7200
+        _os.utime(str(fifo_path), (stamp, stamp))
+
+        def _must_not_be_called(p):
+            raise AssertionError(
+                "_autopilot_lock_read must never be called on a non-regular "
+                "file -- the S_ISREG guard has to refuse it first")
+
+        with mock.patch.object(self.airuleset, "_autopilot_lock_read",
+                               side_effect=_must_not_be_called):
+            rows = self._discover()
+        fifo_rows = [r for r in rows if r.get("path") == str(fifo_path)]
+        self.assertEqual(len(fifo_rows), 1)
+        self.assertIsNotNone(fifo_rows[0].get("reason"))
+        self.assertIn("not a regular file", fifo_rows[0]["reason"])
+
+    def test_a_foreign_owned_lock_file_is_refused(self):
+        # #409 review finding 6: /tmp is sticky-bit -- a foreign-owned
+        # artifact can never be unlinked by this sweep's own uid anyway, so
+        # refusing it at DISCOVERY time (rather than attempting-and-failing
+        # every 24h sweep, forever) avoids permanent unactionable
+        # "delete failed" churn on the shared subdev/gk boxes (3 managed
+        # users each). Simulate "foreign owner" by patching os.getuid() to
+        # a value that can never match this real file's real uid.
+        import unittest.mock as mock
+        dp = dead_pid()
+        p = self._lock_file("nnn", {"pid": dp, "repo": "/tmp/x"})
+        with mock.patch.object(self.airuleset.os, "getuid", return_value=-1):
+            rows = self._discover()
+        lock_rows = [r for r in rows if r.get("path") == str(p)]
+        self.assertEqual(len(lock_rows), 1)
+        self.assertIn("owned by another user", lock_rows[0]["reason"])
+
+    def test_a_foreign_owned_mutex_is_refused(self):
+        import unittest.mock as mock
+        p = self._mutex("ooo")
+        with mock.patch.object(self.airuleset.os, "getuid", return_value=-1):
+            rows = self._discover()
+        mutex_rows = [r for r in rows if r.get("path") == str(p)]
+        self.assertEqual(len(mutex_rows), 1)
+        self.assertIn("owned by another user", mutex_rows[0]["reason"])
+
+    def test_a_foreign_owned_real_target_dir_is_refused(self):
+        import unittest.mock as mock
+        p = self._named_dir("airuleset-autopilot-ppp.lock-real-target", empty=True)
+        with mock.patch.object(self.airuleset.os, "getuid", return_value=-1):
+            rows = self._discover()
+        target_rows = [r for r in rows if r.get("path") == str(p)]
+        self.assertEqual(len(target_rows), 1)
+        self.assertIn("owned by another user", target_rows[0]["reason"])
+
 
 class TestSweepAutopilotLockLitter(TestCase):
     """sweep_autopilot_lock_litter() -- #409. Discovery already isolates
@@ -523,6 +597,26 @@ class TestSweepAutopilotLockLitter(TestCase):
         import time as _time
         p = Path(self.scratch) / ("airuleset-autopilot-%s.lock" % stem)
         p.write_text(json.dumps(payload))
+        old = _time.time() - age_s
+        _os.utime(p, (old, old))
+        return p
+
+    def _mutex(self, stem, age_s=7200):
+        import os as _os
+        import time as _time
+        p = Path(self.scratch) / ("airuleset-autopilot-%s.lock.mutex" % stem)
+        p.write_text("")
+        old = _time.time() - age_s
+        _os.utime(p, (old, old))
+        return p
+
+    def _named_dir(self, name, age_s=7200, empty=True):
+        import os as _os
+        import time as _time
+        p = Path(self.scratch) / name
+        p.mkdir()
+        if not empty:
+            (p / "x").write_text("x")
         old = _time.time() - age_s
         _os.utime(p, (old, old))
         return p
@@ -598,6 +692,55 @@ class TestSweepAutopilotLockLitter(TestCase):
         self.assertFalse(any(r.get("removed") for r in results))
         self.assertTrue((Path(self.scratch) / "airuleset-autopilot-hhh.lock").exists())
 
+    # --- #409 review finding 4: the mutex/lock-dir/real-target/lock-symlink
+    # DELETE branches had zero coverage -- mutation-confirmed to be no-ops
+    # that pass the whole file (M5/M6/M7/M9/M15/M17). Each test below drives
+    # a REAL (non-dry-run) sweep through one specific delete branch and
+    # asserts the artifact is actually gone, not merely that `removed` is
+    # truthy in the returned dict.
+
+    def test_removes_a_genuine_litter_mutex(self):
+        p = self._mutex("iii")   # no base .lock at all -- litter by definition
+        results = self._sweep()
+        mutex_rows = [r for r in results if r.get("kind") == "mutex"]
+        self.assertEqual(len(mutex_rows), 1)
+        self.assertTrue(mutex_rows[0].get("removed"))
+        self.assertFalse(p.exists(), "the mutex file must actually be gone")
+
+    def test_removes_an_empty_legacy_lock_dir(self):
+        p = self._named_dir("airuleset-autopilot-jjj.lock", empty=True)
+        results = self._sweep()
+        dir_rows = [r for r in results if r.get("kind") == "lock-dir"]
+        self.assertEqual(len(dir_rows), 1)
+        self.assertTrue(dir_rows[0].get("removed"))
+        self.assertFalse(p.exists(), "the empty legacy lock directory must actually be gone")
+
+    def test_removes_an_orphaned_empty_real_target_dir(self):
+        p = self._named_dir("airuleset-autopilot-kkk.lock-real-target", empty=True)
+        results = self._sweep()
+        target_rows = [r for r in results if r.get("kind") == "real-target"]
+        self.assertEqual(len(target_rows), 1)
+        self.assertTrue(target_rows[0].get("removed"))
+        self.assertFalse(p.exists(), "the orphaned empty real-target directory must actually be gone")
+
+    def test_removes_a_symlink_to_an_empty_real_target(self):
+        target = self._named_dir("airuleset-autopilot-lll.lock-real-target", empty=True)
+        link = Path(self.scratch) / "airuleset-autopilot-lll.lock"
+        link.symlink_to(target)
+        import os as _os
+        import time as _time
+        old = _time.time() - 7200
+        _os.utime(str(link), (old, old), follow_symlinks=False)
+        results = self._sweep()
+        symlink_rows = [r for r in results if r.get("kind") == "lock-symlink"]
+        self.assertEqual(len(symlink_rows), 1)
+        self.assertTrue(symlink_rows[0].get("removed"))
+        self.assertFalse(link.is_symlink(), "the symlink itself must actually be gone")
+        self.assertFalse(target.exists(),
+                         "its paired real-target directory is ALSO its own "
+                         "litter candidate (paired symlink confirmed litter) "
+                         "and must be swept in the same pass")
+
 
 class TestSweepAutopilotLocksCommand(TestCase):
     def test_registered_in_subcommands_table(self):
@@ -607,6 +750,15 @@ class TestSweepAutopilotLocksCommand(TestCase):
                       airuleset.cmd_sweep_autopilot_locks)
 
     def test_cli_dry_run_reports_without_deleting(self):
+        # #409 review finding 3: the original version of this test asserted
+        # only that the fixture file still exists and that "would be"
+        # appears SOMEWHERE in stdout -- both are true even if the CLI does
+        # NOTHING at all (an empty sweep's own summary line unconditionally
+        # reads "0 ... would be removed."). Mutation-confirmed: pointing
+        # `lock_dir` at a nonexistent path, or having discovery ignore
+        # AIRULESET_AUTOPILOT_LOCK_DIR entirely, both left the OLD
+        # assertions green. Assert the SPECIFIC path is named under a real
+        # "WOULD REMOVE" tag, and that the count is exactly 1.
         import json
         import os as _os
         import subprocess as _sp
@@ -626,7 +778,11 @@ class TestSweepAutopilotLocksCommand(TestCase):
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(p.exists(), "dry-run must never delete anything")
-        self.assertIn("would be", r.stdout.lower())
+        self.assertIn("WOULD REMOVE: %s" % p, r.stdout,
+                      "the specific candidate path must actually be named, "
+                      "not just the word 'would' appearing anywhere")
+        self.assertIn("1 autopilot-lock litter artifact(s) would be removed.",
+                      r.stdout)
 
 
 
