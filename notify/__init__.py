@@ -1503,17 +1503,26 @@ _CD_PREFIX_RE = re.compile(
     r"""^\s*cd\s+(?:"([^"]*)"|'([^']*)'|(\S+))\s*(?:&&|;)""")
 
 
-def resolve_work_cwd(cmd, cwd, run=None):
+def resolve_work_cwd(cmd, cwd, run=None, trigger_re=None):
     """The directory whose repo `cmd` actually operates on -- a `cd <path>
     &&`/`cd <path>;` that is the very FIRST statement of `cmd` overrides
     `cwd` (#187) when, and only when, that path is a real, resolvable git
-    repo AND `cmd` contains a `git commit` invocation somewhere. Never
-    guesses: no leading `cd`, no `git commit` anywhere in `cmd`, or a `cd`
-    target that isn't a git repo all fall through to `cwd` unchanged.
-    Anchoring to the command's own start (not "a cd preceded by any
-    boundary character anywhere") is deliberate -- see the module comment
-    for the adversarial-review history that shape closes."""
-    if isinstance(cmd, str) and cmd and _GIT_COMMIT_CMD_RE.search(cmd):
+    repo AND `cmd` contains a TRIGGERING invocation somewhere -- `git
+    commit` by default (`block-commit-without-design.sh`'s own use case),
+    or `trigger_re` when a DIFFERENT caller needs a different anchor (#436
+    -- `post-record-design-comment.sh` passes its own `gh issue comment`
+    trigger, since its whole command shape never contains `git commit` at
+    all). Never guesses: no leading `cd`, no trigger match anywhere in
+    `cmd`, or a `cd` target that isn't a git repo all fall through to `cwd`
+    unchanged. Anchoring to the command's own start (not "a cd preceded by
+    any boundary character anywhere") is deliberate -- see the module
+    comment for the adversarial-review history that shape closes; a custom
+    `trigger_re` changes ONLY which command this function bothers to
+    resolve for -- the SAME anchored, injection-hardened
+    `_CD_PREFIX_RE.match()` (string-start only) runs for every caller,
+    unchanged."""
+    trigger = trigger_re if trigger_re is not None else _GIT_COMMIT_CMD_RE
+    if isinstance(cmd, str) and cmd and trigger.search(cmd):
         m = _CD_PREFIX_RE.match(cmd)
         if m:
             path = m.group(1) or m.group(2) or m.group(3) or ""
