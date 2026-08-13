@@ -1270,5 +1270,71 @@ class TestTrivialTriageArchitectureExemption(_Base):
         self.assertIn("Architekt", reason)
 
 
+# --------------------------------------------------------------------------- #
+# #436 -- cwd resolution mismatch vs block-commit-without-design.sh. A worker
+# dispatched with session cwd = repo A, running
+# `cd /path/to/repo-B && gh issue comment N --body "..."`, must have its
+# marker written under repo B's key (the repo the comment is actually
+# posted against), not repo A's (the payload's static cwd) -- exactly what
+# block-commit-without-design.sh's OWN #187/#220 `notify.resolve_work_cwd`
+# resolution already does for the READER side; this hook is the WRITER
+# side, and used to resolve `repo_key`/the verification `gh issue view`
+# subprocess cwd from the raw payload cwd alone.
+# --------------------------------------------------------------------------- #
+
+class TestRepoResolvedFromInlineCdPrefix(_Base):
+
+    def _other_repo(self, remote="https://github.com/zbynekdrlik/otherrepo.git"):
+        other = Path(tempfile.mkdtemp(prefix="airuleset-designhook-other-"))
+        self.addCleanup(shutil.rmtree, other, True)
+        _git(other, "init", "-q", "-b", "main")
+        _git(other, "remote", "add", "origin", remote)
+        return other
+
+    def marker_in(self, repo, issue, kind="design"):
+        os.environ["HOME"] = str(self.home)
+        return dg.read_marker(repo, issue, kind)
+
+    def test_marker_written_under_the_cd_target_repo(self):
+        other = self._other_repo()
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/otherrepo/issues/61#issuecomment-101",
+        }])
+        cmd = 'cd %s && gh issue comment 61 --body "x"' % other
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(
+            self.marker_in("otherrepo", 61),
+            "the marker must be written under the cd TARGET repo's key")
+        self.assertIsNone(
+            self.marker_in("airuleset", 61),
+            "the marker must NOT be written under the stale payload-cwd repo")
+
+    def test_no_cd_prefix_still_resolves_from_payload_cwd_unchanged(self):
+        # no `cd` anywhere in the command -- must behave exactly as before.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/62#issuecomment-102",
+        }])
+        r = self.run_hook('gh issue comment 62 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(62))
+
+    def test_cd_to_a_non_repo_path_falls_back_to_payload_cwd(self):
+        # a `cd` to something that is NOT a git repo must never be trusted --
+        # falls back to the payload cwd, same as having no `cd` at all.
+        not_a_repo = Path(tempfile.mkdtemp(prefix="airuleset-designhook-notrepo-"))
+        self.addCleanup(shutil.rmtree, not_a_repo, True)
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/63#issuecomment-103",
+        }])
+        cmd = 'cd %s && gh issue comment 63 --body "x"' % not_a_repo
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(63))
+
+
 if __name__ == "__main__":
     main()
