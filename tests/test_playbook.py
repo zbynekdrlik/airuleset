@@ -39,24 +39,33 @@ class TestPlaybookReviewSkill(TestCase):
 
 class TestPlaybookStopHook(TestCase):
     HOOK = str(REPO / "hooks" / "stop-check-playbook-review.sh")
-    RETRY_FILE = "/tmp/airuleset-playbook-block-test-pb"
 
+    # A UNIQUE session id per test (same idiom as the prose-gate test files):
+    # the hook keys its retry counter on the session id, so the old FIXED
+    # "test-pb" id shared ONE /tmp counter file across every concurrently
+    # running instance of this suite — a parallel run (or a review agent
+    # running the tests) could leave the counter at the cap, making the hook
+    # exit with EMPTY stdout here and fail the block assertion (live flake,
+    # 2026-08-13, full-suite run alongside a concurrent test runner).
     def setUp(self):
         import os
+        import uuid
+        self._sid = "test-pb-%s" % uuid.uuid4().hex[:12]
+        self._retry_file = "/tmp/airuleset-playbook-block-%s" % self._sid
         try:
-            os.remove(self.RETRY_FILE)
+            os.remove(self._retry_file)
         except FileNotFoundError:
             pass
 
     def tearDown(self):
         import os
         try:
-            os.remove(self.RETRY_FILE)
+            os.remove(self._retry_file)
         except FileNotFoundError:
             pass
 
     def _run(self, msg):
-        payload = json.dumps({"last_assistant_message": msg, "session_id": "test-pb"})
+        payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid})
         return subprocess.run(["bash", self.HOOK], input=payload,
                               capture_output=True, text=True)
 

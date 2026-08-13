@@ -28,6 +28,8 @@ Checking that a process is running, an API returns 200, or a page loads is NOT v
 - If you fixed a data flow → send data in, verify it arrives at the destination with correct values.
 - If you modified a form → submit it and check the backend received the correct data.
 
+**Mechanical anchor (#446 — this discipline provably failed as prose):** montalu3 (2026-08-13) shipped order-status notification emails with 0 € prices everywhere — only send/delivery was verified, never the RENDERED content, though the sent mail was readable from the DB. The report-level trace is therefore MANDATORY and hook-enforced: every `## ✅ Work Complete` report carries `✅ Výstup: <concrete observed values read back from the real artifact>` (or an explicit `n/a — <prečo>` when the work truly has no user-facing output) — see `completion-report.md` (Hard rules); `stop-check-prose-violations.sh` blocks a report without it, with a value-free line, or with an `n/a` contradicting the report's own 🌐/📱 surface.
+
 #### Verification protocol
 
 After CI deploys to a target machine:

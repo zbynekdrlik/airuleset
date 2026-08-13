@@ -1063,6 +1063,7 @@ if [ "$IS_COMPLETION_SIGNAL" = "1" ] && [ "$IS_COMPLETION_HEADING" = "0" ]; then
     echo "    ✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵" >&2
     echo "    ✅ Deploy: <verified behavior on live target>   (omit if no deploy)" >&2
     echo "    ✅ Regression test: <path>:<line> — RED <sha>, GREEN <sha>   (bug-fix only)" >&2
+    echo "    ✅ Výstup: <konkrétne hodnoty odčítané z reálneho artefaktu> | n/a — <prečo>   (ALWAYS)" >&2
     echo "" >&2
     echo "    ---" >&2
     echo "" >&2
@@ -1151,6 +1152,91 @@ if [ "$IS_COMPLETION" = "1" ]; then
             echo "    ✅ Regression test: <test_path>:<line> — failed before fix (<test_sha>), passes after fix (<fix_sha>)" >&2
             echo "  See regression-test-first.md and completion-report.md." >&2
             add_hard "Missing ✅ Regression test: <path>:<line> — RED <sha>, GREEN <sha> line on bug-fix PR"
+        fi
+    fi
+
+    # The mandatory '✅ Výstup:' output-content verification line — the montalu3
+    # incident (2026-08-13): order-status notification emails shipped with 0 €
+    # prices everywhere; only SEND/DELIVERY was verified, never the RENDERED
+    # content, although the sent mail was readable from the DB. The prose rule
+    # (autonomous-verification.md, "liveness is not verification") provably
+    # failed, so the report-level trace is MECHANICAL now — same family as the
+    # '✅ Regression test:' check above. The line is UNCONDITIONAL for every
+    # completion report (heading, signal and PR-less routes alike): the hook
+    # cannot judge whether the work produced a user-facing artifact — only the
+    # agent can — so the CLASSIFICATION itself must be visible and conscious:
+    # either concrete OBSERVED values read back from the real artifact, or an
+    # explicit 'n/a — <prečo>'. Fail directions per the #194 taxonomy above:
+    # the presence probe is a REQUIRED-FIELD msg_has (fail OPEN — an
+    # unevaluable check never becomes an accusation); the substance and
+    # n/a-vs-🌐 contradiction probes only ever fire on POSITIVELY obtained
+    # evidence (a msg_lines failure skips them, msg_missing's unknown skips
+    # the contradiction). LC_ALL=C.UTF-8 is forced on every grep whose
+    # pattern carries a diacritic ('Výstup' — the '-i' fold next to a
+    # multibyte char is locale-dependent under a bare C locale, the same
+    # lesson the Slovak detectors above already encode).
+    VYSTUP_RX='✅[[:space:]]*\**[[:space:]]*(v[ýy]stup|output)[[:space:]]*\**[[:space:]]*:'
+    HAS_VYSTUP=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "$VYSTUP_RX" && echo 1 || echo 0)
+    if [ "$HAS_VYSTUP" = "0" ]; then
+        echo "VIOLATION: Work Complete report missing the '✅ Výstup:' content-verification line — required on EVERY report. Work that produced/changed a user-facing OUTPUT artifact (email, document, render, UI screen, notification, report) must cite CONCRETE OBSERVED VALUES read back from the REAL artifact — never 'sent OK'/'delivered'/'funguje' (that is liveness, not content — the montalu3 0 € email incident). Work with NO user-facing output states the explicit n/a form instead:" >&2
+        echo "  Required line (one of):" >&2
+        echo "    ✅ Výstup: email obj. 2041 — cena 12,50 €, mena CZK, zákaznícke číslo zvýraznené v hlavičke" >&2
+        echo "    ✅ Výstup: n/a — čisto interná zmena hooku, žiadny user-facing artefakt" >&2
+        echo "  See completion-report.md (Hard rules) and autonomous-verification.md." >&2
+        add_hard "Missing ✅ Výstup: line — cite concrete observed values read back from the real artifact, or an explicit 'n/a — <prečo>'"
+    else
+        # Line present — judge its SUBSTANCE, but only on positively obtained
+        # text: a msg_lines failure leaves VYSTUP_LINE empty and every probe
+        # below is skipped (never an accusation built on an unevaluable read).
+        # Selection is LINE-ANCHORED first (adversarial review of this check,
+        # F2): a quoted MENTION of the template earlier in the message — e.g.
+        # prose narrating this hook's own stderr guidance, "`✅ Výstup: n/a —
+        # <prečo>`", before the rewritten report — sits mid-line behind a
+        # backtick and must not be the line the substance/contradiction probes
+        # judge, or a mention converts into a fail-CLOSED accusation against a
+        # report whose REAL line is fine. The unanchored fallback keeps the
+        # probes alive for an indented/prefixed real line; the presence probe
+        # above deliberately stays unanchored raw-MSG (fail-open: a mention
+        # can only make a missing line look present, never accuse).
+        VYSTUP_LINE=""
+        if _VYSTUP_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "^[[:space:]]*${VYSTUP_RX}"); then
+            VYSTUP_LINE=$(head -1 <<<"$_VYSTUP_LINES")
+        fi
+        if [ -z "$VYSTUP_LINE" ]; then
+            if _VYSTUP_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "$VYSTUP_RX"); then
+                VYSTUP_LINE=$(head -1 <<<"$_VYSTUP_LINES")
+            fi
+        fi
+        if [ -n "$VYSTUP_LINE" ]; then
+            VYSTUP_NA=0
+            if LC_ALL=C.UTF-8 msg_has "$VYSTUP_LINE" -qiE "${VYSTUP_RX}[[:space:]]*n/a[[:space:]]*(—|–|-)+[[:space:]]*[^[:space:]]"; then
+                VYSTUP_NA=1
+            fi
+            if [ "$VYSTUP_NA" = "1" ]; then
+                # 'n/a' claims the work has NO user-facing output — a report
+                # whose own 🌐/📱 lines present a user-clickable surface
+                # contradicts that claim by construction (completion-report.md
+                # reserves those markers for THIS work's own user-facing
+                # surfaces). The accusation fires only on a POSITIVE 🌐/📱
+                # sighting: msg_missing resolves unknown as "lacks it", so an
+                # unevaluable check skips, never accuses.
+                if ! msg_missing "$MSG" -qE "^[[:space:]]*(🌐|📱)"; then
+                    echo "VIOLATION: '✅ Výstup: n/a' contradicts this report's own 🌐/📱 line(s) — the report itself presents a user-clickable surface, so the work HAS a user-facing output. Open that live surface, read real values from it (rendered page content, UI screen values, the version label) and cite them on the Výstup line instead of n/a." >&2
+                    add_hard "✅ Výstup: n/a while the report lists a 🌐/📱 user-facing surface — read real observed values from that live surface instead"
+                fi
+            else
+                # Value floor: a genuine read-back essentially always carries a
+                # digit (price, order number, version, count) or a quoted span
+                # (an observed heading/label) — 'odoslané OK' carries neither.
+                # A bare 'n/a' with no reason lands here too (the n/a branch
+                # above requires the dash + a stated reason). Alternation of
+                # literal quote characters, never a bracket class — a multibyte
+                # char inside [] matches per-BYTE under a bare C locale.
+                if ! LC_ALL=C.UTF-8 msg_has "$VYSTUP_LINE" -qE '[0-9]|"|„|“|”|«|»|‚|‘|’|'\'; then
+                    echo "VIOLATION: The '✅ Výstup:' line carries no concrete observed value — a real read-back from the artifact has a number (cena, číslo objednávky, verzia, počet) or a quoted span; 'odoslané OK'/'delivered'/'funguje' is liveness, not content. Open the REAL artifact (the sent email from the DB, the rendered document, the live UI screen) and cite what you actually SAW — the values must be ON the '✅ Výstup:' line itself (one line; a continuation line below it is not scanned). If the work truly has no user-facing output, write the explicit form '✅ Výstup: n/a — <prečo>'." >&2
+                    add_hard "✅ Výstup: line is value-free — cite concrete observed values (numbers/quoted text) read from the real artifact, or an explicit 'n/a — <prečo>'"
+                fi
+            fi
         fi
     fi
 
