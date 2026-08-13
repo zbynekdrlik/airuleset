@@ -1,6 +1,6 @@
 {
  "files": {
-  "airuleset.py": 14492,
+  "airuleset.py": 14510,
   "backlog_marker_gate.py": 90,
   "burn/__init__.py": 2339,
   "design_gate.py": 834,
@@ -15,7 +15,7 @@
   "tests/_goal_arm_helpers.py": 176,
   "tests/_hook_state_cleanup.py": 42,
   "tests/conftest.py": 110,
-  "tests/test_airuleset.py": 14215,
+  "tests/test_airuleset.py": 14237,
   "tests/test_architecture_first_414.py": 120,
   "tests/test_ask_before_assuming.py": 46,
   "tests/test_ask_before_assuming_dropped_rows.py": 576,
