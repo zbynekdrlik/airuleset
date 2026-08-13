@@ -497,6 +497,84 @@ class TestStaleMsgfileQuarantine(_Base):
         self.assertNotIn("quarantin", r.stderr.lower())
 
 
+# --------------------------------------------------------------------------- #
+# #431: EVERY test above seeds msg.txt INSIDE self.repo -- accidentally never
+# exercising the shape the quarantine feature exists FOR: this project's own
+# gh-cli-recipes.md scratchpad convention, where the msgfile lives under
+# /tmp, entirely OUTSIDE any repo's working tree. `git ls-files
+# --error-unmatch` on an out-of-tree absolute path returns rc=128 ("fatal:
+# ...is outside repository..."), NOT rc=1 -- design_gate.is_git_tracked()
+# lumped that in with every other unmeasurable failure and defaulted to
+# "assume tracked, never quarantine", silently disabling the feature for
+# its own primary real-world use case (live incident, 2026-08-13, five days
+# after the #310 fix landed).
+# --------------------------------------------------------------------------- #
+
+class TestStaleMsgfileQuarantineOutsideRepoTree(_Base):
+
+    def setUp(self):
+        super().setUp()
+        self.scratch = Path(tempfile.mkdtemp(prefix="airuleset-commitgate-scratch-"))
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+
+    def _seed(self, content="STALE PRE-EXISTING CONTENT\n"):
+        p = self.scratch / "msg.txt"
+        p.write_text(content)
+        return p
+
+    def _compound(self, path):
+        return (
+            "cat > %s <<'EOF'\n"
+            "fix(hook): thing (#41) [green]\n"
+            "EOF\n"
+            "git commit -F %s" % (path, path)
+        )
+
+    def test_a_blocked_compound_quarantines_an_out_of_tree_scratch_path(self):
+        p = self._seed()
+        r = self.run_hook(self._compound(str(p)))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertFalse(
+            p.exists(),
+            "an out-of-tree /tmp scratchpad msgfile must be quarantined "
+            "exactly like an in-repo one (#431) -- is_git_tracked() must "
+            "not treat 'outside repository' (rc=128) as 'assume tracked'")
+        siblings = [f for f in self.scratch.iterdir()
+                    if f.name.startswith("msg.txt.stale-")]
+        self.assertEqual(len(siblings), 1, siblings)
+        self.assertEqual(siblings[0].read_text(), "STALE PRE-EXISTING CONTENT\n")
+
+    def test_the_block_message_names_the_out_of_tree_quarantine(self):
+        p = self._seed()
+        r = self.run_hook(self._compound(str(p)))
+        self.assertIn("msg.txt", r.stderr)
+        self.assertIn("quarantin", r.stderr.lower())
+
+    def test_a_bare_retry_against_the_quarantined_out_of_tree_path_fails_loud(self):
+        p = self._seed()
+        r = self.run_hook(self._compound(str(p)))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        env = dict(os.environ)
+        env.update({"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+                    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+        retry = subprocess.run(
+            ["git", "-C", str(self.repo), "commit", "--allow-empty", "-F", str(p)],
+            capture_output=True, text=True, env=env)
+        self.assertNotEqual(retry.returncode, 0,
+                             "a bare retry against the quarantined out-of-tree "
+                             "path must fail loud, never silently commit "
+                             "stale content")
+
+    def test_a_marked_issue_is_never_quarantined_since_no_block_occurs(self):
+        self.mark(41)
+        p = self._seed()
+        r = self.run_hook(self._compound(str(p)))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(p.exists())
+        self.assertEqual(p.read_text(), "STALE PRE-EXISTING CONTENT\n")
+
+
 class TestBypass(_Base):
 
     def test_bare_bypass_without_reason_is_rejected(self):
