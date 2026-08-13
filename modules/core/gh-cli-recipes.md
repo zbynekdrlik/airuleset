@@ -18,6 +18,18 @@ EOF
 gh issue create -t "Title" -F body.md          # or: -F - to read body from stdin
 ```
 
+**Bypassing `gh issue`/`gh pr` and calling bare `gh api` directly for a body/comment → the flag-case rule is DIFFERENT and easy to get backwards.** `gh issue create`/`gh pr create`/`gh issue comment`'s own `-F`/`--body-file` above is a DIFFERENT mechanism from bare `gh api`'s generic `-f`/`--raw-field` vs `-F`/`--field` flags. For `gh api`, lowercase `-f`/`--raw-field` is ALWAYS a literal string — it never reads a file, even when the value looks like `@path`. Only uppercase `-F`/`--field` has the magic `@filename` file-read behavior (`gh api --help`: "if the value starts with `@`, the rest of the value is interpreted as a filename to read the value from"). Mixing them up posts the LITERAL text `@/tmp/body.md` as the comment body instead of the file's contents, and nothing errors — it just silently posts garbage:
+
+```bash
+# WRONG — posts the literal string "@/tmp/body.md", not the file's contents
+gh api repos/OWNER/REPO/issues/N/comments -f body=@/tmp/body.md
+
+# RIGHT — -F reads the file and posts its actual content
+gh api repos/OWNER/REPO/issues/N/comments -F body=@/tmp/body.md
+```
+
+Always use uppercase `-F` for any `@file` reference passed to `gh api`; the one-letter difference between `-f` and `-F` is easy to typo and gh gives no warning either way.
+
 **Write the scratch body/message file in its OWN Bash call, never chained with the command that consumes it.** A PreToolUse hook can deny a WHOLE compound command atomically — if it fires on `cat > body.md <<'EOF' ... EOF && gh issue create -F body.md` (or the equivalent `git commit -F msg.txt` shape), the block prevents the `cat >` write from ever running too, so a leftover file from an earlier attempt survives untouched at that path. A LATER, differently-composed retry (e.g. a bare `gh issue create -F body.md` / `git commit -F msg.txt`, assuming the file is "already written") can then silently consume that stale content, since the retry's own command text carries none of the context the original write intended. Compose the file in its own call, confirm it, THEN run the consuming command in a second call.
 
 **Read fields back — THIS is where `--json` belongs:**

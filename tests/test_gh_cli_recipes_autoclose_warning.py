@@ -37,5 +37,28 @@ class TestAutoCloseNegationWarningIsDocumented(TestCase):
         self.assertIn("#N remains open", t)
 
 
+class TestBareGhApiFileFlagCaseIsDocumented(TestCase):
+    """#412: bare `gh api -f body=@file` silently posts the literal `@path`
+    string, not the file's content — only uppercase `-F` reads the file.
+    Locks the module's warning so a future edit can't silently drop it."""
+
+    def test_warns_that_lowercase_f_is_always_literal(self):
+        t = read()
+        self.assertIn("-f", t)
+        self.assertIn("--raw-field", t)
+        self.assertIn("ALWAYS a literal string", t)
+
+    def test_names_the_uppercase_f_magic_file_read(self):
+        t = read()
+        self.assertIn("-F", t)
+        self.assertIn("--field", t)
+        self.assertIn("magic `@filename` file-read", t)
+
+    def test_gives_a_bad_and_good_example(self):
+        t = read()
+        self.assertIn("gh api repos/OWNER/REPO/issues/N/comments -f body=@/tmp/body.md", t)
+        self.assertIn("gh api repos/OWNER/REPO/issues/N/comments -F body=@/tmp/body.md", t)
+
+
 if __name__ == "__main__":
     main()

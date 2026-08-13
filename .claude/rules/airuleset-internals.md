@@ -1299,3 +1299,41 @@ do.
 `run_once()` → a job-registry dispatch) is explicitly OUT of this ratchet's own scope and
 lands separately, after #403 (goal-machinery collapse) shrinks the file further first. The
 ratchet's whole job until then is simply: stop the wound from getting deeper.
+
+- **The COMMITTED `tests/size_ratchet.json` on disk does NOT match `save_snapshot()`'s
+  own `indent=2` — it was written with `indent=1` (verified byte-for-byte with `cat -A`:
+  level-1 keys get ONE leading space, level-2 keys get TWO, not the 2/4 an `indent=2` dump
+  would produce), and the mismatch predates any commit this repo's own `git log -p` can
+  find touching that indent value — `save_snapshot()` has said `indent=2` since #404's own
+  first commit.** Consequence for a HAND-RAISE (the sanctioned, human-only way to raise a
+  ceiling — `--update` structurally cannot, it only tightens): running the CANONICAL
+  writer (`save_snapshot()`, or its own `--update` CLI wrapper) to touch even ONE value
+  reformats the WHOLE file to `indent=2`, producing a 172+172-line diff for a genuine
+  5-value change — not a bug in the writer, just an honest consequence of the committed
+  baseline being stale relative to what the tool itself now produces. Hand-edit instead:
+  `text.count(old) == 1` assert + `str.replace(old, new, 1)` per changed `"key": value,`
+  line, preserving every other byte — this is what keeps the diff to exactly the changed
+  values and is a MORE minimal, more reviewable result than running the sanctioned tool
+  would give you. Before assuming a "canonical writer would give a cleaner diff" for ANY
+  future hand-edit-vs-tool question in this repo, actually run the tool once on a scratch
+  copy and diff its own output against the committed file — the two can silently disagree
+  on formatting long after the writer's own default changed.
+- **A mutation-testing finding that survives the shipped suite is not automatically a
+  missing TEST — trace whether the guarded state is even REACHABLE through the real call
+  path before writing a test for it.** #428-review MINOR-1 flagged
+  `is_trivial = triage_ok and dg.triage_class(body) == "trivial"` (post-record-design-
+  comment.sh) as having a surviving mutant (`triage_ok and` dropped). Tracing precisely:
+  `classify_design_comment`'s own `MIN_LEN` gate and `classify_triage_and_approaches`'s
+  `MIN_LEN_TRIAGE_TRIVIAL` gate are the SAME constant, checked on the SAME
+  `(body or "").strip()` string — so any body that clears the FIRST gate (a precondition
+  for the design-kind branch to run at all) has ALREADY cleared the second, making the
+  "too short, trivial" branch of `classify_triage_and_approaches` structurally
+  unreachable at that call site. Writing a HOOK-LEVEL test asserting that combined
+  scenario would misrepresent production reachability (it can't happen there) — the
+  honest fix was a direct, standalone unit test of `classify_triage_and_approaches`
+  itself (calling it directly, bypassing the hook's precondition entirely), closing a
+  real but SEPARATE gap: its sibling non-trivial-branch length floor already had a test,
+  the trivial branch's identical floor didn't. When a review's own proposed test scenario
+  turns out to be unreachable via the path it claims to guard, look one level down for
+  the genuinely-reachable gap the finding is actually pointing at, rather than writing a
+  misleading test to satisfy the finding's own (possibly slightly-off) framing verbatim.

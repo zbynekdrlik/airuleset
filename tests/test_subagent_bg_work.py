@@ -611,6 +611,48 @@ class TestMonitoringClaimReviewFixes(SubagentStopHookBase):
         self.assertIn("block", out.stdout)
 
 
+class TestFilenameMentionIsNotAMonitoringClaim(SubagentStopHookBase):
+    """#413: a final message that merely NAMES a file/path whose basename
+    contains the substring "monitoring" (e.g. `ci-monitoring.md`) must not
+    be misread as an unbacked ongoing-watch claim. `\\b` alone treats the
+    hyphen in "ci-monitoring.md" as a genuine word boundary (a hyphen is a
+    non-word character), so the OLD `\\bmonitor(ing|s)?\\b` matched a bare
+    file citation just as readily as a real claim -- live-triggered during
+    an adversarial-review dispatch for #405 (see the issue thread)."""
+
+    def test_ci_monitoring_md_filename_mention_does_not_block(self):
+        out = self._run([], last_assistant_message=
+                        "Reviewed ci-monitoring.md and confirmed the fix "
+                        "is correct, zero live background work outstanding")
+        self.assertNotIn("block", out.stdout)
+        self.assertEqual(out.returncode, 0)
+
+    def test_ci_monitoring_md_path_mention_does_not_block(self):
+        out = self._run([], last_assistant_message=
+                        "See modules/core/ci-monitoring.md for the polling "
+                        "recipe -- review complete, nothing outstanding")
+        self.assertNotIn("block", out.stdout)
+
+    def test_bare_skill_name_ci_monitor_mention_does_not_block(self):
+        out = self._run([], last_assistant_message=
+                        "Loaded the ci-monitor skill and applied its "
+                        "foreground poll loop -- review complete")
+        self.assertNotIn("block", out.stdout)
+
+    def test_genuine_claim_still_blocks_alongside_a_filename_mention(self):
+        # a filename mention in the SAME message must never mask a genuine
+        # claim elsewhere in it
+        out = self._run([], last_assistant_message=
+                        "Per ci-monitoring.md's own recipe, I am still "
+                        "monitoring the deploy to terminal")
+        self.assertIn("block", out.stdout)
+
+    def test_genuine_claim_ending_a_sentence_with_a_period_still_blocks(self):
+        # guard against the fix over-tightening on trailing punctuation
+        out = self._run([], last_assistant_message="Still watching.")
+        self.assertIn("block", out.stdout)
+
+
 class TestPostToolUseRecorder(unittest.TestCase):
     """post-record-subagent-bg-launch.sh — the synchronous ownership ledger.
     Live PostToolUse payload (captured 2026-07-24): subagent context carries

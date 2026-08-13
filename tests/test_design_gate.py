@@ -1249,6 +1249,23 @@ class TestClassifyTriageAndApproaches(unittest.TestCase):
         ok, reason = dg.classify_triage_and_approaches(body)
         self.assertFalse(ok, reason)
 
+    def test_trivial_short_body_fails_on_length_even_with_triage_line(self):
+        # #428-review MINOR-1: the sibling of the non-trivial short-body
+        # test above -- the trivial branch has the identical MIN_LEN_
+        # TRIAGE_TRIVIAL floor and needs its own coverage. Note this exact
+        # shape is structurally UNREACHABLE through post-record-design-
+        # comment.sh's real "design" kind branch (classify_design_comment's
+        # own MIN_LEN gate == MIN_LEN_TRIAGE_TRIVIAL, checked on the SAME
+        # stripped body, so a body short enough to hit this branch is
+        # already refused before the hook ever calls
+        # classify_triage_and_approaches at all) -- this is a direct unit
+        # test of the function's own standalone contract, not a claim
+        # about hook reachability.
+        body = "Triage: trivial"
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("too short", reason)
+
     def test_slovak_pristup_markers_are_recognized(self):
         body = (
             "Triage: netriviálne -- nová dlhožijúca komponenta.\n\n"
@@ -1275,6 +1292,50 @@ class TestClassifyTriageAndApproaches(unittest.TestCase):
     def test_none_body_fails(self):
         ok, reason = dg.classify_triage_and_approaches(None)
         self.assertFalse(ok)
+
+
+class TestTriageClass(unittest.TestCase):
+    """#428: `dg.triage_class(body)` -- just the `Triage:` class named in
+    `body` ("trivial"/"non-trivial"/None), no depth/length checks, unlike
+    `classify_triage_and_approaches`. Lets a caller (post-record-design-
+    comment.sh) decide whether the Architektúra: requirement applies
+    WITHOUT re-running the full depth classifier."""
+
+    def test_trivial_triage_line_classifies_trivial(self):
+        self.assertEqual(dg.triage_class(TRIVIAL_TRIAGE_BODY), "trivial")
+
+    def test_nontrivial_triage_line_classifies_nontrivial(self):
+        self.assertEqual(dg.triage_class(NONTRIVIAL_GOOD_BODY), "non-trivial")
+
+    def test_missing_triage_line_is_none(self):
+        self.assertIsNone(dg.triage_class(GOOD_SCOPED))
+
+    def test_triage_value_naming_neither_class_is_none(self):
+        body = GOOD_SCOPED + "\n\nTriage: unsure"
+        self.assertIsNone(dg.triage_class(body))
+
+    def test_negated_not_trivial_is_nontrivial_not_trivial(self):
+        # #414-review MAJOR-1's own negation case: "not trivial" must never
+        # read as trivial just because it contains the substring "trivial".
+        body = GOOD_SCOPED + "\n\nTriage: not trivial -- new daemon"
+        self.assertEqual(dg.triage_class(body), "non-trivial")
+
+    def test_dash_bullet_prefixed_triage_line_still_classifies(self):
+        body = GOOD_SCOPED + "\n\n- Triage: trivial"
+        self.assertEqual(dg.triage_class(body), "trivial")
+
+    def test_short_trivial_line_alone_still_classifies_trivial(self):
+        # triage_class has NO length floor -- classification is independent
+        # of classify_triage_and_approaches's own MIN_LEN_TRIAGE_TRIVIAL
+        # depth check, which is exactly why post-record-design-comment.sh
+        # needs a SEPARATE function for this decision.
+        self.assertEqual(dg.triage_class("Triage: trivial"), "trivial")
+
+    def test_empty_body_is_none(self):
+        self.assertIsNone(dg.triage_class(""))
+
+    def test_none_body_is_none(self):
+        self.assertIsNone(dg.triage_class(None))
 
 
 # --------------------------------------------------------------------------- #
