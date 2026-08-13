@@ -727,6 +727,16 @@ answer to "which issues share one round" — this ticket found no gap in either.
    > round), `airuleset.py sweep-worktrees [--dry-run]` bypasses the cadence gate on demand.
    > Then run the SAME per-member verification bullets as the serial-fallback box above, against
    > the ONE round PR/push instead of a per-worker one, before writing `docs/autopilot-log.md`.
+   > **Read back each surviving member's OUTPUT artifact BEFORE firing its card (#450).** When
+   > the ticket produced or changed a user-facing output (email content from the DB, a rendered
+   > document, live UI values), open the ACTUAL artifact and record CONCRETE observed values —
+   > price, currency, order number, heading — never send/delivery/liveness alone (the montalu3
+   > 0 € email class: emails "verified" delivered while every price rendered 0 €). This is the
+   > worktree-fleet sibling of CYCLE step 8's own read-back: on the DEFAULT dispatch YOU (the
+   > supervisor) compose the cards, not the worker, so the observed values must exist HERE. They
+   > feed the round report's mandatory `✅ Výstup:` line (`completion-report.md` — an explicit
+   > `n/a — <prečo>` when a member truly has no user-facing output), and each card fires only
+   > AFTER this read-back.
    > **Fire the per-ticket run-card yourself, for EACH surviving member, right after this ONE
    > integration lands** — `airuleset.py notify --run-card --repo <owner/name> --issue <N> --goal
    > "<plain goal>" --achieved "<plain what landed>" --version "<deployed version read from the
@@ -753,7 +763,7 @@ answer to "which issues share one round" — this ticket found no gap in either.
    each worker already confirmed locally before its branch was merged (its own PR gate in serial
    mode, its own local run in worktree mode — `agents/autopilot-worker.md`), never re-running the
    review yourself — and neither should the worker have, as a literal `Skill({skill: "review"})`/
-   `code-review` invocation either, per #363), `✅ Deploy: <version>`
+   `code-review` invocation either, per #363), `✅ Deploy: <version>`, `✅ Výstup: <observed values>` (RELAYS each worker's Step-4 read-back of its member's real OUTPUT artifact — an explicit `n/a — <prečo>` when a member has no user-facing output; `completion-report.md` blocks a report missing this line)
    — then Goal/What changed in plain language (covering every member of the round, not just one
    worker's batch), the 🌐 URL(s) from the workers' `--url`, and the PR title/link/merge SHA (the
    round's ONE PR, per the repo-flow policy) — terminating in `✅ DONE: <plain outcome, e.g.
