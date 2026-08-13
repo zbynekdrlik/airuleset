@@ -182,6 +182,23 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   verify it stays inside the worktree", that guard is correct — stay inside your own worktree,
   never `cd` out of it, and prefer the simplest command shape (a plain command, or a small
   literal-list loop) over anything the checker might read as ambiguous.
+- **Your scratchpad directory is SHARED across every sibling worker dispatched in the SAME fleet
+  round — it is NOT private to you (#432).** It is keyed off the SUPERVISOR's own top-level
+  conversation id, so every worker the supervisor dispatches this round inherits the identical
+  path verbatim, even though each of you runs in its own isolated git worktree. A conventionally
+  named scratch file (`gh-cli-recipes.md` itself recommends generic names like `body.md` /
+  `red-commit-msg.txt`) is a live collision hazard: two siblings writing-then-consuming the same
+  filename can silently clobber each other (real incident, presenter #683: one worker's commit
+  shipped under a sibling's unrelated message text). Before writing ANY temp/body/commit-message
+  file, create your OWN uniquely-namespaced subdirectory first — e.g. `mkdir -p
+  <scratchpad>/agent-<your-worktree-id>` (skip the extra `agent-` prefix if your worktree's own
+  directory name already starts with it) — and put every transient file for this dispatch under
+  it, never at the scratchpad's top level. This is the SAME-ROUND SIBLING half of a wider hazard
+  `.claude/rules/airuleset-internals.md` already documents from #325 (the scratchpad is ALSO
+  shared across DIFFERENT rounds and days, not just siblings in this one) — that rule's own
+  remedy (scope every filename with the issue number, and verify a scratch file's content
+  immediately before feeding it to `git commit -F`/`gh issue comment -F`) still applies fully
+  inside your own per-worker subdirectory, and is not replaced by having one.
 - **NEVER `push`, NEVER run `airuleset.py push`/`install`, NEVER fire your own run-card, NEVER
   open or merge the PR yourself.** All of that is INTEGRATION, and integration is the
   SUPERVISOR's job, done ONCE for the whole round after every worker in it has returned

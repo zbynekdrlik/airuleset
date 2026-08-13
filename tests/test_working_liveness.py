@@ -26,8 +26,10 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset
+from _hook_state_cleanup import sweep_session_files
 
 REPO = Path(airuleset.__file__).resolve().parent
 HOOK = REPO / "hooks" / "stop-check-working-liveness.sh"
@@ -58,16 +60,21 @@ def completed_shell(tid="bdone1"):
 
 
 class HookBase(unittest.TestCase):
-    def setUp(self):
-        import glob
-        self.addCleanup(lambda: [os.remove(f) for f in
-                                  glob.glob("/tmp/airuleset-working-liveness-block-t-*")])
-
     def _run(self, msg, background_tasks="__ABSENT__", session_id=None):
+        # #427: compute the sid HERE (rather than leaving payload() to mint
+        # one _run never sees) so cleanup can be scoped to the EXACT file
+        # this call may have written -- never a fixed-prefix wildcard that
+        # would also match a concurrently-running SIBLING process's retry
+        # file (every generated sid shares the same "t-" prefix). Swept via
+        # the SAME sweep_session_files() helper #202 already uses in 8
+        # other test files; safe to register once per distinct sid even
+        # across several _run() calls in one test (sweep is idempotent).
+        sid = session_id or ("t-" + uuid.uuid4().hex[:10])
+        self.addCleanup(sweep_session_files, sid)
         return subprocess.run(
             ["bash", str(HOOK)],
             input=payload(msg, background_tasks=background_tasks,
-                          session_id=session_id),
+                          session_id=sid),
             capture_output=True, text=True, timeout=15)
 
 
@@ -228,6 +235,60 @@ class TestRetryCapNeverWedgesASession(HookBase):
         r3 = self._run("⏳ WORKING: claim 3, false again", background_tasks=[],
                         session_id=sid)
         self.assertIn('"decision": "block"', r3.stdout)
+
+
+class TestCleanupIsScopedToOwnSession(HookBase):
+    """#427: `HookBase.setUp()` used to register ONE cleanup per test —
+    `glob.glob("/tmp/airuleset-working-liveness-block-t-*")` — a
+    FIXED-PREFIX wildcard that matches EVERY session's retry-counter file,
+    not just the one(s) THIS test/process created (every generated sid
+    shares the literal "t-" prefix, see `payload()` above). Harmless in a
+    solo run (no sibling process has a live retry file at teardown time —
+    "green standalone 22/22"), but under the fleet-dispatch architecture
+    this repo runs (#317 — several worktree workers executing this SAME
+    suite concurrently on the SAME shared /tmp, e.g. wave7gate3), one
+    worker's own test cleanup could delete a DIFFERENT worker's in-flight
+    counter file mid-sequence. Locks the fix: cleanup must only ever touch
+    the retry file(s) this test's own process actually created — same
+    scoped-sid idiom #202 already established (`_hook_state_cleanup.py`)."""
+
+    def test_cleanup_never_touches_a_different_sessions_retry_file(self):
+        foreign_sid = "t-" + uuid.uuid4().hex[:10]
+        foreign_file = Path("/tmp/airuleset-working-liveness-block-" + foreign_sid)
+        foreign_file.write_text("1")
+        try:
+            out = self._run("⏳ WORKING: niečo beží", background_tasks=[])
+            self.assertIn('"decision": "block"', out.stdout)
+            self.doCleanups()   # run only what THIS test registered so far
+            self.assertTrue(
+                foreign_file.exists(),
+                "a DIFFERENT session's retry file must survive this test's "
+                "own teardown -- #427 cross-session wildcard-cleanup bug")
+        finally:
+            if foreign_file.exists():
+                foreign_file.unlink()
+
+    def test_own_retry_file_is_actually_removed_by_cleanup(self):
+        # #427-review F5: the sibling test above proves a FOREIGN file
+        # survives, but never that this test's OWN file is genuinely
+        # swept -- a mutant registering NO cleanup at all (reintroducing
+        # the #202-shaped litter regression, ~2418 leftover
+        # /tmp/airuleset-*-block-* files measured in one real day) would
+        # still pass it. Assert the positive half explicitly.
+        own_sid = "t-" + uuid.uuid4().hex[:10]
+        own_file = Path("/tmp/airuleset-working-liveness-block-" + own_sid)
+        out = self._run("⏳ WORKING: niečo beží", background_tasks=[],
+                         session_id=own_sid)
+        self.assertIn('"decision": "block"', out.stdout)
+        self.assertTrue(
+            own_file.exists(),
+            "the hook itself must have written a retry-state file for "
+            "this sid before cleanup can be meaningfully tested")
+        self.doCleanups()
+        self.assertFalse(
+            own_file.exists(),
+            "cleanup must actually REMOVE the file THIS test's own "
+            "session created, not merely spare foreign ones")
 
 
 if __name__ == "__main__":

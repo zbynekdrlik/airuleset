@@ -374,21 +374,16 @@ class TestMultiInterfaceUrls(TestCase):
                          "(#113); a second Popen is a new un-polled call site")
 
     def test_cmd_upload_prints_a_url_per_interface(self):
-        import airuleset
         import filedrop
-        sk = socket.socket()
-        sk.bind(("127.0.0.1", 0))
-        port = sk.getsockname()[1]
-        sk.close()
         dest = Path(tempfile.mkdtemp())
         _log_dir(self)                       # #115: keep the log out of /tmp
-        # two loopback addresses both bind on Linux → two advertised URLs
+        # two loopback addresses both bind on Linux → two advertised URLs.
+        # #427: the port is probed+retried by _cmd_upload_output (a TOCTOU
+        # race under real box contention -- #405's own closing evidence),
+        # never a single doomed probe.
         with m.patch.object(filedrop, "bind_ips",
                             return_value=["127.0.0.1", "127.0.0.2"]):
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port))
-            out = buf.getvalue()
+            out, port = _cmd_upload_output(self, dest)
         self.assertIn(f"http://127.0.0.1:{port}/", out)
         self.assertIn(f"http://127.0.0.2:{port}/", out)
 
@@ -428,6 +423,86 @@ class TestMultiInterfaceUrls(TestCase):
             out = buf.getvalue()
         self.assertIn("http://100.90.94.41:8788/tok/f.bin", out)
         self.assertIn("http://10.77.9.21:8788/tok/f.bin", out)
+
+
+# --------------------------------------------------------------------------- #
+# #427: `test_cmd_upload_prints_a_url_per_interface` probes a "free" port via
+# `sk.bind(("127.0.0.1", 0)); ...; sk.close()` and hands that exact number to
+# `airuleset.cmd_upload()` — a genuine TOCTOU race under real box contention
+# (a sibling worktree worker's own suite run competing for the same ephemeral
+# port range; #405's own closing evidence: "1 nesúvisiaci load-flake,
+# samostatne 44/44" — deterministic solo, flaky only under load).
+# `_cmd_upload_output()` (below `TestUploadPortRaceRetry`, wired into the
+# call site once it exists) retries with a FRESH probe whenever `cmd_upload`
+# gives up (its own SystemExit after a 5s bind-nothing timeout) — the same
+# poll/retry-beats-a-fixed-guess idiom this file's own #113 fix already
+# established for the analogous startup-timing race, applied here to the
+# port-pick race instead. Locked with a deterministic mock so the retry
+# MECHANISM is hermetic and never depends on reproducing a live collision.
+# --------------------------------------------------------------------------- #
+
+def _cmd_upload_output(test, dest, ttl=5, max_attempts=5):
+    """Call `airuleset.cmd_upload` with a freshly-probed port, retrying on a
+    transient TOCTOU port-bind collision (#427). Returns `(stdout, port)`
+    of whichever attempt actually came up. Raises AssertionError (never
+    lets a real SystemExit escape) once `max_attempts` is exhausted --
+    still fails loud if `cmd_upload` is genuinely broken, not just
+    port-unlucky, since every attempt gets its own fresh probe."""
+    import airuleset
+    last_out = ""
+    for _ in range(max_attempts):
+        sk = socket.socket()
+        sk.bind(("127.0.0.1", 0))
+        port = sk.getsockname()[1]
+        sk.close()
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=ttl, port=port))
+        except SystemExit:
+            continue   # the probed port lost the race -- try a fresh one
+        out = buf.getvalue()
+        last_out = out
+        if ("http://127.0.0.1:%d/" % port) in out:
+            return out, port
+    raise AssertionError(
+        "cmd_upload never came up after %d port-race retries; last output:\n%s"
+        % (max_attempts, last_out))
+
+
+class TestUploadPortRaceRetry(TestCase):
+
+    def test_retries_past_a_transient_bind_collision(self):
+        dest = Path(tempfile.mkdtemp())
+        _log_dir(self)
+        calls = []
+
+        def fake_cmd_upload(args):
+            calls.append(args.port)
+            if len(calls) == 1:
+                sys.exit(1)          # simulate the stolen-port collision
+            print("http://127.0.0.1:%d/tok/" % args.port)
+
+        with m.patch("airuleset.cmd_upload", side_effect=fake_cmd_upload):
+            out, port = _cmd_upload_output(self, dest)
+        self.assertEqual(2, len(calls), "must retry exactly once past the collision")
+        # #427-review F3: a mutant that probes ONCE outside the loop and
+        # reuses the SAME (already-lost) port on every retry is a
+        # production no-op -- it leaves the real TOCTOU flake exactly as
+        # it was, yet the pre-fix assertions above pass unchanged. Each
+        # retry attempt must probe a genuinely FRESH port.
+        self.assertNotEqual(calls[0], calls[1],
+                             "each retry must probe a FRESH port, not "
+                             "reuse the one that just lost the race")
+        self.assertIn("http://127.0.0.1:%d/" % port, out)
+
+    def test_gives_up_after_max_attempts_with_a_clear_message(self):
+        dest = Path(tempfile.mkdtemp())
+        _log_dir(self)
+        with m.patch("airuleset.cmd_upload", side_effect=SystemExit(1)):
+            with self.assertRaises(AssertionError) as ctx:
+                _cmd_upload_output(self, dest, max_attempts=3)
+        self.assertIn("3 port-race retries", str(ctx.exception))
 
 
 class TestTotalBindFailureIsFatal(TestCase):
