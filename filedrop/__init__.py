@@ -228,7 +228,12 @@ def host_ip():
 
     FILEDROP_HOST env wins. Otherwise prefer the TAILSCALE IP (stable across
     network switches — the user reaches the box on the fallback network too), then
-    a 10.77.* dev-LAN address, then the first non-loopback IPv4, else loopback."""
+    a 10.77.* dev-LAN address, then any OTHER private IP (#434 — must never
+    return a public/docker-bridge address here: bind_ips() never binds one,
+    so a caller resolving the primary host via host_ip() would build an
+    address the server never actually listens on — e.g. spinbike-vps, which
+    has only a public IPv4 and no private interface at all), else loopback,
+    matching bind_ips()'s own established final fallback."""
     override = os.environ.get("FILEDROP_HOST")
     if override:
         return override
@@ -240,7 +245,7 @@ def host_ip():
         if ip.startswith("10.77."):
             return ip
     for ip in ips:
-        if ":" not in ip and not ip.startswith("127."):
+        if _is_private(ip):
             return ip
     return "127.0.0.1"
 
