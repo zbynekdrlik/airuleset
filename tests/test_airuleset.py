@@ -3496,6 +3496,28 @@ class TestManagedSettingsDefaults(TestCase):
         out = airuleset.apply_managed_settings_defaults({})
         self.assertIs(out["disableAgentView"], True)
 
+    def test_disables_remote_control(self):
+        # User directive 2026-08-13 (#439): "vypni vsade rc remote control aj v
+        # nastaveniach claude, vadi mi to" — the statusline showed
+        # `/rc connecting…` / `/rc failed` on every session because
+        # `remoteControlAtStartup` was persisted true, so every session tried
+        # an RC connection at startup. Same unconditional managed-default
+        # treatment as disableAgentView/tui/model: a managed box always gets
+        # both keys on the next install, regardless of what was there before.
+        out = airuleset.apply_managed_settings_defaults({})
+        self.assertIs(out["disableRemoteControl"], True)
+        self.assertIs(out["remoteControlAtStartup"], False)
+
+    def test_overrides_existing_remote_control_values(self):
+        # Unconditional, like disableAgentView/tui/model — a managed box
+        # always gets the managed default on the next install, even if a
+        # hand-edited settings.json (or a stale pre-#439 install) left the
+        # opposite value in place.
+        out = airuleset.apply_managed_settings_defaults(
+            {"disableRemoteControl": False, "remoteControlAtStartup": True})
+        self.assertIs(out["disableRemoteControl"], True)
+        self.assertIs(out["remoteControlAtStartup"], False)
+
     def test_forces_fullscreen_tui_renderer(self):
         # #376 REVERSES the earlier classic pin: fullscreen keeps the WHOLE
         # conversation in its OWN app-internal scrollback (PgUp/PgDn, Ctrl+O),
