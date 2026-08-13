@@ -20,6 +20,7 @@
 ✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵 (or addressed in commit <sha>)
 ✅ Deploy: <user-visible behavior verified on the live target — include version label read from DOM>
 ✅ Regression test: <test_path>:<line> — RED on <test_sha>, GREEN on <fix_sha>   ← REQUIRED for bug-fix PRs (see regression-test-first.md); OMIT for non-bug PRs
+✅ Výstup: <konkrétne hodnoty ODČÍTANÉ z reálneho artefaktu — email/dokument/render/UI/notifikácia> | n/a — <prečo>   ← ALWAYS required (see Hard rules); never "sent OK"
 
 **Plan steps:**           ← OPTIONAL: multi-step work only; terse user-visible one-liners
 - <step 1>
@@ -58,7 +59,7 @@ A stream with `airuleset.py authority` != full has no PR-to-main / merge / deplo
 ✅ PR: #M do <integration branch> zmergnutý <sha>                          ← branch-merge (ends there; ticket stays OPEN — gatekeeper closes it only after the full `/process-subdev` release pipeline, #349)
 ```
 
-No 🌐/Deploy lines (nothing deployed by this stream); Goal + What changed stay mandatory and plain-language.
+No 🌐/Deploy lines (nothing deployed by this stream); Goal + What changed stay mandatory and plain-language — and so does `✅ Výstup:` (the artifact read-back runs on the local/integration environment: the rendered email from the test DB, the local UI screen, the generated document).
 **`branch-merge` NEVER omits the Hand-off line** — merging into the project's INTEGRATION
 branch does NOT auto-close the ticket (that branch is not the repo's default branch, so
 GitHub's `Closes #N` never fires there), and skipping the hand-off comment leaves the
@@ -83,16 +84,19 @@ tickets were self-closed with no hand-off at all and sat neither queued nor revi
 - **`/requesting-code-review` MUST also pass clean.** `/review` is a fast first-pass; `superpowers:requesting-code-review` is the deep second-pass that historically catches issues `/review` misses. Both audit lines are required — but `/review` must NEVER be satisfied by literally invoking the built-in `Skill({skill: "review"})`/`code-review` platform skill (it is not airuleset's own, and it has spiraled into a disproportionate multi-agent fan-out, become cross-task addressable, and orphaned silently across a session-limit reset — `agents/autopilot-worker.md` CYCLE step 6, #363); self-apply the standards directly, or dispatch ONE fresh-context `general-purpose` subagent instead. Fix every 🔴/🟡/🔵 from BOTH; only then send the report. Skipping the deep pass to "save time" is banned — the user always runs it afterwards and the missed issues come back as rework.
 - **localhost is banned in URLs** — see `no-localhost-urls.md`. Use real IPs. Verify each URL returns 200 before pasting.
 - **Bug-fix PR ⇒ `✅ Regression test:` line is REQUIRED.** Triggered when the PR closes/fixes a `bug`-labeled issue, the title contains `fix`/`bugfix`/`hotfix`/`patch`/`regression`, or the work fixed a defect. The line MUST cite the test file path, line number, the test commit SHA (RED — test failing without the fix), and the fix commit SHA (GREEN — test passing with the fix). Stop hook blocks bug-fix reports missing this line. See `regression-test-first.md`.
+- **`✅ Výstup:` is ALWAYS present — concrete OBSERVED values read back from the REAL artifact, or an explicit `n/a — <prečo>` (#446, montalu3 email incident 2026-08-13).** Work that produced or changed a user-facing OUTPUT artifact (email, document, render, UI screen, notification, report) must cite values you actually READ from that artifact — `✅ Výstup: email obj. 2041 — cena 12,50 €, mena CZK, zákaznícke číslo zvýraznené` — never "sent OK"/"delivered"/"doručené"/"funguje" (send/delivery is LIVENESS, not content: the montalu3 order-status emails went out with 0 € prices while only send/delivery was verified). Work with genuinely NO user-facing output states `✅ Výstup: n/a — <prečo>` explicitly — and an `n/a` in a report that lists any 🌐/📱 surface is a self-contradiction (that surface IS a user-facing output — read something from it: the rendered page, the UI values, the version label). SOTA/architecture verification is NOT re-stated here — it lives in the ticket's own `Architektúra:` design comment (#414). Hook-enforced (`stop-check-prose-violations.sh`): line missing, value-free (no digit/quoted value), bare `n/a` without a reason, or `n/a` alongside a 🌐/📱 line = blocked.
 
 #### Pre-completion gate (run BEFORE writing the report)
 
 1. Invoke `plan-check` skill — fix any `[ ]` NOT DONE items.
 2. Apply `/review` standards (Correctness / Security / Performance / Maintainability / Style) — fix every 🔴 critical, 🟡 warning, AND 🔵 suggestion inside the diff. **Never invoke the built-in `Skill({skill: "review"})`/`code-review` tool for this** — it is a Claude Code platform skill this repo does not own, and it has proven to spiral into a disproportionate multi-agent fan-out, become cross-task addressable, and orphan silently across a session-limit reset (`agents/autopilot-worker.md` CYCLE step 6, #363). Self-apply the standards directly, or dispatch ONE self-contained fresh-context `general-purpose` subagent — never the built-in skill.
 3. Invoke `superpowers:requesting-code-review` skill — the DEEP pass. Fix every 🔴/🟡/🔵 it surfaces. This historically catches issues `/review` misses; the user always runs it after the report, so skipping = guaranteed rework.
-4. All THREE audit lines MUST appear in the audits block:
+4. Read back the OUTPUT artifact the work produced/changed — open the real thing (the sent email from the DB, the rendered document, the live UI screen) and note the concrete values you SEE; that read-back is what the `✅ Výstup:` line cites (or establish honestly that no user-facing output exists → the explicit `n/a — <prečo>` form).
+5. All FOUR audit lines MUST appear in the audits block:
    - `✅ /plan-check: N/N fulfilled`
    - `✅ /review: clean — 0 🔴 0 🟡 0 🔵`
    - `✅ /requesting-code-review: clean — 0 🔴 0 🟡 0 🔵`
+   - `✅ Výstup: <konkrétne pozorované hodnoty> | n/a — <prečo>`
 
 If ANY audit fails, you are NOT done — fix the findings, re-run, then send.
 
@@ -102,7 +106,7 @@ The whole report fits in ~20 lines (audits + optional plan steps + Goal + What c
 
 #### Enforcement
 
-The Stop hook (`stop-check-prose-violations.sh`) BLOCKS completion reports missing required structure (Goal / What changed / plan-check / review lines, wrong order, missing 🌐 for multi-env deploys, banned shortcut menus) and HARD-blocks a `🌐` or `📱` line pointing at localhost/127.0.0.1/0.0.0.0. When blocked, fix the report and resend in the same turn. The hook covers all detectable violations; trust it to catch your slips, but write the full template the first time so blocking is rare. It cannot mechanically check whether a client-app project's `🌐 Demo:`/`📱 <platform>:` lines are actually PRESENT — that obligation is yours to apply from the rule above.
+The Stop hook (`stop-check-prose-violations.sh`) BLOCKS completion reports missing required structure (Goal / What changed / plan-check / review lines, a missing or value-free `✅ Výstup:` line — including a bare `n/a` with no reason and an `n/a` alongside a 🌐/📱 surface —, wrong order, missing 🌐 for multi-env deploys, banned shortcut menus) and HARD-blocks a `🌐` or `📱` line pointing at localhost/127.0.0.1/0.0.0.0. When blocked, fix the report and resend in the same turn. The hook covers all detectable violations; trust it to catch your slips, but write the full template the first time so blocking is rare. It cannot mechanically check whether a client-app project's `🌐 Demo:`/`📱 <platform>:` lines are actually PRESENT — that obligation is yours to apply from the rule above.
 
 #### Compact at your own boundary — served (non-worker) sessions too (#228)
 

@@ -414,7 +414,16 @@ steps 5–10 yourself ONLY in the documented serial fallback (no `isolation:`).
 8. **Deploy the new version — it is standing-approved** (`approval-scope.md`), including prod and
    including a manual `scp`/`rsync`/MCP deploy with no CI pipeline, and including the restart of
    the deployed app to load it. Then post-deploy verification (`post-deploy-verification.md`): open
-   the live app, read the version label from the DOM, exercise the changed feature. No per-issue
+   the live app, read the version label from the DOM, exercise the changed feature. **CONTENT
+   read-back is part of this verification, sibling of the DOM version read:** when the ticket
+   produced or changed a user-facing OUTPUT artifact (email, document, render, UI screen,
+   notification, report), open the ACTUAL artifact with your own tools (the sent email from the
+   DB, the rendered document, the live screen) and record CONCRETE observed values — price,
+   currency, order number, heading — never send/delivery/liveness alone (the montalu3 0 € email
+   incident: emails "verified" as delivered while every price rendered 0 €). These observed values
+   feed the report's mandatory `✅ Výstup:` line (`completion-report.md` — an explicit
+   `n/a — <prečo>` when the ticket truly has no user-facing output), and the run-card fires only
+   AFTER this read-back. No per-issue
    device ping for the deploy itself (`milestone-notifications.md`); do NOT gate it on approval.
    **Only STOP and ask for** a genuinely destructive
    NON-deploy op (rebooting the HOST, stopping/killing a service or process OUTSIDE the deploy,
