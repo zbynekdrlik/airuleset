@@ -42,11 +42,13 @@ class TestWorkflowCostDiscipline(TestCase):
         t = read("modules/core/model-awareness.md")
         # The self-audit must still name a tiering MISS (inverted under max-performance).
         self.assertIn("tiering MISS", t)
-        # Mechanical lookups stay on a light/low tier under EVERY policy —
-        # since the 2026-08-13 Opus 5 ban the cheap end is Opus 4.8 at low
-        # effort (sonnet/haiku only for the genuinely trivial), see
+        # Mechanical lookups stay on a light/low tier under EVERY policy. The
+        # #455 (2026-08-14) refinement rehabilitated Sonnet 5 as the LIGHT-work
+        # tier ("moze byt aj sonnet 5 vyuzivany"), so the cheap end is now
+        # Sonnet 5 (Opus 4.8 low where a surface can name it); see
         # tests/test_model_tiering.py for the full lineup locks.
-        self.assertIn("Purely MECHANICAL / READ-ONLY plumbing = Opus 4.8", t)
+        self.assertIn(
+            "Purely MECHANICAL / READ-ONLY / LIGHT plumbing = Sonnet 5", t)
         # Redundancy stays banned even with unlimited budget.
         self.assertIn("Redundancy is still waste, not rigor", t)
 

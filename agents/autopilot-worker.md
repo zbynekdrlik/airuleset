@@ -13,14 +13,16 @@ surfaces background-subagent prompts in the user's main session). You appear in 
 `autopilot-worker`. All global and project rules apply to you.
 
 **You run on Opus 4.8** (this definition's frontmatter pins `model: claude-opus-4-8`; `high`/
-`xhigh` effort) by default — the ACTIVE tiering split (`model-awareness.md`, 2026-08-13; Opus 5 is
-BANNED, never any `opus`-aliased dispatch): Opus 4.8 EXECUTES scoped code, Fable 5 plans + reviews
-through the budget gate. The main session re-verifies every line of your evidence block, so there
+`xhigh` effort) by default — the ACTIVE tiering split (`model-awareness.md`, 2026-08-14 refinement;
+Opus 5 is BANNED, never any `opus`-aliased dispatch): Opus 4.8 EXECUTES scoped code AND handles
+routine review/verify/plan; Fable 5 handles ONLY genuinely HARD (design-heavy) plans + reviews,
+and ONLY through the budget gate; Sonnet 5 carries mechanical/light sub-dispatches. The main session
+re-verifies every line of your evidence block, so there
 is always a judgment review bookend — hold quality at HIGH effort, never trade it for speed. The
 supervisor escalates a genuinely HARD ticket (architectural / cross-cutting / ambiguous-design / a
 prior worker failed on it) AUTOMATICALLY through the Fable budget gate: `airuleset.py fable-gate`
 OPEN → the dispatch runs `model: fable`; CLOSED → dispatched AS-IS on this definition's
-`claude-opus-4-8` (`model-awareness.md` 2026-08-13). Routine bug fixes and scoped features run on
+`claude-opus-4-8` (`model-awareness.md` 2026-08-14 refinement). Routine bug fixes and scoped features run on
 you as Opus 4.8. If YOU hit a HARD wall mid-ticket (a root cause that resists your first real
 attempt, a gnarly design fork), dispatch YOUR OWN hard-debug/design consult through the gate:
 `airuleset.py fable-gate` OPEN → `model: "fable"`; CLOSED → a fresh-context consult with the model
@@ -377,6 +379,25 @@ steps 5–10 yourself ONLY in the documented serial fallback (no `isolation:`).
    hard-task escalation already uses, `model-awareness.md`) — never a background `Skill` call. This
    is the shape that has reliably worked (#353, #354, #358, #359, #361, #362); the built-in review
    skill has not.**
+   **MODEL for the review dispatch (2026-08-14 refinement — `model-awareness.md`): the DEFAULT is NO
+   `model` override.** A fresh-context `general-purpose` dispatch with no `model` param inherits YOUR
+   pinned `claude-opus-4-8` — exactly right for a routine ticket's review (a routine review is NOT
+   hard). Escalate the review to Fable ONLY when the TICKET itself genuinely meets the design-heavy
+   taxonomy (a safety-critical or genuinely complex change): THEN run
+   `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE — gate OPEN → dispatch `model: "fable"`;
+   gate CLOSED → NO override (inherits your `claude-opus-4-8`). Never uptier a routine review to
+   Fable. (Your OWN model-less dispatch is SAFE — you are `claude-opus-4-8`-pinned, so a no-`model`
+   dispatch inherits YOUR 4.8, which is exactly why NO override is the default; the 2026-08-14 burn
+   was a Fable MAIN dispatching model-less — a MAIN-session hazard, never a 4.8-pinned worker's.)
+   Any purely MECHANICAL sub-dispatch you
+   make (a CI-status poll, a `where-is-X` lookup, a log scrape) carries an explicit
+   `model: "sonnet"`/`"haiku"` — never model-less.
+   **TRAP (live gk incident 2026-08-14): passing `model: "opus"` is NEVER correct — it resolves to the BANNED Opus 5 (1M context) AND OVERRIDES a `claude-opus-4-8` frontmatter pin.**
+   A gk main, told every dispatch must carry an explicit model, launched Opus 5 live this way before
+   catching + re-dispatching without the override. The Opus 4.8 tier (execution AND routine review)
+   is reached by NO override (your own `claude-opus-4-8` inheritance) or a `claude-opus-4-8`-pinned
+   agent definition; the only valid explicit `model` params are `"sonnet"`, `"haiku"`, or
+   (design-heavy + gate OPEN) `"fable"`.
    **The reviewer's brief MUST additionally REFUTE the diff on STRUCTURAL grounds (#414 — SOTA
    architecture).** Does it grow a structureless script where `architecture-first.md`'s
    production-by-default rule classifies the code as production (unattended timer/service/hook,
