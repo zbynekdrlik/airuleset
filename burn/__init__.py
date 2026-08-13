@@ -784,8 +784,8 @@ def weekly_budget(cache, now=None):
 
 # #286-review — how STALE a cross-host weekly-window CANDIDATE may be before
 # `group_fleet_by_account()` refuses to trust it. Mirrors
-# `watchdog.FABLE_GATE_MAX_AGE`'s own 6h staleness bound for this EXACT same
-# cache file (`~/.claude/airuleset-usage-cache.json`) — a deliberate MIRROR,
+# `watchdog.usage.FABLE_GATE_MAX_AGE`'s own 6h staleness bound for this EXACT
+# same cache file (`~/.claude/airuleset-usage-cache.json`) — a deliberate MIRROR,
 # never a shared import: `burn` must never import `watchdog`, which already
 # imports `burn` (see `usage_cache_path()`'s own docstring for why).
 FLEET_WEEKLY_CANDIDATE_MAX_AGE = 6 * 3600

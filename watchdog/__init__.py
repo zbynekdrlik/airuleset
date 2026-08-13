@@ -8646,17 +8646,24 @@ def _owner_disabled(kind):
 # #404 point 3 (module split) -- per-service submodule re-exports.
 #
 # Each name below is DEFINED in its own watchdog/<module>.py file, never
-# here -- this is a facade re-export, not a definition. It is placed at the
-# very end of the file (after every symbol any of these submodules might
-# need from __init__.py is already bound) so that (a) each submodule's own
-# `from watchdog import X` succeeds against the already-partially-built
-# `watchdog` module object, and (b) every existing consumer that resolves
-# these names via `watchdog.<name>` dotted access (goal.py, compact.py) or
-# via `from watchdog import <name>` (airuleset.py's cmd_watchdog/
-# cmd_fable_gate) keeps working with ZERO changes, since the names still
-# live in watchdog's own top-level namespace -- just re-exported instead of
-# defined in this file directly. See watchdog/usage.py's own module
-# docstring for what this specific cluster does.
+# here -- this is a facade re-export, not a definition. It is placed AFTER
+# every symbol `watchdog/usage.py` itself needs from __init__.py is already
+# bound (NOT the true end of this file -- run_once() and ~2000 lines of
+# other code still follow it) so that (a) `usage.py`'s own imports would
+# succeed even if it needed to reach back into `watchdog` (it currently does
+# not -- it imports only stdlib), and (b) every existing consumer that
+# resolves these names via `watchdog.<name>` dotted access or via
+# `from watchdog import <name>` (airuleset.py's cmd_watchdog/cmd_fable_gate)
+# keeps working with ZERO changes, since the names still live in watchdog's
+# own top-level namespace -- just re-exported instead of defined in this
+# file directly. This is the FIRST facade-re-export split in this repo
+# (unlike watchdog/compact.py and watchdog/goal.py, which are consumed via
+# plain `watchdog.compact`/`watchdog.goal` attribute access with no
+# re-export block at all) -- a FUTURE submodule extracted from a cluster
+# defined LATER in this file (e.g. inside run_once() itself) needs its own
+# facade import placed AFTER that cluster's own definitions, never assume
+# this block's current position already covers it. See watchdog/usage.py's
+# own module docstring for what this specific cluster does.
 from watchdog.usage import (  # noqa: E402
     fetch_usage as fetch_usage,
     weekly_percent as weekly_percent,
@@ -8721,7 +8728,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
       (3) (only when `usage_fetch` is given) a rate-limited WEEKLY-TOKEN-USAGE poll
-          → ping when a weekly limit reaches the cap %;
+          → ping at the cap % (`watchdog/usage.py`'s docstring is the SSOT);
       (4) a session idle on `⏳ WORKING` ≥ `stall_working` with NO advancing subagent
           → NUDGE the pane with a `stuck-check` self-check prompt (its launched work
           may have died silently); retry up to `max_nudges`, escalate-ping on give-up.

@@ -14,12 +14,16 @@ the 15k+-line watchdog module with low fan-in from the rest of the file.
 Re-exported from `watchdog/__init__.py` (`from watchdog.usage import ...`,
 placed after every symbol this module depends on is already defined --
 `watchdog.check_usage`/`watchdog.fable_gate`/etc. keep resolving via
-attribute access exactly as before, the same facade convention
-`watchdog/janitor.py` and the other #404 split modules use) so every existing
-caller (`run_once()`'s job 3, `airuleset.py`'s `cmd_fable_gate`/`cmd_watchdog`,
-`burn/__init__.py`, and the test suite) needs zero changes beyond import path
-updates where a caller imported these names directly rather than via the
-`watchdog` package attribute.
+attribute access exactly as before) so every existing caller (`run_once()`'s
+job 3, `airuleset.py`'s `cmd_fable_gate`/`cmd_watchdog`, `burn/__init__.py`,
+and the test suite) needs zero changes beyond import path updates where a
+caller imported these names directly rather than via the `watchdog` package
+attribute. This is the FIRST facade-re-export split in this repo -- the
+prior #402/#403 extractions (`watchdog/compact.py`, `watchdog/goal.py`) are
+consumed via plain `watchdog.compact`/`watchdog.goal` attribute access with
+no re-export block at all, since neither one had a pre-existing bare-name
+consumer inside `watchdog/__init__.py` to preserve; this cluster's own
+`check_usage()` call inside `run_once()` did, hence the facade.
 """
 
 import json
