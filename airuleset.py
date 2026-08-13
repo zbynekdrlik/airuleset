@@ -409,12 +409,15 @@ OPTIONAL_PLUGINS = ("playwright@claude-plugins-official",)
 # Plugins explicitly DISABLED by managed policy (#39 item 3, 2026-07-25
 # /doctor findings): rust-analyzer-lsp + claude-md-management had 0 lifetime
 # uses on dev2 and `/doctor` disabled them directly in settings.json
-# (backup: settings.json.bak-doctor). The plugin reconcile below only ever
-# ENABLES MANAGED_PLUGINS and otherwise merges the existing enabledPlugins
-# dict untouched, so these disables already survive a normal push — this
-# list makes the intent EXPLICIT and durable (and applies it on every box,
-# not just dev2) so a future change to the reconcile logic can never
-# silently resurrect them.
+# (backup: settings.json.bak-doctor). The plugin reconcile below force-writes
+# every key in this list to False (and every OPTIONAL_PLUGINS key too, #415),
+# so these disables survive a normal push regardless of what a `claude plugin
+# install`/`/doctor`/manual edit left behind — this list makes the intent
+# EXPLICIT and durable (and applies it on every box, not just dev2) so a
+# future change can never silently resurrect them. (This comment used to say
+# the reconcile "only ever ENABLES MANAGED_PLUGINS and otherwise merges the
+# existing dict untouched" — false since this list existed, #39, and more so
+# since #415's OPTIONAL tier.)
 MANAGED_DISABLED_PLUGINS = (
     "rust-analyzer-lsp@claude-plugins-official",
     "claude-md-management@claude-plugins-official",
@@ -7328,23 +7331,53 @@ def ensure_playwright_browsers(cache_dir: Path = None):
               "run manually: npx playwright install chromium" % e, file=sys.stderr)
 
 
-def setup_managed_plugins() -> bool:
-    """Ensure the managed baseline plugins are installed + enabled (idempotent).
+def _reconcile_settings_file():
+    """Read SETTINGS_JSON, apply reconcile_managed_plugins(), write back only
+    when it changed (backing up first). Returns "invalid" (unparseable JSON,
+    nothing written), "wrote" (reconciled + written), or "unchanged" (already
+    correct). Shared by setup_managed_plugins()'s TWO reconcile passes (see
+    that function) so they can never drift on how the file is written."""
+    raw = read_file_safe(SETTINGS_JSON)
+    try:
+        settings = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        return "invalid"
+    new_str = json.dumps(reconcile_managed_plugins(settings), indent=2) + "\n"
+    if new_str.strip() != raw.strip():
+        if SETTINGS_JSON.exists():
+            shutil.copy2(SETTINGS_JSON, SETTINGS_JSON.with_suffix(".json.bak"))
+        SETTINGS_JSON.write_text(new_str)
+        return "wrote"
+    return "unchanged"
 
-    1. reconcile settings.json (enabledPlugins keys true + marketplaces
-       registered) — runs FIRST, before any install attempt below (issue:
-       push: plugin installs fail on fresh stream accounts, 2026-08-06 —
-       reconciling AFTER install, as this used to, means the settings write
-       lands too late to help the very install call it's meant to unblock),
-    2. for every plugin whose REGISTRY ENTRY is missing (claude's own
-       installed_plugins.json — see _managed_plugin_built()'s docstring;
-       never a cache-file glob, #276): register its marketplace
+
+def setup_managed_plugins() -> bool:
+    """Ensure the managed plugin tiers are installed and reconciled (idempotent).
+
+    1. reconcile settings.json (MANAGED_PLUGINS keys true, MANAGED_DISABLED_
+       PLUGINS + OPTIONAL_PLUGINS keys FALSE, marketplaces registered) — runs
+       FIRST, before any install attempt below (issue: push: plugin installs
+       fail on fresh stream accounts, 2026-08-06 — reconciling AFTER install,
+       as this used to, means the settings write lands too late to help the
+       very install call it's meant to unblock),
+    2. for every plugin (BOTH tiers, #415) whose REGISTRY ENTRY is missing
+       (claude's own installed_plugins.json — see _managed_plugin_built()'s
+       docstring; never a cache-file glob, #276): register its marketplace
        (idempotent `claude plugin marketplace add` — see
        ensure_marketplace_registered()'s docstring) THEN install it
        (best-effort, time-boxed). Installing without a registered
        marketplace only reproduces the "not found in marketplace" failure,
        so a failed registration skips that plugin's install attempt
        entirely rather than trying anyway.
+    3. RE-ASSERT the reconcile after the install loop (#415, adversarial
+       review F1): `claude plugin install <key>` itself writes
+       enabledPlugins[<key>]=true into settings.json, OVERWRITING the force-
+       disabled OPTIONAL keys step 1 wrote — so on a FRESH box (registry entry
+       missing -> install actually ran) the OPTIONAL plugin would end
+       re-ENABLED, the exact pre-#415 resident-Chrome regime. The second
+       reconcile flips it back to false. It is a no-op write on the already-
+       built fast path (nothing installed -> settings still correct -> no
+       write), so an already-provisioned box pays nothing.
     Returns True iff nothing REQUIRED failed (marketplace registration and
     install, for every plugin whose registry entry was missing) — a still-failing
     plugin install after correct marketplace registration is a genuine
@@ -7356,24 +7389,16 @@ def setup_managed_plugins() -> bool:
     print("  Wiring managed baseline plugins")
     ok = True
 
-    raw = read_file_safe(SETTINGS_JSON)
-    try:
-        settings = json.loads(raw) if raw.strip() else {}
-    except json.JSONDecodeError:
+    status = _reconcile_settings_file()
+    if status == "invalid":
         print("    settings.json invalid JSON — skipped plugin reconcile",
               file=sys.stderr)
-        settings = None
         ok = False
-    if settings is not None:
-        new_str = json.dumps(reconcile_managed_plugins(settings), indent=2) + "\n"
-        if new_str.strip() != raw.strip():
-            if SETTINGS_JSON.exists():
-                shutil.copy2(SETTINGS_JSON, SETTINGS_JSON.with_suffix(".json.bak"))
-            SETTINGS_JSON.write_text(new_str)
-            print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}"
-                  f"; installed-but-disabled {', '.join(OPTIONAL_PLUGINS)}")
-        else:
-            print("    settings.json: already correct")
+    elif status == "wrote":
+        print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}"
+              f"; installed-but-disabled {', '.join(OPTIONAL_PLUGINS)}")
+    else:
+        print("    settings.json: already correct")
 
     market_ok = {}
     # #415: install BOTH tiers — an OPTIONAL plugin is force-disabled in user
@@ -7422,6 +7447,15 @@ def setup_managed_plugins() -> bool:
             ok = False
 
     ensure_playwright_browsers()
+
+    # #415 (adversarial review F1): `claude plugin install` re-enabled every
+    # key it installed, clobbering the OPTIONAL force-disables from step 1.
+    # Re-assert the reconcile so any install-flipped OPTIONAL key is forced
+    # back OFF. A no-op on the already-built fast path (nothing installed ->
+    # nothing to flip -> no write).
+    if _reconcile_settings_file() == "wrote":
+        print(f"    settings.json: re-asserted disabled "
+              f"{', '.join(OPTIONAL_PLUGINS)} after plugin install")
     return ok
 
 
