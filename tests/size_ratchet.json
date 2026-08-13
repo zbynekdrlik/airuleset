@@ -10,7 +10,7 @@
   "filedrop/upload_server.py": 309,
   "filedrop/vault.py": 664,
   "filedrop/vault_server.py": 385,
-  "notify/__init__.py": 2139,
+  "notify/__init__.py": 2180,
   "statusbar.py": 604,
   "tests/_goal_arm_helpers.py": 176,
   "tests/_hook_state_cleanup.py": 42,

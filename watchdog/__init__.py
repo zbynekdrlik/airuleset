@@ -2812,35 +2812,41 @@ def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
     ONLY terminal-answer detection there is. Safe by design: if the question
     is somehow still pending after a human prompt, the loop re-asks (the
     prompt cleared the ping dedup) and re-records a fresh entry."""
-    from notify import load_questions, drop_question
+    from notify import ask_generation, load_questions, drop_question
     logs = []
     try:
         qmap = load_questions()
     except Exception:
         return logs
     # #407: collapse SUPERSEDED duplicates FIRST — per (session, channel)
-    # only the NEWEST entry is the session's current question. A reworded ❓
-    # past the 15-min edit window used to fall through to a fresh POST +
-    # record with the OLD entry left tracked forever (no age TTL since
-    # #368), so reping_stale_questions re-pinged BOTH daily — an immortal
-    # ghost. record_question now supersedes at write time (birth-site,
-    # notify/__init__.py); THIS pass reaps the pairs that already exist on
-    # the fleet, and it runs BEFORE reping in run_once, so a ghost dies
-    # without one further ping. Channel-scoped exactly like the writer: a
-    # DISCORD_MIRROR pair (same session, different channels) is one
-    # generation's siblings, never collapsed. No transcript needed — this
-    # is a map-shape fact, so it works for sessions the answered-in-session
-    # loop below cannot even resolve. Deletion keyed on an ARTIFACT (a
-    # duplicate group in the map), never a new suppression that could go
-    # silent.
+    # only the NEWEST-ASK entry is the session's current question. A
+    # reworded ❓ past the 15-min edit window used to fall through to a
+    # fresh POST + record with the OLD entry left tracked forever (no age
+    # TTL since #368), so reping_stale_questions re-pinged BOTH daily — an
+    # immortal ghost. record_question now supersedes at write time
+    # (birth-site, notify/__init__.py); THIS pass reaps the pairs that
+    # already exist on the fleet, and it runs BEFORE reping in run_once,
+    # so a ghost dies without one further ping. Ordered by ASK GENERATION
+    # (notify.ask_generation — `asked` preserved across daily re-tracks,
+    # legacy fallback = record ts), never bare record time: a stale
+    # sibling's re-post carries a fresh ts, and comparing record times
+    # would keep the re-posted OLD ask over the session's LIVE newer
+    # question (#407 review MAJOR-1). Channel-scoped exactly like the
+    # writer: a DISCORD_MIRROR pair (same session, different channels) is
+    # one generation's siblings, never collapsed. No transcript needed —
+    # this is a map-shape fact, so it works for sessions the
+    # answered-in-session loop below cannot even resolve. Deletion keyed
+    # on an ARTIFACT (a duplicate group in the map), never a new
+    # suppression that could go silent.
     def _gen_order(gid):
         grec = qmap.get(gid) or {}
         gts = grec.get("ts")
         if isinstance(gts, bool) or not isinstance(gts, (int, float)):
             gts = 0            # legacy/bool ts reads as oldest, never raises
-        # Discord snowflakes are time-ordered — on a ts tie the larger id
-        # IS the later posting (deterministic, never dict order).
-        return (gts, int(gid) if str(gid).isdigit() else 0)
+        # Discord snowflakes are time-ordered — on a full tie the larger
+        # id IS the later posting (deterministic, never dict order).
+        return (ask_generation(grec), gts,
+                int(gid) if str(gid).isdigit() else 0)
 
     groups = {}
     for qid, rec in qmap.items():
@@ -2935,8 +2941,8 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
     "error", "no-config") leaves the entry exactly as it was, so the next
     sweep retries -- a transient failure must never silently defer a whole
     day's worth of "ask again"."""
-    from notify import (load_questions, drop_question, record_question,
-                        notification_channel)
+    from notify import (ask_generation, load_questions, drop_question,
+                        record_question, notification_channel)
     reping = QUESTION_REPING_S if reping is None else reping
     owner_by_sid = owner_by_sid or {}
     owner_by_cwd = owner_by_cwd or {}
@@ -2990,8 +2996,15 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
         retracked = False
         if new_mid:
             ch = notification_channel(owner=owner, kind="questions") or ""
+            # asked_ts (#407 review MAJOR-1): a re-track is a REPOST of the
+            # SAME old ask, never a new one — carry the entry's own ask
+            # generation through, so the record-time supersede and the
+            # sweep collapse keep treating it as the OLD ask and can never
+            # displace a LIVE, newer question tracked on the current
+            # questions channel.
             retracked = record_question(new_mid, ch, sid, cwd, now=now,
-                                        path=path, question=block)
+                                        path=path, question=block,
+                                        asked_ts=ask_generation(rec))
         if retracked:
             drop_question(qid, path)
     return logs

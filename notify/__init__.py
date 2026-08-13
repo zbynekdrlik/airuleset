@@ -1716,8 +1716,29 @@ def _save_questions(d, path=None):
         return False
 
 
+def ask_generation(rec):
+    """The ASK GENERATION of a question-map entry — when the question was
+    originally ASKED (`asked`, preserved verbatim across daily re-tracks by
+    reping_stale_questions), falling back to the record `ts` for a legacy
+    entry written before the field existed (its ts IS its ask time — only
+    a re-track ever separates the two). 0 for anything unreadable
+    (non-dict, bool/garbage timestamps — the isinstance(True, int) trap),
+    which reads as "oldest", the safe direction for every consumer: the
+    supersede and the collapse both keep the NEWEST generation (#407
+    review: comparing record time instead inverted the ask order the
+    moment a stale sibling's re-post landed on a live question's
+    channel)."""
+    if not isinstance(rec, dict):
+        return 0
+    for key in ("asked", "ts"):
+        v = rec.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return v
+    return 0
+
+
 def record_question(message_id, channel, session, cwd, now=None, path=None,
-                    question=""):
+                    question="", asked_ts=None):
     """Record that Discord message `message_id` (in `channel`) is the ❓ ping for
     `session` (transcript stem = CC session id) in `cwd`. Prunes malformed +
     over-cap entries in the same write (#368: no longer AGE — see the module
@@ -1746,13 +1767,24 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     `message_id` and `channel` must be NUMERIC Discord snowflakes — anything else
     (a Mock repr from a mis-wired test, a mangled shell var) is refused so garbage
     can never pollute the live map (real incident: Mock strings landed in
-    ~/.claude/discord-questions.json, 2026-07-04)."""
+    ~/.claude/discord-questions.json, 2026-07-04).
+
+    `asked_ts` (#407 review): the ASK GENERATION this record belongs to.
+    Omitted (a genuinely NEW ask — the hook path) it defaults to `now`;
+    reping_stale_questions passes the OLD entry's own generation on a
+    daily re-track, so a re-posted old question keeps reading as the OLD
+    ask to the supersede below and to the sweep collapse — never as a
+    fresh one that could displace a live, newer question."""
     message_id = str(message_id or "").strip()
     channel = str(channel or "").strip()
     session = str(session or "").strip()
     if not message_id.isdigit() or not channel.isdigit() or not session:
         return False
     now = time.time() if now is None else now
+    if isinstance(asked_ts, bool) or not isinstance(asked_ts, (int, float)):
+        asked = int(now)
+    else:
+        asked = int(asked_ts)
     q = " ".join(str(question or "").split())
     q = re.sub(r"^(?:<@[!&]?\d+>\s*)+", "", q)[:_QUESTION_TEXT_MAX]
     block = re.sub(r"^(?:<@[!&]?\d+>\s*)+", "",
@@ -1760,28 +1792,37 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     d = load_questions(path)
     d[message_id] = {"session": session, "cwd": str(cwd or ""),
                      "channel": str(channel or ""), "ts": int(now),
-                     "question": q, "block": block}
-    # #407: SUPERSEDE — the newest ask per (session, channel) is the ONLY
+                     "asked": asked, "question": q, "block": block}
+    # #407: SUPERSEDE — the newest ASK per (session, channel) is the ONLY
     # tracked entry. A reworded ❓ past _EDIT_WINDOW_S cannot EDIT the old
     # Discord card any more (update_question refuses purely on age), so the
     # pending hook falls through to a fresh POST + a fresh record here —
     # before this, the OLD entry stayed tracked forever (no age TTL since
     # #368) and reping_stale_questions re-pinged BOTH daily: an immortal
-    # "ghost". Dropping every OTHER same-(session, channel) entry at record
-    # time makes the ghost impossible to create — this function is the
-    # map's single writer (the send hook AND reping's own re-track both
-    # flow through it). Channel-scoped ON PURPOSE: a DISCORD_MIRROR
-    # fan-out records one entry per target THREAD (same session, DIFFERENT
-    # channels) within seconds — those are siblings of one generation, not
-    # ghosts, and each must stay tracked so a reply in either thread keeps
-    # routing (watchdog job 7). This mirrors the edit path's own
-    # within-window semantics (the second ask REPLACES the first on the
-    # phone) — past the window the behavior is now consistent instead of
-    # accidentally divergent.
+    # "ghost". Dropping every same-(session, channel) entry of an OLDER-OR-
+    # EQUAL ask generation at record time makes the ghost impossible to
+    # create — this function is the map's single writer (the send hook AND
+    # reping's own re-track both flow through it). GENERATION-guarded
+    # (#407 review MAJOR-1): a daily re-track posts an OLD question onto
+    # the CURRENT questions channel — an unconditional drop there ate a
+    # LIVE, newer question the session tracked on that channel; comparing
+    # ask generations keeps the newer ask untouched. Channel-scoped ON
+    # PURPOSE: a DISCORD_MIRROR fan-out records one entry per target
+    # THREAD (same session, DIFFERENT channels) within seconds — one
+    # generation's siblings, not ghosts, each kept so a reply in either
+    # thread keeps routing (watchdog job 7). This mirrors the edit path's
+    # own within-window semantics (the second ask REPLACES the first on
+    # the phone) — past the window the behavior is now consistent instead
+    # of accidentally divergent. Accepted, documented residual (review
+    # MAJOR-2): a superseded ask's own Discord card stays visible and
+    # answerable-looking; a reply to it is silently ignored by job 7 —
+    # the same convergence the within-window edit already imposes, minus
+    # the card rewrite.
     for mid in [mm for mm, v in d.items()
                 if mm != message_id and isinstance(v, dict)
                 and str(v.get("session") or "") == session
-                and str(v.get("channel") or "") == channel]:
+                and str(v.get("channel") or "") == channel
+                and ask_generation(v) <= asked]:
         d.pop(mid, None)
     # prune malformed — a legacy entry that isn't a dict (never one this
     # function itself could have written) is immediately prunable rather
