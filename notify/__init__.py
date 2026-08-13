@@ -1764,7 +1764,7 @@ def ask_generation(rec):
 
 
 def record_question(message_id, channel, session, cwd, now=None, path=None,
-                    question="", asked_ts=None):
+                    question="", asked_ts=None, grace_path=None):
     """Record that Discord message `message_id` (in `channel`) is the ❓ ping for
     `session` (transcript stem = CC session id) in `cwd`. Prunes malformed +
     over-cap entries in the same write (#368: no longer AGE — see the module
@@ -1839,16 +1839,25 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     # thread keeps routing (watchdog job 7). This mirrors the edit path's
     # own within-window semantics (the second ask REPLACES the first on
     # the phone) — past the window the behavior is now consistent instead
-    # of accidentally divergent. Accepted, documented residual (review
-    # MAJOR-2): a superseded ask's own Discord card stays visible and
-    # answerable-looking; a reply to it is silently ignored by job 7 —
-    # the same convergence the within-window edit already imposes, minus
-    # the card rewrite.
+    # of accidentally divergent. #449 closes #407's documented MAJOR-2
+    # residual (a superseded ask's card stays visible/answerable on
+    # Discord while its entry was DELETED, so a reply to it — including a
+    # reply to YESTERDAY's card after the daily re-track superseded it —
+    # was silently lost): a superseded entry now moves to the GRACE store
+    # (see the grace-store section below drop_question) instead of being
+    # popped outright, so job 7 keeps routing replies to it for
+    # QUESTION_GRACE_S. No ghost re-ping risk: reping_stale_questions and
+    # the statusline both read ONLY the main map. A _grace_put failure is
+    # deliberately not fatal here — the supersede itself must still
+    # happen (the live, newer ask wins the map either way).
     for mid in [mm for mm, v in d.items()
                 if mm != message_id and isinstance(v, dict)
                 and str(v.get("session") or "") == session
                 and str(v.get("channel") or "") == channel
                 and ask_generation(v) <= asked]:
+        _grace_put(mid, d.get(mid), now=now,
+                   path=grace_path if grace_path is not None
+                   else _grace_path_for(path))
         d.pop(mid, None)
     # prune malformed — a legacy entry that isn't a dict (never one this
     # function itself could have written) is immediately prunable rather
@@ -1879,6 +1888,131 @@ def drop_question(message_id, path=None):
     if message_id in d:
         d.pop(message_id, None)
         return _save_questions(d, path)
+    return False
+
+
+# --- pruned-question GRACE store (#449) ------------------------------------
+# prune_answered_questions' "any later human prompt = answered at the
+# terminal" inference is provably FALSE for a user who types OTHER things at
+# the terminal while answering the actual question on the phone (david live
+# incident 2026-08-13: 4 entries pruned, the Discord answer silently lost —
+# job 7 never even fetched, since an empty map short-circuits it). A pruned
+# or superseded entry therefore moves HERE instead of being deleted:
+# watchdog job 7 merges this store for reply matching, so a reply within
+# QUESTION_GRACE_S still routes NORMALLY (typed into the asking session,
+# with the original question wording). The MAIN map stays the single source
+# for the statusline Q badge (statusbar.py reads discord-questions.json
+# directly) and for the daily re-ask (reping_stale_questions reads
+# load_questions only) — a grace entry is never counted and never re-pinged,
+# so #407's ghost problem and the 2026-07-22 stale-badge problem both stay
+# fixed. Same file shape, same hard cap, same fail-safe discipline as the
+# main map; `pruned` stamps when the entry left the main map. Expiry is
+# enforced by job 7 at load time (deliver_discord_replies), NOT by the
+# prune: bare run_once tests without a Discord fetcher must never touch
+# this store, and job 7 is the store's only consumer anyway.
+_GRACE_REL = "discord-questions-grace.json"
+QUESTION_GRACE_S = 24 * 3600
+
+
+def _grace_path():
+    # DERIVED from the main map's directory, never _claude_dir() directly:
+    # a test that sandboxes _questions_path (the established per-class
+    # patch) automatically sandboxes the grace store too. NOT sufficient
+    # alone (#449-review F1): callers passing an EXPLICIT `path=` never
+    # consult this function, so record_question/grace_question derive
+    # their grace path from that explicit path themselves — see
+    # _grace_path_for(). Both halves together are what keep the store
+    # hermetic under pytest AND unittest discover.
+    return os.path.join(os.path.dirname(_questions_path()), _GRACE_REL)
+
+
+def _grace_path_for(path):
+    """The grace path belonging BESIDE an explicit main-map `path` (#449-
+    review F1: the pre-existing test population sandboxes via the `path=`
+    PARAMETER, not by patching _questions_path — deriving from the global
+    resolver alone silently wrote grace entries into the REAL ~/.claude on
+    every suite run). None/empty path → the global _grace_path()."""
+    if not path:
+        return _grace_path()
+    return os.path.join(os.path.dirname(os.path.abspath(path)), _GRACE_REL)
+
+
+def load_grace_questions(path=None):
+    """The pruned-question grace map (message-id → entry + `pruned` ts).
+    {} on any error."""
+    path = path or _grace_path()
+    try:
+        with open(path, encoding="utf-8") as h:
+            d = json.load(h)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_grace_questions(d, path=None):
+    path = path or _grace_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as h:
+            json.dump(d, h)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def _grace_put(message_id, rec, now=None, path=None):
+    """Insert one entry into the grace store (stamping `pruned`), capped
+    like the main map (newest by `pruned` kept). Fail-safe — False on any
+    write failure, and the caller must then KEEP its main-map entry (losing
+    the answer is the one failure this store exists to prevent)."""
+    message_id = str(message_id or "").strip()
+    if not message_id or not isinstance(rec, dict):
+        return False
+    now = time.time() if now is None else now
+    d = load_grace_questions(path)
+    ent = dict(rec)
+    ent["pruned"] = int(now)
+    d[message_id] = ent
+    for mid in [m for m, v in d.items() if not isinstance(v, dict)]:
+        d.pop(mid, None)
+    if len(d) > _QUESTIONS_MAX:
+        for mid, _v in sorted(
+                d.items(),
+                key=lambda kv: kv[1].get("pruned") or 0
+        )[:len(d) - _QUESTIONS_MAX]:
+            d.pop(mid, None)
+    return _save_grace_questions(d, path)
+
+
+def grace_question(message_id, now=None, path=None, grace_path=None):
+    """Move one entry MAIN map → GRACE store (#449). Grace-put FIRST, then
+    drop from the main map — a grace-write failure keeps the entry in the
+    main map (still routable, the prune retries next sweep) rather than
+    losing it. False when absent or on write failure."""
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        return False
+    rec = load_questions(path).get(message_id)
+    if not isinstance(rec, dict):
+        return False
+    if grace_path is None:
+        grace_path = _grace_path_for(path)     # #449-review F1
+    if not _grace_put(message_id, rec, now=now, path=grace_path):
+        return False
+    return drop_question(message_id, path)
+
+
+def drop_grace_question(message_id, path=None):
+    """Remove one delivered/expired grace entry. Fail-safe."""
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        return False
+    d = load_grace_questions(path)
+    if message_id in d:
+        d.pop(message_id, None)
+        return _save_grace_questions(d, path)
     return False
 
 

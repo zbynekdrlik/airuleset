@@ -2413,6 +2413,202 @@ DREPLY_TICKET_FALLBACK_S = 180      # reply blocked this long → deliver via th
 DREPLY_NOPANE_FALLBACK_S = 900
 _TICKET_NUM_RX = re.compile(r"#(\d{1,6})")
 
+# --- #449: the NEVER-SILENT floor for owner answer attempts ---------------- #
+# How long job 7 keeps fetching a QUESTION channel after its last live/grace
+# entry vanished (state["dreply_channels"], {channel: {"ts", "q"}}). This is
+# what lets the orphan floor below see a reply that lands AFTER the grace
+# window (or against an empty map — the david 2026-08-13 incident state):
+# without a tracked entry the channel set used to be empty and job 7 returned
+# before fetching anything at all, so the loss left zero journal lines.
+DREPLY_CHANNEL_MEMORY_S = 7 * 24 * 3600
+# Only messages younger than this (by their own snowflake timestamp) can
+# trigger the orphan ping — the 25-message fetch window routinely contains
+# ancient history (feature rollout, a long-idle thread), and pinging about a
+# weeks-old message the user has long moved past is pure noise.
+ORPHAN_ANSWER_WINDOW_S = 48 * 3600
+_DISCORD_EPOCH_MS = 1420070400000
+
+
+def _snowflake_ts(sid):
+    """Epoch seconds encoded in a Discord snowflake id; 0 when unparsable
+    (a non-numeric test id, garbage) — the caller then skips the orphan
+    ping rather than guessing the message's age."""
+    s = str(sid or "").strip()
+    if not s.isdigit():
+        return 0
+    return ((int(s) >> 22) + _DISCORD_EPOCH_MS) / 1000.0
+
+
+def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
+                          channel, now):
+    """Classify `msg` as an owner ANSWER ATTEMPT that can no longer be routed
+    (#449) — returns "untracked-ref" (an explicit reply to a message we no
+    longer track: pruned past grace, superseded past grace, or simply never
+    ours) or "not-a-reply" (a plain message in a QUESTIONS thread — the
+    security gate requires an explicit reply, so it can never route), else
+    None. Pure and deliberately NARROW:
+
+    - scoped to QUESTION channels only (the per-owner `-q` threads, #296 —
+      every bot message there is a ❓, so an unmatched owner message there is
+      near-certainly a lost answer; the main thread's cards/✅ chatter is
+      excluded, the card-reopen flow owns replies there);
+    - owner-authored, usable text, recent (ORPHAN_ANSWER_WINDOW_S via the
+      message's own snowflake — an unparsable id reads as too old, skip);
+    - a reply to another HUMAN's message (referenced_message present with a
+      non-bot author) is conversation, never an answer attempt — stay quiet.
+      A missing/deleted referenced_message stays classified as an orphan:
+      in a questions thread the referenced message was almost certainly our
+      own ❓, and the never-silent mandate prefers a rare extra ping over a
+      silent loss."""
+    if channel not in question_channels or not isinstance(msg, dict):
+        return None
+    mid = str(msg.get("id") or "").strip()
+    author_id = str((msg.get("author") or {}).get("id") or "").strip()
+    if not mid or author_id not in allowed_ids:
+        return None
+    if not clean_reply_text(msg.get("content")):
+        return None
+    sts = _snowflake_ts(mid)
+    if not sts or now - sts > ORPHAN_ANSWER_WINDOW_S:
+        return None
+    ref = str((msg.get("message_reference") or {}).get("message_id") or "").strip()
+    if not ref:
+        return "not-a-reply"
+    if ref in qmap or ref in cardmap:
+        return None                    # tracked — the normal flows own it
+    rm = msg.get("referenced_message")
+    if isinstance(rm, dict):
+        rauthor = rm.get("author")
+        # Only a GENUINELY human-shaped author (a real id, bot falsy) reads
+        # as chatter (#449-review F5: an author-less/degenerate dict must
+        # fail toward the orphan ping, per the never-silent mandate — the
+        # opposite of what a bare `(rm.get("author") or {}).get("bot")`
+        # falsy-check gives).
+        if (isinstance(rauthor, dict) and rauthor.get("id")
+                and not rauthor.get("bot")):
+            return None                # human-to-human chatter, not an answer
+    return "untracked-ref"
+
+
+def _orphan_ping_text(msg, reason):
+    """The Slovak owner ping for an unroutable answer attempt (#449) — the
+    user must never learn about a lost answer only from silence."""
+    frag = clean_reply_text((msg or {}).get("content"))[:120] or "(bez textu)"
+    if reason == "not-a-reply":
+        return ("⚠️ Tvoja správa na Discorde («%s») nie je Reply na konkrétnu "
+                "❓ otázku, takže sa nedá bezpečne priradiť k session. "
+                "Odpovedz prosím cez Reply priamo na ❓ kartu, alebo odpoveď "
+                "napíš do terminálu." % frag)
+    return ("⚠️ Tvoja Discord odpoveď («%s») sa už nedá priradiť — pôvodná "
+            "otázka medzitým prestala byť sledovaná (zodpovedaná v termináli "
+            "alebo nahradená novšou). Ak stále platí, odpovedz prosím na "
+            "NAJNOVŠIU ❓ otázku v tomto vlákne, alebo ju napíš priamo do "
+            "terminálu." % frag)
+
+
+def _merge_grace_questions(qmap, now, dry_run, logs):
+    """#449: merge the GRACE store into `qmap` for reply matching, expiring
+    entries past QUESTION_GRACE_S as we go (this is the store's ONLY
+    consumer, so it owns the lifecycle — the prune deliberately never
+    expires, so a bare run_once test without a Discord fetcher never
+    touches the store). A dry-run drops nothing (#304 discipline) but still
+    merges the same view. Returns the set of ids merged FROM grace so
+    `_delivered` drops them from the right store. Residual, documented: a
+    HOSTED foreign user's own grace store is not merged (historical shape,
+    no live hosted stream today — the never-silent floor still covers it
+    via the channel memory)."""
+    from notify import (QUESTION_GRACE_S, drop_grace_question,
+                        load_grace_questions)
+    grace_ids = set()
+    for gid, grec in list(load_grace_questions().items()):
+        if not isinstance(grec, dict):
+            if not dry_run:
+                drop_grace_question(gid)
+            continue
+        gts = grec.get("pruned")
+        if isinstance(gts, bool) or not isinstance(gts, (int, float)):
+            gts = grec.get("ts")
+            if isinstance(gts, bool) or not isinstance(gts, (int, float)):
+                gts = 0
+        if now - gts > QUESTION_GRACE_S:
+            if not dry_run:
+                drop_grace_question(gid)
+            logs.append("question grace expired — dropped %s [%s]"
+                        % (str(gid)[-6:],
+                           project_label(str(grec.get("cwd") or ""))))
+            continue
+        if gid not in qmap:
+            qmap[gid] = grec
+            grace_ids.add(gid)
+    return grace_ids
+
+
+def _refresh_channel_memory(chan_seen, channels, q_channels, now):
+    """#449: expire + refresh the question-channel memory (the shape stored
+    in state["dreply_channels"]: {channel: {"ts", "q"}}). Every channel
+    currently carrying a tracked entry is re-stamped `now`; a remembered
+    channel survives DREPLY_CHANNEL_MEMORY_S past its last sighting, so the
+    orphan floor can still SEE an answer that arrives after every entry
+    expired. Returns the fresh dict — the CALLER decides whether to persist
+    it (never on dry-run, #304) and widens its own fetch/question sets."""
+    kept = {}
+    for chx, ent in chan_seen.items():
+        if not isinstance(ent, dict):
+            continue
+        cts = ent.get("ts")
+        if isinstance(cts, bool) or not isinstance(cts, (int, float)):
+            continue
+        if now - cts <= DREPLY_CHANNEL_MEMORY_S:
+            kept[str(chx)] = {"ts": cts, "q": bool(ent.get("q"))}
+    for chx in channels:
+        prev_q = bool((kept.get(chx) or {}).get("q"))
+        kept[chx] = {"ts": now, "q": prev_q or (chx in q_channels)}
+    kept.pop("", None)
+    return kept
+
+
+def _orphan_floor(msg, ch, allowed, qmap, cardmap, q_channels, now, env,
+                  dry_run, skip_ids, orphan_done, orphan_done_set,
+                  state, persist, logs):
+    """#449 NEVER-SILENT floor: an owner's answer attempt that cannot be
+    routed (a reply to a message no longer tracked — pruned/superseded past
+    grace — or a plain non-reply message in a questions thread the security
+    gate can never match) must leave a journal line AND ping the owner,
+    never vanish. The journal line is unconditional (the floor even when
+    Discord itself is down); the ping is deduped per message id —
+    state-marked only on a CONFIRMED send ("sent"/"dedup"), so a transient
+    send error retries next sweep, and a dry-run marks nothing (#304)."""
+    mid_o = str(msg.get("id") or "").strip() if isinstance(msg, dict) else ""
+    if not mid_o or mid_o in skip_ids or mid_o in orphan_done_set:
+        return
+    reason = _orphan_answer_reason(msg, allowed, qmap, cardmap,
+                                   q_channels, ch, now)
+    if not reason:
+        return
+    logs.append("reply orphaned (%s) %s [%s]" % (reason, mid_o[-8:], ch))
+    from notify import forget_marker, marker_delivered, send as _send
+    dkey = "dorphan:%s" % mid_o
+    st_o = _send(_orphan_ping_text(msg, reason), env=env,
+                 dedup_key=dkey, dry_run=dry_run, kind="questions")
+    # #449-review F2: "dedup" alone is NOT confirmation — notify.send's
+    # dedup CLAIM marker is written BEFORE the POST, so a retry after one
+    # transient POST failure short-circuits to "dedup" with zero further
+    # POSTs. Only marker_delivered (the status recorded AFTER the POST,
+    # #135) is the honest read — the #134 marker-presence-vs-delivery
+    # trap, avoided at this call site. An undelivered "dedup" claim is
+    # additionally RELEASED so the NEXT sweep's send genuinely re-POSTs
+    # instead of short-circuiting at the stale claim forever (worst case
+    # of the release: one duplicate ⚠️ ping under a rare cross-process
+    # race — strictly better than a permanently silent one).
+    if not dry_run and (st_o == "sent"
+                        or (st_o == "dedup" and marker_delivered(dkey))):
+        orphan_done_set.add(mid_o)
+        orphan_done.append(mid_o)
+        state["dorphan_done"] = orphan_done[-_DREPLY_DONE_CAP:]
+        persist()
+    elif not dry_run and st_o == "dedup":
+        forget_marker(dkey)
+
 
 def _input_line_text(captured):
     """Text sitting in the pane's INPUT BOX: '' = bare prompt, None = no input
@@ -2801,18 +2997,33 @@ def _transcript_for_session(projects_dir, sid, cwd):
 
 
 def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
-    """Drop question-map entries whose asking session received a HUMAN prompt
-    AFTER the ❓ was pinged — the question was answered at the terminal, so
-    the entry would otherwise linger and inflate the statusline 'otazky'
-    badge (user complaint 2026-07-22: 14 stale questions shown in a project
-    with zero). #368: the map no longer has an AGE-based TTL to fall back on
-    either — an entry only ever leaves the map here (answered in-session, or
-    superseded by a newer ask of the same session+channel — #407), on
-    a routed Discord reply (job 7), or the hard cap — so this is now the
-    ONLY terminal-answer detection there is. Safe by design: if the question
-    is somehow still pending after a human prompt, the loop re-asks (the
-    prompt cleared the ping dedup) and re-records a fresh entry."""
-    from notify import ask_generation, load_questions, drop_question
+    """MOVE question-map entries whose asking session received a HUMAN prompt
+    AFTER the ❓ was pinged out of the MAIN map — the question was PRESUMED
+    answered at the terminal, so the entry would otherwise linger and
+    inflate the statusline 'otazky' badge (user complaint 2026-07-22: 14
+    stale questions shown in a project with zero). #368: the map no longer
+    has an AGE-based TTL to fall back on either — an entry only ever leaves
+    the map here (answered in-session, or superseded by a newer ask of the
+    same session+channel — #407), on a routed Discord reply (job 7), or the
+    hard cap — so this is the ONLY terminal-answer detection there is.
+
+    #449 (david live incident 2026-08-13): the "any later human prompt =
+    answered at the terminal" inference is FALSE for a user who types OTHER
+    things at the terminal while answering the actual question on the
+    phone. A hard delete here destroyed the only key job 7 can fetch/match/
+    route a Discord reply through, so the phone answer was lost with zero
+    trace. Entries therefore now move to the GRACE store
+    (notify.grace_question — discord-questions-grace.json, 24h window)
+    instead of being deleted: the badge still drops IMMEDIATELY (the main
+    map is what statusbar + reping read), but job 7 keeps merging grace
+    entries for reply matching, so a phone answer inside the window still
+    routes normally. Grace EXPIRY is enforced by job 7 at load time — NOT
+    here — so a bare run_once test without a Discord fetcher never touches
+    the store, and the store's only consumer owns its lifecycle. The old
+    "safe by design: the loop re-asks" note only ever covered the re-ask,
+    never a reply already sent to the pruned card — that is the gap grace
+    closes."""
+    from notify import ask_generation, grace_question, load_questions
     logs = []
     try:
         qmap = load_questions()
@@ -2864,10 +3075,10 @@ def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
         for qid in qids[:-1]:
             gcwd = str((qmap.get(qid) or {}).get("cwd") or "")
             if not dry_run:
-                drop_question(qid)
+                grace_question(qid)     # #449: routable for 24h, never lost
             qmap.pop(qid, None)   # the loop below must not re-process it
             logs.append("question superseded by a newer ask — pruned %s [%s]"
-                        % (str(qid)[-6:], project_label(gcwd)))
+                        " (grace)" % (str(qid)[-6:], project_label(gcwd)))
     for qid, rec in list(qmap.items()):
         if not isinstance(rec, dict):
             continue
@@ -2882,9 +3093,9 @@ def prune_answered_questions(now, projects_dir=PROJECTS_DIR, dry_run=False):
         hts = _last_human_prompt_ts(tpath)
         if hts and hts > qts + 30:       # grace: never race the ping's own turn
             if not dry_run:
-                drop_question(qid)
+                grace_question(qid)     # #449: routable for 24h, never lost
             logs.append("question answered in-session — pruned %s [%s]"
-                        % (str(qid)[-6:], project_label(cwd)))
+                        " (grace)" % (str(qid)[-6:], project_label(cwd)))
     return logs
 
 
@@ -2941,7 +3152,7 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
     "error", "no-config") leaves the entry exactly as it was, so the next
     sweep retries -- a transient failure must never silently defer a whole
     day's worth of "ask again"."""
-    from notify import (ask_generation, load_questions, drop_question,
+    from notify import (ask_generation, grace_question, load_questions,
                         record_question, notification_channel)
     reping = QUESTION_REPING_S if reping is None else reping
     owner_by_sid = owner_by_sid or {}
@@ -3006,7 +3217,14 @@ def reping_stale_questions(now, send_fn, dry_run=False, path=None,
                                         path=path, question=block,
                                         asked_ts=ask_generation(rec))
         if retracked:
-            drop_question(qid, path)
+            # #449-review F4: GRACE the old entry, never hard-delete it.
+            # Same-channel re-tracks are usually already graced by
+            # record_question's own supersede (this is then a no-op), but
+            # a CROSS-channel re-track (a freshly provisioned -q thread,
+            # owner-resolution drift) misses the channel-scoped supersede
+            # — and the user's reply to YESTERDAY's still-visible card
+            # must keep routing for the grace window, not vanish.
+            grace_question(qid, path=path)
     return logs
 
 
@@ -4583,8 +4801,9 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     marker for a mutation that already landed (a real `gh` reopen/comment or
     a real keystroke delivery). Defaults to a no-op; `run_once`'s own trailing
     `save_state()` still covers the ordinary case."""
-    from notify import (bot_token, known_owner_ids, load_questions, drop_question,
-                        _read_env, load_cards, forget_marker)
+    from notify import (bot_token, drop_grace_question, drop_question,
+                        forget_marker, known_owner_ids, load_cards,
+                        load_questions, _read_env)
     logs = []
     env = _read_env() if env is None else env
     qmap = load_questions()
@@ -4605,7 +4824,18 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             if qid not in qmap and isinstance(rec, dict):
                 qmap[qid] = rec
                 q_owner[qid] = fu
-    if (not qmap and not cardmap and not state.get("dreply_pointer")):
+    # (#449) Merge the GRACE store — entries the prune/supersede moved out
+    # of the main map. A reply to a graced entry still routes NORMALLY for
+    # QUESTION_GRACE_S (see _merge_grace_questions). And the QUESTION-
+    # CHANNEL MEMORY: with an EMPTY map this function used to return before
+    # fetching anything, which is exactly how david's answer vanished with
+    # zero journal lines (2026-08-13) — remembered channels keep the fetch
+    # alive for the orphan floor below.
+    grace_ids = _merge_grace_questions(qmap, now, dry_run, logs)
+    chan_seen = state.get("dreply_channels")
+    chan_seen = dict(chan_seen) if isinstance(chan_seen, dict) else {}
+    if (not qmap and not cardmap and not state.get("dreply_pointer")
+            and not chan_seen):
         return logs
     token = bot_token(env)
     allowed = known_owner_ids(env)
@@ -4633,11 +4863,24 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     react_done_set = set(react_done)
     # MINOR-7 (#297/#298 review): a malformed/legacy qmap/cardmap entry (not
     # a dict) must not crash the channel-set build — skip it, never guess.
-    channels = {str(v.get("channel") or "") for v in qmap.values()
-                if isinstance(v, dict)}
+    q_channels = {str(v.get("channel") or "") for v in qmap.values()
+                  if isinstance(v, dict)}
+    q_channels.discard("")
+    channels = set(q_channels)
     channels |= {str(v.get("channel") or "") for v in cardmap.values()
                 if isinstance(v, dict)}
     channels.discard("")
+    # (#449) update + expire the channel memory (persist only on a real
+    # sweep — #304), widen the fetch set with it, and remember which
+    # remembered channels were QUESTION channels (the orphan floor's scope).
+    kept_chans = _refresh_channel_memory(chan_seen, channels, q_channels, now)
+    if not dry_run:
+        state["dreply_channels"] = kept_chans
+    channels |= set(kept_chans)
+    q_channels |= {c for c, e in kept_chans.items() if e.get("q")}
+    orphan_done = state.get("dorphan_done")
+    orphan_done = list(orphan_done) if isinstance(orphan_done, list) else []
+    orphan_done_set = set(orphan_done)
 
     def _ack(r):
         # ✅ = RECEIPT, fired the moment the reply is MATCHED (even while the
@@ -4668,6 +4911,8 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             fu = q_owner.get(r["referenced"])
             if fu:
                 f_drop(fu, r["referenced"])
+            elif r["referenced"] in grace_ids:
+                drop_grace_question(r["referenced"])   # #449: graced entry
             else:
                 drop_question(r["referenced"])
             # #304 review MINOR-5: popping the reply's "first blocked at"
@@ -4820,7 +5065,16 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                                 % (cr["issue"], cr["repo"]))
 
             r = parse_discord_reply(msg, allowed, qmap, bot_id="")
-            if not r or r["reply_id"] in done_set:
+            if not r:
+                # (#449) NEVER-SILENT floor — see _orphan_floor: an owner's
+                # unroutable answer attempt journals + pings, never vanishes.
+                _orphan_floor(msg, ch, allowed, qmap, cardmap, q_channels,
+                              now, env, dry_run,
+                              done_set | card_done_set,
+                              orphan_done, orphan_done_set,
+                              state, persist, logs)
+                continue
+            if r["reply_id"] in done_set:
                 continue
             _ack(r)
             pane = panes_by_sid.get(r["session"])

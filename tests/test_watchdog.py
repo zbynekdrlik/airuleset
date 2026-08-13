@@ -2211,6 +2211,23 @@ class RunOnceSubagentVisibility(unittest.TestCase):
     ping-only, never a keystroke) instead of waiting up to ~30 min for job 4's
     indirect subagent_active() mtime path."""
 
+    def setUp(self):
+        # (#449 gate-run live catch — pre-existing, reproduced against the
+        # pre-#449 code too) run_once with dry_run=False wires
+        # reping_stale_questions against notify's REAL question map: a
+        # GENUINE production ❓ on this box crossing its 24h re-ask
+        # boundary mid-test injected an unexpected re-ask ping into this
+        # class's fake send_fn, failing the pings3==[] lock. Sandbox the
+        # map (the grace store derives from the same dirname) so the class
+        # only ever sees its own state.
+        import notify
+        tmpq = TemporaryDirectory()
+        self.addCleanup(tmpq.cleanup)
+        qp = str(Path(tmpq.name) / "discord-questions.json")
+        p = unittest.mock.patch.object(notify, "_questions_path", lambda: qp)
+        p.start()
+        self.addCleanup(p.stop)
+
     CWD = "/home/newlevel/devel/some-project"
     PANE = "%3"
     SID = "sess-abc"
