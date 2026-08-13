@@ -14,6 +14,7 @@ import http.client
 import io
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -331,18 +332,65 @@ class TestMultiInterfaceUrls(TestCase):
         self.assertLess(took, 8.0,
                         "must fail on the child's exit, not on the deadline")
 
+    def _readiness_timeout_probe(self, child_startup_delay_s=0.0):
+        """Drive the readiness-timeout path against a fake server that never
+        binds and never exits — the zombie shape a lingering child presents
+        to the wait — and return the assertRaises ctx for the caller's own
+        assertions. `child_startup_delay_s` simulates a load-delayed child
+        startup (this box runs many concurrent full-suite runs — see the
+        load-flake entry in the project playbook): the delay runs BEFORE
+        the fake writes its stderr diagnostic, exactly where real CPU
+        contention slows a fresh interpreter down.
+
+        The 1.0s readiness deadline is the SUBJECT under test (the wait
+        must fail with the server's own stderr) — it must never double as
+        a bound on the fake child's startup, so the probe synchronises on
+        an out-of-band sentinel FILE the fake touches right after flushing
+        its diagnostic, and only THEN starts the readiness wait. Both
+        assertions the callers make are untouched; only the extraneous
+        startup race is removed."""
+        dest = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(dest), ignore_errors=True)
+        tmpd = tempfile.mkdtemp(prefix="upload-readiness-diag-")
+        self.addCleanup(shutil.rmtree, tmpd, ignore_errors=True)
+        sentinel = os.path.join(tmpd, "diag-written")
+        mute = ('import time; time.sleep(%r); import sys; '
+                'sys.stderr.write("DIAG-never-bound\\n"); '
+                'sys.stderr.flush(); open(%r, "w").close(); '
+                'time.sleep(60)' % (child_startup_delay_s, sentinel))
+        proc, port = _spawn(self, "tok113mute", dest,
+                            launcher=[sys.executable, "-c", mute])
+        # Bounded event wait: the diagnostic provably exists BEFORE the
+        # readiness budget under test starts ticking. A fake that dies
+        # early ends the wait immediately — _wait_until_serving's own
+        # exited-before-serving branch then reports its stderr.
+        end = time.monotonic() + 60.0
+        while not os.path.exists(sentinel) and time.monotonic() < end:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        with self.assertRaises(AssertionError) as ctx:
+            _wait_until_serving(
+                self, proc, "http://127.0.0.1:%d/tok113mute/" % port, 1.0)
+        return ctx
+
     def test_readiness_timeout_reports_the_servers_own_stderr(self):
         # The ticket's other requirement: when the budget DOES run out, fail
         # with the server's captured stderr rather than a bare connection
         # error, so the next reader gets a diagnosis instead of a mystery.
-        # This launcher never binds and never exits — the zombie shape a
-        # lingering child (above) presents to the wait.
-        dest = Path(tempfile.mkdtemp())
-        mute = ('import sys, time; sys.stderr.write("DIAG-never-bound\\n"); '
-                'sys.stderr.flush(); time.sleep(30)')
-        with self.assertRaises(AssertionError) as ctx:
-            _serve(self, "tok113mute", dest, deadline_s=1.0,
-                   launcher=[sys.executable, "-c", mute])
+        ctx = self._readiness_timeout_probe()
+        self.assertIn("never served", str(ctx.exception))
+        self.assertIn("DIAG-never-bound", str(ctx.exception))
+
+    def test_readiness_timeout_diag_survives_slow_child_startup(self):
+        """#444 regression: the 1.0s readiness deadline under test must
+        never double as a bound on the fake child's own interpreter
+        startup — under real suite-contention load the startup alone can
+        outlast it, the deadline kill then lands BEFORE the diagnostic was
+        ever written, and the failure message loses the stderr diagnosis
+        this test exists to guarantee. A 2.0s injected pre-write delay
+        deterministically outlasts the deadline."""
+        ctx = self._readiness_timeout_probe(child_startup_delay_s=2.0)
         self.assertIn("never served", str(ctx.exception))
         self.assertIn("DIAG-never-bound", str(ctx.exception))
 

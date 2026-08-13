@@ -19,6 +19,7 @@ status=="running". Empty (key present) -> BLOCK. Key absent entirely
 
 import json
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -33,6 +34,17 @@ from _hook_state_cleanup import sweep_session_files
 
 REPO = Path(airuleset.__file__).resolve().parent
 HOOK = REPO / "hooks" / "stop-check-working-liveness.sh"
+
+# #444: harness hang-guard for every hook subprocess in this file. The hook
+# does bounded work (a few jq calls, no waits) and normally finishes in
+# 0.03-0.04s (measured) -- but this box runs 6-19 concurrent full-suite
+# runs at once (the load-flake entry in the project playbook), and that
+# contention genuinely pushed a HEALTHY hook past the old 15s bound once
+# (subprocess.TimeoutExpired -- the ticket's own evidence). 120s is ~8x
+# past the bound that already failed under real load, still tightly
+# bounded for a genuine hang, and it changes NOTHING about what any test
+# asserts -- the hook's decision output is verified exactly as before.
+HOOK_TIMEOUT_S = 120
 
 
 def payload(msg, background_tasks="__ABSENT__", session_id=None):
@@ -75,7 +87,7 @@ class HookBase(unittest.TestCase):
             ["bash", str(HOOK)],
             input=payload(msg, background_tasks=background_tasks,
                           session_id=sid),
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S)
 
 
 class TestHookExistsAndWired(unittest.TestCase):
@@ -204,12 +216,13 @@ class TestFailOpenWhenUnprovable(HookBase):
 
     def test_no_jq_no_input_never_crashes(self):
         out = subprocess.run(["bash", str(HOOK)], input="", capture_output=True,
-                              text=True, timeout=15)
+                              text=True, timeout=HOOK_TIMEOUT_S)
         self.assertEqual(out.returncode, 0)
 
     def test_garbage_stdin_fails_open(self):
         out = subprocess.run(["bash", str(HOOK)], input="not json at all",
-                              capture_output=True, text=True, timeout=15)
+                              capture_output=True, text=True,
+                              timeout=HOOK_TIMEOUT_S)
         self.assertEqual(out.returncode, 0)
         self.assertNotIn('"decision"', out.stdout)
 
@@ -289,6 +302,30 @@ class TestCleanupIsScopedToOwnSession(HookBase):
             own_file.exists(),
             "cleanup must actually REMOVE the file THIS test's own "
             "session created, not merely spare foreign ones")
+
+
+class TestHarnessTimeoutHasContentionHeadroom(unittest.TestCase):
+    """#444: the hook-subprocess bound in this file is a pure hang-guard --
+    the hook's normal runtime is 0.03-0.04s (measured, 3 runs) -- yet a 15s
+    bound was genuinely exceeded by a HEALTHY hook under this box's
+    6-19-concurrent-full-suite contention (subprocess.TimeoutExpired, the
+    ticket's own evidence). Lock BOTH halves of the fix: the shared
+    constant keeps real contention headroom, and no call site regresses to
+    a private numeric literal the constant cannot govern."""
+
+    def test_timeout_constant_keeps_contention_headroom(self):
+        self.assertGreaterEqual(
+            globals().get("HOOK_TIMEOUT_S", 15), 120,
+            "HOOK_TIMEOUT_S must keep ~8x headroom past the 15s bound that "
+            "real suite-contention load already exceeded on a healthy hook")
+
+    def test_no_call_site_uses_a_private_numeric_timeout(self):
+        src = Path(__file__).read_text()
+        hits = re.findall(r"timeout\s*=\s*\d+", src)
+        self.assertEqual(
+            hits, [],
+            "every subprocess timeout in this file must use the shared "
+            "HOOK_TIMEOUT_S constant, never a private numeric literal")
 
 
 if __name__ == "__main__":
