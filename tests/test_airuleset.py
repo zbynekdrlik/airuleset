@@ -1767,7 +1767,26 @@ class TestPrePushBaseSyncHook(TestCase):
         self._edit_line2(repo, "dev", "DEV-EDIT")
         r = self._run(repo, "git push origin dev")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("CONFLICT", r.stdout)
+        # #417: the block reason moved to stderr (Claude Code's PreToolUse
+        # exit-2 contract surfaces the block reason FROM stderr).
+        self.assertIn("CONFLICT", r.stderr)
+
+    def test_block_reason_reaches_stderr_not_just_stdout(self):
+        # #417: Claude Code's PreToolUse exit-2 contract surfaces the block
+        # REASON from stderr -- every other exit-2-emitting hook in this repo
+        # routes its message through `>&2`; this one used to be the one
+        # outlier, landing its whole block message on stdout with ZERO bytes
+        # on stderr (reproduced live: exit 2, 596 bytes stdout, 0 bytes
+        # stderr against a real genuine-conflict repo), which the harness
+        # then reports as the opaque "No stderr output" hook error instead
+        # of the real CONFLICT explanation. The pre-existing
+        # test_blocks_on_genuine_conflict above never checked stderr at all.
+        repo = self._conflicting()
+        r = self._run(repo, "git push origin dev")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("CONFLICT", r.stderr,
+                       "block reason must be on stderr, not only stdout "
+                       f"(stdout={r.stdout!r} stderr={r.stderr!r})")
 
     def test_allows_merge_commit_only_behind(self):
         # THE #1 critical false-block: after a --no-ff PR merge + version bump, dev

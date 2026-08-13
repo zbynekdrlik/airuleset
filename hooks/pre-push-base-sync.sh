@@ -106,7 +106,7 @@ MT_RC=${MT_RC:-0}
 [ "$MT_RC" -ne 1 ] && exit 0
 
 CONFLICTS=$(printf '%s' "$MT_OUT" | grep -iE 'CONFLICT' | head -3 || true)
-cat <<MSG
+cat >&2 <<MSG
 🚫 BLOCKED: pushing '${BRANCH}' now would create a CONFLICTING PR against '${BASE}'.
 
 A trial merge of '${BASE}' into '${BRANCH}' has conflicts:
