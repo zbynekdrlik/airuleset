@@ -120,9 +120,9 @@ The USER-FACING slash surface is its own audit axis of every run — a mis-firin
 command wastes the user's time directly. Precedent: `/exit` kept mis-invoking `/playbook-review`
 from the picker (transcript-proven, the user's own words: "to sa len omylom stlacilo namiesto
 /exit") until #447 hid it. The picker executes the HIGHLIGHTED row on Enter with undocumented
-ranking and known mis-selection bugs (anthropics/claude-code #11431 — `/com` ran `/pr_comments`;
-#26307 stale filtering; #41828) — a command need NOT share letters with what the user typed to be
-mis-run, so visibility itself is the exposure.
+ranking and known mis-selection bugs (upstream anthropics/claude-code issues 11431 — `/com` ran
+`/pr_comments`; 26307 — stale filtering; 41828) — a command need NOT share letters with what the
+user typed to be mis-run, so visibility itself is the exposure.
 
 Inventory (what the user can actually type on THIS box):
 ```bash
@@ -141,7 +141,7 @@ Checks, each producing Step F findings:
    user-typed `<command-name>` ones — a skill with ~zero deliberate user invocations is agent-only.
 2. **Collision check** of every VISIBLE command against built-ins and against each other: prefix
    overlap, small edit distance, or duplicated purpose (two visible commands doing one job). Flag
-   collisions for rename/hide — with the #11431/#26307 caveat above, closeness is a hazard even
+   collisions for rename/hide — with the upstream-picker caveat above, closeness is a hazard even
    without shared letters, so the fix that always works is fewer visible entries.
 3. **Quality-command coverage.** Which quality-raising commands (review / verify / audit /
    simplify / security classes) exist installed vs available (reuse the Step D1 catalog + the
@@ -153,7 +153,7 @@ Checks, each producing Step F findings:
 
 All B2 findings route through the Step F review-loop like every other audit line — never
 auto-applied.
-Sources: code.claude.com/docs/en/skills.md (frontmatter: `user-invocable`) · code.claude.com/docs/en/commands.md · anthropics/claude-code#11431 · #447
+Sources: code.claude.com/docs/en/skills.md (frontmatter: `user-invocable`) · code.claude.com/docs/en/commands.md · upstream anthropics/claude-code issue 11431 · #447
 
 ## Step C — MCP / connector audit (read-only)
 
