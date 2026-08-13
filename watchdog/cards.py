@@ -30,6 +30,18 @@ bare-name callers already rely on. `_git_commit_ts` itself stays behind in
 `__init__.py`: only `delivery_state` (cluster E) uses it, this cluster does
 not need it at all, so there is no reason to move it before E is extracted.
 
+MONKEYPATCH SEAM NOTE (#433 cluster-F review MINOR-2): before this move,
+`watchdog._default_git_run = spy` reached every caller of the trio, since
+they all resolved it against the SAME module's globals. After this move it
+resolves against `watchdog.cards.__dict__` instead -- a package-level patch
+of `watchdog._default_git_run` no longer reaches `_git_first_line` (here)
+or any `__init__.py`-resident caller (`_git_commit_ts`/`delivery_state`/
+`_repo_label`). No existing test does this (verified: no test patches these
+names at all -- every test that needs control injects `git_run=` instead,
+which is unaffected), so this is a latent seam-narrowing rather than a live
+break; worth remembering if cluster E's own extraction adds a test that
+patches the trio by package attribute rather than via `git_run=`.
+
 Re-exported from `watchdog/__init__.py` (`from watchdog.cards import ...`,
 placed after every symbol this cluster depends on is already defined -- it
 depends on none) so every existing caller (`run_once()`'s job 25 dispatch,
