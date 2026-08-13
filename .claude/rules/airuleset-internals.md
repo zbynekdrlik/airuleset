@@ -1423,24 +1423,33 @@ writes only `~/.claude/`, and having it iterate over managed repos to write each
 project's own git-tracked `.claude/settings.json` would be a bigger, separately-
 scoped mechanism (new machinery, out of #415's scope + against the FREEZE), not
 "impossible" outright: a `.claude/settings.json` edit IS governance, not project
-CODE, so a FUTURE deliberate change could do it. The projects with genuine
-Playwright evidence (audiotester, songplayer, spinbike, restreamer, devbridge,
-automatizacie-montalu, tvdole, audiomatrix, media-bridge, reaperiem — from
-#415's live scan) each opt in themselves; that migration was DONE in #452
-(2026-08-13) — the one-line `enabledPlugins.playwright=true` key was written
-into all 10 projects' own `<repo>/.claude/settings.json` on dev1 (all 10 are
-dev1-local; none dev2-only), MERGED into the two that already had a settings.json
-(audiotester, reaperiem — both preserving their existing `hooks` key), created
-fresh for the other eight, and read back per project (playwright == true, valid
-JSON). The two BORDERLINE candidates named in #415/#452 were verified
-individually and EXCLUDED, because neither uses the Playwright MCP server the
-opt-in governs: claudy runs pytest-playwright (`from playwright.sync_api import
-sync_playwright` in its own test fixtures, spawning its own Chromium — never the
-MCP), and ekasagrabber uses the Node Playwright library directly
-(`require("playwright")`) and is not even a git repo (a non-maintained scratch
-dir) — opting either in would re-introduce exactly the resident MCP Chrome #415
-fought. `autonomous-verification.md`'s Playwright duty is fully intact for an
-opted-in project; the inversion removes a default, never a capability.
+CODE, so a FUTURE deliberate change could do it. The projects #415's SOURCE-LEVEL
+scan flagged as Playwright-needing (audiotester, songplayer, spinbike, restreamer,
+devbridge, automatizacie-montalu, tvdole, audiomatrix, media-bridge, reaperiem)
+each opt in themselves; that migration was DONE in #452 (2026-08-13) — the
+one-line `enabledPlugins.playwright=true` key was written into all 10 projects'
+own `<repo>/.claude/settings.json` on dev1 (all 10 are dev1-local; none
+dev2-only), MERGED into the two that already had a settings.json (audiotester,
+reaperiem — both preserving their existing `hooks` key), created fresh for the
+other eight, and read back per project (playwright == true, valid JSON). Of the
+two BORDERLINE candidates named in #452, one was INCLUDED and one EXCLUDED after
+a live `.playwright-mcp/` check (the MCP server's own `browser_snapshot`/console
+output dir — a runtime signature #415's source-only scan structurally could not
+see): claudy WAS opted in — despite its pytest-playwright test suite
+(`from playwright.sync_api import sync_playwright`, which spawns its own Chromium),
+its `.playwright-mcp/page-*.yml` output from the SAME day as the migration proves
+it genuinely uses the Playwright MCP too; ekasagrabber stays EXCLUDED (Node
+Playwright library directly via `require("playwright")`, no `.playwright-mcp/` at
+all, and not even a git repo). This makes 11 opted-in projects, not 10.
+`autonomous-verification.md`'s Playwright duty is fully intact for an opted-in
+project; the inversion removes a default, never a capability. **Completeness
+caveat:** the set above is #415's source-scan set, NOT an exhaustive list of every
+MCP-using project — a live `.playwright-mcp/` audit found FOUR more projects with
+genuine, recent MCP output that #415's scan missed (camera-box, forestshop_app,
+ziadosti-mesto, windows-machines — #415 had even explicitly named three of them
+"no footprint"), tracked as a needs-user-decision follow-up in #453 (it
+contradicts #415's own reviewed exclusions, so a human adjudicates rather than a
+worker silently overriding them).
 
 **Verify the inversion on a box:** `pgrep -fc playwright-mcp` before/after a
 session start in a NON-opted-in project should stay 0. A project's own
