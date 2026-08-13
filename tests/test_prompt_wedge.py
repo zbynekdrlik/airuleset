@@ -146,8 +146,12 @@ class TestMachineNudgeAutoSubmit(unittest.TestCase):
         self.assertFalse([a for a in run.calls if a[-1] == "Enter"])
 
     def test_protocol_declares_canonical_prefix(self):
+        # #426: cross-stream rule 6 (this prefix's own definition) moved
+        # VERBATIM to this reference file (SKILL.md exceeded its own #414
+        # line budget).
         skill = (Path(__file__).resolve().parent.parent / "skills" /
-                 "autopilot" / "SKILL.md").read_text(encoding="utf-8")
+                 "autopilot" / "references" /
+                 "cross-stream-protocol.md").read_text(encoding="utf-8")
         self.assertIn("Priorita: prio:bounce", skill)
         self.assertIn("auto-submits", skill)
 

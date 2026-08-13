@@ -40,6 +40,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = "skills/autopilot/SKILL.md"
 SKILL_MASTER = "skills/autopilot-master/SKILL.md"
+# #426: cross-stream rule 4's own text (incl. "is now MECHANICAL,") moved
+# VERBATIM to this reference file (SKILL.md exceeded its own #414 line
+# budget) — SKILL.md itself now carries only a short pointer paragraph.
+SKILL_CROSS_STREAM = "skills/autopilot/references/cross-stream-protocol.md"
 
 
 def read(rel):
@@ -429,7 +433,7 @@ class TestTheFullProofCountsWhatOnlyThisBoxCanAction(TestCase):
         self.assertIn("core-quals --list", bullet)
 
     def test_cross_stream_rule_four_records_the_mechanical_hold(self):
-        t = read(SKILL)
+        t = read(SKILL_CROSS_STREAM)
         i = t.index("is now MECHANICAL,")
         window = " ".join(t[i:i + 900].split())   # markdown line-wraps -> spaces
         self.assertIn("core-quals", window)

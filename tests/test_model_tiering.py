@@ -181,7 +181,10 @@ class TestSubdevReviewIsFableGated(TestCase):
         self.assertRegex(txt, r"(?i)sub-dev[^\n]*(hand-off|review|submission)")
 
     def test_cross_stream_protocol_carries_the_tier(self):
-        txt = (ROOT / "skills" / "autopilot" / "SKILL.md").read_text()
+        # #426: the cross-stream protocol's own text moved VERBATIM to this
+        # reference file (SKILL.md exceeded its own #414 line budget).
+        txt = (ROOT / "skills" / "autopilot" / "references"
+               / "cross-stream-protocol.md").read_text()
         self.assertRegex(txt, r"(?i)review[^\n]*fable[^\n]*gate|fable[^\n]*gate[^\n]*review")
 
 
