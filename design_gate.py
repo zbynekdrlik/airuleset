@@ -431,8 +431,8 @@ def stale_msgfile_candidates(cmd):
 
 
 def is_git_tracked(path, cwd):
-    """True iff `path` is a file git ALREADY tracks in `cwd`'s repo -- a
-    genuine scratch msgfile is NEVER tracked, so this is the discriminator
+    """True iff `path` is a file SOME repo already tracks -- a genuine
+    scratch msgfile is NEVER tracked, so this is the discriminator
     stale_msgfile_candidates' own docstring promises: refuse to quarantine
     anything that could plausibly be a real project file. Fails toward
     TRACKED (never quarantine) on ANY unmeasurable result -- git missing,
@@ -440,18 +440,37 @@ def is_git_tracked(path, cwd):
     the more consequential action" direction `required_refs` already uses
     one function up, just applied to a destructive action instead of a
     block decision. `git ls-files --error-unmatch` has FOUR outcomes, not
-    two: rc=0 (tracked), rc=1 (git ran fine and specifically confirmed the
-    path is untracked -- "did not match any file(s) known to git"), rc=128
-    with "is outside repository" (the queried path is not even INSIDE
-    `cwd`'s working tree at all -- every real worker scratchpad file, under
-    /tmp, always hits this case, since the repo lives elsewhere entirely --
-    #431: a path outside the repo cannot by definition be a file THIS repo
-    tracks, so this is a SECOND confident "not tracked" signal, exactly as
-    conclusive as rc==1, not merely "less unmeasurable"), and anything else
-    (128 for "not a git repository" -- `cwd` itself isn't a repo, genuinely
-    unmeasurable -- or any other failure/timeout). Only rc==1 and the
-    is-outside-repository rc==128 case are real, positive "safe to
-    quarantine" signals; every other outcome still fails toward TRACKED."""
+    two: rc=0 (tracked BY cwd's repo), rc=1 (git ran fine and specifically
+    confirmed the path is untracked -- "did not match any file(s) known to
+    git", which can only happen for a path genuinely INSIDE cwd's own
+    working tree), rc=128 with "is outside repository" (the queried path is
+    not even INSIDE `cwd`'s working tree at all -- every real worker
+    scratchpad file, under /tmp, hits this case), and anything else (128
+    for "not a git repository" -- `cwd` itself isn't a repo, genuinely
+    unmeasurable -- or any other failure/timeout).
+
+    #431-review F1 (live-triggered, empirically confirmed): "outside cwd's
+    repo" does NOT mean "untracked anywhere" -- a worktree's own `cwd`
+    makes its sibling MAIN checkout (they share one `.git`, per two-branch-
+    workflow.md/#317, but each worktree has its OWN separate working tree)
+    read as "is outside repository" too, and so does any file genuinely
+    tracked by a COMPLETELY DIFFERENT repo. Naively treating rc=128
+    "outside repository" as a second confident "not tracked" signal would
+    let `quarantine_stale_msgfile` rename away a real, valuable,
+    git-tracked project file the instant it merely lives outside THIS
+    worktree's own directory -- exactly the "moved a real project file"
+    disaster `stale_msgfile_candidates`' own docstring promises can never
+    happen. Fix: on rc=128 "outside repository", ask whichever repo (if
+    any) actually OWNS `path`'s containing directory -- via
+    `git -C <dirname(path)> rev-parse --show-toplevel` -- rather than
+    assuming "outside cwd's repo" means "untracked by every repo". If NO
+    repo owns that directory at all (rev-parse itself fails: rc!=0 or
+    empty stdout), `path` is genuinely outside version control anywhere --
+    the real /tmp-scratchpad case #431 exists to fix -- confidently
+    untracked. If a repo DOES own it, re-query `--error-unmatch` against
+    THAT repo and fail toward TRACKED on anything but a confirmed rc==1
+    (mirrors the original outer check's own fail-safe direction one level
+    down, rather than inventing a new one)."""
     try:
         out = subprocess.run(
             ["git", "ls-files", "--error-unmatch", "--", path],
@@ -462,7 +481,25 @@ def is_git_tracked(path, cwd):
     if out.returncode == 1:
         return False
     if out.returncode == 128 and "is outside repository" in (out.stderr or ""):
-        return False
+        try:
+            owner_dir = os.path.dirname(path) or "."
+            top = subprocess.run(
+                ["git", "-C", owner_dir, "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=8,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        owner = top.stdout.strip()
+        if top.returncode != 0 or not owner:
+            return False
+        try:
+            owned = subprocess.run(
+                ["git", "-C", owner, "ls-files", "--error-unmatch", "--", path],
+                capture_output=True, text=True, timeout=8,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        return owned.returncode != 1
     return True
 
 
