@@ -35,6 +35,17 @@ from _hook_state_cleanup import sweep_session_files
 REPO = Path(airuleset.__file__).resolve().parent
 HOOK = REPO / "hooks" / "stop-check-working-liveness.sh"
 
+# #444: harness hang-guard for every hook subprocess in this file. The hook
+# does bounded work (a few jq calls, no waits) and normally finishes in
+# 0.03-0.04s (measured) -- but this box runs 6-19 concurrent full-suite
+# runs at once (the load-flake entry in the project playbook), and that
+# contention genuinely pushed a HEALTHY hook past the old 15s bound once
+# (subprocess.TimeoutExpired -- the ticket's own evidence). 120s is ~8x
+# past the bound that already failed under real load, still tightly
+# bounded for a genuine hang, and it changes NOTHING about what any test
+# asserts -- the hook's decision output is verified exactly as before.
+HOOK_TIMEOUT_S = 120
+
 
 def payload(msg, background_tasks="__ABSENT__", session_id=None):
     d = {
@@ -76,7 +87,7 @@ class HookBase(unittest.TestCase):
             ["bash", str(HOOK)],
             input=payload(msg, background_tasks=background_tasks,
                           session_id=sid),
-            capture_output=True, text=True, timeout=15)
+            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S)
 
 
 class TestHookExistsAndWired(unittest.TestCase):
@@ -205,12 +216,13 @@ class TestFailOpenWhenUnprovable(HookBase):
 
     def test_no_jq_no_input_never_crashes(self):
         out = subprocess.run(["bash", str(HOOK)], input="", capture_output=True,
-                              text=True, timeout=15)
+                              text=True, timeout=HOOK_TIMEOUT_S)
         self.assertEqual(out.returncode, 0)
 
     def test_garbage_stdin_fails_open(self):
         out = subprocess.run(["bash", str(HOOK)], input="not json at all",
-                              capture_output=True, text=True, timeout=15)
+                              capture_output=True, text=True,
+                              timeout=HOOK_TIMEOUT_S)
         self.assertEqual(out.returncode, 0)
         self.assertNotIn('"decision"', out.stdout)
 

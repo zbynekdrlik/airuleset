@@ -18,9 +18,12 @@ WITHOUT `--verbose`, and `cmd_watchdog` only printed job logs under that flag
 
 import io
 import contextlib
+import os
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import unittest.mock as m
@@ -390,7 +393,19 @@ class CmdWatchdogPrintsLogsWithoutVerbose(unittest.TestCase):
         (this box runs 6-19 concurrent full-suite runs -- see the
         load-flake entry in the project playbook): the delay runs BEFORE
         the child's imports, exactly where real CPU contention slows a
-        fresh interpreter down."""
+        fresh interpreter down.
+
+        The parent synchronises on an OBSERVABLE EVENT, never a fixed
+        wall-clock sleep: the child touches a sentinel FILE immediately
+        after the wired log_fn call, and only then does the parent
+        SIGTERM. The sentinel is deliberately OUT-OF-BAND (a file
+        creation, visible regardless of stdout buffering), so it cannot
+        mask the very bug this probe exists to catch -- a non-flushing
+        log_fn still reaches the sentinel with the probe stuck in the
+        child's block buffer, and the SIGTERM still loses it."""
+        tmpdir = tempfile.mkdtemp(prefix="strip-sel-sigterm-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        sentinel = os.path.join(tmpdir, "logged")
         script = f"""
 import time
 time.sleep({child_startup_delay_s!r})   # injected load simulation (0 = none)
@@ -404,7 +419,10 @@ def fake(*a, **kw):
     log_fn = kw.get("log_fn")
     if log_fn:
         log_fn("PIPE-FLUSH-PROBE-172")
-    time.sleep(15)      # stay alive so the parent can SIGTERM mid-sleep
+    open({sentinel!r}, "w").close()   # out-of-band "logged" event marker
+    time.sleep(60)      # stay alive so the parent can SIGTERM mid-sleep;
+                        # long enough that a natural exit (which would
+                        # flush buffers and false-pass) stays unreachable
     return []
 
 class Args:
@@ -418,10 +436,18 @@ with m.patch.object(wd, "run_once", side_effect=fake):
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
         try:
-            time.sleep(1.5)   # give the child time to import + print
+            # Bounded event wait: the child announces "log_fn was called"
+            # via the sentinel; under load this simply takes longer and the
+            # poll absorbs it. A child that dies early (import crash) ends
+            # the wait immediately -- communicate() below surfaces stderr.
+            deadline = time.time() + 60.0
+            while not os.path.exists(sentinel) and time.time() < deadline:
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
             proc.send_signal(signal.SIGTERM)
             try:
-                out, err = proc.communicate(timeout=10)
+                out, err = proc.communicate(timeout=30)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 out, err = proc.communicate()
