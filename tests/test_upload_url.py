@@ -364,8 +364,8 @@ class TestMultiInterfaceUrls(TestCase):
         # readiness budget under test starts ticking. A fake that dies
         # early ends the wait immediately — _wait_until_serving's own
         # exited-before-serving branch then reports its stderr.
-        end = time.time() + 60.0
-        while not os.path.exists(sentinel) and time.time() < end:
+        end = time.monotonic() + 60.0
+        while not os.path.exists(sentinel) and time.monotonic() < end:
             if proc.poll() is not None:
                 break
             time.sleep(0.05)

@@ -440,8 +440,8 @@ with m.patch.object(wd, "run_once", side_effect=fake):
             # via the sentinel; under load this simply takes longer and the
             # poll absorbs it. A child that dies early (import crash) ends
             # the wait immediately -- communicate() below surfaces stderr.
-            deadline = time.time() + 60.0
-            while not os.path.exists(sentinel) and time.time() < deadline:
+            deadline = time.monotonic() + 60.0
+            while not os.path.exists(sentinel) and time.monotonic() < deadline:
                 if proc.poll() is not None:
                     break
                 time.sleep(0.05)
