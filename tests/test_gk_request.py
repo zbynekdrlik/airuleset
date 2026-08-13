@@ -453,22 +453,96 @@ class TestGkreqRepingBackoff(unittest.TestCase):
 
 
 class TestGkreqFetch(unittest.TestCase):
+    """Job 11's fetch. Widened by the stale hand-off alarm (#399): the
+    contract is now {"tickets": [...], "handoffs": {num: updated_epoch}} —
+    `tickets` keeps the pre-#399 population EXACTLY (needs-gatekeeper label
+    ∪ GATEKEEPER-ACTION title fallback), `handoffs` additionally folds in
+    `ready-for-review` rows and every row's updatedAt, minus rows carrying
+    an excluded label (prio:bounce / ops-channel / autopilot-skip) and
+    minus rows whose timestamp does not parse. Legacy bare-list fixtures
+    stay valid for CALLERS via the normalize adapter (see
+    TestStaleHandoffAlarm's own compat control)."""
+
+    @staticmethod
+    def _row(num, updated="2026-08-13T00:00:00Z", labels=(), title=None):
+        row = {"number": num, "updatedAt": updated,
+               "labels": [{"name": n} for n in labels]}
+        if title is not None:
+            row["title"] = title
+        return row
+
     def test_label_and_title_fallback_queries_union(self):
         calls = []
 
         def run(argv, **kw):
             calls.append(argv)
-            out = ([{"number": 5}] if "--label" in argv
-                   else [{"number": 9,
-                          "title": "GATEKEEPER-ACTION: obnov docker sock"}])
+            if "needs-gatekeeper" in argv:
+                out = [self._row(5, labels=("needs-gatekeeper",))]
+            elif "ready-for-review" in argv:
+                out = [self._row(12, labels=("ready-for-review",))]
+            else:
+                out = [self._row(
+                    9, title="GATEKEEPER-ACTION: obnov docker sock")]
             return m.Mock(returncode=0, stdout=json.dumps(out))
 
         with m.patch("subprocess.run", side_effect=run):
             got = wd._fetch_gkreq_tickets("/tmp/x")
-        self.assertEqual(got, [5, 9])
+        self.assertEqual(got["tickets"], [5, 9])
+        self.assertEqual(sorted(got["handoffs"]), [5, 9, 12])
         flat = json.dumps(calls)
         self.assertIn("needs-gatekeeper", flat)
         self.assertIn("GATEKEEPER-ACTION", flat)
+        self.assertIn("ready-for-review", flat)
+
+    def test_ready_for_review_never_joins_the_tickets_contract(self):
+        # #399: a hand-off awaiting review is NOT a stream→supervisor
+        # action request — it must never enter job 11's immediate
+        # nudge/ping flow (a fresh hand-off pinging immediately would be
+        # the banned per-phase spam shape); it feeds ONLY the stale map.
+        def run(argv, **kw):
+            out = ([self._row(12, labels=("ready-for-review",))]
+                   if "ready-for-review" in argv else [])
+            return m.Mock(returncode=0, stdout=json.dumps(out))
+
+        with m.patch("subprocess.run", side_effect=run):
+            got = wd._fetch_gkreq_tickets("/tmp/x")
+        self.assertEqual(got["tickets"], [])
+        self.assertEqual(sorted(got["handoffs"]), [12])
+
+    def test_bounced_and_ops_channel_handoffs_are_excluded(self):
+        # #399: prio:bounce = the ticket is back in the SUB-DEV's court (a
+        # bounce overrides a hand-off claim); ops-channel = a PERMANENT,
+        # never-auto-closing channel that would otherwise read "stale"
+        # forever. Both excluded CLIENT-SIDE from the fetched labels.
+        def run(argv, **kw):
+            if "ready-for-review" in argv:
+                out = [
+                    self._row(3, labels=("ready-for-review", "prio:bounce")),
+                    self._row(4, labels=("ready-for-review", "ops-channel")),
+                    self._row(5, labels=("ready-for-review",)),
+                ]
+            else:
+                out = []
+            return m.Mock(returncode=0, stdout=json.dumps(out))
+
+        with m.patch("subprocess.run", side_effect=run):
+            got = wd._fetch_gkreq_tickets("/tmp/x")
+        self.assertEqual(sorted(got["handoffs"]), [5])
+        self.assertEqual(got["tickets"], [])
+
+    def test_unparsable_updated_at_row_is_skipped_from_handoffs(self):
+        # #399: unmeasurable staleness must never alarm — but the row is
+        # still a perfectly real REQUEST for the tickets contract.
+        def run(argv, **kw):
+            out = ([self._row(6, updated="not-a-timestamp",
+                              labels=("needs-gatekeeper",))]
+                   if "needs-gatekeeper" in argv else [])
+            return m.Mock(returncode=0, stdout=json.dumps(out))
+
+        with m.patch("subprocess.run", side_effect=run):
+            got = wd._fetch_gkreq_tickets("/tmp/x")
+        self.assertEqual(got["tickets"], [6])
+        self.assertEqual(got["handoffs"], {})
 
     def test_tokenized_search_match_is_filtered_client_side(self):
         # LIVE false positive (2026-07-24, first minutes of the job): GitHub
@@ -485,7 +559,9 @@ class TestGkreqFetch(unittest.TestCase):
             return m.Mock(returncode=0, stdout=json.dumps(out))
 
         with m.patch("subprocess.run", side_effect=run):
-            self.assertEqual(wd._fetch_gkreq_tickets("/tmp/x"), [])
+            got = wd._fetch_gkreq_tickets("/tmp/x")
+        self.assertEqual(got["tickets"], [])
+        self.assertEqual(got["handoffs"], {})
 
     def test_any_query_error_returns_none(self):
         with m.patch("subprocess.run",
@@ -511,14 +587,234 @@ class TestGkreqFetchExcludesOpsChannel(unittest.TestCase):
 
         with m.patch("subprocess.run", side_effect=run):
             wd._fetch_gkreq_tickets("/tmp/x")
-        self.assertEqual(len(calls), 2, calls)
-        label_call = next(c for c in calls if "--label" in c)
-        title_call = next(c for c in calls if "--label" not in c)
-        self.assertIn("-label:ops-channel", json.dumps(label_call),
-                       "needs-gatekeeper label query missing ops-channel excl")
-        self.assertIn("-label:ops-channel", json.dumps(title_call),
-                       "GATEKEEPER-ACTION: title-fallback query missing "
-                       "ops-channel excl")
+        # 3 queries since #399 added the ready-for-review stale-alarm
+        # fetch alongside the two #364-audited ones — ALL must carry
+        # the ops-channel exclusion.
+        self.assertEqual(len(calls), 3, calls)
+        for c in calls:
+            self.assertIn("-label:ops-channel", json.dumps(c),
+                          "gkreq query missing ops-channel excl: %r" % (c,))
+class TestStaleHandoffAlarm(unittest.TestCase):
+    """#399 — stale ready-for-review / needs-gatekeeper hand-off alarm: the
+    GATEKEEPER box watches its own review queue instead of the owner having
+    to notice a rotting hand-off on GitHub. A hand-off untouched
+    (updatedAt) for GKREQ_STALE_HANDOFF_S+ raises ONE staged Discord alarm
+    stream (the SAME 24h/3d/7d `_gkreq_reping_due` backoff as the sibling
+    no-pane ping, under its own `stale_seen` dedup namespace); a fresh
+    hand-off is normal flow the /process-subdev loop consumes and must
+    never ping (the banned per-phase spam shape)."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.root = str(Path(tmp.name) / "devel" / "demo")
+        Path(self.root).mkdir(parents=True)
+        seed_repo_cache(self.home, self.root, "demo")
+        self.pings = []
+
+    def _send(self, body, **kw):
+        self.pings.append((body, kw))
+        return "sent"
+
+    def _sweep(self, now, state, fetched, panes=None, captured=IDLE,
+               persist=None):
+        tmux = FakeTmux(panes if panes is not None else [], captured)
+        logs = wd.gk_request_backstop(
+            now, tmux, state, self._send, home=self.home,
+            gh_fetch=lambda root: fetched, user="gatekeeper",
+            persist=persist)
+        return logs, tmux
+
+    @staticmethod
+    def _fetched(handoffs, tickets=()):
+        return {"tickets": list(tickets), "handoffs": dict(handoffs)}
+
+    def test_threshold_is_six_hours(self):
+        # regression pin — sized between the 30-min sweep cadence and the
+        # 24h first reping stage; a future edit must fail loudly.
+        self.assertEqual(wd.GKREQ_STALE_HANDOFF_S, 6 * 3600)
+
+    def test_stale_ready_for_review_handoff_pings_discord(self):
+        now = time.time()
+        logs, _t = self._sweep(now, {}, self._fetched(
+            {7: int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)}))
+        self.assertEqual(len(self.pings), 1, logs)
+        body = self.pings[0][0]
+        self.assertIn("#7", body)
+        self.assertIn("hand-off", body)
+        self.assertTrue(any(ln.startswith("gkstale-ping") for ln in logs),
+                        logs)
+
+    def test_fresh_handoff_stays_silent(self):
+        # a hand-off ONE hour old is the /process-subdev loop's normal
+        # queue — alarming here would be the banned per-phase spam ping.
+        now = time.time()
+        logs, _t = self._sweep(now, {}, self._fetched({7: int(now - 3600)}))
+        self.assertFalse(self.pings, logs)
+
+    def test_legacy_bare_list_fetch_shape_never_raises_the_stale_alarm(self):
+        # compat control (GREEN on both sides of the #399 change): every
+        # pre-#399 caller/fixture returns a bare list — the stale scan is
+        # UNMEASURABLE there and must never alarm, while the existing
+        # needs-gatekeeper no-pane ping is byte-for-byte unchanged.
+        now = time.time()
+        logs, _t = self._sweep(now, {}, [7])
+        self.assertEqual(len(self.pings), 1)
+        self.assertIn("needs-gatekeeper", self.pings[0][0])
+        self.assertNotIn("hand-off", self.pings[0][0])
+        self.assertFalse([ln for ln in logs if ln.startswith("gkstale")],
+                         logs)
+
+    def test_stale_alarm_repings_on_the_staged_schedule(self):
+        state = {}
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+        self._sweep(now, state, self._fetched({7: upd}))
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 12 * 3600, state, self._fetched({7: upd}))
+        self.assertEqual(len(self.pings), 1,
+                         "an unchanged stale set must hold for the 24h stage")
+        self._sweep(now + 24 * 3600 + 5, state, self._fetched({7: upd}))
+        self.assertEqual(len(self.pings), 2)
+
+    def test_a_new_stale_handoff_joining_resets_to_an_immediate_ping(self):
+        state = {}
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+        self._sweep(now, state, self._fetched({7: upd}))
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, self._fetched({7: upd, 9: upd}))
+        self.assertEqual(len(self.pings), 2,
+                         "a new stale hand-off must alarm immediately")
+
+    def test_reviewed_queue_forgets_the_dedup_record(self):
+        state = {}
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+        self._sweep(now, state, self._fetched({7: upd}))
+        self.assertEqual(len(self.pings), 1)
+        self._sweep(now + 3600, state, self._fetched({}))
+        self.assertNotIn("demo", state["gkreq"].get("stale_seen") or {},
+                         "a clean queue must forget the stale record")
+        # the SAME ticket rotting again later is a fresh first sighting
+        self._sweep(now + 2 * 3600, state, self._fetched({7: upd}))
+        self.assertEqual(len(self.pings), 2)
+
+    def test_busy_pane_needs_gatekeeper_rot_still_alarms(self):
+        # the previously-uncovered case: job 11's busy branch gives the
+        # pane NOTHING (correct — never interrupt mid-work) and used to
+        # give the PHONE nothing either, forever.
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+        logs, tmux = self._sweep(
+            now, {}, self._fetched({7: upd}, tickets=[7]),
+            panes=[("%1", self.root)], captured=BUSY)
+        self.assertFalse(tmux.typed(),
+                         "a busy pane must still get no keystroke")
+        self.assertEqual(len(self.pings), 1, logs)
+        self.assertTrue(any(ln.startswith("gkstale-ping") for ln in logs),
+                        logs)
+
+    def test_dedup_key_is_fresh_and_project_is_stream_qualified(self):
+        # dedup key fresh per DECISION INSTANT (never per content — the
+        # sibling's own notify-TTL lesson) + the repo's own project thread.
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+        with m.patch("getpass.getuser", return_value="david2"):
+            self._sweep(now, {}, self._fetched({7: upd}))
+        kw = self.pings[0][1]
+        self.assertTrue(kw["dedup_key"].startswith("gkstale:demo:"), kw)
+        self.assertEqual(kw.get("project"), "demo-david2")
+
+    def test_unmeasurable_updated_at_never_alarms(self):
+        # defensive: a handoff map value that is not a real number must be
+        # skipped (unmeasurable staleness is never alarmed on a guess).
+        now = time.time()
+        logs, _t = self._sweep(now, {}, self._fetched({7: None}))
+        self.assertFalse(self.pings, logs)
+
+    def test_reduced_stream_home_never_stale_alarms(self):
+        # the requester's own box must never alarm about its own hand-off —
+        # only a full-authority/supervisor root watches the queue.
+        with TemporaryDirectory() as home2:
+            root = "/home/david/devel/odoo-erp"
+            tmux = FakeTmux([("%9", root)])
+            now = time.time()
+            upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+            wd.gk_request_backstop(
+                now, tmux, {}, self._send, home=home2,
+                gh_fetch=lambda r: {"tickets": [], "handoffs": {7: upd}},
+                user="david")
+        self.assertFalse(self.pings)
+
+    def test_same_name_double_target_alarms_once_per_sweep(self):
+        # #399-review MINOR-1 (triggered): two targets resolving to the
+        # SAME name in ONE sweep (a duplicate checkout — pane target +
+        # uncovered cache root) with DIVERGENT stale sets used to fire two
+        # sends under the SAME decision-instant dedup key, and notify's
+        # own per-key marker swallowed the second, richer alarm until the
+        # 24h stage. One name = ONE stale evaluation per sweep; a genuine
+        # divergence resolves on the NEXT sweep with a fresh key instead.
+        root2 = str(Path(self.home) / "devel2" / "demo")
+        Path(root2).mkdir(parents=True)
+        seed_repo_cache(self.home, root2, "demo")
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+
+        def fetched_for(root):
+            if root == self.root:
+                return self._fetched({7: upd})
+            return self._fetched({7: upd, 9: upd})
+
+        tmux = FakeTmux([("%1", self.root)], IDLE)
+        logs = wd.gk_request_backstop(
+            now, tmux, {}, self._send, home=self.home,
+            gh_fetch=fetched_for, user="gatekeeper")
+        self.assertEqual(len(self.pings), 1, (logs, self.pings))
+
+    def test_dedup_record_is_persisted_before_the_ping_leaves(self):
+        # #399-review MINOR-2 lock (kill-simulation — the established
+        # SystemExit technique, which propagates past every
+        # `except Exception` in the module): a mid-sweep kill AT the send
+        # must find the dedup record already on disk. A mutant moving
+        # persist() after send_fn fails exactly here.
+        state_path = str(Path(self.home) / "gkreq-state.json")
+        state1 = wd.load_state(state_path)
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+
+        def killed_send(body, **kw):
+            raise SystemExit("simulated mid-sweep kill at the send")
+
+        with self.assertRaises(SystemExit):
+            wd.gk_request_backstop(
+                now, FakeTmux([], IDLE), state1, killed_send,
+                home=self.home,
+                gh_fetch=lambda root: self._fetched({7: upd}),
+                user="gatekeeper",
+                persist=lambda: wd.save_state(state_path, state1))
+        state2 = wd.load_state(state_path)
+        rec = (state2.get("gkreq") or {}).get("stale_seen") or {}
+        self.assertIn("demo", rec,
+                      "the dedup record must reach disk BEFORE the ping")
+
+    def test_stale_state_survives_a_simulated_restart(self):
+        # mirrors the sibling #353 requirement: a killed-and-relaunched
+        # timer tick must honour the persisted backoff clock.
+        state_path = str(Path(self.home) / "gkreq-state.json")
+        state1 = wd.load_state(state_path)
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+        self._sweep(now, state1, self._fetched({7: upd}),
+                    persist=lambda: wd.save_state(state_path, state1))
+        self.assertEqual(len(self.pings), 1)
+        state2 = wd.load_state(state_path)
+        self._sweep(now + 12 * 3600, state2, self._fetched({7: upd}),
+                    persist=lambda: wd.save_state(state_path, state2))
+        self.assertEqual(len(self.pings), 1,
+                         "a restarted process must honour the persisted "
+                         "backoff clock")
 
 
 class TestMachinePrefixes(unittest.TestCase):

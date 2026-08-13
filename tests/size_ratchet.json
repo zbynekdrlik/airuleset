@@ -56,7 +56,7 @@
   "tests/test_fork_no_merge_close_guard.py": 216,
   "tests/test_gh_cli_recipes_autoclose_warning.py": 64,
   "tests/test_gh_json_hook.py": 205,
-  "tests/test_gk_request.py": 1146,
+  "tests/test_gk_request.py": 1442,
   "tests/test_global_rules_symlink.py": 129,
   "tests/test_goal_arm.py": 599,
   "tests/test_goal_backlog_proof.py": 902,
@@ -168,7 +168,7 @@
   "airuleset.py::main": 503,
   "watchdog/__init__.py::deliver_discord_replies": 423,
   "watchdog/__init__.py::prompt_wedge_check": 235,
-  "watchdog/__init__.py::run_once": 1985,
+  "watchdog/__init__.py::run_once": 1992,
   "watchdog/cards.py::card_reconcile": 260
  }
 }
