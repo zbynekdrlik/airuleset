@@ -42,8 +42,11 @@ class TestWorkflowCostDiscipline(TestCase):
         t = read("modules/core/model-awareness.md")
         # The self-audit must still name a tiering MISS (inverted under max-performance).
         self.assertIn("tiering MISS", t)
-        # Mechanical lookups stay on a light tier under EVERY policy (latency, not cost).
-        self.assertIn("Purely MECHANICAL / READ-ONLY plumbing = Sonnet 5 (or Haiku", t)
+        # Mechanical lookups stay on a light/low tier under EVERY policy —
+        # since the 2026-08-13 Opus 5 ban the cheap end is Opus 4.8 at low
+        # effort (sonnet/haiku only for the genuinely trivial), see
+        # tests/test_model_tiering.py for the full lineup locks.
+        self.assertIn("Purely MECHANICAL / READ-ONLY plumbing = Opus 4.8", t)
         # Redundancy stays banned even with unlimited budget.
         self.assertIn("Redundancy is still waste, not rigor", t)
 

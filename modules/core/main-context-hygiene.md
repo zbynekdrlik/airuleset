@@ -2,7 +2,7 @@
 
 **Context gate — related rules you MUST also apply:**
 - `claude-code-tooling.md` — the in-session subagent / agent-strip surfaces (foreground vs background)
-- `model-awareness.md` — tier the delegated read: cheap model (Sonnet/Haiku) + low/medium effort for read-only sweeps
+- `model-awareness.md` — tier the delegated read: low/medium effort on the cheap end (Opus 4.8 low; Sonnet/Haiku only for genuinely trivial lookups)
 - `subagent-type-discipline.md` — use ONLY a listed `subagent_type` (`Explore` / `general-purpose`); never invent one
 - `subagent-continuation.md` — every dispatch is one-shot; embed all context in the prompt
 

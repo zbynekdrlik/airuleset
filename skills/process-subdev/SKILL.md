@@ -112,12 +112,16 @@ repo's own CLAUDE.md / playbook is what names the command.
    2026-07-24: maximum scrutiny on sub-dev submissions before anything approaches
    prod).** Run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE per processing
    run: OPEN → the cold-review/verdict stages dispatch `model: fable` at `effort:
-   xhigh`; CLOSED → `opus` — never a cheaper tier for the judgment. ADVISOR shape
-   adapted for review: cheap `sonnet` stages GROUND (collect the pinned diff, ticket
-   claims, CI evidence into digests); the Fable stage receives the digest + THE DIFF
+   xhigh`; CLOSED → `claude-opus-4-8` (agent-definition frontmatter / Workflow
+   `opts.model` full id / inheritance — Opus 5 and its bare `opus` alias are BANNED,
+   2026-08-13) — never a cheaper tier for the judgment. ADVISOR shape adapted for
+   review: cheap grounding stages GROUND (collect the pinned diff, ticket claims, CI
+   evidence into digests — `claude-opus-4-8` at low effort, `sonnet` only for the
+   genuinely trivial collection); the Fable stage receives the digest + THE DIFF
    ITSELF (the diff is the review object — reading it is not self-grounding) and
    returns findings/verdict; workers execute any follow-up, never Fable. Finding
-   VERIFIERS may run `opus`; the final clean-verdict pass is the gated top-tier call.
+   VERIFIERS may run `claude-opus-4-8`; the final clean-verdict pass is the gated
+   top-tier call.
    The tier never degrades across iterations — a re-handoff's re-review runs the SAME
    tier as the first pass (mirror of the depth rule).
 2. **Mandatory frame** (repo CLAUDE.md adds instance specifics):

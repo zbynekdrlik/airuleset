@@ -135,7 +135,14 @@ class TestModelCombinationFixes(TestCase):
                       read("skills/fable-advisor/SKILL.md"))
 
     def test_ticket_validator_has_an_explicit_model_tier(self):
-        self.assertIn("model: sonnet", read("agents/ticket-validator.md")[:400])
+        # 2026-08-13 Opus 5 ban: the validator's explicit tier is the full
+        # Opus 4.8 id pinned in frontmatter (never the banned `opus` alias,
+        # never sonnet — see tests/test_model_tiering.py's lineup locks).
+        # window widened 400 -> 500: the full-id spelling is longer than the
+        # old bare alias; the intent (an explicit tier in the frontmatter,
+        # near the top of the file) is unchanged.
+        self.assertIn("model: claude-opus-4-8",
+                      read("agents/ticket-validator.md")[:500])
 
 
 if __name__ == "__main__":

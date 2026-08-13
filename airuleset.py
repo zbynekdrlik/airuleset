@@ -62,23 +62,24 @@ EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")
 # ultracode`. The user can still raise/lower per session with `/effort`.
 MANAGED_EFFORT_LEVEL = "high"
 
-# Managed default MAIN-session model (2026-07-25 cost-fix package, #37):
-# **Opus 5** is now the default main + judgment tier (model-awareness.md) —
-# Opus 4.8's regression + Sonnet 5's coordinator gap that made Fable-as-main
-# a deliberate WORKAROUND are both gone now that Opus 5 shipped, so managed
-# boxes should default MAIN to Opus 5 instead of whatever a prior session
-# left in settings.json. Measured over 8 days across the 6 managed boxes:
-# Fable 5 accounted for 76% of all token spend ($10,350 of ~$13,600) —
-# gatekeeper $2,115, dev2 $2,027, montalu $1,392 — largely automated streams
-# still defaulting to Fable as MAIN rather than the gated advisor shape.
+# Managed default MAIN-session model (user directive 2026-08-13): **Opus 5
+# is BANNED everywhere** ("opus 5 sa nesmie pouzivat... by default pri
+# spusteni claude fable") — the managed MAIN default is **Fable 5**, and the
+# unconditional-managed-default treatment is exactly what makes the ban
+# self-healing fleet-wide: a stale banned id a prior session left in
+# settings.json is overwritten on the next install/push (the live dev1
+# regression the #440 STEP 0 validation observed — a hand-flip to Fable did
+# not survive the next push while this constant still carried the old id).
+# The previous value was the 2026-07-25 cost-fix package's Opus 5 default;
+# the full policy history lives in the fable-advisor skill.
 # The `[1m]` suffix is a DELIBERATE part of the id, not a typo: it is how
 # Claude Code's own usage tracking keys the 1M-context variant (verified —
 # `lastModelUsage` entries in ~/.claude.json store ids exactly like
-# `claude-opus-4-8[1m]`, distinct from the bare `claude-opus-4-8` key) — kept
-# so this change does NOT also shrink the context window. The user relies on
-# the 1M window to avoid context-loss regressions; whether to reconsider that
-# is a SEPARATE decision for a later step, not bundled into this one.
-MANAGED_MODEL = "claude-opus-5[1m]"
+# `claude-fable-5[1m]`, distinct from the bare key) — kept so this change
+# does NOT also shrink the context window. The user relies on the 1M window
+# to avoid context-loss regressions. burn.tier("claude-fable-5[1m]") →
+# "fable", so the statusline highlight keeps working unchanged.
+MANAGED_MODEL = "claude-fable-5[1m]"
 
 # Managed default subagent-spawn ceiling (#288, 2026-08-07): Claude Code's
 # own default `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` is 200, and on CC
@@ -914,8 +915,8 @@ CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 #   -c                              : continue the most recent conversation in the cwd.
 #   --model '{{MANAGED_MODEL}}'     : baked in at RENDER time so EVERY mode except
 #       `plain` — including a RESUMED (-c) session — explicitly requests the managed
-#       model. Proven live on gatekeeper: settings.json said `claude-opus-5[1m]`, but a
-#       resumed session's transcript kept showing `claude-opus-4-8` on every turn — `-c`
+#       model. Proven live on gatekeeper: settings.json requested the then-managed
+#       Opus id, but a resumed session's transcript kept showing an older model — `-c`
 #       alone just continues whatever model the prior transcript was started with; only
 #       an explicit --model on the launch command line forces it.
 # The conversation probe globs ~/.claude/projects/<encoded-cwd>/*.jsonl — Claude Code
@@ -2845,11 +2846,11 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       function's own `promptSuggestionEnabled` bullet documents for a different
       key.
 
-    - `model = MANAGED_MODEL` (Opus 5[1m]) is the default MAIN-session model on
-      every managed box (2026-07-25 cost-fix package, #37) — see MANAGED_MODEL's
-      own comment for the measured evidence. Same unconditional-managed-default
-      treatment as effortLevel/disableAgentView/tui; the user can still switch
-      per session with `/model`.
+    - `model = MANAGED_MODEL` (Fable 5[1m] — user directive 2026-08-13, Opus 5
+      is banned) is the default MAIN-session model on every managed box — see
+      MANAGED_MODEL's own comment for the history. Same unconditional-managed-
+      default treatment as effortLevel/disableAgentView/tui; the user can
+      still switch per session with `/model`.
 
     - `promptSuggestionEnabled = False` turns OFF Claude Code's predicted-next-
       prompt suggestion in the input box (#189). CC renders that suggestion as
@@ -13141,12 +13142,15 @@ def cmd_secret(args):
 
 
 def cmd_fable_gate(args):
-    """Budget gate for AUTOMATIC Fable escalation (model-tiering policy 2026-07-03):
+    """Budget gate for the AUTOMATIC Fable judgment layer (model-tiering policy
+    2026-08-13 — Opus 5 banned; the gate now guards the DEFAULT judgment tier):
     exit 0 + `OPEN ...` when the Fable weekly + shared weekly windows have headroom
     (< threshold, default 80% / AIRULESET_FABLE_GATE_PCT), exit 1 + `CLOSED ...`
     otherwise (incl. missing/stale cache — fail-safe: no blind Fable burn). The
-    orchestrator / autopilot supervisor runs this ONCE per hard task/batch before
-    dispatching `model: fable`; CLOSED → dispatch opus instead."""
+    orchestrator / autopilot supervisor runs this ONCE per judgment task/batch
+    before dispatching `model: fable`; CLOSED → the same work runs on
+    claude-opus-4-8 (agent-definition frontmatter / Workflow opts.model full id /
+    inheritance — never the banned bare alias)."""
     from watchdog import fable_gate
     ok, reason = fable_gate(threshold=getattr(args, "threshold", None))
     print(("OPEN " if ok else "CLOSED ") + reason)
@@ -14822,8 +14826,9 @@ def main():
                        help="Request text for --issue mode (Slovak, plain)")
 
     p_gate = sub.add_parser(
-        "fable-gate", help="Budget gate for automatic Fable escalation — exit 0 "
-                           "(OPEN, dispatch fable) / 1 (CLOSED, dispatch opus)")
+        "fable-gate", help="Budget gate for the automatic Fable judgment layer — "
+                           "exit 0 (OPEN, dispatch fable) / 1 (CLOSED, run the "
+                           "work on claude-opus-4-8)")
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 

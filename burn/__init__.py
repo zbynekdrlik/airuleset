@@ -34,7 +34,7 @@ PRICE = {
 
 
 def tier(model):
-    """Map a `message.model` id (e.g. `claude-opus-5[1m]`) to a PRICE key, or
+    """Map a `message.model` id (e.g. `claude-fable-5[1m]`) to a PRICE key, or
     'other' when unrecognized (never crashes on an unknown/foreign model)."""
     m = (model or "").lower()
     for k in PRICE:
