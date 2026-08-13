@@ -80,14 +80,14 @@ class TestUsageCacheWrite(TestCase):
         # The default path MUST be resolved from the module global at call time, not
         # bound at def time — else patching it (in tests) can't stop check_usage from
         # clobbering the real ~/.claude cache. This is the regression that leaked once.
-        orig = watchdog._USAGE_CACHE_PATH
+        orig = watchdog.usage._USAGE_CACHE_PATH
         with tempfile.TemporaryDirectory() as d:
             patched = os.path.join(d, "cache.json")
-            watchdog._USAGE_CACHE_PATH = patched
+            watchdog.usage._USAGE_CACHE_PATH = patched
             try:
                 watchdog.write_usage_cache(SAMPLE_USAGE, 42)   # NO explicit path
             finally:
-                watchdog._USAGE_CACHE_PATH = orig
+                watchdog.usage._USAGE_CACHE_PATH = orig
             self.assertTrue(os.path.exists(patched), "must write to the patched global path")
 
     def test_writes_account_email_from_claude_json(self):
@@ -98,12 +98,12 @@ class TestUsageCacheWrite(TestCase):
             claude_json = os.path.join(d, "claude.json")
             Path(claude_json).write_text(json.dumps(
                 {"oauthAccount": {"emailAddress": "t4user@example.com"}}))
-            orig = watchdog._CLAUDE_JSON_PATH
-            watchdog._CLAUDE_JSON_PATH = claude_json
+            orig = watchdog.usage._CLAUDE_JSON_PATH
+            watchdog.usage._CLAUDE_JSON_PATH = claude_json
             try:
                 watchdog.write_usage_cache(SAMPLE_USAGE, 1_700_000_000, path=path)
             finally:
-                watchdog._CLAUDE_JSON_PATH = orig
+                watchdog.usage._CLAUDE_JSON_PATH = orig
             got = json.load(open(path))
             self.assertEqual(got["account_email"], "t4user@example.com")
 
@@ -112,12 +112,12 @@ class TestUsageCacheWrite(TestCase):
         # the account identity can't be read (missing file, malformed JSON).
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "cache.json")
-            orig = watchdog._CLAUDE_JSON_PATH
-            watchdog._CLAUDE_JSON_PATH = os.path.join(d, "does-not-exist.json")
+            orig = watchdog.usage._CLAUDE_JSON_PATH
+            watchdog.usage._CLAUDE_JSON_PATH = os.path.join(d, "does-not-exist.json")
             try:
                 watchdog.write_usage_cache(SAMPLE_USAGE, 1, path=path)
             finally:
-                watchdog._CLAUDE_JSON_PATH = orig
+                watchdog.usage._CLAUDE_JSON_PATH = orig
             got = json.load(open(path))
             self.assertEqual(got["account_email"], "")
             self.assertEqual(got["ts"], 1)
@@ -191,7 +191,7 @@ class TestStatuslineRendersEndToEnd(TestCase):
 
 class TestWiring(TestCase):
     def test_check_usage_writes_the_cache(self):
-        src = read("watchdog/__init__.py")
+        src = read("watchdog/usage.py")  # #404 pt3: moved verbatim
         self.assertIn("write_usage_cache(data, now)", src)
 
     def test_statusline_shim_reads_per_model_cache(self):

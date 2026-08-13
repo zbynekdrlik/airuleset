@@ -1047,10 +1047,10 @@ class TestGroupFleetByAccount(unittest.TestCase):
         # box whose own watchdog stopped refreshing its usage cache) beat a
         # FRESHER, correct candidate from another box on the SAME account
         # purely because its stale percent happens to be numerically
-        # higher. Mirrors watchdog.FABLE_GATE_MAX_AGE's own 6h staleness
-        # bound for this EXACT cache file -- burn must never import
-        # watchdog (see usage_cache_path()'s own docstring), so the bound
-        # is a deliberate mirror, never a shared import.
+        # higher. Mirrors watchdog.usage.FABLE_GATE_MAX_AGE's own 6h
+        # staleness bound for this EXACT cache file -- burn must never
+        # import watchdog (see usage_cache_path()'s own docstring), so the
+        # bound is a deliberate mirror, never a shared import.
         now = time.time()
         stale_ts = now - (6 * 3600) - 3600   # 7h old -- past the 6h bound
         fresh_ts = now - 3600                # 1h old -- comfortably fresh
