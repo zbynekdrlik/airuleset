@@ -102,6 +102,8 @@ class TestVystupReadbackInSupervisorStep4(TestCase):
 
     def test_readback_precedes_the_card_firing(self):
         rb = re.search(r"(?i)read[ -]?back", self.flat)
+        self.assertIsNotNone(
+            rb, "no read-back phrase in Step 4 at all — the mirror is missing")
         fire = self.flat.index("Fire the per-ticket run-card yourself")
         self.assertLess(
             rb.start(), fire,

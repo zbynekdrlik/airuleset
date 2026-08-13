@@ -763,7 +763,7 @@ answer to "which issues share one round" — this ticket found no gap in either.
    each worker already confirmed locally before its branch was merged (its own PR gate in serial
    mode, its own local run in worktree mode — `agents/autopilot-worker.md`), never re-running the
    review yourself — and neither should the worker have, as a literal `Skill({skill: "review"})`/
-   `code-review` invocation either, per #363), `✅ Deploy: <version>`
+   `code-review` invocation either, per #363), `✅ Deploy: <version>`, `✅ Výstup: <observed values>` (RELAYS each worker's Step-4 read-back of its member's real OUTPUT artifact — an explicit `n/a — <prečo>` when a member has no user-facing output; `completion-report.md` blocks a report missing this line)
    — then Goal/What changed in plain language (covering every member of the round, not just one
    worker's batch), the 🌐 URL(s) from the workers' `--url`, and the PR title/link/merge SHA (the
    round's ONE PR, per the repo-flow policy) — terminating in `✅ DONE: <plain outcome, e.g.
