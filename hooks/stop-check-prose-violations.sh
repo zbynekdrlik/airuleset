@@ -1188,9 +1188,24 @@ if [ "$IS_COMPLETION" = "1" ]; then
         # Line present — judge its SUBSTANCE, but only on positively obtained
         # text: a msg_lines failure leaves VYSTUP_LINE empty and every probe
         # below is skipped (never an accusation built on an unevaluable read).
+        # Selection is LINE-ANCHORED first (adversarial review of this check,
+        # F2): a quoted MENTION of the template earlier in the message — e.g.
+        # prose narrating this hook's own stderr guidance, "`✅ Výstup: n/a —
+        # <prečo>`", before the rewritten report — sits mid-line behind a
+        # backtick and must not be the line the substance/contradiction probes
+        # judge, or a mention converts into a fail-CLOSED accusation against a
+        # report whose REAL line is fine. The unanchored fallback keeps the
+        # probes alive for an indented/prefixed real line; the presence probe
+        # above deliberately stays unanchored raw-MSG (fail-open: a mention
+        # can only make a missing line look present, never accuse).
         VYSTUP_LINE=""
-        if _VYSTUP_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "$VYSTUP_RX"); then
+        if _VYSTUP_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "^[[:space:]]*${VYSTUP_RX}"); then
             VYSTUP_LINE=$(head -1 <<<"$_VYSTUP_LINES")
+        fi
+        if [ -z "$VYSTUP_LINE" ]; then
+            if _VYSTUP_LINES=$(LC_ALL=C.UTF-8 msg_lines "$MSG" -iE "$VYSTUP_RX"); then
+                VYSTUP_LINE=$(head -1 <<<"$_VYSTUP_LINES")
+            fi
         fi
         if [ -n "$VYSTUP_LINE" ]; then
             VYSTUP_NA=0
@@ -1218,7 +1233,7 @@ if [ "$IS_COMPLETION" = "1" ]; then
                 # literal quote characters, never a bracket class — a multibyte
                 # char inside [] matches per-BYTE under a bare C locale.
                 if ! LC_ALL=C.UTF-8 msg_has "$VYSTUP_LINE" -qE '[0-9]|"|„|“|”|«|»|‚|‘|’|'\'; then
-                    echo "VIOLATION: The '✅ Výstup:' line carries no concrete observed value — a real read-back from the artifact has a number (cena, číslo objednávky, verzia, počet) or a quoted span; 'odoslané OK'/'delivered'/'funguje' is liveness, not content. Open the REAL artifact (the sent email from the DB, the rendered document, the live UI screen) and cite what you actually SAW — or, if the work truly has no user-facing output, write the explicit form '✅ Výstup: n/a — <prečo>'." >&2
+                    echo "VIOLATION: The '✅ Výstup:' line carries no concrete observed value — a real read-back from the artifact has a number (cena, číslo objednávky, verzia, počet) or a quoted span; 'odoslané OK'/'delivered'/'funguje' is liveness, not content. Open the REAL artifact (the sent email from the DB, the rendered document, the live UI screen) and cite what you actually SAW — the values must be ON the '✅ Výstup:' line itself (one line; a continuation line below it is not scanned). If the work truly has no user-facing output, write the explicit form '✅ Výstup: n/a — <prečo>'." >&2
                     add_hard "✅ Výstup: line is value-free — cite concrete observed values (numbers/quoted text) read from the real artifact, or an explicit 'n/a — <prečo>'"
                 fi
             fi

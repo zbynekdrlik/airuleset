@@ -176,6 +176,24 @@ class TestOutputLineIsRequired(_HookCase):
     def test_bare_na_without_reason_is_blocked(self):
         r = self._run(_report(vystup="✅ Výstup: n/a\n"))
         self.assertVystupViolation(r, "bare 'n/a' with no reason")
+        # Adversarial-review F1: on THIS (🌐-carrying) report a mutant that
+        # accepts bare n/a would still block via the CONTRADICTION branch —
+        # same observable, different reason. Pin the reason to the value-free
+        # branch so that tautology cannot hide the mutant.
+        self.assertTrue(any("value-free" in v for v in self._violations(r)),
+                        "bare n/a blocked, but not by the value-free branch: %s"
+                        % self._violations(r))
+
+    def test_bare_na_on_surfaceless_report_is_blocked(self):
+        """Adversarial-review F1 (the surviving mutant's escape population):
+        a lazy bare 'n/a' on a report with NO 🌐/📱 surface anywhere — the
+        contradiction branch structurally cannot fire here, so only the
+        n/a-needs-a-reason requirement blocks it."""
+        r = self._run(_fork_report(vystup="✅ Výstup: n/a\n"))
+        self.assertVystupViolation(r, "bare 'n/a' on a surface-less report")
+        self.assertTrue(any("value-free" in v for v in self._violations(r)),
+                        "blocked, but not by the value-free branch: %s"
+                        % self._violations(r))
 
     def test_na_alongside_a_globe_surface_is_blocked(self):
         """A report that lists a 🌐 user-clickable surface while claiming the
@@ -218,6 +236,27 @@ class TestLegitimateReportsAreNotBlocked(_HookCase):
         r = self._run("⏳ WORKING: bežím na #446 (Výstup line), "
                       "nothing needed from you.")
         self.assertClean(r, "an ordinary ⏳ WORKING progress message")
+
+    def test_quoted_template_mention_before_real_line_passes(self):
+        """Adversarial-review F2(a): prose QUOTING the template (backticked,
+        mid-line) before the report must not be the line the substance probe
+        judges — the REAL line-anchored `✅ Výstup:` carries the values."""
+        msg = ("Hook si pýta riadok `✅ Výstup: <konkrétne hodnoty z "
+               "reálneho artefaktu>` — dopĺňam ho do reportu.\n\n"
+               + _report(vystup=GOOD_VYSTUP))
+        r = self._run(msg)
+        self.assertClean(r, "a backticked template mention before a valid report")
+
+    def test_quoted_na_mention_before_globe_report_passes(self):
+        """Adversarial-review F2(b): a just-blocked agent narrating the n/a
+        example from this hook's own stderr guidance, then sending a
+        🌐-carrying report whose REAL line cites values — must not trip the
+        n/a×🌐 contradiction off the mention."""
+        msg = ("Gate vyžaduje `✅ Výstup: n/a — čisto interná zmena` pre prácu "
+               "bez výstupu; tu ale výstup je, citujem hodnoty.\n\n"
+               + _report(vystup=GOOD_VYSTUP))
+        r = self._run(msg)
+        self.assertClean(r, "a backticked n/a mention before a valued 🌐 report")
 
 
 if __name__ == "__main__":  # pragma: no cover
