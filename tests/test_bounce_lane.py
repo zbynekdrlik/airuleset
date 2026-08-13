@@ -155,9 +155,15 @@ class TestCrossStreamProtocolCanonical(TestCase):
     protocol ('musis pochopit co vsetko sa pod gatekeeper rules riesilo a
     prevziat to pod svoju spravu'). The autopilot skill carries the canonical
     section BOTH sides read; repo-local commands (odoo-erp /process-subdev)
-    must conform to it, never define their own variant."""
+    must conform to it, never define their own variant.
 
-    SKILL = "skills/autopilot/SKILL.md"
+    #426: the canonical section's body moved VERBATIM to
+    `skills/autopilot/references/cross-stream-protocol.md` (SKILL.md itself
+    exceeded its own #414 ~1000-line/file budget) — SKILL.md now carries only
+    a short pointer paragraph. This class reads the reference file, where the
+    actual protocol content (and this test's own anchors) now lives."""
+
+    SKILL = "skills/autopilot/references/cross-stream-protocol.md"
 
     def test_canonical_section_exists(self):
         self.assertIn("## Cross-stream protocol", read(self.SKILL))
@@ -232,6 +238,11 @@ class TestBounceMeansOneThingInAllThreeHomes(TestCase):
 
     CANON = ("sub-dev", "holds", "review-watch", "not the never-stops failure")
     SKILL = "skills/autopilot/SKILL.md"
+    # #426: cross-stream rules 2/3 themselves moved VERBATIM to this reference
+    # file (SKILL.md exceeded its own #414 line budget) — only the two
+    # cross-stream-rule methods below read from it; the others still read the
+    # unmoved goal templates / airuleset.py.
+    CROSS_STREAM = "skills/autopilot/references/cross-stream-protocol.md"
 
     def _window(self, text, start, end):
         """Comment markers stripped and whitespace collapsed: a canonical
@@ -258,13 +269,13 @@ class TestBounceMeansOneThingInAllThreeHomes(TestCase):
         self._assert_canonical(window, "airuleset.py's label comment")
 
     def test_cross_stream_rule_two_states_it(self):
-        t = read(self.SKILL)
+        t = read(self.CROSS_STREAM)
         window = self._window(t, "2. **Priority = labels",
                               "3. **Label lifecycle")
         self._assert_canonical(window, "cross-stream rule 2")
 
     def test_cross_stream_rule_three_states_it(self):
-        t = read(self.SKILL)
+        t = read(self.CROSS_STREAM)
         window = self._window(t, "3. **Label lifecycle",
                               "4. **The ping-pong")
         self._assert_canonical(window, "cross-stream rule 3")

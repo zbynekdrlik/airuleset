@@ -1077,8 +1077,16 @@ class TestProtocolDocs(unittest.TestCase):
         txt = (Path(airuleset.__file__).parent / "skills" / "autopilot"
                / "SKILL.md").read_text()
         self.assertIn("needs-gatekeeper", txt)
-        self.assertIn("gk-request", txt)
-        self.assertIn("GATEKEEPER-ACTION", txt)
+        # #426: cross-stream rule 7 (the actual gk-request / GATEKEEPER-ACTION
+        # channel definition) moved VERBATIM to this reference file (SKILL.md
+        # exceeded its own #414 line budget) — SKILL.md itself keeps only a
+        # short pointer paragraph, which does not name the channel's own
+        # exact commands.
+        cross_stream = (Path(airuleset.__file__).parent / "skills" /
+                        "autopilot" / "references" /
+                        "cross-stream-protocol.md").read_text()
+        self.assertIn("gk-request", cross_stream)
+        self.assertIn("GATEKEEPER-ACTION", cross_stream)
 
     def test_statusline_vocabulary_no_longer_documents_the_gkq_badge(self):
         # #367 (third footer simplification round): the dedicated `· gkq N`
