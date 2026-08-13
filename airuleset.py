@@ -9202,6 +9202,17 @@ REMOTE_HOSTS = [
         "host": "100.82.64.27",
         "user": "newlevel",
         "repo_path": "~/devel/airuleset",
+        # #451: dev2 is a managed deploy target whose `newlevel` user is NOT
+        # a sub-dev stream account (not in AUTHORITY_BY_USER), so it was
+        # filtered OUT of the meeting-analysis Soniox key delivery -- yet a
+        # meeting-analysis session can run here (a montalu session on dev2,
+        # 2026-08-13) and the skill greps ~/.soniox.env FIRST (SKILL.md:123).
+        # This flag admits dev2 into provision_subdev_soniox_key's target set
+        # WITHOUT touching the merge-authority map (AUTHORITY_BY_USER is about
+        # merge rights, not meeting-analysis usage). Any future non-subdev
+        # meeting-analysis box gets the key the same way -- one line, no
+        # parallel mechanism.
+        "soniox": True,
     },
     {
         # odoo-gatekeeper VPS (prod merge/deploy + hotfix box). Key-based SSH,
@@ -9484,7 +9495,9 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
                                  skip_names=None, control_opts=None):
     """Deliver `~/.soniox.env` (the meeting-analysis skill's canonical,
     UN-guarded Soniox key path -- see skills/meeting-analysis/SKILL.md and
-    hooks/block-vault-store-read.sh) to every subdev stream account (#275).
+    hooks/block-vault-store-read.sh) to every subdev stream account (#275)
+    PLUS any host explicitly flagged `"soniox": True` -- a managed NON-subdev
+    box that still runs meeting-analysis, e.g. newlevel@dev2 (#451).
 
     `control_opts` (#358): the SAME `_ssh_multiplex_opts()` list
     `cmd_push()`'s own deploy loop built for this run, so an account
@@ -9498,10 +9511,11 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     The value is piped to each remote via `input=` on the ssh subprocess
     call -- never embedded in argv, never printed by this process -- and
     the source read is scoped to the ONE matching line (`_soniox_key_line`),
-    never the whole voiceagent `.env`. Targets are filtered to
-    `AUTHORITY_BY_USER`'s keys FIRST, before the source is ever read, so a
-    host list with no subdev stream account in it (dev2, gatekeeper) never
-    touches the filesystem at all.
+    never the whole voiceagent `.env`. Targets are filtered FIRST -- a
+    subdev stream account (its `user` in `AUTHORITY_BY_USER`) OR a host
+    explicitly flagged `"soniox": True` (#451) -- before the source is ever
+    read, so a host list with no such target in it (e.g. gatekeeper-only)
+    never touches the filesystem at all.
 
     A missing source on this box is a LOUD stderr failure -- every subdev
     target is reported failed, exactly like a real per-host delivery
@@ -9523,7 +9537,7 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     run = run or subprocess.run
     control_opts = list(control_opts or [])
     targets = [h for h in (hosts if hosts is not None else REMOTE_HOSTS)
-               if h.get("user") in AUTHORITY_BY_USER]
+               if h.get("user") in AUTHORITY_BY_USER or h.get("soniox")]
     if not targets:
         return []
 
