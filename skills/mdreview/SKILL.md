@@ -126,7 +126,7 @@ user typed to be mis-run, so visibility itself is the exposure.
 
 Inventory (what the user can actually type on THIS box):
 ```bash
-grep -L "user-invocable: false" ~/devel/airuleset/skills/*/SKILL.md   # visible airuleset set
+grep -L '^user-invocable: false' ~/devel/airuleset/skills/*/SKILL.md  # visible airuleset set (line-anchored: a skill BODY citing the field must not hide that skill from this inventory)
 # cross-check per-box scoping: SKILLS_MAINTAINER_ONLY / SKILLS_FULL_AUTHORITY_ONLY in airuleset.py
 claude plugin list                                                     # plugin command surface
 # built-ins: code.claude.com/docs/en/commands.md (/exit /quit /clear /help /compact …)

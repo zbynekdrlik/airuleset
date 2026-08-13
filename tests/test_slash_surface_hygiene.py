@@ -3,9 +3,10 @@
 # RED→GREEN lock for the /exit → /playbook-review mis-trigger mitigation.
 # playbook-review is an agent-driven post-ticket mandate (Skill tool call
 # after every ticket) the user never deliberately types — transcript sweep
-# 2026-08-13: 392 model-side Skill invocations vs 3 user-typed ones, of
-# which 2 were proven accidental (the user's own words in the spinbike
-# transcript: "to sa len omylom stlacilo namiesto /exit"). Claude Code's
+# 2026-08-13: 392 model-side Skill invocations vs 3 user-typed ones — one
+# proven accidental by the user's own words in the spinbike transcript
+# ("to sa len omylom stlacilo namiesto /exit"), a second strongly implied
+# by the real /exit typed 15 s after it (camera-box). Claude Code's
 # picker executes the HIGHLIGHTED row on Enter with undocumented ranking
 # and known mis-selection bugs (anthropics/claude-code #11431, #26307,
 # #41828) — "exit" shares no fuzzy subsequence with "playbook-review" (no
@@ -68,8 +69,12 @@ class TestMdreviewCommandSurfaceAxis(TestCase):
 
     def _b2_section(self):
         t = self._skill_text()
-        self.assertIn("B2", t, "mdreview Step B missing the B2 slash-surface sub-step")
-        start = t.index("B2")
+        # Anchor on the HEADING, not a bare "B2" — an earlier prose mention of
+        # "B2" elsewhere in the file must not silently widen this slice
+        # (review finding F2: a widened slice lets the anchors below match
+        # outside the real section and the lock degrades without failing).
+        self.assertIn("### B2", t, "mdreview Step B missing the B2 slash-surface sub-step")
+        start = t.index("### B2")
         end = t.find("## Step C", start)
         self.assertGreater(end, start, "B2 must live inside Step B, before Step C")
         return t[start:end]
