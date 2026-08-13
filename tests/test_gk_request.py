@@ -723,6 +723,57 @@ class TestStaleHandoffAlarm(unittest.TestCase):
                 user="david")
         self.assertFalse(self.pings)
 
+    def test_same_name_double_target_alarms_once_per_sweep(self):
+        # #399-review MINOR-1 (triggered): two targets resolving to the
+        # SAME name in ONE sweep (a duplicate checkout — pane target +
+        # uncovered cache root) with DIVERGENT stale sets used to fire two
+        # sends under the SAME decision-instant dedup key, and notify's
+        # own per-key marker swallowed the second, richer alarm until the
+        # 24h stage. One name = ONE stale evaluation per sweep; a genuine
+        # divergence resolves on the NEXT sweep with a fresh key instead.
+        root2 = str(Path(self.home) / "devel2" / "demo")
+        Path(root2).mkdir(parents=True)
+        seed_repo_cache(self.home, root2, "demo")
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+
+        def fetched_for(root):
+            if root == self.root:
+                return self._fetched({7: upd})
+            return self._fetched({7: upd, 9: upd})
+
+        tmux = FakeTmux([("%1", self.root)], IDLE)
+        logs = wd.gk_request_backstop(
+            now, tmux, {}, self._send, home=self.home,
+            gh_fetch=fetched_for, user="gatekeeper")
+        self.assertEqual(len(self.pings), 1, (logs, self.pings))
+
+    def test_dedup_record_is_persisted_before_the_ping_leaves(self):
+        # #399-review MINOR-2 lock (kill-simulation — the established
+        # SystemExit technique, which propagates past every
+        # `except Exception` in the module): a mid-sweep kill AT the send
+        # must find the dedup record already on disk. A mutant moving
+        # persist() after send_fn fails exactly here.
+        state_path = str(Path(self.home) / "gkreq-state.json")
+        state1 = wd.load_state(state_path)
+        now = time.time()
+        upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
+
+        def killed_send(body, **kw):
+            raise SystemExit("simulated mid-sweep kill at the send")
+
+        with self.assertRaises(SystemExit):
+            wd.gk_request_backstop(
+                now, FakeTmux([], IDLE), state1, killed_send,
+                home=self.home,
+                gh_fetch=lambda root: self._fetched({7: upd}),
+                user="gatekeeper",
+                persist=lambda: wd.save_state(state_path, state1))
+        state2 = wd.load_state(state_path)
+        rec = (state2.get("gkreq") or {}).get("stale_seen") or {}
+        self.assertIn("demo", rec,
+                      "the dedup record must reach disk BEFORE the ping")
+
     def test_stale_state_survives_a_simulated_restart(self):
         # mirrors the sibling #353 requirement: a killed-and-relaunched
         # timer tick must honour the persisted backoff clock.
