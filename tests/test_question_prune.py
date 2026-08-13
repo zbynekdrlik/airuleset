@@ -10,6 +10,7 @@ harness task-notifications, slash-command echoes) and tool_result entries must
 never count as an answer.
 """
 
+import inspect
 import json
 import sys
 import time
@@ -569,6 +570,108 @@ class GhostPairRepingsOnceAfterCollapse(unittest.TestCase):
 
         wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
         self.assertEqual(sent, ["nova formulacia?"])
+
+
+class SupersedeIsAskGenerationGuarded(unittest.TestCase):
+    """Adversarial-review findings on the ghost fix (#407) — a re-tracked
+    DAILY RE-ASK of an old question is NOT a new ask: it must never
+    supersede (nor later out-collapse) a LIVE, newer question the same
+    session tracks on the target channel. "Newest ask wins" compares ASK
+    GENERATION (the `asked` field, preserved across re-tracks), never the
+    record time — a stale cross-channel sibling's re-post lands on the
+    CURRENT questions channel with a fresh record ts, and comparing record
+    times there inverts the ask order exactly where the loss is worst."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        p = m.patch.object(notify, "_questions_path", lambda: self.qpath)
+        p.start()
+        self.addCleanup(p.stop)
+        self.projects = Path(self.tmp.name) / "projects"
+        _lt = time.localtime()
+        self.now = time.mktime(
+            (_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))
+
+    def _seed_live_and_cross_channel_stale(self):
+        live = {"session": SID, "cwd": CWD, "channel": "777001",
+                "ts": self.now - 3600, "question": "ziva otazka?",
+                "block": "ziva otazka?"}
+        stale = {"session": SID, "cwd": CWD, "channel": "999999",
+                 "ts": self.now - wd.QUESTION_REPING_S - 10,
+                 "question": "stara otazka?", "block": "stara otazka?"}
+        Path(self.qpath).write_text(json.dumps({"888100": live,
+                                                "888001": stale}))
+        return live, stale
+
+    def test_reping_retrack_never_eats_a_live_question_on_the_channel(self):
+        # MAJOR-1: the stale sibling lives on ANOTHER channel; its daily
+        # re-ask posts + re-tracks onto the CURRENT questions channel,
+        # where the session's live, newer, different question is tracked.
+        # The live entry must survive; the re-track must carry the OLD
+        # ask's generation so later passes keep treating it as older.
+        _live, stale = self._seed_live_and_cross_channel_stale()
+
+        def send_fn(body, owner=None, dedup_key=None, dry_run=False,
+                    kind="default", return_message_id=False):
+            return ("sent", "999001") if return_message_id else "sent"
+
+        with m.patch.object(notify, "notification_channel",
+                            lambda **kw: "777001"):
+            wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        q = notify.load_questions(self.qpath)
+        self.assertIn("888100", q)             # the live question survives
+        self.assertIn("999001", q)             # the re-post is tracked
+        self.assertNotIn("888001", q)          # the old key was dropped
+        self.assertEqual(q["999001"]["channel"], "777001")
+        self.assertEqual(q["999001"]["asked"], int(stale["ts"]))
+
+    def test_collapse_prefers_the_newer_ask_generation_over_record_time(self):
+        # After the re-track above, the shared channel briefly holds the
+        # live ask (older record ts, newer GENERATION) and the re-posted
+        # old ask (fresh record ts, older generation). The collapse must
+        # keep the newer GENERATION — the live question.
+        live = {"session": SID, "cwd": CWD, "channel": "777001",
+                "ts": self.now - 3600, "question": "ziva otazka?",
+                "block": "ziva otazka?"}
+        repost = {"session": SID, "cwd": CWD, "channel": "777001",
+                  "ts": self.now, "asked": int(self.now - 90000),
+                  "question": "stara otazka?", "block": "stara otazka?"}
+        Path(self.qpath).write_text(json.dumps({"888100": live,
+                                                "999001": repost}))
+        wd.prune_answered_questions(self.now,
+                                    projects_dir=str(self.projects))
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888100"])
+
+    def test_record_supersede_is_generation_guarded(self):
+        # Recording with an OLD asked_ts (a re-track) must not supersede a
+        # newer-generation entry; a genuinely NEW ask (no asked_ts) still
+        # supersedes everything older on its channel.
+        t0, t1 = 1_700_000_000, 1_700_050_000
+        notify.record_question("888100", "777001", SID, CWD, now=t1,
+                               path=self.qpath, question="ziva?")
+        notify.record_question("999001", "777001", SID, CWD, now=t1 + 40000,
+                               path=self.qpath, question="stara?",
+                               asked_ts=t0)
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888100", "999001"])
+        notify.record_question("999002", "777001", SID, CWD, now=t1 + 50000,
+                               path=self.qpath, question="nova?")
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["999002"])
+
+
+class RunOnceOrdersPruneBeforeReping(unittest.TestCase):
+    """The ghost-collapse design (#407) leans on run_once running the prune
+    (which collapses superseded pairs) BEFORE the daily re-ask — lock the
+    real call ordering, not just a test-sequenced prune-then-reping."""
+
+    def test_prune_call_precedes_reping_call_in_run_once(self):
+        src = inspect.getsource(wd.run_once)
+        self.assertLess(src.index("prune_answered_questions("),
+                        src.index("reping_stale_questions("))
 
 
 if __name__ == "__main__":
