@@ -5071,15 +5071,23 @@ def _gh_env(home=None, base=None):
 # `needs-gatekeeper` would still surface here as a nudge candidate.
 #
 # Deliberately an INDEPENDENT literal, same name/value as airuleset.py's
-# own constant, rather than `from airuleset import AUTOPILOT_SKIP_EXCL`:
-# airuleset.py imports FROM this module (every `from watchdog import ...`
-# call site is local/deferred, inside function bodies -- see
-# cmd_gk_request/cmd_core_quals/etc.), so a module-level import in the
-# reverse direction here would invert that layering and risk a real
-# circular import the moment both modules are imported together (as
-# several test files already do: `import airuleset` + `import watchdog as
-# wd` side by side). If the label ever changes, both copies must be
-# updated together -- `grep -rn ops-channel` finds both.
+# own constant (pinned equal by TestAutopilotSkipExclConstantsStayInSync
+# below), rather than `from airuleset import AUTOPILOT_SKIP_EXCL`. NOT
+# because of a circular import -- measured, there isn't one today (every
+# `from watchdog import ...` call site inside airuleset.py is local/
+# deferred, inside function bodies -- see cmd_gk_request/cmd_core_quals/
+# etc. -- and `import watchdog` + `import airuleset` succeed in either
+# order). The real reason is COST: this module is a systemd `--user`
+# TIMER firing every 60s on every managed box, and `-X importtime`
+# measured `import watchdog` alone at ~28ms; pulling in the reverse
+# import would drag the whole ~14.5k-line airuleset.py (plus filedrop)
+# along for every one of those wake-ups, pushing it to ~49ms (+75%) for
+# one shared string. A reverse import would also become a genuine cycle
+# the day anyone adds a top-level `import watchdog` to airuleset.py --
+# a real, if currently latent, layering-fragility risk on top of the
+# cost one. If the label ever changes, both copies must be updated
+# together -- `grep -rn ops-channel` finds both, and the sync test below
+# fails loudly if one is missed.
 AUTOPILOT_SKIP_EXCL = "-label:autopilot-skip -label:ops-channel"
 
 

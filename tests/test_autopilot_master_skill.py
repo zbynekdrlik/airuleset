@@ -161,10 +161,6 @@ class TestGoalTemplate(TestCase):
         self.assertIn("❓ NEEDS YOU: vlož /goal", t)
 
 
-if __name__ == "__main__":
-    main()
-
-
 class TestRunCardFiredInEveryLane(TestCase):
     """#47: on the gatekeeper (24/7, running autopilot-master), per-ticket
     Discord cards stopped arriving entirely — neither autopilot-master nor
@@ -225,3 +221,7 @@ class TestPreflightBoardExcludesOpsChannel(TestCase):
         i = t.index("Core backlog + questions")
         window = t[i:i + 300]
         self.assertIn("-label:ops-channel", window)
+
+
+if __name__ == "__main__":
+    main()

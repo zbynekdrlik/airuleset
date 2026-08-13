@@ -1119,5 +1119,20 @@ class TestProtocolDocs(unittest.TestCase):
         self.assertNotIn("gkq", txt)
 
 
+class TestAutopilotSkipExclConstantsStayInSync(unittest.TestCase):
+    """#364 review finding: `watchdog.AUTOPILOT_SKIP_EXCL` is a deliberately
+    INDEPENDENT literal (never `from airuleset import ...`, per its own
+    docstring -- import-cost + layering-fragility reasons, not a circular
+    import). #364 exists precisely because a second hand-rolled copy of
+    this exclusion drifted from #362's original one; a THIRD copy with
+    nothing pinning it equal to the first would be the same bet again. If
+    either the label or the exclusion shape ever changes in one module
+    without the other, this fails loudly instead of relying on a human
+    `grep -rn ops-channel`."""
+
+    def test_watchdog_and_airuleset_constants_are_identical(self):
+        self.assertEqual(wd.AUTOPILOT_SKIP_EXCL, airuleset.AUTOPILOT_SKIP_EXCL)
+
+
 if __name__ == "__main__":
     unittest.main()

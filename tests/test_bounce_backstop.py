@@ -159,7 +159,6 @@ class TestBounceBackstop(unittest.TestCase):
         # `project=` kwarg, so it lands in the project's own thread instead
         # of the owner's plain pile -- stream-qualified the SAME way a
         # run-card / idle ping for the SAME repo checkout on THIS box would.
-        import unittest.mock as m
         state = {}
         with m.patch("getpass.getuser", return_value="david2"):
             self._go(state, [1705], panes=[])
@@ -444,10 +443,6 @@ class TestGhEnvTokenFallback(unittest.TestCase):
             self.assertNotIn("GH_TOKEN", env)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 WORKFLOW_WAIT = ("● Review beží\n"
                  "  ⏳ WORKING: review Workflow beží — verdikt čaká. Nič netreba.\n"
                  "✻ Waiting for 1 dynamic workflow to finish\n"
@@ -676,3 +671,7 @@ class TestFetchBounceTicketsExcludesOpsChannel(unittest.TestCase):
         self.assertTrue(calls, "no gh call recorded")
         flat = json.dumps(calls)
         self.assertIn("-label:ops-channel", flat)
+
+
+if __name__ == "__main__":
+    unittest.main()
