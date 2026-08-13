@@ -74,6 +74,18 @@ class TestHostIp(unittest.TestCase):
         self._fd._ordered_ips = lambda: ["127.0.0.1"]
         self.assertEqual(self._fd.host_ip(), "127.0.0.1")
 
+    def test_falls_back_to_loopback_on_a_public_ip_only_box(self):
+        # #434: spinbike-vps has ONLY a public IPv4 (no tailscale, no
+        # 10.77.* dev-LAN, no other private interface at all) -- the third
+        # fallback used to accept ANY non-loopback IPv4 unconditionally,
+        # including this public one, which the server itself (bind_ips())
+        # never actually binds -- the health-check probe then always fails.
+        # bind_ips() already degrades to ["127.0.0.1"] in this exact shape
+        # (its own final `out or ["127.0.0.1"]` fallback); host_ip() must
+        # agree, never returning a public/docker-bridge address.
+        self._fd._ordered_ips = lambda: ["167.233.245.147", "fe80::1"]
+        self.assertEqual(self._fd.host_ip(), "127.0.0.1")
+
 
 class TestSafeName(unittest.TestCase):
     def test_strips_directory(self):
