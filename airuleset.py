@@ -2819,14 +2819,21 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       nastaveniach claude, vadi mi to") stop every session from attempting a
       Remote Control (RC) connection at startup — the persisted
       `remoteControlAtStartup: true` default made the statusline show
-      `/rc connecting…` / `/rc failed` on every managed box. Same
-      unconditional-managed-default treatment as disableAgentView/tui/model:
-      a managed box always gets both keys on the next install, overriding
-      whatever was there before. dev1/dev2 already carry the equivalent
-      hand-patched `settings.json` live (out of this pipeline, done
-      manually); this is the fleet-wide enforcement so every OTHER managed
-      box (subdev/gk users, a fresh box, a future hand-revert) self-heals
-      the same way on its next push.
+      `/rc connecting…` / `/rc failed` on every managed box. Both keys are
+      real, not guessed: the installed 2.1.231 build's own binary carries
+      the literal strings `disableRemoteControl` (12 occurrences) and
+      `remoteControlAtStartup` (16 occurrences), same evidence class as
+      promptSuggestionEnabled's own citation above. Same UNCONDITIONAL
+      managed-default treatment as disableAgentView (the closest analog of
+      the two here -- `tui`/`model` also carry a per-session `/tui`/`/model`
+      escape hatch, these two do not: `/config` toggling RC back on reverts
+      on the next push, same as disableAgentView): a managed box always
+      gets both keys on the next install, overriding whatever was there
+      before. dev1/dev2 already carry the equivalent hand-patched
+      `settings.json` live (out of this pipeline, done manually); this is
+      the fleet-wide enforcement so every OTHER managed box (subdev/gk
+      users, a fresh box, a future hand-revert) self-heals the same way on
+      its next push.
 
     - `tui = "fullscreen"` (#376, REVERSING the earlier `tui = "default"` pin) pins
       Claude Code's fullscreen (alt-screen) renderer fleet-wide. History: this
