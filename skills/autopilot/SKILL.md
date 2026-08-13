@@ -505,6 +505,20 @@ answer to "which issues share one round" — this ticket found no gap in either.
    (or `Work issue #<N> in <repo>.` for a solo batch) plus any repo-specific note. ONE PR per
    ROUND (not per worker), ONE CI cycle per round — see the repo-flow policy above for exactly
    which branch each worker's worktree branch integrates into.
+   - **Compute AND CREATE this batch's own scratch subdirectory BEFORE dispatching, then STATE it
+     in the prompt as a fact (#435, #432's own follow-up)** — never leave the worker to compute
+     its own. `mkdir -p <scratchpad>/issues-<A>[-<B>-<C>...]` (the batch's own issue numbers,
+     sorted, hyphen-joined — deterministic and known BEFORE the `Agent` call ever fires, since you
+     already assembled every batch's issue set back in Step 1b/1c; collision-free by construction,
+     since no two batches in the SAME round share an issue), then append `Your scratchpad
+     subdirectory for this dispatch (already created): <that path> — use it for every
+     temp/body/commit-message file; never the scratchpad's top level.` to the prompt text
+     verbatim. This reduces the sibling-collision hazard from N independent prose-followers (every
+     worker computing its own path) down to ONE (the supervisor, once per round, with a safe
+     worker-side fallback below) — it is still a prose-followed step, not a mechanically
+     enforced one (no hook exists here, per the repo's FREEZE on new hooks/watchdog jobs) —
+     `agents/autopilot-worker.md`'s WORKTREE AWARENESS section still carries the worker-side
+     fallback (compute its own `agent-<worktree-id>` path) for a dispatch that doesn't state one.
    - **Include the Step 1b validator verdict in the dispatch prompt when you ran it** (`Validator:
      STILL_VALID — <one-line note>` per member) — it saves the worker re-deriving what you already
      found. This is a courtesy, not the enforcement mechanism (#213): even when Step 1b was skipped
