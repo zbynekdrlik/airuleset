@@ -1,7 +1,7 @@
 ---
 name: playbook-review
 description: Review the project playbook after a ticket — before the completion report. Use after completing a ticket / before writing the completion report / to capture reusable procedure or gotcha / to update project playbook / per project-playbook-maintenance rule.
-user-invocable: true
+user-invocable: false
 ---
 
 # Playbook Review

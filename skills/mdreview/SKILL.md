@@ -114,6 +114,47 @@ Decision rules:
 - Foreign-owned orphan skills (`win-mcp.md`, `test-contact-form.md`) → file an issue, do NOT auto-delete (see project skill-ownership rule).
 Sources: code.claude.com/docs/en/discover-plugins · `claude plugin --help`
 
+### B2 — Slash-command surface: ergonomics + collisions + quality-command coverage (#447)
+
+The USER-FACING slash surface is its own audit axis of every run — a mis-firing or missing
+command wastes the user's time directly. Precedent: `/exit` kept mis-invoking `/playbook-review`
+from the picker (transcript-proven, the user's own words: "to sa len omylom stlacilo namiesto
+/exit") until #447 hid it. The picker executes the HIGHLIGHTED row on Enter with undocumented
+ranking and known mis-selection bugs (anthropics/claude-code #11431 — `/com` ran `/pr_comments`;
+#26307 stale filtering; #41828) — a command need NOT share letters with what the user typed to be
+mis-run, so visibility itself is the exposure.
+
+Inventory (what the user can actually type on THIS box):
+```bash
+grep -L "user-invocable: false" ~/devel/airuleset/skills/*/SKILL.md   # visible airuleset set
+# cross-check per-box scoping: SKILLS_MAINTAINER_ONLY / SKILLS_FULL_AUTHORITY_ONLY in airuleset.py
+claude plugin list                                                     # plugin command surface
+# built-ins: code.claude.com/docs/en/commands.md (/exit /quit /clear /help /compact …)
+```
+
+Checks, each producing Step F findings:
+1. **Agent-only skills must be hidden.** Any skill the user never deliberately types (post-ticket
+   mandates, worker-path machinery, stub targets) carrying `user-invocable: true` is picker noise
+   AND a mis-selection hazard → flag: flip to `user-invocable: false` (documented frontmatter
+   field — hides from the picker, model Skill-tool invocation unaffected; skills.md frontmatter
+   table). Evidence bar: transcript ratio of model-side `"skill":"<name>"` invocations vs
+   user-typed `<command-name>` ones — a skill with ~zero deliberate user invocations is agent-only.
+2. **Collision check** of every VISIBLE command against built-ins and against each other: prefix
+   overlap, small edit distance, or duplicated purpose (two visible commands doing one job). Flag
+   collisions for rename/hide — with the #11431/#26307 caveat above, closeness is a hazard even
+   without shared letters, so the fix that always works is fewer visible entries.
+3. **Quality-command coverage.** Which quality-raising commands (review / verify / audit /
+   simplify / security classes) exist installed vs available (reuse the Step D1 catalog + the
+   built-ins list) but are NOT wired into any standard flow (worker CYCLE, completion-report
+   gates, this skill itself)? Per command: installed? visible? wired-where? verdict
+   (wire-into-flow / keep-manual / skip + why). A wire-into-autopilot verdict is a FLOW change →
+   always a Step F user decision + a follow-up ticket for the autopilot lane, never applied from
+   here (the built-in review/code-review skill stays BANNED in the worker path per #363).
+
+All B2 findings route through the Step F review-loop like every other audit line — never
+auto-applied.
+Sources: code.claude.com/docs/en/skills.md (frontmatter: `user-invocable`) · code.claude.com/docs/en/commands.md · anthropics/claude-code#11431 · #447
+
 ## Step C — MCP / connector audit (read-only)
 
 ```bash
