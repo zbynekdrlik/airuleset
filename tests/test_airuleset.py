@@ -8449,11 +8449,11 @@ class TestApiWatchdog(TestCase):
         self.pings = []
         # Isolate the usage cache so check_usage's write can NEVER clobber the real
         # ~/.claude/airuleset-usage-cache.json during the suite (it did once).
-        self._orig_usage_cache = self.w._USAGE_CACHE_PATH
-        self.w._USAGE_CACHE_PATH = str(Path(self.tmp) / "usage-cache.json")
+        self._orig_usage_cache = self.w.usage._USAGE_CACHE_PATH
+        self.w.usage._USAGE_CACHE_PATH = str(Path(self.tmp) / "usage-cache.json")
 
     def tearDown(self):
-        self.w._USAGE_CACHE_PATH = self._orig_usage_cache
+        self.w.usage._USAGE_CACHE_PATH = self._orig_usage_cache
 
     def _send(self, body, owner=None, dedup_key=None, dry_run=False):
         self.pings.append((body, dedup_key, owner))
@@ -10231,9 +10231,9 @@ class TestApiWatchdog(TestCase):
         # account email, the box hostname/unix-account, and WHO it's
         # addressed to.
         st, now = {}, 1_000_000
-        with m.patch.object(self.w, "_account_email", return_value="t4user@example.com"), \
-                m.patch.object(self.w, "_box_hostname", return_value="subdev"), \
-                m.patch.object(self.w, "_local_account", return_value="montalu"):
+        with m.patch.object(self.w.usage, "_account_email", return_value="t4user@example.com"), \
+                m.patch.object(self.w.usage, "_box_hostname", return_value="subdev"), \
+                m.patch.object(self.w.usage, "_local_account", return_value="montalu"):
             self.w.check_usage(now, st, self._send, fetch=lambda: self._wk(99, "RWID"),
                                owner="zbynek", threshold=98, interval=900)
         self.assertEqual(len(self.pings), 1)
