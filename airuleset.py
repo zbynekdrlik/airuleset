@@ -47,38 +47,36 @@ MANAGED_MARKER = "<!-- airuleset-managed -->"
 # its guidance block here — preserve it so a `push` doesn't silently delete it.
 EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")]
 
-# Managed default effort: `high` is the persistent default the user wants in
-# EVERY managed project so they never have to remember to set it (#56,
-# 2026-07-25). Official Anthropic docs for the Claude 5 family (Opus 5, Fable
-# 5) both say "start with `high`, the default" and explicitly warn against
-# reusing an effort setting carried over from an earlier model — this was
-# previously `xhigh`, set in the Opus 4.7/4.8 era ("start with xhigh for
-# coding and agentic use cases"), exactly the carried-over case the docs now
-# flag. `xhigh` stays reserved for demanding coding/agentic work (dispatched
-# via `effort:` on a specific agent/task, e.g. the autopilot-worker, or a
-# gated HARD-task escalation) — never this blanket MAIN-session default.
-# `max`/`ultracode` are session-only (not valid here) — ultracode adds
-# auto-workflow orchestration on top and stays a per-session `/effort
-# ultracode`. The user can still raise/lower per session with `/effort`.
-MANAGED_EFFORT_LEVEL = "high"
+# Managed default effort: `xhigh` — the settings-representable HALF of the
+# standing ultracode default the user directed 2026-08-13 ("chcem aby by
+# default vzdy bol ultracode... maximalna akceleracia"), reversing #56's
+# `high` baseline on that explicit dated instruction. `effortLevel` accepts
+# only low|medium|high|xhigh (docs: `max`/`ultracode` are session-only and
+# not valid here), so managed ultracode is COMPOSED of two parts: this key
+# at `xhigh` + the launch script baking `--settings '{"ultracode":true}'`
+# (the orchestration half) into every mode except the deliberate vanilla
+# `plain` escape hatch — see CLAUDE_LAUNCH_SCRIPT_CONTENT. The user can
+# still raise/lower per session with `/effort`.
+MANAGED_EFFORT_LEVEL = "xhigh"
 
-# Managed default MAIN-session model (2026-07-25 cost-fix package, #37):
-# **Opus 5** is now the default main + judgment tier (model-awareness.md) —
-# Opus 4.8's regression + Sonnet 5's coordinator gap that made Fable-as-main
-# a deliberate WORKAROUND are both gone now that Opus 5 shipped, so managed
-# boxes should default MAIN to Opus 5 instead of whatever a prior session
-# left in settings.json. Measured over 8 days across the 6 managed boxes:
-# Fable 5 accounted for 76% of all token spend ($10,350 of ~$13,600) —
-# gatekeeper $2,115, dev2 $2,027, montalu $1,392 — largely automated streams
-# still defaulting to Fable as MAIN rather than the gated advisor shape.
+# Managed default MAIN-session model (user directive 2026-08-13): **Opus 5
+# is BANNED everywhere** ("opus 5 sa nesmie pouzivat... by default pri
+# spusteni claude fable") — the managed MAIN default is **Fable 5**, and the
+# unconditional-managed-default treatment is exactly what makes the ban
+# self-healing fleet-wide: a stale banned id a prior session left in
+# settings.json is overwritten on the next install/push (the live dev1
+# regression the #440 STEP 0 validation observed — a hand-flip to Fable did
+# not survive the next push while this constant still carried the old id).
+# The previous value was the 2026-07-25 cost-fix package's Opus 5 default;
+# the full policy history lives in the fable-advisor skill.
 # The `[1m]` suffix is a DELIBERATE part of the id, not a typo: it is how
 # Claude Code's own usage tracking keys the 1M-context variant (verified —
 # `lastModelUsage` entries in ~/.claude.json store ids exactly like
-# `claude-opus-4-8[1m]`, distinct from the bare `claude-opus-4-8` key) — kept
-# so this change does NOT also shrink the context window. The user relies on
-# the 1M window to avoid context-loss regressions; whether to reconsider that
-# is a SEPARATE decision for a later step, not bundled into this one.
-MANAGED_MODEL = "claude-opus-5[1m]"
+# `claude-fable-5[1m]`, distinct from the bare key) — kept so this change
+# does NOT also shrink the context window. The user relies on the 1M window
+# to avoid context-loss regressions. burn.tier("claude-fable-5[1m]") →
+# "fable", so the statusline highlight keeps working unchanged.
+MANAGED_MODEL = "claude-fable-5[1m]"
 
 # Managed default subagent-spawn ceiling (#288, 2026-08-07): Claude Code's
 # own default `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` is 200, and on CC
@@ -893,41 +891,44 @@ ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
 # Fix: .bashrc holds ONLY thin one-line wrapper functions with NO flag
 # literals -- each just execs the managed SCRIPT (CLAUDE_LAUNCH_SCRIPT_DEST),
 # which carries ALL the actual logic (continue-or-new, --model, skip-perms,
-# ultracode only for the `ultracode` mode). A script is read fresh from disk
+# the standing ultracode flag). A script is read fresh from disk
 # on EVERY invocation, so a `push` that rewrites the script changes behavior
 # in every already-running shell IMMEDIATELY -- no `source ~/.bashrc`, no
 # relaunch, no restart. Same shape as the caveman stable statusline shim
 # (render_caveman_shim() below) -- read that first before changing this.
 CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 # --- the script content itself -----------------------------------------------
-# Ultracode is OPT-IN (#53, 2026-07-25): `--settings '{"ultracode":true}'` used
-# to be baked into EVERY default launch, so ultracode mode silently came back
-# on every session restart even after the user had turned it off for that
-# session (found repeatedly on restreamer). Only the `ultracode` mode carries
-# it now -- the `claude-ultracode()` bashrc function is the explicit opt-in
-# escape hatch, carrying EXACTLY today's old default behavior.
+# Ultracode is the STANDING DEFAULT (user directive 2026-08-13, #445 -- "by
+# default vzdy ultracode... maximalna akceleracia"): every mode except the
+# deliberate vanilla `plain` escape hatch bakes the flag in. This knowingly
+# REVERSES #53 (2026-07-25), which made ultracode session-only opt-in after it
+# kept silently resurrecting against the user's wishes -- back then the
+# resurrection was UNWANTED drift; now the always-on behavior is the user's
+# explicit dated instruction, so the reversal is faithful, not a regression.
+# `claude-ultracode()` stays as an explicit alias (identical behavior to the
+# default mode); `plain` is the only ultracode-free launch.
 #   --settings '{"ultracode":true}' : ultracode is SESSION-ONLY (never on disk, NOT
 #       accepted in settings.json — GH #64817); --settings is the only doc-blessed
 #       always-on route and MERGES per-key, so hooks/model/effortLevel stay intact.
-#       Only the `ultracode` mode passes this now.
 #   --dangerously-skip-permissions  : auto-approve (the user opted in for their dev boxes).
 #   -c                              : continue the most recent conversation in the cwd.
 #   --model '{{MANAGED_MODEL}}'     : baked in at RENDER time so EVERY mode except
 #       `plain` — including a RESUMED (-c) session — explicitly requests the managed
-#       model. Proven live on gatekeeper: settings.json said `claude-opus-5[1m]`, but a
-#       resumed session's transcript kept showing `claude-opus-4-8` on every turn — `-c`
+#       model. Proven live on gatekeeper: settings.json requested the then-managed
+#       Opus id, but a resumed session's transcript kept showing an older model — `-c`
 #       alone just continues whatever model the prior transcript was started with; only
 #       an explicit --model on the launch command line forces it.
 # The conversation probe globs ~/.claude/projects/<encoded-cwd>/*.jsonl — Claude Code
 # encodes cwd by turning / . _ into dashes; a project dir holding only memory/ (no
 # transcript) means nothing to continue. Unknown encoding chars fail toward the
 # FRESH branch (worse case: a new session instead of a cryptic error).
-# Modes: `default` (claude — continue-or-new, skip-perms, model, NO ultracode),
-# `new` (claude-new — always FRESH, skip-perms, model, NO ultracode — force a
-# clean start), `ultracode` (claude-ultracode — deliberate opt-in: continue-or-new
-# + skip-perms + ultracode + model), `plain` (claude-plain — vanilla, no flags),
-# `fullscreen` (claude-fullscreen — deliberate opt-in: continue-or-new + skip-perms
-# + model, PLUS CLAUDE_CODE_NO_FLICKER=1).
+# Modes: `default` (claude — continue-or-new, skip-perms, model, ultracode),
+# `new` (claude-new — always FRESH, skip-perms, model, ultracode — force a
+# clean start), `ultracode` (claude-ultracode — alias of the default mode, kept
+# for muscle memory: continue-or-new + skip-perms + ultracode + model), `plain`
+# (claude-plain — vanilla, no flags — the ONLY ultracode-free launch, #445),
+# `fullscreen` (claude-fullscreen — continue-or-new + skip-perms + model +
+# ultracode, PLUS CLAUDE_CODE_NO_FLICKER=1).
 #   CLAUDE_CODE_NO_FLICKER=1 : #376 REVERSED the `apply_managed_settings_defaults`
 #       pin from `"tui": "default"` (classic) to `"tui": "fullscreen"` fleet-wide
 #       (see that function's own docstring for the full history/tradeoff/citation)
@@ -984,7 +985,8 @@ case "$mode" in
     exec claude "$@"
     ;;
   new)
-    exec claude --dangerously-skip-permissions --model '{{MANAGED_MODEL}}' "$@"
+    exec claude --dangerously-skip-permissions \
+      --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     ;;
   ultracode)
     if _has_conversation; then
@@ -998,16 +1000,20 @@ case "$mode" in
   fullscreen)
     export CLAUDE_CODE_NO_FLICKER=1
     if _has_conversation; then
-      exec claude --dangerously-skip-permissions -c --model '{{MANAGED_MODEL}}' "$@"
+      exec claude --dangerously-skip-permissions -c \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     else
-      exec claude --dangerously-skip-permissions --model '{{MANAGED_MODEL}}' "$@"
+      exec claude --dangerously-skip-permissions \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     fi
     ;;
   *)
     if _has_conversation; then
-      exec claude --dangerously-skip-permissions -c --model '{{MANAGED_MODEL}}' "$@"
+      exec claude --dangerously-skip-permissions -c \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     else
-      exec claude --dangerously-skip-permissions --model '{{MANAGED_MODEL}}' "$@"
+      exec claude --dangerously-skip-permissions \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     fi
     ;;
 esac
@@ -2801,8 +2807,10 @@ def setup_tmux_cutover_subdev_via_gatekeeper(run=None, identity_path: Path = Non
 def apply_managed_settings_defaults(settings: dict) -> dict:
     """Ensure airuleset's managed settings defaults are present (non-hook keys).
 
-    - `effortLevel = xhigh` so deep adaptive reasoning is the persistent default in
-      every managed project without the user remembering to raise it. The user can
+    - `effortLevel = xhigh` (#445, 2026-08-13) — the settings half of the standing
+      ultracode default, so deep adaptive reasoning is persistent in every managed
+      project without the user remembering to raise it; the launch script carries
+      the orchestration half (`--settings '{"ultracode":true}'`). The user can
       still override per session with `/effort`.
     - `disableAgentView = true` HARD-disables Claude Code's `claude agents` / fleet /
       `claude --bg` background daemon (the on-demand supervisor that spawns DETACHED
@@ -2866,11 +2874,11 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       function's own `promptSuggestionEnabled` bullet documents for a different
       key.
 
-    - `model = MANAGED_MODEL` (Opus 5[1m]) is the default MAIN-session model on
-      every managed box (2026-07-25 cost-fix package, #37) — see MANAGED_MODEL's
-      own comment for the measured evidence. Same unconditional-managed-default
-      treatment as effortLevel/disableAgentView/tui; the user can still switch
-      per session with `/model`.
+    - `model = MANAGED_MODEL` (Fable 5[1m] — user directive 2026-08-13, Opus 5
+      is banned) is the default MAIN-session model on every managed box — see
+      MANAGED_MODEL's own comment for the history. Same unconditional-managed-
+      default treatment as effortLevel/disableAgentView/tui; the user can
+      still switch per session with `/model`.
 
     - `promptSuggestionEnabled = False` turns OFF Claude Code's predicted-next-
       prompt suggestion in the input box (#189). CC renders that suggestion as
@@ -6103,9 +6111,9 @@ def cmd_install(args):
     # ~/.bashrc`, no relaunch, no restart (a bashrc FUNCTION, by contrast, is
     # frozen in a shell's memory at startup forever, which is exactly how
     # ultracode kept resurrecting after #53). Ultracode can't live in
-    # settings.json (session-only, GH #64817) — only the `ultracode` mode
-    # (claude-ultracode) passes it, deliberate opt-in only (#53). effortLevel
-    # above is the persistent fallback for reasoning depth regardless of mode.
+    # settings.json (session-only, GH #64817) — the script passes it in every
+    # mode except `plain` (standing default, directive 2026-08-13, #445 —
+    # reversing #53); effortLevel above is the settings half of that default.
     try:
         changed = apply_ultracode_launcher()
         print(f"  Updated:   {CLAUDE_LAUNCH_SCRIPT_DEST} (claude launcher script — "
@@ -13166,12 +13174,15 @@ def cmd_secret(args):
 
 
 def cmd_fable_gate(args):
-    """Budget gate for AUTOMATIC Fable escalation (model-tiering policy 2026-07-03):
+    """Budget gate for the AUTOMATIC Fable judgment layer (model-tiering policy
+    2026-08-13 — Opus 5 banned; the gate now guards the DEFAULT judgment tier):
     exit 0 + `OPEN ...` when the Fable weekly + shared weekly windows have headroom
     (< threshold, default 80% / AIRULESET_FABLE_GATE_PCT), exit 1 + `CLOSED ...`
     otherwise (incl. missing/stale cache — fail-safe: no blind Fable burn). The
-    orchestrator / autopilot supervisor runs this ONCE per hard task/batch before
-    dispatching `model: fable`; CLOSED → dispatch opus instead."""
+    orchestrator / autopilot supervisor runs this ONCE per judgment task/batch
+    before dispatching `model: fable`; CLOSED → the same work runs on
+    claude-opus-4-8 (agent-definition frontmatter / Workflow opts.model full id /
+    inheritance — never the banned bare alias)."""
     from watchdog import fable_gate
     ok, reason = fable_gate(threshold=getattr(args, "threshold", None))
     print(("OPEN " if ok else "CLOSED ") + reason)
@@ -14847,8 +14858,8 @@ def main():
                        help="Request text for --issue mode (Slovak, plain)")
 
     p_gate = sub.add_parser(
-        "fable-gate", help="Budget gate for automatic Fable escalation — exit 0 "
-                           "(OPEN, dispatch fable) / 1 (CLOSED, dispatch opus)")
+        "fable-gate", help="Budget gate for the automatic Fable judgment layer — exit "
+                           "0 (OPEN, dispatch fable) / 1 (CLOSED, run on claude-opus-4-8)")
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 

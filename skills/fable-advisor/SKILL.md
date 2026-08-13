@@ -1,15 +1,17 @@
 ---
 name: fable-advisor
-description: One-shot Fable ADVISOR consult for a genuinely HARD decision — the master session (any model) grounds the problem into a tight digest, checks the budget gate, dispatches ONE Fable call (digest in → decision out) and hands execution to a Sonnet worker. Load when a hard design fork / root-cause dead-end / safety-critical verdict needs top-tier judgment WITHOUT running the whole session on Fable.
+description: One-shot Fable ADVISOR consult for a genuinely HARD decision — the master session (any model) grounds the problem into a tight digest, checks the budget gate, dispatches ONE Fable call (digest in → decision out) and hands execution to an Opus 4.8 worker. Load when a hard design fork / root-cause dead-end / safety-critical verdict needs top-tier judgment WITHOUT re-grounding the whole problem on Fable.
 ---
 
 # Fable Advisor — digest in, decision out, execution elsewhere
 
-The affordable way to get Fable-grade judgment (airuleset #32): the MASTER
-session stays on a cheap model (Opus default), Fable is consulted as a
-ONE-SHOT advisor for the genuinely hard call, and a Sonnet worker executes
-the decision. Never run the implementation loop on Fable — a Fable main
-re-reads the whole conversation every turn (the 2026-07-01 burn; the
+The affordable way to get Fable-grade judgment on a HARD call from a
+NON-Fable context (airuleset #32 — since 2026-08-13 the managed MAIN default
+IS Fable, so this consult shape mostly serves the Opus 4.8 execution
+workers): the caller grounds the problem into a tight digest, Fable is
+consulted as a ONE-SHOT advisor, and an Opus 4.8 worker executes the
+decision. Never let Fable ground itself or type the implementation — a
+Fable session re-reading everything every turn is the 2026-07-01 burn (the
 presenter incident 2026-07-24; hook-enforced by
 `block-main-implementation.sh`, which also blocks a MAIN session with an
 ARMED `/goal` from implementing on ANY model, #54).
@@ -17,10 +19,10 @@ ARMED `/goal` from implementing on ANY model, #54).
 ## When to consult (the HARD bar — model-awareness.md)
 
 Complex/cross-cutting architecture or design synthesis; a root cause that
-resisted an Opus-tier attempt; adversarial verify of a safety-critical
-change; an Opus session CIRCLING (≥2 laps on the same decision without
-progress). When unsure whether it is hard → it is NOT; stay on Opus and do
-not consult.
+resisted a first Opus-4.8-tier attempt; adversarial verify of a
+safety-critical change; a session CIRCLING (≥2 laps on the same decision
+without progress). When unsure whether it is hard → it is NOT; stay at your
+current tier and do not consult.
 
 ## Protocol
 
@@ -29,34 +31,48 @@ not consult.
    python3 ~/devel/airuleset/airuleset.py fable-gate
    ```
    Exit 0 = OPEN → advisor runs on `fable`. Exit 1 = CLOSED (incl.
-   missing/stale cache) → the SAME consult runs on `opus` instead — never
+   missing/stale cache) → the SAME consult runs on **Opus 4.8**
+   (`claude-opus-4-8`) instead — never the bare `opus` alias (it resolves
+   to the BANNED Opus 5, directive 2026-08-13): reach 4.8 via a
+   `claude-opus-4-8`-pinned agent definition or by omitting the `model`
+   override from a `claude-opus-4-8` session; a Fable MAIN at gate CLOSED
+   holds the judgment itself rather than spending a new dispatch. Never
    skip the gate, never re-poll it within the task.
 
 2. **Ground the problem into a TIGHT digest — in THIS session, or via one
-   cheap `sonnet` read stage.** The digest carries: the facts (measured, not
+   cheap read stage (`claude-opus-4-8` low where a surface names it;
+   `sonnet` only for genuinely trivial collection).** The digest carries:
+   the facts (measured, not
    assumed), the constraints, what was already tried and how it failed, and
    the ONE concrete question. No file dumps, no repo tours — the advisor
    never re-reads sources (that is the burn shape this skill exists to
    prevent).
 
 3. **ONE advisor dispatch** (background, so the master stays interactive):
-   Agent tool — `subagent_type: general-purpose`, `model: fable` (or `opus`
-   when the gate is CLOSED), `effort: xhigh`, `run_in_background: true`;
+   Agent tool — `subagent_type: general-purpose`, `model: fable` when the
+   gate is OPEN (at CLOSED use the Opus 4.8 route above — the bare alias is
+   BANNED), `effort: xhigh`, `run_in_background: true`;
    prompt = the digest + the question + "Return ONLY the decision with a
    short rationale — do not read the repository, do not execute anything."
 
-4. **Execute via a Sonnet worker.** The master receives the decision,
+4. **Execute via an Opus 4.8 worker.** The master receives the decision,
    records it durably (ticket comment — `durable-decisions-to-tickets.md`),
-   and dispatches execution to `model: sonnet` at `high`/`xhigh` (or the
-   proper mechanism: autopilot-worker / subagent-driven-development). The
-   master reviews the worker's diff — that is the oversight role.
+   and dispatches execution on the Opus 4.8 tier — the repo's two pinned
+   definitions are `agents/autopilot-worker.md` and
+   `agents/ticket-validator.md` (`model: claude-opus-4-8` frontmatter); a
+   `subagent-driven-development` implementer or other ad-hoc execution
+   dispatch has NO repo pin and inherits the session's model — from a
+   worker that is 4.8, from a Fable main it stays Fable, so prefer the
+   pinned worker for issue-shaped execution (never sonnet for anything
+   complex). The master reviews the worker's diff — that is the oversight
+   role.
 
 ## Anti-patterns (all rewordings)
 
 - Consulting Fable as a long-lived WORKER or letting it ground itself by
   reading the repo → the exact 2026-07-01 burn. Digest in, decision out.
-- Escalating routine work ("this feature is non-trivial") → routine stays
-  Opus/Sonnet; the HARD criteria above are the whole list.
+- Escalating routine work ("this feature is non-trivial") → routine
+  execution stays Opus 4.8; the HARD criteria above are the whole list.
 - Skipping the gate because "it's just one call" → every automatic Fable
   dispatch is gated, no exceptions.
 - Re-asking the advisor per sub-question → ONE consult per hard fork; new
@@ -69,15 +85,15 @@ Moved VERBATIM from `modules/core/model-awareness.md` (#92 item 2): the always-o
 
 ### The lineup and what each tier costs
 
-**Opus 5** (`opus`, `claude-opus-5`) is the default main + judgment tier: measured within 0.5% of Fable 5 on CursorBench 3.2 at HALF the price (https://www.anthropic.com/news/claude-opus-5), and Opus 5 ships thinking ON by default (a change from 4.8, where it was opt-in) — Fable 5 cannot disable thinking at all, so its output tokens are structurally higher than Opus's for the same task. Dispatched EXECUTION defaults to **Sonnet 5** (`sonnet`, `claude-sonnet-5`, full effort range `low`–`max`; trails Opus on agentic-coding benchmarks but at a fraction of the cost). Above Opus (barely, per CursorBench) sits **Fable 5** (`claude-fable-5`, the `fable` alias — Anthropic's Mythos-class tier, the most intelligent generally-available Claude, Claude 5 family; a first-class subagent `model` value): genuinely HARD tasks escalate to it AUTOMATICALLY through the budget gate — it burns tokens fast, so it is never a blanket default and every automatic use is gated on weekly-limit headroom. Haiku 4.5 (`haiku`) for the most trivial reads. Pricing per Mtok in/out (official pricing page, 2026-07-25): Fable 5 $10/$50 · Opus 5 $5/$25 (cache read $0.50, cache write $6.25 5-min / $10 1-hour) · Sonnet 5 $2/$10 · Haiku 4.5 $1/$5; ALL current models ship the 1M context window at standard pricing. (Literalism behavior holds across the family; Fable 5, Opus 5 and Sonnet 5 are concise, grounded, honest, and need less anti-slop frontend prompting.)
+**CURRENT lineup (2026-08-13): Fable 5** (`claude-fable-5[1m]`, the `fable` alias — Anthropic's Mythos-class tier, the most intelligent generally-available Claude; a first-class subagent `model` value) **is the managed MAIN default AND the budget-gated judgment tier; Opus 4.8** (`claude-opus-4-8`) **is the execution + gate-CLOSED tier; Sonnet 5** (`sonnet`) only for genuinely trivial mechanical lookups; **Haiku 4.5** (`haiku`) for the most trivial reads. **Opus 5** (`claude-opus-5`, and the bare `opus` alias that resolves to it) is **BANNED since 2026-08-13** — the user's directive, driven by widespread community dissatisfaction with Opus 5 ("intenet je plny obrovskej nespokojnosti s opus 5"). Historical record of its era (2026-07-25 → 2026-08-13, when it WAS the default main + judgment tier): measured within 0.5% of Fable 5 on CursorBench 3.2 at HALF the price (https://www.anthropic.com/news/claude-opus-5), and it shipped thinking ON by default (a change from 4.8, where it was opt-in) — Fable 5 cannot disable thinking at all, so its output tokens are structurally higher for the same task. Pricing per Mtok in/out (official pricing page, 2026-07-25): Fable 5 $10/$50 · Opus 5 $5/$25 (cache read $0.50, cache write $6.25 5-min / $10 1-hour) · Sonnet 5 $2/$10 · Haiku 4.5 $1/$5; ALL current models ship the 1M context window at standard pricing. (Literalism behavior holds across the family — the top tiers are concise, grounded, honest, and need less anti-slop frontend prompting.)
 
-### Why Opus 5 is the recommended MAIN default (2026-07-25 rewrite)
+### Why Opus 5 WAS the recommended MAIN default (2026-07-25 rewrite — superseded 2026-08-13)
 
-Honest history: earlier in 2026 the user ran Fable 5 as MAIN by hand — a deliberate WORKAROUND, not a taste preference: Opus 4.8 was regressing (the CIRCLING valve exists because of it) and Sonnet 5 could not reliably carry the coordinator role, so Fable was the only model that held up as main. Opus 5 retires that workaround: the regression + the Sonnet coordinator gap that made Fable-as-main necessary are both gone, so the recommended default flips back to Opus 5. This is NOT a ban on Fable as main — the user's `/model` choice stays theirs alone, gated on nothing.
+Honest history: earlier in 2026 the user ran Fable 5 as MAIN by hand — a deliberate WORKAROUND, not a taste preference: Opus 4.8 was regressing (the CIRCLING valve exists because of it) and Sonnet 5 could not reliably carry the coordinator role, so Fable was the only model that held up as main. Opus 5 retires that workaround: the regression + the Sonnet coordinator gap that made Fable-as-main necessary are both gone, so the recommended default flipped back to Opus 5 — that was the 2026-07-25 reasoning. SUPERSEDED: the 2026-08-13 directive bans Opus 5 outright (community-wide dissatisfaction with it) and returns MAIN to Fable 5 as the MANAGED default — this time the user's explicit standing choice, not a workaround; the user's `/model` choice stays theirs alone, gated on nothing.
 
 ### Why every automatic escalation is budget-gated
 
-History that shapes this policy: the 2026-07-01 Fable-everywhere mode burned tokens brutally and kept tripping the usage limits mid-work — the user reverted it 2026-07-02 (reverted the 2026-07-01 policy). What makes the 2026-07-03 middle tier safe where Fable-everywhere was not: (1) only the HARD subset escalates (routine work stays Opus/Sonnet), and (2) every automatic escalation is BUDGET-GATED — `airuleset.py fable-gate` checks the Fable weekly + shared weekly windows from the watchdog's usage cache and closes automatic Fable once headroom runs out (default gate 80%, env `AIRULESET_FABLE_GATE_PCT`), so the limit-trip-stops-work failure cannot repeat. (The 5-hour session window intentionally does NOT gate — only the weekly windows do; don't 'fix' that.)
+History that shapes this policy: the 2026-07-01 Fable-everywhere mode burned tokens brutally and kept tripping the usage limits mid-work — the user reverted it 2026-07-02 (reverted the 2026-07-01 policy). What made the 2026-07-03 middle tier safe where Fable-everywhere was not: (1) only the HARD subset escalated (routine work stayed on the cheaper tiers), and (2) every automatic escalation is BUDGET-GATED — `airuleset.py fable-gate` checks the Fable weekly + shared weekly windows from the watchdog's usage cache and closes automatic Fable once headroom runs out (default gate 80%, env `AIRULESET_FABLE_GATE_PCT`), so the limit-trip-stops-work failure cannot repeat. Under the 2026-08-13 policy the gate carries MORE load, not less: it now guards the DEFAULT judgment layer (every judgment dispatch, not just a HARD subset), with Opus 4.8 as the CLOSED fallback — the gate is what keeps the ban affordable. (The 5-hour session window intentionally does NOT gate — only the weekly windows do; don't 'fix' that.)
 
 ### Why the CIRCLING valve keys on behavior, not on rumors
 

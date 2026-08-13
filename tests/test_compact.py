@@ -70,11 +70,15 @@ class TestManagedAutoCompactWindowReverted(unittest.TestCase):
         self.assertNotIn("autoCompactWindow", out)
 
     def test_preserves_other_keys(self):
+        # `model` is itself a managed key (unconditionally overwritten to
+        # MANAGED_MODEL) — assert against the constant, not a literal, so
+        # this test stops breaking on every managed-model policy change
+        # (it broke on the 2026-08-13 Opus 5 ban with a stale opus-5 id).
         out = airuleset.apply_managed_settings_defaults(
-            {"hooks": {"Stop": []}, "model": "claude-opus-5[1m]",
+            {"hooks": {"Stop": []}, "model": airuleset.MANAGED_MODEL,
              "autoCompactWindow": 155000})
         self.assertEqual(out["hooks"], {"Stop": []})
-        self.assertEqual(out["model"], "claude-opus-5[1m]")
+        self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
         self.assertNotIn("autoCompactWindow", out)
 
 

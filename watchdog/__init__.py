@@ -7965,7 +7965,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              repo_roots=None, issue_counts_fetch=None, git_fetch=None,
              vault_purge=None, log_fn=None, reopen_fetch=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
-             progress_dir=None):
+             progress_dir=None, questions_path=None):
     """Scan every `claude` pane once. 29 numbered jobs per poll — 23 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -9598,7 +9598,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # Needs only `send_fn` (always resolved by now), not `discord_fetch` —
     # it posts, it never reads Discord.
     try:
+        # questions_path (None = live box map): same hermeticity reason as
+        # state_path/projects_dir — a run_once TEST otherwise inherits the
+        # box's REAL pending questions (observed flake, test_watchdog).
         logs += reping_stale_questions(now, send_fn, dry_run=dry_run,
+                                       path=questions_path,
                                        owner_by_sid=owner_by_sid,
                                        owner_by_cwd=owner_by_cwd,
                                        owners_seen=owners_seen,

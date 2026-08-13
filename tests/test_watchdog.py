@@ -2279,8 +2279,52 @@ class RunOnceSubagentVisibility(unittest.TestCase):
 
         logs = wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
                            projects_dir=proj, state_path=state_path,
-                           pending_prefix=str(Path(proj).parent / "pending-"))
+                           pending_prefix=str(Path(proj).parent / "pending-"),
+                           # hermetic: without this, the daily question-reping
+                           # sweep reads the LIVE ~/.claude/discord-questions.json
+                           # and a real pending question on the box leaks an
+                           # extra ping into these assertions (observed live:
+                           # the ping-count check below flaked from 1 to 2 the
+                           # moment a real question crossed its reping bucket).
+                           questions_path=str(Path(proj).parent
+                                              / "questions.json"))
         return logs, sent, pings
+
+    def test_question_reping_reads_only_the_injected_questions_path(self):
+        # The passthrough itself must be real: a stale entry in the INJECTED
+        # map fires a reping ping through run_once; the live box map is never
+        # consulted. (Pre-fix this failed with TypeError: unexpected keyword
+        # 'questions_path' — run_once parameterized every other state source
+        # but read the questions map from the live default.)
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj, now = self._build(
+            tmp, [_assistant("Bežím ďalej.")], [_assistant("ok")],
+            sup_age=10, sub_age=10)
+        qpath = Path(tmp) / "questions.json"
+        qpath.write_text(json.dumps({
+            "123456": {"session": "s-x", "cwd": "/tmp/qproj",
+                       "ts": now - 2 * 24 * 3600,
+                       "block": "**Otázka — projekt qproj:**\ntest?\n❓ NEEDS YOU: test?"},
+        }))
+        pings = []
+
+        def fake_run(argv, timeout=8):
+            return ""
+
+        def fake_send(body, **k):
+            pings.append((body, k))
+            return ("sent", "m-1")
+
+        wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
+                    projects_dir=proj, state_path=Path(tmp) / "state.json",
+                    pending_prefix=str(Path(tmp) / "pending-"),
+                    questions_path=str(qpath))
+        reping = [p for p in pings
+                  if (p[1] or {}).get("dedup_key", "").startswith("question-reping:")]
+        self.assertEqual(len(reping), 1,
+                         "the injected stale entry must fire exactly one "
+                         "reping ping: %r" % pings)
+        self.assertIn("projekt qproj", reping[0][0])
 
     # --- (1b) subagent api-error ------------------------------------------------
 
