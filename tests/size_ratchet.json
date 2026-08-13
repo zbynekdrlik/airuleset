@@ -130,7 +130,7 @@
     "tests/test_situational_injection.py": 490,
     "tests/test_size_ratchet.py": 723,
     "tests/test_slash_surface_hygiene.py": 97,
-    "tests/test_soniox_provisioning.py": 678,
+    "tests/test_soniox_provisioning.py": 773,
     "tests/test_stale_worktree_sweep.py": 1364,
     "tests/test_stash_delivery.py": 650,
     "tests/test_stash_unconditional.py": 609,

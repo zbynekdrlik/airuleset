@@ -378,6 +378,101 @@ class TestProvisionSubdevSonioxKey(TestCase):
 
 
 # ---------------------------------------------------------------------------
+# #451 -- a managed NON-subdev host (newlevel@dev2) that still runs the
+# meeting-analysis skill needs `~/.soniox.env` too. It carries an explicit
+# `"soniox": True` marker, and the target filter admits it ALONGSIDE the
+# AUTHORITY_BY_USER subdev accounts -- so it rides the SAME delivery loop
+# (line-scoped source read, value via stdin, umask/chmod, retry, loud
+# failure) with no parallel mechanism. The marker decouples soniox
+# eligibility from merge-authority (which is what AUTHORITY_BY_USER means).
+# ---------------------------------------------------------------------------
+
+class TestSonioxFlaggedNonSubdevHost(TestCase):
+    def _source_with_key(self, value=FAKE_KEY):
+        d = Path(tempfile.mkdtemp())
+        src = d / ".env"
+        src.write_text("SONIOX_API_KEY=%s\n" % value)
+        return src
+
+    def test_flagged_host_receives_key_even_when_user_not_in_authority(self):
+        # user "newlevel" is NOT in FAKE_AUTHORITY, but the `soniox` flag
+        # makes it a target anyway -- exactly the dev2 case (#451).
+        src = self._source_with_key()
+        flagged = {"name": "dev2", "host": "1.2.3.4", "user": "newlevel",
+                   "soniox": True, "repo_path": "~/devel/airuleset"}
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return _fake_cp()
+
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY):
+            failed = airuleset.provision_subdev_soniox_key(
+                hosts=[flagged], run=run, source=src)
+        self.assertEqual(failed, [])
+        self.assertEqual(len(calls), 1,
+                          "a soniox-flagged host must receive the key even "
+                          "when its user is not in AUTHORITY_BY_USER")
+        argv, kw = calls[0]
+        # value via stdin, never argv -- the same guarantee every target has
+        self.assertNotIn(FAKE_KEY, " ".join(str(a) for a in argv))
+        self.assertIn(FAKE_KEY, kw.get("input", ""))
+        self.assertIn("1.2.3.4", " ".join(str(a) for a in argv))
+
+    def test_an_unflagged_non_authority_host_is_still_excluded(self):
+        # control: WITHOUT the flag, a non-authority user is filtered out
+        # (the pre-#451 behaviour, unchanged) -- proves the flag, not any
+        # widening of the user check, is what admits dev2. A filtered host
+        # never even triggers the source read.
+        src = self._source_with_key()
+        plain = {"name": "dev2", "host": "1.2.3.4", "user": "newlevel",
+                 "repo_path": "~/devel/airuleset"}
+        calls = []
+
+        def run(argv, **kw):
+            calls.append((argv, kw))
+            return _fake_cp()
+
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY), \
+                m.patch.object(airuleset, "_soniox_key_line") as line_fn:
+            failed = airuleset.provision_subdev_soniox_key(
+                hosts=[plain], run=run, source=src)
+        line_fn.assert_not_called()
+        self.assertEqual(calls, [])
+        self.assertEqual(failed, [])
+
+    def test_dev2_carries_the_soniox_flag(self):
+        # regression lock over the REAL REMOTE_HOSTS: the dev2 entry must
+        # carry the flag (this is the one load-bearing guard that a future
+        # edit removing it fails loudly on).
+        dev2 = next(h for h in airuleset.REMOTE_HOSTS if h["name"] == "dev2")
+        self.assertTrue(dev2.get("soniox"),
+                        "dev2 must be flagged for soniox delivery (#451)")
+
+    def test_dev2_is_a_real_delivery_target_via_the_production_filter(self):
+        # drive the REAL provision function over the REAL REMOTE_HOSTS +
+        # REAL AUTHORITY_BY_USER (neither patched) with a fake run and a
+        # fake source -- proves the PRODUCTION filter itself (not a
+        # re-derivation of it) admits dev2 alongside the subdev accounts,
+        # with no regression to any existing target.
+        src = self._source_with_key()
+        contacted = []
+
+        def run(argv, **kw):
+            contacted.append(" ".join(str(a) for a in argv))
+            return _fake_cp()
+
+        failed = airuleset.provision_subdev_soniox_key(run=run, source=src)
+        self.assertEqual(failed, [])
+        joined = "\n".join(contacted)
+        # dev2's real user@host -- the account this ticket exists to fix
+        self.assertIn("newlevel@100.82.64.27", joined)
+        # a couple of subdev stream accounts still contacted (no regression)
+        self.assertIn("montalu@100.118.174.27", joined)
+        self.assertIn("marek@100.118.174.27", joined)
+
+
+# ---------------------------------------------------------------------------
 # #358 adversarial-review F2 (MAJOR): the soniox delivery leg was exactly
 # as exposed to gk's saturated-MaxStartups drop as the deploy leg, but had
 # NO retry at all -- a transient connection failure permanently lost that
