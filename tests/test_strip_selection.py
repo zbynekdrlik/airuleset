@@ -377,20 +377,24 @@ class CmdWatchdogPrintsLogsWithoutVerbose(unittest.TestCase):
             "flush under a piped, non-tty stdout (systemd), so a killed "
             "sweep prints nothing at all, reproducing the #172 incident")
 
-    def test_log_fn_survives_a_sigterm_under_a_real_pipe(self):
-        """#172 REOPENED finding 1, measured exactly like the reopen review
-        did: `print('x')` + SIGTERM 1s later captures '' under a real OS
-        pipe (systemd's own stdout shape -- non-tty, so CPython
-        block-buffers it); `print('x', flush=True)` + the same SIGTERM
-        captures 'x'. This drives the REAL `cmd_watchdog` wiring (run_once
-        mocked to log one line then block, exactly like a hung per-repo
-        network call would) in a REAL subprocess with a REAL pipe for
-        stdout, then SIGTERMs it -- the only way to observe whether a
-        decision line genuinely reached the journal before a kill, since
-        unittest.mock's in-process capture never touches an OS buffer at
-        all."""
+    def _sigterm_pipe_probe(self, child_startup_delay_s=0.0):
+        """Drive the REAL `cmd_watchdog` wiring (run_once mocked to log one
+        line then block, exactly like a hung per-repo network call would)
+        in a REAL subprocess with a REAL pipe for stdout, SIGTERM it
+        mid-run, and return the captured `(stdout, stderr)` -- the only way
+        to observe whether a decision line genuinely reached the journal
+        before a kill, since unittest.mock's in-process capture never
+        touches an OS buffer at all.
+
+        `child_startup_delay_s` simulates a load-delayed child startup
+        (this box runs 6-19 concurrent full-suite runs -- see the
+        load-flake entry in the project playbook): the delay runs BEFORE
+        the child's imports, exactly where real CPU contention slows a
+        fresh interpreter down."""
         script = f"""
-import sys, time
+import time
+time.sleep({child_startup_delay_s!r})   # injected load simulation (0 = none)
+import sys
 sys.path.insert(0, {REPO_ROOT!r})
 import unittest.mock as m
 import airuleset
@@ -425,12 +429,36 @@ with m.patch.object(wd, "run_once", side_effect=fake):
             if proc.poll() is None:
                 proc.kill()
                 proc.communicate()
+        return out, err
+
+    def test_log_fn_survives_a_sigterm_under_a_real_pipe(self):
+        """#172 REOPENED finding 1, measured exactly like the reopen review
+        did: `print('x')` + SIGTERM 1s later captures '' under a real OS
+        pipe (systemd's own stdout shape -- non-tty, so CPython
+        block-buffers it); `print('x', flush=True)` + the same SIGTERM
+        captures 'x'."""
+        out, err = self._sigterm_pipe_probe()
         self.assertIn(
             b"PIPE-FLUSH-PROBE-172", out,
             "the decision line must survive a SIGTERM delivered while the "
             "process is alive but blocked (mid per-repo network call) -- "
             "under systemd's real piped stdout, a non-flushing log_fn "
             "loses it exactly like the #172 incident (stderr: %r)" % err)
+
+    def test_probe_survives_slow_child_startup(self):
+        """#444 regression: under real suite-contention load the child's
+        import phase alone can outlast any fixed parent-side wait, so the
+        SIGTERM used to land BEFORE the probe was ever printed (`b''`
+        captured -- the exact ticket failure). A 2.0s injected startup
+        delay deterministically outlasts the historical fixed 1.5s wait;
+        the parent must synchronise on the observable logged event, never
+        a wall-clock guess about child import speed."""
+        out, err = self._sigterm_pipe_probe(child_startup_delay_s=2.0)
+        self.assertIn(
+            b"PIPE-FLUSH-PROBE-172", out,
+            "a load-delayed child startup (simulated 2.0s) must not lose "
+            "the probe -- the parent has to wait on the logged event "
+            "itself, never a fixed wall-clock sleep (stderr: %r)" % err)
 
 
 if __name__ == "__main__":
