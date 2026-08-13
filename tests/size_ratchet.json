@@ -1,6 +1,6 @@
 {
  "files": {
-  "airuleset.py": 15065,
+  "airuleset.py": 15111,
   "backlog_marker_gate.py": 90,
   "burn/__init__.py": 2339,
   "design_gate.py": 834,
@@ -73,7 +73,7 @@
   "tests/test_long_turn.py": 408,
   "tests/test_long_wait_background_waiter.py": 138,
   "tests/test_main_implementation_guard.py": 2102,
-  "tests/test_managed_plugins.py": 688,
+  "tests/test_managed_plugins.py": 761,
   "tests/test_managed_repo_sweeps.py": 744,
   "tests/test_mdreview_content_axes.py": 87,
   "tests/test_measure_design_compliance.py": 125,
