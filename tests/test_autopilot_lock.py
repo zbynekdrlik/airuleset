@@ -581,7 +581,6 @@ class TestSweepAutopilotLockLitter(TestCase):
                         "force=True must always bypass the cadence gate")
 
     def test_toctou_recheck_refuses_a_lock_that_became_alive_since_discovery(self):
-        import os
         import unittest.mock as mock
         dp = dead_pid()
         self._lock_file("hhh", {"pid": dp, "repo": "/tmp/x"})
