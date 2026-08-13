@@ -35,6 +35,7 @@ test file regardless of how the fake behaves.
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -75,14 +76,24 @@ NON_COMPLETION_MSG = ("⏳ WORKING: dispatched worker for #1393, will report "
 BLOCKED_COMPLETION_MSG = "## ✅ Work Complete\n\nnot enough structure here"
 
 _FAKE_PYTHON3_TEMPLATE = """#!/usr/bin/env bash
-# Records every invocation's argv (one per line, space-joined) to the log
-# path baked in at write time (never an env var -- a hook's own subprocess
-# calls don't inherit anything this test harness didn't put on PATH), then
-# prints a fixed disposition word on stdout -- mirrors the real
-# `cmd_compact_request`'s own contract closely enough for the hook's own
-# `case … in sent|expired|...) ;; *) RESULT=error ;; esac`-shaped callers
-# (none exist in THIS hook -- it fires best-effort, output discarded -- but
-# a real-shaped reply keeps the fake honest regardless).
+# #411-review MINOR (fresh-context adversarial review, live-triggered): a
+# fake that intercepts EVERY python3 invocation unconditionally also
+# swallows the SAME hook's own OTHER python3 use -- `strip_mentions()`'s
+# `python3 - "$_f" <<'PYEOF'` heredoc calls (invoked twice per turn, for
+# MSG and MSG_NOGOAL). A generic "log argv, print 'sent'" reply makes
+# those calls return `sent` instead of the real classification, silently
+# disabling the whole mention-vs-use family for the duration of these
+# tests -- demonstrated live: a genuine `gh pr merge --admin` bypass offer
+# stopped being blocked at all under the naive fake. Dispatch on `$1`
+# instead: the compact-request call's own argv[1] is always an absolute
+# path ending in `airuleset.py`; strip_mentions's own call is always
+# literally `-` (read script from stdin). Anything else falls through to
+# the REAL interpreter (its absolute path baked in at write time, from
+# BEFORE this fake ever went on PATH) so no other python3 use in the hook
+# is ever affected by this fake's presence.
+if [ "$1" = "-" ]; then
+    exec "%s" "$@"
+fi
 echo "$*" >> "%s"
 printf 'sent'
 """
@@ -94,13 +105,17 @@ class _HookCase(unittest.TestCase):
     call is observed rather than reaching any real state file."""
 
     def setUp(self):
+        # Resolved BEFORE the fake bindir goes on PATH -- the fake's own
+        # passthrough branch execs this absolute path, never a bare
+        # `python3` (which would recurse into the fake itself).
+        real_python3 = shutil.which("python3")
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         bindir = Path(self.tmp.name) / "bin"
         bindir.mkdir()
         self.fake_log = Path(self.tmp.name) / "python3-calls.log"
         fake = bindir / "python3"
-        fake.write_text(_FAKE_PYTHON3_TEMPLATE % str(self.fake_log))
+        fake.write_text(_FAKE_PYTHON3_TEMPLATE % (real_python3, str(self.fake_log)))
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
         self.env = dict(os.environ)
         self.env["PATH"] = "%s:%s" % (bindir, os.environ.get("PATH", ""))
