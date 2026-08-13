@@ -7351,12 +7351,16 @@ from watchdog.burn_jobs import (  # noqa: E402
 # circular-import hazard a coupled cluster would have.
 #
 # The three git-primitive names re-exported here (`_default_git_run`,
-# `_git_first_line`, `_git_base_ref`) are ALSO used by code still resident
-# in this file (`_git_commit_ts`, `delivery_state`, `_repo_label` -- cluster
-# E, not yet extracted): every one of those callers keeps resolving them as
-# bare module-global names through THIS import, exactly like `run_once()`'s
-# own bare-name calls to `burn_snapshot_job`/`check_usage`/etc. above --
-# zero changes needed in any of cluster E's still-resident code.
+# `_git_first_line`, `_git_base_ref`) were, at the time this facade was
+# written, ALSO used by code still resident in this file (`_git_commit_ts`,
+# `delivery_state`, `_repo_label` -- cluster E). That is no longer true:
+# cluster E was extracted in a later commit (its own `watchdog/repo_health.py`
+# imports the trio directly from `watchdog.cards`, a plain leaf-to-leaf
+# forward import) -- `_git_commit_ts`/`delivery_state`/`_repo_label` no
+# longer live in this file at all, and this repeated re-export block is now
+# pure namespace preservation (kept for `watchdog.<name>` attribute-access
+# compatibility) rather than the load-bearing bare-name resolution mechanism
+# described above when it was cluster E's own facade dependency.
 from watchdog.cards import (  # noqa: E402
     _default_git_run as _default_git_run,
     _git_first_line as _git_first_line,

@@ -13,34 +13,35 @@ own job dispatch, and never called BY any other watchdog job.
 
 THE SHARED GIT-HELPER TRIO (`_default_git_run`/`_git_first_line`/
 `_git_base_ref`) moved here TOO, even though this file's own module
-docstring only needs to explain job 25: all three are genuinely shared with
-job 24's `delivery_state`/`_repo_label` (still resident in
-`watchdog/__init__.py`, cluster E, not yet extracted) -- `_default_git_run`'s
-own docstring says so explicitly ("job 24's `_git_first_line`/
-`delivery_state`, job 25's `merged_closes`"). This is NOT the circular-import
-hazard a coupled cluster like C/D would have: the dependency direction here
-is the SAFE one -- this file needs nothing back from `watchdog/__init__.py`
-(only stdlib `re` + a locally-imported `subprocess` + locally-imported
-`notify` package functions, unchanged from before the move), while
-`__init__.py`'s own still-resident code (`_git_commit_ts`, `delivery_state`,
-`_repo_label`) keeps calling `_git_first_line`/`_git_base_ref` as bare names,
-resolved through `__init__.py`'s own module globals after the facade
-re-export runs -- exactly the same mechanism every other moved cluster's
-bare-name callers already rely on. `_git_commit_ts` itself stays behind in
-`__init__.py`: only `delivery_state` (cluster E) uses it, this cluster does
-not need it at all, so there is no reason to move it before E is extracted.
+docstring only needs to explain job 25: at the time this file was
+extracted, all three were genuinely shared with job 24's `delivery_state`/
+`_repo_label` (then still resident in `watchdog/__init__.py`, cluster E,
+not yet extracted) -- `_default_git_run`'s own docstring says so explicitly
+("job 24's `_git_first_line`/`delivery_state`, job 25's `merged_closes`").
+That was NOT the circular-import hazard a coupled cluster like C/D would
+have: the dependency direction was the SAFE one -- this file needs nothing
+back from `watchdog/__init__.py` (only stdlib `re` + a locally-imported
+`subprocess` + locally-imported `notify` package functions, unchanged from
+before the move). Cluster E has SINCE been extracted too, into
+`watchdog/repo_health.py` -- `_git_commit_ts`, `delivery_state`, and
+`_repo_label` no longer live in `watchdog/__init__.py` at all;
+`repo_health.py` imports `_git_first_line`/`_git_base_ref` directly from
+this module (`from watchdog.cards import _git_first_line, _git_base_ref`),
+a plain leaf-to-leaf forward import, exactly the shape this docstring
+predicted would be safe when it was written.
 
-MONKEYPATCH SEAM NOTE (#433 cluster-F review MINOR-2): before this move,
-`watchdog._default_git_run = spy` reached every caller of the trio, since
-they all resolved it against the SAME module's globals. After this move it
-resolves against `watchdog.cards.__dict__` instead -- a package-level patch
-of `watchdog._default_git_run` no longer reaches `_git_first_line` (here)
-or any `__init__.py`-resident caller (`_git_commit_ts`/`delivery_state`/
-`_repo_label`). No existing test does this (verified: no test patches these
-names at all -- every test that needs control injects `git_run=` instead,
-which is unaffected), so this is a latent seam-narrowing rather than a live
-break; worth remembering if cluster E's own extraction adds a test that
-patches the trio by package attribute rather than via `git_run=`.
+MONKEYPATCH SEAM NOTE (#433 cluster-F review MINOR-2, updated after cluster
+E's own extraction): before cluster F's own move, `watchdog._default_git_run
+= spy` reached every caller of the trio, since they all resolved it against
+the SAME module's globals. After cluster F it resolves against
+`watchdog.cards.__dict__` instead -- a package-level patch of
+`watchdog._default_git_run` no longer reaches `_git_first_line` (here) or
+any caller now resident in `watchdog.repo_health` (`_git_commit_ts`/
+`delivery_state`/`_repo_label`). No existing test does this (verified: no
+test patches these names at all, in either module -- every test that needs
+control injects `git_run=` instead, which is unaffected) -- cluster E's own
+extraction did not add such a test either, so this remains a latent
+seam-narrowing rather than a live break.
 
 Re-exported from `watchdog/__init__.py` (`from watchdog.cards import ...`,
 placed after every symbol this cluster depends on is already defined -- it
