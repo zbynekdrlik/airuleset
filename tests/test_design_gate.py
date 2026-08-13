@@ -879,6 +879,53 @@ class TestIsGitTracked(unittest.TestCase):
         with m.patch.object(dg.subprocess, "run", side_effect=OSError("no git")):
             self.assertTrue(dg.is_git_tracked(str(self.repo / "x"), str(self.repo)))
 
+    def test_a_tracked_file_in_a_worktrees_main_checkout_is_still_tracked(self):
+        # #431-review F1 (live-triggered): a worktree's own cwd makes its
+        # SIBLING main checkout read as "is outside repository" too (they
+        # share one .git, per two-branch-workflow.md/#317, but each
+        # worktree has its OWN separate working tree) -- a real tracked
+        # project file living there must NEVER be quarantined just because
+        # it happens to sit outside THIS worktree's own directory.
+        (self.repo / "README.md").write_text("real content\n")
+        self._git("add", "README.md")
+        self._git("commit", "-q", "-m", "initial")
+        wt = Path(tempfile.mkdtemp(prefix="airuleset-designgate-wt-"))
+        self.addCleanup(shutil.rmtree, wt, True)
+        wt.rmdir()  # git worktree add refuses a non-empty existing dir
+        self._git("worktree", "add", "-q", "-b", "wt-branch", str(wt))
+        self.assertTrue(
+            dg.is_git_tracked(str(self.repo / "README.md"), str(wt)),
+            "a real tracked file in the MAIN checkout must stay TRACKED "
+            "even when queried with cwd=a sibling worktree")
+
+    def test_a_tracked_file_in_a_completely_different_repo_is_still_tracked(self):
+        # #431-review F1: "outside cwd's repo" must not collapse to
+        # "untracked anywhere" -- a file tracked by a WHOLLY UNRELATED repo
+        # is still a real project file and must never be quarantined.
+        other = Path(tempfile.mkdtemp(prefix="airuleset-designgate-otherrepo-"))
+        self.addCleanup(shutil.rmtree, other, True)
+        import subprocess as sp
+        sp.run(["git", "-C", str(other), "init", "-q", "-b", "main"],
+               check=True, capture_output=True, text=True, env=self._env)
+        (other / "OTHER.md").write_text("other repo's real content\n")
+        sp.run(["git", "-C", str(other), "add", "OTHER.md"],
+               check=True, capture_output=True, text=True, env=self._env)
+        sp.run(["git", "-C", str(other), "commit", "-q", "-m", "initial"],
+               check=True, capture_output=True, text=True, env=self._env)
+        self.assertTrue(
+            dg.is_git_tracked(str(other / "OTHER.md"), str(self.repo)),
+            "a real tracked file owned by a DIFFERENT repo must stay "
+            "TRACKED even when queried with cwd=an unrelated repo")
+
+    def test_a_path_owned_by_no_repo_at_all_stays_the_431_fix(self):
+        # the original #431 case must still work once F1's fix is applied:
+        # a genuine /tmp scratchpad file, owned by no repo whatsoever, is
+        # still confidently untracked and safe to quarantine.
+        scratch = Path(tempfile.mkdtemp(prefix="airuleset-designgate-noowner-"))
+        self.addCleanup(shutil.rmtree, scratch, True)
+        (scratch / "body.md").write_text("scratch\n")
+        self.assertFalse(dg.is_git_tracked(str(scratch / "body.md"), str(self.repo)))
+
 
 class TestStaleMsgfileEndToEndTrackedFileNeverQuarantined(TestIsGitTracked):
     """The exact adversarial-review reproduction: a `-m` message merely
