@@ -41,10 +41,21 @@ class TestHostIp(unittest.TestCase):
         import filedrop
         self._fd = filedrop
         self._orig = filedrop._ordered_ips
+        self._orig_if = filedrop._iface_ips
         self._env = os.environ.pop("FILEDROP_HOST", None)
+        # #438: host_ip() now delegates to bind_ips(), which calls the real
+        # `ip -o -4 addr show` subprocess (_iface_ips) FIRST — on a real dev box
+        # that returns genuine live interfaces regardless of the _ordered_ips
+        # mock below, so these CIDR-priority scenarios would never take effect.
+        # Force _iface_ips empty so bind_ips() falls back to the CIDR-only path
+        # over the mocked _ordered_ips — the exact pattern TestBindIps.setUp
+        # already uses, keeping these tests hermetic and driving the real
+        # delegation end-to-end (not mocking bind_ips itself).
+        filedrop._iface_ips = lambda: []
 
     def tearDown(self):
         self._fd._ordered_ips = self._orig
+        self._fd._iface_ips = self._orig_if
         if self._env is not None:
             os.environ["FILEDROP_HOST"] = self._env
 
@@ -126,10 +137,12 @@ class TestHostIpDelegatesToBindIps(unittest.TestCase):
         self.assertEqual(self._fd.host_ip(), self._fd.bind_ips()[0])
 
     def test_docker_bridge_dropped_tailscale_still_wins(self):
-        # Fuller iface set: tailscale + docker0 bridge + LAN. host_ip() returns
-        # the tailscale IP (bind_ips()[0]), never the docker bridge -- and the
-        # _ordered_ips order deliberately puts the bridge BEFORE the LAN so a
-        # CIDR-only host_ip() could not accidentally agree by input order alone.
+        # Companion (NOT an independent revert-kill): tailscale + docker0 bridge
+        # + LAN. host_ip() returns the tailscale IP (bind_ips()[0]), never the
+        # docker bridge. The OLD three-loop host_ip() also passed this (its
+        # tailscale loop finds 100.90.94.41 first), so the revert-to-old-loops
+        # kill lives in the podman test above and the no-tailscale test below --
+        # this one just pins that a bridge never wins when tailscale is present.
         self._fd._ordered_ips = lambda: [
             "100.90.94.41", "172.17.0.1", "10.77.9.21"]
         self._fd._iface_ips = lambda: [
@@ -138,6 +151,24 @@ class TestHostIpDelegatesToBindIps(unittest.TestCase):
             ("10.77.9.21", "eth0"),
         ]
         self.assertEqual(self._fd.host_ip(), "100.90.94.41")
+        self.assertEqual(self._fd.host_ip(), self._fd.bind_ips()[0])
+
+    def test_no_tailscale_bind_priority_beats_input_order(self):
+        # Second INDEPENDENT revert-kill (no bridge, no tailscale, no 10.77):
+        # an other-10 (e.g. a wg/VPN 10.x) and a 192.168 LAN, both on REAL
+        # interfaces. The OLD host_ip()'s third loop returned the first
+        # _is_private in _ordered_ips INPUT order (192.168.1.5); the new
+        # delegation returns bind_ips()[0], which _bind_priority-sorts the
+        # other-10 (priority 2) ahead of 192.168 (priority 3) -> 10.0.5.9. This
+        # locks the priority ALIGNMENT (not just the interface-drop) so the
+        # class carries a second kill the tailscale companion above cannot.
+        self._fd._ordered_ips = lambda: ["192.168.1.5", "10.0.5.9"]
+        self._fd._iface_ips = lambda: [
+            ("192.168.1.5", "eth0"),
+            ("10.0.5.9", "wg0"),
+        ]
+        self.assertEqual(self._fd.bind_ips(), ["10.0.5.9", "192.168.1.5"])
+        self.assertEqual(self._fd.host_ip(), "10.0.5.9")
         self.assertEqual(self._fd.host_ip(), self._fd.bind_ips()[0])
 
     def test_env_override_short_circuits_before_bind_ips(self):
