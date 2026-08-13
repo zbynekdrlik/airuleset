@@ -102,7 +102,7 @@ Most blockers have a tool-shaped fix. The user has access to install / configure
 
 **Tool requests you SHOULD make (correct hand-off direction):**
 
-- "I don't have Playwright MCP installed in this session. Install `plugin:playwright` so I can drive the browser myself." → user installs → you test
+- "I don't have Playwright MCP installed in this session. Install `plugin:playwright` so I can drive the browser myself." → user installs → you test. **Note (#415):** Playwright is INSTALLED on every managed box but OFF by default (no resident Chrome in browser-free projects). A project that genuinely needs the browser turns it on with ONE line in its OWN `.claude/settings.json` — `{"enabledPlugins": {"playwright@claude-plugins-official": true}}` (project scope beats the user-scope default-off, no re-install needed). Prefer that one-line project opt-in over asking the user each session.
 - "MCP server `win-resolume` is unreachable. Restart it on the Windows host (or share the new host/port)." → user restarts → you test
 - "I can't authenticate to claude.ai — the OAuth flow needs a real browser session against your account. Install Chrome DevTools MCP / Playwright with persistent profile, OR paste a session cookie / bearer token from your active session." → user provides credential → you test
 - "I need read access to the production Postgres instance to verify the migration landed. Share connection string in 1Password / set `PROD_DB_URL` env / open SSH tunnel." → user provides → you test

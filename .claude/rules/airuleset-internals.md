@@ -1416,12 +1416,18 @@ Playwright while every other project on the box stays browser-free. The plugin
 is already installed and the browser cache is already warm (both tiers are
 installed by `setup_managed_plugins()`, and `ensure_playwright_browsers()`'s
 guard keys on `MANAGED_PLUGINS + OPTIONAL_PLUGINS`), so the opt-in needs no
-install step. airuleset does NOT and cannot make this edit for those repos (it
-only writes `~/.claude/`); the projects with genuine Playwright evidence
-(audiotester, songplayer, spinbike, restreamer, devbridge, automatizacie-montalu,
-tvdole, audiomatrix, media-bridge, reaperiem — from #415's live scan) opt in
-themselves. `autonomous-verification.md`'s Playwright duty is fully intact for an
-opted-in project; the inversion removes a default, never a capability.
+install step. airuleset does NOT make this edit for those repos in #415 — it
+writes only `~/.claude/`, and having it iterate over managed repos to write each
+project's own git-tracked `.claude/settings.json` would be a bigger, separately-
+scoped mechanism (new machinery, out of #415's scope + against the FREEZE), not
+"impossible" outright: a `.claude/settings.json` edit IS governance, not project
+CODE, so a FUTURE deliberate change could do it. For now the projects with
+genuine Playwright evidence (audiotester, songplayer, spinbike, restreamer,
+devbridge, automatizacie-montalu, tvdole, audiomatrix, media-bridge, reaperiem —
+from #415's live scan) opt in themselves; that migration + the fleet-wide
+discoverability of the opt-in are TRACKED as a #415 follow-up (no-dropped-work),
+not left implicit. `autonomous-verification.md`'s Playwright duty is fully intact
+for an opted-in project; the inversion removes a default, never a capability.
 
 **Verify the inversion on a box:** `pgrep -fc playwright-mcp` before/after a
 session start in a NON-opted-in project should stay 0. A project's own
