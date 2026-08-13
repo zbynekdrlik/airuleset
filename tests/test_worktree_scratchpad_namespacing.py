@@ -23,6 +23,32 @@ from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
 AGENT_DOC = ROOT / "agents" / "autopilot-worker.md"
+SKILL_DOC = ROOT / "skills" / "autopilot" / "SKILL.md"
+
+
+def _dispatch_the_round_item(text):
+    """SKILL.md's top-level numbered item "2. **Dispatch the ROUND ..."
+    -- from its own line up to (not including) the next top-level
+    numbered item (`^[0-9]+\\. `). This is the item #435's own new
+    scratchpad-precreation bullet lives inside (#435-review MAJOR:
+    #435 shipped with no locking test at all -- this class closes it)."""
+    m = re.search(r"(?m)^2\.\s+\*\*Dispatch the ROUND\b.*?$", text)
+    if not m:
+        return ""
+    rest = text[m.end():]
+    nxt = re.search(r"(?m)^[0-9]+\.\s+\*\*", rest)
+    return rest[:nxt.start()] if nxt else rest
+
+
+def _precreate_bullet(item):
+    """The ONE top-level sub-bullet paragraph (a line starting `   - `
+    up to the next `   - ` bullet or end of item) that mentions
+    "scratchpad" -- same scoping discipline as `_scratchpad_bullet`
+    below: a whole-item word-presence check would be vacuous, since
+    "scratchpad"/"subdirectory" occur in sibling bullets discussing
+    unrelated dispatch-prompt content too."""
+    m = re.search(r"(?ims)^   -\s.*?scratchpad.*?(?=^   -\s|\Z)", item)
+    return m.group(0) if m else ""
 
 
 def _worktree_awareness_section(text):
@@ -137,6 +163,64 @@ class TestScratchpadNamespacingIsDocumented(TestCase):
                              "scratchpad guidance must be one of the "
                              "WORKTREE AWARENESS bullets, not trail after "
                              "the serial-fallback bullet")
+
+
+class TestSupervisorPrecreatesScratchpadInSkillMd(TestCase):
+    """#435-review MAJOR: the sibling-lock class above only ever reads
+    `agents/autopilot-worker.md` -- it never opens `skills/autopilot/
+    SKILL.md` at all, so #435's own change (the SUPERVISOR-side
+    precreate-and-state-the-path step, in SKILL.md's Step 3.2 dispatch
+    item) shipped with zero locking test. A future SKILL.md edit could
+    silently reword or drop the whole bullet and no test would notice,
+    silently regressing to the #432 hazard this ticket exists to close.
+
+    Scoped to the ONE sub-bullet inside the "2. **Dispatch the ROUND"
+    item that mentions "scratchpad" (`_precreate_bullet`), never the
+    whole item -- the same vacuous-whole-section trap the #432 class
+    above already documents and guards against."""
+
+    def setUp(self):
+        self.item = _dispatch_the_round_item(
+            SKILL_DOC.read_text(encoding="utf-8"))
+        self.assertTrue(
+            self.item.strip(),
+            "SKILL.md must have a '2. **Dispatch the ROUND' item")
+        self.bullet = _precreate_bullet(self.item)
+        self.assertTrue(
+            self.bullet,
+            "no sub-bullet inside the Dispatch-the-ROUND item mentions "
+            "'scratchpad' at all")
+
+    def test_instructs_precreating_the_subdirectory_before_dispatch(self):
+        self.assertTrue(
+            re.search(r"mkdir\s+-p", self.bullet),
+            "the bullet must instruct an actual `mkdir -p` precreate "
+            "step, not just describe the hazard")
+        self.assertTrue(
+            re.search(r"before\s+dispatch", self.bullet, re.IGNORECASE),
+            "the bullet must say the subdirectory is created BEFORE "
+            "the dispatch call fires, not left to the worker")
+
+    def test_states_the_literal_prompt_line_the_worker_must_see(self):
+        # Normalize markdown line-wraps before the substring check -- the
+        # real bullet legitimately wraps mid-phrase ("Your scratchpad\n
+        # subdirectory..."), so a raw assertIn against unwrapped text
+        # would fail on CORRECT prose.
+        flat = " ".join(self.bullet.split())
+        self.assertIn(
+            "Your scratchpad subdirectory for this dispatch "
+            "(already created)", flat,
+            "the bullet must state the EXACT prompt-text line the "
+            "supervisor appends, so the worker-side check in "
+            "agents/autopilot-worker.md has something concrete to look "
+            "for -- a vaguer paraphrase would leave the two docs able "
+            "to silently drift apart")
+
+    def test_cites_the_435_ticket(self):
+        self.assertIn("#435", self.bullet,
+                       "the bullet must cite #435 so the reasoning "
+                       "traces back to the ticket this guidance exists "
+                       "for")
 
 
 if __name__ == "__main__":

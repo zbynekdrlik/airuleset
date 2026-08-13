@@ -513,8 +513,10 @@ answer to "which issues share one round" — this ticket found no gap in either.
      since no two batches in the SAME round share an issue), then append `Your scratchpad
      subdirectory for this dispatch (already created): <that path> — use it for every
      temp/body/commit-message file; never the scratchpad's top level.` to the prompt text
-     verbatim. This removes the sibling-collision hazard STRUCTURALLY instead of relying on every
-     worker correctly computing and creating its own path from prose alone —
+     verbatim. This reduces the sibling-collision hazard from N independent prose-followers (every
+     worker computing its own path) down to ONE (the supervisor, once per round, with a safe
+     worker-side fallback below) — it is still a prose-followed step, not a mechanically
+     enforced one (no hook exists here, per the repo's FREEZE on new hooks/watchdog jobs) —
      `agents/autopilot-worker.md`'s WORKTREE AWARENESS section still carries the worker-side
      fallback (compute its own `agent-<worktree-id>` path) for a dispatch that doesn't state one.
    - **Include the Step 1b validator verdict in the dispatch prompt when you ran it** (`Validator:

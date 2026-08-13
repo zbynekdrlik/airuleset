@@ -34,12 +34,17 @@ class TestGoalSweep(unittest.TestCase):
     def setUp(self):
         # #437: goal.goal_sweep() -> goal.deliver_goal() -> _log_goal_sync()
         # resolves goal.goal_sync_log_path() to the REAL ~/.claude/goal-
-        # sync.log unless that module-level function itself is patched --
-        # every test method below reaches deliver_goal (directly, or via
-        # the malformed-entry/kill-switch/dry-run/already-handled early
-        # exits), so isolate it centrally here rather than per test, the
-        # same shape test_goal_arm.py's TestDeliverGoal/TestGoalArmCli
-        # already use for the SAME module.
+        # sync.log unless that module-level function itself is patched.
+        # Only 3 of this class's 7 methods (test_sent_request_is_cleared,
+        # test_skip_leaves_the_request_pending, test_expired_request_is_
+        # dropped) actually reach deliver_goal -- the other 4 (malformed-
+        # entry/already-handled/dry-run/kill-switch) hit an earlier
+        # `continue` in goal_sweep's own early-exit chain and never call
+        # it at all. Isolate UNCONDITIONALLY here anyway, not per test:
+        # correctness must not depend on which of the 7 currently reaches
+        # the logger, since a future 8th method could easily land on the
+        # writing side -- the same unconditional shape test_goal_arm.py's
+        # TestDeliverGoal/TestGoalArmCli already use for the SAME module.
         self.reqp, self.syncp = _isolate_goal_state(self)
 
     def _dir(self):
