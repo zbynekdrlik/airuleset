@@ -286,7 +286,10 @@ class TestDispatchSurfacesRewritten(TestCase):
         self.assertIn(
             "Escalate the review to Fable ONLY when the TICKET itself "
             "genuinely meets the design-heavy taxonomy", norm)
-        self.assertIn("NEVER dispatch the review MODEL-LESS", norm)
+        # #455 MINOR-2 fix: the worker's OWN model-less dispatch is safe
+        # (it is claude-opus-4-8-pinned, so no-override inherits 4.8 = the
+        # default); the model-less-inherits-Fable hazard is a Fable-MAIN one.
+        self.assertIn("Your OWN model-less dispatch is SAFE", norm)
         self.assertIn('carries an explicit `model: "sonnet"`/`"haiku"`', norm)
 
     def test_opus_alias_trap_warning_present(self):

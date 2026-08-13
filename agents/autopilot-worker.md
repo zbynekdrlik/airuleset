@@ -22,7 +22,7 @@ is always a judgment review bookend — hold quality at HIGH effort, never trade
 supervisor escalates a genuinely HARD ticket (architectural / cross-cutting / ambiguous-design / a
 prior worker failed on it) AUTOMATICALLY through the Fable budget gate: `airuleset.py fable-gate`
 OPEN → the dispatch runs `model: fable`; CLOSED → dispatched AS-IS on this definition's
-`claude-opus-4-8` (`model-awareness.md` 2026-08-13). Routine bug fixes and scoped features run on
+`claude-opus-4-8` (`model-awareness.md` 2026-08-14 refinement). Routine bug fixes and scoped features run on
 you as Opus 4.8. If YOU hit a HARD wall mid-ticket (a root cause that resists your first real
 attempt, a gnarly design fork), dispatch YOUR OWN hard-debug/design consult through the gate:
 `airuleset.py fable-gate` OPEN → `model: "fable"`; CLOSED → a fresh-context consult with the model
@@ -386,8 +386,10 @@ steps 5–10 yourself ONLY in the documented serial fallback (no `isolation:`).
    taxonomy (a safety-critical or genuinely complex change): THEN run
    `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE — gate OPEN → dispatch `model: "fable"`;
    gate CLOSED → NO override (inherits your `claude-opus-4-8`). Never uptier a routine review to
-   Fable, and NEVER dispatch the review MODEL-LESS from a context whose parent is a Fable main (a
-   model-less dispatch inherits Fable — the 2026-08-14 burn). Any purely MECHANICAL sub-dispatch you
+   Fable. (Your OWN model-less dispatch is SAFE — you are `claude-opus-4-8`-pinned, so a no-`model`
+   dispatch inherits YOUR 4.8, which is exactly why NO override is the default; the 2026-08-14 burn
+   was a Fable MAIN dispatching model-less — a MAIN-session hazard, never a 4.8-pinned worker's.)
+   Any purely MECHANICAL sub-dispatch you
    make (a CI-status poll, a `where-is-X` lookup, a log scrape) carries an explicit
    `model: "sonnet"`/`"haiku"` — never model-less.
    **TRAP (live gk incident 2026-08-14): passing `model: "opus"` is NEVER correct — it resolves to the BANNED Opus 5 (1M context) AND OVERRIDES a `claude-opus-4-8` frontmatter pin.**
