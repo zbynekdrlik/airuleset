@@ -482,7 +482,7 @@ answer to "which issues share one round" — this ticket found no gap in either.
    inventing a second, parallel one. TRIVIAL members skip this sub-step entirely — no
    `Plan` dispatch, no extra cost, same one-paragraph design comment as today. For each
    DESIGN-HEAVY member: run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE for the whole
-   batch (the same gate every judgment dispatch runs). Gate OPEN → dispatch ONE read-only
+   batch (the gate now guards ONLY these HARD/design-heavy dispatches — routine work never runs it). Gate OPEN → dispatch ONE read-only
    `subagent_type: "Plan"` agent per member at `model: "fable"`; gate CLOSED → do NOT spend a new
    gated dispatch (omitting the override would inherit the Fable main — exactly what a CLOSED gate
    says there is no headroom for): hold the design synthesis in the main session itself (the
@@ -534,7 +534,7 @@ answer to "which issues share one round" — this ticket found no gap in either.
      comment`, mechanically checked at its SubagentStop (`design_gate.py`) — so validation coverage
      no longer depends on your Step 1b prose actually having run for this specific dispatch.
    - **Model = Opus 4.8 by default; HARD tickets escalate — Fable through the budget gate**
-     (`model-awareness.md` ACTIVE policy 2026-08-13; Opus 5 is BANNED — never any `opus`-aliased
+     (`model-awareness.md` ACTIVE policy 2026-08-14 — Fable ONLY for design-heavy work; Opus 5 is BANNED — never any `opus`-aliased
      dispatch, never sonnet on anything complex). The `autopilot-worker` frontmatter pins
      `model: claude-opus-4-8` — dispatch it AS-IS for a routine ticket (bug fix, scoped feature).
      When the ticket-validator or the issue signals genuinely HARD work — **architectural /
