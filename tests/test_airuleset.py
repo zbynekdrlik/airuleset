@@ -3493,20 +3493,28 @@ class TestSendMessageNarrationHook(TestCase):
 
 
 class TestManagedSettingsDefaults(TestCase):
-    """apply_managed_settings_defaults sets the persistent effortLevel=high default
-    in every managed project, preserving all other settings keys, idempotently.
+    """apply_managed_settings_defaults sets the persistent effortLevel=xhigh
+    default in every managed project, preserving all other settings keys,
+    idempotently.
 
-    #56 (2026-07-25): the official Opus 5 / Fable 5 effort docs changed the
-    recommendation from the 4.7/4.8-era 'start with xhigh for coding and
-    agentic use cases' to 'start with high, the default' — and explicitly
-    warn against carrying an effort setting over from an earlier model
-    without re-sweeping. `MANAGED_EFFORT_LEVEL` moves xhigh -> high to match;
-    xhigh stays reserved for demanding coding/agentic work (the
-    autopilot-worker, HARD escalations), never a blanket MAIN-session default."""
+    User directive 2026-08-13 ("by default vzdy ultracode... maximalna
+    akceleracia"): ultracode is the STANDING fleet default. `effortLevel`
+    accepts only low|medium|high|xhigh (docs: `max`/`ultracode` are
+    session-only), so managed ultracode is composed of its two real parts:
+    `MANAGED_EFFORT_LEVEL = "xhigh"` (this key) + the launch script's
+    `--settings '{"ultracode":true}'` flag in every mode except `plain`
+    (TestUltracodeLauncher). This deliberately reverses #56's high baseline
+    and #53's session-only opt-in — on the user's explicit dated directive,
+    not a drift."""
 
-    def test_sets_effort_high(self):
+    def test_sets_effort_xhigh(self):
         out = airuleset.apply_managed_settings_defaults({})
-        self.assertEqual(out["effortLevel"], "high")
+        self.assertEqual(out["effortLevel"], "xhigh")
+
+    def test_managed_effort_level_constant_is_xhigh(self):
+        # the settings-representable half of the standing ultracode default
+        # (the orchestration half is the launch flag, locked separately).
+        self.assertEqual(airuleset.MANAGED_EFFORT_LEVEL, "xhigh")
 
     def test_disables_agent_view(self):
         # Hard-disables the `claude agents` / fleet / `claude --bg` background daemon
@@ -3557,13 +3565,13 @@ class TestManagedSettingsDefaults(TestCase):
             {"hooks": {"Stop": []}, "enabledPlugins": {"x": True}})
         self.assertEqual(out["hooks"], {"Stop": []})
         self.assertEqual(out["enabledPlugins"], {"x": True})
-        self.assertEqual(out["effortLevel"], "high")
+        self.assertEqual(out["effortLevel"], "xhigh")
 
     def test_idempotent_and_overrides_lower(self):
         once = airuleset.apply_managed_settings_defaults({"effortLevel": "medium"})
         twice = airuleset.apply_managed_settings_defaults(once)
         self.assertEqual(once, twice)
-        self.assertEqual(twice["effortLevel"], "high")  # raises a lower default
+        self.assertEqual(twice["effortLevel"], "xhigh")  # raises a lower default
 
     def test_does_not_mutate_input(self):
         src = {"hooks": {}}
@@ -3754,8 +3762,10 @@ class TestUltracodeLauncher(TestCase):
     frozen in that shell's memory forever -- a `push` rewriting .bashrc had
     ZERO effect on an already-running panel shell, so ultracode (or any
     future flag change) silently kept resurrecting on every relaunch of a
-    stale shell. Ultracode itself stays OPT-IN (#53, 2026-07-25): only the
-    dedicated `ultracode` mode / `claude-ultracode` function carries it."""
+    stale shell. Since the 2026-08-13 user directive ("by default vzdy
+    ultracode") ultracode is the STANDING DEFAULT: every mode except the
+    deliberate vanilla `plain` escape hatch carries the flag — reversing
+    #53's session-only opt-in on the user's explicit dated instruction."""
 
     def _tmp(self, content=None):
         from pathlib import Path
@@ -3871,17 +3881,16 @@ class TestUltracodeLauncher(TestCase):
         self.assertEqual(s.read_text(), airuleset.render_claude_launch_script())
         self.assertEqual(h.read_text(), airuleset.render_claude_history_script())
 
-    def test_default_launchers_carry_no_ultracode_in_the_script(self):
-        # #53: ultracode used to be baked into EVERY default launch. The
-        # ultracode JSON literal must appear ONLY inside the script's own
-        # `ultracode)` case branch, never in the default/new/plain branches.
+    def test_ultracode_flag_present_in_every_mode_except_plain(self):
+        # 2026-08-13 directive REVERSES #53: ultracode is the STANDING
+        # DEFAULT, so the flag is baked into every launch mode except the
+        # deliberate vanilla `plain` escape hatch (mirror of the --model
+        # flag test below). new(x1) + ultracode(if/else x2)
+        # + fullscreen(if/else x2) + default(if/else x2) = 7
         content = airuleset.render_claude_launch_script()
-        start = content.index("ultracode)")
-        end = content.index(";;", start)
-        ultracode_branch = content[start:end]
-        self.assertIn('"ultracode":true', ultracode_branch)
-        rest = content[:start] + content[end + len(";;"):]
-        self.assertNotIn('"ultracode":true', rest)
+        self.assertEqual(content.count('"ultracode":true'), 7, content)
+        plain_branch = content.split("plain)", 1)[1].split(";;", 1)[0]
+        self.assertNotIn("ultracode", plain_branch)
 
     def test_no_flicker_env_var_only_in_fullscreen_branch(self):
         # #253: CLAUDE_CODE_NO_FLICKER=1 is the OPT-IN mitigation for the
@@ -6543,7 +6552,21 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         self.assertNotIn(" -c", out)
         self.assertIn("--model %s" % airuleset.MANAGED_MODEL, out)
 
-    def test_claude_new_is_skip_perms_but_never_continue_or_ultracode(self):
+    def test_default_mode_carries_ultracode_flag_continue_and_fresh(self):
+        # 2026-08-13 standing-ultracode directive: the DEFAULT launcher (the
+        # bare `claude` function) carries the ultracode flag on BOTH its
+        # branches — a resumed (-c) session and a fresh one.
+        home = tempfile.mkdtemp()
+        cwd = Path(home) / "proj"
+        cwd.mkdir()
+        out = self._run_launcher(home, cwd)                      # fresh
+        self.assertIn('--settings {"ultracode":true}', out)
+        (self._proj_dir(home, cwd) / "abc.jsonl").write_text("{}")
+        out = self._run_launcher(home, cwd)                      # continue
+        self.assertIn(" -c", out)
+        self.assertIn('--settings {"ultracode":true}', out)
+
+    def test_claude_new_is_skip_perms_fresh_and_carries_ultracode(self):
         home = tempfile.mkdtemp()
         cwd = Path(home) / "proj"
         cwd.mkdir()
@@ -6551,7 +6574,8 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         out = self._run_launcher(home, cwd, fn="claude-new")
         self.assertIn("--dangerously-skip-permissions", out)
         self.assertNotIn(" -c", out)                  # always fresh, even with a prior convo
-        self.assertNotIn("ultracode", out)
+        # 2026-08-13: ultracode is the standing default in every mode but plain
+        self.assertIn('--settings {"ultracode":true}', out)
 
     def test_claude_ultracode_is_the_deliberate_opt_in_escape_hatch(self):
         home = tempfile.mkdtemp()
@@ -6597,7 +6621,8 @@ class TestClaudeLauncherContinueOrNew(TestCase):
         self.assertIn(" -c", out)
         self.assertIn("--model %s" % airuleset.MANAGED_MODEL, out)
         self.assertIn("--dangerously-skip-permissions", out)
-        self.assertNotIn("ultracode", out)
+        # 2026-08-13: ultracode is the standing default in every mode but plain
+        self.assertIn('--settings {"ultracode":true}', out)
 
     def test_claude_fullscreen_fresh_dir_starts_new_without_dash_c(self):
         home = tempfile.mkdtemp()

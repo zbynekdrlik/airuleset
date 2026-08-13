@@ -323,5 +323,35 @@ class TestOpus5GrepGate(TestCase):
         self.assertEqual(violations, [])
 
 
+class TestUltracodeStandingDefault(TestCase):
+    """#445: user directive 2026-08-13 ("chcel by som aby by default vzdy bol
+    ultracode... maximalna akceleracia... paralelne, ak to uloha dovoli") —
+    ultracode is a STANDING opt-in on every managed session, and maximum
+    acceleration (worktree fleet, disjoint lanes, serial-only integration)
+    is the default doctrine. The settings/launcher halves are locked in
+    tests/test_airuleset.py; these lock the policy PROSE."""
+
+    def test_tooling_records_the_directive_verbatim(self):
+        t = read(TOOLING)
+        self.assertIn("chcel by som aby by default vzdy bol ultracode", t)
+        self.assertIn("STANDING DEFAULT", t)
+
+    def test_stop_and_ask_step_is_retired(self):
+        t = read(TOOLING)
+        self.assertNotIn("STOP and ASK for ultracode", t)
+        self.assertNotIn("The agent CANNOT enable ultracode itself", t)
+
+    def test_max_acceleration_doctrine_is_explicit(self):
+        t = read(TOOLING)
+        self.assertIn("disjoint lanes", t)
+        self.assertIn("integration strictly serial", t)
+        self.assertIn("single-worker only when the task genuinely cannot parallelize", t)
+
+    def test_module_effort_baseline_is_xhigh_plus_ultracode(self):
+        m = read(MODULE)
+        self.assertIn("managed MAIN-session baseline is `xhigh` + standing ultracode", m)
+        self.assertNotIn("managed MAIN-session baseline is `high`", m)
+
+
 if __name__ == "__main__":
     main()

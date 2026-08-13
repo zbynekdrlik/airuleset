@@ -14826,9 +14826,8 @@ def main():
                        help="Request text for --issue mode (Slovak, plain)")
 
     p_gate = sub.add_parser(
-        "fable-gate", help="Budget gate for the automatic Fable judgment layer — "
-                           "exit 0 (OPEN, dispatch fable) / 1 (CLOSED, run the "
-                           "work on claude-opus-4-8)")
+        "fable-gate", help="Budget gate for the automatic Fable judgment layer — exit "
+                           "0 (OPEN, dispatch fable) / 1 (CLOSED, run on claude-opus-4-8)")
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 
