@@ -2814,6 +2814,27 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       autopilot-worker) — those are a separate, session-scoped mechanism that dies
       with the session. Takes effect on the NEXT `claude` launch.
 
+    - `disableRemoteControl = true` + `remoteControlAtStartup = false` (user
+      directive 2026-08-13, #439: "vypni vsade rc remote control aj v
+      nastaveniach claude, vadi mi to") stop every session from attempting a
+      Remote Control (RC) connection at startup — the persisted
+      `remoteControlAtStartup: true` default made the statusline show
+      `/rc connecting…` / `/rc failed` on every managed box. Both keys are
+      real, not guessed: the installed 2.1.231 build's own binary carries
+      the literal strings `disableRemoteControl` (12 occurrences) and
+      `remoteControlAtStartup` (16 occurrences), same evidence class as
+      promptSuggestionEnabled's own citation above. Same UNCONDITIONAL
+      managed-default treatment as disableAgentView (the closest analog of
+      the two here -- `tui`/`model` also carry a per-session `/tui`/`/model`
+      escape hatch, these two do not: `/config` toggling RC back on reverts
+      on the next push, same as disableAgentView): a managed box always
+      gets both keys on the next install, overriding whatever was there
+      before. dev1/dev2 already carry the equivalent hand-patched
+      `settings.json` live (out of this pipeline, done manually); this is
+      the fleet-wide enforcement so every OTHER managed box (subdev/gk
+      users, a fresh box, a future hand-revert) self-heals the same way on
+      its next push.
+
     - `tui = "fullscreen"` (#376, REVERSING the earlier `tui = "default"` pin) pins
       Claude Code's fullscreen (alt-screen) renderer fleet-wide. History: this
       function used to pin CLASSIC specifically because `Ctrl+B [` tmux-native
@@ -2895,6 +2916,10 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     result = dict(settings)
     result["effortLevel"] = MANAGED_EFFORT_LEVEL
     result["disableAgentView"] = True
+    # #439: stop every session attempting an RC connection at startup -- see
+    # this function's own docstring bullet above for the full citation.
+    result["disableRemoteControl"] = True
+    result["remoteControlAtStartup"] = False
     # #376: fullscreen is now the pin -- see this function's own docstring
     # bullet above for the full history/tradeoff/citation. The old ordering
     # concern ("re-check env-var-vs-setting precedence before changing this
