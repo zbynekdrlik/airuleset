@@ -427,8 +427,8 @@ class TestRunOnceDocstringIsAccurate(unittest.TestCase):
         scan)."""
         doc = wd.run_once.__doc__ or ""
         src = "\n".join(
-            (REPO / "watchdog" / name).read_text(encoding="utf-8")
-            for name in ("__init__.py", "goal.py", "compact.py"))
+            path.read_text(encoding="utf-8")
+            for path in sorted((REPO / "watchdog").glob("*.py")))
         for num in sorted(self._documented(), key=int):
             entry = re.search(r"^\s*\(%s\)(.{0,600})" % num, doc,
                               re.M | re.S).group(1)
