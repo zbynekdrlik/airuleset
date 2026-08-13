@@ -10,6 +10,7 @@ harness task-notifications, slash-command echoes) and tool_result entries must
 never count as an answer.
 """
 
+import inspect
 import json
 import sys
 import time
@@ -383,6 +384,294 @@ class RepingStaleQuestions(unittest.TestCase):
         q = notify.load_questions(self.qpath)
         self.assertIn("888001", q)
         self.assertEqual(q["888001"]["ts"], int(old_ts))
+
+
+class RecordQuestionSupersede(unittest.TestCase):
+    """Ghost questions (#407) — a NEW tracked ask supersedes the session's
+    previous ask on the SAME channel at the map's single writer, so a
+    reworded ❓ past the edit window can never leave an immortal duplicate
+    behind. Channel-scoped: a mirror fan-out records one entry per target
+    THREAD (same session, different channels) — siblings of one generation,
+    never ghosts."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+
+    def _load(self):
+        return notify.load_questions(self.qpath)
+
+    def test_reword_past_the_edit_window_supersedes_the_old_entry(self):
+        # The full ghost-birth sequence from the ticket: ask -> reword past
+        # the 15-min window (update_question refuses purely on AGE — the
+        # fake http proves Discord was never even consulted) -> the hook
+        # falls through to a fresh POST -> record_question with a NEW id.
+        # The OLD entry must be superseded, never tracked alongside.
+        t0 = 1_700_000_000
+        t1 = t0 + notify._EDIT_WINDOW_S + 60
+        notify.record_question("888001", "777001", SID, CWD, now=t0,
+                               path=self.qpath, question="verzia 1?")
+        calls = []
+
+        def fake_http(token, method, url, payload=None):
+            calls.append(method)
+            return {"content": "❓ x"}
+
+        edited = notify.update_question(SID, "verzia 2?",
+                                        env={"DISCORD_BOT_TOKEN": "t"},
+                                        now=t1, path=self.qpath,
+                                        http=fake_http)
+        self.assertFalse(edited)
+        self.assertEqual(calls, [])            # refused on age alone
+        notify.record_question("888002", "777001", SID, CWD, now=t1,
+                               path=self.qpath, question="verzia 2?")
+        self.assertEqual(sorted(self._load()), ["888002"])
+
+    def test_mirror_pair_on_different_channels_both_survive(self):
+        notify.record_question("888001", "777001", SID, CWD, now=1000,
+                               path=self.qpath, question="q?")
+        notify.record_question("888002", "777002", SID, CWD, now=1001,
+                               path=self.qpath, question="q?")
+        self.assertEqual(sorted(self._load()), ["888001", "888002"])
+
+    def test_distinct_sessions_on_the_same_channel_both_survive(self):
+        notify.record_question("888001", "777001", SID, CWD, now=1000,
+                               path=self.qpath, question="a?")
+        notify.record_question("888002", "777001", "other-sid", CWD, now=1001,
+                               path=self.qpath, question="b?")
+        self.assertEqual(sorted(self._load()), ["888001", "888002"])
+
+
+class PruneCollapsesSupersededDuplicates(unittest.TestCase):
+    """Ghost questions (#407) — PRE-EXISTING duplicate pairs (born before the
+    record-time supersede shipped) are reaped by the EXISTING sweep: per
+    (session, channel) only the NEWEST entry survives, with zero extra
+    pings. Runs before reping in run_once, so a ghost dies un-pinged."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        p = m.patch.object(notify, "_questions_path", lambda: self.qpath)
+        p.start()
+        self.addCleanup(p.stop)
+        self.projects = Path(self.tmp.name) / "projects"
+        self.now = time.time()
+
+    def _entry(self, ts, sid=SID, chan="777001", cwd=CWD, **kw):
+        e = {"session": sid, "cwd": cwd, "channel": chan, "ts": ts,
+             "question": "q?", "block": "q?"}
+        e.update(kw)
+        return e
+
+    def _seed(self, entries):
+        Path(self.qpath).write_text(json.dumps(entries))
+
+    def _prune(self, dry_run=False):
+        return wd.prune_answered_questions(self.now,
+                                           projects_dir=str(self.projects),
+                                           dry_run=dry_run)
+
+    def test_ghost_pair_collapses_to_the_newest_without_any_transcript(self):
+        # No transcript exists at all (a goal loop that never got a human
+        # prompt) — the collapse must still reap the superseded entry.
+        self._seed({"888001": self._entry(1000), "888002": self._entry(1960)})
+        logs = self._prune()
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888002"])
+        self.assertTrue(any("superseded" in ln for ln in logs), logs)
+
+    def test_mirror_pair_is_never_collapsed(self):
+        self._seed({"888001": self._entry(1000, chan="777001"),
+                    "888002": self._entry(1001, chan="777002")})
+        self._prune()
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888001", "888002"])
+
+    def test_distinct_sessions_are_never_collapsed(self):
+        self._seed({"888001": self._entry(1000),
+                    "888002": self._entry(1001, sid="other-sid")})
+        self._prune()
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888001", "888002"])
+
+    def test_a_single_live_question_is_untouched(self):
+        self._seed({"888001": self._entry(1000)})
+        logs = self._prune()
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888001"])
+        self.assertFalse(any("superseded" in ln for ln in logs), logs)
+
+    def test_ts_tie_breaks_on_the_larger_message_id(self):
+        # Discord snowflakes are time-ordered: on a ts tie the larger id IS
+        # the later posting — deterministic, never arbitrary dict order.
+        self._seed({"888002": self._entry(1000), "888001": self._entry(1000)})
+        self._prune()
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888002"])
+
+    def test_dry_run_logs_but_leaves_the_map_untouched(self):
+        self._seed({"888001": self._entry(1000), "888002": self._entry(1960)})
+        logs = self._prune(dry_run=True)
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888001", "888002"])
+        self.assertTrue(any("superseded" in ln for ln in logs), logs)
+
+    def test_malformed_and_bool_ts_entries_never_break_the_collapse(self):
+        # A non-dict legacy value is skipped without crashing; a legacy
+        # bool ts (the isinstance(True, int) trap) reads as oldest and is
+        # collapsed away safely rather than raising.
+        self._seed({"888000": "garbage",
+                    "888001": self._entry(True),
+                    "888002": self._entry(2000)})
+        self._prune()
+        q = notify.load_questions(self.qpath)
+        self.assertIn("888002", q)
+        self.assertNotIn("888001", q)
+
+
+class GhostPairRepingsOnceAfterCollapse(unittest.TestCase):
+    """Ghost questions (#407), integration — run_once orders prune BEFORE
+    reping, so a ghost pair produces exactly ONE daily re-ask (the newest
+    wording), not 2+ pings/day for one logical question forever."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        p = m.patch.object(notify, "_questions_path", lambda: self.qpath)
+        p.start()
+        self.addCleanup(p.stop)
+        self.projects = Path(self.tmp.name) / "projects"
+        # Same local-noon pin as RepingStaleQuestions (sleep-window safety).
+        _lt = time.localtime()
+        self.now = time.mktime(
+            (_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))
+
+    def test_prune_then_reping_sends_only_the_newest_block(self):
+        due = self.now - wd.QUESTION_REPING_S - 10
+        ghost = {"session": SID, "cwd": CWD, "channel": "777001",
+                 "ts": due - 960, "question": "stara formulacia?",
+                 "block": "stara formulacia?"}
+        real = {"session": SID, "cwd": CWD, "channel": "777001",
+                "ts": due, "question": "nova formulacia?",
+                "block": "nova formulacia?"}
+        Path(self.qpath).write_text(json.dumps({"888001": ghost,
+                                                "888002": real}))
+        wd.prune_answered_questions(self.now,
+                                    projects_dir=str(self.projects))
+        sent = []
+
+        def send_fn(body, owner=None, dedup_key=None, dry_run=False,
+                    kind="default", return_message_id=False):
+            sent.append(body)
+            return ("dedup", None) if return_message_id else "dedup"
+
+        wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        self.assertEqual(sent, ["nova formulacia?"])
+
+
+class SupersedeIsAskGenerationGuarded(unittest.TestCase):
+    """Adversarial-review findings on the ghost fix (#407) — a re-tracked
+    DAILY RE-ASK of an old question is NOT a new ask: it must never
+    supersede (nor later out-collapse) a LIVE, newer question the same
+    session tracks on the target channel. "Newest ask wins" compares ASK
+    GENERATION (the `asked` field, preserved across re-tracks), never the
+    record time — a stale cross-channel sibling's re-post lands on the
+    CURRENT questions channel with a fresh record ts, and comparing record
+    times there inverts the ask order exactly where the loss is worst."""
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        p = m.patch.object(notify, "_questions_path", lambda: self.qpath)
+        p.start()
+        self.addCleanup(p.stop)
+        self.projects = Path(self.tmp.name) / "projects"
+        _lt = time.localtime()
+        self.now = time.mktime(
+            (_lt.tm_year, _lt.tm_mon, _lt.tm_mday, 12, 0, 0, 0, 0, -1))
+
+    def _seed_live_and_cross_channel_stale(self):
+        live = {"session": SID, "cwd": CWD, "channel": "777001",
+                "ts": self.now - 3600, "question": "ziva otazka?",
+                "block": "ziva otazka?"}
+        stale = {"session": SID, "cwd": CWD, "channel": "999999",
+                 "ts": self.now - wd.QUESTION_REPING_S - 10,
+                 "question": "stara otazka?", "block": "stara otazka?"}
+        Path(self.qpath).write_text(json.dumps({"888100": live,
+                                                "888001": stale}))
+        return live, stale
+
+    def test_reping_retrack_never_eats_a_live_question_on_the_channel(self):
+        # MAJOR-1: the stale sibling lives on ANOTHER channel; its daily
+        # re-ask posts + re-tracks onto the CURRENT questions channel,
+        # where the session's live, newer, different question is tracked.
+        # The live entry must survive; the re-track must carry the OLD
+        # ask's generation so later passes keep treating it as older.
+        _live, stale = self._seed_live_and_cross_channel_stale()
+
+        def send_fn(body, owner=None, dedup_key=None, dry_run=False,
+                    kind="default", return_message_id=False):
+            return ("sent", "999001") if return_message_id else "sent"
+
+        with m.patch.object(notify, "notification_channel",
+                            lambda **kw: "777001"):
+            wd.reping_stale_questions(self.now, send_fn, path=self.qpath)
+        q = notify.load_questions(self.qpath)
+        self.assertIn("888100", q)             # the live question survives
+        self.assertIn("999001", q)             # the re-post is tracked
+        self.assertNotIn("888001", q)          # the old key was dropped
+        self.assertEqual(q["999001"]["channel"], "777001")
+        self.assertEqual(q["999001"]["asked"], int(stale["ts"]))
+
+    def test_collapse_prefers_the_newer_ask_generation_over_record_time(self):
+        # After the re-track above, the shared channel briefly holds the
+        # live ask (older record ts, newer GENERATION) and the re-posted
+        # old ask (fresh record ts, older generation). The collapse must
+        # keep the newer GENERATION — the live question.
+        live = {"session": SID, "cwd": CWD, "channel": "777001",
+                "ts": self.now - 3600, "question": "ziva otazka?",
+                "block": "ziva otazka?"}
+        repost = {"session": SID, "cwd": CWD, "channel": "777001",
+                  "ts": self.now, "asked": int(self.now - 90000),
+                  "question": "stara otazka?", "block": "stara otazka?"}
+        Path(self.qpath).write_text(json.dumps({"888100": live,
+                                                "999001": repost}))
+        wd.prune_answered_questions(self.now,
+                                    projects_dir=str(self.projects))
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888100"])
+
+    def test_record_supersede_is_generation_guarded(self):
+        # Recording with an OLD asked_ts (a re-track) must not supersede a
+        # newer-generation entry; a genuinely NEW ask (no asked_ts) still
+        # supersedes everything older on its channel.
+        t0, t1 = 1_700_000_000, 1_700_050_000
+        notify.record_question("888100", "777001", SID, CWD, now=t1,
+                               path=self.qpath, question="ziva?")
+        notify.record_question("999001", "777001", SID, CWD, now=t1 + 40000,
+                               path=self.qpath, question="stara?",
+                               asked_ts=t0)
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["888100", "999001"])
+        notify.record_question("999002", "777001", SID, CWD, now=t1 + 50000,
+                               path=self.qpath, question="nova?")
+        self.assertEqual(sorted(notify.load_questions(self.qpath)),
+                         ["999002"])
+
+
+class RunOnceOrdersPruneBeforeReping(unittest.TestCase):
+    """The ghost-collapse design (#407) leans on run_once running the prune
+    (which collapses superseded pairs) BEFORE the daily re-ask — lock the
+    real call ordering, not just a test-sequenced prune-then-reping."""
+
+    def test_prune_call_precedes_reping_call_in_run_once(self):
+        src = inspect.getsource(wd.run_once)
+        self.assertLess(src.index("prune_answered_questions("),
+                        src.index("reping_stale_questions("))
 
 
 if __name__ == "__main__":
