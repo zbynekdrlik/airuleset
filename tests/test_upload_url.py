@@ -374,21 +374,16 @@ class TestMultiInterfaceUrls(TestCase):
                          "(#113); a second Popen is a new un-polled call site")
 
     def test_cmd_upload_prints_a_url_per_interface(self):
-        import airuleset
         import filedrop
-        sk = socket.socket()
-        sk.bind(("127.0.0.1", 0))
-        port = sk.getsockname()[1]
-        sk.close()
         dest = Path(tempfile.mkdtemp())
         _log_dir(self)                       # #115: keep the log out of /tmp
-        # two loopback addresses both bind on Linux → two advertised URLs
+        # two loopback addresses both bind on Linux → two advertised URLs.
+        # #427: the port is probed+retried by _cmd_upload_output (a TOCTOU
+        # race under real box contention -- #405's own closing evidence),
+        # never a single doomed probe.
         with m.patch.object(filedrop, "bind_ips",
                             return_value=["127.0.0.1", "127.0.0.2"]):
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port))
-            out = buf.getvalue()
+            out, port = _cmd_upload_output(self, dest)
         self.assertIn(f"http://127.0.0.1:{port}/", out)
         self.assertIn(f"http://127.0.0.2:{port}/", out)
 
@@ -445,6 +440,35 @@ class TestMultiInterfaceUrls(TestCase):
 # port-pick race instead. Locked with a deterministic mock so the retry
 # MECHANISM is hermetic and never depends on reproducing a live collision.
 # --------------------------------------------------------------------------- #
+
+def _cmd_upload_output(test, dest, ttl=5, max_attempts=5):
+    """Call `airuleset.cmd_upload` with a freshly-probed port, retrying on a
+    transient TOCTOU port-bind collision (#427). Returns `(stdout, port)`
+    of whichever attempt actually came up. Raises AssertionError (never
+    lets a real SystemExit escape) once `max_attempts` is exhausted --
+    still fails loud if `cmd_upload` is genuinely broken, not just
+    port-unlucky, since every attempt gets its own fresh probe."""
+    import airuleset
+    last_out = ""
+    for _ in range(max_attempts):
+        sk = socket.socket()
+        sk.bind(("127.0.0.1", 0))
+        port = sk.getsockname()[1]
+        sk.close()
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=ttl, port=port))
+        except SystemExit:
+            continue   # the probed port lost the race -- try a fresh one
+        out = buf.getvalue()
+        last_out = out
+        if ("http://127.0.0.1:%d/" % port) in out:
+            return out, port
+    raise AssertionError(
+        "cmd_upload never came up after %d port-race retries; last output:\n%s"
+        % (max_attempts, last_out))
+
 
 class TestUploadPortRaceRetry(TestCase):
 

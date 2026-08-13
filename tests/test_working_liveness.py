@@ -26,8 +26,10 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset
+from _hook_state_cleanup import sweep_session_files
 
 REPO = Path(airuleset.__file__).resolve().parent
 HOOK = REPO / "hooks" / "stop-check-working-liveness.sh"
@@ -58,16 +60,21 @@ def completed_shell(tid="bdone1"):
 
 
 class HookBase(unittest.TestCase):
-    def setUp(self):
-        import glob
-        self.addCleanup(lambda: [os.remove(f) for f in
-                                  glob.glob("/tmp/airuleset-working-liveness-block-t-*")])
-
     def _run(self, msg, background_tasks="__ABSENT__", session_id=None):
+        # #427: compute the sid HERE (rather than leaving payload() to mint
+        # one _run never sees) so cleanup can be scoped to the EXACT file
+        # this call may have written -- never a fixed-prefix wildcard that
+        # would also match a concurrently-running SIBLING process's retry
+        # file (every generated sid shares the same "t-" prefix). Swept via
+        # the SAME sweep_session_files() helper #202 already uses in 8
+        # other test files; safe to register once per distinct sid even
+        # across several _run() calls in one test (sweep is idempotent).
+        sid = session_id or ("t-" + uuid.uuid4().hex[:10])
+        self.addCleanup(sweep_session_files, sid)
         return subprocess.run(
             ["bash", str(HOOK)],
             input=payload(msg, background_tasks=background_tasks,
-                          session_id=session_id),
+                          session_id=sid),
             capture_output=True, text=True, timeout=15)
 
 
