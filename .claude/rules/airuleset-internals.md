@@ -1424,18 +1424,57 @@ writes only `~/.claude/`, and having it iterate over managed repos to write each
 project's own git-tracked `.claude/settings.json` would be a bigger, separately-
 scoped mechanism (new machinery, out of #415's scope + against the FREEZE), not
 "impossible" outright: a `.claude/settings.json` edit IS governance, not project
-CODE, so a FUTURE deliberate change could do it. For now the projects with
-genuine Playwright evidence (audiotester, songplayer, spinbike, restreamer,
-devbridge, automatizacie-montalu, tvdole, audiomatrix, media-bridge, reaperiem —
-from #415's live scan) opt in themselves; that migration + the fleet-wide
-discoverability of the opt-in are TRACKED as a #415 follow-up (no-dropped-work),
-not left implicit. `autonomous-verification.md`'s Playwright duty is fully intact
-for an opted-in project; the inversion removes a default, never a capability.
+CODE, so a FUTURE deliberate change could do it. The projects #415's SOURCE-LEVEL
+scan flagged as Playwright-needing (audiotester, songplayer, spinbike, restreamer,
+devbridge, automatizacie-montalu, tvdole, audiomatrix, media-bridge, reaperiem)
+each opt in themselves; that migration was DONE in #452 (2026-08-13) — the
+one-line `enabledPlugins.playwright=true` key was written into all 10 projects'
+own `<repo>/.claude/settings.json` on dev1 (all 10 are dev1-local; none
+dev2-only), MERGED into the two that already had a settings.json (audiotester,
+reaperiem — both preserving their existing `hooks` key), created fresh for the
+other eight, and read back per project (playwright == true, valid JSON). Of the
+two BORDERLINE candidates named in #452, one was INCLUDED and one EXCLUDED after
+a live `.playwright-mcp/` check (the MCP server's own `browser_snapshot`/console
+output dir — a runtime signature #415's source-only scan structurally could not
+see): claudy WAS opted in — despite its pytest-playwright test suite
+(`from playwright.sync_api import sync_playwright`, which spawns its own Chromium),
+its `.playwright-mcp/page-*.yml` output from the SAME day as the migration proves
+it genuinely uses the Playwright MCP too; ekasagrabber stays EXCLUDED (Node
+Playwright library directly via `require("playwright")`, no `.playwright-mcp/` at
+all, and not even a git repo). This makes 11 opted-in projects, not 10.
+`autonomous-verification.md`'s Playwright duty is fully intact for an opted-in
+project; the inversion removes a default, never a capability. **Completeness
+caveat:** the set above is #415's source-scan set, NOT an exhaustive list of every
+MCP-using project — a live `.playwright-mcp/` audit found FOUR more projects with
+genuine, recent MCP output that #415's scan missed (camera-box, forestshop_app,
+ziadosti-mesto, windows-machines — #415 had even explicitly named three of them
+"no footprint"), tracked as a needs-user-decision follow-up in #453 (it
+contradicts #415's own reviewed exclusions, so a human adjudicates rather than a
+worker silently overriding them).
 
 **Verify the inversion on a box:** `pgrep -fc playwright-mcp` before/after a
 session start in a NON-opted-in project should stay 0. A project's own
 `disabledMcpServers` entries in `~/.claude.json` are untouched (airuleset has
 zero writes to `~/.claude.json`).
+
+**Deciding whether a project genuinely needs the opt-in — check `.playwright-mcp/`,
+not a source grep (#452, the migration's own core discriminator):** the Playwright
+MCP server writes its `browser_snapshot`/console-capture output into
+`<repo>/.playwright-mcp/` (`page-*.yml`, `console-*.log`) — a runtime signature
+(usually gitignored) that a self-spawned pytest-playwright / Node `require("playwright")`
+library browser NEVER produces. So `grep -rIl playwright <repo>` (config/deps/CLAUDE.md
+footprint) CANNOT tell an MCP user (an agent driving the browser via `browser_*` to
+verify a UI — the case the opt-in serves) apart from a project that merely spawns its
+own test-framework browser (the case the opt-in must NOT pay for, per #415's whole
+point). This is exactly how #415's source-only live scan misclassified projects in both
+directions: claudy (`from playwright.sync_api import sync_playwright` in fixtures) was a
+borderline the source-grep read as pytest-only, yet its `.playwright-mcp/page-*.yml` from
+the migration day itself proved genuine MCP use (→ opted IN, 11th project); and #415 named
+camera-box/forestshop/windows-machines "no footprint" while all three carry live
+`.playwright-mcp/` output the source scan couldn't see (→ #453, a needs-user-decision
+follow-up). Reuse `python3 -c` over `glob(<repo>/**/.playwright-mcp)` + newest file mtime
+(`~/devel/ekasagrabber` etc. have none → confidently NOT MCP) as the fast, reliable
+per-project classifier for any future opt-in decision.
 - **`claude plugin install <key>@<marketplace>` writes `enabledPlugins[<key>]=true` into user-scope `~/.claude/settings.json` as a SIDE EFFECT, and it OVERWRITES a pre-seeded `false` — so any reconcile pass that force-DISABLES a plugin BEFORE the install loop is silently clobbered on any box where that plugin actually gets installed (registry entry missing → install runs).** #415 adversarial review F1 (proven twice in isolated `CLAUDE_CONFIG_DIR` sandboxes): `setup_managed_plugins()` reconciles FIRST (deliberate #273 ordering — the settings write must land early to unblock the install), then installs; on a FRESH box the playwright install re-enabled the key the reconcile had just disabled, ending provisioning in the exact pre-#415 resident-Chrome regime. An already-provisioned box is unaffected (registry present → `_managed_plugin_built` short-circuits → 0 installs → the reconcile's `false` stands), which is why the headline flip-stale-true criterion passed while the fresh-box path was broken — and why a mocked-subprocess test suite (installs are side-effect-free mocks) could not see it. Fix (`setup_managed_plugins`): keep the reconcile-before-install, and RE-ASSERT the same reconcile AFTER the install loop (extracted `_reconcile_settings_file()`), a no-op write on the already-built fast path. Any future OPTIONAL/force-disabled plugin has this exact hazard — reconcile-after-install is mandatory, not just reconcile-before. The regression test must use a fake `claude plugin install` that WRITES `enabledPlugins[key]=true` into the patched `SETTINGS_JSON` (mimicking the real side effect) and assert the final on-disk file has the key `False`; a fake that only records argv cannot catch it.
 - **A `gh issue create -F "$VAR"` (or any hook-gated command with a `$VAR` argument) is read by the PreToolUse hook as the LITERAL unexpanded text `$VAR` — hooks see argv BEFORE shell expansion — so a hook that reads the `-F` body file gets an empty/unreadable body and false-blocks on "no Scope-gate / no Dedup-checked line" even when the file has both.** #415: `block-ungated-issue-filing.sh` logged `criterion=none dedup="none"` for a body file that demonstrably had both lines, purely because the path was passed as `$SP/followup_body.md`. Always pass the FULL LITERAL absolute path to a `-F`/`--body-file` argument of any hook-gated `gh`/`git` command. Companion (#159, re-hit): a `printf ... >> body.md && gh issue create ... -F body.md` chained on ONE line never appends when the `gh` half is blocked — a PreToolUse block kills the WHOLE compound command atomically, so the `printf` never runs. Compose the body (and any last-line append) in its OWN Bash call, then file in a SECOND call.
 - **airuleset.py splits (#433 H/K) live in a DIFFERENT import topology than the watchdog package splits — the script runs as `__main__`, so a new sibling module referencing anything back in airuleset.py at ITS OWN module level is a guaranteed CLI-mode crash, and the safe default is a FULLY SELF-CONTAINED leaf.** Trace of the crash shape (worked out at design time, #433 cluster H/K design comment): `python3 airuleset.py` executes the file as module `__main__` → the facade `from cli_vault import ...` starts cli_vault's init → a top-level `from airuleset import REPO_DIR` there finds NO `airuleset` in sys.modules (the running instance is registered as `__main__`, not `airuleset`) → Python imports airuleset.py a SECOND time as module `airuleset` → ITS facade line re-enters cli_vault, which IS in sys.modules but mid-init with the target name not yet bound → `ImportError: cannot import name ... from partially initialized module`. This is the C/D circular-import hazard (entry above) wearing script-topology clothes. The clean resolution used for both #433 airuleset clusters: make the leaf self-contained by (a) moving a needed helper IN and facade-re-exporting it back for the resident caller (`_pick_free_port` → cli_vault.py, re-exported for `cmd_upload`'s bare-name call — the proven cards.py `_git_*` reverse-arrow shape), and (b) duplicating a one-line canonical path const (`REPO_DIR = Path(__file__).resolve().parent` in cli_vault.py — same directory, identical value; `CLAUDE_DIR = Path.home() / ".claude"` in cli_autopilot_lock.py — the exact expression watchdog/goal.py + watchdog/compact.py already inline locally). Deferred `import airuleset` inside function bodies DOES also work here (module level of airuleset.py is pure: docstring + idempotent filedrop try-import + `__main__` guard — verified by AST), but in CLI mode it triggers a full second module-instance execution and it cannot cover a coupling that lives in a module-level CONST VALUE at all — reserve it for clusters whose coupling is genuinely many resident FUNCTIONS (C/D class), never pay it for a one-line const.
