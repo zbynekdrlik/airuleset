@@ -1005,13 +1005,31 @@ class TestFreePortScanSeesTheServersOwnBinds(TestCase):
         # assumed — the connect probe really is blind to the held port, so a
         # picker that still returns it is reproducing the live defect and not an
         # artefact of how this test is built.
-        held = self._hold("127.0.0.2")
-        probe = socket.socket()
-        self.addCleanup(probe.close)
-        self.assertNotEqual(
-            0, probe.connect_ex(("127.0.0.1", held)),
-            "premise broken: a connect probe on 127.0.0.1 was supposed to be "
-            "blind to a listener held on 127.0.0.2")
+        #
+        # The ephemeral port the kernel hands out for 127.0.0.2 can COLLIDE
+        # with an unrelated wildcard/loopback listener already sitting on that
+        # same number on this many-service dev box — then the 127.0.0.1 probe
+        # connects to THAT stranger and the premise reads broken with no
+        # defect anywhere in the code under test (observed live: unittest
+        # discover run 2026-08-13, failures=1 exactly here, green on
+        # immediate isolated re-run). So on connect_ex()==0 re-pick a fresh
+        # ephemeral port, bounded: systematic blindness (the defect this
+        # premise guards) still fails after every retry, only the 1-in-
+        # thousands stranger collision is absorbed.
+        held = None
+        for _ in range(10):
+            candidate = self._hold("127.0.0.2")
+            probe = socket.socket()
+            self.addCleanup(probe.close)
+            if probe.connect_ex(("127.0.0.1", candidate)) != 0:
+                held = candidate
+                break
+        self.assertIsNotNone(
+            held,
+            "premise broken 10/10: a connect probe on 127.0.0.1 was supposed "
+            "to be blind to a listener held on 127.0.0.2 — ten distinct "
+            "ephemeral ports all accepted on 127.0.0.1, which is systematic, "
+            "not a stray-listener collision")
         free = _free_port()
         self.assertEqual(
             free, airuleset._pick_free_port(["127.0.0.2"], [held, free]),
