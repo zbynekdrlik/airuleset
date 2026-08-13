@@ -340,15 +340,38 @@ class TestMultiInterfaceUrls(TestCase):
         startup (this box runs many concurrent full-suite runs — see the
         load-flake entry in the project playbook): the delay runs BEFORE
         the fake writes its stderr diagnostic, exactly where real CPU
-        contention slows a fresh interpreter down."""
+        contention slows a fresh interpreter down.
+
+        The 1.0s readiness deadline is the SUBJECT under test (the wait
+        must fail with the server's own stderr) — it must never double as
+        a bound on the fake child's startup, so the probe synchronises on
+        an out-of-band sentinel FILE the fake touches right after flushing
+        its diagnostic, and only THEN starts the readiness wait. Both
+        assertions the callers make are untouched; only the extraneous
+        startup race is removed."""
         dest = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, str(dest), ignore_errors=True)
+        tmpd = tempfile.mkdtemp(prefix="upload-readiness-diag-")
+        self.addCleanup(shutil.rmtree, tmpd, ignore_errors=True)
+        sentinel = os.path.join(tmpd, "diag-written")
         mute = ('import time; time.sleep(%r); import sys; '
                 'sys.stderr.write("DIAG-never-bound\\n"); '
-                'sys.stderr.flush(); time.sleep(30)' % child_startup_delay_s)
+                'sys.stderr.flush(); open(%r, "w").close(); '
+                'time.sleep(60)' % (child_startup_delay_s, sentinel))
+        proc, port = _spawn(self, "tok113mute", dest,
+                            launcher=[sys.executable, "-c", mute])
+        # Bounded event wait: the diagnostic provably exists BEFORE the
+        # readiness budget under test starts ticking. A fake that dies
+        # early ends the wait immediately — _wait_until_serving's own
+        # exited-before-serving branch then reports its stderr.
+        end = time.time() + 60.0
+        while not os.path.exists(sentinel) and time.time() < end:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.05)
         with self.assertRaises(AssertionError) as ctx:
-            _serve(self, "tok113mute", dest, deadline_s=1.0,
-                   launcher=[sys.executable, "-c", mute])
+            _wait_until_serving(
+                self, proc, "http://127.0.0.1:%d/tok113mute/" % port, 1.0)
         return ctx
 
     def test_readiness_timeout_reports_the_servers_own_stderr(self):

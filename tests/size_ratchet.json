@@ -140,7 +140,7 @@
   "tests/test_tier0_local_build_hook.py": 386,
   "tests/test_tmux_socket_recovery.py": 369,
   "tests/test_transcript_compress.py": 630,
-  "tests/test_upload_url.py": 1123,
+  "tests/test_upload_url.py": 1146,
   "tests/test_usage_cache.py": 366,
   "tests/test_vault_channel.py": 1382,
   "tests/test_vault_disclosures.py": 165,
