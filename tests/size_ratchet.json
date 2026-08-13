@@ -76,7 +76,7 @@
     "tests/test_long_wait_background_waiter.py": 138,
     "tests/test_main_implementation_guard.py": 2102,
     "tests/test_managed_plugins.py": 801,
-    "tests/test_managed_repo_sweeps.py": 744,
+    "tests/test_managed_repo_sweeps.py": 849,
     "tests/test_mdreview_content_axes.py": 87,
     "tests/test_measure_design_compliance.py": 125,
     "tests/test_measure_question_quality_baseline.py": 182,
@@ -163,12 +163,12 @@
     "tests/test_working_liveness.py": 332,
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 9943,
+    "watchdog/__init__.py": 9945,
     "watchdog/burn_jobs.py": 306,
     "watchdog/cards.py": 481,
     "watchdog/compact.py": 1037,
     "watchdog/goal.py": 1103,
-    "watchdog/repo_health.py": 713,
+    "watchdog/repo_health.py": 758,
     "watchdog/usage.py": 380
   },
   "functions": {

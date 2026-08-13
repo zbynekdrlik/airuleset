@@ -7933,6 +7933,7 @@ from watchdog.repo_health import (  # noqa: E402
     MANAGED_SWEEP_INTERVAL_S as MANAGED_SWEEP_INTERVAL_S,
     discover_managed_repos as discover_managed_repos,
     _repo_label as _repo_label,
+    _repo_is_fork as _repo_is_fork,
     _sweep_due as _sweep_due,
     _repo_sweep_batch as _repo_sweep_batch,
     REPO_SWEEP_BATCH_MAX as REPO_SWEEP_BATCH_MAX,
@@ -7940,6 +7941,7 @@ from watchdog.repo_health import (  # noqa: E402
     net_drift_alarm as net_drift_alarm,
     NET_DRIFT_THRESHOLD as NET_DRIFT_THRESHOLD,
     stuck_main_sweep as stuck_main_sweep,
+    _stuck_main_skip_set as _stuck_main_skip_set,
     STUCK_MAIN_AGE_S as STUCK_MAIN_AGE_S,
     STUCK_MAIN_AHEAD_MIN as STUCK_MAIN_AHEAD_MIN,
 )
