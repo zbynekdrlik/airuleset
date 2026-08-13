@@ -412,6 +412,8 @@ toward once file-overlapping issues have been sequenced across several rounds. T
 (`autonomous-batch-issue-development.md`) plus the collision heuristic together are the whole
 answer to "which issues share one round" — this ticket found no gap in either.
 
+**Keep the lanes full — one CI wait never idles the whole loop (#442, reopened).** While any dispatched worker is long-blocked (its own foreground CI wait on a serial-fallback repo, or the supervisor's own integration CI), keep assembling and dispatching the next bundle-safe backlog tickets into ADDITIONAL parallel `isolation: "worktree"` lanes up to the concurrency cap above — never collapse to a round-of-one and idle on that single wait (the 2h10m single-worker gatekeeper stall). A worker parked on a CI poll still writes its transcript, so it reads as an "occupied" lane to any liveness signal — never treat one occupied lane as a full fleet while unworked backlog remains. Only INTEGRATION stays strictly serial (one merge / one CI cycle / one push per round, exactly as the repo-flow policy above requires); DISPATCH never blocks on another lane's CI.
+
 1. **Per round SLOT — assemble one BATCH; bundle by default to spend ONE CI cycle on many issues**
    (`autonomous-batch-issue-development.md`). CI here is long, so bundling small issues into one PR
    is the main lever to cut CI cost per worker (fleet dispatch, above, is the lever that cuts
