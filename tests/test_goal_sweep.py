@@ -22,6 +22,7 @@ from _goal_arm_helpers import (  # noqa: E402
     GOAL_BUSY_CAP,
     GOAL_IDLE_CAP,
     _encode,
+    _isolate_goal_state,
     DeliverGoalFakeTmux,
     _write_goal_marker,
     _write_marker_transcript,
@@ -29,6 +30,17 @@ from _goal_arm_helpers import (  # noqa: E402
 
 class TestGoalSweep(unittest.TestCase):
     CWD = "/home/newlevel/devel/goalsweep"
+
+    def setUp(self):
+        # #437: goal.goal_sweep() -> goal.deliver_goal() -> _log_goal_sync()
+        # resolves goal.goal_sync_log_path() to the REAL ~/.claude/goal-
+        # sync.log unless that module-level function itself is patched --
+        # every test method below reaches deliver_goal (directly, or via
+        # the malformed-entry/kill-switch/dry-run/already-handled early
+        # exits), so isolate it centrally here rather than per test, the
+        # same shape test_goal_arm.py's TestDeliverGoal/TestGoalArmCli
+        # already use for the SAME module.
+        self.reqp, self.syncp = _isolate_goal_state(self)
 
     def _dir(self):
         d = TemporaryDirectory()
