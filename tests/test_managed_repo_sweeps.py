@@ -117,6 +117,59 @@ class TestRepoLabel(unittest.TestCase):
         self.assertEqual(wd._repo_label(str(r)), "no-remote-repo")
 
 
+class TestRepoIsFork(unittest.TestCase):
+    """#441: a fork clone (a distinct `upstream` remote) is detected purely
+    locally, so job 28 never measures its deliberately-frozen origin/main."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-isfork-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_distinct_upstream_remote_is_a_fork(self):
+        r = _make_repo(self.tmp, "odoo-erp",
+                       origin_url="https://github.com/kvaskodev/odoo-erp.git")
+        _git(r, "remote", "add", "upstream",
+             "https://github.com/zbynekdrlik/odoo-erp.git")
+        self.assertTrue(wd._repo_is_fork(str(r)))
+
+    def test_no_upstream_remote_is_not_a_fork(self):
+        r = _make_repo(self.tmp, "camera-box",
+                       origin_url="https://github.com/zbynekdrlik/camera-box.git")
+        self.assertFalse(wd._repo_is_fork(str(r)))
+
+    def test_upstream_identical_to_origin_is_not_a_fork(self):
+        url = "https://github.com/zbynekdrlik/thing.git"
+        r = _make_repo(self.tmp, "thing", origin_url=url)
+        _git(r, "remote", "add", "upstream", url)
+        self.assertFalse(wd._repo_is_fork(str(r)))
+
+    def test_upstream_present_with_no_origin_remote_is_a_fork(self):
+        # A lone upstream with no configured origin remote still delivers
+        # upstream, not to its own main -- treat it as a fork.
+        r = _make_repo(self.tmp, "lonely")  # no origin_url -> no origin remote
+        _git(r, "remote", "add", "upstream",
+             "https://github.com/zbynekdrlik/lonely.git")
+        self.assertTrue(wd._repo_is_fork(str(r)))
+
+
+class TestStuckMainSkipSet(unittest.TestCase):
+    """#441: AIRULESET_STUCK_MAIN_SKIP is the explicit per-repo opt-out for a
+    fork/mirror clone that lacks the `upstream`-remote convention."""
+
+    def test_empty_env_is_empty_set(self):
+        with unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_STUCK_MAIN_SKIP", None)
+            self.assertEqual(wd._stuck_main_skip_set(), set())
+
+    def test_comma_and_space_separated(self):
+        with unittest.mock.patch.dict(
+                os.environ,
+                {"AIRULESET_STUCK_MAIN_SKIP": "kvaskodev/odoo-erp, a/b  c/d"}):
+            self.assertEqual(
+                wd._stuck_main_skip_set(),
+                {"kvaskodev/odoo-erp", "a/b", "c/d"})
+
+
 class TestSweepDue(unittest.TestCase):
     def test_first_call_is_due(self):
         self.assertTrue(wd._sweep_due({}, "k", NOW, 3600))
@@ -289,6 +342,58 @@ class TestStuckMainSweep(unittest.TestCase):
                            repo_roots=[str(r)],
                            git_fetch=lambda root: calls.append(1))
         self.assertEqual(len(calls), 1)
+
+    def _fork(self, name="odoo-erp", base_ts=NOW - 36 * DAY, undelivered=30):
+        """kvaskodev/odoo-erp's shape: origin/main frozen, work piled up, and
+        a distinct `upstream` remote (integration goes there via gatekeeper)."""
+        r = _make_repo(self.tmp, name, base_ts=base_ts, work_ts=NOW - 3600,
+                       undelivered=undelivered,
+                       origin_url="https://github.com/kvaskodev/%s.git" % name)
+        _git(r, "remote", "add", "upstream",
+             "https://github.com/zbynekdrlik/%s.git" % name)
+        return r
+
+    def test_fork_with_upstream_remote_is_not_pinged(self):
+        """#441: a fork's origin/main is deliberately frozen (delivery goes
+        upstream) -- job 28 must NOT alarm on it, even at the exact camera-box
+        stuck-main signature."""
+        r = self._fork()
+        logs = wd.stuck_main_sweep(NOW, self.state, send_fn=self.send,
+                                   repo_roots=[str(r)])
+        self.assertEqual(self.sent, [])
+        self.assertTrue(any("stuck-main skip" in line for line in logs))
+
+    def test_fork_skip_happens_before_git_fetch(self):
+        """A skipped fork must not even spend a git fetch on itself."""
+        r = self._fork()
+        fetched = []
+        wd.stuck_main_sweep(NOW, self.state, send_fn=self.send, repo_roots=[str(r)],
+                           git_fetch=lambda root: fetched.append(root))
+        self.assertEqual(self.sent, [])
+        self.assertEqual(fetched, [])
+
+    def test_fork_skip_drops_stale_dedup_memory(self):
+        """A fork that once (wrongly) pinged must have that dedup entry cleared
+        so it can never re-ping either."""
+        r = self._fork()
+        self.state["stuck_main"] = {"kvaskodev/odoo-erp": {"pinged_ts": NOW - DAY}}
+        wd.stuck_main_sweep(NOW, self.state, send_fn=self.send, repo_roots=[str(r)])
+        self.assertEqual(self.sent, [])
+        self.assertNotIn("kvaskodev/odoo-erp", self.state.get("stuck_main", {}))
+
+    def test_env_skip_list_silences_a_named_repo(self):
+        """#441: an operator opt-out via AIRULESET_STUCK_MAIN_SKIP silences a
+        fork/mirror clone even when it lacks the `upstream`-remote convention."""
+        r = _make_repo(self.tmp, "odoo-erp", base_ts=NOW - 6 * DAY,
+                       work_ts=NOW - 3600, undelivered=25,
+                       origin_url="https://github.com/kvaskodev/odoo-erp.git")
+        with unittest.mock.patch.dict(
+                os.environ,
+                {"AIRULESET_STUCK_MAIN_SKIP": "kvaskodev/odoo-erp"}):
+            logs = wd.stuck_main_sweep(NOW, self.state, send_fn=self.send,
+                                       repo_roots=[str(r)])
+        self.assertEqual(self.sent, [])
+        self.assertTrue(any("stuck-main skip" in line for line in logs))
 
 
 class TestRunOnceWiring(unittest.TestCase):
