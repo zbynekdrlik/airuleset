@@ -1368,3 +1368,62 @@ ratchet's whole job until then is simply: stop the wound from getting deeper.
 - **A block-reason assertion on a fixture that trips TWO branches of the same gate is a mutation-teeth tautology: pin the asserted reason to the branch under test, and keep one fixture where the other branch structurally CANNOT fire.** #446 adversarial review F1: bare `n/a` on a 🌐-carrying fixture blocked via EITHER the value-free branch or the n/a×🌐 contradiction — a mutant deleting the n/a-reason requirement survived because the contradiction still blocked the same fixture (same observable, different reason). The surface-less (no 🌐/📱) sibling fixture is what killed it.
 - **A POLICY-INVERSION ticket (a directive overturning a lineup/default the test suite deliberately LOCKS — #440's Opus 5 ban, #445's ultracode standing default) has its stale locks scattered in test files named for OTHER features, and the FULL suite is the only reliable finder — a scoped run of the "obviously related" files is guaranteed to miss some.** #440/#445 live inventory: beyond the expected `tests/test_model_tiering.py`, stale locks on the old policy turned up in `test_workflow_cost_discipline.py` (mechanical-tier phrase), `test_dynamic_application.py` (validator frontmatter alias, plus a `[:400]` char-window too tight for the full-id spelling), `test_main_implementation_guard.py` (a `#54`/"armed /goal" pointer the module rewrite dropped), `test_compact.py` (a hardcoded stale `claude-opus-5[1m]` literal where `airuleset.MANAGED_MODEL` was always the honest assertion), and `test_context_diet_tier1.py` (a behavioural-anchor phrase from the OLD tiering wording). Protocol for the next such ticket: `grep -rn -F '<the exact old literal/value>' tests/` for every value being inverted BEFORE writing the RED commit, invert each found lock with stated justification in the RED/GREEN pair it belongs to — and still treat the full-suite run as the real gate, since phrase-anchors (not literals) only surface there.
 - **Changing `MANAGED_MODEL`/`MANAGED_EFFORT_LEVEL` (or any managed settings default): the blast-radius map measured on #440/#445.** Tests keying on the CONSTANT (robust, no edit needed): the launcher subprocess tests (`--model %s % airuleset.MANAGED_MODEL`), `test_sets_managed_model`, statusbar/caveman tests passing `managed_model=` explicitly. Tests keying on LITERALS (must be inverted in the RED commit): `TestManagedModelDefault`'s value lock, `test_compact.py::test_preserves_other_keys` (now fixed to use the constant), the effort-value locks in `TestManagedSettingsDefaults`. Also consumed by the same constant, verify not assume: `burn.tier(<new id>)` must map to a recognized tier (statusline highlight semantics — `burn.tier("claude-fable-5[1m]") == "fable"` verified live), `render_claude_launch_script()` bakes it into every branch (`bash -n` the rendered script), and the `[1m]` suffix stays part of the id (1M-context alias, `lastModelUsage` keying). A resumed worker inheriting a PRIOR (dead) worker's posted-but-never-classified design comments: the 180s window makes them permanently ungradeable — post a fresh CONDENSED re-classification comment per issue naming the original as source-of-truth, sanity-checked against all three `design_gate` classifiers locally first, then verify `marker_exists('airuleset', N, kind)` same-turn.
+
+## Managed-plugin tiers + per-project Playwright opt-in (#415, 2026-08-13)
+
+There are now THREE plugin tiers in `airuleset.py`, distinguished by what
+`reconcile_managed_plugins()` writes into user-scope `~/.claude/settings.json`:
+
+- **`MANAGED_PLUGINS`** (superpowers only) — force-ENABLED (`enabled[key]=True`)
+  on every box, every project. The rules invoke its skills directly, so it is a
+  genuine always-on baseline.
+- **`MANAGED_DISABLED_PLUGINS`** (rust-analyzer-lsp, claude-md-management) —
+  force-DISABLED (`False`), never wanted at all, and NOT installed.
+- **`OPTIONAL_PLUGINS`** (playwright) — force-DISABLED in user scope BUT still
+  INSTALLED + marketplace-registered + browser-cache-provisioned on every box.
+  Off by default; opted-in PER PROJECT.
+
+**Why #415 inverted Playwright from `MANAGED_PLUGINS` to `OPTIONAL_PLUGINS`:**
+force-enabling it fleet-wide spawned a resident ~144MB headless Chrome tree per
+session per box on the first `browser_*` call, in projects with zero
+browser-testing footprint (~400MB reclaimed live on dev1 by killing two idle
+trees, but they respawn every session). The #158 "baseline-installed AND ENABLED
+everywhere" decision is SUPERSEDED — see the superseding comment block right
+above `MANAGED_PLUGINS`'s definition.
+
+**Force-DISABLE, not drop-the-write, is load-bearing.** Every already-pushed box
+carries a stale `playwright: true` from the pre-#415 force-enable regime. Merely
+removing playwright from `MANAGED_PLUGINS` and leaving the key absent would leave
+that stale `true` in place — the resident-Chrome behaviour would be unchanged on
+exactly the fleet the fix exists to help. `reconcile_managed_plugins()` writes
+`enabled[key]=False` for every `OPTIONAL_PLUGINS` key, which idempotently flips
+the stale `true` off on the next push. (A per-project allowlist keyed on project
+name is architecturally impossible here: airuleset writes USER-scope
+`enabledPlugins`, which is global, not per-project; a per-project map would need
+airuleset to write each project's own git-tracked `.claude/settings.json`, a
+write surface it deliberately never touches — see #415's design comment.)
+
+**The per-project OPT-IN (one line, in the PROJECT's own repo, not airuleset):**
+a project that genuinely needs the browser adds to its OWN
+`<repo>/.claude/settings.json`:
+
+```json
+{"enabledPlugins": {"playwright@claude-plugins-official": true}}
+```
+
+Project scope resolves ABOVE the user-scope `false`, so that one project gets
+Playwright while every other project on the box stays browser-free. The plugin
+is already installed and the browser cache is already warm (both tiers are
+installed by `setup_managed_plugins()`, and `ensure_playwright_browsers()`'s
+guard keys on `MANAGED_PLUGINS + OPTIONAL_PLUGINS`), so the opt-in needs no
+install step. airuleset does NOT and cannot make this edit for those repos (it
+only writes `~/.claude/`); the projects with genuine Playwright evidence
+(audiotester, songplayer, spinbike, restreamer, devbridge, automatizacie-montalu,
+tvdole, audiomatrix, media-bridge, reaperiem — from #415's live scan) opt in
+themselves. `autonomous-verification.md`'s Playwright duty is fully intact for an
+opted-in project; the inversion removes a default, never a capability.
+
+**Verify the inversion on a box:** `pgrep -fc playwright-mcp` before/after a
+session start in a NON-opted-in project should stay 0. A project's own
+`disabledMcpServers` entries in `~/.claude.json` are untouched (airuleset has
+zero writes to `~/.claude.json`).
