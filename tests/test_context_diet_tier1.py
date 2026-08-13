@@ -139,7 +139,10 @@ class TestProductDocsDropped(TestCase):
             "#### Dynamic Workflows (the `Workflow` tool)",
             "#### Autonomous Goals (`/goal`)",
             "#### Verification tools",
-            "`opts.model: 'fable'` for the genuinely HARD judgment stages",
+            # anchor updated for the 2026-08-13 Opus 5 ban rewrite: the
+            # fable-stage guidance survives, now phrased as the gated
+            # judgment-stage rule (same behavioural content, new lineup)
+            "never bake in an ungated Fable stage",
             "Applies to all rewordings and semantic equivalents",
         ]:
             self.assertIn(keep, t, f"behavioural content must stay: {keep}")

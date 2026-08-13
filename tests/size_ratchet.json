@@ -35,7 +35,7 @@
   "tests/test_ci_monitoring_scope.py": 209,
   "tests/test_ci_poll_repeat_block.py": 909,
   "tests/test_compact.py": 1432,
-  "tests/test_context_diet_tier1.py": 192,
+  "tests/test_context_diet_tier1.py": 195,
   "tests/test_delegation_meter.py": 653,
   "tests/test_delivery_stall.py": 362,
   "tests/test_design_before_code.py": 137,
