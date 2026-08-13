@@ -374,8 +374,38 @@ VALID_CAVEMAN_MODES = {
 # not validated live, since doing so would require modifying a remote box,
 # and Claude Code's own auto-install could simply race ahead again on the
 # very next invocation regardless.
-MANAGED_PLUGINS = ("superpowers@claude-plugins-official",
-                    "playwright@claude-plugins-official")
+#
+# #415 (2026-08-13): the #158 "baseline-installed AND ENABLED everywhere"
+# decision above is SUPERSEDED. Force-enabling Playwright fleet-wide meant
+# every session on every box spawned a resident ~144MB headless Chrome tree
+# on its first browser call, in projects with zero browser-testing footprint
+# (measured live on dev1: two idle Chrome trees, both parked on about:blank,
+# ~400MB reclaimed by killing them — but they respawn per session per box).
+# Playwright moved to OPTIONAL_PLUGINS below: still INSTALLED + marketplace-
+# registered on every box (so a project opt-in is one line and the browser
+# cache stays warm), but force-DISABLED in user scope by reconcile. A project
+# that genuinely needs the browser (audiotester, songplayer, spinbike,
+# restreamer, devbridge, automatizacie-montalu, tvdole, audiomatrix, media-
+# bridge, reaperiem) turns it back ON with one line in its OWN git-tracked
+# `.claude/settings.json` — `{"enabledPlugins": {"playwright@claude-plugins-
+# official": true}}` — which project scope resolves ABOVE the user-scope
+# false. autonomous-verification.md's Playwright duty is fully intact for
+# those projects: this is a DEFAULT inversion, never a capability removal.
+# Force-DISABLE (not merely dropping the write) is deliberate — it flips the
+# stale `true` every already-pushed box carries, so the inversion takes
+# effect fleet-wide on the next push rather than only on a fresh box. The
+# #158 "no per-user opt-out" gap is thereby also closed: the default is now
+# off, and a project opts IN rather than a stream having to opt out.
+MANAGED_PLUGINS = ("superpowers@claude-plugins-official",)
+# OPTIONAL_PLUGINS (#415): installed + marketplace-registered on every box,
+# but force-DISABLED in user-scope settings by reconcile_managed_plugins(),
+# so it is OFF by default and a project opts in per its own project-scope
+# settings.json (which beats user scope). Distinct from MANAGED_DISABLED_
+# PLUGINS (plugins we never want at all): an OPTIONAL plugin IS installed and
+# browser-cache-provisioned, ready for a one-line project opt-in. Must never
+# overlap MANAGED_PLUGINS (a key cannot be both force-enabled and force-
+# disabled — see the sanity check in tests/test_managed_plugins.py).
+OPTIONAL_PLUGINS = ("playwright@claude-plugins-official",)
 # Plugins explicitly DISABLED by managed policy (#39 item 3, 2026-07-25
 # /doctor findings): rust-analyzer-lsp + claude-md-management had 0 lifetime
 # uses on dev2 and `/doctor` disabled them directly in settings.json
@@ -7154,21 +7184,29 @@ def ensure_ffmpeg_static_binary(dest: Path = None, probe_dest: Path = None):
 
 def reconcile_managed_plugins(settings: dict) -> dict:
     """Pure: return a new settings dict with every managed baseline plugin
-    enabled, every MANAGED_DISABLED_PLUGINS key forced off (#39 item 3), and
-    every marketplace those plugins live in REGISTERED in
-    extraKnownMarketplaces (belt-and-suspenders alongside `claude plugin
-    marketplace add` in setup_managed_plugins() — a fresh account has no
-    marketplace registered at all otherwise; see MARKETPLACE_SOURCES).
-    Every other key preserved untouched; idempotent."""
+    enabled, every MANAGED_DISABLED_PLUGINS key AND every OPTIONAL_PLUGINS
+    key forced OFF in user scope (#39 item 3, #415), and every marketplace
+    those plugins live in REGISTERED in extraKnownMarketplaces (belt-and-
+    suspenders alongside `claude plugin marketplace add` in
+    setup_managed_plugins() — a fresh account has no marketplace registered
+    at all otherwise; see MARKETPLACE_SOURCES). Every other key preserved
+    untouched; idempotent.
+
+    #415: an OPTIONAL_PLUGINS key is force-DISABLED here (not merely left at
+    whatever value the box already carries) precisely so a stale user-scope
+    `true` from the pre-#415 force-enable regime is flipped OFF on the next
+    push, making the default inversion take effect fleet-wide. A project that
+    needs the plugin re-enables it in its OWN project-scope settings.json,
+    which resolves above this user-scope false."""
     result = dict(settings)
     enabled = dict(result.get("enabledPlugins", {}))
     for key in MANAGED_PLUGINS:
         enabled[key] = True
-    for key in MANAGED_DISABLED_PLUGINS:
+    for key in MANAGED_DISABLED_PLUGINS + OPTIONAL_PLUGINS:
         enabled[key] = False
     result["enabledPlugins"] = enabled
     markets = dict(result.get("extraKnownMarketplaces", {}))
-    for name in _marketplace_names_for(MANAGED_PLUGINS):
+    for name in _marketplace_names_for(MANAGED_PLUGINS + OPTIONAL_PLUGINS):
         repo = MARKETPLACE_SOURCES.get(name)
         if repo is not None:
             markets[name] = {"source": {"source": "github", "repo": repo}}
@@ -7263,10 +7301,14 @@ def ensure_playwright_browsers(cache_dir: Path = None):
     and the plugin enabled but an EMPTY browser cache, so every real browser
     call would fail with "Executable doesn't exist" until someone ran this
     by hand. No sudo needed (a per-user cache under $HOME), so this runs
-    even on the sudo-less subdev stream accounts. A no-op when the baseline
-    doesn't include Playwright, or the cache is already populated."""
+    even on the sudo-less subdev stream accounts. A no-op when neither the
+    baseline nor the optional tier includes Playwright, or the cache is
+    already populated. #415: keyed on MANAGED_PLUGINS + OPTIONAL_PLUGINS —
+    Playwright now lives in OPTIONAL, but the browser cache must still be
+    provisioned so a project's one-line opt-in works immediately (a plugin
+    that is installed but has no browser binaries fails every browser call)."""
     import subprocess
-    if PLAYWRIGHT_PLUGIN_KEY not in MANAGED_PLUGINS:
+    if PLAYWRIGHT_PLUGIN_KEY not in MANAGED_PLUGINS + OPTIONAL_PLUGINS:
         return
     if _playwright_browsers_installed(cache_dir):
         return
@@ -7328,12 +7370,16 @@ def setup_managed_plugins() -> bool:
             if SETTINGS_JSON.exists():
                 shutil.copy2(SETTINGS_JSON, SETTINGS_JSON.with_suffix(".json.bak"))
             SETTINGS_JSON.write_text(new_str)
-            print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}")
+            print(f"    settings.json: enabled {', '.join(MANAGED_PLUGINS)}"
+                  f"; installed-but-disabled {', '.join(OPTIONAL_PLUGINS)}")
         else:
             print("    settings.json: already correct")
 
     market_ok = {}
-    for key in MANAGED_PLUGINS:
+    # #415: install BOTH tiers — an OPTIONAL plugin is force-disabled in user
+    # scope but still installed + marketplace-registered so a project's
+    # one-line opt-in works with no per-project install step.
+    for key in MANAGED_PLUGINS + OPTIONAL_PLUGINS:
         # Adversarial-review MINOR finding: `_marketplace_names_for`
         # deliberately tolerates a bare (no "@") key, but `key.split("@",
         # 1)[1]` a few lines below is unguarded — a raw IndexError there
