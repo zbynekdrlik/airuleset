@@ -1249,6 +1249,23 @@ class TestClassifyTriageAndApproaches(unittest.TestCase):
         ok, reason = dg.classify_triage_and_approaches(body)
         self.assertFalse(ok, reason)
 
+    def test_trivial_short_body_fails_on_length_even_with_triage_line(self):
+        # #428-review MINOR-1: the sibling of the non-trivial short-body
+        # test above -- the trivial branch has the identical MIN_LEN_
+        # TRIAGE_TRIVIAL floor and needs its own coverage. Note this exact
+        # shape is structurally UNREACHABLE through post-record-design-
+        # comment.sh's real "design" kind branch (classify_design_comment's
+        # own MIN_LEN gate == MIN_LEN_TRIAGE_TRIVIAL, checked on the SAME
+        # stripped body, so a body short enough to hit this branch is
+        # already refused before the hook ever calls
+        # classify_triage_and_approaches at all) -- this is a direct unit
+        # test of the function's own standalone contract, not a claim
+        # about hook reachability.
+        body = "Triage: trivial"
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertFalse(ok, reason)
+        self.assertIn("too short", reason)
+
     def test_slovak_pristup_markers_are_recognized(self):
         body = (
             "Triage: netriviálne -- nová dlhožijúca komponenta.\n\n"
