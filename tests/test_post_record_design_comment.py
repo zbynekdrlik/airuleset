@@ -29,6 +29,12 @@ _FAKE_GH = """#!/usr/bin/env bash
 # stray characters (reproduced live while writing this fixture). Avoid the
 # pitfall entirely: resolve the default in a separate statement.
 echo "$@" >> "${FAKE_GH_LOG:-/dev/null}"
+# #436-review MINOR -- a SEPARATE, additive log (never the shape
+# FAKE_GH_LOG's own consumers assert `startswith("issue view")` on) so a
+# test can independently verify the SUBPROCESS'S OWN cwd, not just the
+# repo_key it resolved. Writes /dev/null by default -- zero behaviour
+# change for every pre-existing FAKE_GH_LOG-only test.
+pwd >> "${FAKE_GH_CWD_LOG:-/dev/null}"
 [ "${FAKE_GH_FAIL:-0}" = "1" ] && exit 1
 JSON="${FAKE_GH_COMMENTS_JSON:-}"
 [ -z "$JSON" ] && JSON='{"comments":[]}'
@@ -1268,6 +1274,131 @@ class TestTrivialTriageArchitectureExemption(_Base):
         reason = self.reject(42, "design")
         self.assertIsNotNone(reason)
         self.assertIn("Architekt", reason)
+
+
+# --------------------------------------------------------------------------- #
+# #436 -- cwd resolution mismatch vs block-commit-without-design.sh. A worker
+# dispatched with session cwd = repo A, running
+# `cd /path/to/repo-B && gh issue comment N --body "..."`, must have its
+# marker written under repo B's key (the repo the comment is actually
+# posted against), not repo A's (the payload's static cwd) -- exactly what
+# block-commit-without-design.sh's OWN #187/#220 `notify.resolve_work_cwd`
+# resolution already does for the READER side; this hook is the WRITER
+# side, and used to resolve `repo_key`/the verification `gh issue view`
+# subprocess cwd from the raw payload cwd alone.
+# --------------------------------------------------------------------------- #
+
+class TestRepoResolvedFromInlineCdPrefix(_Base):
+
+    def _other_repo(self, remote="https://github.com/zbynekdrlik/otherrepo.git"):
+        other = Path(tempfile.mkdtemp(prefix="airuleset-designhook-other-"))
+        self.addCleanup(shutil.rmtree, other, True)
+        _git(other, "init", "-q", "-b", "main")
+        _git(other, "remote", "add", "origin", remote)
+        return other
+
+    def marker_in(self, repo, issue, kind="design"):
+        os.environ["HOME"] = str(self.home)
+        return dg.read_marker(repo, issue, kind)
+
+    def test_marker_written_under_the_cd_target_repo(self):
+        other = self._other_repo()
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/otherrepo/issues/61#issuecomment-101",
+        }])
+        cmd = 'cd %s && gh issue comment 61 --body "x"' % other
+        # #436-review MINOR -- verify the `gh issue view` VERIFICATION
+        # subprocess's own cwd too, not just the resolved repo_key: a
+        # regression that fixed repo_key but left `cwd=cwd` (never
+        # `cwd=work_cwd`) on the subprocess call would still pass every
+        # OTHER assertion below (the shared fake `gh` answers identically
+        # regardless of its own cwd), so this is the only assertion that
+        # actually locks the subprocess-cwd half of the fix.
+        cwd_log = self.home / "gh-cwd.log"
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = self.gh_dir + os.pathsep + env.get("PATH", "")
+        env["FAKE_GH_COMMENTS_JSON"] = comments
+        env["FAKE_GH_CWD_LOG"] = str(cwd_log)
+        payload = json.dumps({"tool_input": {"command": cmd}, "cwd": str(self.repo)})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(
+            self.marker_in("otherrepo", 61),
+            "the marker must be written under the cd TARGET repo's key")
+        self.assertIsNone(
+            self.marker_in("airuleset", 61),
+            "the marker must NOT be written under the stale payload-cwd repo")
+        self.assertTrue(cwd_log.exists(), "gh issue view was never invoked")
+        seen_cwds = cwd_log.read_text().splitlines()
+        self.assertEqual(
+            seen_cwds, [str(other.resolve())],
+            "the gh issue view verification subprocess must run in the cd "
+            "TARGET repo (work_cwd), never the stale payload cwd")
+
+    def test_no_cd_prefix_still_resolves_from_payload_cwd_unchanged(self):
+        # no `cd` anywhere in the command -- must behave exactly as before.
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/62#issuecomment-102",
+        }])
+        r = self.run_hook('gh issue comment 62 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(62))
+
+    def test_cd_to_a_non_repo_path_falls_back_to_payload_cwd(self):
+        # a `cd` to something that is NOT a git repo must never be trusted --
+        # falls back to the payload cwd, same as having no `cd` at all.
+        not_a_repo = Path(tempfile.mkdtemp(prefix="airuleset-designhook-notrepo-"))
+        self.addCleanup(shutil.rmtree, not_a_repo, True)
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/63#issuecomment-103",
+        }])
+        cmd = 'cd %s && gh issue comment 63 --body "x"' % not_a_repo
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(63))
+
+    def test_ambiguous_second_cd_later_in_the_command_refuses_the_first(self):
+        """#436-review MINOR (fresh-context adversarial review, live-
+        triggered): `cd /B && gh issue comment 71 ...; cd /A && gh issue
+        comment 72 ...` -- a command with TWO invocations, each meant to
+        run in a DIFFERENT repo (#208's own multi-issue support makes this
+        a genuinely reachable shape, unlike the single-`git commit`
+        caller). Trusting only the FIRST `cd` (repo B) for the WHOLE
+        command would silently write issue 72's marker under repo B too,
+        and run its own `gh issue view` verification there -- the wrong
+        repo for an invocation that never even mentioned it. A second
+        top-level `cd` anywhere later in the command must refuse the
+        resolution entirely (fall back to the payload cwd, same as no `cd`
+        at all) rather than guess which invocation the first `cd` applied
+        to."""
+        repo_b = self._other_repo(remote="https://github.com/zbynekdrlik/repo-b.git")
+        repo_a = self._other_repo(remote="https://github.com/zbynekdrlik/repo-a.git")
+        comments = _comments_json([{
+            "body": GOOD_BODY, "createdAt": _iso(5), "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/71#issuecomment-201",
+        }])
+        cmd = ('cd %s && gh issue comment 71 --body "x"; '
+               'cd %s && gh issue comment 72 --body "y"' % (repo_b, repo_a))
+        r = self.run_hook(cmd, comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(
+            self.marker_in("repo-b", 71),
+            "must never trust the FIRST cd once a SECOND cd exists later")
+        self.assertIsNone(
+            self.marker_in("repo-b", 72),
+            "issue 72 must never resolve to repo B -- it was never cd'd there")
+        self.assertIsNone(
+            self.marker_in("repo-a", 72),
+            "must never trust the SECOND cd either -- the whole command is ambiguous")
+        self.assertIsNotNone(
+            self.marker(71),
+            "falls back to the payload cwd (airuleset), same as having no cd at all")
+        self.assertIsNotNone(self.marker(72))
 
 
 if __name__ == "__main__":

@@ -1501,21 +1501,47 @@ _GIT_COMMIT_CMD_RE = re.compile(
     _STMT_BOUNDARY + r"\s*(?:sudo\s+|env\s+)?git\s+commit\b")
 _CD_PREFIX_RE = re.compile(
     r"""^\s*cd\s+(?:"([^"]*)"|'([^']*)'|(\S+))\s*(?:&&|;)""")
+# #436-review MINOR (fresh-context adversarial review, live-triggered): a
+# SECOND top-level `cd` statement anywhere after the first one means `cmd`
+# is a compound command with MORE THAN ONE cd-scoped segment (this became
+# practically reachable only once `post-record-design-comment.sh` started
+# passing commands built from #208's own multi-`gh issue comment`-invocation
+# support -- `cd /B && gh issue comment 5 ...; cd /A && gh issue comment 7
+# ...` -- something `block-commit-without-design.sh`'s single-`git commit`
+# caller never produces). Trusting only the FIRST `cd` there silently
+# resolves EVERY invocation to the WRONG repo for every segment after the
+# first, rather than the safe "fall back to cwd" a genuinely ambiguous
+# command deserves. `_LATER_CD_RE` matches ANY later `cd` starting a fresh
+# top-level statement; finding one refuses the whole resolution (falls back
+# to `cwd`, same as having no `cd` at all) rather than guessing which
+# invocation the trusted first `cd` was actually meant for.
+_LATER_CD_RE = re.compile(r"(?:&&|;|\|)\s*cd\s+")
 
 
-def resolve_work_cwd(cmd, cwd, run=None):
+def resolve_work_cwd(cmd, cwd, run=None, trigger_re=None):
     """The directory whose repo `cmd` actually operates on -- a `cd <path>
     &&`/`cd <path>;` that is the very FIRST statement of `cmd` overrides
     `cwd` (#187) when, and only when, that path is a real, resolvable git
-    repo AND `cmd` contains a `git commit` invocation somewhere. Never
-    guesses: no leading `cd`, no `git commit` anywhere in `cmd`, or a `cd`
-    target that isn't a git repo all fall through to `cwd` unchanged.
-    Anchoring to the command's own start (not "a cd preceded by any
-    boundary character anywhere") is deliberate -- see the module comment
-    for the adversarial-review history that shape closes."""
-    if isinstance(cmd, str) and cmd and _GIT_COMMIT_CMD_RE.search(cmd):
+    repo AND `cmd` contains a TRIGGERING invocation somewhere -- `git
+    commit` by default (`block-commit-without-design.sh`'s own use case),
+    or `trigger_re` when a DIFFERENT caller needs a different anchor (#436
+    -- `post-record-design-comment.sh` passes its own `gh issue comment`
+    trigger, since its whole command shape never contains `git commit` at
+    all). Never guesses: no leading `cd`, no trigger match anywhere in
+    `cmd`, a `cd` target that isn't a git repo, OR a SECOND top-level `cd`
+    statement anywhere later in `cmd` (#436-review -- an ambiguous
+    multi-segment command is refused, never resolved from only the first
+    segment's `cd`) all fall through to `cwd` unchanged. Anchoring to the
+    command's own start (not "a cd preceded by any boundary character
+    anywhere") is deliberate -- see the module comment for the
+    adversarial-review history that shape closes; a custom `trigger_re`
+    changes ONLY which command this function bothers to resolve for -- the
+    SAME anchored, injection-hardened `_CD_PREFIX_RE.match()` (string-start
+    only) runs for every caller, unchanged."""
+    trigger = trigger_re if trigger_re is not None else _GIT_COMMIT_CMD_RE
+    if isinstance(cmd, str) and cmd and trigger.search(cmd):
         m = _CD_PREFIX_RE.match(cmd)
-        if m:
+        if m and not _LATER_CD_RE.search(cmd, m.end()):
             path = m.group(1) or m.group(2) or m.group(3) or ""
             path = os.path.expanduser(path)
             if path and path != cwd and repo_name_for(path, run=run):

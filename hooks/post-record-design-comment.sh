@@ -270,6 +270,19 @@ try:
     if not cwd:
         sys.exit(0)
 
+    # #436 -- resolve the repo this comment is actually landing in, exactly
+    # the way block-commit-without-design.sh's own #187/#220 resolution
+    # does (notify.resolve_work_cwd) -- a worker dispatched with session
+    # cwd = repo A, running `cd /path/to/repo-B && gh issue comment ...`,
+    # must have its marker written under repo B's key, not repo A's. The
+    # SAME anchored, injection-hardened cd-prefix parser is reused
+    # verbatim; only the TRIGGER differs (this hook's own command shape is
+    # `gh issue comment`, never `git commit`). Used for BOTH the repo_key
+    # lookup below AND the `gh issue view` verification subprocess's own
+    # cwd, so the two can never disagree about which repo this is.
+    work_cwd = notify.resolve_work_cwd(
+        cmd, cwd, trigger_re=re.compile(r"\bgh\s+issue\s+comment\b"))
+
     scan_cmd = _control_flow_text(cmd, repo_root)
 
     # #208 -- every `gh issue comment <N>` occurrence in the command text,
@@ -311,7 +324,7 @@ try:
         repo_key = explicit_repo.rstrip("/").split("/")[-1]
         gh_repo_args = ["-R", explicit_repo]
     else:
-        repo_key = notify.repo_name_for(cwd)
+        repo_key = notify.repo_name_for(work_cwd)
         gh_repo_args = []
 
     if not repo_key:
@@ -364,7 +377,7 @@ try:
         try:
             r = subprocess.run(
                 ["gh", "issue", "view", str(issue)] + gh_repo_args + ["--json", "comments"],
-                capture_output=True, text=True, timeout=10, cwd=cwd)
+                capture_output=True, text=True, timeout=10, cwd=work_cwd)
         except Exception as exc:
             _log_exception("gh-view #%d" % issue, exc)
             continue
