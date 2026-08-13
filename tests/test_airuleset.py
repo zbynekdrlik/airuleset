@@ -1767,7 +1767,9 @@ class TestPrePushBaseSyncHook(TestCase):
         self._edit_line2(repo, "dev", "DEV-EDIT")
         r = self._run(repo, "git push origin dev")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("CONFLICT", r.stdout)
+        # #417: the block reason moved to stderr (Claude Code's PreToolUse
+        # exit-2 contract surfaces the block reason FROM stderr).
+        self.assertIn("CONFLICT", r.stderr)
 
     def test_block_reason_reaches_stderr_not_just_stdout(self):
         # #417: Claude Code's PreToolUse exit-2 contract surfaces the block
