@@ -1761,6 +1761,28 @@ def record_question(message_id, channel, session, cwd, now=None, path=None,
     d[message_id] = {"session": session, "cwd": str(cwd or ""),
                      "channel": str(channel or ""), "ts": int(now),
                      "question": q, "block": block}
+    # #407: SUPERSEDE — the newest ask per (session, channel) is the ONLY
+    # tracked entry. A reworded ❓ past _EDIT_WINDOW_S cannot EDIT the old
+    # Discord card any more (update_question refuses purely on age), so the
+    # pending hook falls through to a fresh POST + a fresh record here —
+    # before this, the OLD entry stayed tracked forever (no age TTL since
+    # #368) and reping_stale_questions re-pinged BOTH daily: an immortal
+    # "ghost". Dropping every OTHER same-(session, channel) entry at record
+    # time makes the ghost impossible to create — this function is the
+    # map's single writer (the send hook AND reping's own re-track both
+    # flow through it). Channel-scoped ON PURPOSE: a DISCORD_MIRROR
+    # fan-out records one entry per target THREAD (same session, DIFFERENT
+    # channels) within seconds — those are siblings of one generation, not
+    # ghosts, and each must stay tracked so a reply in either thread keeps
+    # routing (watchdog job 7). This mirrors the edit path's own
+    # within-window semantics (the second ask REPLACES the first on the
+    # phone) — past the window the behavior is now consistent instead of
+    # accidentally divergent.
+    for mid in [mm for mm, v in d.items()
+                if mm != message_id and isinstance(v, dict)
+                and str(v.get("session") or "") == session
+                and str(v.get("channel") or "") == channel]:
+        d.pop(mid, None)
     # prune malformed — a legacy entry that isn't a dict (never one this
     # function itself could have written) is immediately prunable rather
     # than crashing the write (mirrors the identical fix in
