@@ -494,21 +494,29 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
             calls.append((pid, text))
             return True
 
-        rec = {}
+        rec = {"lna": 2}    # a prior abort streak must clear on success
+        state = {}
         with m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
             logs, owns, tmux = self._call(GOAL_ARMED_DRAFT_CAP,
-                                          lambda cwd: 5, now, tmtime, rec=rec)
+                                          lambda cwd: 5, now, tmtime, rec=rec,
+                                          state=state)
         self.assertTrue(owns)
         self.assertFalse(any("skip draft" in ln for ln in logs), logs)
         self.assertEqual(len(calls), 1, logs)
         self.assertEqual(calls[0][0], "111")
         self.assertEqual(rec.get("ln"), 1)
+        self.assertNotIn("lna", rec)   # #442-review F2: streak cleared
+        # #442-review F3: janitor provenance cleared again on success.
+        self.assertNotIn("111", state.get("janitor_watch", {}))
         self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
 
     def test_draft_stash_abort_never_consumes_the_nudge_budget(self):
         # An aborted verified delivery typed nothing (or undid itself) —
         # transient, retried next sweep, and it must NOT advance the
-        # ln/llast budget (the #176 verified-and-fallible-path lesson).
+        # ln/llast budget (the #176 verified-and-fallible-path lesson). It
+        # DOES advance the consecutive-abort streak (#442-review F2), and
+        # the janitor provenance mark must PERSIST on failure so the
+        # shared janitor can recover a stuck stash send (#442-review F3).
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         calls = []
@@ -519,15 +527,104 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
             return False
 
         rec = {}
+        state = {}
         with m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
             logs, owns, tmux = self._call(GOAL_ARMED_DRAFT_CAP,
-                                          lambda cwd: 5, now, tmtime, rec=rec)
+                                          lambda cwd: 5, now, tmtime, rec=rec,
+                                          state=state)
         self.assertTrue(owns)
         self.assertEqual(len(calls), 1, logs)
         self.assertNotIn("ln", rec)
         self.assertNotIn("llast", rec)
+        self.assertEqual(rec.get("lna"), 1)
+        self.assertIn("111", state.get("janitor_watch", {}))
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs),
                          logs)
+
+    def test_consecutive_stash_aborts_reach_the_give_up_ping(self):
+        # #442-review F2: without a bound, a permanently-aborting lane
+        # retried silently every sweep forever and the give-up ping was
+        # structurally unreachable (the nudge counter only advances on
+        # success). At the abort cap the give-up branch fires instead.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_DRAFT_CAP)
+        rec = {"lna": goal.GOAL_LANE_MAX_STASH_ABORTS}
+        sent = []
+        with m.patch("airuleset.resolve_authority", return_value="full"), \
+             m.patch.object(wd, "deliver_with_stash",
+                            side_effect=AssertionError(
+                                "no delivery may be attempted past the "
+                                "abort cap")):
+            logs, owns = goal.goal_lane_occupancy_nudge(
+                now, tmux, rec, self.SID, self.CWD, "111",
+                GOAL_ARMED_DRAFT_CAP, tpath, tmtime, "loc",
+                lambda msg, **k: sent.append(msg), False, None, proj,
+                backlog_fetch=lambda cwd: 5, state={},
+                sleep_fn=lambda s: None)
+        self.assertTrue(owns)
+        self.assertTrue(any("consecutive stash aborts" in ln for ln in logs),
+                        logs)
+        self.assertEqual(len(sent), 1, logs)
+        self.assertIn("zlyhalo", sent[0])
+        self.assertEqual(tmux.sent, [])
+
+    def test_draft_changed_between_captures_refuses_composition(self):
+        # #442-review F1: un-submitted COMPOSITION stamps neither
+        # recent-activity signal (the presence marker only ever gets
+        # stamped on a prompt SUBMIT), so the two-capture draft diff is
+        # the one direct evidence of live typing — a box whose content
+        # moved between the sweep-top capture and the pre-send one must
+        # refuse, consume nothing, and never reach the stash primitive.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        grown = GOAL_ARMED_DRAFT_CAP.replace("rozpisany draft",
+                                             "rozpisany draft a este kus")
+        for label, top_cap, fresh_cap in (
+                ("draft grew", GOAL_ARMED_DRAFT_CAP, grown),
+                ("bare became draft", GOAL_ARMED_CAP, GOAL_ARMED_DRAFT_CAP)):
+            with self.subTest(label):
+                tmux = DeliverGoalFakeTmux(
+                    [("%9", "claude", self.CWD, "111")], top_cap,
+                    cap_seq=[fresh_cap])
+                rec = {}
+                calls = []
+                with m.patch("airuleset.resolve_authority",
+                             return_value="full"), \
+                     m.patch.object(wd, "deliver_with_stash",
+                                    side_effect=lambda *a, **k:
+                                    calls.append(a) or True):
+                    logs, owns = goal.goal_lane_occupancy_nudge(
+                        now, tmux, rec, self.SID, self.CWD, "111", top_cap,
+                        tpath, tmtime, "loc", None, False, None, proj,
+                        backlog_fetch=lambda cwd: 5, state={},
+                        sleep_fn=lambda s: None)
+                self.assertTrue(owns)
+                self.assertTrue(any("composing" in ln for ln in logs), logs)
+                self.assertEqual(calls, [])
+                self.assertEqual(
+                    [a for a in tmux.sent if "send-keys" in " ".join(a)], [])
+                self.assertNotIn("ln", rec)
+
+    def test_non_at_rest_draft_still_skips(self):
+        # #442-review F4: a draft that is NOT at rest (the free-prompt
+        # shape refuses — e.g. a menu-pointer head) must still be the old
+        # "skip draft" refusal, never a delivery.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_has_free_prompt", return_value=False):
+            logs, owns, tmux = self._call(GOAL_ARMED_DRAFT_CAP,
+                                          lambda cwd: 5, now, tmtime)
+        self.assertFalse(owns)
+        self.assertTrue(any("skip draft" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
 
 
 class TestGoalLaneNudgeDoctrine(unittest.TestCase):
