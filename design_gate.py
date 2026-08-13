@@ -637,6 +637,35 @@ _TRADEOFF_RE = re.compile(
 )
 
 
+def _triage_class(text):
+    """The `Triage:` class named in `text` ("trivial" / "non-trivial" /
+    `None`) -- extracted, never depth-checked. SHARED by
+    `classify_triage_and_approaches` (below) and its public single-purpose
+    wrapper `triage_class` (#428), so the two can never drift on what a
+    given body's class actually is. `text` is assumed already `(body or
+    "").strip()`-ed by the caller."""
+    m = _TRIAGE_LINE_RE.search(text)
+    if not m:
+        return None
+    value = m.group("cls")
+    if _TRIAGE_NONTRIVIAL_RE.search(value):
+        return "non-trivial"
+    if _TRIAGE_TRIVIAL_RE.search(value):
+        return "trivial"
+    return None
+
+
+def triage_class(body):
+    """Public, #428: just the `Triage:` class named in `body`
+    ("trivial"/"non-trivial"/`None`) -- no depth/length checks, unlike
+    `classify_triage_and_approaches`. Lets a caller (`hooks/post-record-
+    design-comment.sh`) decide whether the Architektúra: requirement
+    applies WITHOUT re-running (or duplicating) the full triage classifier
+    -- a TRIVIAL ticket needs nothing beyond its own Triage: line, per
+    `classify_triage_and_approaches`'s own doc comment below."""
+    return _triage_class((body or "").strip())
+
+
 def classify_triage_and_approaches(body):
     """Heuristic verdict for #414: does `body` carry a `Triage:` line
     naming trivial/non-trivial and -- ONLY for the non-trivial class -- at
@@ -653,13 +682,9 @@ def classify_triage_and_approaches(body):
                 len(text), MIN_LEN_TRIAGE_TRIVIAL)
         return False, "missing: Triage: line (trivial / non-trivial)"
 
-    value = m.group("cls")
-    if _TRIAGE_NONTRIVIAL_RE.search(value):
-        cls = "non-trivial"
-    elif _TRIAGE_TRIVIAL_RE.search(value):
-        cls = "trivial"
-    else:
-        return False, "Triage: value %r names neither trivial nor non-trivial" % value
+    cls = _triage_class(text)
+    if cls is None:
+        return False, "Triage: value %r names neither trivial nor non-trivial" % m.group("cls")
 
     if cls == "trivial":
         if len(text) < MIN_LEN_TRIAGE_TRIVIAL:

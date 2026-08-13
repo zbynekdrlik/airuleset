@@ -411,16 +411,29 @@ try:
             ok, reason = classifiers[kind](body)
             if ok and kind == "design":
                 # #414 -- SOTA architecture: a "design" marker ALSO
-                # requires the Architektúra:/Triage: shape. ANDed here,
-                # NEVER inside classify_design_comment() itself -- that
-                # function has three OTHER independent consumers that
+                # requires the Architektúra:/Triage: shape -- but #428:
+                # ONLY when the ticket triaged NON-TRIVIAL. A TRIVIAL
+                # ticket needs nothing beyond its own Triage: line
+                # (classify_triage_and_approaches's own doc comment, and
+                # CYCLE step 2's settled "depth scales with the problem"
+                # principle) -- so arch_ok is required ONLY when
+                # dg.triage_class(body) is NOT "trivial" (this also covers
+                # the "Triage: line missing/unrecognized" case, where
+                # triage_ok already fails on its own and the combined
+                # reject reason below still names what's missing). ANDed
+                # here, NEVER inside classify_design_comment() itself --
+                # that function has three OTHER independent consumers that
                 # depend on its stable, unchanged meaning (see
                 # design_gate.py's own #414 section). Checking BOTH even
                 # when the first already failed gives a complete "what's
                 # missing" picture in one shot instead of a multi-round
                 # discovery.
-                arch_ok, arch_reason = dg.classify_architecture_section(body)
                 triage_ok, triage_reason = dg.classify_triage_and_approaches(body)
+                is_trivial = triage_ok and dg.triage_class(body) == "trivial"
+                if is_trivial:
+                    arch_ok, arch_reason = True, "ok (trivial -- architecture not required)"
+                else:
+                    arch_ok, arch_reason = dg.classify_architecture_section(body)
                 if not (arch_ok and triage_ok):
                     parts = [r for ok2, r in
                              ((arch_ok, arch_reason), (triage_ok, triage_reason))
