@@ -803,10 +803,12 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
 # --------------------------------------------------------------------------- #
 # LANE-OCCUPANCY NUDGE (#365, owner directive 2026-08-11) -- the ONE
 # watchdog-INITIATED action the owner explicitly named as surviving this
-# collapse. Migrated here verbatim (functionally) from job 20's old
-# `_goal_lane_occupancy_nudge` -- same trigger logic, same state shape, same
-# `send_continue` delivery, same recent-human-activity gate (this one is a
-# real watchdog-initiated action, unlike arm delivery above).
+# collapse. Migrated here from job 20's old `_goal_lane_occupancy_nudge`;
+# #442 then un-suppressed it in place: the recent-human-activity gate keeps
+# firing (this one is a real watchdog-initiated action, unlike arm delivery
+# above) but through the lane path's OWN short live-conversation window
+# below, and an at-rest draft is DELIVERED via `deliver_with_stash` instead
+# of being a "skip draft" dead end.
 # --------------------------------------------------------------------------- #
 
 GOAL_LANE_IDLE_S = 15 * 60
@@ -814,13 +816,35 @@ GOAL_LANE_INTERVAL_S = 15 * 60
 GOAL_LANE_MAX_NUDGES = 2
 GOAL_LANE_LIVE_WINDOW_S = 15 * 60
 
+# #442 -- the lane-fill path's OWN "live conversation" definition. The
+# shared check's default window (`GOAL_AUTOARM_RECENT_HUMAN_S`, 30 min) is
+# calibrated for the VIRGIN-ARM decision -- irreversibly arming a whole
+# loop into a possibly-live conversation -- and blanket-applying it here
+# made the nudge structurally self-suppressing on any box the owner merely
+# GLANCES at every ~20-30 min (gk journal: "SKIP-TRANSIENT ... presence
+# marker 1331-1628s old" on every single attempt). The lane nudge is a
+# rate-limited reminder into an ALREADY-armed session, so it only needs to
+# avoid typing into an exchange a human is actively MID-SENTENCE in: live
+# typing stamps the presence marker every minute or two, so ~3 min covers
+# "typing right now" while a periodic glance no longer suppresses it.
+# Worst-case annoyance stays bounded by GOAL_LANE_INTERVAL_S +
+# GOAL_LANE_MAX_NUDGES regardless.
+GOAL_LANE_LIVE_CONVO_S = 3 * 60
+
+# #442 -- the text TEACHES the fleet-dispatch doctrine
+# (skills/autopilot/SKILL.md: parallel worktree workers, the account-wide
+# concurrent-agent cap of 8, serialize-only integration), never just a
+# bare "dispatch more workers" poke.
 GOAL_LANE_NUDGE_TEXT = (
-    "lane-check: backlog=%d otvorených tiketov, no BEžÍ 0 "
-    "dispatched workerov (žiadny live subagent transcript), waiterov "
-    "beží: %d. Prázdne implementačné lány nie sú "
-    "dôvod na nečinnosť ani počas čakania na CI/waiter "
-    "— dispatchni TERAZ ďalších paralelných workerov na "
-    "zvyšný backlog (TURBO)."
+    "lane-check: backlog=%d otvorených tiketov, no BEŽÍ 0 dispatched "
+    "workerov (žiadny live subagent transcript; waiterov beží: %d). "
+    "Prázdne implementačné lány nie sú dôvod na nečinnosť ani počas "
+    "čakania na CI/waiter. Postupuj podľa FLEET doktríny skills/autopilot "
+    "SKILL.md: dispatchni TERAZ ďalšie batchnuté tickety ako PARALELNÝCH "
+    "isolation:\"worktree\" autopilot-worker subagentov "
+    "(run_in_background), drž ACCOUNT-WIDE cap 8 súbežných agentov "
+    "(workeri + validatory + review dispatche SPOLU) a integruj výhradne "
+    "SÉRIOVO — jeden merge/CI/push za celé kolo."
 )
 
 
@@ -865,8 +889,16 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
 
     def _boundary_ok(cap):
         kind, draft = watchdog._classify_boundary(cap)
-        if kind != "input" or draft:
+        if kind != "input":
             return False, kind, draft
+        if draft:
+            # #442: an AT-REST draft is deliverable -- `deliver_with_stash`
+            # parks it (single slot, auto-restores once the delivered turn
+            # completes), so it stopped being a reason to skip. At-rest-ness
+            # for a draft is the draft-admitting free-prompt shape
+            # (`bare_only=False`), the same precondition deliver_with_stash
+            # re-verifies internally before its first keystroke.
+            return watchdog._has_free_prompt(cap, bare_only=False), kind, draft
         return watchdog.pane_at_idle_prompt(cap), kind, draft
 
     ok, kind, draft = _boundary_ok(captured)
@@ -912,7 +944,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%d -> "
                     "rate-limited, skip" % (loc, waiters, backlog_n))
         return logs, True
-    recent, reason = watchdog._goal_autoarm_recent_human_activity(sid, tpath, now)
+    # #442: the SAME shared check job 9's virgin-arm gate uses, but through
+    # the lane path's OWN short window (never the 30-min default -- see
+    # GOAL_LANE_LIVE_CONVO_S above). The `window_s` seam already exists on
+    # the shared function, so job 9's own default-window semantics stay
+    # byte-identical and arm delivery stays exempt entirely.
+    recent, reason = watchdog._goal_autoarm_recent_human_activity(
+        sid, tpath, now, window_s=GOAL_LANE_LIVE_CONVO_S)
     if recent:
         logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> %s -- recent "
                     "human activity, never overwrite a live conversation"
@@ -930,12 +968,32 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "the sweep" % loc)
         return logs, True
     text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
-    watchdog.send_continue(pid, text, run)
+    if draft:
+        # #442 -- deliver INTO the held draft via the stash protocol (the
+        # primitive re-verifies idle-with-draft itself and undoes its own
+        # keystrokes on any failed verify). Provenance is marked BEFORE
+        # the attempt so the shared janitor can recover a stuck stash send
+        # for THIS pane, and cleared only on success -- the same shape
+        # `deliver_goal`'s own draft branch uses.
+        watchdog._janitor_mark_watch(state, pid, now)
+        if not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
+                                           logs=logs, sleep_fn=sleep_fn):
+            # The abort typed nothing (or provably undid itself) --
+            # transient, retried next sweep, and it must NOT consume the
+            # ln/llast budget (a refused attempt is not a nudge).
+            logs.append("lane-occupancy %s stash-abort -> transient, "
+                        "retry next sweep" % loc)
+            return logs, True
+        watchdog._janitor_clear_watch(state, pid)
+        mode = "stash"
+    else:
+        watchdog.send_continue(pid, text, run)
+        mode = "typed"
     rec["ln"] = n + 1
     rec["llast"] = now
-    logs.append("lane-occupancy nudge %s workers=0 waiters=%d backlog=%d "
-                "idle=%dm (%d/%d)" % (loc, waiters, backlog_n, idle // 60,
-                                      n + 1, GOAL_LANE_MAX_NUDGES))
+    logs.append("lane-occupancy nudge (%s) %s workers=0 waiters=%d backlog=%d "
+                "idle=%dm (%d/%d)" % (mode, loc, waiters, backlog_n,
+                                      idle // 60, n + 1, GOAL_LANE_MAX_NUDGES))
     return logs, True
 
 
