@@ -339,6 +339,24 @@ def _repo_label(root, git_run=None):
     return os.path.basename(str(root).rstrip("/"))
 
 
+def _repo_is_fork(root, git_run=None):
+    """True when `root` is a fork CLONE whose own origin/main is NOT its real
+    delivery target -- detected purely locally by a distinct `upstream` remote
+    (the standard fork-clone convention: `origin` = your fork, `upstream` = the
+    source you integrate into). A fork's own default branch freezing is the
+    EXPECTED steady state -- integration goes UPSTREAM (for the sub-dev streams,
+    the gatekeeper does it) -- so job 28's stuck-main heuristic must never
+    measure it (#441: kvaskodev/odoo-erp pinged David daily). Purely local git,
+    no network / no auth -- job 28's own invariant is preserved."""
+    up = _git_first_line(root, ["remote", "get-url", "upstream"], git_run)
+    if not up:
+        return False
+    origin = _git_first_line(root, ["remote", "get-url", "origin"], git_run)
+    # A distinct upstream (or an upstream with no configured origin at all) is
+    # the fork shape; an upstream identical to origin is not.
+    return up != origin
+
+
 def _sweep_due(state, key, now, interval):
     """True once per `interval`, tracked in `state[key]`. Shared cadence gate
     for jobs 27/28 -- neither needs to run every 60s poll; both cost a
@@ -591,6 +609,16 @@ STUCK_MAIN_AHEAD_MIN = 20             # env AIRULESET_STUCK_MAIN_AHEAD
 STUCK_MAIN_REPING_S = 86400
 
 
+def _stuck_main_skip_set():
+    """`owner/repo` labels an operator explicitly opted OUT of the stuck-main
+    sweep via `AIRULESET_STUCK_MAIN_SKIP` (comma/space separated) -- the
+    per-repo opt-out (#441) for a fork/mirror clone whose delivery goes
+    elsewhere but which lacks the `upstream`-remote convention `_repo_is_fork`
+    auto-detects. Empty / unset -> empty set (never skips anything)."""
+    raw = os.environ.get("AIRULESET_STUCK_MAIN_SKIP", "")
+    return {tok for tok in re.split(r"[,\s]+", raw) if tok}
+
+
 def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                      git_run=None, git_fetch=None, age_threshold=None,
                      ahead_threshold=None, reping=STUCK_MAIN_REPING_S,
@@ -662,9 +690,19 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
     if not dry_run:
         state["stuck_main"] = seen    # #172 F3: same dict from here on
     live = set()
+    skip_set = _stuck_main_skip_set()
     for root in batch:
         label = _repo_label(root, git_run)
         touched.add(label)
+        # #441: a fork's origin/main is deliberately frozen (delivery goes
+        # upstream, not to its own main), so this base ref is never a stalled
+        # merge -- skip it BEFORE the fetch, and drop any stale dedup memory so
+        # it can never re-ping either. Auto-detected via a distinct `upstream`
+        # remote (purely local, no network) or via the explicit opt-out list.
+        if label in skip_set or _repo_is_fork(root, git_run):
+            seen.pop(label, None)
+            logs.append("stuck-main skip %s (fork/opt-out)" % label)
+            continue
         if git_fetch is not None:
             try:
                 git_fetch(root)
