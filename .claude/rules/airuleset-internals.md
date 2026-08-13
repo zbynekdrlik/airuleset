@@ -1423,13 +1423,24 @@ writes only `~/.claude/`, and having it iterate over managed repos to write each
 project's own git-tracked `.claude/settings.json` would be a bigger, separately-
 scoped mechanism (new machinery, out of #415's scope + against the FREEZE), not
 "impossible" outright: a `.claude/settings.json` edit IS governance, not project
-CODE, so a FUTURE deliberate change could do it. For now the projects with
-genuine Playwright evidence (audiotester, songplayer, spinbike, restreamer,
-devbridge, automatizacie-montalu, tvdole, audiomatrix, media-bridge, reaperiem —
-from #415's live scan) opt in themselves; that migration + the fleet-wide
-discoverability of the opt-in are TRACKED as a #415 follow-up (no-dropped-work),
-not left implicit. `autonomous-verification.md`'s Playwright duty is fully intact
-for an opted-in project; the inversion removes a default, never a capability.
+CODE, so a FUTURE deliberate change could do it. The projects with genuine
+Playwright evidence (audiotester, songplayer, spinbike, restreamer, devbridge,
+automatizacie-montalu, tvdole, audiomatrix, media-bridge, reaperiem — from
+#415's live scan) each opt in themselves; that migration was DONE in #452
+(2026-08-13) — the one-line `enabledPlugins.playwright=true` key was written
+into all 10 projects' own `<repo>/.claude/settings.json` on dev1 (all 10 are
+dev1-local; none dev2-only), MERGED into the two that already had a settings.json
+(audiotester, reaperiem — both preserving their existing `hooks` key), created
+fresh for the other eight, and read back per project (playwright == true, valid
+JSON). The two BORDERLINE candidates named in #415/#452 were verified
+individually and EXCLUDED, because neither uses the Playwright MCP server the
+opt-in governs: claudy runs pytest-playwright (`from playwright.sync_api import
+sync_playwright` in its own test fixtures, spawning its own Chromium — never the
+MCP), and ekasagrabber uses the Node Playwright library directly
+(`require("playwright")`) and is not even a git repo (a non-maintained scratch
+dir) — opting either in would re-introduce exactly the resident MCP Chrome #415
+fought. `autonomous-verification.md`'s Playwright duty is fully intact for an
+opted-in project; the inversion removes a default, never a capability.
 
 **Verify the inversion on a box:** `pgrep -fc playwright-mcp` before/after a
 session start in a NON-opted-in project should stay 0. A project's own
