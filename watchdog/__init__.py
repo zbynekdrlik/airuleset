@@ -5669,6 +5669,8 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
     projects_dir = projects_dir or PROJECTS_DIR
     persist()                                  # cadence stamp survives a kill
     logs = []
+    stale_handled = set()                      # (#399) one stale evaluation
+                                               # per NAME per sweep
 
     panes = list_claude_panes(run, logs=logs, dry_run=dry_run)
     # #353 round-2 review, MAJOR-3 — computed BEFORE the pane targets so a
@@ -5712,8 +5714,16 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
         # needs-gatekeeper flow's own early `continue`s below — `if not
         # tickets: continue` would otherwise skip exactly the main new
         # case: zero open requests, but a stale ready-for-review hand-off
-        # rotting in the review queue.
-        if handoffs is not None:
+        # rotting in the review queue. ONE evaluation per NAME per sweep
+        # (review MINOR-1, the shared per-sweep handled-set shape): two
+        # same-name targets (a duplicate checkout — pane target + an
+        # uncovered cache root) with divergent fetches would otherwise
+        # send twice under the SAME decision-instant dedup key, and
+        # notify's own per-key marker would swallow the second, richer
+        # alarm until the 24h stage; a genuine divergence resolves on the
+        # NEXT sweep with a fresh key instead.
+        if handoffs is not None and name not in stale_handled:
+            stale_handled.add(name)
             logs += _stale_handoff_alarm(name, root, handoffs, g, now,
                                          send_fn, dry_run, persist, schedule)
         if tickets is None:
