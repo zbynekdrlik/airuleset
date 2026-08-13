@@ -542,6 +542,46 @@ class TheTemplatesDeclareTheQuestionTimeoutEscapeHatch(TestCase):
     # that text ever appears, even though nothing currently produces it.
 
 
+class TestKeepLanesFullMandate(TestCase):
+    """#442 (reopened) -- a single worker blocked on CI for 2h+ let ~46 tickets
+    sit idle while the supervisor loop waited on that one CI, because the loop
+    had no doctrine keeping parallel worktree lanes filled during a CI wait
+    (and the mechanical lane-fill guard keys on ``live_workers > 0``, which a
+    CI-polling worker's still-fresh transcript satisfies -- so it stays silent).
+
+    The self-acting fix is a keep-lanes-full mandate in BOTH loop skills'
+    bodies, plus ONE transcript-enforceable LANES-FULL sentence in the MASTER
+    LOOP template (the gatekeeper's own default loop, where the stall actually
+    happened; headroom there is ample). The full-authority autopilot /goal
+    template deliberately does NOT carry the sentence: the #384/#395 healthy-
+    headroom lock (TheTemplatesHaveHealthyCapHeadroom, MIN_HEADROOM 150) leaves
+    no room for the full enforceable form, and eroding that lock or shaving the
+    sentence past its escape clause is not allowed -- the body mandate covers
+    plain /autopilot.
+
+    The 4000-char cap stays locked by TheTemplatesMustFitClaudeCodesGoalCap /
+    TheMasterLoopTemplateMustFitClaudeCodesGoalCapToo above; this class only
+    locks that the mandate TEXT is present, so a future edit that silently
+    drops it fails loudly here rather than regressing the stall.
+    """
+
+    def test_both_loop_skill_bodies_carry_the_keep_lanes_full_mandate(self):
+        for rel in (SKILL, SKILL_MASTER):
+            self.assertIn("keep the lanes full", read(rel).lower(),
+                          "%s missing the #442 keep-lanes-full mandate" % rel)
+
+    def test_both_bodies_state_one_ci_wait_never_idles(self):
+        for rel in (SKILL, SKILL_MASTER):
+            self.assertIn("one ci wait never idles", read(rel).lower(),
+                          "%s missing the #442 'one CI wait never idles' rule" % rel)
+
+    def test_the_master_template_carries_the_transcript_enforceable_rule(self):
+        # master_goal_lines()[0] IndexErrors if the template ever vanishes --
+        # a hard failure, guarding against silently measuring nothing.
+        self.assertIn("LANES-FULL", master_goal_lines()[0],
+                      "master /goal template missing the #442 LANES-FULL rule")
+
+
 if __name__ == "__main__":
     main()
 
