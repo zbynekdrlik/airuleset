@@ -2289,7 +2289,7 @@ class RunOnceSubagentVisibility(unittest.TestCase):
                        "ts": now - 2 * 24 * 3600,
                        "block": "**Otázka — projekt qproj:**\ntest?\n❓ NEEDS YOU: test?"},
         }))
-        sent, pings = [], []
+        pings = []
 
         def fake_run(argv, timeout=8):
             return ""
