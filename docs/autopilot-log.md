@@ -4654,3 +4654,16 @@ Size ratchet: pipeline_race 376->380, test_airuleset 14256->14260, test_playbook
 Fix: jedna veta-rodina do Step 4 fleet/worktree integračného boxu HNEĎ PRED "Fire the per-ticket run-card yourself" — read back reálny OUTPUT artefakt s konkrétnymi pozorovanými hodnotami (price/currency/order number/heading), odmietni send/delivery/liveness samotné (montalu3 0 € email), a card fíruj len PO read-backu; hodnoty kŕmia round-report `✅ Výstup:` riadok. Mirror-uje CYCLE krok 8 verbatim. RED e376f85 (tests/test_vystup_readback_skill_step4.py — 8 assertions failujú proti pôvodnému SKILL.md, setUp prejde) -> GREEN 1616328; nový test súbor do ratchetu 119 (5359c74). Lock scope-nutý na run-card firing item cez _step4_integration_item + _flat (blockquote strip + wrap collapse), nie celý file — #432/#435 vacuous-whole-section pattern.
 
 STEP 0 validated + design (Triage: trivial) markery same-turn overené (marker_exists('airuleset', 450, ...)). Adversarial review (fresh-context general-purpose, model fable, gate OPEN, REFUTE framing): verdict SAFE-TO-SHIP + jeden DO-NOW MINOR — Step 5 audit enumeration (CI/plan-check/review/requesting-code-review/Deploy) nikdy nelistoval `✅ Výstup:` riadok na ktorý mirror ukazuje, takže supervisor podľa nej složí report ktorý prose-violations gate zablokuje. Fix c6517b9 (Výstup audit inline do Step 5, žiadny nový fyzický riadok — file ostáva 999; + assertIsNotNone guard na ordering test, ratchet 119->121 v tom istom commite). Review markér reviewed overený. Empiricky potvrdené: teeth (6 locked stringov 0× v pre-edit Step 4 itemi), regex extrakcia (nested `> 1.`-`5.` nematchne `^[0-9]. **`), no supervisor-verify, RED->GREEN commit poradie. Worktree worker, commit-local only — supervisor integruje/pushuje/deployuje fleet.
+- #415 Playwright MCP default inverted (off-unless-opted-in). RED 645ac0d
+  (tests/test_managed_plugins.py: test_reconcile_flips_a_stale_optional_true
+  behavioural — reconcile force-enabled playwright True) -> GREEN a2cdafa
+  (airuleset.py: new OPTIONAL_PLUGINS = ("playwright@...",); MANAGED_PLUGINS =
+  superpowers only; reconcile force-DISABLES OPTIONAL in user scope + registers
+  their marketplaces; setup installs both tiers; ensure_playwright_browsers
+  guard keys on MANAGED_PLUGINS + OPTIONAL_PLUGINS). Force-disable (not
+  drop-the-write) flips the stale user-scope `true` every pushed box carries.
+  Per-project opt-in: `{"enabledPlugins":{"playwright@claude-plugins-official":
+  true}}` in a project's own .claude/settings.json (project scope beats user
+  scope). Design+validated+reviewed markers posted. Rejected: per-project
+  allowlist in airuleset (user-scope enabledPlugins is global, not per-project)
+  and drop-key-absent (leaves stale true, no fleet effect).

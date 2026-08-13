@@ -1371,3 +1371,69 @@ ratchet's whole job until then is simply: stop the wound from getting deeper.
 - **Changing `MANAGED_MODEL`/`MANAGED_EFFORT_LEVEL` (or any managed settings default): the blast-radius map measured on #440/#445.** Tests keying on the CONSTANT (robust, no edit needed): the launcher subprocess tests (`--model %s % airuleset.MANAGED_MODEL`), `test_sets_managed_model`, statusbar/caveman tests passing `managed_model=` explicitly. Tests keying on LITERALS (must be inverted in the RED commit): `TestManagedModelDefault`'s value lock, `test_compact.py::test_preserves_other_keys` (now fixed to use the constant), the effort-value locks in `TestManagedSettingsDefaults`. Also consumed by the same constant, verify not assume: `burn.tier(<new id>)` must map to a recognized tier (statusline highlight semantics — `burn.tier("claude-fable-5[1m]") == "fable"` verified live), `render_claude_launch_script()` bakes it into every branch (`bash -n` the rendered script), and the `[1m]` suffix stays part of the id (1M-context alias, `lastModelUsage` keying). A resumed worker inheriting a PRIOR (dead) worker's posted-but-never-classified design comments: the 180s window makes them permanently ungradeable — post a fresh CONDENSED re-classification comment per issue naming the original as source-of-truth, sanity-checked against all three `design_gate` classifiers locally first, then verify `marker_exists('airuleset', N, kind)` same-turn.
 
 - **The #446 "adding a NEW mandatory `## ✅ Work Complete` line touches a FIXED five-place checklist" entry was itself INCOMPLETE — there is a SIXTH home: `skills/autopilot/SKILL.md`'s own Step 5 round-report audit enumeration** (the inline `audits — ✅ CI: green, ✅ /plan-check…, ✅ /review…, ✅ /requesting-code-review…, ✅ Deploy: <version>` list the SUPERVISOR follows when composing a whole-round `## ✅ Work Complete` report). #450 (F3 from #446): the `✅ Výstup:` line was merged into all five #446 homes but never added to this Step 5 enumeration, so a supervisor literally following Step 5's listed audits composes a round report that `stop-check-prose-violations.sh` then blocks (one self-healing but wasted blocked turn per round) — found only by an adversarial review of a DIFFERENT #450 change that happened to reference the Výstup line, never by the #446 work itself. Whenever a NEW mandatory audit line is added to the `## ✅ Work Complete` contract, grep `skills/autopilot/SKILL.md` for the Step 5 audit enumeration (the `✅ Deploy: <version>` anchor sits at its end) and add the new line there too, as a sixth checklist item alongside #446's five — the SUPERVISOR's own round report is a distinct composition path from any worker's per-ticket report, and #446's checklist only covered the shapes a worker/served session emits.
+## Managed-plugin tiers + per-project Playwright opt-in (#415, 2026-08-13)
+
+There are now THREE plugin tiers in `airuleset.py`, distinguished by what
+`reconcile_managed_plugins()` writes into user-scope `~/.claude/settings.json`:
+
+- **`MANAGED_PLUGINS`** (superpowers only) — force-ENABLED (`enabled[key]=True`)
+  on every box, every project. The rules invoke its skills directly, so it is a
+  genuine always-on baseline.
+- **`MANAGED_DISABLED_PLUGINS`** (rust-analyzer-lsp, claude-md-management) —
+  force-DISABLED (`False`), never wanted at all, and NOT installed.
+- **`OPTIONAL_PLUGINS`** (playwright) — force-DISABLED in user scope BUT still
+  INSTALLED + marketplace-registered + browser-cache-provisioned on every box.
+  Off by default; opted-in PER PROJECT.
+
+**Why #415 inverted Playwright from `MANAGED_PLUGINS` to `OPTIONAL_PLUGINS`:**
+force-enabling it fleet-wide spawned a resident ~144MB headless Chrome tree per
+session per box on the first `browser_*` call, in projects with zero
+browser-testing footprint (~400MB reclaimed live on dev1 by killing two idle
+trees, but they respawn every session). The #158 "baseline-installed AND ENABLED
+everywhere" decision is SUPERSEDED — see the superseding comment block right
+above `MANAGED_PLUGINS`'s definition.
+
+**Force-DISABLE, not drop-the-write, is load-bearing.** Every already-pushed box
+carries a stale `playwright: true` from the pre-#415 force-enable regime. Merely
+removing playwright from `MANAGED_PLUGINS` and leaving the key absent would leave
+that stale `true` in place — the resident-Chrome behaviour would be unchanged on
+exactly the fleet the fix exists to help. `reconcile_managed_plugins()` writes
+`enabled[key]=False` for every `OPTIONAL_PLUGINS` key, which idempotently flips
+the stale `true` off on the next push. (A per-project allowlist keyed on project
+name is architecturally impossible here: airuleset writes USER-scope
+`enabledPlugins`, which is global, not per-project; a per-project map would need
+airuleset to write each project's own git-tracked `.claude/settings.json`, a
+write surface it deliberately never touches — see #415's design comment.)
+
+**The per-project OPT-IN (one line, in the PROJECT's own repo, not airuleset):**
+a project that genuinely needs the browser adds to its OWN
+`<repo>/.claude/settings.json`:
+
+```json
+{"enabledPlugins": {"playwright@claude-plugins-official": true}}
+```
+
+Project scope resolves ABOVE the user-scope `false`, so that one project gets
+Playwright while every other project on the box stays browser-free. The plugin
+is already installed and the browser cache is already warm (both tiers are
+installed by `setup_managed_plugins()`, and `ensure_playwright_browsers()`'s
+guard keys on `MANAGED_PLUGINS + OPTIONAL_PLUGINS`), so the opt-in needs no
+install step. airuleset does NOT make this edit for those repos in #415 — it
+writes only `~/.claude/`, and having it iterate over managed repos to write each
+project's own git-tracked `.claude/settings.json` would be a bigger, separately-
+scoped mechanism (new machinery, out of #415's scope + against the FREEZE), not
+"impossible" outright: a `.claude/settings.json` edit IS governance, not project
+CODE, so a FUTURE deliberate change could do it. For now the projects with
+genuine Playwright evidence (audiotester, songplayer, spinbike, restreamer,
+devbridge, automatizacie-montalu, tvdole, audiomatrix, media-bridge, reaperiem —
+from #415's live scan) opt in themselves; that migration + the fleet-wide
+discoverability of the opt-in are TRACKED as a #415 follow-up (no-dropped-work),
+not left implicit. `autonomous-verification.md`'s Playwright duty is fully intact
+for an opted-in project; the inversion removes a default, never a capability.
+
+**Verify the inversion on a box:** `pgrep -fc playwright-mcp` before/after a
+session start in a NON-opted-in project should stay 0. A project's own
+`disabledMcpServers` entries in `~/.claude.json` are untouched (airuleset has
+zero writes to `~/.claude.json`).
+- **`claude plugin install <key>@<marketplace>` writes `enabledPlugins[<key>]=true` into user-scope `~/.claude/settings.json` as a SIDE EFFECT, and it OVERWRITES a pre-seeded `false` — so any reconcile pass that force-DISABLES a plugin BEFORE the install loop is silently clobbered on any box where that plugin actually gets installed (registry entry missing → install runs).** #415 adversarial review F1 (proven twice in isolated `CLAUDE_CONFIG_DIR` sandboxes): `setup_managed_plugins()` reconciles FIRST (deliberate #273 ordering — the settings write must land early to unblock the install), then installs; on a FRESH box the playwright install re-enabled the key the reconcile had just disabled, ending provisioning in the exact pre-#415 resident-Chrome regime. An already-provisioned box is unaffected (registry present → `_managed_plugin_built` short-circuits → 0 installs → the reconcile's `false` stands), which is why the headline flip-stale-true criterion passed while the fresh-box path was broken — and why a mocked-subprocess test suite (installs are side-effect-free mocks) could not see it. Fix (`setup_managed_plugins`): keep the reconcile-before-install, and RE-ASSERT the same reconcile AFTER the install loop (extracted `_reconcile_settings_file()`), a no-op write on the already-built fast path. Any future OPTIONAL/force-disabled plugin has this exact hazard — reconcile-after-install is mandatory, not just reconcile-before. The regression test must use a fake `claude plugin install` that WRITES `enabledPlugins[key]=true` into the patched `SETTINGS_JSON` (mimicking the real side effect) and assert the final on-disk file has the key `False`; a fake that only records argv cannot catch it.
+- **A `gh issue create -F "$VAR"` (or any hook-gated command with a `$VAR` argument) is read by the PreToolUse hook as the LITERAL unexpanded text `$VAR` — hooks see argv BEFORE shell expansion — so a hook that reads the `-F` body file gets an empty/unreadable body and false-blocks on "no Scope-gate / no Dedup-checked line" even when the file has both.** #415: `block-ungated-issue-filing.sh` logged `criterion=none dedup="none"` for a body file that demonstrably had both lines, purely because the path was passed as `$SP/followup_body.md`. Always pass the FULL LITERAL absolute path to a `-F`/`--body-file` argument of any hook-gated `gh`/`git` command. Companion (#159, re-hit): a `printf ... >> body.md && gh issue create ... -F body.md` chained on ONE line never appends when the `gh` half is blocked — a PreToolUse block kills the WHOLE compound command atomically, so the `printf` never runs. Compose the body (and any last-line append) in its OWN Bash call, then file in a SECOND call.
