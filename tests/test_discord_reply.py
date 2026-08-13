@@ -66,9 +66,14 @@ class QuestionMap(unittest.TestCase):
         # ANY later write swept the map) was the exact inversion of "ask at
         # least once a day, never silently drop" (the user's own directive,
         # 2026-08-11). Only a MALFORMED entry (not a dict) is still pruned.
+        # Fixture re-pinned for the ghost-supersede work: the two entries
+        # belong to DISTINCT sessions, because this lock's claim is about
+        # AGE (a later write must not sweep an old entry) — a same-session
+        # same-channel pair is a different fact (a superseded ask), owned
+        # by its own dedicated tests in tests/test_question_prune.py.
         p = self._p()
         notify.record_question("100", "900", "s", "/x", now=0, path=p)
-        notify.record_question("200", "900", "s", "/x", now=100_000, path=p)
+        notify.record_question("200", "900", "s2", "/x", now=100_000, path=p)
         q = notify.load_questions(p)
         self.assertIn("100", q)                # still there, far past 24h old
         self.assertIn("200", q)

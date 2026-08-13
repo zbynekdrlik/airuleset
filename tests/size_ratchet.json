@@ -42,7 +42,7 @@
   "tests/test_design_gate.py": 1449,
   "tests/test_dev_env_provisioning.py": 1366,
   "tests/test_discord_notify_check.py": 106,
-  "tests/test_discord_reply.py": 1813,
+  "tests/test_discord_reply.py": 1818,
   "tests/test_dispatch_floor.py": 601,
   "tests/test_draft_rescue.py": 378,
   "tests/test_durable_decisions.py": 70,
