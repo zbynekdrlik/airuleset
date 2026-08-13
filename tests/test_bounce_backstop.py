@@ -14,6 +14,7 @@ import json
 import sys
 import time
 import unittest
+import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -158,7 +159,6 @@ class TestBounceBackstop(unittest.TestCase):
         # `project=` kwarg, so it lands in the project's own thread instead
         # of the owner's plain pile -- stream-qualified the SAME way a
         # run-card / idle ping for the SAME repo checkout on THIS box would.
-        import unittest.mock as m
         state = {}
         with m.patch("getpass.getuser", return_value="david2"):
             self._go(state, [1705], panes=[])
@@ -443,10 +443,6 @@ class TestGhEnvTokenFallback(unittest.TestCase):
             self.assertNotIn("GH_TOKEN", env)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 WORKFLOW_WAIT = ("● Review beží\n"
                  "  ⏳ WORKING: review Workflow beží — verdikt čaká. Nič netreba.\n"
                  "✻ Waiting for 1 dynamic workflow to finish\n"
@@ -650,3 +646,32 @@ class TestForeignTmuxUserNeverPings(unittest.TestCase):
             self.assertTrue(pings, "montalu is no longer foreign-tmux — "
                             "job 8 must run normally, not no-op")
             self.assertTrue(any("bounce-ping" in ln for ln in logs), logs)
+
+
+class TestFetchBounceTicketsExcludesOpsChannel(unittest.TestCase):
+    """#364 (follow-up to #362): job 8's own bounce-nudge candidate query
+    (`_fetch_bounce_tickets`, the `gh_fetch` default) still hand-rolled a
+    bare `-label:autopilot-skip` with no `ops-channel` awareness — #362
+    fixed the `/goal` stop-proof (`core-quals`/`slice-quals` in
+    airuleset.py) but never touched this watchdog-side query. A PERMANENT
+    ops-channel ticket (a stream's own self-declared "never auto-closes"
+    channel) that also happened to carry `prio:bounce` would still surface
+    here as a nudge candidate."""
+
+    def test_query_excludes_ops_channel(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return m.Mock(returncode=0, stdout="[]")
+
+        with TemporaryDirectory() as root:
+            with m.patch("subprocess.run", side_effect=run):
+                wd._fetch_bounce_tickets(root)
+        self.assertTrue(calls, "no gh call recorded")
+        flat = json.dumps(calls)
+        self.assertIn("-label:ops-channel", flat)
+
+
+if __name__ == "__main__":
+    unittest.main()

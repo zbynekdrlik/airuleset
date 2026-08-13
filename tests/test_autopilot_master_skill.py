@@ -135,6 +135,15 @@ class TestGoalTemplate(TestCase):
         self.assertIn("RELEASED", g)
         self.assertIn("verified", g.lower())
 
+    def test_done_means_everything_shipped_also_excludes_ops_channel(self):
+        # #364 (#362 follow-up): this loop's own stop-proof hand-rolls its
+        # own `-label:autopilot-skip` search string -- separate from
+        # airuleset.py's `AUTOPILOT_SKIP_EXCL` #362 fixed -- and must
+        # exclude a PERMANENT ops-channel ticket the same way, or the
+        # master loop's own `--count 0`-equivalent condition can never be
+        # honestly satisfied while one sits open.
+        self.assertIn("-label:ops-channel", self._goal_line())
+
     def test_goal_carries_rearm_and_stop_conditions(self):
         g = self._goal_line()
         self.assertIn("re-print", g)
@@ -150,10 +159,6 @@ class TestGoalTemplate(TestCase):
         t = read(SKILL)
         self.assertIn("**Otázka — projekt", t)
         self.assertIn("❓ NEEDS YOU: vlož /goal", t)
-
-
-if __name__ == "__main__":
-    main()
 
 
 class TestRunCardFiredInEveryLane(TestCase):
@@ -200,3 +205,23 @@ class TestMissedWindowNeverSilent(TestCase):
             if line.startswith("/goal "):
                 g = line
         self.assertIn("never a silent missed window", g)
+
+
+class TestPreflightBoardExcludesOpsChannel(TestCase):
+    """#364 (#362 follow-up): Step 1's own preflight "core backlog" query
+    hand-rolls a bare `-label:autopilot-skip` search string with no
+    `ops-channel` awareness -- the same defect class as the `/goal MASTER
+    LOOP` stop-proof line itself (covered separately in TestGoalTemplate).
+    A permanent ops-channel ticket would still print in the LANE STATUS
+    board's CORE count even though it is never actually workable backlog.
+    """
+
+    def test_step1_core_backlog_query_excludes_ops_channel(self):
+        t = read(SKILL)
+        i = t.index("Core backlog + questions")
+        window = t[i:i + 300]
+        self.assertIn("-label:ops-channel", window)
+
+
+if __name__ == "__main__":
+    main()

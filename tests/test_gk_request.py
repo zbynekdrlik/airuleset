@@ -493,6 +493,34 @@ class TestGkreqFetch(unittest.TestCase):
             self.assertIsNone(wd._fetch_gkreq_tickets("/tmp/x"))
 
 
+class TestGkreqFetchExcludesOpsChannel(unittest.TestCase):
+    """#364 (follow-up to #362): same defect class as the bounce backstop
+    -- BOTH `_fetch_gkreq_tickets` queries (the `needs-gatekeeper` label
+    query AND the `GATEKEEPER-ACTION:` title-fallback query) still
+    hand-rolled a bare `-label:autopilot-skip` with no `ops-channel`
+    exclusion. A PERMANENT ops-channel ticket that also carried
+    `needs-gatekeeper` (or a `GATEKEEPER-ACTION:` title) would still
+    surface here as a gk-request nudge candidate."""
+
+    def test_both_queries_exclude_ops_channel(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return m.Mock(returncode=0, stdout="[]")
+
+        with m.patch("subprocess.run", side_effect=run):
+            wd._fetch_gkreq_tickets("/tmp/x")
+        self.assertEqual(len(calls), 2, calls)
+        label_call = next(c for c in calls if "--label" in c)
+        title_call = next(c for c in calls if "--label" not in c)
+        self.assertIn("-label:ops-channel", json.dumps(label_call),
+                       "needs-gatekeeper label query missing ops-channel excl")
+        self.assertIn("-label:ops-channel", json.dumps(title_call),
+                       "GATEKEEPER-ACTION: title-fallback query missing "
+                       "ops-channel excl")
+
+
 class TestMachinePrefixes(unittest.TestCase):
     def test_gkreq_nudge_is_a_machine_prompt(self):
         self.assertTrue(any(
@@ -1097,6 +1125,21 @@ class TestProtocolDocs(unittest.TestCase):
                / "statusline-vocabulary.md").read_text()
         self.assertNotIn("gk-req", txt)
         self.assertNotIn("gkq", txt)
+
+
+class TestAutopilotSkipExclConstantsStayInSync(unittest.TestCase):
+    """#364 review finding: `watchdog.AUTOPILOT_SKIP_EXCL` is a deliberately
+    INDEPENDENT literal (never `from airuleset import ...`, per its own
+    docstring -- import-cost + layering-fragility reasons, not a circular
+    import). #364 exists precisely because a second hand-rolled copy of
+    this exclusion drifted from #362's original one; a THIRD copy with
+    nothing pinning it equal to the first would be the same bet again. If
+    either the label or the exclusion shape ever changes in one module
+    without the other, this fails loudly instead of relying on a human
+    `grep -rn ops-channel`."""
+
+    def test_watchdog_and_airuleset_constants_are_identical(self):
+        self.assertEqual(wd.AUTOPILOT_SKIP_EXCL, airuleset.AUTOPILOT_SKIP_EXCL)
 
 
 if __name__ == "__main__":
