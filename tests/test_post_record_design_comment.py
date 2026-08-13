@@ -79,6 +79,31 @@ GOOD_BODY = (
     "process or service. Framework: reused the existing retry module "
     "directly, no new machinery needed."
 )
+
+# #428 -- a TRIVIAL-triaged body WITHOUT any Architektúra: section: the #414
+# extension used to require Architektúra: unconditionally, refusing even a
+# TRIVIAL ticket a marker despite classify_triage_and_approaches's own doc
+# comment ("A TRIVIAL ticket needs nothing beyond the Triage: line itself").
+GOOD_BODY_TRIVIAL_NO_ARCH = GOOD_BODY_NO_ARCH + "\n\nTriage: trivial"
+
+# #428 -- a NON-TRIVIAL-triaged body, ALSO without Architektúra:, to prove
+# the #428 fix narrows the exemption to trivial ONLY -- a non-trivial ticket
+# must still be refused a marker until it carries the Architektúra: section.
+GOOD_BODY_NONTRIVIAL_NO_ARCH = (
+    "Triage: non-trivial -- introduces a new long-lived daemon.\n\n"
+    "Root cause: no existing process watches this queue, so items rot "
+    "silently until someone happens to look. Approach 1: a new systemd "
+    "timer polling the queue every 60s, reusing the existing watchdog job "
+    "runner -- trade-off: adds one more job to an already-large run_once(), "
+    "but zero new infrastructure. Approach 2: a dedicated long-lived daemon "
+    "process -- trade-off: cleaner separation, but a whole new supervised "
+    "process to deploy/monitor/restart, more moving parts for a queue this "
+    "small. Chosen approach: Approach 1, the polling timer -- the queue "
+    "volume does not justify a dedicated process yet. Rejected alternative: "
+    "Approach 2, the dedicated daemon -- too much operational overhead for "
+    "the current volume."
+)
+
 BAD_BODY = "still looking into this, will update soon"
 
 # #213 -- validation-shaped body (no design content at all).
@@ -1199,6 +1224,50 @@ class TestArchitectureTriageGate(_Base):
         info = self.marker(41, "design")
         self.assertIsNotNone(info)
         self.assertIn("pre-414-comment", info["url"])
+
+
+# --------------------------------------------------------------------------- #
+# #428 -- the Architektúra: requirement must apply ONLY to a non-trivial-
+# triaged design comment; a TRIVIAL one needs nothing beyond its own
+# Triage: line (classify_triage_and_approaches's own doc comment, and
+# CYCLE step 2's settled "depth scales with the problem" principle).
+# --------------------------------------------------------------------------- #
+
+class TestTrivialTriageArchitectureExemption(_Base):
+
+    def reject(self, issue, kind="design"):
+        os.environ["HOME"] = str(self.home)
+        return dg.read_reject_reason("airuleset", issue, kind)
+
+    def test_trivial_triage_without_architektura_grants_design_marker(self):
+        self.assertTrue(dg.classify_design_comment(GOOD_BODY_TRIVIAL_NO_ARCH)[0])
+        comments = _comments_json([{
+            "body": GOOD_BODY_TRIVIAL_NO_ARCH, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/41#issuecomment-70",
+        }])
+        r = self.run_hook('gh issue comment 41 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNotNone(self.marker(41, "design"),
+                             "a TRIVIAL-triaged comment must not need an "
+                             "Architektúra: section to earn a design marker")
+
+    def test_nontrivial_triage_without_architektura_still_refuses_marker(self):
+        self.assertTrue(dg.classify_design_comment(GOOD_BODY_NONTRIVIAL_NO_ARCH)[0])
+        self.assertTrue(dg.classify_triage_and_approaches(GOOD_BODY_NONTRIVIAL_NO_ARCH)[0])
+        comments = _comments_json([{
+            "body": GOOD_BODY_NONTRIVIAL_NO_ARCH, "createdAt": _iso(5),
+            "viewerDidAuthor": True,
+            "url": "https://github.com/zbynekdrlik/airuleset/issues/42#issuecomment-71",
+        }])
+        r = self.run_hook('gh issue comment 42 --body "x"', comments)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIsNone(self.marker(42, "design"),
+                          "a NON-TRIVIAL-triaged comment must still need "
+                          "the Architektúra: section")
+        reason = self.reject(42, "design")
+        self.assertIsNotNone(reason)
+        self.assertIn("Architekt", reason)
 
 
 if __name__ == "__main__":

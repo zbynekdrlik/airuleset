@@ -1277,6 +1277,50 @@ class TestClassifyTriageAndApproaches(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestTriageClass(unittest.TestCase):
+    """#428: `dg.triage_class(body)` -- just the `Triage:` class named in
+    `body` ("trivial"/"non-trivial"/None), no depth/length checks, unlike
+    `classify_triage_and_approaches`. Lets a caller (post-record-design-
+    comment.sh) decide whether the Architektúra: requirement applies
+    WITHOUT re-running the full depth classifier."""
+
+    def test_trivial_triage_line_classifies_trivial(self):
+        self.assertEqual(dg.triage_class(TRIVIAL_TRIAGE_BODY), "trivial")
+
+    def test_nontrivial_triage_line_classifies_nontrivial(self):
+        self.assertEqual(dg.triage_class(NONTRIVIAL_GOOD_BODY), "non-trivial")
+
+    def test_missing_triage_line_is_none(self):
+        self.assertIsNone(dg.triage_class(GOOD_SCOPED))
+
+    def test_triage_value_naming_neither_class_is_none(self):
+        body = GOOD_SCOPED + "\n\nTriage: unsure"
+        self.assertIsNone(dg.triage_class(body))
+
+    def test_negated_not_trivial_is_nontrivial_not_trivial(self):
+        # #414-review MAJOR-1's own negation case: "not trivial" must never
+        # read as trivial just because it contains the substring "trivial".
+        body = GOOD_SCOPED + "\n\nTriage: not trivial -- new daemon"
+        self.assertEqual(dg.triage_class(body), "non-trivial")
+
+    def test_dash_bullet_prefixed_triage_line_still_classifies(self):
+        body = GOOD_SCOPED + "\n\n- Triage: trivial"
+        self.assertEqual(dg.triage_class(body), "trivial")
+
+    def test_short_trivial_line_alone_still_classifies_trivial(self):
+        # triage_class has NO length floor -- classification is independent
+        # of classify_triage_and_approaches's own MIN_LEN_TRIAGE_TRIVIAL
+        # depth check, which is exactly why post-record-design-comment.sh
+        # needs a SEPARATE function for this decision.
+        self.assertEqual(dg.triage_class("Triage: trivial"), "trivial")
+
+    def test_empty_body_is_none(self):
+        self.assertIsNone(dg.triage_class(""))
+
+    def test_none_body_is_none(self):
+        self.assertIsNone(dg.triage_class(None))
+
+
 # --------------------------------------------------------------------------- #
 # #414 -- reject-reason I/O: purely diagnostic, never gates anything itself.
 # Lets block-commit-without-design.sh surface WHY the worker's last posted
