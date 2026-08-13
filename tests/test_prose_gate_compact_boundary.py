@@ -74,14 +74,16 @@ NON_COMPLETION_MSG = ("⏳ WORKING: dispatched worker for #1393, will report "
 # violations" tail (where the new call lives) is never reached.
 BLOCKED_COMPLETION_MSG = "## ✅ Work Complete\n\nnot enough structure here"
 
-_FAKE_PYTHON3 = """#!/usr/bin/env bash
-# Records every invocation's argv (one per line, space-joined) to $FAKE_LOG,
-# then prints a fixed disposition word on stdout -- mirrors the real
+_FAKE_PYTHON3_TEMPLATE = """#!/usr/bin/env bash
+# Records every invocation's argv (one per line, space-joined) to the log
+# path baked in at write time (never an env var -- a hook's own subprocess
+# calls don't inherit anything this test harness didn't put on PATH), then
+# prints a fixed disposition word on stdout -- mirrors the real
 # `cmd_compact_request`'s own contract closely enough for the hook's own
 # `case … in sent|expired|...) ;; *) RESULT=error ;; esac`-shaped callers
 # (none exist in THIS hook -- it fires best-effort, output discarded -- but
 # a real-shaped reply keeps the fake honest regardless).
-echo "$*" >> "$FAKE_LOG"
+echo "$*" >> "%s"
 printf 'sent'
 """
 
@@ -98,7 +100,7 @@ class _HookCase(unittest.TestCase):
         bindir.mkdir()
         self.fake_log = Path(self.tmp.name) / "python3-calls.log"
         fake = bindir / "python3"
-        fake.write_text(_FAKE_PYTHON3)
+        fake.write_text(_FAKE_PYTHON3_TEMPLATE % str(self.fake_log))
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
         self.env = dict(os.environ)
         self.env["PATH"] = "%s:%s" % (bindir, os.environ.get("PATH", ""))

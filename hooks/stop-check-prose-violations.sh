@@ -17,6 +17,10 @@ MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || ec
 # key, i.e. one shared, never-expiring per-BOX bucket. An empty value here is
 # resolved to "no retry state" further down, never to a bucket.
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+# #411 — the payload's own cwd, needed ONLY for the best-effort
+# compact-request call in the "no hard violations" tail below (never a
+# retry-key/state discriminator, so an empty value here is harmless).
+CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 [ -z "$MSG" ] && exit 0
 
 # #96: use vs MENTION — third occurrence of the exact classifier-blindness
@@ -1514,4 +1518,33 @@ fi
 if [ -n "$RETRY_FILE" ]; then
     rm -f "$RETRY_FILE" 2>/dev/null || true
 fi
+
+# #411 — a genuine `## Work Complete` report reaching this point (the report
+# passed every hard-violation check above) IS this served/interactive
+# session's own `/compact` boundary — per message-status-marker.md's own
+# "Compact at your own boundary" contract, the ONLY durable proof of that
+# boundary is `compact-request --self`, and after #400 removed the passive
+# text-sniffing Stop-hook fallback entirely, NOTHING mechanical calls it —
+# only prose in completion-report.md/the /goal skill templates tells the
+# MODEL to call it itself, which a sonnet-tier stream session reliably skips
+# (the live david@subdev incident this ticket was filed from). Firing
+# `--record` here — never `--self`, which resolves the pane via $TMUX_PANE
+# and has none inside a hook process — reuses the payload's OWN
+# session_id/cwd fields directly, exactly like the SubagentStop sibling
+# channel (notify-compact-subagent-boundary.sh) already does for a worker's
+# ticket boundary. `--origin self-callback` is the SAME proven-boundary
+# origin `--self` uses, so the exact same, already-adversarially-reviewed
+# exemption machinery (_compact_self_reported_complete, #425) applies
+# unchanged. Best-effort, silent, non-blocking: a redundant call alongside a
+# compliant model's own `--self` invocation is a harmless no-op
+# (record_compact_request's own re-record/cooldown semantics already
+# collapse it), and any failure here (no python3, no jq-independent
+# resolution, a read-only $HOME) must never turn a clean report into a
+# blocked Stop.
+if [ "$IS_COMPLETION_HEADING" = "1" ] && [ -n "$SESSION_ID" ] && command -v python3 &>/dev/null; then
+    AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
+    python3 "$AIRULESET_PY" compact-request --record --session "$SESSION_ID" \
+        --cwd "$CWD" --origin "self-callback" >/dev/null 2>&1 || true
+fi
+
 exit 0

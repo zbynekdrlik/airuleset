@@ -321,7 +321,7 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/stop-check-prose-violations.sh",
-            "timeout": 5
+            "timeout": 15
           },
           {
             "type": "command",
