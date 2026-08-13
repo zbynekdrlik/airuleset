@@ -183,10 +183,13 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # (#312 re-pin: `progress_dir=None` was added on a NEW trailing
         # line after `backlog_fetch=None,` — the closing `):` moved off
         # this line again. The anchor and mutation target did not.)
+        # (#440 re-pin: `questions_path=None` was added on the SAME trailing
+        # line as `progress_dir=None`, right before the closing `):` — the
+        # anchor moved again; the guard and the mutation target did not.)
         old = ("             vault_purge=None, log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
                "backlog_fetch=None,\n"
-               "             progress_dir=None):")
+               "             progress_dir=None, questions_path=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         mutated = src.replace(
             old, "             vault_purge=lambda: [], log_fn=None, "

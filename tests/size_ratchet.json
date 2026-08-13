@@ -144,7 +144,7 @@
   "tests/test_usage_cache.py": 366,
   "tests/test_vault_channel.py": 1382,
   "tests/test_vault_disclosures.py": 165,
-  "tests/test_vault_purge_job.py": 234,
+  "tests/test_vault_purge_job.py": 237,
   "tests/test_vault_read_guard.py": 1268,
   "tests/test_vault_templates.py": 322,
   "tests/test_watchdog.py": 3571,
