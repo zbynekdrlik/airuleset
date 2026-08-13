@@ -224,30 +224,32 @@ def _is_tailscale(ip):
 
 
 def host_ip():
-    """The IP to bind to / put in URLs.
+    """The single IP to bind to / put in a URL — bind_ips()'s first (highest-
+    priority) address, so it can NEVER diverge from what the server actually
+    binds and what `share` / `upload` advertise (#438).
 
-    FILEDROP_HOST env wins. Otherwise prefer the TAILSCALE IP (stable across
-    network switches — the user reaches the box on the fallback network too), then
-    a 10.77.* dev-LAN address, then any OTHER private IP (#434 — must never
-    return a public/docker-bridge address here: bind_ips() never binds one,
-    so a caller resolving the primary host via host_ip() would build an
-    address the server never actually listens on — e.g. spinbike-vps, which
-    has only a public IPv4 and no private interface at all), else loopback,
-    matching bind_ips()'s own established final fallback."""
+    FILEDROP_HOST env still wins first. Otherwise bind_ips() is the ONE source
+    of truth, delegated to here instead of re-implementing the same selection a
+    second time (the #438 divergence: host_ip()'s former three ordered loops
+    filtered by CIDR class only (`_is_private`), interface-BLIND, so a 10.88.*
+    cni-podman0 bridge address — RFC1918, so it passed — was returned even
+    though bind_ips() drops it BY INTERFACE NAME and the server never binds it).
+    bind_ips() is interface-aware, tailscale-first then dev-LAN then other
+    private (identical priority to the former loops); NEVER a public address
+    (#434 — spinbike-vps has only a public IPv4, and `_is_private` excludes
+    public on every path), and container/bridge addresses are dropped by
+    interface name WHEN `ip` is available (a `10.88.*` cni-podman0 bridge can
+    still be re-admitted by bind_ips()'s own CIDR-only fallback when `ip` is
+    unavailable — but the server then binds that same address, so the
+    host_ip()==bind_ips()[0] invariant still holds). Falls back to loopback
+    when nothing private is found. It is guaranteed non-empty (its own
+    `out or ["127.0.0.1"]`), so [0] never raises; both of its subprocess
+    primitives degrade to that same loopback under a sandboxed / no-`ip`-binary
+    environment (the systemd-served fallback path that calls host_ip())."""
     override = os.environ.get("FILEDROP_HOST")
     if override:
         return override
-    ips = _ordered_ips()
-    for ip in ips:
-        if _is_tailscale(ip):
-            return ip
-    for ip in ips:
-        if ip.startswith("10.77."):
-            return ip
-    for ip in ips:
-        if _is_private(ip):
-            return ip
-    return "127.0.0.1"
+    return bind_ips()[0]
 
 
 def filedrop_url():

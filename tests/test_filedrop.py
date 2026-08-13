@@ -41,10 +41,21 @@ class TestHostIp(unittest.TestCase):
         import filedrop
         self._fd = filedrop
         self._orig = filedrop._ordered_ips
+        self._orig_if = filedrop._iface_ips
         self._env = os.environ.pop("FILEDROP_HOST", None)
+        # #438: host_ip() now delegates to bind_ips(), which calls the real
+        # `ip -o -4 addr show` subprocess (_iface_ips) FIRST — on a real dev box
+        # that returns genuine live interfaces regardless of the _ordered_ips
+        # mock below, so these CIDR-priority scenarios would never take effect.
+        # Force _iface_ips empty so bind_ips() falls back to the CIDR-only path
+        # over the mocked _ordered_ips — the exact pattern TestBindIps.setUp
+        # already uses, keeping these tests hermetic and driving the real
+        # delegation end-to-end (not mocking bind_ips itself).
+        filedrop._iface_ips = lambda: []
 
     def tearDown(self):
         self._fd._ordered_ips = self._orig
+        self._fd._iface_ips = self._orig_if
         if self._env is not None:
             os.environ["FILEDROP_HOST"] = self._env
 
@@ -85,6 +96,101 @@ class TestHostIp(unittest.TestCase):
         # agree, never returning a public/docker-bridge address.
         self._fd._ordered_ips = lambda: ["167.233.245.147", "fe80::1"]
         self.assertEqual(self._fd.host_ip(), "127.0.0.1")
+
+
+class TestHostIpDelegatesToBindIps(unittest.TestCase):
+    """#438: host_ip() must never diverge from bind_ips() -- the address the
+    server actually binds. A container/bridge RFC1918 address (10.88.* podman,
+    172.17.* docker) passes host_ip()'s old CIDR-only _is_private filter but is
+    dropped BY INTERFACE NAME by bind_ips(), so host_ip() used to hand back a
+    URL / health-probe target the server never listens on. Locked here against
+    the exact live-proven divergence from the ticket body, mocking the
+    _iface_ips / _ordered_ips enumeration PRIMITIVES (never bind_ips itself) so
+    the test drives the REAL end-to-end delegation and stays hermetic on any
+    box -- the box's own live interfaces never leak in."""
+
+    def setUp(self):
+        import filedrop
+        self._fd = filedrop
+        self._orig = filedrop._ordered_ips
+        self._orig_if = filedrop._iface_ips
+        self._env = os.environ.pop("FILEDROP_HOST", None)
+
+    def tearDown(self):
+        self._fd._ordered_ips = self._orig
+        self._fd._iface_ips = self._orig_if
+        if self._env is not None:
+            os.environ["FILEDROP_HOST"] = self._env
+
+    def test_podman_bridge_no_longer_diverges_from_bind_ips(self):
+        # The exact live-proven divergence from the issue: a cni-podman0 bridge
+        # RFC1918 address host_ip() used to return, though bind_ips() drops it
+        # by interface name and the server therefore never binds it.
+        self._fd._ordered_ips = lambda: ["10.88.0.1", "192.168.1.5"]
+        self._fd._iface_ips = lambda: [
+            ("10.88.0.1", "cni-podman0"),
+            ("192.168.1.5", "eth0"),
+        ]
+        self.assertEqual(self._fd.bind_ips(), ["192.168.1.5"])
+        # host_ip() MUST agree with the single source of truth, not the bridge.
+        self.assertEqual(self._fd.host_ip(), "192.168.1.5")
+        self.assertEqual(self._fd.host_ip(), self._fd.bind_ips()[0])
+
+    def test_docker_bridge_dropped_tailscale_still_wins(self):
+        # Companion (NOT an independent revert-kill): tailscale + docker0 bridge
+        # + LAN. host_ip() returns the tailscale IP (bind_ips()[0]), never the
+        # docker bridge. The OLD three-loop host_ip() also passed this (its
+        # tailscale loop finds 100.90.94.41 first), so the revert-to-old-loops
+        # kill lives in the podman test above and the no-tailscale test below --
+        # this one just pins that a bridge never wins when tailscale is present.
+        self._fd._ordered_ips = lambda: [
+            "100.90.94.41", "172.17.0.1", "10.77.9.21"]
+        self._fd._iface_ips = lambda: [
+            ("172.17.0.1", "docker0"),
+            ("100.90.94.41", "tailscale0"),
+            ("10.77.9.21", "eth0"),
+        ]
+        self.assertEqual(self._fd.host_ip(), "100.90.94.41")
+        self.assertEqual(self._fd.host_ip(), self._fd.bind_ips()[0])
+
+    def test_no_tailscale_bind_priority_beats_input_order(self):
+        # Second INDEPENDENT revert-kill (no bridge, no tailscale, no 10.77):
+        # an other-10 (e.g. a wg/VPN 10.x) and a 192.168 LAN, both on REAL
+        # interfaces. The OLD host_ip()'s third loop returned the first
+        # _is_private in _ordered_ips INPUT order (192.168.1.5); the new
+        # delegation returns bind_ips()[0], which _bind_priority-sorts the
+        # other-10 (priority 2) ahead of 192.168 (priority 3) -> 10.0.5.9. This
+        # locks the priority ALIGNMENT (not just the interface-drop) so the
+        # class carries a second kill the tailscale companion above cannot.
+        self._fd._ordered_ips = lambda: ["192.168.1.5", "10.0.5.9"]
+        self._fd._iface_ips = lambda: [
+            ("192.168.1.5", "eth0"),
+            ("10.0.5.9", "wg0"),
+        ]
+        self.assertEqual(self._fd.bind_ips(), ["10.0.5.9", "192.168.1.5"])
+        self.assertEqual(self._fd.host_ip(), "10.0.5.9")
+        self.assertEqual(self._fd.host_ip(), self._fd.bind_ips()[0])
+
+    def test_env_override_short_circuits_before_bind_ips(self):
+        # FILEDROP_HOST wins before bind_ips() is ever consulted -- even when
+        # the only interface is a bridge bind_ips() would otherwise reject.
+        os.environ["FILEDROP_HOST"] = "10.0.0.9"
+        try:
+            self._fd._iface_ips = lambda: [("10.88.0.1", "cni-podman0")]
+            self._fd._ordered_ips = lambda: ["10.88.0.1"]
+            self.assertEqual(self._fd.host_ip(), "10.0.0.9")
+        finally:
+            os.environ.pop("FILEDROP_HOST", None)
+
+    def test_degrades_to_loopback_when_no_enumeration_available(self):
+        # Sandbox / no-`ip`-binary path (the systemd-served fallback the ticket
+        # flags in point 3): both enumeration primitives yield nothing, so
+        # host_ip() must still return loopback via bind_ips()'s own final
+        # fallback -- never raise on bind_ips()[0], never a public/bridge IP.
+        self._fd._iface_ips = lambda: []
+        self._fd._ordered_ips = lambda: []
+        self.assertEqual(self._fd.host_ip(), "127.0.0.1")
+        self.assertEqual(self._fd.host_ip(), self._fd.bind_ips()[0])
 
 
 class TestSafeName(unittest.TestCase):
