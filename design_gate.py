@@ -439,12 +439,19 @@ def is_git_tracked(path, cwd):
     not a repo, timeout, unexpected output -- the same "never guess toward
     the more consequential action" direction `required_refs` already uses
     one function up, just applied to a destructive action instead of a
-    block decision. `git ls-files --error-unmatch` has THREE outcomes, not
+    block decision. `git ls-files --error-unmatch` has FOUR outcomes, not
     two: rc=0 (tracked), rc=1 (git ran fine and specifically confirmed the
-    path is untracked -- "did not match any file(s) known to git"), and
-    anything else (128 for "not a git repository", or any other failure --
-    genuinely unmeasurable, never a confirmed answer either way). Only
-    rc=1 is a real, positive "safe to quarantine" signal."""
+    path is untracked -- "did not match any file(s) known to git"), rc=128
+    with "is outside repository" (the queried path is not even INSIDE
+    `cwd`'s working tree at all -- every real worker scratchpad file, under
+    /tmp, always hits this case, since the repo lives elsewhere entirely --
+    #431: a path outside the repo cannot by definition be a file THIS repo
+    tracks, so this is a SECOND confident "not tracked" signal, exactly as
+    conclusive as rc==1, not merely "less unmeasurable"), and anything else
+    (128 for "not a git repository" -- `cwd` itself isn't a repo, genuinely
+    unmeasurable -- or any other failure/timeout). Only rc==1 and the
+    is-outside-repository rc==128 case are real, positive "safe to
+    quarantine" signals; every other outcome still fails toward TRACKED."""
     try:
         out = subprocess.run(
             ["git", "ls-files", "--error-unmatch", "--", path],
@@ -452,7 +459,11 @@ def is_git_tracked(path, cwd):
         )
     except (OSError, subprocess.SubprocessError):
         return True
-    return out.returncode != 1
+    if out.returncode == 1:
+        return False
+    if out.returncode == 128 and "is outside repository" in (out.stderr or ""):
+        return False
+    return True
 
 
 def quarantine_stale_msgfile(path, ts=None):
