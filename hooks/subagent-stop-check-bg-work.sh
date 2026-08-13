@@ -162,7 +162,24 @@ _check_unbacked_monitoring_claim() {
         # 64KiB up). A here-string has no separate writer process, so the
         # race cannot exist.
         MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || echo "")
-        if grep -qiE '\bmonitor(ing|s)?\b|\bwatching\b' <<<"$MSG"; then
+        # #413 -- exclude a bare FILENAME/PATH mention (e.g. "ci-monitoring.md",
+        # "hooks/ci-monitor") from counting as a claim: `\b` alone treats a
+        # hyphen/dot/slash as a genuine word boundary (they are non-word
+        # characters), so "ci-monitoring.md" satisfied the OLD
+        # `\bmonitoring\b` just as readily as a real claim ("still monitoring
+        # the deploy"). Requires GNU grep -P (lookaround) -- already relied on
+        # elsewhere in this hook family (stop-check-prose-violations.sh
+        # documents the same `grep -qP` recipe). A match is refused when it is
+        # immediately preceded by `-`/`.`/`/` (a hyphenated/pathy compound:
+        # "ci-monitor", "hooks/monitoring") OR immediately followed by a known
+        # file extension or `/` (the whole-token filename shape). Deliberately
+        # narrow, per this repo's own "fix the reported corpus, don't chase
+        # every theoretical shape" discipline -- a genuinely exotic hyphenated
+        # CLAIM ("self-monitoring the deploy") is an accepted, documented
+        # residual, the same class as this hook's other MAX_BLOCKS-bounded
+        # false-positive tolerances.
+        MONITOR_RE='(?<![-./])\b(?:monitor(?:ing|s)?|watching)\b(?!\.(?:md|py|sh|ya?ml|json|txt|js|ts|rs|toml|cfg|ini|conf|log)\b)(?!/)'
+        if grep -qiP "$MONITOR_RE" <<<"$MSG"; then
             echo $((BLOCKS + 1)) > "$BLOCK_FILE"
             REASON2="Your final message claims you are still monitoring/watching \
 something, but you have NO live tracked background work — you are a \
