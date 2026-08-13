@@ -47,20 +47,17 @@ MANAGED_MARKER = "<!-- airuleset-managed -->"
 # its guidance block here — preserve it so a `push` doesn't silently delete it.
 EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")]
 
-# Managed default effort: `high` is the persistent default the user wants in
-# EVERY managed project so they never have to remember to set it (#56,
-# 2026-07-25). Official Anthropic docs for the Claude 5 family (Opus 5, Fable
-# 5) both say "start with `high`, the default" and explicitly warn against
-# reusing an effort setting carried over from an earlier model — this was
-# previously `xhigh`, set in the Opus 4.7/4.8 era ("start with xhigh for
-# coding and agentic use cases"), exactly the carried-over case the docs now
-# flag. `xhigh` stays reserved for demanding coding/agentic work (dispatched
-# via `effort:` on a specific agent/task, e.g. the autopilot-worker, or a
-# gated HARD-task escalation) — never this blanket MAIN-session default.
-# `max`/`ultracode` are session-only (not valid here) — ultracode adds
-# auto-workflow orchestration on top and stays a per-session `/effort
-# ultracode`. The user can still raise/lower per session with `/effort`.
-MANAGED_EFFORT_LEVEL = "high"
+# Managed default effort: `xhigh` — the settings-representable HALF of the
+# standing ultracode default the user directed 2026-08-13 ("chcem aby by
+# default vzdy bol ultracode... maximalna akceleracia"), reversing #56's
+# `high` baseline on that explicit dated instruction. `effortLevel` accepts
+# only low|medium|high|xhigh (docs: `max`/`ultracode` are session-only and
+# not valid here), so managed ultracode is COMPOSED of two parts: this key
+# at `xhigh` + the launch script baking `--settings '{"ultracode":true}'`
+# (the orchestration half) into every mode except the deliberate vanilla
+# `plain` escape hatch — see CLAUDE_LAUNCH_SCRIPT_CONTENT. The user can
+# still raise/lower per session with `/effort`.
+MANAGED_EFFORT_LEVEL = "xhigh"
 
 # Managed default MAIN-session model (user directive 2026-08-13): **Opus 5
 # is BANNED everywhere** ("opus 5 sa nesmie pouzivat... by default pri
@@ -894,23 +891,25 @@ ULTRACODE_MARK_END = "# <<< airuleset: ultracode default <<<"
 # Fix: .bashrc holds ONLY thin one-line wrapper functions with NO flag
 # literals -- each just execs the managed SCRIPT (CLAUDE_LAUNCH_SCRIPT_DEST),
 # which carries ALL the actual logic (continue-or-new, --model, skip-perms,
-# ultracode only for the `ultracode` mode). A script is read fresh from disk
+# the standing ultracode flag). A script is read fresh from disk
 # on EVERY invocation, so a `push` that rewrites the script changes behavior
 # in every already-running shell IMMEDIATELY -- no `source ~/.bashrc`, no
 # relaunch, no restart. Same shape as the caveman stable statusline shim
 # (render_caveman_shim() below) -- read that first before changing this.
 CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 # --- the script content itself -----------------------------------------------
-# Ultracode is OPT-IN (#53, 2026-07-25): `--settings '{"ultracode":true}'` used
-# to be baked into EVERY default launch, so ultracode mode silently came back
-# on every session restart even after the user had turned it off for that
-# session (found repeatedly on restreamer). Only the `ultracode` mode carries
-# it now -- the `claude-ultracode()` bashrc function is the explicit opt-in
-# escape hatch, carrying EXACTLY today's old default behavior.
+# Ultracode is the STANDING DEFAULT (user directive 2026-08-13, #445 -- "by
+# default vzdy ultracode... maximalna akceleracia"): every mode except the
+# deliberate vanilla `plain` escape hatch bakes the flag in. This knowingly
+# REVERSES #53 (2026-07-25), which made ultracode session-only opt-in after it
+# kept silently resurrecting against the user's wishes -- back then the
+# resurrection was UNWANTED drift; now the always-on behavior is the user's
+# explicit dated instruction, so the reversal is faithful, not a regression.
+# `claude-ultracode()` stays as an explicit alias (identical behavior to the
+# default mode); `plain` is the only ultracode-free launch.
 #   --settings '{"ultracode":true}' : ultracode is SESSION-ONLY (never on disk, NOT
 #       accepted in settings.json — GH #64817); --settings is the only doc-blessed
 #       always-on route and MERGES per-key, so hooks/model/effortLevel stay intact.
-#       Only the `ultracode` mode passes this now.
 #   --dangerously-skip-permissions  : auto-approve (the user opted in for their dev boxes).
 #   -c                              : continue the most recent conversation in the cwd.
 #   --model '{{MANAGED_MODEL}}'     : baked in at RENDER time so EVERY mode except
@@ -985,7 +984,8 @@ case "$mode" in
     exec claude "$@"
     ;;
   new)
-    exec claude --dangerously-skip-permissions --model '{{MANAGED_MODEL}}' "$@"
+    exec claude --dangerously-skip-permissions \
+      --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     ;;
   ultracode)
     if _has_conversation; then
@@ -999,16 +999,20 @@ case "$mode" in
   fullscreen)
     export CLAUDE_CODE_NO_FLICKER=1
     if _has_conversation; then
-      exec claude --dangerously-skip-permissions -c --model '{{MANAGED_MODEL}}' "$@"
+      exec claude --dangerously-skip-permissions -c \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     else
-      exec claude --dangerously-skip-permissions --model '{{MANAGED_MODEL}}' "$@"
+      exec claude --dangerously-skip-permissions \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     fi
     ;;
   *)
     if _has_conversation; then
-      exec claude --dangerously-skip-permissions -c --model '{{MANAGED_MODEL}}' "$@"
+      exec claude --dangerously-skip-permissions -c \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     else
-      exec claude --dangerously-skip-permissions --model '{{MANAGED_MODEL}}' "$@"
+      exec claude --dangerously-skip-permissions \
+        --settings '{"ultracode":true}' --model '{{MANAGED_MODEL}}' "$@"
     fi
     ;;
 esac
@@ -2802,8 +2806,10 @@ def setup_tmux_cutover_subdev_via_gatekeeper(run=None, identity_path: Path = Non
 def apply_managed_settings_defaults(settings: dict) -> dict:
     """Ensure airuleset's managed settings defaults are present (non-hook keys).
 
-    - `effortLevel = xhigh` so deep adaptive reasoning is the persistent default in
-      every managed project without the user remembering to raise it. The user can
+    - `effortLevel = xhigh` (#445, 2026-08-13) — the settings half of the standing
+      ultracode default, so deep adaptive reasoning is persistent in every managed
+      project without the user remembering to raise it; the launch script carries
+      the orchestration half (`--settings '{"ultracode":true}'`). The user can
       still override per session with `/effort`.
     - `disableAgentView = true` HARD-disables Claude Code's `claude agents` / fleet /
       `claude --bg` background daemon (the on-demand supervisor that spawns DETACHED
