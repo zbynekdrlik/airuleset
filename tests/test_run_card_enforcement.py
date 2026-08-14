@@ -737,6 +737,34 @@ class TestCardReconcile(unittest.TestCase):
         self.assertTrue(self.sent, "a later successful verification must "
                                    "still be able to report it")
 
+    def test_a_stably_verify_rejected_ticket_is_not_re_verified_every_sweep(self):
+        # #474: a `merged_closes` candidate that a SUCCESSFUL `closed_fetch`
+        # rejects (local `Closes #N`, but GitHub says it was not closed by that
+        # merged PR — the odoo-erp non-default-branch shape) is a STABLE
+        # disagreement. Re-verifying it every 60s sweep spent one gh GraphQL
+        # call per sweep FOREVER (gk: the same 9 odoo-erp tickets re-verified
+        # every sweep). It must be remembered and skipped from re-verification.
+        calls = []
+        r = self.repo(closes=(3,))
+        self.reconcile([r], closed_fetch=lambda root, since: calls.append(root) or {})
+        self.reconcile([r], closed_fetch=lambda root, since: calls.append(root) or {})
+        self.assertEqual(len(calls), 1,
+                         "a stably verify-rejected ticket must be remembered, "
+                         "not re-verified with a gh call every sweep")
+        self.assertEqual(self.sent, [])
+
+    def test_verify_rejected_logs_the_transition_once_not_every_sweep(self):
+        # #474: the `verify-rejected` journal line is logged on the TRANSITION
+        # (a NEWLY-rejected ticket), never repeated every sweep for a ticket
+        # already remembered as rejected.
+        r = self.repo(closes=(3,))
+        logs1 = self.reconcile([r], closed_fetch=lambda root, since: {})
+        logs2 = self.reconcile([r], closed_fetch=lambda root, since: {})
+        self.assertTrue(any("verify-rejected" in ln for ln in logs1), logs1)
+        self.assertFalse(any("verify-rejected" in ln for ln in logs2),
+                         "the rejection was already logged; do not repeat it "
+                         "every sweep")
+
     def test_the_fallback_verified_path_is_not_re_verified_a_second_time(self):
         # when `merged_closes` itself found nothing (the tvdole/#230 shape),
         # `closed_fetch` already ran once as the FALLBACK and its answer IS
