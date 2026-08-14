@@ -96,6 +96,36 @@ _log_tier0_event() {
     { echo "$(date -Iseconds)  project=$project  $tag  cmd=${cmd_flat}" >> "$AUDIT_LOG"; } 2>/dev/null || true
 }
 
+# #477: heavy tests/builds in the camera-box repo go through CI ONLY -- the
+# ad-hoc `# airuleset:build-ok` marker AND the AIRULESET_ALLOW_LOCAL_BUILD env
+# var are DISABLED there (workers ran local `cargo test` 247x/2 days through the
+# marker, overloading the shared dev1 box; user decision 2026-08-14). The
+# DELIBERATE project-level Tier-1/2 opt-in (walked further down) is UNAFFECTED --
+# only the two ad-hoc per-command bypasses are removed, and only for camera-box.
+#
+# Detection is by the repo's AUTHORITATIVE identity: `git remote get-url origin`
+# basename == camera-box (the same repo-name convention notify.repo_name_for
+# uses -- a repo's identity is its remote, never its directory basename). If a
+# remote resolves to a DIFFERENT name it wins over any `camera-box` path
+# component; only when NO remote resolves (a detached/no-origin checkout, or a
+# worktree) does a `camera-box` path component decide. Fails toward NOT-camera-
+# box on any ambiguity, so an unresolvable repo keeps the bypass exactly as
+# before -- this never over-blocks a non-camera-box project.
+_is_camera_box_repo() {
+    local base="$1" url name
+    [ -z "$base" ] && return 1
+    url=$(cd "$base" 2>/dev/null && git remote get-url origin 2>/dev/null) || url=""
+    if [ -n "$url" ]; then
+        name="${url%.git}"; name="${name%/}"; name="${name##*/}"; name="${name##*:}"
+        [ "$name" = "camera-box" ] && return 0
+        return 1   # remote resolved to a DIFFERENT repo -> authoritatively not camera-box
+    fi
+    case "/$base/" in
+        */camera-box/*) return 0 ;;
+    esac
+    return 1
+}
+
 # #471 (F2): segment-scoped `--no-run` exemption for the `--no-run`-gated cargo
 # shapes (`test`/`bench`). The old whole-command `--no-run` grep wrongly exempted
 # a genuine RUN sitting in a DIFFERENT top-level segment (`cargo test --no-run &&
@@ -307,18 +337,27 @@ fi
 
 [ "$CMD_IS_HEAVY" = 0 ] && exit 0
 
+# #477: is this the camera-box repo? If so, the two ad-hoc bypasses below are
+# NOT honoured -- the command falls through to the Tier-0 walk-and-block, which
+# points at CI. (The deliberate project Tier-1/2 opt-in still exempts.)
+CAMERA_BOX=0
+if _is_camera_box_repo "${CWD:-$PWD}"; then CAMERA_BOX=1; fi
+
 # Deliberate one-off bypass (a real reason to build locally just this once) —
 # still sanctioned, now ACCOUNTABLE: every use on a genuinely heavy command
-# is appended to the audit log instead of vanishing silently.
-case "$STRIPPED" in
-    *"airuleset:build-ok"*)
-        _log_tier0_event "inline-bypass" || true
+# is appended to the audit log instead of vanishing silently. EXCEPT for
+# camera-box (#477), where neither ad-hoc bypass is honoured at all.
+if [ "$CAMERA_BOX" != 1 ]; then
+    case "$STRIPPED" in
+        *"airuleset:build-ok"*)
+            _log_tier0_event "inline-bypass" || true
+            exit 0
+            ;;
+    esac
+    if [ "${AIRULESET_ALLOW_LOCAL_BUILD:-0}" = "1" ]; then
+        _log_tier0_event "env-bypass" || true
         exit 0
-        ;;
-esac
-if [ "${AIRULESET_ALLOW_LOCAL_BUILD:-0}" = "1" ]; then
-    _log_tier0_event "env-bypass" || true
-    exit 0
+    fi
 fi
 
 # Heavy build (directly, or via an invoked script). Walk cwd → / for the
@@ -340,7 +379,9 @@ done
 
 _log_tier0_event "blocked" || true
 
-if [ -n "$HEAVY_SCRIPT" ]; then
+if [ "$CAMERA_BOX" = 1 ]; then
+    echo "BLOCKED: heavy local build/test in the camera-box repo (no-local-builds.md, airuleset #477). The '# airuleset:build-ok' marker and AIRULESET_ALLOW_LOCAL_BUILD are DISABLED for camera-box — heavy compilation and tests run in CI ONLY. Locally, run only a cheap check: cargo check / cargo clippy / cargo test --no-run." >&2
+elif [ -n "$HEAVY_SCRIPT" ]; then
     echo "BLOCKED: heavy local build hidden inside invoked script '$HEAVY_SCRIPT' in a Tier-0 project (no-local-builds.md). Compilation + release builds run in CI — locally run only a cheap check: cargo check / cargo clippy / cargo test --no-run. To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
 else
     echo "BLOCKED: heavy local build in a Tier-0 project (no-local-builds.md). Compilation + release builds run in CI — locally run only a cheap check: cargo check / cargo clippy / cargo test --no-run. To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
