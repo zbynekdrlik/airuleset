@@ -166,7 +166,11 @@ def split_top_level(text):
 
 
 anchor = re.compile(r"(^|[;&|(\s])cargo\s+" + re.escape(sub) + r"(\s|$|[;&|)(<>])")
-norun = re.compile(r"(^|\s)--no-run(\s|$)")
+# #471-review: the --no-run boundary is widened to the SAME metachar class as
+# the heavy-token anchors, so a `--no-run` glued to a trailing `;`/`)`/`|`/... is
+# still recognized as the compile-only flag (a `--no-run-decoy` harness arg,
+# followed by `-`, still does NOT match and stays heavy).
+norun = re.compile(r"(^|\s)--no-run(\s|$|[;&|)(<>])")
 for seg in split_top_level(cmd):
     if anchor.search(seg) and not norun.search(seg):
         sys.exit(0)   # heavy: a real run with no --no-run in its own segment
@@ -194,7 +198,7 @@ is_heavy() {
     # whole-flag `--no-run` present -> the segment helper decides (a genuine run
     # in a different segment, or a `--no-run-decoy` harness arg, still blocks).
     if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+test([[:space:]]|$|[;&|)(<>])'; then
-        if printf '%s' "$c" | grep -qE '(^|[[:space:]])--no-run([[:space:]]|$)'; then
+        if printf '%s' "$c" | grep -qE '(^|[[:space:]])--no-run([[:space:]]|$|[;&|)(<>])'; then
             _gated_shape_is_heavy "$c" 'test' && return 0
         else
             return 0
@@ -222,7 +226,7 @@ is_heavy() {
     # `cargo bench` that RUNS benches (NOT the compile-only `--no-run`, same #471
     # (F2) segment-scoped treatment as the `cargo test` carve-out above).
     if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+bench([[:space:]]|$|[;&|)(<>])'; then
-        if printf '%s' "$c" | grep -qE '(^|[[:space:]])--no-run([[:space:]]|$)'; then
+        if printf '%s' "$c" | grep -qE '(^|[[:space:]])--no-run([[:space:]]|$|[;&|)(<>])'; then
             _gated_shape_is_heavy "$c" 'bench' && return 0
         else
             return 0
