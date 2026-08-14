@@ -638,6 +638,25 @@ class TestContinuousRefillMandate(TestCase):
         self.assertIn("dispatch is never gated", body,
                       "SKILL dropped the #456 'DISPATCH is NEVER gated' guarantee")
 
+    def test_the_master_locks_all_lanes_concurrent_and_reviews_never_starve(self):
+        # Round-2 blocker (#456 decision 3): decisions 1 & 2 got positive locks
+        # (M1/M2 above), but decision 3 -- ALL lanes concurrent, never
+        # round-robin, sub-dev reviews never starve -- had NONE. A one-clause
+        # revert of the master template back to "the LANE SCHEDULER (first lane
+        # with workable items wins)" passed the WHOLE suite. Lock it in BOTH the
+        # /goal template AND the Step-3 body. Every anchor below sits on one
+        # physical line so a markdown reflow cannot split it (the wrap trap).
+        tpl = master_goal_lines()[0]
+        self.assertIn("ALL LANES CONCURRENTLY", tpl,
+                      "master template dropped the all-lanes-concurrent mandate")
+        self.assertIn("review queue never starves", tpl.lower(),
+                      "master template dropped the reviews-never-starve guarantee")
+        body = read(SKILL_MASTER).lower()
+        self.assertIn("never round-robin", body,
+                      "master Step-3 body dropped the never-round-robin scheduler")
+        self.assertIn("must never starve", body,
+                      "master Step-3 body dropped reviews' never-starve precedence")
+
     def test_the_master_template_carries_the_lanes_full_reminder(self):
         # master_goal_lines()[0] IndexErrors if the template ever vanishes --
         # a hard failure, guarding against silently measuring nothing.
