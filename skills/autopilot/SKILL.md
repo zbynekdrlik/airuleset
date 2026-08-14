@@ -581,12 +581,7 @@ gap in either.
      do the merge→gates→push; exit 1 = a DIFFERENT live session is integrating this repo right now
      — do NOT integrate this turn, keep DISPATCHING new lanes and re-check next turn) — and
      **release it the moment that cycle's push has landed** (`autopilot-lock release --repo <repo
-     path>`), so another session's integration can proceed. **The lock CLI's own `exit 1` stderr
-     still prints legacy dispatch-lock wording ("Serial-per-repo dispatch — … do NOT dispatch a
-     second worker") from before this narrowing — IGNORE that phrasing and follow THIS bullet: exit
-     1 means do not INTEGRATE this repo right now, NOT stop dispatching. (Rewording that one CLI
-     message is a tracked residual — see the internals note; `cli_autopilot_lock.py` is outside this
-     ticket's named surface.)** This mutex is what prevents two sessions
+     path>`), so another session's integration can proceed. This mutex is what prevents two sessions
      running a merge/push on the SAME repo at the SAME instant (the proven camera-box #495 and
      #499/#500-vs-#505 collision). In the serial fallback the SUPERVISOR still acquires the mutex
      before dispatching the single worker and releases it once that worker's own PR merge has landed

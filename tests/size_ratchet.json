@@ -26,7 +26,7 @@
     "tests/test_authority_profiles.py": 3196,
     "tests/test_autopilot_ci_resilience.py": 71,
     "tests/test_autopilot_dialog_default.py": 144,
-    "tests/test_autopilot_lock.py": 832,
+    "tests/test_autopilot_lock.py": 865,
     "tests/test_autopilot_master_skill.py": 227,
     "tests/test_backlog_marker_gate.py": 129,
     "tests/test_block_commit_without_design.py": 659,
