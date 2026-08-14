@@ -26,6 +26,13 @@ The dispatch tells you the issue number + repo (e.g. `Validate issue #567 in mon
 4. **Reproduce the CURRENT behavior** with whatever tools exist — the running app, MCP tools
    (read-only DB/service bridges), curl, SSH, a quick repro. For a bug: does it STILL reproduce on
    current `dev`? For a "we need X": is X genuinely still missing, or already present?
+   **On a prod-snapshot shadow box** (a stream whose "live" env is a periodic PROD snapshot, e.g.
+   montalu×N), a claim about current PROD DATA state is valid ONLY off a FRESH refresh from PROD
+   right before it — a stale idle snapshot has drifted (the client renamed/edited records on the
+   real prod since the last refresh). Refresh first (the repo names its own trigger, e.g.
+   odoo-erp's `REFRESH-DEV-BOX-FROM-PROD: <stream>`), or state your data's SOURCE + TIME; never
+   assert a current PROD-data fact from an old idle snapshot (the 2026-08-14 montalu incident: a
+   PROD-data claim read off a stale snapshot was already false).
 5. **Per-premise / per-question check.** For EACH thing the issue (or a design question someone is
    about to ask about it) assumes, verify it against the code/system — never assume the issue text
    is current. The classic failure: re-opening "how do we reach Money via the prod proxy" when the
