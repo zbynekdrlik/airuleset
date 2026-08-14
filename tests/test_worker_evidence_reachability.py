@@ -349,6 +349,19 @@ class TestWorkerDocDescribesContinuousIntegration(unittest.TestCase):
         self.assertNotIn(
             "round integration", flat,
             "pre-(#456) 'round-integration' timing phrasing must be reworded")
+        # (#462 review) the (#8) lock is an INTEGRATION mutex, never a dispatch
+        # lock -- no surviving claim may frame it as serializing DISPATCH or as
+        # acquired before dispatch (the exact pre-(#456) mental model killed).
+        self.assertNotIn(
+            "cross-session dispatch lock", self.text,
+            "pre-(#456) 'dispatch lock' framing of the (#8) lock must be reworded")
+        self.assertNotIn(
+            "serializes dispatch", self.text,
+            "the (#8) lock serializes INTEGRATION, never dispatch (#456)")
+        # per-integration-cycle run-card, never a single round-wide one.
+        self.assertNotIn(
+            "round's run-card", self.text,
+            "run-card is per-ticket at its integration cycle, not round-wide")
 
     def test_continuous_integration_phrasing_is_present(self):
         self.assertIn(

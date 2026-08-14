@@ -159,7 +159,7 @@
     "tests/test_watchdog.py": 3601,
     "tests/test_watchdog_state_keys.py": 113,
     "tests/test_worker_attestation.py": 97,
-    "tests/test_worker_evidence_reachability.py": 365,
+    "tests/test_worker_evidence_reachability.py": 378,
     "tests/test_worker_review_dispatch_shape.py": 235,
     "tests/test_workflow_cost_discipline.py": 68,
     "tests/test_working_liveness.py": 332,
