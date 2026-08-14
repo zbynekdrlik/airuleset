@@ -218,7 +218,14 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
                # the AskUserQuestion PreToolUse matcher for every stream
                # (every box asks questions, so this deploys everywhere,
                # like its "Ruleset trim wave 2" siblings above).
-               "user-questions-slovak"]
+               "user-questions-slovak",
+               # #465 (2026-08-14) — the verified Odoo Discuss XML-RPC
+               # message_post recipe (body_is_html=True, post-then-rewrite
+               # BANNED). FREEZE-compliant surface for #464 (a new hook is
+               # banned); hidden on-demand, deploys everywhere at zero
+               # slash-noise cost, description-triggered when a session
+               # posts to an Odoo Discuss channel over XML-RPC.
+               "odoo-discuss-xmlrpc"]
 
 # --- Per-box skill scoping (user complaint 2026-07-11: "slash cmd by nemali byt
 # vsetky vsade ale len relevantne k danemu projektu") ---
