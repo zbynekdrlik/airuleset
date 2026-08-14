@@ -1,10 +1,10 @@
 {
   "files": {
-    "airuleset.py": 9840,
+    "airuleset.py": 9850,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 793,
-    "cli_quals.py": 814,
+    "cli_quals.py": 830,
     "cli_quals_cmd.py": 549,
     "cli_scratch_sweep.py": 976,
     "cli_target_purge.py": 892,
@@ -181,7 +181,7 @@
     "airuleset.py::cmd_install": 409,
     "airuleset.py::cmd_notify": 318,
     "airuleset.py::cmd_push": 356,
-    "airuleset.py::main": 511,
+    "airuleset.py::main": 521,
     "cli_vault.py::cmd_secret": 300,
     "watchdog/__init__.py::deliver_discord_replies": 459,
     "watchdog/__init__.py::gk_request_backstop": 214,

@@ -404,6 +404,22 @@ def cmd_authority(args):
     if getattr(args, "maintainer_login", False):
         print(airuleset.MAINTAINER_GH_LOGIN)
         return
+    if getattr(args, "self_login", False):
+        # THIS box's own gh identity for the self-authored-close carve-out
+        # (block-fork-no-merge-issue-close.sh, #463). An App installation token
+        # 403s on `gh api user` structurally, so an App-token box's identity is
+        # the fixed bot login every ticket it FILES carries, resolved WITHOUT a
+        # network call (`gh api user` would only 403 anyway). Every other box
+        # uses its real gh login. Prints nothing (empty) when the login cannot
+        # be resolved -> the hook's fail-safe refuses the exemption (blocks),
+        # never guesses.
+        if _is_gh_app_token_box():
+            print(airuleset.STREAM_APP_BOT_LOGIN)
+            return
+        login = airuleset._gh_login()
+        if login:
+            print(login)
+        return
     profile = resolve_authority()
     print(profile)
     if getattr(args, "explain", False):

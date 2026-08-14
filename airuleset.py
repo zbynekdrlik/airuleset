@@ -9737,6 +9737,16 @@ def main():
                              "sub-finding apart from the maintainer-authored "
                              "assigned work every such stream shares an "
                              "identity with)")
+    p_auth.add_argument("--self-login", action="store_true",
+                        help="Print THIS box's own gh identity for the "
+                             "self-authored-close carve-out in "
+                             "block-fork-no-merge-issue-close.sh (#463): on a "
+                             "GitHub App-token box `gh api user` 403s, so return "
+                             "the fixed stream bot login (STREAM_APP_BOT_LOGIN) "
+                             "without a network call; on every other box return "
+                             "the real gh login. Prints nothing when the "
+                             "identity cannot be resolved (the hook then refuses "
+                             "the exemption / fails safe).")
 
     p_slice = sub.add_parser(
         "slice-quals",
