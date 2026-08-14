@@ -134,5 +134,91 @@ class TestVerifyLaunchedWorkLivenessConsistency(TestCase):
             "(CI / rebuild) wait and assuming it will re-invoke you", t)
 
 
+class TestMemoryPressureReapDeathModeNamed(TestCase):
+    """#448: the long-wait background-waiter guidance named ONLY the compaction
+    death mode (the OS process usually SURVIVES; only the notification handle is
+    orphaned). Claude Code ALSO proactively SIGTERM->SIGKILLs a MAIN-session
+    background shell on a Node `memoryPressure` event (telemetry
+    `task_local_shell_pressure_reap`; fires only when agentId===undefined, i.e.
+    main-session launches; a subagent-launched bg shell is EXEMPT) -- confirmed
+    live in the installed 2.1.232 binary. That mode is materially different: it
+    kills the OS PROCESS outright, and it hits in MINUTES on a memory-tight box,
+    not just at a compaction boundary -- so a reader who internalised "the
+    process usually survives, only re-link the handle" will under-react to a
+    genuinely dead waiter. These asserts lock the failure mode + its recovery
+    onto every surface a session OR a DISPATCHED WORKER reads: the always-on
+    module stub is the one that reaches a worker (#104/#105 -- a skill body does
+    not)."""
+
+    SURFACES = (
+        "modules/core/ci-monitoring.md",
+        "skills/verify-launched-work-liveness/SKILL.md",
+        "modules/quality/verify-launched-work-liveness.md",
+    )
+    # The two FULLER surfaces carry the mitigation detail; the always-on stub
+    # stays terse (reap named + recovery), so the env kill-switch / minutes /
+    # subagent-exempt asserts below apply only to these two.
+    FULL = (
+        "modules/core/ci-monitoring.md",
+        "skills/verify-launched-work-liveness/SKILL.md",
+    )
+
+    @staticmethod
+    def _window(text, needle, radius=1000):
+        i = text.find(needle)
+        if i == -1:
+            return ""
+        return " ".join(text[max(0, i - radius): i + radius].split())
+
+    def test_reap_trigger_named_on_every_surface(self):
+        # `memoryPressure` is a single unbreakable token -- it cannot appear by
+        # a wrap-accident, so its presence proves the reap failure mode is named.
+        for rel in self.SURFACES:
+            self.assertIn(
+                "memoryPressure", read(rel),
+                "%s must name the memoryPressure reap trigger" % rel)
+
+    def test_reap_says_the_process_is_killed_and_ties_to_recovery(self):
+        # Not merely the token -- the failure-mode text must say the OS process
+        # is KILLED (unlike compaction's orphan-only mode) AND tie to the SAME
+        # recovery the rule already prescribes (relaunch / re-derive / durable).
+        for rel in self.SURFACES:
+            w = self._window(read(rel), "memoryPressure").lower()
+            self.assertTrue(
+                any(k in w for k in ("sigterm", "sigkill", "kill", "reap")),
+                "%s: the reap window must say the process is killed" % rel)
+            self.assertTrue(
+                any(k in w for k in
+                    ("relaunch", "re-derive", "durable", "fresh waiter")),
+                "%s: the reap window must tie to the relaunch/re-derive "
+                "recovery" % rel)
+
+    def test_reap_distinguished_from_compaction_by_speed(self):
+        # The whole point: a DIFFERENT death mode from compaction -- it kills
+        # the process and hits in MINUTES. The fuller surfaces must say so.
+        for rel in self.FULL:
+            w = self._window(read(rel), "memoryPressure").lower()
+            self.assertIn(
+                "minute", w,
+                "%s: name that the reap can kill in MINUTES" % rel)
+
+    def test_reap_notes_main_session_only_subagent_exempt(self):
+        # The guard's key property -- a dispatched subagent's own bg shell is
+        # EXEMPT -- is what makes the subagent-foreground mitigation valid.
+        for rel in self.FULL:
+            w = self._window(read(rel), "memoryPressure").lower()
+            self.assertIn("subagent", w)
+            self.assertIn("exempt", w)
+
+    def test_env_kill_switch_mitigation_named_on_the_fuller_surfaces(self):
+        # A cheap, zero-machinery mitigation documented as guidance (not a new
+        # hook -- FREEZE): the CLI-env kill-switch restores the documented
+        # background-waiter semantics.
+        for rel in self.FULL:
+            self.assertIn(
+                "CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP", read(rel),
+                "%s: name the documented env kill-switch mitigation" % rel)
+
+
 if __name__ == "__main__":
     main()
