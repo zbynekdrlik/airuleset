@@ -186,15 +186,24 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # (#440 re-pin: `questions_path=None` was added on the SAME trailing
         # line as `progress_dir=None`, right before the closing `):` — the
         # anchor moved again; the guard and the mutation target did not.)
+        # (#461 re-pin: `owner_decision_fetch=None` was added on a NEW trailing
+        # line after `questions_path=None,` — the closing `):` moved off this
+        # line again. The anchor and mutation target did not.)
         old = ("             vault_purge=None, log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
                "backlog_fetch=None,\n"
-               "             progress_dir=None, questions_path=None):")
+               "             progress_dir=None, questions_path=None,\n"
+               "             owner_decision_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
+        # Mutate ONLY the guard's default (`vault_purge=None` ->
+        # `vault_purge=lambda: []`) and keep every other param intact — a
+        # truncating replacement would drop later params whose body
+        # references sit outside a try/except (e.g. #461's own
+        # `if owner_decision_fetch is not None:` guard), NameError-ing the
+        # mutant for a reason unrelated to the guard under test. Preserving
+        # the whole signature is both correct and future-proof.
         mutated = src.replace(
-            old, "             vault_purge=lambda: [], log_fn=None, "
-                 "reopen_fetch=None,\n"
-                 "             time_fn=None, sweep_budget_s=None):", 1)
+            old, old.replace("vault_purge=None", "vault_purge=lambda: []"), 1)
         self.assertNotEqual(mutated, src, "the mutation did not apply")
 
         name = "watchdog_live_default_mutant"

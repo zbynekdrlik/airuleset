@@ -148,6 +148,22 @@ class TestDigestBlock(unittest.TestCase):
         block = wd._owner_decision_digest_block([("r", 1, "z" * 200)])
         self.assertNotIn("z" * 120, block)
 
+    def test_default_worst_case_stays_under_notify_max_content(self):
+        # notify.send truncates a forwarded block at _MAX_CONTENT (1900). The
+        # default `limit` must keep the WORST case -- long repo names + full
+        # 80-char titles -- comfortably under that, or the tail tickets AND the
+        # 'Odpovedz prosím' footer would be silently cut mid-truncation. A
+        # revert of the default from 12 back to 15 makes this fail.
+        import notify
+        many = [("automatizacie-montalu-x", 9999999, "T" * 200)
+                for _ in range(60)]
+        block = wd._owner_decision_digest_block(many)   # production default
+        self.assertLess(len(block), notify._MAX_CONTENT,
+                        "digest %d >= _MAX_CONTENT %d -- footer would be cut"
+                        % (len(block), notify._MAX_CONTENT))
+        # The cap still fired and stayed honest about the remainder.
+        self.assertIn("ďalších", block)
+
 
 class TestRepingOwnerDecisionTickets(unittest.TestCase):
     def _spy_send(self):

@@ -3305,11 +3305,15 @@ def _fetch_owner_decision_tickets(home=None):
     return sorted(out)
 
 
-def _owner_decision_digest_block(tickets, limit=15):
+def _owner_decision_digest_block(tickets, limit=12):
     """The Slovak, phone-readable, self-contained digest body. NOT a session
     `❓` marker (this is posted directly to Discord by send_fn, never via a
-    Stop-hook), so it carries no `NEEDS YOU` keyword. Caps the list so a huge
-    backlog stays under Discord's forwarding budget."""
+    Stop-hook), so it carries no `NEEDS YOU` keyword. `limit` caps the listed
+    tickets (the rest collapse into one honest '…a ďalších K' line) so the
+    WORST case -- long repo names + 80-char titles + header/footer -- stays
+    under notify's `_MAX_CONTENT` (1900) forwarding cap: 12 lines is ~1.6 KB,
+    comfortably clear, whereas 15 could reach ~1.9 KB and silently drop the
+    tail tickets AND the 'Odpovedz prosím' footer mid-truncation."""
     n = len(tickets)
     lines = [
         "**Rozhodnutia čakajúce na teba (denný súhrn):**",
@@ -3367,12 +3371,27 @@ def reping_owner_decision_tickets(now, send_fn, state, home=None, dry_run=False,
         logs.append("owner-decision-digest unmeasurable "
                     "(all repo queries failed)")
         return logs                            # retry next sweep (bucket unset)
+    # The bucket is stamped on a measurable FETCH, before the send -- so a
+    # Discord POST failure (transient 5xx, or a box with notify unconfigured)
+    # loses THIS day's roundup rather than re-fetching+re-posting every 60s all
+    # day. Deliberate: the digest is a daily nicety (the footer `U N` and the
+    # per-ticket ❓ pings are the critical paths), and one lost day beats an
+    # all-day query/POST storm on a persistent misconfig. notify.send's own
+    # marker only records on genuine DELIVERY (#135), so it would NOT dedupe a
+    # retry -- our bucket stamp is the only cap, on purpose.
     dd["bucket"] = bucket
     state["owner_decision_digest"] = dd
     (persist or (lambda: None))()              # cadence survives a kill (job 8)
     if not tickets:
         logs.append("owner-decision-digest: 0 pending")
         return logs
+    # ONE owner per box: account_owner/resolve_owner() is box-scoped, while the
+    # tickets span every repo in _cache_repo_roots(home). On the fleet each
+    # box's $HOME belongs to one Discord owner (dev1=newlevel; every subdev
+    # stream user has their OWN $HOME + account), so this is per-owner-correct
+    # today. Accepted residual (FREEZE): a single $HOME whose repos spanned two
+    # different Discord owners would ping the box owner for all of them -- the
+    # same box-wide addressing every other watchdog ping already uses (#212).
     owner = account_owner or None              # already stream-redirected (#212)
     if not owner:
         from notify import resolve_owner
