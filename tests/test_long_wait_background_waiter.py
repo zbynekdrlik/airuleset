@@ -219,6 +219,18 @@ class TestMemoryPressureReapDeathModeNamed(TestCase):
                 "CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP", read(rel),
                 "%s: name the documented env kill-switch mitigation" % rel)
 
+    def test_reap_incident_archaeology_lives_in_the_playbook(self):
+        # Mirrors this module's own TestIncidentNarrativeLivesInThePlaybook:
+        # the always-on ci-monitoring.md keeps the tight pointer (it is at its
+        # word cap); the measurement archaeology lives in the paths:-scoped
+        # playbook, which is exactly where ci-monitoring.md's "in the playbook"
+        # pointers resolve.
+        pb = read(".claude/rules/airuleset-internals.md")
+        self.assertIn("memoryPressure", pb,
+                      "playbook must carry the reap incident narrative")
+        self.assertIn("287 MB", pb,
+                      "playbook must carry the reap incident measurement")
+
 
 if __name__ == "__main__":
     main()
