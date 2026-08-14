@@ -639,6 +639,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         rec = {}
         state = {}
         sent = []
+        all_logs = []
         with m.patch("airuleset.resolve_authority", return_value="full"), \
              m.patch.object(wd, "_count_live_subagents", return_value=2), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192), \
@@ -652,9 +653,25 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
                     lambda msg, **k: sent.append(msg), False, None, proj,
                     backlog_fetch=lambda cwd: 32, state=state,
                     sleep_fn=lambda s: None)
+                all_logs += logs
         self.assertEqual(len(sent), 1, "give-up ping must fire exactly once")
         self.assertTrue(any("GAVE UP after" in ln and "stash abort" in ln
-                            for ln in logs), logs)
+                            for ln in all_logs), all_logs)
+
+    def test_zero_worker_active_rearms_giveup_counters(self):
+        # #442-review F1: the session-active give-up re-arm (clear ln/lna/
+        # lpinged) is PRESERVED for the 0-worker branch -- an active empty-lane
+        # box that had given up must reset so it re-arms once it goes quiet.
+        now = 100000
+        tmtime = now - 30  # active
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lna": 3, "lpinged": True}
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now,
+                                      tmtime, rec=rec)
+        self.assertFalse(owns)
+        self.assertEqual(rec.get("ln"), 0)
+        self.assertEqual(rec.get("lna"), 0)
+        self.assertFalse(rec.get("lpinged"))
+        self.assertTrue(any("skip:idle" in ln for ln in logs), logs)
 
     # ---------------------------------------------------------------- #
     # #442 — the lane-fill path gets its OWN, much shorter "live

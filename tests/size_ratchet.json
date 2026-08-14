@@ -66,7 +66,7 @@
     "tests/test_goal_backlog_proof.py": 1039,
     "tests/test_goal_indicator_above_box.py": 96,
     "tests/test_goal_strictness_clause.py": 51,
-    "tests/test_goal_sweep.py": 906,
+    "tests/test_goal_sweep.py": 960,
     "tests/test_goal_sweep_hermeticity.py": 74,
     "tests/test_goal_turn_boundary.py": 112,
     "tests/test_hook_state_cleanup.py": 67,
@@ -169,7 +169,7 @@
     "watchdog/burn_jobs.py": 306,
     "watchdog/cards.py": 481,
     "watchdog/compact.py": 1037,
-    "watchdog/goal.py": 1278,
+    "watchdog/goal.py": 1283,
     "watchdog/repo_health.py": 758,
     "watchdog/usage.py": 380
   },

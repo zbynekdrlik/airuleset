@@ -949,19 +949,17 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     if authority != "full":
         return logs, False
     idle = now - (tmtime or now)
-    # #442 THIRD GAP -- the session-active reset stays (clears the give-up
-    # counters so the 0-worker give-up re-arms after the session next goes
-    # quiet), but it NO LONGER early-returns. The old top-of-function idle
-    # gate returned HERE with EMPTY logs whenever the transcript was fresh --
-    # which a BUSY under-saturated session ALWAYS is (turns spinning -> mtime
-    # fresh) -- so it never reached the fill-the-cap decision and journalled
-    # nothing (the reopen-3 root cause: gk 2 workers, I 32, guard silent 20+
-    # min). The idle requirement is re-applied PER BRANCH below: the 0-worker
-    # empty-lane branch keeps the 15-min requirement (and now LOGS its skip);
-    # the under-saturated fill-the-cap branch has none, firing exactly while
-    # the session is busy with too few workers -- which is the whole point.
-    if idle < GOAL_LANE_IDLE_S and (rec.get("ln") or rec.get("lna")):
-        rec.update({"ln": 0, "lpinged": False, "lna": 0})
+    # #442 THIRD GAP -- the old top-of-function idle gate returned HERE with
+    # EMPTY logs whenever the transcript was fresh -- which a BUSY
+    # under-saturated session ALWAYS is (turns spinning -> mtime fresh) -- so
+    # it never reached the fill-the-cap decision and journalled nothing (the
+    # reopen-3 root cause: gk 2 workers, I 32, guard silent 20+ min). The idle
+    # requirement is now applied PER BRANCH below, and the session-active
+    # give-up reset moved WITH it into the 0-worker branch: a busy
+    # under-saturated session must NOT re-arm every sweep (#442-review F1 --
+    # the reset here zeroed the stash-abort streak before it could reach its
+    # cap, so the give-up was structurally unreachable on exactly the
+    # population this fix newly enables).
     marker = watchdog.transcript_last_marker(tpath)
     if marker == "❓":
         return logs, False
@@ -1079,6 +1077,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # window and the per-fire cooldown below (so a fresh transcript never spams
     # -- it just stops SILENTLY excluding the busy state).
     if not under_saturated and idle < GOAL_LANE_IDLE_S:
+        # #442-review F1: the session-active give-up reset lives HERE now
+        # (0-worker branch only), never at the top -- a BUSY under-saturated
+        # session must NOT re-arm every sweep, or its stash-abort streak never
+        # reaches its cap and the give-up stays unreachable (the give-up is only
+        # ever evaluated at the idle prompt anyway, which is exactly here).
+        if rec.get("ln") or rec.get("lna"):
+            rec.update({"ln": 0, "lpinged": False, "lna": 0})
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d idle=%ds "
                     "-> skip:idle (empty-lane, < %dm since last transcript write)"
                     % (loc, live_workers, waiters, backlog_n, int(idle),
