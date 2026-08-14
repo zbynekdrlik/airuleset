@@ -137,9 +137,38 @@ class QuestionFailLoud(unittest.TestCase):
             "the arm-question skip must leave a delivery-log line: "
             + repr(lines))
 
+    def test_large_message_with_early_marker_still_logs(self):
+        # The backstop grep must survive a payload larger than the 64 KiB pipe
+        # buffer with the ❓ marker EARLY: under `set -o pipefail`, a
+        # `printf … | grep -q` quits at the early match while printf is still
+        # writing, so printf takes SIGPIPE, the pipe returns 141, the `if` goes
+        # false, and the `unhandled` line is silently never written — the exact
+        # silence class this fix exists to close (#190/#192/#194). A here-string
+        # has no concurrent writer, so it must log regardless of size.
+        sid = self._sid("large")
+        msg = (
+            "**Otázka — projekt odoo-erp (ERP pre firmu):** rozhodni postup.\n"
+            "\n"
+            "❓ NEEDS YOU: ktory sposob instalacie APK mam pouzit?\n"
+            "\n"
+            + ("Poznamka k buildu, riadok. " * 4000))   # ~112 KB trailing note
+        self.assertGreater(len(msg.encode()), 65536)     # past the pipe buffer
+        r = self._fire(sid, msg, mid="466007")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(
+            any("unhandled" in ln for ln in self._dlog_lines()),
+            "a large ❓-carrying turn whose marker is not the last line must "
+            "still leave a fail-loud line — the backstop grep must not lose the "
+            "SIGPIPE race: " + repr(self._dlog_lines()))
+
     # --- per-question identification (req c) --------------------------------
 
     def test_pending_lines_carry_qhash(self):
+        # (Coverage note: the reword-in-place / edit-fallthrough / not-delivered /
+        # arm-question _pending_log calls all pass the SAME proven-non-empty $QH
+        # and are log-only; the edit-SUCCESS path is not directly exercisable in
+        # this bash harness because --edit-question uses urllib, not the faked
+        # curl — the dedup line below is the reachable proxy for the qhash field.)
         # A verbatim re-poke logs a `verbatim-repeat-dedup` pending line — it
         # (like every kind=pending line) must carry a per-question `qhash=` so
         # two DIFFERENT questions are distinguishable in the log (the

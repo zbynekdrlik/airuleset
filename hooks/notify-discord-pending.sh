@@ -542,9 +542,14 @@ fi
 # the incident's silence class. LOG-ONLY: this never pings, so a false positive
 # (a ✅ report quoting "❓ NEEDS YOU" as text) is a harmless diagnostic line,
 # never a spurious ping.
+# HERE-STRING, never `printf … | grep -q`: under this hook's `set -o pipefail`,
+# `grep -q` quits at the first match while `printf` is still writing, so past the
+# 64 KiB pipe buffer `printf` takes SIGPIPE, the pipe returns 141, the `if` goes
+# false, and the backstop silently fails to log — reintroducing the exact silence
+# class it exists to close (the #190/#192/#194 race). A here-string has no
+# concurrent writer, so the race cannot exist; still `set -e`-safe in an `if`.
 if [ "${SENDQ_CALLED:-0}" = "0" ] \
-   && printf '%s\n' "$MSG" \
-      | grep -qE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)'; then
+   && grep -qE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)' <<<"$MSG"; then
     _pending_log "unhandled" "question-marker-not-dispatched" "$(_qhash "$MSG")"
 fi
 
