@@ -2342,6 +2342,62 @@ class GraphqlBudgetGuard(unittest.TestCase):
             self.assertEqual(cache["open"], 7)
             self.assertEqual(cache["name"], "demo")
 
+    def test_refresh_skips_reduced_authority_path_too_when_budget_low(self):
+        # The guard sits BEFORE the full-vs-reduced authority split, so a
+        # reduced-authority (sub-dev stream) box must yield identically. This
+        # covers the branch the full-authority skip test cannot reach.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            _seed_cache(home, repo, open_n=9, name="demo", scope="mine")
+            marker = Path(bindir) / "EXPENSIVE_CALLED"
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"api rate_limit"*) echo '
+                "'" + self._rl(150) + "';;\n"
+                '  *) touch "%s"; echo "SHOULD_NOT_BE_CALLED";;\n'
+                'esac\n' % marker)
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(
+                marker.exists(),
+                "reduced-authority refresh made a GraphQL call under low budget")
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 9, "stale slice cache must be preserved")
+            self.assertIn("budget", r.stdout.lower())
+
+    def test_gh_graphql_floor_default_and_env_override(self):
+        import unittest.mock as m
+        # No override -> the documented default.
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_GH_GRAPHQL_FLOOR", None)
+            self.assertEqual(airuleset._gh_graphql_floor(),
+                             airuleset.GH_GRAPHQL_REFRESH_FLOOR)
+        # A valid override wins.
+        with m.patch.dict(os.environ, {"AIRULESET_GH_GRAPHQL_FLOOR": "500"}):
+            self.assertEqual(airuleset._gh_graphql_floor(), 500)
+        # 0 is a deliberate, honoured disable (never rewritten to the default).
+        with m.patch.dict(os.environ, {"AIRULESET_GH_GRAPHQL_FLOOR": "0"}):
+            self.assertEqual(airuleset._gh_graphql_floor(), 0)
+        # Non-numeric and negative fall back to the default rather than
+        # silently disabling the guard.
+        for bad in ("", "abc", "-5", "1.5"):
+            with m.patch.dict(os.environ,
+                              {"AIRULESET_GH_GRAPHQL_FLOOR": bad}):
+                self.assertEqual(airuleset._gh_graphql_floor(),
+                                 airuleset.GH_GRAPHQL_REFRESH_FLOOR, bad)
+
 
 if __name__ == "__main__":
     unittest.main()

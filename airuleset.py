@@ -8199,8 +8199,9 @@ def cmd_tickets_status(args):
         # draining the last of the shared budget on a cosmetic read (the
         # functional calls — gh issue create / autopilot / run-cards — keep
         # their headroom). Fails OPEN, so an unmeasurable budget proceeds
-        # exactly as before. The 120s TTL + 30s spawn-guard re-probe (free)
-        # and resume real refreshes once the budget recovers.
+        # exactly as before. A later render re-probes (free) under the same
+        # 120s TTL + 30s spawn-guard cadence and resumes real refreshes once
+        # the budget recovers.
         floor = _gh_graphql_floor()
         budget_ok, remaining = _graphql_budget_ok(floor, cwd=root)
         if not budget_ok:
