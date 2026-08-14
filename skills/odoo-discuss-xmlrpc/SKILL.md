@@ -14,43 +14,64 @@ in one day, on PROD** (odoo-erp thread 258; airuleset #464 → #465). The
 "documented fix" of rewriting the body after posting is **wrong** (see below).
 
 For the fuller Odoo-19 API surface (channel create in 19, the `[id]` unwrap,
-`message_update_content`, API-key gotchas) see the odoo-erp-owned
-`montalu-odoo-19` skill — this one is the focused Discuss-posting recipe.
+API-key gotchas) see the odoo-erp-owned `montalu-odoo-19` skill — this one is
+the focused Discuss-posting recipe.
 
 ## The one rule: a SINGLE `message_post(..., body_is_html=True)`
 
-`message_post(body=<str>)` runs the body through `plaintext2html` (HTML-escape)
+`message_post(body=<str>)` **escapes** a plain-`str` body (markupsafe `escape()`)
 before it stores the message AND fires the live `discuss.channel/new_message`
-bus push. So a raw HTML string sent without the flag is escaped — clients see
-literal tags. Pass **`body_is_html=True`** and Odoo stores + pushes the HTML
-verbatim (Odoo 19 `mail_thread.py` ~2188/2220/2302).
+bus push — so raw HTML sent as a plain string reaches clients as literal tags.
+
+- **In-process Odoo Python** you would pass a `Markup` body (`body=Markup("<p>…</p>")`)
+  — `escape()` keeps a `Markup` verbatim.
+- **Over XML-RPC / JSON-RPC (this skill's context) you CANNOT** — a `Markup`
+  object serializes to a plain `str` on the wire and gets re-escaped server-side.
+  So pass a `str` body **plus `body_is_html=True`**, which Odoo's own docstring
+  marks *"to be used only for RPC calls"*: it wraps the str in `Markup`
+  server-side so the HTML is kept, not escaped. Verified in Odoo 19
+  `addons/mail/models/mail_thread.py` — `def message_post(..., body_is_html=False, …)`
+  (~L2201), docstring (~L2233), the wrap (~L2315-2318).
+
+Two caveats from that source, both benign for stream automation:
+- Odoo only honors `body_is_html` for an **internal user** — integration /
+  system-admin RPC users (what a stream uses) qualify; a portal/public user
+  would still get the body escaped.
+- For an internal user it logs a harmless `"Posting HTML message using
+  body_is_html=True, use a Markup object instead"` warning. That is a log nudge
+  toward the in-process `Markup` path, **not** an error — the post is correct.
+  (Do not "fix" the warning by dropping the flag; over RPC the flag is the path.)
 
 ## BANNED anti-pattern: post-then-rewrite
 
 Do **NOT** post the escaped body and then "fix" it by re-reading and
-`mail.message.write({'body': ...})`-ing the unescaped version back. The bus push
-**already delivered the escaped body to every live client** at post time, and a
-raw `write` emits **zero** bus notifications — so live clients keep the broken
-version until a manual reload (F5). The DB looking correct afterwards hides a
-delivery that was already wrong. There is no "correct it after" — get it right
-in the single post.
+`mail.message.write({'body': ...})`-ing the unescaped version back. Two reasons
+it cannot work:
 
-(If you genuinely must EDIT an already-posted message, use
-`discuss.channel.message_update_content`, which DOES emit a `mail.record/insert`
-bus notification. A plain `write` never does.)
+1. The bus push **already delivered the escaped body to every live client** at
+   post time — a later DB change cannot un-send it.
+2. A raw `mail.message.write({'body': ...})` emits **zero** bus notifications, so
+   even the rewrite is invisible to connected clients until a manual reload (F5).
+
+The DB looking correct afterwards just hides a delivery that was already wrong.
+There is no reliable "correct it after" over RPC — get it right in the single
+`body_is_html=True` post.
 
 ## Channel + recipients
 
 - **Address the channel BY NAME**, and post into a **sub-thread under an
   existing channel** — never create a new top-level channel / group for a post.
-  (Odoo 19 removed `channel_get` / `create_group`; creating channels is a
-  separate, deliberate act, not something a post does implicitly.)
+  (Odoo 19 removed the public `channel_get` / `create_group`; creating a channel
+  is a separate, deliberate act, not something a post does implicitly.)
 - **`partner_ids`: the named recipients AND ALWAYS the owner** as a control ping,
   so a broken or missing delivery is always visible to the owner (odoo-erp
   #4006/#4011). Never post to a client thread without the owner on it.
-- Use the correct **mention anchor** format for any `@`-mention
-  (`<a href="#" data-oe-model="res.partner" data-oe-id="<pid>">@Name</a>`
-  inside the HTML body) so mentions resolve instead of rendering as text.
+- For an `@`-mention, embed the partner-mention anchor Odoo's own composer emits
+  (an `<a>` carrying `data-oe-model="res.partner"` + `data-oe-id="<pid>"` for the
+  partner) inside the HTML body so it resolves instead of rendering as text —
+  **verify the exact attribute set against a real mention posted through the 19.0
+  Discuss composer** before relying on a hand-built anchor; the markup has changed
+  across versions.
 
 ## Minimal correct example
 
@@ -58,7 +79,7 @@ bus notification. A plain `write` never does.)
 import xmlrpc.client
 
 common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
-uid = common.authenticate(db, login, api_key, {})
+uid = common.authenticate(db, login, api_key, {})   # login must be an internal user
 models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
 
 body_html = "<p>Objednávka <b>2041</b> potvrdená.</p>"
@@ -69,20 +90,30 @@ res = models.execute_kw(db, uid, api_key,
     [channel_id],
     {
         "body": body_html,
-        "body_is_html": True,          # <-- non-negotiable for any HTML body
+        "body_is_html": True,          # <-- non-negotiable for any HTML body over RPC
         "message_type": "comment",
         "partner_ids": [owner_pid, *recipient_pids],
     })
-message_id = res[0] if isinstance(res, list) else res  # JSON/XML-RPC returns [id]
+# message_post returns the mail.message record; over JSON/XML-RPC that
+# serializes to a list [id] (montalu-odoo-19 §113) — unwrap defensively.
+message_id = res[0] if isinstance(res, list) else res
 ```
 
 ## Post-verification (do it every time)
 
-1. Read the stored body back and assert it has **no `&lt;`** (i.e. it was NOT
-   escaped) — `mail.message.read([message_id], ["body"])`.
-2. Assert the `mail.notification` rows for the message are **`sent`** (not
-   `exception`) for each recipient — that is proof the bus actually delivered.
-3. If either fails, the post is broken — fix the call, do not rewrite the DB.
+1. **Prove the HTML survived:** read the stored body back
+   (`mail.message.read([message_id], ["body"])`) and assert the intended TAGS are
+   present (e.g. it contains `<b>` / `<p>`), i.e. it was stored as HTML — NOT
+   escaped to `&lt;b&gt;`. (Assert the tags render, not merely "no `&lt;`" — a
+   legitimate `<` in text such as "5 < 10" is correctly escaped and would false-
+   positive.)
+2. **Delivery, per channel:** the live channel render is the fire-and-forget bus
+   push and leaves NO `mail.notification` row, so it is not provable from
+   `mail.notification`. `mail.notification` rows being `sent` (not `exception`)
+   prove **email / inbox** dispatch to any NOTIFIED partners (`partner_ids`) —
+   check them for the owner + recipients, but do not read them as proof the
+   in-channel bus render succeeded.
+3. If (1) fails, the post is broken — fix the call, do not rewrite the DB.
 
 ## Related
 
