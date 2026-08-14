@@ -766,10 +766,36 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
         self.assertEqual(goal.GOAL_LANE_SATURATION_WORKERS, 5)
 
     def test_mem_available_mb_reads_proc_meminfo(self):
-        # On any managed Linux box this reads a real positive MB value.
+        # On any managed Linux box this reads a real positive MB value that is
+        # genuinely in MEGABYTES -- i.e. below the box's own MemTotal expressed
+        # in MB. A mutant dropping the kB->MB `// 1024` returns a raw-kB value
+        # (~thousands of times MemTotal-in-MB), which fails the `< total_mb`
+        # bound below (#442-review M1: the conversion must have teeth).
         val = goal._mem_available_mb()
         self.assertIsInstance(val, int)
         self.assertGreater(val, 0)
+        total_kb = None
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total_kb = int(line.split()[1])
+                    break
+        self.assertIsNotNone(total_kb, "/proc/meminfo has no MemTotal line")
+        self.assertLess(val, total_kb // 1024)
+
+    def test_mem_available_mb_converts_kb_to_mb(self):
+        # #442-review M1: deterministic teeth for the kB->MB `// 1024` step,
+        # independent of the box's real memory. MemAvailable 8388608 kB is
+        # exactly 8192 MB; a mutant returning raw kB would report 8388608.
+        meminfo = (
+            "MemTotal:       16384000 kB\n"
+            "MemFree:          512000 kB\n"
+            "MemAvailable:    8388608 kB\n"
+            "Buffers:          128000 kB\n"
+        )
+        with m.patch("builtins.open", m.mock_open(read_data=meminfo)):
+            val = goal._mem_available_mb()
+        self.assertEqual(val, 8192)
 
     def test_mem_available_mb_fails_open_on_read_error(self):
         # Fail-OPEN: unreadable meminfo -> None, so the caller does NOT block.
