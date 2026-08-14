@@ -3447,6 +3447,45 @@ def _draft_rescue_persist(pid, captured, now=None, dir_path=None, logs=None):
         return None
     _draft_rescue_prune(now, dir_path=dir_path)
     safe_pid = re.sub(r"[^A-Za-z0-9_-]+", "_", str(pid)).strip("_") or "pane"
+    # #479 -- content dedup: a LIVE draft parked across sweeps (a stash slot
+    # held by the user's OWN text, retype-verify-failed every ~60s) must NOT
+    # spawn a fresh rescue file every sweep -- the 2026-08-14 storm wrote the
+    # SAME 702-char draft 7x over ~3h on pane %1, and the 14-day TTL held all
+    # of them. If an existing rescue file of THIS pane already holds
+    # byte-identical content, reuse it: refresh its mtime so the TTL prune
+    # keeps the one surviving copy while the draft is still parked, and skip
+    # the duplicate write. Scoped to OUR OWN filename shape for THIS pane
+    # (`<safe_pid>-<digits>[-<n>].txt`) -- a tighter, pane-specific form of
+    # `_DRAFT_RESCUE_NAME_RX` -- so it can never dedup against unrelated
+    # content a misconfigured rescue dir might hold, and never across panes
+    # (each is an independent conversation). A genuinely EDITED draft is
+    # different content -> a fresh rescue, so the safety net is never weakened.
+    pane_rx = re.compile(r"^" + re.escape(safe_pid) + r"-\d+(?:-\d+)?\.txt$")
+    try:
+        names = sorted(os.listdir(dir_path))
+    except OSError:
+        names = []
+    for name in names:
+        if not pane_rx.match(name):
+            continue
+        cand = Path(dir_path) / name
+        try:
+            if os.path.islink(cand):
+                continue                # never a write of ours; never trust
+            if cand.read_text(encoding="utf-8") != text:
+                continue
+        except (OSError, ValueError):
+            continue                    # unreadable / non-utf8 -> not a match
+        refreshed = "ok"
+        try:
+            os.utime(str(cand), (now, now))
+        except OSError as exc:
+            refreshed = "failed:%r" % (exc,)   # surfaced below, never silent
+        if isinstance(logs, list):
+            logs.append("draft-rescue: identical content already parked "
+                        "(pane %s, %d chars, mtime-refresh=%s) -> %s"
+                        % (pid, len(text), refreshed, cand))
+        return str(cand)
     base = "%s-%d" % (safe_pid, int(now * 1000))
     for attempt in range(_DRAFT_RESCUE_MAX_RETRIES):
         suffix = "" if attempt == 0 else "-%d" % (attempt + 1)

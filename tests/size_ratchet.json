@@ -51,7 +51,7 @@
     "tests/test_discord_notify_check.py": 106,
     "tests/test_discord_reply.py": 1818,
     "tests/test_dispatch_floor.py": 601,
-    "tests/test_draft_rescue.py": 378,
+    "tests/test_draft_rescue.py": 435,
     "tests/test_durable_decisions.py": 70,
     "tests/test_dynamic_application.py": 149,
     "tests/test_ensure_timezone.py": 116,
@@ -69,7 +69,7 @@
     "tests/test_goal_backlog_proof.py": 1094,
     "tests/test_goal_indicator_above_box.py": 96,
     "tests/test_goal_strictness_clause.py": 51,
-    "tests/test_goal_sweep.py": 1210,
+    "tests/test_goal_sweep.py": 1318,
     "tests/test_goal_sweep_hermeticity.py": 74,
     "tests/test_goal_turn_boundary.py": 112,
     "tests/test_hook_state_cleanup.py": 67,
@@ -170,11 +170,11 @@
     "tests/test_working_liveness.py": 332,
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 8716,
+    "watchdog/__init__.py": 8755,
     "watchdog/burn_jobs.py": 306,
     "watchdog/cards.py": 535,
     "watchdog/compact.py": 1037,
-    "watchdog/goal.py": 1444,
+    "watchdog/goal.py": 1493,
     "watchdog/repo_health.py": 758,
     "watchdog/usage.py": 380
   },
@@ -190,6 +190,6 @@
     "watchdog/__init__.py::run_once": 2011,
     "watchdog/cards.py::card_reconcile": 314,
     "watchdog/cross_stream.py::gk_request_backstop": 216,
-    "watchdog/goal.py::goal_lane_occupancy_nudge": 328
+    "watchdog/goal.py::goal_lane_occupancy_nudge": 349
   }
 }
