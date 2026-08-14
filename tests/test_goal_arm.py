@@ -228,18 +228,21 @@ class TestDeliverGoal(unittest.TestCase):
 
     def _go(self, captured, now=None, request_ts=None, in_mode=False,
            cap_seq=(), proj=None, state=None, send_fn=None, dry_run=False,
-           model_type=True):
+           model_type=True, origin=None):
         if proj is None:
             proj = self._dir()
             _write_marker_transcript(proj, self.CWD, self.SID)
         tmux = DeliverGoalFakeTmux(
             [("%9", "claude", self.CWD, "111")], captured, in_mode=in_mode,
             cap_seq=cap_seq, model_type=model_type)
+        # `origin` only forwarded when set, so the pre-#478 callers exercise
+        # the production default (origin=None -> no recent-human gate).
+        kw = {} if origin is None else {"origin": origin}
         word = goal.deliver_goal(self.SID, self.CWD, self.TEXT, "full",
                                  run=tmux, projects_dir=proj, now=now,
                                  state=state, request_ts=request_ts,
                                  send_fn=send_fn, dry_run=dry_run,
-                                 sleep_fn=lambda s: None)
+                                 sleep_fn=lambda s: None, **kw)
         return word, tmux, proj
 
     def test_idle_bare_pane_sends(self):
@@ -390,6 +393,44 @@ class TestDeliverGoal(unittest.TestCase):
         word, tmux, _ = self._go(GOAL_IDLE_CAP, now=2100, request_ts=1000,
                                  proj=proj)
         self.assertEqual(word, "sent")
+
+    # ----------------------------------------------------------------- #
+    # #478 — a watchdog-INITIATED auto-re-arm (origin="dark-rearm") must
+    # honour the recent-human gate at the keystroke point, UNLIKE the user's
+    # own /autopilot callback (whose origin IS the user, so it stays exempt).
+    # ----------------------------------------------------------------- #
+
+    def test_dark_rearm_origin_skips_on_recent_human(self):
+        # A dark-watch auto-re-arm is watchdog-INITIATED, so at DELIVERY time
+        # it MUST refuse while a human is active — never type /goal into a
+        # pane a human just touched (they may have deliberately stopped the
+        # loop without a `/goal clear`). RED: deliver_goal has no origin gate.
+        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
+                            return_value=(True, "presence marker fresh")):
+            word, tmux, _ = self._go(GOAL_IDLE_CAP, origin="dark-rearm")
+        self.assertEqual(word, "skip:recent-human")
+        self.assertEqual(tmux.sent, [])          # never typed
+
+    def test_dark_rearm_origin_sends_when_no_recent_human(self):
+        # With the gate returning "no recent human", a dark-rearm delivers
+        # normally through the verified keystroke path.
+        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
+                            return_value=(False, "")):
+            word, tmux, _ = self._go(GOAL_IDLE_CAP, origin="dark-rearm")
+        self.assertEqual(word, "sent")
+        self.assertIn(self.TEXT, tmux.typed_texts())
+
+    def test_normal_origin_stays_exempt_from_recent_human(self):
+        # The self-callback (user typed /autopilot) origin stays EXEMPT: its
+        # origin IS the user. A recent human must NOT block a normal arm —
+        # applying the gate here would be the structurally-always-refuses bug
+        # this module's header warns about. Teeth against a mutant that gates
+        # ALL origins.
+        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
+                            return_value=(True, "would block if applied")):
+            word, tmux, _ = self._go(GOAL_IDLE_CAP)      # origin defaults to None
+        self.assertEqual(word, "sent")
+        self.assertIn(self.TEXT, tmux.typed_texts())
 
     def test_bootstrap_turn_ending_needs_you_still_arms(self):
         # #403-review CRITICAL C1: the /autopilot bootstrap turn that

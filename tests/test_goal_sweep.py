@@ -155,6 +155,13 @@ class TestGoalSweep(unittest.TestCase):
 class TestGoalDarkWatch(unittest.TestCase):
     CWD = "/home/newlevel/devel/darkwatch"
 
+    def setUp(self):
+        # #478: dark-watch may now RECORD a goal-arm request (auto-re-arm),
+        # so isolate the goal-requests/-sync files from the live systemd
+        # watchdog exactly like the sibling goal-delivery tests -- a test
+        # process must never race the real ~/.claude/goal-requests.json.
+        self.reqp, self.syncp = _isolate_goal_state(self)
+
     def _dir(self):
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
@@ -256,33 +263,49 @@ class TestGoalDarkWatch(unittest.TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
         return proj, tmux
 
-    def _sweep(self, tmux, proj, state, sent, now, obl):
+    def _sweep(self, tmux, proj, state, sent, now, obl, rearm=None, reqs=None):
+        # `rearm`/`reqs` are only forwarded when set, so a caller that omits
+        # them exercises the production defaults path unchanged (#478).
+        kw = {}
+        if rearm is not None:
+            kw["rearm_fn"] = rearm
+        if reqs is not None:
+            kw["requests_path"] = reqs
         goal.goal_dark_watch(now, run=tmux,
                              send_fn=lambda m, **k: sent.append(m),
                              projects_dir=proj, state=state,
-                             sleep_fn=lambda s: None, obligation_fn=obl)
+                             sleep_fn=lambda s: None, obligation_fn=obl, **kw)
 
     @staticmethod
     def _obl(open_n, ts):
         """A fake obligation_fn returning a fixed (open, ts) for any cwd."""
         return lambda cwd: (open_n, ts)
 
-    def test_persistently_dark_goal_with_work_remaining_is_re_pinged(self):
-        # #459's actual fix, and the RED driver: a still-dark goal whose cwd
-        # still has open obligations must be RE-pinged after the schedule
-        # interval — RED against the pre-#459 one-shot dedup (ping once, then
-        # skip forever), so the away user who missed the first ping is
-        # reminded within their waking window.
-        proj, tmux = self._dark("sess-dark-reping")
+    def test_persistently_dark_goal_with_work_remaining_is_re_armed(self):
+        # #478 (reverses #403 for THIS dark-died branch): a still-dark goal
+        # whose cwd still has genuinely WORKABLE obligations must be AUTO-
+        # RE-ARMED -- a goal-arm request RECORDED for job 9 to deliver via
+        # the verified keystroke path -- NOT merely pinged. RED against the
+        # #459 ping-only behaviour this deliberately replaces. dark-watch
+        # STILL types nothing (it only WRITES the request; the keystroke and
+        # its recent-human gate live in deliver_goal).
+        proj, tmux = self._dark("sess-dark-rearm")
         sent, state = [], {}
-        obl = self._obl(5, 1500)             # 5 open obligations, fresh cache
-        self._sweep(tmux, proj, state, sent, 1000, obl)   # first observation
-        self._sweep(tmux, proj, state, sent, 2000, obl)   # first ping fires
-        self.assertEqual(len(sent), 1, "first ping fires on the 2-sweep debounce")
-        t = 2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10
-        self._sweep(tmux, proj, state, sent, t, obl)      # schedule cleared
-        self.assertEqual(len(sent), 2, "a still-dark goal with work remaining must "
-                         "be re-pinged after the schedule interval")
+        reqs = self._dir() / "goal-requests.json"
+        obl = self._obl(5, 1500)                        # workable, fresh
+        rearm = lambda cwd: ("/goal DONE or stop after 50", "full")
+        self._sweep(tmux, proj, state, sent, 1000, obl, rearm, reqs)   # debounce
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "no re-arm on the first (debounce) observation")
+        self._sweep(tmux, proj, state, sent, 2000, obl, rearm, reqs)   # confirmed
+        self.assertEqual(sent, [], "a workable dark goal is RE-ARMED, never pinged")
+        reqs_d = goal.load_goal_requests(reqs)
+        self.assertIn("sess-dark-rearm", reqs_d, "re-arm request recorded")
+        entry = reqs_d["sess-dark-rearm"]
+        self.assertEqual(entry["origin"], "dark-rearm")
+        self.assertEqual(entry["text"], "/goal DONE or stop after 50")
+        self.assertEqual(entry["authority"], "full")
+        self.assertEqual(tmux.sent, [], "dark-watch never types -- only records")
 
     def test_first_ping_text_and_dedup_key_are_byte_for_byte_403(self):
         # #459 preserves #403's FIRST ping exactly: the message is the original
@@ -294,6 +317,12 @@ class TestGoalDarkWatch(unittest.TestCase):
         proj, tmux = self._dark("sess-dark-firstping")
         rec, state = [], {}
         obl = self._obl(5, 1500)
+        # #478: a workable backlog now RE-ARMS instead of pinging. This test
+        # still locks the #403/#459 ping TEXT + dedup-key, reached via the
+        # #478 ping FALLBACK: workable but the /goal template cannot be
+        # resolved (rearm_fn -> None) -> can't auto-fix -> ping the user
+        # exactly as #459 did (first "zomrelo", then "STÁLE" re-ping).
+        reqs = self._dir() / "goal-requests.json"
 
         def send_fn(m, **k):
             rec.append((m, k.get("dedup_key")))
@@ -301,7 +330,9 @@ class TestGoalDarkWatch(unittest.TestCase):
         def sweep(now):
             goal.goal_dark_watch(now, run=tmux, send_fn=send_fn,
                                  projects_dir=proj, state=state,
-                                 sleep_fn=lambda s: None, obligation_fn=obl)
+                                 sleep_fn=lambda s: None, obligation_fn=obl,
+                                 rearm_fn=lambda cwd: (None, "full"),
+                                 requests_path=reqs)
 
         sweep(1000)                                           # first observation
         sweep(2000)                                           # first ping
@@ -316,6 +347,8 @@ class TestGoalDarkWatch(unittest.TestCase):
         reping_msg, reping_key = rec[1]
         self.assertIn("STÁLE", reping_msg)
         self.assertEqual(reping_key, first_key + ":2", reping_key)
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "the template-unresolved ping fallback records no re-arm")
 
     def test_achieved_backlog_zero_obligations_gets_one_ping_never_nags(self):
         # #459 safety — an ACHIEVED loop is transcript-identical to a stall
@@ -370,17 +403,133 @@ class TestGoalDarkWatch(unittest.TestCase):
         # genuinely dead loop; the cap backstops the fresh-cache case.)
         proj, tmux = self._dark("sess-dark-cap")
         sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        # #478: stay in the ping FALLBACK (workable but template unresolved),
+        # the only path that still re-pings a workable backlog -- so the cap
+        # is exercised exactly as #459 intended.
+        rearm = lambda cwd: (None, "full")
         now = [1_700_000_000]
 
         def obl(cwd):
             return (5, now[0] - 60)          # always fresh (60s before now)
 
-        self._sweep(tmux, proj, state, sent, now[0], obl)    # first observation
+        self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)  # first obs
         for _ in range(goal.GOAL_DARK_REPING_MAX + 8):
             now[0] += 30 * 3600                              # > final stage (24h)
-            self._sweep(tmux, proj, state, sent, now[0], obl)
+            self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
         self.assertEqual(len(sent), goal.GOAL_DARK_REPING_MAX,
                          "re-pings must be hard-capped per episode")
+
+    # ----------------------------------------------------------------- #
+    # #478 — AUTO-RE-ARM the dark-DIED branch (reverses #403), gated on a
+    # genuinely WORKABLE obligation cache. The safeguard is the SAME #459
+    # cache gate (open>0 AND fresh) — which by construction already excludes
+    # an empty backlog, a user-waiting-only backlog, and skip-only tickets.
+    # ----------------------------------------------------------------- #
+
+    def test_user_cleared_goal_is_never_re_armed(self):
+        # A user-CLEARED goal (newest marker `cleared`, not `set`) is skipped
+        # at the mark-gate BEFORE the dark-died branch — so even with a fully
+        # workable cache and a resolvable template it is NEVER re-armed. The
+        # deliberate user clear (#403) is respected exactly as before; #478
+        # revives ONLY the death-by-outage branch.
+        proj = self._dir()
+        sid = "sess-cleared-norearm"
+        _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal cleared: /goal x",
+                           ts_epoch=500)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP)
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        obl = self._obl(5, 1500)                        # workable
+        rearm = lambda cwd: ("/goal x", "full")         # template resolves
+        for now in (1000, 2000, 2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10):
+            self._sweep(tmux, proj, state, sent, now, obl, rearm, reqs)
+        self.assertEqual(sent, [])
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "a user-cleared goal must NEVER be auto-re-armed")
+
+    def test_empty_backlog_is_pinged_not_re_armed(self):
+        # open==0 (a genuinely-achieved / empty backlog) is NOT workable ->
+        # no re-arm; the #459 first ping still fires once, then silence.
+        proj, tmux = self._dark("sess-empty-norearm")
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        obl = self._obl(0, 1500)                        # achieved/empty
+        rearm = lambda cwd: ("/goal x", "full")
+        self._sweep(tmux, proj, state, sent, 1000, obl, rearm, reqs)
+        self._sweep(tmux, proj, state, sent, 2000, obl, rearm, reqs)
+        self.assertEqual(len(sent), 1, "empty backlog gets the #459 first ping")
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "an empty/achieved backlog must never be re-armed")
+
+    def test_user_waiting_only_backlog_is_never_re_armed(self):
+        # A backlog that is ALL user-waiting (needs-answer/needs-decision)
+        # surfaces as open==0 in the cache: statusbar's `open` is the WORKABLE
+        # count (len(workable_rows) - gk via airuleset._partition_user_waiting),
+        # so user-waiting tickets are excluded by construction. open==0 ->
+        # not workable -> no re-arm (locks the "not user-waiting" half of the
+        # mandated safeguard at the dark-watch layer; the cache-contract half
+        # is test_statusbar.ObligationCountSafeguard).
+        proj, tmux = self._dark("sess-uwait-norearm")
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        obl = self._obl(0, 1500)       # workable open==0 (all remaining U-bucket)
+        rearm = lambda cwd: ("/goal x", "full")
+        self._sweep(tmux, proj, state, sent, 1000, obl, rearm, reqs)
+        self._sweep(tmux, proj, state, sent, 2000, obl, rearm, reqs)
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "a user-waiting-only backlog must never be re-armed")
+
+    def test_stale_or_missing_cache_is_never_re_armed(self):
+        # A stale (older than GOAL_DARK_CACHE_MAX_AGE_S) or absent obligation
+        # cache is NOT trusted -> never re-arm (fail toward no keystroke).
+        base = 1_700_000_000
+        for label, obl in (
+            ("stale", self._obl(5, base - goal.GOAL_DARK_CACHE_MAX_AGE_S - 100)),
+            ("missing", self._obl(None, None)),
+        ):
+            with self.subTest(cache=label):
+                proj, tmux = self._dark("sess-%s-norearm" % label)
+                sent, state = [], {}
+                reqs = self._dir() / "goal-requests.json"
+                rearm = lambda cwd: ("/goal x", "full")
+                self._sweep(tmux, proj, state, sent, base, obl, rearm, reqs)
+                self._sweep(tmux, proj, state, sent, base + 2000, obl, rearm, reqs)
+                self.assertEqual(goal.load_goal_requests(reqs), {},
+                                 "%s cache must never re-arm" % label)
+
+    def test_re_arm_backs_off_and_is_hard_capped(self):
+        # Repeated re-arm ATTEMPTS (a session that keeps sitting dark because
+        # delivery keeps hitting recent-human) back off on the SAME widening
+        # schedule and are hard-capped per episode, reusing the #459 ping
+        # machinery. Counted via a record_goal_request spy, since the record
+        # overwrites the SAME sid each time.
+        proj, tmux = self._dark("sess-dark-rearm-cap")
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        rearm = lambda cwd: ("/goal x", "full")
+        writes = []
+        real_record = goal.record_goal_request
+
+        def spy(*a, **k):
+            writes.append(1)
+            return real_record(*a, **k)
+
+        now = [1_700_000_000]
+
+        def obl(cwd):
+            return (5, now[0] - 60)                     # always workable + fresh
+
+        with m.patch.object(goal, "record_goal_request", side_effect=spy):
+            self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)  # debounce
+            for _ in range(goal.GOAL_DARK_REPING_MAX + 8):
+                now[0] += 30 * 3600                     # > final stage (24h)
+                self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
+        self.assertEqual(sent, [], "the re-arm path never pings")
+        self.assertEqual(len(writes), goal.GOAL_DARK_REPING_MAX,
+                         "re-arm attempts must be hard-capped per episode")
 
     def test_sweep_deadline_defers_remaining_panes(self):
         # #403 STEP 0's own requirement: this per-pane loop must respect
