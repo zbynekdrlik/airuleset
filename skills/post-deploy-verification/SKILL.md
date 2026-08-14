@@ -17,6 +17,8 @@ After every deployment, verify the target machine responds correctly before repo
 
 **Verify on the LIVE / prod target without asking permission and without asking about events.** Testing the deployed change on prod is part of the standing-approved deploy flow — never gate it on "is there a live event / is prod in use / is it safe now". Guarding prod-event timing is the user's job (`approval-scope.md` → "NEVER gate on events / prod-usage"); they stop you in the moment. Just deploy, test on the live target, report what you observed.
 
+**If the target is a prod-snapshot SHADOW box, not the real prod, a claim about current PROD DATA needs a fresh refresh first.** A stale idle snapshot has drifted from prod (the client renames/edits records meanwhile), so verifying a DATA-dependent effect against an old snapshot proves nothing about live prod. Refresh the shadow from PROD right before (the repo names its own trigger, e.g. odoo-erp's `REFRESH-DEV-BOX-FROM-PROD: <stream>`), and state the SOURCE + TIME of any PROD-state claim (PROD API / fresh refresh at HH:MM). A fast snapshot RECREATE is fine for a code-only check from committed HEAD, never for a claim about current prod data. This is only about DATA-state claims — the version-label read (Layer 2) and functional flow (Layer 3) below are CODE-state, which a shadow reflects correctly and which need no data refresh.
+
 #### Layer 1: Liveness (necessary but NOT sufficient)
 
 - Process running: `ssh USER@HOST "tasklist | findstr app"` or `pgrep`
