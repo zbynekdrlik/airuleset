@@ -521,6 +521,11 @@ class TheTemplatesCarryNoDeadQuestionTimeoutPromise(TestCase):
     edit that silently RE-ADDS the dead promise fails LOUDLY here."""
 
     def test_no_template_promises_the_deleted_question_timeout(self):
+        # count guard (#430-review): a future prefix rename that made
+        # goal_lines() return [] must never pass this loop VACUOUSLY -- the
+        # sibling cap test also locks the count, but keep this class
+        # non-vacuous on its own.
+        self.assertEqual(len(goal_lines()), 3)
         for i, line in enumerate(goal_lines()):
             self.assertNotIn(
                 "question-timeout:", line,
@@ -770,10 +775,11 @@ class TestConditionAIsNeverFalselyHeldOrFalselyReleased(TestCase):
       * ask-and-continue (`❓ ASKED` ... `⏳ WORKING`) never satisfies (A)
         — the loop was never going to stop on it in the first place;
       * ONCE (A) genuinely holds, ANY new user-role transcript entry after
-        the `❓ NEEDS YOU` line releases it — a real answer and the #161
-        `question-timeout:` nudge are the SAME shape to this clause, which
-        is exactly why the watchdog needs no separate loop-continuation
-        machinery of its own (see the design comment on issue #161)."""
+        the `❓ NEEDS YOU` line releases it — a genuine user answer is
+        the ONLY shape that releases it (historically the #161
+        `question-timeout:` nudge, DROPPED in #430, was the same shape;
+        the clause's logic is unchanged either way), which is exactly why
+        the watchdog needs no separate loop-continuation machinery."""
 
     def test_every_template_states_this_exact_clause(self):
         # the decision function above must not drift from what is shipped
@@ -789,9 +795,9 @@ class TestConditionAIsNeverFalselyHeldOrFalselyReleased(TestCase):
             "❓ NEEDS YOU: pokračovať teraz?"))
 
     def test_a_reply_after_it_releases_the_block(self):
-        # covers BOTH a genuine user answer and the #161 watchdog nudge —
-        # to this clause they are the identical shape: "a user message
-        # after it".
+        # a genuine user answer is what releases the block (historically
+        # the now-dropped #161 nudge was the same shape to this clause: "a
+        # user message after it").
         self.assertFalse(condition_a_holds(
             "❓ NEEDS YOU: pokračovať teraz?", user_message_after=True))
 
