@@ -185,7 +185,6 @@
     "airuleset.py::main": 521,
     "cli_vault.py::cmd_secret": 300,
     "watchdog/__init__.py::deliver_discord_replies": 459,
-    "watchdog/__init__.py::gk_request_backstop": 214,
     "watchdog/__init__.py::prompt_wedge_check": 235,
     "watchdog/__init__.py::run_once": 2011,
     "watchdog/cards.py::card_reconcile": 314,
