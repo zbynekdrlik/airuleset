@@ -87,15 +87,16 @@ class TestAuthorityResolution(TestCase):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
     def test_cli_prints_the_profile(self):
-        # #349: `m.Mock` auto-creates any unspecified attribute as a truthy
-        # Mock, so the new `--maintainer-login` early-return branch would
-        # silently hijack this test unless pinned False (the established
-        # `m.Mock(...)`-args gotcha this repo's own dev rules already
+        # #349/#463: `m.Mock` auto-creates any unspecified attribute as a truthy
+        # Mock, so the `--maintainer-login` / `--self-login` early-return
+        # branches would silently hijack this test unless pinned False (the
+        # established `m.Mock(...)`-args gotcha this repo's own dev rules already
         # document for exactly this shape).
         with m.patch.object(airuleset, "_current_user", return_value="marek"):
             with m.patch("builtins.print") as p:
                 airuleset.cmd_authority(
-                    m.Mock(explain=False, maintainer_login=False))
+                    m.Mock(explain=False, maintainer_login=False,
+                           self_login=False))
         p.assert_any_call("branch-merge")
 
     def test_cli_prints_maintainer_login(self):
