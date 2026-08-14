@@ -4698,3 +4698,33 @@ GREEN <this commit>. Secret hygiene: placeholders only, no literal token value.
   review (general-purpose, no model override → claude-opus-4-8) 0 CRITICAL/0 MAJOR/1 MINOR (cohesion
   Rozsah-B, dropnutá s odôvodnením — nie defekt). Worktree-only, bez push/PR/merge. PR/#433 close =
   supervisor. Zostáva: D (cross_stream), G (supercluster), L (install sub-split).
+- #433 cluster D (`watchdog/cross_stream.py`): 14 cross-stream backstop funkcií
+  (`_repo_in_cross_stream_flow`, `_bounce_quals`, `_gh_env`, `_fetch_bounce_tickets`,
+  `_cache_repo_roots`, `_try_stash_nudge`, `_safe_to_bounce_nudge`, `bounce_backstop` job 8,
+  `_gkreq_reping_due`, `_gkreq_supervisor_root`, `_fetch_gkreq_tickets`, `gk_request_backstop`
+  job 11, `_cached_backlog_open`, `_cached_backlog_count`) presunuté byte-verbatim do nového leaf
+  modulu `watchdog/cross_stream.py` (812 r.) + facade re-export pred `run_once`. DRUHÝ coupled
+  watchdog leaf (po C): 26 rezidentných symbolov (16 cluster-privátnych konštánt, 3 privátne
+  helpery `_parse_gh_ts`/`_normalize_gkreq`/`_stale_handoff_alarm`, 8 zdieľaných pane/transcript
+  primitív + `PROJECTS_DIR`) ostáva v `__init__.py`, dosahované cez top-level `import watchdog` +
+  call-time `watchdog.<meno>` (goal.py/compact.py/janitor.py idiom, circular-import-safe). Odchýlky
+  od byte-verbatim, všetky reverse-diff proven (strip prefixov + revert sentinelov → MD5 identický
+  base blok, 14/14 MATCH): 36 `watchdog.` prefixov + 5 None-sentinel konverzií default argumentov
+  ktoré referencovali rezidentnú konštantu (`bounce_backstop` interval/renudge, `gk_request_backstop`
+  interval/schedule, `_gkreq_reping_due` schedule — `param=None` → `param = watchdog.CONST if param
+  is None else param`, idiom `_janitor_watch_seen`, defer read na call-time) + `from pathlib import
+  Path` do leaf import bloku (bare-name rezidentný stdlib import ktorý `_gh_env` používa — chytené
+  AŽ first-CALL smoke, neviditeľné pre import aj reverse-diff; full free-var analýza je jediný spoľahlivý
+  check). `__init__.py` 9738→9031; ratchet ceiling ručne znížený, `::gk_request_backstop` entry re-keyed
+  na `watchdog/cross_stream.py::gk_request_backstop` (214→216 = +2 sentinel riadky), leaf untracked
+  (<1000, janitor.py precedent). `--update` NEPOUŽITÝ (zamietol by sibling untracked staleness —
+  janitor.py/cli_burn.py/~11 test files — massive scope creep). Bez RED (byte-verbatim refactor);
+  lock = existujúca sada. Patch-seam preserved bez repoint (žiaden test nepatchuje moved helper cez
+  attribute; DI parametre sú seam). Commity d8d1e7f + 9a11184 (review-fix docstringu). Full pytest
+  `-n 4` 6027 passed (baseline match) + unittest discover druhý runner 5965 OK. Live `airuleset.py
+  watchdog --once --dry-run` exit 0 (job 8+11 cez reálny dispatch). Fresh-context adversarial review
+  (general-purpose, no model override → claude-opus-4-8, REFUTE framing) 0 CRITICAL/0 MAJOR/1 MINOR
+  = docstring patch-seam claim "no internal calls" nepresný (moved funkcie SA volajú navzájom bare;
+  seam safe lebo žiaden TEST nepatchuje moved helper cez attribute) → opravené in-branch 9a11184.
+  Worktree-only, bez push/PR/merge. PR/#433 close = supervisor. Zostáva: E/F/G (superclustre),
+  H/I/J/K/L (airuleset.py + install sub-split — časť už zmergovaná mimo tejto vetvy).
