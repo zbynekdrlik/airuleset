@@ -323,7 +323,8 @@ def cmd_slice_quals(args):
         sys.exit(1)
     want_count = getattr(args, "count", False)
     want_list = getattr(args, "list", False)
-    if not (want_count or want_list):
+    want_waiting = getattr(args, "waiting", False)
+    if not (want_count or want_list or want_waiting):
         for q in quals:
             print(q)
         return
@@ -365,7 +366,19 @@ def cmd_slice_quals(args):
         # index-response has ever been observed (only a full-empty one, the
         # repo-rename repro this guard was built from).
         _refuse_unless_empty_is_trustworthy("slice-quals", quals, cwd=root)
-    unhandled = {n: v for n, v in rows.items() if not handed.get(n)}
+    # #468: partition the tickets parked on the USER's answer
+    # (`needs-answer`/`needs-decision`) out of the workable slice — they leave
+    # the workable `--count` (never double-counted as handed-off) and surface via
+    # `--waiting` / the footer's `U N`. DEFAULT path only, mirroring core-quals
+    # and the `not extra`-scoping of `_slice_mine_and_handed`'s own enrichment.
+    if extra:
+        workable_rows, waiting = rows, {}
+    else:
+        workable_rows, waiting = airuleset._partition_user_waiting(rows)
+    unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
+    if want_waiting:
+        _print_issue_rows(waiting, own_stream=user)
+        return
     if want_count:
         print(len(unhandled))
         return
@@ -446,7 +459,8 @@ def cmd_core_quals(args):
     quals = airuleset._obligation_quals()
     want_count = getattr(args, "count", False)
     want_list = getattr(args, "list", False)
-    if not (want_count or want_list):
+    want_waiting = getattr(args, "waiting", False)
+    if not (want_count or want_list or want_waiting):
         for q in quals:
             print(q)
         return
@@ -480,6 +494,19 @@ def cmd_core_quals(args):
         print("core-quals: a gh query failed — this is NOT a reliable 0",
               file=sys.stderr)
         sys.exit(1)
+    # #468: partition the tickets parked on the USER's answer
+    # (`needs-answer`/`needs-decision`) OUT of the workable obligation set — they
+    # are the user's responsibility, not this box's (the loop can do nothing with
+    # them until the user answers), so they never count toward the workable-0
+    # stop-proof and never block 🏁; `--waiting` LISTS them so nothing is hidden.
+    # ONLY on the DEFAULT path: a `--extra` (bounce-seed) query is a different
+    # axis and keeps its full set, mirroring the `not extra`-scoping of the
+    # empty-refusal and hand-off-health gates below. ONE partition of the SAME
+    # already-fetched rows — never a second gh query that could drift (#367).
+    if extra:
+        workable, waiting = seen, {}
+    else:
+        workable, waiting = airuleset._partition_user_waiting(seen)
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:
@@ -509,9 +536,14 @@ def cmd_core_quals(args):
                 "Refusing (#181 round 4)." % (health, detail),
                 file=sys.stderr)
             sys.exit(1)
+    if want_waiting:
+        # own_stream=None: a full-authority box owns no stream, so EVERY
+        # stream-labelled row is action-only.
+        _print_issue_rows(waiting, own_stream=None)
+        return
     if want_count:
-        print(len(seen))
+        print(len(workable))
         return
     # own_stream=None: a full-authority box owns no stream, so EVERY
     # stream-labelled row in its obligation set is action-only.
-    _print_issue_rows(seen, own_stream=None)
+    _print_issue_rows(workable, own_stream=None)

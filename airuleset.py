@@ -7422,9 +7422,22 @@ def cmd_tickets_status(args):
                 quals, rows, handed, failed = [], {}, {}, True
             else:
                 rows, handed, failed = _slice_mine_and_handed(quals, root, slug)
-            gk = sum(1 for n_num in rows if handed.get(n_num))
-            entry["open"] = None if failed else (len(rows) - gk)
-            entry["gk"] = None if failed else gk
+            # #468: partition the tickets parked on the USER's answer
+            # (needs-answer/needs-decision) OUT of the workable slice FIRST, then
+            # split the workable remainder into own-unhandled (I N) vs handed-off
+            # (gk). A user-waiting ticket is the user's responsibility, counted in
+            # `U N`, never in `I N` or `gk`. ONE partition of the SAME fetch
+            # `slice-quals --count` uses (#391/#367 consistency guard).
+            if failed:
+                entry["open"] = None
+                entry["gk"] = None
+                entry["user_waiting"] = None
+            else:
+                workable_rows, waiting = _partition_user_waiting(rows)
+                gk = sum(1 for n_num in workable_rows if handed.get(n_num))
+                entry["open"] = len(workable_rows) - gk
+                entry["gk"] = gk
+                entry["user_waiting"] = len(waiting)
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
@@ -7463,7 +7476,17 @@ def cmd_tickets_status(args):
             excl = _core_search_excl()
             seen, u_failed = _union_open_issues(_obligation_quals(),
                                                 AUTOPILOT_SKIP_EXCL, cwd=root)
-            entry["open"] = None if u_failed else len(seen)
+            # #468: user-waiting tickets (needs-answer/needs-decision) leave the
+            # workable `I N` and surface as `U N` — ONE partition of the SAME
+            # fetch the /goal stop-proof (`core-quals --count`) uses, never a
+            # parallel query that could drift (#367 lesson).
+            if u_failed:
+                entry["open"] = None
+                entry["user_waiting"] = None
+            else:
+                workable, waiting = _partition_user_waiting(seen)
+                entry["open"] = len(workable)
+                entry["user_waiting"] = len(waiting)
             # Skipped bucket (2026-07-16): the POSITIVE label query over the
             # CORE partition — how many tickets are excluded from autopilot.
             # #367 left this scoped to the core partition (unchanged) rather
@@ -10571,6 +10594,9 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _obligation_quals as _obligation_quals,
     _repo_root as _repo_root,
     _ticket_is_stream_labeled as _ticket_is_stream_labeled,
+    USER_WAITING_LABELS as USER_WAITING_LABELS,
+    _row_is_user_waiting as _row_is_user_waiting,
+    _partition_user_waiting as _partition_user_waiting,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,
@@ -11324,6 +11350,10 @@ def main():
     p_slice.add_argument(
         "--list", action="store_true",
         help="Print number<TAB>createdAt<TAB>action<TAB>title, oldest first")
+    p_slice.add_argument(
+        "--waiting", action="store_true",
+        help="List the user-waiting remainder (needs-answer/needs-decision) "
+             "parked on the user's answer — excluded from --count/--list (#468)")
     p_slice.add_argument("--extra", default=None,
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")
@@ -11341,6 +11371,10 @@ def main():
         help="Print number<TAB>createdAt<TAB>action<TAB>title, oldest first "
              "(action = action-only for a sub-dev stream's ticket, implement "
              "otherwise)")
+    p_core.add_argument(
+        "--waiting", action="store_true",
+        help="List the user-waiting remainder (needs-answer/needs-decision) "
+             "parked on the user's answer — excluded from --count/--list (#468)")
     p_core.add_argument("--extra", default=None,
                         help="Extra search qualifier ANDed onto every query "
                              "(e.g. label:prio:bounce for the bounce seed)")

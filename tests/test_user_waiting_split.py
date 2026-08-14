@@ -79,11 +79,14 @@ class PartitionHelpers(unittest.TestCase):
 
 
 def _run_quals(subcmd, flag, repo, home, bindir, marker=None):
+    # core-quals/slice-quals resolve authority + the repo root from the PROCESS
+    # cwd (_repo_root → git rev-parse), so the subprocess MUST run inside the
+    # temp repo — that is where its CLAUDE.md authority marker lives.
     if marker is not None:
         Path(repo, "CLAUDE.md").write_text(marker + "\n")
     return subprocess.run(
         [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"), subcmd, flag],
-        capture_output=True, text=True,
+        capture_output=True, text=True, cwd=repo,
         env={**os.environ, "HOME": home, "PATH": f"{bindir}:{os.environ['PATH']}"})
 
 
