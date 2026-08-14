@@ -936,7 +936,14 @@ def _is_bottom_chrome(s):
     novel chrome (a truly-new glyph is handled structurally, between the box's own
     separators — the `▶ brand-new-widget` test); this enumeration only keeps KNOWN
     shapes current, and stays the sole chrome answer for `pane_goal_armed`'s
-    footer-in-view proof, which has no structural alternative."""
+    footer-in-view proof, which has no structural alternative.
+
+    The `⧉` match is a bare PREFIX (like the sibling `●◯` branch). A content row whose
+    stripped first char is `⧉` would be misread as chrome — a theoretical #383 off-
+    screen-footer residual (#458-review) — but CC only ever emits `⧉  <project>` as
+    genuine bottom chrome, never mid-draft, and a draft's HEAD keeps `❯` (`❯ ⧉…` → not
+    chrome). Accepted per FREEZE, same as the `●◯` prefix; the only reachable effect
+    would be a `/goal` replace (deliver_goal) or a dark-watch ping, never a keystroke."""
     if not s:
         return True
     if s[0] in "●◯":                                    # agent-strip rows
