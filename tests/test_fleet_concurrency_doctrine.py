@@ -1,15 +1,17 @@
-"""Locks the fleet-dispatch concurrency/rate-limit doctrine added by #332.
+"""Locks the fleet-dispatch concurrency/rate-limit doctrine (#332, narrowed #456).
 
 Incident (2026-08-08, this repo's own dogfooding): the #317/#325 worker-only
 cap ("3-5 parallel workers") never bounded the read-only `ticket-validator`
 dispatches Step 1b fires per batch member -- both draw from the SAME
-server-side rate limit. Kolo 2 (4 workers, no validator burst) ran clean;
-Kolo 3 (5 workers + 13 concurrent validators = 18 total agents) had 3 killed
-by a server-side rate limit within minutes. #332 adds: a TOTAL
-concurrent-agent cap (workers + validators + any helper subagent combined)
-of 8, staggered into waves above that; a dead-validator-never-blocks-the-
-round rule; a worktree-mode dead-worker branch-resume protocol; and a
-"when fleet dispatch pays off" doctrine paragraph for long-CI repos.
+server-side rate limit. A burst of 4 workers ran with no rate-limit kills;
+a later burst of 5 workers + 13 concurrent validators = 18 total agents had
+3 killed by a server-side rate limit within minutes. #332 first responded
+with a fixed TOTAL concurrent-agent cap of 8; #456 SUPERSEDES that fixed cap
+with a REACTIVE bound (saturate, back off ONLY on a real resource signal --
+never a fixed number), keeping the #332 measurements as CONTEXT for what a
+signal looks like. Still locked: the dead-validator-never-blocks-the-round
+rule; the worktree-mode dead-worker branch-resume protocol; and the "when
+fleet dispatch pays off" doctrine paragraph for long-CI repos.
 
 Deliberately prose-only (FREEZE: no new hook/watchdog job) -- these are grep
 locks on `skills/autopilot/SKILL.md` and `skills/autopilot-master/SKILL.md`,
@@ -46,45 +48,43 @@ def window(text, start, end):
     return " ".join(text[i:j].split())
 
 
-class TestTotalConcurrentAgentCap(TestCase):
-    """The cap covers workers + validators combined, not workers alone."""
+class TestNoFixedAgentCap(TestCase):
+    """#456: the account-wide bound is REACTIVE (a real resource signal), NOT a
+    fixed number -- superseding #332's fixed cap of 8. The section still cites
+    the #332 measurements as CONTEXT for what a rate-limit signal looks like, and
+    still covers workers + validators combined, not workers alone."""
 
-    def test_the_cap_section_exists_and_states_eight(self):
-        t = read(AUTOPILOT)
-        i = t.index("**Total concurrent agent cap")
-        w = window(t, "**Total concurrent agent cap", "**Serial fallback")
-        self.assertIn("at 8.", w)
-        self.assertGreater(i, t.index("**Concurrency cap + serialize-on-overlap"),
-                            "the total cap must follow the worker-only cap, "
-                            "not precede it")
+    def test_the_section_exists_and_states_no_fixed_number(self):
+        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
+        self.assertIn("no fixed number", w.lower())
+        self.assertIn("resource signal", w.lower())
+        self.assertNotIn("at 8.", w)
 
-    def test_the_cap_cites_the_real_measured_incident(self):
-        w = window(read(AUTOPILOT), "**Total concurrent agent cap",
-                   "**Serial fallback")
+    def test_the_section_cites_the_real_measured_incident(self):
+        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
         self.assertIn("18 total agents", w)
         self.assertIn("3 of them", w)
         self.assertIn("rate limit", w.lower())
         self.assertIn("2026-08-08", w)
 
-    def test_the_cap_names_stagger_into_waves(self):
-        w = window(read(AUTOPILOT), "**Total concurrent agent cap",
-                   "**Serial fallback")
+    def test_the_section_names_stagger_into_waves(self):
+        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
         self.assertIn("waves", w.lower())
 
-    def test_the_cap_covers_validators_not_just_workers(self):
-        w = window(read(AUTOPILOT), "**Total concurrent agent cap",
-                   "**Serial fallback")
+    def test_the_section_covers_validators_not_just_workers(self):
+        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
         self.assertIn("validator", w.lower())
         self.assertIn("workers", w.lower())
 
 
 class TestStep1b_WaveDispatchAndDeadValidatorNeverBlocks(TestCase):
-    def test_step_1b_points_at_the_total_cap(self):
+    def test_step_1b_points_at_the_no_fixed_cap_saturation_doctrine(self):
         t = read(AUTOPILOT)
         w = window(t, "1b. **VALIDATE EACH batch member FIRST",
                    "Branch")
-        self.assertIn("TOTAL concurrent agent cap", w)
-        self.assertIn("staggered", w.lower())
+        self.assertIn("no-fixed-cap", w.lower())
+        self.assertIn("resource signal", w.lower())
+        self.assertIn("wave", w.lower())
 
     def test_a_dead_validator_is_never_re_dispatched_or_blocking(self):
         t = read(AUTOPILOT)
@@ -134,13 +134,13 @@ class TestFleetPaysOffDoctrine(TestCase):
 
     def test_it_states_the_ci_cost_is_paid_once_either_way(self):
         w = window(read(AUTOPILOT), "**When fleet dispatch pays off",
-                   "1. **Per round SLOT")
+                   "1. **Per lane SLOT")
         self.assertIn("paid exactly once", w)
         self.assertIn("ci-monitoring.md", w)
 
     def test_it_names_the_one_real_dont_bother_case(self):
         w = window(read(AUTOPILOT), "**When fleet dispatch pays off",
-                   "1. **Per round SLOT")
+                   "1. **Per lane SLOT")
         self.assertIn("single workable candidate", w)
 
 
@@ -151,20 +151,21 @@ class TestAutopilotMasterPointsAtTheCanonicalHome(TestCase):
     def test_the_collision_guards_bullet_points_at_the_autopilot_skill(self):
         t = read(MASTER)
         w = window(t, "**Collision guards:**", "Single-lane commands")
-        self.assertIn("8", w)
-        self.assertIn("Total concurrent agent cap", w)
+        self.assertIn("no fixed concurrent-agent cap", w.lower())
+        self.assertIn("resource signal", w.lower())
         self.assertIn("never re-derive it here", w)
 
-    def test_the_goal_master_loop_template_is_completely_untouched(self):
-        """Regression guard for the design's own rejected alternative: the
-        `/goal MASTER LOOP` line must still carry its ORIGINAL "capped 3-5"
-        wording verbatim -- if this fails, someone edited the capped
-        template instead of the prose body, which is exactly what #332's
-        design comment rejected (measured headroom + the #169 precedent)."""
+    def test_the_goal_master_loop_template_mandates_continuous_saturation(self):
+        """#456 INVERTS the pre-#332 regression guard: the `/goal MASTER LOOP`
+        LANES-FULL reminder must NO LONGER carry the superseded "capped 3-5"
+        fixed cap -- it must mandate CONTINUOUS saturation bounded only by a real
+        resource signal. If "capped 3-5" reappears, the fixed-cap regression #456
+        removed is back. The 4000-char cap still holds."""
         t = read(MASTER)
         lines = re.findall(r"^/goal MASTER LOOP.*$", t, re.MULTILINE)
         self.assertEqual(len(lines), 1)
-        self.assertIn("capped 3-5", lines[0])
+        self.assertNotIn("capped 3-5", lines[0])
+        self.assertIn("saturating continuously", lines[0].lower())
         self.assertLessEqual(len(lines[0]), 4000)
 
 
@@ -179,17 +180,17 @@ class TestAccountWideCapScopeNotPerRound(TestCase):
     across everything concurrently running, not per round."""
 
     def test_the_rule_sentence_says_account_wide_not_per_round(self):
-        w = window(read(AUTOPILOT), "**Total concurrent agent cap",
+        w = window(read(AUTOPILOT), "**No fixed agent cap",
                    "**Serial fallback")
-        self.assertIn("at 8.", w)
+        self.assertNotIn("at 8.", w)
         self.assertIn("ACCOUNT-WIDE", w)
         self.assertIn("never", w.lower())
         self.assertIn("per round", w.lower())
 
-    def test_master_collision_guards_says_across_lanes_and_repos_not_per_round(self):
+    def test_master_collision_guards_says_account_wide_never_per_lane(self):
         w = window(read(MASTER), "**Collision guards:**", "Single-lane commands")
-        self.assertIn("8", w)
-        self.assertIn("not per round", w.lower())
+        self.assertIn("account-wide", w.lower())
+        self.assertIn("never per lane", w.lower())
 
 
 class TestDeadWorkerBranchMappingIsFollowable(TestCase):
@@ -226,12 +227,12 @@ class TestMeasurementClaimsAreAccurate(TestCase):
     combined with the failing validator burst."""
 
     def test_kolo_2_claim_does_not_overstate_zero_issues(self):
-        w = window(read(AUTOPILOT), "**Total concurrent agent cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
         self.assertIn("no rate-limit kills", w.lower())
         self.assertNotIn("ran clean with zero issues", w)
 
     def test_the_five_worker_band_is_not_claimed_clean(self):
-        w = window(read(AUTOPILOT), "**Total concurrent agent cap", "**Serial fallback")
+        w = window(read(AUTOPILOT), "**No fixed agent cap", "**Serial fallback")
         self.assertNotIn("(4–5 workers, no validator burst)", w)
         self.assertNotIn("(4-5 workers, no validator burst)", w)
 
