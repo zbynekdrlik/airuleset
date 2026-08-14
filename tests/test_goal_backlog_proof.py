@@ -502,45 +502,48 @@ class TheMasterLoopTemplateMustFitClaudeCodesGoalCapToo(TestCase):
         self.assertEqual(len(master_goal_lines()), 1)
 
 
-class TheTemplatesDeclareTheQuestionTimeoutEscapeHatch(TestCase):
-    """#161 — condition (A)'s "NEVER continue me past an unanswered
-    `❓ NEEDS YOU`" is no longer an UNCONDITIONAL permanent stop: a
-    `question-timeout:` nudge (watchdog job 20, `_goal_question_park_nudge`,
-    ~30 min unanswered) is the ONE sanctioned exception, and every template
-    must say so — never re-print the question, never bare "continue".
+class TheTemplatesCarryNoDeadQuestionTimeoutPromise(TestCase):
+    """#430 — the #161 `question-timeout:` (30m) park nudge was DROPPED.
+    #403 deleted the whole mechanism (`goal_rearm` /
+    `_goal_question_park_nudge` / `GOAL_QUESTION_PARK_TEXT` /
+    `GOAL_QUESTION_TIMEOUT_S`) wholesale, so nothing in the code ever emits
+    that text into a pane any more. #430 aligns the docs to reality: the
+    templates no longer promise a mechanism that does not exist.
 
-    Kept as its OWN class (never folded into the cap-only test above) so a
-    future edit that shrinks a template back under budget by silently
-    dropping this clause fails LOUDLY here, not just on the cap."""
+    The real invariant #161 established — condition (A)'s "NEVER continue me
+    past an unanswered `❓ NEEDS YOU`" — STAYS true and is still locked here;
+    only the dead escape-hatch clause is gone. A blocked `❓ NEEDS YOU` is a
+    terminal state (stop-condition A); the user's own Discord ping + the
+    `Q N` footer + ask-and-continue are what keep a genuine block from
+    stalling silently, not a watchdog park nudge that no longer exists.
 
-    def test_every_template_declares_the_escape_hatch(self):
+    Kept as its OWN class (never folded into the cap-only test) so a future
+    edit that silently RE-ADDS the dead promise fails LOUDLY here."""
+
+    def test_no_template_promises_the_deleted_question_timeout(self):
+        # count guard (#430-review): a future prefix rename that made
+        # goal_lines() return [] must never pass this loop VACUOUSLY -- the
+        # sibling cap test also locks the count, but keep this class
+        # non-vacuous on its own.
+        self.assertEqual(len(goal_lines()), 3)
         for i, line in enumerate(goal_lines()):
-            self.assertIn("question-timeout:", line,
-                          "template %d missing the #161 escape hatch" % i)
+            self.assertNotIn(
+                "question-timeout:", line,
+                "template %d still promises the DROPPED #161 park nudge "
+                "(deleted by #403; see #430)" % i)
 
-    def test_the_escape_hatch_still_forbids_a_bare_continue(self):
+    def test_every_template_still_forbids_continuing_past_a_block(self):
+        # the real #161 invariant, UNCHANGED by the #430 drop: a blocked
+        # `❓ NEEDS YOU` is a permanent terminal stop, never auto-continued.
         for line in goal_lines():
             self.assertIn("NEVER continue me past an unanswered", line)
 
-    def test_with_the_escape_hatch_every_template_still_fits_the_cap(self):
-        # the companion check to TheTemplatesMustFitClaudeCodesGoalCap —
-        # named here so a future reader sees WHY this specific addition is
-        # measured, not just that some generic cap exists.
+    def test_every_template_still_fits_the_cap(self):
+        # companion to TheTemplatesMustFitClaudeCodesGoalCap — dropping the
+        # escape-hatch clause only ever RELAXES the 4000-char #169 cap.
         over = [(i, len(line)) for i, line in enumerate(goal_lines())
                 if len(line) > 4000]
         self.assertEqual(over, [])
-
-    # test_the_stated_minutes_matches_the_real_constant (#161-review MINOR
-    # m4) removed by #403: `GOAL_QUESTION_TIMEOUT_S` and the whole
-    # `_goal_question_park_nudge` mechanism it tuned are deleted wholesale
-    # (nothing auto-produces the "question-timeout:" text into a pane any
-    # more, per #403's own design comment item 8) — the templates' literal
-    # "(30m)" is no longer tied to any live constant to drift against. The
-    # SKILL.md templates themselves are deliberately left UNCHANGED by
-    # #403 (a design-comment-stated scope boundary): the escape-hatch
-    # clause stays documented prose describing what a session should do IF
-    # that text ever appears, even though nothing currently produces it.
-
 
 class TestKeepLanesFullMandate(TestCase):
     """#442 (reopened) -- a single worker blocked on CI for 2h+ let ~46 tickets
@@ -772,10 +775,11 @@ class TestConditionAIsNeverFalselyHeldOrFalselyReleased(TestCase):
       * ask-and-continue (`❓ ASKED` ... `⏳ WORKING`) never satisfies (A)
         — the loop was never going to stop on it in the first place;
       * ONCE (A) genuinely holds, ANY new user-role transcript entry after
-        the `❓ NEEDS YOU` line releases it — a real answer and the #161
-        `question-timeout:` nudge are the SAME shape to this clause, which
-        is exactly why the watchdog needs no separate loop-continuation
-        machinery of its own (see the design comment on issue #161)."""
+        the `❓ NEEDS YOU` line releases it — a genuine user answer is
+        the ONLY shape that releases it (historically the #161
+        `question-timeout:` nudge, DROPPED in #430, was the same shape;
+        the clause's logic is unchanged either way), which is exactly why
+        the watchdog needs no separate loop-continuation machinery."""
 
     def test_every_template_states_this_exact_clause(self):
         # the decision function above must not drift from what is shipped
@@ -791,9 +795,9 @@ class TestConditionAIsNeverFalselyHeldOrFalselyReleased(TestCase):
             "❓ NEEDS YOU: pokračovať teraz?"))
 
     def test_a_reply_after_it_releases_the_block(self):
-        # covers BOTH a genuine user answer and the #161 watchdog nudge —
-        # to this clause they are the identical shape: "a user message
-        # after it".
+        # a genuine user answer is what releases the block (historically
+        # the now-dropped #161 nudge was the same shape to this clause: "a
+        # user message after it").
         self.assertFalse(condition_a_holds(
             "❓ NEEDS YOU: pokračovať teraz?", user_message_after=True))
 
