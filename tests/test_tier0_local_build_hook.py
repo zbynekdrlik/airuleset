@@ -670,6 +670,48 @@ class AnchorEscapeAndNoRunSegmentScopeTest(_Runner):
         self.assertIn("project=camera-box", lines[0])
         self.assertIn("cargo bench;", lines[0])
 
+    # ---- #471-review: F1 must widen the `--no-run` EXEMPT-flag boundary too,
+    # symmetrically with the heavy-token anchors -- else a sanctioned
+    # compile-only workaround with a trailing metachar wrongly BLOCKS (rc=2). ----
+
+    def test_no_run_compile_with_trailing_semicolon_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run;", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_bench_no_run_compile_with_trailing_semicolon_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench --no-run;", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_no_run_compile_in_parens_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("(cargo test --no-run)", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_no_run_compile_piped_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run|tee log", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_no_run_compile_backgrounded_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run&", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_no_run_compile_redirected_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run>log", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_glued_semicolon_chain_no_run_then_real_bench_still_blocks(self):
+        # positive control: widening the --no-run boundary must NOT accidentally
+        # exempt the real bench run in a `;`-glued chain -- segment 2's `cargo
+        # bench` has no --no-run of its own.
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run;cargo bench", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
