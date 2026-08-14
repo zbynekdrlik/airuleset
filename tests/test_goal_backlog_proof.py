@@ -1054,6 +1054,14 @@ class TestUserWaitingTicketsAreParkedNotWorkable(TestCase):
                       "full template must name needs-decision as user-waiting")
         self.assertIn("never blocks 🏁", line,
                       "full template must state a user-waiting ticket never blocks 🏁")
+        # The full template pastes no `tickets-status` (unlike the reduced ones,
+        # whose pasted footer shows `· U N`), so it must give its OWN in-transcript
+        # surface for the parked remainder — else `🏁 BACKLOG EMPTY: 0 open` fires
+        # with U>0 and no trace of which tickets are parked (adversarial review,
+        # #468). `core-quals --waiting` is that surface.
+        self.assertIn("core-quals --waiting", line,
+                      "full template must surface the user-waiting remainder "
+                      "in-transcript (`core-quals --waiting`)")
 
     def test_reduced_templates_surface_user_waiting_in_the_parked_clause(self):
         for profile in (BRANCH_MERGE, FORK_NO_MERGE):
