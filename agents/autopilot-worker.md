@@ -278,11 +278,12 @@ block's `obsolete_handed_off:` line, and let the maintainer close it.
 
 ## CYCLE (no pauses, no process questions — `ask-before-assuming.md`)
 
-**The supervisor holds the cross-session dispatch lock, not you.** Before dispatching you, the
-supervisor acquired the repo's lock via `airuleset.py autopilot-lock acquire --repo <path>` (issue
-#8 — serializes dispatch across SEPARATE `/autopilot` sessions on the same repo, not just within
-one session) and releases it after verifying your evidence block. You never call `autopilot-lock`
-yourself — just do your work; the lock is the supervisor's concern.
+**The supervisor holds the cross-session integration mutex, not you.** The supervisor acquires the
+repo's #8 lock via `airuleset.py autopilot-lock acquire --repo <path>` ONLY around each
+merge→gates→push INTEGRATION cycle — it serializes INTEGRATION across SEPARATE `/autopilot` sessions
+on the same repo (one integration at a time per repo), never dispatch (#456 narrowed it from the old
+round-scope dispatch lock) — and releases it the moment that cycle's push has landed. You never call
+`autopilot-lock` yourself — just do your work; the lock is the supervisor's concern.
 
 1. `git fetch origin`; confirm you are on `dev` with a clean tree (worktree mode: your worktree's
    OWN branch, created off `dev`/`main` — not literally the shared `dev` ref, but based on it).
