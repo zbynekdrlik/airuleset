@@ -262,11 +262,14 @@ class TestBounceMeansOneThingInAllThreeHomes(TestCase):
                 "%r)" % (where, needle))
 
     def test_the_code_comment_states_it(self):
-        src = read("airuleset.py")
+        # #433 cluster I: MAINTAINER_ACTION_LABELS + its label comment moved
+        # into the cli_quals.py leaf (footer/stop-proof split). Read it where
+        # the constant now lives, not the stale airuleset.py home.
+        src = read("cli_quals.py")
         window = self._window(
             src, "An open, non-skip ticket carrying ANY of these labels",
             "MAINTAINER_ACTION_LABELS = (")
-        self._assert_canonical(window, "airuleset.py's label comment")
+        self._assert_canonical(window, "cli_quals.py's label comment")
 
     def test_cross_stream_rule_two_states_it(self):
         t = read(self.CROSS_STREAM)
