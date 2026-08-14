@@ -81,6 +81,23 @@ class _RunCard(unittest.TestCase):
     and `notify.send` -- the same harness `test_run_card_gathers_title_and_
     backlog_then_sends` (tests/test_airuleset.py) already uses."""
 
+    def setUp(self):
+        # Isolate the notify marker/log store (#141/#385): a #474 content
+        # refusal now writes a durable terminal-skip marker under
+        # `notify._claude_dir()/autopilot-notify-sent`. Without isolation
+        # those markers would (a) pollute the developer's real ~/.claude and
+        # (b) couple these tests to each other -- a marker written by one
+        # test would make the early-skip short-circuit a LATER test using the
+        # SAME (repo, issue, goal, achieved), changing its observable stderr
+        # and log calls. A per-test temp dir gives every test a clean store.
+        import notify
+        self._home = tempfile.mkdtemp(prefix="airuleset-runcard-home-")
+        self.addCleanup(shutil.rmtree, self._home, True)
+        cd = m.patch.object(notify, "_claude_dir",
+                            return_value=os.path.join(self._home, ".claude"))
+        cd.start()
+        self.addCleanup(cd.stop)
+
     def _send(self, args, *, gh=None):
         """Run cmd_notify; return (captured-body-or-None, stderr-text,
         systemexit-code-or-None)."""
