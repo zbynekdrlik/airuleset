@@ -49,12 +49,20 @@ to the base):
     read to call time. Behavior-identical: run_once relies on these defaults and
     None reproduces the constant exactly.
 
-Patch-seam note (#1510): a test that patches a resident symbol by attribute
+Patch-seam note (#1510): a test that patches a RESIDENT symbol by attribute
 (`patch.object(watchdog, "capture_pane")`) STILL reaches these functions — they
-read `watchdog.__dict__[name]` at call time, the exact dict the patch writes. No
-test patches any moved name internally (the K-class break case is absent); the
-one moved-name patch (`patch.object(wd, "bounce_backstop")`) targets run_once's
-own bare call, resolved through the facade dict.
+read `watchdog.__dict__[name]` at call time, the exact dict the patch writes. The
+moved functions DO call one another by bare (leaf-global) name (e.g.
+`bounce_backstop` -> `_bounce_quals`/`_fetch_bounce_tickets`/`_try_stash_nudge`),
+so a hypothetical `patch.object(wd, "<moved helper>")` would NOT intercept that
+internal call — it writes `watchdog.__dict__`, not `cross_stream.__dict__` (the
+genuine K-class break shape). What makes the seam safe is that NO test patches a
+moved helper by attribute: the whole bounce/gk-request suite drives these
+functions through their DI parameters (`gh_fetch=`/`cross_stream_repos=`/`run=`/
+`send_fn=`/`user=`) plus stdlib-level patching (`getpass`/`subprocess`), never
+`patch.object(wd, "<moved name>")`. The one moved-name patch that DOES exist
+(`patch.object(wd, "bounce_backstop")`) targets run_once's OWN bare call in
+`__init__.py`, resolved through `watchdog.__dict__` (the facade) — safe.
 """
 import json
 import os
