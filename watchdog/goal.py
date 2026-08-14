@@ -949,10 +949,17 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     if authority != "full":
         return logs, False
     idle = now - (tmtime or now)
-    if idle < GOAL_LANE_IDLE_S:
-        if rec.get("ln") or rec.get("lna"):
-            rec.update({"ln": 0, "lpinged": False, "lna": 0})
-        return logs, False
+    # #442 THIRD GAP -- the old top-of-function idle gate returned HERE with
+    # EMPTY logs whenever the transcript was fresh -- which a BUSY
+    # under-saturated session ALWAYS is (turns spinning -> mtime fresh) -- so
+    # it never reached the fill-the-cap decision and journalled nothing (the
+    # reopen-3 root cause: gk 2 workers, I 32, guard silent 20+ min). The idle
+    # requirement is now applied PER BRANCH below, and the session-active
+    # give-up reset moved WITH it into the 0-worker branch: a busy
+    # under-saturated session must NOT re-arm every sweep (#442-review F1 --
+    # the reset here zeroed the stash-abort streak before it could reach its
+    # cap, so the give-up was structurally unreachable on exactly the
+    # population this fix newly enables).
     marker = watchdog.transcript_last_marker(tpath)
     if marker == "❓":
         return logs, False
@@ -1038,10 +1045,11 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     % (loc, live_workers, waiters, backlog_n,
                        GOAL_LANE_SATURATION_WORKERS))
         return logs, False
-    if live_workers > 0:
+    under_saturated = live_workers > 0
+    if under_saturated:
         if backlog_n <= GOAL_LANE_UNDERSAT_BACKLOG_MIN:
             logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                        "under-saturated but backlog <= %d, skip"
+                        "skip:backlog-small (under-saturated but backlog <= %d)"
                         % (loc, live_workers, waiters, backlog_n,
                            GOAL_LANE_UNDERSAT_BACKLOG_MIN))
             return logs, False
@@ -1057,14 +1065,48 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                         % (loc, live_workers, waiters, backlog_n, mem_mb,
                            GOAL_LANE_MIN_MEM_AVAIL_MB))
             return logs, True
+    # #442 THIRD GAP -- the idle gate, now applied PER BRANCH (was a silent
+    # top-of-function early-return that structurally excluded every busy
+    # under-saturated session). The 0-worker EMPTY-lane branch keeps the
+    # original 15-min idle requirement -- a box being actively typed into may
+    # be mid-dispatch, so wait for quiet -- but now LOGS the skip with numbers
+    # instead of returning empty logs. The UNDER-SATURATED fill-the-cap branch
+    # has NO idle floor: firing exactly when the supervisor is spinning with
+    # too few workers is the entire point, and delivery is still gated by
+    # _boundary_ok (idle prompt), the two-capture draft-diff, the recent-human
+    # window and the per-fire cooldown below (so a fresh transcript never spams
+    # -- it just stops SILENTLY excluding the busy state).
+    if not under_saturated and idle < GOAL_LANE_IDLE_S:
+        # #442-review F1: the session-active give-up reset lives HERE now
+        # (0-worker branch only), never at the top -- a BUSY under-saturated
+        # session must NOT re-arm every sweep, or its stash-abort streak never
+        # reaches its cap and the give-up stays unreachable (the give-up is only
+        # ever evaluated at the idle prompt anyway, which is exactly here).
+        if rec.get("ln") or rec.get("lna"):
+            rec.update({"ln": 0, "lpinged": False, "lna": 0})
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d idle=%ds "
+                    "-> skip:idle (empty-lane, < %dm since last transcript write)"
+                    % (loc, live_workers, waiters, backlog_n, int(idle),
+                       GOAL_LANE_IDLE_S // 60))
+        return logs, False
     n = rec.get("ln", 0)
     aborts = rec.get("lna", 0)
-    if n >= GOAL_LANE_MAX_NUDGES or aborts >= GOAL_LANE_MAX_STASH_ABORTS:
+    # #442 THIRD GAP -- the nudge-count give-up (GOAL_LANE_MAX_NUDGES) applies
+    # ONLY to the 0-worker empty-lane branch: a truly stalled box gets a
+    # bounded number of pokes then one give-up ping. The UNDER-SATURATED
+    # fill-the-cap branch has NO permanent give-up -- a session that stays
+    # under-saturated for hours must keep being pushed every
+    # GOAL_LANE_INTERVAL_S (constant #365 anti-annoyance give-up structurally
+    # disabled saturation enforcement). The stash-abort give-up (a delivery
+    # that permanently FAILS) stays for BOTH branches -- it is a
+    # delivery-mechanics bound, not a "stop nudging" decision.
+    count_gaveup = (not under_saturated) and n >= GOAL_LANE_MAX_NUDGES
+    if count_gaveup or aborts >= GOAL_LANE_MAX_STASH_ABORTS:
         # #442-review F2: a lane whose delivery ABORTS consecutively
         # reaches this give-up (and its one-shot ping) too -- previously
         # only landed nudges could, so a permanently-aborting lane
         # retried silently forever with the escalation unreachable.
-        if n >= GOAL_LANE_MAX_NUDGES:
+        if count_gaveup:
             why = ("ani po %d štúchnutiach sa lány nezaplnili"
                    % GOAL_LANE_MAX_NUDGES)
             gave = "GAVE UP after %d nudges" % GOAL_LANE_MAX_NUDGES
@@ -1095,8 +1137,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     last = rec.get("llast")
     if last is not None and (now - last) < GOAL_LANE_INTERVAL_S:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                    "rate-limited, skip"
-                    % (loc, live_workers, waiters, backlog_n))
+                    "skip:cooldown remaining=%ds"
+                    % (loc, live_workers, waiters, backlog_n,
+                       int(GOAL_LANE_INTERVAL_S - (now - last))))
         return logs, True
     # #442: the SAME shared check job 9's virgin-arm gate uses, but through
     # the lane path's OWN short window (never the 30-min default -- see
@@ -1171,10 +1214,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # #442 re-fix 2: log the real worker count and (for the under-saturated fill
     # nudge) the measured MemAvailable, so an under-saturated firing is diagnosable.
     mem_suffix = "" if mem_mb is None else " MemAvailable=%dMB" % mem_mb
+    # #442 THIRD GAP: the give-up counter only bounds the 0-worker branch, so
+    # only that branch logs "(n/MAX)"; the under-saturated fill-the-cap branch
+    # repeats with the cooldown and has no MAX, so it logs "(fill)".
+    prog = "fill" if under_saturated else "%d/%d" % (n + 1, GOAL_LANE_MAX_NUDGES)
     logs.append("lane-occupancy nudge (%s) %s workers=%d%s waiters=%d backlog=%d "
-                "idle=%dm (%d/%d)" % (mode, loc, live_workers, mem_suffix,
-                                      waiters, backlog_n, idle // 60,
-                                      n + 1, GOAL_LANE_MAX_NUDGES))
+                "idle=%dm (%s)" % (mode, loc, live_workers, mem_suffix,
+                                   waiters, backlog_n, idle // 60, prog))
     return logs, True
 
 
