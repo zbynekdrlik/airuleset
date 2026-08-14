@@ -441,6 +441,10 @@ class TestGoalLaneSweep(unittest.TestCase):
         self.assertEqual(logs, [])
 
     def test_not_armed_is_skipped_entirely(self):
+        # GOAL_IDLE_CAP -> pane_goal_armed reads DETERMINABLY False (a plain,
+        # readable footer with no ◎ /goal). #475: this stays deliberately
+        # silent -- it is not a lane-occupancy candidate at all, so no decision
+        # line is journalled (contrast the undeterminable case below).
         proj = self._dir()
         sid = "sess-lane-1"
         _write_marker_transcript(proj, self.CWD, sid)
@@ -448,6 +452,22 @@ class TestGoalLaneSweep(unittest.TestCase):
         logs = goal.goal_lane_sweep(1000, run=tmux, projects_dir=proj,
                                     backlog_fetch=lambda cwd: 5)
         self.assertEqual(logs, [])
+        self.assertEqual(tmux.sent, [])
+
+    def test_armed_undeterminable_logs_skip_not_silent(self):
+        # #475 incident path (gk 13:10-14:15): a busy/obscured supervisor pane
+        # reads pane_goal_armed -> None (undeterminable), which the driver used
+        # to `continue` on SILENTLY -- so a genuinely-armed, saturated session
+        # produced ZERO lane-occupancy log lines. It must now journal WHY the
+        # goal state could not be confirmed this sweep, and never type.
+        proj = self._dir()
+        sid = "sess-lane-undet"
+        _write_marker_transcript(proj, self.CWD, sid)
+        self.assertIsNone(wd.pane_goal_armed(GOAL_BUSY_CAP))
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_BUSY_CAP)
+        logs = goal.goal_lane_sweep(1000, run=tmux, projects_dir=proj,
+                                    backlog_fetch=lambda cwd: 5)
+        self.assertTrue(any("skip:armed-undeterminable" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
     def test_sweep_deadline_defers_remaining_panes(self):
@@ -561,6 +581,94 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
                 sleep_fn=lambda s: None)
         self.assertFalse(owns)
         self.assertEqual(tmux.sent, [])
+        # #475: the ❓ early return used to be silent -> now journals a decision.
+        self.assertTrue(any("skip:awaiting-user" in ln for ln in logs), logs)
+
+    # #475 -- every previously-silent early-return path of the guard now logs a
+    # `lane-occupancy <loc> -> skip:<reason>` decision (the #442c every-sweep
+    # logging contract), or is a documented deliberately-silent structural N/A.
+    def test_blocking_dialog_logs_skip_not_silent(self):
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "pane_waiting_on_user", return_value=True):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
+        self.assertFalse(owns)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip:blocking-dialog" in ln for ln in logs), logs)
+
+    def test_compacting_logs_skip_not_silent(self):
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_pane_compacting", return_value=True):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
+        self.assertFalse(owns)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip:compacting" in ln for ln in logs), logs)
+
+    def test_already_handled_logs_skip_not_silent(self):
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      handled={self.SID})
+        self.assertFalse(owns)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip:already-handled" in ln for ln in logs), logs)
+
+    def test_working_marker_no_tasks_logs_skip_not_silent(self):
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "transcript_last_marker", return_value="⏳"), \
+             m.patch.object(wd, "_pane_live_task_count", return_value=0):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
+        self.assertFalse(owns)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip:working-no-tasks" in ln for ln in logs), logs)
+
+    def test_input_box_not_idle_logs_skip_not_silent(self):
+        # kind=="input", no draft, but not at an idle prompt -> the ONE
+        # previously-silent _boundary_ok sub-case (every other not-ok shape
+        # already logged).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "pane_at_idle_prompt", return_value=False):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
+        self.assertFalse(owns)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip:not-idle-prompt" in ln for ln in logs), logs)
+
+    def test_gave_up_already_pinged_logs_skip_not_silent(self):
+        # After the one-shot GAVE UP ping has fired (lpinged already True),
+        # later sweeps used to return silently.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lpinged": True, "lna": 0}
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(owns)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip:gave-up" in ln for ln in logs), logs)
+
+    def test_reduced_authority_is_deliberately_silent(self):
+        # A reduced-authority box has no worktree lanes -> structurally N/A,
+        # deliberately silent (locks the documented no-log decision).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      authority="branch-merge")
+        self.assertEqual(logs, [])
+        self.assertFalse(owns)
+        self.assertEqual(tmux.sent, [])
+
+    def test_wiring_guard_is_deliberately_silent(self):
+        # Unwired backlog_fetch/state is a test/degraded call -> silent by design.
+        proj = self._dir()
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        logs, owns = goal.goal_lane_occupancy_nudge(
+            100000, lambda *a, **k: "", {}, self.SID, self.CWD, "111",
+            GOAL_ARMED_CAP, tpath, 100000, "loc", None, False, None, proj,
+            backlog_fetch=None, state={}, sleep_fn=lambda s: None)
+        self.assertEqual(logs, [])
+        self.assertFalse(owns)
 
     def test_no_open_backlog_refuses(self):
         now = 100000
