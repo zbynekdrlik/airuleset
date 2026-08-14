@@ -75,9 +75,12 @@ multi-stream repo the `ticket-validator` gate ALSO, before declaring STILL_VALID
 
 The `ticket-validator` returns two always-present verdict fields for this — `cross_stream`
 (`clear` / `conflict` / `n/a`) and `governing_design` (`clear` / `conflict` / `follows` /
-`n/a`) — and the caller (`autopilot` Step 1b) actions them: a `cross_stream: conflict` drops
-the member from the batch (cross-link + wait), a `governing_design: conflict` asks the user,
-a `governing_design: follows` carries that decision into the worker's design grounding.
+`n/a`) — checked IN ADDITION to the STILL_VALID/OVERCOME/etc `verdict:`, so a `conflict` in
+either drops/gates the ticket even when it is otherwise STILL_VALID. Both callers action them:
+`autopilot` Step 1b drops the member from the batch (a `cross_stream: conflict` → cross-link +
+wait; a `governing_design: conflict` → ask the user; a `governing_design: follows` → carry that
+decision into the worker's design grounding), and `/issue-planner` surfaces any `conflict` to the
+user before selecting the issue rather than queueing it blind.
 
 #### Anti-patterns (all rewordings apply)
 

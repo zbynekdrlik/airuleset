@@ -477,6 +477,10 @@ gap in either.
    - **UNCLEAR** → DROP from the batch and ask the user, quoting the validator's `premise_check` so nothing
      already-answered is re-asked. **One unclear/overcome member must NOT block the rest of the batch** —
      pull it out and proceed with the surviving STILL_VALID / PARTIAL members.
+   - **`cross_stream` and `governing_design` are checked IN ADDITION to `verdict:`** — the validator emits
+     them ALWAYS, independent of STILL_VALID/OVERCOME/etc, so a `conflict` in EITHER field DROPS the member
+     even when `verdict: STILL_VALID` (a ticket valid against merged code can still collide with unmerged /
+     foreign work — that is the whole point). Then:
    - **`cross_stream: conflict`** (multi-stream repo — another stream is actively working an overlapping
      domain, or a foreign in-flight branch/PR overlaps the same files) → DROP from the batch, do NOT
      dispatch: cross-link the overlapping stream/PR/branch on the ticket (`gh issue comment <N>`) and WAIT —

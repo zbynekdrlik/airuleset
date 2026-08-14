@@ -71,7 +71,7 @@ class TestTicketValidatorRunsTheCrossStreamCheck(unittest.TestCase):
         # the caller actions differ: cross-link+wait vs ask-the-user vs cite
         self.assertIn("cross-links + waits", self.n)
         self.assertIn("the caller asks the user", self.n)
-        self.assertIn("follows", self.t)
+        self.assertIn("`follows`", self.t)
 
 
 class TestVerifySkillDocumentsTheProtocol(unittest.TestCase):
