@@ -28,12 +28,13 @@ SKILL_DOC = ROOT / "skills" / "autopilot" / "SKILL.md"
 
 
 def _step4_integration_item(text):
-    """SKILL.md's Step 3 top-level numbered item `4. **Once EVERY worker in the
-    round has returned ...` -- from its own line up to (not including) the next
-    top-level numbered item (`^[0-9]+\\. `). This is the item that owns the
-    fleet/worktree round integration, the deploy-verify and the per-member
-    run-card firing, so it is where the read-back mirror belongs."""
-    m = re.search(r"(?m)^4\.\s+\*\*Once EVERY worker in the round has returned\b.*?$", text)
+    """SKILL.md's Step 3 top-level numbered item `4. **As workers return with
+    ready branches, integrate them under the integration mutex ...` (#456) --
+    from its own line up to (not including) the next top-level numbered item
+    (`^[0-9]+\\. `). This is the item that owns the fleet/worktree integration,
+    the deploy-verify and the per-member run-card firing, so it is where the
+    read-back mirror belongs."""
+    m = re.search(r"(?m)^4\.\s+\*\*As workers return with ready branches\b.*?$", text)
     if not m:
         return ""
     rest = text[m.end():]
@@ -56,8 +57,8 @@ class TestVystupReadbackInSupervisorStep4(TestCase):
         self.item = _step4_integration_item(SKILL_DOC.read_text(encoding="utf-8"))
         self.assertTrue(
             self.item.strip(),
-            "SKILL.md must have a Step 4 `4. **Once EVERY worker in the round "
-            "has returned` numbered item")
+            "SKILL.md must have a Step 4 `4. **As workers return with ready "
+            "branches, integrate them...` numbered item")
         self.flat = _flat(self.item)
         self.assertIn(
             "Fire the per-ticket run-card yourself", self.flat,

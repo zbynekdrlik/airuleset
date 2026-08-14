@@ -501,6 +501,22 @@ class TheMasterLoopTemplateMustFitClaudeCodesGoalCapToo(TestCase):
         """Guards the assertion above against silently measuring nothing."""
         self.assertEqual(len(master_goal_lines()), 1)
 
+    # #456: the LANES-FULL clause once pushed this template to 20 chars from
+    # the 4000 hard cap with NO guard (the #384-review adversarial finding).
+    # A dense single line can't spare the 150 the 3 worker templates keep, so
+    # it gets its own floor -- 120 is still ~7x the #384 incident precursor
+    # (11-18 chars). Crossing the hard cap disables goal-arming fleet-wide (#169).
+    MIN_MASTER_HEADROOM = 120
+
+    def test_the_master_template_keeps_healthy_headroom(self):
+        line = master_goal_lines()[0]
+        headroom = self.CAP - len(line)
+        self.assertGreaterEqual(
+            headroom, self.MIN_MASTER_HEADROOM,
+            "master /goal template headroom %d < %d -- trim it; a template that "
+            "creeps to the 4000 hard cap disables goal-arming fleet-wide (#169)"
+            % (headroom, self.MIN_MASTER_HEADROOM))
+
 
 class TheTemplatesCarryNoDeadQuestionTimeoutPromise(TestCase):
     """#430 — the #161 `question-timeout:` (30m) park nudge was DROPPED.
@@ -545,55 +561,121 @@ class TheTemplatesCarryNoDeadQuestionTimeoutPromise(TestCase):
                 if len(line) > 4000]
         self.assertEqual(over, [])
 
-class TestKeepLanesFullMandate(TestCase):
-    """#442 (reopened) -- a single worker blocked on CI for 2h+ let ~46 tickets
-    sit idle. Root cause: the supervisor dispatched a round of ONE worker while
-    46 bundle-safe tickets were available, and the round-level hard lock (Step
-    3.2 / LANE 3 entry gate: "if a round is in flight, do NOTHING; never a
-    second round while one is in flight") then CORRECTLY made the loop wait for
-    that one worker's CI -- so a round of one became the whole loop's
-    bottleneck. (The mechanical lane-fill guard is deliberately unchanged:
-    telling a CI-polling worker apart from an editing one needs transcript-
-    content parsing, a banned heuristic, and the user wants the loop fixed, not
-    more nudging.)
+class TestContinuousRefillMandate(TestCase):
+    """#456 -- a single worker blocked on CI for 2h+ let ~46 tickets sit idle.
+    Root cause: the loop was ROUND-based. The supervisor dispatched a whole
+    round of lanes only at the START of a turn, and the round-level gate plus
+    the OLD #8 cross-session lock (held through integration) forbade any second
+    dispatch until the whole round finished and integrated. So as a round's fast
+    lanes finished while one blocked on a 2h CI wait, the live-lane count decayed
+    to 1-2 by design and never refilled -- the #442 fill-the-round-to-the-cap
+    mandate could not fix it, because filling a round of 5 still drops to 1 as
+    fast lanes finish while the round-lock blocks refill until the slow lane's CI
+    ends.
 
-    The self-acting fix is CONSISTENT with the round-level lock, not a
-    contradiction of it (adversarial-review CRITICAL-1): fill each round to the
-    concurrency cap (3-5 parallel worktree lanes) AT DISPATCH -- never a round
-    of one while several bundle-safe tickets remain -- so a single CI-blocked
-    worker never idles the whole fleet. Full continuous pipelining (developing
-    round N+1 while round N integrates) WOULD require amending the #8 cross-
-    session integration-collision lock and is out of this minimal ticket's
-    scope. The mandate lands as body prose in BOTH loop skills plus a LANES-FULL
-    reminder inside the MASTER LOOP /goal condition (the gatekeeper's default
-    loop). That reminder is context-steering the session re-reads each turn, NOT
-    an evaluator stop-condition -- a violation resolves to CONTINUE, which the
-    open backlog already guarantees. The full-authority autopilot /goal template
-    deliberately carries NO sentence: the #384/#395 healthy-headroom lock
-    (TheTemplatesHaveHealthyCapHeadroom, MIN_HEADROOM 150) leaves no room, and
-    eroding that lock is not allowed -- the body mandate covers plain /autopilot.
+    #456 DECOUPLES dispatch from integration: DISPATCH becomes CONTINUOUS
+    (saturate lanes every turn -- a lane per every workable unit, bounded ONLY by
+    real resource signals, never a fixed number, superseding #442's fixed 3-5
+    cap), while INTEGRATION stays STRICTLY EXCLUSIVE, serialized by the #8 lock
+    NARROWED to guard the merge->gates->push critical section ONLY (never
+    dispatch) and integrating ready branches without waiting for stragglers.
 
-    The 4000-char cap stays locked by TheTemplatesMustFitClaudeCodesGoalCap /
-    TheMasterLoopTemplateMustFitClaudeCodesGoalCapToo above; this class only
-    locks that the mandate TEXT is present, so a future edit that silently drops
-    it fails loudly here rather than regressing the stall.
+    This class locks that the consolidated continuous-refill protocol TEXT is
+    present in BOTH loop skills (a future edit that silently drops it, or
+    re-introduces the superseded fixed cap, fails loudly here) plus the
+    LANES-FULL reminder inside the MASTER LOOP /goal condition. The 4000-char cap
+    stays locked separately by TheTemplatesMustFitClaudeCodesGoalCap /
+    TheMasterLoopTemplateMustFitClaudeCodesGoalCapToo above.
     """
 
-    def test_both_loop_skill_bodies_carry_the_keep_lanes_full_mandate(self):
+    def test_both_loop_skill_bodies_mandate_continuous_lane_refill(self):
         for rel in (SKILL, SKILL_MASTER):
-            self.assertIn("keep the lanes full", read(rel).lower(),
-                          "%s missing the #442 keep-lanes-full mandate" % rel)
+            body = read(rel).lower()
+            self.assertIn("continuous", body,
+                          "%s missing the #456 continuous-refill mandate" % rel)
+            self.assertIn("refill", body,
+                          "%s missing the #456 lane-refill mandate" % rel)
 
-    def test_both_bodies_state_one_ci_wait_never_idles(self):
+    def test_both_bodies_bound_saturation_on_a_resource_signal_not_a_number(self):
         for rel in (SKILL, SKILL_MASTER):
-            self.assertIn("one ci wait never idles", read(rel).lower(),
-                          "%s missing the #442 'one CI wait never idles' rule" % rel)
+            self.assertIn("resource signal", read(rel).lower(),
+                          "%s missing the #456 real-resource-signal back-off bound" % rel)
+
+    def test_both_bodies_serialize_only_integration_under_the_mutex(self):
+        for rel in (SKILL, SKILL_MASTER):
+            self.assertIn("integration mutex", read(rel).lower(),
+                          "%s missing the #456 integration-mutex (dispatch decoupled)" % rel)
+
+    def test_the_superseded_fixed_cap_mandate_is_gone(self):
+        for rel in (SKILL, SKILL_MASTER):
+            body = read(rel).lower()
+            self.assertNotIn("keep the lanes full", body,
+                             "%s still carries the superseded #442 keep-lanes-full mandate" % rel)
+            # A bold form (**3-5**) has `*` between the digits and "parallel",
+            # so the old bare `assertNotIn("3-5 parallel")` missed it. Match any
+            # 3<dash>5 (ASCII hyphen OR en-dash) anywhere: the skills contain no
+            # legitimate 3-5 range, so a hit is always the resurrected cap.
+            self.assertIsNone(re.search(r"3[-–]5", body),
+                              "%s still names a fixed 3-5 cap (any spelling)" % rel)
+            self.assertIsNone(re.search(r"cap (a|the) round", body),
+                              "%s still mandates capping a round at a fixed size" % rel)
+            # The positive half: the superseding no-fixed-cap doctrine must be
+            # PRESENT, so a revert that deletes it (not just re-adds 3-5) fails.
+            self.assertIn("fixed cap", body,
+                          "%s dropped the #456 'no fixed cap' doctrine" % rel)
+
+    def test_the_integration_mutex_bullet_locks_dispatch_decoupling(self):
+        # M2: the decay-causing revert re-widens the #8 lock back to round
+        # scope. That revert passes every OTHER test here (it can leave
+        # "continuous"/"refill"/"integration mutex" words intact while making
+        # the lock gate dispatch again). These two phrases are what it CANNOT
+        # keep: the exact narrowed-mutex bullet name, and the flat statement
+        # that dispatch is never gated. Scoped to SKILL (autopilot), where the
+        # narrowed #8-lock bullet lives.
+        body = read(SKILL).lower()
+        self.assertIn("integration mutex (hard)", body,
+                      "SKILL dropped the #456 narrowed integration-mutex bullet")
+        self.assertIn("dispatch is never gated", body,
+                      "SKILL dropped the #456 'DISPATCH is NEVER gated' guarantee")
+
+    def test_the_master_locks_all_lanes_concurrent_and_reviews_never_starve(self):
+        # Round-2 blocker (#456 decision 3): decisions 1 & 2 got positive locks
+        # (M1/M2 above), but decision 3 -- ALL lanes concurrent, never
+        # round-robin, sub-dev reviews never starve -- had NONE. A one-clause
+        # revert of the master template back to "the LANE SCHEDULER (first lane
+        # with workable items wins)" passed the WHOLE suite. Lock it in BOTH the
+        # /goal template AND the Step-3 body. Every anchor below sits on one
+        # physical line so a markdown reflow cannot split it (the wrap trap).
+        tpl = master_goal_lines()[0]
+        self.assertIn("ALL LANES CONCURRENTLY", tpl,
+                      "master template dropped the all-lanes-concurrent mandate")
+        self.assertIn("review queue never starves", tpl.lower(),
+                      "master template dropped the reviews-never-starve guarantee")
+        body = read(SKILL_MASTER).lower()
+        self.assertIn("never round-robin", body,
+                      "master Step-3 body dropped the never-round-robin scheduler")
+        self.assertIn("must never starve", body,
+                      "master Step-3 body dropped reviews' never-starve precedence")
 
     def test_the_master_template_carries_the_lanes_full_reminder(self):
         # master_goal_lines()[0] IndexErrors if the template ever vanishes --
         # a hard failure, guarding against silently measuring nothing.
         self.assertIn("LANES-FULL", master_goal_lines()[0],
-                      "master /goal template missing the #442 LANES-FULL rule")
+                      "master /goal template missing the LANES-FULL rule")
+
+    def test_the_master_template_reminder_is_continuous_not_a_fixed_cap(self):
+        # N6: scope to the LANES-FULL clause itself, not the whole template
+        # line -- LANE 3 CORE also says "continuous", so a whole-line check
+        # would pass even if the LANES-FULL reminder silently lost the word.
+        full = master_goal_lines()[0]
+        start = full.index("LANES-FULL:")
+        after = full[start + len("LANES-FULL:"):]
+        m = re.search(r"LANE \d", after)
+        clause = (after[:m.start()] if m else after).lower()
+        self.assertIn("continuous", clause,
+                      "master LANES-FULL clause must mandate continuous saturation")
+        self.assertIsNone(re.search(r"3[-–]5", clause),
+                          "master LANES-FULL clause must not name a fixed 3-5 cap")
 
 
 if __name__ == "__main__":
