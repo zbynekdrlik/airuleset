@@ -28,7 +28,7 @@ CLAUDE_DIR = Path.home() / ".claude"
 
 
 # ---------------------------------------------------------------------------
-# autopilot-lock — cross-session serial-per-repo dispatch lock (issue #8)
+# autopilot-lock — cross-session INTEGRATION mutex (issue #8, narrowed by #456)
 # ---------------------------------------------------------------------------
 
 
@@ -51,7 +51,7 @@ def _autopilot_lock_path(repo):
     production over weeks (measured live: 8350 `.lock` + 6329 `.lock.mutex` +
     1009 `.lock-real-target` symlinks + 1027 directory-shaped locks on this
     box alone) before this override existed. Unset (real `/autopilot`
-    dispatch, and every OTHER caller) is byte-for-byte unchanged."""
+    run, and every OTHER caller) is byte-for-byte unchanged."""
     import hashlib
     import tempfile as _tempfile
     real = str(Path(repo).resolve())
@@ -157,13 +157,18 @@ def _autopilot_lock_read(lock_path):
 
 
 def cmd_autopilot_lock(args):
-    """Cross-session serial-per-repo dispatch lock for /autopilot (issue #8).
+    """Cross-session INTEGRATION mutex for /autopilot (issue #8; narrowed by
+    #456 from a round-scope dispatch lock to integration-only).
 
-    The "serial per repo" rule (skills/autopilot/SKILL.md,
+    Under #456 this lock guards the merge->gates->push INTEGRATION cycle
+    ONLY — one integration at a time per repo across ALL sessions.  DISPATCH
+    is NEVER gated by it: continuous refill fires new worktree lanes whenever
+    bundle-safe backlog remains, and N lanes running concurrently is the
+    point.  The "serial per repo" rule (skills/autopilot/SKILL.md,
     two-branch-workflow.md) previously had only SESSION-LOCAL enforcement (a
     supervisor checks its own agent strip) — a SEPARATE `/autopilot` session
-    on the same repo has no visibility into that and can dispatch a
-    colliding worker onto the same `dev` branch (camera-box #495, and the
+    on the same repo has no visibility into that and can run a colliding
+    merge/push on the same repo at the same instant (camera-box #495, and the
     #499/#500-vs-#505 collision).
 
     `acquire` FAILS (exit 1) when a LIVE holder exists; a DEAD holder's lock
@@ -265,12 +270,15 @@ def cmd_autopilot_lock(args):
             elif lock_path.exists():
                 holder = _autopilot_lock_read(lock_path)
                 if _pid_alive(holder.get("pid")):
-                    print(f"BLOCKED: {payload['repo']} already has an active "
-                          f"autopilot worker (held by pid={holder.get('pid')}, "
+                    print(f"BLOCKED: {payload['repo']} is being INTEGRATED right "
+                          f"now by another live session (holder pid={holder.get('pid')}, "
                           f"session={holder.get('session', '')}, "
-                          f"since={holder.get('acquired_at', '')}). Serial-per-repo "
-                          f"dispatch — wait for it to finish (`autopilot-lock status "
-                          f"--repo {repo}`), do NOT dispatch a second worker.",
+                          f"since={holder.get('acquired_at', '')}). The #8 lock "
+                          f"guards INTEGRATION exclusivity ONLY (narrowed by #456) — "
+                          f"parallel worktree DISPATCH is never gated by it. exit 1 "
+                          f"means: do NOT integrate this repo this turn; KEEP "
+                          f"DISPATCHING new lanes and re-check next turn "
+                          f"(`autopilot-lock status --repo {repo}`).",
                           file=sys.stderr)
                     sys.exit(1)
                 # Holder's pid is dead — steal it, log the steal.

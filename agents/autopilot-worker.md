@@ -209,9 +209,11 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   inside your own per-worker subdirectory, and is not replaced by having one.
 - **NEVER `push`, NEVER run `airuleset.py push`/`install`, NEVER fire your own run-card, NEVER
   open or merge the PR yourself.** All of that is INTEGRATION, and integration is the
-  SUPERVISOR's job, done ONCE for the whole round after every worker in it has returned
-  (`skills/autopilot/SKILL.md` Step 4). Doing any of it yourself from inside a worktree would race
-  or duplicate whatever the other workers in the same round are doing.
+  SUPERVISOR's job, done CONTINUOUSLY under the #8 integration mutex — each returned branch is
+  integrated in its own merge→gates→push cycle, one integration cycle at a time, as it becomes
+  ready, never held for the whole round to finish (`skills/autopilot/SKILL.md` Step 4). Doing any
+  of it yourself from inside a worktree would race or duplicate whatever the other workers in the
+  same round are doing.
 - **Your job stops at a green LOCAL result on your OWN branch**, committed inside your worktree:
   version bump → per-issue TDD (RED→GREEN, each member its own `Closes #<n>` commit) → local
   `/review` + `/requesting-code-review` clean (via CYCLE step 6's dispatch shape below — never the
@@ -276,11 +278,12 @@ block's `obsolete_handed_off:` line, and let the maintainer close it.
 
 ## CYCLE (no pauses, no process questions — `ask-before-assuming.md`)
 
-**The supervisor holds the cross-session dispatch lock, not you.** Before dispatching you, the
-supervisor acquired the repo's lock via `airuleset.py autopilot-lock acquire --repo <path>` (issue
-#8 — serializes dispatch across SEPARATE `/autopilot` sessions on the same repo, not just within
-one session) and releases it after verifying your evidence block. You never call `autopilot-lock`
-yourself — just do your work; the lock is the supervisor's concern.
+**The supervisor holds the cross-session integration mutex, not you.** The supervisor acquires the
+repo's #8 lock via `airuleset.py autopilot-lock acquire --repo <path>` ONLY around each
+merge→gates→push INTEGRATION cycle — it serializes INTEGRATION across SEPARATE `/autopilot` sessions
+on the same repo (one integration at a time per repo), never dispatch (#456 narrowed it from the old
+round-scope dispatch lock) — and releases it the moment that cycle's push has landed. You never call
+`autopilot-lock` yourself — just do your work; the lock is the supervisor's concern.
 
 1. `git fetch origin`; confirm you are on `dev` with a clean tree (worktree mode: your worktree's
    OWN branch, created off `dev`/`main` — not literally the shared `dev` ref, but based on it).
@@ -342,8 +345,9 @@ branch and local `/review` + `/requesting-code-review` + the local test suite ar
 self-contained fresh-context `general-purpose` review dispatch, NEVER the built-in review/
 code-review Skill (#363, CYCLE step 6 below) — do NOT push, open a PR, merge, wait for CI, deploy,
 or fire a run-card yourself. Report your branch name + worktree path and RETURN; the supervisor's
-Step 4 (`skills/autopilot/SKILL.md`) does steps 5–10 below ONCE for the whole round. Continue with
-steps 5–10 yourself ONLY in the documented serial fallback (no `isolation:`).
+Step 4 (`skills/autopilot/SKILL.md`) does steps 5–10 below for your branch as it returns — one
+integration cycle at a time under the #8 integration mutex, never held for the whole round to
+finish. Continue with steps 5–10 yourself ONLY in the documented serial fallback (no `isolation:`).
 
 5. Commit each member on `dev` with its own `Closes #<n>` message. After ALL members are committed,
    push **once** (one push for the whole batch — `ci-push-discipline.md`), then wait for CI.
@@ -550,19 +554,19 @@ filed: <#K list | "none">
 
 **Worktree-mode variant of the FINAL MESSAGE** (`isolation: "worktree"`, full authority — the
 default, #317: you stopped at CYCLE step 4 per the WORKTREE AWARENESS section above; no push, no
-PR, no merge, no deploy, no run-card exist yet — the supervisor's own round-integration produces
-all of those, ONCE, for the whole round):
+PR, no merge, no deploy, no run-card exist yet — the supervisor's own integration produces all of
+those, one integration cycle at a time under the #8 integration mutex, as each branch returns):
 
 ```
-issues: #<A> <title>, #<B> <title>, … (one PR closes all — opened by the SUPERVISOR at round integration)
+issues: #<A> <title>, #<B> <title>, … (one PR closes all — opened by the SUPERVISOR when your branch is integrated)
 plan: <per issue, N/N acceptance-criteria items fulfilled — your own self-audit>
 validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — closed: <what>">
 approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a".>
 review: <per issue: LOCAL `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>`>
-achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supervisor relays this verbatim into the round's run-card>
+achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supervisor relays this verbatim into your ticket's own run-card at its integration cycle>
 worktree: <your worktree's absolute path>
 branch: <your worktree branch name — the supervisor merges directly from this ref>
-local_verify: <local test suite + lint command → result (green) — the proof the supervisor's round-integration will re-check before merging>
+local_verify: <local test suite + lint command → result (green) — the proof the supervisor's integration cycle will re-check before merging>
 dropped: <#K split out mid-flight (gate violation), issue left OPEN, re-dispatched solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence | "none">
 unverified: <list | "none">
