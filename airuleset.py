@@ -1013,6 +1013,17 @@ if [ "$#" -gt 0 ]; then shift; fi
 # "claude: command not found", 2026-07-04).
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
 
+# Managed-default (#460, user decision 2026-08-14): disable CC's memory-pressure
+# REAP of a main-session run_in_background waiter (SIGTERM->SIGKILL in minutes on
+# a swap-thrashing box, #448) so the long-wait background-waiter pattern survives
+# fleet-wide. Exported into the CLI process env (inherited across the exec claude)
+# for every managed mode; the vanilla `plain` escape hatch is left uncontaminated,
+# mirroring how --model/ultracode apply to every mode except plain. ROLLBACK =
+# delete this one line (rollback criterion in the #448 section of
+# .claude/rules/airuleset-internals.md; dev1 camera-box build pressure is the
+# named risk, tracked as #470).
+[ "$mode" = plain ] || export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1
+
 _has_conversation() {
   local ccdir="${PWD//\//-}"; ccdir="${ccdir//./-}"; ccdir="${ccdir//_/-}"
   compgen -G "$HOME/.claude/projects/$ccdir/*.jsonl" >/dev/null 2>&1

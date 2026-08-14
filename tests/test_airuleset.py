@@ -3866,7 +3866,8 @@ class TestUltracodeLauncher(TestCase):
         block = block.split(airuleset.ULTRACODE_MARK_END)[0]
         for literal in ("--settings", "--model", "--dangerously-skip-permissions",
                         "ultracode\":true", airuleset.MANAGED_MODEL,
-                        "CLAUDE_CODE_NO_FLICKER"):
+                        "CLAUDE_CODE_NO_FLICKER",
+                        "CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP"):
             self.assertNotIn(literal, block, block)
         self.assertIn(airuleset.CLAUDE_LAUNCH_SCRIPT_DEST.name, block)
         for fn, mode in (("claude", "default"), ("claude-new", "new"),
@@ -3948,6 +3949,32 @@ class TestUltracodeLauncher(TestCase):
         self.assertEqual(content.count(expected), 7, content)
         plain_branch = content.split("plain)", 1)[1].split(";;", 1)[0]
         self.assertNotIn("--model", plain_branch)
+
+    def test_pressure_reap_disabled_in_every_managed_mode_except_plain(self):
+        # #460 (user decision 2026-08-14): the managed launcher exports
+        # CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1 into the CLI process env
+        # so every managed session's long-wait run_in_background waiter
+        # survives CC's memoryPressure reap (SIGTERM->SIGKILL in minutes on a
+        # swap-thrashing box, #448). Fleet-wide, WITH a recorded rollback
+        # criterion. It applies to every managed mode but NOT the vanilla
+        # `plain` escape hatch -- the same "every mode except plain" placement
+        # as the --model / ultracode flags above, so a deliberate stock-claude
+        # reproduction via `claude-plain` stays uncontaminated (#445). It is an
+        # env EXPORT (inherited across the `exec claude`), not a CLI flag, so
+        # it appears ONCE as a guarded line before the mode `case`.
+        content = airuleset.render_claude_launch_script()
+        export = "export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1"
+        self.assertIn(export, content)
+        # The export is a SINGLE guarded pre-`case` line (not a per-branch flag
+        # like --model), so asserting it verbatim WITH its guard is what gives
+        # the "except plain" invariant teeth -- a mutant that drops the guard
+        # (so `plain` would ALSO get the export, contaminating the #445 vanilla
+        # escape hatch) fails here. The bare `plain)`-case-body check below can
+        # never see the export (it lives above the case), so it alone is
+        # vacuous w.r.t. the guard (#460-review MAJOR).
+        self.assertIn('[ "$mode" = plain ] || ' + export, content)
+        plain_branch = content.split("plain)", 1)[1].split(";;", 1)[0]
+        self.assertNotIn("PRESSURE_REAP", plain_branch)
 
 
 class TestStreamNotifyOwnerRouting(TestCase):
