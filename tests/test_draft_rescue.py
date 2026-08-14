@@ -245,6 +245,63 @@ class TestDraftRescuePersist(unittest.TestCase):
         wd._draft_rescue_persist("%1", DRAFT_CAP, dir_path=self.dir_path, now=now)
         self.assertFalse(old.exists())
 
+    # ---------------------------------------------------------------- #
+    # #479 — content dedup: a LIVE draft parked across sweeps must NOT
+    # spawn a fresh rescue file every sweep (the 2026-08-14 storm: the same
+    # 702-byte draft rescued 7x over ~3h on pane %1). Identical content is
+    # deduped to the ONE existing file, whose mtime is refreshed so the
+    # 14-day TTL prune never removes a still-parked draft; genuinely
+    # different content is always a new rescue (the safety net is never
+    # weakened).
+    # ---------------------------------------------------------------- #
+
+    def test_479_identical_content_across_sweeps_writes_no_duplicate(self):
+        self.dir_path.mkdir(parents=True)
+        first = wd._draft_rescue_persist("%1", DRAFT_CAP, dir_path=self.dir_path,
+                                         now=1000.0)
+        logs = []
+        second = wd._draft_rescue_persist("%1", DRAFT_CAP, dir_path=self.dir_path,
+                                          now=2000.0, logs=logs)
+        files = [p.name for p in self.dir_path.iterdir()]
+        self.assertEqual(len(files), 1,
+                         "identical content must not create a duplicate rescue")
+        self.assertEqual(first, second,
+                         "dedup returns the existing rescue path")
+        self.assertTrue(any("identical content already parked" in ln
+                            for ln in logs), logs)
+
+    def test_479_dedup_refreshes_mtime_so_ttl_keeps_the_parked_draft(self):
+        self.dir_path.mkdir(parents=True)
+        first = wd._draft_rescue_persist("%1", DRAFT_CAP, dir_path=self.dir_path,
+                                         now=1000.0)
+        os.utime(first, (1000.0, 1000.0))
+        wd._draft_rescue_persist("%1", DRAFT_CAP, dir_path=self.dir_path,
+                                 now=5000.0)
+        self.assertGreaterEqual(Path(first).stat().st_mtime, 5000.0 - 1,
+                                "the surviving rescue's mtime must be refreshed "
+                                "so the 14-day TTL never prunes a still-parked "
+                                "draft")
+
+    def test_479_different_content_still_writes_a_new_rescue(self):
+        # control — the dedup is CONTENT-scoped; an edited draft is a
+        # genuinely new rescue and must always be saved.
+        self.dir_path.mkdir(parents=True)
+        wd._draft_rescue_persist("%1", DRAFT_CAP, dir_path=self.dir_path,
+                                 now=1000.0)
+        edited = "● turn done\n❯\xa0" + DRAFT_TEXT + " a pridane\n  ctx ░░\n"
+        wd._draft_rescue_persist("%1", edited, dir_path=self.dir_path, now=2000.0)
+        self.assertEqual(len(list(self.dir_path.iterdir())), 2)
+
+    def test_479_dedup_is_per_pane_never_cross_pane(self):
+        # control — two different panes with coincidentally identical draft
+        # text are independent conversations; each keeps its own rescue.
+        self.dir_path.mkdir(parents=True)
+        wd._draft_rescue_persist("%1", DRAFT_CAP, dir_path=self.dir_path,
+                                 now=1000.0)
+        wd._draft_rescue_persist("%2", DRAFT_CAP, dir_path=self.dir_path,
+                                 now=2000.0)
+        self.assertEqual(len(list(self.dir_path.iterdir())), 2)
+
 
 class TestDraftRescueDir(unittest.TestCase):
     def test_default_resolves_under_home(self):

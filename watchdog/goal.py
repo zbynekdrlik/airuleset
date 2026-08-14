@@ -951,6 +951,34 @@ GOAL_LANE_LIVE_CONVO_S = 3 * 60
 # successful delivery and on the session-active idle reset.
 GOAL_LANE_MAX_STASH_ABORTS = 5
 
+# #479 -- escalating backoff for a lane whose stash delivery keeps ABORTING
+# against the SAME persistently-parked live draft. The single reactions were
+# already correct (never overwrite a live draft, rescue before any keystroke);
+# what was missing was REPETITION damping. The abort branch only bumped the
+# consecutive-abort counter and returned "retry next sweep", so a stash slot
+# held by the user's OWN parked draft was re-typed + re-rescued every ~60s
+# sweep for hours (the 2026-08-14 storm: 15:18->15:19->15:20->15:21) until the
+# give-up at MAX aborts. A stash-abort now PARKS the next attempt for a
+# widening window in durable `rec['lnpark']`; within it the nudge skips
+# WITHOUT touching the pane at all. Mirrors the repo's staged-schedule PATTERN
+# (`WORKING_RESPONDED_BACKOFF_SCHEDULE_S`, `_gkreq_reping_due`) -- an explicit
+# tuple of widening intervals, `min(n-1, len-1)` indexing, holding at the cap
+# stage forever. The refusal itself is NEVER weakened: deliver_with_stash
+# still refuses the live draft, the give-up ping is still reached (just over
+# elapsed time, not once per sweep), and the park clears on any successful
+# delivery and on the session-active idle reset.
+GOAL_LANE_STASH_ABORT_BACKOFF_S = (120, 300, 900, 1800)
+
+
+def _lane_stash_abort_backoff(aborts):
+    """Seconds to park the lane's next stash-delivery attempt after its
+    `aborts`-th consecutive abort (1-indexed). Widens with each abort and
+    holds at the final stage forever -- see GOAL_LANE_STASH_ABORT_BACKOFF_S."""
+    sched = GOAL_LANE_STASH_ABORT_BACKOFF_S
+    idx = min(max(int(aborts), 1) - 1, len(sched) - 1)
+    return sched[idx]
+
+
 # #442 -- the text TEACHES the fleet-dispatch doctrine
 # (skills/autopilot/SKILL.md: parallel worktree workers, the account-wide
 # concurrent-agent cap of 8, serialize-only integration), never just a
@@ -1220,6 +1248,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # ever evaluated at the idle prompt anyway, which is exactly here).
         if rec.get("ln") or rec.get("lna"):
             rec.update({"ln": 0, "lpinged": False, "lna": 0})
+            rec.pop("lnpark", None)   # #479 -- clear abort backoff on reset
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d idle=%ds "
                     "-> skip:idle (empty-lane, < %dm since last transcript write)"
                     % (loc, live_workers, waiters, backlog_n, int(idle),
@@ -1276,6 +1305,20 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                         "skip:gave-up (already escalated, holding)"
                         % (loc, live_workers, waiters, backlog_n))
+        return logs, True
+    # #479 -- abort-backoff park (next to the cooldown gate, after the
+    # give-up check so a MAX-abort lane still escalates). A stash-abort
+    # against a persistently-parked live draft parks the NEXT attempt for a
+    # widening window; within it, skip WITHOUT capture/keystroke/rescue --
+    # this is the sole damping of the ~60s retry hammer. The park clears on
+    # success and on the idle reset; it "resumes" naturally when the draft
+    # goes (existing gates take the send_continue path) or the window elapses.
+    park = rec.get("lnpark")
+    if park is not None and now < park:
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                    "skip:abort-backoff remaining=%ds (%d aborts, park until %d)"
+                    % (loc, live_workers, waiters, backlog_n,
+                       int(park - now), aborts, int(park)))
         return logs, True
     last = rec.get("llast")
     if last is not None and (now - last) < GOAL_LANE_INTERVAL_S:
@@ -1342,9 +1385,14 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             # aborting lane eventually reaches the give-up ping above
             # (#442-review F2) instead of retrying silently forever.
             rec["lna"] = rec.get("lna", 0) + 1
-            logs.append("lane-occupancy %s stash-abort (%d/%d) -> "
-                        "transient, retry next sweep"
-                        % (loc, rec["lna"], GOAL_LANE_MAX_STASH_ABORTS))
+            # #479 -- park the NEXT attempt for a widening window instead of
+            # re-typing + re-rescuing this same live draft every ~60s sweep.
+            back = _lane_stash_abort_backoff(rec["lna"])
+            rec["lnpark"] = now + back
+            logs.append("lane-occupancy %s stash-abort (%d/%d) -> backoff %ds, "
+                        "park until %d"
+                        % (loc, rec["lna"], GOAL_LANE_MAX_STASH_ABORTS,
+                           back, int(rec["lnpark"])))
             return logs, True
         watchdog._janitor_clear_watch(state, pid)
         mode = "stash"
@@ -1352,6 +1400,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         watchdog.send_continue(pid, text, run)
         mode = "typed"
     rec.pop("lna", None)
+    rec.pop("lnpark", None)   # #479 -- successful delivery clears abort backoff
     rec["ln"] = n + 1
     rec["llast"] = now
     # #442 re-fix 2: log the real worker count and (for the under-saturated fill
