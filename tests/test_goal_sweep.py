@@ -603,7 +603,11 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
                                           now, tmtime, rec=rec)
         self.assertTrue(owns)
-        self.assertTrue(any("skip:cooldown" in ln and "remaining=" in ln
+        # #442-review F2: assert the VALUE, not just the substring, so a
+        # sign-flip mutant (remaining=-840s) is caught. Fired 60s ago into a
+        # 15-min window -> 840s remaining.
+        self.assertTrue(any("skip:cooldown remaining=%ds"
+                            % (goal.GOAL_LANE_INTERVAL_S - 60) in ln
                             for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
@@ -618,6 +622,39 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(owns)
         self.assertTrue(any("skip:backlog-small" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
+
+    def test_busy_undersaturated_stash_abort_still_reaches_giveup(self):
+        # #442-review F1: the stash-abort give-up (requirement 2 -- must stay
+        # for BOTH branches) was made structurally UNREACHABLE on a busy
+        # under-saturated session by the session-active reset. A busy session
+        # always has idle < GOAL_LANE_IDLE_S, so the reset zeroed `lna` every
+        # sweep before the streak could reach the cap. A permanently-aborting
+        # lane (parked draft occupying the stash slot) on a busy box must still
+        # accumulate the streak across sweeps and fire the ONE give-up ping.
+        now = 100000
+        tmtime = now - 30  # busy: fresh transcript, idle << 15min
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        rec = {}
+        state = {}
+        sent = []
+        with m.patch("airuleset.resolve_authority", return_value="full"), \
+             m.patch.object(wd, "_count_live_subagents", return_value=2), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192), \
+             m.patch.object(wd, "deliver_with_stash", return_value=False):
+            for _ in range(goal.GOAL_LANE_MAX_STASH_ABORTS + 2):
+                tmux = DeliverGoalFakeTmux(
+                    [("%9", "claude", self.CWD, "111")], GOAL_ARMED_DRAFT_CAP)
+                logs, owns = goal.goal_lane_occupancy_nudge(
+                    now, tmux, rec, self.SID, self.CWD, "111",
+                    GOAL_ARMED_DRAFT_CAP, tpath, tmtime, "loc",
+                    lambda msg, **k: sent.append(msg), False, None, proj,
+                    backlog_fetch=lambda cwd: 32, state=state,
+                    sleep_fn=lambda s: None)
+        self.assertEqual(len(sent), 1, "give-up ping must fire exactly once")
+        self.assertTrue(any("GAVE UP after" in ln and "stash abort" in ln
+                            for ln in logs), logs)
 
     # ---------------------------------------------------------------- #
     # #442 — the lane-fill path gets its OWN, much shorter "live
