@@ -382,5 +382,117 @@ class AdversarialReviewFindingsTest(_Runner):
         self.assertRegex(lines[0], r"^\S+\s+project=realproj\s")
 
 
+class NewlyDetectedHeavyBuildShapesTest(_Runner):
+    """#470: heavy compile/run shapes that ESCAPED is_heavy() entirely — no
+    block, no audit line, ran silently and overloaded dev1. camera-box
+    provably uses all five (STEP 0 evidence + the #470 inventory comment):
+    `cargo run --release`, `cargo bench`, `cargo nextest run` (the real CI
+    test runner), `cargo mutants`, `cmake --build <dir>` (the vendored-libobs
+    local dev1 build). They are now detected via the SAME command-position
+    anchor + `--no-run` cheap-check exemption the direct build/test regexes
+    already use.
+
+    The two SANCTIONED camera-box Tier-0 workarounds must stay ALLOWED: a
+    `--no-run` compile-only, a direct `target/.../deps/<bin>` execution (running
+    an already-compiled binary is not a compile), and a `gcc`/`cc` harness
+    compile (CI-only vendor tree). So must every cheap check (`cargo check`/
+    `clippy`/`nextest list`/`bench --no-run`), and both sanctioned escapes
+    (the `# airuleset:build-ok` marker, a Tier-1/2 project marker)."""
+
+    def test_cargo_run_release_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo run --release", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("BLOCKED", out.stderr)
+
+    def test_bare_cargo_run_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo run", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_bench_running_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_bench_no_run_is_allowed(self):
+        # compile-only, exactly like the existing `cargo test --no-run` carve-out
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench --no-run", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_cargo_nextest_run_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo nextest run --all-features", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_nextest_list_is_allowed(self):
+        # a compile+list, not a full run — deliberately left uncaught (cheap-ish)
+        proj = self._mkproj()
+        out = self.run_hook("cargo nextest list", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_cargo_mutants_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo mutants --in-place", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cmake_build_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cmake --build /tmp/obs-vendor-build", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cmake_configure_step_is_allowed(self):
+        # the configure step (no --build) is light — only the build is heavy
+        proj = self._mkproj()
+        out = self.run_hook("cmake -S . -B build", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_new_shape_in_a_compound_command_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cd /home/x/camera-box && cargo bench 2>&1 | tail", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_direct_test_binary_run_is_allowed(self):
+        # SANCTIONED Tier-0 workaround: run an already-compiled binary (the
+        # compile happened via the allowed `cargo test --no-run`)
+        proj = self._mkproj()
+        out = self.run_hook(
+            "target/debug/deps/harness_rig_lease-abc123 --nocapture", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_gcc_harness_compile_is_allowed(self):
+        # SANCTIONED Tier-0 workaround: gcc/cc harness compile for the CI-only
+        # vendored C tree — must never be blocked
+        proj = self._mkproj()
+        out = self.run_hook("gcc -O2 harness.c -o /tmp/harness", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_run_mentioned_inside_a_string_is_not_matched(self):
+        proj = self._mkproj()
+        out = self.run_hook('echo "reminder: cargo run --release later"', proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_inline_marker_still_bypasses_a_new_shape(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo run --release # airuleset:build-ok reason", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_tier1_marker_still_exempts_a_new_shape(self):
+        proj = self._mkproj(marker="allowed")
+        out = self.run_hook("cargo bench", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_blocked_new_shape_is_logged_with_project(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo nextest run", proj)
+        self.assertEqual(out.returncode, 2)
+        lines = self.audit_lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("blocked", lines[0])
+        self.assertIn("project=camera-box", lines[0])
+        self.assertIn("cargo nextest run", lines[0])
+
+
 if __name__ == "__main__":
     unittest.main()
