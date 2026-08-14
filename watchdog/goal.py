@@ -866,6 +866,66 @@ GOAL_LANE_NUDGE_TEXT = (
     "SÉRIOVO — jeden merge/CI/push za celé kolo."
 )
 
+# #442 re-fix 2 (REOPEN č.2 + owner directives 2026-08-14) -- the COUNT-based
+# fill-the-cap widening. The empty-lane nudge above (0 workers) fires as before;
+# these two thresholds add the UNDER-SATURATED case (some workers, but fewer than
+# the fill floor, while a substantial backlog still waits). Owner (#456
+# "DOPLNENIE ROZHODNUTIA"): "kludne ovela viac subagentov moze paralelne
+# pracovat" -- so the floor is 5, not a small 3, and the nudge TEXT frames
+# saturation as WORK-DRIVEN (every independent workable ticket/review/release
+# step earns a lane; a CI-waiting worker never blocks further dispatch), not a
+# fixed target. GOAL_LANE_SATURATION_WORKERS is a pragmatic UPPER cap on WHEN the
+# nudge stops firing, never a "fill exactly this many" target.
+GOAL_LANE_SATURATION_WORKERS = 5      # >= this many live workers -> saturated, silent
+GOAL_LANE_UNDERSAT_BACKLOG_MIN = 10   # under-saturated nudge needs backlog > this
+
+# #442 re-fix 2 (owner directive 2026-08-14: "vsak ak na to mas watcher tak ten
+# si vie aj pamet na boxe overit") -- the fill-lanes nudge (which tells the
+# supervisor to dispatch MORE parallel workers) fires only when the box has real
+# memory headroom. Below this many MB of MemAvailable, another worktree worker
+# risks tipping a memory-tight box into the #448 pressure-reap zone (a reaped bg
+# shell / OOM-killed worker is worse than a briefly under-filled lane), so the
+# guard stays silent and journals the measured value. ~1.5 GB: comfortably above
+# a single worker's steady-state footprint plus headroom for its subprocesses,
+# and well clear of the pressure zone where #448's reaper starts culling. The
+# 0-worker EMPTY-lane nudge is UNAFFECTED -- a fully stalled box must always be
+# nudged regardless of memory.
+GOAL_LANE_MIN_MEM_AVAIL_MB = 1536
+
+# #442 re-fix 2 -- the UNDER-SATURATED (non-zero worker) nudge text. Distinct
+# from GOAL_LANE_NUDGE_TEXT (which says "0 dispatched workerov"): here 1-4 workers
+# ARE running, so the text names the real count and frames saturation as
+# work-driven, not a fixed number.
+GOAL_LANE_UNDERSAT_NUDGE_TEXT = (
+    "lane-check: beží len %d dispatched worker(ov), no čaká %d otvorených "
+    "tiketov (waiterov beží: %d). Lány nie sú plné podľa PRÁCE: každý nezávislý "
+    "workable tiket / review / release krok má dostať vlastnú PARALELNÚ lane, a "
+    "worker čakajúci na CI NEblokuje ďalší dispatch. Nikdy nenechaj 1-2 workerov, "
+    "kým sedí veľký backlog. Podľa FLEET doktríny skills/autopilot SKILL.md "
+    "dispatchni TERAZ ďalšie batchnuté tickety ako PARALELNÝCH "
+    "isolation:\"worktree\" autopilot-worker subagentov (run_in_background) — "
+    "nasýtenie je podľa PRÁCE, nie fixného počtu, až po ACCOUNT-WIDE hard strop "
+    "8 súbežných agentov (workeri + validatory + review dispatche SPOLU) — a "
+    "integruj výhradne SÉRIOVO, jeden merge/CI/push za celé kolo."
+)
+
+
+def _mem_available_mb():
+    """MemAvailable from /proc/meminfo in MEGABYTES, or None if it can't be
+    read/parsed (#442 re-fix 2). Fail-OPEN (None -> the caller does NOT block the
+    nudge): this guard's whole purpose is that a stalled box is too SILENT, and
+    every managed box is Linux with /proc/meminfo -- an unreadable meminfo is an
+    anomaly that must not re-silence the guard, so only the memory PROTECTION is
+    skipped, never the nudge itself."""
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        return None
+    return None
+
 
 def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               tmtime, loc, send_fn, dry_run, handled,
@@ -896,7 +956,23 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     marker = watchdog.transcript_last_marker(tpath)
     if marker == "❓":
         return logs, False
-    if watchdog._pane_has_bg_agent(captured) or watchdog.pane_waiting_on_user(captured):
+    # #442 re-fix 2 (REOPEN č.2): worker PRESENCE is now a COUNT decision made
+    # below (`live_workers`), so it can distinguish an UNDER-SATURATED box (1-4
+    # workers + big backlog -> still nudge to fill the cap) from a saturated one
+    # -- the whole point of the reopen. The old early-skip on
+    # `_pane_has_bg_agent(captured)` made that impossible: with ANY visible worker
+    # in the agent strip it returned True and skipped the entire path BEFORE
+    # `live_workers` was even counted, so the count widening alone would never fire
+    # on a live box (the exact reopen-2 root cause -- 2 visible workers -> strip
+    # shows `◯ ...` rows -> skip here, never reaching the count check). It is folded
+    # into the count via `_count_live_subagents` + a pane-strip corroboration floor
+    # below. `pane_waiting_on_user` STAYS -- it is a genuine delivery-safety gate (a
+    # blocking dialog occupies the input area, so there is no free prompt to deliver
+    # into); worker presence is not. The `_boundary_ok` idle-prompt gate below still
+    # refuses to type into a non-idle pane, and the 15-min supervisor-idle gate
+    # above already prevents nudging right after a dispatch, so folding worker
+    # presence into the count is safe.
+    if watchdog.pane_waiting_on_user(captured):
         return logs, False
     if watchdog._pane_compacting(captured):
         return logs, False
@@ -927,16 +1003,60 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                         % (draft and "draft" or kind, loc))
         return logs, False
     live_workers = watchdog._count_live_subagents(tpath, now, GOAL_LANE_LIVE_WINDOW_S)
-    if live_workers > 0:
-        logs.append("lane-occupancy %s workers=%d waiters=%d -> occupied, "
-                    "skip" % (loc, live_workers, waiters))
-        return logs, False
+    # Pane-strip corroboration (#442 re-fix 2): the strip is a boolean ">=1 bg
+    # agent visible" view; the transcript count is authoritative for HOW MANY.
+    # When the strip shows a worker but the transcript momentarily reads 0 (a
+    # just-dispatched worker whose subagents/*.jsonl mtime is not fresh yet), floor
+    # the count at 1 so a visible-but-uncounted worker never reads as a truly empty
+    # box -- pure count reconciliation of two signals the guard already reads, no
+    # transcript-content parse. This preserves the old `_pane_has_bg_agent`
+    # early-gate's false-0 protection for the empty-lane nudge exactly.
+    if live_workers == 0 and watchdog._pane_has_bg_agent(captured):
+        live_workers = 1
     backlog_n = watchdog._cached_backlog_count(cwd, backlog_fetch, state, now)
     if not isinstance(backlog_n, int) or backlog_n <= 0:
-        logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%r -> "
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%r -> "
                     "no measurable open backlog, skip"
-                    % (loc, waiters, backlog_n))
+                    % (loc, live_workers, waiters, backlog_n))
         return logs, False
+    # #442 re-fix 2 -- the fill-the-cap widening, on the two PURE COUNTS the guard
+    # already reads (live worker count + open backlog), no transcript-content
+    # heuristic. Two nudge-worthy states:
+    #   * EMPTY lanes (live_workers == 0) -- fires on ANY open backlog, exactly as
+    #     before this widening.
+    #   * UNDER-SATURATED lanes (0 < live_workers < GOAL_LANE_SATURATION_WORKERS)
+    #     with a SUBSTANTIAL backlog still waiting (> GOAL_LANE_UNDERSAT_BACKLOG_MIN)
+    #     AND genuine memory headroom -- 1-4 workers while dozens of bundle-safe
+    #     tickets sit unallocated is the reopen-2 incident itself; those tickets
+    #     should be filling the empty parallel worktree lanes up to the cap.
+    # At or above the fill floor = saturated = silent; under-saturated with only a
+    # small backlog left = not worth a keystroke = silent.
+    mem_mb = None
+    if live_workers >= GOAL_LANE_SATURATION_WORKERS:
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                    "saturated (>= %d workers), skip"
+                    % (loc, live_workers, waiters, backlog_n,
+                       GOAL_LANE_SATURATION_WORKERS))
+        return logs, False
+    if live_workers > 0:
+        if backlog_n <= GOAL_LANE_UNDERSAT_BACKLOG_MIN:
+            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                        "under-saturated but backlog <= %d, skip"
+                        % (loc, live_workers, waiters, backlog_n,
+                           GOAL_LANE_UNDERSAT_BACKLOG_MIN))
+            return logs, False
+        # The fill-lanes nudge dispatches MORE parallel workers -- only fire when
+        # the box has real memory headroom, else another worktree worker risks the
+        # #448 pressure-reap zone on a memory-tight box. Measured on the box the
+        # guard runs on (owner directive). The 0-worker empty-lane nudge is exempt
+        # (a fully stalled box must always be nudged).
+        mem_mb = _mem_available_mb()
+        if mem_mb is not None and mem_mb < GOAL_LANE_MIN_MEM_AVAIL_MB:
+            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                        "skip:low-mem MemAvailable=%dMB (< %dMB)"
+                        % (loc, live_workers, waiters, backlog_n, mem_mb,
+                           GOAL_LANE_MIN_MEM_AVAIL_MB))
+            return logs, True
     n = rec.get("ln", 0)
     aborts = rec.get("lna", 0)
     if n >= GOAL_LANE_MAX_NUDGES or aborts >= GOAL_LANE_MAX_STASH_ABORTS:
@@ -956,23 +1076,27 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             if send_fn is not None and not dry_run:
                 rec["lpinged"] = True
                 from notify import stream_redirect
+                # #442 re-fix 2: the give-up is now reachable in the
+                # UNDER-SATURATED state (1-4 workers), so the text names the
+                # real count instead of the old "nebeží ani jeden worker".
                 send_fn("⚠️ **%s** — backlog=%d otvorených, "
-                        "`/goal` armovaný, ale %d min nebeží ani "
-                        "jeden worker (waiterov: %d) a %s (%s). "
-                        "Pozri sa na reláciu, prosím."
+                        "`/goal` armovaný, ale %d min sa lány nezaplnili na "
+                        "fill cap (beží len %d workerov, waiterov: %d) a %s "
+                        "(%s). Pozri sa na reláciu, prosím."
                         % (watchdog.project_label(cwd), backlog_n,
-                           int(idle // 60), waiters, why, loc),
+                           int(idle // 60), live_workers, waiters, why, loc),
                         owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
                         dedup_key="lanestall:%s:%d" % (sid, int(tmtime or 0)),
                         dry_run=dry_run)
-            logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%d "
+            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
                         "idle=%dm -> %s"
-                        % (loc, waiters, backlog_n, idle // 60, gave))
+                        % (loc, live_workers, waiters, backlog_n, idle // 60, gave))
         return logs, True
     last = rec.get("llast")
     if last is not None and (now - last) < GOAL_LANE_INTERVAL_S:
-        logs.append("lane-occupancy %s workers=0 waiters=%d backlog=%d -> "
-                    "rate-limited, skip" % (loc, waiters, backlog_n))
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                    "rate-limited, skip"
+                    % (loc, live_workers, waiters, backlog_n))
         return logs, True
     # #442: the SAME shared check job 9's virgin-arm gate uses, but through
     # the lane path's OWN short window (never the 30-min default -- see
@@ -987,9 +1111,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     % (loc, reason))
         return logs, True
     if dry_run:
-        logs.append("READY (lane-occupancy) %s workers=0 waiters=%d "
-                    "backlog=%d idle=%dm" % (loc, waiters, backlog_n,
-                                             idle // 60))
+        logs.append("READY (lane-occupancy) %s workers=%d waiters=%d "
+                    "backlog=%d idle=%dm" % (loc, live_workers, waiters,
+                                             backlog_n, idle // 60))
         return logs, True
     fresh = watchdog.capture_pane(pid, run, lines=40)
     ok, kind, fresh_draft = _boundary_ok(fresh)
@@ -1008,7 +1132,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> draft changed "
                     "between captures -- human composing right now" % loc)
         return logs, True
-    text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
+    # #442 re-fix 2: EMPTY-lane vs UNDER-SATURATED text. The empty-lane text says
+    # "0 dispatched workerov"; the under-saturated text names the real count
+    # (mem_mb was already read above in the under-saturated branch).
+    if live_workers == 0:
+        text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
+    else:
+        text = GOAL_LANE_UNDERSAT_NUDGE_TEXT % (live_workers, backlog_n, waiters)
     if fresh_draft:
         # #442 -- deliver INTO the held draft via the stash protocol (the
         # primitive re-verifies idle-with-draft itself and undoes its own
@@ -1038,9 +1168,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     rec.pop("lna", None)
     rec["ln"] = n + 1
     rec["llast"] = now
-    logs.append("lane-occupancy nudge (%s) %s workers=0 waiters=%d backlog=%d "
-                "idle=%dm (%d/%d)" % (mode, loc, waiters, backlog_n,
-                                      idle // 60, n + 1, GOAL_LANE_MAX_NUDGES))
+    # #442 re-fix 2: log the real worker count and (for the under-saturated fill
+    # nudge) the measured MemAvailable, so an under-saturated firing is diagnosable.
+    mem_suffix = "" if mem_mb is None else " MemAvailable=%dMB" % mem_mb
+    logs.append("lane-occupancy nudge (%s) %s workers=%d%s waiters=%d backlog=%d "
+                "idle=%dm (%d/%d)" % (mode, loc, live_workers, mem_suffix,
+                                      waiters, backlog_n, idle // 60,
+                                      n + 1, GOAL_LANE_MAX_NUDGES))
     return logs, True
 
 

@@ -69,6 +69,16 @@ GOAL_ARMED_CAP = ("● Predošlá práca hotová.\n❯ \n"
 # nudge must deliver into it via deliver_with_stash, never "skip draft".
 GOAL_ARMED_DRAFT_CAP = ("● Hotovo.\n❯ rozpisany draft\n"
                         "  ctx ███░  caveman:lite  ◎ /goal active\n")
+# #442 re-fix 2 — an ARMED, idle pane whose agent strip shows LIVE background
+# workers (`◯ ...` rows), exactly like the reopen-2 live box (2 workers visible).
+# `_pane_has_bg_agent` returns True here, while the box stays at a free idle `❯`
+# prompt (armed, deliverable) — so the count-based fill-the-cap nudge must still
+# fire, proving the removal of the old `_pane_has_bg_agent` early-skip.
+GOAL_ARMED_STRIP_CAP = ("● Predošlá práca hotová.\n❯ \n"
+                        "  ctx ███░  caveman:lite  ◎ /goal active\n"
+                        "  ● main\n"
+                        "  ◯ autopilot-worker  Working on #500\n"
+                        "  ◯ autopilot-worker  Awaiting CI on ci-complete gate\n")
 
 
 class DeliverGoalFakeTmux:
