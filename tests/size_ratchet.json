@@ -1,12 +1,13 @@
 {
   "files": {
-    "airuleset.py": 12240,
+    "airuleset.py": 11397,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 785,
     "cli_quals.py": 757,
     "cli_quals_cmd.py": 517,
     "cli_vault.py": 663,
+    "cli_worktree_sweep.py": 913,
     "design_gate.py": 834,
     "filedrop/__init__.py": 256,
     "filedrop/server.py": 193,
@@ -133,7 +134,7 @@
     "tests/test_size_ratchet.py": 723,
     "tests/test_slash_surface_hygiene.py": 97,
     "tests/test_soniox_provisioning.py": 773,
-    "tests/test_stale_worktree_sweep.py": 1364,
+    "tests/test_stale_worktree_sweep.py": 1365,
     "tests/test_stash_delivery.py": 650,
     "tests/test_stash_unconditional.py": 609,
     "tests/test_statusbar.py": 2403,

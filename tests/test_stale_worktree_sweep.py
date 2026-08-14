@@ -45,6 +45,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset                                          # noqa: E402
+import cli_worktree_sweep                                 # noqa: E402  # #433 cluster L: sweep members moved here; intra-leaf patch seams target this module
 
 NOW = 1786176246.0          # fixed; never time.time() (repo convention)
 DAY = 86400.0
@@ -589,7 +590,7 @@ class TestSweepStaleWorktrees(unittest.TestCase):
 
     def test_discovery_error_is_logged_and_does_not_stamp_cadence(self):
         _mkrepo(self.root, "proj")
-        with m.patch.object(airuleset, "discover_stale_worktrees",
+        with m.patch.object(cli_worktree_sweep, "discover_stale_worktrees",
                             side_effect=RuntimeError("boom")):
             results = self._sweep(dry_run=False, force=False)
         self.assertEqual(len(results), 1)
@@ -610,7 +611,7 @@ class TestCmdSweepWorktreesWiring(unittest.TestCase):
 
     def test_forwards_dry_run_and_forces(self):
         ns = SimpleNamespace(dry_run=True)
-        with m.patch.object(airuleset, "sweep_stale_worktrees") as p:
+        with m.patch.object(cli_worktree_sweep, "sweep_stale_worktrees") as p:
             p.return_value = [{"path": "/x/wt", "branch": "worktree-agent-x", "repo": "/x",
                                "removed": True, "reason": "would remove (dry-run)"}]
             out = StringIO()
@@ -624,7 +625,7 @@ class TestCmdSweepWorktreesWiring(unittest.TestCase):
 
     def test_real_run_reports_removed_not_would_remove(self):
         ns = SimpleNamespace(dry_run=False)
-        with m.patch.object(airuleset, "sweep_stale_worktrees") as p:
+        with m.patch.object(cli_worktree_sweep, "sweep_stale_worktrees") as p:
             p.return_value = [{"path": "/x/wt", "branch": "worktree-agent-x", "repo": "/x",
                                "removed": True, "reason": "removed"}]
             out = StringIO()
@@ -655,7 +656,7 @@ class TestReviewMajor1_DryRunCliReporting(unittest.TestCase):
 
     def test_dry_run_cli_counts_and_labels_the_real_candidate_shape(self):
         ns = SimpleNamespace(dry_run=True)
-        with m.patch.object(airuleset, "sweep_stale_worktrees") as p:
+        with m.patch.object(cli_worktree_sweep, "sweep_stale_worktrees") as p:
             # This is sweep_stale_worktrees's OWN real dry-run output shape:
             # removed stays False (nothing was actually deleted).
             p.return_value = [{"path": "/x/wt", "branch": "worktree-agent-x",
