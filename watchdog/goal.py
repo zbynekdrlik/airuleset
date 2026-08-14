@@ -956,8 +956,23 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     marker = watchdog.transcript_last_marker(tpath)
     if marker == "❓":
         return logs, False
-    # RED baseline (#442 re-fix 2 not yet applied): early-skip on _pane_has_bg_agent.
-    if watchdog._pane_has_bg_agent(captured) or watchdog.pane_waiting_on_user(captured):
+    # #442 re-fix 2 (REOPEN č.2): worker PRESENCE is now a COUNT decision made
+    # below (`live_workers`), so it can distinguish an UNDER-SATURATED box (1-4
+    # workers + big backlog -> still nudge to fill the cap) from a saturated one
+    # -- the whole point of the reopen. The old early-skip on
+    # `_pane_has_bg_agent(captured)` made that impossible: with ANY visible worker
+    # in the agent strip it returned True and skipped the entire path BEFORE
+    # `live_workers` was even counted, so the count widening alone would never fire
+    # on a live box (the exact reopen-2 root cause -- 2 visible workers -> strip
+    # shows `◯ ...` rows -> skip here, never reaching the count check). It is folded
+    # into the count via `_count_live_subagents` + a pane-strip corroboration floor
+    # below. `pane_waiting_on_user` STAYS -- it is a genuine delivery-safety gate (a
+    # blocking dialog occupies the input area, so there is no free prompt to deliver
+    # into); worker presence is not. The `_boundary_ok` idle-prompt gate below still
+    # refuses to type into a non-idle pane, and the 15-min supervisor-idle gate
+    # above already prevents nudging right after a dispatch, so folding worker
+    # presence into the count is safe.
+    if watchdog.pane_waiting_on_user(captured):
         return logs, False
     if watchdog._pane_compacting(captured):
         return logs, False
@@ -988,17 +1003,60 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                         % (draft and "draft" or kind, loc))
         return logs, False
     live_workers = watchdog._count_live_subagents(tpath, now, GOAL_LANE_LIVE_WINDOW_S)
-    if live_workers > 0:
-        logs.append("lane-occupancy %s workers=%d waiters=%d -> occupied, "
-                    "skip" % (loc, live_workers, waiters))
-        return logs, False
+    # Pane-strip corroboration (#442 re-fix 2): the strip is a boolean ">=1 bg
+    # agent visible" view; the transcript count is authoritative for HOW MANY.
+    # When the strip shows a worker but the transcript momentarily reads 0 (a
+    # just-dispatched worker whose subagents/*.jsonl mtime is not fresh yet), floor
+    # the count at 1 so a visible-but-uncounted worker never reads as a truly empty
+    # box -- pure count reconciliation of two signals the guard already reads, no
+    # transcript-content parse. This preserves the old `_pane_has_bg_agent`
+    # early-gate's false-0 protection for the empty-lane nudge exactly.
+    if live_workers == 0 and watchdog._pane_has_bg_agent(captured):
+        live_workers = 1
     backlog_n = watchdog._cached_backlog_count(cwd, backlog_fetch, state, now)
     if not isinstance(backlog_n, int) or backlog_n <= 0:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%r -> "
                     "no measurable open backlog, skip"
                     % (loc, live_workers, waiters, backlog_n))
         return logs, False
+    # #442 re-fix 2 -- the fill-the-cap widening, on the two PURE COUNTS the guard
+    # already reads (live worker count + open backlog), no transcript-content
+    # heuristic. Two nudge-worthy states:
+    #   * EMPTY lanes (live_workers == 0) -- fires on ANY open backlog, exactly as
+    #     before this widening.
+    #   * UNDER-SATURATED lanes (0 < live_workers < GOAL_LANE_SATURATION_WORKERS)
+    #     with a SUBSTANTIAL backlog still waiting (> GOAL_LANE_UNDERSAT_BACKLOG_MIN)
+    #     AND genuine memory headroom -- 1-4 workers while dozens of bundle-safe
+    #     tickets sit unallocated is the reopen-2 incident itself; those tickets
+    #     should be filling the empty parallel worktree lanes up to the cap.
+    # At or above the fill floor = saturated = silent; under-saturated with only a
+    # small backlog left = not worth a keystroke = silent.
     mem_mb = None
+    if live_workers >= GOAL_LANE_SATURATION_WORKERS:
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                    "saturated (>= %d workers), skip"
+                    % (loc, live_workers, waiters, backlog_n,
+                       GOAL_LANE_SATURATION_WORKERS))
+        return logs, False
+    if live_workers > 0:
+        if backlog_n <= GOAL_LANE_UNDERSAT_BACKLOG_MIN:
+            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                        "under-saturated but backlog <= %d, skip"
+                        % (loc, live_workers, waiters, backlog_n,
+                           GOAL_LANE_UNDERSAT_BACKLOG_MIN))
+            return logs, False
+        # The fill-lanes nudge dispatches MORE parallel workers -- only fire when
+        # the box has real memory headroom, else another worktree worker risks the
+        # #448 pressure-reap zone on a memory-tight box. Measured on the box the
+        # guard runs on (owner directive). The 0-worker empty-lane nudge is exempt
+        # (a fully stalled box must always be nudged).
+        mem_mb = _mem_available_mb()
+        if mem_mb is not None and mem_mb < GOAL_LANE_MIN_MEM_AVAIL_MB:
+            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                        "skip:low-mem MemAvailable=%dMB (< %dMB)"
+                        % (loc, live_workers, waiters, backlog_n, mem_mb,
+                           GOAL_LANE_MIN_MEM_AVAIL_MB))
+            return logs, True
     n = rec.get("ln", 0)
     aborts = rec.get("lna", 0)
     if n >= GOAL_LANE_MAX_NUDGES or aborts >= GOAL_LANE_MAX_STASH_ABORTS:
