@@ -501,6 +501,22 @@ class TheMasterLoopTemplateMustFitClaudeCodesGoalCapToo(TestCase):
         """Guards the assertion above against silently measuring nothing."""
         self.assertEqual(len(master_goal_lines()), 1)
 
+    # #456: the LANES-FULL clause once pushed this template to 20 chars from
+    # the 4000 hard cap with NO guard (the #384-review adversarial finding).
+    # A dense single line can't spare the 150 the 3 worker templates keep, so
+    # it gets its own floor -- 120 is still ~7x the #384 incident precursor
+    # (11-18 chars). Crossing the hard cap disables goal-arming fleet-wide (#169).
+    MIN_MASTER_HEADROOM = 120
+
+    def test_the_master_template_keeps_healthy_headroom(self):
+        line = master_goal_lines()[0]
+        headroom = self.CAP - len(line)
+        self.assertGreaterEqual(
+            headroom, self.MIN_MASTER_HEADROOM,
+            "master /goal template headroom %d < %d -- trim it; a template that "
+            "creeps to the 4000 hard cap disables goal-arming fleet-wide (#169)"
+            % (headroom, self.MIN_MASTER_HEADROOM))
+
 
 class TheTemplatesCarryNoDeadQuestionTimeoutPromise(TestCase):
     """#430 — the #161 `question-timeout:` (30m) park nudge was DROPPED.
@@ -595,10 +611,32 @@ class TestContinuousRefillMandate(TestCase):
             body = read(rel).lower()
             self.assertNotIn("keep the lanes full", body,
                              "%s still carries the superseded #442 keep-lanes-full mandate" % rel)
-            self.assertNotIn("3-5 parallel", body,
-                             "%s still carries the superseded fixed 3-5 cap" % rel)
-            self.assertNotIn("3–5 parallel", body,
-                             "%s still carries the superseded fixed 3–5 cap" % rel)
+            # A bold form (**3-5**) has `*` between the digits and "parallel",
+            # so the old bare `assertNotIn("3-5 parallel")` missed it. Match any
+            # 3<dash>5 (ASCII hyphen OR en-dash) anywhere: the skills contain no
+            # legitimate 3-5 range, so a hit is always the resurrected cap.
+            self.assertIsNone(re.search(r"3[-–]5", body),
+                              "%s still names a fixed 3-5 cap (any spelling)" % rel)
+            self.assertIsNone(re.search(r"cap (a|the) round", body),
+                              "%s still mandates capping a round at a fixed size" % rel)
+            # The positive half: the superseding no-fixed-cap doctrine must be
+            # PRESENT, so a revert that deletes it (not just re-adds 3-5) fails.
+            self.assertIn("fixed cap", body,
+                          "%s dropped the #456 'no fixed cap' doctrine" % rel)
+
+    def test_the_integration_mutex_bullet_locks_dispatch_decoupling(self):
+        # M2: the decay-causing revert re-widens the #8 lock back to round
+        # scope. That revert passes every OTHER test here (it can leave
+        # "continuous"/"refill"/"integration mutex" words intact while making
+        # the lock gate dispatch again). These two phrases are what it CANNOT
+        # keep: the exact narrowed-mutex bullet name, and the flat statement
+        # that dispatch is never gated. Scoped to SKILL (autopilot), where the
+        # narrowed #8-lock bullet lives.
+        body = read(SKILL).lower()
+        self.assertIn("integration mutex (hard)", body,
+                      "SKILL dropped the #456 narrowed integration-mutex bullet")
+        self.assertIn("dispatch is never gated", body,
+                      "SKILL dropped the #456 'DISPATCH is NEVER gated' guarantee")
 
     def test_the_master_template_carries_the_lanes_full_reminder(self):
         # master_goal_lines()[0] IndexErrors if the template ever vanishes --
@@ -607,11 +645,18 @@ class TestContinuousRefillMandate(TestCase):
                       "master /goal template missing the LANES-FULL rule")
 
     def test_the_master_template_reminder_is_continuous_not_a_fixed_cap(self):
-        line = master_goal_lines()[0].lower()
-        self.assertIn("continuous", line,
-                      "master template LANES-FULL reminder must mandate continuous saturation")
-        self.assertNotIn("3-5", line,
-                         "master template LANES-FULL reminder must not name a fixed 3-5 cap")
+        # N6: scope to the LANES-FULL clause itself, not the whole template
+        # line -- LANE 3 CORE also says "continuous", so a whole-line check
+        # would pass even if the LANES-FULL reminder silently lost the word.
+        full = master_goal_lines()[0]
+        start = full.index("LANES-FULL:")
+        after = full[start + len("LANES-FULL:"):]
+        m = re.search(r"LANE \d", after)
+        clause = (after[:m.start()] if m else after).lower()
+        self.assertIn("continuous", clause,
+                      "master LANES-FULL clause must mandate continuous saturation")
+        self.assertIsNone(re.search(r"3[-–]5", clause),
+                          "master LANES-FULL clause must not name a fixed 3-5 cap")
 
 
 if __name__ == "__main__":

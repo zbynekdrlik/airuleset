@@ -15,8 +15,8 @@ disable-model-invocation: true
 > handed to an **in-session background `autopilot-worker` subagent** (`run_in_background: true`)
 > — fresh context (your main session stays thin AND interactive — you can keep messaging it),
 > visible in the agent strip, and **able to ask you the genuinely-important questions directly**.
-> After each round completes (merged + deployed, or a question resolved), the loop picks the
-> **next** — including right after a merge. It **NEVER** pre-filters "needs input" issues and
+> As each integration lands (merged + deployed) or a question resolves — and continuously as lanes
+> free up — the loop refills the **next** lanes, including right after a merge. It **NEVER** pre-filters "needs input" issues and
 > **NEVER** refuses to start. The goal is to finish everything; your only job is to answer the
 > important per-issue questions when a worker raises one.
 
@@ -338,13 +338,13 @@ SATURATE — dispatch a lane for every workable bundle-safe unit — bounded ONL
 signals in the next paragraph, never by a chosen number. A worker should still prefer running a
 SCOPED test subset first before the full suite where the project supports it, same discipline as
 any single worker. When assembling a
-candidate batch for a round slot (repeat the per-slot procedure below once per slot, up to the
-cap), SKIP — don't add to this round — any issue whose bundling-relevant files heavily overlap a
-batch ALREADY claimed by an earlier slot in the SAME round (today's live example: #311/#316/#317
+candidate batch for a NEW lane (repeat the per-lane procedure below for each lane you dispatch),
+SKIP — don't dispatch it — any issue whose bundling-relevant files heavily overlap a
+batch ALREADY claimed by a LIVE lane (today's live example: #311/#316/#317
 all edited `agents/autopilot-worker.md` and had to be sequenced, not parallelized). Two workers
 independently editing the same file in two separate worktrees is a guaranteed merge conflict at
-integration — worse than simply doing it next round. An overlapping issue is not lost — it seeds a
-LATER round, exactly like any issue that fails the bundling gate today.
+integration — worse than simply waiting until the overlapping lane has integrated. An overlapping
+issue is not lost — it seeds a LATER lane, exactly like any issue that fails the bundling gate today.
 
 **No fixed agent cap — saturate; back off ONLY on a real resource signal + stagger (#456; the
 #332 numbers below are measured CONTEXT, not a cap).** There is NO fixed number bounding the
@@ -581,10 +581,16 @@ gap in either.
      do the merge→gates→push; exit 1 = a DIFFERENT live session is integrating this repo right now
      — do NOT integrate this turn, keep DISPATCHING new lanes and re-check next turn) — and
      **release it the moment that cycle's push has landed** (`autopilot-lock release --repo <repo
-     path>`), so another session's integration can proceed. This is what prevents two sessions
+     path>`), so another session's integration can proceed. **The lock CLI's own `exit 1` stderr
+     still prints legacy dispatch-lock wording ("Serial-per-repo dispatch — … do NOT dispatch a
+     second worker") from before this narrowing — IGNORE that phrasing and follow THIS bullet: exit
+     1 means do not INTEGRATE this repo right now, NOT stop dispatching. (Rewording that one CLI
+     message is a tracked residual — see the internals note; `cli_autopilot_lock.py` is outside this
+     ticket's named surface.)** This mutex is what prevents two sessions
      running a merge/push on the SAME repo at the SAME instant (the proven camera-box #495 and
-     #499/#500-vs-#505 collision). The serial-fallback batch, where the worker integrates its own
-     PR, still acquires the mutex around that worker's merge just the same. A crashed holder never
+     #499/#500-vs-#505 collision). In the serial fallback the SUPERVISOR still acquires the mutex
+     before dispatching the single worker and releases it once that worker's own PR merge has landed
+     — one worker at a time, so the broader lock span carries no decay. A crashed holder never
      wedges the mutex — a dead holder's lock is auto-stolen by the NEXT `acquire`, logged to
      `audits/autopilot-lock-steals.log`, as a backstop.
 3. The worker re-validates each batched issue is still real (`verify-issue-still-valid.md` — defense
@@ -686,9 +692,9 @@ gap in either.
    continuous dispatch keeps refilling lanes meanwhile). For each returned worker being integrated,
    independently verify its evidence block from primary sources (never trust the claim). Read its
    `dropped:` and `obsolete_closed:` lines and compute that worker's **SURVIVING set** = its batch
-   members MINUS dropped MINUS obsolete-closed — a dropped / obsolete member is **NOT a verify
-   failure**. This integration cycle's surviving set is the union across the workers integrated in
-   it (a straggler still running joins the NEXT cycle).
+   members MINUS dropped MINUS obsolete-closed —
+   a dropped / obsolete member is **NOT a verify failure**. This integration cycle's surviving set
+   is the union across the workers integrated in it (a straggler still running joins the NEXT cycle).
 
    > **Serial fallback (no `isolation:`): unchanged, per-batch, exactly as before.** The worker
    > already pushed, opened, and merged its OWN PR — verify it directly:
