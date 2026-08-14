@@ -209,6 +209,11 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
                "post-deploy-verification", "regression-test-first", "ci-push-discipline",
                "comprehensive-logging", "verify-launched-work-liveness", "pr-merge-policy",
                "deliver-files-as-urls", "notification-mechanics", "cloudflare-api-tokens",
+               # #420 (2026-08-14) — adopt claude-code-log (external, maintained)
+               # for transcript browsing/HTML export; hidden on-demand skill,
+               # deploys everywhere. Documents the #410 gzip interplay (reads
+               # only plain .jsonl; claude-history is the gzip-aware fallback).
+               "claude-code-log",
                # #95 item 9 (2026-08-09) — the STREDNÁ CESTA split of
                # user-questions-slovak.md: long template/examples moved
                # VERBATIM to this hidden, on-demand skill, auto-loaded via
