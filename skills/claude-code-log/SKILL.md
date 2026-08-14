@@ -6,11 +6,11 @@ description: Browse, export, or archive Claude Code session transcripts as HTML/
 
 ### Browsing / Exporting / Archiving Transcripts — `claude-code-log` (adopt, don't build — #420)
 
-**To read, browse, export, or archive Claude Code session transcripts as HTML / Markdown / a TUI, use the external `claude-code-log` tool — never hand-roll an HTML exporter.** This is airuleset's ADOPTED transcript-browsing path (audit #416 verdict "ADOPT, don't build"; adopted in #420). It is a real, actively-maintained Python CLI (github.com/daaain/claude-code-log, PyPI, MIT, ~1.2k★, v1.5.0 2026-07) that turns the raw JSONL under `~/.claude/projects/` into clean, chronological, navigable pages.
+**To read, browse, export, or archive Claude Code session transcripts as HTML / Markdown / a TUI, use the external `claude-code-log` tool — never hand-roll an HTML exporter.** This is airuleset's ADOPTED transcript-browsing path (audit #416 verdict "ADOPT, don't build"; adopted in #420). It is a real, actively-maintained Python CLI (github.com/daaain/claude-code-log, PyPI, MIT) that turns the raw JSONL under `~/.claude/projects/` into clean, chronological, navigable pages.
 
 #### Run it (no install needed)
 
-- **One-shot, always latest:** `uvx claude-code-log@latest` — reads `~/.claude/projects/` and writes HTML.
+- **One-shot, always latest:** `uvx claude-code-log@latest` — reads `~/.claude/projects/` and writes HTML. (Pin a specific release — `uvx claude-code-log==<version>` — if you need a reproducible run rather than the newest.)
 - **Interactive TUI:** `uvx claude-code-log@latest --tui` — browse sessions in the terminal (textual-based).
 - **Persistent install:** `pip install claude-code-log` (Python ≥3.10), then `claude-code-log`.
 - **One project only:** point it at a single `~/.claude/projects/<encoded-cwd>/` directory.
@@ -18,7 +18,7 @@ description: Browse, export, or archive Claude Code session transcripts as HTML/
 
 #### #410 gzip-at-rest interplay — the load-bearing caveat
 
-**`claude-code-log` reads ONLY plain `.jsonl` files — it has NO gzip support.** Its discovery globs `*.jsonl` and opens with a plain `open()`, so a `.jsonl.gz` file is **invisible to it: silently skipped, never read — it does NOT crash.** This is the same accepted horizon as Claude Code's native `/resume` (which also lists only `*.jsonl`).
+**`claude-code-log` reads ONLY plain `.jsonl` files — it has NO gzip support.** It discovers and reads only plain `*.jsonl` (no gzip decoding), so a `.jsonl.gz` file is **invisible to it: silently skipped, never read — it does NOT crash.** This is the same accepted horizon as Claude Code's native `/resume` (which also lists only `*.jsonl`).
 
 Why this is a bounded, non-blocking caveat (not a reason to avoid the tool):
 
