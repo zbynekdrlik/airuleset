@@ -281,9 +281,12 @@ clean_q() {
 # same cap the send path uses, and dry-run logs nothing (mirrors the send
 # path's own dry-run-logs-nothing contract).
 _pending_log() {
-    # $1 = status, $2 = reason
+    # $1 = status, $2 = reason. set -u safe: both default to "" so a future
+    # caller passing <2 args logs a blank field instead of aborting the hook.
     [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ] && return 0
-    local log stamp size
+    local log stamp size status reason
+    status="${1:-}"
+    reason="${2:-}"
     log="$HOME/.claude/notify-delivery.log"
     mkdir -p "$(dirname "$log")" 2>/dev/null || true
     size=$(stat -c %s "$log" 2>/dev/null || echo 0)
@@ -291,7 +294,7 @@ _pending_log() {
     [ "$size" -gt 512000 ] && mv -f "$log" "$log.1" 2>/dev/null || true
     stamp=$(date -Iseconds 2>/dev/null || echo '?')
     { printf '%s %s kind=pending key=%s reason=%s\n' \
-        "$stamp" "$1" "$SID" "$2" >>"$log"; } 2>/dev/null || true
+        "$stamp" "$status" "$SID" "$reason" >>"$log"; } 2>/dev/null || true
     return 0
 }
 
