@@ -5037,6 +5037,32 @@ def cmd_notify(args):
                         resolve_project_channel, resolve_questions_channel,
                         send)
 
+    # #476: the read-only query/print flags (--repo-name, --channel-id, …) are
+    # each checked and RETURN before the send actions (--run-card etc.) below, so
+    # a caller who typos `--repo-name` for `--repo` on a `--run-card` invocation
+    # short-circuits into the print path and exits 0 with NO card sent — a silent
+    # no-send that looks like success (codex-bridge, 2026-08-14: three cards
+    # "sent", zero delivered — the misused-flag path bypasses #134's exit-nonzero
+    # guarantee because the send path is never entered). A send action combined
+    # with a read-only query flag is always a mistake; refuse it LOUD (non-zero)
+    # rather than let a print branch silently short-circuit it.
+    if getattr(args, "run_card", False):
+        _query_only = [name for name, on in (
+            ("--repo-name", getattr(args, "repo_name", False)),
+            ("--channel-id", getattr(args, "channel_id", False)),
+            ("--owner", getattr(args, "owner", False)),
+            ("--mirror-owners", getattr(args, "mirror_owners", False)),
+            ("--project-label", getattr(args, "project_label", False)),
+            ("--newest-card", getattr(args, "newest_card", False)),
+            ("--mention-prefix", getattr(args, "mention_prefix", False)),
+        ) if on]
+        if _query_only:
+            print("notify --run-card: %s is a read-only query flag, not a send "
+                  "target — did you mean --repo? Refusing rather than printing "
+                  "and exiting 0 with no card sent (#476)."
+                  % ", ".join(_query_only), file=sys.stderr)
+            sys.exit(1)
+
     if getattr(args, "record_question", False):
         # Record a ❓ ping's Discord message id → the session that asked, so the
         # watchdog can route the user's Discord REPLY back into that session.

@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 9746,
+    "airuleset.py": 9772,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 793,
@@ -125,7 +125,7 @@
     "tests/test_review_dispatch_authority.py": 119,
     "tests/test_rules_ab_experiment.py": 830,
     "tests/test_ruleset_conversion_wave2.py": 278,
-    "tests/test_run_card_content_validation.py": 334,
+    "tests/test_run_card_content_validation.py": 370,
     "tests/test_run_card_enforcement.py": 2125,
     "tests/test_runtime_deps.py": 210,
     "tests/test_schedule_wakeup_loop_only.py": 66,
@@ -179,7 +179,7 @@
   "functions": {
     "airuleset.py::_notify_run_card": 266,
     "airuleset.py::cmd_install": 409,
-    "airuleset.py::cmd_notify": 292,
+    "airuleset.py::cmd_notify": 318,
     "airuleset.py::cmd_push": 356,
     "airuleset.py::main": 511,
     "cli_vault.py::cmd_secret": 300,
