@@ -154,21 +154,21 @@
     "tests/test_vault_purge_job.py": 237,
     "tests/test_vault_read_guard.py": 1268,
     "tests/test_vault_templates.py": 322,
-    "tests/test_watchdog.py": 3591,
+    "tests/test_watchdog.py": 3601,
     "tests/test_watchdog_state_keys.py": 113,
     "tests/test_worker_attestation.py": 97,
     "tests/test_worker_evidence_reachability.py": 327,
     "tests/test_worker_review_dispatch_shape.py": 235,
-    "tests/test_workflow_cost_discipline.py": 66,
+    "tests/test_workflow_cost_discipline.py": 68,
     "tests/test_working_liveness.py": 332,
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 9960,
+    "watchdog/__init__.py": 9962,
     "watchdog/burn_jobs.py": 306,
     "watchdog/cards.py": 481,
     "watchdog/compact.py": 1037,
     "watchdog/goal.py": 1103,
-    "watchdog/repo_health.py": 713,
+    "watchdog/repo_health.py": 758,
     "watchdog/usage.py": 380
   },
   "functions": {
@@ -183,9 +183,5 @@
     "watchdog/__init__.py::prompt_wedge_check": 235,
     "watchdog/__init__.py::run_once": 1996,
     "watchdog/cards.py::card_reconcile": 260
-  },
-  "tests/test_watchdog.py": 3601,
-  "tests/test_workflow_cost_discipline.py": 68,
-  "watchdog/__init__.py": 9962,
-  "watchdog/repo_health.py": 758
+  }
 }
