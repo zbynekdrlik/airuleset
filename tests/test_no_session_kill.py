@@ -174,22 +174,26 @@ class TestNoSessionEndingKeystroke(unittest.TestCase):
         expression fails. A plain substring assert would match its own
         explanation; a docstring-stripped AST walk cannot."""
         import ast
-        src = (REPO / "watchdog" / "__init__.py").read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        docstring_nodes = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.FunctionDef,
-                                 ast.AsyncFunctionDef, ast.ClassDef)):
-                body = getattr(node, "body", None)
-                if (body and isinstance(body[0], ast.Expr)
-                        and isinstance(body[0].value, ast.Constant)
-                        and isinstance(body[0].value.value, str)):
-                    docstring_nodes.add(id(body[0].value))
-        offenders = [
-            (n.lineno, n.value) for n in ast.walk(tree)
-            if isinstance(n, ast.Constant) and isinstance(n.value, str)
-            and id(n) not in docstring_nodes
-            and n.value.strip() in _SESSION_ENDING_PAYLOADS]
+        offenders = []
+        # #433 extracted leaf modules out of __init__.py — the guard must
+        # cover EVERY watchdog/*.py, or a payload could hide in a leaf
+        # (the cluster-G review's 🔵 finding: this scan lagged the split).
+        for py in sorted((REPO / "watchdog").glob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+            docstring_nodes = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Module, ast.FunctionDef,
+                                     ast.AsyncFunctionDef, ast.ClassDef)):
+                    body = getattr(node, "body", None)
+                    if (body and isinstance(body[0], ast.Expr)
+                            and isinstance(body[0].value, ast.Constant)
+                            and isinstance(body[0].value.value, str)):
+                        docstring_nodes.add(id(body[0].value))
+            offenders.extend(
+                (py.name, n.lineno, n.value) for n in ast.walk(tree)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and id(n) not in docstring_nodes
+                and n.value.strip() in _SESSION_ENDING_PAYLOADS)
         self.assertEqual(
             offenders, [],
             "a session-ending payload survives as executable code in "
