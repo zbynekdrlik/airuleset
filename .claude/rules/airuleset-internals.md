@@ -1503,3 +1503,45 @@ per-project classifier for any future opt-in decision.
 
 - **A "was this signal just rejected, so suppress it" settle-check built on the OVER-BROAD glob `/tmp/airuleset-*-block-<sid>` scans EVERY one of the 8 stop-gate markers, so an ORTHOGONAL gate firing silently swallows a legitimate signal the settle-check has nothing to do with — scope the settle to the ONE gate whose block is genuinely about the thing being suppressed, and LOG every suppression so silence is diagnosable.** #467 (the reported "pochovaná otázka": a `❓ ASKED` + `⏳ WORKING` ask-and-continue turn NEVER pinged): `notify-discord-pending.sh`'s `send_q` used that broad glob to decide "the last question was rejected and is being rewritten, so drop this ping" (the camera-box 2026-07-05 triple-ping fix). But a `⏳ WORKING` ask-and-continue turn routinely trips `stop-check-working-liveness` (empty `background_tasks` once a dispatched worker has returned — normal in a busy batch), leaving a fresh `airuleset-working-liveness-block-<sid>` marker that `send_q` misread as "the question was rejected" and dropped the ping — with ZERO `notify-delivery.log` line, so the loss was undiagnosable (the incident's log had nothing at all). Fix, both edits in the ONE hook: (1) narrow the settle to `airuleset-question-quality-block-<sid>` ONLY — the one gate whose block is genuinely about the question — with the SAME `[ -f ] && [ ! -L ] && [ -O ]` + future-clamp planted-marker guards this file already documents for `/tmp` state (a foreign uid can pre-create any `<sid>`-named path, sids being world-readable out of `/tmp`); (2) add `_pending_log` (`set -u` safe: `status="${1:-}" reason="${2:-}"`) so every suppression/skip writes one durable `notify-delivery.log` line (`empty-content`, `verbatim-repeat-dedup`, `question-quality-rewrite`). The terminal `❓ NEEDS YOU` path + LASTQ dedup (verbatim repeat silent, reword edits) are untouched — both only ever get MORE reliable. General class: any "suppress X because Y was just rejected" check whose Y-detector scans a shared namespace of unrelated markers will eventually suppress a legitimate X the moment an orthogonal mechanism writes into that namespace — narrow the detector to Y's own exclusive artifact, and never let a suppression be silent.
 - **Extracting a module and removing a now-DEAD top-level stdlib import breaks any test that patched `<oldmod>.<stdlib>.<attr>` in STRING form — a seam class the standard `patch.object(mod, "MOVEDNAME")` grep structurally misses (#433 cluster L2, 2026-08-14).** After moving `_compress_transcript_file` into `cli_scratch_sweep.py` and removing `airuleset.py`'s now-dead top-level `import gzip` (ruff F401 correctly flags it — ruff can't see a runtime `patch(...)` STRING reference), `test_transcript_compress.py:375`'s `m.patch("airuleset.gzip.open")` broke with `AttributeError: module 'airuleset' has no attribute 'gzip'`: the string-form patch relied on `gzip` being a module ATTRIBUTE of `airuleset`, which the removed import had provided. The moved function resolves `gzip.open` in its NEW module's namespace, so the fix is `patch("cli_scratch_sweep.gzip.open")` (the module where the function now lives + top-level-imports gzip). Removing the dead import is still correct (never keep a genuinely-unused import just so a test can patch its attribute — repoint the test instead). The seam-sweep that certifies a leaf extraction complete must grep for BOTH shapes: (1) `patch.object(<oldmod>, "MOVEDNAME")` / `patch("<oldmod>.MOVEDNAME")` for every moved function/const (the #1482 K-lesson class), AND (2) `patch("<oldmod>.<stdlib>.<attr>")` for EVERY stdlib module a moved function uses — a targeted `grep -rnE 'patch\(["'"'"']<oldmod>\.(gzip|zlib|shutil|json|os|re|sys|tempfile|subprocess)\.' tests/` plus a bare `grep -rnE '<oldmod>\.(gzip|zlib)' tests/` finds the string-form stdlib-attr patches the moved-NAME sweep cannot. The original miss happened because the seam-search regex only matched `patch` calls whose argument was a QUOTED moved-name; a `patch("airuleset.gzip.open")` (stdlib attribute, not one of the 51 moved names) was invisible to it. Do this string-form sweep BEFORE claiming the seams are all repointed — the touched-file suite green ≠ the whole suite green, and this exact miss shipped a RED full suite past a green targeted run once.
+
+## Footer/quals CLI + goal-template + test-harness gotchas (#468, 2026-08-14)
+
+Learned adding the `U N` user-waiting split (footer `I N` + the `/goal` stop-proof
+now exclude `needs-answer`/`needs-decision` tickets, which surface as `· U N`):
+
+- **Adding a NEW flag to `core-quals`/`slice-quals` (read via `getattr(args,
+  "<flag>", False)`) silently breaks EVERY existing Mock-driven test** —
+  `unittest.mock.Mock(count=True, list=False, extra=None)` AUTO-VIVIFIES the new
+  `.<flag>` attribute as a TRUTHY Mock, so `getattr` returns truthy and the command
+  takes the new branch instead of `--count`/`--list`. Symptom: ~30 unrelated
+  `test_authority_profiles.py` failures + 1 in `test_gk_request.py`, all "wrong
+  count / empty output". Fix: pass `<flag>=False` EXPLICITLY in every quals-driving
+  Mock/`dict(count=...)` constructor — the SAME pattern `count`/`list`/`extra`
+  already follow. Grep `Mock(count=|dict(count=|cmd_(core|slice)_quals(` before
+  assuming your production change is wrong.
+- **The client-side single-definition pattern (#367):** to split/partition the
+  ticket set, partition the ONE already-fetched rows dict (`_union_open_issues`/
+  `_slice_mine_and_handed` already fetch `labels`) client-side (`_partition_user_
+  waiting`) — NEVER a second gh query. A second query is exactly the "parallel
+  derivation" that lets the footer and the `/goal` stop-proof drift apart. Keep
+  empty-result refuse gates (`_refuse_unless_empty_is_trustworthy`) on the FULL
+  fetched set (`not seen`/`not rows`), not the partitioned subset — a non-empty set
+  that is ENTIRELY parked is a real, trusted workable-0.
+- **The three `/goal STOP CONDITIONS` templates in `skills/autopilot/SKILL.md`
+  have a hard 4000-char cap AND a ≥150-char min-headroom lock test**
+  (`test_every_template_keeps_healthy_headroom`). The fork-no-merge one is the
+  tightest — measure `len()` of each `^/goal STOP CONDITIONS.*$` line before AND
+  after every edit. The reduced templates share an IDENTICAL `gk N` parked clause
+  (edit with `replace_all`); the full one has no `tickets-status` paste, so surface
+  any new "parked" bucket in-transcript there explicitly (e.g. `core-quals
+  --waiting`), not just via the live footer.
+- **`test_goal_backlog_proof.py::test_the_backlog_scope_bullet_no_longer_
+  contradicts_the_proof`** reads a 1200-char window from `**Backlog scope` and
+  asserts `core-quals --list` sits inside it — do NOT grow text BEFORE that mention
+  (it was at distance ~1041/1200). Append new bullet prose at the END of the
+  bullet, and prefer a net-neutral/shrinking edit to the first sentence.
+- **`size_ratchet.json` is hand-bumped for deliberate growth:** load, set the exact
+  new line count per changed file (+ `functions/<file>::<fn>` for a grown
+  function), `json.dump(..., indent=2, ensure_ascii=False, sort_keys=True)` +
+  trailing `\n` reproduces the file's format for a clean ~1-line-per-file diff.
+  `.claude/rules/*.md` are NOT ratcheted; test files + `.py` source ARE.

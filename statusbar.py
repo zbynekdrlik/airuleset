@@ -148,6 +148,25 @@ def _stream_split_sfx(cache):
     return ""
 
 
+def _user_waiting_sfx(cache):
+    """The '· U N' suffix — tickets parked on the USER's answer
+    (`needs-answer`/`needs-decision`), split OUT of the workable `I N` so
+    `I` = only what THIS box must action and `U` = what is on the user (#468,
+    the 2026-08-14 directive "v I by nemali byť tie čo sú Q — nech je jasné kto za
+    čo zodpovedá"). Orange-adjacent (208), distinct from the grey gk/skip
+    exclusion badges, hidden at 0 (badge semantics like gk/skip). Rendered on
+    BOTH scopes: a full box's core tickets and a sub-dev's own slice can each be
+    parked on the user, so this reads `user_waiting` regardless of scope.
+
+    Schema-compatible: a stale/legacy cache written before #468 carries no
+    `user_waiting` key at all, so `.get(...)` is None → hidden (never a crash,
+    never a wrong `U 0`)."""
+    u = cache.get("user_waiting")
+    if isinstance(u, int) and u > 0:
+        return " \033[38;5;208m· U %d\033[0m" % u
+    return ""
+
+
 def tickets_segment(cwd, now=None, home=None, spawn=True):
     """The GitHub-tickets statusline segment for the session at `cwd`
     (label shortened 'Issues' -> 'I', #223): 'I N' where N is the LIVE
@@ -220,8 +239,8 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
 
     open_n = cache.get("open")
     if isinstance(open_n, int):
-        return "\033[38;5;75mI %d\033[0m%s%s" % (
-            open_n, _stream_split_sfx(cache), skip_sfx)
+        return "\033[38;5;75mI %d\033[0m%s%s%s" % (
+            open_n, _user_waiting_sfx(cache), _stream_split_sfx(cache), skip_sfx)
     return ""
 
 

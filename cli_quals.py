@@ -303,6 +303,63 @@ def _ticket_is_stream_labeled(labels):
     return any(("stream:%s" % u) in names for u in airuleset.AUTHORITY_BY_USER)
 
 
+# The labels that mark a ticket as WAITING ON THE USER's answer — a question
+# asked and hanging: `needs-answer` (the ask-and-continue durable marker, pinged)
+# and `needs-decision` (the sleep-window deferral, queued for after 06:00). Such
+# a ticket is genuine open work, but it is NOT this box's ACTIVE responsibility:
+# the loop can do nothing with it until the user answers (the question already
+# pinged the phone), so it LEAVES the workable "I N" count and the /goal
+# stop-proof's workable-0 proof — and surfaces SEPARATELY as `U N` + the
+# stop-proof's user-waiting remainder, so nothing is hidden and the loop parks on
+# it rather than claiming "backlog empty" past it (#468, the user's directive
+# 2026-08-14: "v I by nemali byť tie čo sú Q — nech je jasné kto za čo zodpovedá").
+#
+# Deliberately DISTINCT from AUTOPILOT_SKIP_EXCL/ops-channel (which fully EXCLUDE
+# a ticket from every consideration): a user-waiting ticket stays tracked,
+# listed (`--waiting`) and counted (`U N`) — only PARTITIONED out of "mine to
+# action right now". And distinct from `needs-design`/`question`/`blocked`
+# (filing-time "needs input" labels that stay fully WORKABLE and get worked — the
+# worker raises the question): these two are applied ONLY AFTER a question has
+# already been raised, so partitioning them never risks a question going unasked
+# (skills/autopilot/SKILL.md's Step-1 backlog-scope bullet, #468 reconciliation).
+USER_WAITING_LABELS = ("needs-answer", "needs-decision")
+
+
+def _row_is_user_waiting(labels):
+    """True if `labels` (a gh --json labels value: a list of {'name': ...}
+    dicts, or None/malformed) carries any USER_WAITING_LABELS label.
+
+    A missing/unreadable `labels` value reads as NOT user-waiting (→ workable) —
+    the SAFE side: never hide a ticket from THIS box's own responsibility because
+    of a failed label read. The mirror of `_ticket_is_stream_labeled(None)` being
+    False, and the OPPOSITE conservative direction from `_row_action`'s
+    ownership check (there the harm is inviting foreign-code edits, so a failed
+    read goes `action-only`; here the harm is hiding own work, so it stays
+    workable) — both pick the non-harmful side of their own asymmetry."""
+    names = {(lb or {}).get("name") for lb in (labels or [])
+             if isinstance(lb, dict)}
+    return any(lb in names for lb in USER_WAITING_LABELS)
+
+
+def _partition_user_waiting(rows):
+    """Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
+    (`{number: {"number","title","createdAt","labels"}}`) into
+    `(workable, waiting)` by USER_WAITING_LABELS on each row.
+
+    ONE derivation, never two queries: both halves come from the SAME
+    already-fetched set, so the footer's `I N`/`U N` and the /goal stop-proof's
+    workable count / user-waiting list cannot silently drift (#367 lesson — the
+    exact reason a search-exclusion + separate positive query was rejected).
+    Extends the repo's own established client-side-partition pattern
+    (`_slice_mine_and_handed` splits handed/unhandled from one fetch;
+    `_row_action`/`_stream_owner_of` partition by ownership) — no new mechanism."""
+    workable, waiting = {}, {}
+    for number, row in rows.items():
+        labels = row.get("labels") if isinstance(row, dict) else None
+        (waiting if _row_is_user_waiting(labels) else workable)[number] = row
+    return workable, waiting
+
+
 def _authority_marker(cwd=None):
     """Read an `<!-- airuleset:authority=<profile> -->` override from the project
     CLAUDE.md (cwd-relative), or None. Lets a project raise/lower a stream's default
