@@ -713,5 +713,136 @@ class AnchorEscapeAndNoRunSegmentScopeTest(_Runner):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
+class CameraBoxBypassDisabledTest(_Runner):
+    """#477: the ad-hoc build-ok bypasses (the `# airuleset:build-ok` inline
+    marker AND the `AIRULESET_ALLOW_LOCAL_BUILD` env var) are DISABLED for the
+    camera-box repo -- heavy camera-box tests/builds go through CI only (user
+    decision 2026-08-14; workers ran local `cargo test` 247x/2 days through the
+    marker, overloading the shared dev1 box). Detection is by the repo's
+    AUTHORITATIVE identity (`git remote get-url origin` basename == camera-box),
+    falling back to a `camera-box` path component ONLY when no remote resolves
+    (a detached/no-origin checkout, or a worktree). Every OTHER repo, and
+    camera-box's own DELIBERATE project-level Tier-1/2 opt-in, are unchanged --
+    only the two ad-hoc per-command bypasses are removed, and only for
+    camera-box.  is_heavy() (#470/#471) is untouched: this is the bypass layer."""
+
+    def _mkgit_remote(self, name, remote_url):
+        """A REAL git repo (so `git remote get-url origin` resolves) with a
+        Tier-0 CLAUDE.md and the given origin URL -- exercises the remote-URL
+        detection path independent of the directory name."""
+        p = self.root / name
+        p.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q"], cwd=p, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", remote_url], cwd=p,
+                       check=True, capture_output=True)
+        (p / "CLAUDE.md").write_text("# no marker\n")
+        return p
+
+    # ---- the core decision: camera-box + build-ok + heavy = BLOCKED ----
+
+    def test_camera_box_inline_marker_no_longer_bypasses_cargo_test(self):
+        # the exact 247x-abused shape
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo test # airuleset:build-ok testing", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_camera_box_inline_marker_no_longer_bypasses_cargo_build(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo build --release # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_camera_box_env_override_no_longer_bypasses(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo test", proj,
+                             extra_env={"AIRULESET_ALLOW_LOCAL_BUILD": "1"})
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_camera_box_block_message_points_to_ci(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo test # airuleset:build-ok testing", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("camera-box", out.stderr)
+        self.assertIn("CI", out.stderr)
+
+    def test_camera_box_detected_by_ssh_remote_url_not_just_dir_name(self):
+        # dir named 'renamed-checkout', origin remote = camera-box -> still blocked
+        proj = self._mkgit_remote("renamed-checkout",
+                                  "git@github.com:zbynekdrlik/camera-box.git")
+        out = self.run_hook("cargo test # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_camera_box_detected_by_https_remote_url(self):
+        proj = self._mkgit_remote("cb2",
+                                  "https://github.com/zbynekdrlik/camera-box.git")
+        out = self.run_hook("cargo build --release # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_camera_box_new_heavy_shape_with_marker_is_blocked(self):
+        # a #470/#471 shape (cargo nextest run) + build-ok in camera-box
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo nextest run # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- NEGATIVE controls: every OTHER repo's bypass is untouched ----
+
+    def test_non_camera_box_inline_marker_still_bypasses(self):
+        proj = self._mkproj(name="spinbike")
+        out = self.run_hook("cargo test # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_non_camera_box_env_override_still_bypasses(self):
+        proj = self._mkproj(name="dantesync")
+        out = self.run_hook("cargo build --release", proj,
+                             extra_env={"AIRULESET_ALLOW_LOCAL_BUILD": "1"})
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_non_camera_box_git_remote_marker_still_bypasses(self):
+        proj = self._mkgit_remote("some-rust-proj",
+                                  "git@github.com:zbynekdrlik/restreamer.git")
+        out = self.run_hook("cargo test # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_remote_authoritatively_non_camera_box_overrides_dir_name(self):
+        # dir literally named 'camera-box' BUT origin remote = restreamer ->
+        # remote is authoritative -> NOT camera-box -> the bypass still works.
+        proj = self._mkgit_remote("camera-box",
+                                  "git@github.com:zbynekdrlik/restreamer.git")
+        out = self.run_hook("cargo test # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- camera-box: cheap checks unaffected; the Tier opt-in still works ----
+
+    def test_camera_box_cheap_check_still_allowed(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo check --workspace", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_camera_box_no_run_compile_still_allowed(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo test --no-run --workspace", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_camera_box_non_heavy_command_with_marker_untouched(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("echo hi # airuleset:build-ok", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_camera_box_tier1_project_marker_still_exempts(self):
+        # the deliberate project-level opt-in is unaffected -- only the ad-hoc
+        # per-command build-ok bypass is disabled for camera-box.
+        proj = self._mkproj(name="camera-box", marker="allowed")
+        out = self.run_hook("cargo test # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_camera_box_blocked_command_is_audit_logged(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo test # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 2)
+        lines = self.audit_lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("project=camera-box", lines[0])
+
+
 if __name__ == "__main__":
     unittest.main()
