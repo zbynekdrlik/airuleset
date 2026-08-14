@@ -138,9 +138,9 @@ _delivery_log() {
         mv -f "$DELIVERY_LOG" "$DELIVERY_LOG.1" 2>/dev/null || true
     fi
     {
-        printf '%s %s kind=shell key=%s reason=%s\n' \
+        printf '%s %s kind=shell key=%s reason=%s qhash=%s\n' \
             "$(date -Iseconds 2>/dev/null || echo '?')" "$1" \
-            "${EMOJI}:${PROJECT}" "$2" >>"$DELIVERY_LOG"
+            "${EMOJI}:${PROJECT}" "$2" "${ND_QHASH:-}" >>"$DELIVERY_LOG"
     } 2>/dev/null || true
 }
 

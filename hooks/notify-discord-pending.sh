@@ -49,6 +49,12 @@ AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airul
 
 LAST_LINE=$(printf '%s\n' "$MSG" | grep -vE '^[[:space:]]*$' | tail -1 || true)
 
+# #466 fail-loud: send_q() sets this to 1 when it runs. A ❓-carrying turn that
+# never reaches send_q (marker not on the last line → the `else` branch; the
+# arm-question skip) must still leave a delivery-log line — the backstop before
+# the final exit consults this flag so the silence class becomes impossible.
+SENDQ_CALLED=0
+
 # Strip markdown emphasis + a leading marker label so the phone line is clean
 # Slovak prose (e.g. "❓ **Question:** approve merge?" -> "approve merge?").
 strip_md() {
@@ -280,21 +286,32 @@ clean_q() {
 # read-only $HOME can never turn logging into a dropped ping), rotated at the
 # same cap the send path uses, and dry-run logs nothing (mirrors the send
 # path's own dry-run-logs-nothing contract).
+# Short, stable per-question fingerprint for the delivery log — lets two
+# DIFFERENT questions be told apart (the per-project `❓:<project>` send key
+# never could, #466). sha1sum where present, cksum as a portable fallback;
+# both yield a stable short token used ONLY for log identity, never a decision.
+_qhash() {
+    printf '%s' "${1:-}" | { sha1sum 2>/dev/null || cksum; } \
+        | tr -cd '0-9a-fA-F' | cut -c1-8
+}
+
 _pending_log() {
-    # $1 = status, $2 = reason. set -u safe: both default to "" so a future
-    # caller passing <2 args logs a blank field instead of aborting the hook.
+    # $1 = status, $2 = reason, $3 = per-question hash (which question — #466).
+    # set -u safe: all default to "" so a future caller passing <3 args logs a
+    # blank field instead of aborting the hook.
     [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ] && return 0
-    local log stamp size status reason
+    local log stamp size status reason qhash
     status="${1:-}"
     reason="${2:-}"
+    qhash="${3:-}"
     log="$HOME/.claude/notify-delivery.log"
     mkdir -p "$(dirname "$log")" 2>/dev/null || true
     size=$(stat -c %s "$log" 2>/dev/null || echo 0)
     case "$size" in ''|*[!0-9]*) size=0 ;; esac
     [ "$size" -gt 512000 ] && mv -f "$log" "$log.1" 2>/dev/null || true
     stamp=$(date -Iseconds 2>/dev/null || echo '?')
-    { printf '%s %s kind=pending key=%s reason=%s\n' \
-        "$stamp" "$status" "$SID" "$reason" >>"$log"; } 2>/dev/null || true
+    { printf '%s %s kind=pending key=%s reason=%s qhash=%s\n' \
+        "$stamp" "$status" "$SID" "$reason" "$qhash" >>"$log"; } 2>/dev/null || true
     return 0
 }
 
@@ -318,14 +335,16 @@ send_q() {
     # DIFFERENT question always pings. This is NOT the removed "❓ + continuing
     # language → swallow" bug: no new question is ever suppressed — only the
     # already-pinged one, repeated verbatim to a user who already has it.
-    local key payload send f now m
+    local key payload send f now m QH
+    SENDQ_CALLED=1
     key=$(strip_md "$1" | jq -Rrs 'rtrimstr("\n") | .[0:1500]')
     payload=$(clean_q "$2")
     [ -z "$payload" ] && payload="$key"
     [ -z "$key" ] && key="$payload"
-    [ -z "$key" ] && { _pending_log "suppressed" "empty-content"; return 0; }
+    QH=$(_qhash "$key")
+    [ -z "$key" ] && { _pending_log "suppressed" "empty-content" "$QH"; return 0; }
     if [ -f "$LASTQ" ] && [ "$(cat "$LASTQ" 2>/dev/null)" = "$key" ]; then
-        _pending_log "suppressed" "verbatim-repeat-dedup"
+        _pending_log "suppressed" "verbatim-repeat-dedup" "$QH"
         return 0
     fi
 
@@ -359,7 +378,7 @@ send_q() {
         m=$(stat -c %Y "$qqf" 2>/dev/null || echo 0)
         case "$m" in ''|*[!0-9]*) m=0 ;; esac
         if [ "$m" -le "$now" ] && [ $((now - m)) -lt 12 ]; then
-            _pending_log "suppressed" "question-quality-rewrite"
+            _pending_log "suppressed" "question-quality-rewrite" "$QH"
             return 0
         fi
     fi
@@ -375,15 +394,21 @@ send_q() {
         if [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ]; then
             { printf '[edit]\n'; printf '%s\n' "$payload"; } \
                 >> "${ND_DRYRUN_FILE:-/dev/null}"
+            _pending_log "edit" "reword-dryrun" "$QH"
             printf '%s' "$key" > "$LASTQ"
             return 0
         fi
         if printf '%s' "$payload" | python3 "$AIRULESET_PY" \
                 notify --edit-question --session "$SID" >/dev/null 2>&1; then
+            # An edit does not push-ping and does NOT record the question map —
+            # before #466 it also left ZERO log trace, the exact silence class
+            # (an in-place reword vanished from every diagnostic). Log it loud.
+            _pending_log "edit" "reword-in-place" "$QH"
             printf '%s' "$key" > "$LASTQ"
             return 0
         fi
         # nothing recent/editable (expired, deleted) → fall through to a POST
+        _pending_log "edit-fallthrough" "no-recent-question" "$QH"
     fi
     # ND_CONFIRM: the send runs FOREGROUND and exits 0 only on confirmed HTTP 2xx
     # delivery. LASTQ is recorded ONLY then — a transient Discord failure on the
@@ -397,8 +422,13 @@ send_q() {
     # must NOT '> '-blockquote it (a quote renders the question as one gray
     # wall); it posts header + blank line + the block as-is.
     if ND_EMOJI="❓" ND_TEXT="$payload" ND_CWD="$CWD" ND_CONFIRM=1 ND_BLOCK=1 \
-            ND_SESSION_ID="$SID" bash "$send"; then
+            ND_SESSION_ID="$SID" ND_QHASH="$QH" bash "$send"; then
         printf '%s' "$key" > "$LASTQ"
+    else
+        # The send path already logs its own not-delivered reason, but a send
+        # that never reached its own logger (a missing/failed script) must not
+        # be silent — guarantee a pending-side line either way (#466).
+        _pending_log "not-delivered" "send-nonzero" "$QH"
     fi
 }
 
@@ -423,6 +453,9 @@ send_q() {
 # char inside [] (the same class of bug as the LC_ALL=C awk octal gotcha).
 if printf '%s\n' "$MSG" | grep -qiE '❓.*(vlož|vloz|pastni|paste).*/goal'; then
     rm -f "$PENDING" 2>/dev/null || true
+    # No phone ping (the watchdog auto-arm types the /goal itself), but this IS
+    # a ❓ turn — leave a trace so it is never a silent path either (#466).
+    _pending_log "suppressed" "arm-question" "$(_qhash "$MSG")"
     echo "arm-question — skipped (watchdog auto-arm handles it)" >&2
     exit 0
 fi
@@ -500,6 +533,19 @@ elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:sp
 else
     # No marker → nothing to notify. Clear any stale pending.
     rm -f "$PENDING" 2>/dev/null || true
+fi
+
+# Fail-loud backstop (#466): a ❓ NEEDS YOU / ❓ ASKED marker present in the turn
+# but NOT routed to send_q — the marker was not the last non-empty line (a
+# trailing note, or a wrapped long URL leaving a tail fragment), so dispatch
+# fell to the `else`/`⏳`/`✅` branch and the question vanished with zero trace,
+# the incident's silence class. LOG-ONLY: this never pings, so a false positive
+# (a ✅ report quoting "❓ NEEDS YOU" as text) is a harmless diagnostic line,
+# never a spurious ping.
+if [ "${SENDQ_CALLED:-0}" = "0" ] \
+   && printf '%s\n' "$MSG" \
+      | grep -qE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)'; then
+    _pending_log "unhandled" "question-marker-not-dispatched" "$(_qhash "$MSG")"
 fi
 
 exit 0
