@@ -284,6 +284,39 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertEqual(len(sent), 2, "a still-dark goal with work remaining must "
                          "be re-pinged after the schedule interval")
 
+    def test_first_ping_text_and_dedup_key_are_byte_for_byte_403(self):
+        # #459 preserves #403's FIRST ping exactly: the message is the original
+        # "zomrelo potichu" text (never the "STÁLE mŕtvy" reminder), and the
+        # dedup_key stays goal-dark:sid:mark WITHOUT a :count suffix — so a
+        # legacy on-disk dedup marker from pre-#459 code never yields a
+        # duplicate first ping across the deploy boundary. Re-pings append
+        # :count. Teeth against silently changing either.
+        proj, tmux = self._dark("sess-dark-firstping")
+        rec, state = [], {}
+        obl = self._obl(5, 1500)
+
+        def send_fn(m, **k):
+            rec.append((m, k.get("dedup_key")))
+
+        def sweep(now):
+            goal.goal_dark_watch(now, run=tmux, send_fn=send_fn,
+                                 projects_dir=proj, state=state,
+                                 sleep_fn=lambda s: None, obligation_fn=obl)
+
+        sweep(1000)                                           # first observation
+        sweep(2000)                                           # first ping
+        self.assertEqual(len(rec), 1)
+        first_msg, first_key = rec[0]
+        self.assertIn("zomrelo potichu", first_msg)
+        self.assertNotIn("STÁLE", first_msg)
+        # legacy shape: exactly "goal-dark:<sid>:<mark>" (two colons after label)
+        self.assertEqual(first_key.count(":"), 2, first_key)
+        sweep(2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10)  # re-ping #2
+        self.assertEqual(len(rec), 2)
+        reping_msg, reping_key = rec[1]
+        self.assertIn("STÁLE", reping_msg)
+        self.assertEqual(reping_key, first_key + ":2", reping_key)
+
     def test_achieved_backlog_zero_obligations_gets_one_ping_never_nags(self):
         # #459 safety — an ACHIEVED loop is transcript-identical to a stall
         # (both mark=set / footer dark, no cleared marker). The cache's

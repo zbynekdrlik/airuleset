@@ -887,10 +887,16 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                 msg = ("\U0001f480 **%s** — /goal loop je STÁLE mŕtvy "
                        "(pripomienka #%d; transkript hovorí armovaný, footer "
                        "nie). Spústi prosím `/autopilot` znova." % (proj, count))
+            # The FIRST ping keeps #403's exact dedup_key (goal-dark:sid:mark) so
+            # a legacy disk marker written by pre-#459 code never yields a
+            # duplicate first ping across the deploy boundary; re-pings append
+            # :count so each staged reminder delivers on its own.
+            dkey = ("goal-dark:%s:%d" % (sid, int(mark_ts or 0)) if count == 1
+                    else "goal-dark:%s:%d:%d" % (sid, int(mark_ts or 0), count))
             send_fn(
                 msg,
                 owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
-                dedup_key="goal-dark:%s:%d:%d" % (sid, int(mark_ts or 0), count),
+                dedup_key=dkey,
                 dry_run=dry_run)
     return logs
 
