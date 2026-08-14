@@ -217,6 +217,13 @@ class TestForkNoMergeCloseGuard(TestCase):
     # bot login STREAM_APP_BOT_LOGIN), not a raw `gh api user`. The App identity
     # is DISTINCT from the maintainer, so it restores the self-vs-assigned
     # distinguishability the pre-App shared-PAT setup destroyed.
+    #
+    # `api_user_403=True` below models the REAL App-box environment (its `gh api
+    # user` genuinely 403s) — but note the App path SHORT-CIRCUITS on
+    # `_is_gh_app_token_box()` (driven here by `app_token_dir`) and never calls
+    # `gh api user` at all, so the 403 model is a realistic-environment guard,
+    # not the thing under test: these tests prove identity resolution works
+    # WITHOUT any `/user` call (#463 adversarial review MINOR-1).
 
     def test_allows_self_authored_close_on_app_token_box(self):
         # The odoo-erp #4006 live case: an App-authored, stream-filed sub-finding

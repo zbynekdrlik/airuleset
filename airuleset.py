@@ -8940,6 +8940,15 @@ MAINTAINER_GH_LOGIN = "zbynekdrlik"
 # .author.login`, which renders this bot as exactly `app/odoo-erp-stream-tokens`
 # (verified live 2026-08-14; the REST `.user.login` form is the different
 # `odoo-erp-stream-tokens[bot]`, which the hook never reads).
+#
+# Scope (#463 adversarial review T-1): every montalu-family box authenticates as
+# this SAME shared App identity, so the self-close carve-out fires for ANY ticket
+# authored by it — including a sub-finding filed by a DIFFERENT subdev stream, not
+# only the box's own. This is broader than strict per-stream self-close but is NOT
+# a maintainer-review bypass: maintainer-ASSIGNED work is filed from dev1 and
+# authored by MAINTAINER_GH_LOGIN (`zbynekdrlik`), never this App identity, so it
+# stays blocked. Only self-vs-maintainer distinguishability is what the guard needs
+# and preserves; stream-A-own vs stream-B-own is deliberately not distinguished.
 STREAM_APP_BOT_LOGIN = "app/odoo-erp-stream-tokens"
 
 

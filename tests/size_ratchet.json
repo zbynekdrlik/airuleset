@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 9850,
+    "airuleset.py": 9859,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 793,
@@ -59,7 +59,7 @@
     "tests/test_fleet_concurrency_doctrine.py": 257,
     "tests/test_fleet_hygiene.py": 1022,
     "tests/test_fork_context_inheritance.py": 109,
-    "tests/test_fork_no_merge_close_guard.py": 275,
+    "tests/test_fork_no_merge_close_guard.py": 282,
     "tests/test_gh_cli_recipes_autoclose_warning.py": 64,
     "tests/test_gh_json_hook.py": 205,
     "tests/test_gk_request.py": 1442,
