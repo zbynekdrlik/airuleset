@@ -684,9 +684,66 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
 # pane every tick regardless of pending requests.
 # --------------------------------------------------------------------------- #
 
+# #459 -- STAGED dark-goal re-ping. Root cause (CC research, binary 2.1.232
+# + upstream anthropics/claude-code issues 82546/58373/50920): /compact never
+# CLEARS the goal, but the PROCESS-BOUND /goal loop can silently stop firing
+# turns through/around a compaction while the transcript keeps reporting
+# armed (on montalu -- this repo's own issue 76 -- the footer ALSO loses the
+# glyph, which is the shape dark-watch detects). Pre-#403 the old goal_rearm
+# backstop healed ~93% (14/15 measured) of these within ~2 min; #403 deleted
+# it, so a compact-stalled loop now gets exactly ONE ping and, if the away
+# user misses it (the 02:59-into-a-sleeping-user incident), no follow-up.
+# The FIRST ping stays byte-for-byte as #403 shipped it; a persistently-dark
+# goal is then RE-pinged on a widening schedule, but ONLY while the per-cwd
+# tickets-status obligation cache proves work still remains (open > 0) -- an
+# ACHIEVED loop is transcript-indistinguishable from a stalled one (both
+# mark=set / footer dark; achievement persists NO marker, measured over 8329
+# transcripts), so an ungated re-ping would nag every completed backlog, the
+# exact noise class the user purged. No positive confirmation -> stay silent
+# (the first ping already went out). Zero keystrokes, ever. Tunable; mirrors
+# the #399/#353 staged-alarm constant style.
+GOAL_DARK_REPING_SCHEDULE_S = (3600, 3 * 3600, 6 * 3600, 24 * 3600)
+GOAL_DARK_REPING_MAX = 10               # hard cap on total pings per dark episode
+GOAL_DARK_CACHE_MAX_AGE_S = 3 * 24 * 3600   # ignore an obligation cache older than this
+
+
+def _goal_dark_reping_due(prev, now, schedule):
+    """Pure staged-schedule check for a dark-goal RE-ping (#459), mirroring
+    the `_gkreq_reping_due` SHAPE (#353/#352) as an INDEPENDENT function
+    reusing that proven pattern per this repo's own 'same shape, own
+    vocabulary' precedent, never a cross-job call. `prev` is a prior ping
+    record with `count`>=1 and `last`. Returns `(due, next_count)`: too soon
+    -> `(False, count)`; the schedule interval for this stage cleared ->
+    `(True, count + 1)`. Holds at the final stage forever. A record with no
+    readable `last` re-pings once (fail toward reminding), never silently
+    sticks."""
+    count = int(prev.get("count") or 1)
+    last = prev.get("last")
+    if last is None:
+        return True, count + 1
+    step = min(count - 1, len(schedule) - 1)
+    if (now - last) < schedule[step]:
+        return False, count
+    return True, count + 1
+
+
+def _default_obligation_fn(cwd):
+    """Real obligation source for `goal_dark_watch`'s re-ping gate: the
+    per-cwd tickets-status cache via `statusbar.obligation_count`. Lazily
+    imported and FULLY guarded — any failure (statusbar unimportable at the
+    watchdog's runtime path, a corrupt cache) degrades to `(None, None)`,
+    which the caller reads as 'cannot confirm work remains' -> stay silent
+    (fail toward no-nag)."""
+    try:
+        import statusbar
+        return statusbar.obligation_count(cwd)
+    except Exception:
+        return None, None
+
+
 def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                     projects_dir=None, sleep_fn=None, time_fn=None,
-                    sweep_deadline=None):
+                    sweep_deadline=None, obligation_fn=None):
     """#403 STEP 0 confirmed #172's own sweep_deadline/tail_deadline
     budget-sharing mechanism must survive this collapse -- unlike
     `goal_sweep` (bounded by the tiny pending-arm-request count),
@@ -699,7 +756,13 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     iteration -- a pane already being processed always finishes; only a
     NOT-YET-STARTED pane is deferred to the next sweep, and nothing is
     written for it (off_state/seen_state/pinged_state stay untouched), so
-    it is retried next sweep exactly like an unvisited pane always is."""
+    it is retried next sweep exactly like an unvisited pane always is.
+
+    `obligation_fn(cwd) -> (open, ts)` (#459; default `_default_obligation_fn`,
+    the per-cwd tickets-status cache) is the injected death-vs-achievement
+    source for the staged re-ping gate below -- only a positive, fresh
+    `open > 0` lets a persistently-dark goal be RE-pinged past its first
+    ping."""
     logs = []
     if watchdog._owner_disabled("goal"):
         logs.append("goal jobs DISABLED by owner flag "
@@ -782,20 +845,58 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             logs.append("dark-watch %s sid=%s -> first observation, debouncing"
                         % (loc, sid))
             continue
-        if pinged_state.get(sid) == mark_ts:
-            continue   # already pinged for this exact episode
-        pinged_state[sid] = mark_ts
-        logs.append("dark-watch %s sid=%s -> goal died silently, pinging"
-                    % (loc, sid))
+        # #459 -- STAGED re-ping. The FIRST ping of an episode fires ALWAYS
+        # (byte-for-byte as #403 shipped it). LATER re-pings of a STILL-dark
+        # goal fire on the widening GOAL_DARK_REPING_SCHEDULE_S, but ONLY
+        # while the per-cwd obligation cache confirms work still remains
+        # (open > 0, fresh) -- otherwise stay SILENT (an achieved loop is
+        # transcript-identical to a stall, so an unconfirmed re-ping would
+        # nag every completed backlog). Hard-capped per episode. Still zero
+        # keystrokes, ever.
+        prec = pinged_state.get(sid)
+        is_first = not (isinstance(prec, dict) and prec.get("mark_ts") == mark_ts)
+        if is_first:
+            count = 1
+        else:
+            count = int(prec.get("count") or 1)
+            if count >= GOAL_DARK_REPING_MAX:
+                continue                          # hard cap -- stop for this episode
+            due, count = _goal_dark_reping_due(prec, now,
+                                               GOAL_DARK_REPING_SCHEDULE_S)
+            if not due:
+                continue                          # too soon this stage
+            open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
+            fresh = (cts is not None
+                     and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
+            if not (isinstance(open_n, int) and open_n > 0 and fresh):
+                continue                          # can't confirm work -- no nag
+        pinged_state[sid] = {"mark_ts": mark_ts, "count": count, "last": now}
+        logs.append(
+            "dark-watch %s sid=%s -> %s" % (
+                loc, sid,
+                "goal died silently, pinging" if count == 1
+                else "goal still dark, re-pinging #%d" % count))
         if send_fn is not None and not dry_run:
             from notify import stream_redirect
+            proj = watchdog.project_label(cwd)
+            if count == 1:
+                msg = ("\U0001f480 **%s** — /goal loop zomrelo potichu "
+                       "(transkript hovorí armovaný, footer nie). "
+                       "Spústi prosím `/autopilot` znova." % proj)
+            else:
+                msg = ("\U0001f480 **%s** — /goal loop je STÁLE mŕtvy "
+                       "(pripomienka #%d; transkript hovorí armovaný, footer "
+                       "nie). Spústi prosím `/autopilot` znova." % (proj, count))
+            # The FIRST ping keeps #403's exact dedup_key (goal-dark:sid:mark) so
+            # a legacy disk marker written by pre-#459 code never yields a
+            # duplicate first ping across the deploy boundary; re-pings append
+            # :count so each staged reminder delivers on its own.
+            dkey = ("goal-dark:%s:%d" % (sid, int(mark_ts or 0)) if count == 1
+                    else "goal-dark:%s:%d:%d" % (sid, int(mark_ts or 0), count))
             send_fn(
-                "\U0001f480 **%s** — /goal loop zomrelo potichu "
-                "(transkript hovorí armovaný, footer nie). "
-                "Spústi prosím `/autopilot` znova."
-                % watchdog.project_label(cwd),
+                msg,
                 owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
-                dedup_key="goal-dark:%s:%d" % (sid, int(mark_ts or 0)),
+                dedup_key=dkey,
                 dry_run=dry_run)
     return logs
 
