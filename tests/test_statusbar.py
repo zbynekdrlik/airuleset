@@ -2248,17 +2248,20 @@ class GraphqlBudgetGuard(unittest.TestCase):
         return ('{"resources":{"graphql":{"remaining":%d,"limit":5000},'
                 '"core":{"remaining":4999,"limit":5000}}}' % remaining)
 
+    def _runner(self, remaining):
+        return lambda *a, **k: self._rl(remaining)
+
     def test_budget_ok_true_above_floor_false_below(self):
-        hi = lambda *a, **k: self._rl(4000)
-        lo = lambda *a, **k: self._rl(200)
-        self.assertEqual(airuleset._graphql_budget_ok(1000, runner=hi),
-                         (True, 4000))
-        self.assertEqual(airuleset._graphql_budget_ok(1000, runner=lo),
-                         (False, 200))
+        self.assertEqual(
+            airuleset._graphql_budget_ok(1000, runner=self._runner(4000)),
+            (True, 4000))
+        self.assertEqual(
+            airuleset._graphql_budget_ok(1000, runner=self._runner(200)),
+            (False, 200))
         # boundary: exactly AT the floor is still ok (>=)
-        eq = lambda *a, **k: self._rl(1000)
-        self.assertEqual(airuleset._graphql_budget_ok(1000, runner=eq),
-                         (True, 1000))
+        self.assertEqual(
+            airuleset._graphql_budget_ok(1000, runner=self._runner(1000)),
+            (True, 1000))
 
     def test_budget_ok_fails_open_when_unmeasurable(self):
         # A probe that errors / returns junk must NOT block the refresh — the
