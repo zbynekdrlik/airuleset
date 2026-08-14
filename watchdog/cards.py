@@ -462,9 +462,25 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             # (a dict/list, even empty) makes a "not in confirmed" stable.
             if raw is None:
                 verify_ok = False
+                # #474-review MINOR-1: a None here is the verifier saying "I
+                # could not reach GitHub", NOT "GitHub confirmed these were
+                # not merge-closed". Log it as verify-UNMEASURABLE, never
+                # verify-REJECTED — a sustained graphql-bucket outage would
+                # otherwise re-log a MISLEADING "rejected" line every sweep
+                # for each unverified candidate (the ping decision is still
+                # correct: dropped this sweep, retried next). The exception
+                # branch above already logs its own `verify-failed` line, so
+                # only the graceful-None path needs this.
+                logs.append("card-reconcile verify-unmeasurable %s issues=%s"
+                            % (name, ",".join(str(n)
+                                              for n in pingable[:CARD_MAX_LISTED])))
             confirmed = _normalize_closed(raw)
             newly_rejected = [n for n in pingable if n not in confirmed]
-            if newly_rejected:
+            # verify-REJECTED only for a SUCCESSFUL verify's genuine
+            # rejections (verify_ok) — the transient-failure paths (None /
+            # exception) have their own honest lines above and must never
+            # claim GitHub rejected a ticket it was never actually asked.
+            if newly_rejected and verify_ok:
                 logs.append("card-reconcile verify-rejected %s issues=%s"
                             % (name, ",".join(str(n)
                                               for n in newly_rejected[:CARD_MAX_LISTED])))

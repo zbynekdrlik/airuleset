@@ -126,7 +126,7 @@
     "tests/test_rules_ab_experiment.py": 830,
     "tests/test_ruleset_conversion_wave2.py": 278,
     "tests/test_run_card_content_validation.py": 474,
-    "tests/test_run_card_enforcement.py": 2153,
+    "tests/test_run_card_enforcement.py": 2170,
     "tests/test_runtime_deps.py": 210,
     "tests/test_schedule_wakeup_loop_only.py": 66,
     "tests/test_scope_gate.py": 1388,
@@ -170,7 +170,7 @@
     "tests/test_wrapped_draft.py": 619,
     "watchdog/__init__.py": 9962,
     "watchdog/burn_jobs.py": 306,
-    "watchdog/cards.py": 519,
+    "watchdog/cards.py": 535,
     "watchdog/compact.py": 1037,
     "watchdog/goal.py": 1384,
     "watchdog/repo_health.py": 758,
@@ -187,6 +187,6 @@
     "watchdog/__init__.py::gk_request_backstop": 214,
     "watchdog/__init__.py::prompt_wedge_check": 235,
     "watchdog/__init__.py::run_once": 1996,
-    "watchdog/cards.py::card_reconcile": 298
+    "watchdog/cards.py::card_reconcile": 314
   }
 }

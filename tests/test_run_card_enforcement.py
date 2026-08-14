@@ -765,6 +765,23 @@ class TestCardReconcile(unittest.TestCase):
                          "the rejection was already logged; do not repeat it "
                          "every sweep")
 
+    def test_a_None_degrade_verify_logs_unmeasurable_not_rejected_and_retries(self):
+        # #474-review MINOR-1: `closed_fetch` returning None is its degrade
+        # sentinel (a gh failure), NOT a rejection. It must log
+        # verify-UNMEASURABLE (never the misleading verify-rejected), persist
+        # NOTHING, and leave the ticket pingable so a later successful sweep
+        # still reports it.
+        r = self.repo(closes=(3,))
+        logs = self.reconcile([r], closed_fetch=lambda root, since: None)
+        self.assertEqual(self.sent, [])
+        self.assertTrue(any("verify-unmeasurable" in ln for ln in logs), logs)
+        self.assertFalse(any("verify-rejected" in ln for ln in logs), logs)
+        # NOT swallowed: nothing was persisted to `rejected`, so a later
+        # successful verify still reports the ticket.
+        self.reconcile([r], closed_fetch=lambda root, since: {3: NOW - 3600})
+        self.assertTrue(self.sent, "a None-degrade verify must not persist a "
+                                   "rejection — the ticket stays pingable")
+
     def test_the_fallback_verified_path_is_not_re_verified_a_second_time(self):
         # when `merged_closes` itself found nothing (the tvdole/#230 shape),
         # `closed_fetch` already ran once as the FALLBACK and its answer IS
