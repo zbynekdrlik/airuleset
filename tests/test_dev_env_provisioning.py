@@ -32,6 +32,10 @@ from unittest import TestCase, main
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+# #433 cluster L: the installers moved here; a leaf→leaf internal call
+# (ensure_claude_cli_installed → _claude_cli_installed → _claude_cli_env)
+# resolves in this leaf, so those helpers are patched via cli_binary_installers.
+import cli_binary_installers
 
 
 class _FakeCP:
@@ -80,7 +84,7 @@ class TestClaudeCliInstalled(TestCase):
             self.assertFalse(airuleset._claude_cli_installed(env))   # must not raise
 
     def test_defaults_to_claude_cli_env_when_no_env_given(self):
-        with m.patch.object(airuleset, "_claude_cli_env",
+        with m.patch.object(cli_binary_installers, "_claude_cli_env",
                              return_value={"PATH": "/x"}) as env_fn, \
                 m.patch("shutil.which", return_value=None) as which_fn, \
                 m.patch("subprocess.run",
@@ -92,7 +96,7 @@ class TestClaudeCliInstalled(TestCase):
 
 class TestEnsureClaudeCliInstalled(TestCase):
     def test_no_op_when_already_installed(self):
-        with m.patch.object(airuleset, "_claude_cli_installed", return_value=True), \
+        with m.patch.object(cli_binary_installers, "_claude_cli_installed", return_value=True), \
                 m.patch("subprocess.run") as run:
             airuleset.ensure_claude_cli_installed({"PATH": "/x"})
         run.assert_not_called()
@@ -104,7 +108,7 @@ class TestEnsureClaudeCliInstalled(TestCase):
             calls["n"] += 1
             return calls["n"] > 1  # missing on the check, present after install
 
-        with m.patch.object(airuleset, "_claude_cli_installed",
+        with m.patch.object(cli_binary_installers, "_claude_cli_installed",
                              side_effect=fake_installed), \
                 m.patch("subprocess.run",
                         return_value=m.Mock(returncode=0)) as run:
@@ -121,7 +125,7 @@ class TestEnsureClaudeCliInstalled(TestCase):
 
     def test_install_failure_is_loud_but_non_fatal(self):
         out = StringIO()
-        with m.patch.object(airuleset, "_claude_cli_installed", return_value=False), \
+        with m.patch.object(cli_binary_installers, "_claude_cli_installed", return_value=False), \
                 m.patch("subprocess.run",
                         return_value=m.Mock(returncode=1, stderr="boom", stdout="")), \
                 m.patch("sys.stderr", out):
@@ -131,7 +135,7 @@ class TestEnsureClaudeCliInstalled(TestCase):
 
     def test_install_exception_is_non_fatal(self):
         out = StringIO()
-        with m.patch.object(airuleset, "_claude_cli_installed", return_value=False), \
+        with m.patch.object(cli_binary_installers, "_claude_cli_installed", return_value=False), \
                 m.patch("subprocess.run", side_effect=FileNotFoundError("curl")), \
                 m.patch("sys.stderr", out):
             airuleset.ensure_claude_cli_installed({"PATH": "/x"})   # must not raise
