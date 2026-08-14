@@ -1122,6 +1122,103 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("skip draft" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
+    # ---------------------------------------------------------------- #
+    # #479 — a delivery that keeps hitting the SAME persistently-parked
+    # LIVE human draft must BACK OFF, not retry every ~60s sweep (the
+    # 2026-08-14 storm on zbynek-4:0.0: type-verify-failed -> retry ->
+    # re-type -> re-rescue, every sweep for ~3h, until GAVE UP after 5).
+    # The single reactions were already correct (never overwrite a live
+    # draft, rescue before any keystroke); what was missing is REPETITION
+    # damping. An abort now parks the delivery for an escalating window in
+    # durable `rec['lnpark']`; within that window the nudge skips WITHOUT
+    # touching the pane at all. The refusal itself is NEVER weakened --
+    # deliver_with_stash still refuses the live draft, and a permanently-
+    # aborting lane still reaches the give-up ping, just over elapsed time
+    # instead of once per sweep.
+    # ---------------------------------------------------------------- #
+
+    def test_479_stash_abort_parks_delivery_with_escalating_backoff(self):
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {}
+        with m.patch.object(wd, "deliver_with_stash", return_value=False):
+            self._call(GOAL_ARMED_DRAFT_CAP, lambda cwd: 5, now, tmtime,
+                       rec=rec, state={})
+        self.assertEqual(rec.get("lna"), 1)
+        self.assertEqual(rec.get("lnpark"),
+                         now + goal._lane_stash_abort_backoff(1))
+        self.assertGreater(goal._lane_stash_abort_backoff(2),
+                           goal._lane_stash_abort_backoff(1))
+        self.assertGreater(goal._lane_stash_abort_backoff(3),
+                           goal._lane_stash_abort_backoff(2))
+
+    def test_479_within_backoff_window_skips_without_touching_the_pane(self):
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"lna": 1, "lnpark": now + 200}
+        calls = []
+
+        def fake_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
+            calls.append(pid)
+            return False
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
+            logs, owns, tmux = self._call(GOAL_ARMED_DRAFT_CAP, lambda cwd: 5,
+                                          now, tmtime, rec=rec, state={})
+        self.assertTrue(owns)
+        self.assertEqual(calls, [],
+                         "within the abort-backoff window the pane must not be "
+                         "touched at all -- no re-type, no re-rescue")
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("abort-backoff" in ln for ln in logs), logs)
+
+    def test_479_backoff_clears_on_successful_delivery(self):
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"lna": 2, "lnpark": now - 1}   # park already elapsed
+        with m.patch.object(wd, "deliver_with_stash", return_value=True):
+            self._call(GOAL_ARMED_DRAFT_CAP, lambda cwd: 5, now, tmtime,
+                       rec=rec, state={})
+        self.assertNotIn("lna", rec)
+        self.assertNotIn("lnpark", rec)
+
+    def test_479_backoff_spaces_out_reattempts_across_sweeps(self):
+        # the core damping: over 10 minute-apart sweeps of a permanently-
+        # aborting lane, the pane is touched only a FEW times (as the backoff
+        # windows elapse), never once per sweep (the 60s hammer the journal
+        # shows at 15:18->15:19->15:20->15:21 on 2026-08-14).
+        start = 100000
+        rec = {}
+        state = {}
+        calls = []
+
+        def fake_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
+            calls.append(pid)
+            return False
+
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        with m.patch("airuleset.resolve_authority", return_value="full"), \
+             m.patch.object(wd, "_count_live_subagents", return_value=2), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192), \
+             m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
+            for i in range(10):                     # 10 sweeps, 60s apart
+                now = start + i * 60
+                tmtime = now - 30                    # busy under-saturated
+                tmux = DeliverGoalFakeTmux(
+                    [("%9", "claude", self.CWD, "111")], GOAL_ARMED_DRAFT_CAP)
+                goal.goal_lane_occupancy_nudge(
+                    now, tmux, rec, self.SID, self.CWD, "111",
+                    GOAL_ARMED_DRAFT_CAP, tpath, tmtime, "loc",
+                    lambda msg, **k: None, False, None, proj,
+                    backlog_fetch=lambda cwd: 32, state=state,
+                    sleep_fn=lambda s: None)
+        self.assertGreaterEqual(len(calls), 1)
+        self.assertLessEqual(len(calls), 4,
+                             "backoff must throttle the 60s retry hammer to a "
+                             "few attempts, never once per sweep")
+
 
 class TestGoalLaneNudgeDoctrine(unittest.TestCase):
     """#442 — the nudge TEXT must teach the fleet-dispatch doctrine
