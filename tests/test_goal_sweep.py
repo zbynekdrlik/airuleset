@@ -881,8 +881,17 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # sweep before the streak could reach the cap. A permanently-aborting
         # lane (parked draft occupying the stash slot) on a busy box must still
         # accumulate the streak across sweeps and fire the ONE give-up ping.
-        now = 100000
-        tmtime = now - 30  # busy: fresh transcript, idle << 15min
+        # #479 -- the abort streak is now throttled by ELAPSED TIME (an
+        # escalating backoff parks each next attempt), not by raw iteration
+        # count, so "across sweeps" must advance the clock past each park
+        # window (max 1800s) for the streak to accumulate. The INTENT is
+        # unchanged and still asserted: a permanently-aborting lane on a busy
+        # box still reaches the ONE give-up ping -- just over elapsed time,
+        # not once per 60s sweep. (`step` exceeds the largest backoff, so every
+        # park has always elapsed by the next sweep -> the streak advances one
+        # per sweep exactly as before, only on a moving clock.)
+        start = 100000
+        step = 2000
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
@@ -894,7 +903,9 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
              m.patch.object(wd, "_count_live_subagents", return_value=2), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192), \
              m.patch.object(wd, "deliver_with_stash", return_value=False):
-            for _ in range(goal.GOAL_LANE_MAX_STASH_ABORTS + 2):
+            for i in range(goal.GOAL_LANE_MAX_STASH_ABORTS + 3):
+                now = start + i * step
+                tmtime = now - 30  # busy: fresh transcript, idle << 15min
                 tmux = DeliverGoalFakeTmux(
                     [("%9", "claude", self.CWD, "111")], GOAL_ARMED_DRAFT_CAP)
                 logs, owns = goal.goal_lane_occupancy_nudge(
