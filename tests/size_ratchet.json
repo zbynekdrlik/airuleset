@@ -154,7 +154,7 @@
     "tests/test_vault_purge_job.py": 237,
     "tests/test_vault_read_guard.py": 1268,
     "tests/test_vault_templates.py": 322,
-    "tests/test_watchdog.py": 3588,
+    "tests/test_watchdog.py": 3598,
     "tests/test_watchdog_state_keys.py": 113,
     "tests/test_worker_attestation.py": 97,
     "tests/test_worker_evidence_reachability.py": 327,
