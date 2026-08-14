@@ -494,5 +494,182 @@ class NewlyDetectedHeavyBuildShapesTest(_Runner):
         self.assertIn("cargo nextest run", lines[0])
 
 
+class AnchorEscapeAndNoRunSegmentScopeTest(_Runner):
+    """#471: the two PRE-EXISTING residuals #470's own review filed as this ticket,
+    fixed uniformly across EVERY cargo shape at once.
+
+    F1 -- trailing-metachar anchor escape. Every anchored heavy shape closes with
+    `([[:space:]]|$)`, so a shell metacharacter glued directly to the subcommand
+    token (`cargo run;`, `(cargo run)`, `cargo run|tee`, `cargo run&`, the loop
+    body `for i in 1 2; do cargo run; done`) satisfied neither and ran unblocked.
+    The widened anchor `([[:space:]]|$|[;&|)(<>])` catches every metachar while
+    still rejecting a longer-word decoy (`cargo runner`, `cargo run-script`).
+
+    F2 -- whole-command `--no-run` exemption looseness. The `cargo test`/`cargo
+    bench` carve-out grepped the ENTIRE command for `--no-run`, so an unrelated
+    `--no-run` in a DIFFERENT top-level segment exempted a genuine RUN
+    (`cargo test --no-run && cargo bench`, `cargo bench --no-run && cargo bench`),
+    and a substring decoy (`cargo bench -- --no-run-decoy`) exempted a real run.
+    The exemption is now segment-scoped (via the repo's quote-aware
+    `split_top_level` splitter) and `--no-run` is matched as a WHOLE flag.
+
+    Every SANCTIONED Tier-0 workaround stays allowed and is locked below: a
+    `--no-run` compile, a direct `target/.../deps/<bin>` execution, a `gcc`/`cc`
+    harness compile, the `# airuleset:build-ok` marker, a Tier-1/2 project marker,
+    and the longer-word decoys `cargo runner`/`cargo run-script`.
+    """
+
+    # ---- F1: trailing-metachar anchor escape (was rc=0, must block) ----
+
+    def test_cargo_build_trailing_semicolon_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo build;", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("BLOCKED", out.stderr)
+
+    def test_cargo_run_trailing_semicolon_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo run;", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_run_trailing_ampersand_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo run&", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_run_in_parens_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("(cargo run)", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_run_piped_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo run|tee log", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_test_trailing_semicolon_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test;", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_bench_trailing_semicolon_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench;", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_mutants_trailing_semicolon_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo mutants;", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_nextest_run_trailing_semicolon_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo nextest run;", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_run_glued_inside_loop_body_is_blocked(self):
+        # `do cargo run; done` -- the `;` glued to `run` escaped the old anchor
+        proj = self._mkproj()
+        out = self.run_hook("for i in 1 2; do cargo run; done", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- F2: --no-run exemption looseness (was rc=0, must block) ----
+
+    def test_unrelated_no_run_does_not_exempt_a_real_bench(self):
+        # the test's own --no-run must not exempt the genuine bench RUN
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run && cargo bench", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_no_run_compile_then_real_bench_run_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench --no-run && cargo bench", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_no_run_substring_decoy_does_not_exempt_bench(self):
+        # `--no-run-decoy` is a bench harness arg, NOT the cargo --no-run flag
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench -- --no-run-decoy", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_no_run_in_unrelated_echo_does_not_exempt_test(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test && echo --no-run", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_no_run_substring_decoy_does_not_exempt_test(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test -- --no-run-decoy", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- SANCTIONED workarounds + decoys: MUST stay allowed (before & after) ----
+
+    def test_cargo_test_no_run_compile_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --workspace", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_cargo_bench_no_run_compile_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench --no-run", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_two_no_run_compiles_chained_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run && cargo bench --no-run", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_cargo_runner_decoy_still_allowed(self):
+        # widened anchor must NOT match `run` followed by a letter
+        proj = self._mkproj()
+        out = self.run_hook("cargo runner", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_cargo_run_script_decoy_still_allowed(self):
+        # widened anchor must NOT match `run` followed by `-`
+        proj = self._mkproj()
+        out = self.run_hook("cargo run-script deploy", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_direct_test_binary_run_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook(
+            "target/debug/deps/harness_rig_lease-abc123 --nocapture", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_gcc_harness_compile_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("gcc -O2 harness.c -o /tmp/harness", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_no_run_flag_only_exempts_test_and_bench_not_build(self):
+        # `cargo build` has no --no-run carve-out, so it still blocks even when
+        # an unrelated `cargo test --no-run` precedes it
+        proj = self._mkproj()
+        out = self.run_hook(
+            "cargo test --no-run && cargo build --release", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_inline_marker_still_bypasses_an_escape_shape(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo run; # airuleset:build-ok reason", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_tier1_marker_still_exempts_an_escape_shape(self):
+        proj = self._mkproj(marker="allowed")
+        out = self.run_hook("cargo run;", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_blocked_escape_shape_is_logged_with_project(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo bench;", proj)
+        self.assertEqual(out.returncode, 2)
+        lines = self.audit_lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("blocked", lines[0])
+        self.assertIn("project=camera-box", lines[0])
+        self.assertIn("cargo bench;", lines[0])
+
+
 if __name__ == "__main__":
     unittest.main()
