@@ -39,7 +39,11 @@ AIRULESET = REPO / "airuleset.py"
 # Distinctive substrings of the #419 decision bullet — sampled from its head,
 # the decisive capability facts (no always-on component, settings-defaults not
 # plugin-settable), the structural clincher, and the re-audit trigger, so the
-# whole decision (not just a header) is proven present and verbatim.
+# whole decision (not just a header) is proven present and verbatim. Every
+# anchor is chosen to be #419-UNIQUE (occurs exactly once in the internals
+# rule) — the generic "Re-audit trigger (per #423's ...)" header is shared
+# verbatim with the sibling #418 bullet, so the re-audit anchor instead pins
+# the #419-specific trigger CONDITION (per-installer skill-subset mechanism).
 DECISION_ANCHORS = [
     "it is DEFERRED-KEEP and the bespoke `airuleset.py install/push` deployer "
     "is KEPT for the WHOLE payload (#419",
@@ -47,7 +51,8 @@ DECISION_ANCHORS = [
     "honors ONLY `agent`+`subagentStatusLine`, so the managed fleet-policy "
     "settings defaults",
     "a plugin channel is ADDITIVE, not a replacement — push never retires",
-    "Re-audit trigger (per #423's permanent native-now process)",
+    "a per-installer skill-subset mechanism flips this KEEP into a real "
+    "migration evaluation",
 ]
 
 
