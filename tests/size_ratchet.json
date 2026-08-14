@@ -174,7 +174,7 @@
     "watchdog/burn_jobs.py": 306,
     "watchdog/cards.py": 535,
     "watchdog/compact.py": 1037,
-    "watchdog/goal.py": 1444,
+    "watchdog/goal.py": 1458,
     "watchdog/repo_health.py": 758,
     "watchdog/usage.py": 380
   },
@@ -190,6 +190,6 @@
     "watchdog/__init__.py::run_once": 2011,
     "watchdog/cards.py::card_reconcile": 314,
     "watchdog/cross_stream.py::gk_request_backstop": 216,
-    "watchdog/goal.py::goal_lane_occupancy_nudge": 328
+    "watchdog/goal.py::goal_lane_occupancy_nudge": 336
   }
 }
