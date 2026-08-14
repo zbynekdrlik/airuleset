@@ -1,9 +1,11 @@
 {
   "files": {
-    "airuleset.py": 13805,
+    "airuleset.py": 12170,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 785,
+    "cli_quals.py": 757,
+    "cli_quals_cmd.py": 517,
     "cli_vault.py": 663,
     "design_gate.py": 834,
     "filedrop/__init__.py": 256,
@@ -21,7 +23,7 @@
     "tests/test_architecture_first_414.py": 120,
     "tests/test_ask_before_assuming.py": 46,
     "tests/test_ask_before_assuming_dropped_rows.py": 576,
-    "tests/test_authority_profiles.py": 3190,
+    "tests/test_authority_profiles.py": 3196,
     "tests/test_autopilot_ci_resilience.py": 71,
     "tests/test_autopilot_dialog_default.py": 144,
     "tests/test_autopilot_lock.py": 798,

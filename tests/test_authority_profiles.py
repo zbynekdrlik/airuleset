@@ -16,6 +16,12 @@ from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
+# #433 cluster I: `_refuse_unless_empty_is_trustworthy` + `cmd_slice_quals`/
+# `cmd_core_quals` moved into the cli_quals_cmd leaf. A test that intercepts the
+# SHARED refusal helper must patch it where those commands RESOLVE the bare name
+# (the leaf's own globals), not on the airuleset facade attr (K-seam, internals
+# #1482).
+import cli_quals_cmd
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -2583,7 +2589,7 @@ class TestEveryStopProofRefusesAnUnansweringSearchIndex(TestCase):
         def recorder(cmd, quals, cwd=None):
             callers.append(cmd)
 
-        with mk.patch.object(airuleset, "_refuse_unless_empty_is_trustworthy",
+        with mk.patch.object(cli_quals_cmd, "_refuse_unless_empty_is_trustworthy",
                              side_effect=recorder):
             _drive(airuleset.cmd_core_quals, _renamed_repo_gh(healthy=True))
             _drive(airuleset.cmd_slice_quals, _renamed_repo_gh(healthy=True),
