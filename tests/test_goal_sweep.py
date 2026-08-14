@@ -32,6 +32,19 @@ from _goal_arm_helpers import (  # noqa: E402
     _write_marker_transcript,
 )
 
+
+def _rearm_ok(cwd):
+    """#478: a resolvable /goal template for a full-authority pane -- lets the
+    dark-watch auto-re-arm fire (module fn, not an assigned lambda: E731)."""
+    return ("/goal x", "full")
+
+
+def _rearm_none(cwd):
+    """#478: an UNRESOLVABLE template -> forces the dark-watch ping FALLBACK
+    (the only path that still pings a workable backlog)."""
+    return (None, "full")
+
+
 class TestGoalSweep(unittest.TestCase):
     CWD = "/home/newlevel/devel/goalsweep"
 
@@ -293,7 +306,10 @@ class TestGoalDarkWatch(unittest.TestCase):
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
         obl = self._obl(5, 1500)                        # workable, fresh
-        rearm = lambda cwd: ("/goal DONE or stop after 50", "full")
+
+        def rearm(cwd):
+            return ("/goal DONE or stop after 50", "full")
+
         self._sweep(tmux, proj, state, sent, 1000, obl, rearm, reqs)   # debounce
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "no re-arm on the first (debounce) observation")
@@ -383,16 +399,28 @@ class TestGoalDarkWatch(unittest.TestCase):
         # #459 — an obligation cache older than GOAL_DARK_CACHE_MAX_AGE_S is
         # not trusted for the re-ping gate (work may have been done elsewhere
         # while the loop sat dark for days). Teeth against dropping freshness.
+        # #478: routed through the template-unresolved ping FALLBACK
+        # (rearm_fn -> None) so the fresh-cache first ping fires as #459 (a
+        # fresh workable cache would otherwise RE-ARM); the stale third sweep
+        # then neither re-pings nor re-arms — the same freshness gate guards
+        # both actions.
         proj, tmux = self._dark("sess-dark-stale")
         sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        rearm = _rearm_none
         base = 1_700_000_000
-        self._sweep(tmux, proj, state, sent, base, lambda c: (5, base - 10))
-        self._sweep(tmux, proj, state, sent, base + 1000, lambda c: (5, base - 10))
+        self._sweep(tmux, proj, state, sent, base, lambda c: (5, base - 10),
+                    rearm, reqs)
+        self._sweep(tmux, proj, state, sent, base + 1000, lambda c: (5, base - 10),
+                    rearm, reqs)
         self.assertEqual(len(sent), 1)
         t = base + 1000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10
         stale_ts = t - goal.GOAL_DARK_CACHE_MAX_AGE_S - 100
-        self._sweep(tmux, proj, state, sent, t, lambda c: (5, stale_ts))
+        self._sweep(tmux, proj, state, sent, t, lambda c: (5, stale_ts),
+                    rearm, reqs)
         self.assertEqual(len(sent), 1, "a stale cache must not re-ping")
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "a stale/unresolved-template path records no re-arm")
 
     def test_re_pinging_is_hard_capped_per_episode(self):
         # #459 — with a cache that stays FRESH and non-empty forever (a
@@ -407,7 +435,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         # #478: stay in the ping FALLBACK (workable but template unresolved),
         # the only path that still re-pings a workable backlog -- so the cap
         # is exercised exactly as #459 intended.
-        rearm = lambda cwd: (None, "full")
+        rearm = _rearm_none
         now = [1_700_000_000]
 
         def obl(cwd):
@@ -443,7 +471,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
         obl = self._obl(5, 1500)                        # workable
-        rearm = lambda cwd: ("/goal x", "full")         # template resolves
+        rearm = _rearm_ok                               # template resolves
         for now in (1000, 2000, 2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10):
             self._sweep(tmux, proj, state, sent, now, obl, rearm, reqs)
         self.assertEqual(sent, [])
@@ -457,7 +485,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
         obl = self._obl(0, 1500)                        # achieved/empty
-        rearm = lambda cwd: ("/goal x", "full")
+        rearm = _rearm_ok
         self._sweep(tmux, proj, state, sent, 1000, obl, rearm, reqs)
         self._sweep(tmux, proj, state, sent, 2000, obl, rearm, reqs)
         self.assertEqual(len(sent), 1, "empty backlog gets the #459 first ping")
@@ -476,7 +504,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
         obl = self._obl(0, 1500)       # workable open==0 (all remaining U-bucket)
-        rearm = lambda cwd: ("/goal x", "full")
+        rearm = _rearm_ok
         self._sweep(tmux, proj, state, sent, 1000, obl, rearm, reqs)
         self._sweep(tmux, proj, state, sent, 2000, obl, rearm, reqs)
         self.assertEqual(goal.load_goal_requests(reqs), {},
@@ -494,7 +522,7 @@ class TestGoalDarkWatch(unittest.TestCase):
                 proj, tmux = self._dark("sess-%s-norearm" % label)
                 sent, state = [], {}
                 reqs = self._dir() / "goal-requests.json"
-                rearm = lambda cwd: ("/goal x", "full")
+                rearm = _rearm_ok
                 self._sweep(tmux, proj, state, sent, base, obl, rearm, reqs)
                 self._sweep(tmux, proj, state, sent, base + 2000, obl, rearm, reqs)
                 self.assertEqual(goal.load_goal_requests(reqs), {},
@@ -509,7 +537,7 @@ class TestGoalDarkWatch(unittest.TestCase):
         proj, tmux = self._dark("sess-dark-rearm-cap")
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
-        rearm = lambda cwd: ("/goal x", "full")
+        rearm = _rearm_ok
         writes = []
         real_record = goal.record_goal_request
 
