@@ -270,6 +270,31 @@ clean_q() {
                      end'
 }
 
+# --- suppression diagnostics (#467) -----------------------------------------
+# Every early RETURN in send_q() that DROPS a question ping writes ONE durable
+# line to the SAME notify-delivery.log the send path uses. Before this, a
+# suppression (a verbatim re-poke dedup, or the question-quality-rewrite
+# settle skip) left ZERO trace anywhere — the exact #467 silence (empty
+# question map AND empty delivery log) that made a lost ask-and-continue
+# question undiagnosable. Diagnostics only: every write is guarded (a
+# read-only $HOME can never turn logging into a dropped ping), rotated at the
+# same cap the send path uses, and dry-run logs nothing (mirrors the send
+# path's own dry-run-logs-nothing contract).
+_pending_log() {
+    # $1 = status, $2 = reason
+    [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ] && return 0
+    local log stamp size
+    log="$HOME/.claude/notify-delivery.log"
+    mkdir -p "$(dirname "$log")" 2>/dev/null || true
+    size=$(stat -c %s "$log" 2>/dev/null || echo 0)
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    [ "$size" -gt 512000 ] && mv -f "$log" "$log.1" 2>/dev/null || true
+    stamp=$(date -Iseconds 2>/dev/null || echo '?')
+    { printf '%s %s kind=pending key=%s reason=%s\n' \
+        "$stamp" "$1" "$SID" "$2" >>"$log"; } 2>/dev/null || true
+    return 0
+}
+
 send_q() {
     # $1 = raw ❓ marker-LINE content (the dedup KEY), $2 = the full question
     # BLOCK payload (from extract_block; falls back to the key when empty).
@@ -295,8 +320,9 @@ send_q() {
     payload=$(clean_q "$2")
     [ -z "$payload" ] && payload="$key"
     [ -z "$key" ] && key="$payload"
-    [ -z "$key" ] && return 0
+    [ -z "$key" ] && { _pending_log "suppressed" "empty-content"; return 0; }
     if [ -f "$LASTQ" ] && [ "$(cat "$LASTQ" 2>/dev/null)" = "$key" ]; then
+        _pending_log "suppressed" "verbatim-repeat-dedup"
         return 0
     fi
 
@@ -311,13 +337,29 @@ send_q() {
     # The suppressed draft writes NO LASTQ, so the final version still pings.
     sleep "${ND_BLOCK_SETTLE:-3}"
     now=$(date +%s)
-    for f in /tmp/airuleset-*-block-"${SID}"; do
-        [ -e "$f" ] || continue
-        m=$(stat -c %Y "$f" 2>/dev/null || echo 0)
-        if [ $((now - m)) -lt 12 ]; then
+    # ONLY the question-quality gate's block means "this QUESTION draft is
+    # being rewritten and the reworded version re-delivers"; every OTHER stop
+    # gate (working-liveness / status-marker / prose / untracked / playbook /
+    # sendmessage / prod-gating) blocks for a reason ORTHOGONAL to the
+    # question, so its marker must never eat a legitimate ping. #467: an
+    # ask-and-continue ⏳ WORKING turn routinely trips working-liveness in a
+    # busy batch (no live background_tasks once the dispatched worker has
+    # returned) — and the OLD broad `airuleset-*-block-${SID}` glob read that
+    # unrelated block as "the question was rejected" and SILENTLY dropped the
+    # ping, with no delivery-log line at all. The genuine double-ping of the
+    # SAME reworded question is still guarded by the LASTQ dedup + reword-edit
+    # below, unchanged. `-L`/`-O` guard a foreign-uid-planted /tmp marker
+    # (shared, sticky /tmp) from suppressing a ping — a planted file fails the
+    # owner test, so the safe direction is taken (the question pings).
+    qqf="/tmp/airuleset-question-quality-block-${SID}"
+    if [ -f "$qqf" ] && [ ! -L "$qqf" ] && [ -O "$qqf" ]; then
+        m=$(stat -c %Y "$qqf" 2>/dev/null || echo 0)
+        case "$m" in ''|*[!0-9]*) m=0 ;; esac
+        if [ "$m" -le "$now" ] && [ $((now - m)) -lt 12 ]; then
+            _pending_log "suppressed" "question-quality-rewrite"
             return 0
         fi
-    done
+    fi
 
     send="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/notify-discord-send.sh"
     # REWORD of a still-unanswered question (LASTQ exists = a ❓ was already
