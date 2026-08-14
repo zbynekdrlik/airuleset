@@ -7856,6 +7856,53 @@ def _gh_out(*gh_args, timeout=8, cwd=None):
         return ""
 
 
+# #370: the whole fleet shares ONE GitHub account → ONE 5000/h GraphQL bucket,
+# and `gh issue list`/`gh repo view` are BOTH `POST /graphql` (measured), so
+# every periodic footer refresh draws on that single shared budget. Default
+# floor: yield cosmetic reads once >80% of the shared budget is spent, keeping
+# ~1000 headroom for the FUNCTIONAL calls (`gh issue create`, autopilot,
+# run-cards) that fail when the bucket hits 0. Env-tunable for the fleet.
+GH_GRAPHQL_REFRESH_FLOOR = 1000
+
+
+def _gh_graphql_floor():
+    """The graphql-budget floor below which cosmetic periodic gh work yields,
+    from `AIRULESET_GH_GRAPHQL_FLOOR` (default `GH_GRAPHQL_REFRESH_FLOOR`).
+    A non-integer/negative override falls back to the default rather than
+    disabling the guard by accident."""
+    try:
+        v = int(os.environ.get("AIRULESET_GH_GRAPHQL_FLOOR", ""))
+        return v if v >= 0 else GH_GRAPHQL_REFRESH_FLOOR
+    except (TypeError, ValueError):
+        return GH_GRAPHQL_REFRESH_FLOOR
+
+
+def _graphql_budget_ok(floor, cwd=None, runner=None):
+    """`(ok, remaining)` for the shared GraphQL rate-limit bucket — whether it
+    has at least `floor` calls left, read from GitHub's FREE `rate_limit`
+    endpoint (`gh api rate_limit` does NOT count against any bucket — measured:
+    graphql.remaining is unchanged across the call).
+
+    Fails OPEN: on ANY probe failure or unparseable payload it returns
+    `(True, None)` so the caller proceeds EXACTLY as it does today. The guard
+    only ever tells a caller to SKIP on POSITIVE evidence of a low budget —
+    it is a pure-additive optimisation, never a new failure mode. (`rate_limit`
+    is itself never rate-limited, so a probe failure means a genuine
+    connectivity/auth problem, in which case the expensive calls would fail
+    too and the existing error path already handles that.)
+
+    On an App-token box (david2/3/4, #356) the token has its OWN 5000/h bucket,
+    so this reads that box's own budget and gates it independently — exactly
+    the right per-box behaviour, no special-casing needed."""
+    run = runner or _gh_out
+    raw = run("api", "rate_limit", cwd=cwd, timeout=8)
+    try:
+        remaining = int(json.loads(raw)["resources"]["graphql"]["remaining"])
+    except (ValueError, TypeError, KeyError):
+        return (True, None)
+    return (remaining >= floor, remaining)
+
+
 def _repo_slug(cwd=None):
     """`owner/repo` via `gh repo view`, or "" on any failure — the REST-API
     slug a hand-off comment-fallback fetch needs (`repos/<slug>/issues/N/
@@ -8143,6 +8190,24 @@ def cmd_tickets_status(args):
     root = _repo_root(cwd, runner=_out)
     if root:
         entry["root"] = root
+        # #370: before ANY of the ~5 GraphQL calls below (repo view + the
+        # per-qual `_union_open_issues` searches + the skipped query, all
+        # `POST /graphql`), yield if the SHARED graphql bucket is low. The
+        # probe is FREE (`gh api rate_limit`), so this adds zero quota; on a
+        # low budget we make zero GraphQL calls and leave the existing cache
+        # untouched, so the footer serves the last-known counts instead of
+        # draining the last of the shared budget on a cosmetic read (the
+        # functional calls — gh issue create / autopilot / run-cards — keep
+        # their headroom). Fails OPEN, so an unmeasurable budget proceeds
+        # exactly as before. A later render re-probes (free) under the same
+        # 120s TTL + 30s spawn-guard cadence and resumes real refreshes once
+        # the budget recovers.
+        floor = _gh_graphql_floor()
+        budget_ok, remaining = _graphql_budget_ok(floor, cwd=root)
+        if not budget_ok:
+            print("skipped: graphql budget low (remaining=%s < floor=%s) — "
+                  "served stale cache" % (remaining, floor))
+            return
         slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
                      "-q", ".nameWithOwner"], root)
         entry["name"] = slug.rstrip("/").split("/")[-1] if slug else ""
