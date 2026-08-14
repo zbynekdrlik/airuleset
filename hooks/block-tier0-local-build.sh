@@ -96,16 +96,120 @@ _log_tier0_event() {
     { echo "$(date -Iseconds)  project=$project  $tag  cmd=${cmd_flat}" >> "$AUDIT_LOG"; } 2>/dev/null || true
 }
 
+# #471 (F2): segment-scoped `--no-run` exemption for the `--no-run`-gated cargo
+# shapes (`test`/`bench`). The old whole-command `--no-run` grep wrongly exempted
+# a genuine RUN sitting in a DIFFERENT top-level segment (`cargo test --no-run &&
+# cargo bench`, `cargo bench --no-run && cargo bench`) and matched `--no-run` as a
+# SUBSTRING of an unrelated harness arg (`cargo bench -- --no-run-decoy`). This
+# reuses the repo's quote-aware `split_top_level` splitter (from
+# hooks/block-ungated-issue-filing.sh, itself from block-gh-invalid-json-flag.sh
+# -- copied inline per this repo's per-hook-inline-Python convention; a bash hook
+# has no shared library to import from) to scope the exemption to the segment the
+# invocation actually sits in: HEAVY iff some top-level segment invokes
+# `cargo <sub>` in command position WITHOUT a WHOLE-flag `--no-run` in THAT same
+# segment. It runs ONLY when the caller's outer per-shape grep already matched AND
+# a whole-flag `--no-run` is actually present, so the hot path (every Bash command)
+# pays nothing extra.
+#
+# Accepted residual (#471-review, THEORETICAL/MINOR): a `--no-run` that follows a
+# harness `--` separator (`cargo test -- --no-run>log`) is regex-indistinguishable
+# from the real cargo flag and now exempts. It is a pre-existing decoy class (the
+# space/EOL form `cargo test -- --no-run` already exempted), unrunnable (libtest
+# rejects `--no-run` as a harness arg), and closing it needs `--`-position parsing
+# -- out of scope for this symmetric-widening fix.
+_gated_shape_is_heavy() {
+    # $1 = command (quotes already stripped by the caller); $2 = subcommand
+    # (`test` / `bench`). python exit 0 = heavy. Any python failure returns
+    # non-zero -- the caller then treats this exactly like the pre-#471 exempt
+    # path (allowed), never a fail-toward-block, so a broken python3 can never
+    # false-block a real `cargo test --no-run`.
+    python3 - "$1" "$2" 2>/dev/null <<'PYEOF'
+import re
+import sys
+
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+sub = sys.argv[2] if len(sys.argv) > 2 else ""
+
+
+def split_top_level(text):
+    # QUOTE-AWARE top-level split on &&/||/;/&/|/newline, reused verbatim from
+    # hooks/block-ungated-issue-filing.sh's own split_top_level. The input is
+    # already quote-stripped by the caller, so the quote-awareness is
+    # belt-and-suspenders; reusing the same splitter also inherits its
+    # backslash-escape handling.
+    segs, buf, i, n, quote = [], [], 0, len(text), None
+    while i < n:
+        c = text[i]
+        if quote:
+            buf.append(c)
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            buf.append(c)
+            buf.append(text[i + 1])
+            i += 2
+            continue
+        if text[i:i + 2] in ("&&", "||"):
+            segs.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        if c in (";", "&", "|", "\n"):
+            segs.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    segs.append("".join(buf))
+    return segs
+
+
+anchor = re.compile(r"(^|[;&|(\s])cargo\s+" + re.escape(sub) + r"(\s|$|[;&|)(<>])")
+# #471-review: the --no-run boundary is widened to the SAME metachar class as
+# the heavy-token anchors, so a `--no-run` glued to a trailing `;`/`)`/`|`/... is
+# still recognized as the compile-only flag (a `--no-run-decoy` harness arg,
+# followed by `-`, still does NOT match and stays heavy).
+norun = re.compile(r"(^|\s)--no-run(\s|$|[;&|)(<>])")
+for seg in split_top_level(cmd):
+    if anchor.search(seg) and not norun.search(seg):
+        sys.exit(0)   # heavy: a real run with no --no-run in its own segment
+sys.exit(1)
+PYEOF
+}
+
 # Is it a HEAVY build? (cargo check / clippy / cargo test --no-run are NOT)
 is_heavy() {
     local c="$1"
-    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+build([[:space:]]|$)' && return 0
+    # #471 (F1): every closing anchor widened `([[:space:]]|$)` ->
+    # `([[:space:]]|$|[;&|)(<>])` so a shell metachar glued directly to the
+    # subcommand token (`cargo run;`, `(cargo run)`, `cargo run|tee`, `cargo run&`)
+    # no longer escapes, while a longer-word decoy (`cargo runner`, `cargo
+    # run-script`) still does not match (the char after `run` there is a letter/
+    # `-`, neither whitespace/EOL nor a metachar). The tauri/trunk/wasm-pack shapes
+    # below have NO closing anchor -- they match a prefix regardless of the
+    # trailing char -- so F1 does not apply to them.
+    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+build([[:space:]]|$|[;&|)(<>])' && return 0
     printf '%s' "$c" | grep -qE 'cargo[- ]tauri[[:space:]]+build' && return 0
     printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])trunk[[:space:]]+build' && return 0
     printf '%s' "$c" | grep -qE 'wasm-pack[[:space:]]+build' && return 0
-    # `cargo test` that RUNS tests (NOT the compile-only `--no-run`)
-    if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+test([[:space:]]|$)'; then
-        printf '%s' "$c" | grep -qE -- '--no-run' || return 0
+    # `cargo test` that RUNS tests (NOT the compile-only `--no-run`). #471 (F2):
+    # no WHOLE-flag `--no-run` anywhere -> heavy on the fast path (no python); a
+    # whole-flag `--no-run` present -> the segment helper decides (a genuine run
+    # in a different segment, or a `--no-run-decoy` harness arg, still blocks).
+    if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+test([[:space:]]|$|[;&|)(<>])'; then
+        if printf '%s' "$c" | grep -qE '(^|[[:space:]])--no-run([[:space:]]|$|[;&|)(<>])'; then
+            _gated_shape_is_heavy "$c" 'test' && return 0
+        else
+            return 0
+        fi
     fi
     # #470: heavy compile/run cargo subcommands that escaped the build/test
     # regexes and ran SILENTLY (no block, no audit line) -- camera-box provably
@@ -117,19 +221,23 @@ is_heavy() {
     #
     #   cargo run     -- compiles + runs the binary (no cheap subcommand)
     #   cargo mutants -- compiles + runs the whole mutation set
-    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+run([[:space:]]|$)' && return 0
-    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+mutants([[:space:]]|$)' && return 0
+    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+run([[:space:]]|$|[;&|)(<>])' && return 0
+    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+mutants([[:space:]]|$|[;&|)(<>])' && return 0
     # `cargo nextest run` -- the real CI test runner (compiles + runs); the
     # compile-only `cargo nextest list` is a cheap check and is NOT matched.
-    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+nextest[[:space:]]+run([[:space:]]|$)' && return 0
+    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+nextest[[:space:]]+run([[:space:]]|$|[;&|)(<>])' && return 0
     # `cmake --build <dir>` -- the vendored-libobs C build documented for local
     # dev1 use (vendor/BUILD.md). The `cmake -S . -B` configure step is light
     # and is NOT matched -- only `--build` is heavy.
-    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cmake[[:space:]]+--build([[:space:]]|$)' && return 0
-    # `cargo bench` that RUNS benches (NOT the compile-only `--no-run`, mirroring
-    # the `cargo test` carve-out above).
-    if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+bench([[:space:]]|$)'; then
-        printf '%s' "$c" | grep -qE -- '--no-run' || return 0
+    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cmake[[:space:]]+--build([[:space:]]|$|[;&|)(<>])' && return 0
+    # `cargo bench` that RUNS benches (NOT the compile-only `--no-run`, same #471
+    # (F2) segment-scoped treatment as the `cargo test` carve-out above).
+    if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+bench([[:space:]]|$|[;&|)(<>])'; then
+        if printf '%s' "$c" | grep -qE '(^|[[:space:]])--no-run([[:space:]]|$|[;&|)(<>])'; then
+            _gated_shape_is_heavy "$c" 'bench' && return 0
+        else
+            return 0
+        fi
     fi
     return 1
 }
