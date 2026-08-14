@@ -8947,6 +8947,30 @@ AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 # (2026-07-20). A shared-account box scopes its slice by the stream LABEL only.
 MAINTAINER_GH_LOGIN = "zbynekdrlik"
 
+# The GitHub App whose INSTALLATION token every odoo-erp subdev stream
+# (montalu, montalu2/3/4, marek, david2/3/4) authenticates `gh` as after the
+# App-token migration (odoo-erp #3284, 2026-08-11). On such a box `gh api user`
+# returns `403 Resource not accessible by integration` — an App installation
+# token carries no user identity (see `cli_quals._is_gh_app_token_box()`'s own
+# docstring) — so the box's OWN identity for the self-authored-close carve-out
+# in `block-fork-no-merge-issue-close.sh` cannot be read from /user. But every
+# ticket the stream FILES is authored by this fixed bot identity, so THAT is
+# the box's self-close identity. Rendered in the GraphQL `app/<slug>` form
+# because the hook compares it against `gh issue view --json author -q
+# .author.login`, which renders this bot as exactly `app/odoo-erp-stream-tokens`
+# (verified live 2026-08-14; the REST `.user.login` form is the different
+# `odoo-erp-stream-tokens[bot]`, which the hook never reads).
+#
+# Scope (#463 adversarial review T-1): every montalu-family box authenticates as
+# this SAME shared App identity, so the self-close carve-out fires for ANY ticket
+# authored by it — including a sub-finding filed by a DIFFERENT subdev stream, not
+# only the box's own. This is broader than strict per-stream self-close but is NOT
+# a maintainer-review bypass: maintainer-ASSIGNED work is filed from dev1 and
+# authored by MAINTAINER_GH_LOGIN (`zbynekdrlik`), never this App identity, so it
+# stays blocked. Only self-vs-maintainer distinguishability is what the guard needs
+# and preserves; stream-A-own vs stream-B-own is deliberately not distinguished.
+STREAM_APP_BOT_LOGIN = "app/odoo-erp-stream-tokens"
+
 
 def _current_user() -> str:
     import getpass
@@ -9742,6 +9766,16 @@ def main():
                              "sub-finding apart from the maintainer-authored "
                              "assigned work every such stream shares an "
                              "identity with)")
+    p_auth.add_argument("--self-login", action="store_true",
+                        help="Print THIS box's own gh identity for the "
+                             "self-authored-close carve-out in "
+                             "block-fork-no-merge-issue-close.sh (#463): on a "
+                             "GitHub App-token box `gh api user` 403s, so return "
+                             "the fixed stream bot login (STREAM_APP_BOT_LOGIN) "
+                             "without a network call; on every other box return "
+                             "the real gh login. Prints nothing when the "
+                             "identity cannot be resolved (the hook then refuses "
+                             "the exemption / fails safe).")
 
     p_slice = sub.add_parser(
         "slice-quals",

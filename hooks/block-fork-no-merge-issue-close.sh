@@ -96,7 +96,21 @@ fi
 ISSUE_NUM=$(printf '%s' "$CMD" | grep -oE 'gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?([0-9]+)' | grep -oE '[0-9]+' | head -1 || echo "")
 REPO_ARG=$(printf '%s' "$CMD" | grep -oE '(-R|--repo)[[:space:]=]+"?[A-Za-z0-9._/-]+' | head -1 | sed -E 's/^(-R|--repo)[[:space:]=]+"?//' || echo "")
 if [ -n "$ISSUE_NUM" ]; then
-    ME=$(gh api user -q .login 2>/dev/null || echo "")
+    # THIS box's own gh identity. NOT a raw `gh api user` — on a GitHub
+    # App-token box (odoo-erp #3284: montalu/2/3/4, marek, david2/3/4) that
+    # 403s structurally ("Resource not accessible by integration"), leaving ME
+    # empty and the self-authored carve-out permanently unreachable even for a
+    # genuinely App-authored sub-finding (#463). `authority --self-login`
+    # returns the fixed stream bot login on such a box (no network call) and
+    # the real `gh api user` login (via `_gh_login()`) on every other box — a
+    # box whose gh resolves identically stays behaviourally the same, and a
+    # git-credentials-only box (david's fork-no-merge) is a strict FAIL-SAFE
+    # improvement: the old raw `gh api user` failed there (empty ME -> carve-out
+    # broken) while `_gh_login()` resolves its real login; every divergence
+    # still fails toward BLOCK, never a wrong-allow (#463 adversarial review).
+    # The App identity (distinct from the maintainer) restores the
+    # self-vs-assigned distinguishability the pre-App shared-PAT setup destroyed.
+    ME=$(python3 "$REPO_DIR/airuleset.py" authority --self-login 2>/dev/null || echo "")
     MAINTAINER_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --maintainer-login 2>/dev/null || echo "")
     if [ -n "$REPO_ARG" ]; then
         AUTHOR=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json author -q .author.login 2>/dev/null || echo "")
