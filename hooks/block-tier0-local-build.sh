@@ -107,6 +107,30 @@ is_heavy() {
     if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+test([[:space:]]|$)'; then
         printf '%s' "$c" | grep -qE -- '--no-run' || return 0
     fi
+    # #470: heavy compile/run cargo subcommands that escaped the build/test
+    # regexes and ran SILENTLY (no block, no audit line) -- camera-box provably
+    # runs all of these locally (STEP 0 evidence + the #470 inventory). Same
+    # command-position anchor as above so a quoted mention or an argument is
+    # never matched; the SANCTIONED Tier-0 workarounds (a `--no-run` compile, a
+    # direct `target/.../deps/<bin>` execution, a `gcc`/`cc` harness compile)
+    # stay untouched -- none of them contains one of these command shapes.
+    #
+    #   cargo run     -- compiles + runs the binary (no cheap subcommand)
+    #   cargo mutants -- compiles + runs the whole mutation set
+    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+run([[:space:]]|$)' && return 0
+    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+mutants([[:space:]]|$)' && return 0
+    # `cargo nextest run` -- the real CI test runner (compiles + runs); the
+    # compile-only `cargo nextest list` is a cheap check and is NOT matched.
+    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+nextest[[:space:]]+run([[:space:]]|$)' && return 0
+    # `cmake --build <dir>` -- the vendored-libobs C build documented for local
+    # dev1 use (vendor/BUILD.md). The `cmake -S . -B` configure step is light
+    # and is NOT matched -- only `--build` is heavy.
+    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cmake[[:space:]]+--build([[:space:]]|$)' && return 0
+    # `cargo bench` that RUNS benches (NOT the compile-only `--no-run`, mirroring
+    # the `cargo test` carve-out above).
+    if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+bench([[:space:]]|$)'; then
+        printf '%s' "$c" | grep -qE -- '--no-run' || return 0
+    fi
     return 1
 }
 
