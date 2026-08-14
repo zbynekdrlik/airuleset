@@ -330,5 +330,41 @@ class TestAdversarialContentShapes(_RunCard):
         self.assertIn("Oprava nasadená", body)
 
 
+class TestRepoNameQueryFlagOnRunCardFailsLoud(_RunCard):
+    """#476: `--repo-name` is a read-only query/print flag whose branch in
+    `cmd_notify` is checked and RETURNs BEFORE the `--run-card` send branch. A
+    caller who typos `--repo-name` for `--repo` on a `--run-card` invocation
+    used to short-circuit into the print path, print the repo name, and exit 0
+    with NO card sent -- a silent no-send that looked like success (codex-bridge,
+    2026-08-14: three cards "sent", zero delivered). The combination must fail
+    LOUD (non-zero) instead of silently short-circuiting."""
+
+    def test_repo_name_on_run_card_exits_nonzero_and_sends_nothing(self):
+        args = _run_card_args(repo_name=True, cwd=".")
+        body, err, code = self._send(args)
+        self.assertIsNone(body, "no card body may reach send()")
+        self.assertEqual(code, 1,
+                         "a read-only query flag on --run-card must exit "
+                         "non-zero, never silently print+exit0")
+        self.assertIn("read-only", err.lower())
+        self.assertIn("--repo", err)
+
+    def test_every_read_only_query_flag_on_run_card_is_refused(self):
+        for flag in ("repo_name", "channel_id", "owner", "mirror_owners",
+                     "project_label", "newest_card", "mention_prefix"):
+            with self.subTest(flag=flag):
+                args = _run_card_args(cwd=".", **{flag: True})
+                body, _err, code = self._send(args)
+                self.assertIsNone(body, flag)
+                self.assertEqual(code, 1, flag)
+
+    def test_a_clean_run_card_without_any_query_flag_still_sends(self):
+        # Guardrail: the conflict guard must not touch the ordinary send path.
+        args = _run_card_args()
+        body, err, code = self._send(args)
+        self.assertIsNone(code, err)
+        self.assertIsNotNone(body, "a clean --run-card must still send")
+
+
 if __name__ == "__main__":
     unittest.main()
