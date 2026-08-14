@@ -7978,6 +7978,15 @@ def _watchdog_gkreq_fetch(root):
     return _fetch_gkreq_tickets(root)
 
 
+def _watchdog_owner_decision_fetch(home=None):
+    """#461 daily owner-decision digest fetch — the box-wide aggregate of open
+    `needs-answer`/`needs-decision` tickets. Wired here (not inside run_once) so
+    every OTHER job's run_once unit test stays network-free, exactly like the
+    job 8/11 bounce/gk-request fetches."""
+    from watchdog import _fetch_owner_decision_tickets
+    return _fetch_owner_decision_tickets(home)
+
+
 def _watchdog_card_probe(root, base):
     """Job 25's confirming fetch (#134).
 
@@ -8412,6 +8421,10 @@ def cmd_watchdog(args):
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
                     gkreq_fetch=_watchdog_gkreq_fetch,
+                    # #461 — the daily owner-decision ticket digest fires from
+                    # run_once's #368 daily-reask section, gated on this fetch
+                    # being wired (network-free tests for every other job).
+                    owner_decision_fetch=_watchdog_owner_decision_fetch,
                     # Job 24 (#138) runs on EVERY managed box — a loop whose
                     # merges have stopped is a per-repo failure, not a
                     # coordinator-only one, and the box that hosts the loop
