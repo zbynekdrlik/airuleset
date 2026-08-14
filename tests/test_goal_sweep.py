@@ -329,18 +329,23 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertEqual(len(sent), 1, "a stale cache must not re-ping")
 
     def test_re_pinging_is_hard_capped_per_episode(self):
-        # #459 — even with work remaining forever, re-pings stop at
-        # GOAL_DARK_REPING_MAX total pings for one dark episode.
+        # #459 — with a cache that stays FRESH and non-empty forever (a
+        # stalled session that keeps re-rendering its statusline), the ONLY
+        # thing that can bound the ping count is the hard cap. (A FROZEN
+        # cache instead ages out at GOAL_DARK_CACHE_MAX_AGE_S — the stale
+        # test above — so the freshness gate is the practical bound for a
+        # genuinely dead loop; the cap backstops the fresh-cache case.)
         proj, tmux = self._dark("sess-dark-cap")
         sent, state = [], {}
-        obl = self._obl(5, 1_700_000_000)
-        now = 1_700_000_000
-        self._sweep(tmux, proj, state, sent, now, obl)       # first observation
-        # Walk far enough past every schedule stage, many times over, so the
-        # ONLY thing that can bound the ping count is the hard cap.
+        now = [1_700_000_000]
+
+        def obl(cwd):
+            return (5, now[0] - 60)          # always fresh (60s before now)
+
+        self._sweep(tmux, proj, state, sent, now[0], obl)    # first observation
         for _ in range(goal.GOAL_DARK_REPING_MAX + 8):
-            now += 30 * 3600                                  # > final stage (24h)
-            self._sweep(tmux, proj, state, sent, now, obl)
+            now[0] += 30 * 3600                              # > final stage (24h)
+            self._sweep(tmux, proj, state, sent, now[0], obl)
         self.assertEqual(len(sent), goal.GOAL_DARK_REPING_MAX,
                          "re-pings must be hard-capped per episode")
 

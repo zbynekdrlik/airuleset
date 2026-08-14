@@ -76,6 +76,30 @@ def _load(path):
         return None
 
 
+def obligation_count(cwd, home=None):
+    """The LIVE obligation-ticket count for `cwd`, read from the SAME
+    machine-local tickets-status cache `tickets_segment` renders. Returns
+    `(open: int | None, ts: float | None)`: the cache's `open` field (which
+    is, by construction, `core-quals`/`slice-quals`'s own /goal stop-proof
+    count — `len(mine) - gk` for a reduced-authority stream) plus the cache
+    write time. `(None, None)` when the cache is absent/unparseable or
+    carries no int `open`. Reads only — never spawns a refresh, never
+    touches the network; the sole caller (watchdog `goal_dark_watch`, #459)
+    uses `open > 0` as its death-vs-achievement discriminator ("the goal's
+    own SLICE-EMPTY stop condition is NOT met, so this dark goal is a
+    genuine stall, not a legitimately-achieved completion")."""
+    if not cwd:
+        return None, None
+    cache = _load(cache_dir(home) / (cwd_key(cwd) + ".json"))
+    if not isinstance(cache, dict):
+        return None, None
+    open_n = cache.get("open")
+    if not isinstance(open_n, int):
+        return None, None
+    ts = cache.get("ts")
+    return open_n, (ts if isinstance(ts, (int, float)) else None)
+
+
 def _spawn_refresh(cwd, home=None):
     """Kick a DETACHED `tickets-status --refresh` for `cwd` — guarded by a marker
     mtime so a burst of statusline renders spawns at most one per SPAWN_GUARD_S."""
