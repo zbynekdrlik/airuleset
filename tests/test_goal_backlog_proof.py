@@ -1037,3 +1037,50 @@ class TestParkedWorkNeverBlocksTermination(TestCase):
                     + "✅ DONE: hotovo\n")
             holds, reason = backlog_empty_holds(turn, profile)
             self.assertTrue(holds, reason)
+
+
+class TestUserWaitingTicketsAreParkedNotWorkable(TestCase):
+    """#468 — a ticket parked on the USER's answer (`needs-answer`/
+    `needs-decision`) is the USER's responsibility, not this box's: it LEAVES
+    the workable `core-quals`/`slice-quals --count` and never blocks 🏁, but it
+    is SURFACED so nothing is hidden (`U N` in the reduced templates' pasted
+    footer; a named clause in the full template). Locks the template text that
+    tells the loop this — the runtime exclusion is locked by
+    test_user_waiting_split.py."""
+
+    def test_full_template_states_user_waiting_is_parked_never_blocking(self):
+        line = goal_lines()[FULL]
+        self.assertIn("needs-decision", line,
+                      "full template must name needs-decision as user-waiting")
+        self.assertIn("never blocks 🏁", line,
+                      "full template must state a user-waiting ticket never blocks 🏁")
+
+    def test_reduced_templates_surface_user_waiting_in_the_parked_clause(self):
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            line = goal_lines()[profile]
+            self.assertIn("U N", line,
+                          "reduced template %d must name the U N parked bucket"
+                          % profile)
+            self.assertIn("never blocks 🏁", line,
+                          "reduced template %d must state parked work never blocks 🏁"
+                          % profile)
+
+    def test_a_nonzero_user_waiting_count_in_the_footer_still_lets_B_hold(self):
+        # SURFACE-ONLY, exactly like the gk lock above: a pasted `U N` of any
+        # value is as valid a proof as none — the loop parks on it, never
+        # claims it as its own remaining workable work.
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            turn = (_proof_block(profile)
+                    + "$ python3 ~/devel/airuleset/airuleset.py tickets-status --refresh ...\n"
+                    + "I 0 · U 2\n"
+                    + MARKER + " 0 open, released\n"
+                    + "✅ DONE: hotovo\n")
+            holds, reason = backlog_empty_holds(turn, profile)
+            self.assertTrue(holds, reason)
+
+    def test_the_new_clause_keeps_every_template_within_the_cap(self):
+        for i, line in enumerate(goal_lines()):
+            self.assertLessEqual(
+                len(line), 4000,
+                "template %d over the 4000-char /goal cap after the #468 clause"
+                % i)

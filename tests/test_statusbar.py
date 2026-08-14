@@ -33,7 +33,7 @@ import statusbar
 
 
 def _seed_cache(home, cwd, open_n=None, name="", ts=None, gk=None, scope=None,
-                skipped=None):
+                skipped=None, user_waiting=None):
     d = statusbar.cache_dir(home)
     d.mkdir(parents=True, exist_ok=True)
     entry = {"open": open_n, "name": name, "root": str(cwd),
@@ -44,6 +44,8 @@ def _seed_cache(home, cwd, open_n=None, name="", ts=None, gk=None, scope=None,
         entry["scope"] = scope
     if skipped is not None:
         entry["skipped"] = skipped
+    if user_waiting is not None:
+        entry["user_waiting"] = user_waiting
     (d / (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(entry))
 
 
@@ -1544,6 +1546,131 @@ class SkippedBucket(unittest.TestCase):
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(cache["open"], 3)
             self.assertEqual(cache["skipped"], 2)
+
+
+class UserWaitingSegment(unittest.TestCase):
+    """#468 — a `· U N` bucket for tickets parked on the USER's answer
+    (`needs-answer`/`needs-decision`). They LEAVE the workable `I N` count (they
+    are the user's responsibility, not this box's) and render orange-adjacent,
+    hidden at 0, on BOTH scopes (a full box's core tickets and a sub-dev's own
+    slice can both be parked on the user)."""
+
+    def _seg(self, home, cwd):
+        return statusbar.tickets_segment(cwd, home=home, spawn=False)
+
+    def test_render_shows_user_waiting_when_positive(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=17, name="demo", user_waiting=2)
+            seg = self._seg(home, cwd)
+            self.assertIn("I 17", seg)
+            self.assertIn("U 2", seg)
+
+    def test_render_hides_user_waiting_at_zero_or_missing(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=12, name="demo", user_waiting=0)
+            self.assertNotIn("U ", self._seg(home, cwd))
+            # a legacy cache with NO user_waiting key must not crash + not render U
+            _seed_cache(home, cwd, open_n=12, name="demo")
+            seg = self._seg(home, cwd)
+            self.assertIn("I 12", seg)
+            self.assertNotIn("U ", seg)
+
+    def test_render_combines_user_waiting_with_gk_and_skip(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=3, name="demo", gk=5, scope="mine",
+                        skipped=2, user_waiting=4)
+            seg = self._seg(home, cwd)
+            self.assertIn("I 3", seg)
+            self.assertIn("U 4", seg)
+            self.assertIn("gk 5", seg)
+            self.assertIn("skip 2", seg)
+
+    def test_render_shows_user_waiting_on_a_full_authority_cache(self):
+        with TemporaryDirectory() as home:
+            cwd = "/home/x/devel/demo"
+            _seed_cache(home, cwd, open_n=8, name="demo", scope="core",
+                        user_waiting=3)
+            seg = self._seg(home, cwd)
+            self.assertIn("I 8", seg)
+            self.assertIn("U 3", seg)
+            self.assertNotIn("gk", seg)   # full box has no gk bucket
+
+    def test_refresh_full_authority_partitions_user_waiting_out_of_open(self):
+        # The obligation union returns 5 rows; #4/#5 carry needs-answer/
+        # needs-decision → open=3 (workable), user_waiting=2. ONE fetch, one
+        # partition — the footer and the /goal stop-proof cannot disagree.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            FIVE = json.dumps([
+                {"number": 1, "labels": [{"name": "bug"}]},
+                {"number": 2, "labels": []},
+                {"number": 3, "labels": [{"name": "enhancement"}]},
+                {"number": 4, "labels": [{"name": "needs-answer"}]},
+                {"number": 5, "labels": [{"name": "needs-decision"}]}])
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/demo";;\n'
+                '  *"--search label:autopilot-skip"*) echo 0;;\n'
+                "  *) echo '%s';;\n" % FIVE +
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache["open"], 3, "user-waiting must leave I N")
+            self.assertEqual(cache["user_waiting"], 2)
+            seg = statusbar.tickets_segment(repo, home=home, spawn=False)
+            self.assertIn("I 3", seg)
+            self.assertIn("U 2", seg)
+
+    def test_refresh_reduced_authority_partitions_user_waiting_out_of_open(self):
+        # own-account slice {1,4} ∪ {2}; #4 needs-answer + #2 needs-decision are
+        # user-waiting → open (own unhandled workable) = {1} = 1, user_waiting=2.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            A = json.dumps([{"number": 1, "labels": [{"name": "bug"}]},
+                            {"number": 4, "labels": [{"name": "needs-answer"}]}])
+            B = json.dumps([{"number": 2, "labels": [{"name": "needs-decision"}]}])
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  */comments*) echo "[]";;\n'
+                '  *"--search label:autopilot-skip"*) echo "[]";;\n'
+                '  *assignee:@me*) echo \'%s\';;\n' % A +
+                '  *author:@me*)   echo \'%s\';;\n' % B +
+                '  *label:stream:*) echo "[]";;\n'
+                '  *) echo "kvaskodev";;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(cache.get("scope"), "mine")
+            self.assertEqual(cache["open"], 1, "user-waiting must leave I N")
+            self.assertEqual(cache["user_waiting"], 2)
 
 
 class AutopilotProgressFeed(unittest.TestCase):
