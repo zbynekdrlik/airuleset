@@ -80,6 +80,40 @@ class TestAcquireRelease(TestCase):
         self.assertEqual(r2.returncode, 1, r2.stdout + r2.stderr)
         self.assertIn(str(me), r2.stdout + r2.stderr)
 
+    def test_blocked_message_reflects_narrowed_integration_mutex(self):
+        # (#462) Under (#456) the (#8) lock guards INTEGRATION exclusivity
+        # ONLY -- parallel worktree DISPATCH is sanctioned and unlimited by
+        # it. So the acquire-failure (exit 1) stderr must NOT tell the reader
+        # to stop dispatching: exit 1 means "do not INTEGRATE this repo now,
+        # keep dispatching new lanes, re-check next turn". The pre-(#456)
+        # wording ("Serial-per-repo dispatch ... do NOT dispatch a second
+        # worker") is a live model-facing COUNTER-instruction at the exact
+        # decision point. This drives the real CLI subprocess so it locks the
+        # ACTUAL emitted message, never the source string.
+        import os
+        me = os.getpid()
+        r1 = run(["acquire", "--repo", self.repo, "--pid", str(me)])
+        self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
+        r2 = run(["acquire", "--repo", self.repo, "--pid", "1234567890"])
+        self.assertEqual(r2.returncode, 1, r2.stdout + r2.stderr)
+        msg = r2.stdout + r2.stderr
+        # the stale dispatch-lock counter-instruction is gone
+        self.assertNotIn(
+            "do NOT dispatch a second worker", msg,
+            "stale pre-(#456) counter-instruction must be removed: " + msg)
+        self.assertNotIn(
+            "Serial-per-repo dispatch", msg,
+            "stale pre-(#456) dispatch-lock framing must be removed: " + msg)
+        # narrowed-mutex truth present: INTEGRATION exclusivity, keep dispatching
+        self.assertIn(
+            "integrat", msg.lower(),
+            "must frame exit 1 as an INTEGRATION-exclusivity block: " + msg)
+        self.assertIn(
+            "keep dispatching", msg.lower(),
+            "must affirm dispatch continues under this lock: " + msg)
+        # the holder pid is still surfaced (unchanged diagnostic)
+        self.assertIn(str(me), msg)
+
     def test_acquire_steals_stale_lock_held_by_dead_pid(self):
         home = tempfile.mkdtemp()
         dp = dead_pid()

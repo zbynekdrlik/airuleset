@@ -323,5 +323,43 @@ class TestStubModuleObligationsAreRestatedWorkerSide(unittest.TestCase):
         self.assertEqual(missing, [], "\n".join(missing))
 
 
+class TestWorkerDocDescribesContinuousIntegration(unittest.TestCase):
+    """(#462) agents/autopilot-worker.md must describe the supervisor
+    integrating ready branches CONTINUOUSLY under the (#8) integration mutex --
+    one integration cycle (merge->gates->push) at a time as each branch
+    returns -- NOT the pre-(#456) "ONCE for the whole round after every worker
+    returned" model. The worker still stops at green-local (step 4); only the
+    description of WHEN the supervisor integrates changed. This is a doc lock:
+    a reduced-context session reading the stale round-wording is misled about
+    when its returned branch is picked up."""
+
+    def setUp(self):
+        self.text = WORKER_MD.read_text(encoding="utf-8")
+
+    def test_stale_once_per_round_integration_timing_is_gone(self):
+        self.assertNotIn(
+            "ONCE for the whole round", self.text,
+            "pre-(#456) once-per-round integration timing must be reworded")
+        # normalise the hyphen so 'round-integration' and 'round integration'
+        # are both caught; the genuinely-correct DISPATCH-round uses (sibling
+        # workers dispatched in the SAME round, per-round scratchpad namespacing)
+        # never spell the two words adjacent, so this only catches the stale
+        # integration-timing phrasing.
+        flat = self.text.replace("-", " ")
+        self.assertNotIn(
+            "round integration", flat,
+            "pre-(#456) 'round-integration' timing phrasing must be reworded")
+
+    def test_continuous_integration_phrasing_is_present(self):
+        self.assertIn(
+            "integration mutex", self.text,
+            "must name the (#456) integration mutex the supervisor holds "
+            "per integration cycle")
+        self.assertIn(
+            "one integration cycle at a time", self.text,
+            "must describe continuous, one-cycle-at-a-time integration as "
+            "branches return")
+
+
 if __name__ == "__main__":
     unittest.main()
