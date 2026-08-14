@@ -677,20 +677,21 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("no measurable open backlog" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
-    def test_live_worker_present_small_backlog_refuses(self):
-        # #442 re-fix 2: (2 workers, backlog 5) -> silent. Under-saturated
-        # (2 < GOAL_LANE_SATURATION_WORKERS) but the backlog is small
-        # (5 <= GOAL_LANE_UNDERSAT_BACKLOG_MIN), so no fill nudge. This REPLACES
-        # the old "occupied" reason: worker presence is now a COUNT decision, so
-        # 2 workers is under-saturated, not blanket "occupied".
+    def test_live_worker_present_small_backlog_now_nudges(self):
+        # #481: floor = min(5, backlog). (2 workers, backlog 5) -> floor 5,
+        # 2 < 5 -> NUDGE. This INVERTS the old #442 behaviour (the old
+        # backlog>10 hard gate made this skip:backlog-small); the owner's
+        # semantics is `active_workers < min(5, workable_backlog)`, so a
+        # small-but-real backlog with idle lanes must be filled.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=2):
-            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
-        self.assertFalse(owns)
-        self.assertTrue(any("under-saturated but backlog" in ln for ln in logs),
-                        logs)
-        self.assertEqual(tmux.sent, [])
+        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 5,
+                                          now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
     # ---------------------------------------------------------------- #
     # #442 re-fix 2 (REOPEN č.2 + owner directives 2026-08-14) -- the
@@ -861,16 +862,19 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
                             for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
-    def test_undersaturated_small_backlog_logs_skip_backlog_small(self):
-        # The under-saturated small-backlog skip carries the `skip:backlog-small`
-        # decision name (item 3) alongside its existing wording.
+    def test_min_floor_saturates_below_five_when_backlog_is_small(self):
+        # #481: floor = min(5, backlog). (3 workers, backlog 3) -> floor 3,
+        # 3 >= 3 -> SATURATED (silent), and the decision names the ACTUAL
+        # floor (3), not a fixed 5. Locks the `min` computation: a mutant
+        # using a fixed 5 would read 3 < 5 -> under-saturated -> fire.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=2):
-            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now,
-                                          tmtime)
+        with m.patch.object(wd, "_count_live_subagents", return_value=3):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 3,
+                                          now, tmtime)
         self.assertFalse(owns)
-        self.assertTrue(any("skip:backlog-small" in ln for ln in logs), logs)
+        self.assertTrue(any("saturated (>= 3 workers)" in ln for ln in logs),
+                        logs)
         self.assertEqual(tmux.sent, [])
 
     def test_busy_undersaturated_stash_abort_still_reaches_giveup(self):
@@ -1138,12 +1142,15 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
         self.assertIn("sériovo", low)
 
     def test_undersat_nudge_text_is_work_driven_and_names_the_count(self):
-        # #442 re-fix 2: the under-saturated text names the real worker count,
-        # commands fleet dispatch, AND frames saturation as WORK-DRIVEN (not a
-        # fixed cap number).
-        rendered = goal.GOAL_LANE_UNDERSAT_NUDGE_TEXT % (2, 37, 1)
+        # #442 re-fix 2 + #481: the under-saturated text names the real worker
+        # count AND the target lane floor, commands fleet dispatch, and frames
+        # saturation as WORK-DRIVEN (not a fixed cap number).
+        # Args: (live_workers, floor, backlog, waiters).
+        rendered = goal.GOAL_LANE_UNDERSAT_NUDGE_TEXT % (2, 5, 37, 1)
         low = rendered.lower()
         self.assertIn("beží len 2", rendered)
+        # #481: the target lane floor is cited alongside the seen worker count.
+        self.assertIn("cieľových 5", rendered)
         self.assertIn("worktree", low)
         self.assertIn("paraleln", low)
         self.assertIn("sériovo", low)
