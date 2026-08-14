@@ -37,6 +37,10 @@ from unittest import TestCase, main
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+# #433 cluster L: ensure_ffmpeg_static_binary + _ffmpeg_available moved here;
+# the leaf→leaf internal call resolves in this leaf, so _ffmpeg_available is
+# patched via cli_binary_installers.
+import cli_binary_installers
 
 
 # A fixed, obviously-fake value — never a real Soniox key. Used to prove the
@@ -658,7 +662,7 @@ class TestEnsureFfmpegStaticBinary(TestCase):
 
     def test_no_op_when_already_available(self):
         d, p = self._dests()
-        with m.patch.object(airuleset, "_ffmpeg_available", return_value=True), \
+        with m.patch.object(cli_binary_installers, "_ffmpeg_available", return_value=True), \
                 m.patch("subprocess.run") as run:
             airuleset.ensure_ffmpeg_static_binary(d, p)
         run.assert_not_called()
@@ -671,7 +675,7 @@ class TestEnsureFfmpegStaticBinary(TestCase):
             calls["n"] += 1
             return calls["n"] > 1   # missing on the check, present after install
 
-        with m.patch.object(airuleset, "_ffmpeg_available",
+        with m.patch.object(cli_binary_installers, "_ffmpeg_available",
                              side_effect=fake_available), \
                 m.patch("subprocess.run", return_value=_fake_cp()) as run:
             airuleset.ensure_ffmpeg_static_binary(d, p)
@@ -698,7 +702,7 @@ class TestEnsureFfmpegStaticBinary(TestCase):
     def test_install_failure_is_loud_but_non_fatal(self):
         out = StringIO()
         d, p = self._dests()
-        with m.patch.object(airuleset, "_ffmpeg_available", return_value=False), \
+        with m.patch.object(cli_binary_installers, "_ffmpeg_available", return_value=False), \
                 m.patch("subprocess.run",
                         return_value=_fake_cp(returncode=1, stderr="boom")), \
                 m.patch("sys.stderr", out):
@@ -708,7 +712,7 @@ class TestEnsureFfmpegStaticBinary(TestCase):
     def test_install_exception_is_non_fatal(self):
         out = StringIO()
         d, p = self._dests()
-        with m.patch.object(airuleset, "_ffmpeg_available", return_value=False), \
+        with m.patch.object(cli_binary_installers, "_ffmpeg_available", return_value=False), \
                 m.patch("subprocess.run", side_effect=FileNotFoundError("curl")), \
                 m.patch("sys.stderr", out):
             airuleset.ensure_ffmpeg_static_binary(d, p)   # must not raise
@@ -754,7 +758,7 @@ class TestEnsureFfmpegStaticBinary(TestCase):
             kw.setdefault("env", env)
             return _real_subprocess_run(argv, **kw)
 
-        with m.patch.object(airuleset, "_ffmpeg_available",
+        with m.patch.object(cli_binary_installers, "_ffmpeg_available",
                              side_effect=lambda dd=None, pp=None:
                              (dd or d).is_file() and (pp or p).is_file()), \
                 m.patch("subprocess.run", side_effect=real_run):
