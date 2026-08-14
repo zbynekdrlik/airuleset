@@ -5037,6 +5037,32 @@ def cmd_notify(args):
                         resolve_project_channel, resolve_questions_channel,
                         send)
 
+    # #476: the read-only query/print flags (--repo-name, --channel-id, …) are
+    # each checked and RETURN before the send actions (--run-card etc.) below, so
+    # a caller who typos `--repo-name` for `--repo` on a `--run-card` invocation
+    # short-circuits into the print path and exits 0 with NO card sent — a silent
+    # no-send that looks like success (codex-bridge, 2026-08-14: three cards
+    # "sent", zero delivered — the misused-flag path bypasses #134's exit-nonzero
+    # guarantee because the send path is never entered). A send action combined
+    # with a read-only query flag is always a mistake; refuse it LOUD (non-zero)
+    # rather than let a print branch silently short-circuit it.
+    if getattr(args, "run_card", False):
+        _query_only = [name for name, on in (
+            ("--repo-name", getattr(args, "repo_name", False)),
+            ("--channel-id", getattr(args, "channel_id", False)),
+            ("--owner", getattr(args, "owner", False)),
+            ("--mirror-owners", getattr(args, "mirror_owners", False)),
+            ("--project-label", getattr(args, "project_label", False)),
+            ("--newest-card", getattr(args, "newest_card", False)),
+            ("--mention-prefix", getattr(args, "mention_prefix", False)),
+        ) if on]
+        if _query_only:
+            print("notify --run-card: %s is a read-only query flag, not a send "
+                  "target — did you mean --repo? Refusing rather than printing "
+                  "and exiting 0 with no card sent (#476)."
+                  % ", ".join(_query_only), file=sys.stderr)
+            sys.exit(1)
+
     if getattr(args, "record_question", False):
         # Record a ❓ ping's Discord message id → the session that asked, so the
         # watchdog can route the user's Discord REPLY back into that session.
@@ -6379,6 +6405,25 @@ def _run_card_norm(raw):
     return " ".join(s.split())
 
 
+def _run_card_content_fp(goal, achieved):
+    """A stable fingerprint of a run-card's worker-authored CONTENT
+    (--goal + --achieved), for the #474 terminal content-refusal marker.
+
+    Normalizes via `_run_card_norm` so trivially-different spellings of the
+    SAME refused content (case, trailing space, a dropped diacritic) do not
+    each spawn their own marker + re-log. Guards None -> "" BEFORE
+    normalizing: `_run_card_norm(None)` folds str(None) = "None" to "none",
+    which would make an ABSENT --achieved collide with the literal
+    placeholder word "none" and defeat the 'a genuinely fixed card
+    re-enables' guarantee (the fp is exactly what distinguishes the refused
+    content from a later real value). `\x1f` (unit separator, never in real
+    content) keeps the two fields unambiguous."""
+    import hashlib
+    g = _run_card_norm(goal) if goal is not None else ""
+    a = _run_card_norm(achieved) if achieved is not None else ""
+    return hashlib.sha256(("%s\x1f%s" % (g, a)).encode("utf-8")).hexdigest()[:16]
+
+
 def _run_card_has_no_letters(s):
     """True when `s` carries zero alphabetic characters anywhere — a bare
     ticket ref ("457", "#457", "##457", "#457."), pure punctuation
@@ -6426,7 +6471,8 @@ def _run_card_achieved_is_bad(achieved_raw):
     return _run_card_norm(s) in _RUN_CARD_GENERIC_ACHIEVED
 
 
-def _run_card_refuse(name, issue, dry_run, log_reason, stderr_detail):
+def _run_card_refuse(name, issue, dry_run, log_reason, stderr_detail,
+                     content_fp=None):
     """A #272 content-validation refusal: never send a contentless card, but
     never crash the worker's turn either — exit non-zero with the reason on
     stderr, the SAME shape a genuine delivery failure already uses (#135),
@@ -6450,6 +6496,17 @@ def _run_card_refuse(name, issue, dry_run, log_reason, stderr_detail):
     if not dry_run:
         from notify import log_delivery
         log_delivery("refused", kind="run-card", key=key, reason=log_reason)
+        if content_fp:
+            # #474: record a TERMINAL content-refusal marker so a later
+            # IDENTICAL retry of this same-content card short-circuits before
+            # any gh fetch or new log line (the 3502x/33h `x#457` spam). Only
+            # refusals that are deterministic on the CLI args ALONE
+            # (achieved-bad — title-INDEPENDENT) pass content_fp; a
+            # goal-bare-AND-title-bare refusal depends on the gh-fetched
+            # title (which could gain content on a later run and make the
+            # card valid), so it is deliberately NOT terminal-marked.
+            from notify import mark_run_card_content_refused
+            mark_run_card_content_refused(name, issue, content_fp, log_reason)
     print("notify --run-card: REFUSED (%s) — %s" % (key, stderr_detail),
           file=sys.stderr)
     sys.exit(1)
@@ -6467,6 +6524,28 @@ def _notify_run_card(args, compose_autopilot_card, send):
         issue = getattr(args, "issue", None)
         if not repo or issue is None:
             return  # need --repo + --issue to build a card
+
+        # #474 terminal-skip: an external caller re-firing an IDENTICAL
+        # contentless card (empty/generic --goal or --achieved) would
+        # otherwise re-fetch the gh view AND re-log a `refused` line on
+        # EVERY retry (3502x for x#457 over 33h on dev1). A content refusal
+        # is deterministic on these CLI args, so the FIRST such refusal
+        # writes a terminal marker (below, in _run_card_refuse) and a later
+        # identical retry short-circuits HERE — before the gh fetch, before
+        # a new log line. `name`/`raw_goal`/`raw_achieved`/`dry_run` are also
+        # RE-USED by the send path below (round-2 review: the log/dedup key
+        # must be the bare repo NAME#ISSUE), so they are computed ONCE here.
+        name = str(repo).rstrip("/").split("/")[-1]
+        raw_goal = getattr(args, "goal", None)
+        raw_achieved = getattr(args, "achieved", None) or getattr(args, "result", None)
+        dry_run = getattr(args, "dry_run", False)
+        content_fp = _run_card_content_fp(raw_goal, raw_achieved)
+        from notify import run_card_content_refused
+        if run_card_content_refused(name, issue, content_fp):
+            print("notify --run-card: REFUSED (%s#%s) — content unchanged "
+                  "since a prior refusal; not re-fetching or re-logging "
+                  "(#474)." % (name, issue), file=sys.stderr)
+            sys.exit(1)
 
         # title + labels in ONE call — labels decide whether THIS ticket is a
         # sub-dev stream:<user> hand-off (#164 defect 2): the D/T progress
@@ -6573,15 +6652,11 @@ def _notify_run_card(args, compose_autopilot_card, send):
             remaining = None if u_failed else len(seen)
             scope_label = None
 
-        # Dedup / log key = the bare repo NAME (the LAST path segment of
-        # `--repo`) — computed here (moved up from just before the send()
-        # call) so a #272 content-validation refusal uses the SAME key
-        # every other run-card log line already does, never the full
-        # "owner/repo" form (round-2 adversarial review finding).
-        name = str(repo).rstrip("/").split("/")[-1]
-        raw_goal = getattr(args, "goal", None)
-        raw_achieved = getattr(args, "achieved", None) or getattr(args, "result", None)
-        dry_run = getattr(args, "dry_run", False)
+        # `name`/`raw_goal`/`raw_achieved`/`dry_run`/`content_fp` were
+        # computed once at the top of the try (for the #474 terminal-skip);
+        # the goal/achieved validation below re-uses them, so a #272
+        # content-validation refusal shares the SAME bare-repo NAME#ISSUE key
+        # every other run-card log line uses (never the full "owner/repo").
         # 🎯 Cieľ = the worker's PLAIN-language --goal (simple, understandable).
         # #272: a GOAL that merely LOOKS omitted is auto-enriched from the
         # fetched issue title — extending the pre-existing "goal genuinely
@@ -6609,12 +6684,16 @@ def _notify_run_card(args, compose_autopilot_card, send):
         # or generic filler is always a hard refusal, never a silently-sent
         # generic default (#272).
         if _run_card_achieved_is_bad(raw_achieved):
+            # content_fp passed -> this refusal is TERMINAL-marked (#474): it
+            # is deterministic on the CLI args alone (independent of the
+            # gh-fetched title), so an identical retry short-circuits.
             _run_card_refuse(
                 name, issue, dry_run,
                 log_reason="achieved is missing or generic",
                 stderr_detail="achieved %r is missing or generic — pass a "
                               "real --achieved describing what actually "
-                              "landed and was verified" % raw_achieved)
+                              "landed and was verified" % raw_achieved,
+                content_fp=content_fp)
         achieved = raw_achieved
         # --pr is the full PR URL → a clickable "kód (PR)" link (the number was
         # dropped, the link kept). --url = "where to see it live" link(s).

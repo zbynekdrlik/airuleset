@@ -1357,6 +1357,62 @@ def mark_backfill_reported(name, numbers, status):
                if _dedup_mark_status(backfill_marker_key(name, n), status))
 
 
+def run_card_refused_key(name, issue, fp):
+    """The marker key for a TERMINAL content-refusal of a run-card (#474).
+
+    A content refusal (an empty/generic --goal or --achieved that is
+    deterministic on the CLI args ALONE) will be refused again on every
+    byte-identical retry — so the FIRST such refusal writes this marker and
+    a later identical retry short-circuits: no re-verify, no wasted `gh
+    issue view` fetch, no new durable log line (the 3502x/33h `x#457` spam
+    this fixes).
+
+    A DISTINCT namespace from BOTH the per-ticket card key (`<repo>#<n>`,
+    exactly one `#`, read by the run-card gate/backstop) and the backfill
+    key (`backfill#<name>#<n>`): this one starts with `refused` and carries
+    a CONTENT fingerprint, so a genuinely FIXED card (a different
+    fingerprint) is never suppressed by the old refusal's marker. `#`
+    survives `_dedup_path`'s sanitisation, so the parts stay distinct.
+    `name` is sanitised to the card alphabet because it does NOT arrive
+    validated (`repo_name_for`/`--repo` split by hand), matching the SAME
+    discipline `backfill_marker_key` uses."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(name))
+    return "refused#%s#%s#%s" % (safe, issue, fp)
+
+
+def mark_run_card_content_refused(name, issue, fp, reason=""):
+    """Record that a run-card for (name, issue) was TERMINALLY refused for a
+    content reason with fingerprint `fp` (#474).
+
+    Best-effort in the fail-OPEN direction: a marker that cannot be written
+    simply is not written, so the next identical retry re-refuses and
+    re-logs once — never a false-suppress of a genuine card. Returns whether
+    the marker reached disk. `reason` is a short CLASSIFICATION only (never
+    the raw worker-authored --goal/--achieved text — the marker store is a
+    second place that content could come to rest, #157's lesson)."""
+    if not name or issue is None or not fp:
+        return False
+    try:
+        os.makedirs(_dedup_dir(), exist_ok=True)
+    except OSError:
+        return False
+    return _dedup_mark_status(run_card_refused_key(name, issue, fp),
+                              "refused:%s" % (reason or "content"))
+
+
+def run_card_content_refused(name, issue, fp):
+    """True when (name, issue) already carries a TERMINAL content-refusal
+    marker for fingerprint `fp` (#474) — so the caller short-circuits before
+    any gh fetch or new log line.
+
+    A missing/unreadable marker reads as NOT-refused (fail-open: re-evaluate
+    the card rather than suppress it), the SAME safe direction as
+    `_dedup_claim`'s own error handling."""
+    if not name or issue is None or not fp:
+        return False
+    return os.path.exists(_dedup_path(run_card_refused_key(name, issue, fp)))
+
+
 # --- the autopilot worker's evidence block (#134) --------------------------
 # Two facts below come from reading 339 REAL evidence blocks (extracted from
 # 5,180 subagent transcripts), not from the template in

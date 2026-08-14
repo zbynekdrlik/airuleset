@@ -404,6 +404,19 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         # never be "missing" again, so its entry is dead weight.
         pinged = {k: v for k, v in (prev.get("pinged") or {}).items()
                   if int(k) in closed}
+        # #474: per-ticket "STABLY verify-rejected, ever" memory — parallel
+        # to `pinged`, pruned the same way. A candidate that a SUCCESSFUL
+        # `closed_fetch` verify rejected (a local `Closes #N` trailer that
+        # GitHub's own CLOSED_EVENT->closer check does NOT confirm — the
+        # odoo-erp non-default-branch shape) is a STABLE disagreement. Before
+        # this memory it was re-verified with a fresh `gh` GraphQL call AND
+        # its `verify-rejected` line re-logged on EVERY 60s sweep, forever
+        # (gk: the same 9 odoo-erp tickets every sweep). Remembering it here
+        # excludes it from `pingable` below, so neither the re-verify nor the
+        # re-log happens again — the rejection is logged once, on the sweep
+        # it first happens.
+        rejected = {k: v for k, v in (prev.get("rejected") or {}).items()
+                    if int(k) in closed}
         # A ticket is still inside its own grace window when its closing
         # commit's timestamp is known AND recent. An UNKNOWN timestamp
         # (the `closed_fetch` bare-int-list fallback) is never treated as
@@ -412,7 +425,8 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         pingable = [n for n in missing
                     if not (closed.get(n) is not None
                             and now - closed[n] < grace)
-                    and str(n) not in pinged]
+                    and str(n) not in pinged
+                    and str(n) not in rejected]
 
         # #232: `merged_closes` is a bare commit-message-keyword match — it
         # is NOT proof GitHub actually closed the ticket from that commit
@@ -431,16 +445,56 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         # forever (the direction the pre-existing fallback-failure branch
         # above already takes).
         if pingable and not verified_source and closed_fetch is not None:
+            verify_ok = True
             try:
-                confirmed = _normalize_closed(closed_fetch(root, now - window))
+                raw = closed_fetch(root, now - window)
             except Exception as e:
                 logs.append("card-reconcile verify-failed %s: %r" % (root, e))
-                confirmed = {}
-            rejected = [n for n in pingable if n not in confirmed]
-            if rejected:
+                raw = None
+                verify_ok = False
+            # #474: `closed_fetch`'s OWN documented degrade sentinel is None
+            # (`_watchdog_closed_fetch` returns None on any gh failure —
+            # "degrade to the local-only answer rather than to silence"). A
+            # None here is an UNMEASURABLE verify, NOT a stable rejection —
+            # treat it exactly like a raised exception below: drop the ping
+            # this sweep but persist NOTHING, so a genuine finding is retried
+            # once the verifier recovers. Only a genuine MEASURED answer
+            # (a dict/list, even empty) makes a "not in confirmed" stable.
+            if raw is None:
+                verify_ok = False
+                # #474-review MINOR-1: a None here is the verifier saying "I
+                # could not reach GitHub", NOT "GitHub confirmed these were
+                # not merge-closed". Log it as verify-UNMEASURABLE, never
+                # verify-REJECTED — a sustained graphql-bucket outage would
+                # otherwise re-log a MISLEADING "rejected" line every sweep
+                # for each unverified candidate (the ping decision is still
+                # correct: dropped this sweep, retried next). The exception
+                # branch above already logs its own `verify-failed` line, so
+                # only the graceful-None path needs this.
+                logs.append("card-reconcile verify-unmeasurable %s issues=%s"
+                            % (name, ",".join(str(n)
+                                              for n in pingable[:CARD_MAX_LISTED])))
+            confirmed = _normalize_closed(raw)
+            newly_rejected = [n for n in pingable if n not in confirmed]
+            # verify-REJECTED only for a SUCCESSFUL verify's genuine
+            # rejections (verify_ok) — the transient-failure paths (None /
+            # exception) have their own honest lines above and must never
+            # claim GitHub rejected a ticket it was never actually asked.
+            if newly_rejected and verify_ok:
                 logs.append("card-reconcile verify-rejected %s issues=%s"
                             % (name, ",".join(str(n)
-                                              for n in rejected[:CARD_MAX_LISTED])))
+                                              for n in newly_rejected[:CARD_MAX_LISTED])))
+            # #474: only a SUCCESSFUL verify's rejections are STABLE — persist
+            # them into `rejected` so a later sweep excludes them from
+            # `pingable` above and never re-verifies or re-logs. A TRANSIENT
+            # verify failure (`confirmed = {}` makes EVERYTHING look rejected)
+            # must remember NOTHING, so a genuine finding is retried next
+            # sweep once the verifier recovers — the same direction the
+            # fallback-failure branch above already takes, and what keeps a
+            # ticket rejected only by a boom-verifier still pingable later.
+            if verify_ok:
+                for n in newly_rejected:
+                    rejected[str(n)] = now
             pingable = [n for n in pingable if n in confirmed]
 
         if dry_run or send_fn is None or not pingable:
@@ -449,7 +503,7 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
             # (jobs 21/24's contract, reused verbatim). A `pingable` empty
             # only because everything is still inside grace, or already
             # pinged, is equally a no-op this sweep.
-            seen[root] = {"pinged": pinged}
+            seen[root] = {"pinged": pinged, "rejected": rejected}
             continue
 
         shown = ", ".join("#%d" % n for n in pingable[:CARD_MAX_LISTED])
@@ -474,7 +528,7 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         logs.append("card-unreported PING %s -> %s" % (name, status))
         for n in pingable:
             pinged[str(n)] = now
-        seen[root] = {"pinged": pinged}
+        seen[root] = {"pinged": pinged, "rejected": rejected}
 
     if not dry_run:
         state["card_unreported"] = {k: v for k, v in seen.items() if k in live}

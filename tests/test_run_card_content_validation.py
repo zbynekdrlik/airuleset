@@ -33,7 +33,10 @@ was captured separately on the ticket, per STEP 0)."""
 import contextlib
 import io
 import json
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -77,6 +80,23 @@ class _RunCard(unittest.TestCase):
     """Drives `airuleset.cmd_notify` in-process against a mocked `_gh_out`
     and `notify.send` -- the same harness `test_run_card_gathers_title_and_
     backlog_then_sends` (tests/test_airuleset.py) already uses."""
+
+    def setUp(self):
+        # Isolate the notify marker/log store (#141/#385): a #474 content
+        # refusal now writes a durable terminal-skip marker under
+        # `notify._claude_dir()/autopilot-notify-sent`. Without isolation
+        # those markers would (a) pollute the developer's real ~/.claude and
+        # (b) couple these tests to each other -- a marker written by one
+        # test would make the early-skip short-circuit a LATER test using the
+        # SAME (repo, issue, goal, achieved), changing its observable stderr
+        # and log calls. A per-test temp dir gives every test a clean store.
+        import notify
+        self._home = tempfile.mkdtemp(prefix="airuleset-runcard-home-")
+        self.addCleanup(shutil.rmtree, self._home, True)
+        cd = m.patch.object(notify, "_claude_dir",
+                            return_value=os.path.join(self._home, ".claude"))
+        cd.start()
+        self.addCleanup(cd.stop)
 
     def _send(self, args, *, gh=None):
         """Run cmd_notify; return (captured-body-or-None, stderr-text,
@@ -328,6 +348,126 @@ class TestAdversarialContentShapes(_RunCard):
         body, err, code = self._send(args)
         self.assertIsNone(code, err)
         self.assertIn("Oprava nasadená", body)
+
+
+class TestRepoNameQueryFlagOnRunCardFailsLoud(_RunCard):
+    """#476: `--repo-name` is a read-only query/print flag whose branch in
+    `cmd_notify` is checked and RETURNs BEFORE the `--run-card` send branch. A
+    caller who typos `--repo-name` for `--repo` on a `--run-card` invocation
+    used to short-circuit into the print path, print the repo name, and exit 0
+    with NO card sent -- a silent no-send that looked like success (codex-bridge,
+    2026-08-14: three cards "sent", zero delivered). The combination must fail
+    LOUD (non-zero) instead of silently short-circuiting."""
+
+    def test_repo_name_on_run_card_exits_nonzero_and_sends_nothing(self):
+        args = _run_card_args(repo_name=True, cwd=".")
+        body, err, code = self._send(args)
+        self.assertIsNone(body, "no card body may reach send()")
+        self.assertEqual(code, 1,
+                         "a read-only query flag on --run-card must exit "
+                         "non-zero, never silently print+exit0")
+        self.assertIn("read-only", err.lower())
+        self.assertIn("--repo", err)
+
+    def test_every_read_only_query_flag_on_run_card_is_refused(self):
+        for flag in ("repo_name", "channel_id", "owner", "mirror_owners",
+                     "project_label", "newest_card", "mention_prefix"):
+            with self.subTest(flag=flag):
+                args = _run_card_args(cwd=".", **{flag: True})
+                body, _err, code = self._send(args)
+                self.assertIsNone(body, flag)
+                self.assertEqual(code, 1, flag)
+
+    def test_a_clean_run_card_without_any_query_flag_still_sends(self):
+        # Guardrail: the conflict guard must not touch the ordinary send path.
+        args = _run_card_args()
+        body, err, code = self._send(args)
+        self.assertIsNone(code, err)
+        self.assertIsNotNone(body, "a clean --run-card must still send")
+
+
+class TestContentRefusalIsTerminalNotEverySweep(unittest.TestCase):
+    """#474: a content refusal (contentless --goal, missing/generic --achieved)
+    is deterministic on its inputs, so an external caller re-firing the IDENTICAL
+    card every sweep used to write one `refused` delivery-log line per call --
+    3502 lines for one key (x#457) in 33h on dev1. The second and later identical
+    refusal must reach a TERMINAL state: no new durable log line, and no wasted
+    `gh issue view` fetch (short-circuit before it). A genuinely FIXED card (a
+    different content fingerprint) must never be suppressed."""
+
+    def setUp(self):
+        # Every write here goes into $HOME/.claude -- never the real one (the
+        # live api-watchdog runs this working tree every 60s on this box, and
+        # the refusal marker is a real SUPPRESSION artifact for job 25).
+        self.home = Path(tempfile.mkdtemp(prefix="airuleset-runcard-refuse-"))
+        self.addCleanup(shutil.rmtree, self.home, True)
+        (self.home / ".claude").mkdir(parents=True, exist_ok=True)
+        self._env = dict(os.environ)
+        os.environ["HOME"] = str(self.home)
+        self.addCleanup(lambda: os.environ.clear() or os.environ.update(self._env))
+
+    def _delivery_lines(self):
+        log = self.home / ".claude" / "notify-delivery.log"
+        if not log.exists():
+            return []
+        return [ln for ln in log.read_text().splitlines() if ln.strip()]
+
+    def _drive(self, **overrides):
+        """Drive cmd_notify against a mocked send + a gh view that is COUNTED;
+        return (number of `gh issue view` calls, captured body-or-None, exit)."""
+        gh_view_calls = []
+
+        def fake_gh(*a, **k):
+            if "view" in a:
+                gh_view_calls.append(a)
+                return json.dumps({"title": "Real Title", "labels": []})
+            return "3"
+
+        captured = {}
+
+        def fake_send(body, **k):
+            captured["body"] = body
+            return "sent"
+
+        code = None
+        args = _run_card_args(repo="o/x", issue=457, **overrides)
+        with m.patch.object(airuleset, "_gh_out", side_effect=fake_gh):
+            with m.patch("notify.send", side_effect=fake_send):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        airuleset.cmd_notify(args)
+                    except SystemExit as exc:
+                        code = exc.code
+        return len(gh_view_calls), captured.get("body"), code
+
+    def _refused_lines(self):
+        return [ln for ln in self._delivery_lines()
+                if "refused" in ln and "x#457" in ln]
+
+    def test_second_identical_refusal_writes_no_new_line_and_skips_gh(self):
+        gh1, body1, code1 = self._drive(achieved=None)
+        self.assertIsNone(body1, "no card body may reach send()")
+        self.assertEqual(code1, 1)
+        self.assertEqual(len(self._refused_lines()), 1, "first refusal logs once")
+        self.assertGreaterEqual(gh1, 1, "first refusal fetches the title")
+
+        gh2, body2, code2 = self._drive(achieved=None)
+        self.assertIsNone(body2)
+        self.assertEqual(code2, 1, "the caller still sees a non-zero exit")
+        self.assertEqual(len(self._refused_lines()), 1,
+                         "an identical content refusal must not re-log -- one "
+                         "line per (key, fingerprint) transition, never 3502")
+        self.assertEqual(gh2, 0,
+                         "the terminal skip short-circuits BEFORE the gh fetch")
+
+    def test_a_genuinely_fixed_card_re_enables_and_sends(self):
+        self._drive(achieved=None)          # terminal-refuse the contentless card
+        gh, body, code = self._drive(
+            achieved="Fix nasadený, overený na reálnej ticke")
+        self.assertIsNone(code, "a fixed card must send, never be suppressed")
+        self.assertIsNotNone(body)
+        self.assertIn("Fix nasadený", body)
+        self.assertGreaterEqual(gh, 1, "a fixed card is not skipped before gh")
 
 
 if __name__ == "__main__":
