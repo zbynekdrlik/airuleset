@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 9832,
+    "airuleset.py": 9838,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 793,
@@ -96,6 +96,7 @@
     "tests/test_notify_question_block.py": 278,
     "tests/test_notify_questions_channel.py": 299,
     "tests/test_notify_repo_resolution.py": 108,
+    "tests/test_owner_decision_digest.py": 325,
     "tests/test_per_ticket_completion_marker.py": 151,
     "tests/test_playbook.py": 104,
     "tests/test_playbook_write_surface.py": 95,
@@ -156,7 +157,7 @@
     "tests/test_user_waiting_split.py": 204,
     "tests/test_vault_channel.py": 1382,
     "tests/test_vault_disclosures.py": 165,
-    "tests/test_vault_purge_job.py": 237,
+    "tests/test_vault_purge_job.py": 246,
     "tests/test_vault_read_guard.py": 1268,
     "tests/test_vault_templates.py": 322,
     "tests/test_watchdog.py": 3601,
@@ -168,7 +169,7 @@
     "tests/test_working_liveness.py": 332,
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 9738,
+    "watchdog/__init__.py": 9913,
     "watchdog/burn_jobs.py": 306,
     "watchdog/cards.py": 535,
     "watchdog/compact.py": 1037,
@@ -186,7 +187,7 @@
     "watchdog/__init__.py::deliver_discord_replies": 459,
     "watchdog/__init__.py::gk_request_backstop": 214,
     "watchdog/__init__.py::prompt_wedge_check": 235,
-    "watchdog/__init__.py::run_once": 1996,
+    "watchdog/__init__.py::run_once": 2011,
     "watchdog/cards.py::card_reconcile": 314,
     "watchdog/goal.py::goal_lane_occupancy_nudge": 328
   }
