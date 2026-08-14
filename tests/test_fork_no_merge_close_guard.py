@@ -40,7 +40,11 @@ _FAKE_GH = """#!/usr/bin/env bash
 # Hermetic gh stand-in for the close-guard tests.
 [ "${FAKE_GH_FAIL:-0}" = "1" ] && exit 1
 case "$1 $2" in
-  "api user")   echo "${FAKE_GH_ME:-}";;
+  "api user")
+    # An App installation token 403s structurally on /user (#463) — model it.
+    [ "${FAKE_GH_API_USER_403:-0}" = "1" ] && \
+      { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
+    echo "${FAKE_GH_ME:-}";;
   "issue view") echo "${FAKE_GH_AUTHOR:-}";;
   *) exit 1;;
 esac
@@ -62,15 +66,28 @@ def _fake_gh_dir():
     return d
 
 
-def run(cmd, cwd, hook=None, me="", author="", gh_fail=False):
+def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
+        app_token_dir=None, api_user_403=False):
     payload = json.dumps({"tool_input": {"command": cmd}})
     env = dict(os.environ)
     env["PATH"] = _fake_gh_dir() + os.pathsep + env.get("PATH", "")
     env["FAKE_GH_ME"] = me
     env["FAKE_GH_AUTHOR"] = author
     env["FAKE_GH_FAIL"] = "1" if gh_fail else "0"
+    env["FAKE_GH_API_USER_403"] = "1" if api_user_403 else "0"
+    if app_token_dir is not None:
+        # An existing dir here makes cli_quals._is_gh_app_token_box() true, so
+        # `authority --self-login` returns STREAM_APP_BOT_LOGIN with no gh call
+        # (the #463 App-token identity path).
+        env["GH_APP_TOKEN_DIR"] = app_token_dir
+    else:
+        env.pop("GH_APP_TOKEN_DIR", None)
     return subprocess.run(["bash", str(hook or HOOK)], input=payload,
                           capture_output=True, text=True, cwd=cwd, env=env)
+
+
+def _app_token_dir():
+    return tempfile.mkdtemp()
 
 
 class TestForkNoMergeCloseGuard(TestCase):
@@ -191,6 +208,48 @@ class TestForkNoMergeCloseGuard(TestCase):
         r = run("gh issue close 1408 --comment 'fixed, tests green'",
                 self.branch, me="kvaskodev", author="kvaskodev")
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- #463: App-token stream (`gh api user` 403s) self-close carve-out ---
+    #
+    # Every montalu-family subdev stream migrated to a GitHub App installation
+    # token (odoo-erp #3284). `gh api user` 403s structurally there, so the
+    # identity read must come from `authority --self-login` (the fixed stream
+    # bot login STREAM_APP_BOT_LOGIN), not a raw `gh api user`. The App identity
+    # is DISTINCT from the maintainer, so it restores the self-vs-assigned
+    # distinguishability the pre-App shared-PAT setup destroyed.
+
+    def test_allows_self_authored_close_on_app_token_box(self):
+        # The odoo-erp #4006 live case: an App-authored, stream-filed sub-finding
+        # on an App-token box. `gh api user` 403s, but the ticket's author IS the
+        # stream's own bot identity -> self-close ALLOWED.
+        self.assertNotEqual(airuleset.STREAM_APP_BOT_LOGIN,
+                            airuleset.MAINTAINER_GH_LOGIN)
+        r = run("gh issue close 4006 --comment 'docs-only fix, merged to develop'",
+                self.branch, api_user_403=True,
+                author=airuleset.STREAM_APP_BOT_LOGIN,
+                app_token_dir=_app_token_dir())
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_blocks_maintainer_authored_close_on_app_token_box(self):
+        # A maintainer-ASSIGNED ticket on the same App-token box is authored by
+        # the human maintainer (never the App), so author != the App identity ->
+        # still BLOCKED. This is the review-requiring work the guard protects.
+        r = run("gh issue close 3312 --comment done", self.branch,
+                api_user_403=True, author=airuleset.MAINTAINER_GH_LOGIN,
+                app_token_dir=_app_token_dir())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_blocks_foreign_bot_authored_close_on_app_token_box(self):
+        # A ticket authored by a DIFFERENT bot (dependabot, a foreign App) must
+        # NOT be self-closable -- the fix compares against the SPECIFIC stream
+        # slug, never "any bot-authored ticket on an App-token box".
+        self.assertNotEqual("app/dependabot", airuleset.STREAM_APP_BOT_LOGIN)
+        r = run("gh issue close 4100 --comment done", self.fork,
+                api_user_403=True, author="app/dependabot",
+                app_token_dir=_app_token_dir())
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("fork-no-merge", r.stderr)
 
     def test_allows_unrelated_commands_under_fork_no_merge(self):
         for cmd in ("git status", "gh issue list --state open",
