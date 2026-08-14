@@ -477,6 +477,15 @@ gap in either.
    - **UNCLEAR** → DROP from the batch and ask the user, quoting the validator's `premise_check` so nothing
      already-answered is re-asked. **One unclear/overcome member must NOT block the rest of the batch** —
      pull it out and proceed with the surviving STILL_VALID / PARTIAL members.
+   - **`cross_stream: conflict`** (multi-stream repo — another stream is actively working an overlapping
+     domain, or a foreign in-flight branch/PR overlaps the same files) → DROP from the batch, do NOT
+     dispatch: cross-link the overlapping stream/PR/branch on the ticket (`gh issue comment <N>`) and WAIT —
+     it re-enters a later batch once the overlap clears. Same drop-from-batch shape as OVERCOME/UNCLEAR;
+     one conflicted member never blocks the rest.
+   - **`governing_design: conflict`** (the ticket contradicts a frozen governing decision) → DROP from the
+     batch and ask the user — a frozen-decision conflict is a genuine design decision, never a silent pick.
+     A `governing_design: follows` is NOT a drop: keep the member and carry that governing decision # into
+     the Step 1c design grounding so the worker's design comment cites it instead of re-deciding.
    (Hybrid close policy: auto-close ONLY clear-cut hard-overcome; everything uncertain goes to the user.)
    After validation, the batch = the surviving STILL_VALID / PARTIAL members. This stops the recurring
    failure (working / re-asking on an already-overcome ticket).

@@ -46,6 +46,38 @@ read-only **`ticket-validator`** subagent, and its verdict gates the work. The f
 verdicts and how each is actioned — lives in the `autopilot` and `issue-planner` skills (which own it);
 this rule just mandates the gate.
 
+#### Cross-stream + governing-design validation (multi-stream repos)
+
+**Steps 1-5 above check a ticket against the CURRENT MERGED code. On a multi-stream repo
+(a `stream:*` label taxonomy — e.g. odoo-erp: david/marek/montalu×N/gatekeeper), that is not
+enough:** a ticket can be perfectly valid against `main` and still collide with (a) an
+in-flight branch/PR of ANOTHER stream that has not merged yet, or (b) a governing epic /
+frozen design decision (e.g. a `needs-design` / `needs-decision` epic, or a settled decision
+ticket) the working ticket does not know about. The 2026-08-14 finding that motivated this:
+three open PRs of three streams bumped one shared addon's manifest to the SAME version with
+colliding `migrations/<version>/` dirs (whichever merged fourth would silently strand the
+others' migrations), alongside a merge that ran past a frozen governing decision. So on a
+multi-stream repo the `ticket-validator` gate ALSO, before declaring STILL_VALID:
+
+- **`git fetch` + scan OTHER streams' in-flight work** — remote branches outside your own
+  stream's prefix (`git branch -r`) and every open PR (`gh pr list --state open --json
+  number,headRefName,files`) — for FILE-LEVEL / domain overlap with the paths the ticket
+  touches. A domain another stream is ACTIVELY working is not started blind: cross-link it on
+  the ticket and WAIT, never duplicate or contradict it. For a shared addon, watch for two
+  open PRs bumping the same manifest version or colliding migration dirs (the mechanical
+  version/migration-collision guard for that is a repo-side CI check, filed separately — this
+  gate only surfaces it).
+- **Read the governing epic + open design/decision tickets** — a discussed / frozen direction
+  either SETTLES this ticket's approach (cite it in the design comment so the worker follows
+  it) or CONTRADICTS it (a conflict the user decides, never a silent implementation that
+  buries the settled work).
+
+The `ticket-validator` returns two always-present verdict fields for this — `cross_stream`
+(`clear` / `conflict` / `n/a`) and `governing_design` (`clear` / `conflict` / `follows` /
+`n/a`) — and the caller (`autopilot` Step 1b) actions them: a `cross_stream: conflict` drops
+the member from the batch (cross-link + wait), a `governing_design: conflict` asks the user,
+a `governing_design: follows` carries that decision into the worker's design grounding.
+
 #### Anti-patterns (all rewordings apply)
 
 - Reading the issue body and starting to implement without checking current behavior — **WRONG.**
