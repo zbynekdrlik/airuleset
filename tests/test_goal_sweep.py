@@ -240,6 +240,110 @@ class TestGoalDarkWatch(unittest.TestCase):
                              projects_dir=proj, sleep_fn=lambda s: None)
         self.assertEqual(sent, [])
 
+    # ----------------------------------------------------------------- #
+    # #459 — STAGED re-ping. The FIRST ping is unchanged (locked by the
+    # tests above); a persistently-dark goal is then re-pinged on a
+    # widening schedule, but ONLY while the per-cwd obligation cache proves
+    # work still remains — so an achieved backlog (open==0) never nags.
+    # ----------------------------------------------------------------- #
+
+    def _dark(self, sid):
+        """A dark-goal fixture: transcript+`Goal set:` marker, an idle pane
+        with NO `◎ /goal` footer (pane_goal_armed -> False)."""
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: /goal x", ts_epoch=500)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        return proj, tmux
+
+    def _sweep(self, tmux, proj, state, sent, now, obl):
+        goal.goal_dark_watch(now, run=tmux,
+                             send_fn=lambda m, **k: sent.append(m),
+                             projects_dir=proj, state=state,
+                             sleep_fn=lambda s: None, obligation_fn=obl)
+
+    @staticmethod
+    def _obl(open_n, ts):
+        """A fake obligation_fn returning a fixed (open, ts) for any cwd."""
+        return lambda cwd: (open_n, ts)
+
+    def test_persistently_dark_goal_with_work_remaining_is_re_pinged(self):
+        # #459's actual fix, and the RED driver: a still-dark goal whose cwd
+        # still has open obligations must be RE-pinged after the schedule
+        # interval — RED against the pre-#459 one-shot dedup (ping once, then
+        # skip forever), so the away user who missed the first ping is
+        # reminded within their waking window.
+        proj, tmux = self._dark("sess-dark-reping")
+        sent, state = [], {}
+        obl = self._obl(5, 1500)             # 5 open obligations, fresh cache
+        self._sweep(tmux, proj, state, sent, 1000, obl)   # first observation
+        self._sweep(tmux, proj, state, sent, 2000, obl)   # first ping fires
+        self.assertEqual(len(sent), 1, "first ping fires on the 2-sweep debounce")
+        t = 2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10
+        self._sweep(tmux, proj, state, sent, t, obl)      # schedule cleared
+        self.assertEqual(len(sent), 2, "a still-dark goal with work remaining must "
+                         "be re-pinged after the schedule interval")
+
+    def test_achieved_backlog_zero_obligations_gets_one_ping_never_nags(self):
+        # #459 safety — an ACHIEVED loop is transcript-identical to a stall
+        # (both mark=set / footer dark, no cleared marker). The cache's
+        # open==0 is the discriminator: the ONE ping still fires (unchanged),
+        # then NEVER a re-ping. Teeth against a re-ping-regardless mutant.
+        proj, tmux = self._dark("sess-dark-achieved")
+        sent, state = [], {}
+        obl = self._obl(0, 1500)             # backlog empty -> achieved
+        self._sweep(tmux, proj, state, sent, 1000, obl)
+        self._sweep(tmux, proj, state, sent, 2000, obl)
+        self.assertEqual(len(sent), 1)
+        self._sweep(tmux, proj, state, sent,
+                    2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10, obl)
+        self.assertEqual(len(sent), 1, "an achieved backlog (open==0) must never nag")
+
+    def test_unavailable_obligation_cache_does_not_re_ping(self):
+        # #459 fail-safe — cache absent/unreadable => cannot confirm work
+        # remains => no re-ping (the first ping already went out). Fail
+        # toward no-nag. Teeth against a re-ping-on-unknown mutant.
+        proj, tmux = self._dark("sess-dark-nocache")
+        sent, state = [], {}
+        obl = self._obl(None, None)
+        self._sweep(tmux, proj, state, sent, 1000, obl)
+        self._sweep(tmux, proj, state, sent, 2000, obl)
+        self.assertEqual(len(sent), 1)
+        self._sweep(tmux, proj, state, sent,
+                    2000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10, obl)
+        self.assertEqual(len(sent), 1, "an unavailable cache must not re-ping")
+
+    def test_stale_obligation_cache_does_not_re_ping(self):
+        # #459 — an obligation cache older than GOAL_DARK_CACHE_MAX_AGE_S is
+        # not trusted for the re-ping gate (work may have been done elsewhere
+        # while the loop sat dark for days). Teeth against dropping freshness.
+        proj, tmux = self._dark("sess-dark-stale")
+        sent, state = [], {}
+        base = 1_700_000_000
+        self._sweep(tmux, proj, state, sent, base, lambda c: (5, base - 10))
+        self._sweep(tmux, proj, state, sent, base + 1000, lambda c: (5, base - 10))
+        self.assertEqual(len(sent), 1)
+        t = base + 1000 + goal.GOAL_DARK_REPING_SCHEDULE_S[0] + 10
+        stale_ts = t - goal.GOAL_DARK_CACHE_MAX_AGE_S - 100
+        self._sweep(tmux, proj, state, sent, t, lambda c: (5, stale_ts))
+        self.assertEqual(len(sent), 1, "a stale cache must not re-ping")
+
+    def test_re_pinging_is_hard_capped_per_episode(self):
+        # #459 — even with work remaining forever, re-pings stop at
+        # GOAL_DARK_REPING_MAX total pings for one dark episode.
+        proj, tmux = self._dark("sess-dark-cap")
+        sent, state = [], {}
+        obl = self._obl(5, 1_700_000_000)
+        now = 1_700_000_000
+        self._sweep(tmux, proj, state, sent, now, obl)       # first observation
+        # Walk far enough past every schedule stage, many times over, so the
+        # ONLY thing that can bound the ping count is the hard cap.
+        for _ in range(goal.GOAL_DARK_REPING_MAX + 8):
+            now += 30 * 3600                                  # > final stage (24h)
+            self._sweep(tmux, proj, state, sent, now, obl)
+        self.assertEqual(len(sent), goal.GOAL_DARK_REPING_MAX,
+                         "re-pings must be hard-capped per episode")
+
     def test_sweep_deadline_defers_remaining_panes(self):
         # #403 STEP 0's own requirement: this per-pane loop must respect
         # the #172/#255 wall-clock self-bound, since it walks EVERY live

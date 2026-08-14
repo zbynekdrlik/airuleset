@@ -684,9 +684,32 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
 # pane every tick regardless of pending requests.
 # --------------------------------------------------------------------------- #
 
+# #459 -- STAGED dark-goal re-ping. Root cause (CC research, binary 2.1.232
+# + upstream anthropics/claude-code issues 82546/58373/50920): /compact never
+# CLEARS the goal, but the PROCESS-BOUND /goal loop can silently stop firing
+# turns through/around a compaction while the transcript keeps reporting
+# armed (on montalu -- this repo's own issue 76 -- the footer ALSO loses the
+# glyph, which is the shape dark-watch detects). Pre-#403 the old goal_rearm
+# backstop healed ~93% (14/15 measured) of these within ~2 min; #403 deleted
+# it, so a compact-stalled loop now gets exactly ONE ping and, if the away
+# user misses it (the 02:59-into-a-sleeping-user incident), no follow-up.
+# The FIRST ping stays byte-for-byte as #403 shipped it; a persistently-dark
+# goal is then RE-pinged on a widening schedule, but ONLY while the per-cwd
+# tickets-status obligation cache proves work still remains (open > 0) -- an
+# ACHIEVED loop is transcript-indistinguishable from a stalled one (both
+# mark=set / footer dark; achievement persists NO marker, measured over 8329
+# transcripts), so an ungated re-ping would nag every completed backlog, the
+# exact noise class the user purged. No positive confirmation -> stay silent
+# (the first ping already went out). Zero keystrokes, ever. Tunable; mirrors
+# the #399/#353 staged-alarm constant style.
+GOAL_DARK_REPING_SCHEDULE_S = (3600, 3 * 3600, 6 * 3600, 24 * 3600)
+GOAL_DARK_REPING_MAX = 10               # hard cap on total pings per dark episode
+GOAL_DARK_CACHE_MAX_AGE_S = 3 * 24 * 3600   # ignore an obligation cache older than this
+
+
 def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                     projects_dir=None, sleep_fn=None, time_fn=None,
-                    sweep_deadline=None):
+                    sweep_deadline=None, obligation_fn=None):
     """#403 STEP 0 confirmed #172's own sweep_deadline/tail_deadline
     budget-sharing mechanism must survive this collapse -- unlike
     `goal_sweep` (bounded by the tiny pending-arm-request count),
