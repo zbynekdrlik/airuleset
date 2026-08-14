@@ -32,6 +32,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset                                          # noqa: E402
+import cli_target_purge                                   # noqa: E402
 
 NOW = 1786176246.0          # fixed; never time.time() (repo convention)
 DAY = 86400.0
@@ -437,7 +438,7 @@ class TestPurgeStaleTier0Targets(unittest.TestCase):
         in use"."""
         repo = _mkrepo(self.root, "camera-box")
         t = _mktarget(repo, age_days=45)
-        with m.patch.object(airuleset, "_target_in_live_use", side_effect=[False, True]):
+        with m.patch.object(cli_target_purge, "_target_in_live_use", side_effect=[False, True]):
             results = self._purge(max_age_days=7, dry_run=False)
         self.assertFalse(results[0]["purged"])
         self.assertTrue(t.exists(), "a process starting mid-walk must still block the delete")
@@ -610,7 +611,7 @@ class TestPurgeStaleTier0Targets(unittest.TestCase):
         completely silent (no log line anywhere) and be retried at most
         once a day forever with zero trace."""
         _mkrepo(self.root, "songplayer")
-        with m.patch.object(airuleset, "discover_target_purge_candidates",
+        with m.patch.object(cli_target_purge, "discover_target_purge_candidates",
                             side_effect=RuntimeError("boom")):
             results = self._purge(max_age_days=7, dry_run=False, force=False)
         self.assertEqual(len(results), 1)
@@ -632,7 +633,7 @@ class TestCmdPurgeTargetsWiring(unittest.TestCase):
 
     def test_forwards_dry_run_and_max_age_days_and_forces(self):
         ns = SimpleNamespace(dry_run=True, max_age_days=3)
-        with m.patch.object(airuleset, "purge_stale_tier0_targets") as p:
+        with m.patch.object(cli_target_purge, "purge_stale_tier0_targets") as p:
             p.return_value = [{"target": "/x/target", "repo": "/x", "purged": True,
                                "reason": "stale (99.0d >= 3d), 1.0MB", "size": 1048576}]
             out = StringIO()
@@ -648,7 +649,7 @@ class TestCmdPurgeTargetsWiring(unittest.TestCase):
 
     def test_real_run_reports_purged_not_would_purge(self):
         ns = SimpleNamespace(dry_run=False, max_age_days=None)
-        with m.patch.object(airuleset, "purge_stale_tier0_targets") as p:
+        with m.patch.object(cli_target_purge, "purge_stale_tier0_targets") as p:
             p.return_value = [{"target": "/x/target", "repo": "/x", "purged": True,
                                "reason": "stale", "size": 2048}]
             out = StringIO()

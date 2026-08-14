@@ -30,6 +30,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset                                          # noqa: E402
+import cli_scratch_sweep                                  # noqa: E402
 
 NOW = 1786176246.0          # fixed; never time.time() (repo convention)
 DAY = 86400.0
@@ -371,7 +372,7 @@ class TestCompressTranscriptFile(unittest.TestCase):
         def _fake_gzip_open(path, mode):
             return _FakeDecompressedRead(bytes(wrong_bytes))
 
-        with m.patch("airuleset.gzip.open", side_effect=_fake_gzip_open):
+        with m.patch("cli_scratch_sweep.gzip.open", side_effect=_fake_gzip_open):
             result = airuleset._compress_transcript_file(p, now=NOW)
 
         self.assertFalse(result["removed"])
@@ -486,7 +487,7 @@ class TestSweepOldTranscripts(unittest.TestCase):
                 raise RuntimeError("boom -- simulated unexpected failure")
             return real_compress(path, now=now)
 
-        with m.patch.object(airuleset, "_compress_transcript_file", side_effect=flaky_compress):
+        with m.patch.object(cli_scratch_sweep, "_compress_transcript_file", side_effect=flaky_compress):
             results = airuleset.sweep_old_transcripts(
                 projects_dir=self.pdir, dry_run=False, force=True, now=NOW,
                 min_age_days=30, min_size_bytes=100,
@@ -549,7 +550,7 @@ class TestSweepOldTranscripts(unittest.TestCase):
 
 class TestSweepTranscriptsCLICommand(unittest.TestCase):
     def test_dry_run_reports_and_prints_log_path(self):
-        with m.patch.object(airuleset, "sweep_old_transcripts") as fake:
+        with m.patch.object(cli_scratch_sweep, "sweep_old_transcripts") as fake:
             fake.return_value = [
                 {"path": "/home/x/.claude/projects/p/old.jsonl",
                  "reason": "would compress (dry-run)", "size": 570574, "removed": False},
@@ -612,7 +613,7 @@ class TestCmdInstallTranscriptWiring(unittest.TestCase):
     def test_default_sweep_fn_is_the_real_sweep_old_transcripts(self):
         """Without an injected sweep_fn, the step must call the REAL
         production sweep -- not silently no-op."""
-        with m.patch.object(airuleset, "sweep_old_transcripts", return_value=[]) as fake:
+        with m.patch.object(cli_scratch_sweep, "sweep_old_transcripts", return_value=[]) as fake:
             with m.patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("AIRULESET_TRANSCRIPT_COMPRESS_LIVE", None)
                 airuleset._run_transcript_compress_step()

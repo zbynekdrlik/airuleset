@@ -24,6 +24,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset                                          # noqa: E402
+import cli_target_purge                                   # noqa: E402
+import cli_scratch_sweep                                  # noqa: E402
 
 NOW = 1786176246.0          # fixed; never time.time() (repo convention)
 DAY = 86400.0
@@ -508,7 +510,7 @@ class TestCliVersionCLICommand(unittest.TestCase):
 
     def test_dry_run_reports_and_prints_log_path(self):
         vdir = _mk_versions(self.root, [("2.1.223", 30), ("2.1.226", 0)])
-        with m.patch.object(airuleset, "sweep_stale_cli_versions") as fake_sweep:
+        with m.patch.object(cli_target_purge, "sweep_stale_cli_versions") as fake_sweep:
             fake_sweep.return_value = [
                 {"path": str(vdir / "2.1.223"), "version": "2.1.223",
                  "reason": "would remove (dry-run)", "size": 4096, "removed": False},
@@ -955,7 +957,7 @@ class TestSweepClaudeScratch(unittest.TestCase):
 
 class TestClaudeScratchCLICommand(unittest.TestCase):
     def test_dry_run_reports_and_prints_log_path(self):
-        with m.patch.object(airuleset, "sweep_claude_scratch") as fake_sweep:
+        with m.patch.object(cli_scratch_sweep, "sweep_claude_scratch") as fake_sweep:
             fake_sweep.return_value = [
                 {"path": "/tmp/claude-1000/old.txt",
                  "reason": "would remove (dry-run)", "size": 2048, "removed": False},
