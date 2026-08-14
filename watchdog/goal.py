@@ -1028,6 +1028,15 @@ def _mem_available_mb():
     return None
 
 
+def _lane_skip(logs, loc, reason):
+    """#475: append a lane-occupancy DECISION line for a previously-silent
+    early-return path, mirroring the existing `lane-occupancy <pane> ... ->
+    <decision>` format so every sweep journals WHY no nudge fired (the #442c
+    every-sweep logging contract). The early skips below run before
+    `live_workers`/`backlog_n` are counted, so they name the gate, not counts."""
+    logs.append("lane-occupancy %s -> %s" % (loc, reason))
+
+
 def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               tmtime, loc, send_fn, dry_run, handled,
                               projects_dir, backlog_fetch=None, state=None,
@@ -1041,6 +1050,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     sleep_fn = sleep_fn or time.sleep
     logs = []
     if backlog_fetch is None or state is None:
+        # #475 deliberately silent: a wiring/injection guard -- both are always
+        # passed by the driver in production; unwired means a test or a degraded
+        # call, never a real lane decision worth journalling.
         return logs, False
     try:
         import airuleset
@@ -1048,6 +1060,11 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     except Exception:
         authority = None
     if authority != "full":
+        # #475 deliberately silent: lane occupancy fills PARALLEL WORKTREE lanes,
+        # which only a full-authority box has -- a reduced-authority sub-dev
+        # stream has no lanes to fill, so this is structurally N/A, not a
+        # decision. Logging it for every armed sub-dev pane every sweep would be
+        # pure noise.
         return logs, False
     idle = now - (tmtime or now)
     # #442 THIRD GAP -- the old top-of-function idle gate returned HERE with
@@ -1063,6 +1080,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # population this fix newly enables).
     marker = watchdog.transcript_last_marker(tpath)
     if marker == "❓":
+        _lane_skip(logs, loc, "skip:awaiting-user (❓ marker -- session blocked "
+                              "on a question, never nudge)")
         return logs, False
     # #442 re-fix 2 (REOPEN č.2): worker PRESENCE is now a COUNT decision made
     # below (`live_workers`), so it can distinguish an UNDER-SATURATED box (1-4
@@ -1081,13 +1100,21 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # above already prevents nudging right after a dispatch, so folding worker
     # presence into the count is safe.
     if watchdog.pane_waiting_on_user(captured):
+        _lane_skip(logs, loc, "skip:blocking-dialog (a dialog/prompt occupies "
+                              "the input area -- no free prompt to deliver into)")
         return logs, False
     if watchdog._pane_compacting(captured):
+        _lane_skip(logs, loc, "skip:compacting (pane is mid-/compact, transient)")
         return logs, False
     if handled is not None and sid in handled:
+        _lane_skip(logs, loc, "skip:already-handled (another sweep job already "
+                              "delivered to this session this cycle)")
         return logs, False
     waiters = watchdog._pane_live_task_count(captured)
     if marker == "⏳" and waiters <= 0:
+        logs.append("lane-occupancy %s waiters=%d -> skip:working-no-tasks "
+                    "(⏳ marker but 0 live tasks -- session claims working, "
+                    "defer)" % (loc, waiters))
         return logs, False
 
     def _boundary_ok(cap):
@@ -1109,6 +1136,14 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         if kind != "input" or draft:
             logs.append("skip %s (lane-occupancy) %s"
                         % (draft and "draft" or kind, loc))
+        else:
+            # #475: the ONE previously-silent boundary sub-case -- an input box,
+            # empty (no draft), but not settled at an idle prompt this sweep
+            # (busy/unsettled). Every OTHER not-ok shape (busy/no-input-line, or
+            # a non-at-rest draft) already logs above; this one returned empty.
+            _lane_skip(logs, loc, "skip:not-idle-prompt (input box present, no "
+                                  "draft, but not settled at an idle prompt "
+                                  "this sweep)")
         return logs, False
     live_workers = watchdog._count_live_subagents(tpath, now, GOAL_LANE_LIVE_WINDOW_S)
     # Pane-strip corroboration (#442 re-fix 2): the strip is a boolean ">=1 bg
@@ -1234,6 +1269,13 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
                         "idle=%dm -> %s"
                         % (loc, live_workers, waiters, backlog_n, idle // 60, gave))
+        else:
+            # #475: after the one-shot GAVE UP ping has fired, later sweeps used
+            # to return silently -- log the held give-up state so the every-sweep
+            # contract still shows WHY no nudge is happening.
+            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                        "skip:gave-up (already escalated, holding)"
+                        % (loc, live_workers, waiters, backlog_n))
         return logs, True
     last = rec.get("llast")
     if last is not None and (now - last) < GOAL_LANE_INTERVAL_S:
@@ -1367,6 +1409,24 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         captured = run(["tmux", "capture-pane", "-p", "-t", pid]) or ""
         armed = watchdog.pane_goal_armed(captured)
         if armed is not True:
+            if armed is None:
+                # #475: the incident path -- a genuinely-armed supervisor whose
+                # footer is obscured this sweep (busy mid-turn / chrome / a large
+                # unsent draft) reads UNDETERMINABLE, so the driver silently
+                # skipped it and the guard's own every-sweep decision log never
+                # fired (gk 13:10-14:15: 46 of 57 sweeps silent while 7-8 workers
+                # held). Log it: the footer could not be read, so the goal state
+                # cannot be confirmed this sweep.
+                loc = watchdog._pane_location(pid, run) or pid
+                logs.append("lane-occupancy %s -> skip:armed-undeterminable "
+                            "(footer obscured this sweep -- busy / chrome / "
+                            "large unsent draft; cannot confirm the goal is "
+                            "still armed)" % loc)
+            # armed is False: the footer IS readable and shows no armed /goal, so
+            # this pane is not a lane-occupancy candidate at all (a plain
+            # interactive session, or a cleared/finished loop). Deliberately
+            # silent -- logging every non-armed candidate pane every sweep would
+            # be pure noise.
             continue
         loc = watchdog._pane_location(pid, run) or pid
         rec = recs.get(sid)
