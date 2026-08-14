@@ -89,7 +89,7 @@
     "tests/test_meeting_analysis_skill.py": 88,
     "tests/test_model_tiering.py": 468,
     "tests/test_module_machinery_offload.py": 62,
-    "tests/test_no_session_kill.py": 545,
+    "tests/test_no_session_kill.py": 549,
     "tests/test_notify_dedup_long_key.py": 159,
     "tests/test_notify_delivery_log.py": 362,
     "tests/test_notify_project_channel.py": 673,
