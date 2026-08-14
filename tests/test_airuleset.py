@@ -3965,6 +3965,14 @@ class TestUltracodeLauncher(TestCase):
         content = airuleset.render_claude_launch_script()
         export = "export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1"
         self.assertIn(export, content)
+        # The export is a SINGLE guarded pre-`case` line (not a per-branch flag
+        # like --model), so asserting it verbatim WITH its guard is what gives
+        # the "except plain" invariant teeth -- a mutant that drops the guard
+        # (so `plain` would ALSO get the export, contaminating the #445 vanilla
+        # escape hatch) fails here. The bare `plain)`-case-body check below can
+        # never see the export (it lives above the case), so it alone is
+        # vacuous w.r.t. the guard (#460-review MAJOR).
+        self.assertIn('[ "$mode" = plain ] || ' + export, content)
         plain_branch = content.split("plain)", 1)[1].split(";;", 1)[0]
         self.assertNotIn("PRESSURE_REAP", plain_branch)
 
