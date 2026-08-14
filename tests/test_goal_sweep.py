@@ -22,6 +22,7 @@ from watchdog import goal
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
     GOAL_ARMED_DRAFT_CAP,
+    GOAL_ARMED_STRIP_CAP,
     GOAL_BUSY_CAP,
     GOAL_IDLE_CAP,
     _encode,
@@ -426,12 +427,98 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("no measurable open backlog" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
-    def test_live_worker_present_refuses(self):
+    def test_live_worker_present_small_backlog_refuses(self):
+        # #442 re-fix 2: (2 workers, backlog 5) -> silent. Under-saturated
+        # (2 < GOAL_LANE_SATURATION_WORKERS) but the backlog is small
+        # (5 <= GOAL_LANE_UNDERSAT_BACKLOG_MIN), so no fill nudge. This REPLACES
+        # the old "occupied" reason: worker presence is now a COUNT decision, so
+        # 2 workers is under-saturated, not blanket "occupied".
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         with m.patch.object(wd, "_count_live_subagents", return_value=2):
             logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
-        self.assertTrue(any("occupied" in ln for ln in logs), logs)
+        self.assertFalse(owns)
+        self.assertTrue(any("under-saturated but backlog" in ln for ln in logs),
+                        logs)
+        self.assertEqual(tmux.sent, [])
+
+    # ---------------------------------------------------------------- #
+    # #442 re-fix 2 (REOPEN č.2 + owner directives 2026-08-14) -- the
+    # COUNT-based fill-the-cap widening. Nudge when live_workers < 5 AND
+    # backlog > 10 AND MemAvailable is healthy; the old guard only fired at
+    # exactly 0 workers, and its `_pane_has_bg_agent` early-skip meant it
+    # could never fire on a live box with visible workers at all.
+    # ---------------------------------------------------------------- #
+
+    def test_two_workers_big_backlog_with_memory_nudges(self):
+        # THE live-box lock: the pane SHOWS the agent strip (2 `◯` rows), so the
+        # OLD code's `_pane_has_bg_agent` early-skip would have refused here --
+        # the exact reopen-2 root cause. `_count_live_subagents`=2 + backlog 37 +
+        # healthy memory must now NUDGE.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
+                                          now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("workers=2" in ln for ln in logs), logs)
+        self.assertTrue(any("MemAvailable=8192MB" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+        # The under-saturated text, not the empty-lane "0 dispatched" text.
+        typed = " ".join(a[-1] for a in tmux.sent if "-l" in a)
+        self.assertIn("beží len 2", typed)
+
+    def test_four_workers_big_backlog_with_memory_nudges(self):
+        # Owner #456: the floor is 5, so 4 workers is still under-saturated ->
+        # NUDGE (was silent under the earlier <3 draft).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_count_live_subagents", return_value=4), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
+                                          now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("workers=4" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+
+    def test_five_workers_big_backlog_is_silent(self):
+        # 5 workers >= GOAL_LANE_SATURATION_WORKERS -> saturated -> silent.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_count_live_subagents", return_value=5), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
+                                          now, tmtime)
+        self.assertFalse(owns)
+        self.assertTrue(any("saturated (>= 5 workers)" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
+    def test_zero_workers_small_backlog_still_nudges(self):
+        # Regression: the 0-worker empty-lane nudge is UNCHANGED -- fires on ANY
+        # open backlog (backlog 3 here), with no memory gate.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 3, now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("workers=0" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+
+    def test_undersaturated_low_memory_skips_with_diagnostic(self):
+        # Under-saturated + big backlog but LOW memory -> silent, and the skip
+        # is journaled with the measured value so a tight box stays diagnosable.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+             m.patch.object(goal, "_mem_available_mb", return_value=812):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
+                                          now, tmtime)
+        self.assertTrue(owns)  # a genuine candidate, deferred for memory
+        self.assertTrue(any("skip:low-mem MemAvailable=812MB" in ln
+                            for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
     def test_max_nudges_gives_up_and_pings_once(self):
@@ -657,6 +744,39 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
         self.assertIn("paraleln", low)
         self.assertIn("8", rendered)
         self.assertIn("sériovo", low)
+
+    def test_undersat_nudge_text_is_work_driven_and_names_the_count(self):
+        # #442 re-fix 2: the under-saturated text names the real worker count,
+        # commands fleet dispatch, AND frames saturation as WORK-DRIVEN (not a
+        # fixed cap number).
+        rendered = goal.GOAL_LANE_UNDERSAT_NUDGE_TEXT % (2, 37, 1)
+        low = rendered.lower()
+        self.assertIn("beží len 2", rendered)
+        self.assertIn("worktree", low)
+        self.assertIn("paraleln", low)
+        self.assertIn("sériovo", low)
+        # work-driven, not a fixed target
+        self.assertIn("prác", low)
+        self.assertIn("ci", low)
+
+    def test_min_mem_threshold_is_a_named_constant_documented(self):
+        # #442 re-fix 2: the memory floor is a named, sane default (~1.5 GB).
+        self.assertGreaterEqual(goal.GOAL_LANE_MIN_MEM_AVAIL_MB, 1024)
+        self.assertLessEqual(goal.GOAL_LANE_MIN_MEM_AVAIL_MB, 4096)
+        self.assertEqual(goal.GOAL_LANE_SATURATION_WORKERS, 5)
+
+    def test_mem_available_mb_reads_proc_meminfo(self):
+        # On any managed Linux box this reads a real positive MB value.
+        val = goal._mem_available_mb()
+        self.assertIsInstance(val, int)
+        self.assertGreater(val, 0)
+
+    def test_mem_available_mb_fails_open_on_read_error(self):
+        # Fail-OPEN: unreadable meminfo -> None, so the caller does NOT block.
+        def boom(*a, **k):
+            raise OSError("no /proc/meminfo")
+        with m.patch("builtins.open", side_effect=boom):
+            self.assertIsNone(goal._mem_available_mb())
 
     def test_lane_live_convo_window_is_minutes_not_the_30min_blanket(self):
         self.assertLessEqual(goal.GOAL_LANE_LIVE_CONVO_S, 5 * 60)
