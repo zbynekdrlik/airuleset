@@ -50,18 +50,20 @@ PRESENTER_PANE = (
     "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
 )
 
-# The SAME box, but with an unrecognised chrome row below the statusline (the
-# live `⧉  <project>` shape already documented in `_find_boundary_line`). That
-# makes the glyph fallback structurally unable to reach the box, so this
-# fixture can ONLY be resolved by the structural strategy — which is what
-# isolates fault 1 from fault 2.
+# The SAME box, but with an unrecognised chrome row below the statusline. The
+# original live incident used `⧉  <project>`, but #458 enumerated `⧉` itself as
+# known chrome (it is a real, thrice-observed CC element) — so this fixture now
+# uses a GENUINELY-novel glyph (`▶`, the same placeholder as test_watchdog.py's
+# NEVER_SEEN_CHROME_CAP) to keep the glyph fallback structurally unable to reach
+# the box, so this fixture can ONLY be resolved by the structural strategy —
+# which is what isolates fault 1 from fault 2.
 LABELLED_BORDER_ONLY = (
     "  ❓ NEEDS YOU: vlož /goal riadok vyššie a autopilot sa rozbehne\n"
     "\n"
     "──────────────────────────────────────────────────── ultracode ─\n"
     "❯\xa0                                                            \n"
     "────────────────────────────────────────────────────────────────\n"
-    "  ⧉  presenter-dev2\n"
+    "  ▶  presenter-dev2\n"
 )
 
 # A BORDERLESS box (no separator pair at all) followed by the post-#223

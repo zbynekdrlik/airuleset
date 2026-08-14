@@ -444,7 +444,10 @@ class StructuralInputLineDetection(unittest.TestCase):
     that render the box borderless (most of this file's older fixtures)."""
 
     # The live incident, reproduced: a real separator-bounded box holding a
-    # DRAFT, with the never-seen-before `⧉  <project>` chrome row below it.
+    # DRAFT, with the then-novel `⧉  <project>` chrome row below it (`⧉` is
+    # itself enumerated chrome as of #458, but these fixtures' STRICT borders
+    # make that immaterial — the box is found structurally regardless of what
+    # renders below; the truly-novel-chrome proof lives in NEVER_SEEN_CHROME_CAP).
     UNKNOWN_CHROME_DRAFT_CAP = (
         "● Predošlá práca hotová.\n"
         "──────────\n"
