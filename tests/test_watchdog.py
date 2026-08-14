@@ -2315,10 +2315,20 @@ class RunOnceSubagentVisibility(unittest.TestCase):
             pings.append((body, k))
             return ("sent", "m-1")
 
-        wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
-                    projects_dir=proj, state_path=Path(tmp) / "state.json",
-                    pending_prefix=str(Path(tmp) / "pending-"),
-                    questions_path=str(qpath))
+        # This test exercises the injected-questions-path PASSTHROUGH, not the
+        # 00:00-05:59 Europe/Bratislava sleep window that reping_stale_questions
+        # defers a re-ask past (#368). `now` is wall-clock (`time.time()`), so
+        # whenever the suite ran overnight the reping deferred and this
+        # assertion flaked to 0 (#457 — the batch-15 blocker); the grace store
+        # is a red herring, already sandboxed by setUp's `_questions_path`
+        # patch. Pin the sleep gate OFF so the reping-due path is exercised
+        # deterministically at any wall-clock time.
+        with unittest.mock.patch.object(
+                wd, "_in_sleep_window", lambda *a, **k: False):
+            wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
+                        projects_dir=proj, state_path=Path(tmp) / "state.json",
+                        pending_prefix=str(Path(tmp) / "pending-"),
+                        questions_path=str(qpath))
         reping = [p for p in pings
                   if (p[1] or {}).get("dedup_key", "").startswith("question-reping:")]
         self.assertEqual(len(reping), 1,
