@@ -83,5 +83,47 @@ class TestRuleIntakeGate(TestCase):
         self.assertIn("originating incident + date", t)
 
 
+class TestMachineryNativeNowAxis(TestCase):
+    """#423: the native-now axis (axis 1) must cover the supervision
+    MACHINERY (watchdog / hooks / notify), not just rules, plus a standing
+    'after every Claude Code release' re-audit trigger. Seeded from the
+    #416 native+ecosystem audit and its sibling replacement tickets."""
+
+    SKILL = "skills/mdreview/SKILL.md"
+
+    def test_axis1_scope_extends_to_machinery(self):
+        t = read(self.SKILL)
+        self.assertIn("supervision MACHINERY", t)
+        # the machinery sub-step of the native-now pass, added in-place
+        self.assertIn("D-machinery", t)
+
+    def test_machinery_verdicts_present(self):
+        # #416's own per-area verdict vocabulary must be reused verbatim.
+        t = read(self.SKILL)
+        self.assertIn("REPLACE-with-native", t)
+        self.assertIn("KEEP-custom", t)
+        self.assertIn("HYBRID", t)
+
+    def test_seed_checklist_cites_416_and_siblings(self):
+        t = read(self.SKILL)
+        for ref in ("#416", "#421", "#422"):
+            self.assertIn(ref, t)
+        # the concrete native candidates named in the seed checklist
+        self.assertIn("SendMessage", t)
+        self.assertIn("agents --json", t)
+        self.assertIn("/usage", t)
+
+    def test_release_reaudit_trigger_present(self):
+        t = read(self.SKILL)
+        self.assertIn("after every Claude Code release", t)
+
+    def test_manual_invocation_still_holds(self):
+        # the release trigger is a run CONDITION, not an auto-schedule --
+        # the no-cron manual-invocation rule must survive the change.
+        t = read(self.SKILL)
+        self.assertIn("manually invoked", t)
+        self.assertIn("no auto-schedule", t)
+
+
 if __name__ == "__main__":
     main()
