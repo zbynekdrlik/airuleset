@@ -4683,3 +4683,18 @@ Wired into SKILL_NAMES on an existing line (airuleset.py at its ratchet ceiling
 RED 3030926 (test_cloudflare_api_tokens_skill.py: inventory + content locks) ->
 GREEN <this commit>. Secret hygiene: placeholders only, no literal token value.
 - #458 (goal-autoarm `skip:undeterminable` na ordinary ultracode paneloch): root cause = CC pinned-preview/attachment riadok `⧉  <project>` (U+29C9) na spodku chrome zóny NEBOL v `_is_bottom_chrome` enumerácii, takže `pane_goal_armed`'s #383 footer-chrome-evidence walk (`_trailing_bottom_chrome`) sa naň zlomil ako na prvý spodný footer riadok → `[]` → `None` → `deliver_goal` skip (goal.py:546). Box-FINDING bol immune (structural strategy), takže `_classify_boundary` už bol `("input","")` armable — `pane_goal_armed` bol jediný blokér. Fix: 1 vetva `if s.startswith("⧉"): return True` v zdieľanom `_is_bottom_chrome` (commit 473921f). RED `tests/test_goal_undeterminable_pane.py` (montalu3 fixture verbatim, RED 461a45b, GREEN 473921f), 3/6 mutation-teeth. Fixtures čo spoliehali na `⧉` = unrecognised swapnuté na genuinely-novel `▶` (test_labelled_box_border.py::LABELLED_BORDER_ONLY — inak `test_the_bottom_edge_still_has_to_be_a_strict_separator` padol), bordered test_watchdog.py UNKNOWN_CHROME_* nechali `⧉` (strict borders → immaterial, len comment). Fresh-context review (general-purpose, no model override, no fable): SAFE TO SHIP AS-IS, 1 THEORETICAL residual (bare `⧉` prefix, ako sibling `●◯`) zdokumentovaný in-code (656e767). Ratchet ceilings ručne (9943→9960, +2/+3 test comments). 1 pre-existing #449 grace-json leak fail (test_question_reping..., proven independent na base). Worktree-only, bez push/merge/close.
+- #433 cluster C (`watchdog/janitor.py`): 7 #372 janitor funkcií (`_janitor_clear_box`,
+  `_janitor_pop_stash`, `_janitor_watch_seen`, `_janitor_mark_watch`, `_janitor_clear_watch`,
+  `_janitor_recover`, `_pane_location`, blok `__init__.py` 4163-4400) presunuté byte-verbatim
+  do nového leaf modulu `watchdog/janitor.py` (278 r.) + facade re-export pred `run_once`. PRVÝ
+  watchdog leaf so spätnou väzbou do `__init__.py`: 11 rezidentných symbolov (4 janitor-privátne
+  `JANITOR_*` konštanty, `STASH_MARKER`, + zdieľané `capture_pane`/`_input_line_text`/`pane_owner`/
+  `project_label`/`_draft_rescue_persist`/`_looks_like_own_stuck_content`) ostáva rezidentných,
+  dosahované cez top-level `import watchdog` + call-time `watchdog.<meno>` (goal.py/compact.py idiom,
+  circular-import-safe). Jediná odchýlka od byte-verbatim = 16 deklarovaných `watchdog.` prefixov
+  (reverse-diff proof: strip → identický base blok, MD5 b29f8a3d...). `__init__.py` 9962→9738,
+  ratchet ceiling znížený v tom istom commite. Bez RED (refactor); lock = existujúca sada. Commit
+  3073c53. Full pytest `-n 4` 5954 passed + unittest discover druhý runner. Fresh-context adversarial
+  review (general-purpose, no model override → claude-opus-4-8) 0 CRITICAL/0 MAJOR/1 MINOR (cohesion
+  Rozsah-B, dropnutá s odôvodnením — nie defekt). Worktree-only, bez push/PR/merge. PR/#433 close =
+  supervisor. Zostáva: D (cross_stream), G (supercluster), L (install sub-split).
