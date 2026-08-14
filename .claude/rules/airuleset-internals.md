@@ -1499,3 +1499,45 @@ per-project classifier for any future opt-in decision.
 - **A session-active reset gated on `idle < GOAL_LANE_IDLE_S` is ALWAYS true on a BUSY session (fresh transcript mtime), so if it also zeroes a streak/give-up counter, that counter can never accumulate on the busy path and every escalation it feeds becomes STRUCTURALLY UNREACHABLE — scope such a reset to the branch that genuinely goes quiet, never at the top of a function a busy path also flows through (#442 THIRD GAP + its own F1 review).** The whole #442 THIRD GAP fix (`goal_lane_occupancy_nudge`, `watchdog/goal.py`) is: the top-of-function idle gate `if idle < GOAL_LANE_IDLE_S: return logs, False` was a SILENT early-return (empty `logs`) that ran BEFORE `live_workers`/`backlog_n` were counted — a busy under-saturated supervisor (2 workers, turns spinning → mtime always fresh) never reached the fill-the-cap decision and the guard journalled NOTHING (gk: 2 workers, I 32, silent 20+ min). Fix = move the idle gate DOWN, per-branch: the 0-worker EMPTY-lane branch keeps the 15-min requirement (and now LOGS `skip:idle` with numbers instead of returning empty); the UNDER-SATURATED (1..4 workers + backlog>10 + mem OK) fill branch has NO idle floor (fires while busy — the whole point) and NO permanent give-up (`GOAL_LANE_MAX_NUDGES` is 0-worker-only via `count_gaveup = (not under_saturated) and n >= MAX`), repeating with the 15-min `GOAL_LANE_INTERVAL_S` cooldown. Delivery stays gated by `_boundary_ok` (idle prompt) + the two-capture draft-diff + cooldown, so removing the under-sat idle floor never spams. **The F1 recurrence (the trap this bullet exists for):** the session-active reset (`ln/lna/lpinged`) was left at the top gated on `idle < GOAL_LANE_IDLE_S` — always true on a busy session — so it zeroed the stash-abort streak `lna` every sweep and a permanently-aborting lane's give-up ping (`aborts >= GOAL_LANE_MAX_STASH_ABORTS`) became unreachable (harmless in the OLD code because the top idle gate early-returned before any stash delivery; exposed the instant the busy path became reachable). Fix = move the reset INTO the 0-worker empty-lane branch only (fires at the idle prompt, the only point the give-up is ever evaluated). Every reaching branch now logs its decision with numbers (`skip:idle`/`skip:saturated`/`skip:backlog-small`/`skip:low-mem`/`skip:cooldown remaining=Ns`/`fire`) — silence is no longer undiagnosable. Both the outcome close-criteria (a journal showing guard decisions with numbers; ≥5 live workers at backlog>10 across ≥3 checks ≥2h apart) are a LIVE-gk gate the supervisor owns, never satisfied by green tests + merge alone.
 - **Folding a `:count`/generation SUFFIX into an existing `notify.send` `dedup_key` (goal-dark re-pings, or any staged-reping feature) must keep the FIRST occurrence's key BYTE-FOR-BYTE the legacy shape — appending the suffix to `count==1` yields ONE duplicate ping across the live deploy boundary, because the api-watchdog runs the working tree every 60s and a pre-deploy on-disk dedup marker (`~/.claude/autopilot-notify-sent/…`, 14-day TTL) was written under the OLD key and does not collide with the new `:1`-suffixed key.** #459 (staged dark-goal re-ping, `goal_dark_watch`): the fix branches the key — `count==1` → `"goal-dark:%s:%d" % (sid, mark_ts)` (exactly what #403 shipped), suffix `:%d` appended only for `count>=2`. The message text was already identical; only the key had drifted, and a green test suite that only counts `len(sent)` never sees it (a fresh-context adversarial review's MINOR finding, live-reachable during that one deploy tick, self-heals after). General rule for THIS repo's dedup work: when adding a new segment to any deployed `dedup_key`, preserve the exact legacy key for whatever value the pre-deploy marker was written under (usually the first/count==1 case), and LOCK the first occurrence's message + key with a test that captures the `dedup_key` kwarg (not just the message), mutation-verified against a revert of the branch — `len(sent)`-only assertions have no teeth on key shape.
 - **A dark-watch/escalation re-ping that must tell a genuinely-dead loop from a legitimately-ACHIEVED one (both are transcript-identical: newest marker `set`, footer dark, no `cleared` marker) uses the per-cwd tickets-status obligation cache as the discriminator, read via `statusbar.obligation_count(cwd) -> (open, ts)` — reuse THAT reader, never re-derive `cwd_key`/`cache_dir` in a parallel path.** #459: `obligation_count` reads the SAME `cache_dir(home)/(cwd_key(cwd)+".json")` + `open` field the footer's `tickets_segment` renders (single source of truth, read-only — never spawns a refresh), so `open>0` ≡ the goal's own SLICE-EMPTY stop condition is NOT met ≡ genuine stall; `open==0` ≡ achievement (gets exactly one ping, never nags). Gate every re-ping on `isinstance(open_n, int) and open_n > 0 and fresh` where `fresh = (cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)` — the `0 <=` lower bound rejects a future-dated cache ts (clock skew / cross-box synced cache) toward no-nag, and a genuinely-dead loop's FROZEN cache ages out at the max-age so a fresh-forever cache is bounded only by the hard `GOAL_DARK_REPING_MAX` cap. The injected `_default_obligation_fn` degrades to `(None,None)` on any statusbar import/read failure → the `isinstance(open_n,int)` guard makes that stay SILENT (fail toward no-nag), never a wrong re-ping.
+
+## Footer/quals CLI + goal-template + test-harness gotchas (#468, 2026-08-14)
+
+Learned adding the `U N` user-waiting split (footer `I N` + the `/goal` stop-proof
+now exclude `needs-answer`/`needs-decision` tickets, which surface as `· U N`):
+
+- **Adding a NEW flag to `core-quals`/`slice-quals` (read via `getattr(args,
+  "<flag>", False)`) silently breaks EVERY existing Mock-driven test** —
+  `unittest.mock.Mock(count=True, list=False, extra=None)` AUTO-VIVIFIES the new
+  `.<flag>` attribute as a TRUTHY Mock, so `getattr` returns truthy and the command
+  takes the new branch instead of `--count`/`--list`. Symptom: ~30 unrelated
+  `test_authority_profiles.py` failures + 1 in `test_gk_request.py`, all "wrong
+  count / empty output". Fix: pass `<flag>=False` EXPLICITLY in every quals-driving
+  Mock/`dict(count=...)` constructor — the SAME pattern `count`/`list`/`extra`
+  already follow. Grep `Mock(count=|dict(count=|cmd_(core|slice)_quals(` before
+  assuming your production change is wrong.
+- **The client-side single-definition pattern (#367):** to split/partition the
+  ticket set, partition the ONE already-fetched rows dict (`_union_open_issues`/
+  `_slice_mine_and_handed` already fetch `labels`) client-side (`_partition_user_
+  waiting`) — NEVER a second gh query. A second query is exactly the "parallel
+  derivation" that lets the footer and the `/goal` stop-proof drift apart. Keep
+  empty-result refuse gates (`_refuse_unless_empty_is_trustworthy`) on the FULL
+  fetched set (`not seen`/`not rows`), not the partitioned subset — a non-empty set
+  that is ENTIRELY parked is a real, trusted workable-0.
+- **The three `/goal STOP CONDITIONS` templates in `skills/autopilot/SKILL.md`
+  have a hard 4000-char cap AND a ≥150-char min-headroom lock test**
+  (`test_every_template_keeps_healthy_headroom`). The fork-no-merge one is the
+  tightest — measure `len()` of each `^/goal STOP CONDITIONS.*$` line before AND
+  after every edit. The reduced templates share an IDENTICAL `gk N` parked clause
+  (edit with `replace_all`); the full one has no `tickets-status` paste, so surface
+  any new "parked" bucket in-transcript there explicitly (e.g. `core-quals
+  --waiting`), not just via the live footer.
+- **`test_goal_backlog_proof.py::test_the_backlog_scope_bullet_no_longer_
+  contradicts_the_proof`** reads a 1200-char window from `**Backlog scope` and
+  asserts `core-quals --list` sits inside it — do NOT grow text BEFORE that mention
+  (it was at distance ~1041/1200). Append new bullet prose at the END of the
+  bullet, and prefer a net-neutral/shrinking edit to the first sentence.
+- **`size_ratchet.json` is hand-bumped for deliberate growth:** load, set the exact
+  new line count per changed file (+ `functions/<file>::<fn>` for a grown
+  function), `json.dump(..., indent=2, ensure_ascii=False, sort_keys=True)` +
+  trailing `\n` reproduces the file's format for a clean ~1-line-per-file diff.
+  `.claude/rules/*.md` are NOT ratcheted; test files + `.py` source ARE.
