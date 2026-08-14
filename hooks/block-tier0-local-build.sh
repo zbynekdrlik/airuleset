@@ -110,6 +110,13 @@ _log_tier0_event() {
 # segment. It runs ONLY when the caller's outer per-shape grep already matched AND
 # a whole-flag `--no-run` is actually present, so the hot path (every Bash command)
 # pays nothing extra.
+#
+# Accepted residual (#471-review, THEORETICAL/MINOR): a `--no-run` that follows a
+# harness `--` separator (`cargo test -- --no-run>log`) is regex-indistinguishable
+# from the real cargo flag and now exempts. It is a pre-existing decoy class (the
+# space/EOL form `cargo test -- --no-run` already exempted), unrunnable (libtest
+# rejects `--no-run` as a harness arg), and closing it needs `--`-position parsing
+# -- out of scope for this symmetric-widening fix.
 _gated_shape_is_heavy() {
     # $1 = command (quotes already stripped by the caller); $2 = subcommand
     # (`test` / `bench`). python exit 0 = heavy. Any python failure returns
