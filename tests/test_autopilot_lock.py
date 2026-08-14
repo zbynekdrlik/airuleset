@@ -326,6 +326,39 @@ class TestWiring(TestCase):
         text = (REPO / "agents" / "autopilot-worker.md").read_text()
         self.assertIn("autopilot-lock", text)
 
+    def test_skill_doc_has_no_stale_ignore_cli_phrasing_residual(self):
+        # (#469) #462 reworded the lock CLI's BLOCKED (exit 1) stderr to the
+        # narrowed-mutex truth, so the #456 in-surface mitigation that told
+        # the supervisor to IGNORE the CLI's (then-stale) dispatch-lock
+        # phrasing is itself stale. The integration-mutex bullet must no
+        # longer instruct the reader to ignore anything, nor quote the removed
+        # "Serial-per-repo dispatch … do NOT dispatch a second worker" wording.
+        text = (REPO / "skills" / "autopilot" / "SKILL.md").read_text()
+        flat = " ".join(text.split())  # dodge the line-wrap trap on the quote
+        self.assertNotIn(
+            "IGNORE that phrasing", text,
+            "stale 'IGNORE that phrasing' mitigation must be removed (#469)")
+        self.assertNotIn(
+            "Serial-per-repo dispatch", text,
+            "stale dispatch-lock wording quote must be removed (#469)")
+        self.assertNotIn(
+            "do NOT dispatch a second worker", flat,
+            "stale counter-instruction quote must be removed (#469)")
+
+    def test_internals_note_marks_cli_residual_resolved(self):
+        # (#469) The #456 internals note recorded the CLI BLOCKED message +
+        # docstring as a KNOWN residual "a FOLLOW-UP should reword". #462
+        # landed that rewording, so the note must no longer frame it as
+        # pending, nor quote the removed stale CLI message.
+        text = (REPO / ".claude" / "rules" / "airuleset-internals.md").read_text()
+        flat = " ".join(text.split())
+        self.assertNotIn(
+            "a FOLLOW-UP should reword", flat,
+            "internals note must no longer call the CLI rewording pending (#469)")
+        self.assertNotIn(
+            "Serial-per-repo dispatch", flat,
+            "internals note must not quote the removed stale CLI message (#469)")
+
 
 class TestCampaignPidAncestryWalk(TestCase):
     """(adversarial-review finding) `_campaign_pid()` must stay alive for
