@@ -843,6 +843,23 @@ class CameraBoxBypassDisabledTest(_Runner):
         self.assertEqual(len(lines), 1, lines)
         self.assertIn("project=camera-box", lines[0])
 
+    # ---- review-fix hardening: robust remote-basename parsing ----
+
+    def test_camera_box_detected_case_insensitively(self):
+        # git treats repo names case-insensitively -- a `Camera-Box` origin
+        # spelling still resolves to the same repo and must still be caught.
+        proj = self._mkgit_remote("cb-case",
+                                  "git@github.com:zbynekdrlik/Camera-Box.git")
+        out = self.run_hook("cargo test # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_camera_box_detected_with_trailing_slash_git_url(self):
+        # a `.git/` trailing-slash origin URL must still resolve to camera-box.
+        proj = self._mkgit_remote("cb-slash",
+                                  "https://github.com/zbynekdrlik/camera-box.git/")
+        out = self.run_hook("cargo test # airuleset:build-ok x", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

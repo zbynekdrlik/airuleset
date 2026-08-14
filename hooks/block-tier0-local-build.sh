@@ -104,20 +104,31 @@ _log_tier0_event() {
 # only the two ad-hoc per-command bypasses are removed, and only for camera-box.
 #
 # Detection is by the repo's AUTHORITATIVE identity: `git remote get-url origin`
-# basename == camera-box (the same repo-name convention notify.repo_name_for
-# uses -- a repo's identity is its remote, never its directory basename). If a
-# remote resolves to a DIFFERENT name it wins over any `camera-box` path
-# component; only when NO remote resolves (a detached/no-origin checkout, or a
-# worktree) does a `camera-box` path component decide. Fails toward NOT-camera-
-# box on any ambiguity, so an unresolvable repo keeps the bypass exactly as
-# before -- this never over-blocks a non-camera-box project.
+# basename == camera-box, matched case-INSENSITIVELY (git resolves repo names
+# case-insensitively) -- the same repo-name convention notify.repo_name_for
+# uses (a repo's identity is its remote, never its directory basename). A
+# resolved remote is decisive in BOTH directions: a DIFFERENT name wins over
+# any `camera-box` path component (so a non-camera-box repo is never over-
+# blocked), and a camera-box remote is caught even inside a renamed checkout OR
+# a git worktree (a worktree shares its main checkout's origin, so it resolves
+# via the remote path, not the fallback). ONLY when no remote resolves at all
+# (a detached / no-origin checkout) does a `camera-box` path component decide.
+# Two accepted residuals, both with no shape on the fleet: only `origin` is
+# consulted (a camera-box checkout on a non-origin remote name falls to the
+# path check -- notify.repo_name_for is origin-only too), and a genuinely
+# no-origin repo that merely lives under a `camera-box/` ancestor is treated as
+# camera-box. Fails toward NOT-camera-box on any other ambiguity.
 _is_camera_box_repo() {
     local base="$1" url name
     [ -z "$base" ] && return 1
     url=$(cd "$base" 2>/dev/null && git remote get-url origin 2>/dev/null) || url=""
     if [ -n "$url" ]; then
-        name="${url%.git}"; name="${name%/}"; name="${name##*/}"; name="${name##*:}"
-        [ "$name" = "camera-box" ] && return 0
+        # strip a trailing slash, then the `.git` suffix, then any remaining
+        # trailing slash, then reduce to the last path (`/`) or scp-host (`:`)
+        # segment -- handles `git@h:o/n.git`, `https://h/o/n.git`, `…/n.git/`.
+        name="${url%/}"; name="${name%.git}"; name="${name%/}"
+        name="${name##*/}"; name="${name##*:}"
+        [ "${name,,}" = "camera-box" ] && return 0
         return 1   # remote resolved to a DIFFERENT repo -> authoritatively not camera-box
     fi
     case "/$base/" in
