@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from unittest import TestCase, main
+from unittest import TestCase, TestResult, main
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "post-record-design-comment.sh"
@@ -157,6 +157,23 @@ def _comments_json(comments):
 
 class _Base(TestCase):
     def setUp(self):
+        # Several helpers below mutate os.environ["HOME"] IN-PROCESS (so
+        # dg.read_marker resolves ~ into the fake home). Without this restore
+        # the LAST test's fake home leaked to every later module in the same
+        # unittest-discover process — notify._read_env() then found no Discord
+        # env and deliver_discord_replies returned before its pointer loop,
+        # failing test_send_verified_adoption.ReplyPointerAdoption only under
+        # the push gate's sequential discover (pytest -n masked it by process
+        # placement). Live incident: batch-31 push refused, 2026-08-16.
+        self._orig_home = os.environ.get("HOME")
+
+        def _restore_home():
+            if self._orig_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = self._orig_home
+
+        self.addCleanup(_restore_home)
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-designhook-home-"))
         self.addCleanup(shutil.rmtree, self.home, True)
         (self.home / ".claude").mkdir(parents=True)
@@ -1399,6 +1416,24 @@ class TestRepoResolvedFromInlineCdPrefix(_Base):
             self.marker(71),
             "falls back to the payload cwd (airuleset), same as having no cd at all")
         self.assertIsNotNone(self.marker(72))
+
+
+
+
+class TestEnvHygieneHomeRestored(TestCase):
+    """Regression lock for the batch-31 push-gate incident (2026-08-16): a
+    _Base test's in-process HOME mutation must be restored after the test, or
+    it poisons every later module in the same discover process."""
+
+    def test_home_is_restored_after_a_base_test_runs(self):
+        before = os.environ.get("HOME")
+        case = TestWritesMarkerOnDeliveredDesignComment(
+            "test_a_fresh_authored_comment_that_classifies_writes_the_marker")
+        result = TestResult()
+        case.run(result)
+        self.assertEqual([], result.errors, result.errors)
+        self.assertEqual(os.environ.get("HOME"), before,
+                         "HOME must be restored by _Base's cleanup")
 
 
 if __name__ == "__main__":
