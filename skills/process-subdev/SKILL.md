@@ -158,9 +158,15 @@ repo's own CLAUDE.md / playbook is what names the command.
      bug fixes, correctly scoped per instance.
    - **Every test/verification CONTEXT the repo declares** (e.g. disposable-shadow full
      suite AND read-only live-prod post-deploy) — verify the change behaves in EACH.
-   - **Unverifiable-pre-prod paths** — a slice the pre-prod envs CANNOT exercise (dead
-     upstream data source etc., repo names them) must be declared `UNVERIFIED: <path>`
-     in the hand-off, and gatekeeper verifies it ON PROD as part of the release tail.
+   - **Unverifiable-pre-prod paths — a genuinely un-exercisable CODE PATH, never a prod-STATE
+     READ.** A slice the pre-prod envs CANNOT exercise (dead upstream data source etc., repo
+     names them) is an un-exercisable code PATH: declare it `UNVERIFIED: <path>` in the
+     hand-off, and the gatekeeper verifies it ON PROD as part of the release tail. But a
+     prod-STATE READ (is user X in group Y, a count, a config value, sent-mail content) is
+     NOT unverifiable — a FRESH COPY of prod answers it (`REFRESH-DEV-BOX-FROM-PROD: <stream>`;
+     on any API error read the BODY and try a narrower method, never surrender after one 500),
+     so a "can't verify prod state" hand-off or bounce is itself a FINDING, not a legitimate
+     `UNVERIFIED`. See the SELF-SERVICE doctrine in `autonomous-verification.md`.
    - **Cross-instance blast radius** — classify every touched path instance-scoped vs
      SHARED; a shared-path edit gets the same review depth for the OTHER instance, and
      both instances' pre-prod green is mandatory evidence (watch data files that

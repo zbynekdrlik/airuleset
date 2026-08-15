@@ -71,6 +71,20 @@ When verification fails because of a tool error, auth failure, sandbox limit, mi
 4. **Fix locally, verify locally.** Then verify on the live target with the same flow.
 5. **Only then escalate** — and only if the blocker requires user-only access (their personal token, their org admin permission, their browser session). Even then: ask for the SPECIFIC access, not a test handoff.
 
+#### "What's on PROD?" is a SELF-SERVICE question — never a first-choice UNVERIFIED / hand-off
+
+"I can't see what's on PROD" is a BLOCKER with a specific correct reaction (the section above), NOT a genuine user-only wall — and it is the one blocker a stream / gatekeeper session most often surrenders to wrongly. For a prod-STATE READ (is user X in group Y, a row count, a config value, the content of a sent mail) there is ALWAYS a self-service answer, so reaching for `UNVERIFIED: can't verify prod` or a "share prod access with me" hand-off as your FIRST move is the exact banned instinct this module exists to kill (#500 — a montalu2 stream twice wrote "membership on PROD I cannot verify", once after a single HTTP 500 whose body it never read, never once considering the fresh prod copy that exists for precisely this).
+
+**Decision tree for a prod-STATE READ:**
+
+1. **The stream's OWN direct read-only channel, where the project provides one** (e.g. odoo-erp montalu*: the read-only handover API account on the prod instance — `has_group` / `search_read`; a Money RO tunnel for Money). On ANY HTTP/API error, READ THE ERROR BODY and try a NARROWER method — never surrender after one 500 (a 500 on a broad `users` read is a per-field permission ceiling, not "prod is unreadable"; a `has_group` check on the ONE user still answers the question).
+2. **A FRESH COPY of prod on your own box** — the universal fallback for ANY data / group / config / mail-content question, where the project provides the mechanism (odoo-erp: `REFRESH-DEV-BOX-FROM-PROD: <stream>` on the repo's tracking ticket → a fresh rsync/pg_dump of the CURRENT prod with full psql / odoo-shell access in ~20–40 min). It is a snapshot (minutes old): AUTHORITATIVE for STATE questions; channel 1 stays for second-live things.
+3. **`UNVERIFIED` / a hand-off for a prod read is the LAST choice, never the first** — legitimate only after 1 AND 2 provably fail, which for a read is practically never.
+
+This OVERRIDES the generic "ask for prod DB access / an SSH tunnel" tool-request below FOR any project that gives you a self-service prod-read path — you already HAVE the tool, so asking the user or gatekeeper for prod access is the hand-off this whole module bans, wearing a "prod" costume. (Where a project genuinely provides NO prod-read path at all, that tool-request stays correct.)
+
+**A prod-STATE READ is NOT a genuinely-un-exercisable pre-prod CODE PATH.** A code PATH the pre-prod envs cannot exercise (a dead upstream feed, logic only a real prod event triggers) stays a legitimate `UNVERIFIED: <path>` the gatekeeper verifies on prod at release (`skills/process-subdev`). A prod-STATE READ has a self-service answer, so "can't verify prod state" written as a hand-off or a bounce is itself a FINDING, not an honest UNVERIFIED.
+
 #### Banned hand-off phrases (intent — all rewordings apply)
 
 All mean "user, you are my tester now" and are FORBIDDEN — shifting verification from YOUR tools (Playwright / curl / SSH / MCP) to the user's eyes/clicks. Representative: "Can you test it on your end?", "Please verify it works", "Let me know if it works / breaks", "Tell me what you see", "Ping me when you've checked", "Report back when…", "Next user test", "Using you as tester", "I'll fix locally before next user test". This family is HARD-blocked at Stop by `stop-check-prose-violations.sh` (locked by the `TestTesterHandoffHook` tests) — with one escape: an explicit `UNVERIFIED:` line stating what you cannot test and why.

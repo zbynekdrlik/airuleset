@@ -267,6 +267,8 @@ that one member (do NOT add its `Closes #N` to the PR), note it on the evidence 
 `obsolete_closed:` line, and proceed with the rest; for a solo issue, stop after closing. Only
 confirmed-still-valid issues proceed to the cycle below.
 
+**"Can't verify what's on PROD" is NOT an honest UNVERIFIED for a prod-STATE READ.** Before you write any `UNVERIFIED:` (or hand off / bounce) about prod STATE — a group membership, a row count, a config value, sent-mail content — FIRST exhaust the self-service prod-read paths: the stream's direct read-only channel (reading the BODY of any HTTP error and trying a narrower method, never surrendering after one 500) and a FRESH COPY of prod on your own box where the project provides the mechanism (`REFRESH-DEV-BOX-FROM-PROD: <stream>`). This is the SELF-SERVICE prod-read doctrine in `autonomous-verification.md`. A genuinely un-exercisable pre-prod CODE PATH is different and stays a legitimate `UNVERIFIED` (`skills/process-subdev`).
+
 **Record STILL-VALID evidence too, as its own durable comment (#213) — never only the supervisor's
 Step 1b validator run, which is a MAIN-session-only obligation nothing mechanically re-checks per
 dispatch.** For EVERY still-valid member (not just the obsolete ones you close), post `gh issue
