@@ -35,6 +35,38 @@ def seed_repo_cache(home, root, name):
         {"open": 1, "name": name, "root": root, "ts": int(time.time())}))
 
 
+# --------------------------------------------------------------------------- #
+# #497 -- bounce_backstop's BARE-box send now goes through the transcript-proof
+# `send_verified` (the swallowed-submit-books-as-delivered fix). These tests
+# assert bounce_backstop's own JOB LOGIC (which repo is nudged, busy-pane skip,
+# budget, dedup, cadence), not the keystroke MECHANICS -- so `send_verified` is
+# replaced module-wide by a happy-path stand-in that TYPES + submits the nudge
+# via the same tmux `run` (single -l, mirroring the pre-#497 send_continue
+# shape) and reports the submit VERIFIED. Every existing `tmux.typed()` /
+# persist-order assertion then holds unchanged. The real transcript-proof
+# verification / chunk-typing / undo-on-swallow is covered end to end in
+# test_send_verified.py; the swallowed-submit (False) job handling in
+# test_send_verified_adoption.py.
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+    run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
+    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    return True
+
+
+_SV_PATCHER = None
+
+
+def setUpModule():
+    global _SV_PATCHER
+    _SV_PATCHER = m.patch.object(wd, "send_verified", _typing_send_verified)
+    _SV_PATCHER.start()
+
+
+def tearDownModule():
+    if _SV_PATCHER is not None:
+        _SV_PATCHER.stop()
+
+
 class FakeTmux:
     """Static capture by default. `model_stash=True` additionally models Claude
     Code's SINGLE-SLOT prompt stash (Ctrl+S) and the input box, so the

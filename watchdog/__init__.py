@@ -5728,7 +5728,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 now, run, state, send_fn, dry_run=dry_run,
                 gh_fetch=bounce_fetch, projects_dir=projects_dir,
                 persist=lambda: save_state(state_path, state),
-                time_fn=time_fn, sweep_deadline=tail_deadline)
+                time_fn=time_fn, sweep_deadline=tail_deadline, sleep_fn=sleep_fn)
         except Exception as e:
             logs.append("bounce-backstop error: %r" % (e,))
 
@@ -5740,7 +5740,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             logs += gk_request_backstop(
                 now, run, state, send_fn, dry_run=dry_run,
                 gh_fetch=gkreq_fetch, projects_dir=projects_dir,
-                persist=lambda: save_state(state_path, state))
+                persist=lambda: save_state(state_path, state), sleep_fn=sleep_fn)
         except Exception as e:
             logs.append("gkreq-backstop error: %r" % (e,))
 

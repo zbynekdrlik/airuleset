@@ -191,5 +191,26 @@ class GkreqNudgeAdoption(unittest.TestCase):
         self.assertTrue(any("gkreq-nudge-failed" in ln for ln in logs), logs)
 
 
+class JanitorPrefixReclaim(unittest.TestCase):
+    """The cross_stream nudges are CHUNK-typed (BOUNCE_NUDGE 286c, GKREQ_NUDGE
+    412c, both >200c), so a swallowed send can leave a LITERAL partial residue
+    that `send_verified` withholds keystrokes on (never a blind backspace, #193).
+    That residue is reclaimed only if the #372 janitor recognizes it as OUR OWN
+    payload — so each nudge's prefix MUST be registered (the #490 Round-2 re-
+    injection lesson: an unrecognized partial nudge is mis-read as a draft,
+    stashed, and CC-auto-restored back into the box)."""
+
+    def test_bounce_and_gkreq_prefixes_are_recognized_own_payloads(self):
+        self.assertTrue(wd._looks_like_own_payload(
+            wd.BOUNCE_NUDGE % ("#1", "demo")), "bounce nudge residue reclaimable")
+        self.assertTrue(wd._looks_like_own_payload(
+            wd.GKREQ_NUDGE % ("#1", "demo")), "gkreq nudge residue reclaimable")
+
+    def test_a_genuine_human_draft_is_never_own_payload(self):
+        # the negative control: the recognition must not swallow a real draft
+        self.assertFalse(wd._looks_like_own_payload(
+            "chekni ci nemas nieco nove"))
+
+
 if __name__ == "__main__":
     unittest.main()
