@@ -25,7 +25,7 @@
   "tests/_goal_arm_helpers.py": 190,
   "tests/_hook_state_cleanup.py": 42,
   "tests/conftest.py": 110,
-  "tests/test_airuleset.py": 14321,
+  "tests/test_airuleset.py": 14425,
   "tests/test_architecture_first_414.py": 120,
   "tests/test_ask_before_assuming.py": 46,
   "tests/test_ask_before_assuming_dropped_rows.py": 576,
@@ -42,7 +42,7 @@
   "tests/test_bounce_lane.py": 292,
   "tests/test_burn.py": 2286,
   "tests/test_caveman.py": 694,
-  "tests/test_channels_transport_defer_418.py": 104,
+  "tests/test_channels_transport_defer_418.py": 99,
   "tests/test_ci_monitoring_scope.py": 209,
   "tests/test_ci_poll_repeat_block.py": 909,
   "tests/test_claude_code_log_skill.py": 96,
@@ -207,7 +207,7 @@
   "watchdog/stash.py": 952,
   "watchdog/sweep_jobs.py": 263,
   "watchdog/tmux_io.py": 476,
-  "watchdog/transcripts.py": 467,
+  "watchdog/transcripts.py": 543,
   "watchdog/usage.py": 380
  },
  "functions": {
