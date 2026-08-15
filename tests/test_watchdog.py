@@ -62,6 +62,34 @@ CAMERA_BOX_TEXT = ('court <invoke name="Read"><parameter name="file_path">'
                    '/tmp/x/tasks/b0kqzh3do.output</parameter></invoke>')
 
 
+# #497 batch 2 — jobs 1 (api-error) and 6 (session-limit) now route their bare
+# nudge through the transcript-proof `send_verified`. These tests assert the JOB
+# LOGIC (which pane is nudged, ping/keystroke discipline, the state machine), not
+# the keystroke MECHANICS, so `send_verified` is replaced module-wide by a happy-
+# path fake that byte-mirrors the old `send_continue` (type `-l --` + Enter,
+# returns True). The keystroke mechanics live in test_send_verified.py; the
+# swallowed-submit (False) path in test_send_verified_adoption.py.
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+    run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
+    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    return True
+
+
+_SV_PATCHER = None
+
+
+def setUpModule():
+    global _SV_PATCHER
+    _SV_PATCHER = unittest.mock.patch.object(wd, "send_verified",
+                                             _typing_send_verified)
+    _SV_PATCHER.start()
+
+
+def tearDownModule():
+    if _SV_PATCHER is not None:
+        _SV_PATCHER.stop()
+
+
 class TextToolcallStallDetector(unittest.TestCase):
     def _stall(self, entries):
         with TemporaryDirectory() as d:

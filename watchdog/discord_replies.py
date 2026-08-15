@@ -289,7 +289,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                             hosted_users=None, foreign_questions=None,
                             foreign_drop=None, cwd_by_sid=None,
                             projects_dir=PROJECTS_DIR, reaction_fetch=None,
-                            card_gh_fn=None, persist=None):
+                            card_gh_fn=None, persist=None, sleep_fn=None):
     """Route owner Discord replies into the sessions that asked (job 7) — AND
     (#297/#298) a ❓/❔ REACTION on a tracked bot message, and a REPLY on a
     tracked completion CARD.
@@ -727,13 +727,27 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
         pid, captured = pane
         if not watchdog.pane_at_idle_prompt(captured) or watchdog.pane_in_mode(pid, run):
             continue
-        if not dry_run:
-            watchdog.send_continue(pid, "Odpoveď užívateľa na tvoju otázku je na "
-                               "tickete #%s (komentár ODPOVEĎ UŽÍVATEĽA Z "
-                               "DISCORDU) — prečítaj ho a zariaď sa podľa "
-                               "neho." % ent.get("num"), run)
-        ptr.pop(sid)
-        logs.append("reply pointer→#%s [%s]" % (ent.get("num"), sid[:12]))
+        ptr_text = ("Odpoveď užívateľa na tvoju otázku je na tickete #%s "
+                    "(komentár ODPOVEĎ UŽÍVATEĽA Z DISCORDU) — prečítaj ho a "
+                    "zariaď sa podľa neho." % ent.get("num"))
+        if dry_run:
+            ptr.pop(sid)
+            logs.append("reply pointer→#%s [%s]" % (ent.get("num"), sid[:12]))
+            continue
+        # #497 — transcript-proof send: the one-shot `ptr.pop(sid)` consumes the
+        # pointer, so consume it ONLY on a VERIFIED submit. A swallowed one
+        # (agent-strip #36) must leave the pointer in place so the next sweep
+        # retries (until its own 1-day expiry above) instead of silently losing
+        # the visible answer-hint — strictly safer than the old unconditional pop.
+        tpath = watchdog._transcript_for_session(
+            projects_dir, sid, (cwd_by_sid or {}).get(sid))
+        if watchdog.send_verified(pid, ptr_text, run, tpath,
+                                  sleep_fn=sleep_fn, logs=logs):
+            ptr.pop(sid)
+            logs.append("reply pointer→#%s [%s]" % (ent.get("num"), sid[:12]))
+        else:
+            logs.append("reply pointer unverified→#%s [%s], retry next sweep"
+                        % (ent.get("num"), sid[:12]))
     state["dreply_pointer"] = ptr
 
     state["dreply_done"] = done[-_DREPLY_DONE_CAP:]

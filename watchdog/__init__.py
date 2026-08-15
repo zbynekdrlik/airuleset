@@ -2349,19 +2349,32 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             # leaves the bottom region and job 6 exits on its own.
                             logs.append("skip busy-pane (session-limit resume) %s" % (project or pid))
                         else:
+                            # #497 — transcript-proof send: a swallowed `continue`
+                            # (agent-strip selector #36, or a turn started under the
+                            # send) must NOT be booked as "resumed". Record
+                            # continued/attempts/the resume ping ONLY on a verified
+                            # submit; on an unverified one set none of them so the
+                            # session stays limit-parked and the next sweep retries
+                            # from a clean prompt.
+                            ok = True
                             if not dry_run:
-                                send_continue(pid, NUDGE_TEXT, run)
-                            attempts += 1
-                            s["attempts"] = attempts
-                            s["last_try"] = now
-                            s["continued"] = True
-                            logs.append("session-limit %s — reset passed → continue" % project)
-                            if attempts == 1:
-                                send_fn("✅ **%s** — 5h limit sa resetol, poslal som "
-                                        "`continue` — pokračujem." % project,
-                                        owner=owner,
-                                        dedup_key="sesslimit-resume:%s:%s" % (key, ra),
-                                        dry_run=dry_run)
+                                ok = send_verified(pid, NUDGE_TEXT, run, tpath,
+                                                   sleep_fn=sleep_fn, logs=logs)
+                            if ok:
+                                attempts += 1
+                                s["attempts"] = attempts
+                                s["last_try"] = now
+                                s["continued"] = True
+                                logs.append("session-limit %s — reset passed → continue" % project)
+                                if attempts == 1:
+                                    send_fn("✅ **%s** — 5h limit sa resetol, poslal som "
+                                            "`continue` — pokračujem." % project,
+                                            owner=owner,
+                                            dedup_key="sesslimit-resume:%s:%s" % (key, ra),
+                                            dry_run=dry_run)
+                            else:
+                                logs.append("session-limit %s — continue submit-unverified, "
+                                            "retry next sweep" % project)
                 continue                                # job 6 owns this session this poll
 
             # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -
@@ -2629,9 +2642,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         logs.append("nudge#%d %s [%s] (stash)" % (n, project, key))
                     else:
                         state[key] = entry
-                        logs.append("nudge#%d %s [%s]" % (n, project, key))
+                        # #497 — transcript-proof send. NO persist reorder here:
+                        # decide()'s own interval/re-sighting cadence retries a
+                        # swallowed nudge, and its after-max_nudges escalation is
+                        # CORRECT on repeated swallows (delivery genuinely failing
+                        # → the give-up ping below). So just swap the primitive and
+                        # log the delivery result honestly (napísané ≠ odoslané).
+                        ok = True
                         if not dry_run:
-                            send_continue(pid, NUDGE_TEXT, run)
+                            ok = send_verified(pid, NUDGE_TEXT, run, tpath,
+                                               sleep_fn=sleep_fn, logs=logs)
+                        logs.append("nudge#%d %s [%s]%s"
+                                    % (n, project, key,
+                                       "" if ok else " (submit-unverified)"))
                     if n == 1:                 # first nudge → tell the user it stalled
                         send_fn(compose_api_error_alert(project, err_text),
                                 owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
@@ -3207,7 +3230,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                             hosted_users=hosted_users,
                                             cwd_by_sid=cwd_by_sid,
                                             projects_dir=projects_dir,
-                                            persist=lambda: save_state(state_path, state))
+                                            persist=lambda: save_state(state_path, state),
+                                            sleep_fn=sleep_fn)
         except Exception as e:
             logs.append("discord-reply error: %r" % (e,))
 

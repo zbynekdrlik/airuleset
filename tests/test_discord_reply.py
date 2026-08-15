@@ -11,6 +11,7 @@ drop-on-delivery, busy/absent-pane retry, question-map persistence + pruning).
 import sys
 import time
 import unittest
+import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -18,6 +19,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import notify
 import watchdog as wd
+
+
+# #497 batch 2 — the job-7 reply POINTER now routes through the transcript-proof
+# `send_verified` (the reply-pointer delivery, not the typed answer, which stays
+# on send_continue). These tests assert the JOB LOGIC (typed when typable, popped
+# once delivered), not the keystroke mechanics, so `send_verified` is replaced
+# module-wide by a happy-path fake that byte-mirrors send_continue (type `-l --`
+# + Enter, returns True). Swallowed-submit handling: test_send_verified_adoption.
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+    run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
+    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    return True
+
+
+_SV_PATCHER = None
+
+
+def setUpModule():
+    global _SV_PATCHER
+    _SV_PATCHER = m.patch.object(wd, "send_verified", _typing_send_verified)
+    _SV_PATCHER.start()
+
+
+def tearDownModule():
+    if _SV_PATCHER is not None:
+        _SV_PATCHER.stop()
 
 
 # --------------------------------------------------------------------------- #
