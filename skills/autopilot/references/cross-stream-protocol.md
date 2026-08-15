@@ -102,4 +102,21 @@ re-review and no pickup).
    result, remove the label or close, then nudge the requesting stream's pane (rule 6 mechanics)
    so it resumes without polling. Session-local pollers for this lane are FORBIDDEN — the
    watchdog owns the cadence (the odoo-erp master-loop interim poller is superseded).
+8. **Carve-out HAND-OFF vs. ACTION request — the SAME `needs-gatekeeper` label, told apart by
+   `stream:<user>` (airuleset #498, live incident odoo-erp #3244).** `needs-gatekeeper` is
+   OVERLOADED. A stream carved OUT of the hand-off gate (a phase-1 stream with no shadow box,
+   whose validation hand-off gate fails STRUCTURALLY) has its `ready-for-review` label stripped at
+   every hand-off; the repo-side gate applies `needs-gatekeeper` INSTEAD of silently stripping, so
+   that stream's code HAND-OFFS arrive under `needs-gatekeeper` + `stream:<user>` and belong in the
+   gatekeeper's REVIEW queue. The gatekeeper's review queue is therefore
+   `ready-for-review` ∪ `needs-gatekeeper`, scoped to `stream:<stream>` — NEVER `ready-for-review`
+   alone (the miva incident: an rfr-only queue never surfaced the carve-out hand-off, so it rotted
+   with both sides claiming done). The ACTION request of rule 7 also carries `needs-gatekeeper` but
+   NEVER `stream:<user>` (`handed-by:<user>` instead, #191 C1), so the `stream:<stream>` scope is
+   exactly what keeps the two apart: a carve-out hand-off enters review, a bare action-request does
+   NOT. **Queue membership is carried by LABELS — the `GATEKEEPER-ACTION:` / `READY-FOR-REVIEW:`
+   comment TEXT is never a queue signal, labels carry queue state** (a `in:comments` query
+   over-matches and would over-count the queue — the same reason `cli_quals.py`'s obligation set
+   uses the LABEL, not the comment). This is the CANONICAL definition; `/process-subdev` step 1 and
+   `/autopilot-master` LANE 1 both conform to it.
 

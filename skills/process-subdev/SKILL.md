@@ -21,9 +21,11 @@ repo parameters, never a divergent variant. The companion sub-dev side and the s
 `## Cross-stream protocol` live in the `autopilot` skill — both sides obey it.
 
 Gatekeeper is an **independent observer**, not a consumer of the sub-dev's narrative. The
-`ready-for-review` label is a *visibility signal* — it says THAT something is ready,
-never WHAT to conclude. Every conclusion comes from gatekeeper's own reading of the diff
-and its own CI/release run. Sub-dev comments never task or steer the judgment.
+hand-off LABEL (`ready-for-review`, or `needs-gatekeeper` for a carve-out stream whose
+hand-off gate strips `ready-for-review` structurally — see step 1) is a *visibility
+signal* — it says THAT something is ready, never WHAT to conclude. Every conclusion comes
+from gatekeeper's own reading of the diff and its own CI/release run. Sub-dev comments
+never task or steer the judgment.
 
 ## Repo parameters (read from the repo CLAUDE.md — never hardcoded here)
 
@@ -49,9 +51,31 @@ and its own CI/release run. Sub-dev comments never task or steer the judgment.
 
 ### 1. Pick up the queue
 
+**The queue = `ready-for-review` ∪ `needs-gatekeeper`, scoped to the stream — NEVER
+`ready-for-review` alone.**
+
 ```bash
-gh issue list --label ready-for-review --label stream:<stream> --state open --json number,title,labels
+gh issue list --state open --search "label:ready-for-review,needs-gatekeeper label:stream:<stream>" --json number,title,labels
 ```
+
+(In `gh --search`, a comma INSIDE one `label:` qualifier is OR; a space BETWEEN
+qualifiers is AND — so this is `(ready-for-review OR needs-gatekeeper) AND stream:<stream>`.)
+
+**Why BOTH labels, and why the union is safe.** A carve-out stream (a phase-1 stream with
+no shadow box, whose validation hand-off gate fails STRUCTURALLY) has its `ready-for-review`
+label stripped at EVERY hand-off; the repo-side gate applies `needs-gatekeeper` INSTEAD of
+silently stripping, so that stream's hand-offs arrive EXCLUSIVELY under `needs-gatekeeper` +
+`stream:<stream>`. A `ready-for-review`-only queue never surfaces them and they rot
+invisibly (the live miva incident on odoo-erp — both sides claimed done for hours). The
+union is safe because the queue is `stream:<stream>`-scoped and a bare `needs-gatekeeper`
+stream→supervisor ACTION request (box access / infra — Cross-stream protocol rule 7) NEVER
+carries `stream:<stream>` (it uses `handed-by:<user>`), so an action-request is NOT swept
+into review. **Queue membership is carried by LABELS — the `GATEKEEPER-ACTION:` /
+`READY-FOR-REVIEW:` comment TEXT is NEVER a queue signal, labels carry queue state** (a
+comment query over-matches and would over-count the queue). If BOTH label mechanisms fail
+so a hand-off carries no label at all, that is a repo-automation failure to fix AT THE REPO
+(the gate above exists precisely so a structural strip GUARANTEES a `needs-gatekeeper`
+label) — never a comment fallback here.
 
 One fork branch (fork-no-merge) or one release-batch of merged integration PRs
 (branch-merge) = one processing run. Queue empty → say so, but check the RELEASE debt
@@ -179,7 +203,9 @@ repo's own CLAUDE.md / playbook is what names the command.
      --goal "<plain Slovak>" --achieved "<plain Slovak>" --version "<version read from
      the live DOM>" --url "<Label=URL>"` — one call per ticket, same mechanism
      `agents/autopilot-worker.md` uses, never a hand-fired `reply`/`PushNotification`.
-     THEN close the stream's tickets with merge evidence and remove `ready-for-review`.
+     THEN close the stream's tickets with merge evidence and remove whichever hand-off
+     label was applied (`ready-for-review` and/or `needs-gatekeeper` — a carve-out
+     stream's hand-off carries `needs-gatekeeper`, not `ready-for-review`).
 - **FINDINGS → the bounce lane** (`## Cross-stream protocol` in the autopilot skill is
   canonical): post the findings as a precise comment on each affected ticket (file:line,
   what is wrong, what evidence is missing — the ticket carries the FULL content),
@@ -231,7 +257,7 @@ NEVER part of it (that is /autopilot's job). Template — substitute the repo's 
 parameters:
 
 ```
-/goal The <stream> sub-dev queue is EMPTY and fully SHIPPED — for EVERY stream shape alike (fork-no-merge included): every processed slice is RELEASED (integration→staging→main merged) AND its prod deploys completed per the repo parameters (windowed instance deployed INSIDE its airuleset:release-window; approval-gated instance deployed after my explicit approval — ask via ❓ NEEDS YOU when the release is staged) AND post-deploy verified — proven in the transcript; tickets closed with the release still pending is NOT done, it is release review-watch: keep the loop alive — hold intermediate turns OPEN with a FOREGROUND sleep-poll (repeated short sleep+re-check tool calls; NEVER a wakeup/schedule mechanism inside this armed /goal — the loop fires the next turn immediately and spins tokens; the deploy window wait holds the same way), end them ⏳ WORKING, and immediately process new arrivals meanwhile. Waiting IS the designed state — never ask the user whether to keep waiting (the hold costs a handful of tool calls per hour). Also not-done while any open prio:bounce ticket of this stream awaits a sub-dev fix or a re-handoff awaits my re-review. EVERY arrival — the 5th exactly like the 1st, depth NEVER degrades across iterations — gets the FULL pipeline: cold diff-first review with adversarial verify, cross-check vs tickets, own CI/release gates, release tail — and the transcript must show, PER hand-off, the review verdict posted to the ticket(s) BEFORE any merge/release. Stop only on a ❓ NEEDS YOU decision or a CI failure unfixable after two real attempts. Never gate on prod-usage/events beyond the repo's declared window/approval parameters.
+/goal The <stream> sub-dev queue is EMPTY and fully SHIPPED — for EVERY stream shape alike (fork-no-merge included): every processed slice is RELEASED (integration→staging→main merged) AND its prod deploys completed per the repo parameters (windowed instance deployed INSIDE its airuleset:release-window; approval-gated instance deployed after my explicit approval — ask via ❓ NEEDS YOU when the release is staged) AND post-deploy verified — proven in the transcript; tickets closed with the release still pending is NOT done, it is release review-watch: keep the loop alive — hold intermediate turns OPEN with a FOREGROUND sleep-poll (repeated short sleep+re-check tool calls; NEVER a wakeup/schedule mechanism inside this armed /goal — the loop fires the next turn immediately and spins tokens; the deploy window wait holds the same way), end them ⏳ WORKING, and immediately process new arrivals meanwhile. Waiting IS the designed state — never ask the user whether to keep waiting (the hold costs a handful of tool calls per hour). Also not-done while any open hand-off of this stream carrying ready-for-review OR needs-gatekeeper (a carve-out stream hands off via needs-gatekeeper, not ready-for-review) awaits my review, or any open prio:bounce ticket of this stream awaits a sub-dev fix or a re-handoff awaits my re-review. EVERY arrival — the 5th exactly like the 1st, depth NEVER degrades across iterations — gets the FULL pipeline: cold diff-first review with adversarial verify, cross-check vs tickets, own CI/release gates, release tail — and the transcript must show, PER hand-off, the review verdict posted to the ticket(s) BEFORE any merge/release. Stop only on a ❓ NEEDS YOU decision or a CI failure unfixable after two real attempts. Never gate on prod-usage/events beyond the repo's declared window/approval parameters.
 ```
 
 **The anti-degradation rule is part of the condition, not advice:** a later hand-off

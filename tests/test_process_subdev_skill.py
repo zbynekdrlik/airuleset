@@ -295,7 +295,8 @@ class TestQueueUnionsBothHandoffLabels(TestCase):
         # that was actually applied, not only ready-for-review.
         flat = " ".join(read(SKILL).split())
         i = flat.index("close the stream's tickets with merge")
-        window = flat[max(0, i - 200):i + 40]
+        # the "remove <label>" clause is AFTER the close phrase -> look forward.
+        window = flat[i:i + 220]
         self.assertIn("needs-gatekeeper", window)
 
 
