@@ -61,7 +61,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import notify                                            # noqa: E402
 import watchdog as wd                                    # noqa: E402
-from _hook_state_cleanup import sweep_session_files       # noqa: E402
+from _hook_state_cleanup import (                         # noqa: E402
+    new_hook_sid, sweep_session_files)
 
 ROOT = Path(__file__).resolve().parent.parent
 GATE = ROOT / "hooks" / "subagent-stop-check-run-card.sh"
@@ -227,11 +228,13 @@ class _GateBase(unittest.TestCase):
         _git(self.repo, "init", "-q", "-b", "main")
         _git(self.repo, "remote", "add", "origin",
              "https://github.com/zbynekdrlik/parovanie-produktov.git")
-        self.sid = "gate-%d" % os.getpid()
-        self.addCleanup(lambda: [
-            os.remove(f) for f in
-            Path("/tmp").glob("airuleset-runcard-gate-gate-*")
-            if os.path.exists(f)])
+        # #494 — a GLOBALLY-UNIQUE (uuid) SID so a state file left by a KILLED
+        # prior run can never collide with a fresh run's and suppress its first
+        # block; PRECISE per-sid cleanup (never a box-wide glob, which on this
+        # many-workers-per-box machine could delete a CONCURRENT process's live
+        # file); and an age-gated sweep reclaiming an hour-old kill-orphan.
+        self.sid = new_hook_sid(self, "gate",
+                                ["airuleset-runcard-gate-gate-*"])
 
     def mark(self, key, status="sent"):
         d = self.home / ".claude" / "autopilot-notify-sent"
@@ -392,6 +395,34 @@ class TestGateStaysOutOfTheWay(_GateBase):
         self.assertEqual(r.stderr.strip(), "",
                          "a hook that pollutes stderr while exiting 0 is "
                          "invisible (#124)")
+
+
+class TestCrossRunStatePollutionIsIsolated(_GateBase):
+    """#494 -- the run-card gate keys its `/tmp/airuleset-runcard-gate-<SID>`
+    "blocked once per (session, repo#issue)" state only on SID and reads it at
+    start (an already-listed issue is `continue`-skipped, never re-blocked). A
+    run KILLED after the hook wrote its state leaves that file behind; when the
+    OS later recycles its pid, a PID-based SID (`gate-<pid>`) re-derives the
+    SAME name and reads the leftover, so the fresh run's FIRST gate call for an
+    issue already listed there wrongly does NOT block -- the same cross-run
+    flake class #485 fixed for the design gate, shared by every `_GateBase`
+    test here (all drive the one per-session state file). The guarantee: a
+    fresh run's SID must never collide with a prior run's, so a stale file at
+    the OLD predictable pid-keyed name can never suppress a block.
+    Deterministic -- no timing, no retry."""
+
+    def test_a_stale_pid_keyed_state_file_does_not_suppress_the_first_block(self):
+        # A leftover from a "prior killed run" at the OLD predictable pid-keyed
+        # name (`gate-<pid>`, the pre-#494 convention), already listing
+        # parovanie-produktov#41 as seen.
+        pid_keyed = Path("/tmp") / (
+            "airuleset-runcard-gate-gate-%d" % os.getpid())
+        self.addCleanup(pid_keyed.unlink, missing_ok=True)
+        pid_keyed.write_text("parovanie-produktov#41")
+        # This run must still block for #41 -- it only does once this test's
+        # SID no longer collides with that predictable pid-keyed name.
+        r = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(r), (r.returncode, r.stdout, r.stderr))
 
 
 class TestGateIsWired(unittest.TestCase):

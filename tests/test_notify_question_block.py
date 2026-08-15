@@ -28,6 +28,8 @@ from pathlib import Path
 from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _hook_state_cleanup import new_hook_sid  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PENDING = ROOT / "hooks" / "notify-discord-pending.sh"
@@ -181,19 +183,16 @@ class TestStructuredLongQuestion(TestCase):
         # The gate validates the SAME block — its extraction must also see the
         # head, or a perfectly-structured long question gets hard-blocked.
         import json
-        import os
-        sid = "test-qq-longq-%d" % os.getpid()
-        try:
-            payload = json.dumps({"last_assistant_message": LONG_STRUCTURED_MSG,
-                                  "session_id": sid})
-            r = subprocess.run(["bash", str(GATE)], input=payload,
-                               capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertNotIn('"block"', r.stdout, r.stdout)
-        finally:
-            for f in ("/tmp/airuleset-question-quality-block-" + sid,):
-                if os.path.exists(f):
-                    os.remove(f)
+        # #494 — uuid SID (never a recyclable pid) + precise/age-gated cleanup
+        # via the shared helper, so a killed prior run's leftover can never
+        # collide with this run and skew the gate's retry-budget dedup.
+        sid = new_hook_sid(self, "test-qq-longq", ["*test-qq-longq-*"])
+        payload = json.dumps({"last_assistant_message": LONG_STRUCTURED_MSG,
+                              "session_id": sid})
+        r = subprocess.run(["bash", str(GATE)], input=payload,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('"block"', r.stdout, r.stdout)
 
 
 # #45 — an unanswered question referenced by allusion instead of restated in
@@ -223,38 +222,27 @@ rozhodnutie: má tento konkrétny beh použiť ultracode na paralelizáciu prác
 
 
 class TestHistoryAllusionBlocked(TestCase):
+    # #494 — each method mints a uuid SID via the shared helper (never a
+    # recyclable pid), with precise + age-gated cleanup registered on the
+    # testcase, so a killed prior run's leftover can never collide with a fresh
+    # run's and skew the gate's retry-budget dedup.
     def _run_gate(self, msg, sid):
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
         return subprocess.run(["bash", str(GATE)], input=payload,
                               capture_output=True, text=True)
 
-    def _cleanup(self, sid):
-        for f in (
-            "/tmp/airuleset-question-quality-block-" + sid,
-            "/tmp/claude-discord-lastq-" + sid,
-            "/tmp/claude-user-active-" + sid,
-        ):
-            if os.path.exists(f):
-                os.remove(f)
-
     def test_allusion_to_an_old_question_is_hard_blocked(self):
-        sid = "test-qq-reference-%d" % os.getpid()
-        try:
-            r = self._run_gate(REFERENCE_MSG, sid)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertIn('"block"', r.stdout, r.stdout)
-            self.assertIn("allusion", r.stdout.lower())
-        finally:
-            self._cleanup(sid)
+        sid = new_hook_sid(self, "test-qq-reference", ["*test-qq-reference-*"])
+        r = self._run_gate(REFERENCE_MSG, sid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('"block"', r.stdout, r.stdout)
+        self.assertIn("allusion", r.stdout.lower())
 
     def test_full_self_contained_reask_passes(self):
-        sid = "test-qq-reask-%d" % os.getpid()
-        try:
-            r = self._run_gate(FULL_REASK_MSG, sid)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertNotIn('"block"', r.stdout, r.stdout)
-        finally:
-            self._cleanup(sid)
+        sid = new_hook_sid(self, "test-qq-reask", ["*test-qq-reask-*"])
+        r = self._run_gate(FULL_REASK_MSG, sid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('"block"', r.stdout, r.stdout)
 
     def test_verbatim_repeat_of_the_same_blocked_question_still_passes(self):
         # First ask: the reference-shaped message would normally block, so
@@ -262,16 +250,53 @@ class TestHistoryAllusionBlocked(TestCase):
         # simulate the dedup state notify-discord-pending.sh would have
         # written (lastq file) and repeat the SAME marker line byte-identical
         # — the VERBATIM-repeat bypass must still short-circuit before Check 5.
-        sid = "test-qq-verbatim-%d" % os.getpid()
-        try:
-            marker_line = "NEEDS YOU: mám zapnúť ultracode pre tento beh?"
-            with open("/tmp/claude-discord-lastq-" + sid, "w") as f:
-                f.write(marker_line)
-            r = self._run_gate(FULL_REASK_MSG, sid)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertNotIn('"block"', r.stdout, r.stdout)
-        finally:
-            self._cleanup(sid)
+        sid = new_hook_sid(self, "test-qq-verbatim", ["*test-qq-verbatim-*"])
+        marker_line = "NEEDS YOU: mám zapnúť ultracode pre tento beh?"
+        with open("/tmp/claude-discord-lastq-" + sid, "w") as f:
+            f.write(marker_line)
+        r = self._run_gate(FULL_REASK_MSG, sid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('"block"', r.stdout, r.stdout)
+
+
+class TestCrossRunRetryBudgetIsIsolated(TestCase):
+    """#494 — the question-quality gate keys its retry budget at
+    /tmp/airuleset-question-quality-block-<SID>, RETRIES read at start, and
+    blocks only while RETRIES < MAX_RETRIES(3). A run KILLED after it exhausted
+    that budget (or the OS recycling a pid that a prior run advanced) leaves the
+    file behind; a fresh run minting a PID-based SID (`test-qq-*-<pid>`, as
+    every method above does) re-derives the SAME name, reads the exhausted
+    budget, and does NOT re-block — so `test_allusion_to_an_old_question_is_
+    hard_blocked`'s asserted block silently does not fire. The same recyclable-
+    pid /tmp-state flake class #485 fixed for the design gate. The guarantee: a
+    fresh run's SID must never collide with a prior run's predictable pid-keyed
+    name. Deterministic — no timing, no retry."""
+
+    def setUp(self):
+        # The run SID — the ONE thing #494's fix flips (pid → uuid). Minted via
+        # the shared helper exactly like _GateBase.self.sid so RED/GREEN turn on
+        # this line; the helper also registers precise + age-gated cleanup.
+        self.sid = new_hook_sid(self, "test-qq-reference",
+                                ["*test-qq-reference-*"])
+
+    def _run_gate(self, msg, sid):
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
+        return subprocess.run(["bash", str(GATE)], input=payload,
+                              capture_output=True, text=True)
+
+    def test_a_stale_pid_keyed_retry_file_does_not_suppress_the_block(self):
+        # A leftover from a "prior killed run" at the OLD predictable pid-keyed
+        # name (`test-qq-reference-<pid>`), retry budget already exhausted
+        # (>= MAX_RETRIES). Cleaned regardless of the run SID.
+        pid_keyed = Path("/tmp") / (
+            "airuleset-question-quality-block-test-qq-reference-%d" % os.getpid())
+        self.addCleanup(lambda: pid_keyed.exists() and pid_keyed.unlink())
+        pid_keyed.write_text("3")
+        # The allusion block must STILL fire — it only does once this test's
+        # run SID (self.sid) no longer collides with that pid-keyed name.
+        r = self._run_gate(REFERENCE_MSG, self.sid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('"block"', r.stdout, r.stdout)
 
 
 if __name__ == "__main__":
