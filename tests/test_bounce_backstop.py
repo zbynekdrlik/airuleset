@@ -725,7 +725,7 @@ class TestBounceDiscordRepingSurvivesNotifyDedup(unittest.TestCase):
         # re-ping (its own `same and fresh` 6h window has elapsed).
         state["bounce"]["last_check"] = 0             # reopen the cadence gate
         t1 = t0 + wd.BOUNCE_RENUDGE_SECONDS + 60
-        self._reping(send, state, t1)
+        logs2 = self._reping(send, state, t1)
 
         # BOTH re-pings must actually reach Discord -- the second must NOT be
         # swallowed by notify's own 14-day marker (the #360 defect: the two
@@ -735,6 +735,12 @@ class TestBounceDiscordRepingSurvivesNotifyDedup(unittest.TestCase):
         # not the byte-identical content-based key the old code built.
         keys = [k for _b, k in calls]
         self.assertEqual(len(set(keys)), 2, keys)
+        # #360 observability (gk-request sibling parity, cross_stream.py:761):
+        # the journal line records the send RESULT, so a live box can tell a
+        # delivered re-ping ('sent') from one notify swallowed ('dedup') --
+        # exactly the delivery-vs-swallow distinction this fix exists to make
+        # verifiable per the repo's live-box verification bar.
+        self.assertTrue(any("(send='sent')" in ln for ln in logs2), logs2)
 
 
 if __name__ == "__main__":

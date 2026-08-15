@@ -38,7 +38,7 @@
     "tests/test_block_commit_without_design.py": 659,
     "tests/test_block_foreign_airuleset_write.py": 135,
     "tests/test_block_staged_content_values.py": 260,
-    "tests/test_bounce_backstop.py": 741,
+    "tests/test_bounce_backstop.py": 747,
     "tests/test_bounce_lane.py": 292,
     "tests/test_burn.py": 2286,
     "tests/test_caveman.py": 694,

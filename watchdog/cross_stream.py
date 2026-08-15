@@ -424,9 +424,9 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
             # and stays short regardless of backlog size. Exactly the shape
             # gk_request_backstop already uses (#353, see its identical fix +
             # rationale above at the `gkreq:%s:%d` send).
-            send_fn(body, dedup_key="bounce:%s:%d" % (name, int(now)),
-                    dry_run=dry_run, project=stream_qualified(name))
-            logs.append("bounce-ping %s %s" % (name, tick_str))
+            result = send_fn(body, dedup_key="bounce:%s:%d" % (name, int(now)),
+                             dry_run=dry_run, project=stream_qualified(name))
+            logs.append("bounce-ping %s %s (send=%r)" % (name, tick_str, result))
     return logs
 
 
