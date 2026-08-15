@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -55,11 +56,17 @@ class _GateBase(TestCase):
         _git(self.repo, "init", "-q", "-b", "main")
         _git(self.repo, "remote", "add", "origin",
              "https://github.com/zbynekdrlik/airuleset.git")
-        self.sid = "designstop-%d" % os.getpid()
-        self.addCleanup(lambda: [
-            os.remove(f) for f in
-            Path("/tmp").glob("airuleset-designgate-designstop-*")
-            if os.path.exists(f)])
+        # #485 -- a GLOBALLY-UNIQUE SID (never a recyclable pid), so a state
+        # file left by a KILLED prior run can never collide with a fresh
+        # run's and suppress its first block. The hook hardcodes /tmp and
+        # keys ONLY on SID (its real prod SIDs are session UUIDs, correct as
+        # is), so the isolation lives entirely in the SID's uniqueness plus
+        # a PRECISE per-file cleanup -- never a glob, which on this
+        # many-workers-per-box machine could delete a CONCURRENT process's
+        # live state file.
+        self.sid = "designstop-" + uuid.uuid4().hex
+        self._state_file = Path("/tmp") / ("airuleset-designgate-" + self.sid)
+        self.addCleanup(self._state_file.unlink, missing_ok=True)
 
     def mark(self, issue, repo="airuleset", kind="design"):
         os.environ["HOME"] = str(self.home)
