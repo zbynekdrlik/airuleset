@@ -401,7 +401,70 @@ def is_api_issues_post(tk):
     return has_issues and has_post
 
 
-def resolve_body(tk, seg_line, is_api):
+def _cd_target(tk):
+    """The directory a leading `cd` segment changes into, or None when the
+    target cannot be known statically (#483) -- no argument (bare `cd` ->
+    $HOME), or an unexpandable $VAR / ~ / glob / command-substitution target
+    that only the runtime shell could resolve. `tk` is a tokenized segment
+    whose first token is already known to be `cd`."""
+    target = None
+    for t in tk[1:]:
+        if t == "--":
+            continue
+        if t.startswith("-"):
+            continue  # cd -L / -P / -e / -@ options carry no path
+        target = t
+        break
+    if target is None:
+        return None
+    # Anything the shell would expand at runtime is not statically knowable.
+    if any(ch in target for ch in "$~*?`"):
+        return None
+    return target
+
+
+def _apply_cd(base, tk):
+    """Fold one `cd <dir>` segment into the running effective cwd (#483).
+    Returns the new effective cwd, or None once it becomes unknowable -- a
+    later relative -F then degrades to the explicit not-readable message
+    (option 2) rather than a WRONG resolution or a fail-open pass. An
+    absolute target replaces the cwd outright; a relative one is
+    normpath-joined onto the current effective cwd, which STARTS as the
+    hook's own cwd (== the shell's own starting cwd), so a no-`cd` command
+    resolves exactly as before this fix."""
+    target = _cd_target(tk)
+    if target is None:
+        return None
+    if os.path.isabs(target):
+        return os.path.normpath(target)
+    if base is None:
+        return None
+    return os.path.normpath(os.path.join(base, target))
+
+
+def _unreadable_body_err(bf, eff_cwd):
+    """#483 -- an actionable per-item block reason for a `-F <file>` disk
+    path that could not be read, replacing the opaque `-> none`. Names the
+    file, the effective cwd it was resolved against (or that it was
+    unresolvable), and the fix (an absolute -F path). One line -- it crosses
+    the tab-separated hand-off to bash (see _clean_field)."""
+    if os.path.isabs(bf):
+        return ("body file '%s' not readable -- path is missing or unreadable "
+                "(check the absolute -F path)" % bf)
+    where = ("'%s'" % eff_cwd) if eff_cwd is not None else \
+        "an unresolvable 'cd' target ($VAR/~/glob)"
+    return ("body file '%s' not readable -- a relative -F path resolved "
+            "against %s; use an absolute -F path" % (bf, where))
+
+
+def resolve_body(tk, seg_line, is_api, eff_cwd):
+    """Returns (body_text_or_None, err_or_None). `err` is set ONLY when a
+    `-F <file>` DISK path was present but could not be read (#483) -- it
+    carries the explicit, actionable block reason instead of the old opaque
+    `none`. `eff_cwd` (#483) is the command's effective cwd after any
+    leading `cd <dir>`; a relative -F is resolved against it, NOT the hook's
+    own process cwd (which a `cd` prefix would otherwise make wrong -- the
+    gk@odoo-erp incident)."""
     if is_api:
         # `gh api` overloads -f/-F for arbitrary key=value FIELDS (typed
         # vs raw), unlike `gh issue create`'s -F <FILE PATH>. Find a
@@ -410,30 +473,37 @@ def resolve_body(tk, seg_line, is_api):
             if t in ("-f", "-F", "--field", "--raw-field") and idx + 1 < len(tk):
                 v = tk[idx + 1]
                 if v.startswith("body="):
-                    return v[len("body="):]
+                    return v[len("body="):], None
             elif t.startswith(("-f", "-F", "--field=", "--raw-field=")) and "=" in t:
                 # -fbody=x / --field=body=x shapes — best-effort only.
                 pass
-        return None
+        return None, None
     bf = flag_value(tk, ("-F", "--body-file"))
     if bf is not None:
         if bf == "-":
             m = HEREDOC_RE.search(seg_line.rstrip())
             if m and m.group(2) in direct_bodies:
-                return direct_bodies[m.group(2)]
-            return None
+                return direct_bodies[m.group(2)], None
+            return None, None
         if bf in file_bodies:
-            return file_bodies[bf]
-        try:
-            path = bf if os.path.isabs(bf) else os.path.join(cwd, bf)
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                return fh.read()
-        except OSError:
-            return None
+            return file_bodies[bf], None
+        if os.path.isabs(bf):
+            path = bf
+        elif eff_cwd is not None:
+            path = os.path.join(eff_cwd, bf)
+        else:
+            path = None  # relative -F under an unresolvable `cd` target
+        if path is not None:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    return fh.read(), None
+            except OSError:
+                pass
+        return None, _unreadable_body_err(bf, eff_cwd)
     inline = flag_value(tk, ("--body",))
     if inline is not None:
-        return inline
-    return None
+        return inline, None
+    return None, None
 
 
 CRITERION_RE = re.compile(r'(?m)^\s*Scope-gate:\s*(\S+)')
@@ -928,10 +998,23 @@ _local_day_count = {}      # target_repo -> count
 _local_parent_count = {}   # (target_repo, parent) -> count
 _batch_titles_by_repo = {}  # target_repo -> [title, ...] already PASSed
 
+# #483 -- the effective cwd a relative `-F` body path resolves against.
+# Starts as the hook's own cwd (== the shell's own starting cwd) and is
+# folded forward by every leading `cd <dir>` segment as the command is
+# walked in order, so `cd /dir && gh issue create ... -F body.md` reads
+# body.md from /dir, not from the hook's cwd.
+effective_cwd = cwd
+
 for seg in split_top_level(skeleton):
     if not seg.strip():
         continue
     tk = strip_prefix(tokens_of(seg))
+    # #483 -- a `cd` segment changes where a later relative `-F` lives; fold
+    # it into effective_cwd (unknowable target -> None, degrades to the
+    # explicit not-readable reason) and move on -- it is never a filing.
+    if tk and tk[0] == "cd":
+        effective_cwd = _apply_cd(effective_cwd, tk)
+        continue
     api_call = is_api_issues_post(tk)
     if not (is_issue_create(tk) or api_call):
         continue
@@ -943,7 +1026,7 @@ for seg in split_top_level(skeleton):
                 title = tk[idx + 1][len("title="):]
                 break
     title = title or "(no title)"
-    body = resolve_body(tk, seg, api_call)
+    body, body_err = resolve_body(tk, seg, api_call, effective_cwd)
     crit = None
     if body:
         m = CRITERION_RE.search(body)
@@ -1008,8 +1091,11 @@ for seg in split_top_level(skeleton):
     elif not (crit and crit.lower() in ALLOWED):
         # unchanged from before #329 -- missing/invalid Scope-gate blocks
         # here, BEFORE the new dedup/cap checks below (keeps every
-        # pre-existing test's block reason unaffected).
-        results.append(("BLOCK", clean_title, _clean_field(crit), parents_str,
+        # pre-existing test's block reason unaffected). #483: when the body
+        # was UNRESOLVED because a `-F` disk path could not be read, surface
+        # that explicit, actionable reason instead of the opaque `-> none`.
+        reason = body_err if (body is None and body_err) else _clean_field(crit)
+        results.append(("BLOCK", clean_title, reason, parents_str,
                          target_repo, ""))
     else:
         dedup_match = DEDUP_RE.search(body) if body else None
