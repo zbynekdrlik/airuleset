@@ -598,6 +598,53 @@ class TestChooseFiledropPort(unittest.TestCase):
                                     lambda a: (0, "active\n", "")):
             self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 8791)
 
+    def test_distinct_uids_get_distinct_ports(self):
+        # #493: the racy shared-:8788 default piled all ~12 subdev stream
+        # accounts onto ONE port — 10 of 12 servers dead unable to bind it,
+        # every loser's share URL 404ing off a stranger's server. Two DIFFERENT
+        # users (distinct uid) must get DIFFERENT filedrop ports so their
+        # servers never contend and their URLs never cross into another user's
+        # store. Drive _choose_filedrop_port as two users via os.getuid; the
+        # setUp already pins the service inactive + no persisted port.
+        ports = []
+        for uid in (1002, 1004):        # real subdev uids (montalu, montalu2)
+            with self.m.patch("os.getuid", lambda u=uid: u):
+                ports.append(self.ar._choose_filedrop_port("127.0.0.1"))
+        self.assertNotEqual(
+            ports[0], ports[1],
+            "two users must not share one filedrop port (#493 pileup)")
+
+
+class TestDefaultPortForUid(unittest.TestCase):
+    """#493: a DETERMINISTIC per-uid file-drop port so N accounts on ONE host
+    (the ~12 subdev streams) never race for a single shared :8788."""
+
+    def test_deterministic_and_default_for_uid_base(self):
+        import filedrop
+        # a single-user box (uid ≡ 0 mod 1000) keeps the historical default
+        self.assertEqual(filedrop.default_port_for_uid(1000), filedrop.DEFAULT_PORT)
+        self.assertEqual(filedrop.default_port_for_uid(1002), filedrop.DEFAULT_PORT + 2)
+        # deterministic: same uid → same port, every call
+        self.assertEqual(filedrop.default_port_for_uid(1007),
+                         filedrop.default_port_for_uid(1007))
+
+    def test_all_managed_subdev_uids_map_to_distinct_ports(self):
+        import filedrop
+        uids = [1000, 1001, 1002, 1003, 1004, 1005,
+                1006, 1007, 1011, 1012, 1013, 1014]   # live subdev uid set
+        ports = {filedrop.default_port_for_uid(u) for u in uids}
+        self.assertEqual(len(ports), len(uids),
+                         "each managed uid must map to its OWN filedrop port")
+
+    def test_module_port_falls_back_to_the_per_uid_port(self):
+        # with no FILEDROP_PORT env and no persisted file, filedrop.PORT must
+        # derive from the per-uid port, not a blind shared 8788 — so the share
+        # CLI advertises the SAME port the per-uid server binds.
+        import filedrop
+        env = os.getenv("FILEDROP_PORT")
+        if env is None and filedrop.persisted_port() is None:
+            self.assertEqual(filedrop.PORT, filedrop.default_port_for_uid())
+
 
 class TestBindIps(unittest.TestCase):
     """bind_ips() / advertise_urls() — the multi-interface URL fix (2026-07-10).
