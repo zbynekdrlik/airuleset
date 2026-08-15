@@ -20,7 +20,16 @@ not just the one or two hooks a caller has in mind today.
 """
 import glob
 import os
+import stat
 import sys
+import time
+import uuid
+
+# A killed run's orphan is reclaimed only once it is at least this old, so a
+# CONCURRENT live run's state file (always far younger — a gate call completes
+# in milliseconds) is never touched. One hour is well clear of even the slowest
+# full-suite run this contended box produces.
+STALE_ORPHAN_MAX_AGE_S = 3600
 
 
 def sweep_session_files(sid, tmp_dir="/tmp"):
@@ -40,3 +49,71 @@ def sweep_session_files(sid, tmp_dir="/tmp"):
             # so a failure here must not fail or hide the actual assertion.
             sys.stderr.write(
                 "sweep_session_files: could not remove %s: %s\n" % (f, e))
+
+
+def reclaim_stale_orphans(pattern, tmp_dir="/tmp",
+                          max_age_s=STALE_ORPHAN_MAX_AGE_S, now=None):
+    """Age-gated reclamation of killed-run litter for ONE hook-state test
+    family, matched by a SPECIFIC glob `pattern` (relative to `tmp_dir`, e.g.
+    "airuleset-runcard-gate-gate-*"). Unlink every matching REGULAR file whose
+    mtime is older than `max_age_s`.
+
+    This restores the litter self-healing #485's precise-unlink removed —
+    a run KILLED before its teardown ran leaves a unique orphan no future run
+    would otherwise sweep — WITHOUT the box-wide-glob cross-process deletion
+    hazard: a concurrent LIVE run's file is always far younger than the age
+    window, so it is never touched (#494). Only regular files are reclaimed
+    (never a directory, never a symlink target); the flake this addresses is
+    the hooks' read-at-start `/tmp` FILE state.
+
+    `pattern` MUST be specific: a trivial pattern that would match the whole
+    directory (bare "*"/"**"/…) is refused — a shared /tmp cleanup helper must
+    never be able to wipe unrelated files.
+    """
+    if not pattern or not pattern.strip("*"):
+        return
+    cutoff = (time.time() if now is None else now) - max_age_s
+    for p in glob.glob(os.path.join(tmp_dir, pattern)):
+        try:
+            st = os.lstat(p)                      # never follow a symlink
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if st.st_mtime >= cutoff:             # a live/young file — leave it
+                continue
+            os.remove(p)
+        except OSError as e:
+            # Same best-effort contract as sweep_session_files: a concurrent
+            # process may have removed it first; test cleanup must never fail
+            # or mask the real assertion.
+            sys.stderr.write(
+                "reclaim_stale_orphans: could not remove %s: %s\n" % (p, e))
+
+
+def new_hook_sid(testcase, prefix, orphan_globs=(), tmp_dir="/tmp"):
+    """Mint a globally-unique hook-state session id `"<prefix>-" + uuid4().hex`
+    for a test that drives a REAL hook keying its persistent `/tmp` state on the
+    session id, and register its cleanup on `testcase`:
+
+      1. PRECISE per-sid teardown via `sweep_session_files` — its `*<sid>*` glob
+         is collision-proof BECAUSE the sid is uuid, so it removes exactly this
+         test's own state file(s) and can never touch a concurrent process's
+         (never a box-wide prefix glob — the #485 cross-process-deletion
+         hazard). A pid-based sid defeated BOTH halves of this: it is
+         recyclable, so a killed run's leftover re-collides with a fresh run's,
+         and `sweep_session_files` explicitly assumes a uuid-unique sid.
+
+      2. AGE-GATED reclamation, right now (call this from setUp), of killed-run
+         orphans a prior run of this SAME family left when its teardown never
+         ran — one `reclaim_stale_orphans` call per SPECIFIC pattern in
+         `orphan_globs` (each a full `/tmp` stem this hook writes for the
+         family, e.g. "airuleset-runcard-gate-gate-*").
+
+    Returns the sid. #494 — the shared remediation of the #485 pid-SID
+    `/tmp`-state test-isolation flake class, applied per hook-driving
+    `_GateBase`/test.
+    """
+    for pattern in orphan_globs:
+        reclaim_stale_orphans(pattern, tmp_dir=tmp_dir)
+    sid = "%s-%s" % (prefix, uuid.uuid4().hex)
+    testcase.addCleanup(sweep_session_files, sid, tmp_dir)
+    return sid

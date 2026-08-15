@@ -61,7 +61,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import notify                                            # noqa: E402
 import watchdog as wd                                    # noqa: E402
-from _hook_state_cleanup import sweep_session_files       # noqa: E402
+from _hook_state_cleanup import (                         # noqa: E402
+    new_hook_sid, sweep_session_files)
 
 ROOT = Path(__file__).resolve().parent.parent
 GATE = ROOT / "hooks" / "subagent-stop-check-run-card.sh"
@@ -227,11 +228,13 @@ class _GateBase(unittest.TestCase):
         _git(self.repo, "init", "-q", "-b", "main")
         _git(self.repo, "remote", "add", "origin",
              "https://github.com/zbynekdrlik/parovanie-produktov.git")
-        self.sid = "gate-%d" % os.getpid()
-        self.addCleanup(lambda: [
-            os.remove(f) for f in
-            Path("/tmp").glob("airuleset-runcard-gate-gate-*")
-            if os.path.exists(f)])
+        # #494 — a GLOBALLY-UNIQUE (uuid) SID so a state file left by a KILLED
+        # prior run can never collide with a fresh run's and suppress its first
+        # block; PRECISE per-sid cleanup (never a box-wide glob, which on this
+        # many-workers-per-box machine could delete a CONCURRENT process's live
+        # file); and an age-gated sweep reclaiming an hour-old kill-orphan.
+        self.sid = new_hook_sid(self, "gate",
+                                ["airuleset-runcard-gate-gate-*"])
 
     def mark(self, key, status="sent"):
         d = self.home / ".claude" / "autopilot-notify-sent"
