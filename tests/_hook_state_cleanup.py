@@ -20,6 +20,7 @@ not just the one or two hooks a caller has in mind today.
 """
 import glob
 import os
+import re
 import stat
 import sys
 import time
@@ -30,6 +31,26 @@ import uuid
 # in milliseconds) is never touched. One hour is well clear of even the slowest
 # full-suite run this contended box produces.
 STALE_ORPHAN_MAX_AGE_S = 3600
+
+# An orphan-sweep pattern must carry a LITERAL run of at least this many chars
+# so it is anchored to a specific hook-state family — never a degenerate glob
+# ("*", "?*", "[a-z]*", …) that would match a broad slice of a world-writable
+# /tmp. Every real caller's literal stem ("airuleset-runcard-gate-gate-",
+# "test-qq-reference-", …) is far longer than this floor.
+_MIN_PATTERN_ANCHOR = 8
+
+
+def _pattern_is_specific(pattern):
+    """True iff `pattern` has a literal (non-glob-metachar) run of at least
+    `_MIN_PATTERN_ANCHOR` chars — the anchor that makes an orphan sweep
+    target one family, not the whole directory. Splits on the glob metachar
+    class `* ? [ ]` and measures the longest resulting literal segment, so a
+    pattern made only of metachars/ranges (`*`, `?*`, `[a-z]*`) has no anchor
+    and is refused."""
+    if not pattern:
+        return False
+    return max((len(seg) for seg in re.split(r"[*?\[\]]", pattern)),
+               default=0) >= _MIN_PATTERN_ANCHOR
 
 
 def sweep_session_files(sid, tmp_dir="/tmp"):
@@ -66,11 +87,11 @@ def reclaim_stale_orphans(pattern, tmp_dir="/tmp",
     (never a directory, never a symlink target); the flake this addresses is
     the hooks' read-at-start `/tmp` FILE state.
 
-    `pattern` MUST be specific: a trivial pattern that would match the whole
-    directory (bare "*"/"**"/…) is refused — a shared /tmp cleanup helper must
-    never be able to wipe unrelated files.
+    `pattern` MUST be specific: a pattern with no literal anchor of at least
+    `_MIN_PATTERN_ANCHOR` chars (bare "*"/"**", "?*", "[a-z]*", …) is refused —
+    a shared /tmp cleanup helper must never be able to wipe unrelated files.
     """
-    if not pattern or not pattern.strip("*"):
+    if not _pattern_is_specific(pattern):
         return
     cutoff = (time.time() if now is None else now) - max_age_s
     for p in glob.glob(os.path.join(tmp_dir, pattern)):

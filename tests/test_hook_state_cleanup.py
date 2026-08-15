@@ -130,6 +130,24 @@ class TestReclaimStaleOrphans(TestCase):
         reclaim_stale_orphans(None, tmp_dir=self.tmp.name, max_age_s=3600)
         self.assertTrue(old.exists())
 
+    def test_a_degenerate_glob_without_a_literal_anchor_is_refused(self):
+        # #494 review MINOR — a pattern made only of glob metachars/ranges
+        # (`?*`, `?`, `[a-z]*`) has no family anchor and would broadly match a
+        # world-writable /tmp; it must be refused just like a bare "*".
+        old = self._mk("zzz-some-old-unrelated-file", age_s=7200)
+        for degenerate in ("?*", "?", "[a-z]*", "ab*", "[!x]*"):
+            reclaim_stale_orphans(degenerate, tmp_dir=self.tmp.name,
+                                  max_age_s=3600)
+        self.assertTrue(old.exists(), "a degenerate pattern must reclaim nothing")
+
+    def test_a_pattern_with_a_real_literal_anchor_is_accepted(self):
+        # The complement: a specific-enough pattern (long literal run) still
+        # works, so the guard cannot be satisfied by refusing everything.
+        old = self._mk("airuleset-runcard-gate-gate-old", age_s=7200)
+        reclaim_stale_orphans("airuleset-runcard-gate-gate-*",
+                              tmp_dir=self.tmp.name, max_age_s=3600)
+        self.assertFalse(old.exists())
+
     def test_only_regular_files_never_a_dir_or_symlink(self):
         # Directories and symlinks matching the pattern are left untouched —
         # only the hooks' read-at-start regular-FILE state is the flake.
@@ -184,15 +202,19 @@ class TestNewHookSid(TestCase):
     def test_registered_cleanup_removes_exactly_this_sids_files(self):
         c = _FakeCase()
         sid = new_hook_sid(c, "test-qq-reference", tmp_dir=self.tmp.name)
+        # All THREE shapes the question-quality gate writes for one SID.
         mine = Path(self.tmp.name) / ("airuleset-question-quality-block-" + sid)
         lastq = Path(self.tmp.name) / ("claude-discord-lastq-" + sid)
+        active = Path(self.tmp.name) / ("claude-user-active-" + sid)
         mine.write_text("1\n")
         lastq.write_text("1\n")
+        active.write_text("1\n")
         other = Path(self.tmp.name) / "airuleset-question-quality-block-someoneelse"
         other.write_text("1\n")
         c.run_cleanups()
         self.assertFalse(mine.exists())
         self.assertFalse(lastq.exists())
+        self.assertFalse(active.exists())
         self.assertTrue(other.exists(), "a concurrent sid's file must survive")
 
     def test_reclaims_an_old_orphan_of_the_family_at_mint_time(self):
