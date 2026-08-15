@@ -16,9 +16,10 @@ land) or already relocated + re-exported by an earlier step (``discord_api``,
 correct no matter which module physically owns the name today, so step 9 is safe
 to land before steps 7/8 (the DI defaults are all call-time ``None`` + in-body
 resolution, so no def-time binding on those modules exists). Co-moved names that
-NO test patches at the package path stay bare (module-local); ``_gh_comment`` and
-the three ``clean_reply_text`` regex/cap constants ARE patched, so their in-body
-references keep the ``watchdog.`` form. Every moved name is re-exported into the
+NO test patches at the package path stay bare (module-local); the four PATCHED
+names keep the ``watchdog.`` form wherever referenced — ``_gh_comment`` in-body
+here, the three ``clean_reply_text`` regex/cap constants only via their
+``discord_api.py`` consumer (here merely defined + re-exported). Every moved name is re-exported into the
 ``watchdog`` namespace by ``__init__`` so ``watchdog.<name>`` /
 ``monkeypatch.setattr(watchdog, ...)`` seams stay live unchanged.
 
