@@ -204,7 +204,10 @@ def write_heartbeat(payload, event, base_dir=None, now=None):
         goal_armed = goal_armed_from_transcript(payload.get("transcript_path"))
     data = build_heartbeat(payload, event, goal_armed=goal_armed, now=now)
     sid = payload.get("session_id") or "unknown"
-    agent_id = payload.get("agent_id") if event == "subagent_stop" else None
+    # A subagent is ALWAYS keyed by agent_id (defaulting to "unknown" when the
+    # payload lacks one) so it can never fall back to <sid>.json and clobber the
+    # main session's file — the whole point of #486 (b).
+    agent_id = (payload.get("agent_id") or "unknown") if event == "subagent_stop" else None
     path = status_path(sid, agent_id, base_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name("%s.tmp.%d" % (path.name, os.getpid()))

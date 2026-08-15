@@ -129,6 +129,22 @@ def test_write_heartbeat_atomic_no_tmp_leftover(tmp_path):
     assert list(tmp_path.glob("*.tmp.*")) == []  # no temp leftover
 
 
+def test_subagent_missing_agent_id_never_clobbers_main(tmp_path):
+    # A subagent SHARES the parent's sid; if its payload has NO agent_id the
+    # producer must STILL never write to <sid>.json (the main file). It falls
+    # back to <sid>__unknown.json.
+    ss.write_heartbeat({"session_id": "sid-x", "cwd": "/main",
+                        "last_assistant_message": "m\n⏳ WORKING: z"},
+                       "stop", base_dir=tmp_path, now=1)
+    p = ss.write_heartbeat({"session_id": "sid-x", "cwd": "/wt",
+                            "last_assistant_message": "done"},
+                           "subagent_stop", base_dir=tmp_path, now=2)
+    assert p == tmp_path / "sid-x__unknown.json"
+    main = json.loads((tmp_path / "sid-x.json").read_text())
+    assert main["kind"] == "main"  # NOT clobbered by the subagent write
+    assert main["cwd"] == "/main"
+
+
 def test_subagent_heartbeat_does_not_clobber_main(tmp_path):
     # THE point-(b) guarantee: a subagent SHARES the parent's sid but must
     # never overwrite the main session's file.
