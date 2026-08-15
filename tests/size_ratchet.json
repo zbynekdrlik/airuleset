@@ -197,7 +197,7 @@
     "watchdog/cross_stream.py": 812,
     "watchdog/goal.py": 1682,
     "watchdog/handoff_alarm.py": 139,
-    "watchdog/janitor.py": 388,
+    "watchdog/janitor.py": 396,
     "watchdog/pane_classify.py": 533,
     "watchdog/pane_text.py": 178,
     "watchdog/repo_health.py": 758,

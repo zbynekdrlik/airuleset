@@ -222,15 +222,23 @@ def _janitor_prune_parks(state, live_pids):
 
     Runs each sweep alongside the marker-gone backstop (which only sees panes
     STILL in the candidate set) — this covers the panes that LEFT it. FAIL-SAFE
-    by construction: an empty/None `live_pids` (a failed `tmux list-panes`
-    read) prunes NOTHING, so a transient tmux error never wipes a VALID fresh
-    record (which would silently defeat a genuine reclaim). A no-op when `state`
-    is None or holds no parks. Known, honestly-stated residual (non-destructive,
-    heavily backstop-mitigated): tmux `%N` pane-ids reset on a SERVER restart,
-    so a record written just before a restart can coincide with a reused id on a
-    DIFFERENT session — but the marker-gone backstop clears it on the first
-    unoccupied sighting of the reused pane, and the only reachable action while
-    occupied+bare is a non-destructive `pop`, never a box-destroy."""
+    by construction, in BOTH directions: an empty/None `live_pids` (a failed
+    `tmux list-panes` read) prunes NOTHING; and a PARTIAL read (a live pane's id
+    missing) can at worst drop a still-VALID record, which only ever makes the
+    janitor MORE conservative — it loses `park_seen` provenance and falls back to
+    the 6h generic mark, never destroying a draft nor licensing a wrong reclaim.
+    So every prune error mode lands on the safe side (a missed legitimate
+    reclaim), never the dangerous one. A no-op when `state` is None or holds no
+    parks. Known, honestly-stated residual (heavily backstop-mitigated): tmux
+    `%N` pane-ids reset on a SERVER restart, so a record written just before a
+    restart can coincide with a reused id on a DIFFERENT session — but the
+    marker-gone backstop clears it on the first unoccupied sighting of the reused
+    pane. Even if it does not, the reachable actions never destroy a human's
+    draft: occupied+bare → a non-destructive `pop` (restores the slot); occupied+
+    own-content → a `clear-and-pop` that FIRST `_draft_rescue_persist`-snapshots
+    the box AND requires `_looks_like_own_stuck_content` — a gate a human's
+    ordinary draft never matches (`test_park_record_does_not_bypass_the_foreign_
+    occupant_gate`)."""
     if state is None or not live_pids:
         return
     parks = state.get("stash_parks")
