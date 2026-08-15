@@ -1094,7 +1094,12 @@ for seg in split_top_level(skeleton):
         # pre-existing test's block reason unaffected). #483: when the body
         # was UNRESOLVED because a `-F` disk path could not be read, surface
         # that explicit, actionable reason instead of the opaque `-> none`.
-        reason = body_err if (body is None and body_err) else _clean_field(crit)
+        # #483-review 🔴: _clean_field is MANDATORY here -- body_err embeds
+        # the attacker-controlled `-F` token / cwd, and an embedded tab or
+        # newline would otherwise forge a second record (a `verdict=PASS`
+        # for an arbitrary repo) in the tab-separated hand-off to bash /
+        # scope-gate.log, re-opening the #329 field-injection.
+        reason = _clean_field(body_err) if (body is None and body_err) else _clean_field(crit)
         results.append(("BLOCK", clean_title, reason, parents_str,
                          target_repo, ""))
     else:
