@@ -455,6 +455,39 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
             logs.append("skip busy-pane (subagent-%s) %s [%s]" % (dedup_prefix, project, wid))
         return
     wkey = "subagent-%s:%s" % (dedup_prefix, wid)
+    # (#491) ACKNOWLEDGEMENT RESOLUTION. A dead worker never recovers, so the
+    # ONLY useful thing a nudge does is tell the SUPERVISOR its worker died.
+    # Once the supervisor has demonstrably PROCESSED a prior nudge about THIS
+    # worker — its own session transcript carries a GENUINE assistant turn
+    # dated after our last nudge, and we only ever inject that nudge at a FREE
+    # idle prompt (the pane_at_idle_prompt gate above), so our nudge is the
+    # very next input it acts on — it has SEEN the death and owns the
+    # resume-vs-redispatch call. Re-nudging from here delivers zero new
+    # information and costs the session a full paid turn each time (the
+    # reporting incident's 244k-token resurrect-to-silence workaround, #491,
+    # which the salvageable full-nudge cycle earns even AFTER #287 bounded the
+    # never-recover case). Mark the worker RESOLVED and go permanently silent;
+    # the state's own SUBAGENT_NUDGE_STATE_TTL_SECONDS cleanup drops it once
+    # the file ages past the trigger window. Purely durable-state driven (the
+    # supervisor's own transcript) — no manual ack, no supervisor-transcript
+    # edit. Retry-if-unseen is preserved: NO genuine post-nudge assistant turn
+    # (a swallowed submit, or a supervisor still stuck) → no resolution → the
+    # decide_working cycle below still fires nudge#2/#3 then escalates.
+    prev = state.get(wkey) or {}
+    prev_nudges = prev.get("nudges") or []
+    resolved = bool(prev.get("resolved"))
+    if not resolved and prev_nudges:
+        sup_tpath = watchdog.supervisor_transcript_for_subagent(sub_path)
+        if sup_tpath is not None:
+            ack_ts = watchdog.transcript_last_genuine_assistant_ts(sup_tpath)
+            resolved = bool(ack_ts) and ack_ts > prev_nudges[-1]
+    if resolved:
+        prev["resolved"] = True
+        prev["last_seen"] = int(now)       # keep sticky across the TTL window
+        state[wkey] = prev
+        logs.append("subagent-%s-resolved %s [%s] — supervisor acknowledged"
+                    % (dedup_prefix, project, wid))
+        return
     # (#287) A worker whose own transcript is provably unsalvageable earns
     # AT MOST ONE typed nudge, never the full retry cycle — see
     # _subagent_transcript_unsalvageable's own docstring.

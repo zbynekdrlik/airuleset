@@ -308,6 +308,36 @@ def transcript_last_assistant_text(path):
     return ""
 
 
+def transcript_last_genuine_assistant_ts(path):
+    """(#491) Epoch of the session's most-recent GENUINE assistant turn —
+    the SAME walk/skip semantics as `transcript_last_assistant_text` (an
+    `isApiErrorMessage` entry and tool-only/synthetic `_SENTINELS` text are
+    NOT genuine turns) — or `0.0` when there is none, no timestamp, or an
+    unparseable one. Job 1b's #491 acknowledgement check reads it: a genuine
+    assistant turn dated AFTER our last dead-worker nudge PROVES the
+    supervisor processed that nudge (we only ever inject the nudge at a FREE
+    idle prompt, so it is the very next input the supervisor acts on) and
+    thus SAW its worker is dead. Returning `0.0` on a trailing
+    `isApiErrorMessage` is deliberate: a supervisor whose own last turn is
+    itself an api-error has NOT genuinely responded, so the dead worker must
+    NOT be resolved on it (job 1's own auto-resume owns that supervisor)."""
+    from datetime import datetime
+    for entry in reversed(_iter_jsonl_tail(path)):
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        if entry.get("isApiErrorMessage") is True:
+            return 0.0
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue
+        try:
+            return datetime.fromisoformat(
+                str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
+    return 0.0
+
+
 def subagent_active(transcript_path, now, window):
     """True if a SUBAGENT transcript of this session was written within `window`
     seconds — a dispatched worker / workflow is live, so the parent's `⏳ WORKING`
@@ -380,6 +410,25 @@ def newest_subagent_transcript(transcript_path):
             if m > newest_m:
                 newest, newest_m = p, m
         return newest
+    except Exception:
+        return None
+
+
+def supervisor_transcript_for_subagent(sub_path):
+    """(#491) The PARENT supervisor session transcript (`<project>/<sid>.jsonl`)
+    for a subagent transcript at `<project>/<sid>/subagents/**/*.jsonl` — the
+    inverse of `newest_subagent_transcript`'s layout — or None when `sub_path`
+    is not under a `subagents/` dir or the parent transcript does not exist.
+    Fail-safe None on any path problem (job 1b then simply never resolves and
+    keeps its existing nudge behavior)."""
+    try:
+        p = Path(sub_path)
+        for parent in p.parents:
+            if parent.name == "subagents":
+                session_dir = parent.parent            # <project>/<sid>
+                cand = session_dir.parent / (session_dir.name + ".jsonl")
+                return cand if cand.exists() else None
+        return None
     except Exception:
         return None
 
