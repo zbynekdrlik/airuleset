@@ -75,5 +75,64 @@ class TestLoadBearingIncidentKnowledge(TestCase):
         self.assertIn("secret request cloudflare_", t)  # vault NAME is underscore-only
 
 
+def _description(path):
+    """The `description:` line from the SKILL.md YAML frontmatter — the text
+    that makes a session LOAD this skill. One physical line in the frontmatter."""
+    for line in read(path).splitlines():
+        if line.startswith("description:"):
+            return line
+    return ""
+
+
+class TestCredentialTaxonomy480(TestCase):
+    """The #480 additions: the four-artifact credential taxonomy and the
+    account-owned `cfat_` trap (a VALID `cfat_` token rejected twice — the miva
+    incident, 2026-08-15). Guards this load-bearing knowledge from silent
+    deletion, exactly as TestLoadBearingIncidentKnowledge does for #443."""
+
+    def test_description_triggers_on_credential_types(self):
+        # the description is what makes a session LOAD this skill the moment a
+        # cfat_ / account-owned token / Global API Key appears.
+        desc = _description(SKILL)
+        for needle in ("cfat_", "account-owned", "Global API Key"):
+            self.assertIn(needle, desc, needle)
+
+    def test_taxonomy_table_covers_all_four_artifacts(self):
+        t = read(SKILL)
+        self.assertIn("cfat_", t)            # account-owned token prefix
+        self.assertIn("account-owned", t)
+        self.assertIn("X-Auth-Email", t)     # Global API Key auth (NEVER Bearer)
+        self.assertIn("X-Auth-Key", t)
+        self.assertIn("Origin CA key", t)
+        self.assertIn("v1.0-", t)            # Origin CA key shape
+        # values, not just presence: a length/header swap must not pass silently
+        self.assertIn("~53", t)              # account-owned cfat_ length
+        self.assertIn("~40", t)              # legacy user token length
+        self.assertIn("37 hex", t)           # Global API Key length
+        self.assertIn("NEVER `Bearer`", t)   # Global API Key must NEVER use Bearer
+
+    def test_verify_endpoint_lies_for_account_tokens_by_design(self):
+        # the core #480 trap: /user/tokens/verify returns `Invalid API Token`
+        # for a VALID account-owned token, BY DESIGN.
+        t = read(SKILL)
+        self.assertIn("Invalid API Token", t)
+        self.assertIn("BY DESIGN", t)
+        self.assertIn("/accounts/{account_id}/tokens/verify", t)
+
+    def test_capability_probe_is_the_correct_check(self):
+        t = read(SKILL)
+        self.assertIn("capability probe", t)
+        self.assertIn("/client/v4/zones", t)
+        self.assertIn("success:true", t)
+
+    def test_never_reject_on_shape_never_escalate_to_global_key(self):
+        t = read(SKILL)
+        self.assertIn("never REJECT on shape", t)
+        self.assertIn("Never escalate to a Global API Key", t)
+
+    def test_trim_whitespace_before_use(self):
+        self.assertIn("tr -d '[:space:]'", read(SKILL))
+
+
 if __name__ == "__main__":
     main()
