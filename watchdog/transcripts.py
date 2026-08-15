@@ -308,34 +308,61 @@ def transcript_last_assistant_text(path):
     return ""
 
 
-def transcript_last_genuine_assistant_ts(path):
-    """(#491) Epoch of the session's most-recent GENUINE assistant turn —
-    the SAME walk/skip semantics as `transcript_last_assistant_text` (an
-    `isApiErrorMessage` entry and tool-only/synthetic `_SENTINELS` text are
-    NOT genuine turns) — or `0.0` when there is none, no timestamp, or an
-    unparseable one. Job 1b's #491 acknowledgement check reads it: a genuine
-    assistant turn dated AFTER our last dead-worker nudge PROVES the
-    supervisor processed that nudge (we only ever inject the nudge at a FREE
-    idle prompt, so it is the very next input the supervisor acts on) and
-    thus SAW its worker is dead. Returning `0.0` on a trailing
-    `isApiErrorMessage` is deliberate: a supervisor whose own last turn is
-    itself an api-error has NOT genuinely responded, so the dead worker must
-    NOT be resolved on it (job 1's own auto-resume owns that supervisor)."""
-    from datetime import datetime
-    for entry in reversed(_iter_jsonl_tail(path)):
-        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+def supervisor_responded_to_nudge(path, nudge_signature, max_lines=200):
+    """(#491) True iff the supervisor transcript at `path` shows a CAUSAL
+    acknowledgement of our dead-worker stuck-check nudge: a LANDED `user` turn
+    whose text contains `nudge_signature` (proof the keystroke was ACCEPTED,
+    not swallowed — CC writes the `user` turn the instant it accepts the
+    submit; a swallowed submit writes nothing, per `transcript_last_error`'s
+    own docstring) FOLLOWED BY a GENUINE assistant turn (proof the supervisor
+    actually RESPONDED, not merely received).
+
+    This is deliberately STRONGER than "a genuine assistant turn is merely
+    DATED after the nudge" (the first-cut #491 signal an adversarial review
+    refuted): in the incident's own `/goal`-loop environment the supervisor
+    emits genuine post-nudge turns turn-after-turn INDEPENDENTLY of the nudge,
+    and the nudge send is best-effort (`send_continue`, no submit-verify), so a
+    SWALLOWED nudge plus one `/goal` re-fire would satisfy a timestamp-only
+    check and falsely silence the worker while the supervisor is still blindly
+    waiting for it. Requiring the nudge to appear as a landed `user` turn ties
+    the acknowledgement to THIS nudge; the retry-if-unseen path (a swallowed
+    nudge → no `user` turn → returns False → the caller keeps nudging then
+    escalates) is thereby preserved.
+
+    Skip semantics mirror the #490 `_submit_confirmed` gotchas: an `isMeta` /
+    `isCompactSummary` `user` entry (a `/compact` summary can QUOTE a prior
+    nudge) and a `tool_result`-carrying `user` entry are not typed nudges. The
+    assistant side reuses `transcript_last_assistant_text`'s genuine-turn skip
+    (`isApiErrorMessage` + `_SENTINELS`), so a supervisor that itself DIED on
+    an api-error right after receiving the nudge does NOT resolve (job 1's own
+    auto-resume owns that supervisor). Bounded to the last `max_lines` entries
+    (200, matching `transcript_text_toolcall_stall`'s sibling window) — the
+    nudge+response land adjacent and near the tail on the first post-response
+    sweep, and the resolution is made STICKY in state, so one in-window sight
+    is enough."""
+    seen_nudge = False
+    for entry in _iter_jsonl_tail(path, max_lines=max_lines):
+        if not isinstance(entry, dict):
             continue
-        if entry.get("isApiErrorMessage") is True:
-            return 0.0
-        text = (_entry_text(entry) or "").strip()
-        if text in _SENTINELS:
+        etype = entry.get("type")
+        if etype == "user":
+            if entry.get("isMeta") is True or entry.get("isCompactSummary") is True:
+                continue
+            msg = entry.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                continue
+            if nudge_signature and nudge_signature in (_entry_text(entry) or ""):
+                seen_nudge = True
             continue
-        try:
-            return datetime.fromisoformat(
-                str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
-        except Exception:
-            return 0.0
-    return 0.0
+        if etype == "assistant" and seen_nudge:
+            if entry.get("isApiErrorMessage") is True:
+                continue
+            if (_entry_text(entry) or "").strip() in _SENTINELS:
+                continue
+            return True
+    return False
 
 
 def subagent_active(transcript_path, now, window):
