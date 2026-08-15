@@ -334,6 +334,90 @@ class TestBasicBehavior(TestCase):
         self.assertIn("criterion=planned-work", text)
 
 
+class TestCdPrefixRelativeBodyPath(TestCase):
+    """#483 -- a `-F <relative>` body file after a leading `cd <dir> &&`/`;`
+    was resolved against the HOOK's OWN cwd, not the effective cwd after the
+    cd, so `open()` failed and a fully-compliant filing was BLOCKED with the
+    opaque per-item reason `-> none` (live incident gk@odoo-erp filing
+    odoo-erp#4102; the identical body PASSED with an absolute path). The fix
+    tracks a leading `cd` (option 1) and, when a `-F` disk path still cannot
+    be read, gives an explicit actionable reason (option 2)."""
+
+    def test_cd_prefix_relative_body_file_resolves(self):
+        # Body file lives in `bodydir`; the hook runs from a DIFFERENT cwd
+        # (`hookdir`, no body.md), and the command cd's into `bodydir`
+        # before filing -- exactly the incident shape.
+        with tempfile.TemporaryDirectory() as bodydir, \
+                tempfile.TemporaryDirectory() as hookdir:
+            (Path(bodydir) / "body.md").write_text(
+                "Dedup-checked: searched, found none\n"
+                "Scope-gate: schema-migration\n")
+            r = run("cd %s && gh issue create -t 'cd-relative' -F body.md" % bodydir,
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_cd_prefix_semicolon_separator_resolves(self):
+        # The `;` separator (not just `&&`) must resolve the same way.
+        with tempfile.TemporaryDirectory() as bodydir, \
+                tempfile.TemporaryDirectory() as hookdir:
+            (Path(bodydir) / "body.md").write_text(
+                "Dedup-checked: searched, found none\n"
+                "Scope-gate: cross-cutting\n")
+            r = run("cd %s ; gh issue create -t 'cd-semicolon' -F body.md" % bodydir,
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_unreadable_relative_body_gives_explicit_reason(self):
+        # A relative -F that genuinely cannot be read must block with an
+        # ACTIONABLE reason naming the file and telling the filer to use an
+        # absolute path -- never the opaque `-> none`.
+        with tempfile.TemporaryDirectory() as hookdir:
+            # No body.md anywhere; cd into a real but body-less dir.
+            r = run("cd %s && gh issue create -t 'missing' -F body.md" % hookdir,
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("not readable", r.stderr)
+            self.assertIn("absolute", r.stderr)
+            self.assertNotIn("-> none", r.stderr)
+
+    def test_unresolvable_cd_target_relative_body_explicit_reason(self):
+        # A `cd` into an unexpandable target ($VAR) makes the effective cwd
+        # statically unknowable -- a relative -F must still degrade to the
+        # explicit reason, never a wrong resolution or a fail-open pass.
+        with tempfile.TemporaryDirectory() as hookdir:
+            r = run("cd $SOMEDIR && gh issue create -t 'var-cd' -F body.md",
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("not readable", r.stderr)
+            self.assertIn("absolute", r.stderr)
+
+    def test_absolute_body_path_still_reads(self):
+        # Regression guard: an absolute -F path keeps working unchanged,
+        # even behind a cd prefix.
+        with tempfile.TemporaryDirectory() as bodydir, \
+                tempfile.TemporaryDirectory() as hookdir:
+            bf = Path(bodydir) / "body.md"
+            bf.write_text("Dedup-checked: searched, found none\n"
+                          "Scope-gate: schema-migration\n")
+            r = run("cd %s && gh issue create -t 'abs' -F %s" % (hookdir, bf),
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_missing_scope_gate_still_blocks_with_real_reason(self):
+        # No regression on the genuinely-missing-Scope-gate path: a READABLE
+        # body (resolved via the cd prefix) with NO criterion still blocks,
+        # and NOT with the #483 not-readable reason.
+        with tempfile.TemporaryDirectory() as bodydir, \
+                tempfile.TemporaryDirectory() as hookdir:
+            (Path(bodydir) / "body.md").write_text(
+                "Dedup-checked: searched, found none\n"
+                "Just a plain finding with no criterion.\n")
+            r = run("cd %s && gh issue create -t 'no-crit' -F body.md" % bodydir,
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertNotIn("not readable", r.stderr)
+
+
 class TestChainDepthCap(TestCase):
     """#311 -- a review-finding follow-up (this issue names its own PARENT
     issue as a "follow-up" -- the EXACT phrasing the real odoo-erp
