@@ -158,7 +158,7 @@
   "tests/test_strip_selection.py": 491,
   "tests/test_stuckcheck_sensitivity.py": 114,
   "tests/test_subagent_bg_work.py": 956,
-  "tests/test_subagent_stop_check_design.py": 283,
+  "tests/test_subagent_stop_check_design.py": 315,
   "tests/test_subdev_cross_stream_validation.py": 125,
   "tests/test_subdev_handoff_match.py": 309,
   "tests/test_sudo_hosted_pane.py": 91,
