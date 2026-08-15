@@ -1,11 +1,12 @@
 {
  "files": {
-  "airuleset.py": 8963,
+  "airuleset.py": 8461,
   "backlog_marker_gate.py": 90,
   "burn/__init__.py": 2339,
   "cli_autopilot_lock.py": 793,
   "cli_binary_installers.py": 241,
   "cli_burn.py": 537,
+  "cli_caveman_plugins.py": 589,
   "cli_quals.py": 830,
   "cli_quals_cmd.py": 549,
   "cli_scratch_sweep.py": 976,
@@ -90,7 +91,7 @@
   "tests/test_long_turn.py": 408,
   "tests/test_long_wait_background_waiter.py": 236,
   "tests/test_main_implementation_guard.py": 2102,
-  "tests/test_managed_plugins.py": 801,
+  "tests/test_managed_plugins.py": 810,
   "tests/test_managed_repo_sweeps.py": 849,
   "tests/test_mdreview_content_axes.py": 129,
   "tests/test_measure_design_compliance.py": 125,
