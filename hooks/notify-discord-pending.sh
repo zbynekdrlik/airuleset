@@ -47,6 +47,16 @@ LASTQ="/tmp/claude-discord-lastq-${SID}"
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
 
+# #486 G1 — structured session heartbeat (~/.claude/session-status/<sid>.json),
+# the STRUCTURED replacement for render-text liveness/armed/marker detection.
+# The producer re-parses $INPUT itself (marker from last_assistant_message,
+# armed-goal from the transcript via the canonical scan_goal_markers). Runs at
+# the TOP so it fires on EVERY Stop regardless of this hook's own later branches.
+# Best-effort + non-blocking: guarded so a heartbeat failure can never affect
+# this hook's notify job or the Stop decision pipeline. NO consumer yet (G1).
+printf '%s' "$INPUT" | PYTHONPATH="${AIRULESET_PY%/airuleset.py}" \
+    python3 -m watchdog.session_status --event stop >/dev/null 2>&1 || true
+
 LAST_LINE=$(printf '%s\n' "$MSG" | grep -vE '^[[:space:]]*$' | tail -1 || true)
 
 # #466 fail-loud: send_q() sets this to 1 when it runs. A ❓-carrying turn that

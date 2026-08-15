@@ -77,6 +77,25 @@ def _isolate_gh_app_token_dir():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_session_status_dir():
+    """#486 G1: the session heartbeat producer (`watchdog/session_status.py`),
+    invoked by the notify-discord-pending / notify-compact-subagent-boundary /
+    session-start-fetch hooks, writes `~/.claude/session-status/<sid>.json` via
+    `AIRULESET_SESSION_STATUS_DIR` (falling back to the real `~/.claude`). A
+    `pytest`-direct run that exercises any of those hooks would otherwise
+    scatter heartbeat files into the developer's REAL home (measured: 49 files
+    from the hook-behaviour subset alone) — same class as the draft-rescue /
+    gh-app-token / autopilot-lock leaks isolated above. Point the dir at a
+    throwaway location; a test that wants a specific one still wins with its own
+    innermost `monkeypatch.setenv`/`base_dir=` (identical composability)."""
+    with TemporaryDirectory() as d:
+        target = Path(d) / "session-status"
+        with mock.patch.dict(os.environ,
+                             {"AIRULESET_SESSION_STATUS_DIR": str(target)}):
+            yield target
+
+
+@pytest.fixture(autouse=True)
 def _ignore_owner_kill_switch(monkeypatch):
     """#400: the owner kill-switch flag files under the REAL ~/.claude are
     production state; a direct pytest run on a box with them set must not
