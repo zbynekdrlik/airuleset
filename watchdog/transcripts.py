@@ -97,8 +97,10 @@ def transcript_last_error(path):
         working session. A `user` entry with only PLAIN TEXT is NOT proof of recovery
         and is SKIPPED (keep scanning back) — it may be a human/resume prompt the
         session has not yet acted on, or, decisively, job 1's OWN injected `continue`
-        nudge, which lands in the transcript as a bare-text `user` entry the instant
-        it is typed and stays there whether or not it woke the session. Treating any
+        nudge, which lands as a bare-text `user` entry the moment CC ACCEPTS the submit
+        — before any response exists — so its presence never proves the following turn
+        succeeded (and a SWALLOWED submit writes nothing at all, which the skip handles
+        identically). Treating any
         `user` tail as recovery (the round-A 🔴) re-broke this exact bug on the
         MAIN-session path: `transcript_last_error('') → falsy` skips job 1's
         `stalled.add(key)`, the end-of-sweep cleanup wipes the episode, and the #175
@@ -413,8 +415,10 @@ def _entry_has_tool_result(entry):
     the harness actually RAN a tool and fed its result back, which only happens on a
     live, working session. This is the ONE user-side proof of genuine progress that
     `transcript_last_error` trusts (#484 round-A): a PLAIN-TEXT `user` entry (a human /
-    resume prompt not yet acted on, or job 1's OWN injected `continue` nudge that may
-    never have woken the session) is NOT proof of recovery and must not be read as such."""
+    resume prompt not yet acted on, or job 1's OWN injected `continue` nudge — which
+    lands the moment CC accepts the submit, before any response exists, so it never
+    proves the following turn succeeded) is NOT proof of recovery and must not be read
+    as such."""
     msg = entry.get("message") if isinstance(entry, dict) else None
     if not isinstance(msg, dict):
         return False
