@@ -997,16 +997,19 @@ GOAL_LANE_NUDGE_TEXT = (
 
 # #442 re-fix 2 (REOPEN č.2 + owner directives 2026-08-14) -- the COUNT-based
 # fill-the-cap widening. The empty-lane nudge above (0 workers) fires as before;
-# these two thresholds add the UNDER-SATURATED case (some workers, but fewer than
-# the fill floor, while a substantial backlog still waits). Owner (#456
-# "DOPLNENIE ROZHODNUTIA"): "kludne ovela viac subagentov moze paralelne
-# pracovat" -- so the floor is 5, not a small 3, and the nudge TEXT frames
-# saturation as WORK-DRIVEN (every independent workable ticket/review/release
-# step earns a lane; a CI-waiting worker never blocks further dispatch), not a
-# fixed target. GOAL_LANE_SATURATION_WORKERS is a pragmatic UPPER cap on WHEN the
-# nudge stops firing, never a "fill exactly this many" target.
-GOAL_LANE_SATURATION_WORKERS = 5      # >= this many live workers -> saturated, silent
-GOAL_LANE_UNDERSAT_BACKLOG_MIN = 10   # under-saturated nudge needs backlog > this
+# this threshold adds the UNDER-SATURATED case (some workers, but fewer than the
+# fill floor, while any backlog still waits). Owner (#456 "DOPLNENIE
+# ROZHODNUTIA"): "kludne ovela viac subagentov moze paralelne pracovat" -- so the
+# floor is 5, not a small 3, and the nudge TEXT frames saturation as WORK-DRIVEN
+# (every independent workable ticket/review/release step earns a lane; a
+# CI-waiting worker never blocks further dispatch), not a fixed target.
+# #481: the fill floor is `min(GOAL_LANE_SATURATION_WORKERS, backlog)` -- a
+# small-but-real backlog (2-10 workable) with idle lanes is filled up to the
+# backlog, not just once it passes a fixed 10-ticket gate, matching the owner's
+# `active_workers < min(5, workable_backlog)`. GOAL_LANE_SATURATION_WORKERS is a
+# pragmatic UPPER cap on WHEN the nudge stops firing, never a "fill exactly this
+# many" target.
+GOAL_LANE_SATURATION_WORKERS = 5      # fill floor caps here: >= min(5, backlog) live workers -> saturated
 
 # #442 re-fix 2 (owner directive 2026-08-14: "vsak ak na to mas watcher tak ten
 # si vie aj pamet na boxe overit") -- the fill-lanes nudge (which tells the
@@ -1024,10 +1027,13 @@ GOAL_LANE_MIN_MEM_AVAIL_MB = 1536
 # #442 re-fix 2 -- the UNDER-SATURATED (non-zero worker) nudge text. Distinct
 # from GOAL_LANE_NUDGE_TEXT (which says "0 dispatched workerov"): here 1-4 workers
 # ARE running, so the text names the real count and frames saturation as
-# work-driven, not a fixed number.
+# work-driven, not a fixed number. #481: also names the target lane floor
+# (min(5, backlog)) alongside the seen worker count. Args: (live_workers, floor,
+# backlog_n, waiters).
 GOAL_LANE_UNDERSAT_NUDGE_TEXT = (
-    "lane-check: beží len %d dispatched worker(ov), no čaká %d otvorených "
-    "tiketov (waiterov beží: %d). Lány nie sú plné podľa PRÁCE: každý nezávislý "
+    "lane-check: beží len %d z cieľových %d lán (floor=min(5, backlog)), no "
+    "čaká %d otvorených tiketov (waiterov beží: %d). Lány nie sú plné podľa "
+    "PRÁCE: každý nezávislý "
     "workable tiket / review / release krok má dostať vlastnú PARALELNÚ lane, a "
     "worker čakajúci na CI NEblokuje ďalší dispatch. Nikdy nenechaj 1-2 workerov, "
     "kým sedí veľký backlog. Podľa FLEET doktríny skills/autopilot SKILL.md "
@@ -1190,33 +1196,40 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "no measurable open backlog, skip"
                     % (loc, live_workers, waiters, backlog_n))
         return logs, False
-    # #442 re-fix 2 -- the fill-the-cap widening, on the two PURE COUNTS the guard
-    # already reads (live worker count + open backlog), no transcript-content
-    # heuristic. Two nudge-worthy states:
+    # #442 re-fix 2 + #481 -- the fill-the-cap widening, on the PURE COUNTS the
+    # guard already reads (live worker count + open backlog), no
+    # transcript-content heuristic. Two nudge-worthy states:
     #   * EMPTY lanes (live_workers == 0) -- fires on ANY open backlog, exactly as
-    #     before this widening.
-    #   * UNDER-SATURATED lanes (0 < live_workers < GOAL_LANE_SATURATION_WORKERS)
-    #     with a SUBSTANTIAL backlog still waiting (> GOAL_LANE_UNDERSAT_BACKLOG_MIN)
-    #     AND genuine memory headroom -- 1-4 workers while dozens of bundle-safe
-    #     tickets sit unallocated is the reopen-2 incident itself; those tickets
-    #     should be filling the empty parallel worktree lanes up to the cap.
-    # At or above the fill floor = saturated = silent; under-saturated with only a
-    # small backlog left = not worth a keystroke = silent.
+    #     before this widening; memory-exempt (a fully stalled box must always be
+    #     nudged) and idle-gated (wait for quiet) below.
+    #   * UNDER-SATURATED lanes (0 < live_workers < floor) with genuine memory
+    #     headroom -- 1-4 workers while workable tickets sit unallocated should be
+    #     filling the empty parallel worktree lanes up to the floor.
+    # #481: floor = min(GOAL_LANE_SATURATION_WORKERS, backlog) -- the owner's
+    # `active_workers < min(5, workable_backlog)`. This unifies the old fixed
+    # `>= 5` cap + the `backlog > 10` hard gate: a small-but-real backlog (2-10
+    # workable) with idle lanes is now filled up to the backlog, not just once it
+    # passes 10. backlog_n is already >= 1 (the `<= 0` guard above returned), so
+    # floor >= 1 and workers==0 is always < floor (the empty-lane branch stays
+    # reachable). live_workers (dispatched SUBAGENT transcripts) already EXCLUDES
+    # `waiters` (CC's bg-shell/monitor badge, a separate population) from the
+    # count; a CI-waiting or finished-but-recent subagent still writes its
+    # transcript, so live_workers is an honest OVER-estimate of genuinely-working
+    # lanes -- which makes the guard CONSERVATIVE (nudges less, never over), the
+    # safe direction. Anti-flap (#481 design): the 15-min per-fire cooldown + the
+    # 3-min recent-human gate + the 15-min live-window's own completion-recency
+    # (a just-merged worker stays counted through its integration window) + the
+    # empty-lane idle gate -- no new debounce, reusing only state the guard reads.
+    # At or above the floor = saturated = silent.
     mem_mb = None
-    if live_workers >= GOAL_LANE_SATURATION_WORKERS:
+    floor = min(GOAL_LANE_SATURATION_WORKERS, backlog_n)
+    if live_workers >= floor:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                     "saturated (>= %d workers), skip"
-                    % (loc, live_workers, waiters, backlog_n,
-                       GOAL_LANE_SATURATION_WORKERS))
+                    % (loc, live_workers, waiters, backlog_n, floor))
         return logs, False
     under_saturated = live_workers > 0
     if under_saturated:
-        if backlog_n <= GOAL_LANE_UNDERSAT_BACKLOG_MIN:
-            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                        "skip:backlog-small (under-saturated but backlog <= %d)"
-                        % (loc, live_workers, waiters, backlog_n,
-                           GOAL_LANE_UNDERSAT_BACKLOG_MIN))
-            return logs, False
         # The fill-lanes nudge dispatches MORE parallel workers -- only fire when
         # the box has real memory headroom, else another worktree worker risks the
         # #448 pressure-reap zone on a memory-tight box. Measured on the box the
@@ -1367,7 +1380,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     if live_workers == 0:
         text = GOAL_LANE_NUDGE_TEXT % (backlog_n, waiters)
     else:
-        text = GOAL_LANE_UNDERSAT_NUDGE_TEXT % (live_workers, backlog_n, waiters)
+        text = GOAL_LANE_UNDERSAT_NUDGE_TEXT % (live_workers, floor, backlog_n, waiters)
     if fresh_draft:
         # #442 -- deliver INTO the held draft via the stash protocol (the
         # primitive re-verifies idle-with-draft itself and undoes its own
@@ -1410,9 +1423,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # only that branch logs "(n/MAX)"; the under-saturated fill-the-cap branch
     # repeats with the cooldown and has no MAX, so it logs "(fill)".
     prog = "fill" if under_saturated else "%d/%d" % (n + 1, GOAL_LANE_MAX_NUDGES)
-    logs.append("lane-occupancy nudge (%s) %s workers=%d%s waiters=%d backlog=%d "
-                "idle=%dm (%s)" % (mode, loc, live_workers, mem_suffix,
-                                   waiters, backlog_n, idle // 60, prog))
+    logs.append("lane-occupancy nudge (%s) %s workers=%d floor=%d%s waiters=%d "
+                "backlog=%d idle=%dm (%s)" % (mode, loc, live_workers, floor,
+                                              mem_suffix, waiters, backlog_n,
+                                              idle // 60, prog))
     return logs, True
 
 
