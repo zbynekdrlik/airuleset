@@ -234,7 +234,7 @@
   "airuleset.py::cmd_push": 356,
   "airuleset.py::main": 521,
   "cli_vault.py::cmd_secret": 300,
-  "watchdog/__init__.py::run_once": 2012,
+  "watchdog/__init__.py::run_once": 2008,
   "watchdog/cards.py::card_reconcile": 314,
   "watchdog/cross_stream.py::gk_request_backstop": 216,
   "watchdog/discord_replies.py::deliver_discord_replies": 459,

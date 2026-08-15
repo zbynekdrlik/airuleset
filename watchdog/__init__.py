@@ -3171,28 +3171,36 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             if (now - ts) > stale_after:
                 del bc[k]
 
+    # --- STANDALONE JOB REGISTRY (#433 step 16) ------------------------------
+    # The post-loop standalone sequence (jobs 3/5/7 + #368/#461 extensions,
+    # then jobs 8→29) as an ORDER-PRESERVING (label, gate, invoke, err) registry
+    # run by the single loop before save_state. Gates/args are verbatim inside
+    # closures capturing locals naturally, so every `watchdog.<name>` seam is
+    # unchanged. Representation change only — characterization test pins it.
+    # `err`: "<prefix> error" text logged on a raise, or None to swallow it.
+    _standalone_registry = []
+
+    def _add(label, gate, invoke, err):
+        _standalone_registry.append((label, gate, invoke, err))
+
     # --- (3) WEEKLY TOKEN-USAGE alert (only when a fetcher is wired) — rate-limited
     # to USAGE_INTERVAL inside check_usage so the 60s tmux cadence doesn't hammer
     # the aggressively-429'd endpoint. Best-effort: never breaks the tmux jobs.
-    if usage_fetch is not None:
-        try:
-            line = check_usage(now, state, send_fn, fetch=usage_fetch,
-                               owner=account_owner or None, dry_run=dry_run)
-            if line:
-                logs.append(line)
-        except Exception:
-            pass
+    def _job_check_usage():
+        line = check_usage(now, state, send_fn, fetch=usage_fetch,
+                           owner=account_owner or None, dry_run=dry_run)
+        return [line] if line else []
+    _add("check_usage", lambda: usage_fetch is not None, _job_check_usage, None)
 
     # --- (5) DELIVER PENDING ✅ — backstop for the unreliable idle_prompt event.
     # Best-effort: a bad pending file must never break the tmux jobs.
-    try:
-        logs += deliver_pending_done(now, send_fn, projects_dir,
-                                     owner_by_sid=owner_by_sid, account_owner=account_owner,
-                                     dry_run=dry_run, done_grace=done_grace,
-                                     pending_prefix=pending_prefix,
-                                     owner_by_cwd=owner_by_cwd, owners_seen=owners_seen)
-    except Exception:
-        pass
+    _add("deliver_pending_done", lambda: True,
+         lambda: deliver_pending_done(now, send_fn, projects_dir,
+                                      owner_by_sid=owner_by_sid, account_owner=account_owner,
+                                      dry_run=dry_run, done_grace=done_grace,
+                                      pending_prefix=pending_prefix,
+                                      owner_by_cwd=owner_by_cwd, owners_seen=owners_seen),
+         None)
 
     # --- (7) ROUTE DISCORD REPLIES → the asking session, a ❓/❔ REACTION on a
     # tracked bot message (#297), and a REPLY on a completion card (#298) —
@@ -3200,26 +3208,23 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # never break the tmux jobs. `cwd_by_sid` (#297/#298): resolves "the
     # nearest live session of repo X" for the flag-fallback / post-reopen
     # nudge — already built above for job 24's own repo read.
-    if discord_fetch is not None:
-        try:
-            logs += deliver_discord_replies(now, run, state, panes_by_sid,
-                                            dry_run=dry_run, discord_fetch=discord_fetch,
-                                            hosted_users=hosted_users,
-                                            cwd_by_sid=cwd_by_sid,
-                                            projects_dir=projects_dir,
-                                            persist=lambda: save_state(state_path, state))
-        except Exception as e:
-            logs.append("discord-reply error: %r" % (e,))
+    _add("deliver_discord_replies", lambda: discord_fetch is not None,
+         lambda: deliver_discord_replies(now, run, state, panes_by_sid,
+                                         dry_run=dry_run, discord_fetch=discord_fetch,
+                                         hosted_users=hosted_users,
+                                         cwd_by_sid=cwd_by_sid,
+                                         projects_dir=projects_dir,
+                                         persist=lambda: save_state(state_path, state)),
+         "discord-reply error")
 
     # Terminal-answered ❓ cleanup — a question answered by a HUMAN prompt in
     # the asking session leaves the map NOW, not on some later timer (it
     # feeds the statusline 'otazky' badge, which must be trustworthy per
     # stream).
-    try:
-        logs += prune_answered_questions(now, projects_dir=projects_dir,
-                                         dry_run=dry_run)
-    except Exception as e:
-        logs.append("question-prune error: %r" % (e,))
+    _add("prune_answered_questions", lambda: True,
+         lambda: prune_answered_questions(now, projects_dir=projects_dir,
+                                          dry_run=dry_run),
+         "question-prune error")
 
     # #368 -- an unanswered ❓ that survives the pruning above (nobody
     # answered it, at the terminal or on Discord) is now re-asked FRESH AND
@@ -3227,32 +3232,29 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # own question-tracking mechanism (never a new job, per the FREEZE).
     # Needs only `send_fn` (always resolved by now), not `discord_fetch` —
     # it posts, it never reads Discord.
-    try:
-        # questions_path (None = live box map): same hermeticity reason as
-        # state_path/projects_dir — a run_once TEST otherwise inherits the
-        # box's REAL pending questions (observed flake, test_watchdog).
-        logs += reping_stale_questions(now, send_fn, dry_run=dry_run,
-                                       path=questions_path,
-                                       owner_by_sid=owner_by_sid,
-                                       owner_by_cwd=owner_by_cwd,
-                                       owners_seen=owners_seen,
-                                       account_owner=account_owner)
-    except Exception as e:
-        logs.append("question-reping error: %r" % (e,))
+    # questions_path (None = live box map): same hermeticity reason as
+    # state_path/projects_dir — a run_once TEST otherwise inherits the
+    # box's REAL pending questions (observed flake, test_watchdog).
+    _add("reping_stale_questions", lambda: True,
+         lambda: reping_stale_questions(now, send_fn, dry_run=dry_run,
+                                        path=questions_path,
+                                        owner_by_sid=owner_by_sid,
+                                        owner_by_cwd=owner_by_cwd,
+                                        owners_seen=owners_seen,
+                                        account_owner=account_owner),
+         "question-reping error")
 
     # #461 -- the DURABLE owner-decision queue's daily re-ask (the TICKET
     # backstop of #368's session-question re-ask above). Same #368 daily-reask
     # section, never a new job. Only when a real fetch is wired (cmd_watchdog),
     # so other jobs' run_once tests stay network-free. `account_owner` is the
     # box-wide owner resolved in the pane loop above (already stream-redirected).
-    if owner_decision_fetch is not None:
-        try:
-            logs += reping_owner_decision_tickets(
-                now, send_fn, state, dry_run=dry_run,
-                account_owner=account_owner, fetch=owner_decision_fetch,
-                persist=lambda: save_state(state_path, state))
-        except Exception as e:
-            logs.append("owner-decision-digest error: %r" % (e,))
+    _add("reping_owner_decision_tickets", lambda: owner_decision_fetch is not None,
+         lambda: reping_owner_decision_tickets(
+             now, send_fn, state, dry_run=dry_run,
+             account_owner=account_owner, fetch=owner_decision_fetch,
+             persist=lambda: save_state(state_path, state)),
+         "owner-decision-digest error")
 
     # #255 (adversarial review, MAJOR finding): jobs 8/9 must NOT reuse the
     # bare `sweep_deadline` above -- that deadline is scoped to the
@@ -3269,27 +3271,23 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # never rot after a loop ends). Only when a fetch is wired (cmd_watchdog
     # passes the real one; unit tests of other jobs stay network-free).
     # Cadence-gated internally; best-effort.
-    if bounce_fetch is not None:
-        try:
-            logs += bounce_backstop(
-                now, run, state, send_fn, dry_run=dry_run,
-                gh_fetch=bounce_fetch, projects_dir=projects_dir,
-                persist=lambda: save_state(state_path, state),
-                time_fn=time_fn, sweep_deadline=tail_deadline)
-        except Exception as e:
-            logs.append("bounce-backstop error: %r" % (e,))
+    _add("bounce_backstop", lambda: bounce_fetch is not None,
+         lambda: bounce_backstop(
+             now, run, state, send_fn, dry_run=dry_run,
+             gh_fetch=bounce_fetch, projects_dir=projects_dir,
+             persist=lambda: save_state(state_path, state),
+             time_fn=time_fn, sweep_deadline=tail_deadline),
+         "bounce-backstop error")
 
     # Job 11 — gk-request backstop (#30): the stream→supervisor mirror of
     # job 8. Same gating: only when a fetch is wired; cadence-gated
     # internally; best-effort.
-    if gkreq_fetch is not None:
-        try:
-            logs += gk_request_backstop(
-                now, run, state, send_fn, dry_run=dry_run,
-                gh_fetch=gkreq_fetch, projects_dir=projects_dir,
-                persist=lambda: save_state(state_path, state))
-        except Exception as e:
-            logs.append("gkreq-backstop error: %r" % (e,))
+    _add("gk_request_backstop", lambda: gkreq_fetch is not None,
+         lambda: gk_request_backstop(
+             now, run, state, send_fn, dry_run=dry_run,
+             gh_fetch=gkreq_fetch, projects_dir=projects_dir,
+             persist=lambda: save_state(state_path, state)),
+         "gkreq-backstop error")
 
     # OWNER KILL-SWITCH (2026-08-12, direct order: "vypni compact watcher a aj
     # goal watcher lebo stale si ich neopravil zato mi stale promptuju kde
@@ -3305,12 +3303,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # this gate (a test, a future caller) still self-disables and logs.
     _goal_jobs_disabled = _owner_disabled("goal")
     _compact_jobs_disabled = _owner_disabled("compact")
-    if _goal_jobs_disabled:
-        logs.append("goal jobs DISABLED by owner flag "
-                    "~/.claude/watchdog-disable-goal (rm to re-enable)")
-    if _compact_jobs_disabled:
-        logs.append("compact jobs DISABLED by owner flag "
-                    "~/.claude/watchdog-disable-compact (rm to re-enable)")
+
+    # The DISABLED lines emit from an ORDERED registry entry (the one non-job
+    # entry) at the if-chain's exact position, so `logs` order is byte-identical;
+    # the flags stay computed HERE because the later compact/goal gates read them.
+    def _kill_switch_notice():
+        _n = []
+        if _goal_jobs_disabled:
+            _n.append("goal jobs DISABLED by owner flag "
+                      "~/.claude/watchdog-disable-goal (rm to re-enable)")
+        if _compact_jobs_disabled:
+            _n.append("compact jobs DISABLED by owner flag "
+                      "~/.claude/watchdog-disable-compact (rm to re-enable)")
+        return _n
+    _add("_owner_kill_switch_notice", lambda: True, _kill_switch_notice, None)
 
     # Job 9's own real body (goal.goal_sweep) is dispatched further down,
     # alongside job 20 -- both now need `compact_handled_this_sweep`
@@ -3339,13 +3345,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # this job sees NO behavior change (no write to the real
     # ~/.claude/burn-history/ during a test, no surprise state key).
     # Best-effort; internally also cadence-gated to at most once per hour.
-    if burn_snapshot_path:
-        try:
-            logs += burn_snapshot_job(now, state, snapshot_path=burn_snapshot_path,
-                                      transcripts_root=str(projects_dir),
-                                      dry_run=dry_run)
-        except Exception as e:
-            logs.append("burn-snapshot error: %r" % (e,))
+    _add("burn_snapshot_job", lambda: burn_snapshot_path,
+         lambda: burn_snapshot_job(now, state, snapshot_path=burn_snapshot_path,
+                                   transcripts_root=str(projects_dir),
+                                   dry_run=dry_run),
+         "burn-snapshot error")
 
     # #69 — shared per-sweep set: job 14 records every sid it actually
     # compacts THIS sweep. Originally also fed job 15/17 (both REMOVED,
@@ -3362,16 +3366,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # that knows nothing about this job sees NO behavior change. `state` is
     # threaded through so a real send can mark the shared janitor's
     # provenance (#372). Best-effort.
-    if compact_requests_path and not _compact_jobs_disabled:
-        try:
-            from watchdog import compact as _compact
-            logs += _compact.compact_sweep(now, run=run, dry_run=dry_run,
-                                           projects_dir=projects_dir,
-                                           requests_path=compact_requests_path,
-                                           state=state,
-                                           handled=compact_handled_this_sweep)
-        except Exception as e:
-            logs.append("compact-request error: %r" % (e,))
+    def _job_compact_sweep():
+        from watchdog import compact as _compact
+        return _compact.compact_sweep(now, run=run, dry_run=dry_run,
+                                      projects_dir=projects_dir,
+                                      requests_path=compact_requests_path,
+                                      state=state,
+                                      handled=compact_handled_this_sweep)
+    _add("compact_sweep", lambda: compact_requests_path and not _compact_jobs_disabled,
+         _job_compact_sweep, "compact-request error")
 
     # Job 15 — REMOVED (#102, 2026-07-27). Used to fire /compact off context
     # size + idle duration alone; see run_once's own docstring paragraph
@@ -3383,13 +3386,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # this job just merges them). Same "wired = on" convention as jobs
     # 3/7/8/11/13/14. Best-effort; internally also cadence-gated to at most
     # once per hour.
-    if fleet_fetch is not None:
-        try:
-            logs += fleet_burn_job(now, state, fleet_hosts or [], send_fn,
-                                   fetch=fleet_fetch, fleet_path=fleet_path,
-                                   owner=account_owner or None, dry_run=dry_run)
-        except Exception as e:
-            logs.append("fleet-burn error: %r" % (e,))
+    _add("fleet_burn_job", lambda: fleet_fetch is not None,
+         lambda: fleet_burn_job(now, state, fleet_hosts or [], send_fn,
+                                fetch=fleet_fetch, fleet_path=fleet_path,
+                                owner=account_owner or None, dry_run=dry_run),
+         "fleet-burn error")
 
     # Job 19 — HOURLY BURN ALERT (#81): only when `burn_alert_enabled` is
     # truthy (cmd_watchdog computes it the SAME dev1-only way it computes
@@ -3398,12 +3399,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # Runs right after job 16 so it evaluates the row job 16 may have just
     # written THIS sweep. Best-effort; internally cadence-gated to at most
     # once per hour bucket.
-    if burn_alert_enabled:
-        try:
-            logs += burn_alert_job(now, state, send_fn, fleet_path=fleet_path,
-                                   owner=account_owner or None, dry_run=dry_run)
-        except Exception as e:
-            logs.append("burn-alert error: %r" % (e,))
+    _add("burn_alert_job", lambda: burn_alert_enabled,
+         lambda: burn_alert_job(now, state, send_fn, fleet_path=fleet_path,
+                                owner=account_owner or None, dry_run=dry_run),
+         "burn-alert error")
 
     # Job 17 — REMOVED (#102, 2026-07-27). Used to fire /compact off a fixed
     # context ceiling alone, regardless of idle duration; see run_once's own
@@ -3422,16 +3421,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # after job 14's /compact senders run above. Only when
     # `goal_jobs_enabled` is truthy (cmd_watchdog passes True) — same
     # "wired = on" convention as jobs 13/14/16/19.
-    if goal_jobs_enabled and not _goal_jobs_disabled:
-        try:
-            from watchdog import goal as _goal_mod
-            logs += _goal_mod.goal_sweep(
-                now, run=run, dry_run=dry_run, projects_dir=projects_dir,
-                requests_path=goal_requests_path, state=state,
-                handled=compact_handled_this_sweep, send_fn=send_fn,
-                sleep_fn=sleep_fn)
-        except Exception as e:
-            logs.append("goal-sweep error: %r" % (e,))
+    def _job_goal_sweep():
+        from watchdog import goal as _goal_mod
+        return _goal_mod.goal_sweep(
+            now, run=run, dry_run=dry_run, projects_dir=projects_dir,
+            requests_path=goal_requests_path, state=state,
+            handled=compact_handled_this_sweep, send_fn=send_fn,
+            sleep_fn=sleep_fn)
+    _add("goal_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
+         _job_goal_sweep, "goal-sweep error")
 
     # Job 20 — GOAL DARK-WATCH + LANE-OCCUPANCY NUDGE (#403, collapsing the
     # old `goal_rearm`'s 968-line re-arm/drift/outage/forensics machinery):
@@ -3449,27 +3447,27 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     #     the whole family (#365/#351's own lane-occupancy nudge,
     #     functionally unchanged) and needs `compact_handled_this_sweep`
     #     for the identical reason job 9 above does.
-    if goal_jobs_enabled and not _goal_jobs_disabled:
-        try:
-            from watchdog import goal as _goal_mod
-            logs += _goal_mod.goal_dark_watch(
-                now, run=run, state=state, send_fn=send_fn,
-                dry_run=dry_run, projects_dir=projects_dir,
-                sleep_fn=sleep_fn, time_fn=time_fn,
-                sweep_deadline=tail_deadline,
-                requests_path=goal_requests_path)
-        except Exception as e:
-            logs.append("goal-dark-watch error: %r" % (e,))
-        try:
-            from watchdog import goal as _goal_mod
-            logs += _goal_mod.goal_lane_sweep(
-                now, run=run, dry_run=dry_run, projects_dir=projects_dir,
-                state=state, handled=compact_handled_this_sweep,
-                backlog_fetch=backlog_fetch, send_fn=send_fn,
-                sleep_fn=sleep_fn, time_fn=time_fn,
-                sweep_deadline=tail_deadline)
-        except Exception as e:
-            logs.append("goal-lane-sweep error: %r" % (e,))
+    def _job_goal_dark_watch():
+        from watchdog import goal as _goal_mod
+        return _goal_mod.goal_dark_watch(
+            now, run=run, state=state, send_fn=send_fn,
+            dry_run=dry_run, projects_dir=projects_dir,
+            sleep_fn=sleep_fn, time_fn=time_fn,
+            sweep_deadline=tail_deadline,
+            requests_path=goal_requests_path)
+    _add("goal_dark_watch", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
+         _job_goal_dark_watch, "goal-dark-watch error")
+
+    def _job_goal_lane_sweep():
+        from watchdog import goal as _goal_mod
+        return _goal_mod.goal_lane_sweep(
+            now, run=run, dry_run=dry_run, projects_dir=projects_dir,
+            state=state, handled=compact_handled_this_sweep,
+            backlog_fetch=backlog_fetch, send_fn=send_fn,
+            sleep_fn=sleep_fn, time_fn=time_fn,
+            sweep_deadline=tail_deadline)
+    _add("goal_lane_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
+         _job_goal_lane_sweep, "goal-lane-sweep error")
 
     # Job 21 — LONG-TURN WATCH (#84): only when `long_turn_enabled` is truthy
     # (cmd_watchdog passes True) — same "wired = on" convention as jobs
@@ -3477,14 +3475,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # no tmux round-trip beyond `_pane_location` for a pane already past the
     # threshold, and it never types anything, so it cannot interact with any
     # sender above it. Best-effort.
-    if long_turn_enabled:
-        try:
-            logs += long_turn_watch(now, run, state, panes_by_sid,
-                                    send_fn=send_fn, dry_run=dry_run,
-                                    project_by_sid=project_by_sid,
-                                    owner_by_sid=owner_by_sid)
-        except Exception as e:
-            logs.append("long-turn error: %r" % (e,))
+    _add("long_turn_watch", lambda: long_turn_enabled,
+         lambda: long_turn_watch(now, run, state, panes_by_sid,
+                                 send_fn=send_fn, dry_run=dry_run,
+                                 project_by_sid=project_by_sid,
+                                 owner_by_sid=owner_by_sid),
+         "long-turn error")
 
     # Job 24 — DELIVERY-STALL WATCH (#138): only when `delivery_probe` is
     # given (cmd_watchdog wires the real fetch + gh lookup) — same
@@ -3494,30 +3490,26 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # only, so it is safe alongside job 21 at the end; it takes no tmux
     # round-trip at all (the cwd map was built during the pane sweep above)
     # and never types anything. Best-effort.
-    if delivery_probe is not None:
-        try:
-            logs += delivery_stall_watch(now, run, state, cwd_by_sid,
-                                         send_fn=send_fn, dry_run=dry_run,
-                                         delivery_probe=delivery_probe,
-                                         owner_by_sid=owner_by_sid,
-                                         project_by_sid=project_by_sid)
-        except Exception as e:
-            logs.append("delivery-stall error: %r" % (e,))
+    _add("delivery_stall_watch", lambda: delivery_probe is not None,
+         lambda: delivery_stall_watch(now, run, state, cwd_by_sid,
+                                      send_fn=send_fn, dry_run=dry_run,
+                                      delivery_probe=delivery_probe,
+                                      owner_by_sid=owner_by_sid,
+                                      project_by_sid=project_by_sid),
+         "delivery-stall error")
 
     # Job 25 — CARD RECONCILIATION (#134): the mirror of job 24, same
     # "wired = on" convention and the same confirm-then-announce contract.
     # Detection only, no tmux round-trip (the cwd map came from the pane
     # sweep above). Best-effort — a failure here must never cost a sweep.
-    if card_probe is not None:
-        try:
-            logs += card_reconcile(now, run, state, cwd_by_sid,
-                                   send_fn=send_fn, dry_run=dry_run,
-                                   card_probe=card_probe,
-                                   closed_fetch=closed_fetch,
-                                   reopen_fetch=reopen_fetch,
-                                   owner_by_sid=owner_by_sid)
-        except Exception as e:
-            logs.append("card-reconcile error: %r" % (e,))
+    _add("card_reconcile", lambda: card_probe is not None,
+         lambda: card_reconcile(now, run, state, cwd_by_sid,
+                                send_fn=send_fn, dry_run=dry_run,
+                                card_probe=card_probe,
+                                closed_fetch=closed_fetch,
+                                reopen_fetch=reopen_fetch,
+                                owner_by_sid=owner_by_sid),
+         "card-reconcile error")
 
     # Job 26 — COMPACT-STALL WATCH — REMOVED (#402, 2026-08-12). Used to
     # watch the shared /compact claim file for a stuck entry; that whole
@@ -3535,14 +3527,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # most `REPO_SWEEP_BATCH_MAX` repos' worth of stale data (see that
     # constant's own comment for the real, per-repo bound — NOT "one hour"),
     # never an unbounded livelock and never a lost dedup entry.
-    if issue_counts_fetch is not None:
-        try:
-            logs += net_drift_alarm(now, state, send_fn=send_fn,
-                                    dry_run=dry_run, repo_roots=repo_roots,
-                                    issue_counts_fetch=issue_counts_fetch,
-                                    persist=lambda: save_state(state_path, state))
-        except Exception as e:
-            logs.append("net-drift error: %r" % (e,))
+    _add("net_drift_alarm", lambda: issue_counts_fetch is not None,
+         lambda: net_drift_alarm(now, state, send_fn=send_fn,
+                                 dry_run=dry_run, repo_roots=repo_roots,
+                                 issue_counts_fetch=issue_counts_fetch,
+                                 persist=lambda: save_state(state_path, state)),
+         "net-drift error")
 
     # Job 28 — STUCK-MAIN SWEEP (#137): only when `repo_roots` is given —
     # the "wired = on" convention. Self-gated on an hourly cadence
@@ -3553,36 +3543,42 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # cadence marker persisted before `repo_roots()` runs. #172 REOPENED F5:
     # a fetch failure now SKIPS the repo this sweep rather than measuring on
     # refs that may be stale.
-    if repo_roots is not None:
-        try:
-            logs += stuck_main_sweep(now, state, send_fn=send_fn,
-                                     dry_run=dry_run, repo_roots=repo_roots,
-                                     git_fetch=git_fetch,
-                                     persist=lambda: save_state(state_path, state))
-        except Exception as e:
-            logs.append("stuck-main error: %r" % (e,))
+    _add("stuck_main_sweep", lambda: repo_roots is not None,
+         lambda: stuck_main_sweep(now, state, send_fn=send_fn,
+                                  dry_run=dry_run, repo_roots=repo_roots,
+                                  git_fetch=git_fetch,
+                                  persist=lambda: save_state(state_path, state)),
+         "stuck-main error")
 
     # Job 22 — STALE EXEC-MARKER CLEANUP (#97): ALWAYS wired (no gating
     # param — same "always on" shape as jobs 9/15/17, since it depends on
     # nothing external beyond /tmp + the pane list already available this
     # sweep). Pure hygiene, never security-critical (a marker is matched by
     # session id, so a stale one is already inert) — best-effort.
-    try:
-        logs += cleanup_stale_exec_markers(now, run=run,
-                                           projects_dir=projects_dir,
-                                           dry_run=dry_run)
-    except Exception as e:
-        logs.append("exec-marker-cleanup error: %r" % (e,))
+    _add("cleanup_stale_exec_markers", lambda: True,
+         lambda: cleanup_stale_exec_markers(now, run=run,
+                                            projects_dir=projects_dir,
+                                            dry_run=dry_run),
+         "exec-marker-cleanup error")
 
     # Job 29 — HOURLY CREDENTIAL-STORE SWEEP (#144): only when `vault_purge`
     # is given (cmd_watchdog passes filedrop.vault.purge). Best-effort and
     # internally hour-gated; deletes only what is already past its own TTL.
-    if vault_purge:
-        try:
-            logs += vault_purge_job(now, state, purge_fn=vault_purge,
-                                    dry_run=dry_run)
-        except Exception as e:
-            logs.append("vault-purge error: %r" % (e,))
+    _add("vault_purge_job", lambda: vault_purge,
+         lambda: vault_purge_job(now, state, purge_fn=vault_purge,
+                                 dry_run=dry_run),
+         "vault-purge error")
+
+    # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
+    # try/except = the SAME per-job isolation boundary; `err` logs a raise with
+    # the job's custom prefix or (None) swallows it. Accumulation is verbatim.
+    for _label, _gate, _invoke, _err in _standalone_registry:
+        if _gate():
+            try:
+                logs += _invoke()
+            except Exception as e:
+                if _err:
+                    logs.append("%s: %r" % (_err, e))
 
     save_state(state_path, state)
     return logs
