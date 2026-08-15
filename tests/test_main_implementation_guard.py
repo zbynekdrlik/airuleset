@@ -2098,5 +2098,102 @@ class TestWiringAndSkill(unittest.TestCase):
         self.assertRegex(txt, r"(?i)armed[^\n]*(/goal|goal)")
 
 
+class CrossUserLogPathCollision492(unittest.TestCase):
+    """#492: the audit/bypass telemetry used FIXED /tmp filenames
+    (/tmp/airuleset-main-exec-block.log, -bypass.log). On a shared box the
+    FIRST user to create each file owns it 0644; every OTHER user's `>>`
+    append then fails EACCES — and because `>> file 2>/dev/null || true`
+    does NOT silence a redirect-OPEN failure (bash reports the error on the
+    shell's stderr before the per-command 2> applies; || true only fixes
+    the exit status), the `Permission denied` LEAKS to stderr, which Claude
+    Code surfaces as a `PreToolUse:Bash hook error` on every block. Fix:
+    per-user (`-<uid>`) path so each user owns their own accumulating file,
+    plus a brace-group redirect so an unwritable log can never leak again."""
+
+    UID = os.getuid()
+    BLOCK_LOG = Path("/tmp/airuleset-main-exec-block-%d.log" % UID)
+    BYPASS_LOG = Path("/tmp/airuleset-main-exec-bypass-%d.log" % UID)
+    FIXED_BLOCK = Path("/tmp/airuleset-main-exec-block.log")
+    FIXED_BYPASS = Path("/tmp/airuleset-main-exec-bypass.log")
+
+    def _make_unwritable(self, p):
+        """Simulate a first-user-owned unwritable file at `p`: save any real
+        content, recreate it 0444, restore on cleanup. Skips as root (root
+        bypasses permission bits, so the EACCES the bug needs cannot arise)."""
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses file permission bits; cannot reproduce EACCES")
+        saved = None
+        if p.exists():
+            saved = (p.read_bytes(), p.stat().st_mode)
+
+        def restore():
+            try:
+                if p.exists():
+                    os.chmod(p, 0o644)
+                    p.unlink()
+                if saved is not None:
+                    p.write_bytes(saved[0])
+                    os.chmod(p, saved[1])
+            except OSError:
+                # airuleset:script-ok best-effort test-cleanup restore of a
+                # shared /tmp telemetry file; a failure here must not mask
+                # the actual test result.
+                pass
+        self.addCleanup(restore)
+        p.write_text("")            # created 0644 by us...
+        os.chmod(p, 0o444)          # ...then made unwritable (foreign-owned proxy)
+
+    def test_block_no_permission_denied_leak_when_fixed_path_unwritable(self):
+        # RED on old code (writes to the fixed 0444 path -> leaks); GREEN
+        # after fix (writes to the per-uid path, never touches this one).
+        self._make_unwritable(self.FIXED_BLOCK)
+        sid = "t-492-blockleak-" + uuid.uuid4().hex[:8]
+        out = MainImplementationGuard()._run(
+            tool="Bash", command="grep -rn 'TODO' .", sid=sid,
+            transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 2, out.stderr)     # block still enforced
+        self.assertNotIn("Permission denied", out.stderr, out.stderr)
+        self.assertNotIn("airuleset-main-exec-block.log", out.stderr, out.stderr)
+
+    def test_block_logged_to_per_user_path(self):
+        # RED on old code (per-uid file has no such line / doesn't exist);
+        # GREEN after fix.
+        sid = "t-492-blockpath-" + uuid.uuid4().hex[:8]
+        out = MainImplementationGuard()._run(
+            tool="Bash", command="grep -rn 'TODO' .", sid=sid,
+            transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertTrue(self.BLOCK_LOG.exists(),
+                        "per-user block log not created: %s" % self.BLOCK_LOG)
+        lines = [ln for ln in self.BLOCK_LOG.read_text().splitlines() if sid in ln]
+        self.assertTrue(lines, "block not logged to the per-user path")
+
+    def test_bypass_no_leak_and_logged_to_per_user_path_when_fixed_unwritable(self):
+        # RED on old code; GREEN after fix.
+        self._make_unwritable(self.FIXED_BYPASS)
+        sid = "t-492-bypass-" + uuid.uuid4().hex[:8]
+        out = MainImplementationGuard()._run(
+            tool="Edit", content=BIG, sid=sid, bypass="new")
+        self.assertEqual(out.returncode, 0, out.stderr)     # bypass consumed
+        self.assertNotIn("Permission denied", out.stderr, out.stderr)
+        self.assertTrue(self.BYPASS_LOG.exists(),
+                        "per-user bypass log not created")
+        self.assertTrue(
+            [ln for ln in self.BYPASS_LOG.read_text().splitlines() if sid in ln],
+            "bypass not logged to the per-user path")
+
+    def test_hardened_redirect_no_leak_even_when_per_user_log_unwritable(self):
+        # Guards the brace-group hardening: even the per-uid file itself
+        # being unwritable (disk full / hostile precreation on sticky /tmp)
+        # must never leak. GREEN after fix (verifies the redirect form).
+        self._make_unwritable(self.BLOCK_LOG)
+        sid = "t-492-hardened-" + uuid.uuid4().hex[:8]
+        out = MainImplementationGuard()._run(
+            tool="Bash", command="grep -rn 'TODO' .", sid=sid,
+            transcript_text=goal_armed_transcript())
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertNotIn("Permission denied", out.stderr, out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
