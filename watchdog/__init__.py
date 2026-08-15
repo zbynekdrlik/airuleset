@@ -5531,8 +5531,10 @@ GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
 # `pane_goal_armed` False that resulted killed the #442/#481 lane-fill
 # guard. Widened, still CLOSED-form (the MINOR-1 lesson): an OPTIONAL
 # leading `STASH_MARKER + " · "` prefix (derived from the repo constant,
-# never a divergent copy; separator verified by hexdump of the real
-# render) and the age unit class `[hm]` -> `[hmd]`. The tail stays
+# never a divergent copy; ALL its separators confirmed plain 0x20 — NOT
+# nbsp U+00A0 — by hexdump of the raw byte-faithful gk capture, where
+# `·` survived as c2 b7 so an nbsp would equally have shown as c2 a0)
+# and the age unit class `[hm]` -> `[hmd]`. The tail stays
 # exactly " active"/" active (<1-3 digits><h|m|d>)", so every #393
 # wrapped-prose false-positive control (with/without punctuation, prefix
 # or not) is still rejected. A fractional-hour/nbsp render remains the
