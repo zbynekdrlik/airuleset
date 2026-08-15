@@ -210,7 +210,7 @@ class TestPaneHasQueuedCompact(unittest.TestCase):
 # test_already_queued_compact_is_handled_not_resent` (and the periodic-sweep
 # equivalent, `TestCompactSweep`) — `_pane_has_queued_compact` itself (the
 # primitive `TestPaneHasQueuedCompact` above locks) is UNCHANGED and still
-# lives in `watchdog/__init__.py`, reused verbatim by the new module.
+# lives in `watchdog/pane_text.py` (moved there in #433 step 3), verbatim.
 
 
 # --------------------------------------------------------------------------- #
