@@ -127,8 +127,13 @@ class HumanDraftNeverReclaimed(unittest.TestCase):
         own_no_stash = "● Hotovo.\n❯ /goal STOP keď je CI zelené\n  ctx ███░\n"
         state = {"stash_parks": {PID: NOW - 40 * 3600}}   # no generic mark
         logs, _rec, run = _recover(state, captured=own_no_stash, dry_run=False)
-        self.assertEqual(logs, [])
+        # The stale record is journalled + cleared by the marker-gone backstop
+        # (slot not occupied), and NO destructive box-clear is attempted (that
+        # action needs the 6h generic mark, which the park record never
+        # substitutes for).
         self.assertNotIn(PID, state.get("stash_parks", {}))   # backstop cleared it
+        self.assertTrue(any("stale park record cleared" in ln for ln in logs), logs)
+        self.assertFalse(any("would attempt" in ln for ln in logs), logs)
         self.assertFalse(any(a[1] == "send-keys" for a in run.state["sent"]))
 
 
@@ -141,8 +146,8 @@ class MarkerGoneBackstop(unittest.TestCase):
         bare_no_stash = "● Hotovo.\n❯ \n  ctx ███░  ◎ /goal active\n"
         state = {"stash_parks": {PID: NOW - 40 * 3600}}
         logs, _rec, _run = _recover(state, captured=bare_no_stash, dry_run=False)
-        self.assertEqual(logs, [])
         self.assertNotIn(PID, state.get("stash_parks", {}))
+        self.assertTrue(any("stale park record cleared" in ln for ln in logs), logs)
 
     def test_backstop_does_not_mutate_state_on_dry_run(self):
         bare_no_stash = "● Hotovo.\n❯ \n  ctx ███░  ◎ /goal active\n"

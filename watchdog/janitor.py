@@ -256,10 +256,12 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     occupied = watchdog.STASH_MARKER in (captured or "")
 
     # #488 -- the DURABLE, age-unbounded park record. Written by
-    # deliver_with_stash's callers when a stash delivery aborted (may have
-    # left a park), it survives a restart/deploy and does NOT expire, so a
-    # genuinely-ours park is reclaimable after any delay -- the exact gk gap
-    # (a goal ran `(1d)`, past the 6h `_janitor_watch_seen` bound).
+    # `deliver_with_stash` itself the instant it DEFINITIVELY parks a draft
+    # (STASH_PARKED), never on a bare abort outcome, so it can only ever mark
+    # an unambiguously-ours park (the slot was free before our own C-s). It
+    # survives a restart/deploy and does NOT expire, so a genuinely-ours park
+    # is reclaimable after any delay -- the exact gk gap (a goal ran `(1d)`,
+    # past the 6h `_janitor_watch_seen` bound).
     park_seen = _janitor_park_seen(state, pid)
     if park_seen and not occupied:
         # Marker-gone backstop: the park was resolved (CC's own async
@@ -267,10 +269,16 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
         # clear it. This is what bounds an age-unbounded record WITHOUT a
         # timeout: it survives ONLY while OUR park is still visibly present,
         # which is also why a human's LATER stash (recorded by nobody) can
-        # never satisfy the gate purely by reusing this pane later.
+        # never satisfy the gate purely by reusing this pane later. The clear
+        # is JOURNALLED (#488-review-2 MINOR / the #486 "no silent state
+        # mutation" direction) so a live-box operator can see the record being
+        # reclaimed; on a plain dry-run sweep it mutates nothing and stays
+        # silent.
         park_seen = False
         if not dry_run:
             _janitor_clear_park(state, pid)
+            logs.append("janitor: stale park record cleared (%s) -> slot no "
+                        "longer occupied" % loc)
 
     # PROVENANCE. The generic 6h delivery-attempt mark alone still gates the
     # destructive no-stash `clear` action (unchanged -- a conservative bound
