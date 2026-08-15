@@ -177,6 +177,7 @@ from cli_filedrop_watchdog import (  # noqa: E402
     FILEDROP_DEFAULT_PORT as FILEDROP_DEFAULT_PORT,
     FILEDROP_PORT_FILE as FILEDROP_PORT_FILE,
     filedrop_persisted_port as filedrop_persisted_port,
+    filedrop_default_port_for_uid as filedrop_default_port_for_uid,
     filedrop_host_ip as filedrop_host_ip,
     filedrop_bind_ips as filedrop_bind_ips,
     filedrop_url as filedrop_url,

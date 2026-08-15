@@ -37,6 +37,7 @@ CLAUDE_DIR = Path.home() / ".claude"
 try:
     from filedrop import (PORT as FILEDROP_PORT, DEFAULT_PORT as FILEDROP_DEFAULT_PORT,
                           PORT_FILE as FILEDROP_PORT_FILE, persisted_port as filedrop_persisted_port,
+                          default_port_for_uid as filedrop_default_port_for_uid,
                           host_ip as filedrop_host_ip, bind_ips as filedrop_bind_ips,
                           filedrop_url, FILEDROP_DIR)
 except Exception:  # pragma: no cover — filedrop package should always import
@@ -47,6 +48,11 @@ except Exception:  # pragma: no cover — filedrop package should always import
 
     def filedrop_persisted_port():
         return None
+
+    def filedrop_default_port_for_uid(uid=None):
+        if uid is None:
+            uid = os.getuid() if hasattr(os, "getuid") else 0
+        return FILEDROP_DEFAULT_PORT + (uid % 1000)
 
     def filedrop_host_ip():
         return os.environ.get("FILEDROP_HOST", "127.0.0.1")
@@ -121,72 +127,133 @@ def _render_filedrop_unit(port=None):
             .replace("{{PORT}}", str(port if port is not None else FILEDROP_PORT)))
 
 
-def _choose_filedrop_port(bind_ip):
-    """The port this user's file-drop should serve on.
+def _filedrop_port_bindable(bind_ip, port):
+    """True iff (bind_ip, port) can be bound right now.
 
-    Two airuleset users on ONE host (montalu@dev1, marek@gatekeeper) collide on
-    the default :8788 — the second user's service restart-loops on Errno 98
-    (observed on montalu@dev1, 2026-07-04). Precedence:
+    SO_REUSEADDR mirrors the server's own HTTPServer.allow_reuse_address, so a
+    port merely in TIME_WAIT from OUR OWN just-restarted server reads as
+    reclaimable (not stolen); a live FOREIGN LISTEN still yields EADDRINUSE even
+    with the flag, so it correctly reads as taken (#115). Any bind failure = not
+    usable here — we only ever accept a port we could actually bind."""
+    import socket as _socket
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+    try:
+        s.bind((bind_ip, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _persist_filedrop_port(port):
+    """Write the chosen file-drop port to ~/.claude/filedrop.port so the `share`
+    CLI and `filedrop status` read the SAME port the serve unit bakes. Best-
+    effort — a write failure is printed, never fatal."""
+    try:
+        FILEDROP_PORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        FILEDROP_PORT_FILE.write_text(f"{port}\n")
+    except OSError as e:
+        print(f"  could not persist file-drop port choice ({e})", file=sys.stderr)
+
+
+def _filedrop_current_served_port():
+    """The FILEDROP_PORT our ALREADY-INSTALLED filedrop unit is configured to
+    serve on (read from the live unit's Environment), or None when unknown.
+
+    Lets _choose_filedrop_port tell "our OWN active service holds this port"
+    apart from "a FOREIGN instance holds it" — a bind-test alone cannot, since
+    BOTH a live foreign LISTEN and our own live LISTEN yield EADDRINUSE. Without
+    this, an account whose live service sits on a legacy port could bake a `want`
+    that a foreign account holds → the restart fails to bind → dead service →
+    `share` still advertises `want` → 404 off the stranger (the #493 bug itself,
+    re-introduced narrowly during the old→new fleet migration)."""
+    rc, out, _err = _run_systemctl(["show", "filedrop.service", "-p", "Environment"])
+    if rc != 0:
+        return None
+    for tok in out.split():
+        if tok.startswith("FILEDROP_PORT="):
+            try:
+                return int(tok.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def _choose_filedrop_port(bind_ip):
+    """The port this user's file-drop should serve on — DETERMINISTIC per uid.
+
+    N airuleset accounts on ONE host (the ~12 subdev streams) used to race for a
+    single shared :8788: the old first-free probe reflected a transient instant,
+    so under a fleet push every account bound :8788 momentarily, only one server
+    survived, and every loser's `share` URL still advertised :8788 → 404 off a
+    stranger's store (#493). The fix anchors each account on its OWN deterministic
+    per-uid port (filedrop.default_port_for_uid), which is distinct per uid, so no
+    two accounts ever contend and no probe/race is possible in the normal case.
+
+    A port is SERVEABLE for us iff it is free to bind now OR it is the port our
+    OWN live service already holds (`served`) — the latter reads as EADDRINUSE to
+    a bind-test but is legitimately ours to keep, since the restart rebinds it.
+    We NEVER choose a port a FOREIGN instance holds (that kills our service AND
+    points `share` at a stranger), which is what the `served` distinction buys.
+    Precedence:
       1. FILEDROP_PORT env — explicit override, never second-guessed.
-      2. A previously PERSISTED choice (~/.claude/filedrop.port) — kept when our
-         own service actively serves it OR it still bind-tests free on this
-         host; a port carried over by a ~/.claude migration that a DIFFERENT
-         user's file-drop holds here is dropped and re-picked (montalu@subdev
-         inherited dev1's 8789 == marek's subdev port, #33, 2026-07-24).
-      3. The default, when OUR OWN service is already actively serving it.
-      4. Probe bind on the actual bind IP: default free → default; taken by a
-         FOREIGN instance → first free port in 8789-8798, persisted so the serve
-         unit, the share CLI, and `filedrop status` all agree on the same URL.
-    Fail-open to the default when nothing binds (the service then fails loudly,
-    exactly as before)."""
+      2. A previously PERSISTED port (~/.claude/filedrop.port) — only ever exists
+         after a past collision forced a non-deterministic fallback, or a
+         ~/.claude migration carried another box's port (#33). Honored while it
+         is still serveable; a value a DIFFERENT instance holds is dropped.
+      3. The DETERMINISTIC per-uid port `want`, when serveable — no persist
+         (share re-derives it from our uid); any stale persist file is dropped.
+      4. Only if `want` is held by ANOTHER instance (a rare uid-mod collision, an
+         unrelated service, or a mid-migration foreign holder): probe upward for
+         a serveable port and PERSIST it so unit + share CLI + status agree.
+      5. Fail-safe when nothing in [want, want+10] is serveable: keep serving on
+         our current port if known (persisted so share agrees), else fail-open to
+         `want` (the service then fails loudly, exactly as the pre-#493 code)."""
     env = os.environ.get("FILEDROP_PORT")
     if env:
         return int(env)
-    persisted = filedrop_persisted_port()
+    want = filedrop_default_port_for_uid()
     rc, out, _err = _run_systemctl(["is-active", "filedrop.service"])
     our_active = rc == 0 and out.strip() == "active"
+    # The port our OWN live service already holds (if any). A port equal to it is
+    # choosable even though a bind-test reads it EADDRINUSE (it is OURS; the
+    # restart rebinds it) — this is what lets us KEEP our deterministic port
+    # instead of migrating off it, WITHOUT ever trusting a foreign-held port.
+    served = _filedrop_current_served_port() if our_active else None
+
+    def _serveable(port):
+        return port == served or _filedrop_port_bindable(bind_ip, port)
+
+    persisted = filedrop_persisted_port()
     if persisted:
-        if our_active:
-            return persisted        # our own live instance serves it
-        import socket as _socket
-        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        try:
-            s.bind((bind_ip, persisted))
-        except OSError:
-            # a ~/.claude migrated from another box carries THAT box's port —
-            # here it can be a DIFFERENT user's live file-drop (montalu@subdev
-            # inherited dev1's 8789 == marek's subdev port; #33, 2026-07-24).
-            # Stale → drop the file and fall through to the probe re-pick.
-            print(f"  persisted file-drop port {persisted} is held by another "
-                  f"instance on this host (not ours) — dropping "
-                  f"{FILEDROP_PORT_FILE} and re-picking")
-            FILEDROP_PORT_FILE.unlink(missing_ok=True)
-        else:
-            return persisted        # still free on THIS host
-        finally:
-            s.close()
-    if our_active:
-        return FILEDROP_DEFAULT_PORT     # our own live instance owns the default
-    import socket as _socket
-    for cand in range(FILEDROP_DEFAULT_PORT, FILEDROP_DEFAULT_PORT + 11):
-        s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-        try:
-            s.bind((bind_ip, cand))
-        except OSError:
-            continue
-        finally:
-            s.close()
-        if cand != FILEDROP_DEFAULT_PORT:
-            try:
-                FILEDROP_PORT_FILE.parent.mkdir(parents=True, exist_ok=True)
-                FILEDROP_PORT_FILE.write_text(f"{cand}\n")
-                print(f"  Port {FILEDROP_DEFAULT_PORT} taken by another file-drop "
-                      f"on this host — using {cand} (persisted to {FILEDROP_PORT_FILE})")
-            except OSError as e:
-                print(f"  could not persist file-drop port choice ({e})",
-                      file=sys.stderr)
-        return cand
-    return FILEDROP_DEFAULT_PORT
+        if _serveable(persisted):
+            return persisted        # a past fallback we can still serve
+        # a ~/.claude migrated from another box carries THAT box's port — here it
+        # can be a DIFFERENT user's live file-drop (montalu@subdev inherited
+        # dev1's 8789 == marek's subdev port; #33, 2026-07-24). Foreign → drop.
+        print(f"  persisted file-drop port {persisted} is held by another "
+              f"instance on this host (not ours) — dropping "
+              f"{FILEDROP_PORT_FILE} and re-picking")
+        FILEDROP_PORT_FILE.unlink(missing_ok=True)
+    if _serveable(want):
+        FILEDROP_PORT_FILE.unlink(missing_ok=True)   # share re-derives want; drop stale
+        return want
+    # `want` held by ANOTHER instance — probe upward for a serveable port and
+    # PERSIST it so the unit + share CLI agree (share never re-derives non-`want`).
+    for cand in range(want + 1, want + 11):
+        if _serveable(cand):
+            _persist_filedrop_port(cand)
+            print(f"  file-drop port {want} taken by another instance on "
+                  f"this host — using {cand} (persisted to {FILEDROP_PORT_FILE})")
+            return cand
+    # Nothing in [want, want+10] is serveable. Keep our current working port if
+    # known (persist so share agrees); else fail-open to `want` (fails loudly).
+    if served is not None:
+        _persist_filedrop_port(served)
+        return served
+    return want
 
 
 def _filedrop_is_live(url, timeout=2):
