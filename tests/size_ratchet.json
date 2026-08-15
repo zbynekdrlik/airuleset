@@ -210,7 +210,7 @@
     "watchdog/goal.py::goal_lane_occupancy_nudge": 357
   },
   "rule_bytes": {
-    ".claude/rules/airuleset-internals.md": 51200,
+    ".claude/rules/airuleset-internals.md": 8192,
     ".claude/rules/internals-burn.md": 51200,
     ".claude/rules/internals-cli.md": 51200,
     ".claude/rules/internals-filedrop.md": 51200,
