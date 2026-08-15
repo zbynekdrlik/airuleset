@@ -21,6 +21,15 @@ from unittest import TestCase, main
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+# #433 cluster L-C: MANAGED_PLUGINS / OPTIONAL_PLUGINS / PLAYWRIGHT_BROWSER_CACHE
+# moved into cli_caveman_plugins.py; the functions that READ them (reconcile_
+# managed_plugins / ensure_playwright_browsers / setup_managed_plugins /
+# _playwright_browsers_installed) moved with them and resolve those names in the
+# LEAF's namespace — so a `patch.object(airuleset, "<X>")` is a silent no-op and
+# every such patch below is repointed to `cli_caveman_plugins` (K #1482 seam).
+# Plain READS of `airuleset.MANAGED_PLUGINS` etc. still work via the facade
+# re-export and stay unchanged.
+import cli_caveman_plugins
 
 
 def _write_plugin_registry(claude_dir: Path, keys):
@@ -386,8 +395,8 @@ class TestPlaywrightBrowsers(TestCase):
     def test_no_op_when_playwright_in_neither_tier(self):
         # #415: the guard now keys on MANAGED_PLUGINS + OPTIONAL_PLUGINS, so
         # a genuine no-op needs playwright absent from BOTH tiers.
-        with m.patch.object(airuleset, "MANAGED_PLUGINS", ("superpowers@claude-plugins-official",)), \
-                m.patch.object(airuleset, "OPTIONAL_PLUGINS", ()), \
+        with m.patch.object(cli_caveman_plugins, "MANAGED_PLUGINS", ("superpowers@claude-plugins-official",)), \
+                m.patch.object(cli_caveman_plugins, "OPTIONAL_PLUGINS", ()), \
                 m.patch("subprocess.run") as run:
             airuleset.ensure_playwright_browsers(self._empty_dir())
         run.assert_not_called()
@@ -395,8 +404,8 @@ class TestPlaywrightBrowsers(TestCase):
     def test_installs_when_playwright_only_in_the_optional_tier(self):
         # #415: playwright's real home is OPTIONAL now — the browser cache
         # must still be provisioned so a project's one-line opt-in works.
-        with m.patch.object(airuleset, "MANAGED_PLUGINS", ("superpowers@claude-plugins-official",)), \
-                m.patch.object(airuleset, "OPTIONAL_PLUGINS", ("playwright@claude-plugins-official",)), \
+        with m.patch.object(cli_caveman_plugins, "MANAGED_PLUGINS", ("superpowers@claude-plugins-official",)), \
+                m.patch.object(cli_caveman_plugins, "OPTIONAL_PLUGINS", ("playwright@claude-plugins-official",)), \
                 m.patch("subprocess.run", return_value=m.Mock(returncode=0)) as run:
             airuleset.ensure_playwright_browsers(self._empty_dir())
         run.assert_called_once()
@@ -653,7 +662,7 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         (playwright_cache / "chromium-1234").mkdir()
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
-                m.patch.object(airuleset, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
+                m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
                 m.patch("subprocess.run") as run:
             ok = airuleset.setup_managed_plugins()
         self.assertTrue(ok)
@@ -699,7 +708,7 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         bad_plugins = ("bare-key-no-at",) + airuleset.MANAGED_PLUGINS
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
-                m.patch.object(airuleset, "MANAGED_PLUGINS", bad_plugins), \
+                m.patch.object(cli_caveman_plugins, "MANAGED_PLUGINS", bad_plugins), \
                 m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch("sys.stderr", out):
             airuleset.setup_managed_plugins()   # must NOT raise
@@ -732,7 +741,7 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         out = StringIO()
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
-                m.patch.object(airuleset, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
+                m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
                 m.patch("subprocess.run") as run, \
                 m.patch("sys.stderr", out):
             ok = airuleset.setup_managed_plugins()
