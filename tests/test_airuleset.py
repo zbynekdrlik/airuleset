@@ -8577,6 +8577,22 @@ class TestApiWatchdog(TestCase):
     _SENT = {"type": "assistant",
              "message": {"role": "assistant", "content": [{"type": "text",
                          "text": "No response requested."}]}}
+    # --- issue #484 recovery fixtures: a subagent that RECOVERED from an api-error
+    # (SendMessage resume → live Bash poll loop) writes these AFTER the append-only
+    # api-error line. A pure tool_use assistant entry has EMPTY text ("" ∈ _SENTINELS)
+    # and a tool_result is a `user` entry — both were silently skipped by the old
+    # walk-back, letting it re-find the historical error forever.
+    _TOOLUSE = {"type": "assistant", "isApiErrorMessage": False,
+                "message": {"role": "assistant",
+                            "content": [{"type": "tool_use", "name": "Bash",
+                                         "input": {"command": "sleep 240; gh run view"}}]}}
+    _TRESULT = {"type": "user",
+                "message": {"role": "user",
+                            "content": [{"type": "tool_result",
+                                         "content": "PENDING in_progress"}]}}
+    _RESUME = {"type": "user",
+               "message": {"role": "user",
+                           "content": [{"type": "text", "text": "pokracuj"}]}}
 
     def _transcript(self, cwd, entries, age_s, now):
         d = self.projects / self.w.encode_project_dir(cwd)
@@ -8614,6 +8630,41 @@ class TestApiWatchdog(TestCase):
     def test_transcript_last_error_skips_sentinel(self):
         # CC appends a synthetic "No response requested." after the error → still detected
         p = self._transcript("/x/p", [self._ERR, self._SENT], 600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    # --- issue #484: a HISTORICAL api-error that has SINCE recovered must NOT be
+    # reported. The append-only jsonl keeps the error line forever, so job 1b's
+    # `_nudge_dying_subagent` would stuck-check ping the supervisor endlessly. The
+    # fix reads the RIGHT signal: recency of the error vs later activity (mirrors the
+    # sibling reader `transcript_text_toolcall_stall`). ------------------------------
+    def test_transcript_last_error_recovered_via_tool_use_is_empty(self):
+        # api-error, then the resumed agent's Bash poll (tool_use, empty text) → healthy
+        p = self._transcript("/x/p", [self._ERR, self._TOOLUSE], 600, 1_000_000)
+        self.assertEqual(self.w.transcript_last_error(p), "")
+
+    def test_transcript_last_error_recovered_via_tool_result_tail_is_empty(self):
+        # newest entry is a tool_result (user) → conversation progressed → not stalled
+        p = self._transcript("/x/p", [self._ERR, self._TOOLUSE, self._TRESULT], 600, 1_000_000)
+        self.assertEqual(self.w.transcript_last_error(p), "")
+
+    def test_transcript_last_error_484_endless_ping_scenario_is_empty(self):
+        # The exact montalu 2026-08-15 shape: api-error(429) → SendMessage resume →
+        # several live Bash poll chunks. Old code returned the 429 text forever.
+        entries = [self._ERR, self._RESUME, self._TOOLUSE, self._TRESULT,
+                   self._TOOLUSE, self._TRESULT]
+        p = self._transcript("/x/p", entries, 600, 1_000_000)
+        self.assertEqual(self.w.transcript_last_error(p), "")
+
+    def test_transcript_last_error_genuine_stall_after_toolcalls_still_detected(self):
+        # The agent DID work (tool_use), THEN api-errored as its last real turn →
+        # this is a genuine current stall and MUST still be reported.
+        p = self._transcript("/x/p", [self._TOOLUSE, self._TRESULT, self._ERR], 600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    def test_transcript_last_error_genuine_stall_with_trailing_system_still_detected(self):
+        # A trailing `system` (hook noise) entry after the error must not mask it.
+        sys_entry = {"type": "system", "content": "hook fired"}
+        p = self._transcript("/x/p", [self._ERR, sys_entry], 600, 1_000_000)
         self.assertIn("529", self.w.transcript_last_error(p))
 
     def test_list_claude_panes_dedups_and_filters(self):
