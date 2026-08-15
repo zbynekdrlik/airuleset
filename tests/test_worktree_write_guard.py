@@ -251,5 +251,73 @@ class RuleAStillWorks(WorktreeGuardBase):
         self.assertAllowed(p)
 
 
+class BashHardeningR1(WorktreeGuardBase):
+    """Round-1 adversarial-review hardening (#496): multi-option git, plain
+    copy-family write utilities with a main DESTINATION, and the path-boundary
+    fix that stops a sibling `<main>-backup` from being read as the main path."""
+
+    # --- newly BLOCKED: multi-option git targeting main ----------------------
+    def test_bash_git_multi_option_gitdir_worktree(self):
+        p = self.bash_payload(
+            f"git --git-dir={self.main}/.git --work-tree={self.main} add -A")
+        self.assertBlocked(p)
+
+    # --- newly BLOCKED: plain copy-family write utilities INTO main -----------
+    def test_bash_cp_into_main(self):
+        self.assertBlocked(self.bash_payload(
+            f"cp ./x.py {self.main}/watchdog/x.py"))
+
+    def test_bash_mv_into_main(self):
+        self.assertBlocked(self.bash_payload(
+            f"mv ./x.py {self.main}/watchdog/x.py"))
+
+    def test_bash_install_into_main(self):
+        self.assertBlocked(self.bash_payload(
+            f"install -m644 ./x.py {self.main}/watchdog/x.py"))
+
+    def test_bash_dd_into_main(self):
+        self.assertBlocked(self.bash_payload(
+            f"dd if=./x.py of={self.main}/watchdog/x.py"))
+
+    def test_bash_cp_main_to_main(self):
+        self.assertBlocked(self.bash_payload(
+            f"cp {self.main}/a.py {self.main}/b.py"))
+
+    # --- STILL ALLOWED: copy FROM main is a read (dest is the worktree) -------
+    def test_bash_cp_from_main_trailing_dot(self):
+        self.assertAllowed(self.bash_payload(f"cp {self.main}/watchdog/x.py ."))
+
+    def test_bash_cp_from_main_into_relative_dir(self):
+        self.assertAllowed(self.bash_payload(f"cp {self.main}/watchdog/x.py ./here/"))
+
+    def test_bash_rsync_from_main(self):
+        self.assertAllowed(self.bash_payload(f"rsync -a {self.main}/watchdog/ ./local/"))
+
+    # --- STILL ALLOWED: a sibling dir sharing the main path as a prefix -------
+    def test_bash_redirect_into_sibling_backup_allowed(self):
+        self.assertAllowed(self.bash_payload(f"echo hi > {self.main}-backup/x.py"))
+
+    def test_bash_git_C_sibling_backup_allowed(self):
+        self.assertAllowed(self.bash_payload(f"git -C {self.main}-backup commit -am x"))
+
+    # --- STILL ALLOWED: read-only git via -C main ----------------------------
+    def test_bash_git_C_main_log_allowed(self):
+        self.assertAllowed(self.bash_payload(f"git -C {self.main} log --oneline"))
+
+    def test_bash_git_C_main_status_allowed(self):
+        self.assertAllowed(self.bash_payload(f"git -C {self.main} status"))
+
+    # --- STILL ALLOWED: own-worktree git via -C, and bypass consistency ------
+    def test_bash_git_C_own_worktree_add_allowed(self):
+        self.assertAllowed(self.bash_payload(f"git -C {self.wt} add -A"))
+
+    def test_bash_marker_inside_quoted_body_still_blocks(self):
+        # the marker only counts OUTSIDE quotes now (like RULE A's foreign-ok):
+        # a marker WRITTEN INTO a main file must NOT disable the guard.
+        p = self.bash_payload(
+            f'echo "airuleset:worktree-ok" > {self.main}/watchdog/x.py')
+        self.assertBlocked(p)
+
+
 if __name__ == "__main__":
     main()

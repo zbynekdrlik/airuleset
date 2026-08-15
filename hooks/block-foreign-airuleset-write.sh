@@ -105,33 +105,51 @@ EOF
           fi
         fi
 
-        # --- Bash : a command whose effective write TARGETS the main checkout
+        # --- Bash : a command whose effective write TARGETS the main checkout.
+        # Best-effort denylist over the harness's own cwd-based worktree guard;
+        # the Write/Edit path above covers the actual #496 incident vector.
+        # Accepted residuals (need a real shell parser to close robustly; the
+        # harness backstops the executed forms): a QUOTED redirect/copy target
+        # (`> "$MAIN/x"`) — kept stripped so a `gh issue comment --body "…/main/…"`
+        # is not false-blocked; an interpreter write (`python -c "open('…','w')"`);
+        # a git READ verb reused as a name (`git -C <main> tag -l`).
         if [ "$TOOL" = "Bash" ] && [ -n "$CMD" ]; then
-          case "$CMD" in
-            *"airuleset:worktree-ok"*)
+          # strip quoted spans (a quoted body/heredoc/comment path is inert
+          # payload — e.g. a `gh issue comment --body "…/main/…"`), then blank
+          # worktree-path refs so only GENUINE main-checkout paths remain.
+          STRIPPED=$(printf '%s' "$CMD" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g') || STRIPPED="$CMD"
+          NOWT=$(printf '%s' "$STRIPPED" | sed "s#${MAIN_ESC}/\\.claude/worktrees#__WT__#g") || NOWT="$STRIPPED"
+          case "$STRIPPED" in
+            *"airuleset:worktree-ok"*)   # bypass marker, checked post-strip like RULE A
               echo "[block-foreign-airuleset-write:ruleB] bypass marker: $CMD" \
                 >> /tmp/airuleset-worktree-escape-block.log 2>/dev/null || true
               ;;
             *)
-              # strip quoted spans (a quoted body/heredoc path is inert payload),
-              # then blank worktree-path refs so only GENUINE main paths remain.
-              STRIPPED=$(printf '%s' "$CMD" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g') || STRIPPED="$CMD"
-              NOWT=$(printf '%s' "$STRIPPED" | sed "s#${MAIN_ESC}/\\.claude/worktrees#__WT__#g") || NOWT="$STRIPPED"
+              # a genuine main-checkout PATH = the literal main path followed by
+              # a NON-filename char (/ space ; & | " …) or end — never a mere
+              # string prefix, so a sibling `<main>-backup` never counts (R1).
               MAIN_REF=0
-              case "$NOWT" in *"$MAINSTR"*) MAIN_REF=1 ;; esac
+              printf '%s' "$NOWT" | grep -qE "${MAIN_ESC}([^A-Za-z0-9._-]|\$)" && MAIN_REF=1 || true
 
-              gitwrite() {
+              gitwrite() {  # a git WRITE, allowing ANY run of option tokens (-C <p>,
+                            # --git-dir=<p>, --work-tree=<p>, bare -x) before the verb
                 printf '%s' "$NOWT" | grep -qE \
-                  '(^|[;&|[:space:]])git([[:space:]]+(-C|--git-dir=?)[[:space:]=]*[^[:space:]]+)?[[:space:]]+(commit|apply|checkout|restore|add|rm|mv|stash|reset|merge|rebase|cherry-pick|revert|clean|am|tag|push|pull)([[:space:]]|$)'
+                  '(^|[;&|[:space:]])git([[:space:]]+(-C[[:space:]]+[^[:space:]]+|--git-dir[=[:space:]][^[:space:]]+|--work-tree[=[:space:]][^[:space:]]+|-[A-Za-z][^[:space:]]*|--[A-Za-z][A-Za-z-]*))*[[:space:]]+(commit|apply|checkout|restore|add|rm|mv|stash|reset|merge|rebase|cherry-pick|revert|clean|am|tag|push|pull)([[:space:]]|$)'
               }
-              redirect_to_main() {
-                printf '%s' "$NOWT" | grep -qE '(>>?|tee([[:space:]]+-a)?)[[:space:]]*"?'"$MAIN_ESC"
+              redirect_to_main() {  # >, >>, tee whose TARGET is a main path
+                printf '%s' "$NOWT" | grep -qE '(>>?|tee([[:space:]]+-a)?)[[:space:]]*"?'"${MAIN_ESC}"'([^A-Za-z0-9._-]|$)'
               }
-              sed_i_main() {
+              copy_to_main() {  # cp/mv/install/rsync whose DEST (last arg of the
+                                # segment) is a main path, or dd of=<main>
+                printf '%s' "$NOWT" | grep -qE '(^|[;&|])[[:space:]]*(cp|mv|install|rsync)[[:space:]].*[[:space:]]"?'"${MAIN_ESC}"'/[^[:space:];&|]*[[:space:]]*"?[[:space:]]*($|[;&|])' \
+                  || printf '%s' "$NOWT" | grep -qE '(^|[;&|[:space:]])dd[[:space:]].*[[:space:]]of=[[:space:]]*"?'"${MAIN_ESC}"'/'
+              }
+              sed_i_main() {  # sed -i editing a main-path arg in place
                 [ "$MAIN_REF" = 1 ] && printf '%s' "$NOWT" | grep -qE 'sed[[:space:]]+-i'
               }
 
-              if { [ "$MAIN_REF" = 1 ] && gitwrite; } || redirect_to_main || sed_i_main; then
+              if { [ "$MAIN_REF" = 1 ] && gitwrite; } \
+                   || redirect_to_main || copy_to_main || sed_i_main; then
                 deny_write "Bash command mutating the main checkout: $CMD"
               fi
               ;;
