@@ -714,11 +714,17 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         return Path(d.name)
 
     def _call(self, captured, backlog_fetch, now, tmtime, rec=None, state=None,
-             authority="full", handled=None):
+             authority="full", handled=None, enters_swallowed=0):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
-        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], captured)
+        # #490 — the fake now models the submit end to end: a delivered nudge
+        # appends the real `user` turn `send_verified` verifies against; a
+        # swallowed one (`enters_swallowed` > 0) writes nothing and keeps the
+        # box text, so the transcript-proof restore path can be driven.
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], captured,
+                                   model_type=True, transcript_path=tpath,
+                                   enters_swallowed=enters_swallowed)
         with m.patch("airuleset.resolve_authority", return_value=authority):
             logs, owns = goal.goal_lane_occupancy_nudge(
                 now, tmux, rec if rec is not None else {}, self.SID, self.CWD,
@@ -736,6 +742,28 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertIn("C-s" not in tmux.keys() and True, [True])  # no stash needed
         self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+
+    def test_swallowed_submit_is_not_booked_as_delivered(self):
+        # #490 RED — a swallowed Enter (the box KEEPS the typed text and NO
+        # `user` turn appears in the transcript) must NOT be recorded as a
+        # delivered nudge, and the foreign text must be restored off the
+        # user's input box. The bare-box branch used a raw `send_continue`
+        # (type + Enter, no post-send read), so the live lane-fill nudge
+        # booked the nudge and left its own text hanging in the prompt until
+        # the user found it (2026-08-15 regression).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {}
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      rec=rec, enters_swallowed=99)
+        # never logged as a DELIVERED nudge (the transcript never confirmed it)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        # the delivery is journalled as unverified, retryable, not silent
+        self.assertTrue(any("submit-unverified" in ln for ln in logs), logs)
+        # the nudge budget is NOT consumed (a refused attempt is not a nudge)
+        self.assertNotIn("ln", rec)
+        # the foreign text is restored — never left in the user's input box
+        self.assertEqual(tmux.box, "", tmux.sent)
 
     def test_goal_disarmed_between_sweep_and_send_is_never_typed(self):
         # #403-review m2: the FRESH re-verify right before the send
@@ -1175,7 +1203,8 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         t = now - marker_age_s
         os.utime(marker, (t, t))
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_ARMED_CAP)
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=tpath)
         with m.patch("airuleset.resolve_authority", return_value="full"):
             logs, owns = goal.goal_lane_occupancy_nudge(
                 now, tmux, {}, sid, self.CWD, "111", GOAL_ARMED_CAP,

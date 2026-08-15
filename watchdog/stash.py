@@ -925,9 +925,15 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
 # The two payload shapes THIS codebase's own delivery jobs are known to
 # type (#372's two forensically-confirmed incidents): a `/goal <condition>`
 # re-arm (jobs 9/20) and a bare `/compact` request (job 14, `COMPACT_TEXT`).
+# `"lane-check: "` (#490) is job 20's lane-fill nudge delivered via
+# `send_verified` — a plain-text nudge, not a slash command, but equally an
+# unambiguous OWN payload (a human never types a message starting with it), so
+# a partial/stuck lane-check residue is recognized and reclaimed by the janitor
+# recover that runs BEFORE the lane sweep re-processes the pane (goal_dark_watch
+# → _janitor_recover), never left to be mis-read as a draft and re-injected.
 # Used ONLY to recognize a box's content as PROVABLY our own — never to
 # guess about a genuine foreign draft that merely starts with a slash.
-_JANITOR_OWN_PREFIXES = ("/goal ", "/compact")
+_JANITOR_OWN_PREFIXES = ("/goal ", "/compact", "lane-check: ")
 
 JANITOR_CLEAR_MAX_ITER = 25       # bounds the observed-state clear loop
 JANITOR_CLEAR_BATCH_MAX = 200     # per-iteration backspace batch, sized to
@@ -953,7 +959,9 @@ JANITOR_WATCH_MAX_AGE_S = 6 * 3600
 
 def _looks_like_own_payload(text):
     """#372 — True when `text` starts with one of THIS codebase's own
-    recognized slash-command payloads (`_JANITOR_OWN_PREFIXES`)."""
+    recognized delivery payloads (`_JANITOR_OWN_PREFIXES`): the `/goal `/
+    `/compact` slash commands, or (#490) the `lane-check: ` plain-text
+    lane-fill nudge — each an unambiguous OWN payload no human would type."""
     return bool(text) and text.startswith(_JANITOR_OWN_PREFIXES)
 
 

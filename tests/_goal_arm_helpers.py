@@ -99,7 +99,7 @@ class DeliverGoalFakeTmux:
     `_typed_landed` see the SAME thing a real pane would."""
 
     def __init__(self, panes, captured, in_mode=False, cap_seq=(),
-                model_type=False):
+                model_type=False, enters_swallowed=0, transcript_path=None):
         self.panes = panes
         self.captured = captured
         self.in_mode = in_mode
@@ -107,6 +107,14 @@ class DeliverGoalFakeTmux:
         self._cap_calls = 0
         self.sent = []
         self.model_type = model_type
+        # #490 — model the two facts `send_verified` verifies against: an
+        # ACCEPTED submit appends a real `user` turn to `transcript_path` and
+        # clears the box; a SWALLOWED submit (`enters_swallowed` > 0) keeps the
+        # box text and writes NOTHING (the live lane-nudge regression). A
+        # `BSpace` run trims the box so the restore/undo path reaches a
+        # genuinely-bare box.
+        self.enters_swallowed = enters_swallowed
+        self.transcript_path = transcript_path
         self.box = ""
         self._bare_line = None
         if model_type:
@@ -114,6 +122,18 @@ class DeliverGoalFakeTmux:
                 if ln.strip() == "❯":
                     self._bare_line = ln
                     break
+
+    def _append_user_turn(self, text):
+        """Model CC accepting a submit: append the real `user` turn it writes
+        the instant it ACCEPTS a submit (before any response exists) — the
+        structured signal `send_verified` polls for (`transcript_last_error`'s
+        own documented invariant)."""
+        from datetime import datetime, timezone
+        iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        entry = {"type": "user", "message": {"content": text},
+                 "timestamp": iso}
+        with open(self.transcript_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
 
     def _render(self):
         if not self.model_type or self._bare_line is None:
@@ -142,12 +162,22 @@ class DeliverGoalFakeTmux:
         if "send-keys" in j:
             self.sent.append(argv)
             if self.model_type:
+                keys = argv[4:]  # after "-t", pid
                 if "-l" in argv:
-                    text = argv[-1]
-                    self.box += text
+                    self.box += argv[-1]
                 elif argv[-1] == "Enter":
-                    self.box = ""
-                # Escape: no-op for the box in this model.
+                    if self.enters_swallowed > 0:
+                        # a swallowed submit: the box KEEPS its text and the
+                        # transcript gains NOTHING (the #490 live incident).
+                        self.enters_swallowed -= 1
+                    else:
+                        if self.box and self.transcript_path is not None:
+                            self._append_user_turn(self.box)
+                        self.box = ""
+                elif keys and all(k == "BSpace" for k in keys):
+                    n = len(keys)
+                    self.box = self.box[:-n] if n < len(self.box) else ""
+                # Escape / C-s: no-op for the box in this model.
             return ""
         if "capture-pane" in j:
             if not self.cap_seq:

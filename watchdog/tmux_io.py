@@ -42,9 +42,25 @@ from-import, never a below-position ``from watchdog import <function>`` shape.
 
 import os
 import re
+import time
 
 import watchdog
 from watchdog import NUDGE_TEXT, WORKING_NUDGE_TEXT
+
+# #490 — transcript-proof submit verification (`send_verified`, below). CC
+# writes the accepted `user` turn near-instantly, so most confirms land on the
+# first poll; the window only ever runs to the end for a genuinely swallowed
+# submit. Worst case a lost keystroke runs BOTH windows (~2 × POLLS × S ≈ 20s
+# of real sleep) inside ONE pane's iteration; `goal_lane_sweep`'s wall-clock
+# deadline is checked only BETWEEN panes, so several wedged panes in one sweep
+# trend toward the #172 timeout class (acceptable: a lost keystroke is rare and
+# the happy path returns on the first poll).
+SEND_VERIFY_POLLS = 10
+SEND_VERIFY_S = 1
+# Pre-Enter type-settle (borrowed from goal._await_typed's GOAL_TYPE_SETTLE_*):
+# CC needs a moment to INGEST a multi-KB chunked paste before it renders it.
+SEND_TYPE_SETTLE_POLLS = 8
+SEND_TYPE_SETTLE_S = 1
 
 
 def _default_run(argv, timeout=8):
@@ -474,3 +490,157 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
                     dry_run=dry_run)
     else:
         logs.append("subagent-%s-%s %s [%s]" % (dedup_prefix, action, project, wid))
+
+
+def _await_submit_confirmed(tpath, baseline, text, sleep_fn):
+    """Poll (bounded, ~SEND_VERIFY_POLLS × SEND_VERIFY_S) for the accepted
+    `user` turn — returns the instant `_submit_confirmed` sees it, or False
+    after the window. A structured-settle poll, never a blind timeout."""
+    sleep_fn = sleep_fn or time.sleep
+    for i in range(SEND_VERIFY_POLLS):
+        if watchdog._submit_confirmed(tpath, baseline, text):
+            return True
+        if i < SEND_VERIFY_POLLS - 1:
+            sleep_fn(SEND_VERIFY_S)
+    return False
+
+
+def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
+    """Poll (bounded) until the input box shows evidence of `text`
+    (`want=True`) or has stopped showing it (`want=False`) — the pre-Enter
+    TYPE verify. Mirrors `goal._await_typed`, reproduced here to keep tmux_io's
+    `import watchdog`-only module boundary (#433, the same idiom
+    `compact._compact_still_in_box` repeats). Returns the final verdict; a type
+    that never renders is refused (`not want`)."""
+    sleep_fn = sleep_fn or time.sleep
+    for i in range(SEND_TYPE_SETTLE_POLLS):
+        landed = watchdog._typed_landed(text, watchdog._input_line_text(
+            watchdog.capture_pane(pane_id, run, lines=40)))
+        if landed is want:
+            return landed
+        if i < SEND_TYPE_SETTLE_POLLS - 1:
+            sleep_fn(SEND_TYPE_SETTLE_S)
+    return not want
+
+
+def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None):
+    """Type `text` + Enter into a BARE input box and VERIFY the submit landed
+    via the TRANSCRIPT (the #486 delivery bullet's structured proof), not the
+    pane render: after the send, the session jsonl at `tpath` must gain a new
+    `user` turn carrying `text` within a bounded window. This is the missing
+    transcript-proof member of the delivery family (`deliver_with_stash` /
+    `_send_goal_verified` / the compact submit-verify) — the piece a raw
+    `send_continue` (type + Enter, no post-send read) never had, so a swallowed
+    Enter (agent-strip selector #36, or a turn started under the send) used to
+    be booked "sent" with the text left hanging in the user's input box (#490).
+
+    The type half mirrors `_send_goal_verified`: a fresh bare re-check right
+    before typing, a strip-selector Escape (#36), `_type_literal` CHUNK-typing
+    (never a single multi-KB `-l` burst that CC would collapse into a paste,
+    #322 — the lane nudge texts run ~550–720 chars, well past the 200-char
+    threshold), and a pre-Enter TYPE verify that never submits a collapsed or
+    unrendered paste. Only the SUBMIT verify differs: the transcript, not the
+    pane render.
+
+    Returns True ONLY on a transcript-CONFIRMED submit. On failure:
+      - our text still PROVABLY stuck in the box -> ONE corrective Escape+Enter
+        (#36; never a second Escape #35, never a bare second Enter), re-verify;
+        if still stuck, `_undo_and_release_slot` backspaces exactly our own
+        text off the box (verified bare before we typed, so every char is ours);
+      - box bare but unconfirmed -> return False with NO corrective Escape (a
+        bare box after a submit may mean a turn genuinely STARTED — an Escape
+        there would interrupt it, the #233 harm) and nothing undone;
+      - box holds UNRECOGNIZED content (a truncated type, a collapsed hint) ->
+        withhold keystrokes (a blind backspace could eat a real draft, #193),
+        log the residue HONESTLY (never claim "bare" unread, #134/#360), and
+        let the caller's #372 janitor mark backstop it.
+    False means "not delivered, retryable next sweep" — the caller leaves its
+    own budget unconsumed.
+
+    `tpath` is REQUIRED (the transcript is the whole proof); a falsy or
+    unreadable `tpath` refuses to send rather than typing blind or reading from
+    byte 0. Bare-box ONLY: a pane holding a DRAFT is delivered via
+    `deliver_with_stash`; a draft that RACED into the box since the caller's own
+    check is rescued and the send aborted."""
+    run = run or watchdog._default_run
+    sleep_fn = sleep_fn or time.sleep
+
+    def _log(reason):
+        if isinstance(logs, list):
+            logs.append(reason)
+
+    if not tpath:
+        _log("send-verified abort: no transcript path")
+        return False
+    # A FRESH capture right before typing (the sibling helpers' own race
+    # guard): the caller proved the box bare a moment ago, but round-trips pass
+    # before the real keystroke lands.
+    cap = watchdog.capture_pane(pane_id, run, lines=40)
+    if watchdog._input_line_text(cap) != "":
+        watchdog._draft_rescue_persist(pane_id, cap, logs=logs)
+        _log("send-verified abort: box not bare pre-send")
+        return False
+    if watchdog._strip_selected(cap):
+        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+    # Re-verify bare AFTER the strip-Escape and immediately before the type
+    # keystroke — a draft racing into that gap would otherwise be typed over
+    # (the same second bare-check `_send_goal_verified` does, #176-F3).
+    fresh = watchdog.capture_pane(pane_id, run, lines=40)
+    if watchdog._input_line_text(fresh) != "":
+        watchdog._draft_rescue_persist(pane_id, fresh, logs=logs)
+        _log("send-verified abort: box raced busy pre-send")
+        return False
+    try:
+        baseline = os.path.getsize(tpath)
+    except OSError:
+        # An unreadable transcript cannot verify a submit; refuse rather than
+        # read from byte 0 (a prior identical nudge would false-confirm).
+        _log("send-verified abort: transcript unreadable pre-send")
+        return False
+    watchdog._type_literal(pane_id, run, text, sleep_fn)
+    if not _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
+        # Never rendered / collapsed — NEVER submit a garbage prompt into the
+        # user's session. Nothing typed reliably, so nothing to undo (the same
+        # collapsed-paste abort `_send_goal_verified` takes).
+        if watchdog._pane_shows_collapsed_paste(watchdog._input_line_text(
+                watchdog.capture_pane(pane_id, run, lines=40))):
+            _log("send-verified abort: collapsed-paste, not submitted")
+        else:
+            _log("send-verified abort: type not landed, not submitted")
+        return False
+    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    if _await_submit_confirmed(tpath, baseline, text, sleep_fn):
+        return True
+    # Unconfirmed. Only act further when our text is PROVABLY still in the box.
+    if watchdog._typed_landed(text, watchdog._input_line_text(
+            watchdog.capture_pane(pane_id, run, lines=40))):
+        # A swallowed Enter (#36 class) — ONE corrective Escape+Enter.
+        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+        run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+        if _await_submit_confirmed(tpath, baseline, text, sleep_fn):
+            return True
+        if watchdog._typed_landed(text, watchdog._input_line_text(
+                watchdog.capture_pane(pane_id, run, lines=40))):
+            # Genuinely stuck — back our own text off the bare-verified box so
+            # the next sweep retries from a clean prompt. parked=False: bare
+            # box, no stash to pop.
+            watchdog._undo_and_release_slot(pane_id, run, text, False, _log,
+                                            "send-verified swallowed",
+                                            sleep_fn=sleep_fn)
+            return False
+    # Unconfirmed and NOT provably stuck. Read the box ONCE and log honestly —
+    # never claim a state we did not read (#134/#360). Withhold keystrokes on
+    # every branch (Escape could interrupt a turn that started #233; a blind
+    # backspace could eat a real draft #193). A caller that marked janitor
+    # provenance AND whose payload starts with a recognized OWN prefix
+    # (`_JANITOR_OWN_PREFIXES`, e.g. the lane-check nudge) has the #372 janitor
+    # reclaim any residue before the next sweep re-reads the pane.
+    itext = watchdog._input_line_text(watchdog.capture_pane(pane_id, run, lines=40))
+    if itext is None:
+        _log("send-verified unconfirmed: box unreadable, submit not proven")
+    elif itext == "":
+        _log("send-verified unconfirmed: box bare, submit not proven")
+    else:
+        _log("send-verified unconfirmed: box holds unrecognized content, "
+             "left in place (retryable)")
+    return False
