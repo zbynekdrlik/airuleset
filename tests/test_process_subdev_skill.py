@@ -255,6 +255,28 @@ class TestQueueUnionsBothHandoffLabels(TestCase):
         j = t.index("### 2. Get the work in front of you")
         return t[i:j]
 
+    def _step1_query_line(self):
+        # the ACTUAL `gh issue list ... --search "..."` statement in step 1 --
+        # identified by the stream label it scopes on, NOT by the labels under
+        # test (else the finder itself would beg the question).
+        for line in self._step1_window().splitlines():
+            s = line.strip()
+            if s.startswith("gh issue list") and "--search" in s and "label:stream" in s:
+                return s
+        return ""
+
+    def test_step1_QUERY_LINE_itself_unions_both_labels(self):
+        # #498 review (MAJOR, teeth): the query STATEMENT must carry BOTH labels
+        # -- not merely the surrounding prose. A revert of only the query to
+        # rfr-only (leaving the "why both labels" paragraph intact) must still
+        # FAIL here. (internals-skills-modules.md: assert the STATEMENT, never a
+        # window that also contains the prose that names the token.)
+        q = self._step1_query_line()
+        self.assertTrue(q, "no step-1 `gh issue list --search` query line found")
+        self.assertIn("ready-for-review", q)
+        self.assertIn("needs-gatekeeper", q)
+        self.assertIn("stream:", q)
+
     def test_step1_query_unions_both_handoff_labels_stream_scoped(self):
         w = self._step1_window()
         self.assertIn("ready-for-review", w)
@@ -316,10 +338,17 @@ class TestCrossStreamProtocolRecordsCarveOutHandoff(TestCase):
             "cross-stream protocol must record the carve-out hand-off path")
 
     def test_action_request_distinguished_by_stream_label(self):
+        # #498 review (rev 2, MINOR): assert the DISTINGUISHER, not just that
+        # `stream:` appears somewhere near (which is near-tautological). The
+        # carve-out-vs-action-request rule turns on the action-request carrying
+        # `handed-by:<user>` and NEVER `stream:<user>`. All four tokens are
+        # unique to rule 8 in this file, so a whole-file assertion locks the
+        # distinction without a drift-prone fixed-width window.
         flat = " ".join(read(CROSS_STREAM).split())
-        i = flat.lower().index("carve-out")
-        window = flat[i:i + 700]
-        self.assertIn("stream:", window)
+        self.assertIn("carve-out", flat.lower())
+        self.assertIn("stream:", flat)
+        self.assertIn("handed-by", flat)
+        self.assertIn("action-request", flat.lower().replace(" ", "-"))
 
 
 if __name__ == "__main__":

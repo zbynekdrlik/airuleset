@@ -115,8 +115,11 @@ re-review and no pickup).
    NEVER `stream:<user>` (`handed-by:<user>` instead, #191 C1), so the `stream:<stream>` scope is
    exactly what keeps the two apart: a carve-out hand-off enters review, a bare action-request does
    NOT. **Queue membership is carried by LABELS — the `GATEKEEPER-ACTION:` / `READY-FOR-REVIEW:`
-   comment TEXT is never a queue signal, labels carry queue state** (a `in:comments` query
-   over-matches and would over-count the queue — the same reason `cli_quals.py`'s obligation set
-   uses the LABEL, not the comment). This is the CANONICAL definition; `/process-subdev` step 1 and
-   `/autopilot-master` LANE 1 both conform to it.
+   comment TEXT is never a QUEUE-membership signal, labels carry queue state** (a repo-wide
+   `in:comments` phrase query over-matches and would over-count the queue — the same reason
+   `cli_quals.py`'s obligation SET uses the LABEL, not the comment). The one narrow exception is
+   NOT a queue definition: the statusline `gk`-bucket's BOUNDED per-ticket `READY-FOR-REVIEW:`-
+   comment recovery (`_is_readiness_comment`, #313 pt 2) is a DISPLAY-count fallback for a
+   broken-label residual, never the review queue itself. This is the CANONICAL queue definition;
+   `/process-subdev` step 1 and `/autopilot-master` LANE 1 both conform to it.
 

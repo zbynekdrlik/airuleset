@@ -250,6 +250,37 @@ class TestReviewLaneUnionsBothHandoffLabels(TestCase):
         self.assertIn("stream:", flat)
         self.assertIn("action-request", flat.lower().replace(" ", "-"))
 
+    def _board_handoff_query_line(self):
+        t = read(SKILL)
+        i = t.index("# Per stream: hand-offs waiting")
+        j = t.index("# Release debt", i)
+        for line in t[i:j].splitlines():
+            s = line.strip()
+            if s.startswith("gh issue list") and "prio:bounce" not in s:
+                return s
+        return ""
+
+    def test_board_QUERY_LINE_itself_unions_both_labels(self):
+        # #498 review (MAJOR, teeth): the board hand-off query STATEMENT (not the
+        # surrounding comment) must carry BOTH labels; a revert of only the query
+        # to rfr-only must still FAIL here.
+        q = self._board_handoff_query_line()
+        self.assertTrue(q, "no board `gh issue list` hand-off query line found")
+        self.assertIn("ready-for-review", q)
+        self.assertIn("needs-gatekeeper", q)
+
+    def test_board_counts_only_stream_labeled_handoffs_as_review(self):
+        # #498 review (MAJOR): the board query is not stream-scoped (gh --search
+        # cannot express "any stream:*"), so a bare needs-gatekeeper
+        # action-request must be excluded from the REVIEW total when reading rows
+        # -- keep this consistent with LANE 1's own stream:<user> requirement.
+        t = read(SKILL)
+        i = t.index("# Per stream: hand-offs waiting")
+        j = t.index("# Release debt", i)
+        window = " ".join(t[i:j].split())
+        self.assertIn("stream:", window)
+        self.assertIn("action-request", window.lower().replace(" ", "-"))
+
     def test_board_handoff_query_includes_needs_gatekeeper(self):
         t = read(SKILL)
         i = t.index("# Per stream: hand-offs waiting")

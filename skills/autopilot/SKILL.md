@@ -283,7 +283,9 @@ was cut back; `tests/test_goal_backlog_proof.py` now locks the cap):
   means the way #181 documents happening before this fix. (The pre-#367 divergence this bullet
   used to describe — the footer showing a narrower `core` count plus a separate `· streamy M`
   badge — is gone; both badges were dropped along with the split.)
-- A hand-off in that obligation set is detected by the **`ready-for-review` LABEL**, the same
+- A hand-off in that obligation set is detected by a hand-off **LABEL** — **`ready-for-review`**,
+  or **`needs-gatekeeper`** for a carve-out stream whose hand-off gate strips `ready-for-review`
+  structurally (airuleset #498; `MAINTAINER_ACTION_LABELS` already unions both) — the same
   signal the footer's `gk` bucket uses, not by the `READY-FOR-REVIEW:` comment that is its primary
   signal — the only single-query comment form is `"READY-FOR-REVIEW:" in:comments`, and GitHub
   tokenizes quoted phrases (the 2026-07-24 `in:title` false match), so it over-matches, and
