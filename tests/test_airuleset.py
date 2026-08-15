@@ -8681,6 +8681,45 @@ class TestApiWatchdog(TestCase):
             self.assertIn("529", self.w.transcript_last_error(p),
                           "genuine stall masked by trailing %s entry" % bk)
 
+    # --- issue #484 round-A 🔴: a PLAIN-TEXT `user` entry is NOT proof of recovery.
+    # Job 1's OWN injected `continue` nudge lands in the transcript as a bare-text
+    # `user` entry the instant it is typed, whether or not it woke the session; and a
+    # human/resume prompt the session has not yet acted on is equally not-yet-recovery.
+    # Reading any `user` tail as "recovered" returned '' here → job 1 skipped
+    # `stalled.add(key)`, the sweep cleanup wiped the episode, and the #175 back-off
+    # reset to nudge#1 every time CC's retry re-wrote the error line — the SAME endless
+    # ping, relocated from the subagent path (job 1b) to the main-session path (job 1).
+    # Only a `user` entry carrying a `tool_result` (the harness actually RAN a tool)
+    # counts as recovery. ---------------------------------------------------------------
+    def test_transcript_last_error_plaintext_user_nudge_does_not_mask_stall(self):
+        # api-error, then a bare-text user entry (job 1's `continue` nudge / an
+        # un-acted-on resume prompt) — no tool activity → STILL stalled, must report.
+        p = self._transcript("/x/p", [self._ERR, self._RESUME], 600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    def test_transcript_last_error_plaintext_user_then_bookkeeping_still_stalled(self):
+        # the nudge (plain-text user) buried under trailing bookkeeping, still no
+        # genuine tool_result/tool_use activity anywhere after the error → still stalled.
+        p = self._transcript("/x/p", [self._ERR, self._RESUME, {"type": "queue-operation"}],
+                             600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    def test_transcript_last_error_recovered_via_tool_result_after_plaintext_user_is_empty(self):
+        # nudge (plain-text user) that DID wake the session → the harness then ran a
+        # tool and fed a tool_result back → genuine progress → not stalled.
+        p = self._transcript("/x/p", [self._ERR, self._RESUME, self._TRESULT], 600, 1_000_000)
+        self.assertEqual(self.w.transcript_last_error(p), "")
+
+    def test_transcript_last_error_genuine_stall_survives_long_bookkeeping_tail(self):
+        # round-B 🔵: the bookkeeping-skip robustness is only bounded by the tail
+        # window. CC emits many hook/bookkeeping writes per turn, so a genuine api-error
+        # stall can sit buried under a burst of >60 of them. The reader scans the SAME
+        # 200-line window as the sibling transcript_text_toolcall_stall — the default
+        # 60-line window pushed the error out of view and silently under-reported it.
+        tail = [{"type": "file-history-snapshot"} for _ in range(100)]
+        p = self._transcript("/x/p", [self._ERR] + tail, 600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
     def test_list_claude_panes_dedups_and_filters(self):
         fake = _FakeTmux(panes="%5\tclaude\t/devel/a\n%5\tclaude\t/devel/a\n"
                                "%6\tbash\t/devel/b\n%7\tclaude\t/devel/c\n")
