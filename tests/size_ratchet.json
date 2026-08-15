@@ -187,7 +187,7 @@
     "tests/test_vault_read_guard.py": 1268,
     "tests/test_vault_templates.py": 322,
     "tests/test_vystup_readback_skill_step4.py": 122,
-    "tests/test_watchdog.py": 3802,
+    "tests/test_watchdog.py": 3830,
     "tests/test_watchdog_card_flags_split.py": 299,
     "tests/test_watchdog_decide_split.py": 296,
     "tests/test_watchdog_discord_api_split.py": 248,
