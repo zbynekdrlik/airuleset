@@ -206,12 +206,12 @@
   "watchdog/pane_classify.py": 533,
   "watchdog/pane_text.py": 178,
   "watchdog/repo_health.py": 758,
-  "watchdog/stash.py": 952,
+  "watchdog/stash.py": 960,
   "watchdog/sweep_jobs.py": 263,
-  "watchdog/tmux_io.py": 641,
+  "watchdog/tmux_io.py": 646,
   "watchdog/transcripts.py": 592,
   "watchdog/usage.py": 380,
-  "tests/test_send_verified.py": 205
+  "tests/test_send_verified.py": 224
  },
  "functions": {
   "airuleset.py::_notify_run_card": 288,

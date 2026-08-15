@@ -175,6 +175,25 @@ class SendVerified(_Base):
         self.assertNotIn("BSpace", _tails(tmux.sent))
         self.assertTrue(any("box bare" in ln for ln in logs), logs)
 
+    def test_second_bare_recheck_aborts_a_draft_that_raced_in(self):
+        # F2 lock — a draft racing into the box AFTER the strip-Escape but
+        # BEFORE the type must be caught by the SECOND bare re-check and
+        # rescued, never typed over. cap_seq: bare pre-check, then a draft on
+        # the fresh re-check. (Removing the second re-check makes this type.)
+        with TemporaryDirectory() as rescue:
+            with m.patch.dict("os.environ",
+                              {"AIRULESET_DRAFT_RESCUE_DIR": rescue}):
+                p = self._tpath()
+                tmux = DeliverGoalFakeTmux([(PID, "claude", "/x", "111")],
+                                           GOAL_IDLE_CAP,
+                                           cap_seq=(GOAL_IDLE_CAP, GOAL_DRAFT_CAP))
+                logs = []
+                ok = wd.send_verified(PID, TEXT, tmux, p,
+                                      sleep_fn=lambda s: None, logs=logs)
+                self.assertFalse(ok)
+                self.assertNotIn("-l", [x for a in tmux.sent for x in a])
+                self.assertTrue(any("raced busy" in ln for ln in logs), logs)
+
     def test_raced_draft_is_rescued_and_nothing_typed(self):
         # A draft raced into the box since the caller's own bare check —
         # rescue it and refuse, never type over it.

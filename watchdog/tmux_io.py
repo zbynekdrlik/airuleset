@@ -537,7 +537,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None)
     The type half mirrors `_send_goal_verified`: a fresh bare re-check right
     before typing, a strip-selector Escape (#36), `_type_literal` CHUNK-typing
     (never a single multi-KB `-l` burst that CC would collapse into a paste,
-    #322 — the lane nudge texts run 560–700 chars, well past the 200-char
+    #322 — the lane nudge texts run ~550–720 chars, well past the 200-char
     threshold), and a pre-Enter TYPE verify that never submits a collapsed or
     unrendered paste. Only the SUBMIT verify differs: the transcript, not the
     pane render.
@@ -629,13 +629,18 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None)
                                             sleep_fn=sleep_fn)
             return False
     # Unconfirmed and NOT provably stuck. Read the box ONCE and log honestly —
-    # never claim "bare" unread. Withhold keystrokes either way (Escape could
-    # interrupt a turn that started #233; a blind backspace could eat a real
-    # draft #193); the caller's janitor mark backstops any residue.
+    # never claim a state we did not read (#134/#360). Withhold keystrokes on
+    # every branch (Escape could interrupt a turn that started #233; a blind
+    # backspace could eat a real draft #193). A caller that marked janitor
+    # provenance AND whose payload starts with a recognized OWN prefix
+    # (`_JANITOR_OWN_PREFIXES`, e.g. the lane-check nudge) has the #372 janitor
+    # reclaim any residue before the next sweep re-reads the pane.
     itext = watchdog._input_line_text(watchdog.capture_pane(pane_id, run, lines=40))
-    if itext == "":
+    if itext is None:
+        _log("send-verified unconfirmed: box unreadable, submit not proven")
+    elif itext == "":
         _log("send-verified unconfirmed: box bare, submit not proven")
     else:
         _log("send-verified unconfirmed: box holds unrecognized content, "
-             "left in place (janitor backstop)")
+             "left in place (retryable)")
     return False
