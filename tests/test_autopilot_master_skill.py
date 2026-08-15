@@ -223,5 +223,49 @@ class TestPreflightBoardExcludesOpsChannel(TestCase):
         self.assertIn("-label:ops-channel", window)
 
 
+class TestReviewLaneUnionsBothHandoffLabels(TestCase):
+    """#498 -- LANE 1 REVIEW (the master loop's actual gk execution path) must
+    key on `ready-for-review UNION needs-gatekeeper`, never `ready-for-review`
+    alone. A carve-out stream's hand-off (odoo-erp #4139) exists ONLY under
+    `needs-gatekeeper` + `stream:<user>`, so an rfr-only LANE 1 gate would never
+    trigger a /process-subdev run for it -> miva rots (live incident #3244).
+    A bare `needs-gatekeeper` stream->supervisor ACTION request (no
+    `stream:<user>`) is NOT a review hand-off and must stay out of LANE 1."""
+
+    def _lane1_window(self):
+        t = read(SKILL)
+        i = t.index("- **LANE 1 REVIEW**")
+        j = t.index("- **LANE 2 RELEASE**", i)
+        return t[i:j]
+
+    def test_lane1_review_bullet_unions_both_handoff_labels(self):
+        w = self._lane1_window()
+        self.assertIn("ready-for-review", w)
+        self.assertIn("needs-gatekeeper", w)
+
+    def test_lane1_distinguishes_carve_out_handoff_from_action_request(self):
+        # the needs-gatekeeper arm of LANE 1 is scoped to a real stream
+        # hand-off (stream:<user>) -- a bare action-request stays out.
+        flat = " ".join(self._lane1_window().split())
+        self.assertIn("stream:", flat)
+        self.assertIn("action-request", flat.lower().replace(" ", "-"))
+
+    def test_board_handoff_query_includes_needs_gatekeeper(self):
+        t = read(SKILL)
+        i = t.index("# Per stream: hand-offs waiting")
+        j = t.index("# Release debt", i)
+        window = t[i:j]
+        self.assertIn("needs-gatekeeper", window)
+
+    def test_goal_lane1_summary_mentions_needs_gatekeeper(self):
+        for line in read(SKILL).splitlines():
+            if line.startswith("/goal MASTER LOOP"):
+                i = line.index("LANE 1 REVIEW")
+                j = line.index("LANE 2 RELEASE", i)
+                self.assertIn("needs-gatekeeper", line[i:j])
+                return
+        self.fail("no /goal MASTER LOOP line found in autopilot-master SKILL.md")
+
+
 if __name__ == "__main__":
     main()
