@@ -948,6 +948,30 @@ class TestCompactSubmitVerify(unittest.TestCase):
             tmux.keys(),
             ["/compact", "Enter", "Escape", "Enter", "BSpace"])
 
+    def test_a_draft_that_raced_in_pre_send_aborts_without_typing(self):
+        # Round-1 review item 3 (keystroke safety): a draft appearing AFTER
+        # deliver_compact's own fresh recapture but BEFORE the type keystroke
+        # must be rescued and NEVER typed over — otherwise a later undo could
+        # backspace the user's characters. Mirrors _send_goal_verified's own
+        # raced-busy guard. Driven directly so the non-bare box is presented at
+        # exactly the pre-type re-check (not caught earlier).
+        keys = []
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if "send-keys" in j:
+                keys.append(argv[-1])
+            if "capture-pane" in j:
+                return "● x\n❯ rozpisaný draft usera\n  ctx ███░\n"   # NON-bare
+            return ""
+
+        logs = []
+        outcome = compact._compact_submit_verified(
+            "%9", run, lambda *a, **k: None, lambda r: logs.append(r))
+        self.assertEqual(outcome, "raced-busy")
+        self.assertEqual(keys, [])            # nothing typed, no Enter, no BSpace
+        self.assertTrue(any("raced-busy" in r for r in logs), logs)
+
 
 # --------------------------------------------------------------------------- #
 # 4b. #425 — the shared exemption predicate + its two consumers' origin

@@ -821,37 +821,57 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     swallowed Enter (the agent-strip selector / menu overlay grabbing it, #36
     class) used to be reported "sent".
 
-    Returns True only when the box no longer shows `/compact` (submitted). On a
-    swallow, sends ONE corrective Escape+Enter (never a second Escape #35, never
-    a second bare Enter — the SAME shape `_send_goal_verified` / `deliver_with_
-    stash` use) and re-verifies. On a PERSISTENT swallow, backspaces its own
-    typed text off the box — the caller verified the box BARE immediately before
-    (`deliver_compact`'s fresh-recapture at the raced re-check), so every
-    character in it is ours — and returns False, so the request stays pending
-    for a clean retry next sweep instead of waiting on the janitor.
+    Returns one of:
+      "sent"        — the box no longer shows `/compact` (submitted).
+      "swallowed"   — the Enter was swallowed even after ONE corrective
+                       Escape+Enter (never a second Escape #35, never a second
+                       bare Enter — the SAME shape `_send_goal_verified` /
+                       `deliver_with_stash` use); the own typed text is
+                       backspaced off the box and the caller LEAVES the request
+                       pending for a clean retry instead of waiting on the
+                       janitor.
+      "raced-busy"  — a draft appeared in the box AFTER `deliver_compact`'s own
+                       fresh recapture but BEFORE our type keystroke; NOTHING is
+                       typed and the draft is rescued.
+
+    The pre-type bare re-check mirrors `_send_goal_verified` (goal.py): the
+    caller proved the box bare a moment ago, but a few tmux round-trips pass
+    before the real type keystroke lands (the janitor mark, then
+    `send_continue`'s own strip capture), and `send_continue` itself only checks
+    strip-selection, never bare — so a draft that raced into that window would
+    otherwise be typed over and, on a persistent double-swallow, later
+    backspaced. Re-verifying + `_draft_rescue_persist` here narrows that window
+    to exactly the sibling's, and `_draft_rescue_persist`'s own docstring names
+    this primitive's callers (`deliver_with_stash`, `_send_goal_verified`) as
+    the ones that must call it first.
 
     `/compact` is 8 chars, far below `GOAL_TYPE_CHUNK_THRESHOLD` and sent by
     `send_continue` as one `-l --` burst, so the collapsed-paste shapes
     `_send_goal_verified` guards against cannot arise here. `log_fn(reason)`
-    receives exactly one string on the persistent-swallow path (the undo
-    result), mirroring `_undo_and_release_slot`'s own logging."""
+    receives the raced-busy reason and/or the persistent-swallow undo result,
+    mirroring `_undo_and_release_slot`'s own logging."""
+    cap = watchdog.capture_pane(pid, run, lines=40)
+    if watchdog._input_line_text(cap) != "":
+        watchdog._draft_rescue_persist(pid, cap)
+        log_fn("compact-submit raced-busy: box not bare pre-send, not typed")
+        return "raced-busy"
     watchdog.send_continue(pid, COMPACT_TEXT, run)
     if not _compact_still_in_box(pid, run, sleep_fn):
-        return True
+        return "sent"
     # Swallowed submit (#36 agent-strip-selector class) -- ONE corrective
-    # Escape+Enter. The box holds ONLY our own `/compact` (verified bare before
-    # the type), and a single Escape never deletes a CC draft (#35), so this
-    # only deselects the strip / closes a menu, leaving the text for the Enter.
+    # Escape+Enter. The box holds ONLY our own `/compact` (verified bare above),
+    # and a single Escape never deletes a CC draft (#35), so this only deselects
+    # the strip / closes a menu, leaving the text for the Enter.
     run(["tmux", "send-keys", "-t", pid, "Escape"])
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     if not _compact_still_in_box(pid, run, sleep_fn):
-        return True
+        return "sent"
     # Still stuck. Backspace our own text off the bare-verified box so the next
     # sweep retries from a clean prompt; the janitor (job 20, provenance already
     # marked by the caller) is the backstop if this undo itself fails.
     watchdog._undo_and_release_slot(pid, run, COMPACT_TEXT, False, log_fn,
                                     "compact-submit swallowed", sleep_fn=sleep_fn)
-    return False
+    return "swallowed"
 
 
 # --------------------------------------------------------------------------- #
@@ -978,20 +998,21 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     # bookkeeping is the janitor's only proof it may act on this pane's
     # content at all.
     watchdog._janitor_mark_watch(state, pid, now)
-    if not _compact_submit_verified(
-            pid, run, sleep_fn,
-            lambda reason: _log_compact_sync(
-                "%s sid=%s cwd=%s" % (reason, sid, cwd))):
+    outcome = _compact_submit_verified(
+        pid, run, sleep_fn,
+        lambda reason: _log_compact_sync("%s sid=%s cwd=%s" % (reason, sid, cwd)))
+    if outcome != "sent":
         # The submit was swallowed (agent-strip selector / menu overlay grabbed
-        # the Enter, #36) even after ONE corrective Escape+Enter — the
-        # `/compact` never executed. Do NOT mark delivered or start the 30-min
+        # the Enter, #36) or a draft raced into the box pre-send — either way the
+        # `/compact` did NOT execute. Do NOT mark delivered or start the 30-min
         # cooldown (which would block the retry); LEAVE the request pending (a
-        # `skip:` word, so the caller does not clear it) for the next sweep. The
-        # helper already backspaced its own text off the box, and the janitor
-        # provenance mark set above is the backstop if that undo itself failed.
-        _log_compact_sync("SWALLOWED sid=%s cwd=%s origin=%s"
-                          % (sid, cwd, origin or "-"))
-        return "skip:submit-swallowed"
+        # non-terminal `skip:` word, so the caller does not clear it) for the
+        # next sweep. On a swallow the helper already backspaced its own text
+        # (janitor mark above is the backstop if that undo failed); on a race
+        # nothing was typed at all.
+        _log_compact_sync("NOT-DELIVERED sid=%s cwd=%s origin=%s reason=%s"
+                          % (sid, cwd, origin or "-", outcome))
+        return "skip:submit-%s" % outcome
     # Log the send IMMEDIATELY, before any other write — an exception in
     # mark_compact_delivery_ts below must never leave a real send unlogged.
     _log_compact_sync("SEND sid=%s cwd=%s origin=%s" % (sid, cwd, origin or "-"))
