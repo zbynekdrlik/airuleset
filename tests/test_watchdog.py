@@ -52,6 +52,19 @@ def _user_toolresult():
                         "content": [{"type": "tool_result", "content": "ok"}]}}
 
 
+def _user_nudge(wid, kind="api-error"):
+    """(#491) A `user` transcript entry modeling our dead-worker stuck-check
+    nudge as Claude Code writes it the instant it ACCEPTS the injected submit
+    — the LANDED-nudge signal `supervisor_responded_to_nudge` keys on. Carries
+    the real `_subagent_nudge_signature(wid)` substring the production reader
+    matches, so a signature drift would break these tests."""
+    return {"type": "user",
+            "message": {"role": "user",
+                        "content": ("stuck-check: background worker %s vyzerá mŕtvy "
+                                    "(%s v subagents/%s.jsonl) — over jeho transcript a "
+                                    "zasiahni, nič nerob naslepo." % (wid, kind, wid))}}
+
+
 def _system():
     return {"type": "system", "content": ""}
 
@@ -2613,6 +2626,194 @@ class RunOnceSubagentVisibility(unittest.TestCase):
         self.assertFalse(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs3),
                          "a repeated nudge#1 here means the dedup state was wiped "
                          "and the SAME nudge fired again from scratch: %r" % logs3)
+
+    # --- #491: resolve once the supervisor has acknowledged the dead worker ----
+
+    def _seed_salvageable_worker(self, tmp, now1):
+        """Build a SALVAGEABLE dead-worker fixture (a tool_use/tool_result pair
+        — real progress — before the api-error death, so it earns the FULL
+        nudge cycle, not the separately-tested at-most-once unsalvageable
+        path). Returns (proj, tpath, state_path)."""
+        proj = Path(tmp) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        tpath = proj / enc / (self.SID + ".jsonl")
+        subdir = proj / enc / self.SID / "subagents"
+        subdir.mkdir(parents=True)
+        spath = subdir / (self.WORKER + ".jsonl")
+        _write_jsonl(spath, [_assistant_tooluse(), _user_toolresult(), _assistant_apierror()])
+        death_mtime = now1 - 400            # > GRACE_SECONDS (300)
+        os.utime(spath, (death_mtime, death_mtime))
+        return proj, tpath, Path(tmp) / "state.json"
+
+    def test_subagent_apierror_resolved_when_supervisor_acknowledges(self):
+        # (#491) A SALVAGEABLE dead worker earns the full nudge cycle — but
+        # once the SUPERVISOR has demonstrably ACKNOWLEDGED nudge#1 (its own
+        # transcript shows our nudge as a LANDED `user` turn FOLLOWED BY a
+        # genuine assistant response), it has SEEN the death. A dead worker
+        # never recovers, so re-nudging from here delivers nothing and costs a
+        # paid turn each time (the reporting incident's 244k-token
+        # resurrect-to-silence workaround). The detector must mark the worker
+        # RESOLVED and go permanently silent — NOT fire nudge#2/#3.
+        #
+        # This is the realistic-transcript companion the #287 marker-gap test
+        # (`..._nudge_state_survives_supervisor_marker_gap`) deliberately does
+        # NOT model: that test's fixture carries no landed-nudge `user` turn,
+        # so it exercises the "no provable ack → keep nudging" edge; THIS test
+        # exercises the "provable ack → resolve" edge #491 adds on top.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        now1 = time.time()
+        proj, tpath, state_path = self._seed_salvageable_worker(tmp, now1)
+
+        # sweep 1: supervisor `⏳ WORKING`, has NOT yet been nudged → nudge #1.
+        _write_jsonl(tpath, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")])
+        os.utime(tpath, (now1 - 10, now1 - 10))
+        logs1, sent1, pings1 = self._run(proj, now1, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs1), logs1)
+
+        # sweep 2: enough elapsed that decide_working WOULD fire nudge#2 — but
+        # the supervisor's transcript now shows nudge#1 LANDED as a `user` turn
+        # AND a genuine assistant response to it (still `⏳ WORKING` on the NEXT
+        # ticket, so the marker gate stays open — the incident's /goal shape).
+        now2 = now1 + wd.RETRY_INTERVAL_SECONDS + 20
+        _write_jsonl(tpath, [
+            _assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera."),
+            _user_nudge(self.WORKER),
+            _assistant("Worker je vybavený — úlohu som prevzal a dokončil sám, push done.\n\n"
+                       "⏳ WORKING: pokračujem na ďalšom tickete."),
+        ])
+        os.utime(tpath, (now2 - 10, now2 - 10))
+        logs2, sent2, pings2 = self._run(proj, now2, state_path, self.IDLE_CAP)
+        self.assertEqual(sent2, [], "must NOT re-nudge a worker the supervisor "
+                                    "already acknowledged: %r" % logs2)
+        self.assertFalse(any(ln.startswith("subagent-apierr-nudge#2") for ln in logs2),
+                         "acknowledged death must resolve, not accumulate nudge#2: %r" % logs2)
+        self.assertTrue(any(ln.startswith("subagent-apierr-resolved") for ln in logs2),
+                        "expected a resolved log line once the supervisor "
+                        "acknowledged: %r" % logs2)
+        self.assertEqual(pings2, [], "resolution goes silent — no escalate ping: %r" % pings2)
+
+        # sweep 3: the resolution is STICKY — still silent even later, with the
+        # supervisor still `⏳ WORKING` and the worker file still in-window.
+        now3 = now2 + wd.RETRY_INTERVAL_SECONDS + 20
+        os.utime(tpath, (now3 - 10, now3 - 10))
+        logs3, sent3, pings3 = self._run(proj, now3, state_path, self.IDLE_CAP)
+        self.assertEqual(sent3, [], "resolution must stay silent (keystrokes): %r" % logs3)
+        self.assertEqual(pings3, [], "resolution must stay silent (pings): %r" % pings3)
+
+    def test_subagent_apierror_nudges_again_when_nudge_swallowed(self):
+        # (#491, adversarial-review MAJOR-A) The resolution must NOT fire when
+        # the nudge did NOT land — a SWALLOWED submit writes no `user` turn, so
+        # a `/goal` loop's own later `⏳ WORKING` re-fire (a genuine assistant
+        # turn the supervisor emits INDEPENDENTLY of ever seeing the nudge)
+        # must NOT be read as an acknowledgement. This is the exact scenario a
+        # timestamp-only signal falsely resolved; the causal landed-`user`-turn
+        # signal keeps the retry-if-unseen safety net.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        now1 = time.time()
+        proj, tpath, state_path = self._seed_salvageable_worker(tmp, now1)
+
+        _write_jsonl(tpath, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")])
+        os.utime(tpath, (now1 - 10, now1 - 10))
+        logs1, sent1, pings1 = self._run(proj, now1, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs1), logs1)
+
+        # sweep 2: NO landed nudge `user` turn (swallowed) — only the /goal
+        # loop's own fresh `⏳ WORKING` assistant re-fire → no causal ack.
+        now2 = now1 + wd.RETRY_INTERVAL_SECONDS + 20
+        _write_jsonl(tpath, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")])
+        os.utime(tpath, (now2 - 10, now2 - 10))
+        logs2, sent2, pings2 = self._run(proj, now2, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#2") for ln in logs2),
+                        "a swallowed/unseen nudge must still retry to nudge#2: %r" % logs2)
+        self.assertFalse(any(ln.startswith("subagent-apierr-resolved") for ln in logs2),
+                         "must NOT resolve on a /goal re-fire with no landed nudge: %r" % logs2)
+
+
+
+class SupervisorRespondedToNudge(unittest.TestCase):
+    """(#491) Direct coverage of the CAUSAL acknowledgement helpers that
+    replaced the adversarial-review-refuted timestamp-only signal: a landed
+    `user`-turn nudge FOLLOWED BY a genuine assistant response, plus the
+    supervisor-transcript path reconstruction."""
+
+    WID = "a74fbea9eb56da727"
+
+    def _sig(self):
+        return wd._subagent_nudge_signature(self.WID)
+
+    def _write(self, entries):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        p = Path(tmp) / "sup.jsonl"
+        _write_jsonl(p, entries)
+        return p
+
+    def test_landed_nudge_then_genuine_response_is_ack(self):
+        p = self._write([
+            _assistant("⏳ WORKING: čaká na workera."),
+            _user_nudge(self.WID),
+            _assistant("Prevzal som to, hotovo.\n\n⏳ WORKING: ďalší ticket."),
+        ])
+        self.assertTrue(wd.supervisor_responded_to_nudge(p, self._sig()))
+
+    def test_goal_refire_without_landed_nudge_is_not_ack(self):
+        # the /goal loop emits genuine assistant turns INDEPENDENTLY of the
+        # nudge — with no landed `user` nudge that is NOT an acknowledgement
+        # (the exact false-positive the timestamp-only signal produced).
+        p = self._write([
+            _assistant("⏳ WORKING: čaká na workera."),
+            _assistant("⏳ WORKING: čaká na workera."),
+        ])
+        self.assertFalse(wd.supervisor_responded_to_nudge(p, self._sig()))
+
+    def test_landed_nudge_no_response_yet_is_not_ack(self):
+        p = self._write([
+            _assistant("⏳ WORKING: čaká na workera."),
+            _user_nudge(self.WID),
+        ])
+        self.assertFalse(wd.supervisor_responded_to_nudge(p, self._sig()))
+
+    def test_landed_nudge_then_only_apierror_is_not_ack(self):
+        # supervisor DIED on an api-error right after receiving the nudge →
+        # job 1's own auto-resume owns it; job 1b must not resolve.
+        p = self._write([_user_nudge(self.WID), _assistant_apierror()])
+        self.assertFalse(wd.supervisor_responded_to_nudge(p, self._sig()))
+
+    def test_nudge_quoted_in_compact_summary_is_not_landed(self):
+        # a /compact summary that QUOTES a prior nudge is not a fresh landed
+        # nudge (the #490 _submit_confirmed gotcha) — skip isCompactSummary.
+        quoted = _user_nudge(self.WID)
+        quoted["isCompactSummary"] = True
+        p = self._write([quoted, _assistant("Pokračujem.\n\n⏳ WORKING: ok.")])
+        self.assertFalse(wd.supervisor_responded_to_nudge(p, self._sig()))
+
+    def test_response_that_is_only_a_sentinel_is_not_ack(self):
+        p = self._write([_user_nudge(self.WID), _assistant("")])
+        self.assertFalse(wd.supervisor_responded_to_nudge(p, self._sig()))
+
+    def test_supervisor_transcript_reconstructed_from_subagent_path(self):
+        tmp = tempfile_mkdtemp_cleanup(self)
+        sid = "sess-xyz"
+        proj = Path(tmp) / "-enc"
+        subdir = proj / sid / "subagents"
+        subdir.mkdir(parents=True)
+        sup = proj / (sid + ".jsonl")
+        sup.write_text("{}\n")
+        sub = subdir / (self.WID + ".jsonl")
+        sub.write_text("{}\n")
+        self.assertEqual(str(wd.supervisor_transcript_for_subagent(sub)), str(sup))
+        # nested subagent dir still resolves to the same supervisor transcript
+        nested = subdir / "deep" / (self.WID + ".jsonl")
+        nested.parent.mkdir(parents=True)
+        nested.write_text("{}\n")
+        self.assertEqual(str(wd.supervisor_transcript_for_subagent(nested)), str(sup))
+        # a path not under subagents/ → None; a missing parent transcript → None
+        self.assertIsNone(wd.supervisor_transcript_for_subagent(proj / "x.jsonl"))
+        orphan = proj / "nosid" / "subagents"
+        orphan.mkdir(parents=True)
+        o = orphan / (self.WID + ".jsonl")
+        o.write_text("{}\n")
+        self.assertIsNone(wd.supervisor_transcript_for_subagent(o))
 
 
 class SubagentTranscriptUnsalvageable(unittest.TestCase):

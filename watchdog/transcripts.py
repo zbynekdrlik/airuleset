@@ -311,6 +311,63 @@ def transcript_last_assistant_text(path):
     return ""
 
 
+def supervisor_responded_to_nudge(path, nudge_signature, max_lines=200):
+    """(#491) True iff the supervisor transcript at `path` shows a CAUSAL
+    acknowledgement of our dead-worker stuck-check nudge: a LANDED `user` turn
+    whose text contains `nudge_signature` (proof the keystroke was ACCEPTED,
+    not swallowed — CC writes the `user` turn the instant it accepts the
+    submit; a swallowed submit writes nothing, per `transcript_last_error`'s
+    own docstring) FOLLOWED BY a GENUINE assistant turn (proof the supervisor
+    actually RESPONDED, not merely received).
+
+    This is deliberately STRONGER than "a genuine assistant turn is merely
+    DATED after the nudge" (the first-cut #491 signal an adversarial review
+    refuted): in the incident's own `/goal`-loop environment the supervisor
+    emits genuine post-nudge turns turn-after-turn INDEPENDENTLY of the nudge,
+    and the nudge send is best-effort (`send_continue`, no submit-verify), so a
+    SWALLOWED nudge plus one `/goal` re-fire would satisfy a timestamp-only
+    check and falsely silence the worker while the supervisor is still blindly
+    waiting for it. Requiring the nudge to appear as a landed `user` turn ties
+    the acknowledgement to THIS nudge; the retry-if-unseen path (a swallowed
+    nudge → no `user` turn → returns False → the caller keeps nudging then
+    escalates) is thereby preserved.
+
+    Skip semantics mirror the #490 `_submit_confirmed` gotchas: an `isMeta` /
+    `isCompactSummary` `user` entry (a `/compact` summary can QUOTE a prior
+    nudge) and a `tool_result`-carrying `user` entry are not typed nudges. The
+    assistant side reuses `transcript_last_assistant_text`'s genuine-turn skip
+    (`isApiErrorMessage` + `_SENTINELS`), so a supervisor that itself DIED on
+    an api-error right after receiving the nudge does NOT resolve (job 1's own
+    auto-resume owns that supervisor). Bounded to the last `max_lines` entries
+    (200, matching `transcript_text_toolcall_stall`'s sibling window) — the
+    nudge+response land adjacent and near the tail on the first post-response
+    sweep, and the resolution is made STICKY in state, so one in-window sight
+    is enough."""
+    seen_nudge = False
+    for entry in _iter_jsonl_tail(path, max_lines=max_lines):
+        if not isinstance(entry, dict):
+            continue
+        etype = entry.get("type")
+        if etype == "user":
+            if entry.get("isMeta") is True or entry.get("isCompactSummary") is True:
+                continue
+            msg = entry.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(content, list) and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                continue
+            if nudge_signature and nudge_signature in (_entry_text(entry) or ""):
+                seen_nudge = True
+            continue
+        if etype == "assistant" and seen_nudge:
+            if entry.get("isApiErrorMessage") is True:
+                continue
+            if (_entry_text(entry) or "").strip() in _SENTINELS:
+                continue
+            return True
+    return False
+
+
 def subagent_active(transcript_path, now, window):
     """True if a SUBAGENT transcript of this session was written within `window`
     seconds — a dispatched worker / workflow is live, so the parent's `⏳ WORKING`
@@ -383,6 +440,25 @@ def newest_subagent_transcript(transcript_path):
             if m > newest_m:
                 newest, newest_m = p, m
         return newest
+    except Exception:
+        return None
+
+
+def supervisor_transcript_for_subagent(sub_path):
+    """(#491) The PARENT supervisor session transcript (`<project>/<sid>.jsonl`)
+    for a subagent transcript at `<project>/<sid>/subagents/**/*.jsonl` — the
+    inverse of `newest_subagent_transcript`'s layout — or None when `sub_path`
+    is not under a `subagents/` dir or the parent transcript does not exist.
+    Fail-safe None on any path problem (job 1b then simply never resolves and
+    keeps its existing nudge behavior)."""
+    try:
+        p = Path(sub_path)
+        for parent in p.parents:
+            if parent.name == "subagents":
+                session_dir = parent.parent            # <project>/<sid>
+                cand = session_dir.parent / (session_dir.name + ".jsonl")
+                return cand if cand.exists() else None
+        return None
     except Exception:
         return None
 
