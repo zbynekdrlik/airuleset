@@ -1455,9 +1455,8 @@ class BypassCarriesAReason128(unittest.TestCase):
         m = self._marker(sid)
         m.write_text("first line of the reason\nsecond line\nthird")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        before = len(BYPASS_LOG_PATH.read_text()
-                     .splitlines()) if Path(
-                         "/tmp/airuleset-main-exec-bypass.log").exists() else 0
+        before = (len(BYPASS_LOG_PATH.read_text().splitlines())
+                  if BYPASS_LOG_PATH.exists() else 0)
         self._run(sid)
         after = BYPASS_LOG_PATH.read_text().splitlines()
         self.assertEqual(len(after) - before, 1,

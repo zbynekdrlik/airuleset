@@ -253,7 +253,11 @@ RUN_FILE="/tmp/airuleset-main-bash-run-${RAW_SID:-unknown}"
 # its own file, which still ACCUMULATES across that user's sessions — what
 # these "did it fire, on what" logs want; a per-SESSION suffix would fragment
 # them. ${EUID} is a bash builtin, always set; id -u is the fallback for a
-# non-bash re-exec. Same class as odoo-erp #115 (the shared upload-log).
+# non-bash re-exec. Same class as odoo-erp #115 (the shared upload-log). The
+# per-uid name is still predictable in sticky /tmp, so a hostile local user
+# could pre-create it unwritable — but that only silences a victim's own
+# telemetry (the brace-group below keeps it leak-free either way), never a
+# concern on these trusted dev boxes and no worse than the old fixed name.
 BLOCK_LOG="/tmp/airuleset-main-exec-block-${EUID:-$(id -u)}.log"
 BYPASS_LOG="/tmp/airuleset-main-exec-bypass-${EUID:-$(id -u)}.log"
 
