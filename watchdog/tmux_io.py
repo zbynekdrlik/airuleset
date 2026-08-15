@@ -644,3 +644,115 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None)
         _log("send-verified unconfirmed: box holds unrecognized content, "
              "left in place (retryable)")
     return False
+
+
+def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
+                              sleep_fn=None, logs=None):
+    """#501 — SUBMIT an EXISTING recognized-own nudge draft already sitting in
+    the input box, transcript-verified — WITHOUT typing anything. The missing
+    "submit an already-composed OWN draft" member of the delivery family
+    (`send_verified` TYPES then submits; `deliver_with_stash` parks a FOREIGN
+    draft and types around it): a pane holding OUR OWN previously-swallowed
+    nudge (a pre-#490 blind Enter stranded it) must be FINISHED by submitting
+    the draft in place, never stashed-around and retyped — that retype aborts
+    forever against the persistent swallow that stranded it (the live cam-box
+    zbynek-4:0.0 incident: `stash-abort 1/5 -> backoff -> give-up`, the nudge
+    never delivered).
+
+    HARD foreign-draft gate (never weakened — HARD CONSTRAINT a): `draft` MUST
+    start with one of the UNAMBIGUOUS machine-diagnostic nudge prefixes
+    (`_own_nudge_submit_prefix`: `lane-check: `/`bounce-backstop: `/`gk-request
+    backstop: `, texts a human PROVABLY never types). The human-typeable
+    `/goal `/`/compact` prefixes are refused here (content is not proof of
+    ownership for them — the #372 janitor recovers those only WITH provenance).
+    Any unrecognized/foreign draft is refused with ZERO keystrokes: NEVER a
+    blind Enter on a user's parked draft.
+
+    Transcript-proof (HARD CONSTRAINT b): after the Enter, the session jsonl at
+    `tpath` must gain a NEW top-level `user` turn carrying the matched PREFIX
+    (a wrap-free token at the very start of the submitted draft) within the
+    bounded window (`_await_submit_confirmed`). A swallowed Enter (#36) earns
+    ONE corrective Escape+Enter (never a second Escape #35), re-verified. Never
+    booked delivered on a pane render alone.
+
+    No keystroke ever RE-TYPES or BACKSPACES the draft: the box already holds
+    our own text, and we neither typed it nor can prove its exact length (a
+    wrapped multi-row draft makes a byte-exact undo unprovable), so on a
+    genuinely-stuck submit we leave it EXACTLY as it is — a legit pending own
+    nudge — and return False; the caller's give-up ping escalates (#193: never
+    destroy an unproven buffer).
+
+    Returns True ONLY on a transcript-CONFIRMED submit; False = not delivered,
+    retryable next sweep (the caller leaves its own budget unconsumed). A
+    falsy/unreadable `tpath` refuses (the transcript is the whole proof)."""
+    run = run or watchdog._default_run
+    sleep_fn = sleep_fn or time.sleep
+
+    def _log(reason):
+        if isinstance(logs, list):
+            logs.append(reason)
+
+    prefix = watchdog._own_nudge_submit_prefix(draft)
+    if not prefix:
+        _log("submit-own abort: draft is not an unambiguous own nudge")
+        return False
+    if not tpath:
+        _log("submit-own abort: no transcript path")
+        return False
+    # A FRESH capture right before the Enter (the sibling helpers' own race
+    # guard): the box must STILL hold the same OWN draft. A draft that raced
+    # OUT (bare / submitted by something else) or a FOREIGN draft that raced IN
+    # must NEVER be Entered.
+    cap = watchdog.capture_pane(pane_id, run, lines=40)
+    itext = watchdog._input_line_text(cap)
+    if not itext or not itext.startswith(prefix):
+        _log("submit-own abort: box no longer holds the recognized own draft")
+        return False
+    if "esc to interrupt" in (cap or ""):
+        _log("submit-own abort: live turn")
+        return False
+    # A SELECTED agent-strip row (#36) steals the Enter — ONE Escape returns
+    # focus to the input box (the draft survives ONE Escape; two would delete
+    # it, #35), then re-confirm the draft is still there before submitting.
+    if watchdog._strip_selected(cap):
+        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+        cap = watchdog.capture_pane(pane_id, run, lines=40)
+        itext = watchdog._input_line_text(cap)
+        if not itext or not itext.startswith(prefix):
+            _log("submit-own abort: own draft gone after strip Escape")
+            return False
+    try:
+        baseline = os.path.getsize(tpath)
+    except OSError:
+        _log("submit-own abort: transcript unreadable pre-send")
+        return False
+    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    if _await_submit_confirmed(tpath, baseline, prefix, sleep_fn):
+        _log("submit-own delivered")
+        return True
+    # Unconfirmed. Only send a corrective Escape+Enter when our OWN draft is
+    # PROVABLY still in the box (a swallowed Enter, #36) — never a second
+    # Escape (#35), never an Escape into a box that already went bare (a turn
+    # may have started, #233).
+    still = watchdog._input_line_text(watchdog.capture_pane(pane_id, run, lines=40))
+    if still and still.startswith(prefix):
+        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+        run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+        if _await_submit_confirmed(tpath, baseline, prefix, sleep_fn):
+            _log("submit-own delivered (after corrective Escape+Enter)")
+            return True
+    # Genuinely unconfirmed. Leave the box EXACTLY as-is — never backspace our
+    # own draft (we did not type it, cannot prove its length, and it is a legit
+    # pending own nudge). Read the box ONCE and log honestly (#134/#360), never
+    # claim a state we did not read; the caller's give-up escalation fires.
+    final = watchdog._input_line_text(watchdog.capture_pane(pane_id, run, lines=40))
+    if final is None:
+        _log("submit-own unconfirmed: box unreadable, submit not proven")
+    elif final.startswith(prefix):
+        _log("submit-own unconfirmed: own draft still in box, left in place "
+             "(retryable)")
+    elif final == "":
+        _log("submit-own unconfirmed: box bare, submit not proven")
+    else:
+        _log("submit-own unconfirmed: box changed, left in place (retryable)")
+    return False

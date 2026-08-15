@@ -973,6 +973,41 @@ def _looks_like_own_payload(text):
     return bool(text) and text.startswith(_JANITOR_OWN_PREFIXES)
 
 
+# #501 — the STRICT SUBSET of `_JANITOR_OWN_PREFIXES` a human PROVABLY never
+# types, so a box whose content starts with one is UNAMBIGUOUSLY our own
+# swallowed nudge and may be SUBMITTED IN PLACE on content alone (no janitor
+# provenance needed) by the lane guard's `submit_own_draft_verified` path.
+# Deliberately EXCLUDES the two human-typeable members of
+# `_JANITOR_OWN_PREFIXES` — `/goal ` (the documented manual autopilot-arming
+# flow) and `/compact` — because content is NOT proof of ownership for those:
+# auto-submitting a human's half-composed `/goal <condition>` would ARM a
+# broken goal, so those stay provenance-GATED in the #372 janitor and never
+# reach the content-alone submit path (HARD CONSTRAINT a — the foreign-draft
+# protection is never weakened). Every prefix here is asserted machine-only by
+# `_JANITOR_OWN_PREFIXES`' own registration ("a human never types a message
+# starting with it"): `lane-check: ` (the lane-fill nudge, #490), and the two
+# cross_stream transcript-proof nudges (#497).
+_OWN_NUDGE_SUBMIT_PREFIXES = ("lane-check: ", "bounce-backstop: ",
+                              "gk-request backstop: ")
+
+
+def _own_nudge_submit_prefix(text):
+    """#501 — the `_OWN_NUDGE_SUBMIT_PREFIXES` prefix `text` starts with, or
+    None. Used by the lane guard + `submit_own_draft_verified` to (a) recognize
+    a swallowed OWN nudge safe to submit in place on content alone, and (b) as
+    the wrap-free TRANSCRIPT VERIFICATION TOKEN (the matched prefix sits at the
+    very start of the submitted draft, unaffected by any wrap artifact). A
+    STRICT SUBSET of `_looks_like_own_payload`'s `_JANITOR_OWN_PREFIXES`,
+    excluding the human-typeable `/goal `/`/compact` — see
+    `_OWN_NUDGE_SUBMIT_PREFIXES`."""
+    if not text:
+        return None
+    for p in _OWN_NUDGE_SUBMIT_PREFIXES:
+        if text.startswith(p):
+            return p
+    return None
+
+
 def _looks_like_own_stuck_content(itext):
     """#372 — True when a pane's CURRENT input-box content can ONLY be OUR
     OWN stuck delivery: either Claude Code's own collapsed-paste placeholder

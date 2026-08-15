@@ -433,6 +433,7 @@ from watchdog.tmux_io import (  # noqa: E402
     _strip_selected as _strip_selected,
     send_continue as send_continue,
     send_verified as send_verified,
+    submit_own_draft_verified as submit_own_draft_verified,
     _await_submit_confirmed as _await_submit_confirmed,
     _await_typed_landed as _await_typed_landed,
     send_selfcheck as send_selfcheck,
@@ -706,6 +707,8 @@ from watchdog.stash import (  # noqa: E402
     JANITOR_WATCH_MAX_AGE_S as JANITOR_WATCH_MAX_AGE_S,
     _looks_like_own_payload as _looks_like_own_payload,
     _looks_like_own_stuck_content as _looks_like_own_stuck_content,
+    _OWN_NUDGE_SUBMIT_PREFIXES as _OWN_NUDGE_SUBMIT_PREFIXES,
+    _own_nudge_submit_prefix as _own_nudge_submit_prefix,
 )
 
 
