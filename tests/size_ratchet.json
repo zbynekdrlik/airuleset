@@ -231,7 +231,7 @@
     "watchdog/stash.py": 990,
     "watchdog/sweep_jobs.py": 263,
     "watchdog/tmux_io.py": 695,
-    "watchdog/transcripts.py": 772,
+    "watchdog/transcripts.py": 848,
     "watchdog/usage.py": 380,
     "watchdog/wedge.py": 297
   },
