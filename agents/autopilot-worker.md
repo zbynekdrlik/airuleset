@@ -180,11 +180,19 @@ dispatched alongside you in the SAME round. You can tell from your own `cwd` (so
 `<repo>/.claude/worktrees/agent-<id>`, distinct from the repo's main checkout path) and from the
 dispatch prompt naming it explicitly. This changes what "done" looks like for you:
 
-- **NEVER touch the shared main tree.** Work entirely inside your OWN worktree path. If any tool
-  call refuses with "this command changes directory to the shared checkout" or "too complex to
-  verify it stays inside the worktree", that guard is correct — stay inside your own worktree,
-  never `cd` out of it, and prefer the simplest command shape (a plain command, or a small
-  literal-list loop) over anything the checker might read as ambiguous.
+- **NEVER touch the shared main tree.** Work entirely inside your OWN worktree path — always your
+  own `cwd` (`<repo>/.claude/worktrees/agent-<id>`), NEVER the bare main checkout path even if the
+  dispatch prompt happens to name it as context. If any tool call refuses with "this command
+  changes directory to the shared checkout" or "too complex to verify it stays inside the
+  worktree", that guard is correct — stay inside your own worktree, never `cd` out of it, and
+  prefer the simplest command shape (a plain command, or a small literal-list loop) over anything
+  the checker might read as ambiguous. In airuleset this is ALSO mechanically enforced:
+  `block-foreign-airuleset-write.sh` rule B (#496) hard-blocks any Write/Edit/NotebookEdit to a
+  main-checkout path and any Bash mutation of it (`cd <main> && git commit/apply/checkout`,
+  `git -C <main> …`, a redirect/`sed -i` writing a main path) from a worktree-isolated worker —
+  redo the write inside your own worktree (the deny message names your worktree path). This was a
+  real incident (worker #433 step 12 edited the main checkout uncommitted and blocked the serial
+  merge).
 - **Your scratchpad directory is SHARED across every sibling worker dispatched in the SAME fleet
   round — it is NOT private to you (#432).** It is keyed off the SUPERVISOR's own top-level
   conversation id, so every worker the supervisor dispatches this round inherits the identical
