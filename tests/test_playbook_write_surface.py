@@ -81,7 +81,7 @@ class TestProjectClaudeMdMeetsTheAcceptance(TestCase):
     def test_service_internals_moved_verbatim_not_deleted(self):
         # every service still has a home; the deep internals live on the
         # path-scoped surface where they load only when relevant
-        internals = read(".claude/rules/airuleset-internals.md")
+        internals = "\n".join(p.read_text(encoding="utf-8") for p in ([ROOT / ".claude" / "rules" / "airuleset-internals.md"] + sorted((ROOT / ".claude" / "rules").glob("internals-*.md")) + [ROOT / ".claude" / "rules-reference" / "internals-archive.md"]) if p.exists())  # #482: service internals split across surfaces
         for needle in ("FILEDROP_HOSTS", "render_caveman_shim", "compact_boundary",
                        "DISCORD_MIRROR_", "stop-check-playbook-review.sh"):
             self.assertIn(needle, internals, needle)

@@ -25,7 +25,7 @@ _git_first_line, _git_base_ref`, an ordinary FORWARD import between two
 leaf modules (`cards.py` depends on neither `repo_health.py` nor
 `watchdog/__init__.py`, so there is no cycle). This is the same "which way
 does the dependency arrow point" test cluster F's own design comment and
-the corresponding `.claude/rules/airuleset-internals.md` playbook entry
+the corresponding `.claude/rules/internals-watchdog.md` playbook entry
 establish: a NEW module needing an OLD `__init__.py`-resident symbol is the
 circular-risk direction (clusters C/D); a module needing something already
 hosted in ANOTHER already-extracted leaf module is always safe.

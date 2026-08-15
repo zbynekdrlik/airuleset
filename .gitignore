@@ -27,6 +27,7 @@ Thumbs.db
 # Claude Code local state
 .claude/*
 !.claude/rules/
+!.claude/rules-reference/
 
 # Environment
 .env

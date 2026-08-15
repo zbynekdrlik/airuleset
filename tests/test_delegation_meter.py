@@ -635,7 +635,7 @@ class TestDocumentedWhereASessionWillFindIt(unittest.TestCase):
     keep/revert cycle has to live somewhere a future session actually
     reads, not in a ticket comment."""
 
-    RULE = Path(__file__).resolve().parent.parent / ".claude" / "rules" / "airuleset-internals.md"
+    RULE = Path(__file__).resolve().parent.parent / ".claude" / "rules" / "internals-burn.md"  # #482: measure-cycle #130 moved here
 
     def test_the_working_cycle_is_documented_in_the_path_scoped_rule(self):
         text = self.RULE.read_text()

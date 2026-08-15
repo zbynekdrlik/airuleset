@@ -225,7 +225,7 @@ class TestMemoryPressureReapDeathModeNamed(TestCase):
         # word cap); the measurement archaeology lives in the paths:-scoped
         # playbook, which is exactly where ci-monitoring.md's "in the playbook"
         # pointers resolve.
-        pb = read(".claude/rules/airuleset-internals.md")
+        pb = "\n".join(p.read_text(encoding="utf-8") for p in ([ROOT / ".claude" / "rules" / "airuleset-internals.md"] + sorted((ROOT / ".claude" / "rules").glob("internals-*.md")) + [ROOT / ".claude" / "rules-reference" / "internals-archive.md"]) if p.exists())  # #482: reap narrative in the on-demand archive
         self.assertIn("memoryPressure", pb,
                       "playbook must carry the reap incident narrative")
         self.assertIn("287 MB", pb,
