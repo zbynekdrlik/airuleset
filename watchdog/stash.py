@@ -681,7 +681,8 @@ def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None
                 % prefix)
 
 
-def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
+def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
+                       state=None):
     """Deliver `text` into an IDLE pane, parking whatever the input box holds.
 
     #189 — STASH UNCONDITIONALLY. This helper used to require a NON-EMPTY
@@ -802,6 +803,21 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
         _log("stash-abort: unresolved wrapped box")
         return False
     parked = outcome == STASH_PARKED
+    if parked:
+        # #488 -- we have DEFINITIVELY parked a draft into the single slot: the
+        # box went bare AND the marker lit after our OWN `C-s`, which the
+        # earlier `slot occupied` abort (top of this function) proves the slot
+        # did NOT show before us. So this park is unambiguously OURS, never a
+        # pre-existing FOREIGN one -- recording it here (not on a bare
+        # abort-outcome at the caller) is what keeps the janitor's age-
+        # unbounded reclaim from ever adopting a human's own parked draft
+        # (#488 review MAJOR). Persisted in the shared, already-durable
+        # watchdog `state` so the janitor can reclaim it after ANY delay if
+        # this delivery aborts before popping the draft back (the gk `(1d)`
+        # gap). Cleared on our own verified success below (CC then owns the
+        # async auto-restore); a `None` state (a caller/test not threading it)
+        # is a no-op, exactly like `_janitor_mark_watch`.
+        watchdog._janitor_park_record(state, pid, time.time())
     watchdog._type_literal(pid, run, text, sleep_fn)
     cap = watchdog.capture_pane(pid, run, lines=30)
     itext = watchdog._input_line_text(cap)
@@ -877,6 +893,12 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
                                    "stash-abort: swallowed-submit-not-recovered",
                                    sleep_fn=sleep_fn)
             return False
+    # #488 -- verified success: CC now owns the async auto-restore of the
+    # parked draft, so the janitor must NOT reclaim (a double-restore) -> drop
+    # the durable park record we wrote above. Only meaningful when we actually
+    # parked; a no-op otherwise.
+    if parked:
+        watchdog._janitor_clear_park(state, pid)
     _log("stash-delivered")
     return True
 

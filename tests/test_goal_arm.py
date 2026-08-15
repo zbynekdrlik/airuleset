@@ -399,6 +399,26 @@ class TestDeliverGoal(unittest.TestCase):
         self.assertEqual(word, "sent")
         self.assertEqual(seen_marked_at_call_time, [True])
 
+    def test_stash_branch_threads_state_to_deliver_with_stash(self):
+        # #488: the durable park record is written/cleared INSIDE
+        # deliver_with_stash, and ONLY on a definitively-ours STASH_PARKED
+        # (never a pre-existing foreign slot -- review MAJOR). deliver_goal's
+        # only job is to THREAD `state` through so that machinery can run; the
+        # record write/clear itself is proven at the deliver_with_stash level
+        # (test_stash_unconditional.py::Issue488DurableParkRecord).
+        state = {"tag": "sentinel"}
+        seen = []
+
+        def _fake_stash(pid, text, run, **kw):
+            seen.append(kw.get("state"))
+            return False
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_fake_stash):
+            word, tmux, _ = self._go(GOAL_DRAFT_CAP, state=state)
+        self.assertEqual(word, "skip:stash-abort")
+        self.assertEqual(len(seen), 1)
+        self.assertIs(seen[0], state)
+
     def test_hard_age_cap_expires_and_pings_once(self):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)

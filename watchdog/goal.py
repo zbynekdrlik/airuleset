@@ -630,8 +630,15 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # (#403-review MAJOR M1: this branch used to mark only on success
         # and never clear, exactly backwards).
         watchdog._janitor_mark_watch(state, pid, now)
+        # #488: thread `state` so deliver_with_stash can DURABLY record a park
+        # it definitively creates (STASH_PARKED) -> the shared janitor reclaims
+        # it after ANY delay, not just the 6h generic-mark window (the gk
+        # `(1d)` gap). The record is written ONLY on an unambiguously-ours park
+        # (slot was free before our own C-s), never a pre-existing foreign one,
+        # and deliver_with_stash clears it on its own verified success.
         ok = watchdog.deliver_with_stash(pid, text, run, captured=captured,
-                                         logs=logs, sleep_fn=sleep_fn)
+                                         logs=logs, sleep_fn=sleep_fn,
+                                         state=state)
         if ok:
             watchdog._janitor_clear_watch(state, pid)
             _log_goal_sync("SEND stash sid=%s cwd=%s" % (sid, cwd))
@@ -882,6 +889,21 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     seen_state = state.setdefault("goal_dark_seen", {})
     pinged_state = state.setdefault("goal_dark_pinged", {})
     janitor_recs = state.setdefault("janitor_pinged_rec", {})
+
+    # #488 review-1 -- GC the age-unbounded stash_parks records for panes that
+    # no longer exist. The per-pane marker-gone backstop below only sees panes
+    # STILL in the candidate set; this covers the ones that LEFT it, restoring
+    # the "no stale provenance forever" bound the park record's age-
+    # unboundedness removes. FAIL-SAFE: a failed/empty `tmux list-panes` read
+    # yields no ids -> `_janitor_prune_parks` prunes NOTHING, so a transient
+    # tmux error never wipes a valid fresh record. Dry-run mutates no state.
+    if not dry_run:
+        try:
+            live_pids = (run(["tmux", "list-panes", "-a",
+                              "-F", "#{pane_id}"]) or "").split()
+        except Exception:
+            live_pids = []
+        watchdog._janitor_prune_parks(state, live_pids)
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
@@ -1538,8 +1560,12 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # for THIS pane, and cleared only on success -- the same shape
         # `deliver_goal`'s own draft branch uses.
         watchdog._janitor_mark_watch(state, pid, now)
+        # #488: thread `state` (same as deliver_goal's draft branch) so
+        # deliver_with_stash durably records a park it definitively creates and
+        # clears it on its own verified success.
         if not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
-                                           logs=logs, sleep_fn=sleep_fn):
+                                           logs=logs, sleep_fn=sleep_fn,
+                                           state=state):
             # The abort typed nothing (or provably undid itself) --
             # transient, retried next sweep, and it must NOT consume the
             # ln/llast budget (a refused attempt is not a nudge). It DOES

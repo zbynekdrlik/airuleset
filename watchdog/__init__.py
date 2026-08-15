@@ -151,7 +151,6 @@ no network.
 """
 
 import hashlib
-import json
 import os
 import re
 import time
@@ -2442,6 +2441,10 @@ from watchdog.janitor import (  # noqa: E402
     _janitor_watch_seen as _janitor_watch_seen,
     _janitor_mark_watch as _janitor_mark_watch,
     _janitor_clear_watch as _janitor_clear_watch,
+    _janitor_park_record as _janitor_park_record,
+    _janitor_park_seen as _janitor_park_seen,
+    _janitor_clear_park as _janitor_clear_park,
+    _janitor_prune_parks as _janitor_prune_parks,
     _janitor_recover as _janitor_recover,
     _pane_location as _pane_location,
 )
