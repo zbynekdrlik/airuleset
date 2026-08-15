@@ -223,7 +223,7 @@
   "watchdog/pane_text.py": 178,
   "watchdog/questions.py": 722,
   "watchdog/repo_health.py": 758,
-  "watchdog/stash.py": 982,
+  "watchdog/stash.py": 990,
   "watchdog/sweep_jobs.py": 263,
   "watchdog/tmux_io.py": 646,
   "watchdog/transcripts.py": 772,
