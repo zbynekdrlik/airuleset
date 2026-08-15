@@ -1,12 +1,14 @@
 {
   "files": {
-    "airuleset.py": 7799,
+    "airuleset.py": 6650,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 793,
+    "cli_bashrc_appliers.py": 330,
     "cli_binary_installers.py": 241,
     "cli_burn.py": 537,
     "cli_caveman_plugins.py": 589,
+    "cli_claude_scripts.py": 964,
     "cli_deployer_glue.py": 346,
     "cli_filedrop_watchdog.py": 451,
     "cli_quals.py": 830,
