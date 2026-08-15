@@ -442,14 +442,15 @@ class SessionLimitResumeAdoption(unittest.TestCase):
     """Site #6 — the job-6 session-limit resume `continue` (run_once bare
     `else`)."""
 
-    def _harness(self):
+    def _harness(self, **extra):
         from datetime import datetime
         from zoneinfo import ZoneInfo
         tz = ZoneInfo("Europe/Bratislava")
         now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()  # past 18:10 reset
-        seed = {"sesslimit:" + _RunOnceAdoptHarness.SID: {
-            "resets_at": now - 300, "pinged": True, "continued": False,
-            "first_seen": int(now - 3600), "last_seen": int(now - 60)}}
+        sess = {"resets_at": now - 300, "pinged": True, "continued": False,
+                "first_seen": int(now - 3600), "last_seen": int(now - 60)}
+        sess.update(extra)
+        seed = {"sesslimit:" + _RunOnceAdoptHarness.SID: sess}
         return _RunOnceAdoptHarness(
             self, [_assistant_row("pracujem…")], mtime_age=60,
             capture=SESSION_LIMIT_BANNER, seed_state=seed, now=now)
@@ -479,6 +480,29 @@ class SessionLimitResumeAdoption(unittest.TestCase):
         self.assertFalse(any("resetol" in b for b in sent),
                          "a swallowed resume must not send the delivered ping")
         self.assertTrue(any("submit-unverified" in ln for ln in logs), logs)
+
+    def test_swallow_bumps_streak_and_stamps_last_try(self):
+        # a swallow must feed the give-up streak AND stamp last_try so the
+        # SESSLIMIT_RETRY_S throttle applies next window (no 60s re-type spam).
+        h = self._harness()
+        logs, _sent, _keys, state, _rec = h.run(sv_result=False)
+        self.assertEqual(self._sess(state).get("swallow_fails"), 1)
+        self.assertEqual(self._sess(state).get("last_try"), h.now)
+
+    def test_persistent_swallow_eventually_gives_up(self):
+        # the #442-F2 regression the reviewers caught: a persistently swallowed
+        # `continue` never bumps `attempts`, so the give-up must fire off its own
+        # consecutive-swallow streak instead of being structurally unreachable.
+        h = self._harness(swallow_fails=wd.SESSLIMIT_MAX_TRIES)
+        logs, sent, keys, state, rec = h.run(sv_result=False)
+        self.assertTrue(self._sess(state).get("gave_up"),
+                        "give-up must fire on a persistently swallowed continue")
+        self.assertTrue(any("ručne" in b for b in sent),
+                        "expected the give-up Discord ping: %r" % sent)
+        self.assertEqual(len(rec.calls), 0,
+                         "give-up short-circuits before any further send")
+        self.assertFalse(
+            any("send-keys" in " ".join(a) and wd.NUDGE_TEXT in a for a in keys))
 
 
 class ReplyPointerAdoption(unittest.TestCase):

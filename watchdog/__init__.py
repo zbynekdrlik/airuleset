@@ -2286,12 +2286,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             "the limit hit; never auto-resuming" % project)
                         continue
                     attempts = s.get("attempts", 0)
-                    if attempts >= SESSLIMIT_MAX_TRIES:
+                    swallow_fails = s.get("swallow_fails", 0)
+                    # #497 batch-2 review — a PERSISTENTLY swallowed `continue`
+                    # (send_verified→False every window, input genuinely wedged)
+                    # never bumps `attempts`, so it must reach the give-up via its
+                    # OWN consecutive-swallow streak; otherwise the escalation is
+                    # STRUCTURALLY UNREACHABLE for the case the user most needs it
+                    # (the #442-F2 class — batch 1 of this ticket fixed the identical
+                    # shape for bounce/gkreq).
+                    if attempts >= SESSLIMIT_MAX_TRIES or swallow_fails >= SESSLIMIT_MAX_TRIES:
                         # Bounded — never retry forever. One give-up ping, then silence.
                         if not s.get("gave_up"):
                             s["gave_up"] = True
-                            logs.append("session-limit %s — gave up after %d attempts"
-                                        % (project, SESSLIMIT_MAX_TRIES))
+                            logs.append("session-limit %s — gave up (attempts=%d, "
+                                        "swallow-fails=%d)"
+                                        % (project, attempts, swallow_fails))
                             send_fn("❌ **%s** — limit sa mal resetnúť, ale session sa "
                                     "nepodarilo obnoviť ani po %d pokusoch — obnov ju "
                                     "prosím ručne." % (project, SESSLIMIT_MAX_TRIES),
@@ -2365,6 +2374,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                 s["attempts"] = attempts
                                 s["last_try"] = now
                                 s["continued"] = True
+                                s["swallow_fails"] = 0        # verified → the swallow episode ended
                                 logs.append("session-limit %s — reset passed → continue" % project)
                                 if attempts == 1:
                                     send_fn("✅ **%s** — 5h limit sa resetol, poslal som "
@@ -2373,8 +2383,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                             dedup_key="sesslimit-resume:%s:%s" % (key, ra),
                                             dry_run=dry_run)
                             else:
-                                logs.append("session-limit %s — continue submit-unverified, "
-                                            "retry next sweep" % project)
+                                # a swallowed `continue` is NOT a resume: never book
+                                # continued/attempts. Bump the consecutive-swallow
+                                # streak (feeds the give-up above) and stamp last_try
+                                # so the SESSLIMIT_RETRY_S throttle applies next window
+                                # (no 60s re-type spam on a wedged pane).
+                                s["swallow_fails"] = swallow_fails + 1
+                                s["last_try"] = now
+                                logs.append("session-limit %s — continue submit-unverified "
+                                            "(%d/%d), retry next window"
+                                            % (project, s["swallow_fails"], SESSLIMIT_MAX_TRIES))
                 continue                                # job 6 owns this session this poll
 
             # --- (1) STALLED ON AN API ERROR → auto-resume (ACTS: injects `continue`) -

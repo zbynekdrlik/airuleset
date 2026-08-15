@@ -461,10 +461,6 @@ class FetchChannelMessages(unittest.TestCase):
         self.assertEqual(wd.fetch_channel_messages("ch", ""), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class UpdateQuestion(unittest.TestCase):
     """notify.update_question — EDIT a recent ❓ ping in place (a reworded,
     still-unanswered question must converge the existing Discord card; edits
@@ -1843,3 +1839,7 @@ class DeliverDiscordRepliesFlagReact(unittest.TestCase):
             discord_fetch=lambda ch, t: [self._flagged_msg()],
             reaction_fetch=self._react_fetch([{"id": self.OWNER}]))
         self.assertEqual(self.react_calls, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
