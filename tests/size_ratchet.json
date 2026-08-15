@@ -1,6 +1,6 @@
 {
  "files": {
-  "airuleset.py": 8963,
+  "airuleset.py": 8973,
   "backlog_marker_gate.py": 90,
   "burn/__init__.py": 2339,
   "cli_autopilot_lock.py": 793,
@@ -24,7 +24,7 @@
   "statusbar.py": 647,
   "tests/_goal_arm_helpers.py": 190,
   "tests/_hook_state_cleanup.py": 42,
-  "tests/conftest.py": 110,
+  "tests/conftest.py": 129,
   "tests/test_airuleset.py": 14425,
   "tests/test_architecture_first_414.py": 120,
   "tests/test_ask_before_assuming.py": 46,
@@ -216,7 +216,7 @@
   "airuleset.py::_notify_run_card": 288,
   "airuleset.py::cmd_install": 409,
   "airuleset.py::cmd_notify": 318,
-  "airuleset.py::cmd_push": 356,
+  "airuleset.py::cmd_push": 366,
   "airuleset.py::main": 521,
   "cli_vault.py::cmd_secret": 300,
   "watchdog/__init__.py::deliver_discord_replies": 459,
