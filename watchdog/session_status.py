@@ -45,15 +45,10 @@ SCHEMA_VERSION = 1
 # hard-wired to this number.
 DEFAULT_STALE_AFTER_S = 300
 
-_NOTE = (
-    "airuleset session heartbeat (#486 G1). FRESHNESS = this file's mtime "
-    "(rewritten atomically every hook event); the reader treats mtime as the "
-    "heartbeat, `ts` is a debug convenience. marker = terminal ❓/⏳/✅ of the "
-    "last turn's final text. goal_armed: true/false only meaningful on a main "
-    "'stop' event; null = not applicable or undetermined. kind distinguishes a "
-    "main session from a dispatched subagent (which SHARES the parent's sid, so "
-    "it is keyed by agent_id to avoid clobbering the main file)."
-)
+# Short, per-#486-review (MINOR-5): a ~500-byte prose block in every file was
+# pure redundancy. This keeps only point (d) — staleness semantics in-file — and
+# points at the module for the rest.
+_NOTE = "airuleset session heartbeat (#486 G1); FRESHNESS = this file's mtime, not `ts`."
 
 # Reuse the single source of truth for /goal markers — never a re-implemented
 # parser that could drift from the rest of the supervision (#486). Guarded so a

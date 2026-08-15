@@ -6756,6 +6756,16 @@ def cmd_push(args):
         # `AIRULESET_AUTOPILOT_LOCK_DIR` exists for THIS subprocess.
         test_env["AIRULESET_AUTOPILOT_LOCK_DIR"] = str(
             Path(_lock_tmp) / "autopilot-lock")
+        # #486 G1: the session-heartbeat producer (watchdog/session_status.py),
+        # now invoked by the notify-discord-pending / notify-compact-subagent-
+        # boundary / session-start-fetch hooks, writes
+        # ~/.claude/session-status/<sid>.json via AIRULESET_SESSION_STATUS_DIR.
+        # Existing TestCase tests that spawn those hooks would otherwise litter
+        # the REAL home under `unittest discover` (which does not read
+        # conftest.py's own isolation fixture) — same single-place-that-knows
+        # rule as the two env-overrides above.
+        test_env["AIRULESET_SESSION_STATUS_DIR"] = str(
+            Path(_lock_tmp) / "session-status")
         test_result = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
             cwd=str(REPO_DIR), env=test_env,
