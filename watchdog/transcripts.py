@@ -80,16 +80,42 @@ def _entry_text(entry):
 
 def transcript_last_error(path):
     """Text of the session's last real assistant message IF Claude Code flagged it
-    as an API error (`isApiErrorMessage`), else ''. Trailing synthetic entries
-    ("No response requested.") are skipped; the first real assistant message that
-    is NOT an api-error means the session is fine (not stalled)."""
+    as an API error (`isApiErrorMessage`), else ''. The walk mirrors the discipline
+    of its sibling reader `transcript_text_toolcall_stall` (below) so a HISTORICAL
+    api-error that has SINCE recovered is NOT re-reported (issue #484): the jsonl is
+    append-only, so the error line stays forever, and any genuine activity AFTER it
+    proves the session / background worker recovered and is not currently stalled.
+    Before #484 this walk `continue`d past `user`/tool_result entries and treated a
+    pure `tool_use` assistant entry (empty text ∈ `_SENTINELS`) as synthetic, so a
+    resumed worker's live Bash poll loop was skipped and the scan walked all the way
+    back to the frozen error — making job 1b stuck-check ping the supervisor forever.
+
+      - `system` (hook / system noise) entries are skipped;
+      - a non-assistant (`user` / tool_result) entry means the conversation
+        PROGRESSED past the error → '' (not stalled);
+      - a real `tool_use` assistant entry (recovery activity) is checked BEFORE the
+        empty/sentinel skip, because a pure tool_use entry has empty text
+        (`"" in _SENTINELS`) and would otherwise be skipped and let the scan reach
+        the old error;
+      - the remaining synthetic entries ("No response requested." / truly empty) are
+        still skipped, so a GENUINE stall (the error is the last real turn, at most
+        followed by a system / synthetic entry) still reports it;
+      - the first real non-error assistant reply means the session is fine.
+    """
     for entry in reversed(_iter_jsonl_tail(path)):
-        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        if not isinstance(entry, dict):
             continue
+        t = entry.get("type")
+        if t == "system":
+            continue            # hook / system noise after the turn — skip
+        if t != "assistant":
+            return ""           # user / tool_result tail → progressed, not stalled
         if entry.get("isApiErrorMessage") is True:
             return _entry_text(entry) or "API Error"
+        if _entry_has_tool_use(entry):
+            return ""           # a real tool_use (recovery activity) → not stalled
         if (_entry_text(entry) or "").strip() in _SENTINELS:
-            continue            # synthetic — keep scanning back
+            continue            # synthetic / tool-only text — keep scanning back
         return ""               # a real normal reply → not stalled
     return ""
 

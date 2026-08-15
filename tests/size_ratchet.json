@@ -25,7 +25,7 @@
     "tests/_goal_arm_helpers.py": 190,
     "tests/_hook_state_cleanup.py": 42,
     "tests/conftest.py": 110,
-    "tests/test_airuleset.py": 14321,
+    "tests/test_airuleset.py": 14372,
     "tests/test_architecture_first_414.py": 120,
     "tests/test_ask_before_assuming.py": 46,
     "tests/test_ask_before_assuming_dropped_rows.py": 576,
@@ -201,7 +201,7 @@
     "watchdog/repo_health.py": 758,
     "watchdog/sweep_jobs.py": 263,
     "watchdog/tmux_io.py": 476,
-    "watchdog/transcripts.py": 467,
+    "watchdog/transcripts.py": 493,
     "watchdog/usage.py": 380
   },
   "functions": {
