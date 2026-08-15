@@ -80,16 +80,74 @@ def _entry_text(entry):
 
 def transcript_last_error(path):
     """Text of the session's last real assistant message IF Claude Code flagged it
-    as an API error (`isApiErrorMessage`), else ''. Trailing synthetic entries
-    ("No response requested.") are skipped; the first real assistant message that
-    is NOT an api-error means the session is fine (not stalled)."""
-    for entry in reversed(_iter_jsonl_tail(path)):
-        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+    as an API error (`isApiErrorMessage`), else ''. Reads the RIGHT signal — recency
+    of the error vs later GENUINE-PROGRESS activity — so a HISTORICAL api-error that
+    has SINCE recovered is NOT re-reported (issue #484): the jsonl is append-only, so
+    the error line stays forever, and genuine activity AFTER it proves the session /
+    background worker recovered and is not currently stalled. Before #484 this walk
+    `continue`d past `user`/tool_result entries and treated a pure `tool_use`
+    assistant entry (empty text ∈ `_SENTINELS`) as synthetic, so a resumed worker's
+    live Bash poll loop was skipped and the scan walked all the way back to the frozen
+    error — making job 1b stuck-check ping the supervisor forever.
+
+    What counts as GENUINE PROGRESS (recovery) — and, crucially, what does NOT:
+
+      - a `user` entry carrying a `tool_result` block → '' (not stalled): the harness
+        actually RAN a tool and fed its result back, which only happens on a live,
+        working session. A `user` entry with only PLAIN TEXT is NOT proof of recovery
+        and is SKIPPED (keep scanning back) — it may be a human/resume prompt the
+        session has not yet acted on, or, decisively, job 1's OWN injected `continue`
+        nudge, which lands as a bare-text `user` entry the moment CC ACCEPTS the submit
+        — before any response exists — so its presence never proves the following turn
+        succeeded (and a SWALLOWED submit writes nothing at all, which the skip handles
+        identically). Treating any
+        `user` tail as recovery (the round-A 🔴) re-broke this exact bug on the
+        MAIN-session path: `transcript_last_error('') → falsy` skips job 1's
+        `stalled.add(key)`, the end-of-sweep cleanup wipes the episode, and the #175
+        widening back-off resets to nudge #1 every time CC's own retry re-writes the
+        error line — endless pings relocated from job 1b to job 1.
+      - a real `tool_use` assistant entry (recovery activity) is checked BEFORE the
+        empty/sentinel skip, because a pure tool_use entry has empty text
+        (`"" in _SENTINELS`) and would otherwise be skipped and let the scan reach
+        the old error;
+      - EVERY OTHER non-assistant entry — `system` hook noise AND Claude Code's
+        non-conversational bookkeeping types (`queue-operation`, `ai-title`,
+        `file-history-snapshot`/`-delta`, `mode`, `permission-mode`, `pr-link`, …)
+        — is SKIPPED, exactly as the pre-#484 code did. Returning '' on those would
+        MISS a genuine api-error stall that merely has a bookkeeping line appended
+        after it (round-1 review MAJOR) — a silent, non-self-healing false negative
+        in the higher-stakes auto-RESUME path (job 1), so the old robustness is kept.
+        (The sibling reader `transcript_text_toolcall_stall` still carries the older
+        broad `non-assistant → not-stalled` rule; it is left untouched under the repo
+        FREEZE — its miss is a benign skipped nudge, not an un-resumed session.);
+      - the remaining synthetic assistant entries ("No response requested." / truly
+        empty) are still skipped, so a GENUINE stall (the error is the last real
+        turn, at most followed by system / bookkeeping / synthetic entries) still
+        reports it;
+      - the first real non-error assistant reply means the session is fine.
+
+    Scans the SAME 200-line tail window as the sibling `transcript_text_toolcall_stall`
+    (round-B 🔵): the bookkeeping-skip robustness above is only bounded by how far back
+    the scan can see, so a genuine stall buried under a trailing burst of hook / system
+    / bookkeeping writes must be reachable — the default 60-line window let >60 such
+    trailing entries push the error out of view, silently under-reporting a real stall.
+    """
+    for entry in reversed(_iter_jsonl_tail(path, max_lines=200)):
+        if not isinstance(entry, dict):
             continue
+        t = entry.get("type")
+        if t == "user":
+            if _entry_has_tool_result(entry):
+                return ""       # tool_result → the harness ran a tool → session alive
+            continue            # plain-text user (resume prompt / job 1's own `continue` nudge, maybe unconsumed) → keep scanning
+        if t != "assistant":
+            continue            # system + non-conversational bookkeeping — skip, keep scanning back
         if entry.get("isApiErrorMessage") is True:
             return _entry_text(entry) or "API Error"
+        if _entry_has_tool_use(entry):
+            return ""           # a real tool_use (recovery activity) → not stalled
         if (_entry_text(entry) or "").strip() in _SENTINELS:
-            continue            # synthetic — keep scanning back
+            continue            # synthetic / tool-only text — keep scanning back
         return ""               # a real normal reply → not stalled
     return ""
 
@@ -349,6 +407,24 @@ def _entry_has_tool_use(entry):
     c = msg.get("content")
     if isinstance(c, list):
         return any(isinstance(x, dict) and x.get("type") == "tool_use" for x in c)
+    return False
+
+
+def _entry_has_tool_result(entry):
+    """True if a `user` transcript entry carries a `tool_result` content block — i.e.
+    the harness actually RAN a tool and fed its result back, which only happens on a
+    live, working session. This is the ONE user-side proof of genuine progress that
+    `transcript_last_error` trusts (#484 round-A): a PLAIN-TEXT `user` entry (a human /
+    resume prompt not yet acted on, or job 1's OWN injected `continue` nudge — which
+    lands the moment CC accepts the submit, before any response exists, so it never
+    proves the following turn succeeded) is NOT proof of recovery and must not be read
+    as such."""
+    msg = entry.get("message") if isinstance(entry, dict) else None
+    if not isinstance(msg, dict):
+        return False
+    c = msg.get("content")
+    if isinstance(c, list):
+        return any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c)
     return False
 
 

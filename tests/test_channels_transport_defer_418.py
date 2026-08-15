@@ -31,7 +31,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 INTERNALS = REPO / ".claude" / "rules" / "internals-notify.md"  # #482: #418 decision moved here
 NOTIFY = REPO / "notify" / "__init__.py"
-WATCHDOG = REPO / "watchdog" / "__init__.py"
+# #433 step 6 relocated the job-7 reply parser (parse_discord_reply) OUT of
+# watchdog/__init__.py into watchdog/discord_api.py (re-exported into the
+# package via the facade). The machinery is KEPT, only moved — track it to its
+# new home so this #418 "still-kept" lock stays honest instead of failing on
+# the move.
+WATCHDOG_DISCORD_API = REPO / "watchdog" / "discord_api.py"
 
 # Distinctive substrings of the #418 decision bullet — sampled from its head,
 # the decisive reason, the KEEP verdict, and the re-audit trigger, so the whole
@@ -87,7 +92,7 @@ class TestKeptTransportStillExists(unittest.TestCase):
         )
 
     def test_job7_reply_parser_kept(self):
-        text = WATCHDOG.read_text(encoding="utf-8")
+        text = WATCHDOG_DISCORD_API.read_text(encoding="utf-8")
         self.assertIn(
             "def parse_discord_reply", text,
             "watchdog job-7 reply routing (`parse_discord_reply`) the #418 "

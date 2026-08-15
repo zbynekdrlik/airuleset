@@ -411,9 +411,22 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
             # tell which project (and which stream box) this bounce-backlog
             # ping is about.
             from notify import stream_qualified
-            send_fn(body, dedup_key="bounce:%s:%s" % (name, tick_str),
-                    dry_run=dry_run, project=stream_qualified(name))
-            logs.append("bounce-ping %s %s" % (name, tick_str))
+            # #360 — the dedup key must be fresh per DECISION INSTANT, not per
+            # content. The old `bounce:%s:%s % (name, tick_str)` embedded only
+            # the ticket-set text, so notify's OWN independent 14-day marker TTL
+            # (`notify._DEDUP_TTL_S`) silently swallowed every 6h re-ping of an
+            # unchanged set (the `same and fresh` window above never actually
+            # reached Discord past the first send). This function's own `same
+            # and fresh` renudge window is now the SOLE authority on whether a
+            # send is due, so the key only needs to be unique per decision —
+            # `int(now)` is unique across any two real decisions (sweeps are
+            # >= BOUNCE_INTERVAL apart, re-pings >= BOUNCE_RENUDGE_SECONDS apart)
+            # and stays short regardless of backlog size. Exactly the shape
+            # gk_request_backstop already uses (#353, see its identical fix +
+            # rationale above at the `gkreq:%s:%d` send).
+            result = send_fn(body, dedup_key="bounce:%s:%d" % (name, int(now)),
+                             dry_run=dry_run, project=stream_qualified(name))
+            logs.append("bounce-ping %s %s (send=%r)" % (name, tick_str, result))
     return logs
 
 

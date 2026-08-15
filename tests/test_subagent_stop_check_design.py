@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -55,11 +56,17 @@ class _GateBase(TestCase):
         _git(self.repo, "init", "-q", "-b", "main")
         _git(self.repo, "remote", "add", "origin",
              "https://github.com/zbynekdrlik/airuleset.git")
-        self.sid = "designstop-%d" % os.getpid()
-        self.addCleanup(lambda: [
-            os.remove(f) for f in
-            Path("/tmp").glob("airuleset-designgate-designstop-*")
-            if os.path.exists(f)])
+        # #485 -- a GLOBALLY-UNIQUE SID (never a recyclable pid), so a state
+        # file left by a KILLED prior run can never collide with a fresh
+        # run's and suppress its first block. The hook hardcodes /tmp and
+        # keys ONLY on SID (its real prod SIDs are session UUIDs, correct as
+        # is), so the isolation lives entirely in the SID's uniqueness plus
+        # a PRECISE per-file cleanup -- never a glob, which on this
+        # many-workers-per-box machine could delete a CONCURRENT process's
+        # live state file.
+        self.sid = "designstop-" + uuid.uuid4().hex
+        self._state_file = Path("/tmp") / ("airuleset-designgate-" + self.sid)
+        self.addCleanup(self._state_file.unlink, missing_ok=True)
 
     def mark(self, issue, repo="airuleset", kind="design"):
         os.environ["HOME"] = str(self.home)
@@ -277,6 +284,31 @@ class TestGateStaysOutOfTheWay(_GateBase):
         r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env)
         self.assertFalse(self.blocked(r))
+
+
+class TestCrossRunStatePollutionIsIsolated(_GateBase):
+    """#485 -- the hook keys its `/tmp/airuleset-designgate-<SID>` dedup
+    state only on SID. A run KILLED after the hook wrote its state (so its
+    tearDown never ran) leaves that file behind; when the OS later recycles
+    its pid for a fresh run, a PID-based SID would re-derive the SAME name
+    and read the leftover, so the fresh run's FIRST gate call for an issue
+    already listed there wrongly does NOT block -- the cross-run flake this
+    whole suite shares (every `_GateBase` test uses the one per-session
+    state file). The guarantee: a fresh run's SID must NOT collide with any
+    prior run's, so a stale file at the OLD predictable pid-keyed name can
+    never suppress a block. Deterministic -- no timing, no retry."""
+
+    def test_a_stale_pid_keyed_state_file_does_not_suppress_the_first_block(self):
+        # A leftover from a "prior killed run" at the OLD predictable
+        # pid-keyed name, already listing airuleset#41 as seen.
+        pid_keyed = Path("/tmp") / (
+            "airuleset-designgate-designstop-%d" % os.getpid())
+        self.addCleanup(pid_keyed.unlink, missing_ok=True)
+        pid_keyed.write_text("airuleset#41")
+        # This run must still block for #41 -- it only does once this test's
+        # SID no longer collides with that predictable pid-keyed name.
+        r = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(r), (r.returncode, r.stdout, r.stderr))
 
 
 if __name__ == "__main__":
