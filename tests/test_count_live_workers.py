@@ -54,6 +54,13 @@ def _tool_result_user():
                                                 "content": "ok"}]}})
 
 
+def _textcall_stall():
+    # an assistant turn whose text ENDS with a complete tool-call block the
+    # harness never ran — the silent text-emitted-tool-call death mode (job 4a).
+    return _assistant('<invoke name="Bash">'
+                      '<parameter name="command">ls</parameter></invoke>')
+
+
 def _subagents_dir(root, cwd, sid):
     return Path(root) / encode_project_dir(cwd) / sid / "subagents"
 
@@ -188,6 +195,31 @@ class TestApiErrorGuard(unittest.TestCase):
             self.assertEqual(n, 1)
             self.assertEqual(_states(ev), ["live", "wedged"])
 
+    def test_a_text_toolcall_stalled_worker_is_wedged_not_live(self):
+        # the SECOND silent-death mode: a tool-call emitted as TEXT (job 4a). Same
+        # dangerous direction as api-error — over-counting it live suppresses the
+        # nudge — so it must be excluded from the live count too.
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _write_worker(root, CWD, SID, "stalled", [_textcall_stall()], age_s=4)
+            n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
+            self.assertEqual(n, 0)
+            self.assertEqual(_states(ev), ["wedged"])
+            self.assertIn("text-toolcall", _by_id(ev, "stalled").detail)
+
+    def test_a_finished_worker_ending_in_a_normal_reply_still_counts_live(self):
+        # the honest residual: a cleanly-finished worker (last turn a normal
+        # assistant reply, no error, no text-stall) briefly counts live until its
+        # mtime ages out — CORRECT (the box just finished, it is not stuck).
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _write_worker(root, CWD, SID, "done",
+                          [_tool_result_user(), _assistant("issues: #1 done")],
+                          age_s=8)
+            n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
+            self.assertEqual(n, 1)
+            self.assertEqual(_states(ev), ["live"])
+
 
 class TestCrossSessionAttribution(unittest.TestCase):
     """Workers are keyed by (cwd, session_id) — a sibling session's workers in
@@ -277,6 +309,41 @@ class TestCorruptTolerance(unittest.TestCase):
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
             self.assertEqual(n, 1)
             self.assertEqual(_states(ev), ["live"])
+
+    def test_a_per_file_stat_error_is_an_unreadable_lane_and_warns(self):
+        # a *.jsonl broken symlink is yielded by rglob but stat() raises → the lane
+        # is state="unreadable" (NOT counted) and on_warn fires. Locks the contract
+        # so a mutant dropping the unreadable append OR the warn call is caught.
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            d = _subagents_dir(root, CWD, SID)
+            d.mkdir(parents=True)
+            _write_worker(root, CWD, SID, "real", [_assistant("w")], age_s=2)
+            os.symlink("/nonexistent/target", d / "agent-broken.jsonl")
+            warns = []
+            n, ev = count_live_workers(root, CWD, SID, NOW, FRESH,
+                                       on_warn=warns.append)
+            self.assertEqual(n, 1)  # the real worker still counts
+            self.assertEqual(_by_id(ev, "broken").state, "unreadable")
+            self.assertTrue(warns, "a stat error must fire on_warn")
+            self.assertIn("broken", warns[0])
+
+    def test_is_dir_permission_error_is_safe_and_never_raises(self):
+        # is_dir() propagates EACCES (unlike ENOENT). A search-permission failure on
+        # a parent must return 0 + warn, never crash the sweep the reader guards.
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            sid_dir = Path(root) / encode_project_dir(CWD) / SID
+            (sid_dir / "subagents").mkdir(parents=True)
+            os.chmod(sid_dir, 0o000)
+            try:
+                warns = []
+                n, ev = count_live_workers(root, CWD, SID, NOW, FRESH,
+                                           on_warn=warns.append)
+                self.assertEqual((n, ev), (0, []))       # safe direction, no crash
+                self.assertTrue(warns, "an EACCES must fire on_warn")
+            finally:
+                os.chmod(sid_dir, 0o755)  # let TemporaryDirectory clean up
 
     def test_a_dir_named_like_a_jsonl_never_crashes_the_sweep(self):
         # rglob("*.jsonl") can match a directory named "...jsonl"; a stat/open of it

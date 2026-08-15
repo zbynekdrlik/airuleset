@@ -487,17 +487,24 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
     project, or another project entirely, never leaks in. Cross-session attribution
     is solved by the directory structure, not guessed.
 
-    #484 guard — the DANGEROUS error direction is over-counting a DEAD worker as
+    Wedged guard — the DANGEROUS error direction is over-counting a DEAD worker as
     live, because the consumer's predicate is `workers==0 → the box is stuck →
     nudge`: counting a wedged worker would SUPPRESS the recovery nudge (the exact
-    #486 failure). So a fresh transcript whose last real turn is an unrecovered
-    api-error is classified `wedged` and NOT counted — via the canonical
-    `transcript_last_error`, which already carries the #484 recovery nuance (an
-    api-error FOLLOWED by genuine progress reads as recovered → '' → live again),
-    so no parser is duplicated (drift is exactly what #486 forbids). A cleanly
-    finished worker is left to age out of the window naturally (its mtime freezes
-    at the final report); briefly counting a just-finished lane is CORRECT — the
-    box just finished a ticket, it is not stuck — and self-heals.
+    #486 failure). So a fresh transcript whose last real turn is either documented
+    silent-death mode is classified `wedged` and NOT counted, via the canonical
+    sibling detectors (no parser duplicated — drift is exactly what #486 forbids):
+    (1) an unrecovered api-error (`transcript_last_error`, which carries the #484
+    recovery nuance — an api-error FOLLOWED by genuine progress reads as recovered
+    → '' → live again); (2) a tool-call the model emitted as TEXT and then died on
+    (`transcript_text_toolcall_stall`, job 4a's own high-precision detector — it
+    only fires when the last real turn ENDS with tool-call markup, never on a mere
+    mention). Both are the SAME dangerous direction, so a liveness count excludes
+    both. RESIDUAL, honestly stated: a cleanly-FINISHED worker (its last turn a
+    normal `assistant end_turn` report with no error and no text-stall) is left to
+    age out of the window naturally — its mtime freezes at the final report — so it
+    briefly counts live for up to `freshness_s` after finishing. That is CORRECT,
+    not a bug: a box that just finished a ticket is active, not stuck, and it
+    self-heals once the mtime ages past the window.
 
     Fail toward a SAFE count, loudly, never crashing a sweep (mirrors G1's reader
     direction). Never raises:
@@ -518,6 +525,15 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
     window. Today's lane-occupancy consumer uses 15 min precisely so a live worker
     in a long foreground CI-wait — which writes nothing to its transcript for up to
     ~9 min — is not misread as dead.
+
+    Cost: the stat pass is O(TOTAL subagent files under the session), not O(live
+    lanes) — a supervisor's `subagents/` dir accumulates every historical worker
+    (nothing here prunes it). Measured on the real box: ~1010 files → 11 ms warm,
+    with the per-file content scan (the two death-mode detectors) bounded to the
+    ~10 FRESH candidates. Acceptable for a 60 s sweep; the linear stat growth is a
+    noted residual (a session with tens of thousands of historical workers would
+    see a proportionally larger stat pass) — the same property the predecessor
+    `_count_live_subagents` already has, out of scope to optimize here.
     """
     warn = on_warn or _warn_stderr
     try:
@@ -526,9 +542,14 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
     except Exception as e:
         warn("bad session key (%s / %s): %s" % (cwd, session_id, e))
         return 0, []
-    if not d.is_dir():
-        return 0, []
     try:
+        # is_dir() swallows ENOENT/ENOTDIR (absent dir -> False, the normal
+        # no-workers case, no warn) but PROPAGATES EACCES; guard it in the same
+        # try as rglob so a search-permission failure on any parent warns and
+        # returns 0 (safe direction) instead of crashing the sweep -- the
+        # predecessor `_count_live_subagents` wraps its whole body identically.
+        if not d.is_dir():
+            return 0, []
         candidates = sorted(d.rglob("*.jsonl"))
     except OSError as e:
         warn("subagents dir unreadable (%s): %s" % (d, e))
@@ -550,13 +571,21 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
         if age > freshness_s:
             evidence.append(WorkerLane(agent_id, "stale", age, None, ""))
             continue
-        # fresh candidate: the #484 guard + meta enrichment run ONLY here, so the
-        # per-file content scan is bounded to the handful of live lanes.
+        # fresh candidate: the wedged guard + meta enrichment run ONLY here, so the
+        # per-file content scan is bounded to the handful of live lanes. BOTH
+        # documented silent-death modes are excluded, via their canonical sibling
+        # detectors (no parser duplicated): (1) an unrecovered api-error
+        # (`transcript_last_error`, #484-recovery-aware); (2) a tool-call the model
+        # emitted as TEXT and then died on (`transcript_text_toolcall_stall`, job
+        # 4a's own high-precision detector). Both are the SAME dangerous direction
+        # for the predicate -- a stuck worker counted live suppresses the recovery
+        # nudge -- so a liveness COUNT must exclude both, not just the api-error one.
         atype = _worker_agent_type(p)
-        err = transcript_last_error(p)
-        if err:
-            evidence.append(WorkerLane(agent_id, "wedged", age, atype,
-                                       (err or "")[:80]))
+        wedged = transcript_last_error(p)
+        if not wedged and transcript_text_toolcall_stall(p):
+            wedged = "text-toolcall stall"
+        if wedged:
+            evidence.append(WorkerLane(agent_id, "wedged", age, atype, wedged[:80]))
             continue
         count += 1
         evidence.append(WorkerLane(agent_id, "live", age, atype, ""))
