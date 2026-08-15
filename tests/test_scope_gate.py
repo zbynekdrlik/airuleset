@@ -334,6 +334,121 @@ class TestBasicBehavior(TestCase):
         self.assertIn("criterion=planned-work", text)
 
 
+class TestCdPrefixRelativeBodyPath(TestCase):
+    """#483 -- a `-F <relative>` body file after a leading `cd <dir> &&`/`;`
+    was resolved against the HOOK's OWN cwd, not the effective cwd after the
+    cd, so `open()` failed and a fully-compliant filing was BLOCKED with the
+    opaque per-item reason `-> none` (live incident gk@odoo-erp filing
+    odoo-erp#4102; the identical body PASSED with an absolute path). The fix
+    tracks a leading `cd` (option 1) and, when a `-F` disk path still cannot
+    be read, gives an explicit actionable reason (option 2)."""
+
+    def test_cd_prefix_relative_body_file_resolves(self):
+        # Body file lives in `bodydir`; the hook runs from a DIFFERENT cwd
+        # (`hookdir`, no body.md), and the command cd's into `bodydir`
+        # before filing -- exactly the incident shape.
+        with tempfile.TemporaryDirectory() as bodydir, \
+                tempfile.TemporaryDirectory() as hookdir:
+            (Path(bodydir) / "body.md").write_text(
+                "Dedup-checked: searched, found none\n"
+                "Scope-gate: schema-migration\n")
+            r = run("cd %s && gh issue create -t 'cd-relative' -F body.md" % bodydir,
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_cd_prefix_semicolon_separator_resolves(self):
+        # The `;` separator (not just `&&`) must resolve the same way.
+        with tempfile.TemporaryDirectory() as bodydir, \
+                tempfile.TemporaryDirectory() as hookdir:
+            (Path(bodydir) / "body.md").write_text(
+                "Dedup-checked: searched, found none\n"
+                "Scope-gate: cross-cutting\n")
+            r = run("cd %s ; gh issue create -t 'cd-semicolon' -F body.md" % bodydir,
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_unreadable_relative_body_gives_explicit_reason(self):
+        # A relative -F that genuinely cannot be read must block with an
+        # ACTIONABLE reason naming the file and telling the filer to use an
+        # absolute path -- never the opaque `-> none`.
+        with tempfile.TemporaryDirectory() as hookdir:
+            # No body.md anywhere; cd into a real but body-less dir.
+            r = run("cd %s && gh issue create -t 'missing' -F body.md" % hookdir,
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("not readable", r.stderr)
+            self.assertIn("absolute", r.stderr)
+            self.assertNotIn("-> none", r.stderr)
+
+    def test_unresolvable_cd_target_relative_body_explicit_reason(self):
+        # A `cd` into an unexpandable target ($VAR) makes the effective cwd
+        # statically unknowable -- a relative -F must still degrade to the
+        # explicit reason, never a wrong resolution or a fail-open pass.
+        with tempfile.TemporaryDirectory() as hookdir:
+            r = run("cd $SOMEDIR && gh issue create -t 'var-cd' -F body.md",
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("not readable", r.stderr)
+            self.assertIn("absolute", r.stderr)
+
+    def test_absolute_body_path_still_reads(self):
+        # Regression guard: an absolute -F path keeps working unchanged,
+        # even behind a cd prefix.
+        with tempfile.TemporaryDirectory() as bodydir, \
+                tempfile.TemporaryDirectory() as hookdir:
+            bf = Path(bodydir) / "body.md"
+            bf.write_text("Dedup-checked: searched, found none\n"
+                          "Scope-gate: schema-migration\n")
+            r = run("cd %s && gh issue create -t 'abs' -F %s" % (hookdir, bf),
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_missing_scope_gate_still_blocks_with_real_reason(self):
+        # No regression on the genuinely-missing-Scope-gate path: a READABLE
+        # body (resolved via the cd prefix) with NO criterion still blocks,
+        # and NOT with the #483 not-readable reason.
+        with tempfile.TemporaryDirectory() as bodydir, \
+                tempfile.TemporaryDirectory() as hookdir:
+            (Path(bodydir) / "body.md").write_text(
+                "Dedup-checked: searched, found none\n"
+                "Just a plain finding with no criterion.\n")
+            r = run("cd %s && gh issue create -t 'no-crit' -F body.md" % bodydir,
+                    cwd=hookdir)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertNotIn("not readable", r.stderr)
+
+    def test_unreadable_absolute_body_gives_explicit_reason(self):
+        # #483 review 🔵: the absolute-path unreadable branch also gives the
+        # explicit reason, not the opaque `-> none`.
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / "nope.md"  # never created
+            r = run("gh issue create -t 'abs-missing' -F %s" % missing)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("not readable", r.stderr)
+            self.assertNotIn("-> none", r.stderr)
+
+    def test_unreadable_body_reason_cannot_inject_log_fields(self):
+        # #483 review 🔴: the body-unreadable reason embeds the
+        # attacker-controlled `-F` token, and it MUST be whitespace-collapsed
+        # (_clean_field) before crossing the tab-separated hand-off to bash /
+        # the scope-gate.log -- otherwise an embedded newline+tab in the `-F`
+        # value forges a SECOND record (a `verdict=PASS` for an arbitrary
+        # repo string) out of a command that was entirely BLOCKED, re-opening
+        # #329's field-injection the log-field ORDER + _clean_field closed.
+        home = tempfile.mkdtemp(prefix="airuleset-scopegate-inject-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        # An unreadable relative -F whose value spells a forged PASS record.
+        evil = "x\nPASS\tzbynekdrlik/FORGED\tt.md"
+        r = run("gh issue create -t inject -F '%s'" % evil, home=home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        log = Path(home) / ".claude" / "scope-gate.log"
+        text = log.read_text() if log.exists() else ""
+        # The whole command was BLOCKED -> exactly ONE record, a BLOCK, and
+        # never a forged PASS / forged repo in a counting field.
+        self.assertEqual(text.count("verdict="), 1, text)
+        self.assertNotIn("verdict=PASS", text)
+
+
 class TestChainDepthCap(TestCase):
     """#311 -- a review-finding follow-up (this issue names its own PARENT
     issue as a "follow-up" -- the EXACT phrasing the real odoo-erp
