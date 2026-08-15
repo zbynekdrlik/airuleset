@@ -93,5 +93,103 @@ class GkParkReclaimedAgeUnbounded(unittest.TestCase):
         self.assertTrue(any("would attempt pop" in ln for ln in logs), logs)
 
 
+class HumanDraftNeverReclaimed(unittest.TestCase):
+    """The ticket's hard requirement: a draft with NO durable park record of
+    ours (a human's own stash, or any pane we never left a park on) is never
+    reclaimed via the age-unbounded path."""
+
+    def test_no_record_and_expired_mark_refuses(self):
+        # A human parked their own draft (occupied + box bare); no park
+        # record of ours, and the generic mark is stale/absent -> refused.
+        for state in ({"janitor_watch": {PID: NOW - 25 * 3600}}, {}):
+            logs, _rec, run = _recover(state)
+            self.assertEqual(logs, [], state)
+            # never sent a keystroke, never even resolved a location
+            self.assertFalse(any(a[1] == "send-keys" for a in run.state["sent"]))
+
+    def test_park_record_does_not_bypass_the_foreign_occupant_gate(self):
+        # Even WITH a park record + a fresh mark, an occupied slot whose
+        # visible box holds FOREIGN content (not our recognizable stuck
+        # shape) is refused -- the record makes provenance age-unbounded, it
+        # never bypasses the destructive clear-and-pop content-shape gate.
+        foreign = GK_STASHED_BARE.replace("❯ ", "❯ moja vlastna rozpisana sprava")
+        state = {"stash_parks": {PID: NOW - 40 * 3600},
+                 "janitor_watch": {PID: NOW - 60}}
+        logs, _rec, run = _recover(state, captured=foreign)
+        self.assertEqual(logs, [])
+        self.assertFalse(any(a[1] == "send-keys" for a in run.state["sent"]))
+
+    def test_park_record_does_not_enable_the_no_stash_clear_action(self):
+        # A box directly holding our own stuck content but NO stash slot
+        # (the job-14 `/compact` clear shape) still requires the 6h generic
+        # mark -- a park record (marker-gone -> stale, cleared) must not
+        # license the destructive box-clear on its own.
+        own_no_stash = "● Hotovo.\n❯ /goal STOP keď je CI zelené\n  ctx ███░\n"
+        state = {"stash_parks": {PID: NOW - 40 * 3600}}   # no generic mark
+        logs, _rec, run = _recover(state, captured=own_no_stash, dry_run=False)
+        self.assertEqual(logs, [])
+        self.assertNotIn(PID, state.get("stash_parks", {}))   # backstop cleared it
+        self.assertFalse(any(a[1] == "send-keys" for a in run.state["sent"]))
+
+
+class MarkerGoneBackstop(unittest.TestCase):
+    """A recorded park whose slot is no longer occupied is stale -> cleared,
+    so an age-unbounded record can never license action on a LATER human
+    stash that merely reuses the same pane."""
+
+    def test_record_cleared_when_slot_no_longer_occupied(self):
+        bare_no_stash = "● Hotovo.\n❯ \n  ctx ███░  ◎ /goal active\n"
+        state = {"stash_parks": {PID: NOW - 40 * 3600}}
+        logs, _rec, _run = _recover(state, captured=bare_no_stash, dry_run=False)
+        self.assertEqual(logs, [])
+        self.assertNotIn(PID, state.get("stash_parks", {}))
+
+    def test_backstop_does_not_mutate_state_on_dry_run(self):
+        bare_no_stash = "● Hotovo.\n❯ \n  ctx ███░  ◎ /goal active\n"
+        state = {"stash_parks": {PID: NOW - 40 * 3600}}
+        _recover(state, captured=bare_no_stash, dry_run=True)
+        self.assertIn(PID, state.get("stash_parks", {}))   # dry run touches nothing
+
+
+class ReclaimClearsTheRecord(unittest.TestCase):
+    def test_successful_pop_recovers_and_clears_the_park_record(self):
+        after_pop = "● Hotovo.\n❯ obnoveny parkovany draft\n  ctx ███░\n"
+        run = _mkrun(after_pop=after_pop)
+        state = {"stash_parks": {PID: NOW - 40 * 3600}}
+        logs, rec, _ = _recover(state, dry_run=False, run=run)
+        self.assertTrue(any("RECOVERED (janitor)" in ln for ln in logs), logs)
+        self.assertNotIn(PID, state.get("stash_parks", {}))
+        self.assertTrue(any("C-s" in a for a in run.state["sent"]))
+        self.assertIs(rec.get("janitor_pinged"), False)
+
+
+class ParkRecordHelpers(unittest.TestCase):
+    def test_record_seen_clear_roundtrip(self):
+        state = {}
+        self.assertFalse(wd._janitor_park_seen(state, PID))
+        wd._janitor_park_record(state, PID, 123.0)
+        self.assertEqual(state["stash_parks"][PID], 123.0)
+        self.assertTrue(wd._janitor_park_seen(state, PID))
+        wd._janitor_clear_park(state, PID)
+        self.assertFalse(wd._janitor_park_seen(state, PID))
+
+    def test_seen_is_age_unbounded(self):
+        # ANY age reads as seen -- the whole point vs the 6h generic mark.
+        state = {"stash_parks": {PID: NOW - 999 * 24 * 3600}}
+        self.assertTrue(wd._janitor_park_seen(state, PID))
+
+    def test_seen_type_checked_like_the_generic_mark(self):
+        for bad in (True, False, "x", None, [1]):
+            self.assertFalse(wd._janitor_park_seen({"stash_parks": {PID: bad}}, PID))
+
+    def test_helpers_are_none_state_safe(self):
+        # No crash, no state created -- mirrors _janitor_mark_watch/_clear_watch.
+        wd._janitor_park_record(None, PID, NOW)
+        wd._janitor_clear_park(None, PID)
+        self.assertFalse(wd._janitor_park_seen(None, PID))
+        # clear on a missing key is a no-op, not a KeyError
+        wd._janitor_clear_park({}, PID)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1262,8 +1262,24 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertNotIn("llast", rec)
         self.assertEqual(rec.get("lna"), 1)
         self.assertIn("111", state.get("janitor_watch", {}))
+        # #488: a lane-nudge stash abort ALSO records a durable park so the
+        # shared janitor can reclaim it after ANY delay (not just 6h).
+        self.assertIn("111", state.get("stash_parks", {}))
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs),
                          logs)
+
+    def test_lane_stash_success_clears_the_durable_park_record(self):
+        # #488: a verified lane-nudge success -> CC owns the async restore, so
+        # any prior durable park record for this pane is dropped.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        state = {"stash_parks": {"111": 1.0}}
+        with m.patch.object(wd, "deliver_with_stash", return_value=True):
+            logs, owns, tmux = self._call(GOAL_ARMED_DRAFT_CAP,
+                                          lambda cwd: 5, now, tmtime,
+                                          state=state)
+        self.assertTrue(owns)
+        self.assertNotIn("111", state.get("stash_parks", {}))
 
     def test_consecutive_stash_aborts_reach_the_give_up_ping(self):
         # #442-review F2: without a bound, a permanently-aborting lane

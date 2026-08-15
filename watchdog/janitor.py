@@ -164,6 +164,50 @@ def _janitor_clear_watch(state, pid):
     state.get("janitor_watch", {}).pop(pid, None)
 
 
+def _janitor_park_record(state, pid, now):
+    """#488 — the WRITE side of the DURABLE, park-specific provenance record.
+    Called by a stash-delivery caller when `deliver_with_stash` returned
+    False (an abort that may have left a park in the single slot) — records
+    `state['stash_parks'][pid] = now` in the SAME already-persisted watchdog
+    `state` (`~/.claude/api-watchdog-state.json`, `save_state`), so the fact
+    survives a restart/deploy AND, unlike `_janitor_watch_seen`'s 6h mark,
+    does NOT expire: a genuinely-ours park can sit unresolved for far longer
+    than 6h (the gk goal ran `(1d)`, the exact live gap this fixes). `now`
+    is stored for observability only — the reclaim gate is age-UNBOUNDED,
+    never a timeout band-aid. A no-op when `state` is `None`, mirroring
+    `_janitor_mark_watch`."""
+    if state is None:
+        return
+    state.setdefault("stash_parks", {})[pid] = now
+
+
+def _janitor_park_seen(state, pid):
+    """#488 — the READ side: True when a durable park record proves WE left
+    a stash park outstanding for THIS pane, regardless of age (that is the
+    whole point — a genuinely-ours park is reclaimable after any delay). A
+    human's own parked draft is never given a record, so this is the signal
+    that keeps the age-unbounded reclaim from ever acting on one. Type-
+    checked like `_janitor_watch_seen` so a corrupt state entry never reads
+    as provenance; no age bound (deliberately — see `_janitor_park_record`)."""
+    ts = (state or {}).get("stash_parks", {}).get(pid)
+    return isinstance(ts, (int, float)) and not isinstance(ts, bool)
+
+
+def _janitor_clear_park(state, pid):
+    """#488 — the RELEASE side. Cleared on (a) a verified-successful stash
+    delivery (Claude Code owns the async auto-restore then; the janitor must
+    not interfere — same shape as `_janitor_clear_watch` on success), (b) a
+    successful janitor reclaim, and (c) the marker-gone backstop in
+    `_janitor_recover` (a recorded park whose slot is no longer occupied has
+    been resolved by CC / us / a human, so the record is stale). This is
+    what safely bounds an age-unbounded record WITHOUT a timeout: it survives
+    only while OUR park is still visibly present. A no-op when `state` is
+    `None`, mirroring `_janitor_clear_watch`."""
+    if state is None:
+        return
+    state.get("stash_parks", {}).pop(pid, None)
+
+
 def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
                           dry_run, sleep_fn, state=None, now=None):
     """#372 — the shared, generic per-pane janitor recovery driver, relocated
@@ -208,11 +252,35 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     silent, indefinite retry-forever (criterion 1c)."""
     logs = []
     now = now if now is not None else time.time()
-    if not _janitor_watch_seen(state, pid, now):
-        return logs         # no watchdog job is known to have touched this
-                            # pane recently -- never act on content alone
     itext = watchdog._input_line_text(captured)
     occupied = watchdog.STASH_MARKER in (captured or "")
+
+    # #488 -- the DURABLE, age-unbounded park record. Written by
+    # deliver_with_stash's callers when a stash delivery aborted (may have
+    # left a park), it survives a restart/deploy and does NOT expire, so a
+    # genuinely-ours park is reclaimable after any delay -- the exact gk gap
+    # (a goal ran `(1d)`, past the 6h `_janitor_watch_seen` bound).
+    park_seen = _janitor_park_seen(state, pid)
+    if park_seen and not occupied:
+        # Marker-gone backstop: the park was resolved (CC's own async
+        # auto-restore / our pop-back / a human), so the record is stale ->
+        # clear it. This is what bounds an age-unbounded record WITHOUT a
+        # timeout: it survives ONLY while OUR park is still visibly present,
+        # which is also why a human's LATER stash (recorded by nobody) can
+        # never satisfy the gate purely by reusing this pane later.
+        park_seen = False
+        if not dry_run:
+            _janitor_clear_park(state, pid)
+
+    # PROVENANCE. The generic 6h delivery-attempt mark alone still gates the
+    # destructive no-stash `clear` action (unchanged -- a conservative bound
+    # for an irreversible box-clear). For a STASH reclaim (slot occupied) the
+    # age-unbounded park record ALSO satisfies provenance -- it precisely
+    # proves WE left this park, so a genuinely-ours draft is reclaimable
+    # after any delay while a human's own stash (never recorded) is not.
+    if not (_janitor_watch_seen(state, pid, now) or (occupied and park_seen)):
+        return logs         # no watchdog job is known to have touched this
+                            # pane recently -- never act on content alone
     if occupied:
         if itext == "":
             action = "pop"
@@ -245,6 +313,7 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
         recovered = _janitor_clear_box(pid, run, sleep_fn, _log)
 
     if recovered:
+        _janitor_clear_park(state, pid)     # #488 -- our park is resolved
         rec["janitor_pinged"] = False
         logs.append("RECOVERED (janitor) %s -> stuck own delivery cleared"
                     % loc)
