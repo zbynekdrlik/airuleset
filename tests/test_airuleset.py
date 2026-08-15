@@ -8577,6 +8577,22 @@ class TestApiWatchdog(TestCase):
     _SENT = {"type": "assistant",
              "message": {"role": "assistant", "content": [{"type": "text",
                          "text": "No response requested."}]}}
+    # --- issue #484 recovery fixtures: a subagent that RECOVERED from an api-error
+    # (SendMessage resume → live Bash poll loop) writes these AFTER the append-only
+    # api-error line. A pure tool_use assistant entry has EMPTY text ("" ∈ _SENTINELS)
+    # and a tool_result is a `user` entry — both were silently skipped by the old
+    # walk-back, letting it re-find the historical error forever.
+    _TOOLUSE = {"type": "assistant", "isApiErrorMessage": False,
+                "message": {"role": "assistant",
+                            "content": [{"type": "tool_use", "name": "Bash",
+                                         "input": {"command": "sleep 240; gh run view"}}]}}
+    _TRESULT = {"type": "user",
+                "message": {"role": "user",
+                            "content": [{"type": "tool_result",
+                                         "content": "PENDING in_progress"}]}}
+    _RESUME = {"type": "user",
+               "message": {"role": "user",
+                           "content": [{"type": "text", "text": "pokracuj"}]}}
 
     def _transcript(self, cwd, entries, age_s, now):
         d = self.projects / self.w.encode_project_dir(cwd)
@@ -8614,6 +8630,94 @@ class TestApiWatchdog(TestCase):
     def test_transcript_last_error_skips_sentinel(self):
         # CC appends a synthetic "No response requested." after the error → still detected
         p = self._transcript("/x/p", [self._ERR, self._SENT], 600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    # --- issue #484: a HISTORICAL api-error that has SINCE recovered must NOT be
+    # reported. The append-only jsonl keeps the error line forever, so job 1b's
+    # `_nudge_dying_subagent` would stuck-check ping the supervisor endlessly. The
+    # fix reads the RIGHT signal: recency of the error vs later activity (mirrors the
+    # sibling reader `transcript_text_toolcall_stall`). ------------------------------
+    def test_transcript_last_error_recovered_via_tool_use_is_empty(self):
+        # api-error, then the resumed agent's Bash poll (tool_use, empty text) → healthy
+        p = self._transcript("/x/p", [self._ERR, self._TOOLUSE], 600, 1_000_000)
+        self.assertEqual(self.w.transcript_last_error(p), "")
+
+    def test_transcript_last_error_recovered_via_tool_result_tail_is_empty(self):
+        # newest entry is a tool_result (user), NO tool_use between it and the error,
+        # so this isolates the `user → progressed` branch (a _TOOLUSE middle entry
+        # would satisfy _entry_has_tool_use instead and mask the branch under test).
+        p = self._transcript("/x/p", [self._ERR, self._TRESULT], 600, 1_000_000)
+        self.assertEqual(self.w.transcript_last_error(p), "")
+
+    def test_transcript_last_error_484_endless_ping_scenario_is_empty(self):
+        # The exact montalu 2026-08-15 shape: api-error(429) → SendMessage resume →
+        # several live Bash poll chunks. Old code returned the 429 text forever.
+        entries = [self._ERR, self._RESUME, self._TOOLUSE, self._TRESULT,
+                   self._TOOLUSE, self._TRESULT]
+        p = self._transcript("/x/p", entries, 600, 1_000_000)
+        self.assertEqual(self.w.transcript_last_error(p), "")
+
+    def test_transcript_last_error_genuine_stall_after_toolcalls_still_detected(self):
+        # The agent DID work (tool_use), THEN api-errored as its last real turn →
+        # this is a genuine current stall and MUST still be reported.
+        p = self._transcript("/x/p", [self._TOOLUSE, self._TRESULT, self._ERR], 600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    def test_transcript_last_error_genuine_stall_with_trailing_system_still_detected(self):
+        # A trailing `system` (hook noise) entry after the error must not mask it.
+        sys_entry = {"type": "system", "content": "hook fired"}
+        p = self._transcript("/x/p", [self._ERR, sys_entry], 600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    def test_transcript_last_error_genuine_stall_with_trailing_bookkeeping_still_detected(self):
+        # CC appends NON-conversational bookkeeping entries (queue-operation, ai-title,
+        # file-history-snapshot, mode, permission-mode, …) that are NOT progress —
+        # a genuine api-error stall with one of these newest must STILL be reported
+        # (round-1 review MAJOR: returning '' on any non-assistant tail was a silent
+        # false negative in the auto-resume path).
+        for bk in ("queue-operation", "ai-title", "file-history-snapshot",
+                   "mode", "permission-mode", "pr-link"):
+            p = self._transcript("/x/p", [self._ERR, {"type": bk}], 600, 1_000_000)
+            self.assertIn("529", self.w.transcript_last_error(p),
+                          "genuine stall masked by trailing %s entry" % bk)
+
+    # --- issue #484 round-A 🔴: a PLAIN-TEXT `user` entry is NOT proof of recovery.
+    # Job 1's OWN injected `continue` nudge lands in the transcript as a bare-text
+    # `user` entry the instant it is typed, whether or not it woke the session; and a
+    # human/resume prompt the session has not yet acted on is equally not-yet-recovery.
+    # Reading any `user` tail as "recovered" returned '' here → job 1 skipped
+    # `stalled.add(key)`, the sweep cleanup wiped the episode, and the #175 back-off
+    # reset to nudge#1 every time CC's retry re-wrote the error line — the SAME endless
+    # ping, relocated from the subagent path (job 1b) to the main-session path (job 1).
+    # Only a `user` entry carrying a `tool_result` (the harness actually RAN a tool)
+    # counts as recovery. ---------------------------------------------------------------
+    def test_transcript_last_error_plaintext_user_nudge_does_not_mask_stall(self):
+        # api-error, then a bare-text user entry (job 1's `continue` nudge / an
+        # un-acted-on resume prompt) — no tool activity → STILL stalled, must report.
+        p = self._transcript("/x/p", [self._ERR, self._RESUME], 600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    def test_transcript_last_error_plaintext_user_then_bookkeeping_still_stalled(self):
+        # the nudge (plain-text user) buried under trailing bookkeeping, still no
+        # genuine tool_result/tool_use activity anywhere after the error → still stalled.
+        p = self._transcript("/x/p", [self._ERR, self._RESUME, {"type": "queue-operation"}],
+                             600, 1_000_000)
+        self.assertIn("529", self.w.transcript_last_error(p))
+
+    def test_transcript_last_error_recovered_via_tool_result_after_plaintext_user_is_empty(self):
+        # nudge (plain-text user) that DID wake the session → the harness then ran a
+        # tool and fed a tool_result back → genuine progress → not stalled.
+        p = self._transcript("/x/p", [self._ERR, self._RESUME, self._TRESULT], 600, 1_000_000)
+        self.assertEqual(self.w.transcript_last_error(p), "")
+
+    def test_transcript_last_error_genuine_stall_survives_long_bookkeeping_tail(self):
+        # round-B 🔵: the bookkeeping-skip robustness is only bounded by the tail
+        # window. CC emits many hook/bookkeeping writes per turn, so a genuine api-error
+        # stall can sit buried under a burst of >60 of them. The reader scans the SAME
+        # 200-line window as the sibling transcript_text_toolcall_stall — the default
+        # 60-line window pushed the error out of view and silently under-reported it.
+        tail = [{"type": "file-history-snapshot"} for _ in range(100)]
+        p = self._transcript("/x/p", [self._ERR] + tail, 600, 1_000_000)
         self.assertIn("529", self.w.transcript_last_error(p))
 
     def test_list_claude_panes_dedups_and_filters(self):

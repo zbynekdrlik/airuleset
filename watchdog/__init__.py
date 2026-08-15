@@ -250,59 +250,48 @@ MAX_WORKING_NUDGES = 3
 _LIVE_BG_TASK_RX = re.compile(r"\b\d+\s+(?:shells?|monitors?)\b", re.I)
 
 
-def _pane_live_shell_evidence(captured):
-    """True if the pane's own GENUINELY CURRENT mode-hint line (`⏵⏵ …`)
-    shows CC's live background-shell/monitor badge. (#352 F1, adversarial
-    review round 1: scanning the WHOLE bounded capture for ANY
-    `⏵⏵`-prefixed line was WRONG — a completion report or playbook excerpt
-    quoted verbatim inside the SAME capture window can contain that exact
-    text as scrollback, sitting above the real conversation, and would be
-    misread as live evidence even with a badge-free CURRENT footer, proven
-    by execution.) Fixed the same way every other footer reader in this
-    file resolves "what is the pane's OWN trailing chrome right now": walk
-    UP from the bottom, peeling only rows `_is_bottom_chrome` accepts as
-    genuinely trailing chrome (agent strip, statusline, mode hint, border
-    rules — the identical bounded walk `_above_input_box` already uses),
-    and only ever look for the badge WITHIN that walk. The walk stops dead
-    at the first non-chrome row (an ordinary input-box `❯` line, real
-    conversation prose) — a quoted scrollback line sitting ABOVE that
-    boundary is structurally unreachable, never merely unlikely to match."""
-    lines = str(captured or "").splitlines()
-    i = len(lines)
-    n = 0
-    while i > 0 and _is_bottom_chrome(lines[i - 1].strip()) and n < 40:
-        i -= 1
-        n += 1
-        s = lines[i].strip()
-        if s.startswith("⏵⏵") and _LIVE_BG_TASK_RX.search(s):
-            return True
-    return False
-
-
-def _pane_live_task_count(captured):
-    """Sum of CC's own live background-shell/monitor badge counts (`⏵⏵ … ·
-    N shells` / `· M monitors`) read from the pane's CURRENT trailing chrome
-    (#365) -- the counting sibling of `_pane_live_shell_evidence` above:
-    that function only answers "is the badge showing at all", this answers
-    "how many background Bash tasks does it claim". Reuses the IDENTICAL
-    bounded peel-walk (never scans quoted scrollback above the chrome
-    boundary -- the same #352 F1 lesson). Returns 0 when the badge is
-    absent or unparseable -- never a guess, and never negative."""
-    lines = str(captured or "").splitlines()
-    i = len(lines)
-    n = 0
-    total = 0
-    while i > 0 and _is_bottom_chrome(lines[i - 1].strip()) and n < 40:
-        i -= 1
-        n += 1
-        s = lines[i].strip()
-        if s.startswith("⏵⏵"):
-            for m in _LIVE_BG_TASK_RX.finditer(s):
-                try:
-                    total += int(m.group(0).split()[0])
-                except (ValueError, IndexError):
-                    continue
-    return total
+# #433 item G step 4 -- the decision / parse / state-file core (the two
+# `_pane_live_*` live-task pane readers just above's siblings, plus the whole
+# usage-cap / session-limit / reset-epoch / decide / decide_working / load_state
+# / save_state cluster that used to sit below the transcripts facade) now lives
+# in `watchdog/decide.py`, re-exported here with the same positional-facade
+# convention as the earlier steps. This ONE import covers BOTH originally
+# non-contiguous blocks (nothing between them referenced these names at def
+# time; step 1 already emptied the transcripts block in between). Every
+# `watchdog.<name>` seam (run_once jobs 1/4/6 -- decide/decide_working/save_state
+# /parse_reset_epoch*/is_usage_cap/pane_session_limited -- goal / compact /
+# cross_stream / janitor, hooks, tests) resolves unchanged. `_LIVE_BG_TASK_RX`
+# (bound just above) stays in __init__ and is read by decide.py at its call site
+# via `watchdog._LIVE_BG_TASK_RX` (C4), like pane_text.py's `_QUEUED_COMPACT_RX`.
+from watchdog.decide import (  # noqa: E402
+    _pane_live_shell_evidence as _pane_live_shell_evidence,
+    _pane_live_task_count as _pane_live_task_count,
+    _USAGE_CAP_RX as _USAGE_CAP_RX,
+    _TRANSIENT_RX as _TRANSIENT_RX,
+    is_usage_cap as is_usage_cap,
+    _SESSION_LIMIT_RX as _SESSION_LIMIT_RX,
+    _RESET_TIME_RX as _RESET_TIME_RX,
+    _RESET_MONTH_NUM as _RESET_MONTH_NUM,
+    _RESET_TZ_RX as _RESET_TZ_RX,
+    SESSLIMIT_RETRY_S as SESSLIMIT_RETRY_S,
+    SESSLIMIT_MAX_TRIES as SESSLIMIT_MAX_TRIES,
+    DATED_RESET_STALE_GRACE_S as DATED_RESET_STALE_GRACE_S,
+    pane_session_limited as pane_session_limited,
+    parse_reset_epoch as parse_reset_epoch,
+    _reset_epoch_from_scanned_text as _reset_epoch_from_scanned_text,
+    parse_reset_epoch_from_error_text as parse_reset_epoch_from_error_text,
+    session_user_stopped as session_user_stopped,
+    _human_clock as _human_clock,
+    decide as decide,
+    DECLARED_WAIT_GRACE_S as DECLARED_WAIT_GRACE_S,
+    DECLARED_WAIT_MAX_S as DECLARED_WAIT_MAX_S,
+    WORKING_RESPONDED_BACKOFF_SCHEDULE_S as WORKING_RESPONDED_BACKOFF_SCHEDULE_S,
+    _CLOCK_RX as _CLOCK_RX,
+    declared_wait_until as declared_wait_until,
+    decide_working as decide_working,
+    load_state as load_state,
+    save_state as save_state,
+)
 
 
 # (#352 F3, adversarial review round 1) The skip above trusts whatever the
@@ -409,574 +398,14 @@ from watchdog.transcripts import (  # noqa: E402
 )
 
 
-# A subscription / quota USAGE cap is time-based — `continue` cannot fix it (only
-# the reset clock can), so it is classified separately and only PINGED, never
-# nudged. Kept narrow so a transient 529 / "rate limited" / overloaded (which a
-# retry CAN clear) is NOT caught here and still gets the 3×continue lifecycle.
-# (#175 F2) The WEEKLY cap ("You've hit your weekly limit …") and the BARE cap
-# ("You've hit your limit …", no qualifier word at all) used to be invisible
-# here — only "session"/"usage" were recognized before "limit", and the literal
-# space required between "limit" and "reached/resets" never matched Claude
-# Code's real rendering, which separates them with a MIDDLE DOT ("limit ·
-# resets 11am …"), not a space. Both gaps let a real weekly/bare cap fall
-# through to the generic nudge path and get `continue`d every ~30 min for the
-# WHOLE cap window (days), instead of staying bounded (ping once, wait for the
-# reset). `[\s·]*` accepts any run of whitespace and/or the middle-dot
-# separator between "limit" and the reset wording; `(?:session|usage|weekly)?`
-# is now optional so the bare "hit your limit" shape matches too.
-_USAGE_CAP_RX = re.compile(
-    r"usage limit|quota|limit[\s·]*(?:reached|will reset|resets)|reset at|reached your"
-    r"|hit your (?:(?:session|usage|weekly)\s+)?limit", re.I)
-# Transient SERVER-side throttles — a retry / `continue` CAN clear these, so they
-# must NOT be read as a quota cap. Checked FIRST. Critically this catches
-# "(not your usage limit)" — Claude Code's transient rate-limit banner literally
-# CONTAINS the words "usage limit", which would otherwise false-match above.
-_TRANSIENT_RX = re.compile(
-    r"not your usage limit|temporarily limiting|rate.?limit|overloaded|\b529\b|try again", re.I)
-
-
-def is_usage_cap(text):
-    """True ONLY for a real subscription/quota cap (time-based → `continue` can't
-    fix it → ping only). A transient server throttle returns False so it still gets
-    the 3×`continue` lifecycle."""
-    if not text or _TRANSIENT_RX.search(text):
-        return False
-    return bool(_USAGE_CAP_RX.search(text))
-
-
-# --- 5-HOUR SESSION LIMIT (a distinct, TIME-BASED cap) --------------------------
-# Claude Code's session-limit banner shows in the PANE, e.g.
-#   "You've hit your session limit · resets 6:10pm (Europe/Prague)"
-#   "/usage-credits to finish what you're working on."
-# It is NOT a transient 529 and NOT reliably an `isApiErrorMessage` transcript
-# entry — it lives on screen. Unlike a server throttle, `continue` BEFORE the
-# reset is a no-op that just re-hits the limit (the incident: repeated `continue`
-# → "You've hit your session limit"). So job (6) reads it from the PANE, PINGS
-# ONCE with the reset time, does NOTHING until the reset clock, then sends ONE
-# `continue` AFTER it — never before.
-# (#175 F2) Claude Code also renders a WEEKLY cap ("You've hit your weekly
-# limit · resets Jul 31, 9pm (Europe/Prague)") and a BARE one ("You've hit
-# your limit · resets 11am (Europe/Prague)"), with no "session"/"usage" word
-# at all — this regex used to require one, so both shapes fell straight
-# through to job 1's generic nudge path and got `continue`d every ~30 min for
-# the whole cap window instead of getting job 6's bounded ping-once-then-wait
-# treatment. `(?:session|usage|weekly)?` is now optional.
-#
-# (#172, carried over from #175/#176's own closing pass) A weekly cap's
-# "resets Jul 31, 9pm" clock names an explicit CALENDAR DATE ahead of the
-# time-of-day — `_RESET_TIME_RX` used to require a digit immediately after
-# "resets "/"resets at ", so this dated form matched `is_usage_cap` (bounded,
-# per #175 F2 above) but `parse_reset_epoch` returned None: job 6 could ping
-# once but never compute a resume instant, so a weekly-capped session pinged
-# once and then never auto-resumed even after the real reset passed — the
-# user had to type `continue` by hand. The optional `(?:MONTH DAY,? )?`
-# group below captures the date too, and `parse_reset_epoch` uses it (rather
-# than assuming "today") when present — assuming today would compute an
-# epoch DAYS too early for a multi-day-out weekly reset, and job 6 would
-# retry-resume long before the real reset, immediately re-hitting the limit
-# (exactly what this whole mechanism exists to prevent). The bare
-# clock-time-only forms (`resets 11:20pm`, `resets 12pm`, `resets at 18:10`)
-# are unaffected — the date group is optional and simply doesn't match them.
-_SESSION_LIMIT_RX = re.compile(
-    r"hit your (?:(?:session|usage|weekly)\s+)?limit|/usage-credits to finish", re.I)
-# "resets 6:10pm" / "resets 6pm" / "resets at 18:10" / "resets Jul 31, 9pm"
-# -- capture an optional MONTH + DAY ahead of the clock, then the clock.
-_RESET_TIME_RX = re.compile(
-    r"reset(?:s|ting)?\s+(?:at\s+)?(?:([A-Za-z]{3,9})\s+(\d{1,2}),?\s+)?"
-    # #183 finding 2: the hour group is `(?!\d)`-guarded so it can never be
-    # a TRUNCATED PREFIX of a longer digit run — without it, a 4-digit year
-    # ("resets Jul 31, 2026 9pm") silently absorbed its first two digits as
-    # the hour (epoch one hour early) instead of the whole match failing
-    # (the previously fail-safe None a 2-digit year / reversed-order form
-    # still correctly returns).
-    r"(\d{1,2})(?!\d)(?::(\d{2}))?\s*([ap]m)?", re.I)
-_RESET_MONTH_NUM = {name: i + 1 for i, name in enumerate((
-    "jan", "feb", "mar", "apr", "may", "jun",
-    "jul", "aug", "sep", "oct", "nov", "dec"))}
-# The tz the banner names — "(Europe/Prague)" OR a bare zone word like
-# "(UTC)"/"(GMT)". Broadened from Area/City-only after the gk incident
-# (2026-07-24): the gk box runs UTC, its banner reads "resets 4:40pm (UTC)",
-# and the narrower Area/City-only regex never matched it — silently falling
-# through to the Europe/Bratislava default and computing a reset epoch 2h
-# EARLY (a nonsense past reset time on the Discord ping).
-_RESET_TZ_RX = re.compile(r"\(([A-Za-z]+(?:/[A-Za-z_]+)?)\)")
-# Job 6's bounded post-reset resume retry (FIX C, gk incident 2026-07-24) —
-# see the `elif ra and now >= ra:` branch in run_once for the full story.
-SESSLIMIT_RETRY_S = 5 * 60
-SESSLIMIT_MAX_TRIES = 4
-# #183: how stale a DATED reset target (this year's occurrence) may be
-# before it must mean NEXT year's occurrence instead. The bare-clock
-# branch's OWN 6h window is sized for a 5-HOUR session-limit banner, which
-# can only ever be a few hours stale — far too tight for the WEEKLY-cap
-# banner `parse_reset_epoch` ALSO parses (the same function, the dated
-# branch), whose date can legitimately be up to ~7 days out. Comfortably
-# wider than one full weekly cycle so a genuinely-this-week date is never
-# mistaken for "must be next year".
-DATED_RESET_STALE_GRACE_S = 8 * 86400
-
-
-def pane_session_limited(captured):
-    """True if the pane's BOTTOM shows Claude Code's 5-hour session-limit
-    banner — scoped to the last 10 lines of the region ABOVE the input box
-    (falling back to the raw capture's last 10 lines when no input box is
-    located at all, e.g. a busy/spinner pane with no `❯` boundary).
-
-    A dead BACKGROUND WORKER can leave a `⎿ You've hit your session limit …`
-    ECHO line sitting HIGH in the transcript output, with many later
-    `● pokracujem v praci`-style lines scrolling underneath it for hours — a
-    whole-capture search kept the episode "limited" long after a real resume
-    already happened (gk incident 2026-07-24). Bottom-scoping means only a
-    banner that is still the FRESHEST thing on screen counts."""
-    if not captured:
-        return False
-    region = _above_input_box(captured)
-    lines = [ln for ln in region.splitlines() if ln.strip()]
-    if not lines:
-        lines = [ln for ln in captured.splitlines() if ln.strip()]
-    return bool(_SESSION_LIMIT_RX.search("\n".join(lines[-10:])))
-
-
-def parse_reset_epoch(captured, now):
-    """Parse 'resets <clock>' (optionally 'resets <Month> <day>, <clock>')
-    from the banner. The BARE-CLOCK form (a 5-hour session-limit reset)
-    always returns an epoch >= now (rolled to tomorrow if already past by
-    more than 6h). The DATED form (also used for a WEEKLY-cap banner, whose
-    date can legitimately be up to ~7 days out) returns the parsed target
-    AS-IS whenever it is within `DATED_RESET_STALE_GRACE_S` of now — INCLUDING
-    slightly in the past, which means "the reset already happened" and is
-    correct, not an error: job 6 treats any `resets_at <= now` as "resume
-    immediately". Only once THIS YEAR's occurrence is stale by more than
-    that grace does it roll to next year's occurrence. Either way, returns
-    None whenever the banner cannot be read with confidence — see the
-    per-branch notes below — so job 6 pings but leaves the episode
-    refinable rather than locking in a wrong epoch.
-
-    The clock is read in the tz the banner names: "UTC"/"GMT" literally, an
-    "Area/City" name via ZoneInfo, any other bare parenthesized word (e.g. a
-    stray "(debug)" elsewhere in the pane) falls back to the
-    Europe/Bratislava default (same offset as Prague). The tz is searched
-    ONLY in the ~80 chars starting at the TIME match, never the whole
-    capture: a global search would hijack on ANY parenthesized word
-    anywhere in the pane, however far from the clock (gk incident
-    2026-07-24). Fail-safe: any parse/tz error returns None (job 6 then
-    pings but cannot auto-resume — the user handles it).
-
-    #172 (carried over from #175/#176's own closing pass): when the banner
-    names an explicit calendar date ("resets Jul 31, 9pm"), that date is
-    used for the target — NOT "today". Assuming today for a multi-day-out
-    weekly reset would compute an epoch DAYS too early, and job 6 would
-    retry-resume long before the real reset (immediately re-hitting the
-    limit — the one thing `continue`-before-reset must never do).
-
-    #183 finding 3: the search is BOTTOM-SCOPED to the same last-10-lines
-    region `pane_session_limited` itself uses, never the whole capture — a
-    STALE reset-time echo higher on screen (a dead background worker's old
-    output, or last episode's own banner) must never beat a fresher banner
-    lower down; before this the parse searched globally while the detector
-    that gates it was already deliberately bottom-scoped (the exact
-    stale-echo shape `pane_session_limited`'s own docstring documents).
-
-    #336: the box-scoping happens ONLY here — the actual clock/timezone/
-    date parse below is shared with `parse_reset_epoch_from_error_text`
-    (job 1's own PLAIN error-message text, which needs no pane/box scoping
-    at all) via `_reset_epoch_from_scanned_text`."""
-    try:
-        region = _above_input_box(captured)
-        lines = [ln for ln in region.splitlines() if ln.strip()]
-        if not lines:
-            lines = [ln for ln in (captured or "").splitlines() if ln.strip()]
-        scoped = "\n".join(lines[-10:])
-    except Exception:
-        return None
-    return _reset_epoch_from_scanned_text(scoped, now)
-
-
-def _reset_epoch_from_scanned_text(scoped, now):
-    """The shared clock/timezone/date-parsing core of `parse_reset_epoch` —
-    `scoped` is ALREADY the text to search (a pane's bottom-scoped region
-    for the pane-based caller, or a plain error-message string for
-    `parse_reset_epoch_from_error_text`). See `parse_reset_epoch`'s own
-    docstring for the full parsing contract; this function does not repeat
-    it. Fail-safe: any parse/tz error returns None."""
-    try:
-        # The LAST match, not the first: `.search()` would still pick a
-        # STALE echo sitting higher in the scoped window over a FRESHER
-        # banner below it (#183 finding 3's exact reproduction — bottom
-        # scoping alone narrows the window, it doesn't reorder within it).
-        matches = list(_RESET_TIME_RX.finditer(scoped))
-        if not matches:
-            return None
-        m = matches[-1]
-        month_name, day_s, hh_s, mm_s, ap_s = m.groups()
-        hh = int(hh_s)
-        mm = int(mm_s or 0)
-        ap = (ap_s or "").lower()
-        if ap == "pm" and hh != 12:
-            hh += 12
-        elif ap == "am" and hh == 12:
-            hh = 0
-        if not (0 <= hh <= 23 and 0 <= mm <= 59):
-            return None
-        from datetime import datetime, timedelta
-        tz = None
-        try:
-            from zoneinfo import ZoneInfo
-            seg = scoped[m.start():m.start() + 80]
-            tzm = _RESET_TZ_RX.search(seg)
-            if tzm:
-                name = tzm.group(1)
-                if name in ("UTC", "GMT"):
-                    tz = ZoneInfo("UTC")
-                elif "/" in name:
-                    tz = ZoneInfo(name)
-                else:
-                    tz = ZoneInfo("Europe/Bratislava")
-            else:
-                tz = ZoneInfo("Europe/Bratislava")
-        except Exception:
-            tz = None
-        base = datetime.fromtimestamp(now, tz)
-        month = _RESET_MONTH_NUM.get((month_name or "")[:3].lower())
-        if month_name and not month:
-            # #183 finding 1: the date group MATCHED (a month-shaped word +
-            # a day both present) but the word is not a recognised month
-            # (e.g. a weekday, "Thu 31" — the regex only requires 3-9
-            # letters, it never validates the word itself). Falling through
-            # to the bare-clock branch below would silently reuse TODAY's
-            # date with this banner's clock, computing an epoch DAYS too
-            # early — the exact "resumes before the real reset, immediately
-            # re-hits the limit" outcome this whole function exists to
-            # prevent. An unrecognised month must return None, not guess.
-            return None
-        if month and day_s:
-            # An explicit calendar date -- use IT, not "today" (see the
-            # docstring above).
-            try:
-                target = base.replace(month=month, day=int(day_s), hour=hh,
-                                      minute=mm, second=0, microsecond=0)
-            except ValueError:
-                return None       # e.g. day out of range for the month
-            # #183 findings 4/5: NOT the bare-clock branch's 6h window (see
-            # DATED_RESET_STALE_GRACE_S's own comment) -- a dated target
-            # slightly in the past (including a small negative delta) is
-            # simply returned as-is; only real staleness beyond one weekly
-            # cycle means "must be next year".
-            if target.timestamp() <= now - DATED_RESET_STALE_GRACE_S:
-                target = target.replace(year=target.year + 1)
-            return target.timestamp()
-        target = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        ts = target.timestamp()
-        # The 5-hour reset window is short. A clock only SLIGHTLY in the past means
-        # the reset just happened (or the banner is momentarily stale) → resume NOW,
-        # don't wait a whole day. Only a clock > 6h in the past is really a next-day
-        # time (e.g. a late-night "resets 12:10am" seen at 23:50) → roll to tomorrow.
-        if ts <= now - 6 * 3600:
-            ts = (target + timedelta(days=1)).timestamp()
-        return ts
-    except Exception:
-        return None
-
-
-def parse_reset_epoch_from_error_text(text, now):
-    """Same clock/timezone/date-parsing as `parse_reset_epoch`, run directly
-    over a PLAIN error-message STRING (job 1's own `transcript_last_error()`
-    output) instead of a captured tmux pane — no box-scoping, no agent-strip
-    chrome to strip first, since the transcript's own `isApiErrorMessage`
-    text is already just the message.
-
-    #336: this is what lets a session-limit hit that NEVER renders its
-    banner on the live pane (a background Agent/subagent dying on the
-    account's 5h limit, whose failure only ever shows up in the parent
-    session's OWN next `isApiErrorMessage` entry, never as pane chrome —
-    the montalu2 incident) still get a resume time parked from the error
-    TEXT itself, instead of depending on job 6's live, continuously
-    re-scanned pane detection, which structurally cannot see an error that
-    was never rendered as the pane's bottom-most content in the first
-    place."""
-    return _reset_epoch_from_scanned_text(text or "", now)
-
-
-def session_user_stopped(tpath, since_ts=None):
-    """True if the user explicitly told THIS session to stop (`/exit`) at
-    or after `since_ts`. The narrow, session-limit-scoped counterpart of
-    #335's own general user-stop invariant (`_goal_was_cleared_by_user`,
-    itself deleted along with the rest of the heuristic re-arm machinery
-    by #403 rather than ever reconciled with this function — the two
-    stayed independent implementations of a similar idea for their whole
-    overlapping lifetime; #336's own auto-resume mechanism never depended
-    on that reconciliation landing).
-
-    A session the user deliberately exited must NEVER be auto-resumed by
-    delivering `continue`, even once its parked reset time has passed and
-    even if the SAME transcript is later reattached (`claude -c`) — the
-    user's own explicit `/exit`, issued after the limit hit, is a stronger
-    signal than "the reset clock passed" and always wins.
-
-    Scans the transcript's recent tail for a top-level, plain-STRING
-    `/exit` command entry — Claude Code's own literal marker for the user's
-    `/exit` command, the same top-level shape #335's own design comment
-    names. Matched by PREFIX (`<command-name>/exit</command-name>`), never
-    strict equality: a real `/exit` entry's `message.content` is a
-    COMPOSITE string, e.g.
-    `"<command-name>/exit</command-name>\n            <command-message>exit`
-    `</command-message>\n            <command-args></command-args>"`
-    (verified against real Claude Code transcripts, #336's own adversarial
-    review, finding F1) — a strict-equality check against the bare marker
-    alone NEVER matches a real transcript, which made this whole predicate
-    inert against every genuine `/exit`. The closing `</command-name>` tag
-    is part of the required prefix, so a DIFFERENT command name that merely
-    starts with the same letters (never a real Claude Code shape, but
-    checked defensively) is still correctly refused. `timestamp` must be
-    `>= since_ts` (no lower bound at all when `since_ts` is None).
-
-    Fail-SAFE in the direction that never strands a healthy session: an
-    unreadable/missing transcript, or any parse error, returns False —
-    "can't tell" must never be read as "the user stopped it", or a merely-
-    unreadable transcript would strand a session that was never actually
-    exited."""
-    try:
-        from datetime import datetime
-        for entry in _iter_jsonl_tail(tpath, max_lines=400):
-            if not isinstance(entry, dict) or entry.get("type") != "user":
-                continue
-            msg = entry.get("message")
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if not isinstance(content, str):
-                continue
-            if not content.lstrip().startswith("<command-name>/exit</command-name>"):
-                continue
-            if since_ts is None:
-                return True
-            try:
-                ts = datetime.fromisoformat(
-                    str(entry.get("timestamp")).replace("Z", "+00:00")).timestamp()
-            except Exception:
-                continue          # unparseable timestamp — this is an ANY
-                                  # over the whole window (oldest-to-newest
-                                  # file order, not reversed), so a single
-                                  # bad timestamp just moves on to the next
-                                  # candidate entry, in either direction
-            if ts >= since_ts:
-                return True
-        return False
-    except Exception:
-        return False
-
-
-def _human_clock(epoch, now=None):
-    """Epoch → 'HH:MM' in Europe/Bratislava, for the ping text — but only
-    when the reset falls on TODAY's local date (relative to `now`, default
-    the real wall clock). #183 finding 6: `parse_reset_epoch` started
-    successfully parsing a multi-day-out WEEKLY-cap banner without this
-    consumer ever being updated to match — a cap five days out read as
-    "Reset o 21:00", telling the user it resumes TONIGHT when it actually
-    resumes on a later date. A reset on a different day renders
-    'DD.MM HH:MM' instead."""
-    try:
-        from datetime import datetime
-        try:
-            from zoneinfo import ZoneInfo
-            tz = ZoneInfo("Europe/Bratislava")
-        except Exception:
-            tz = None
-        dt = datetime.fromtimestamp(epoch, tz)
-        today = datetime.fromtimestamp(time.time() if now is None else now, tz)
-        if dt.date() == today.date():
-            return dt.strftime("%H:%M")
-        return dt.strftime("%d.%m %H:%M")
-    except Exception:
-        return "?"
-
-
-def decide(state, key, err_hash, now, grace=GRACE_SECONDS,
-           interval=RETRY_INTERVAL_SECONDS, max_nudges=MAX_NUDGES, first_seen_seed=None,
-           backoff_cap=BACKOFF_CAP_SECONDS):
-    """Pure decision for ONE stalled session. Returns (action, entry) where action
-    is 'nudge' | 'wait'. `entry` is the updated state record (caller persists
-    state[key] = entry).
-
-    The grace is tracked HERE, from `first_seen` (the moment the session's last
-    reply became an api-error), NOT from transcript mtime — Claude Code's own
-    retries + queue/snapshot writes keep touching the transcript, so an mtime-idle
-    gate never trips for a rate-limited session (that bug left `presenter`
-    unnudged). On first sighting `first_seen = first_seen_seed` (the caller seeds it
-    with `now - idle` so an already-stale stall counts from when it really began);
-    if that is already >= grace old the first `continue` goes out NOW, else we
-    `wait` and let Claude Code recover on its own for `grace` first. Thereafter a
-    nudge fires every `interval`, for the first `max_nudges` attempts.
-
-    PAST `max_nudges` the policy no longer gives up (#175 — a multi-hour upstream
-    529 storm used to strand a session after ~15-20 min of silence even with a
-    healthy watchdog, and the hash-stability rule made it worse: a REPEATED
-    identical error is exactly the case that never re-arms). Nudging CONTINUES
-    INDEFINITELY, but the retry interval WIDENS each attempt (doubling from
-    `interval`, capped at `backoff_cap`) so a long outage is covered cheaply
-    (one `continue` per interval) instead of hammering a dead endpoint: attempts
-    #1-#3 at `interval` (300s) spacing, then 600 / 1200 / 1800 / 1800 / ... The
-    one-shot "gave up" Discord ping still fires exactly once — the caller detects
-    it by `entry['escalated']` flipping False -> True on the attempt that FIRST
-    crosses `max_nudges` (the (max_nudges + 1)-th nudge) and fires its own ping
-    then; every later call leaves `escalated` True with no further ping. A
-    different err_hash (a new error) restarts the whole cycle from scratch,
-    including a fresh one-shot escalation.
-
-    A caller-forced `entry['dormant']` (used for a usage/quota cap, where only
-    the external reset clock — not `continue` — can fix it) makes THIS CALL
-    return 'wait' regardless of the schedule above. (#175 F4 correction: a new
-    err_hash is the COMMON way the flag goes away, not the ONLY one — the
-    caller's own state-cleanup pass can drop `state[key]` entirely, e.g. once
-    the session's pane is no longer visible. That is harmless here: the caller
-    re-derives `dormant` from `is_usage_cap(err_text)` on every sweep that
-    reaches a fresh 'nudge', so a rebuilt entry is immediately re-marked
-    dormant from the SAME live error text — no `continue` is ever typed into a
-    genuinely-capped session either way. What CAN differ is the ping: a
-    rebuilt entry reseeds `first_seen`, which changes the alert's dedup key, so
-    a wipe-and-rebuild can cost a second, otherwise-redundant ping — never a
-    keystroke.)"""
-    e = state.get(key)
-    if e is None or e.get("hash") != err_hash:
-        fs = int(first_seen_seed) if first_seen_seed is not None else int(now)
-        entry = {"hash": err_hash, "first_seen": fs, "nudges": [], "escalated": False}
-        if (now - fs) >= grace:           # already stuck >= grace → first continue now
-            entry["nudges"] = [int(now)]
-            return "nudge", entry
-        return "wait", entry              # fresh → give Claude Code `grace` to recover
-    if e.get("dormant"):
-        return "wait", e                 # permanently held (usage cap) until a new hash
-    nudges = list(e.get("nudges", []))
-    last = nudges[-1] if nudges else e.get("first_seen", now)
-    n = len(nudges)
-    if n < max_nudges:
-        needed = grace if not nudges else interval
-    else:
-        step = n - max_nudges + 1        # 1, 2, 3, ... widening back-off step
-        needed = min(interval * (2 ** step), backoff_cap)
-    if (now - last) < needed:
-        return "wait", e
-    e2 = dict(e)
-    e2["nudges"] = nudges + [int(now)]
-    if n >= max_nudges and not e.get("escalated"):
-        e2["escalated"] = True           # one-shot: caller fires the give-up ping now
-    return "nudge", e2
-
-
-# --- Stuck-check sensitivity (2026-07-20, codex-bridge drilling incident) ----
-# A session honestly waiting on a SCHEDULED event ("čakám na 14:15 auto-sync")
-# got nudged every cycle until pressured into premature work. Two valves:
-# declared_wait_until() (respect an explicit future clock in the ⏳ marker) and
-# the responded-backoff in decide_working (answered nudges space out
-# exponentially and never escalate — escalation is for a DEAD process only).
-DECLARED_WAIT_GRACE_S = 20 * 60      # nudge only this long AFTER the declared time
-DECLARED_WAIT_MAX_S = 12 * 3600      # a "future" time further than this is noise
-# (#352) A session that keeps ANSWERING the self-check nudge (genuinely alive,
-# still legitimately waiting) is re-checked on a widening, EXPLICIT schedule
-# rather than an unbounded-feeling exponential — the user's own concrete ask
-# after a live incident of hourly re-checks each burning a full context turn
-# purely to re-prove liveness: 1h, then 3h, then 6h, holding at 6h for any
-# further round. Never nudges MORE often than this even for a session that
-# keeps answering forever, and — paired with `_pane_live_shell_evidence`
-# above, which skips the check ENTIRELY while the pane already shows proof
-# of life — this schedule is now the fallback for the case that check can't
-# see (a shell alive but not pane-visible), not the primary defense.
-WORKING_RESPONDED_BACKOFF_SCHEDULE_S = (3600, 3 * 3600, 6 * 3600)
-_CLOCK_RX = re.compile(r"\b([01]?\d|2[0-3]):([0-5]\d)\b")
-
-
-def declared_wait_until(marker_line, now, tz="Europe/Bratislava"):
-    """Epoch until which the ⏳ marker line's DECLARED future clock time
-    suppresses the stuck-check (latest declared time + grace), or 0 when the
-    line names no usable future time. A time already past resolves to its next
-    occurrence; anything further than DECLARED_WAIT_MAX_S away is ignored
-    (a mentioned historical time, not a wait declaration)."""
-    from datetime import datetime, timedelta
-    try:
-        from zoneinfo import ZoneInfo
-        local = datetime.fromtimestamp(now, ZoneInfo(tz))
-    except Exception:
-        local = datetime.fromtimestamp(now)
-    best = 0.0
-    for m in _CLOCK_RX.finditer(str(marker_line or "")):
-        h, mi = int(m.group(1)), int(m.group(2))
-        cand = local.replace(hour=h, minute=mi, second=0, microsecond=0)
-        if cand.timestamp() <= now:
-            cand += timedelta(days=1)
-        delta = cand.timestamp() - now
-        if 0 < delta <= DECLARED_WAIT_MAX_S:
-            best = max(best, cand.timestamp())
-    return best + DECLARED_WAIT_GRACE_S if best else 0
-
-
-def decide_working(state, wkey, now, idle, interval=WORKING_RETRY_INTERVAL_SECONDS,
-                   max_nudges=MAX_WORKING_NUDGES, responded=False,
-                   backoff_schedule=WORKING_RESPONDED_BACKOFF_SCHEDULE_S):
-    """Pure decision for ONE `⏳ WORKING`-stalled session (job 4). Returns
-    (action, entry) where action is 'nudge' | 'wait' | 'escalate' | 'noop'; the
-    caller persists state[wkey] = entry. Called ONLY after the caller has already
-    confirmed `⏳` marker + idle >= threshold + no advancing subagent, so the FIRST
-    sighting nudges immediately (the threshold IS the grace).
-
-    Unlike job 1's `decide` (api-error, where CC keeps writing the transcript so the
-    timer is state-based), a job-4 nudge that LANDS resets the transcript idle below
-    the threshold — so the caller simply stops invoking this for that session and the
-    episode is cleaned up by last_seen. We only get here AGAIN if the prior nudge
-    produced no transcript write within `interval` (the Claude process is itself
-    wedged), so a retry is the right escalation. After `max_nudges` no-response nudges
-    it escalates ONCE (the single user-facing ping), then noops."""
-    e = state.get(wkey)
-    if e is None:
-        e = {"first_seen": int(now - idle), "nudges": [], "escalated": False}
-    e["last_seen"] = int(now)
-    if e.get("escalated"):
-        return "noop", e
-    nudges = list(e.get("nudges", []))
-    if not nudges:                         # first sighting past the threshold → nudge now
-        e["nudges"] = [int(now)]
-        return "nudge", e
-    if responded:
-        # The session ANSWERED the previous nudge — it is ALIVE, just waiting.
-        # Space repeats out on the EXPLICIT staged schedule (#352: 1h → 3h →
-        # 6h, holding at the last step) and never let answered checks count
-        # toward the 'wedged' escalation (the drilling incident: 3 answered
-        # nudges fired a false wedged ping and the session got pressured into
-        # premature work).
-        answered = int(e.get("answered", 0)) + 1
-        e["answered"] = answered
-        e["noresp"] = 0
-        step = min(answered - 1, len(backoff_schedule) - 1)
-        gap_needed = backoff_schedule[step]
-        if (now - nudges[-1]) < gap_needed:
-            return "wait", e
-        e["nudges"] = nudges + [int(now)]
-        return "nudge", e
-    noresp = int(e.get("noresp", len(nudges)))
-    if noresp >= max_nudges:               # MAX no-response nudges → give up, ping once
-        e["escalated"] = True
-        return "escalate", e
-    if (now - nudges[-1]) >= interval:     # still wedged `interval` later → re-nudge
-        e["nudges"] = nudges + [int(now)]
-        e["noresp"] = noresp + 1
-        return "nudge", e
-    return "wait", e                       # within the retry interval → hold
-
-
-def load_state(state_path):
-    try:
-        with open(state_path) as f:
-            d = json.load(f)
-            return d if isinstance(d, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def save_state(state_path, state):
-    try:
-        Path(state_path).parent.mkdir(parents=True, exist_ok=True)
-        tmp = str(state_path) + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(state, f)
-        os.replace(tmp, state_path)
-    except OSError:
-        pass
+# #433 item G step 4 -- the usage-cap / session-limit / reset-epoch-parse /
+# `decide` / `decide_working` / `load_state` / `save_state` cluster that used to
+# live here (block 864-1411 at design time) now lives in `watchdog/decide.py`,
+# re-exported by the single positional facade above (search for "item G step 4"
+# near the `_pane_live_*` readers). Its regexes/constants (`_USAGE_CAP_RX`,
+# `_SESSION_LIMIT_RX`, `_RESET_TIME_RX`, `SESSLIMIT_*`, `DECLARED_WAIT_*`, ...)
+# moved and are re-exported with it, so every `watchdog.<name>` seam resolves
+# unchanged.
 
 
 # #433 item G step 2 -- the tmux shims (the only impure part; injectable as
@@ -1032,55 +461,17 @@ _MENTION_TOKEN_RX = re.compile(r"<@[!&]?\d+>")
 _CONTROL_CHAR_RX = re.compile(r"[\x00-\x1f\x7f\x80-\x9f]")
 
 
-def clean_reply_text(raw, bot_id=""):
-    """Turn a Discord reply's raw content into a single-line prompt safe to type.
-
-    Strips @mention tokens (`<@id>` / `<@!id>` / `<@&role>` — a reply that pings
-    the bot must not type the ping), strips C0/C1 control characters (THEORETICAL-13,
-    #297/#298 review — `\\s+` alone leaves ESC/BEL/NUL etc. untouched, and this text
-    is later typed via `send-keys -l` into a real pane; a raw ESC byte risks the
-    terminal reading it as the start of an escape sequence rather than literal
-    text), collapses ALL whitespace (incl. newlines — a stray newline would submit
-    the prompt early / split it), and caps the length. Returns "" when nothing
-    usable remains (→ the caller ignores the reply)."""
-    if not raw:
-        return ""
-    s = _MENTION_TOKEN_RX.sub(" ", str(raw))
-    if bot_id:
-        s = s.replace("<@%s>" % bot_id, " ").replace("<@!%s>" % bot_id, " ")
-    s = _CONTROL_CHAR_RX.sub(" ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s[:DISCORD_REPLY_MAX_CHARS]
-
-
-def parse_discord_reply(msg, allowed_ids, qmap, bot_id=""):
-    """Validate ONE Discord message as an answer to a tracked ❓ ping.
-
-    Returns {reply_id, referenced, session, cwd, channel, text} when `msg` is a
-    reply BY an allowed owner TO a message id in `qmap` with usable text; else
-    None. Pure — all the security checks live here so they are unit-testable."""
-    if not isinstance(msg, dict):
-        return None
-    reply_id = str(msg.get("id") or "").strip()
-    author = msg.get("author") or {}
-    author_id = str(author.get("id") or "").strip()
-    ref = (msg.get("message_reference") or {}).get("message_id")
-    ref = str(ref or "").strip()
-    if not reply_id or not author_id or not ref:
-        return None
-    if author_id not in allowed_ids:            # SECURITY: only a known owner
-        return None
-    q = qmap.get(ref)
-    if not q:                                   # must reply to a ❓ WE sent
-        return None
-    text = clean_reply_text(msg.get("content"), bot_id)
-    if not text:
-        return None
-    return {"reply_id": reply_id, "referenced": ref,
-            "session": str(q.get("session") or ""), "cwd": str(q.get("cwd") or ""),
-            "channel": str(q.get("channel") or ""), "text": text,
-            "question": " ".join(str(q.get("question") or "").split()),
-            "asked_ts": q.get("ts") or 0}
+from watchdog.discord_api import (  # noqa: E402
+    clean_reply_text as clean_reply_text,
+    parse_discord_reply as parse_discord_reply,
+    _snowflake_ts as _snowflake_ts,
+    _discord_get as _discord_get,
+    fetch_channel_messages as fetch_channel_messages,
+    _react_ok as _react_ok,
+    parse_discord_card_reply as parse_discord_card_reply,
+    fetch_reaction_users as fetch_reaction_users,
+    _reacted_by_owner as _reacted_by_owner,
+)
 
 
 DREPLY_TICKET_FALLBACK_S = 180      # reply blocked this long → deliver via the ticket
@@ -1106,16 +497,6 @@ DREPLY_CHANNEL_MEMORY_S = 7 * 24 * 3600
 # weeks-old message the user has long moved past is pure noise.
 ORPHAN_ANSWER_WINDOW_S = 48 * 3600
 _DISCORD_EPOCH_MS = 1420070400000
-
-
-def _snowflake_ts(sid):
-    """Epoch seconds encoded in a Discord snowflake id; 0 when unparsable
-    (a non-numeric test id, garbage) — the caller then skips the orphan
-    ping rather than guessing the message's age."""
-    s = str(sid or "").strip()
-    if not s.isdigit():
-        return 0
-    return ((int(s) >> 22) + _DISCORD_EPOCH_MS) / 1000.0
 
 
 def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
@@ -1953,14 +1334,42 @@ def _owner_decision_digest_block(tickets, limit=12):
     return "\n".join(lines)
 
 
+def _box_authority():
+    """This BOX's autopilot authority profile (full / branch-merge /
+    fork-no-merge), resolved cwd-INDEPENDENTLY from the OS user's fixed
+    `AUTHORITY_BY_USER` mapping.
+
+    #489: the owner-decision digest is a BOX-WIDE aggregate (every repo in
+    `_cache_repo_roots`) pinged to the BOX OWNER, so the question it gates on is
+    "is THIS BOX's owner the genuine recipient of these decisions" — fixed by the
+    box identity, never by whatever cwd the watchdog happens to run from.
+    Deliberately NOT `resolve_authority()`: that honours a per-repo
+    `airuleset:authority=full` CLAUDE.md marker, and a stray such marker in the
+    watchdog's cwd must NEVER re-open the cross-stream leak this gate closes. This
+    is the SAME `AUTHORITY_BY_USER` map `resolve_authority` itself falls back to
+    (never a parallel derivation). Deferred `import airuleset` (the idiom already
+    used in this package's `goal.py` + `cli_quals.py`) avoids the module-load
+    cycle. An unmapped user (gk = gatekeeper, dev1/dev2 = newlevel) defaults to
+    "full", exactly as the map's own `.get(user, "full")` does everywhere else."""
+    import airuleset
+    return airuleset.AUTHORITY_BY_USER.get(airuleset._current_user(), "full")
+
+
 def reping_owner_decision_tickets(now, send_fn, state, home=None, dry_run=False,
                                   reping=None, account_owner="", fetch=None,
-                                  persist=None):
+                                  persist=None, authority=None):
     """#461 -- see the section comment above OWNER_DECISION_LABELS. Once per
     QUESTION_REPING_S day-bucket, ping the owner with a summary of every open
     owner-decision ticket. No-op unless BOTH send_fn and fetch are wired
     (fetch=None keeps every OTHER job's run_once test network-free, exactly
     like jobs 8/11).
+
+    #489 -- runs ONLY on a full-authority box (box owner = the genuine decision
+    recipient). `authority` is injectable for hermetic tests; it defaults to the
+    box-wide `_box_authority()` (never `resolve_authority()`'s per-repo marker).
+    A reduced-authority sub-dev box skips ENTIRELY (before any fetch or ping) --
+    its box owner is an external sub-dev but the tickets belong to the
+    gatekeeper/boss.
 
     Gated on a state day-bucket stamp BEFORE the network fetch (no 60s query
     storm) and deferred past the sleep window (retried after 06:00, bucket
@@ -1978,6 +1387,27 @@ def reping_owner_decision_tickets(now, send_fn, state, home=None, dry_run=False,
     dd = state.get("owner_decision_digest") or {}
     if dd.get("bucket") == bucket:
         return []                              # already handled this day-bucket
+    # #489 -- the digest is a BOX-WIDE aggregate (every repo in
+    # _cache_repo_roots) pinged to the BOX OWNER. Run it ONLY where the box owner
+    # is the GENUINE decision recipient: a full-authority (zbynek: gk/dev1/dev2)
+    # box. On a reduced-authority sub-dev box the owner is an EXTERNAL sub-dev
+    # (david = CEO slovnormalu) but the tickets belong to the gatekeeper/boss --
+    # so the repo-scoped fetch leaked 24 internal odoo-erp tickets into david's
+    # Discord thread with a false "these N tickets wait on YOUR decision". Skip
+    # ENTIRELY, before any fetch or ping (the sub-dev's own slice is already
+    # surfaced by the footer `U N` badge + the per-ticket ❓ pings -- the digest's
+    # own "critical paths"). The SINGLE authority check (no new heuristic gate,
+    # #486), resolved cwd-independently so no stray marker re-opens the leak.
+    # Placed AFTER the bucket dedup and it stamps the bucket on skip, so a reduced
+    # box logs the skip at most ONCE per day-bucket (dedup silences the rest),
+    # never every 60s sweep.
+    authority = _box_authority() if authority is None else authority
+    if authority != "full":
+        dd["bucket"] = bucket
+        state["owner_decision_digest"] = dd
+        (persist or (lambda: None))()
+        return ["owner-decision-digest skipped: reduced-authority box (%s) -- "
+                "decisions belong to the maintainer, not this box" % authority]
     logs = []
     if _in_sleep_window(now):
         logs.append("owner-decision-digest deferred sleep-window")
@@ -2050,939 +1480,47 @@ def compose_reply_prompt(r):
             % (when, q, " ".join(str(r.get("text") or "").split()), rearm))
 
 
-def _discord_get(url, token, timeout=6):
-    import urllib.request
-    req = urllib.request.Request(
-        url, headers={"Authorization": "Bot " + token,
-                      "User-Agent": "DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)"})
-    return urllib.request.urlopen(req, timeout=timeout).read()
-
-
-def fetch_channel_messages(channel, token, limit=25):
-    """GET the last `limit` messages of a channel/thread (newest first). Returns a
-    list of message dicts, or [] on any error (fail-safe — never breaks the poll)."""
-    if not channel or not token:
-        return []
-    try:
-        raw = _discord_get(
-            "https://discord.com/api/v10/channels/%s/messages?limit=%d" % (channel, limit),
-            token)
-        data = json.loads(raw)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def _react_ok(channel, message_id, token):
-    """React ✅ to a delivered reply as a visible 'answer routed' confirmation.
-    Best-effort (a failed reaction never blocks delivery)."""
-    import urllib.request
-    try:
-        url = ("https://discord.com/api/v10/channels/%s/messages/%s/reactions/%s/@me"
-               % (channel, message_id, "%E2%9C%85"))     # ✅ url-encoded
-        req = urllib.request.Request(
-            url, method="PUT", data=b"",
-            headers={"Authorization": "Bot " + token, "Content-Length": "0",
-                     "User-Agent": "DiscordBot (https://github.com/zbynekdrlik/airuleset, 1.0)"})
-        urllib.request.urlopen(req, timeout=6).read()
-        return True
-    except Exception:
-        return False
-
-
-# --------------------------------------------------------------------------- #
-# Stash-around delivery (issue #35) — CC's native prompt STASH (Ctrl+S) lets
-# the watchdog deliver its own text into a pane that is idle but holds a
-# FOREIGN draft, without losing that draft: park it, type + submit ours, and
-# CC auto-restores the parked draft the instant the delivered turn completes
-# (empirically verified against CC 2.1.220 — NOT a second Ctrl+S press, which
-# the docs wrongly imply). The stash is SINGLE-SLOT with a SILENT overwrite,
-# so every step is verified against a fresh capture and any surprise aborts
-# to the caller's pre-#35 fallback (pending / ticket-fallback / skip) —
-# never a guess, never data loss.
-# --------------------------------------------------------------------------- #
-
-STASH_MARKER = "› stashed"          # "› stashed" — CC's stash-slot indicator
-
-# CC COLLAPSES a long literal `send-keys -l` into a single placeholder row
-# (`[Pasted text #3]`) instead of rendering the text — live-observed
-# 2026-07-26 on job 20's first real re-arm (a 3152-char /goal). Every
-# verified delivery here matches the typed text against the boundary line,
-# which can NEVER match that placeholder; the check only ever worked because
-# previous callers all sent short text.
-#
-# #372 — CC also renders a SECOND, MULTI-LINE collapse shape for the same
-# kind of long single-line send: `[Pasted text #N +K lines]` (live incident,
-# david2@subdev, 2026-08-11 — even AFTER #354's own settle-poll fix). A
-# single-line-only regex refuses to recognize this as landed, so a
-# GENUINELY SUCCESSFUL delivery gets declared a verify FAILURE, which then
-# triggers a destructive undo (`_undo_typed_text`) against a box its own
-# docstring explicitly assumes it will never have to reason about — the
-# undo backspaces `len(payload)` (~3800) characters against what is really
-# a ~26-char placeholder, sometimes failing to confirm bare within the
-# settle-poll's budget and leaving the box AND the single stash slot stuck.
-# Rather than enumerate this exact second shape as its own alternative (CC
-# has now shown 2 distinct collapse renderings sharing the same `[Pasted
-# text #N` prefix — assume there will be a 3rd), the regex is PREFIX-
-# anchored and suffix-TOLERANT: `[Pasted text #N` followed by anything,
-# closing on `]`. This is deliberately more permissive than enumerating
-# every observed suffix, and is safe: nothing else in a Claude Code pane's
-# input box legitimately renders this literal prefix.
-_PASTED_PLACEHOLDER_RX = re.compile(r"^\[Pasted text #\d+.*\]$")
-
-
-def _typed_landed(text, itext):
-    """True if the input-box content `itext` is evidence that `text` was
-    typed IN FULL — either the literal tail (a short type renders verbatim;
-    a WRAPPED one puts its tail on the boundary line, hence endswith) or
-    CC's collapsed `[Pasted text #N]` placeholder for a long one. A
-    genuinely TRUNCATED partial type matches neither and is still refused —
-    submitting one is the #36 disaster this verification exists to prevent."""
-    if not itext:
-        return False
-    if text.endswith(itext):
-        return True
-    return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip()))
-
-
-# #322 — CC 2.1.226 introduced a SECOND, DIFFERENT paste-collapse shape: a
-# single long literal `send-keys -l` burst renders as `paste again to
-# expand` rather than `[Pasted text #N]` — an INCOMPLETE/unexpanded paste
-# that is never parsed as a slash command. Pressing Enter on it submits
-# whatever content IS committed as an ordinary chat message instead of
-# arming the goal — the exact live incident (dev1's own job 20, and
-# montalu2@subdev, both CC 2.1.226): the delivery "succeeds" with no error,
-# the model receives the `/goal ...` text as a normal prompt, and the goal
-# never arms. A controlled live experiment DISPROVED the earlier "busy
-# pane" hypothesis directly — a 23-char payload armed fine on a BUSY pane,
-# while a 3960-char one failed on an IDLE one; the only variable that
-# discriminated pass/fail was LENGTH, and typing the SAME long payload in
-# small chunks (instead of one burst) armed correctly every time.
-GOAL_TYPE_CHUNK_THRESHOLD = 200      # below this, unchanged single-burst
-                                     # send-keys (never observed to trigger
-                                     # the collapse at this size)
-GOAL_TYPE_CHUNK_SIZE = 120
-GOAL_TYPE_CHUNK_DELAY_S = 0.12
-_PASTE_EXPAND_HINT_RX = re.compile(r"paste again to expand", re.I)
-
-
-def _pane_shows_collapsed_paste(itext):
-    """True when the input box shows CC's 'paste again to expand' hint — an
-    incomplete/unexpanded paste. `_type_literal`'s chunking exists
-    specifically to avoid ever reaching this state; this check is a fast,
-    explicit abort for the case something still does (a coalesced terminal
-    write, a lower-than-expected collapse threshold), rather than relying
-    on the generic type-verify timeout to eventually give up."""
-    return bool(itext) and bool(_PASTE_EXPAND_HINT_RX.search(itext))
-
-
-def _type_literal(pid, run, text, sleep_fn=None):
-    """Send `text` into the pane's input box literally — in ONE burst below
-    `GOAL_TYPE_CHUNK_THRESHOLD` chars (unchanged from before this ticket),
-    or in small CHUNKS at/above it (#322) so CC never treats the whole
-    payload as one terminal-paste event.
-
-    #322 REOPENED (adversarial-review CRITICAL-1, both live-verified against
-    a real tmux 3.7b pane): `tmux send-keys -l <chunk>` parses `<chunk>` as a
-    getopt-style ARGUMENT — a chunk whose first character happens to be `-`
-    (e.g. a 120-char slice landing mid-word on "...`-self` (holds..." in a
-    real shipped template) is read as an unknown FLAG and the whole call
-    fails (`command send-keys: unknown flag -X`, rc 1). `_default_run`
-    silently swallows a non-zero-rc command as `""` (no exception, no log),
-    so the chunk is DROPPED with zero indication — every later chunk still
-    lands, so `_typed_landed`'s tail-based `endswith()` check is satisfied
-    by the (now internally corrupted) remainder, and a GOAL WITH A
-    120-CHARACTER HOLE IN THE MIDDLE gets armed. This is a materially WORSE
-    outcome than the paste-collapse bug this function exists to fix (which
-    armed nothing, rather than arming something silently wrong) — and the
-    same `-l` call is on `deliver_with_stash`'s only type path, so an
-    arbitrary Discord-reply `prompt` (job 7) can be mangled and SUBMITTED
-    the identical way. `--` (end-of-options) makes every following argument
-    literal regardless of a leading `-`; live-verified: `send-keys -l --
-    '-DASH-OK'` lands the literal text, `send-keys -l '-DASH-OK'` (no `--`)
-    fails exactly as above. Applied to BOTH the single-burst and the
-    chunked path — a single-burst payload can equally start with `-` (job
-    7's arbitrary `prompt` argument is not `/goal`-prefixed)."""
-    sleep_fn = sleep_fn or time.sleep
-    if len(text) < GOAL_TYPE_CHUNK_THRESHOLD:
-        run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
-        return
-    for i in range(0, len(text), GOAL_TYPE_CHUNK_SIZE):
-        run(["tmux", "send-keys", "-t", pid, "-l", "--",
-            text[i:i + GOAL_TYPE_CHUNK_SIZE]])
-        if i + GOAL_TYPE_CHUNK_SIZE < len(text):
-            sleep_fn(GOAL_TYPE_CHUNK_DELAY_S)
-
-
-STASH_VERIFY_SETTLE_POLLS = 3      # bounded: a `C-s` toggle's render can lag
-STASH_VERIFY_SETTLE_S = 0.3        # behind the keystroke actually landing (#176 F4)
-
-# The four honest outcomes of our own `C-s` toggle (#189). The mechanism used
-# to collapse them into one boolean ("did the box go bare WITH the marker?")
-# and treat everything else as a failed stash — which is how an EMPTY box
-# became an error condition, and why zero `continue`s were delivered in 24h
-# box-wide. Each outcome now names a genuinely different pane state and gets
-# a genuinely different recovery.
-STASH_PARKED = "parked"            # bare + marker lit: a real draft is in the slot
-STASH_NOOP = "noop"                # bare, no marker: there was nothing to park
-STASH_UNRESOLVED = "unresolved"    # still shows content, no marker: a rendered
-                                   # ghost suggestion, or a genuinely lost
-                                   # keystroke — DELIBERATELY not distinguished
-STASH_NO_BOUNDARY = "no-boundary"  # the input line itself is gone (spinner /
-                                   # dialog / unreadable): touch nothing more
-
-
-def _await_stash_settled(pid, run, sleep_fn):
-    """Poll (bounded) for the pane to settle after our OWN `C-s`, and report
-    WHICH of the four states above it settled into.
-
-    Still a render-SETTLE poll, never a blind timeout — it returns the instant
-    the box agrees, because an IMMEDIATE re-capture can show the UNCHANGED
-    screen even though the toggle already landed server-side (#176 F4).
-
-    What changed in #189 is the question being asked. The old poll demanded
-    `input == "" AND marker lit` and called anything else a failure. But a
-    bare box with NO marker is not a failure at all: it means there was
-    nothing to park, and stashing nothing is a no-op. Since Claude Code's grey
-    prompt suggestion renders as ordinary text once `capture-pane -p` strips
-    its SGR attributes, "the box looks non-empty" was never evidence that a
-    draft existed — so the poll reports what it can actually see and lets the
-    caller act on each state, rather than folding three deliverable states
-    into one abort. Returns (last_capture, outcome, boundary_text) where
-    boundary_text is the input line as it stands at the end (None when there
-    is no input line at all)."""
-    cap = None
-    for i in range(STASH_VERIFY_SETTLE_POLLS):
-        cap = capture_pane(pid, run, lines=30)
-        if _input_line_text(cap) == "":
-            return cap, (STASH_PARKED if STASH_MARKER in (cap or "")
-                         else STASH_NOOP), ""
-        if i < STASH_VERIFY_SETTLE_POLLS - 1:
-            sleep_fn(STASH_VERIFY_SETTLE_S)
-    itext = _input_line_text(cap)
-    if itext is None:
-        return cap, STASH_NO_BOUNDARY, None
-    return cap, STASH_UNRESOLVED, itext
-
-
-def _typed_exclusively(text, itext):
-    """True only if the input box holds NOTHING BUT `text` — the STRICT form of
-    `_typed_landed`, required when we typed into a box that visibly held
-    something (#189).
-
-    `_typed_landed` accepts a TAIL of `text` on the boundary line, because a
-    wrapped input renders its tail there. That allowance is safe on a box we
-    verified bare first, but not on a box that already showed content: if the
-    content was a real draft our text APPENDS to it, and a wrap landing inside
-    our own text would leave a boundary that is a legitimate suffix of `text`
-    — passing the loose check and submitting the user's draft with our text
-    glued on. Requiring an exact match (or Claude Code's collapsed
-    `[Pasted text #N]` placeholder for a long payload) has no such hole: a
-    ghost suggestion is REPLACED by the keystroke, so the box holds exactly
-    our text, while a real draft never can."""
-    if not itext:
-        return False
-    if itext == text:
-        return True
-    return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip()))
-
-
-# Bounds how many backspaces an undo may ever spray at a pane. It sat at 400,
-# BELOW a real payload — the gk-request nudge is 458 chars — so the recovery
-# #193 added for a box verified bare could not have run for the very delivery
-# that stranded its text. Sized off the largest payload this helper actually
-# carries: job 20 delivers `"/goal " + <condition>`, and Claude Code caps that
-# condition at 4000 (#169), so 4096 covers the whole line with headroom rather
-# than refusing it by six characters.
-STASH_UNDO_MAX_BACKSPACES = 4096
-
-# Backs `_undo_typed_text`/`_undo_appended_text`'s own post-backspace verify
-# (#354). A single immediate capture right after backspacing can read the
-# box as still non-bare purely from render lag — the SAME mechanism #176 F4
-# already found and fixed for `deliver_with_stash`'s own post-toggle verify
-# (`_await_stash_settled`), never before extended to this post-backspace
-# verify. Reported live on gatekeeper (#354): two real deliveries logged
-# "stash-abort: typed-NOT-undone, draft left parked" with the /goal text
-# visibly stuck, unsent, in the pane — the user's own draft left
-# permanently parked in the single stash slot because the (genuinely
-# successful, just not-yet-rendered) undo was declared failed.
-#
-# `_await_stash_settled` is the SHAPE precedent (bounded-poll-never-a-blind-
-# timeout, #176 F4) but NOT the magnitude one — its 3x0.3s budget backs a
-# single `C-s` toggle, a far smaller render event than backspacing up to
-# `STASH_UNDO_MAX_BACKSPACES` individual keystrokes. The MAGNITUDE here is
-# deliberately borrowed from `GOAL_TYPE_SETTLE_POLLS`/`_S` (`_await_typed`)
-# instead — this job's own already-established budget for the render lag a
-# multi-KB PASTE causes, the closer analogue by payload size. Accepted cost
-# (adversarial-review finding, #354): ~12x `_await_stash_settled`'s own
-# budget, worst case ~7s added to ONE pane's delivery inside job 20's own
-# per-sweep wall-clock budget — reached only on a genuine settle-window-
-# exhausting failure, never on the already-working happy path.
-STASH_UNDO_SETTLE_POLLS = 8
-STASH_UNDO_SETTLE_S = 1
-
-
-def _undo_appended_text(pid, run, pre_text, text, sleep_fn=None):
-    """Remove exactly the characters WE typed from a box that already held
-    `pre_text`, and VERIFY the box came back to `pre_text` (#189).
-
-    Reached only when nothing was parked and the box shows the exact append
-    signature `pre_text + text` — i.e. our own keystroke landed on top of a
-    real draft because the stash toggle was lost. A restoring `C-s` would be
-    the WRONG recovery here: with an empty slot it would PARK the polluted
-    text, jamming the single slot into the one decline this design keeps and
-    leaving the user's draft invisible. Backspacing our own characters is the
-    only recovery that touches nothing of the user's. Returns whether the
-    draft verifiably came back.
-
-    #354 — a bounded settle poll (never a blind timeout — returns the
-    instant the box agrees) backs the verify, see `STASH_UNDO_SETTLE_POLLS`'s
-    own comment for why a single immediate capture is not enough."""
-    if not text or len(text) > STASH_UNDO_MAX_BACKSPACES:
-        return False
-    sleep_fn = sleep_fn or time.sleep
-    run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(text))
-    for i in range(STASH_UNDO_SETTLE_POLLS):
-        if _input_line_text(capture_pane(pid, run, lines=30)) == pre_text:
-            return True
-        if i < STASH_UNDO_SETTLE_POLLS - 1:
-            sleep_fn(STASH_UNDO_SETTLE_S)
-    return False
-
-
-def _undo_typed_text(pid, run, text, sleep_fn=None):
-    """Remove exactly the characters WE typed from a box that was VERIFIED
-    BARE immediately before we typed, and confirm it came back to bare (#193).
-
-    Reached only from the PARKED / NOOP outcomes, where the settle poll had
-    already read `_input_line_text(cap) == ""`. Every character in the box is
-    therefore ours, so backspacing exactly `len(text)` provably cannot reach
-    anything of the user's — whatever fraction of the type actually landed, a
-    surplus backspace lands on an empty box. That proof is a property of the
-    BOX (observed bare by this function's own caller a moment earlier), never
-    of who called or of what they passed.
-
-    Note it can only run at all when the verify FAILED: a payload Claude Code
-    collapsed into `[Pasted text #N]` verifies through that placeholder and is
-    submitted, so this never has to reason about a collapsed buffer.
-
-    #354 — a bounded settle poll (never a blind timeout — returns the
-    instant the box agrees) backs the verify, see `STASH_UNDO_SETTLE_POLLS`'s
-    own comment for why a single immediate capture is not enough."""
-    if not text or len(text) > STASH_UNDO_MAX_BACKSPACES:
-        return False
-    sleep_fn = sleep_fn or time.sleep
-    run(["tmux", "send-keys", "-t", pid] + ["BSpace"] * len(text))
-    for i in range(STASH_UNDO_SETTLE_POLLS):
-        if _input_line_text(capture_pane(pid, run, lines=30)) == "":
-            return True
-        if i < STASH_UNDO_SETTLE_POLLS - 1:
-            sleep_fn(STASH_UNDO_SETTLE_S)
-    return False
-
-
-def draft_rescue_dir():
-    """`~/.claude/draft-rescue/`, resolved at CALL time (same reasoning as
-    `watchdog.compact.compact_requests_path()`: never a frozen module-level
-    constant, so a
-    relocated `$HOME`/override is honoured on every call, not just the one
-    that happened to run at import time).
-
-    `AIRULESET_DRAFT_RESCUE_DIR`, when set, overrides the default. This is
-    NOT a security boundary (there is nothing to bypass here — see the
-    vault-store env-override lesson in the playbook, which is about a
-    guard an attacker could defeat; this is a plain write-only, self-pruning
-    diagnostic directory nothing else reads or acts on). It exists so
-    `airuleset.py`'s own push-gate test-suite subprocess (`cmd_push`) can
-    point the WHOLE `unittest discover` run at a throwaway directory in one
-    place, instead of adding per-file test isolation to every one of the
-    ~19 test files whose fixtures transitively reach `deliver_with_stash`/
-    `_send_goal_verified` via `run_once` (#271) — the live systemd watchdog
-    executes this repo's own working tree every 60s, so a test process that
-    wrote into the REAL directory would be indistinguishable from production
-    activity. A single test wanting a precise, deterministic rescue-file
-    assertion still patches this function directly
-    (`unittest.mock.patch.object(wd, "draft_rescue_dir", return_value=<tmp>)`
-    — the same established shape `watchdog.compact.compact_requests_path()`
-    already uses)."""
-    override = os.environ.get("AIRULESET_DRAFT_RESCUE_DIR")
-    if override:
-        return Path(override)
-    return Path.home() / ".claude" / "draft-rescue"
-
-
-# 14 days: deliberately generous (#271). This file exists ONLY so a human can
-# recover text nothing else could save — the cost of keeping one around too
-# long is a few KB, the cost of pruning too eagerly is the exact
-# unrecoverable loss this mechanism exists to prevent. There is no "restore
-# confirmed, safe to delete now" signal available to this process (the
-# restore is Claude Code's own async, on-screen-only effect, fired once the
-# DELIVERED turn completes — minutes away, and never observed here), so age
-# is the only thing that ever removes a rescue file.
-DRAFT_RESCUE_TTL_S = 14 * 24 * 3600
-
-# `<safe-pid>-<epoch-ms, >=10 digits>[-<retry-n>].txt` — the EXACT shape
-# `_draft_rescue_persist` writes. `_draft_rescue_prune` matches against this
-# (adversarial-review MAJOR finding, #271) rather than unlinking every name
-# in the directory: a misconfigured `AIRULESET_DRAFT_RESCUE_DIR` pointed at
-# an already-populated directory must never let a routine prune delete
-# unrelated content it happens to share a mtime-age with.
-_DRAFT_RESCUE_NAME_RX = re.compile(r"^.+-\d{10,}(?:-\d+)?\.txt$")
-
-
-def _draft_rescue_text(captured):
-    """Best-effort plain-text reconstruction of the pane's CURRENT input-box
-    content — "" when the box is bare or unlocatable (nothing to rescue).
-
-    Never the exact original bytes: a WRAPPED draft loses its true line
-    breaks the instant Claude Code re-flows it (#189) — this is the
-    RENDERED rows (`_input_box_rows_raw`, already head-first and chrome-
-    stripped) joined back together, with the leading `❯` glyph + its
-    separator stripped off the head row only. Enough for a human to read
-    and retype, which is the whole point of a rescue file.
-
-    `_input_box_rows_raw`'s own glyph-based fallback (a borderless capture)
-    deliberately returns exactly ONE row and never more — so a borderless
-    capture can never pull agent-strip/chrome text into a rescue file; only
-    the STRUCTURAL (bordered) strategy can return multiple rows, and it
-    returns strictly the box's own interior, already guarded (#243) against
-    a transcript-quoted box being misread as the real one."""
-    rows = _input_box_rows_raw(captured)
-    if not rows:
-        return ""
-    head = _normalize_queued_hint(rows[0])
-    if not _is_draft_head(head):
-        return ""            # bare box ("❯" alone) — nothing to rescue
-    first = head[1:].lstrip(" \xa0")
-    body = [first] + list(rows[1:])
-    return "\n".join(ln for ln in body if ln)
-
-
-def _draft_rescue_prune(now, dir_path=None, ttl_s=None):
-    """Remove rescue files older than the TTL. Best-effort (never raises) —
-    called inline from EVERY write (`_draft_rescue_persist`), never a
-    separate job: the repo FREEZE forbids a new numbered watchdog job, and
-    there is no "confirmed delivered" event to hang a dedicated sweep off
-    of anyway (see `DRAFT_RESCUE_TTL_S`'s own docstring) — an inline prune
-    on every write is sufficient to keep the directory bounded.
-
-    Only names matching `_DRAFT_RESCUE_NAME_RX` are ever candidates for
-    deletion — never a bare "everything in this directory" sweep."""
-    dir_path = dir_path or draft_rescue_dir()
-    ttl_s = DRAFT_RESCUE_TTL_S if ttl_s is None else ttl_s
-    try:
-        names = os.listdir(dir_path)
-    except OSError:
-        return
-    for name in names:
-        if not _DRAFT_RESCUE_NAME_RX.match(name):
-            continue
-        p = Path(dir_path) / name
-        try:
-            # A matching-named SYMLINK is never one of our own writes (we
-            # only ever create real files, via O_EXCL|O_NOFOLLOW) — remove
-            # it unconditionally, on age or not. `Path.unlink()` removes the
-            # link itself, never follows it, so this is safe either way.
-            if os.path.islink(p) or now - p.stat().st_mtime > ttl_s:
-                p.unlink()
-        except OSError:
-            continue
-
-
-def _draft_rescue_ensure_dir(dir_path):
-    """Create `dir_path` as an owner-only (0700) directory if missing, and
-    refuse — creating nothing — if it is, or becomes, a symlink.
-
-    Mirrors this repo's own vault-store discipline (checked BEFORE *and*
-    AFTER `os.makedirs`, since that call happily succeeds against a symlink
-    to an existing directory and a later `chmod` would then tighten the
-    TARGET, not a real directory of our own) — these boxes host foreign
-    uids by design, and the rescue directory holds arbitrary user-typed
-    text that can include a pasted credential (adversarial-review CRITICAL
-    finding, #271). Returns True only when `dir_path` is a genuine,
-    owner-only directory ready to receive a write."""
-    try:
-        if os.path.islink(dir_path):
-            return False
-        os.makedirs(dir_path, mode=0o700, exist_ok=True)
-        if os.path.islink(dir_path):
-            return False
-        os.chmod(dir_path, 0o700)
-        return True
-    except OSError:
-        return False
-
-
-# Bounds the filename-collision retry loop below — two rescue writes for the
-# SAME pane landing in the same millisecond needs two full tmux round-trips
-# inside 1ms, which is not realistic in production, but `O_EXCL` makes the
-# collision loud (FileExistsError) instead of a silent O_TRUNC overwrite, so
-# bound the retry rather than loop forever on a persistently occupied name.
-_DRAFT_RESCUE_MAX_RETRIES = 5
-
-
-def _draft_rescue_persist(pid, captured, now=None, dir_path=None, logs=None):
-    """Persist the pane's CURRENT input-box content to disk BEFORE any
-    keystroke of OURS lands in it (#271).
-
-    `deliver_with_stash` parks a real draft via `C-s` and Claude Code
-    auto-restores it once the delivered turn completes — but that restore is
-    entirely on-screen and asynchronous; nothing in this process ever
-    observes it landing. The reported incident (2026-08-06): a long typed
-    message sat in the box, a goal-autoarm delivery ran, and the draft was
-    gone with NO trace at all — CC's input box renders in-place via cursor
-    addressing, so unsent text never even enters tmux scrollback (confirmed
-    against the real incident capture, forensics comment on this issue).
-
-    So every primitive that is about to touch a pane's box
-    (`deliver_with_stash`, `_send_goal_verified`) calls this FIRST,
-    unconditionally, with the SAME capture it is about to act on — before
-    its own first `send-keys`. Stash+restore stays the PRIMARY recovery
-    path; this file is the safety net and is NEVER deleted here on a claimed
-    success (there is no verifiable "the restore actually landed" signal to
-    delete on) — only `_draft_rescue_prune`'s generous TTL, run inline on
-    every write, ever removes one. `send_continue` (job 1/4/7's short-nudge
-    primitive) needs no equivalent: it only ever types into a box its own
-    caller already verified bare, and on the rare swallowed-submit case a
-    stuck draft is APPENDED to and later submitted or auto-recovered — never
-    silently discarded the way an unrestored stash can be.
-
-    The write is owner-only (0600, via `os.O_EXCL | os.O_NOFOLLOW` — never
-    followed through a planted symlink, never silently overwritten by a
-    filename collision) into an owner-only (0700) directory
-    (`_draft_rescue_ensure_dir`) — the content can be arbitrary user-typed
-    text, including a pasted credential (adversarial-review CRITICAL
-    finding, #271), and these boxes host foreign uids by design.
-
-    Returns the path written, or None (box was bare, the directory could not
-    be secured, or the write failed after exhausting the collision-retry
-    budget — best-effort; never blocks the delivery it is protecting, but
-    now LOGS why whenever it fails with a real draft in hand, so a failure
-    here is never as silent as the incident this whole mechanism exists to
-    prevent)."""
-    text = _draft_rescue_text(captured)
-    if not text:
-        return None
-    now = time.time() if now is None else now
-    dir_path = dir_path or draft_rescue_dir()
-    if not _draft_rescue_ensure_dir(dir_path):
-        if isinstance(logs, list):
-            logs.append("draft-rescue: FAILED to secure %s (pane %s, %d "
-                        "chars would have been lost with no trace)"
-                        % (dir_path, pid, len(text)))
-        return None
-    _draft_rescue_prune(now, dir_path=dir_path)
-    safe_pid = re.sub(r"[^A-Za-z0-9_-]+", "_", str(pid)).strip("_") or "pane"
-    # #479 -- content dedup: a LIVE draft parked across sweeps (a stash slot
-    # held by the user's OWN text, retype-verify-failed every ~60s) must NOT
-    # spawn a fresh rescue file every sweep -- the 2026-08-14 storm wrote the
-    # SAME 702-char draft 7x over ~3h on pane %1, and the 14-day TTL held all
-    # of them. If an existing rescue file of THIS pane already holds
-    # byte-identical content, reuse it: refresh its mtime so the TTL prune
-    # keeps the one surviving copy while the draft is still parked, and skip
-    # the duplicate write. Scoped to OUR OWN filename shape for THIS pane
-    # (`<safe_pid>-<digits>[-<n>].txt`) -- a tighter, pane-specific form of
-    # `_DRAFT_RESCUE_NAME_RX` -- so it can never dedup against unrelated
-    # content a misconfigured rescue dir might hold, and never across panes
-    # (each is an independent conversation). A genuinely EDITED draft is
-    # different content -> a fresh rescue, so the safety net is never weakened.
-    pane_rx = re.compile(r"^" + re.escape(safe_pid) + r"-\d+(?:-\d+)?\.txt$")
-    try:
-        names = sorted(os.listdir(dir_path))
-    except OSError:
-        names = []
-    for name in names:
-        if not pane_rx.match(name):
-            continue
-        cand = Path(dir_path) / name
-        # Open with O_NOFOLLOW (matching the write path's O_EXCL|O_NOFOLLOW
-        # discipline, #271) and operate on that ONE fd for BOTH the content
-        # compare and the mtime refresh: O_NOFOLLOW refuses a planted symlink
-        # outright, and a single fd removes the check-then-use race a separate
-        # islink()+read_text()+utime(path) sequence would carry (adversarial-
-        # review MINOR, #479). The dir is already an owner-only 0700 of ours,
-        # so this is defense-in-depth, not the sole guard.
-        try:
-            fd = os.open(str(cand), os.O_RDONLY | os.O_NOFOLLOW)
-        except OSError:
-            continue                    # symlink / vanished / unreadable
-        try:
-            with os.fdopen(fd, "rb") as f:
-                if f.read().decode("utf-8") != text:
-                    continue            # different content -> a fresh rescue
-                refreshed = "ok"
-                try:
-                    os.utime(f.fileno(), (now, now))
-                except OSError as exc:
-                    refreshed = "failed:%r" % (exc,)   # surfaced, never silent
-        except (OSError, ValueError):
-            continue                    # read error / non-utf8 -> not a match
-        if isinstance(logs, list):
-            logs.append("draft-rescue: identical content already parked "
-                        "(pane %s, %d chars, mtime-refresh=%s) -> %s"
-                        % (pid, len(text), refreshed, cand))
-        return str(cand)
-    base = "%s-%d" % (safe_pid, int(now * 1000))
-    for attempt in range(_DRAFT_RESCUE_MAX_RETRIES):
-        suffix = "" if attempt == 0 else "-%d" % (attempt + 1)
-        path = Path(dir_path) / (base + suffix + ".txt")
-        try:
-            fd = os.open(str(path),
-                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                        0o600)
-        except FileExistsError:
-            continue                       # a genuine name collision — retry
-        except OSError as exc:
-            if isinstance(logs, list):
-                logs.append("draft-rescue: FAILED to open %s (pane %s, %d "
-                            "chars would have been lost with no trace) -> %r"
-                            % (path, pid, len(text), exc))
-            return None
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-        except OSError as exc:
-            if isinstance(logs, list):
-                logs.append("draft-rescue: FAILED to write %s (pane %s, %d "
-                            "chars would have been lost with no trace) -> %r"
-                            % (path, pid, len(text), exc))
-            return None
-        if isinstance(logs, list):
-            logs.append("draft-rescue: saved %d chars (pane %s) -> %s"
-                        % (len(text), pid, path))
-        return str(path)
-    if isinstance(logs, list):
-        logs.append("draft-rescue: FAILED for pane %s -> %d consecutive "
-                    "filename collisions, %d chars would have been lost "
-                    "with no trace" % (pid, _DRAFT_RESCUE_MAX_RETRIES,
-                                       len(text)))
-    return None
-
-
-def _undo_and_release_slot(pid, run, text, parked, log_fn, prefix, sleep_fn=None):
-    """Backspace exactly `text` and, only once bare is CONFIRMED, pop a
-    PARKED draft back with one corrective `C-s` -- the shared recovery
-    THREE call sites need (`deliver_with_stash`'s original #193
-    PARKED/NOOP verify-failure branch and its new #306
-    swallowed-submit-not-recovered branch, plus `_send_goal_verified`'s own
-    #306 swallowed-submit path, always with `parked=False`).
-
-    The precondition every caller has already proven before reaching here
-    -- the box's ENTIRE content is, by construction, exactly `text` and
-    nothing else -- holds for a DIFFERENT reason depending on the caller:
-    a settle poll verified the box BARE immediately before typing (the
-    PARKED/NOOP outcome, and `_send_goal_verified`'s own bare-box-only
-    entry gate), or `_typed_exclusively` already proved the box holds ONLY
-    `text` with nothing of a foreign draft's (the UNRESOLVED-exclusive
-    outcome -- `parked` is structurally False on that path, since only a
-    bare-box settle can ever set `STASH_PARKED`, so the dangerous `C-s`
-    pop below can never fire there; only the safe backspace half runs).
-    Either way, `_undo_typed_text` backspaces exactly `len(text)` and
-    itself re-verifies the box came back to bare before this function ever
-    considers popping anything.
-
-    `log_fn(reason)` receives exactly ONE reason string, built from
-    `prefix` (e.g. `"stash-abort"` for the original call site, so the
-    result is byte-identical to the pre-#306 wording; a fuller phrase like
-    `"stash-abort: swallowed-submit-not-recovered"` for the new ones).
-
-    `sleep_fn` (#354) backs `_undo_typed_text`'s own bounded settle poll --
-    threaded through from the caller's existing `sleep_fn` param (never a
-    new one invented here), so a genuine render-lagged undo verify is
-    retried before this function ever calls it a failure and abandons the
-    parked draft. Production defaults to real `time.sleep`; tests inject a
-    no-op."""
-    undone = _undo_typed_text(pid, run, text, sleep_fn=sleep_fn)
-    if not parked:
-        log_fn("%s: typed-undone" % prefix if undone
-               else "%s: typed-NOT-undone" % prefix)
-        return
-    if not undone:
-        log_fn("%s: typed-NOT-undone, draft left parked" % prefix)
-        return
-    # ONLY now, with the box confirmed bare again, may the toggle pop the
-    # parked draft back. Firing it while our own text was still in the box
-    # would PARK that text instead — the slot is single with a SILENT
-    # overwrite — destroying the very draft this protocol exists to
-    # protect (#193).
-    run(["tmux", "send-keys", "-t", pid, "C-s"])
-    # Read the pop back rather than asserting it: a log line that claims a
-    # delivery it never checked is the #134 mistake.
-    log_fn("%s: typed-undone, parked draft popped back" % prefix
-           if _input_line_text(capture_pane(pid, run, lines=30))
-           else "%s: typed-undone, pop UNVERIFIED (draft still parked)"
-                % prefix)
-
-
-def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
-    """Deliver `text` into an IDLE pane, parking whatever the input box holds.
-
-    #189 — STASH UNCONDITIONALLY. This helper used to require a NON-EMPTY
-    draft before it would act, and then required the box to go bare WITH the
-    `› stashed` marker before it would type. Both conditions are answers to
-    the same question — "is there really something in the prompt?" — and that
-    question is UNANSWERABLE from what we can see: `capture_pane` shells
-    `tmux capture-pane -p` with no `-e`, so Claude Code's dim (SGR 246) prompt
-    suggestion arrives stripped of its colour and is byte-identical to text
-    the user typed. Every classifier in this file therefore reported drafts
-    that did not exist; the stash then had nothing to park, no marker could
-    light, and the verify failed forever. Measured cost: `stash-delivered = 0`
-    across the whole fleet in 24h, with a 529 sitting unattended on gatekeeper
-    until the user typed `continue` by hand.
-
-    So we stop computing the answer. Park first, look after, and let each
-    OBSERVED outcome choose its own recovery:
-
-      1. Abort if the stash slot is ALREADY occupied (`› stashed` anywhere in
-         the capture). This is the ONE genuine decline that remains: the slot
-         is single and overwrites silently, so stashing over it would destroy
-         a parked draft with no way back.
-      2. Require only that the pane is idle at an input boundary — a free `❯`
-         (bare or holding anything at all) and no live-turn signal
-         ('esc to interrupt'). Emptiness is explicitly NOT a precondition.
-      3. If the agent-strip selector holds focus (`_strip_selected`, #36),
-         ONE Escape first — never two (a rapid double-Escape PERMANENTLY
-         DELETES a draft, empirically confirmed).
-      4. Ctrl+S. Then a bounded render-SETTLE poll (never a blind timeout)
-         reports which of four states the pane is in: PARKED (bare + marker —
-         a real draft is in the slot), NOOP (bare, no marker — there was
-         nothing to park, which is a fine outcome and not an error),
-         UNRESOLVED (still shows content, no marker — a rendered ghost, or a
-         genuinely lost keystroke, deliberately NOT distinguished), or
-         NO_BOUNDARY (the input line is gone — abort, touch nothing else).
-      5. Type `text` literally and verify. Typing is itself the discriminator
-         the pane refuses to give us: a ghost suggestion is REPLACED by the
-         keystroke, while a real draft is APPENDED to. After PARKED/NOOP the
-         box was verified bare, so the usual tail-tolerant `_typed_landed`
-         applies; after UNRESOLVED the box held something, so the STRICT
-         `_typed_exclusively` is required — otherwise a wrap landing inside
-         our own text could pass an append off as a clean type.
-      6. Verify failure recovers by what actually happened, never blindly, and
-         never leaves our own text behind (#193). PARKED/NOOP → the box was
-         VERIFIED BARE a moment ago, so every character in it is ours:
-         `_undo_typed_text` backspaces exactly what we typed and confirms the
-         box is bare again. Only THEN, and only when PARKED, does one Ctrl+S
-         pop the draft back — firing it while our text still sat in the box
-         would PARK that text over the user's parked draft, since the slot is
-         single and overwrites silently. UNRESOLVED → nothing is parked, so a
-         Ctrl+S would jam the slot into step 1's decline; `_undo_appended_text`
-         backspaces once the box provably ends with our own characters. When
-         it does not — a truncated type — no FURTHER keystrokes are sent and
-         the log says plainly that the payload we already typed is still in
-         the box, because "is there a draft I would destroy?" resolves an
-         unknown to YES. Typing into an already-WRAPPED unresolved box is
-         refused back at step 4, while refusing is still free.
-      7. Enter submits. If the text is STILL at the boundary (a swallowed
-         Enter — the agent-strip-selector class of bug, #36), ONE corrective
-         Escape+Enter (never a second bare Enter, never two Escapes).
-      8. Success = the box no longer shows our text. A parked draft
-         auto-restores itself once the delivered turn completes.
-
-    `logs`, if a list, gets one reason string appended on every abort/success
-    path — callers that want visibility (or tests) pass one in; the default
-    (None) is silent, matching every other keystroke helper in this file.
-    `sleep_fn` backs step 4's settle poll (default `time.sleep`; tests inject
-    a no-op)."""
-    def _log(reason):
-        if isinstance(logs, list):
-            logs.append(reason)
-
-    run = run or _default_run
-    sleep_fn = sleep_fn or time.sleep
-    cap = captured if captured is not None else capture_pane(pid, run, lines=30)
-    if cap and STASH_MARKER in cap:
-        _log("stash-abort: slot occupied")
-        return False
-    if not _has_free_prompt(cap, bare_only=False):
-        _log("stash-abort: no free prompt")
-        return False
-    if "esc to interrupt" in (cap or ""):
-        _log("stash-abort: live turn")
-        return False
-    # #271: from here on we are genuinely about to act on this box — persist
-    # whatever it currently holds BEFORE the first keystroke of ours lands,
-    # so a stash whose eventual on-screen restore silently fails still has a
-    # recoverable trace. A no-op (returns None, writes nothing) whenever the
-    # box is bare, which is the common case. Honesty note (adversarial
-    # review, #271): `cap` is the CALLER's own capture, which for some
-    # callers (job 7's Discord reply, job 20's silent-death re-arm) can be a
-    # few tmux round-trips stale by the time the actual `C-s` fires a couple
-    # of lines below — the rescued text is therefore a best-effort SNAPSHOT
-    # near the moment of action, not a byte-exact guarantee of what the box
-    # holds at the literal instant `C-s` lands.
-    _draft_rescue_persist(pid, cap, logs=logs)
-    if _strip_selected(cap):
-        run(["tmux", "send-keys", "-t", pid, "Escape"])
-    run(["tmux", "send-keys", "-t", pid, "C-s"])
-    cap, outcome, pre_text = _await_stash_settled(pid, run, sleep_fn)
-    if outcome == STASH_NO_BOUNDARY:
-        # The input line vanished between the toggle and the settle window (a
-        # turn started, a dialog opened). We already sent one keystroke, so
-        # this is not a free pre-send refusal — but sending anything MORE into
-        # a pane we can no longer read is exactly the #233 scar. Stop here.
-        _log("stash-abort: input-line-vanished")
-        return False
-    if outcome == STASH_UNRESOLVED and _box_is_wrapped(cap):
-        # The box still shows content our toggle did not park, AND it is
-        # already multi-row. Anything we append re-flows it, so neither
-        # `_typed_exclusively` (which needs the box to hold our text and
-        # nothing else) nor `_undo_appended_text` (which needs the exact
-        # `pre + text` signature) could ever succeed afterwards — we would be
-        # typing into a box we can neither verify nor undo, on top of what may
-        # be a real draft. Refuse while it is still free to refuse (#193).
-        # This shape was unreachable before wrapped boxes became readable, so
-        # refusing restores exactly the guarantee that reading them removed.
-        _log("stash-abort: unresolved wrapped box")
-        return False
-    parked = outcome == STASH_PARKED
-    _type_literal(pid, run, text, sleep_fn)
-    cap = capture_pane(pid, run, lines=30)
-    itext = _input_line_text(cap)
-    if _pane_shows_collapsed_paste(itext):
-        # #322 — CC's "paste again to expand" is a DIFFERENT collapse shape
-        # than `[Pasted text #N]` (which `_typed_landed` already treats as
-        # landed) — it is never parsed as a slash command, so submitting it
-        # would send whatever IS committed as an ordinary chat message.
-        # `_undo_typed_text`'s OWN docstring states its backspace-N-times
-        # proof depends on the box never being a collapsed buffer ("this
-        # never has to reason about a collapsed buffer") — that
-        # precondition does NOT hold for this shape, so routing it through
-        # the existing recovery below would send an unproven backspace
-        # count against a state this function was never designed to undo.
-        # No further keystrokes; the box is left exactly as CC rendered it.
-        # Known, deliberate residual: a PARKED draft stays in the single
-        # stash slot until a LATER sweep's own "slot occupied" check
-        # surfaces it — rare in practice, since `_type_literal`'s chunking
-        # exists specifically to avoid ever reaching this state.
-        _log("stash-abort: collapsed-paste")
-        return False
-    landed = (_typed_exclusively(text, itext) if pre_text
-              else _typed_landed(text, itext))
-    if not landed:
-        _log("stash-abort: type-verify-failed")
-        if not pre_text:
-            # PARKED or NOOP — the settle poll VERIFIED this box bare a moment
-            # ago, so every character in it is ours and backspacing exactly
-            # what we typed can reach nothing of the user's.
-            _undo_and_release_slot(pid, run, text, parked, _log, "stash-abort",
-                                   sleep_fn=sleep_fn)
-        elif itext == pre_text + text or _typed_landed(text, itext):
-            # We only ever type into a SINGLE-ROW unresolved box — the wrapped
-            # shape is refused above — so `pre_text` is that box's COMPLETE
-            # content, and either signature proves our characters sit at its
-            # END: the exact `pre + text` when nothing re-flowed, or
-            # `_typed_landed` when our own payload wrapped the box. Backspacing
-            # exactly what we typed restores it, and `_undo_appended_text`
-            # verifies that byte-for-byte before reporting success.
-            _log("stash-abort: append-undone" if
-                 _undo_appended_text(pid, run, pre_text, text, sleep_fn=sleep_fn)
-                 else "stash-abort: append-NOT-undone")
-        else:
-            # The box does not end with our text at all — a truncated type, or
-            # something else moved it. Backspacing an unproven buffer could eat
-            # a real draft, and "is there a draft I would destroy?" resolves an
-            # unknown to YES. No FURTHER keystrokes; the payload we already
-            # typed stays where it is, said plainly rather than glossed.
-            _log("stash-abort: append-unprovable, typed text left in box")
-        return False
-    run(["tmux", "send-keys", "-t", pid, "Enter"])
-    cap = capture_pane(pid, run, lines=30)
-    itext2 = _input_line_text(cap)
-    if _typed_landed(text, itext2):
-        # swallowed submit (#36 class) — ONE corrective Escape+Enter, never a
-        # second Escape.
-        run(["tmux", "send-keys", "-t", pid, "Escape"])
-        run(["tmux", "send-keys", "-t", pid, "Enter"])
-        cap = capture_pane(pid, run, lines=30)
-        itext3 = _input_line_text(cap)
-        if _typed_landed(text, itext3):
-            # #306 — delivery is genuinely dead here, but by construction the
-            # box's ENTIRE content is exactly `text` (nothing else could be
-            # in it: PARKED/NOOP means it was verified bare before we typed;
-            # UNRESOLVED-exclusive means `_typed_exclusively` already proved
-            # the box holds ONLY `text`) — the same precondition the
-            # verify-failure recovery above already relies on. Recover the
-            # SAME way: backspace our own text and, if we parked something
-            # in THIS call, pop it back — never leave the pane stuck with
-            # our own garbled text AND the single stash slot silently
-            # occupied forever (the live david@subdev ~2h wedge).
-            _undo_and_release_slot(pid, run, text, parked, _log,
-                                   "stash-abort: swallowed-submit-not-recovered",
-                                   sleep_fn=sleep_fn)
-            return False
-    _log("stash-delivered")
-    return True
-
-
-# --------------------------------------------------------------------------- #
-# #372 — GENERIC JANITOR backstop. Root-cause (the multi-line placeholder
-# regex, fixed above) closes TODAY's specific trigger, but the user's own
-# binding acceptance criteria demand more: an invariant that watchdog NEVER
-# leaves its own typed text in a pane across a sweep boundary (submitted +
-# verified / fully undone / a loud one-time ping — never silent), a GENERIC
-# backstop that self-heals an UNKNOWN future failure shape (not just today's
-# two evidenced ones), and a REACHABLE exit for the "stash occupied"
-# deadlock. This is deliberately keyed on OBSERVING our own recognizable
-# content sitting stuck — never on a persisted "delivery in flight" marker
-# threaded through every one of jobs 7/9/14/20's own call sites (a much
-# larger, riskier signature change to a primitive already reviewed 5 times)
-# — so it works for ANY caller of `deliver_with_stash`/`send_continue`
-# without touching their signatures at all. Hosted in job 20 (`goal_rearm`,
-# below) because it is the one job that already sweeps every candidate pane
-# every cycle, per this ticket's own FREEZE-compatible design (extend an
-# existing job, not a new one).
-# --------------------------------------------------------------------------- #
-
-# The two payload shapes THIS codebase's own delivery jobs are known to
-# type (#372's two forensically-confirmed incidents): a `/goal <condition>`
-# re-arm (jobs 9/20) and a bare `/compact` request (job 14, `COMPACT_TEXT`).
-# Used ONLY to recognize a box's content as PROVABLY our own — never to
-# guess about a genuine foreign draft that merely starts with a slash.
-_JANITOR_OWN_PREFIXES = ("/goal ", "/compact")
-
-JANITOR_CLEAR_MAX_ITER = 25       # bounds the observed-state clear loop
-JANITOR_CLEAR_BATCH_MAX = 200     # per-iteration backspace batch, sized to
-                                  # the CURRENTLY OBSERVED remaining content
-                                  # -- never a blind `len(text)`-sized single
-                                  # burst (#372's own root cause: exactly
-                                  # that assumption left a box
-                                  # "typed-NOT-undone" in production,
-                                  # guessing at a placeholder's true length
-                                  # instead of reading it)
-JANITOR_CLEAR_SETTLE_S = 0.3
-
-# Bounds `state['janitor_watch'][pid]` (#372 adversarial-review CRITICAL-1
-# — the janitor's provenance gate). Generous on purpose: a stuck-forever
-# episode this mechanism exists to fix can legitimately sit unresolved for
-# many sweeps (the `JANITOR_CLEAR_MAX_ITER`-bounded clear loop can itself
-# fail, escalate, and need to be retried later) — the bound exists only to
-# stop a genuinely stale mark (a delivering job's own state got wedged, or
-# this pane was never revisited) from licensing action on unrelated LATER
-# content forever, not to cut off a real, still-unresolved episode.
-JANITOR_WATCH_MAX_AGE_S = 6 * 3600
-
-
-def _looks_like_own_payload(text):
-    """#372 — True when `text` starts with one of THIS codebase's own
-    recognized slash-command payloads (`_JANITOR_OWN_PREFIXES`)."""
-    return bool(text) and text.startswith(_JANITOR_OWN_PREFIXES)
-
-
-def _looks_like_own_stuck_content(itext):
-    """#372 — True when a pane's CURRENT input-box content can ONLY be OUR
-    OWN stuck delivery: either Claude Code's own collapsed-paste placeholder
-    shape (only a long single-line `send-keys -l` burst ever renders this —
-    a human pasting something that happens to render identically is a far
-    rarer coincidence than a routine automated delivery) or a literal,
-    uncollapsed KNOWN own-payload prefix (`_looks_like_own_payload`).
-    Ownership is never guessed from resemblance alone; anything else
-    (including a genuinely truncated/partial own payload with no
-    recognizable prefix) is left completely untouched — the janitor would
-    rather miss a recoverable case than risk a genuine foreign draft."""
-    if not itext:
-        return False
-    return bool(_PASTED_PLACEHOLDER_RX.match(itext.strip())) \
-        or _looks_like_own_payload(itext)
+from watchdog.stash import (  # noqa: E402
+    STASH_MARKER as STASH_MARKER,
+    _PASTED_PLACEHOLDER_RX as _PASTED_PLACEHOLDER_RX,
+    _typed_landed as _typed_landed,
+    GOAL_TYPE_CHUNK_THRESHOLD as GOAL_TYPE_CHUNK_THRESHOLD,
+    GOAL_TYPE_CHUNK_SIZE as GOAL_TYPE_CHUNK_SIZE,
+    GOAL_TYPE_CHUNK_DELAY_S as GOAL_TYPE_CHUNK_DELAY_S,
+    _PASTE_EXPAND_HINT_RX as _PASTE_EXPAND_HINT_RX,
+    _pane_shows_collapsed_paste as _pane_shows_collapsed_paste,
+    _type_literal as _type_literal,
+    STASH_VERIFY_SETTLE_POLLS as STASH_VERIFY_SETTLE_POLLS,
+    STASH_VERIFY_SETTLE_S as STASH_VERIFY_SETTLE_S,
+    STASH_PARKED as STASH_PARKED,
+    STASH_NOOP as STASH_NOOP,
+    STASH_UNRESOLVED as STASH_UNRESOLVED,
+    STASH_NO_BOUNDARY as STASH_NO_BOUNDARY,
+    _await_stash_settled as _await_stash_settled,
+    _typed_exclusively as _typed_exclusively,
+    STASH_UNDO_MAX_BACKSPACES as STASH_UNDO_MAX_BACKSPACES,
+    STASH_UNDO_SETTLE_POLLS as STASH_UNDO_SETTLE_POLLS,
+    STASH_UNDO_SETTLE_S as STASH_UNDO_SETTLE_S,
+    _undo_appended_text as _undo_appended_text,
+    _undo_typed_text as _undo_typed_text,
+    draft_rescue_dir as draft_rescue_dir,
+    DRAFT_RESCUE_TTL_S as DRAFT_RESCUE_TTL_S,
+    _DRAFT_RESCUE_NAME_RX as _DRAFT_RESCUE_NAME_RX,
+    _draft_rescue_text as _draft_rescue_text,
+    _draft_rescue_prune as _draft_rescue_prune,
+    _draft_rescue_ensure_dir as _draft_rescue_ensure_dir,
+    _DRAFT_RESCUE_MAX_RETRIES as _DRAFT_RESCUE_MAX_RETRIES,
+    _draft_rescue_persist as _draft_rescue_persist,
+    _undo_and_release_slot as _undo_and_release_slot,
+    deliver_with_stash as deliver_with_stash,
+    _JANITOR_OWN_PREFIXES as _JANITOR_OWN_PREFIXES,
+    JANITOR_CLEAR_MAX_ITER as JANITOR_CLEAR_MAX_ITER,
+    JANITOR_CLEAR_BATCH_MAX as JANITOR_CLEAR_BATCH_MAX,
+    JANITOR_CLEAR_SETTLE_S as JANITOR_CLEAR_SETTLE_S,
+    JANITOR_WATCH_MAX_AGE_S as JANITOR_WATCH_MAX_AGE_S,
+    _looks_like_own_payload as _looks_like_own_payload,
+    _looks_like_own_stuck_content as _looks_like_own_stuck_content,
+)
 
 
 _DREPLY_TYPED_TTL_S = 48 * 3600
@@ -3108,39 +1646,6 @@ def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None):
 
 
 # --- #298: reply on a completion CARD -> reopen the ticket ----------------
-
-def parse_discord_card_reply(msg, allowed_ids, cardmap):
-    """Validate ONE Discord message as a reply to a TRACKED completion card.
-
-    Returns {reply_id, referenced, repo, issue, text, channel} when `msg` is
-    a reply BY an allowed owner TO a message id in `cardmap` with usable
-    text; else None. Mirrors `parse_discord_reply`'s exact security shape
-    (SAME `allowed_ids` boundary) — the only difference is WHICH map the
-    referenced id is looked up in."""
-    if not isinstance(msg, dict):
-        return None
-    reply_id = str(msg.get("id") or "").strip()
-    author = msg.get("author") or {}
-    author_id = str(author.get("id") or "").strip()
-    ref = (msg.get("message_reference") or {}).get("message_id")
-    ref = str(ref or "").strip()
-    if not reply_id or not author_id or not ref:
-        return None
-    if author_id not in allowed_ids:             # SECURITY: only a known owner
-        return None
-    c = cardmap.get(ref)
-    if not isinstance(c, dict):
-        return None
-    repo = str(c.get("repo") or "").strip()
-    issue = c.get("issue")
-    if not repo or issue is None:
-        return None
-    text = clean_reply_text(msg.get("content"))
-    if not text:
-        return None
-    return {"reply_id": reply_id, "referenced": ref, "repo": repo,
-            "issue": issue, "text": text, "channel": str(c.get("channel") or "")}
-
 
 def _card_remark_comment_body(text):
     return ("**Pripomienka z Discordu k done karte:**\n\n%s\n\n"
@@ -3326,36 +1831,6 @@ _FLAG_PROMPT_TEMPLATE = (
 def compose_flag_prompt(flagged_text):
     text = clean_reply_text(flagged_text)[:900] or "(bez textu)"
     return _FLAG_PROMPT_TEMPLATE % text
-
-
-def fetch_reaction_users(channel, message_id, emoji, token):
-    """GET the users who reacted with `emoji` to `message_id` in `channel`.
-    [] on any error/missing input — fail-safe, mirrors `fetch_channel_messages`
-    (never breaks the poll)."""
-    if not channel or not message_id or not token:
-        return []
-    try:
-        from urllib.parse import quote
-        raw = _discord_get(
-            "https://discord.com/api/v10/channels/%s/messages/%s/reactions/%s"
-            % (channel, message_id, quote(emoji)), token)
-        data = json.loads(raw)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def _reacted_by_owner(users, allowed_ids):
-    """True if any user in `users` (a `fetch_reaction_users` result) is a
-    KNOWN OWNER of this machine — the SAME security boundary
-    `known_owner_ids` already enforces for replies."""
-    for u in users or []:
-        if not isinstance(u, dict):
-            continue
-        uid = str(u.get("id") or "").strip()
-        if uid in allowed_ids:
-            return True
-    return False
 
 
 def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
