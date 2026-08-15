@@ -215,43 +215,78 @@ class VerifyFailEscalation(unittest.TestCase):
         self.pings.append((body, kw))
         return "sent"
 
-    def _sweep(self, state, result):
+    def _sweep(self, state, result, now):
         tmux = _CrossStreamFakeTmux([("%1", self.root)])
         with m.patch.object(wd, "send_verified", _SendVerifiedRecorder(result)):
             wd.bounce_backstop(
-                time.time(), tmux, state, self._send, home=self.home,
+                now, tmux, state, self._send, home=self.home,
                 gh_fetch=lambda root: [1705], cross_stream_repos={"demo"},
                 projects_dir=self.projects, sleep_fn=lambda s: None)
         # re-open the ~30-min cadence gate so the next sweep runs
         state.setdefault("bounce", {})["last_check"] = 0
+
+    def _episode(self, state, t0, n=None):
+        """One full failure episode: `n` consecutive unverified sweeps at
+        distinct times starting at `t0`."""
+        n = self.cs._VERIFY_FAIL_GIVEUP if n is None else n
+        for i in range(n):
+            self._sweep(state, result=False, now=t0 + i * 3600)
 
     def _giveups(self):
         return [p for p in self.pings if "nedoručuje" in p[0]]
 
     def test_giveup_ping_fires_once_at_threshold_then_not_again(self):
         state = {}
-        for _ in range(self.cs._VERIFY_FAIL_GIVEUP - 1):
-            self._sweep(state, result=False)
+        self._episode(state, 1_000_000, n=self.cs._VERIFY_FAIL_GIVEUP - 1)
         self.assertEqual(self._giveups(), [], "no ping below the threshold")
-        self._sweep(state, result=False)          # hits threshold
+        self._sweep(state, result=False, now=1_090_000)      # hits threshold
         self.assertEqual(len(self._giveups()), 1, self.pings)
-        self.assertIn("bounce-verify-fail:demo",
-                      str(self._giveups()[0][1].get("dedup_key")))
-        self._sweep(state, result=False)          # past threshold — NO new ping
+        # #497 round-2 F1: the dedup key is FRESH per episode (a trailing
+        # int(now)), not content-stable — else notify's 14-day TTL swallows a
+        # legitimate second-episode re-ping.
+        self.assertRegex(str(self._giveups()[0][1].get("dedup_key")),
+                         r"^bounce-verify-fail:demo:\d+$")
+        self._sweep(state, result=False, now=1_100_000)      # past threshold
         self.assertEqual(len(self._giveups()), 1, "one ping per episode")
 
-    def test_verified_success_resets_the_streak(self):
+    def test_a_second_episode_after_recovery_re_pings_with_a_fresh_key(self):
         state = {}
-        for _ in range(self.cs._VERIFY_FAIL_GIVEUP - 1):
-            self._sweep(state, result=False)
-        self._sweep(state, result=True)           # delivered → streak cleared
-        self.assertEqual(
-            state["bounce"].get("vfail", {}).get("demo", 0), 0,
-            "a verified send forgets the failure streak")
-        for _ in range(self.cs._VERIFY_FAIL_GIVEUP - 1):
-            self._sweep(state, result=False)
-        self.assertEqual(self._giveups(), [],
-                         "streak reset → threshold not re-reached yet")
+        self._episode(state, 1_000_000)                      # episode 1 → ping
+        self._sweep(state, result=True, now=1_050_000)       # recover: streak reset
+        self._episode(state, 2_000_000)                      # episode 2 → ping again
+        keys = [str(p[1].get("dedup_key")) for p in self._giveups()]
+        self.assertEqual(len(keys), 2, "both episodes must escalate")
+        self.assertNotEqual(keys[0], keys[1],
+                            "a fresh key per episode — notify dedup must not swallow it")
+
+    def test_verified_success_resets_streak_and_pinged_flag(self):
+        state = {}
+        self._episode(state, 1_000_000, n=self.cs._VERIFY_FAIL_GIVEUP - 1)
+        self._sweep(state, result=True, now=1_050_000)       # delivered → clear
+        self.assertEqual(state["bounce"].get("vfail", {}).get("demo", 0), 0)
+        self.assertNotIn("demo", state["bounce"].get("vpinged", {}))
+
+    def test_a_transient_notify_error_retries_the_giveup_next_sweep(self):
+        # round-2 F2: the ping is not lost to a single failed send — the vpinged
+        # flag is set only on a delivered result, so an "error" retries.
+        state = {}
+        self.pings = []
+        errored = {"n": 0}
+
+        def _send_err(body, **kw):
+            self.pings.append((body, kw))
+            errored["n"] += 1
+            return "error" if errored["n"] == 1 else "sent"
+
+        real_send = self._send
+        self._send = _send_err
+        try:
+            self._episode(state, 1_000_000)                  # 3rd sweep: send→error
+            self.assertEqual(len(self._giveups()), 1, "first give-up attempt errored")
+            self._sweep(state, result=False, now=1_200_000)  # retry → sent
+            self.assertEqual(len(self._giveups()), 2, "errored give-up retried")
+        finally:
+            self._send = real_send
 
 
 class JanitorPrefixReclaim(unittest.TestCase):

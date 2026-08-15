@@ -235,7 +235,17 @@ def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,
     provenance cleared); False on an unverified/swallowed one — the janitor
     mark is LEFT as the residue backstop and the caller undoes its own
     pre-send dedup so the swallowed nudge retries next sweep. Bare-box only:
-    the DRAFT branch is `_try_stash_nudge` above."""
+    the DRAFT branch is `_try_stash_nudge` above.
+
+    Residual (round-2 review F4): the verify transcript is resolved by CWD
+    (`find_active_transcript(root)`), while the keystroke goes to a specific
+    pane pid; if TWO live claude sessions share the identical cwd, the resolver
+    can pick the OTHER session's newer transcript, so a genuinely-landed nudge
+    reads as unverified → a spurious retry (and, after `_VERIFY_FAIL_GIVEUP`, a
+    spurious give-up ping). This never produces a false 'delivered' (the exact
+    nudge text is typed ONLY into the target pane, so `_submit_confirmed` can
+    never false-CONFIRM off a sibling), and two sessions in one checkout is
+    unusual; the cwd-keyed resolver shape predates #497."""
     tinfo = watchdog.find_active_transcript(projects_dir, root)
     tpath = tinfo[0] if tinfo else None
     watchdog._janitor_mark_watch(state, pid, now)
@@ -260,41 +270,54 @@ _VERIFY_FAIL_GIVEUP = 3
 
 def _note_verify_fail(store, name):
     """Bump `name`'s consecutive-unverified-submit counter; return the new
-    count. The caller fires the give-up ping exactly when it FIRST reaches
-    `_VERIFY_FAIL_GIVEUP` (a `== ` gate → one ping per episode, never per
-    sweep)."""
+    count."""
     vf = store.setdefault("vfail", {})
     vf[name] = int(vf.get(name, 0)) + 1
     return vf[name]
 
 
 def _clear_verify_fail(store, name):
-    """A verified send ends the episode — forget the failure streak."""
-    vf = store.get("vfail")
-    if isinstance(vf, dict):
-        vf.pop(name, None)
+    """A verified send (of any kind — bare OR stash) ends the episode: forget
+    the failure streak AND the give-up-pinged flag, so a fresh episode can
+    re-escalate."""
+    for k in ("vfail", "vpinged"):
+        m = store.get(k)
+        if isinstance(m, dict):
+            m.pop(name, None)
 
 
 def _handle_unverified_nudge(store, name, tick_str, kind, send_fn, persist,
-                             dry_run, logs, giveup_body):
+                             dry_run, now, logs, giveup_body):
     """#497 — the ONE place a bare-box nudge's UNVERIFIED submit is handled
     (shared by bounce + gkreq). Bumps the consecutive-fail streak (persisted
-    BEFORE any ping, the #193 order), logs it, and at `_VERIFY_FAIL_GIVEUP`
-    fires the ONE-shot give-up ping so a pane that never ACCEPTS the nudge
-    escalates to the user instead of rotting on a journal line (round-1 review
-    F3a / playbook #442-F2). The caller has already `seen.pop`ed the dedup so
-    the swallowed nudge retries; the `== ` gate makes the ping one-per-episode
-    (a still-failing streak climbs past the threshold and never re-pings until
-    a verified send resets it via `_clear_verify_fail`)."""
+    BEFORE any ping, the #193 order), logs it, and once the streak reaches
+    `_VERIFY_FAIL_GIVEUP` fires the give-up ping so a pane that never ACCEPTS
+    the nudge escalates to the user instead of rotting on a journal line
+    (round-1 review F3a / playbook #442-F2). The caller has already `seen.pop`ed
+    the dedup so the swallowed nudge retries.
+
+    ONE ping per episode, gated on a `vpinged` flag set ONLY after a delivered
+    send (result != "error") — so a transient notify failure retries next sweep
+    instead of losing the escalation (round-2 review F2), and a still-failing
+    streak never re-pings until a verified send resets both via
+    `_clear_verify_fail`. The dedup key carries `int(now)` so it is FRESH per
+    episode: a content-stable key would be swallowed by notify's own 14-day
+    dedup TTL, silently killing a legitimate SECOND-episode escalation
+    (round-2 review F1 / the #360/#459 dedup-TTL class)."""
     nfail = _note_verify_fail(store, name)
     persist()
     logs.append("%s-nudge-failed %s %s (submit-unverified %d/%d)"
                 % (kind, name, tick_str, nfail, _VERIFY_FAIL_GIVEUP))
-    if nfail == _VERIFY_FAIL_GIVEUP and not dry_run:
+    pinged = (store.get("vpinged") or {}).get(name)
+    if nfail >= _VERIFY_FAIL_GIVEUP and not pinged and not dry_run:
         from notify import stream_qualified
-        result = send_fn(giveup_body, dedup_key="%s-verify-fail:%s" % (kind, name),
-                         dry_run=dry_run, project=stream_qualified(name))
+        result = send_fn(
+            giveup_body, dedup_key="%s-verify-fail:%s:%d" % (kind, name, int(now)),
+            dry_run=dry_run, project=stream_qualified(name))
         logs.append("%s-verify-giveup %s (send=%r)" % (kind, name, result))
+        if result != "error":            # delivered (or unconfigured) → once per episode
+            store.setdefault("vpinged", {})[name] = True
+            persist()
 
 
 def _safe_to_bounce_nudge(captured, cwd, projects_dir):
@@ -462,6 +485,7 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                         logs.append("bounce-nudge-failed %s %s (%s)"
                                     % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
+                _clear_verify_fail(b, name)   # a delivered nudge ends the streak
                 seen[name] = {"tickets": tickets, "ts": int(now)}
                 persist()
                 logs.append("bounce-nudge %s %s" % (name, tick_str))
@@ -483,7 +507,8 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     run, now, projects_dir, sleep_fn, logs):
                 seen.pop(name, None)
                 _handle_unverified_nudge(
-                    b, name, tick_str, "bounce", send_fn, persist, dry_run, logs,
+                    b, name, tick_str, "bounce", send_fn, persist, dry_run, now,
+                    logs,
                     "⚠️ **%s: bounce nudge sa nedoručuje** (%s)\n> V `%s` beží "
                     "session, ale %dx po sebe sa nudge nepodarilo odoslať (submit "
                     "sa neuchytil). Skontroluj ju — vrátené prio:bounce tikety "
@@ -804,6 +829,7 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                         logs.append("gkreq-nudge-failed %s %s (%s)"
                                     % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
+                _clear_verify_fail(g, name)   # a delivered nudge ends the streak
                 seen[name] = {"tickets": tickets, "ts": int(now),
                               "reping_count": count, "pane_seen": new_pane_seen,
                               "pane_absent_pending": new_pending}
@@ -825,7 +851,8 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     run, now, projects_dir, sleep_fn, logs):
                 seen.pop(name, None)
                 _handle_unverified_nudge(
-                    g, name, tick_str, "gkreq", send_fn, persist, dry_run, logs,
+                    g, name, tick_str, "gkreq", send_fn, persist, dry_run, now,
+                    logs,
                     "⚠️ **%s: gk-request nudge sa nedoručuje** (%s)\n> V `%s` beží "
                     "supervízorská session, ale %dx po sebe sa nudge nepodarilo "
                     "odoslať (submit sa neuchytil). Skontroluj ju — needs-gatekeeper "
