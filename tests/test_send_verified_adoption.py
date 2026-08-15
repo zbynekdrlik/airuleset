@@ -191,6 +191,69 @@ class GkreqNudgeAdoption(unittest.TestCase):
         self.assertTrue(any("gkreq-nudge-failed" in ln for ln in logs), logs)
 
 
+class VerifyFailEscalation(unittest.TestCase):
+    """Site #5 — the retry loop's give-up (round-1 review F3a / #442-F2). A
+    pane that never ACCEPTS the nudge (`send_verified` → False every sweep)
+    must ESCALATE to a one-shot Discord ping after `_VERIFY_FAIL_GIVEUP`
+    consecutive failures, not rot with only a journal line; a verified send
+    resets the streak."""
+
+    def setUp(self):
+        from watchdog import cross_stream as cs
+        self.cs = cs
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.root = str(Path(tmp.name) / "devel" / "demo")
+        Path(self.root).mkdir(parents=True)
+        _seed_repo_cache(self.home, self.root, "demo")
+        self.projects = Path(tmp.name) / "projects"
+        _write_transcript(self.projects, self.root)
+        self.pings = []
+
+    def _send(self, body, **kw):
+        self.pings.append((body, kw))
+        return "sent"
+
+    def _sweep(self, state, result):
+        tmux = _CrossStreamFakeTmux([("%1", self.root)])
+        with m.patch.object(wd, "send_verified", _SendVerifiedRecorder(result)):
+            wd.bounce_backstop(
+                time.time(), tmux, state, self._send, home=self.home,
+                gh_fetch=lambda root: [1705], cross_stream_repos={"demo"},
+                projects_dir=self.projects, sleep_fn=lambda s: None)
+        # re-open the ~30-min cadence gate so the next sweep runs
+        state.setdefault("bounce", {})["last_check"] = 0
+
+    def _giveups(self):
+        return [p for p in self.pings if "nedoručuje" in p[0]]
+
+    def test_giveup_ping_fires_once_at_threshold_then_not_again(self):
+        state = {}
+        for _ in range(self.cs._VERIFY_FAIL_GIVEUP - 1):
+            self._sweep(state, result=False)
+        self.assertEqual(self._giveups(), [], "no ping below the threshold")
+        self._sweep(state, result=False)          # hits threshold
+        self.assertEqual(len(self._giveups()), 1, self.pings)
+        self.assertIn("bounce-verify-fail:demo",
+                      str(self._giveups()[0][1].get("dedup_key")))
+        self._sweep(state, result=False)          # past threshold — NO new ping
+        self.assertEqual(len(self._giveups()), 1, "one ping per episode")
+
+    def test_verified_success_resets_the_streak(self):
+        state = {}
+        for _ in range(self.cs._VERIFY_FAIL_GIVEUP - 1):
+            self._sweep(state, result=False)
+        self._sweep(state, result=True)           # delivered → streak cleared
+        self.assertEqual(
+            state["bounce"].get("vfail", {}).get("demo", 0), 0,
+            "a verified send forgets the failure streak")
+        for _ in range(self.cs._VERIFY_FAIL_GIVEUP - 1):
+            self._sweep(state, result=False)
+        self.assertEqual(self._giveups(), [],
+                         "streak reset → threshold not re-reached yet")
+
+
 class JanitorPrefixReclaim(unittest.TestCase):
     """The cross_stream nudges are CHUNK-typed (BOUNCE_NUDGE 286c, GKREQ_NUDGE
     412c, both >200c), so a swallowed send can leave a LITERAL partial residue

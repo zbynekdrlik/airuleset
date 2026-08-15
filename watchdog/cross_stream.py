@@ -245,6 +245,58 @@ def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,
     return False
 
 
+# #497 (round-1 adversarial review F3a / playbook #442-F2) — the transcript-
+# proof send RETRIES on an unverified submit (`seen.pop`), so a pane that never
+# ACCEPTS the nudge (transcript unresolvable, or a persistently swallowed Enter)
+# would otherwise re-log `…-nudge-failed` at the ~30-min cadence forever with no
+# escalation — the bounce/gkreq work rotting with only a journal line. After
+# this many CONSECUTIVE unverified submits for one target, fire a ONE-shot
+# give-up ping so the user is told the session isn't accepting the nudge (the
+# same direction as the no-pane fallback, one pane-state over). The counter
+# lives in the store dict (`state['bounce']`/`['gkreq']`), OUTSIDE the popped
+# `seen` entry, so it survives the retry pop; it is cleared on a verified send.
+_VERIFY_FAIL_GIVEUP = 3
+
+
+def _note_verify_fail(store, name):
+    """Bump `name`'s consecutive-unverified-submit counter; return the new
+    count. The caller fires the give-up ping exactly when it FIRST reaches
+    `_VERIFY_FAIL_GIVEUP` (a `== ` gate → one ping per episode, never per
+    sweep)."""
+    vf = store.setdefault("vfail", {})
+    vf[name] = int(vf.get(name, 0)) + 1
+    return vf[name]
+
+
+def _clear_verify_fail(store, name):
+    """A verified send ends the episode — forget the failure streak."""
+    vf = store.get("vfail")
+    if isinstance(vf, dict):
+        vf.pop(name, None)
+
+
+def _handle_unverified_nudge(store, name, tick_str, kind, send_fn, persist,
+                             dry_run, logs, giveup_body):
+    """#497 — the ONE place a bare-box nudge's UNVERIFIED submit is handled
+    (shared by bounce + gkreq). Bumps the consecutive-fail streak (persisted
+    BEFORE any ping, the #193 order), logs it, and at `_VERIFY_FAIL_GIVEUP`
+    fires the ONE-shot give-up ping so a pane that never ACCEPTS the nudge
+    escalates to the user instead of rotting on a journal line (round-1 review
+    F3a / playbook #442-F2). The caller has already `seen.pop`ed the dedup so
+    the swallowed nudge retries; the `== ` gate makes the ping one-per-episode
+    (a still-failing streak climbs past the threshold and never re-pings until
+    a verified send resets it via `_clear_verify_fail`)."""
+    nfail = _note_verify_fail(store, name)
+    persist()
+    logs.append("%s-nudge-failed %s %s (submit-unverified %d/%d)"
+                % (kind, name, tick_str, nfail, _VERIFY_FAIL_GIVEUP))
+    if nfail == _VERIFY_FAIL_GIVEUP and not dry_run:
+        from notify import stream_qualified
+        result = send_fn(giveup_body, dedup_key="%s-verify-fail:%s" % (kind, name),
+                         dry_run=dry_run, project=stream_qualified(name))
+        logs.append("%s-verify-giveup %s (send=%r)" % (kind, name, result))
+
+
 def _safe_to_bounce_nudge(captured, cwd, projects_dir):
     """Is the pane a session at TRUE REST — safe to type the bounce nudge?
 
@@ -430,10 +482,15 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     state, pid, root, watchdog.BOUNCE_NUDGE % (tick_str, name),
                     run, now, projects_dir, sleep_fn, logs):
                 seen.pop(name, None)
-                persist()
-                logs.append("bounce-nudge-failed %s %s (submit-unverified)"
-                            % (name, tick_str))
+                _handle_unverified_nudge(
+                    b, name, tick_str, "bounce", send_fn, persist, dry_run, logs,
+                    "⚠️ **%s: bounce nudge sa nedoručuje** (%s)\n> V `%s` beží "
+                    "session, ale %dx po sebe sa nudge nepodarilo odoslať (submit "
+                    "sa neuchytil). Skontroluj ju — vrátené prio:bounce tikety "
+                    "inak ostanú nespracované."
+                    % (name, tick_str, root, _VERIFY_FAIL_GIVEUP))
                 continue
+            _clear_verify_fail(b, name)
             logs.append("bounce-nudge %s %s" % (name, tick_str))
         else:
             body = ("⚠️ **%s: %d vrátené tikety čakajú**\n> Gatekeeper vrátil "
@@ -767,10 +824,15 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     state, pid, root, watchdog.GKREQ_NUDGE % (tick_str, name),
                     run, now, projects_dir, sleep_fn, logs):
                 seen.pop(name, None)
-                persist()
-                logs.append("gkreq-nudge-failed %s %s (submit-unverified)"
-                            % (name, tick_str))
+                _handle_unverified_nudge(
+                    g, name, tick_str, "gkreq", send_fn, persist, dry_run, logs,
+                    "⚠️ **%s: gk-request nudge sa nedoručuje** (%s)\n> V `%s` beží "
+                    "supervízorská session, ale %dx po sebe sa nudge nepodarilo "
+                    "odoslať (submit sa neuchytil). Skontroluj ju — needs-gatekeeper "
+                    "žiadosti inak ostanú nespracované."
+                    % (name, tick_str, root, _VERIFY_FAIL_GIVEUP))
                 continue
+            _clear_verify_fail(g, name)
             logs.append("gkreq-nudge %s %s" % (name, tick_str))
         else:
             body = ("⚠️ **%s: %d needs-gatekeeper žiadostí čaká**\n> Sub-dev "
