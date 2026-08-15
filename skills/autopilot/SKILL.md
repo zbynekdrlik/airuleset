@@ -530,7 +530,12 @@ gap in either.
    <repo> as ONE bundled PR (Closes all). You are running in an isolated git worktree — see
    agents/autopilot-worker.md's worktree-awareness section: never touch the shared tree, never
    push/install, never fire your own run-card — return your branch name + worktree path instead.`
-   (or `Work issue #<N> in <repo>.` for a solo batch) plus any repo-specific note. ONE PR per
+   (or `Work issue #<N> in <repo>; isolated worktree — work ONLY in your worktree dir, never the
+   shared main checkout.` for a solo batch) plus any repo-specific note. **LEAD with the worktree,
+   never a bare `Repo <main path>`** — a dispatch prompt that names the main checkout path as
+   "context" is exactly what made a worktree worker `cd` into it and edit the shared tree (#496,
+   worker #433 step 12); `block-foreign-airuleset-write.sh` rule B now hard-blocks that write, but
+   the prompt must not invite it in the first place. ONE PR per
    INTEGRATION CYCLE (not per worker), ONE CI cycle per integration — see the repo-flow policy
    above for exactly which branch each worker's worktree branch integrates into.
    - **Compute AND CREATE this batch's own scratch subdirectory BEFORE dispatching, then STATE it
