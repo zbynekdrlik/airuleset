@@ -176,7 +176,7 @@
     "tests/test_vystup_readback_skill_step4.py": 122,
     "tests/test_watchdog.py": 3601,
     "tests/test_watchdog_state_keys.py": 113,
-    "tests/test_watchdog_tmux_io_split.py": 128,
+    "tests/test_watchdog_tmux_io_split.py": 156,
     "tests/test_watchdog_transcripts_split.py": 114,
     "tests/test_worker_attestation.py": 97,
     "tests/test_worker_evidence_reachability.py": 378,

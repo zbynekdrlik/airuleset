@@ -22,8 +22,10 @@ monkeypatch in the suite) working unchanged after the move:
      `patch.object(wd, "capture_pane", ...)`-class seam is exactly this bug).
 """
 
+import io
 import subprocess
 import sys
+import tokenize
 import unittest
 from pathlib import Path
 
@@ -108,20 +110,46 @@ class ReExportIdentity(unittest.TestCase):
         self.assertIs(tmux_io.WORKING_NUDGE_TEXT, watchdog.WORKING_NUDGE_TEXT)
         self.assertEqual(watchdog.NUDGE_TEXT, "continue")
 
-    def test_back_reference_seams_use_the_package_namespace(self):
-        # The three heaviest monkeypatch seams (capture_pane / pane_in_mode /
-        # send_continue) plus the C5-patched _default_run / sudo-host helpers are
-        # called through the package namespace inside tmux_io.py, so a
-        # patch.object(wd, "<name>", ...) seam stays effective. Guard the exact
-        # bypass the move could reintroduce: a bare intra-module call to a
-        # patched name.
+    def test_patched_seams_are_never_called_bare_inside_tmux_io(self):
+        # TEETH: every name that MUST be reached through the package namespace
+        # (the C5-patched moved seams _default_run / list_claude_panes /
+        # pane_owner / capture_pane / the two sudo-host helpers, PLUS the three
+        # design-mandated heaviest seams capture_pane / pane_in_mode /
+        # send_continue) must appear inside tmux_io.py ONLY as its own
+        # `def <name>` or as `watchdog.<name>` — never as a bare intra-module
+        # call, which would silently bypass a `patch.object(wd, "<name>", ...)`
+        # seam (the design's #1 hazard).
+        #
+        # A substring `assertIn("watchdog.X", src)` is TOOTHLESS here — every
+        # seam name also appears in this module's own docstring, so it would
+        # pass on the prose alone even if a real bare call site existed
+        # (internals-tests playbook: match a SHAPE the mention cannot take).
+        # Tokenizing is the shape: a seam name mentioned in a docstring /
+        # comment / string literal is a STRING/COMMENT token, never a NAME
+        # token, so only genuine code references are checked.
+        SEAMS = {"_default_run", "_pane_hosted_claude_pid", "_hosted_claude_cwd",
+                 "list_claude_panes", "capture_pane", "pane_owner",
+                 "pane_in_mode", "send_continue"}
         src = Path(tmux_io.__file__).read_text()
-        for name in ("_default_run", "capture_pane", "pane_in_mode",
-                     "send_continue", "_pane_hosted_claude_pid",
-                     "_hosted_claude_cwd"):
-            with self.subTest(name=name):
-                self.assertIn(f"watchdog.{name}", src,
-                              f"{name} must be reached via the package namespace")
+        toks = [t for t in tokenize.generate_tokens(io.StringIO(src).readline)
+                if t.type == tokenize.NAME or t.type == tokenize.OP]
+        bare = []
+        for i, t in enumerate(toks):
+            if t.string not in SEAMS:
+                continue
+            prev = toks[i - 1] if i >= 1 else None
+            # its own definition: `def <name>`
+            if prev is not None and prev.string == "def":
+                continue
+            # package-namespace reference: `watchdog . <name>`
+            if (prev is not None and prev.type == tokenize.OP and prev.string == "."
+                    and i >= 2 and toks[i - 2].string == "watchdog"):
+                continue
+            bare.append((t.string, t.start[0]))
+        self.assertEqual(
+            bare, [],
+            f"patched/heavy seam(s) called BARE (silent monkeypatch bypass) "
+            f"at line(s): {bare}")
 
 
 if __name__ == "__main__":
