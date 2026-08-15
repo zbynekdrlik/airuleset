@@ -224,6 +224,102 @@ def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None):
     return watchdog.deliver_with_stash(pid, text, run, captured=captured, logs=logs)
 
 
+def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,
+                              sleep_fn, logs):
+    """#497 — the shared BARE-box transcript-proof send for bounce/gkreq (the
+    sibling of `_try_stash_nudge`, which is the DRAFT-box branch's shared
+    helper). Resolves the pane's own transcript (`find_active_transcript(root)`
+    — the SAME resolver `_safe_to_bounce_nudge` gates on), marks #372 janitor
+    provenance BEFORE the keystroke so a stuck residue is reclaimable, then
+    `send_verified`. Returns True on a transcript-VERIFIED submit (janitor
+    provenance cleared); False on an unverified/swallowed one — the janitor
+    mark is LEFT as the residue backstop and the caller undoes its own
+    pre-send dedup so the swallowed nudge retries next sweep. Bare-box only:
+    the DRAFT branch is `_try_stash_nudge` above.
+
+    Residual (round-2 review F4): the verify transcript is resolved by CWD
+    (`find_active_transcript(root)`), while the keystroke goes to a specific
+    pane pid; if TWO live claude sessions share the identical cwd, the resolver
+    can pick the OTHER session's newer transcript, so a genuinely-landed nudge
+    reads as unverified → a spurious retry (and, after `_VERIFY_FAIL_GIVEUP`, a
+    spurious give-up ping). This never produces a false 'delivered' (the exact
+    nudge text is typed ONLY into the target pane, so `_submit_confirmed` can
+    never false-CONFIRM off a sibling), and two sessions in one checkout is
+    unusual; the cwd-keyed resolver shape predates #497."""
+    tinfo = watchdog.find_active_transcript(projects_dir, root)
+    tpath = tinfo[0] if tinfo else None
+    watchdog._janitor_mark_watch(state, pid, now)
+    if watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs):
+        watchdog._janitor_clear_watch(state, pid)
+        return True
+    return False
+
+
+# #497 (round-1 adversarial review F3a / playbook #442-F2) — the transcript-
+# proof send RETRIES on an unverified submit (`seen.pop`), so a pane that never
+# ACCEPTS the nudge (transcript unresolvable, or a persistently swallowed Enter)
+# would otherwise re-log `…-nudge-failed` at the ~30-min cadence forever with no
+# escalation — the bounce/gkreq work rotting with only a journal line. After
+# this many CONSECUTIVE unverified submits for one target, fire a ONE-shot
+# give-up ping so the user is told the session isn't accepting the nudge (the
+# same direction as the no-pane fallback, one pane-state over). The counter
+# lives in the store dict (`state['bounce']`/`['gkreq']`), OUTSIDE the popped
+# `seen` entry, so it survives the retry pop; it is cleared on a verified send.
+_VERIFY_FAIL_GIVEUP = 3
+
+
+def _note_verify_fail(store, name):
+    """Bump `name`'s consecutive-unverified-submit counter; return the new
+    count."""
+    vf = store.setdefault("vfail", {})
+    vf[name] = int(vf.get(name, 0)) + 1
+    return vf[name]
+
+
+def _clear_verify_fail(store, name):
+    """A verified send (of any kind — bare OR stash) ends the episode: forget
+    the failure streak AND the give-up-pinged flag, so a fresh episode can
+    re-escalate."""
+    for k in ("vfail", "vpinged"):
+        m = store.get(k)
+        if isinstance(m, dict):
+            m.pop(name, None)
+
+
+def _handle_unverified_nudge(store, name, tick_str, kind, send_fn, persist,
+                             dry_run, now, logs, giveup_body):
+    """#497 — the ONE place a bare-box nudge's UNVERIFIED submit is handled
+    (shared by bounce + gkreq). Bumps the consecutive-fail streak (persisted
+    BEFORE any ping, the #193 order), logs it, and once the streak reaches
+    `_VERIFY_FAIL_GIVEUP` fires the give-up ping so a pane that never ACCEPTS
+    the nudge escalates to the user instead of rotting on a journal line
+    (round-1 review F3a / playbook #442-F2). The caller has already `seen.pop`ed
+    the dedup so the swallowed nudge retries.
+
+    ONE ping per episode, gated on a `vpinged` flag set ONLY after a delivered
+    send (result != "error") — so a transient notify failure retries next sweep
+    instead of losing the escalation (round-2 review F2), and a still-failing
+    streak never re-pings until a verified send resets both via
+    `_clear_verify_fail`. The dedup key carries `int(now)` so it is FRESH per
+    episode: a content-stable key would be swallowed by notify's own 14-day
+    dedup TTL, silently killing a legitimate SECOND-episode escalation
+    (round-2 review F1 / the #360/#459 dedup-TTL class)."""
+    nfail = _note_verify_fail(store, name)
+    persist()
+    logs.append("%s-nudge-failed %s %s (submit-unverified %d/%d)"
+                % (kind, name, tick_str, nfail, _VERIFY_FAIL_GIVEUP))
+    pinged = (store.get("vpinged") or {}).get(name)
+    if nfail >= _VERIFY_FAIL_GIVEUP and not pinged and not dry_run:
+        from notify import stream_qualified
+        result = send_fn(
+            giveup_body, dedup_key="%s-verify-fail:%s:%d" % (kind, name, int(now)),
+            dry_run=dry_run, project=stream_qualified(name))
+        logs.append("%s-verify-giveup %s (send=%r)" % (kind, name, result))
+        if result != "error":            # delivered (or unconfigured) → once per episode
+            store.setdefault("vpinged", {})[name] = True
+            persist()
+
+
 def _safe_to_bounce_nudge(captured, cwd, projects_dir):
     """Is the pane a session at TRUE REST — safe to type the bounce nudge?
 
@@ -264,7 +360,7 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     gh_fetch=None, interval=None,
                     renudge=None, persist=None,
                     projects_dir=None, user=None, cross_stream_repos=None,
-                    time_fn=None, sweep_deadline=None):
+                    time_fn=None, sweep_deadline=None, sleep_fn=None):
     """Job 8 — see the section comment. Mutates state['bounce']; `persist` (the
     caller's save-state closure) is invoked BEFORE any keystroke/ping leaves
     the process — the live incident: TimeoutStartSec killed the run after the
@@ -389,14 +485,37 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                         logs.append("bounce-nudge-failed %s %s (%s)"
                                     % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
+                _clear_verify_fail(b, name)   # a delivered nudge ends the streak
                 seen[name] = {"tickets": tickets, "ts": int(now)}
                 persist()
                 logs.append("bounce-nudge %s %s" % (name, tick_str))
                 continue
+            # #193 — persist the dedup BEFORE the keystroke so a systemd
+            # TimeoutStartSec kill after a LANDED nudge but before run_once's
+            # save_state cannot lose it (the 4x re-nudge incident).
             seen[name] = {"tickets": tickets, "ts": int(now)}
-            persist()                          # dedup memory BEFORE the keystroke
-            if not dry_run:
-                watchdog.send_continue(pid, watchdog.BOUNCE_NUDGE % (tick_str, name), run)
+            persist()
+            if dry_run:
+                logs.append("bounce-nudge %s %s (dry-run)" % (name, tick_str))
+                continue
+            # #497 — transcript-proof send. On an UNVERIFIED submit (swallowed
+            # Enter) UNDO the pre-send dedup so the swallowed nudge retries next
+            # sweep instead of dedup-ing itself out; a LANDED nudge keeps its
+            # #193 dedup.
+            if not _send_bare_nudge_verified(
+                    state, pid, root, watchdog.BOUNCE_NUDGE % (tick_str, name),
+                    run, now, projects_dir, sleep_fn, logs):
+                seen.pop(name, None)
+                _handle_unverified_nudge(
+                    b, name, tick_str, "bounce", send_fn, persist, dry_run, now,
+                    logs,
+                    "⚠️ **%s: bounce nudge sa nedoručuje** (%s)\n> V `%s` beží "
+                    "session, ale %dx po sebe sa nudge nepodarilo odoslať (submit "
+                    "sa neuchytil). Skontroluj ju — vrátené prio:bounce tikety "
+                    "inak ostanú nespracované."
+                    % (name, tick_str, root, _VERIFY_FAIL_GIVEUP))
+                continue
+            _clear_verify_fail(b, name)
             logs.append("bounce-nudge %s %s" % (name, tick_str))
         else:
             body = ("⚠️ **%s: %d vrátené tikety čakajú**\n> Gatekeeper vrátil "
@@ -547,7 +666,7 @@ def _fetch_gkreq_tickets(root, home=None):
 def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                         gh_fetch=None, interval=None,
                         schedule=None, persist=None,
-                        projects_dir=None, user=None):
+                        projects_dir=None, user=None, sleep_fn=None):
     """Job 11 — see the section comment. Mutates state['gkreq']; `persist` is
     invoked BEFORE any keystroke/ping leaves the process (the job-8 lesson:
     a TimeoutStartSec kill after the nudge but before save left dedup with no
@@ -710,18 +829,37 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                         logs.append("gkreq-nudge-failed %s %s (%s)"
                                     % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
+                _clear_verify_fail(g, name)   # a delivered nudge ends the streak
                 seen[name] = {"tickets": tickets, "ts": int(now),
                               "reping_count": count, "pane_seen": new_pane_seen,
                               "pane_absent_pending": new_pending}
                 persist()
                 logs.append("gkreq-nudge %s %s" % (name, tick_str))
                 continue
+            # #193 — persist the dedup BEFORE the keystroke (see bounce above).
             seen[name] = {"tickets": tickets, "ts": int(now),
                           "reping_count": count, "pane_seen": new_pane_seen,
                           "pane_absent_pending": new_pending}
-            persist()                          # dedup memory BEFORE the keystroke
-            if not dry_run:
-                watchdog.send_continue(pid, watchdog.GKREQ_NUDGE % (tick_str, name), run)
+            persist()
+            if dry_run:
+                logs.append("gkreq-nudge %s %s (dry-run)" % (name, tick_str))
+                continue
+            # #497 — transcript-proof send; UNDO the pre-send dedup on an
+            # unverified submit so a swallowed nudge retries next sweep.
+            if not _send_bare_nudge_verified(
+                    state, pid, root, watchdog.GKREQ_NUDGE % (tick_str, name),
+                    run, now, projects_dir, sleep_fn, logs):
+                seen.pop(name, None)
+                _handle_unverified_nudge(
+                    g, name, tick_str, "gkreq", send_fn, persist, dry_run, now,
+                    logs,
+                    "⚠️ **%s: gk-request nudge sa nedoručuje** (%s)\n> V `%s` beží "
+                    "supervízorská session, ale %dx po sebe sa nudge nepodarilo "
+                    "odoslať (submit sa neuchytil). Skontroluj ju — needs-gatekeeper "
+                    "žiadosti inak ostanú nespracované."
+                    % (name, tick_str, root, _VERIFY_FAIL_GIVEUP))
+                continue
+            _clear_verify_fail(g, name)
             logs.append("gkreq-nudge %s %s" % (name, tick_str))
         else:
             body = ("⚠️ **%s: %d needs-gatekeeper žiadostí čaká**\n> Sub-dev "

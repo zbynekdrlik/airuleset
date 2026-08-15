@@ -47,6 +47,34 @@ def seed_repo_cache(home, root, name, **extra):
     (d / (statusbar.cwd_key(root) + ".json")).write_text(json.dumps(entry))
 
 
+# #497 -- gk_request_backstop's BARE-box send now goes through the transcript-
+# proof `send_verified`. These tests assert the JOB LOGIC, not the keystroke
+# mechanics, so `send_verified` is replaced module-wide by a happy-path
+# stand-in that types + submits the nudge via the tmux `run` (single -l,
+# mirroring the pre-#497 send_continue shape) and reports the submit VERIFIED
+# (see test_bounce_backstop for the same pattern; mechanics in
+# test_send_verified.py, swallowed-submit handling in
+# test_send_verified_adoption.py).
+def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+    run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
+    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    return True
+
+
+_SV_PATCHER = None
+
+
+def setUpModule():
+    global _SV_PATCHER
+    _SV_PATCHER = m.patch.object(wd, "send_verified", _typing_send_verified)
+    _SV_PATCHER.start()
+
+
+def tearDownModule():
+    if _SV_PATCHER is not None:
+        _SV_PATCHER.stop()
+
+
 class FakeTmux:
     def __init__(self, panes=None, captured=IDLE):
         self.panes = panes or []

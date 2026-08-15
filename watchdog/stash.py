@@ -933,7 +933,15 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
 # → _janitor_recover), never left to be mis-read as a draft and re-injected.
 # Used ONLY to recognize a box's content as PROVABLY our own — never to
 # guess about a genuine foreign draft that merely starts with a slash.
-_JANITOR_OWN_PREFIXES = ("/goal ", "/compact", "lane-check: ")
+# (#497) the cross_stream transcript-proof nudges adopted alongside the lane-
+# fill one — each an unambiguous OWN diagnostic prefix no human ever starts a
+# prompt with, so a chunk-typed partial residue left by a swallowed send is
+# reclaimed by the #372 janitor instead of being mis-read as a draft and re-
+# injected (the #490 Round-2 re-injection class, same fix, sibling sites):
+#   "bounce-backstop: "     — the cross_stream bounce nudge (job 8)
+#   "gk-request backstop: " — the cross_stream gk-request nudge
+_JANITOR_OWN_PREFIXES = ("/goal ", "/compact", "lane-check: ",
+                         "bounce-backstop: ", "gk-request backstop: ")
 
 JANITOR_CLEAR_MAX_ITER = 25       # bounds the observed-state clear loop
 JANITOR_CLEAR_BATCH_MAX = 200     # per-iteration backspace batch, sized to
