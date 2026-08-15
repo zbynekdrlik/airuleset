@@ -319,5 +319,98 @@ class BashHardeningR1(WorktreeGuardBase):
         self.assertBlocked(p)
 
 
+class BashSegmentAwareR2(WorktreeGuardBase):
+    """Round-2 adversarial-review findings (#496): the Bash detector is now
+    segment-aware (worktree_guard.py) so a command that merely READS main and
+    ALSO does own-branch git/sed work is no longer false-blocked (the two
+    CRITICAL FPs), plus the -t/dd/>|/quoted-target fixes."""
+
+    # --- the two CRITICAL false positives — MUST ALLOW -----------------------
+    def test_read_main_then_own_commit(self):
+        self.assertAllowed(self.bash_payload(
+            f"git -C {self.main} log --oneline -5 ; git commit -am wip"))
+
+    def test_copy_from_main_then_add_commit(self):
+        self.assertAllowed(self.bash_payload(
+            f"cp {self.main}/watchdog/__init__.py ./watchdog/ && git add -A && git commit -m sync"))
+
+    def test_own_commit_then_read_main(self):
+        self.assertAllowed(self.bash_payload(
+            f"git commit -am wip && cat {self.main}/watchdog/__init__.py"))
+
+    def test_copy_from_main_then_local_sed_i(self):
+        self.assertAllowed(self.bash_payload(
+            f"cp {self.main}/watchdog/x.py ./ && sed -i 's/foo/bar/' ./x.py"))
+
+    def test_local_sed_i_then_read_main(self):
+        self.assertAllowed(self.bash_payload(
+            f"sed -i 's/a/b/' ./local.py ; cat {self.main}/watchdog/__init__.py"))
+
+    def test_cd_main_then_git_C_worktree(self):
+        # cd into main, but an explicit -C <worktree> targets the OWN branch
+        self.assertAllowed(self.bash_payload(
+            f"cd {self.main} && git -C {self.wt} commit -am x"))
+
+    # --- newly BLOCKED bypasses ----------------------------------------------
+    def test_cp_target_directory_into_main(self):
+        self.assertBlocked(self.bash_payload(f"cp -t {self.main}/watchdog ./x.py"))
+
+    def test_cp_target_directory_long_into_main(self):
+        self.assertBlocked(self.bash_payload(
+            f"cp --target-directory={self.main}/watchdog ./x.py"))
+
+    def test_dd_of_only_into_main(self):
+        self.assertBlocked(self.bash_payload(f"dd of={self.main}/watchdog/x.py"))
+
+    def test_piped_dd_into_main(self):
+        self.assertBlocked(self.bash_payload(
+            f"cat ./src | dd of={self.main}/watchdog/x.py"))
+
+    def test_noclobber_redirect_into_main(self):
+        self.assertBlocked(self.bash_payload(f"echo hi >| {self.main}/watchdog/x.py"))
+
+    def test_quoted_redirect_target_into_main(self):
+        self.assertBlocked(self.bash_payload(
+            f'echo x > "{self.main}/watchdog/x.py"'))
+
+    def test_cd_main_then_relative_redirect(self):
+        self.assertBlocked(self.bash_payload(f"cd {self.main} && echo x > local.py"))
+
+    # --- -t with a LOCAL dest and a main SOURCE stays a read — MUST ALLOW ----
+    def test_cp_target_directory_local_reads_main(self):
+        self.assertAllowed(self.bash_payload(
+            f"cp -t ./localdir {self.main}/watchdog/x.py"))
+
+
+class WorktreeGuardModuleDirect(WorktreeGuardBase):
+    """Direct unit tests of hooks/worktree_guard.mutates_main_checkout — the
+    fail-open contract and a couple of core decisions, independent of the hook."""
+
+    def setUp(self):
+        super().setUp()
+        import importlib.util
+        path = (Path(__file__).resolve().parent.parent / "hooks"
+                / "worktree_guard.py")
+        spec = importlib.util.spec_from_file_location("worktree_guard", path)
+        self.wg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.wg)
+
+    def call(self, cmd):
+        return self.wg.mutates_main_checkout(cmd, self.main, self.wt)
+
+    def test_incident_bash_blocks(self):
+        self.assertTrue(self.call(f"cd {self.main} && git commit -am x"))
+
+    def test_own_branch_commit_allows(self):
+        self.assertFalse(self.call("git commit -am wip"))
+
+    def test_unbalanced_quote_fails_open(self):
+        # a malformed command must NEVER raise / block — fail-open to allow
+        self.assertFalse(self.call(f'echo "unterminated > {self.main}/x'))
+
+    def test_empty_command_allows(self):
+        self.assertFalse(self.call(""))
+
+
 if __name__ == "__main__":
     main()
