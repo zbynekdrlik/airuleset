@@ -228,6 +228,65 @@ class DeliverCompactFakeTmux:
         return [a[-1] for a in self.sent]
 
 
+class CompactSubmitFake:
+    """Stateful fake for the SUBMIT-VERIFY path (#375 part 2). Unlike
+    `DeliverCompactFakeTmux` (static/scripted captures), this one MODELS the
+    input box and the swallowed-Enter behaviour the real fix recovers from, so
+    a mutation dropping the post-send verify / the corrective Escape+Enter /
+    the undo is caught by BOTH the resulting box state AND the keystroke
+    sequence — never invisible behind an unmodeled keystroke (the fixture
+    mutation-invisibility trap this repo's playbook warns about).
+
+    `swallow_enters`: how many Enter keystrokes are SWALLOWED (box unchanged)
+    before one submits (clears the box) — models the agent-strip selector /
+    menu overlay eating the Enter (#36). A single `Escape` NEVER clears the box
+    (a single Escape does not delete a CC draft, #35) — it is a no-op on the
+    box and only recorded as a keystroke. A `BSpace` batch removes that many
+    trailing chars (the undo path). The pane resolves via list-panes exactly
+    like `DeliverCompactFakeTmux`."""
+
+    def __init__(self, panes, swallow_enters=0):
+        self.panes = panes          # [(pane_id, cmd, cwd, pid)]
+        self.box = ""
+        self.swallow_enters = swallow_enters
+        self.sent = []
+
+    def __call__(self, argv, timeout=8):
+        j = " ".join(argv)
+        if "list-panes" in j:
+            return "\n".join("%s\t%s\t%s\t%s" % t for t in self.panes)
+        if "display-message" in j:
+            if argv[-1] == "#{pane_in_mode}":
+                return "0"
+            return "sess:0.0"
+        if "send-keys" in j:
+            self.sent.append(argv)
+            if "-l" in argv:
+                self.box += argv[-1]                     # literal type
+            elif "BSpace" in argv:
+                self.box = self.box[:-argv.count("BSpace")]   # "" if over-run
+            elif argv[-1] == "Enter":
+                if self.swallow_enters > 0:
+                    self.swallow_enters -= 1             # Enter swallowed
+                else:
+                    self.box = ""                        # submitted
+            # Escape (or anything else) is a no-op on the box (#35).
+            return ""
+        if "capture-pane" in j:
+            return ("● Predošlá práca hotová.\n❯ %s\n"
+                    "  ctx ███░  caveman:lite\n" % self.box)
+        return ""
+
+    def keys(self):
+        return [a[-1] for a in self.sent]
+
+    def typed_texts(self):
+        return [a[-1] for a in self.sent if "-l" in a]
+
+    def bspace_batches(self):
+        return [a.count("BSpace") for a in self.sent if "BSpace" in a]
+
+
 # --------------------------------------------------------------------------- #
 # 2. Request state — record / load / clear, non-refreshable age anchor.
 # --------------------------------------------------------------------------- #
@@ -806,6 +865,133 @@ class TestDeliverCompact(unittest.TestCase):
                                        now=time.time())
         self.assertEqual(word, "sent")
         self.assertIn("%9", state.get("janitor_watch", {}))
+
+
+# --------------------------------------------------------------------------- #
+# 4a. #375 part 2 — job 14's `/compact` send VERIFIES the submit landed.
+# --------------------------------------------------------------------------- #
+
+class TestCompactSubmitVerify(unittest.TestCase):
+    """A swallowed Enter (agent-strip selector / menu overlay, #36 class) must
+    NOT be reported 'sent': `deliver_compact` verifies the submit landed, does
+    ONE corrective Escape+Enter, and on a persistent swallow LEAVES the request
+    pending (a `skip:` word, so the caller does not clear it), starts NO 30-min
+    cooldown, and backspaces its own text off the (caller-verified-bare) box —
+    the compact counterpart of the swallowed-submit recovery goal/stash already
+    have (`_send_goal_verified`, `deliver_with_stash`)."""
+
+    SID = "sess-submit-1"
+    CWD = "/home/newlevel/devel/submittest"
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+        # None of these tests depends on genuine elapsed wall-clock time; keep
+        # the (bounded) settle-poll waits instant.
+        p = m.patch("time.sleep", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _go(self, swallow_enters, origin="subagent-stop"):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tmux = CompactSubmitFake([("%9", "claude", self.CWD, "111")],
+                                 swallow_enters=swallow_enters)
+        word = compact.deliver_compact(self.SID, self.CWD, origin=origin,
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp, now=time.time())
+        return word, tmux
+
+    def _cooldown_started(self):
+        return compact.compact_delivery_in_cooldown(
+            self.SID, time.time() + 1, path=self.delp)
+
+    def test_clean_submit_is_sent_with_no_corrective_keystrokes(self):
+        # The unchanged happy path: a submit that lands needs NO Escape/Enter
+        # correction and NO undo — locks that verify never fires the recovery
+        # on a clean send.
+        word, tmux = self._go(swallow_enters=0)
+        self.assertEqual(word, "sent")
+        self.assertEqual(tmux.keys(), ["/compact", "Enter"])
+        self.assertEqual(tmux.bspace_batches(), [])
+        self.assertEqual(tmux.box, "")
+        self.assertTrue(self._cooldown_started())
+
+    def test_swallowed_submit_leaves_request_pending_not_sent(self):
+        word, _tmux = self._go(swallow_enters=9)
+        self.assertEqual(word, "skip:submit-swallowed")
+        self.assertNotIn(word, compact._COMPACT_TERMINAL_WORDS)
+        # A failed send never starts the 30-min cooldown (which would block the
+        # retry the pending request exists to enable).
+        self.assertFalse(self._cooldown_started())
+
+    def test_swallowed_submit_recovered_by_one_corrective_escape_enter(self):
+        word, tmux = self._go(swallow_enters=1)
+        self.assertEqual(word, "sent")
+        self.assertEqual(tmux.keys(),
+                         ["/compact", "Enter", "Escape", "Enter"])
+        self.assertTrue(self._cooldown_started())
+
+    def test_persistent_swallow_undoes_its_own_text_and_sends_one_escape(self):
+        word, tmux = self._go(swallow_enters=9)
+        self.assertEqual(word, "skip:submit-swallowed")
+        self.assertEqual(tmux.box, "")                    # own text backspaced off
+        self.assertEqual(tmux.bspace_batches(),
+                         [len(compact.COMPACT_TEXT)])
+        # Exactly ONE Escape ever — a rapid double-Escape deletes a draft (#35).
+        self.assertEqual(tmux.keys().count("Escape"), 1)
+        self.assertEqual(
+            tmux.keys(),
+            ["/compact", "Enter", "Escape", "Enter", "BSpace"])
+
+    def test_a_draft_that_raced_in_pre_send_aborts_without_typing(self):
+        # Round-1 review item 3 (keystroke safety): a draft appearing AFTER
+        # deliver_compact's own fresh recapture but BEFORE the type keystroke
+        # must be rescued and NEVER typed over — otherwise a later undo could
+        # backspace the user's characters. Mirrors _send_goal_verified's own
+        # raced-busy guard. Driven directly so the non-bare box is presented at
+        # exactly the pre-type re-check (not caught earlier).
+        keys = []
+
+        def run(argv, timeout=8):
+            j = " ".join(argv)
+            if "send-keys" in j:
+                keys.append(argv[-1])
+            if "capture-pane" in j:
+                return "● x\n❯ rozpisaný draft usera\n  ctx ███░\n"   # NON-bare
+            return ""
+
+        logs = []
+        outcome = compact._compact_submit_verified(
+            "%9", run, lambda *a, **k: None, lambda r: logs.append(r))
+        self.assertEqual(outcome, "raced-busy")
+        self.assertEqual(keys, [])            # nothing typed, no Enter, no BSpace
+        self.assertTrue(any("raced-busy" in r for r in logs), logs)
+
+    def test_raced_busy_forwards_draft_rescue_failure_logs(self):
+        # Round-2 review MINOR-1 (observability parity, #271/#360): a draft
+        # rescue that FAILS on the raced path must not be silent — its own log
+        # lines are forwarded through log_fn (the sibling passes logs=logs).
+        def run(argv, timeout=8):
+            if "capture-pane" in " ".join(argv):
+                return "● x\n❯ draft usera\n  ctx ███░\n"
+            return ""
+
+        def fake_rescue(pid, cap, logs=None, **kw):
+            if isinstance(logs, list):
+                logs.append("draft-rescue: FAILED sentinel")
+            return None
+
+        logs = []
+        with m.patch.object(wd, "_draft_rescue_persist", fake_rescue):
+            compact._compact_submit_verified(
+                "%9", run, lambda *a, **k: None, lambda r: logs.append(r))
+        self.assertTrue(
+            any("draft-rescue: FAILED sentinel" in r for r in logs), logs)
 
 
 # --------------------------------------------------------------------------- #
