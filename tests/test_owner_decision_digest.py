@@ -197,7 +197,8 @@ class TestRepingOwnerDecisionTickets(unittest.TestCase):
         tickets = [("odoo-erp", 3018, "decide")]
         wd.reping_owner_decision_tickets(
             now, send, state, fetch=lambda home=None: tickets,
-            account_owner="zbynek", persist=lambda: persisted.append(1))
+            account_owner="zbynek", persist=lambda: persisted.append(1),
+            authority="full")
         # exactly ONE ping
         self.assertEqual(len(calls), 1)
         body, k = calls[0]
@@ -222,10 +223,12 @@ class TestRepingOwnerDecisionTickets(unittest.TestCase):
             return [("r", 1, "t")]
 
         wd.reping_owner_decision_tickets(now, send, state,
-                                         fetch=fetch, account_owner="z")
+                                         fetch=fetch, account_owner="z",
+                                         authority="full")
         # a SECOND sweep in the same day-bucket must NOT fetch or send again
         wd.reping_owner_decision_tickets(now + 60, send, state,
-                                         fetch=fetch, account_owner="z")
+                                         fetch=fetch, account_owner="z",
+                                         authority="full")
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(fetch_calls), 1)
 
@@ -236,7 +239,7 @@ class TestRepingOwnerDecisionTickets(unittest.TestCase):
         out = wd.reping_owner_decision_tickets(
             _night_now(), send, state,
             fetch=lambda home=None: fetch_calls.append(1) or [("r", 1, "t")],
-            account_owner="z")
+            account_owner="z", authority="full")
         self.assertEqual(calls, [])
         self.assertEqual(fetch_calls, [])           # no network at night
         self.assertNotIn("owner_decision_digest", state)  # retried after 06:00
@@ -247,7 +250,7 @@ class TestRepingOwnerDecisionTickets(unittest.TestCase):
         state = {}
         out = wd.reping_owner_decision_tickets(
             _daytime_now(), send, state,
-            fetch=lambda home=None: None, account_owner="z")
+            fetch=lambda home=None: None, account_owner="z", authority="full")
         self.assertEqual(calls, [])
         self.assertNotIn("owner_decision_digest", state)  # retry next sweep
         self.assertTrue(any("unmeasurable" in ln for ln in out))
@@ -257,7 +260,8 @@ class TestRepingOwnerDecisionTickets(unittest.TestCase):
         state = {}
         now = _daytime_now()
         out = wd.reping_owner_decision_tickets(
-            now, send, state, fetch=lambda home=None: [], account_owner="z")
+            now, send, state, fetch=lambda home=None: [], account_owner="z",
+            authority="full")
         self.assertEqual(calls, [])                         # nothing pending
         self.assertEqual(state["owner_decision_digest"]["bucket"],
                          int(now // DAY))                   # but one fetch/day
@@ -269,8 +273,116 @@ class TestRepingOwnerDecisionTickets(unittest.TestCase):
         with mock.patch("notify.resolve_owner", return_value="marek"):
             wd.reping_owner_decision_tickets(
                 _daytime_now(), send, state,
-                fetch=lambda home=None: [("r", 1, "t")], account_owner="")
+                fetch=lambda home=None: [("r", 1, "t")], account_owner="",
+                authority="full")
         self.assertEqual(calls[0][1].get("owner"), "marek")
+
+
+class TestReducedAuthorityBoxSkipsDigest(unittest.TestCase):
+    """#489 — a reduced-authority (sub-dev) box must NEVER send the box-wide
+    owner-decision digest. Its box OWNER is an external sub-dev (david = CEO
+    slovnormalu), but the repo-scoped tickets belong to the gatekeeper/boss —
+    so the repo-wide digest leaked internal odoo-erp tickets to david's Discord
+    thread with a false 'these N tickets wait on YOUR decision'. The digest runs
+    ONLY on a full-authority (owner = the genuine decision recipient) box."""
+
+    def _spy_send(self):
+        calls = []
+
+        def send(body, **k):
+            calls.append((k.get("owner"), body))
+            return "sent"
+        return send, calls
+
+    def test_reduced_authority_box_never_sends_repo_wide_digest(self):
+        # RED on today's code: reping has no authority gate, so a reduced-
+        # authority box (box OS user = david, fork-no-merge) sends the repo-wide
+        # digest to the external owner AND hits the repo-wide fetch.
+        import airuleset
+        send, calls = self._spy_send()
+        state = {}
+        repo_wide = [("odoo-erp", 3020, "provizie obchodnikov"),
+                     ("odoo-erp", 3018, "Money migracia")]
+        fetch_calls = []
+
+        def fetch(home=None):
+            fetch_calls.append(1)
+            return repo_wide
+
+        with mock.patch.object(airuleset, "_current_user", lambda: "david"):
+            wd.reping_owner_decision_tickets(
+                _daytime_now(), send, state, fetch=fetch, account_owner="david")
+        self.assertEqual(calls, [],
+                         "digest leaked to a reduced-authority box owner")
+        self.assertEqual(fetch_calls, [],
+                         "digest must skip BEFORE the box-wide repo fetch")
+
+    def test_default_box_authority_resolver_skips_reduced_box(self):
+        # No explicit authority=: the default _box_authority() reads the box OS
+        # user's AUTHORITY_BY_USER entry. A real reduced user (david) -> skip.
+        import airuleset
+        send, calls = self._spy_send()
+        state = {}
+        with mock.patch.object(airuleset, "_current_user", lambda: "david"):
+            out = wd.reping_owner_decision_tickets(
+                _daytime_now(), send, state,
+                fetch=lambda home=None: [("odoo-erp", 1, "t")],
+                account_owner="david")
+        self.assertEqual(calls, [])
+        self.assertTrue(any("reduced-authority" in ln for ln in out))
+
+    def test_branch_merge_box_also_skips(self):
+        # EVERY non-full profile skips, not just fork-no-merge (marek/montalu are
+        # branch-merge sub-devs; the tickets still belong to the boss).
+        send, calls = self._spy_send()
+        state = {}
+        out = wd.reping_owner_decision_tickets(
+            _daytime_now(), send, state,
+            fetch=lambda home=None: [("odoo-erp", 1, "t")],
+            account_owner="marek", authority="branch-merge")
+        self.assertEqual(calls, [])
+        self.assertTrue(any("branch-merge" in ln for ln in out))
+
+    def test_reduced_skip_stamps_bucket_and_dedups_second_sweep(self):
+        # The skip records the day-bucket, so the reduced box logs the skip at
+        # most ONCE per day and every later same-bucket sweep is a silent dedup
+        # (no per-60s-sweep log noise, no repeated fetch).
+        send, calls = self._spy_send()
+        state = {}
+        now = _daytime_now()
+        fetch_calls = []
+
+        def fetch(home=None):
+            fetch_calls.append(1)
+            return [("odoo-erp", 1, "t")]
+
+        out1 = wd.reping_owner_decision_tickets(
+            now, send, state, fetch=fetch, account_owner="david",
+            authority="fork-no-merge")
+        out2 = wd.reping_owner_decision_tickets(
+            now + 60, send, state, fetch=fetch, account_owner="david",
+            authority="fork-no-merge")
+        self.assertTrue(any("reduced-authority" in ln for ln in out1))
+        self.assertEqual(out2, [])                 # deduped, silent
+        self.assertEqual(calls, [])                # never sent
+        self.assertEqual(fetch_calls, [])          # never fetched
+        self.assertEqual(state["owner_decision_digest"]["bucket"],
+                         int(now // DAY))
+
+    def test_full_authority_default_resolver_still_sends(self):
+        # gk/dev1/dev2 keep working: an UNMAPPED box user resolves to "full" via
+        # the default _box_authority() resolver, and the digest sends as before.
+        import airuleset
+        send, calls = self._spy_send()
+        state = {}
+        with mock.patch.object(airuleset, "_current_user",
+                               lambda: "newlevel-not-in-map"):
+            wd.reping_owner_decision_tickets(
+                _daytime_now(), send, state,
+                fetch=lambda home=None: [("odoo-erp", 3018, "decide")],
+                account_owner="zbynek")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "zbynek")
 
 
 class TestOwnerDecisionLabelsInSync(unittest.TestCase):
@@ -296,18 +408,21 @@ class TestRunOnceWiring(unittest.TestCase):
 
     def test_digest_fetch_is_reached_when_wired(self):
         """The digest fires from run_once's #368 daily-reask section only when a
-        real fetch is injected (jobs 8/11 network-free-tests pattern)."""
+        real fetch is injected (jobs 8/11 network-free-tests pattern). Pinned to a
+        full-authority box (#489) so the reach test is hermetic regardless of the
+        test box's own OS user."""
         fetch_calls = []
 
         def spy_fetch(home=None):
             fetch_calls.append(1)
             return []       # measurable, empty → no send, just records bucket
 
-        wd.run_once(now=_daytime_now(), dry_run=False,
-                    run=lambda argv, **k: "", send_fn=lambda *a, **k: "sent",
-                    projects_dir=self._tmp_dir(), state_path=self._tmp_json(),
-                    questions_path=self._tmp_json(),
-                    owner_decision_fetch=spy_fetch)
+        with mock.patch.object(wd, "_box_authority", lambda: "full"):
+            wd.run_once(now=_daytime_now(), dry_run=False,
+                        run=lambda argv, **k: "", send_fn=lambda *a, **k: "sent",
+                        projects_dir=self._tmp_dir(), state_path=self._tmp_json(),
+                        questions_path=self._tmp_json(),
+                        owner_decision_fetch=spy_fetch)
         self.assertEqual(fetch_calls, [1],
                          "run_once must reach the owner-decision digest fetch "
                          "when it is wired")
