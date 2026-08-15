@@ -5144,9 +5144,22 @@ def pane_goal_armed(captured):
     footer = lines[idx + 1:]
     if not any(ln.strip() for ln in footer):
         return None                        # nothing rendered below it
-    if any(GOAL_INDICATOR in ln for ln in footer):
-        return True
     trailing = _trailing_bottom_chrome(footer)
+    # #386 (mirror of #383) -- trust the `◎ /goal` footer indicator ONLY when
+    # it rides a genuine TRAILING-chrome row (the statusline in the same
+    # unbroken chrome block that ends the capture), NEVER a bare substring
+    # anywhere in `footer`. A parked, UNSENT DRAFT renders its wrapped
+    # CONTINUATION rows BELOW the `❯` head (so they land in `footer`), so a
+    # draft that merely QUOTES the glyph read as armed even on a genuinely
+    # dark goal -- the exact False-direction gap #383 closed, one branch over.
+    # Reusing the SAME `_trailing_bottom_chrome` peel the #383 check below
+    # already needs (computed once) excludes a chrome-shaped-but-mid-draft
+    # row by construction (its own Finding-2 backward walk stops at the first
+    # non-chrome draft row), while the real legacy render (glyph appended to
+    # the statusline chrome row) is inside that block and still matches. The
+    # #388 header path below is untouched.
+    if any(GOAL_INDICATOR in s for s in trailing):
+        return True
     if not any(not _is_border_rule(s) for s in trailing):
         return None                        # #383: footer is box content, a
                                             # chrome-shaped row buried mid-
