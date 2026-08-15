@@ -273,6 +273,46 @@ class TestRepingOwnerDecisionTickets(unittest.TestCase):
         self.assertEqual(calls[0][1].get("owner"), "marek")
 
 
+class TestReducedAuthorityBoxSkipsDigest(unittest.TestCase):
+    """#489 — a reduced-authority (sub-dev) box must NEVER send the box-wide
+    owner-decision digest. Its box OWNER is an external sub-dev (david = CEO
+    slovnormalu), but the repo-scoped tickets belong to the gatekeeper/boss —
+    so the repo-wide digest leaked internal odoo-erp tickets to david's Discord
+    thread with a false 'these N tickets wait on YOUR decision'. The digest runs
+    ONLY on a full-authority (owner = the genuine decision recipient) box."""
+
+    def _spy_send(self):
+        calls = []
+
+        def send(body, **k):
+            calls.append((k.get("owner"), body))
+            return "sent"
+        return send, calls
+
+    def test_reduced_authority_box_never_sends_repo_wide_digest(self):
+        # RED on today's code: reping has no authority gate, so a reduced-
+        # authority box (box OS user = david, fork-no-merge) sends the repo-wide
+        # digest to the external owner AND hits the repo-wide fetch.
+        import airuleset
+        send, calls = self._spy_send()
+        state = {}
+        repo_wide = [("odoo-erp", 3020, "provizie obchodnikov"),
+                     ("odoo-erp", 3018, "Money migracia")]
+        fetch_calls = []
+
+        def fetch(home=None):
+            fetch_calls.append(1)
+            return repo_wide
+
+        with mock.patch.object(airuleset, "_current_user", lambda: "david"):
+            wd.reping_owner_decision_tickets(
+                _daytime_now(), send, state, fetch=fetch, account_owner="david")
+        self.assertEqual(calls, [],
+                         "digest leaked to a reduced-authority box owner")
+        self.assertEqual(fetch_calls, [],
+                         "digest must skip BEFORE the box-wide repo fetch")
+
+
 class TestOwnerDecisionLabelsInSync(unittest.TestCase):
     def test_labels_match_cli_quals_user_waiting(self):
         import cli_quals
