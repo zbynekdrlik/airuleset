@@ -80,36 +80,47 @@ def _entry_text(entry):
 
 def transcript_last_error(path):
     """Text of the session's last real assistant message IF Claude Code flagged it
-    as an API error (`isApiErrorMessage`), else ''. The walk mirrors the discipline
-    of its sibling reader `transcript_text_toolcall_stall` (below) so a HISTORICAL
-    api-error that has SINCE recovered is NOT re-reported (issue #484): the jsonl is
-    append-only, so the error line stays forever, and any genuine activity AFTER it
-    proves the session / background worker recovered and is not currently stalled.
-    Before #484 this walk `continue`d past `user`/tool_result entries and treated a
-    pure `tool_use` assistant entry (empty text ∈ `_SENTINELS`) as synthetic, so a
-    resumed worker's live Bash poll loop was skipped and the scan walked all the way
-    back to the frozen error — making job 1b stuck-check ping the supervisor forever.
+    as an API error (`isApiErrorMessage`), else ''. Reads the RIGHT signal — recency
+    of the error vs later activity — so a HISTORICAL api-error that has SINCE
+    recovered is NOT re-reported (issue #484): the jsonl is append-only, so the error
+    line stays forever, and genuine activity AFTER it proves the session / background
+    worker recovered and is not currently stalled. Before #484 this walk `continue`d
+    past `user`/tool_result entries and treated a pure `tool_use` assistant entry
+    (empty text ∈ `_SENTINELS`) as synthetic, so a resumed worker's live Bash poll
+    loop was skipped and the scan walked all the way back to the frozen error —
+    making job 1b stuck-check ping the supervisor forever.
 
-      - `system` (hook / system noise) entries are skipped;
-      - a non-assistant (`user` / tool_result) entry means the conversation
-        PROGRESSED past the error → '' (not stalled);
+      - a `user` entry (a resume prompt / a `tool_result`) means the conversation
+        genuinely PROGRESSED past the error → '' (not stalled). This is the ONE
+        recovery signal that matters, plus the tool_use one below;
       - a real `tool_use` assistant entry (recovery activity) is checked BEFORE the
         empty/sentinel skip, because a pure tool_use entry has empty text
         (`"" in _SENTINELS`) and would otherwise be skipped and let the scan reach
         the old error;
-      - the remaining synthetic entries ("No response requested." / truly empty) are
-        still skipped, so a GENUINE stall (the error is the last real turn, at most
-        followed by a system / synthetic entry) still reports it;
+      - EVERY OTHER non-assistant entry — `system` hook noise AND Claude Code's
+        non-conversational bookkeeping types (`queue-operation`, `ai-title`,
+        `file-history-snapshot`/`-delta`, `mode`, `permission-mode`, `pr-link`, …)
+        — is SKIPPED, exactly as the pre-#484 code did. Returning '' on those would
+        MISS a genuine api-error stall that merely has a bookkeeping line appended
+        after it (round-1 review MAJOR) — a silent, non-self-healing false negative
+        in the higher-stakes auto-RESUME path (job 1), so the old robustness is kept.
+        (The sibling reader `transcript_text_toolcall_stall` still carries the older
+        broad `non-assistant → not-stalled` rule; it is left untouched under the repo
+        FREEZE — its miss is a benign skipped nudge, not an un-resumed session.);
+      - the remaining synthetic assistant entries ("No response requested." / truly
+        empty) are still skipped, so a GENUINE stall (the error is the last real
+        turn, at most followed by system / bookkeeping / synthetic entries) still
+        reports it;
       - the first real non-error assistant reply means the session is fine.
     """
     for entry in reversed(_iter_jsonl_tail(path)):
         if not isinstance(entry, dict):
             continue
         t = entry.get("type")
-        if t == "system":
-            continue            # hook / system noise after the turn — skip
+        if t == "user":
+            return ""           # user tail (resume prompt / tool_result) → progressed, not stalled
         if t != "assistant":
-            return ""           # user / tool_result tail → progressed, not stalled
+            continue            # system + non-conversational bookkeeping — skip, keep scanning back
         if entry.get("isApiErrorMessage") is True:
             return _entry_text(entry) or "API Error"
         if _entry_has_tool_use(entry):

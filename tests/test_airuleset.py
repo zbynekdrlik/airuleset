@@ -8643,8 +8643,10 @@ class TestApiWatchdog(TestCase):
         self.assertEqual(self.w.transcript_last_error(p), "")
 
     def test_transcript_last_error_recovered_via_tool_result_tail_is_empty(self):
-        # newest entry is a tool_result (user) → conversation progressed → not stalled
-        p = self._transcript("/x/p", [self._ERR, self._TOOLUSE, self._TRESULT], 600, 1_000_000)
+        # newest entry is a tool_result (user), NO tool_use between it and the error,
+        # so this isolates the `user → progressed` branch (a _TOOLUSE middle entry
+        # would satisfy _entry_has_tool_use instead and mask the branch under test).
+        p = self._transcript("/x/p", [self._ERR, self._TRESULT], 600, 1_000_000)
         self.assertEqual(self.w.transcript_last_error(p), "")
 
     def test_transcript_last_error_484_endless_ping_scenario_is_empty(self):
@@ -8666,6 +8668,18 @@ class TestApiWatchdog(TestCase):
         sys_entry = {"type": "system", "content": "hook fired"}
         p = self._transcript("/x/p", [self._ERR, sys_entry], 600, 1_000_000)
         self.assertIn("529", self.w.transcript_last_error(p))
+
+    def test_transcript_last_error_genuine_stall_with_trailing_bookkeeping_still_detected(self):
+        # CC appends NON-conversational bookkeeping entries (queue-operation, ai-title,
+        # file-history-snapshot, mode, permission-mode, …) that are NOT progress —
+        # a genuine api-error stall with one of these newest must STILL be reported
+        # (round-1 review MAJOR: returning '' on any non-assistant tail was a silent
+        # false negative in the auto-resume path).
+        for bk in ("queue-operation", "ai-title", "file-history-snapshot",
+                   "mode", "permission-mode", "pr-link"):
+            p = self._transcript("/x/p", [self._ERR, {"type": bk}], 600, 1_000_000)
+            self.assertIn("529", self.w.transcript_last_error(p),
+                          "genuine stall masked by trailing %s entry" % bk)
 
     def test_list_claude_panes_dedups_and_filters(self):
         fake = _FakeTmux(panes="%5\tclaude\t/devel/a\n%5\tclaude\t/devel/a\n"
