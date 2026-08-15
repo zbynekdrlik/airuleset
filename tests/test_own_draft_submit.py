@@ -269,5 +269,135 @@ class LaneGuardOwnDraft(unittest.TestCase):
         self.assertEqual(rec.get("ln"), 1)    # stash succeeded -> nudge booked
 
 
+# --------------------------------------------------------------------------- #
+# 4. WRAPPED-render coverage (#501 adversarial review CRITICAL). Every real own
+#    nudge is 289-720 chars and WRAPS at a live pane width, so its prefix sits
+#    on the box HEAD row and is ABSENT from the tail. The unwrapped fake in the
+#    classes above is a state that CANNOT occur for a real nudge — recognition
+#    MUST read the head (`_input_box_head_text`), never the tail. These drive
+#    the production (wrapped) shape end to end.
+# --------------------------------------------------------------------------- #
+
+BOX_WIDTH = 176
+
+
+def _wrapped(initial_box, tpath=None, enters_swallowed=0):
+    return DeliverGoalFakeTmux([(PID, "claude", "/x", "111")], GOAL_ARMED_CAP,
+                               model_type=True, transcript_path=tpath,
+                               enters_swallowed=enters_swallowed,
+                               initial_box=initial_box, wrap_width=BOX_WIDTH)
+
+
+class WrappedOwnDraftRecognition(unittest.TestCase):
+    def test_recognition_reads_the_HEAD_of_a_wrapped_box_not_the_tail(self):
+        for payload, pfx in ((OWN_LANE, "lane-check: "),
+                             (OWN_BOUNCE, "bounce-backstop: "),
+                             (OWN_GKREQ, "gk-request backstop: ")):
+            tmux = _wrapped(payload)
+            cap = tmux._render()
+            # the box GENUINELY wraps (head != tail)
+            self.assertIs(wd._find_input_box(cap)[2], True, payload[:20])
+            head = wd._input_box_head_text(cap)
+            tail = wd._input_line_text(cap)
+            self.assertTrue(head.startswith(pfx), (pfx, head[:40]))
+            self.assertFalse(tail.startswith(pfx), (pfx, tail[:40]))
+            # the fingerprint fires on the HEAD, is None on the TAIL — the
+            # exact bug the reviewers found (keying on the tail = dead branch)
+            self.assertEqual(wd._own_nudge_submit_prefix(head), pfx)
+            self.assertIsNone(wd._own_nudge_submit_prefix(tail))
+
+
+class WrappedSubmitOwnDraft(unittest.TestCase):
+    def _tpath(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "sess.jsonl"
+        p.write_text(json.dumps(
+            {"type": "assistant", "message": {"content": "x"}}) + "\n")
+        return p
+
+    def test_wrapped_own_draft_submits_and_confirms(self):
+        p = self._tpath()
+        tmux = _wrapped(OWN_LANE, tpath=p)
+        head = wd._input_box_head_text(tmux._render())
+        logs = []
+        ok = wd.submit_own_draft_verified(PID, head, tmux, p,
+                                          sleep_fn=lambda s: None, logs=logs)
+        self.assertTrue(ok, logs)
+        self.assertEqual(tmux.box, "")                 # submitted (box cleared)
+        self.assertFalse(any("-l" in a for a in tmux.sent), tmux.sent)  # no retype
+        # the transcript gained the full nudge; the head-row token confirmed it
+        self.assertIn("lane-check: ", p.read_text())
+
+    def test_wrapped_swallowed_leaves_the_draft_untouched(self):
+        p = self._tpath()
+        tmux = _wrapped(OWN_LANE, tpath=p, enters_swallowed=99)
+        head = wd._input_box_head_text(tmux._render())
+        logs = []
+        ok = wd.submit_own_draft_verified(PID, head, tmux, p,
+                                          sleep_fn=lambda s: None, logs=logs)
+        self.assertFalse(ok, logs)
+        self.assertEqual(tmux.box, OWN_LANE)           # left EXACTLY as-is
+        self.assertFalse(any("BSpace" in " ".join(a) for a in tmux.sent), tmux.sent)
+        _no_double_escape(tmux.sent)
+
+
+class WrappedLaneGuardOwnDraft(unittest.TestCase):
+    CWD = "/home/newlevel/devel/lanenudge-wrap"
+    SID = "sess-lane-wrap-1"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _run(self, initial_box, rec, state, enters_swallowed=0):
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=tpath,
+                                   enters_swallowed=enters_swallowed,
+                                   initial_box=initial_box, wrap_width=BOX_WIDTH)
+        captured = tmux._render()
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch("airuleset.resolve_authority", return_value="full"), \
+             m.patch.object(wd, "deliver_with_stash", return_value=False) as dws:
+            logs, owns = goal.goal_lane_occupancy_nudge(
+                now, tmux, rec, self.SID, self.CWD, "111", captured, tpath,
+                tmtime, "loc", None, False, None, proj,
+                backlog_fetch=lambda cwd: 5, state=state,
+                sleep_fn=lambda s: None)
+        return logs, owns, tmux, dws, tpath
+
+    def test_wrapped_own_nudge_draft_is_submitted_in_place(self):
+        # THE incident: a wrapped swallowed lane-check draft. The guard must
+        # submit it in place (via the HEAD), never route it to deliver_with_stash.
+        rec, state = {}, {}
+        logs, owns, tmux, dws, tpath = self._run(OWN_LANE, rec, state)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge (own-submit)" in ln
+                            for ln in logs), logs)
+        self.assertEqual(rec.get("ln"), 1)
+        self.assertNotIn("lna", rec)
+        dws.assert_not_called()
+        self.assertEqual(tmux.box, "")
+        self.assertIn("lane-check: ", tpath.read_text())
+
+    def test_wrapped_own_draft_submit_failure_advances_streak(self):
+        rec, state = {}, {}
+        logs, owns, tmux, dws, tpath = self._run(OWN_LANE, rec, state,
+                                                 enters_swallowed=99)
+        self.assertTrue(owns)
+        self.assertTrue(any("own-draft submit-unverified" in ln
+                            for ln in logs), logs)
+        self.assertEqual(rec.get("lna"), 1)
+        self.assertNotIn("ln", rec)
+        dws.assert_not_called()
+        self.assertEqual(tmux.box, OWN_LANE)
+
+
 if __name__ == "__main__":
     unittest.main()

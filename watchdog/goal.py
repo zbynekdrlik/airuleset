@@ -1571,9 +1571,15 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # human PROVABLY never types them) are submitted on content alone; a
         # FOREIGN draft (and the human-typeable `/goal `/`/compact`) stays on
         # today's `deliver_with_stash` path BYTE-FOR-BYTE (HARD CONSTRAINT a --
-        # the foreign-draft protection is never weakened).
-        if watchdog._own_nudge_submit_prefix(fresh_draft):
-            if not watchdog.submit_own_draft_verified(pid, fresh_draft, run,
+        # the foreign-draft protection is never weakened). Recognition reads the
+        # box HEAD row (`_input_box_head_text`), NOT `fresh_draft` (which is the
+        # TAIL for a WRAPPED box): every real own nudge is 289-720 chars and
+        # WRAPS, so its prefix is on the head and never the tail -- keying on
+        # `fresh_draft` made this branch DEAD against exactly the wrapped drafts
+        # the incident is about (#501 adversarial review).
+        own_head = watchdog._input_box_head_text(fresh)
+        if watchdog._own_nudge_submit_prefix(own_head):
+            if not watchdog.submit_own_draft_verified(pid, own_head, run,
                                                       tpath, sleep_fn=sleep_fn,
                                                       logs=logs):
                 # A recognized own draft that will not submit-verify is a

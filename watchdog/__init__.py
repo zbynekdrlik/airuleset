@@ -533,6 +533,7 @@ from watchdog.questions import (  # noqa: E402
 
 from watchdog.pane_text import (  # noqa: E402
     _input_line_text as _input_line_text,
+    _input_box_head_text as _input_box_head_text,
     _classify_boundary as _classify_boundary,
     _above_input_box as _above_input_box,
     _above_box_scan as _above_box_scan,

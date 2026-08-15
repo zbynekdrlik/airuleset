@@ -100,7 +100,7 @@ class DeliverGoalFakeTmux:
 
     def __init__(self, panes, captured, in_mode=False, cap_seq=(),
                 model_type=False, enters_swallowed=0, transcript_path=None,
-                initial_box=""):
+                initial_box="", wrap_width=None):
         self.panes = panes
         self.captured = captured
         self.in_mode = in_mode
@@ -122,6 +122,16 @@ class DeliverGoalFakeTmux:
         # keystroke, and `capture-pane` renders it via the SAME `❯ ` bare-line
         # model. Default "" keeps every pre-#501 test byte-identical.
         self.box = initial_box
+        # #501 -- when set, `capture-pane` renders the box the way a REAL pane
+        # does: greedy word-wrap at `wrap_width` cols into a bordered,
+        # multi-row box (`❯`+NBSP on the head row, continuation rows indented),
+        # so `_find_input_box` reports `wrapped=True` and head/tail DIFFER. This
+        # is the production shape a 289-720-char own nudge always takes -- the
+        # unwrapped single-line render (default None) is a state that CANNOT
+        # occur for a real nudge, so the wrapped path is what actually proves
+        # `_input_box_head_text`-based recognition. Mirrors
+        # `tests/test_wrapped_draft.py::render_box`.
+        self.wrap_width = wrap_width
         self._bare_line = None
         if model_type:
             for ln in captured.splitlines():
@@ -146,8 +156,33 @@ class DeliverGoalFakeTmux:
             return self.captured
         if not self.box:
             return self.captured
+        if self.wrap_width:
+            return self._render_wrapped()
         new_line = self._bare_line.replace("❯", "❯ " + self.box, 1)
         return self.captured.replace(self._bare_line, new_line, 1)
+
+    def _render_wrapped(self):
+        """#501 — render `self.box` the way a REAL wrapped input box captures:
+        greedy word-wrap at `self.wrap_width`, `❯`+NBSP on the head row,
+        continuation rows indented by two cols, bordered above and below (the
+        `tests/test_wrapped_draft.py::render_box` shape). Keeps the armed
+        `◎ /goal active` marker on the ctx line below the box so
+        `pane_goal_armed` still reads True. `_find_input_box` reports
+        `wrapped=True` and head/tail DIFFER — the shape the head-vs-tail
+        recognition (#501) is actually about."""
+        w = self.wrap_width
+        rows, cur, prefix = [], "", "❯\xa0"
+        for word in self.box.split(" "):
+            cand = (cur + " " + word) if cur else word
+            if len(prefix) + len(cand) > w:
+                rows.append(prefix + cur)
+                cur, prefix = word, "  "
+            else:
+                cur = cand
+        rows.append(prefix + cur)
+        ctx = "  ctx ███░  caveman:lite  ◎ /goal active"
+        return "\n".join(
+            ["● Hotovo.", "", "─" * 60] + rows + ["─" * 60, ctx]) + "\n"
 
     def __call__(self, argv, timeout=8):
         j = " ".join(argv)

@@ -668,12 +668,19 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     Any unrecognized/foreign draft is refused with ZERO keystrokes: NEVER a
     blind Enter on a user's parked draft.
 
+    Recognition + verification read the box HEAD row (`_input_box_head_text`),
+    NEVER the tail (`_input_line_text`): every real own nudge is 289-720 chars
+    and WRAPS, so its prefix sits on the head and is absent from the tail (#501
+    -- reading the tail made this path dead against exactly the wrapped drafts
+    the incident is about).
+
     Transcript-proof (HARD CONSTRAINT b): after the Enter, the session jsonl at
-    `tpath` must gain a NEW top-level `user` turn carrying the matched PREFIX
-    (a wrap-free token at the very start of the submitted draft) within the
-    bounded window (`_await_submit_confirmed`). A swallowed Enter (#36) earns
-    ONE corrective Escape+Enter (never a second Escape #35), re-verified. Never
-    booked delivered on a pane render alone.
+    `tpath` must gain a NEW top-level `user` turn carrying the HEAD-ROW TEXT
+    (the draft's own leading substring -- wrap-safe AND far more specific than
+    the bare prefix, so a foreign turn merely containing `lane-check: ` cannot
+    false-confirm) within the bounded window (`_await_submit_confirmed`). A
+    swallowed Enter (#36) earns ONE corrective Escape+Enter (never a second
+    Escape #35), re-verified. Never booked delivered on a pane render alone.
 
     No keystroke ever RE-TYPES or BACKSPACES the draft: the box already holds
     our own text, and we neither typed it nor can prove its exact length (a
@@ -700,12 +707,16 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
         _log("submit-own abort: no transcript path")
         return False
     # A FRESH capture right before the Enter (the sibling helpers' own race
-    # guard): the box must STILL hold the same OWN draft. A draft that raced
-    # OUT (bare / submitted by something else) or a FOREIGN draft that raced IN
-    # must NEVER be Entered.
+    # guard): the box must STILL hold the same OWN draft. Recognition reads the
+    # box HEAD row (`_input_box_head_text`), NOT `_input_line_text` (the TAIL):
+    # every real own nudge is 289-720 chars and WRAPS at a live pane width, so
+    # its prefix sits on the head row and is NEVER on the tail (#501 -- keying
+    # on the tail made this whole path DEAD against exactly the wrapped drafts
+    # the incident is about). A draft that raced OUT (bare / submitted) or a
+    # FOREIGN draft that raced IN must NEVER be Entered.
     cap = watchdog.capture_pane(pane_id, run, lines=40)
-    itext = watchdog._input_line_text(cap)
-    if not itext or not itext.startswith(prefix):
+    head = watchdog._input_box_head_text(cap)
+    if not head or not head.startswith(prefix):
         _log("submit-own abort: box no longer holds the recognized own draft")
         return False
     if "esc to interrupt" in (cap or ""):
@@ -717,8 +728,8 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     if watchdog._strip_selected(cap):
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
         cap = watchdog.capture_pane(pane_id, run, lines=40)
-        itext = watchdog._input_line_text(cap)
-        if not itext or not itext.startswith(prefix):
+        head = watchdog._input_box_head_text(cap)
+        if not head or not head.startswith(prefix):
             _log("submit-own abort: own draft gone after strip Escape")
             return False
     try:
@@ -726,26 +737,33 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     except OSError:
         _log("submit-own abort: transcript unreadable pre-send")
         return False
+    # The head row IS the draft's leading substring (the first ~pane-width
+    # chars), so it appears verbatim in the transcript's `user` turn AND is far
+    # more specific than the bare 12-char prefix — a wrap-safe, low-false-
+    # confirm verification token (a foreign turn would have to carry this whole
+    # ~170-char line, not just `lane-check: `). Its only failure mode is a
+    # benign non-confirm -> retry, never a false positive nor a destroyed draft.
+    token = head
     run(["tmux", "send-keys", "-t", pane_id, "Enter"])
-    if _await_submit_confirmed(tpath, baseline, prefix, sleep_fn):
+    if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
         _log("submit-own delivered")
         return True
     # Unconfirmed. Only send a corrective Escape+Enter when our OWN draft is
     # PROVABLY still in the box (a swallowed Enter, #36) — never a second
     # Escape (#35), never an Escape into a box that already went bare (a turn
     # may have started, #233).
-    still = watchdog._input_line_text(watchdog.capture_pane(pane_id, run, lines=40))
+    still = watchdog._input_box_head_text(watchdog.capture_pane(pane_id, run, lines=40))
     if still and still.startswith(prefix):
         run(["tmux", "send-keys", "-t", pane_id, "Escape"])
         run(["tmux", "send-keys", "-t", pane_id, "Enter"])
-        if _await_submit_confirmed(tpath, baseline, prefix, sleep_fn):
+        if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
             _log("submit-own delivered (after corrective Escape+Enter)")
             return True
     # Genuinely unconfirmed. Leave the box EXACTLY as-is — never backspace our
     # own draft (we did not type it, cannot prove its length, and it is a legit
     # pending own nudge). Read the box ONCE and log honestly (#134/#360), never
     # claim a state we did not read; the caller's give-up escalation fires.
-    final = watchdog._input_line_text(watchdog.capture_pane(pane_id, run, lines=40))
+    final = watchdog._input_box_head_text(watchdog.capture_pane(pane_id, run, lines=40))
     if final is None:
         _log("submit-own unconfirmed: box unreadable, submit not proven")
     elif final.startswith(prefix):
