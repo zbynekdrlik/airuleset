@@ -14,7 +14,7 @@ Unlike ``pane_classify.py`` (a genuine leaf), this is a BACK-REFERENCE module:
 the bodies call primitives that stay resident in ``__init__.py`` (re-exported
 there from ``pane_classify.py``) -- ``_find_input_box``, ``_input_box_rows_raw``,
 ``_find_input_box_from``, ``_is_bottom_chrome``, ``_is_separator_line`` -- and the
-constant ``_QUEUED_COMPACT_RX`` (defined in ``__init__.py``, used only here). It
+constant ``_QUEUED_COMPACT_RX`` (defined in ``long_turn.py``, used only here). It
 also has two intra-module co-moved cross-calls (``_above_box_scan`` ->
 ``_above_input_box``, ``_pane_has_queued_compact`` -> ``_above_box_scan``). Every
 one of those references is written as call-time ``watchdog.<name>`` attribute
