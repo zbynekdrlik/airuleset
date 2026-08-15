@@ -175,7 +175,7 @@
     "tests/test_vault_templates.py": 322,
     "tests/test_vystup_readback_skill_step4.py": 122,
     "tests/test_watchdog.py": 3601,
-    "tests/test_watchdog_discord_api_split.py": 216,
+    "tests/test_watchdog_discord_api_split.py": 248,
     "tests/test_watchdog_handoff_alarm_split.py": 207,
     "tests/test_watchdog_pane_text_split.py": 167,
     "tests/test_watchdog_state_keys.py": 113,

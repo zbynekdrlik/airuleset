@@ -39,6 +39,7 @@ These tests lock the invariants that keep those seams live:
      regression that every functional test passes right through (design #1 hazard).
 """
 
+import ast
 import subprocess
 import sys
 import unittest
@@ -113,6 +114,37 @@ class ReExportIdentity(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(getattr(watchdog, name).__module__,
                                  "watchdog.discord_api")
+
+
+class MovedNamesChecklistIsSelfValidating(unittest.TestCase):
+    """`MOVED_NAMES` is a hand-maintained checklist — every OTHER test in this
+    file trusts it. These two tests cross-check it against the two authoritative
+    sources (the module's own top-level defs, and the facade import block in
+    `__init__.py`), so a name that was moved-but-omitted-from-the-list (or added
+    to the list but never moved / never re-exported) fails loudly here rather
+    than silently reducing every other test's coverage (round-1 review NIT)."""
+
+    def test_module_defines_exactly_the_moved_names(self):
+        # ast over the real file: top-level FunctionDefs in discord_api.py must
+        # be EXACTLY the checklist — nothing moved that the list forgot, nothing
+        # listed that the module doesn't define.
+        src = Path(discord_api.__file__).read_text(encoding="utf-8")
+        defs = {n.name for n in ast.parse(src).body
+                if isinstance(n, ast.FunctionDef)}
+        self.assertEqual(defs, set(MOVED_NAMES))
+
+    def test_facade_imports_exactly_the_moved_names(self):
+        # The single positional facade in __init__.py must re-export EXACTLY the
+        # checklist — a name dropped from the facade would NameError an
+        # __init__-resident caller; an extra one would be a stale import.
+        init_src = (REPO / "watchdog" / "__init__.py").read_text(encoding="utf-8")
+        tree = ast.parse(init_src)
+        imported = set()
+        for node in tree.body:
+            if (isinstance(node, ast.ImportFrom)
+                    and node.module == "watchdog.discord_api"):
+                imported.update(a.name for a in node.names)
+        self.assertEqual(imported, set(MOVED_NAMES))
 
 
 class BackReferencesResolveAtCallTime(unittest.TestCase):
