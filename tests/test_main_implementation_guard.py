@@ -61,6 +61,12 @@ MID_1200 = "n" * 1200          # #178: over AIRULESET_FABLE_EDIT_MAX (800),
 # of a valid marker is.
 BYPASS_REASON = "authoring the policy text itself — the content IS the judgment"
 
+# #492: the block/bypass audit logs are per-USER now (`-<uid>`). Tests read
+# the SAME per-uid path the hook writes — the test process IS the writer's
+# user, so os.getuid() resolves to the identical suffix.
+BLOCK_LOG_PATH = Path("/tmp/airuleset-main-exec-block-%d.log" % os.getuid())
+BYPASS_LOG_PATH = Path("/tmp/airuleset-main-exec-bypass-%d.log" % os.getuid())
+
 
 def _entry(role_type, content, **extra):
     d = {"type": role_type}
@@ -991,7 +997,7 @@ class OneShotBypass80(unittest.TestCase):
         m.write_text(BYPASS_REASON)
         self.addCleanup(lambda: m.unlink(missing_ok=True))
         self._run(sid)
-        log = Path("/tmp/airuleset-main-exec-bypass.log")
+        log = BYPASS_LOG_PATH
         self.assertTrue(log.exists())
         self.assertTrue([ln for ln in log.read_text().splitlines() if sid in ln],
                         "a consumed bypass must still be logged")
@@ -1121,7 +1127,7 @@ class DispatchRatioNudge80(unittest.TestCase):
         sid = self._sid("cap10")
         for _ in range(4):
             self._run(sid)
-        log = Path("/tmp/airuleset-main-exec-block.log")
+        log = BLOCK_LOG_PATH
         self.assertTrue(log.exists())
         mine = [ln for ln in log.read_text().splitlines() if sid in ln]
         self.assertTrue(mine, "the nudge must be in the block log")
@@ -1140,7 +1146,7 @@ class BlockLogging73(unittest.TestCase):
     logs only bypasses, so there is no way to answer 'did it fire, on what'
     after a deploy. Same style/location as the existing bypass log."""
 
-    LOG_PATH = Path("/tmp/airuleset-main-exec-block.log")
+    LOG_PATH = BLOCK_LOG_PATH
 
     def _lines_for(self, sid):
         if not self.LOG_PATH.exists():
@@ -1340,7 +1346,7 @@ class AwayEngagement128(unittest.TestCase):
     def test_away_block_is_tagged_in_the_block_log(self):
         sid = "t-mg-awaylog-" + uuid.uuid4().hex[:8]
         self._plain(tool="Bash", command=self.SWEEP, presence_age=1800, sid=sid)
-        log = Path("/tmp/airuleset-main-exec-block.log")
+        log = BLOCK_LOG_PATH
         lines = [ln for ln in log.read_text().splitlines() if sid in ln]
         self.assertTrue(lines, "away block was not logged")
         self.assertIn("USER_AWAY", lines[-1])
@@ -1377,7 +1383,7 @@ class BypassCarriesAReason128(unittest.TestCase):
                            transcript_text=goal_armed_transcript())
 
     def _bypass_lines(self, sid):
-        log = Path("/tmp/airuleset-main-exec-bypass.log")
+        log = BYPASS_LOG_PATH
         if not log.exists():
             return []
         return [ln for ln in log.read_text().splitlines() if sid in ln]
@@ -1449,11 +1455,11 @@ class BypassCarriesAReason128(unittest.TestCase):
         m = self._marker(sid)
         m.write_text("first line of the reason\nsecond line\nthird")
         self.addCleanup(lambda: m.unlink(missing_ok=True))
-        before = len(Path("/tmp/airuleset-main-exec-bypass.log").read_text()
+        before = len(BYPASS_LOG_PATH.read_text()
                      .splitlines()) if Path(
                          "/tmp/airuleset-main-exec-bypass.log").exists() else 0
         self._run(sid)
-        after = Path("/tmp/airuleset-main-exec-bypass.log").read_text().splitlines()
+        after = BYPASS_LOG_PATH.read_text().splitlines()
         self.assertEqual(len(after) - before, 1,
                          "one bypass = exactly one log line")
         self.assertIn("first line of the reason", after[-1])
@@ -1594,7 +1600,7 @@ class GoalArmedJqFails180(unittest.TestCase):
         # must be the DISTINCT GOAL_UNKNOWN, never GOAL_ARMED -- an audit
         # reading the log must never be told a goal was armed when the
         # truth is "the transcript could not be read".
-        block_log = Path("/tmp/airuleset-main-exec-block.log")
+        block_log = BLOCK_LOG_PATH
         self.assertTrue(block_log.exists(), "the block must be logged")
         lines = [ln for ln in block_log.read_text().splitlines() if sid in ln]
         self.assertTrue(lines, "expected a block log line for this session")
@@ -1647,7 +1653,7 @@ class BypassReasonJqFails180(unittest.TestCase):
         return Path("/tmp/airuleset-main-exec-ok-%s" % sid)
 
     def _bypass_lines(self, sid):
-        log = Path("/tmp/airuleset-main-exec-bypass.log")
+        log = BYPASS_LOG_PATH
         if not log.exists():
             return []
         return [ln for ln in log.read_text().splitlines() if sid in ln]
