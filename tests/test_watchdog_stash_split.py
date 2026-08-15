@@ -48,6 +48,7 @@ test_draft_rescue for `draft_rescue_dir`/`_draft_rescue_persist`, janitor for
      while passing every functional test).
 """
 
+import contextlib
 import subprocess
 import sys
 import tempfile
@@ -258,6 +259,175 @@ class CoMovedCrossCallsGoThroughPackageSeam(unittest.TestCase):
             # a persisted file actually landed in the patched dir
             self.assertIsNotNone(path)
             self.assertTrue(Path(path).parent == Path(d))
+
+
+class CoMovedKeystrokeSeamsGoThroughPackageSeam(unittest.TestCase):
+    """#35/#372 keystroke-safety teeth. The delivery/undo/rescue path makes 14
+    intra-module co-moved cross-calls; the class above already locks 4 of them.
+    This class locks the remaining 10 — INCLUDING every function that actually
+    TYPES (`_type_literal`), BACKSPACES (`_undo_typed_text` /
+    `_undo_appended_text` / `_undo_and_release_slot`), POLLS the settle window
+    (`_await_stash_settled`), or VERIFIES what landed (`_typed_landed` /
+    `_typed_exclusively` / `_pane_shows_collapsed_paste`), plus the two
+    draft-rescue helpers (`_draft_rescue_prune` / `_draft_rescue_ensure_dir`).
+
+    Each is a PATCH-OBSERVING test, the only kind with teeth for a co-moved
+    cross-call (a functional test passes even against a bare-name revert, since
+    the bare name resolves to stash.py's own copy — the design's #1 silent-
+    bypass hazard, here on the keystroke path). A spy is patched at the PACKAGE
+    seam (`watchdog.<name>`) and the caller is driven far enough to reach it; a
+    future bare revert makes the spy's `.called` False and fails the test. The
+    external seams are patched to steer `deliver_with_stash` down a specific
+    branch without touching a real pane."""
+
+    @staticmethod
+    def _recorder():
+        sent = []
+
+        def run(argv):
+            sent.append(argv)
+            return ""
+
+        return sent, run
+
+    @staticmethod
+    def _noop(*_a, **_k):
+        return None
+
+    def test_deliver_happy_path_reaches_type_await_paste_and_landed(self):
+        # NOOP settle -> type -> verify-landed -> submit. Locks _await_stash_settled,
+        # _type_literal, _pane_shows_collapsed_paste, _typed_landed (+ _draft_rescue_persist).
+        _, run = self._recorder()
+        with contextlib.ExitStack() as es:
+            def P(name, **kw):
+                return es.enter_context(mock.patch.object(watchdog, name, **kw))
+            P("capture_pane", return_value="❯ ")
+            P("_has_free_prompt", return_value=True)
+            P("_strip_selected", return_value=False)
+            P("_input_line_text", return_value="")
+            P("_box_is_wrapped", return_value=False)
+            drp = P("_draft_rescue_persist", return_value=None)
+            aws = P("_await_stash_settled",
+                    return_value=("❯ ", watchdog.STASH_NOOP, ""))
+            tl = P("_type_literal", return_value=None)
+            psc = P("_pane_shows_collapsed_paste", return_value=False)
+            tld = P("_typed_landed", side_effect=[True, False])
+            ok = watchdog.deliver_with_stash(
+                "%1", "/goal x", run, sleep_fn=self._noop)
+        self.assertTrue(ok)
+        for spy, nm in ((drp, "_draft_rescue_persist"),
+                        (aws, "_await_stash_settled"),
+                        (tl, "_type_literal"),
+                        (psc, "_pane_shows_collapsed_paste"),
+                        (tld, "_typed_landed")):
+            self.assertTrue(spy.called,
+                            "%s co-moved seam never reached via watchdog.<name>" % nm)
+
+    def test_deliver_verify_fail_reaches_undo_and_release_slot(self):
+        # NOOP settle -> type -> verify FAILS -> the box was VERIFIED BARE, so
+        # recovery goes through _undo_and_release_slot. Locks that seam.
+        _, run = self._recorder()
+        with contextlib.ExitStack() as es:
+            def P(name, **kw):
+                return es.enter_context(mock.patch.object(watchdog, name, **kw))
+            P("capture_pane", return_value="❯ ")
+            P("_has_free_prompt", return_value=True)
+            P("_strip_selected", return_value=False)
+            P("_input_line_text", return_value="")
+            P("_box_is_wrapped", return_value=False)
+            P("_draft_rescue_persist", return_value=None)
+            P("_await_stash_settled",
+              return_value=("❯ ", watchdog.STASH_NOOP, ""))
+            P("_type_literal", return_value=None)
+            P("_pane_shows_collapsed_paste", return_value=False)
+            P("_typed_landed", side_effect=[False])
+            uars = P("_undo_and_release_slot", return_value=None)
+            ok = watchdog.deliver_with_stash(
+                "%1", "/goal x", run, sleep_fn=self._noop)
+        self.assertFalse(ok)
+        self.assertTrue(uars.called,
+                        "_undo_and_release_slot co-moved seam never reached")
+
+    def test_undo_and_release_slot_reaches_undo_typed_text(self):
+        # _undo_and_release_slot's own co-moved cross-call to _undo_typed_text.
+        _, run = self._recorder()
+        with mock.patch.object(watchdog, "_undo_typed_text",
+                               return_value=True) as utt, \
+             mock.patch.object(watchdog, "capture_pane", return_value="❯ "), \
+             mock.patch.object(watchdog, "_input_line_text", return_value=""):
+            watchdog._undo_and_release_slot(
+                "%1", run, "abc", False, [].append, "stash-abort",
+                sleep_fn=self._noop)
+        self.assertTrue(utt.called,
+                        "_undo_typed_text co-moved seam never reached")
+
+    def test_deliver_unresolved_exclusive_reaches_typed_exclusively(self):
+        # UNRESOLVED settle (box held something) -> the STRICT _typed_exclusively
+        # verify is used instead of _typed_landed. Locks that seam.
+        _, run = self._recorder()
+        with contextlib.ExitStack() as es:
+            def P(name, **kw):
+                return es.enter_context(mock.patch.object(watchdog, name, **kw))
+            P("capture_pane", return_value="ghost")
+            P("_has_free_prompt", return_value=True)
+            P("_strip_selected", return_value=False)
+            P("_input_line_text", return_value="ghost")
+            P("_box_is_wrapped", return_value=False)
+            P("_draft_rescue_persist", return_value=None)
+            P("_await_stash_settled",
+              return_value=("ghost", watchdog.STASH_UNRESOLVED, "ghost"))
+            P("_type_literal", return_value=None)
+            P("_pane_shows_collapsed_paste", return_value=False)
+            texc = P("_typed_exclusively", return_value=True)
+            P("_typed_landed", side_effect=[False])
+            ok = watchdog.deliver_with_stash(
+                "%1", "/goal x", run, sleep_fn=self._noop)
+        self.assertTrue(ok)
+        self.assertTrue(texc.called,
+                        "_typed_exclusively co-moved seam never reached")
+
+    def test_deliver_unresolved_append_reaches_undo_appended_text(self):
+        # UNRESOLVED + strict verify FAILS + box ends with pre_text+text ->
+        # recovery goes through _undo_appended_text. Locks that seam.
+        _, run = self._recorder()
+        with contextlib.ExitStack() as es:
+            def P(name, **kw):
+                return es.enter_context(mock.patch.object(watchdog, name, **kw))
+            P("capture_pane", return_value="pre/goal x")
+            P("_has_free_prompt", return_value=True)
+            P("_strip_selected", return_value=False)
+            P("_input_line_text", return_value="pre/goal x")
+            P("_box_is_wrapped", return_value=False)
+            P("_draft_rescue_persist", return_value=None)
+            P("_await_stash_settled",
+              return_value=("pre/goal x", watchdog.STASH_UNRESOLVED, "pre"))
+            P("_type_literal", return_value=None)
+            P("_pane_shows_collapsed_paste", return_value=False)
+            P("_typed_exclusively", return_value=False)
+            uat = P("_undo_appended_text", return_value=True)
+            ok = watchdog.deliver_with_stash(
+                "%1", "/goal x", run, sleep_fn=self._noop)
+        self.assertFalse(ok)
+        self.assertTrue(uat.called,
+                        "_undo_appended_text co-moved seam never reached")
+
+    def test_draft_rescue_persist_reaches_prune_and_ensure_dir(self):
+        # _draft_rescue_persist's own two co-moved cross-calls.
+        _, _run = self._recorder()
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watchdog, "_draft_rescue_text",
+                                   return_value="a draft"), \
+                 mock.patch.object(watchdog, "draft_rescue_dir",
+                                   return_value=Path(d)), \
+                 mock.patch.object(watchdog, "_draft_rescue_ensure_dir",
+                                   return_value=True) as ed, \
+                 mock.patch.object(watchdog, "_draft_rescue_prune") as pr:
+                path = watchdog._draft_rescue_persist("%1", "❯ a draft")
+            self.assertIsNotNone(path)
+            self.assertTrue(ed.called,
+                            "_draft_rescue_ensure_dir co-moved seam never reached")
+            self.assertTrue(pr.called,
+                            "_draft_rescue_prune co-moved seam never reached")
 
 
 if __name__ == "__main__":

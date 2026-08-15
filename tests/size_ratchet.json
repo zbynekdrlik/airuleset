@@ -177,7 +177,7 @@
     "tests/test_watchdog.py": 3601,
     "tests/test_watchdog_handoff_alarm_split.py": 207,
     "tests/test_watchdog_pane_text_split.py": 167,
-    "tests/test_watchdog_stash_split.py": 264,
+    "tests/test_watchdog_stash_split.py": 434,
     "tests/test_watchdog_state_keys.py": 113,
     "tests/test_watchdog_sweep_jobs_split.py": 132,
     "tests/test_watchdog_tmux_io_split.py": 156,
