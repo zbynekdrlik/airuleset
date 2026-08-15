@@ -673,5 +673,75 @@ class TestFetchBounceTicketsExcludesOpsChannel(unittest.TestCase):
         self.assertIn("-label:ops-channel", flat)
 
 
+class TestBounceDiscordRepingSurvivesNotifyDedup(unittest.TestCase):
+    """#360 — the Discord-fallback ping (no live session) built its dedup key
+    from the ticket-set CONTENT (`bounce:%s:%s` % (name, tick_str)), so for an
+    UNCHANGED bounce set every 6h re-ping carried a BYTE-IDENTICAL key.
+    `notify.send`'s own SEPARATE, pre-existing 14-day marker TTL
+    (`notify._DEDUP_TTL_S` via `_dedup_claim`'s `O_CREAT|O_EXCL`) then swallowed
+    every re-ping past the first — job 8's own 6h `BOUNCE_RENUDGE_SECONDS`
+    re-nudge cadence never actually reached Discord (the identical class #353
+    fixed for the sibling gk_request_backstop, `cross_stream.py:723-746`). The
+    fix mirrors #353's proven dedup-key shape: fresh per DECISION INSTANT
+    (`bounce:%s:%d` % (name, int(now))), so job 8's own cadence is the sole
+    authority over whether a Discord send happens."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.root = str(Path(tmp.name) / "devel" / "demo")
+        Path(self.root).mkdir(parents=True)
+        seed_repo_cache(self.home, self.root, "demo")
+
+    def _reping(self, send, state, now):
+        # no pane -> the Discord-fallback branch; SAME unchanged ticket set
+        tmux = FakeTmux([], IDLE)
+        return wd.bounce_backstop(
+            now, tmux, state, send, home=self.home,
+            gh_fetch=lambda root: [1705], cross_stream_repos={"demo"})
+
+    def test_reping_after_window_is_not_swallowed_by_notify_dedup(self):
+        # Model notify.send's real dedup: a key already claimed within its TTL
+        # is swallowed ('dedup'), never re-posted -- exactly notify._dedup_claim's
+        # O_CREAT|O_EXCL behaviour over its 14-day marker window (the TTL never
+        # elapses across the 6h span of this test).
+        claimed = set()
+        calls = []              # (body, dedup_key) per send_fn invocation
+        delivered = []          # bodies that actually reached Discord ('sent')
+
+        def send(body, dedup_key=None, **kw):
+            calls.append((body, dedup_key))
+            if dedup_key in claimed:
+                return "dedup"
+            claimed.add(dedup_key)
+            delivered.append(body)
+            return "sent"
+
+        state = {}
+        t0 = 1_000_000.0
+        self._reping(send, state, t0)                 # first Discord ping
+        # 6h+ later, SAME unchanged set, still no session -> job 8 decides to
+        # re-ping (its own `same and fresh` 6h window has elapsed).
+        state["bounce"]["last_check"] = 0             # reopen the cadence gate
+        t1 = t0 + wd.BOUNCE_RENUDGE_SECONDS + 60
+        logs2 = self._reping(send, state, t1)
+
+        # BOTH re-pings must actually reach Discord -- the second must NOT be
+        # swallowed by notify's own 14-day marker (the #360 defect: the two
+        # keys were byte-identical, so notify.send returned 'dedup' forever).
+        self.assertEqual(len(delivered), 2, calls)
+        # ...because the two dedup keys are DISTINCT (fresh per decision instant),
+        # not the byte-identical content-based key the old code built.
+        keys = [k for _b, k in calls]
+        self.assertEqual(len(set(keys)), 2, keys)
+        # #360 observability (gk-request sibling parity, cross_stream.py:761):
+        # the journal line records the send RESULT, so a live box can tell a
+        # delivered re-ping ('sent') from one notify swallowed ('dedup') --
+        # exactly the delivery-vs-swallow distinction this fix exists to make
+        # verifiable per the repo's live-box verification bar.
+        self.assertTrue(any("(send='sent')" in ln for ln in logs2), logs2)
+
+
 if __name__ == "__main__":
     unittest.main()
