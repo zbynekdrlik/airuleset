@@ -21,19 +21,21 @@ actually TRUE for that type:
 
 | Artifact | Shape | Auth header | Correct verification |
 |---|---|---|---|
-| **User API token** (legacy) | ~40 chars, no prefix | `Authorization: Bearer <token>` | `GET /user/tokens/verify` — TRUE for this ONE type only |
+| **User API token** (legacy) | ~40 chars, no prefix | `Authorization: Bearer <token>` | capability probe `GET /zones` (universal — §2); `GET /user/tokens/verify` works ONLY if the token carries User-level read — a zone-scoped one 401s |
 | **Account-owned API token** | **`cfat_` prefix, ~53 chars** | `Authorization: Bearer <token>` | `GET /accounts/{account_id}/tokens/verify` **OR** capability probe `GET /zones` — **`/user/tokens/verify` returns `Invalid API Token` on it BY DESIGN** (§2) |
 | **Global API Key** | 37 hex chars | `X-Auth-Email: <email>` + `X-Auth-Key: <key>` — **NEVER `Bearer`** | `GET /user` |
-| **Origin CA key** | `v1.0-` prefix | its own use (signs origin certs) | not for the REST API at all |
+| **Origin CA key** | `v1.0-` prefix | `X-Auth-User-Service-Key` (Origin-CA endpoints only) | not a normal REST API token — never send it as `Bearer` |
 
 Rules this taxonomy exists to enforce:
 
 - **Identify by prefix/shape, then PROBE — never REJECT on shape.** A `cfat_`
   token is longer (~53) than a legacy one (~40); that is not a defect. Length
   or prefix is NEVER a validity verdict — only the capability probe (§2) is.
-- **`/user/tokens/verify` is NOT the universal check.** It is TRUE only for a
-  legacy user token: it 401s a valid zone-scoped token and returns
-  `Invalid API Token` for a valid account-owned `cfat_` token — both BY DESIGN.
+- **`/user/tokens/verify` is NOT the universal check** — the capability probe
+  (§2) is. It succeeds ONLY for a token carrying User-level read: it 401s a
+  zone-scoped token (user-owned, no user-level permission) and returns
+  `Invalid API Token` for an account-owned `cfat_` token — both BY DESIGN. What
+  decides the outcome is the token's SCOPE, not merely who owns it.
 - **Never escalate to a Global API Key when a scoped token works.** The Global
   API Key is the most dangerous credential Cloudflare issues (whole account,
   every zone, no scoping). If a `cfat_` / zone-scoped token passes the probe,
@@ -85,14 +87,16 @@ curl -s -H "Authorization: Bearer $CF_TOKEN" \
 #   curl ... https://api.cloudflare.com/client/v4/user/tokens/verify
 ```
 
-**The same trap bites HARDER for an account-owned `cfat_` token:** there
-`/user/tokens/verify` does not just 401 — it returns `Invalid API Token`, which
-reads exactly like "this token is fake". It is NOT: an account-owned token
-verifies at `GET /accounts/{account_id}/tokens/verify`, or — the universal
-answer that needs no account id — the SAME capability probe. `GET /zones`
-(`success:true` + the zones the token can see) is true for EVERY token type, so
-make it your only verdict and skip `/user/tokens/verify` entirely unless you
-positively know you hold a legacy user token:
+**The same trap catches an account-owned `cfat_` token too:** `/user/tokens/verify`
+rejects it with `Invalid API Token` (error 1000) — a VALID token refused, because
+it is the WRONG endpoint for that token TYPE, not because the token is bad (the
+zone-scoped 401 above carries the same message; the HTTP code is not the signal —
+the endpoint mismatch is). Verify an account-owned token at
+`GET /accounts/{account_id}/tokens/verify`, or — the universal answer that needs
+no account id — the SAME capability probe. `GET /zones` (`success:true` + the
+zones the token can see) is true for EVERY token type, so make it your only
+verdict and skip `/user/tokens/verify` unless you positively hold a
+User-level-scoped token:
 
 ```bash
 # ✅ universal capability probe — TRUE for cfat_ account tokens AND zone/user tokens.

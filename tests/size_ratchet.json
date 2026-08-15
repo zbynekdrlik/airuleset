@@ -46,7 +46,7 @@
     "tests/test_ci_monitoring_scope.py": 209,
     "tests/test_ci_poll_repeat_block.py": 909,
     "tests/test_claude_code_log_skill.py": 96,
-    "tests/test_cloudflare_api_tokens_skill.py": 133,
+    "tests/test_cloudflare_api_tokens_skill.py": 138,
     "tests/test_compact.py": 1432,
     "tests/test_context_diet_tier1.py": 195,
     "tests/test_delegation_meter.py": 653,

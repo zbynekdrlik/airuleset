@@ -105,6 +105,11 @@ class TestCredentialTaxonomy480(TestCase):
         self.assertIn("X-Auth-Key", t)
         self.assertIn("Origin CA key", t)
         self.assertIn("v1.0-", t)            # Origin CA key shape
+        # values, not just presence: a length/header swap must not pass silently
+        self.assertIn("~53", t)              # account-owned cfat_ length
+        self.assertIn("~40", t)              # legacy user token length
+        self.assertIn("37 hex", t)           # Global API Key length
+        self.assertIn("NEVER `Bearer`", t)   # Global API Key must NEVER use Bearer
 
     def test_verify_endpoint_lies_for_account_tokens_by_design(self):
         # the core #480 trap: /user/tokens/verify returns `Invalid API Token`
