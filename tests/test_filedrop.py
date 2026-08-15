@@ -481,7 +481,8 @@ class TestAirulesetWiring(unittest.TestCase):
         import unittest.mock as m2
 
         import airuleset
-        with m2.patch.object(airuleset, "filedrop_bind_ips",
+        import cli_filedrop_watchdog  # #433 L-B: _render_filedrop_unit moved here; patch the LEAF
+        with m2.patch.object(cli_filedrop_watchdog, "filedrop_bind_ips",
                              return_value=["100.90.94.41", "10.77.9.21"]):
             unit = airuleset._render_filedrop_unit()
         self.assertIn("Environment=FILEDROP_HOSTS=100.90.94.41,10.77.9.21", unit)
@@ -502,8 +503,10 @@ class TestChooseFiledropPort(unittest.TestCase):
     def setUp(self):
         import unittest.mock as m
         import airuleset
+        import cli_filedrop_watchdog
         self.m = m
         self.ar = airuleset
+        self.fw = cli_filedrop_watchdog  # #433 L-B: _choose_filedrop_port moved here; patch the LEAF, not the facade
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.port_file = Path(tmp.name) / "filedrop.port"
@@ -515,7 +518,7 @@ class TestChooseFiledropPort(unittest.TestCase):
             ("filedrop_persisted_port", lambda: None),
             ("_run_systemctl", lambda a: (3, "inactive", "")),   # our svc NOT active
         ]:
-            p = m.patch.object(airuleset, target, val)
+            p = m.patch.object(cli_filedrop_watchdog, target, val)
             p.start()
             self.addCleanup(p.stop)
 
@@ -528,12 +531,12 @@ class TestChooseFiledropPort(unittest.TestCase):
 
     def test_persisted_choice_is_stable(self):
         # a previously persisted port is reused verbatim — the URL never moves
-        with self.m.patch.object(self.ar, "filedrop_persisted_port", lambda: 8791):
+        with self.m.patch.object(self.fw, "filedrop_persisted_port", lambda: 8791):
             self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 8791)
 
     def test_own_active_service_keeps_default(self):
         # our own live instance holds :8788 → that is OURS, no migration
-        with self.m.patch.object(self.ar, "_run_systemctl",
+        with self.m.patch.object(self.fw, "_run_systemctl",
                                  lambda a: (0, "active\n", "")):
             self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"),
                              self.ar.FILEDROP_DEFAULT_PORT)
@@ -546,7 +549,7 @@ class TestChooseFiledropPort(unittest.TestCase):
         probe.bind(("127.0.0.1", 0))
         base = probe.getsockname()[1]
         probe.close()
-        with self.m.patch.object(self.ar, "FILEDROP_DEFAULT_PORT", base):
+        with self.m.patch.object(self.fw, "FILEDROP_DEFAULT_PORT", base):
             self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), base)
         self.assertFalse(self.port_file.exists(),
                          "default port needs no persisted override")
@@ -557,7 +560,7 @@ class TestChooseFiledropPort(unittest.TestCase):
         blocker.bind(("127.0.0.1", 0))          # OS-assigned free port
         base = blocker.getsockname()[1]         # keep it BOUND = foreign instance
         self.addCleanup(blocker.close)
-        with self.m.patch.object(self.ar, "FILEDROP_DEFAULT_PORT", base):
+        with self.m.patch.object(self.fw, "FILEDROP_DEFAULT_PORT", base):
             chosen = self.ar._choose_filedrop_port("127.0.0.1")
         self.assertNotEqual(chosen, base)
         self.assertGreater(chosen, base)
@@ -576,9 +579,9 @@ class TestChooseFiledropPort(unittest.TestCase):
         taken = hog.getsockname()[1]
         self.addCleanup(hog.close)
         self.port_file.write_text("%d\n" % taken)
-        with self.m.patch.object(self.ar, "filedrop_persisted_port",
+        with self.m.patch.object(self.fw, "filedrop_persisted_port",
                                  lambda: taken), \
-                self.m.patch.object(self.ar, "FILEDROP_DEFAULT_PORT", taken):
+                self.m.patch.object(self.fw, "FILEDROP_DEFAULT_PORT", taken):
             got = self.ar._choose_filedrop_port("127.0.0.1")
         self.assertNotEqual(got, taken,
                             "a foreign-held persisted port must be re-picked")
@@ -589,9 +592,9 @@ class TestChooseFiledropPort(unittest.TestCase):
         # our own live instance actively serves the persisted port — a bind
         # test there would always fail (the port is legitimately in use by
         # US), so it must NOT be treated as foreign and re-picked.
-        with self.m.patch.object(self.ar, "filedrop_persisted_port",
+        with self.m.patch.object(self.fw, "filedrop_persisted_port",
                                  lambda: 8791), \
-                self.m.patch.object(self.ar, "_run_systemctl",
+                self.m.patch.object(self.fw, "_run_systemctl",
                                     lambda a: (0, "active\n", "")):
             self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 8791)
 

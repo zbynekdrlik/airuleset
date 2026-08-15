@@ -459,12 +459,13 @@ class TestMultiInterfaceUrls(TestCase):
 
     def test_cmd_share_prints_a_url_per_interface(self):
         import airuleset
+        import cli_filedrop_watchdog  # #433 L-B: cmd_share moved here; patch _filedrop_is_live on the LEAF
         import filedrop
         with m.patch("filedrop.share.share",
                      return_value=("http://100.90.94.41:8788/tok/f.bin", "/x")), \
              m.patch.object(filedrop, "bind_ips",
                             return_value=["100.90.94.41", "10.77.9.21"]), \
-             m.patch.object(airuleset, "_filedrop_is_live", return_value=True):
+             m.patch.object(cli_filedrop_watchdog, "_filedrop_is_live", return_value=True):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 airuleset.cmd_share(m.Mock(path="/x"))

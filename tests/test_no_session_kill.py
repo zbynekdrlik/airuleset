@@ -34,6 +34,7 @@ import unittest.mock
 from pathlib import Path
 
 import airuleset
+import cli_filedrop_watchdog  # #433 L-B: setup_watchdog_service moved here; patch the LEAF, not the facade
 import watchdog as wd
 
 REPO = Path(__file__).resolve().parent.parent
@@ -518,9 +519,9 @@ class TestWatchdogTimerDisableMarker(unittest.TestCase):
             calls.append(list(args))
             return 0, "", ""
 
-        with unittest.mock.patch.object(airuleset, "_run_systemctl",
+        with unittest.mock.patch.object(cli_filedrop_watchdog, "_run_systemctl",
                                         side_effect=fake_systemctl), \
-             unittest.mock.patch.object(airuleset, "watchdog_disable_marker",
+             unittest.mock.patch.object(cli_filedrop_watchdog, "watchdog_disable_marker",
                                         return_value=Path("/nonexistent")), \
              unittest.mock.patch.object(Path, "exists", return_value=True), \
              unittest.mock.patch.object(Path, "write_text"), \
