@@ -208,6 +208,39 @@ def _janitor_clear_park(state, pid):
     state.get("stash_parks", {}).pop(pid, None)
 
 
+def _janitor_prune_parks(state, live_pids):
+    """#488 review-1 MINOR — GC the age-unbounded `stash_parks` records so one
+    can never orphan for a pane that no longer exists. The park record removed
+    the 6h age bound (deliberately, for the stash case) — but the `janitor_watch`
+    mark that bound guarded ALSO self-expires the stale-provenance an orphan
+    would otherwise carry FOREVER (#372's own "a stale mark cannot license
+    acting on unrelated LATER content forever" property). This restores that
+    bound WITHOUT a timeout: drop every record whose pane-id is NOT in the
+    CURRENT live tmux pane set — a pane absent from tmux can never be typed to,
+    so its record can only ever be stale, and dropping it is strictly safe. Also
+    bounds the dict's growth on a long-lived box.
+
+    Runs each sweep alongside the marker-gone backstop (which only sees panes
+    STILL in the candidate set) — this covers the panes that LEFT it. FAIL-SAFE
+    by construction: an empty/None `live_pids` (a failed `tmux list-panes`
+    read) prunes NOTHING, so a transient tmux error never wipes a VALID fresh
+    record (which would silently defeat a genuine reclaim). A no-op when `state`
+    is None or holds no parks. Known, honestly-stated residual (non-destructive,
+    heavily backstop-mitigated): tmux `%N` pane-ids reset on a SERVER restart,
+    so a record written just before a restart can coincide with a reused id on a
+    DIFFERENT session — but the marker-gone backstop clears it on the first
+    unoccupied sighting of the reused pane, and the only reachable action while
+    occupied+bare is a non-destructive `pop`, never a box-destroy."""
+    if state is None or not live_pids:
+        return
+    parks = state.get("stash_parks")
+    if not parks:
+        return
+    live = set(live_pids)
+    for pid in [p for p in parks if p not in live]:
+        parks.pop(pid, None)
+
+
 def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
                           dry_run, sleep_fn, state=None, now=None):
     """#372 — the shared, generic per-pane janitor recovery driver, relocated

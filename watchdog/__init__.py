@@ -5508,6 +5508,7 @@ from watchdog.janitor import (  # noqa: E402
     _janitor_park_record as _janitor_park_record,
     _janitor_park_seen as _janitor_park_seen,
     _janitor_clear_park as _janitor_clear_park,
+    _janitor_prune_parks as _janitor_prune_parks,
     _janitor_recover as _janitor_recover,
     _pane_location as _pane_location,
 )

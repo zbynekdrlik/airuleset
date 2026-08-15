@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd
+from watchdog import goal
 
 # gk-shaped capture: box bare (`_input_line_text` == ""), single stash slot
 # occupied, a goal armed (1d) — the exact live shape #488 reproduced.
@@ -194,6 +195,62 @@ class ParkRecordHelpers(unittest.TestCase):
         self.assertFalse(wd._janitor_park_seen(None, PID))
         # clear on a missing key is a no-op, not a KeyError
         wd._janitor_clear_park({}, PID)
+
+
+class PruneParksHelper(unittest.TestCase):
+    """#488 review-1: the age-unbounded record must not orphan forever for a
+    pane that no longer exists (restores #372's 'no stale provenance forever'
+    bound the age-unboundedness removed)."""
+
+    def test_prunes_records_for_dead_panes_keeps_live(self):
+        state = {"stash_parks": {"%1": 100.0, "%9": 200.0, "%3": 300.0}}
+        wd._janitor_prune_parks(state, ["%1", "%3"])   # %9 is gone
+        self.assertEqual(set(state["stash_parks"]), {"%1", "%3"})
+
+    def test_empty_live_set_prunes_nothing_failsafe(self):
+        # A failed `tmux list-panes` read yields no ids -> must NOT wipe valid
+        # fresh records (that would silently defeat a genuine reclaim).
+        state = {"stash_parks": {"%1": 100.0}}
+        wd._janitor_prune_parks(state, [])
+        self.assertEqual(set(state["stash_parks"]), {"%1"})
+        wd._janitor_prune_parks(state, None)
+        self.assertEqual(set(state["stash_parks"]), {"%1"})
+
+    def test_none_state_and_no_parks_are_no_ops(self):
+        wd._janitor_prune_parks(None, ["%1"])          # no crash
+        state = {}
+        wd._janitor_prune_parks(state, ["%1"])          # no parks key -> no-op
+        self.assertNotIn("stash_parks", state)          # never creates it
+
+
+class PruneWiredIntoDarkWatch(unittest.TestCase):
+    """The GC actually runs in goal_dark_watch's sweep — the per-pane
+    marker-gone backstop only sees panes still in the candidate set, so a
+    record for a pane that LEFT it is only ever reclaimed by this prune."""
+
+    @staticmethod
+    def _run(live):
+        # Returns `live` ONLY for the prune's own `-F #{pane_id}` call;
+        # everything else (incl. _reconcile_candidate_panes' richer tab format)
+        # gets "" -> zero candidate panes -> the sweep loop is skipped.
+        def run(argv, timeout=8):
+            if argv[:2] == ["tmux", "list-panes"] and argv[-1] == "#{pane_id}":
+                return live
+            return ""
+        return run
+
+    def test_dark_watch_prunes_a_dead_pane_park_record(self):
+        state = {"stash_parks": {"%1": 100.0, "%9": 200.0}}   # %9 dead
+        goal.goal_dark_watch(1000, run=self._run("%1\n%2\n"), state=state,
+                             dry_run=False, sleep_fn=lambda *a, **k: None)
+        self.assertIn("%1", state["stash_parks"])
+        self.assertNotIn("%9", state["stash_parks"])
+
+    def test_dark_watch_dry_run_does_not_prune(self):
+        state = {"stash_parks": {"%9": 200.0}}                 # %9 dead
+        goal.goal_dark_watch(1000, run=self._run("%1\n"), state=state,
+                             dry_run=True, sleep_fn=lambda *a, **k: None)
+        self.assertIn("%9", state["stash_parks"])   # dry-run mutates nothing
 
 
 if __name__ == "__main__":

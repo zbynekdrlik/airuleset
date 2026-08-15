@@ -890,6 +890,21 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     pinged_state = state.setdefault("goal_dark_pinged", {})
     janitor_recs = state.setdefault("janitor_pinged_rec", {})
 
+    # #488 review-1 -- GC the age-unbounded stash_parks records for panes that
+    # no longer exist. The per-pane marker-gone backstop below only sees panes
+    # STILL in the candidate set; this covers the ones that LEFT it, restoring
+    # the "no stale provenance forever" bound the park record's age-
+    # unboundedness removes. FAIL-SAFE: a failed/empty `tmux list-panes` read
+    # yields no ids -> `_janitor_prune_parks` prunes NOTHING, so a transient
+    # tmux error never wipes a valid fresh record. Dry-run mutates no state.
+    if not dry_run:
+        try:
+            live_pids = (run(["tmux", "list-panes", "-a",
+                              "-F", "#{pane_id}"]) or "").split()
+        except Exception:
+            live_pids = []
+        watchdog._janitor_prune_parks(state, live_pids)
+
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
             logs.append("dark-watch-budget-exceeded — deferring remaining "
