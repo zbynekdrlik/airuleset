@@ -910,6 +910,17 @@ class TestCompactSubmitVerify(unittest.TestCase):
         return compact.compact_delivery_in_cooldown(
             self.SID, time.time() + 1, path=self.delp)
 
+    def test_clean_submit_is_sent_with_no_corrective_keystrokes(self):
+        # The unchanged happy path: a submit that lands needs NO Escape/Enter
+        # correction and NO undo — locks that verify never fires the recovery
+        # on a clean send.
+        word, tmux = self._go(swallow_enters=0)
+        self.assertEqual(word, "sent")
+        self.assertEqual(tmux.keys(), ["/compact", "Enter"])
+        self.assertEqual(tmux.bspace_batches(), [])
+        self.assertEqual(tmux.box, "")
+        self.assertTrue(self._cooldown_started())
+
     def test_swallowed_submit_leaves_request_pending_not_sent(self):
         word, _tmux = self._go(swallow_enters=9)
         self.assertEqual(word, "skip:submit-swallowed")

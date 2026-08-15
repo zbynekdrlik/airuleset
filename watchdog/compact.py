@@ -785,12 +785,82 @@ def resolve_self_pane(run=None, projects_dir=None, pane_env=None):
 
 
 # --------------------------------------------------------------------------- #
+# Submit verification (#375 part 2) — the compact counterpart of the
+# swallowed-submit recovery goal/stash already have.
+# --------------------------------------------------------------------------- #
+
+# A bounded render-SETTLE poll, never a blind timeout — it returns the instant
+# the box agrees. Generous on purpose: a FALSE "swallowed" reading (concluding
+# the submit failed when it actually landed and CC just hadn't re-rendered yet)
+# would fire the corrective Escape into a `/compact` that ALREADY started
+# compacting, so the window must comfortably outlast the submit render-lag.
+COMPACT_SUBMIT_SETTLE_POLLS = 6
+COMPACT_SUBMIT_SETTLE_S = 0.3
+
+
+def _compact_still_in_box(pid, run, sleep_fn):
+    """True while `/compact` is STILL sitting in the input box after a submit
+    (a swallowed Enter), False once it has left (submitted). Mirrors
+    `goal._await_typed(want=False)`; reproduced here rather than cross-imported
+    to keep compact.py's `import watchdog`-only module boundary (#433) — the
+    same tiny render-settle idiom `_await_stash_settled` / `_undo_typed_text`
+    already repeat."""
+    for i in range(COMPACT_SUBMIT_SETTLE_POLLS):
+        itext = watchdog._input_line_text(
+            watchdog.capture_pane(pid, run, lines=40))
+        if not watchdog._typed_landed(COMPACT_TEXT, itext):
+            return False                       # gone -> submitted
+        if i < COMPACT_SUBMIT_SETTLE_POLLS - 1:
+            sleep_fn(COMPACT_SUBMIT_SETTLE_S)
+    return True                                # still there -> swallowed
+
+
+def _compact_submit_verified(pid, run, sleep_fn, log_fn):
+    """Type `/compact` and submit it, VERIFYING the submit actually landed —
+    the piece `send_continue` (type + Enter, no post-send read) never had, so a
+    swallowed Enter (the agent-strip selector / menu overlay grabbing it, #36
+    class) used to be reported "sent".
+
+    Returns True only when the box no longer shows `/compact` (submitted). On a
+    swallow, sends ONE corrective Escape+Enter (never a second Escape #35, never
+    a second bare Enter — the SAME shape `_send_goal_verified` / `deliver_with_
+    stash` use) and re-verifies. On a PERSISTENT swallow, backspaces its own
+    typed text off the box — the caller verified the box BARE immediately before
+    (`deliver_compact`'s fresh-recapture at the raced re-check), so every
+    character in it is ours — and returns False, so the request stays pending
+    for a clean retry next sweep instead of waiting on the janitor.
+
+    `/compact` is 8 chars, far below `GOAL_TYPE_CHUNK_THRESHOLD` and sent by
+    `send_continue` as one `-l --` burst, so the collapsed-paste shapes
+    `_send_goal_verified` guards against cannot arise here. `log_fn(reason)`
+    receives exactly one string on the persistent-swallow path (the undo
+    result), mirroring `_undo_and_release_slot`'s own logging."""
+    watchdog.send_continue(pid, COMPACT_TEXT, run)
+    if not _compact_still_in_box(pid, run, sleep_fn):
+        return True
+    # Swallowed submit (#36 agent-strip-selector class) -- ONE corrective
+    # Escape+Enter. The box holds ONLY our own `/compact` (verified bare before
+    # the type), and a single Escape never deletes a CC draft (#35), so this
+    # only deselects the strip / closes a menu, leaving the text for the Enter.
+    run(["tmux", "send-keys", "-t", pid, "Escape"])
+    run(["tmux", "send-keys", "-t", pid, "Enter"])
+    if not _compact_still_in_box(pid, run, sleep_fn):
+        return True
+    # Still stuck. Backspace our own text off the bare-verified box so the next
+    # sweep retries from a clean prompt; the janitor (job 20, provenance already
+    # marked by the caller) is the backstop if this undo itself fails.
+    watchdog._undo_and_release_slot(pid, run, COMPACT_TEXT, False, log_fn,
+                                    "compact-submit swallowed", sleep_fn=sleep_fn)
+    return False
+
+
+# --------------------------------------------------------------------------- #
 # The ONE delivery function.
 # --------------------------------------------------------------------------- #
 
 def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                     delivered_path=None, now=None, state=None,
-                    request_ts=None):
+                    request_ts=None, sleep_fn=None):
     """Evaluate every delivery condition for `sid` ONCE and act. Called
     from BOTH entry points' own immediate synchronous attempt (`--record`/
     `--self`) AND from the periodic sweep (`compact_sweep`) — both thread
@@ -821,6 +891,7 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("SKIP disabled-by-owner sid=%s cwd=%s" % (sid, cwd))
         return "skip:disabled"
     run = run or watchdog._default_run
+    sleep_fn = sleep_fn or time.sleep
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
 
     # Condition (e) — the hard, non-refreshable age cap. Checked first: an
@@ -907,7 +978,20 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     # bookkeeping is the janitor's only proof it may act on this pane's
     # content at all.
     watchdog._janitor_mark_watch(state, pid, now)
-    watchdog.send_continue(pid, COMPACT_TEXT, run)
+    if not _compact_submit_verified(
+            pid, run, sleep_fn,
+            lambda reason: _log_compact_sync(
+                "%s sid=%s cwd=%s" % (reason, sid, cwd))):
+        # The submit was swallowed (agent-strip selector / menu overlay grabbed
+        # the Enter, #36) even after ONE corrective Escape+Enter — the
+        # `/compact` never executed. Do NOT mark delivered or start the 30-min
+        # cooldown (which would block the retry); LEAVE the request pending (a
+        # `skip:` word, so the caller does not clear it) for the next sweep. The
+        # helper already backspaced its own text off the box, and the janitor
+        # provenance mark set above is the backstop if that undo itself failed.
+        _log_compact_sync("SWALLOWED sid=%s cwd=%s origin=%s"
+                          % (sid, cwd, origin or "-"))
+        return "skip:submit-swallowed"
     # Log the send IMMEDIATELY, before any other write — an exception in
     # mark_compact_delivery_ts below must never leave a real send unlogged.
     _log_compact_sync("SEND sid=%s cwd=%s origin=%s" % (sid, cwd, origin or "-"))
@@ -977,7 +1061,7 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
     word = deliver_compact(sid, cwd, origin=origin, run=run,
                            projects_dir=projects_dir,
                            delivered_path=delivered_path, now=now_fn(),
-                           state=state, request_ts=req_ts)
+                           state=state, request_ts=req_ts, sleep_fn=sleep_fn)
     if word in _COMPACT_TERMINAL_WORDS:
         clear_compact_request(sid, path=requests_path)
     return word
