@@ -20,12 +20,15 @@ FRESHNESS = the file's mtime. ``write_heartbeat`` replaces the file atomically
 the liveness signal and classifies a file older than ``stale_after_s`` as
 STALE.
 
-COST: the per-turn producer does NO network / gh / subprocess. A main Stop
-does one ``import watchdog`` (warm ~0.05 s, measured on the fleet) to reuse the
-CANONICAL ``scan_goal_markers`` — the single source of truth for the
-``<local-command-stdout>Goal set:/cleared:`` markers, never a re-implemented
-parser that could drift (#486's own thesis) — plus one bounded, byte-prefiltered
-transcript tail scan. SubagentStop / SessionStart skip the goal scan entirely.
+COST: the per-turn producer does NO network / gh / subprocess. The whole
+CLI invocation costs ~0.15-0.48 s (typ. ~0.3 s), dominated by Python cold-start
+plus importing ``watchdog/__init__.py`` (a warm ``import watchdog`` alone is
+~0.05 s; the rest is interpreter start + the ``-m`` machinery). That import is
+deliberate: a main Stop reuses the CANONICAL ``scan_goal_markers`` — the single
+source of truth for the ``<local-command-stdout>Goal set:/cleared:`` markers,
+never a re-implemented parser that could drift (#486's own thesis) — plus one
+bounded, byte-prefiltered transcript tail scan. SubagentStop / SessionStart skip
+the goal scan (and are guarded so their cost never blocks the host hook).
 """
 import argparse
 import json
@@ -66,7 +69,17 @@ except Exception:  # pragma: no cover - defensive; package import is normally fi
 # terminal status marker
 # --------------------------------------------------------------------------- #
 
-_MARK_DONE_LINE_RE = re.compile(r"✅\s*(DONE|complete[d]?|work\s+complete)", re.I)
+# A marker only counts at the START of the last line (after optional leading
+# whitespace / markdown emphasis / bullet / heading chars) — NEVER mid-sentence.
+# This mirrors notify-discord-pending.sh's own `^[[:space:]]*[*_>~-]*…❓` anchor
+# and the documented incident it prevents (a `✅ DONE: … Discord ❓ ping …` line
+# is a DONE turn whose ❓ is prose, not an active question). A bare substring
+# test would re-land that bug.
+_MARK_PREFIX = r"^[\s*_>~#-]*"
+_MARK_NEEDS_RE = re.compile(_MARK_PREFIX + r"❓")
+_MARK_WORKING_RE = re.compile(_MARK_PREFIX + r"⏳")
+_MARK_DONE_LINE_RE = re.compile(
+    _MARK_PREFIX + r"✅\s*(DONE|complete[d]?|work\s+complete)", re.I)
 _MARK_DONE_HEADING_RE = re.compile(r"(?m)^#{1,6}\s*✅\s*Work\s+Complete\b", re.I)
 
 
@@ -75,21 +88,23 @@ def classify_marker(msg):
     ``needs_you`` / ``working`` / ``done`` / ``unknown``.
 
     Mirrors the two existing gates so the heartbeat AGREES with what they
-    already consider the turn's state: the marker is read from the LAST
-    non-blank line (``stop-check-status-marker.sh``'s terminal-marker rule); an
-    active ❓ on that line WINS over a ``## ✅ Work Complete`` heading elsewhere
-    (``notify-discord-pending.sh``'s precedence); the completion-report heading
-    anywhere counts as done. The ask-and-continue dual-marker shape (a
-    ``❓ ASKED:`` line in the BODY, ``⏳ WORKING:`` as the terminal line)
-    resolves to ``working`` — the terminal line decides.
+    already consider the turn's state: the marker is read from the START of the
+    LAST non-blank line (``stop-check-status-marker.sh``'s terminal-marker rule
+    + ``notify-discord-pending.sh``'s line-start anchor — a ❓/⏳/✅ MID-SENTENCE
+    is prose, never a marker); an active ❓ on that line WINS over a
+    ``## ✅ Work Complete`` heading elsewhere (``notify-discord-pending.sh``'s
+    precedence); the completion-report heading anywhere counts as done. The
+    ask-and-continue dual-marker shape (a ``❓ ASKED:`` line in the BODY,
+    ``⏳ WORKING:`` as the terminal line) resolves to ``working`` — the terminal
+    line decides.
     """
     if not msg:
         return "unknown"
     lines = [ln for ln in msg.splitlines() if ln.strip()]
     last = lines[-1] if lines else ""
-    if "❓" in last:
+    if _MARK_NEEDS_RE.search(last):
         return "needs_you"
-    if "⏳" in last:
+    if _MARK_WORKING_RE.search(last):
         return "working"
     if _MARK_DONE_LINE_RE.search(last):
         return "done"
@@ -132,8 +147,11 @@ _SAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 def _safe(token):
-    """Defang a session_id / agent_id to a filesystem-safe token — the exact
-    ``tr -cd 'A-Za-z0-9_-'`` filter the existing hooks apply to CC ids."""
+    """Defang a session_id / agent_id to a filesystem-safe token. Close to the
+    ``tr -cd 'A-Za-z0-9._-'`` filter the hooks apply to CC ids, but also strips
+    the dot (this module builds the FILENAME itself, so dropping ``.`` keeps a
+    crafted ``..`` id from ever forming a surprising name; a real uuid id
+    carries no dot, so the two agree in practice)."""
     cleaned = _SAFE_RE.sub("", token or "")
     return cleaned or "unknown"
 

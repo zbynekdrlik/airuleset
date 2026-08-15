@@ -54,6 +54,21 @@ def test_active_question_wins_over_done_heading():
     assert ss.classify_marker(msg) == "needs_you"
 
 
+@pytest.mark.parametrize("msg,expected", [
+    # a ❓/⏳ MID-SENTENCE on a ✅ DONE last line is PROSE, not a marker — the
+    # marker must be anchored at the line START (the #486-review MAJOR finding).
+    ("praca\n✅ DONE: nasadené, opravený Discord ❓ ping funguje", "done"),
+    ("praca\n✅ DONE: hotovo, vyriešený ❓ v komentári PR #5", "done"),
+    ("praca\n✅ DONE: kanál ⏳ už nebliká", "done"),
+    # legitimate leading decorations still count as a marker
+    ("praca\n- ⏳ WORKING: bežím", "working"),
+    ("praca\n**❓ NEEDS YOU:** rozhodni", "needs_you"),
+    ("praca\n> ✅ DONE: hotovo", "done"),
+])
+def test_marker_only_at_line_start(msg, expected):
+    assert ss.classify_marker(msg) == expected
+
+
 # --------------------------------------------------------------------------- #
 # build_heartbeat — pure field builder
 # --------------------------------------------------------------------------- #
