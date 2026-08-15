@@ -159,6 +159,40 @@ def is_usage_cap(text):
     return bool(_USAGE_CAP_RX.search(text))
 
 
+# #502 — the two ACCOUNT-LEVEL dispatch blocks the incident surfaced that
+# `_USAGE_CAP_RX` does NOT catch: a MONTHLY-SPEND limit ("You've hit your monthly
+# spend limit · raise it at …") and an ORG-level subscription-access DISABLE
+# ("Your organization has disabled Claude subscription access …"). Neither carries
+# the "resets <clock>" wording the usage-cap regexes key on, so both fell straight
+# through `is_usage_cap` (verified: is_usage_cap returns False for either) — and a
+# lane nudge that kept dispatching into them burned a fresh worker per fire (it
+# dies on the same cap at Step 0). Kept SEPARATE from `is_usage_cap` on purpose:
+# that narrow set drives job 6's ping-once-wait-for-reset dance, which a no-reset
+# spend/org block (no clock to wait for) would mishandle.
+_MONTHLY_SPEND_RX = re.compile(r"monthly spend limit|spend limit", re.I)
+_ORG_DISABLED_RX = re.compile(
+    r"organization has disabled|disabled Claude subscription"
+    r"|subscription access[^.\n]{0,40}disabled", re.I)
+
+
+def is_account_dispatch_block(text):
+    """True for ANY account-level condition that makes dispatching a fresh worker
+    a certain loss (#502): everything `is_usage_cap` already recognizes (session /
+    weekly / usage / quota / reset caps) PLUS a MONTHLY-SPEND limit and an ORG
+    subscription-access disable. A transient server throttle (checked first, via
+    `is_usage_cap`'s own `_TRANSIENT_RX`) is NEVER one of these — a retry CAN clear
+    it, so it must not back off the lane nudge. This is the lane-back-off
+    classifier (`goal.goal_lane_occupancy_nudge`), deliberately BROADER than
+    `is_usage_cap` (job 6's reset-clock driver) and independent of it."""
+    if not text:
+        return False
+    if is_usage_cap(text):
+        return True
+    if _TRANSIENT_RX.search(text):
+        return False
+    return bool(_MONTHLY_SPEND_RX.search(text) or _ORG_DISABLED_RX.search(text))
+
+
 # --- 5-HOUR SESSION LIMIT (a distinct, TIME-BASED cap) --------------------------
 # Claude Code's session-limit banner shows in the PANE, e.g.
 #   "You've hit your session limit · resets 6:10pm (Europe/Prague)"

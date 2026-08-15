@@ -8,7 +8,6 @@ Two defects, two RED->GREEN pairs:
   (b) the nudge TEXT qualifies `backlog=N` as OPEN (not necessarily workable).
 """
 
-import json
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -84,6 +83,39 @@ class TestAccountLimitReleaseAt(unittest.TestCase):
         f = 1_000_000
         self.assertEqual(goal._account_limit_release_at(f, f - 10),
                          f + goal.ACCOUNT_LIMIT_BACKOFF_MAX_S)
+
+
+class TestAccountLimitDecisionHelper(unittest.TestCase):
+    """`_account_limit_decision` in isolation: seed/skip, re-probe+re-arm, clear."""
+
+    def test_block_within_window_backs_off_and_seeds(self):
+        rec = {}
+        back_off, log = goal._account_limit_decision(rec, 100000, WEEKLY, "loc", 0)
+        self.assertTrue(back_off)
+        self.assertIn("skip:account-limit", log)
+        self.assertEqual(rec["alim"]["first_seen"], 100000)
+
+    def test_not_a_block_clears_the_episode(self):
+        rec = {"alim": {"first_seen": 1, "resets_at": None}}
+        back_off, log = goal._account_limit_decision(rec, 100000, "", "loc", 0)
+        self.assertFalse(back_off)
+        self.assertIsNone(log)
+        self.assertNotIn("alim", rec)
+
+    def test_transient_throttle_is_not_a_block_and_clears(self):
+        rec = {"alim": {"first_seen": 1, "resets_at": None}}
+        back_off, _ = goal._account_limit_decision(
+            rec, 100000, "overloaded, please try again", "loc", 0)
+        self.assertFalse(back_off)
+        self.assertNotIn("alim", rec)
+
+    def test_elapsed_window_reprobes_once_and_rearms(self):
+        now = 100000
+        rec = {"alim": {"first_seen": now - 7 * 3600, "resets_at": None}}
+        back_off, log = goal._account_limit_decision(rec, now, ORG, "loc", 0)
+        self.assertFalse(back_off)                          # re-probe (do NOT skip)
+        self.assertIn("back-off elapsed", log)
+        self.assertEqual(rec["alim"]["first_seen"], now)    # re-armed
 
 
 class TestAccountLimitBackoff(unittest.TestCase):

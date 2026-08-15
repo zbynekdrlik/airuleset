@@ -1150,12 +1150,82 @@ def _lane_stash_abort_backoff(aborts):
     return sched[idx]
 
 
+# #502 -- account-limit back-off HARD cap. When the supervisor's transcript shows a
+# recent account-level dispatch block (`is_account_dispatch_block`), the lane nudge
+# backs off until the parsed reset time -- but ALWAYS at most this long from
+# `first_seen`, so a mis-parsed far-future reset OR a no-reset cap (a monthly-spend
+# / org-disable that only human action clears) can never silence the guard beyond
+# one bounded window: past the cap it re-probes ONCE and re-arms, so a persistent
+# cap fires at most once per this window (never the 90-min storm the ticket
+# reports) yet is never permanently silent (and every sweep still logs a decision).
+# ~6h: comfortably covers a full 5h session reset honoured exactly (min() below),
+# short enough that a genuine multi-day weekly cap still re-probes a few times a day.
+ACCOUNT_LIMIT_BACKOFF_MAX_S = 6 * 3600
+
+
+def _account_limit_release_at(first_seen, resets_at):
+    """Wall-clock instant the #502 account-limit back-off releases: the parsed
+    reset time when it is known AND in the future, else `first_seen`+MAX; ALWAYS
+    capped at `first_seen`+`ACCOUNT_LIMIT_BACKOFF_MAX_S` so a far-future or missing
+    reset can never silence the lane nudge for longer than one bounded window."""
+    cap = first_seen + ACCOUNT_LIMIT_BACKOFF_MAX_S
+    if resets_at and resets_at > first_seen:
+        return min(resets_at, cap)
+    return cap
+
+
+def _account_limit_decision(rec, now, err, loc, waiters):
+    """#502 -- the lane nudge's account-limit back-off decision from the
+    supervisor's CURRENT transcript error text `err`. Mutates `rec['alim']` (the
+    caller persists `rec`); returns `(back_off, logline)`:
+
+      * NOT an account-level dispatch block (`is_account_dispatch_block` False --
+        never a transient throttle) -> clears any episode, `(False, None)`: the
+        moment genuine progress recovers, `transcript_last_error` returns '' and
+        the nudge resumes automatically (structured state, #486 -- never pane text).
+      * A block, still inside the bounded window -> `(True, <skip decision log>)`:
+        do NOT dispatch into the dead cap.
+      * A block, but the bounded window ELAPSED -> re-probe ONCE, re-arm the
+        episode for the NEXT window, `(False, <re-probe log>)`: a persistent cap
+        fires at most once per ACCOUNT_LIMIT_BACKOFF_MAX_S (never the 90-min storm
+        the ticket reports) yet the guard is NEVER permanently silent, and every
+        sweep still journals a decision line.
+
+    A background subagent dying on the account's cap surfaces as the PARENT
+    session's own next `isApiErrorMessage` (decide.py's
+    `parse_reset_epoch_from_error_text` docstring -- the montalu2 case), which is
+    exactly what `transcript_last_error` reads, so this covers subagent deaths too."""
+    if not (err and watchdog.is_account_dispatch_block(err)):
+        rec.pop("alim", None)
+        return False, None
+    alim = rec.get("alim")
+    if not isinstance(alim, dict):
+        alim = {"first_seen": now,
+                "resets_at": watchdog.parse_reset_epoch_from_error_text(err, now)}
+        rec["alim"] = alim
+    release = _account_limit_release_at(alim.get("first_seen", now),
+                                        alim.get("resets_at"))
+    if now < release:
+        ra = alim.get("resets_at")
+        when = watchdog._human_clock(ra, now=now) if ra else "neznámy reset"
+        return True, ("lane-occupancy %s waiters=%d -> skip:account-limit "
+                      "(dispatch by teraz zomrel na strope účtu; back-off do %s, "
+                      "zostáva %ds)" % (loc, waiters, when, int(release - now)))
+    # Window elapsed -> re-probe ONCE and re-arm for the next window.
+    alim["first_seen"] = now
+    alim["resets_at"] = watchdog.parse_reset_epoch_from_error_text(err, now)
+    return False, ("lane-occupancy %s -> account-limit back-off elapsed, "
+                   "re-probing once (re-armed)" % loc)
+
+
 # #442 -- the text TEACHES the fleet-dispatch doctrine
 # (skills/autopilot/SKILL.md: parallel worktree workers, the account-wide
 # concurrent-agent cap of 8, serialize-only integration), never just a
 # bare "dispatch more workers" poke.
 GOAL_LANE_NUDGE_TEXT = (
-    "lane-check: backlog=%d otvorených tiketov, no BEŽÍ 0 dispatched "
+    "lane-check: backlog=%d OTVORENÝCH tiketov (nie všetky musia byť hneď "
+    "rozpracovateľné — zadržané zelené vetvy, časť v cudzom repe či zastrešujúce "
+    "NErátaj; dispatchni len naozaj workable), no BEŽÍ 0 dispatched "
     "workerov (žiadny live subagent transcript; waiterov beží: %d). "
     "Prázdne implementačné lány nie sú dôvod na nečinnosť ani počas "
     "čakania na CI/waiter. Postupuj podľa FLEET doktríny skills/autopilot "
@@ -1203,7 +1273,9 @@ GOAL_LANE_MIN_MEM_AVAIL_MB = 1536
 # backlog_n, waiters).
 GOAL_LANE_UNDERSAT_NUDGE_TEXT = (
     "lane-check: beží len %d z cieľových %d lán (floor=min(5, backlog)), no "
-    "čaká %d otvorených tiketov (waiterov beží: %d). Lány nie sú plné podľa "
+    "čaká %d OTVORENÝCH tiketov (nie všetky hneď rozpracovateľné — zadržané "
+    "zelené vetvy / cudzí repo / zastrešujúce NErátaj; dispatchni len workable) "
+    "(waiterov beží: %d). Lány nie sú plné podľa "
     "PRÁCE: každý nezávislý "
     "workable tiket / review / release krok má dostať vlastnú PARALELNÚ lane, a "
     "worker čakajúci na CI NEblokuje ďalší dispatch. Nikdy nenechaj 1-2 workerov, "
@@ -1320,6 +1392,18 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         logs.append("lane-occupancy %s waiters=%d -> skip:working-no-tasks "
                     "(⏳ marker but 0 live tasks -- session claims working, "
                     "defer)" % (loc, waiters))
+        return logs, False
+    # #502 -- ACCOUNT-LIMIT BACK-OFF (extracted helper, keeps this function small).
+    # When the supervisor's OWN transcript shows a recent account-level dispatch
+    # block, dispatching a fresh worker is a certain loss (it dies on the SAME cap
+    # at Step 0). `_account_limit_decision` reads the signal FRESH from the
+    # transcript, mutates rec['alim'] (persisted by the caller), and returns a
+    # bounded skip / re-probe / clear decision -- see its docstring.
+    back_off, alim_log = _account_limit_decision(
+        rec, now, watchdog.transcript_last_error(tpath), loc, waiters)
+    if alim_log:
+        logs.append(alim_log)
+    if back_off:
         return logs, False
 
     def _boundary_ok(cap):
@@ -1470,7 +1554,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                 # #442 re-fix 2: the give-up is now reachable in the
                 # UNDER-SATURATED state (1-4 workers), so the text names the
                 # real count instead of the old "nebeží ani jeden worker".
-                send_fn("⚠️ **%s** — backlog=%d otvorených, "
+                send_fn("⚠️ **%s** — backlog=%d otvorených (nie všetky "
+                        "rozpracovateľné), "
                         "`/goal` armovaný, ale %d min sa lány nezaplnili na "
                         "fill cap (beží len %d workerov, waiterov: %d) a %s "
                         "(%s). Pozri sa na reláciu, prosím."
