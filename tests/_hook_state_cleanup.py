@@ -141,3 +141,24 @@ def new_hook_sid(testcase, prefix, orphan_globs=(), tmp_dir="/tmp"):
     sid = "%s-%s" % (prefix, uuid.uuid4().hex)
     testcase.addCleanup(sweep_session_files, sid, tmp_dir)
     return sid
+
+
+def preserve_home(testcase):
+    """Save os.environ["HOME"] and restore it after the test (addCleanup).
+
+    For tests that mutate HOME IN-PROCESS so an imported hook module resolves
+    `~` into a fake home. Without this the LAST test's fake home leaks to every
+    later module in the same unittest-discover process — the batch-31 push-gate
+    incident (2026-08-16): notify._read_env() found no Discord env and
+    deliver_discord_replies returned before its reply-pointer loop, failing
+    test_send_verified_adoption only under sequential discover.
+    """
+    orig = os.environ.get("HOME")
+
+    def _restore():
+        if orig is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = orig
+
+    testcase.addCleanup(_restore)

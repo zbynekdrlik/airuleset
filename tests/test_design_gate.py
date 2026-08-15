@@ -25,7 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import design_gate as dg                                  # noqa: E402
+import design_gate as dg
+from _hook_state_cleanup import preserve_home                                  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -348,6 +349,7 @@ class TestIssueRefs(unittest.TestCase):
 class TestMarkerIO(unittest.TestCase):
 
     def setUp(self):
+        preserve_home(self)
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-designgate-home-"))
         self.addCleanup(shutil.rmtree, self.home, True)
         self._orig_expanduser = os.path.expanduser
@@ -396,6 +398,7 @@ class TestMarkerIO(unittest.TestCase):
 class TestMultiKindMarkerIO(unittest.TestCase):
 
     def setUp(self):
+        preserve_home(self)
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-designgate-kinds-"))
         self.addCleanup(shutil.rmtree, self.home, True)
         os.environ["HOME"] = str(self.home)
@@ -1397,6 +1400,7 @@ class TestTriageClass(unittest.TestCase):
 class TestRejectReasonIO(unittest.TestCase):
 
     def setUp(self):
+        preserve_home(self)
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-designgate-reject-"))
         self.addCleanup(shutil.rmtree, self.home, True)
         os.environ["HOME"] = str(self.home)

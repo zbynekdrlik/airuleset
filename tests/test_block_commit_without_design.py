@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from _hook_state_cleanup import preserve_home
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,6 +37,7 @@ def _git(repo, *args):
 
 class _Base(TestCase):
     def setUp(self):
+        preserve_home(self)
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-commitgate-home-"))
         self.addCleanup(shutil.rmtree, self.home, True)
         (self.home / ".claude").mkdir(parents=True)
