@@ -245,14 +245,24 @@ class BackReferenceSeamsGoThroughThePackage(unittest.TestCase):
         self.assertEqual(len(s2.calls), 1)
 
     def test_pwedge_min_idle_constant_seam_is_live(self):
+        # A stale-enough draft (STALE > the real PWEDGE_MIN_IDLE_S) pings under
+        # the REAL threshold but is treated as FRESH (popped, no ping) under a
+        # patched huge threshold. That DIVERGENCE proves the call-time read —
+        # not merely the NameError-on-bare-revert teeth (the step-7 no-value-
+        # divergence class the earlier `now - 60` fixture fell into).
         now = time.time()
-        tm = now - 60  # only 60s stale
+        tm = now - self.STALE  # stale vs real 1800, "fresh" vs a huge patch
         st, s = {}, FakeSend()
         with mock.patch.object(watchdog, "PWEDGE_MIN_IDLE_S", 10 ** 9):
             watchdog.prompt_wedge_check(now, st, "%1", DRAFT_PANE, tm, "z", "odoo", s)
             watchdog.prompt_wedge_check(now + 70, st, "%1", DRAFT_PANE, tm, "z", "odoo", s)
-        self.assertFalse(s.calls)
+        self.assertFalse(s.calls, "patched huge idle threshold => looks fresh => no ping")
         self.assertNotIn("pwedge:%1", st)  # treated as fresh -> key popped
+        # control: under the REAL threshold the SAME stale draft DOES ping
+        st2, s2 = {}, FakeSend()
+        watchdog.prompt_wedge_check(now, st2, "%1", DRAFT_PANE, tm, "z", "odoo", s2)
+        watchdog.prompt_wedge_check(now + 70, st2, "%1", DRAFT_PANE, tm, "z", "odoo", s2)
+        self.assertEqual(len(s2.calls), 1)
 
     def test_machine_nudge_prefix_constant_seam_is_live(self):
         now = time.time()
@@ -266,20 +276,30 @@ class BackReferenceSeamsGoThroughThePackage(unittest.TestCase):
         self.assertTrue(_enters(run))
 
     def test_pwedge_ping_cooldown_constant_seam_is_live(self):
-        # A ping fires, then the SAME pane re-wraps (fresh hash) within the
-        # cooldown -> watchdog.PWEDGE_PING_COOLDOWN_S suppresses the re-ping.
+        # A ping fires, then the SAME pane re-wraps (fresh hash) LONG after —
+        # past the real 86400s cooldown. Under the REAL cooldown the re-ping is
+        # allowed; under a patched huge cooldown it stays suppressed. That
+        # DIVERGENCE (not just NameError teeth) proves the call-time read.
         now = time.time()
         tm = now - self.STALE
+        rewrap = DRAFT_PANE.replace("nechať ako je", "nechať ako je tak")
+        far = now + 90000  # > real PWEDGE_PING_COOLDOWN_S (86400)
         st, s = {}, FakeSend()
         watchdog.prompt_wedge_check(now, st, "%1", DRAFT_PANE, tm, "z", "odoo", s)
         watchdog.prompt_wedge_check(now + 70, st, "%1", DRAFT_PANE, tm, "z", "odoo", s)
         self.assertEqual(len(s.calls), 1)          # first ping landed
-        rewrap = DRAFT_PANE.replace("nechať ako je", "nechať ako je tak")
         with mock.patch.object(watchdog, "PWEDGE_PING_COOLDOWN_S", 10 ** 9):
-            watchdog.prompt_wedge_check(now + 140, st, "%1", rewrap, tm, "z", "odoo", s)
-            logs = watchdog.prompt_wedge_check(now + 210, st, "%1", rewrap, tm, "z", "odoo", s)
-        self.assertEqual(len(s.calls), 1, "cooldown must suppress the re-ping")
+            watchdog.prompt_wedge_check(far, st, "%1", rewrap, tm, "z", "odoo", s)
+            logs = watchdog.prompt_wedge_check(far + 70, st, "%1", rewrap, tm, "z", "odoo", s)
+        self.assertEqual(len(s.calls), 1, "patched huge cooldown suppresses the far re-ping")
         self.assertTrue(any("cooldown" in ln for ln in logs), logs)
+        # control: with the REAL cooldown elapsed, the same far re-wrap re-pings
+        st2, s2 = {}, FakeSend()
+        watchdog.prompt_wedge_check(now, st2, "%1", DRAFT_PANE, tm, "z", "odoo", s2)
+        watchdog.prompt_wedge_check(now + 70, st2, "%1", DRAFT_PANE, tm, "z", "odoo", s2)
+        watchdog.prompt_wedge_check(far, st2, "%1", rewrap, tm, "z", "odoo", s2)
+        watchdog.prompt_wedge_check(far + 70, st2, "%1", rewrap, tm, "z", "odoo", s2)
+        self.assertEqual(len(s2.calls), 2, "real cooldown elapsed => re-ping allowed")
 
     # --- function seams: pane / backlog / dreply -------------------------- #
     def test_pane_in_mode_backref_is_observed(self):
