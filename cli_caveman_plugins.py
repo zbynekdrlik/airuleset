@@ -11,9 +11,9 @@ lives inside, used by BOTH `_caveman_plugin_built` and `_managed_plugin_built`.
 Self-contained stdlib leaf: never a module-level `import airuleset` (that would
 re-execute the CLI as __main__). Resident airuleset state + L-A deployer-glue
 symbols (render_caveman_shim / ensure_marketplace_registered / _marketplace_
-names_for / MARKETPLACE_SOURCES / CAVEMAN_SHIM_DEST / CAVEMAN_STATUSLINE_COMMAND
-/ CAVEMAN_MODE_FILE / SETTINGS_JSON / CLAUDE_DIR / read_file_safe /
-reconcile_caveman_settings) are reached LAZILY via a per-body `import airuleset`
+names_for / MARKETPLACE_SOURCES / CAVEMAN_SHIM_DEST / CAVEMAN_MODE_FILE /
+SETTINGS_JSON / CLAUDE_DIR / read_file_safe / reconcile_caveman_settings) are
+reached LAZILY via a per-body `import airuleset`
 + `airuleset.X` — robust whether those names are still resident (pre-L-A-merge)
 or facade re-exports (post-L-A-merge). `_claude_cli_env` is imported DIRECTLY
 from the shipped cli_binary_installers leaf (keeps `env=_claude_cli_env()` a
