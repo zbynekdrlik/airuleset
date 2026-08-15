@@ -210,7 +210,7 @@
     "tests/test_working_liveness.py": 332,
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 3629,
+    "watchdog/__init__.py": 3633,
     "watchdog/burn_jobs.py": 306,
     "watchdog/card_flags.py": 248,
     "watchdog/cards.py": 535,
@@ -230,7 +230,7 @@
     "watchdog/repo_health.py": 758,
     "watchdog/stash.py": 1025,
     "watchdog/sweep_jobs.py": 263,
-    "watchdog/tmux_io.py": 776,
+    "watchdog/tmux_io.py": 825,
     "watchdog/transcripts.py": 848,
     "watchdog/usage.py": 380,
     "watchdog/wedge.py": 297
