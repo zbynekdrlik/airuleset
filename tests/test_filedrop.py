@@ -15,8 +15,10 @@ class TestConstants(unittest.TestCase):
     def test_constants_present(self):
         import filedrop
         env = os.getenv("FILEDROP_PORT")
+        # #493: the no-env/no-persist fallback is now the DETERMINISTIC per-uid
+        # port, not a blind shared DEFAULT_PORT.
         expected = int(env) if env else (filedrop.persisted_port()
-                                         or filedrop.DEFAULT_PORT)
+                                         or filedrop.default_port_for_uid())
         self.assertEqual(filedrop.PORT, expected)
         self.assertEqual(filedrop.DEFAULT_PORT, 8788)
         self.assertEqual(filedrop.TOKEN_BYTES, 16)
@@ -534,59 +536,79 @@ class TestChooseFiledropPort(unittest.TestCase):
         with self.m.patch.object(self.fw, "filedrop_persisted_port", lambda: 8791):
             self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 8791)
 
-    def test_own_active_service_keeps_default(self):
-        # our own live instance holds :8788 → that is OURS, no migration
-        with self.m.patch.object(self.fw, "_run_systemctl",
-                                 lambda a: (0, "active\n", "")):
-            self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"),
-                             self.ar.FILEDROP_DEFAULT_PORT)
+    def test_own_active_service_keeps_its_deterministic_port(self):
+        # #493: our own live instance holds its DETERMINISTIC per-uid port →
+        # that is OURS, no migration, no persist override written.
+        with self.m.patch.object(self.fw, "filedrop_default_port_for_uid",
+                                 lambda: 8794), \
+                self.m.patch.object(self.fw, "_run_systemctl",
+                                    lambda a: (0, "active\n", "")):
+            self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), 8794)
         self.assertFalse(self.port_file.exists())
 
-    def test_default_free_uses_default_without_persisting(self):
+    def test_deterministic_port_free_is_used_without_persisting(self):
+        # #493: the per-uid port, when free, is used verbatim — the share CLI
+        # re-derives the SAME value from our uid, so no persist file is needed.
         import socket
         # find a base whose port is genuinely free right now
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
         base = probe.getsockname()[1]
         probe.close()
-        with self.m.patch.object(self.fw, "FILEDROP_DEFAULT_PORT", base):
+        with self.m.patch.object(self.fw, "filedrop_default_port_for_uid",
+                                 lambda: base):
             self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), base)
         self.assertFalse(self.port_file.exists(),
-                         "default port needs no persisted override")
+                         "the deterministic per-uid port needs no persist override")
 
-    def test_default_busy_picks_next_free_and_persists(self):
+    def test_deterministic_port_busy_picks_next_free_and_persists(self):
+        # #493: only when the per-uid port is genuinely held by another instance
+        # (a rare uid-mod collision / unrelated service) do we probe upward and
+        # PERSIST the fallback so the unit + share CLI agree.
         import socket
         blocker = socket.socket()
         blocker.bind(("127.0.0.1", 0))          # OS-assigned free port
         base = blocker.getsockname()[1]         # keep it BOUND = foreign instance
         self.addCleanup(blocker.close)
-        with self.m.patch.object(self.fw, "FILEDROP_DEFAULT_PORT", base):
+        with self.m.patch.object(self.fw, "filedrop_default_port_for_uid",
+                                 lambda: base):
             chosen = self.ar._choose_filedrop_port("127.0.0.1")
         self.assertNotEqual(chosen, base)
         self.assertGreater(chosen, base)
         self.assertTrue(self.port_file.exists(),
-                        "migrated port must be persisted for the share CLI")
+                        "a collision-fallback port must be persisted for the share CLI")
         self.assertEqual(int(self.port_file.read_text().strip()), chosen)
 
     def test_migrated_persisted_port_held_by_foreign_user_repicks(self):
         # a ~/.claude migrated from another box carries THAT box's port — here
         # it can be a DIFFERENT user's live file-drop (montalu@subdev inherited
         # dev1's 8789 == marek's subdev port; #33 migration, 2026-07-24).
-        # Foreign holder + our service inactive → re-pick + replace the file.
+        # Foreign holder + our service inactive → drop the stale file and fall
+        # back to our OWN deterministic per-uid port (#493).
         import socket
         hog = socket.socket()
         hog.bind(("127.0.0.1", 0))
         taken = hog.getsockname()[1]
         self.addCleanup(hog.close)
+        # a free deterministic port distinct from the foreign-held one
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        want = probe.getsockname()[1]
+        probe.close()
         self.port_file.write_text("%d\n" % taken)
         with self.m.patch.object(self.fw, "filedrop_persisted_port",
                                  lambda: taken), \
-                self.m.patch.object(self.fw, "FILEDROP_DEFAULT_PORT", taken):
+                self.m.patch.object(self.fw, "filedrop_default_port_for_uid",
+                                    lambda: want):
             got = self.ar._choose_filedrop_port("127.0.0.1")
-        self.assertNotEqual(got, taken,
-                            "a foreign-held persisted port must be re-picked")
-        self.assertEqual(self.port_file.read_text().strip(), str(got),
-                         "the stale persisted file must be replaced")
+        self.assertEqual(got, want,
+                         "a foreign-held persisted port must be dropped for our "
+                         "own deterministic port")
+        self.assertNotEqual(got, taken)
+        # the stale foreign value must NOT survive in the persist file
+        self.assertFalse(
+            self.port_file.exists() and self.port_file.read_text().strip() == str(taken),
+            "the stale foreign persisted value must be dropped")
 
     def test_persisted_port_kept_when_our_service_is_active(self):
         # our own live instance actively serves the persisted port — a bind

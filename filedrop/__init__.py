@@ -44,8 +44,33 @@ def persisted_port():
         return None
 
 
+def default_port_for_uid(uid=None):
+    """A DETERMINISTIC file-drop port for a uid, so the ~12 subdev stream
+    accounts on ONE host get DISTINCT ports without probing or racing (#493).
+
+    The racy first-free-port scan anchored every account on the SHARED :8788:
+    under a fleet push (services constantly restarting) each account's probe saw
+    :8788 transiently free and piled onto it — only one server could bind it, the
+    other 10-11 died on Errno 98, and every loser's `share` URL still advertised
+    :8788, hitting a stranger's server whose store lacked the token → 404. Keying
+    the port on the uid removes the contention entirely: every account targets a
+    DIFFERENT port, so no two servers ever fight for one and no share URL ever
+    crosses into another account's store.
+
+    uid defaults to this process's real uid. Returns DEFAULT_PORT for a
+    single-user box (offset 0, uid ≡ 0 mod 1000), spreading upward by uid; two
+    accounts collide only if their uids are congruent mod 1000 (never true for
+    the managed 1000-1014 range) — the install-time probe fallback in
+    _choose_filedrop_port covers that residual case."""
+    if uid is None:
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+    return DEFAULT_PORT + (uid % 1000)
+
+
 _env_port = os.environ.get("FILEDROP_PORT")
-PORT = int(_env_port) if _env_port else (persisted_port() or DEFAULT_PORT)
+# Fallback is the DETERMINISTIC per-uid port (not a blind shared DEFAULT_PORT),
+# so the `share` CLI advertises the SAME port the per-uid server binds (#493).
+PORT = int(_env_port) if _env_port else (persisted_port() or default_port_for_uid())
 
 # Shared files live under ~/.claude/filedrop/<token>/<name> — gitignored, outside
 # the repo, never committed. Overridable for tests via FILEDROP_DIR.
