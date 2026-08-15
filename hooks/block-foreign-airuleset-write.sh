@@ -167,8 +167,13 @@ case "$CWD" in */devel/airuleset|*/devel/airuleset/*) TARGETS=1 ;; esac
 # --- strip quoted spans, then match the WRITE ops + the bypass marker -------
 STRIPPED=$(printf '%s' "$CMD" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g')
 case "$STRIPPED" in *"airuleset:foreign-ok"*)
-  echo "[block-foreign-airuleset-write] bypass marker used: $CMD" \
-    >> /tmp/airuleset-foreign-write-bypass.log 2>/dev/null || true
+  # #492: per-USER log path — a FIXED /tmp name collides across users on a
+  # shared box (first user owns it, others' append fails EACCES and the
+  # error LEAKS to stderr past `2>/dev/null`). ${EUID} isolates each user;
+  # the brace group makes the write silent even if the file is unwritable.
+  FOREIGN_BYPASS_LOG="/tmp/airuleset-foreign-write-bypass-${EUID:-$(id -u)}.log"
+  { echo "[block-foreign-airuleset-write] bypass marker used: $CMD" \
+    >> "$FOREIGN_BYPASS_LOG"; } 2>/dev/null || true
   exit 0 ;;
 esac
 

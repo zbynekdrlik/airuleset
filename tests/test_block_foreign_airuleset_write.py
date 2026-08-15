@@ -17,6 +17,7 @@ as a secondary signal). Read ops, the sanctioned airuleset.py CLI surface
 """
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from unittest import TestCase, main
@@ -119,6 +120,52 @@ class ForeignSessionBlocked(TestCase):
                            capture_output=True, text=True,
                            env={"PATH": "/usr/bin:/bin"})
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class ForeignBypassLogPerUser492(TestCase):
+    """#492 sibling: block-foreign-airuleset-write.sh wrote its bypass log to
+    the FIXED /tmp/airuleset-foreign-write-bypass.log — the same shared-name
+    cross-user collision + `Permission denied` stderr leak as the main guard.
+    Fix: per-user (`-<uid>`) path, and a brace-group redirect so it can never
+    leak even when the per-uid file is itself unwritable."""
+
+    UID = os.getuid()
+    PER_USER = Path("/tmp/airuleset-foreign-write-bypass-%d.log" % UID)
+    FIXED = Path("/tmp/airuleset-foreign-write-bypass.log")
+
+    def _make_unwritable(self, p):
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses file permission bits; cannot reproduce EACCES")
+        saved = (p.read_bytes(), p.stat().st_mode) if p.exists() else None
+
+        def restore():
+            try:
+                if p.exists():
+                    os.chmod(p, 0o644)
+                    p.unlink()
+                if saved is not None:
+                    p.write_bytes(saved[0])
+                    os.chmod(p, saved[1])
+            except OSError:
+                # airuleset:script-ok best-effort test-cleanup restore of a
+                # shared /tmp telemetry file; must not mask the test result.
+                pass
+        self.addCleanup(restore)
+        p.write_text("")
+        os.chmod(p, 0o444)
+
+    def test_bypass_no_leak_and_logged_to_per_user_path(self):
+        # RED on old code (writes to the fixed 0444 path -> leaks); GREEN
+        # after fix (per-uid path, never touches the foreign-owned file).
+        self._make_unwritable(self.FIXED)
+        tag = "issue492probe" + os.urandom(3).hex()
+        r = run("git -C ~/devel/airuleset push  # airuleset:foreign-ok %s" % tag,
+                cwd=RS)
+        self.assertEqual(r.returncode, 0, r.stderr)         # bypass honored
+        self.assertNotIn("Permission denied", r.stderr, r.stderr)
+        self.assertTrue(self.PER_USER.exists(),
+                        "per-user foreign bypass log missing: %s" % self.PER_USER)
+        self.assertIn(tag, self.PER_USER.read_text())
 
 
 class HookWired(TestCase):

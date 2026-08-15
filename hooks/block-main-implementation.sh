@@ -95,7 +95,8 @@ set -euo pipefail
 # #73 (gatekeeper measurement, 2026-07-26): after #66 shipped there was no
 # way to answer "did the hook ever fire, on what" — only bypasses were
 # logged. Every BLOCK (Bash AND Edit/Write) is now ALSO appended to its own
-# log, /tmp/airuleset-main-exec-block.log (timestamp, session, tool, which
+# log, /tmp/airuleset-main-exec-block-<uid>.log (#492 per-user; timestamp,
+# session, tool, which
 # rule matched — FABLE / GOAL_ARMED / USER_AWAY, joined by '+' when more
 # than one holds — the classifier match
 # or len=N, and the first ~120 chars of the command/file) — same
@@ -123,7 +124,8 @@ set -euo pipefail
 # never an inline `--body`) classified as a BULK READ on its `cat` head
 # token. gk's main hit it 58× in a day, armed the bypass marker at 01:24,
 # and the hook was dead for the next 17 hours (332 bypass lines, 304 of them
-# Bash — `/tmp/airuleset-main-exec-block.log` never even got created, which
+# Bash — the block log (now `/tmp/airuleset-main-exec-block-<uid>.log`, #492)
+# never even got created, which
 # is the observation #80 was filed on). Two fixes in the classifier:
 #   • heredoc BODIES are stripped BEFORE segmentation (`strip_heredocs()`,
 #     the same shape block-gh-invalid-json-flag.sh already uses) — a body is
@@ -243,6 +245,22 @@ RAW_SID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "
 RAW_SID=$(printf '%s' "$RAW_SID" | tr -cd 'A-Za-z0-9_-')
 RUN_FILE="/tmp/airuleset-main-bash-run-${RAW_SID:-unknown}"
 
+# #492: per-USER audit/bypass log paths. A FIXED /tmp name is owned by the
+# FIRST user to create it on a shared box (subdev: montalu2-8, david, marek,
+# simap, miva1); every OTHER user's `>>` append then fails EACCES, and (see
+# the brace-group at each write site) that error LEAKS to stderr as a
+# `PreToolUse hook error` on every block. The ${EUID} suffix gives each user
+# its own file, which still ACCUMULATES across that user's sessions — what
+# these "did it fire, on what" logs want; a per-SESSION suffix would fragment
+# them. ${EUID} is a bash builtin, always set; id -u is the fallback for a
+# non-bash re-exec. Same class as odoo-erp #115 (the shared upload-log). The
+# per-uid name is still predictable in sticky /tmp, so a hostile local user
+# could pre-create it unwritable — but that only silences a victim's own
+# telemetry (the brace-group below keeps it leak-free either way), never a
+# concern on these trusted dev boxes and no worse than the old fixed name.
+BLOCK_LOG="/tmp/airuleset-main-exec-block-${EUID:-$(id -u)}.log"
+BYPASS_LOG="/tmp/airuleset-main-exec-bypass-${EUID:-$(id -u)}.log"
+
 # ---- #80: a DISPATCH resets the per-dispatch Bash counter ----
 # This is the whole point of the counter: it measures main-agent Bash calls
 # since the main last delegated. Handled before ANY transcript work — a
@@ -352,8 +370,8 @@ PYEOF
         cat\ *airuleset-main-exec-ok-*|cat\ *airuleset-fable-exec-ok-*)
             ARM_SNIP=$(printf '%s' "$NORM_CMD" | jq -Rr '.[0:120]' 2>/dev/null \
                 || echo "")
-            echo "$(date -Is) main-exec bypass-arm session=$RAW_SID cmd=$ARM_SNIP" \
-                >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
+            { echo "$(date -Is) main-exec bypass-arm session=$RAW_SID cmd=$ARM_SNIP" \
+                >> "$BYPASS_LOG"; } 2>/dev/null || true
             exit 0
             ;;
     esac
@@ -453,15 +471,15 @@ if [ -n "$BYPASS_MARK" ]; then
     BYPASS_REASON=$(printf '%s' "$BYPASS_REASON" | sed 's/^ *//; s/ *$//')
     rm -f "$BYPASS_FILE" 2>/dev/null || true
     if [ "$BYPASS_JQ_RC" -ne 0 ]; then
-        echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (reason extraction FAILED jq_rc=$BYPASS_JQ_RC, cleared)" \
-            >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
+        { echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (reason extraction FAILED jq_rc=$BYPASS_JQ_RC, cleared)" \
+            >> "$BYPASS_LOG"; } 2>/dev/null || true
     elif [ "${#BYPASS_REASON}" -ge "$BYPASS_MIN_REASON" ]; then
-        echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (consumed) reason=$BYPASS_REASON" \
-            >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
+        { echo "$(date -Is) main-exec bypass session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (consumed) reason=$BYPASS_REASON" \
+            >> "$BYPASS_LOG"; } 2>/dev/null || true
         exit 0
     else
-        echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (no reason, cleared)" \
-            >> /tmp/airuleset-main-exec-bypass.log 2>/dev/null || true
+        { echo "$(date -Is) main-exec bypass refused session=$SESSION_ID tool=$TOOL_NAME marker=$BYPASS_MARK (no reason, cleared)" \
+            >> "$BYPASS_LOG"; } 2>/dev/null || true
     fi
 fi
 
@@ -667,9 +685,9 @@ log_block() {
     detail="$1"
     snippet=$(printf '%s' "$2" | jq -Rr '.[0:120]' 2>/dev/null \
         || printf '%s' "$2" | cut -c1-120)
-    printf '%s main-exec BLOCK session=%s tool=%s rule=%s match=%s cmd=%s\n' \
+    { printf '%s main-exec BLOCK session=%s tool=%s rule=%s match=%s cmd=%s\n' \
         "$(date -Is)" "$SESSION_ID" "$TOOL_NAME" "$RULE_TAG" "$detail" "$snippet" \
-        >> /tmp/airuleset-main-exec-block.log 2>/dev/null || true
+        >> "$BLOCK_LOG"; } 2>/dev/null || true
 }
 
 # ---- Bash path (#66): classify, don't size-gate ----

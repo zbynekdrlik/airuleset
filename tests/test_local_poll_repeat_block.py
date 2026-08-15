@@ -198,7 +198,7 @@ class OutOfContractTest(_Runner):
         for _ in range(3):
             self.assertEqual(self.run_hook(cmd).returncode, 0,
                              "and it stays exempt however often it repeats")
-        log = Path(self.state) / "airuleset-localpoll-exempt.log"
+        log = Path(self.state) / ("airuleset-localpoll-exempt-%d.log" % os.getuid())
         self.assertTrue(log.exists(), "the exemption must be the recorded reason")
         self.assertGreaterEqual(log.read_text().count("mutating"), 4)
 
@@ -357,7 +357,7 @@ class LoggingTest(_Runner):
     def test_every_block_is_logged(self):
         self.run_hook(obs_loop())
         self.run_hook(obs_loop())
-        log = Path(self.state) / "airuleset-localpoll-block.log"
+        log = Path(self.state) / ("airuleset-localpoll-block-%d.log" % os.getuid())
         self.assertTrue(log.exists(), "every block must be reviewable later")
         self.assertIn("sess-119", log.read_text())
 
@@ -365,13 +365,13 @@ class LoggingTest(_Runner):
         self.run_hook(obs_loop())
         cmd = obs_loop() + "  # airuleset:poll-ok fanning 9 repos, not a wait"
         self.assertEqual(self.run_hook(cmd).returncode, 0)
-        log = Path(self.state) / "airuleset-localpoll-bypass.log"
+        log = Path(self.state) / ("airuleset-localpoll-bypass-%d.log" % os.getuid())
         self.assertTrue(log.exists())
         self.assertIn("fanning 9 repos", log.read_text())
 
     def test_exemptions_are_logged_for_corpus_review(self):
         self.run_hook("git push origin main && " + obs_loop())
-        log = Path(self.state) / "airuleset-localpoll-exempt.log"
+        log = Path(self.state) / ("airuleset-localpoll-exempt-%d.log" % os.getuid())
         self.assertTrue(log.exists())
         self.assertIn("mutating", log.read_text())
 
@@ -564,7 +564,7 @@ class Issue281TargetKeyHardeningTest(_Runner):
         self.run_hook(self.PR_VIEW_LOOP % 436)  # blocked, targeted
         self.run_hook(obs_loop())
         self.run_hook(obs_loop())  # blocked, no target
-        log = (Path(self.state) / "airuleset-localpoll-block.log").read_text()
+        log = (Path(self.state) / ("airuleset-localpoll-block-%d.log" % os.getuid())).read_text()
         self.assertIn("target=436", log)
         self.assertIn("target=none", log)
 

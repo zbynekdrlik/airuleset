@@ -126,6 +126,12 @@ fi
 umask 077
 STATE_DIR="${AIRULESET_LOCALPOLL_STATE_DIR:-/tmp}"
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+# #492: the accumulating .log names are FIXED — on a shared box (default
+# STATE_DIR=/tmp) the first user owns each (umask 077 above makes it 0600, so
+# every other user gets a hard EACCES), and the append error leaks to stderr.
+# The per-session STATE files are already ${SID}-unique; only the logs need
+# the per-user suffix. ${EUID} is a bash builtin; id -u is the fallback.
+LOG_UID="${EUID:-$(id -u)}"
 
 FLAT=$(printf '%s' "$CMD" | tr '\n' ' ')
 RAW_FLAT=$(printf '%s' "$RAW_CMD" | tr '\n' ' ')
@@ -148,21 +154,21 @@ SID=$(printf '%s' "$RAW_SID" | tr -cd 'A-Za-z0-9_-')
 SID="${SID:-unknown}"
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || echo "")
 
-BLOCK_LOG="$STATE_DIR/airuleset-localpoll-block.log"
-BYPASS_LOG="$STATE_DIR/airuleset-localpoll-bypass.log"
-EXEMPT_LOG="$STATE_DIR/airuleset-localpoll-exempt.log"
+BLOCK_LOG="$STATE_DIR/airuleset-localpoll-block-${LOG_UID}.log"
+BYPASS_LOG="$STATE_DIR/airuleset-localpoll-bypass-${LOG_UID}.log"
+EXEMPT_LOG="$STATE_DIR/airuleset-localpoll-exempt-${LOG_UID}.log"
 SNIPPET=$(printf '%s' "$FLAT" | jq -Rrs '.[0:160]' 2>/dev/null || echo "?")
 
 log_exempt() {
-    printf '%s localpoll EXEMPT session=%s why=%s cmd=%s\n' \
-        "$(date -Is)" "$SID" "$1" "$SNIPPET" >> "$EXEMPT_LOG" 2>/dev/null || true
+    { printf '%s localpoll EXEMPT session=%s why=%s cmd=%s\n' \
+        "$(date -Is)" "$SID" "$1" "$SNIPPET" >> "$EXEMPT_LOG"; } 2>/dev/null || true
 }
 
 # ---- logged escape hatch (never a dead end) ----------------------------
 if printf '%s' "$FLAT" | grep -qE '#[[:space:]]*airuleset:poll-ok'; then
     REASON=$(printf '%s' "$FLAT" | sed -n 's/.*#[[:space:]]*airuleset:poll-ok[[:space:]]*//p' | jq -Rrs '.[0:160]' 2>/dev/null || echo "?")
-    printf '%s localpoll BYPASS session=%s reason=%s\n' \
-        "$(date -Is)" "$SID" "$REASON" >> "$BYPASS_LOG" 2>/dev/null || true
+    { printf '%s localpoll BYPASS session=%s reason=%s\n' \
+        "$(date -Is)" "$SID" "$REASON" >> "$BYPASS_LOG"; } 2>/dev/null || true
     exit 0
 fi
 
@@ -262,9 +268,9 @@ if printf '%s' "$FLAT" \
     WAIT_KIND="task"
 fi
 
-printf '%s localpoll BLOCK session=%s shape=%s target=%s agent=%s kind=%s cmd=%s\n' \
+{ printf '%s localpoll BLOCK session=%s shape=%s target=%s agent=%s kind=%s cmd=%s\n' \
     "$(date -Is)" "$SID" "$SHAPE" "${TARGET:-none}" "${AGENT_ID:-main}" "$WAIT_KIND" "$SNIPPET" \
-    >> "$BLOCK_LOG" 2>/dev/null || true
+    >> "$BLOCK_LOG"; } 2>/dev/null || true
 
 if [ -n "$AGENT_ID" ]; then
     MSG=$(cat <<'SUBMSG'

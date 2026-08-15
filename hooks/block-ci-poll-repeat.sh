@@ -170,6 +170,12 @@ fi
 
 STATE_DIR="${AIRULESET_CIPOLL_STATE_DIR:-/tmp}"
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+# #492: the accumulating .log names are FIXED — on a shared box (default
+# STATE_DIR=/tmp) the first user owns each, so every other user's append
+# fails EACCES and leaks to stderr. The per-session STATE files below are
+# already ${SID}-${KEY}-unique and never collide; only the logs need the
+# per-user suffix. ${EUID} is a bash builtin; id -u is the non-bash fallback.
+LOG_UID="${EUID:-$(id -u)}"
 
 # `tr` flattens newlines so a signature split across continuation lines still
 # matches — grep is line-scoped otherwise.
@@ -204,33 +210,33 @@ BLOCKED_FILE="$STATE_DIR/airuleset-cipoll-blocked-${SID}-${KEY}"
 # ever polled). BLOCKED_FILE itself stays general-purpose (postblock corpus
 # logging + the burst backstop below), unaffected by this split.
 LOOP_BLOCKED_FILE="$STATE_DIR/airuleset-cipoll-loopblocked-${SID}-${KEY}"
-BLOCK_LOG="$STATE_DIR/airuleset-cipoll-block.log"
-POSTBLOCK_LOG="$STATE_DIR/airuleset-cipoll-postblock.log"
-BYPASS_LOG="$STATE_DIR/airuleset-cipoll-bypass.log"
+BLOCK_LOG="$STATE_DIR/airuleset-cipoll-block-${LOG_UID}.log"
+POSTBLOCK_LOG="$STATE_DIR/airuleset-cipoll-postblock-${LOG_UID}.log"
+BYPASS_LOG="$STATE_DIR/airuleset-cipoll-bypass-${LOG_UID}.log"
 
 SNIPPET=$(printf '%s' "$FLAT" | cut -c1-160)
 
 # ---- corpus review: every poll touch on an already-blocked key ----------
 if [ -e "$BLOCKED_FILE" ]; then
-    printf '%s cipoll POST-BLOCK session=%s key=%s agent=%s cmd=%s\n' \
+    { printf '%s cipoll POST-BLOCK session=%s key=%s agent=%s cmd=%s\n' \
         "$(date -Is)" "$SID" "$KEY" "${AGENT_ID:-main}" "$SNIPPET" \
-        >> "$POSTBLOCK_LOG" 2>/dev/null || true
+        >> "$POSTBLOCK_LOG"; } 2>/dev/null || true
 fi
 
 # ---- logged escape hatch (never a dead end) ----------------------------
 if printf '%s' "$FLAT" | grep -qE '#[[:space:]]*airuleset:poll-ok'; then
     REASON=$(printf '%s' "$FLAT" | sed -n 's/.*#[[:space:]]*airuleset:poll-ok[[:space:]]*//p' | cut -c1-160)
-    printf '%s cipoll BYPASS session=%s key=%s reason=%s\n' \
+    { printf '%s cipoll BYPASS session=%s key=%s reason=%s\n' \
         "$(date -Is)" "$SID" "$KEY" "$REASON" \
-        >> "$BYPASS_LOG" 2>/dev/null || true
+        >> "$BYPASS_LOG"; } 2>/dev/null || true
     exit 0
 fi
 
-EXEMPT_LOG="$STATE_DIR/airuleset-cipoll-exempt.log"
+EXEMPT_LOG="$STATE_DIR/airuleset-cipoll-exempt-${LOG_UID}.log"
 log_exempt() {
-    printf '%s cipoll EXEMPT session=%s key=%s why=%s cmd=%s\n' \
+    { printf '%s cipoll EXEMPT session=%s key=%s why=%s cmd=%s\n' \
         "$(date -Is)" "$SID" "$KEY" "$1" "$SNIPPET" \
-        >> "$EXEMPT_LOG" 2>/dev/null || true
+        >> "$EXEMPT_LOG"; } 2>/dev/null || true
 }
 
 # ---- narrowing 1: a command that MUTATES is not primarily a wait -------
@@ -429,10 +435,10 @@ fi
 if [ "$BLOCK_SHAPE" != "oneshot" ]; then
     : > "$LOOP_BLOCKED_FILE" 2>/dev/null || true
 fi
-printf '%s cipoll BLOCK session=%s key=%s agent=%s shape=%s cmd=%s\n' \
+{ printf '%s cipoll BLOCK session=%s key=%s agent=%s shape=%s cmd=%s\n' \
     "$(date -Is)" "$SID" "$KEY" "${AGENT_ID:-main}" \
     "$BLOCK_SHAPE" "$SNIPPET" \
-    >> "$BLOCK_LOG" 2>/dev/null || true
+    >> "$BLOCK_LOG"; } 2>/dev/null || true
 
 # The compliant command must be paste-ready. With a run-id, substitute it. In
 # the generic bucket there is none, so the waiter resolves it itself with the

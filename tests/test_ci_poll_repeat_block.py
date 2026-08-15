@@ -231,14 +231,14 @@ class CiPollRepeatBlockTest(unittest.TestCase):
         cmd = poll_loop(RUN_A) + "  # airuleset:poll-ok fanning 9 repos, not a wait"
         out = self.run_hook(cmd)
         self.assertEqual(out.returncode, 0, out.stderr)
-        log = Path(self.state) / "airuleset-cipoll-bypass.log"
+        log = Path(self.state) / ("airuleset-cipoll-bypass-%d.log" % os.getuid())
         self.assertTrue(log.exists(), "bypass must be logged for corpus review")
         self.assertIn("fanning 9 repos", log.read_text())
 
     def test_every_block_is_logged(self):
         self.run_hook(poll_loop(RUN_A))
         self.run_hook(poll_loop(RUN_A))
-        log = Path(self.state) / "airuleset-cipoll-block.log"
+        log = Path(self.state) / ("airuleset-cipoll-block-%d.log" % os.getuid())
         self.assertTrue(log.exists(), "every block must be logged")
         body = log.read_text()
         self.assertIn(RUN_A, body)
@@ -248,7 +248,7 @@ class CiPollRepeatBlockTest(unittest.TestCase):
         self.run_hook(poll_loop(RUN_A))
         self.run_hook(poll_loop(RUN_A))
         self.run_hook("gh run view %s --json status" % RUN_A)
-        log = Path(self.state) / "airuleset-cipoll-postblock.log"
+        log = Path(self.state) / ("airuleset-cipoll-postblock-%d.log" % os.getuid())
         self.assertTrue(log.exists(), "post-block bursts must be reviewable")
         self.assertIn(RUN_A, log.read_text())
 
@@ -323,7 +323,7 @@ class CorpusFoundWrongBlockTest(unittest.TestCase):
     def test_exemptions_are_logged_for_corpus_review(self):
         self.run_hook(self.MERGE_THEN_WAIT % (312, 312))
         self.run_hook(self.MERGE_THEN_WAIT % (313, 313))
-        log = Path(self.state) / "airuleset-cipoll-exempt.log"
+        log = Path(self.state) / ("airuleset-cipoll-exempt-%d.log" % os.getuid())
         self.assertTrue(log.exists(), "an exemption must be reviewable later")
         self.assertIn("mutating", log.read_text())
 
@@ -741,7 +741,7 @@ class OneShotStatusPollBlockTest(unittest.TestCase):
         self.run_hook(self.oneshot(RUN_A))
         self.run_hook(self.oneshot(RUN_A))
         self.run_hook(self.oneshot(RUN_A))
-        log = Path(self.state) / "airuleset-cipoll-block.log"
+        log = Path(self.state) / ("airuleset-cipoll-block-%d.log" % os.getuid())
         self.assertTrue(log.exists(), "every block must be logged")
         body = log.read_text()
         self.assertIn(RUN_A, body)
@@ -761,7 +761,7 @@ class OneShotStatusPollBlockTest(unittest.TestCase):
         cmd = self.oneshot(RUN_A) + "  # airuleset:poll-ok fanning 9 repos, not a wait"
         out = self.run_hook(cmd)
         self.assertEqual(out.returncode, 0, out.stderr)
-        log = Path(self.state) / "airuleset-cipoll-bypass.log"
+        log = Path(self.state) / ("airuleset-cipoll-bypass-%d.log" % os.getuid())
         self.assertTrue(log.exists(), "bypass must be logged for corpus review")
         self.assertIn("fanning 9 repos", log.read_text())
 
