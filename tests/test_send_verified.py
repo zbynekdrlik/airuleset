@@ -64,6 +64,31 @@ class SubmitConfirmed(_Base):
                                 "timestamp": "2026-08-15T10:00:00.000Z"}) + "\n")
         self.assertTrue(wd._submit_confirmed(p, base, TEXT))
 
+    def test_a_DIFFERENT_new_user_turn_never_confirms(self):
+        # F1 lock — a concurrent plain user turn with OTHER text (the user
+        # submitting their own prompt, a job-7 Discord-relay injection, another
+        # nudge) must NOT confirm OUR swallowed delivery. Without the text
+        # match, ANY new user turn would false-confirm — booked delivered with
+        # our foreign text left in the box (#490 recreated).
+        p = self._tpath()
+        base = p.stat().st_size
+        with open(p, "a") as f:
+            f.write(json.dumps({"type": "user",
+                                "message": {"content": "úplne iný prompt od usera"},
+                                "timestamp": "2026-08-15T10:00:00.000Z"}) + "\n")
+        self.assertFalse(wd._submit_confirmed(p, base, TEXT))
+
+    def test_ignores_a_compact_summary_user_entry(self):
+        # F4 — a /compact continuation summary is a top-level `user` entry that
+        # can QUOTE a prior identical nudge; skipping it (like the sibling
+        # _last_human_prompt_ts) closes that false-confirm.
+        p = self._tpath()
+        base = p.stat().st_size
+        with open(p, "a") as f:
+            f.write(json.dumps({"type": "user", "isCompactSummary": True,
+                                "message": {"content": "…continued… " + TEXT}}) + "\n")
+        self.assertFalse(wd._submit_confirmed(p, base, TEXT))
+
     def test_ignores_a_matching_turn_BEFORE_the_baseline(self):
         # A prior identical nudge already in the transcript must never
         # false-positive — the byte baseline scopes the read to what WE added.

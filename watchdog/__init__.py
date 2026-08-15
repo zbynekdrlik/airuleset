@@ -435,6 +435,7 @@ from watchdog.tmux_io import (  # noqa: E402
     send_continue as send_continue,
     send_verified as send_verified,
     _await_submit_confirmed as _await_submit_confirmed,
+    _await_typed_landed as _await_typed_landed,
     send_selfcheck as send_selfcheck,
     send_subagent_nudge as send_subagent_nudge,
     _subagent_transcript_unsalvageable as _subagent_transcript_unsalvageable,

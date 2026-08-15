@@ -164,9 +164,11 @@ def _submit_confirmed(tpath, baseline_size, text):
     documents: CC writes a plain-text `user` turn the instant it ACCEPTS a
     submit (before any response exists); a SWALLOWED submit writes nothing at
     all — so the presence of this entry, and only it, distinguishes a landed
-    submit from a lost keystroke. `isMeta` / `tool_result` `user` entries are
-    NOT typed prompts and are skipped (the same grammar `_last_human_prompt_ts`
-    parses).
+    submit from a lost keystroke. `isMeta` / `isCompactSummary` / `tool_result`
+    `user` entries are NOT typed prompts and are skipped (the same grammar
+    `_last_human_prompt_ts` parses — a `/compact` continuation summary is a
+    top-level `user` entry that can QUOTE a prior identical nudge, so skipping
+    it closes a false-confirm the substring match would otherwise take).
 
     Fails SAFE toward False on any read/parse problem: an unconfirmable submit
     is treated as not-delivered (retryable), never claimed delivered — the
@@ -188,6 +190,9 @@ def _submit_confirmed(tpath, baseline_size, text):
             continue            # a partial line at the seek boundary, or noise
         if not isinstance(e, dict) or e.get("type") != "user" or e.get("isMeta"):
             continue
+        if e.get("isCompactSummary"):
+            continue            # a /compact continuation summary can quote a
+            #                     prior identical nudge — not a typed submit
         if _entry_has_tool_result(e):
             continue            # a harness tool-result feed, not a typed submit
         et = (_entry_text(e) or "").strip()
