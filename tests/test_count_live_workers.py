@@ -341,7 +341,6 @@ class TestNeverRaises(unittest.TestCase):
     def test_default_on_warn_writes_to_stderr_and_does_not_raise(self):
         # An unreadable subagents dir path must warn (default → stderr) and return 0,
         # never raise. Simulate by making the subagents path a FILE.
-        import io
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             sub = _subagents_dir(root, CWD, SID)
