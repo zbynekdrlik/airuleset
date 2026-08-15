@@ -719,5 +719,70 @@ class TestCliBootstrapFlagRequiresUpdate(unittest.TestCase):
         self.assertEqual(before, after, "the real snapshot must be untouched")
 
 
+class TestRuleBytesCap(unittest.TestCase):
+    """#482: a byte-size cap on every path-scoped ``.claude/rules/*.md`` so the
+    former 973 KB monolith can never regrow into a session-killing injection.
+    BYTE metric (not lines) on purpose: the monolith was only 1575 lines but
+    973 KB (~616 B/line), so a line cap would never have caught it. Distinct
+    semantic from the .py ratchet above: a flat CAP (files may grow with
+    playbook lessons up to the cap, then must archive), not freeze-at-current."""
+
+    def test_default_cap_is_50kb(self):
+        self.assertEqual(sr.RULE_BYTES_DEFAULT_CEILING, 51200)
+
+    def test_tracked_rule_files_are_pathscoped_md_only(self):
+        files = sr.tracked_rule_files()
+        self.assertTrue(files, "expected the split per-area rule files")
+        for rel in files:
+            self.assertTrue(rel.startswith(".claude/rules/"), rel)
+            self.assertTrue(rel.endswith(".md"), rel)
+            text = (REPO / rel).read_text(encoding="utf-8")
+            self.assertTrue(text.lstrip().startswith("---"), f"{rel}: no frontmatter")
+            head = text.split("---")[1]
+            self.assertIn("paths:", head, f"{rel}: frontmatter has no paths:")
+
+    def test_the_ondemand_archive_is_not_tracked(self):
+        files = sr.tracked_rule_files()
+        for rel in files:
+            self.assertNotIn("rules-reference", rel)
+
+    def test_measure_includes_rule_bytes(self):
+        m = sr.measure()
+        self.assertIn("rule_bytes", m)
+        self.assertTrue(m["rule_bytes"])
+        for n in m["rule_bytes"].values():
+            self.assertIsInstance(n, int)
+
+    def test_rule_over_cap_fails_with_byte_wording(self):
+        measured = {"files": {}, "functions": {},
+                    "rule_bytes": {".claude/rules/internals-x.md": sr.RULE_BYTES_DEFAULT_CEILING + 1}}
+        stored = {"files": {}, "functions": {}, "rule_bytes": {}}
+        v = sr.check(measured, stored)
+        self.assertEqual(len(v), 1)
+        self.assertIn("internals-x.md", v[0])
+        self.assertIn("bytes", v[0].lower())
+
+    def test_rule_under_cap_passes(self):
+        measured = {"files": {}, "functions": {},
+                    "rule_bytes": {".claude/rules/internals-x.md": 40000}}
+        stored = {"files": {}, "functions": {}, "rule_bytes": {}}
+        self.assertEqual(sr.check(measured, stored), [])
+
+    def test_rule_respects_a_tighter_stored_ceiling(self):
+        measured = {"files": {}, "functions": {},
+                    "rule_bytes": {".claude/rules/internals-x.md": 45000}}
+        stored = {"files": {}, "functions": {},
+                  "rule_bytes": {".claude/rules/internals-x.md": 40000}}
+        v = sr.check(measured, stored)
+        self.assertEqual(len(v), 1)
+        self.assertIn("40000", v[0])
+
+    def test_every_real_pathscoped_rule_file_is_under_the_cap(self):
+        m = sr.measure()
+        over = {k: n for k, n in m["rule_bytes"].items()
+                if n > sr.RULE_BYTES_DEFAULT_CEILING}
+        self.assertEqual(over, {}, f"path-scoped rule files over the 50KB cap: {over}")
+
+
 if __name__ == "__main__":
     unittest.main()

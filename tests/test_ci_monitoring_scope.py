@@ -133,7 +133,7 @@ class TestIncidentNarrativeLivesInThePlaybook(unittest.TestCase):
             self.assertNotIn(narrative, text)
 
     def test_playbook_still_carries_that_narrative(self):
-        playbook = _text(PLAYBOOK)
+        playbook = "\n".join(p.read_text(encoding="utf-8") for p in ([REPO / ".claude" / "rules" / "airuleset-internals.md"] + sorted((REPO / ".claude" / "rules").glob("internals-*.md")) + [REPO / ".claude" / "rules-reference" / "internals-archive.md"]) if p.exists())  # #482: narrative in the on-demand archive
         self.assertIn("#29193", playbook)
         self.assertIn("OPPOSITE", playbook)
 

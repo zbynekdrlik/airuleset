@@ -5,8 +5,8 @@ Snapshots today's sizes as CEILINGS in ``tests/size_ratchet.json``. A later
 measurement may only equal or beat a stored ceiling, never exceed it —
 shrinking or stagnation always passes; growth past a stored ceiling (or past
 the flat default for a brand-new file/function) fails. See
-``.claude/rules/airuleset-internals.md``'s ratchet section for the full
-design rationale (chosen approach + the rejected "test auto-writes on every
+``.claude/rules/internals-scripts.md`` (deep archive:
+``.claude/rules-reference/internals-archive.md``) for the full design rationale (chosen approach + the rejected "test auto-writes on every
 run" alternative).
 
 This is DELIBERATELY strict: every currently-tracked file/function is frozen
@@ -78,6 +78,17 @@ SNAPSHOT_PATH = REPO / "tests" / "size_ratchet.json"
 FILE_DEFAULT_CEILING = 1000
 FUNC_DEFAULT_CEILING = 300
 
+# #482: a BYTE cap for every path-scoped `.claude/rules/*.md`. Byte metric,
+# not lines: the former airuleset-internals.md monolith was only 1575 lines
+# but 973 KB (~616 B/line) and its `paths:` frontmatter matched nearly the
+# whole repo, so a Read of almost any file injected ~240k tokens and killed
+# the session. ~50 KB keeps any single auto-injected rule well under a
+# session-threatening size. Unlike the .py ratchet above (freeze-at-current,
+# code should only shrink), rule files are DESIGNED to accrete playbook
+# lessons up to this flat CAP, then archive their oldest to the on-demand
+# `.claude/rules-reference/` surface — so this is a cap, not a freeze.
+RULE_BYTES_DEFAULT_CEILING = 51200
+
 # Only a function already at/above this size at the moment a snapshot is
 # (re)generated gets its OWN explicit ceiling entry. A function smaller than
 # this is governed by FUNC_DEFAULT_CEILING alone until it crosses the
@@ -135,6 +146,45 @@ def tracked_files(repo: Path = REPO) -> list:
 def file_line_count(path: Path) -> int:
     with path.open("r", encoding="utf-8", errors="replace") as f:
         return sum(1 for _ in f)
+
+
+def tracked_rule_files(repo: Path = REPO) -> list:
+    """Every path-scoped project rule this byte-cap governs (#482): a
+    ``.claude/rules/*.md`` file that carries a ``paths:`` frontmatter key
+    (i.e. one Claude Code auto-INJECTS when a matching file is read).
+    Relative posix strings. The on-demand ``.claude/rules-reference/``
+    archive has NO frontmatter and lives outside ``.claude/rules/``, so it
+    is deliberately NOT tracked — it never auto-injects, so its size is
+    harmless."""
+    base = repo / ".claude" / "rules"
+    if not base.is_dir():
+        return []
+    out = []
+    for entry in sorted(base.glob("*.md")):
+        try:
+            head = entry.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        stripped = head.lstrip()
+        if not stripped.startswith("---"):
+            continue
+        parts = stripped.split("---", 2)
+        if len(parts) < 3:
+            continue
+        # a frontmatter `paths:` key at the start of a line inside the block
+        front = parts[1]
+        if not any(ln.strip().startswith("paths:") for ln in front.splitlines()):
+            continue
+        out.append(entry.relative_to(repo).as_posix())
+    return out
+
+
+def rule_byte_counts(repo: Path = REPO) -> dict:
+    """{relpath: byte_size} for every path-scoped rule file."""
+    out = {}
+    for rel in tracked_rule_files(repo):
+        out[rel] = (repo / rel).stat().st_size
+    return out
 
 
 def _walk_functions(tree: ast.AST, prefix: str = ""):
@@ -195,7 +245,8 @@ def measure(repo: Path = REPO) -> dict:
             if key in EXEMPT_FUNCTIONS:
                 continue
             functions[key] = n
-    return {"files": files, "functions": functions}
+    return {"files": files, "functions": functions,
+            "rule_bytes": rule_byte_counts(repo)}
 
 
 def _validate_snapshot_shape(data: dict, source: str = "the snapshot") -> None:
@@ -204,7 +255,7 @@ def _validate_snapshot_shape(data: dict, source: str = "the snapshot") -> None:
     tests/size_ratchet.json, and a typo there (a quoted number, a null,
     a wrong-shaped value) must fail loudly and clearly, not as a raw
     TypeError three call-frames deep inside check()."""
-    for kind in ("files", "functions"):
+    for kind in ("files", "functions", "rule_bytes"):
         items = data.get(kind, {})
         if not isinstance(items, dict):
             raise ValueError(
@@ -235,6 +286,7 @@ def load_snapshot(path: Path = SNAPSHOT_PATH) -> dict:
         raise ValueError(f"{path}: top level must be a JSON object")
     data.setdefault("files", {})
     data.setdefault("functions", {})
+    data.setdefault("rule_bytes", {})
     _validate_snapshot_shape(data, source=str(path))
     return data
 
@@ -245,6 +297,7 @@ def save_snapshot(data: dict, path: Path = SNAPSHOT_PATH) -> None:
     ordered = {
         "files": dict(sorted(data.get("files", {}).items())),
         "functions": dict(sorted(data.get("functions", {}).items())),
+        "rule_bytes": dict(sorted(data.get("rule_bytes", {}).items())),
     }
     fd, tmp_name = tempfile.mkstemp(
         dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
@@ -294,6 +347,24 @@ def _violation(kind: str, key: str, current: int, ceiling: int, is_new: bool) ->
     )
 
 
+def _rule_bytes_violation(key: str, current: int, ceiling: int, is_new: bool) -> str:
+    if is_new:
+        return (
+            f"RATCHET VIOLATION: new path-scoped rule {key} is {current} "
+            f"bytes, exceeding the {ceiling}-byte cap. A rule this large "
+            f"auto-injects into every session that touches a matching file "
+            f"(#482) — move its oldest lessons to the on-demand "
+            f".claude/rules-reference/ archive before tracking it."
+        )
+    return (
+        f"RATCHET VIOLATION: path-scoped rule {key} grew to {current} bytes, "
+        f"over its {ceiling}-byte cap. Move its oldest lessons to the "
+        f".claude/rules-reference/ archive (#482) — or, if this growth is "
+        f"genuinely deliberate and reviewed, raise the ceiling by hand in "
+        f"tests/size_ratchet.json (explain why in the commit message)."
+    )
+
+
 def check(measured: dict, stored: dict) -> list:
     """Compare *measured* (from measure()) against *stored* (from
     load_snapshot()). Returns a list of violation messages — empty means
@@ -314,6 +385,13 @@ def check(measured: dict, stored: dict) -> list:
                     violations.append(
                         _violation(kind, key, current, default_ceiling, True)
                     )
+    stored_rb = stored.get("rule_bytes", {})
+    for key, current in sorted(measured.get("rule_bytes", {}).items()):
+        ceiling = stored_rb.get(key, RULE_BYTES_DEFAULT_CEILING)
+        if current > ceiling:
+            violations.append(
+                _rule_bytes_violation(key, current, ceiling, key not in stored_rb)
+            )
     return violations
 
 
@@ -348,10 +426,10 @@ def regen(measured: dict, stored: dict, bootstrap: bool = False):
     """
     if bootstrap and not snapshot_is_empty(stored):
         return (
-            {
-                "files": dict(stored.get("files", {})),
-                "functions": dict(stored.get("functions", {})),
-            },
+            # mirror stored EXACTLY (its own key set, values deep-copied) —
+            # a refused bootstrap writes stored back unchanged, so it must
+            # neither add a rule_bytes key stored lacks nor drop one it has.
+            {k: (dict(v) if isinstance(v, dict) else v) for k, v in stored.items()},
             [
                 "REFUSED: --bootstrap requires an empty/missing snapshot "
                 f"({len(stored.get('files', {}))} file(s) + "
@@ -388,6 +466,16 @@ def regen(measured: dict, stored: dict, bootstrap: bool = False):
                 )
                 continue
             new_snapshot[kind][key] = current
+    # rule_bytes: flat CAP (not freeze-at-current) — a per-area rule file may
+    # grow with playbook lessons up to its ceiling, then must archive its
+    # oldest. Ceiling = human override if present (tighten or, with a stated
+    # reason, loosen), else the default cap. Deleted rule files drop out
+    # naturally (only measured keys are iterated).
+    stored_rb = stored.get("rule_bytes", {})
+    new_snapshot["rule_bytes"] = {
+        key: stored_rb.get(key, RULE_BYTES_DEFAULT_CEILING)
+        for key in sorted(measured.get("rule_bytes", {}))
+    }
     return new_snapshot, refusals
 
 

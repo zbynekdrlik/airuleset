@@ -350,7 +350,7 @@ class TestWiring(TestCase):
         # docstring as a KNOWN residual "a FOLLOW-UP should reword". #462
         # landed that rewording, so the note must no longer frame it as
         # pending, nor quote the removed stale CLI message.
-        text = (REPO / ".claude" / "rules" / "airuleset-internals.md").read_text()
+        text = "\n".join(p.read_text(encoding="utf-8") for p in ([REPO / ".claude" / "rules" / "airuleset-internals.md"] + sorted((REPO / ".claude" / "rules").glob("internals-*.md")) + [REPO / ".claude" / "rules-reference" / "internals-archive.md"]) if p.exists())  # #482: stale text must be absent from every split surface
         flat = " ".join(text.split())
         self.assertNotIn(
             "a FOLLOW-UP should reword", flat,

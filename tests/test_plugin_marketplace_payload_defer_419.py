@@ -33,7 +33,7 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-INTERNALS = REPO / ".claude" / "rules" / "airuleset-internals.md"
+INTERNALS = REPO / ".claude" / "rules" / "internals-hooks.md"  # #482: #419 decision moved here
 AIRULESET = REPO / "airuleset.py"
 
 # Distinctive substrings of the #419 decision bullet — sampled from its head,

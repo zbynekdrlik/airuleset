@@ -8,10 +8,13 @@ Centralized management of Claude Code rules, skills, and hooks shared across mul
 
 ## Services
 
-One line each — the full internals of every service live in
-`.claude/rules/airuleset-internals.md`, which auto-loads the moment you touch
-that service's files (`paths:` frontmatter), so they cost nothing in a session
-that never goes near them.
+One line each — the full internals of every service live in the per-area
+`.claude/rules/internals-<area>.md` files (`watchdog`/`hooks`/`notify`/`filedrop`/
+`cli`/`tests`/`scripts`/`statusbar`/`skills-modules`/`burn`), each auto-loading the
+moment you touch that area's files (`paths:` frontmatter), so they cost nothing in
+a session that never goes near them. `.claude/rules/airuleset-internals.md` is now a
+small always-on ROUTER; the deep archive is the on-demand
+`.claude/rules-reference/internals-archive.md` (#482).
 
 - **File-Drop** (`filedrop/`, `:8788`) — serves user-facing files as clickable LAN URLs (`airuleset.py share`) and receives them back (`airuleset.py upload`). Governs `deliver-files-as-urls.md` + `receive-files-via-upload-url.md`.
 - **Caveman plugin wiring + statusline** (`maybe_setup_caveman`, `statusbar.py`) — keeps caveman wired through a hash-proof runtime shim and renders the `Issues` statusline segment.
@@ -52,11 +55,15 @@ Remote machines:
 
 ## Development Rules
 
-Moved VERBATIM to `.claude/rules/airuleset-internals.md` (#92) — a path-scoped rule
-Claude Code injects automatically the moment you read `airuleset.py`, `statusbar.py`,
-`watchdog/`, `hooks/`, `notify/`, `filedrop/`, `burn/`, `tests/`, `settings/` or
-`scripts/`. It used to sit on the always-on prefix of every session in this repo,
-including the many that never touch that code.
+Moved VERBATIM off the always-on prefix (#92), then SPLIT (#482) out of the former
+973 KB `.claude/rules/airuleset-internals.md` monolith — whose broad `paths:` matched
+nearly the whole repo and injected ~240k tokens on almost any Read, killing sessions.
+Now: a small always-on ROUTER at `.claude/rules/airuleset-internals.md`, per-area
+path-scoped `.claude/rules/internals-<area>.md` files (each < 50 KB, byte-capped by
+the `scripts/size_ratchet.py` ratchet), and the on-demand
+`.claude/rules-reference/internals-archive.md` deep archive. **A new playbook lesson
+goes into the matching `internals-<area>.md`** (not the router, not the archive); when
+that file nears the ~50 KB cap, move its oldest lessons into the archive.
 
 ## Rule intake gate — before ADDING any new always-on module
 

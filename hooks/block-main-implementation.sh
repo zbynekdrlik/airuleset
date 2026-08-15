@@ -262,7 +262,7 @@ if [ "$TOOL_NAME" = "Bash" ]; then
     # #174: manual pane revival must deliver only 'continue' -- never text
     # captured from the SAME pane. UNCONDITIONAL (not gated by Fable/goal-
     # armed/away, no bypass marker): a live incident (2026-07-29, see
-    # .claude/rules/airuleset-internals.md) showed the main session read a
+    # .claude/rules-reference/internals-archive.md) showed the main session read a
     # STALLED pane's stale input-box draft off its screen and typed it back
     # as if it were a real pending prompt -- `continue` was never sent at
     # all. This is a CORRECTNESS/SAFETY concern (what gets typed into
@@ -329,7 +329,7 @@ PYEOF
 ) || SENDKEYS_VERDICT=""
     case "$SENDKEYS_VERDICT" in
         UNSAFE:*)
-            echo "BLOCKED: this MAIN session's command captures a pane's content (tmux capture-pane/display-message) and feeds it straight back into \`tmux send-keys\` -- the exact \"read the screen, type it back as a real prompt\" mistake #174 is about. Manual pane revival may ONLY ever deliver the literal 'continue' -- a genuinely deliberate, hand-composed literal is fine (this only blocks a value that came FROM a pane capture in this SAME command). See .claude/rules/airuleset-internals.md." >&2
+            echo "BLOCKED: this MAIN session's command captures a pane's content (tmux capture-pane/display-message) and feeds it straight back into \`tmux send-keys\` -- the exact \"read the screen, type it back as a real prompt\" mistake #174 is about. Manual pane revival may ONLY ever deliver the literal 'continue' -- a genuinely deliberate, hand-composed literal is fine (this only blocks a value that came FROM a pane capture in this SAME command). See .claude/rules-reference/internals-archive.md." >&2
             exit 2
             ;;
     esac

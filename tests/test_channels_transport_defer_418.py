@@ -29,7 +29,7 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-INTERNALS = REPO / ".claude" / "rules" / "airuleset-internals.md"
+INTERNALS = REPO / ".claude" / "rules" / "internals-notify.md"  # #482: #418 decision moved here
 NOTIFY = REPO / "notify" / "__init__.py"
 WATCHDOG = REPO / "watchdog" / "__init__.py"
 

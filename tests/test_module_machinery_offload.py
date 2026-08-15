@@ -52,7 +52,7 @@ class TestScriptFailurePolicyKeepsOnlyTheActionableRule(TestCase):
             self.assertNotIn(machinery, t, machinery)
 
     def test_hook_internals_moved_verbatim_to_the_path_scoped_surface(self):
-        internals = read(".claude/rules/airuleset-internals.md")
+        internals = read(".claude/rules/internals-hooks.md")  # #482: pre-write-script-check moved here
         for machinery in ("pycodestyle E722", "S110", "24 pre-existing",
                           "pre-write-script-check.sh"):
             self.assertIn(machinery, internals, machinery)

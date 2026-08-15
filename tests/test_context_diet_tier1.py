@@ -71,7 +71,7 @@ class TestDevelopmentRulesMoved(TestCase):
         self.assertNotIn("**", globs, "a bare ** glob makes the rule always-on")
 
     def test_every_anchor_survived_the_move_verbatim(self):
-        text = INTERNALS.read_text(encoding="utf-8")
+        text = "\n".join(p.read_text(encoding="utf-8") for p in ([ROOT / ".claude" / "rules" / "airuleset-internals.md"] + sorted((ROOT / ".claude" / "rules").glob("internals-*.md")) + [ROOT / ".claude" / "rules-reference" / "internals-archive.md"]) if p.exists())  # #482: split across surfaces
         for anchor in INTERNALS_ANCHORS:
             self.assertIn(anchor, text, f"lost in the move: {anchor[:60]}")
 
