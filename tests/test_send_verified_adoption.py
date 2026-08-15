@@ -24,6 +24,7 @@ is never called and every assertion here is RED.
 """
 
 import json
+import os
 import sys
 import time
 import unittest
@@ -308,6 +309,253 @@ class JanitorPrefixReclaim(unittest.TestCase):
         # the negative control: the recognition must not swallow a real draft
         self.assertFalse(wd._looks_like_own_payload(
             "chekni ci nemas nieco nove"))
+
+
+# ------------------------------------------------------------------------- #
+# #497 batch 2 — the three SHORT-text bare-box sites (jobs 1, 6, 7). Each is
+# <200c so it types the FULL literal and send_verified's own undo backs it off
+# a stuck box — no janitor mark / no _JANITOR_OWN_PREFIXES registration (that is
+# why these, and not the chunk-typed jobs 4/4a/8, are batch 2). The tests drive
+# the REAL site with send_verified PATCHED to a recorder, asserting the per-site
+# TPATH and the persist-on-verified-success (a swallowed submit must not book
+# itself delivered). On the pre-adoption code the site calls raw send_continue,
+# so the recorder is never called and every assertion here is RED.
+# ------------------------------------------------------------------------- #
+
+def _write_jsonl_rows(path, entries):
+    path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+
+def _apierror_row(text="API Error: 529 Overloaded"):
+    return {"type": "assistant", "isApiErrorMessage": True,
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": text}]}}
+
+
+def _assistant_row(text):
+    return {"type": "assistant",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": text}]}}
+
+
+SESSION_LIMIT_BANNER = (
+    "❯ continue\n"
+    "  ⎿  You've hit your session limit · resets 6:10pm (Europe/Prague)\n"
+    "     /usage-credits to finish what you're working on.\n\n❯ ")
+
+NO_BANNER_IDLE = "● Hotovo.\n❯ \n  ctx ███░  caveman:lite\n"
+
+
+class _RunOnceAdoptHarness:
+    """Drives the REAL run_once for the two inline decide_working-family sites
+    (job 1 api-error, job 6 session-limit) with send_verified patched to a
+    recorder — a test asserts WHICH transcript the site verifies against and
+    what it does on a True vs a False (swallowed) submit."""
+
+    CWD = "/home/newlevel/devel/demo-adopt"
+    PANE = "%9"
+    SID = "adopt1s2t"
+
+    def __init__(self, tc, transcript_rows, mtime_age, capture, seed_state,
+                 now):
+        tmp = TemporaryDirectory()
+        tc.addCleanup(tmp.cleanup)
+        # sandbox notify's real question map so a genuine production ❓ crossing
+        # its re-ask boundary mid-test never leaks into our send_fn (#449).
+        import notify
+        p = m.patch.object(notify, "_questions_path",
+                           lambda: str(Path(tmp.name) / "q.json"))
+        p.start()
+        tc.addCleanup(p.stop)
+        self.proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (self.proj / enc).mkdir(parents=True)
+        self.tpath = self.proj / enc / (self.SID + ".jsonl")
+        _write_jsonl_rows(self.tpath, transcript_rows)
+        os.utime(self.tpath, (now - mtime_age, now - mtime_age))
+        self.state_path = Path(tmp.name) / "state.json"
+        if seed_state is not None:
+            self.state_path.write_text(json.dumps(seed_state))
+        self.capture = capture
+        self.now = now
+        self.pending = str(Path(tmp.name) / "pending-")
+
+    def run(self, sv_result):
+        keys, sent = [], []
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if "session_group" in j or argv[-1] == "#S":
+                    return "zbynek"
+                return ""
+            if "capture-pane" in j:
+                return self.capture
+            if "send-keys" in j:
+                keys.append(argv)
+                return ""
+            return ""
+
+        rec = _SendVerifiedRecorder(result=sv_result)
+        with m.patch.object(wd, "send_verified", rec):
+            logs = wd.run_once(
+                now=self.now, dry_run=False, run=fake_run,
+                send_fn=lambda body, **k: sent.append(body),
+                projects_dir=self.proj, state_path=self.state_path,
+                pending_prefix=self.pending)
+        state = json.loads(self.state_path.read_text())
+        return logs, sent, keys, state, rec
+
+
+class ApiErrorNudgeAdoption(unittest.TestCase):
+    """Site #1 — the job-1 api-error nudge (run_once bare `else`)."""
+
+    def _harness(self):
+        now = time.time()
+        return _RunOnceAdoptHarness(
+            self, [_apierror_row()], mtime_age=3600, capture=NO_BANNER_IDLE,
+            seed_state=None, now=now)
+
+    def test_verifies_against_the_supervisor_transcript(self):
+        h = self._harness()
+        logs, _sent, keys, _state, rec = h.run(sv_result=True)
+        self.assertEqual(len(rec.calls), 1, logs)
+        self.assertEqual(rec.calls[0]["text"], wd.NUDGE_TEXT)
+        self.assertEqual(rec.tpaths[0], str(h.tpath),
+                         "job 1 must verify against the pane's own transcript")
+        self.assertFalse(
+            any("send-keys" in " ".join(a) and wd.NUDGE_TEXT in a for a in keys),
+            "site must go through send_verified, not a raw type")
+
+    def test_swallowed_submit_logs_honestly(self):
+        h = self._harness()
+        logs, _sent, _keys, _state, _rec = h.run(sv_result=False)
+        self.assertTrue(any("(submit-unverified)" in ln for ln in logs),
+                        "a swallowed job-1 nudge must be logged honestly: %r" % logs)
+
+
+class SessionLimitResumeAdoption(unittest.TestCase):
+    """Site #6 — the job-6 session-limit resume `continue` (run_once bare
+    `else`)."""
+
+    def _harness(self, **extra):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("Europe/Bratislava")
+        now = datetime(2026, 7, 1, 18, 15, tzinfo=tz).timestamp()  # past 18:10 reset
+        sess = {"resets_at": now - 300, "pinged": True, "continued": False,
+                "first_seen": int(now - 3600), "last_seen": int(now - 60)}
+        sess.update(extra)
+        seed = {"sesslimit:" + _RunOnceAdoptHarness.SID: sess}
+        return _RunOnceAdoptHarness(
+            self, [_assistant_row("pracujem…")], mtime_age=60,
+            capture=SESSION_LIMIT_BANNER, seed_state=seed, now=now)
+
+    def _sess(self, state):
+        return state["sesslimit:" + _RunOnceAdoptHarness.SID]
+
+    def test_verified_continue_records_resumed_and_pings(self):
+        h = self._harness()
+        logs, sent, keys, state, rec = h.run(sv_result=True)
+        self.assertEqual(len(rec.calls), 1, logs)
+        self.assertEqual(rec.calls[0]["text"], wd.NUDGE_TEXT)
+        self.assertEqual(rec.tpaths[0], str(h.tpath))
+        self.assertTrue(self._sess(state)["continued"])
+        self.assertEqual(self._sess(state)["attempts"], 1)
+        self.assertTrue(any("resetol" in b for b in sent),
+                        "a verified resume must send the ping: %r" % sent)
+        self.assertFalse(
+            any("send-keys" in " ".join(a) and wd.NUDGE_TEXT in a for a in keys))
+
+    def test_swallowed_continue_stays_parked(self):
+        h = self._harness()
+        logs, sent, _keys, state, _rec = h.run(sv_result=False)
+        self.assertFalse(self._sess(state)["continued"],
+                         "a swallowed `continue` must NOT be booked as resumed")
+        self.assertNotIn("attempts", self._sess(state))
+        self.assertFalse(any("resetol" in b for b in sent),
+                         "a swallowed resume must not send the delivered ping")
+        self.assertTrue(any("submit-unverified" in ln for ln in logs), logs)
+
+    def test_swallow_bumps_streak_and_stamps_last_try(self):
+        # a swallow must feed the give-up streak AND stamp last_try so the
+        # SESSLIMIT_RETRY_S throttle applies next window (no 60s re-type spam).
+        h = self._harness()
+        logs, _sent, _keys, state, _rec = h.run(sv_result=False)
+        self.assertEqual(self._sess(state).get("swallow_fails"), 1)
+        self.assertEqual(self._sess(state).get("last_try"), h.now)
+
+    def test_persistent_swallow_eventually_gives_up(self):
+        # the #442-F2 regression the reviewers caught: a persistently swallowed
+        # `continue` never bumps `attempts`, so the give-up must fire off its own
+        # consecutive-swallow streak instead of being structurally unreachable.
+        h = self._harness(swallow_fails=wd.SESSLIMIT_MAX_TRIES)
+        logs, sent, keys, state, rec = h.run(sv_result=False)
+        self.assertTrue(self._sess(state).get("gave_up"),
+                        "give-up must fire on a persistently swallowed continue")
+        self.assertTrue(any("ručne" in b for b in sent),
+                        "expected the give-up Discord ping: %r" % sent)
+        self.assertEqual(len(rec.calls), 0,
+                         "give-up short-circuits before any further send")
+        self.assertFalse(
+            any("send-keys" in " ".join(a) and wd.NUDGE_TEXT in a for a in keys))
+
+
+class ReplyPointerAdoption(unittest.TestCase):
+    """Site #7 — the job-7 reply pointer (deliver_discord_replies)."""
+
+    CWD = "/home/newlevel/devel/demo-ptr"
+    SID = "ptr1sess2"
+    NUM = "1770"
+
+    def _setup(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        import notify
+        p = m.patch.object(notify, "_questions_path",
+                           lambda: str(Path(tmp.name) / "q.json"))
+        p.start()
+        self.addCleanup(p.stop)
+        proj = Path(tmp.name) / "projects"
+        tpath = _write_transcript(proj, self.CWD, sid=self.SID)
+        now = time.time()
+        state = {"dreply_pointer": {self.SID: {"num": self.NUM, "ts": now}}}
+        return proj, tpath, state, now
+
+    def _go(self, proj, state, now, result):
+        def run(argv, timeout=8):
+            return "0" if "display" in " ".join(argv) else ""
+        rec = _SendVerifiedRecorder(result=result)
+        with m.patch.object(wd, "send_verified", rec):
+            # sleep_fn deliberately NOT passed: send_verified is the recorder
+            # here (ignores it), and omitting it keeps the pre-adoption RED a
+            # clean assertion failure rather than a TypeError on the not-yet-
+            # added param. The real sleep_fn threading is exercised via run_once.
+            wd.deliver_discord_replies(
+                now, run, state, {self.SID: ("%2", IDLE)}, dry_run=False,
+                discord_fetch=lambda ch, t: [], gh_comment=lambda *a: True,
+                cwd_by_sid={self.SID: self.CWD}, projects_dir=proj)
+        return rec
+
+    def test_verifies_against_the_session_transcript_then_pops(self):
+        proj, tpath, state, now = self._setup()
+        rec = self._go(proj, state, now, result=True)
+        self.assertEqual(len(rec.calls), 1)
+        self.assertIn("#" + self.NUM, rec.calls[0]["text"])
+        self.assertEqual(rec.tpaths[0], str(tpath),
+                         "must verify against _transcript_for_session")
+        self.assertNotIn(self.SID, state.get("dreply_pointer", {}),
+                         "a verified pointer consumes the one-shot")
+
+    def test_swallowed_submit_keeps_the_pointer(self):
+        proj, _tpath, state, now = self._setup()
+        self._go(proj, state, now, result=False)
+        self.assertIn(self.SID, state.get("dreply_pointer", {}),
+                      "a swallowed pointer must be retried, not lost")
 
 
 if __name__ == "__main__":
