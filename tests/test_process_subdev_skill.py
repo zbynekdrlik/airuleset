@@ -18,6 +18,8 @@ import airuleset
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skills" / "process-subdev" / "SKILL.md"
+CROSS_STREAM = (ROOT / "skills" / "autopilot" / "references" /
+                "cross-stream-protocol.md")
 
 
 def read(p):
@@ -230,6 +232,123 @@ class TestMechanicalPreReviewGateRecheck(TestCase):
         i3 = t.index("### 3. INDEPENDENT REVIEW")
         window = t[i2b:i3]
         self.assertIn("repo PARAMETER", window)
+
+
+class TestQueueUnionsBothHandoffLabels(TestCase):
+    """#498 -- the gatekeeper review queue MUST be
+    `ready-for-review UNION needs-gatekeeper`, never `ready-for-review` alone.
+
+    Root cause: a carve-out stream (no erp-test shadow box, phase 1) fails the
+    validation hand-off gate STRUCTURALLY, so its `ready-for-review` label is
+    stripped at EVERY hand-off; the repo-side gate (odoo-erp #4139) applies
+    `needs-gatekeeper` INSTEAD of silently stripping, so that stream's hand-offs
+    exist ONLY under `needs-gatekeeper` + `stream:<user>`. An rfr-only queue
+    never surfaces them -> both sides claim done, the ticket rots for hours
+    (live incident odoo-erp #3244, miva). The union is safe because the queue is
+    already `stream:<stream>`-scoped and a bare `needs-gatekeeper`
+    stream->supervisor ACTION request never carries `stream:<user>`
+    (`cmd_gk_request` uses `handed-by:<user>`, never `stream:<user>`)."""
+
+    def _step1_window(self):
+        t = read(SKILL)
+        i = t.index("### 1. Pick up the queue")
+        j = t.index("### 2. Get the work in front of you")
+        return t[i:j]
+
+    def _step1_query_line(self):
+        # the ACTUAL `gh issue list ... --search "..."` statement in step 1 --
+        # identified by the stream label it scopes on, NOT by the labels under
+        # test (else the finder itself would beg the question).
+        for line in self._step1_window().splitlines():
+            s = line.strip()
+            if s.startswith("gh issue list") and "--search" in s and "label:stream" in s:
+                return s
+        return ""
+
+    def test_step1_QUERY_LINE_itself_unions_both_labels(self):
+        # #498 review (MAJOR, teeth): the query STATEMENT must carry BOTH labels
+        # -- not merely the surrounding prose. A revert of only the query to
+        # rfr-only (leaving the "why both labels" paragraph intact) must still
+        # FAIL here. (internals-skills-modules.md: assert the STATEMENT, never a
+        # window that also contains the prose that names the token.)
+        q = self._step1_query_line()
+        self.assertTrue(q, "no step-1 `gh issue list --search` query line found")
+        self.assertIn("ready-for-review", q)
+        self.assertIn("needs-gatekeeper", q)
+        self.assertIn("stream:", q)
+
+    def test_step1_query_unions_both_handoff_labels_stream_scoped(self):
+        w = self._step1_window()
+        self.assertIn("ready-for-review", w)
+        self.assertIn("needs-gatekeeper", w)
+        self.assertIn("stream:", w)
+
+    def test_step1_never_lists_ready_for_review_as_the_lone_queue_label(self):
+        # the exact rfr-only shape the bug was: `--label ready-for-review`
+        # as the whole queue signal, `needs-gatekeeper` nowhere in the query.
+        w = self._step1_window()
+        self.assertNotIn("--label ready-for-review --label stream", w)
+
+    def test_carve_out_stream_arrives_via_needs_gatekeeper(self):
+        flat = " ".join(read(SKILL).split())
+        self.assertIn("needs-gatekeeper", flat)
+        self.assertTrue(
+            "carve-out" in flat.lower(),
+            "process-subdev must name the carve-out stream that arrives via "
+            "needs-gatekeeper")
+
+    def test_comments_are_never_a_queue_signal_labels_carry_queue_state(self):
+        flat = " ".join(read(SKILL).split()).lower()
+        self.assertIn("never a queue signal", flat)
+        self.assertIn("labels carry queue state", flat)
+
+    def test_goal_continuation_stop_proof_counts_needs_gatekeeper(self):
+        # step 7's continuation /goal must not declare the queue done while a
+        # needs-gatekeeper hand-off of this stream is still open.
+        for line in read(SKILL).splitlines():
+            if line.startswith("/goal The"):
+                self.assertIn("needs-gatekeeper", line)
+                return
+        self.fail("no /goal continuation line found in process-subdev SKILL.md")
+
+    def test_close_removes_whichever_handoff_label_was_applied(self):
+        # a carve-out hand-off closes under needs-gatekeeper, not
+        # ready-for-review -- the close step must clear the hand-off label
+        # that was actually applied, not only ready-for-review.
+        flat = " ".join(read(SKILL).split())
+        i = flat.index("close the stream's tickets with merge")
+        # the "remove <label>" clause is AFTER the close phrase -> look forward.
+        window = flat[i:i + 220]
+        self.assertIn("needs-gatekeeper", window)
+
+
+class TestCrossStreamProtocolRecordsCarveOutHandoff(TestCase):
+    """#498 -- the canonical cross-stream protocol (rule 7's home) must record
+    that a carve-out stream's HAND-OFF arrives via `needs-gatekeeper`, DISTINCT
+    from a bare `needs-gatekeeper` stream->supervisor ACTION request (which
+    never carries `stream:<user>`). That distinction is what makes the review
+    queue's `(ready-for-review UNION needs-gatekeeper) AND stream:<stream>`
+    union safe."""
+
+    def test_carve_out_handoff_documented(self):
+        flat = " ".join(read(CROSS_STREAM).split())
+        self.assertIn("needs-gatekeeper", flat)
+        self.assertTrue(
+            "carve-out" in flat.lower(),
+            "cross-stream protocol must record the carve-out hand-off path")
+
+    def test_action_request_distinguished_by_stream_label(self):
+        # #498 review (rev 2, MINOR): assert the DISTINGUISHER, not just that
+        # `stream:` appears somewhere near (which is near-tautological). The
+        # carve-out-vs-action-request rule turns on the action-request carrying
+        # `handed-by:<user>` and NEVER `stream:<user>`. All four tokens are
+        # unique to rule 8 in this file, so a whole-file assertion locks the
+        # distinction without a drift-prone fixed-width window.
+        flat = " ".join(read(CROSS_STREAM).split())
+        self.assertIn("carve-out", flat.lower())
+        self.assertIn("stream:", flat)
+        self.assertIn("handed-by", flat)
+        self.assertIn("action-request", flat.lower().replace(" ", "-"))
 
 
 if __name__ == "__main__":
