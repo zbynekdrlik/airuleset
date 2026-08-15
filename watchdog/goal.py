@@ -1559,7 +1559,30 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         watchdog._janitor_clear_watch(state, pid)
         mode = "stash"
     else:
-        watchdog.send_continue(pid, text, run)
+        # #490 -- verified transcript-proof send (the piece the raw
+        # `send_continue` never had): a swallowed Enter must NOT be booked as
+        # delivered, and its text must be restored off the user's box. Mark
+        # janitor provenance BEFORE the send (like the stash branch above) so
+        # a residual stuck send is reclaimable, cleared only on success -- the
+        # bare branch never did this, a second reason the live incident sat.
+        watchdog._janitor_mark_watch(state, pid, now)
+        if not watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
+                                      logs=logs):
+            # Unverified submit -- transient, retried next sweep, and it must
+            # NOT consume the ln/llast budget (a refused attempt is not a
+            # nudge). It DOES advance the consecutive-abort streak, so a
+            # permanently-unverified lane still reaches the give-up ping above
+            # -- the SAME escalation shape the stash-abort branch uses
+            # (#442-review F2).
+            rec["lna"] = rec.get("lna", 0) + 1
+            back = _lane_stash_abort_backoff(rec["lna"])
+            rec["lnpark"] = now + back
+            logs.append("lane-occupancy %s submit-unverified (%d/%d) -> backoff "
+                        "%ds, park until %d"
+                        % (loc, rec["lna"], GOAL_LANE_MAX_STASH_ABORTS,
+                           back, int(rec["lnpark"])))
+            return logs, True
+        watchdog._janitor_clear_watch(state, pid)
         mode = "typed"
     rec.pop("lna", None)
     rec.pop("lnpark", None)   # #479 -- successful delivery clears abort backoff

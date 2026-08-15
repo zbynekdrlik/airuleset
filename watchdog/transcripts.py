@@ -152,6 +152,50 @@ def transcript_last_error(path):
     return ""
 
 
+def _submit_confirmed(tpath, baseline_size, text):
+    """True iff the transcript at `tpath` GREW past `baseline_size` bytes with
+    a NEW top-level `user` turn whose text carries `text` — the STRUCTURED
+    proof that CC actually ACCEPTED a submit (#490 / #486 delivery bullet).
+
+    Reads only the bytes appended AFTER `baseline_size` (a byte offset the
+    caller records immediately before it types), so a prior identical nudge
+    that was already in the transcript BEFORE the send can never false-
+    positive. It looks for the exact entry `transcript_last_error`'s docstring
+    documents: CC writes a plain-text `user` turn the instant it ACCEPTS a
+    submit (before any response exists); a SWALLOWED submit writes nothing at
+    all — so the presence of this entry, and only it, distinguishes a landed
+    submit from a lost keystroke. `isMeta` / `tool_result` `user` entries are
+    NOT typed prompts and are skipped (the same grammar `_last_human_prompt_ts`
+    parses).
+
+    Fails SAFE toward False on any read/parse problem: an unconfirmable submit
+    is treated as not-delivered (retryable), never claimed delivered — the
+    exact direction the delivery-verify caller needs so it never leaves foreign
+    text behind on an unreadable transcript."""
+    want = (text or "").strip()
+    if not want:
+        return False
+    try:
+        with open(tpath, "rb") as f:
+            f.seek(max(0, int(baseline_size)))
+            raw = f.read()
+    except (OSError, ValueError, TypeError):
+        return False
+    for ln in raw.splitlines():
+        try:
+            e = json.loads(ln)
+        except Exception:
+            continue            # a partial line at the seek boundary, or noise
+        if not isinstance(e, dict) or e.get("type") != "user" or e.get("isMeta"):
+            continue
+        if _entry_has_tool_result(e):
+            continue            # a harness tool-result feed, not a typed submit
+        et = (_entry_text(e) or "").strip()
+        if et and want in et:
+            return True
+    return False
+
+
 def transcript_current_context(path, max_lines=200):
     """The session's CURRENT context size — cache_read_input_tokens +
     cache_creation_input_tokens off the newest assistant usage entry.

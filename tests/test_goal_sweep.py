@@ -1203,7 +1203,8 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         t = now - marker_age_s
         os.utime(marker, (t, t))
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_ARMED_CAP)
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=tpath)
         with m.patch("airuleset.resolve_authority", return_value="full"):
             logs, owns = goal.goal_lane_occupancy_nudge(
                 now, tmux, {}, sid, self.CWD, "111", GOAL_ARMED_CAP,
