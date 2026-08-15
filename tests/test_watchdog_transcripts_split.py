@@ -28,8 +28,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import watchdog
-import watchdog.transcripts as transcripts
+import watchdog  # noqa: E402
+import watchdog.transcripts as transcripts  # noqa: E402
 
 # Every name moved into transcripts.py (18 functions + 7 module-level
 # constants / regexes). Kept explicit — a hand-maintained list is the point:
