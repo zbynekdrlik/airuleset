@@ -468,6 +468,133 @@ class TestItem95_Item12NewSkillTriggers(TestCase):
             self.assertNotIn("Playbook Cleanup", ctx)
 
 
+class TestItem95_RootCauseNewSkillTriggers(TestCase):
+    """#95 item 12 root-cause re-measure (2026-08-15). The 2026-08-15 injection
+    re-measure (issue #95, SAME yardstick as comment 5223460819) found three
+    MODEL-VISIBLE skills at ZERO reach on this box with NO trigger row at all --
+    the exact gap the first item-12 pass closed for fast-iterate/meeting-analysis/
+    playbook-cleanup, reopened by three skills added AFTER that pass:
+    cloudflare-api-tokens, claude-code-log (#420) and odoo-discuss-xmlrpc (#465).
+    None is a delete candidate (each has a validated dormancy reason); the
+    FREEZE-safe fix is the SAME as item 12 -- a real action trigger from each
+    skill's OWN 'when to use' text.
+
+    Each pattern is validated against `inject-situational-rule.sh`'s own
+    quote-stripping AND against real false positives (adversarial review, this
+    pass): cloudflare's reliable Bash catch is the UNQUOTED `api.cloudflare.com`
+    / `wrangler` (a quoted URL is stripped); odoo binds to Write|Edit ONLY (the
+    `message_post` token in the CONTENT, never stripped for a non-Bash tool — a
+    Bash surface caught `grep message_post` far more than any real post); and
+    claude-code-log's `session` arms REQUIRE an html/markdown format so they no
+    longer fire on "export a session cookie" / "browse the session logs"."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def _prompt(self, text, session_id="sess-rootcause"):
+        payload = json.dumps(
+            {
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": text,
+            }
+        )
+        env = dict(os.environ, TMPDIR=self.tmpdir)
+        return subprocess.run(
+            ["bash", str(HOOK)], input=payload, capture_output=True, text=True, env=env
+        )
+
+    def _injected_prompt(self, result):
+        out = result.stdout.strip()
+        if not out:
+            return None
+        data = json.loads(out)
+        spec = data["hookSpecificOutput"]
+        assert spec["hookEventName"] == "UserPromptSubmit", spec
+        return spec["additionalContext"]
+
+    def test_all_three_new_topics_have_a_trigger_row(self):
+        bodies = {r[3] for r in load_conf()}
+        for skill in ["cloudflare-api-tokens", "claude-code-log", "odoo-discuss-xmlrpc"]:
+            self.assertIn(
+                f"skills/{skill}/SKILL.md",
+                bodies,
+                f"{skill} has no automatic load trigger — #95 item 12 root-cause pass",
+            )
+
+    def test_cloudflare_api_call_injects_the_skill(self):
+        ctx = injected(
+            run({"command": "curl https://api.cloudflare.com/client/v4/zones"},
+                tmpdir=self.tmpdir)
+        )
+        self.assertIsNotNone(ctx, "a Cloudflare API call must load the token skill")
+        # a string that exists ONLY in cloudflare-api-tokens' own body
+        self.assertIn("Using Cloudflare API Tokens", ctx)
+
+    def test_wrangler_command_injects_the_cloudflare_skill(self):
+        ctx = injected(run({"command": "wrangler deploy"}, tmpdir=self.tmpdir))
+        self.assertIsNotNone(ctx, "the Cloudflare CLI must load the token skill")
+        self.assertIn("Using Cloudflare API Tokens", ctx)
+
+    def test_odoo_message_post_write_injects_the_skill(self):
+        ctx = injected(
+            run(
+                {"file_path": "/repo/importer.py",
+                 "content": "channel.message_post(body=html, body_is_html=True)"},
+                tool_name="Write",
+                tmpdir=self.tmpdir,
+            )
+        )
+        self.assertIsNotNone(ctx, "writing a message_post call must load the odoo recipe")
+        # a string that exists ONLY in odoo-discuss-xmlrpc' own body
+        self.assertIn("Odoo Discuss over XML-RPC", ctx)
+
+    def test_claude_code_log_export_prompt_injects_the_skill(self):
+        r = self._prompt("Please export this session as HTML so I can share it")
+        ctx = self._injected_prompt(r)
+        self.assertIsNotNone(ctx, "a transcript-export request must load claude-code-log")
+        # a string that exists ONLY in claude-code-log's own body (not the
+        # injection wrapper, which always carries the topic name) -- an
+        # adversarial-review finding: asserting "claude-code-log" alone is a
+        # tautology satisfied by source="airuleset:claude-code-log".
+        self.assertIn("Browsing / Exporting / Archiving Transcripts", ctx)
+
+    def test_claude_code_log_slovak_prompt_injects_the_skill(self):
+        r = self._prompt("exportuj tento session do html prosim")
+        ctx = self._injected_prompt(r)
+        self.assertIsNotNone(ctx, "a Slovak transcript-export request must load the skill")
+        self.assertIn("Browsing / Exporting / Archiving Transcripts", ctx)
+
+    def test_unrelated_bash_does_not_inject_the_cloudflare_skill(self):
+        r = run({"command": "cat cloudflare-notes.md"}, tmpdir=self.tmpdir)
+        ctx = injected(r)
+        if ctx is not None:
+            self.assertNotIn("Using Cloudflare API Tokens", ctx)
+
+    def test_unrelated_prompt_does_not_inject_claude_code_log(self):
+        r = self._prompt("start a new session please, ako sa mas")
+        ctx = self._injected_prompt(r)
+        if ctx is not None:
+            self.assertNotIn("Browsing / Exporting / Archiving Transcripts", ctx)
+
+    def test_session_word_without_format_does_not_inject_claude_code_log(self):
+        # adversarial-review 🟡: the `session` arms MUST require an html/markdown
+        # format so a session cookie / session data / "archive this session"
+        # no longer spuriously loads the 4.2 KB transcript skill.
+        for prompt in [
+            "how do I export a session cookie in curl?",
+            "export session data to a CSV for analytics",
+            "browse the session logs on the server",
+            "let's archive this session and move on",
+        ]:
+            r = self._prompt(prompt, session_id="fp-" + prompt[:12])
+            ctx = self._injected_prompt(r)
+            if ctx is not None:
+                self.assertNotIn("Browsing / Exporting / Archiving Transcripts", ctx, prompt)
+
+
 class TestWiring(TestCase):
     def test_hook_is_wired_on_pretooluse(self):
         conf = json.loads((ROOT / "settings" / "hooks.json").read_text())
