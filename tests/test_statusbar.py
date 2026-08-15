@@ -2526,5 +2526,38 @@ class GraphqlBudgetGuard(unittest.TestCase):
                                  airuleset.GH_GRAPHQL_REFRESH_FLOOR, bad)
 
 
+class ObligationCountSafeguard(unittest.TestCase):
+    """#478 — obligation_count is goal_dark_watch's auto-re-arm gate. It must
+    return the WORKABLE `open` count (which the cache computes as
+    len(workable_rows) - gk via airuleset._partition_user_waiting) and NEVER
+    fold the user-waiting (U-bucket) tickets back in — a user-waiting-only
+    backlog must read as open==0 so a dead /goal loop is never re-armed for
+    work only the user can unblock."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.cwd = "/home/x/devel/oblig"
+
+    def test_open_is_the_workable_count_excluding_user_waiting(self):
+        _seed_cache(self.home, self.cwd, open_n=0, user_waiting=3, ts=1500)
+        open_n, ts = statusbar.obligation_count(self.cwd, home=self.home)
+        self.assertEqual(open_n, 0, "a user-waiting-only backlog reads open==0")
+        self.assertEqual(ts, 1500)
+
+    def test_positive_workable_open_is_reported_with_its_ts(self):
+        _seed_cache(self.home, self.cwd, open_n=5, user_waiting=2, ts=1500)
+        self.assertEqual(statusbar.obligation_count(self.cwd, home=self.home),
+                         (5, 1500))
+
+    def test_absent_or_null_open_reads_as_none(self):
+        self.assertEqual(statusbar.obligation_count(self.cwd, home=self.home),
+                         (None, None))                 # no cache at all
+        _seed_cache(self.home, self.cwd, open_n=None, user_waiting=1)
+        self.assertEqual(statusbar.obligation_count(self.cwd, home=self.home),
+                         (None, None))                 # open is null
+
+
 if __name__ == "__main__":
     unittest.main()

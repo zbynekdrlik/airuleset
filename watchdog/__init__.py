@@ -8634,7 +8634,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 now, run=run, state=state, send_fn=send_fn,
                 dry_run=dry_run, projects_dir=projects_dir,
                 sleep_fn=sleep_fn, time_fn=time_fn,
-                sweep_deadline=tail_deadline)
+                sweep_deadline=tail_deadline,
+                requests_path=goal_requests_path)
         except Exception as e:
             logs.append("goal-dark-watch error: %r" % (e,))
         try:

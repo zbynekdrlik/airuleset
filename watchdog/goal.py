@@ -174,30 +174,71 @@ def _save_goal_requests(d, path=None):
         return False
 
 
+# The two proven writers of the goal-request store: the user's own
+# `goal-arm --self` callback (origin "self-callback") and #478's
+# `goal_dark_watch` auto-re-arm (this weak, watchdog-INITIATED origin).
+_GOAL_REARM_ORIGIN = "dark-rearm"
+_GOAL_SELF_CALLBACK_ORIGIN = "self-callback"
+
+
 def record_goal_request(session, cwd, text, authority, now=None, path=None,
                         origin=None):
-    """Record a pending `/goal` arm request for `session` -- called ONLY by
-    the one proven origin (`goal-arm --self`). Overwrites any earlier
-    pending request for the SAME session, except its `ts`: `ts` is set
-    ONCE, on the call that CREATES the entry, and preserved UNCONDITIONALLY
-    on every later re-record for the same still-pending session
-    (`cwd`/`origin`/`authority`/`text` always take the newest call's
-    values) -- the SAME #400 non-refreshable age-cap invariant
-    `compact.record_compact_request` established, for the identical reason:
-    a request whose anchor can be refreshed by an ordinary re-record never
-    actually ages out. Fail-safe (never raises). Returns True on success."""
+    """Record a pending `/goal` arm request for `session`. TWO writers since
+    #478: the user's `goal-arm --self` callback (origin "self-callback") AND
+    `goal_dark_watch`'s auto-re-arm (origin "dark-rearm"). Overwrites any
+    earlier pending request for the SAME session, with two protections a
+    single-writer store never needed (#478 adversarial-review MAJOR,
+    mirroring the identical `compact.record_compact_request` #402-review
+    MAJOR-1 fix):
+
+      * DOWNGRADE REFUSED — a watchdog `dark-rearm` NEVER overwrites a
+        still-pending entry from any OTHER origin. A pending request means a
+        delivery is already being attempted; clobbering the user's own
+        `self-callback` arm with the watchdog's guess would replace its
+        text/authority AND subject the user's explicit arm to the
+        recent-human gate (which the active user always trips) -> silent
+        expiry of the user's arm. The prior entry is kept entirely intact.
+      * `ts` is otherwise the #400 non-refreshable age-cap anchor: set ONCE
+        on create, preserved on every same-origin re-record (a request whose
+        anchor can be refreshed by an ordinary automatic re-record never
+        ages out). The ONE exception is an UPGRADE from `dark-rearm` to a
+        real user callback: an explicit user `/autopilot` is a genuinely new
+        request and gets a FRESH ts, so it is never judged expired against
+        the stale watchdog anchor -- and it cannot drive the #400
+        refresh-forever shape because it needs a human action each time.
+
+    `cwd`/`origin`/`authority`/`text` otherwise take the newest call's
+    values. Fail-safe (never raises). Returns True on success (INCLUDING a
+    refused downgrade, which is a successful no-op — the pending entry
+    stands)."""
     session = str(session or "").strip()
     if not session:
         return False
     now = time.time() if now is None else now
     d = load_goal_requests(path)
     prior = d.get(session)
-    ts = prior.get("ts") if isinstance(prior, dict) and prior.get("ts") is not None \
-        else int(now)
+    new_origin = str(origin or "").strip()
+    prior_origin = (prior.get("origin") if isinstance(prior, dict) else "") or ""
+
+    # DOWNGRADE REFUSED: never let a dark-rearm clobber a still-pending entry
+    # of a different (user/self-callback) origin.
+    if prior is not None and new_origin == _GOAL_REARM_ORIGIN \
+            and prior_origin != _GOAL_REARM_ORIGIN:
+        return True                              # user's arm stands, untouched
+
+    # UPGRADE (dark-rearm -> a real user callback) gets a FRESH ts anchor;
+    # every other re-record preserves the #400 non-refreshable anchor.
+    upgrade_from_rearm = (prior_origin == _GOAL_REARM_ORIGIN
+                          and new_origin and new_origin != _GOAL_REARM_ORIGIN)
+    if isinstance(prior, dict) and prior.get("ts") is not None \
+            and not upgrade_from_rearm:
+        ts = prior.get("ts")
+    else:
+        ts = int(now)
     d[session] = {
         "cwd": str(cwd or ""),
         "ts": ts,
-        "origin": str(origin or "").strip(),
+        "origin": new_origin,
         "authority": str(authority or "").strip(),
         "text": str(text or ""),
     }
@@ -455,7 +496,7 @@ _GOAL_TERMINAL_WORDS = frozenset((
 
 def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                  now=None, state=None, request_ts=None, send_fn=None,
-                 dry_run=False, sleep_fn=None, logs=None):
+                 dry_run=False, sleep_fn=None, logs=None, origin=None):
     """Evaluate every arm-delivery condition for `sid` ONCE and act. Called
     from BOTH `_goal_sync_attempt` (the CLI's own immediate synchronous
     attempt) AND `goal_sweep` (the periodic re-evaluation of a still-
@@ -480,9 +521,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                         LEAVES the request pending for the
                                         next periodic sweep.
 
-    Deliberately does NOT check `_goal_autoarm_recent_human_activity` --
-    see this module's own header docstring for why that would be a
-    structurally-always-refuses bug here, not a safety net."""
+    Deliberately does NOT check `_goal_autoarm_recent_human_activity` for
+    the normal (user-`/autopilot`) origin -- see this module's own header
+    docstring for why that would be a structurally-always-refuses bug here,
+    not a safety net. The #478 auto-re-arm origin (`origin=="dark-rearm"`)
+    is the exception: it IS watchdog-initiated, so it DOES honour that gate
+    (`skip:recent-human`) exactly like the lane nudge."""
     now = now if now is not None else time.time()
     if watchdog._owner_disabled("goal"):
         _log_goal_sync("SKIP disabled-by-owner sid=%s cwd=%s" % (sid, cwd))
@@ -536,6 +580,31 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                 _log_goal_sync("DROP cleared-after-request sid=%s cwd=%s"
                                % (sid, cwd))
                 return "drop:cleared-after-request"
+        # #478 -- a watchdog-INITIATED auto-re-arm (origin="dark-rearm") must
+        # honour the recent-human gate at the keystroke point, UNLIKE the
+        # user's own /autopilot callback (whose origin IS the user). Never
+        # type /goal into a pane a human just touched -- they may have
+        # deliberately stopped the loop without a `/goal clear`. Left pending
+        # (a "skip:" word) so a later sweep re-tries once the human leaves,
+        # or the 30-min age cap eventually expires it with the "arm failed"
+        # ping. `tpath` is guaranteed defined here (pane resolution above
+        # already required an active transcript).
+        if origin == _GOAL_REARM_ORIGIN:
+            recent, reason = watchdog._goal_autoarm_recent_human_activity(
+                sid, tpath, now)
+            if recent:
+                _log_goal_sync("SKIP recent-human(dark-rearm) sid=%s cwd=%s -> %s"
+                               % (sid, cwd, reason))
+                return "skip:recent-human"
+    elif origin == _GOAL_REARM_ORIGIN:
+        # #478 review MINOR — no active transcript (a delete/archive race
+        # between pane resolution's own transcript match and this re-query)
+        # means the recent-human gate cannot run. For the ONE watchdog-
+        # INITIATED origin, refuse on unprovable state rather than type
+        # blind. Non-terminal "skip:" -> stays pending; a later sweep (or the
+        # 30-min age cap) resolves it.
+        _log_goal_sync("SKIP no-transcript(dark-rearm) sid=%s cwd=%s" % (sid, cwd))
+        return "skip:no-transcript"
 
     # Tri-state already-armed check.
     armed = watchdog.pane_goal_armed(captured)
@@ -613,7 +682,7 @@ def _goal_sync_attempt(sid, cwd, text, authority, origin, run=None,
                         entry.get("authority", authority), run=run,
                         projects_dir=projects_dir, now=now_fn(), state=state,
                         request_ts=req_ts, send_fn=send_fn, dry_run=dry_run,
-                        sleep_fn=sleep_fn)
+                        sleep_fn=sleep_fn, origin=entry.get("origin", origin))
     if word in _GOAL_TERMINAL_WORDS:
         clear_goal_request(sid, path=requests_path)
     return word
@@ -660,7 +729,8 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
         word = deliver_goal(sid, cwd, text, authority, run=run,
                             projects_dir=projects_dir, now=now, state=state,
                             request_ts=entry.get("ts"), send_fn=send_fn,
-                            dry_run=dry_run, sleep_fn=sleep_fn)
+                            dry_run=dry_run, sleep_fn=sleep_fn,
+                            origin=entry.get("origin"))
         if word in _GOAL_TERMINAL_WORDS:
             clear_goal_request(sid, path=requests_path)
         if word == "sent":
@@ -741,9 +811,36 @@ def _default_obligation_fn(cwd):
         return None, None
 
 
+def _default_rearm_fn(cwd):
+    """Real (text, authority) source for `goal_dark_watch`'s #478 auto-re-arm:
+    the installed `/goal` template for this cwd's authority profile. Mirrors
+    `_default_obligation_fn` — lazily imported and FULLY guarded; any failure
+    degrades to a None `text`, which the caller reads as 'template unresolved'
+    and falls back to a ping (never a blank arm).
+
+    #478 review MINOR — an UNEXPECTED `resolve_authority` failure fails toward
+    the PING (returns no template), NEVER UP to `full`: typing a full-
+    authority (merge-to-main) `/goal` template into a reduced-authority
+    stream box would be far worse than one extra ping. `resolve_authority`'s
+    OWN deliberate default for an unmapped user stays authoritative when it
+    returns normally; a falsy authority makes `goal_template_for_authority`
+    return None on its own, which also falls back to the ping."""
+    try:
+        import airuleset
+        authority = airuleset.resolve_authority(cwd)
+    except Exception:
+        return None, None
+    try:
+        text = goal_template_for_authority(authority)
+    except Exception:
+        text = None
+    return (text or None), authority
+
+
 def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                     projects_dir=None, sleep_fn=None, time_fn=None,
-                    sweep_deadline=None, obligation_fn=None):
+                    sweep_deadline=None, obligation_fn=None, rearm_fn=None,
+                    requests_path=None):
     """#403 STEP 0 confirmed #172's own sweep_deadline/tail_deadline
     budget-sharing mechanism must survive this collapse -- unlike
     `goal_sweep` (bounded by the tiny pending-arm-request count),
@@ -762,7 +859,16 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     the per-cwd tickets-status cache) is the injected death-vs-achievement
     source for the staged re-ping gate below -- only a positive, fresh
     `open > 0` lets a persistently-dark goal be RE-pinged past its first
-    ping."""
+    ping.
+
+    `rearm_fn(cwd) -> (text, authority)` / `requests_path` (#478; defaults
+    `_default_rearm_fn` and `goal_requests_path()`) drive the auto-re-arm of
+    the dark-DIED branch: on a genuinely WORKABLE cache (the SAME `open > 0
+    AND fresh` gate), instead of pinging, this WRITES a goal-arm request for
+    job 9 (`goal_sweep`) to deliver via the verified keystroke path -- this
+    function itself STILL types nothing. Reverses #403 for the dark-died
+    branch ONLY; a user-CLEARED goal (mark != "set") never reaches this
+    branch at all."""
     logs = []
     if watchdog._owner_disabled("goal"):
         logs.append("goal jobs DISABLED by owner flag "
@@ -845,14 +951,24 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             logs.append("dark-watch %s sid=%s -> first observation, debouncing"
                         % (loc, sid))
             continue
-        # #459 -- STAGED re-ping. The FIRST ping of an episode fires ALWAYS
-        # (byte-for-byte as #403 shipped it). LATER re-pings of a STILL-dark
-        # goal fire on the widening GOAL_DARK_REPING_SCHEDULE_S, but ONLY
-        # while the per-cwd obligation cache confirms work still remains
-        # (open > 0, fresh) -- otherwise stay SILENT (an achieved loop is
-        # transcript-identical to a stall, so an unconfirmed re-ping would
-        # nag every completed backlog). Hard-capped per episode. Still zero
-        # keystrokes, ever.
+        # #459/#478 -- CONFIRMED silently-dead loop. #459 shipped a staged
+        # Discord re-ping here; #478 (user 2026-08-15) reverses #403 for THIS
+        # dark-died branch ONLY: when the per-cwd obligation cache proves
+        # genuinely WORKABLE tickets remain, AUTO-RE-ARM the loop (record a
+        # goal-arm request for job 9 to deliver via the verified keystroke
+        # path) instead of merely pinging. The safeguard is the SAME #459
+        # cache gate reused verbatim (open>0 AND fresh) -- which since #468
+        # already excludes an empty backlog, a user-waiting-only (U-bucket)
+        # backlog, AND skip-only tickets, so it IS the mandated poistka by
+        # construction. A user-CLEARED goal never reaches here (the
+        # mark != "set" gate above already skipped it), so #478 revives ONLY
+        # the death-by-outage path, never a deliberate user clear. This
+        # function STILL types nothing -- it only WRITES the request; the
+        # recent-human keystroke gate lives at the delivery point
+        # (`deliver_goal`, origin-gated). The FIRST ping of the ping-FALLBACK
+        # fires ALWAYS; a LATER re-ping needs a fresh workable cache -- else
+        # stay SILENT (an achieved loop is transcript-identical to a stall).
+        # Both actions share the SAME widening schedule + per-episode cap.
         prec = pinged_state.get(sid)
         is_first = not (isinstance(prec, dict) and prec.get("mark_ts") == mark_ts)
         if is_first:
@@ -865,11 +981,44 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                                                GOAL_DARK_REPING_SCHEDULE_S)
             if not due:
                 continue                          # too soon this stage
-            open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
-            fresh = (cts is not None
-                     and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
-            if not (isinstance(open_n, int) and open_n > 0 and fresh):
-                continue                          # can't confirm work -- no nag
+
+        open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
+        fresh = (cts is not None
+                 and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
+        workable = isinstance(open_n, int) and open_n > 0 and fresh
+
+        # #478 -- workable backlog AND a resolvable /goal template: RE-ARM.
+        # A None `text` (template unresolvable -- SKILL.md gone / over the
+        # char cap) means we cannot auto-fix, so fall through to the ping.
+        rearm_text = rearm_auth = None
+        if workable:
+            rearm_text, rearm_auth = (rearm_fn or _default_rearm_fn)(cwd)
+        if workable and rearm_text:
+            if dry_run:
+                # Honest dry-run (#478 review MINOR): a diagnostic sweep must
+                # neither WRITE the request nor CONSUME an attempt slot
+                # (`pinged_state` is persisted by run_once's unconditional
+                # save_state), nor claim "recorded" when nothing was.
+                logs.append(
+                    "dark-watch %s sid=%s -> AUTO-RE-ARM (#478) would record "
+                    "(dry-run, open=%s authority=%s)"
+                    % (loc, sid, open_n, rearm_auth))
+                continue
+            pinged_state[sid] = {"mark_ts": mark_ts, "count": count, "last": now}
+            logs.append(
+                "dark-watch %s sid=%s -> AUTO-RE-ARM (#478) recorded "
+                "(open=%s authority=%s attempt #%d)"
+                % (loc, sid, open_n, rearm_auth, count))
+            record_goal_request(sid, cwd, rearm_text, rearm_auth, now=now,
+                                origin=_GOAL_REARM_ORIGIN, path=requests_path)
+            continue
+
+        # Ping FALLBACK: not workable (empty / user-waiting-only / stale-or-
+        # missing cache) OR workable-but-template-unresolvable (can't auto-fix
+        # -> tell the user). A subsequent re-ping still requires a fresh
+        # workable cache; otherwise stay SILENT.
+        if not is_first and not workable:
+            continue                              # can't confirm work -- no nag
         pinged_state[sid] = {"mark_ts": mark_ts, "count": count, "last": now}
         logs.append(
             "dark-watch %s sid=%s -> %s" % (
