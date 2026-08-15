@@ -2614,6 +2614,112 @@ class RunOnceSubagentVisibility(unittest.TestCase):
                          "a repeated nudge#1 here means the dedup state was wiped "
                          "and the SAME nudge fired again from scratch: %r" % logs3)
 
+    # --- #491: resolve once the supervisor has acknowledged the dead worker ----
+
+    @staticmethod
+    def _iso(epoch):
+        return datetime.datetime.fromtimestamp(
+            epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def test_subagent_apierror_resolved_when_supervisor_acknowledges(self):
+        # (#491) A SALVAGEABLE dead worker earns the full nudge cycle — but
+        # once the SUPERVISOR has demonstrably PROCESSED nudge#1 (its own
+        # transcript carries a GENUINE assistant turn dated AFTER that
+        # nudge, i.e. it responded to the injected stuck-check), it has SEEN
+        # the death. A dead worker never recovers, so re-nudging from here
+        # delivers nothing and costs a paid turn each time (the reporting
+        # incident's 244k-token resurrect-to-silence workaround). The
+        # detector must mark the worker RESOLVED and go permanently silent —
+        # NOT fire nudge#2/#3 (which the #287 marker-gap test proves the
+        # dedup state otherwise accumulates toward).
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        now1 = time.time()
+        tpath = proj / enc / (self.SID + ".jsonl")
+        subdir = proj / enc / self.SID / "subagents"
+        subdir.mkdir(parents=True)
+        spath = subdir / (self.WORKER + ".jsonl")
+        # SALVAGEABLE — a tool_use/tool_result pair (real progress) before the
+        # death, so it earns the FULL nudge cycle, not the at-most-once
+        # unsalvageable path (which is separately tested).
+        _write_jsonl(spath, [_assistant_tooluse(), _user_toolresult(), _assistant_apierror()])
+        death_mtime = now1 - 400            # > GRACE_SECONDS (300)
+        os.utime(spath, (death_mtime, death_mtime))
+        state_path = Path(tmp) / "state.json"
+
+        # sweep 1: supervisor `⏳ WORKING`, has NOT yet responded → nudge #1.
+        _write_jsonl(tpath, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")])
+        os.utime(tpath, (now1 - 10, now1 - 10))
+        logs1, sent1, pings1 = self._run(proj, now1, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs1), logs1)
+
+        # sweep 2: enough elapsed that decide_working WOULD fire nudge#2 — but
+        # the supervisor has since REPLIED to nudge#1 with a genuine assistant
+        # turn dated after it (still `⏳ WORKING` on the NEXT ticket, so the
+        # marker gate stays open — exactly the incident's /goal-loop shape).
+        now2 = now1 + wd.RETRY_INTERVAL_SECONDS + 20
+        _write_jsonl(tpath, [_assistant(
+            "Worker je vybavený — úlohu som prevzal a dokončil sám, push done.\n\n"
+            "⏳ WORKING: pokračujem na ďalšom tickete.",
+            timestamp=self._iso(now1 + 60))])
+        os.utime(tpath, (now2 - 10, now2 - 10))
+        logs2, sent2, pings2 = self._run(proj, now2, state_path, self.IDLE_CAP)
+        self.assertEqual(sent2, [], "must NOT re-nudge a worker the supervisor "
+                                    "already acknowledged: %r" % logs2)
+        self.assertFalse(any(ln.startswith("subagent-apierr-nudge#2") for ln in logs2),
+                         "acknowledged death must resolve, not accumulate nudge#2: %r" % logs2)
+        self.assertTrue(any(ln.startswith("subagent-apierr-resolved") for ln in logs2),
+                        "expected a resolved log line once the supervisor "
+                        "acknowledged: %r" % logs2)
+        self.assertEqual(pings2, [], "resolution goes silent — no escalate ping: %r" % pings2)
+
+        # sweep 3: the resolution is STICKY — still silent even later, with the
+        # supervisor still `⏳ WORKING` and the worker file still in-window.
+        now3 = now2 + wd.RETRY_INTERVAL_SECONDS + 20
+        os.utime(tpath, (now3 - 10, now3 - 10))
+        logs3, sent3, pings3 = self._run(proj, now3, state_path, self.IDLE_CAP)
+        self.assertEqual(sent3, [], "resolution must stay silent (keystrokes): %r" % logs3)
+        self.assertEqual(pings3, [], "resolution must stay silent (pings): %r" % pings3)
+
+    def test_subagent_apierror_nudges_again_when_supervisor_did_not_respond(self):
+        # (#491) The resolution must NOT fire when the supervisor did NOT
+        # respond to nudge#1 — a genuinely unseen nudge (swallowed submit, or
+        # a supervisor whose only later turn PREDATES the nudge) must still
+        # earn nudge#2, preserving the retry-if-unseen safety net.
+        tmp = tempfile_mkdtemp_cleanup(self)
+        proj = Path(tmp) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        now1 = time.time()
+        tpath = proj / enc / (self.SID + ".jsonl")
+        subdir = proj / enc / self.SID / "subagents"
+        subdir.mkdir(parents=True)
+        spath = subdir / (self.WORKER + ".jsonl")
+        _write_jsonl(spath, [_assistant_tooluse(), _user_toolresult(), _assistant_apierror()])
+        death_mtime = now1 - 400
+        os.utime(spath, (death_mtime, death_mtime))
+        state_path = Path(tmp) / "state.json"
+
+        _write_jsonl(tpath, [_assistant("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")])
+        os.utime(tpath, (now1 - 10, now1 - 10))
+        logs1, sent1, pings1 = self._run(proj, now1, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs1), logs1)
+
+        # sweep 2: the supervisor's newest genuine assistant turn is dated
+        # BEFORE nudge#1 (it never responded) → no acknowledgement → nudge#2.
+        now2 = now1 + wd.RETRY_INTERVAL_SECONDS + 20
+        _write_jsonl(tpath, [_assistant(
+            "Bežím ďalej.\n\n⏳ WORKING: čaká na workera.",
+            timestamp=self._iso(now1 - 500))])
+        os.utime(tpath, (now2 - 10, now2 - 10))
+        logs2, sent2, pings2 = self._run(proj, now2, state_path, self.IDLE_CAP)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#2") for ln in logs2),
+                        "an unacknowledged nudge must still retry to nudge#2: %r" % logs2)
+        self.assertFalse(any(ln.startswith("subagent-apierr-resolved") for ln in logs2),
+                         "must NOT resolve without a post-nudge supervisor turn: %r" % logs2)
+
 
 class SubagentTranscriptUnsalvageable(unittest.TestCase):
     """(#287, adversarial-review MAJOR finding) The classifier's bar is
