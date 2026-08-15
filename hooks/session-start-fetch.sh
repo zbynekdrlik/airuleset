@@ -11,6 +11,17 @@ set -euo pipefail
 # operation, a genuinely diverged branch, detached HEAD) is left completely
 # untouched and only reported via a WARNING line.
 
+# #486 G1 — register a structured session heartbeat at startup
+# (~/.claude/session-status/<sid>.json), so the reader sees a session as soon
+# as it boots — before the first turn ends. Reads the SessionStart payload from
+# stdin (nothing else in this hook consumes stdin). Placed BEFORE the git checks
+# so it fires regardless of whether the cwd is a git repo. Best-effort +
+# non-blocking; no consumer yet (G1).
+_HB_INPUT=$(cat 2>/dev/null || echo "")
+_HB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || true)"
+printf '%s' "$_HB_INPUT" | PYTHONPATH="$_HB_DIR" \
+    python3 -m watchdog.session_status --event session_start >/dev/null 2>&1 || true
+
 # Only run if we're in a git repo
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
     exit 0

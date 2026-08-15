@@ -262,6 +262,16 @@ CWD=$(_field '.cwd // empty')
 # the log is whitespace-delimited, so only the logged COPY is squeezed
 CWD_LOG=${CWD// /_}
 
+# #486 G1 — structured session heartbeat for THIS subagent
+# (~/.claude/session-status/<sid>__<agent_id>.json, kind=subagent — the
+# complement to G2's transcript-mtime worker count). Placed BEFORE this hook's
+# own autopilot-worker/agent-id early-exits so EVERY subagent stop is recorded;
+# the producer keys by agent_id so it can never clobber the main <sid>.json.
+# Best-effort + non-blocking; no consumer yet (G1).
+_HB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || true)"
+printf '%s' "$INPUT" | PYTHONPATH="$_HB_DIR" \
+    python3 -m watchdog.session_status --event subagent_stop >/dev/null 2>&1 || true
+
 [ "$AGENT_TYPE" = "autopilot-worker" ] || {
     _decide_log_once_per_session DECLINE "reason=not-autopilot-worker"
     exit 0
