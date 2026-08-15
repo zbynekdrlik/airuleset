@@ -1,8 +1,8 @@
-"""#433 cluster L-A — split lock for cli_statusline_glue.py.
+"""#433 cluster L-A — split lock for cli_deployer_glue.py.
 
 The statusline-shim RENDERING, marketplace-registration glue, and per-box
 skill-subset selector were extracted VERBATIM from airuleset.py into the
-pure-stdlib leaf `cli_statusline_glue.py`, re-exported through airuleset's
+pure-stdlib leaf `cli_deployer_glue.py`, re-exported through airuleset's
 facade. This test proves the three things a leaf extraction must guarantee:
 
   1. the leaf imports STANDALONE in a fresh process, with NO airuleset in
@@ -31,7 +31,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(REPO))
 import airuleset  # noqa: E402
-import cli_statusline_glue as g  # noqa: E402
+import cli_deployer_glue as g  # noqa: E402
 
 MOVED_NAMES = (
     "skill_names_for_user",
@@ -50,7 +50,7 @@ class TestStandaloneImport(unittest.TestCase):
         # A fresh process: import ONLY the leaf, and prove airuleset never got
         # imported as a side effect (no module-level `import airuleset`).
         code = (
-            "import sys; import cli_statusline_glue as g; "
+            "import sys; import cli_deployer_glue as g; "
             "assert 'airuleset' not in sys.modules, 'leaf pulled in airuleset at import'; "
             "assert callable(g.render_caveman_shim); "
             "assert g.MARKETPLACE_SOURCES['caveman'] == 'JuliusBrussee/caveman'; "
@@ -62,7 +62,7 @@ class TestStandaloneImport(unittest.TestCase):
         self.assertIn("OK", r.stdout)
 
     def test_leaf_has_no_module_level_import_airuleset(self):
-        src = (REPO / "cli_statusline_glue.py").read_text(encoding="utf-8")
+        src = (REPO / "cli_deployer_glue.py").read_text(encoding="utf-8")
         for line in src.splitlines():
             if line.strip() == "import airuleset":
                 self.assertTrue(line.startswith("    "),

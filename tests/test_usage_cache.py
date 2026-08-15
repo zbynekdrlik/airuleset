@@ -196,9 +196,9 @@ class TestWiring(TestCase):
 
     def test_statusline_shim_reads_per_model_cache(self):
         # #433 L-A: the caveman statusline shim (CAVEMAN_SHIM_CONTENT) moved
-        # verbatim into cli_statusline_glue.py — the per-model cache-reading
+        # verbatim into cli_deployer_glue.py — the per-model cache-reading
         # logic lives there now, still re-exported via airuleset's facade.
-        src = read("cli_statusline_glue.py")
+        src = read("cli_deployer_glue.py")
         self.assertIn("airuleset-usage-cache.json", src)
         # Iterates cached windows and skips the shared ones (model is None).
         self.assertIn('model = w.get("model")', src)

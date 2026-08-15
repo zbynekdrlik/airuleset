@@ -1,11 +1,11 @@
-"""cli_statusline_glue.py — the deployer's statusline-shim rendering, marketplace
+"""cli_deployer_glue.py — the deployer's statusline-shim rendering, marketplace
 registration glue, and per-box skill-subset selector (#433 cluster L-A).
 
 Extracted VERBATIM from airuleset.py (#404 point 3 module split; #433
 continuation — same verbatim-move + facade-re-export pattern as the H/I/J/K/L1/
 L2 CLI leaves, the A-F watchdog leaves, and the L cli_tmux_provisioning.py /
 cli_binary_installers.py leaves). airuleset.py keeps a single
-`from cli_statusline_glue import (...)` re-export at the old definition site, so
+`from cli_deployer_glue import (...)` re-export at the old definition site, so
 `setup_caveman`'s `render_caveman_shim()` write, `setup_managed_plugins`'
 `_marketplace_names_for` / `MARKETPLACE_SOURCES` / `ensure_marketplace_registered`
 / `CAVEMAN_MARKETPLACE_REPO` calls, `install`/`diff`'s `skill_names_for_user()`

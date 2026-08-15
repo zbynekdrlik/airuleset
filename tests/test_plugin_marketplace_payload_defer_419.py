@@ -38,7 +38,7 @@ AIRULESET = REPO / "airuleset.py"
 # #433 L-A: skill_names_for_user was relocated VERBATIM into this leaf, still
 # re-exported by airuleset.py — a relocation is not a deletion, so the #419
 # skill-subset lock below checks the leaf owns the def AND airuleset.py re-exports it.
-CLI_STATUSLINE_GLUE = REPO / "cli_statusline_glue.py"
+CLI_DEPLOYER_GLUE = REPO / "cli_deployer_glue.py"
 
 # Distinctive substrings of the #419 decision bullet — sampled from its head,
 # the decisive capability facts (no always-on component, settings-defaults not
@@ -112,17 +112,17 @@ class TestKeptDeployerStillExists(unittest.TestCase):
     def test_per_box_skill_subset_kept(self):
         # Fact 4: no per-box subset within one plugin — the deployer's own
         # per-box subset selection stays. #433 L-A relocated the function
-        # VERBATIM into the cli_statusline_glue.py leaf, still re-exported by
+        # VERBATIM into the cli_deployer_glue.py leaf, still re-exported by
         # airuleset.py; a relocation within the deployer is NOT the deletion
         # the #419 lock guards against, so the lock now checks the leaf owns
         # the def AND airuleset.py still re-exports it (both must hold — a
         # future migration deleting either re-opens #419).
         text = self._airuleset()
-        leaf = CLI_STATUSLINE_GLUE.read_text(encoding="utf-8")
+        leaf = CLI_DEPLOYER_GLUE.read_text(encoding="utf-8")
         self.assertTrue(
             "def skill_names_for_user" in leaf,
             "the per-box skill SUBSET function the #419 decision keeps is gone "
-            "from the deployer (cli_statusline_glue.py) — re-open #419",
+            "from the deployer (cli_deployer_glue.py) — re-open #419",
         )
         self.assertTrue(
             "skill_names_for_user as skill_names_for_user" in text,

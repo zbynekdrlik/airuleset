@@ -265,7 +265,7 @@ SKILLS_EXTRA_BY_USER = {
 }
 
 # --- #433 cluster L-A: skill_names_for_user (the per-box skill SUBSET
-# selector) moved to cli_statusline_glue.py — re-exported at the L-A facade
+# selector) moved to cli_deployer_glue.py — re-exported at the L-A facade
 # below (after MANAGED_DISABLED_PLUGINS). It reaches the resident SKILL_NAMES
 # / SKILLS_MAINTAINER_ONLY / SKILLS_FULL_AUTHORITY_ONLY / SKILLS_EXTRA_BY_USER
 # / MAINTAINER_USERS / AUTHORITY_BY_USER registries (kept resident) via a
@@ -287,7 +287,7 @@ SKILLS_EXTRA_BY_USER = {
 # statusLine -> shim. `install` then reconciles enable + marketplace + statusLine
 # on every push, self-healing both machines (the user asked to "put it into
 # maintenance"). See modules/core/machine-identities.md sibling docs + memory.
-# CAVEMAN_MARKETPLACE_REPO moved to cli_statusline_glue.py (#433 L-A, with
+# CAVEMAN_MARKETPLACE_REPO moved to cli_deployer_glue.py (#433 L-A, with
 # MARKETPLACE_SOURCES) — re-exported at the L-A facade below.
 CAVEMAN_PLUGIN_KEY = "caveman@caveman"
 CAVEMAN_SHIM_DEST = CLAUDE_DIR / "airuleset-caveman-statusline.sh"
@@ -429,7 +429,7 @@ MANAGED_DISABLED_PLUGINS = (
 )
 # --- #433 cluster L-A: the statusline-shim RENDERING, marketplace-
 # registration glue, and per-box skill-subset selector moved VERBATIM to
-# cli_statusline_glue.py — re-exported here so every existing reference
+# cli_deployer_glue.py — re-exported here so every existing reference
 # (setup_caveman's render_caveman_shim() write, setup_managed_plugins'
 # _marketplace_names_for / MARKETPLACE_SOURCES / ensure_marketplace_registered
 # / CAVEMAN_MARKETPLACE_REPO calls, install/diff's skill_names_for_user()
@@ -437,7 +437,7 @@ MANAGED_DISABLED_PLUGINS = (
 # unchanged. CAVEMAN_STATUSLINE_COMMAND stays resident just below — a module-
 # level f-string over the resident CAVEMAN_SHIM_DEST path (the caveman WIRING
 # that CONSUMES the shim is #433 step L-C).
-from cli_statusline_glue import (  # noqa: E402
+from cli_deployer_glue import (  # noqa: E402
     skill_names_for_user as skill_names_for_user,
     CAVEMAN_MARKETPLACE_REPO as CAVEMAN_MARKETPLACE_REPO,
     OFFICIAL_MARKETPLACE_SOURCE as OFFICIAL_MARKETPLACE_SOURCE,
