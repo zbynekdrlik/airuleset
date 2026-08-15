@@ -394,6 +394,34 @@ class TestGateStaysOutOfTheWay(_GateBase):
                          "invisible (#124)")
 
 
+class TestCrossRunStatePollutionIsIsolated(_GateBase):
+    """#494 -- the run-card gate keys its `/tmp/airuleset-runcard-gate-<SID>`
+    "blocked once per (session, repo#issue)" state only on SID and reads it at
+    start (an already-listed issue is `continue`-skipped, never re-blocked). A
+    run KILLED after the hook wrote its state leaves that file behind; when the
+    OS later recycles its pid, a PID-based SID (`gate-<pid>`) re-derives the
+    SAME name and reads the leftover, so the fresh run's FIRST gate call for an
+    issue already listed there wrongly does NOT block -- the same cross-run
+    flake class #485 fixed for the design gate, shared by every `_GateBase`
+    test here (all drive the one per-session state file). The guarantee: a
+    fresh run's SID must never collide with a prior run's, so a stale file at
+    the OLD predictable pid-keyed name can never suppress a block.
+    Deterministic -- no timing, no retry."""
+
+    def test_a_stale_pid_keyed_state_file_does_not_suppress_the_first_block(self):
+        # A leftover from a "prior killed run" at the OLD predictable pid-keyed
+        # name (`gate-<pid>`, the pre-#494 convention), already listing
+        # parovanie-produktov#41 as seen.
+        pid_keyed = Path("/tmp") / (
+            "airuleset-runcard-gate-gate-%d" % os.getpid())
+        self.addCleanup(pid_keyed.unlink, missing_ok=True)
+        pid_keyed.write_text("parovanie-produktov#41")
+        # This run must still block for #41 -- it only does once this test's
+        # SID no longer collides with that predictable pid-keyed name.
+        r = self.run_gate(MERGED)
+        self.assertTrue(self.blocked(r), (r.returncode, r.stdout, r.stderr))
+
+
 class TestGateIsWired(unittest.TestCase):
 
     def test_registered_on_subagentstop(self):

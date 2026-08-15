@@ -274,5 +274,53 @@ class TestHistoryAllusionBlocked(TestCase):
             self._cleanup(sid)
 
 
+class TestCrossRunRetryBudgetIsIsolated(TestCase):
+    """#494 — the question-quality gate keys its retry budget at
+    /tmp/airuleset-question-quality-block-<SID>, RETRIES read at start, and
+    blocks only while RETRIES < MAX_RETRIES(3). A run KILLED after it exhausted
+    that budget (or the OS recycling a pid that a prior run advanced) leaves the
+    file behind; a fresh run minting a PID-based SID (`test-qq-*-<pid>`, as
+    every method above does) re-derives the SAME name, reads the exhausted
+    budget, and does NOT re-block — so `test_allusion_to_an_old_question_is_
+    hard_blocked`'s asserted block silently does not fire. The same recyclable-
+    pid /tmp-state flake class #485 fixed for the design gate. The guarantee: a
+    fresh run's SID must never collide with a prior run's predictable pid-keyed
+    name. Deterministic — no timing, no retry."""
+
+    def setUp(self):
+        # The run SID — the ONE thing #494's fix flips (pid → uuid). Minted in
+        # setUp exactly like _GateBase.self.sid so RED/GREEN turn on this line.
+        self.sid = "test-qq-reference-%d" % os.getpid()
+        self.addCleanup(self._cleanup, self.sid)
+
+    def _cleanup(self, sid):
+        for f in (
+            "/tmp/airuleset-question-quality-block-" + sid,
+            "/tmp/claude-discord-lastq-" + sid,
+            "/tmp/claude-user-active-" + sid,
+        ):
+            if os.path.exists(f):
+                os.remove(f)
+
+    def _run_gate(self, msg, sid):
+        payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
+        return subprocess.run(["bash", str(GATE)], input=payload,
+                              capture_output=True, text=True)
+
+    def test_a_stale_pid_keyed_retry_file_does_not_suppress_the_block(self):
+        # A leftover from a "prior killed run" at the OLD predictable pid-keyed
+        # name (`test-qq-reference-<pid>`), retry budget already exhausted
+        # (>= MAX_RETRIES). Cleaned regardless of the run SID.
+        pid_keyed = Path("/tmp") / (
+            "airuleset-question-quality-block-test-qq-reference-%d" % os.getpid())
+        self.addCleanup(lambda: pid_keyed.exists() and pid_keyed.unlink())
+        pid_keyed.write_text("3")
+        # The allusion block must STILL fire — it only does once this test's
+        # run SID (self.sid) no longer collides with that pid-keyed name.
+        r = self._run_gate(REFERENCE_MSG, self.sid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('"block"', r.stdout, r.stdout)
+
+
 if __name__ == "__main__":
     main()
