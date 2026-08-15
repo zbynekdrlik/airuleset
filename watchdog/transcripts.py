@@ -19,6 +19,9 @@ banned ``from watchdog import <function-below-its-position>`` shape.
 import hashlib
 import json
 import re
+import stat as _stat
+import sys
+from collections import namedtuple
 from pathlib import Path
 
 from watchdog import _SENTINELS
@@ -426,6 +429,183 @@ SUBAGENT_MAX_AGE_SECONDS = 2 * 3600
 # suppressed until the TTL expires. Not reachable via any dispatch path
 # this repo has today; worth re-checking if that ever changes.
 SUBAGENT_NUDGE_STATE_TTL_SECONDS = SUBAGENT_MAX_AGE_SECONDS
+
+
+# --- #486 G2: worker count from STRUCTURED STATE (not the rendered agent strip) ---
+#
+# A live worker == a subagent transcript this session wrote within `freshness_s`
+# whose last real turn is NOT an unrecovered api-error. Replaces reading the
+# rendered agent-strip (`◯ …` rows / chrome-peel), which goes silently blind on
+# every CC render change (#383/#386/#393). Disk-only; no tmux, no pane capture,
+# no `ps`. `_count_live_subagents` above is the boolean-ish predecessor this
+# supersedes with (cwd, session_id) keying, a #484 wedged-worker guard, and an
+# evidence list for the one-decision-line-per-sweep journal (#486 design bod 3).
+
+WorkerLane = namedtuple("WorkerLane", ["agent_id", "state", "age_s",
+                                       "agent_type", "detail"])
+# state ∈ {"live", "stale", "wedged", "unreadable"}; count == #(state=="live").
+
+
+def _warn_stderr(msg):
+    """Default `on_warn` sink — loud, never raises (mirrors G1's reader contract:
+    a corrupt/unreadable input is surfaced, never swallowed and never fatal). This
+    IS the log-of-last-resort, so a failure to write to stderr has nowhere left to
+    be logged and must not crash the sweep the reader promises never to break.
+    # airuleset:script-ok last-resort stderr sink — a failed write cannot itself be logged."""
+    try:
+        sys.stderr.write("count_live_workers: " + str(msg) + "\n")
+    except Exception:
+        pass
+
+
+def _worker_agent_type(jsonl_path):
+    """`agentType` from the `<stem>.meta.json` sidecar CC writes at spawn, or None.
+    Best-effort enrichment for the decision log only (agentType/description let the
+    journal name the lane) — never raises, never affects the count."""
+    try:
+        with open(jsonl_path.with_suffix(".meta.json"), "r",
+                  encoding="utf-8", errors="replace") as f:
+            d = json.load(f)
+        t = d.get("agentType") if isinstance(d, dict) else None
+        return t if isinstance(t, str) and t else None
+    except Exception:
+        return None
+
+
+def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
+                       *, on_warn=None):
+    """(count, [WorkerLane, ...]) of THIS session's LIVE worker lanes, from disk
+    state ONLY — no tmux, no pane capture, no `ps`. `count` == the number of
+    `state=="live"` lanes; the evidence list carries EVERY candidate (live / stale
+    / wedged / unreadable) so the G3 consumer can write one decision line per sweep.
+
+    A live worker == a subagent transcript written within `freshness_s` seconds
+    whose last real turn is NOT an unrecovered api-error. Subagent transcripts live
+    at ``<projects_dir>/<enc-cwd>/<session_id>/subagents/**/*.jsonl`` (proven live
+    on disk, #486 G2), so keying by ``(encode_project_dir(cwd), session_id)`` counts
+    ONLY the named session's dispatched workers — a sibling session in the same
+    project, or another project entirely, never leaks in. Cross-session attribution
+    is solved by the directory structure, not guessed.
+
+    Wedged guard — the DANGEROUS error direction is over-counting a DEAD worker as
+    live, because the consumer's predicate is `workers==0 → the box is stuck →
+    nudge`: counting a wedged worker would SUPPRESS the recovery nudge (the exact
+    #486 failure). So a fresh transcript whose last real turn is either documented
+    silent-death mode is classified `wedged` and NOT counted, via the canonical
+    sibling detectors (no parser duplicated — drift is exactly what #486 forbids):
+    (1) an unrecovered api-error (`transcript_last_error`, which carries the #484
+    recovery nuance — an api-error FOLLOWED by genuine progress reads as recovered
+    → '' → live again); (2) a tool-call the model emitted as TEXT and then died on
+    (`transcript_text_toolcall_stall`, job 4a's own high-precision detector — it
+    only fires when the last real turn ENDS with tool-call markup, never on a mere
+    mention). Both are the SAME dangerous direction, so a liveness count excludes
+    both. RESIDUAL, honestly stated: a cleanly-FINISHED worker (its last turn a
+    normal `assistant end_turn` report with no error and no text-stall) is left to
+    age out of the window naturally — its mtime freezes at the final report — so it
+    briefly counts live for up to `freshness_s` after finishing. That is CORRECT,
+    not a bug: a box that just finished a ticket is active, not stuck, and it
+    self-heals once the mtime ages past the window.
+
+    Fail toward a SAFE count, loudly, never crashing a sweep (mirrors G1's reader
+    direction). Never raises:
+      - absent `subagents/` dir (or it is not a dir) → (0, []) with NO warn: a
+        session that has dispatched no workers is normal, not an error;
+      - the dir cannot be listed → `on_warn` (default: stderr) + (0, []). 0 only
+        ever ALLOWS a nudge (the #486 direction), never blocks one;
+      - a per-file stat error → `on_warn` + a `state="unreadable"` lane, not counted;
+      - a non-regular file matching `*.jsonl` (a dir/socket) → skipped silently
+        (not a worker transcript);
+      - a mtime older than `freshness_s` → `state="stale"`, not counted (normal);
+      - a half-written / corrupt FRESH transcript cannot be proven wedged, so
+        `transcript_last_error` fails safe to '' and it counts LIVE (a fresh write
+        is the strongest live signal; the corruption is almost always a truncated
+        tail line, not a dead worker).
+
+    `freshness_s` is required (no silent default): the G3 consumer tunes its own
+    window. Today's lane-occupancy consumer uses 15 min precisely so a live worker
+    in a long foreground CI-wait — which writes nothing to its transcript for up to
+    ~9 min — is not misread as dead.
+
+    Cost: the stat pass is O(TOTAL subagent files under the session), not O(live
+    lanes) — a supervisor's `subagents/` dir accumulates every historical worker
+    (nothing here prunes it). Measured on the real box: ~1010 files → 11 ms warm.
+    The per-file content scan (the two death-mode detectors, each an ≤4 MB tail
+    read) runs ONLY on candidates within `freshness_s` — ~10 with today's 15 min
+    window; a caller that passes a very large `freshness_s` widens that set toward
+    every file and voids the bound, so keep the window small relative to the dir's
+    write cadence. Acceptable for a 60 s sweep; the linear stat growth is a noted
+    residual (a session with tens of thousands of historical workers would see a
+    proportionally larger stat pass) — the same property the predecessor
+    `_count_live_subagents` already has, out of scope to optimize here.
+    """
+    warn = on_warn or _warn_stderr
+    try:
+        d = (Path(projects_dir) / encode_project_dir(cwd)
+             / str(session_id) / "subagents")
+    except Exception as e:
+        warn("bad session key (%s / %s): %s" % (cwd, session_id, e))
+        return 0, []
+    try:
+        # is_dir() swallows ENOENT/ENOTDIR (absent dir -> False, the normal
+        # no-workers case, no warn) but PROPAGATES EACCES; guard it in the same
+        # try as rglob so a search-permission failure on any parent warns and
+        # returns 0 (safe direction) instead of crashing the sweep -- the
+        # predecessor `_count_live_subagents` wraps its whole body identically.
+        if not d.is_dir():
+            return 0, []
+        candidates = sorted(d.rglob("*.jsonl"))
+    except OSError as e:
+        warn("subagents dir unreadable (%s): %s" % (d, e))
+        return 0, []
+
+    count = 0
+    evidence = []
+    for p in candidates:
+        agent_id = p.stem
+        try:
+            st = p.stat()
+        except OSError as e:
+            warn("stat failed (%s): %s" % (p, e))
+            evidence.append(WorkerLane(agent_id, "unreadable", None, None, str(e)))
+            continue
+        if not _stat.S_ISREG(st.st_mode):
+            continue                    # a dir/socket named *.jsonl — not a worker
+        age = now - st.st_mtime
+        if age > freshness_s:
+            evidence.append(WorkerLane(agent_id, "stale", age, None, ""))
+            continue
+        # fresh candidate: the wedged guard + meta enrichment run ONLY here, so the
+        # per-file content scan is bounded to the handful of live lanes. BOTH
+        # documented silent-death modes are excluded, via their canonical sibling
+        # detectors (no parser duplicated): (1) an unrecovered api-error
+        # (`transcript_last_error`, #484-recovery-aware); (2) a tool-call the model
+        # emitted as TEXT and then died on (`transcript_text_toolcall_stall`, job
+        # 4a's own high-precision detector). Both are the SAME dangerous direction
+        # for the predicate -- a stuck worker counted live suppresses the recovery
+        # nudge -- so a liveness COUNT must exclude both, not just the api-error one.
+        # The content scan is itself guarded: transcript_last_error /
+        # transcript_text_toolcall_stall delegate to _entry_text, which raises
+        # TypeError on a parseable-but-wrong-typed block (e.g. `"text": null`) — a
+        # corrupt fresh transcript that json.loads accepts but _entry_text chokes
+        # on. Degrade to `unreadable` (safe UNDER-count — a lane we can't classify
+        # is not asserted live, so it never suppresses the nudge), never crash the
+        # sweep this reader promises never to break.
+        try:
+            atype = _worker_agent_type(p)
+            wedged = transcript_last_error(p)
+            if not wedged and transcript_text_toolcall_stall(p):
+                wedged = "text-toolcall stall"
+        except Exception as e:
+            warn("content scan failed (%s): %s" % (p, e))
+            evidence.append(WorkerLane(agent_id, "unreadable", age, None,
+                                       str(e)[:80]))
+            continue
+        if wedged:
+            evidence.append(WorkerLane(agent_id, "wedged", age, atype, wedged[:80]))
+            continue
+        count += 1
+        evidence.append(WorkerLane(agent_id, "live", age, atype, ""))
+    return count, evidence
 
 
 # A tool-call opening the model emitted as TEXT — `<invoke name="...">` / `<invoke
