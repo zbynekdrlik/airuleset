@@ -19,6 +19,9 @@ banned ``from watchdog import <function-below-its-position>`` shape.
 import hashlib
 import json
 import re
+import stat as _stat
+import sys
+from collections import namedtuple
 from pathlib import Path
 
 from watchdog import _SENTINELS
@@ -426,6 +429,138 @@ SUBAGENT_MAX_AGE_SECONDS = 2 * 3600
 # suppressed until the TTL expires. Not reachable via any dispatch path
 # this repo has today; worth re-checking if that ever changes.
 SUBAGENT_NUDGE_STATE_TTL_SECONDS = SUBAGENT_MAX_AGE_SECONDS
+
+
+# --- #486 G2: worker count from STRUCTURED STATE (not the rendered agent strip) ---
+#
+# A live worker == a subagent transcript this session wrote within `freshness_s`
+# whose last real turn is NOT an unrecovered api-error. Replaces reading the
+# rendered agent-strip (`◯ …` rows / chrome-peel), which goes silently blind on
+# every CC render change (#383/#386/#393). Disk-only; no tmux, no pane capture,
+# no `ps`. `_count_live_subagents` above is the boolean-ish predecessor this
+# supersedes with (cwd, session_id) keying, a #484 wedged-worker guard, and an
+# evidence list for the one-decision-line-per-sweep journal (#486 design bod 3).
+
+WorkerLane = namedtuple("WorkerLane", ["agent_id", "state", "age_s",
+                                       "agent_type", "detail"])
+# state ∈ {"live", "stale", "wedged", "unreadable"}; count == #(state=="live").
+
+
+def _warn_stderr(msg):
+    """Default `on_warn` sink — loud, never raises (mirrors G1's reader contract:
+    a corrupt/unreadable input is surfaced, never swallowed and never fatal). This
+    IS the log-of-last-resort, so a failure to write to stderr has nowhere left to
+    be logged and must not crash the sweep the reader promises never to break.
+    # airuleset:script-ok last-resort stderr sink — a failed write cannot itself be logged."""
+    try:
+        sys.stderr.write("count_live_workers: " + str(msg) + "\n")
+    except Exception:
+        pass
+
+
+def _worker_agent_type(jsonl_path):
+    """`agentType` from the `<stem>.meta.json` sidecar CC writes at spawn, or None.
+    Best-effort enrichment for the decision log only (agentType/description let the
+    journal name the lane) — never raises, never affects the count."""
+    try:
+        with open(jsonl_path.with_suffix(".meta.json"), "r",
+                  encoding="utf-8", errors="replace") as f:
+            d = json.load(f)
+        t = d.get("agentType") if isinstance(d, dict) else None
+        return t if isinstance(t, str) and t else None
+    except Exception:
+        return None
+
+
+def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
+                       *, on_warn=None):
+    """(count, [WorkerLane, ...]) of THIS session's LIVE worker lanes, from disk
+    state ONLY — no tmux, no pane capture, no `ps`. `count` == the number of
+    `state=="live"` lanes; the evidence list carries EVERY candidate (live / stale
+    / wedged / unreadable) so the G3 consumer can write one decision line per sweep.
+
+    A live worker == a subagent transcript written within `freshness_s` seconds
+    whose last real turn is NOT an unrecovered api-error. Subagent transcripts live
+    at ``<projects_dir>/<enc-cwd>/<session_id>/subagents/**/*.jsonl`` (proven live
+    on disk, #486 G2), so keying by ``(encode_project_dir(cwd), session_id)`` counts
+    ONLY the named session's dispatched workers — a sibling session in the same
+    project, or another project entirely, never leaks in. Cross-session attribution
+    is solved by the directory structure, not guessed.
+
+    #484 guard — the DANGEROUS error direction is over-counting a DEAD worker as
+    live, because the consumer's predicate is `workers==0 → the box is stuck →
+    nudge`: counting a wedged worker would SUPPRESS the recovery nudge (the exact
+    #486 failure). So a fresh transcript whose last real turn is an unrecovered
+    api-error is classified `wedged` and NOT counted — via the canonical
+    `transcript_last_error`, which already carries the #484 recovery nuance (an
+    api-error FOLLOWED by genuine progress reads as recovered → '' → live again),
+    so no parser is duplicated (drift is exactly what #486 forbids). A cleanly
+    finished worker is left to age out of the window naturally (its mtime freezes
+    at the final report); briefly counting a just-finished lane is CORRECT — the
+    box just finished a ticket, it is not stuck — and self-heals.
+
+    Fail toward a SAFE count, loudly, never crashing a sweep (mirrors G1's reader
+    direction). Never raises:
+      - absent `subagents/` dir (or it is not a dir) → (0, []) with NO warn: a
+        session that has dispatched no workers is normal, not an error;
+      - the dir cannot be listed → `on_warn` (default: stderr) + (0, []). 0 only
+        ever ALLOWS a nudge (the #486 direction), never blocks one;
+      - a per-file stat error → `on_warn` + a `state="unreadable"` lane, not counted;
+      - a non-regular file matching `*.jsonl` (a dir/socket) → skipped silently
+        (not a worker transcript);
+      - a mtime older than `freshness_s` → `state="stale"`, not counted (normal);
+      - a half-written / corrupt FRESH transcript cannot be proven wedged, so
+        `transcript_last_error` fails safe to '' and it counts LIVE (a fresh write
+        is the strongest live signal; the corruption is almost always a truncated
+        tail line, not a dead worker).
+
+    `freshness_s` is required (no silent default): the G3 consumer tunes its own
+    window. Today's lane-occupancy consumer uses 15 min precisely so a live worker
+    in a long foreground CI-wait — which writes nothing to its transcript for up to
+    ~9 min — is not misread as dead.
+    """
+    warn = on_warn or _warn_stderr
+    try:
+        d = (Path(projects_dir) / encode_project_dir(cwd)
+             / str(session_id) / "subagents")
+    except Exception as e:
+        warn("bad session key (%s / %s): %s" % (cwd, session_id, e))
+        return 0, []
+    if not d.is_dir():
+        return 0, []
+    try:
+        candidates = sorted(d.rglob("*.jsonl"))
+    except OSError as e:
+        warn("subagents dir unreadable (%s): %s" % (d, e))
+        return 0, []
+
+    count = 0
+    evidence = []
+    for p in candidates:
+        agent_id = p.stem
+        try:
+            st = p.stat()
+        except OSError as e:
+            warn("stat failed (%s): %s" % (p, e))
+            evidence.append(WorkerLane(agent_id, "unreadable", None, None, str(e)))
+            continue
+        if not _stat.S_ISREG(st.st_mode):
+            continue                    # a dir/socket named *.jsonl — not a worker
+        age = now - st.st_mtime
+        if age > freshness_s:
+            evidence.append(WorkerLane(agent_id, "stale", age, None, ""))
+            continue
+        # fresh candidate: the #484 guard + meta enrichment run ONLY here, so the
+        # per-file content scan is bounded to the handful of live lanes.
+        atype = _worker_agent_type(p)
+        err = transcript_last_error(p)
+        if err:
+            evidence.append(WorkerLane(agent_id, "wedged", age, atype,
+                                       (err or "")[:80]))
+            continue
+        count += 1
+        evidence.append(WorkerLane(agent_id, "live", age, atype, ""))
+    return count, evidence
 
 
 # A tool-call opening the model emitted as TEXT — `<invoke name="...">` / `<invoke
