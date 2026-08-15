@@ -99,7 +99,8 @@ class DeliverGoalFakeTmux:
     `_typed_landed` see the SAME thing a real pane would."""
 
     def __init__(self, panes, captured, in_mode=False, cap_seq=(),
-                model_type=False, enters_swallowed=0, transcript_path=None):
+                model_type=False, enters_swallowed=0, transcript_path=None,
+                initial_box=""):
         self.panes = panes
         self.captured = captured
         self.in_mode = in_mode
@@ -115,7 +116,12 @@ class DeliverGoalFakeTmux:
         # genuinely-bare box.
         self.enters_swallowed = enters_swallowed
         self.transcript_path = transcript_path
-        self.box = ""
+        # #501 — pre-seed the input box with an at-rest draft so a test can
+        # drive the SUBMIT-IN-PLACE path (`submit_own_draft_verified`) end to
+        # end: the box already holds a swallowed OWN nudge before any watchdog
+        # keystroke, and `capture-pane` renders it via the SAME `❯ ` bare-line
+        # model. Default "" keeps every pre-#501 test byte-identical.
+        self.box = initial_box
         self._bare_line = None
         if model_type:
             for ln in captured.splitlines():
