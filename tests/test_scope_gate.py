@@ -417,6 +417,37 @@ class TestCdPrefixRelativeBodyPath(TestCase):
             self.assertEqual(r.returncode, 2, r.stderr)
             self.assertNotIn("not readable", r.stderr)
 
+    def test_unreadable_absolute_body_gives_explicit_reason(self):
+        # #483 review 🔵: the absolute-path unreadable branch also gives the
+        # explicit reason, not the opaque `-> none`.
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / "nope.md"  # never created
+            r = run("gh issue create -t 'abs-missing' -F %s" % missing)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("not readable", r.stderr)
+            self.assertNotIn("-> none", r.stderr)
+
+    def test_unreadable_body_reason_cannot_inject_log_fields(self):
+        # #483 review 🔴: the body-unreadable reason embeds the
+        # attacker-controlled `-F` token, and it MUST be whitespace-collapsed
+        # (_clean_field) before crossing the tab-separated hand-off to bash /
+        # the scope-gate.log -- otherwise an embedded newline+tab in the `-F`
+        # value forges a SECOND record (a `verdict=PASS` for an arbitrary
+        # repo string) out of a command that was entirely BLOCKED, re-opening
+        # #329's field-injection the log-field ORDER + _clean_field closed.
+        home = tempfile.mkdtemp(prefix="airuleset-scopegate-inject-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        # An unreadable relative -F whose value spells a forged PASS record.
+        evil = "x\nPASS\tzbynekdrlik/FORGED\tt.md"
+        r = run("gh issue create -t inject -F '%s'" % evil, home=home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        log = Path(home) / ".claude" / "scope-gate.log"
+        text = log.read_text() if log.exists() else ""
+        # The whole command was BLOCKED -> exactly ONE record, a BLOCK, and
+        # never a forged PASS / forged repo in a counting field.
+        self.assertEqual(text.count("verdict="), 1, text)
+        self.assertNotIn("verdict=PASS", text)
+
 
 class TestChainDepthCap(TestCase):
     """#311 -- a review-finding follow-up (this issue names its own PARENT
