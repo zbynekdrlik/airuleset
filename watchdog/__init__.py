@@ -4899,9 +4899,29 @@ GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
 # age-suffix shape this repo has ever actually rendered is covered;
 # widen the class only if a real nbsp/fractional-hour render is ever
 # observed live.
+#
+# #487 (live gk incident, 2026-08-15) — the MINOR-2 "widen the class
+# only if a real render is ever observed live" clause fired: gk's own
+# armed pane settled to `› stashed · ◎ /goal active (1d)`, a false
+# NEGATIVE from TWO newly-observed shapes at once — (1) CC prepends the
+# stash-slot marker (`STASH_MARKER` + " · ") onto the SAME header line
+# the glyph rides on, so the `^`-anchor never matched; (2) the age
+# crossed to DAY granularity `(1d)`/`(2d)`, which `[hm]` rejected. The
+# `pane_goal_armed` False that resulted killed the #442/#481 lane-fill
+# guard. Widened, still CLOSED-form (the MINOR-1 lesson): an OPTIONAL
+# leading `STASH_MARKER + " · "` prefix (derived from the repo constant,
+# never a divergent copy; ALL its separators confirmed plain 0x20 — NOT
+# nbsp U+00A0 — by hexdump of the raw byte-faithful gk capture, where
+# `·` survived as c2 b7 so an nbsp would equally have shown as c2 a0)
+# and the age unit class `[hm]` -> `[hmd]`. The tail stays
+# exactly " active"/" active (<1-3 digits><h|m|d>)", so every #393
+# wrapped-prose false-positive control (with/without punctuation, prefix
+# or not) is still rejected. A fractional-hour/nbsp render remains the
+# same accepted residual as before.
 _GOAL_HEADER_INDICATOR_RX = re.compile(
-    r"^" + re.escape(GOAL_INDICATOR)
-    + r"( active(\s\(\d{1,3}[hm]\))?)?$")
+    r"^(?:" + re.escape(STASH_MARKER + " · ") + r")?"
+    + re.escape(GOAL_INDICATOR)
+    + r"( active(\s\(\d{1,3}[hmd]\))?)?$")
 _GOAL_LCS_OPEN = "<local-command-stdout>"
 _GOAL_LCS_CLOSE = "</local-command-stdout>"
 
