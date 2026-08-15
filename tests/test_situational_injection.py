@@ -480,11 +480,13 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
     skill's OWN 'when to use' text.
 
     Each pattern is validated against `inject-situational-rule.sh`'s own
-    quote-stripping: a quoted CF URL or a quoted `message_post` arg is stripped
-    out of a Bash haystack, so the reliable Bash catches are `api.cloudflare.com`
-    / `wrangler` (cloudflare) and an UNQUOTED `message_post`, while the primary
-    odoo catch is the `message_post` token in the Write|Edit CONTENT (never
-    stripped for a non-Bash tool)."""
+    quote-stripping AND against real false positives (adversarial review, this
+    pass): cloudflare's reliable Bash catch is the UNQUOTED `api.cloudflare.com`
+    / `wrangler` (a quoted URL is stripped); odoo binds to Write|Edit ONLY (the
+    `message_post` token in the CONTENT, never stripped for a non-Bash tool — a
+    Bash surface caught `grep message_post` far more than any real post); and
+    claude-code-log's `session` arms REQUIRE an html/markdown format so they no
+    longer fire on "export a session cookie" / "browse the session logs"."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -553,13 +555,17 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
         r = self._prompt("Please export this session as HTML so I can share it")
         ctx = self._injected_prompt(r)
         self.assertIsNotNone(ctx, "a transcript-export request must load claude-code-log")
-        self.assertIn("claude-code-log", ctx)
+        # a string that exists ONLY in claude-code-log's own body (not the
+        # injection wrapper, which always carries the topic name) -- an
+        # adversarial-review finding: asserting "claude-code-log" alone is a
+        # tautology satisfied by source="airuleset:claude-code-log".
+        self.assertIn("Browsing / Exporting / Archiving Transcripts", ctx)
 
     def test_claude_code_log_slovak_prompt_injects_the_skill(self):
         r = self._prompt("exportuj tento session do html prosim")
         ctx = self._injected_prompt(r)
         self.assertIsNotNone(ctx, "a Slovak transcript-export request must load the skill")
-        self.assertIn("claude-code-log", ctx)
+        self.assertIn("Browsing / Exporting / Archiving Transcripts", ctx)
 
     def test_unrelated_bash_does_not_inject_the_cloudflare_skill(self):
         r = run({"command": "cat cloudflare-notes.md"}, tmpdir=self.tmpdir)
@@ -571,7 +577,22 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
         r = self._prompt("start a new session please, ako sa mas")
         ctx = self._injected_prompt(r)
         if ctx is not None:
-            self.assertNotIn("claude-code-log", ctx)
+            self.assertNotIn("Browsing / Exporting / Archiving Transcripts", ctx)
+
+    def test_session_word_without_format_does_not_inject_claude_code_log(self):
+        # adversarial-review 🟡: the `session` arms MUST require an html/markdown
+        # format so a session cookie / session data / "archive this session"
+        # no longer spuriously loads the 4.2 KB transcript skill.
+        for prompt in [
+            "how do I export a session cookie in curl?",
+            "export session data to a CSV for analytics",
+            "browse the session logs on the server",
+            "let's archive this session and move on",
+        ]:
+            r = self._prompt(prompt, session_id="fp-" + prompt[:12])
+            ctx = self._injected_prompt(r)
+            if ctx is not None:
+                self.assertNotIn("Browsing / Exporting / Archiving Transcripts", ctx, prompt)
 
 
 class TestWiring(TestCase):
