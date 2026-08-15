@@ -841,9 +841,13 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     strip-selection, never bare — so a draft that raced into that window would
     otherwise be typed over and, on a persistent double-swallow, later
     backspaced. Re-verifying + `_draft_rescue_persist` here narrows that window
-    to exactly the sibling's, and `_draft_rescue_persist`'s own docstring names
-    this primitive's callers (`deliver_with_stash`, `_send_goal_verified`) as
-    the ones that must call it first.
+    to APPROXIMATELY the sibling's — `_send_goal_verified` types via
+    `_type_literal` immediately after its own bare re-check, whereas this routes
+    through `send_continue` (one more `capture_pane` round-trip before the type),
+    so compact's residual race window is marginally wider, still net-protected by
+    the draft rescue + the janitor backstop. `_draft_rescue_persist`'s own
+    docstring names this primitive's callers (`deliver_with_stash`,
+    `_send_goal_verified`) as the ones that must call it first.
 
     `/compact` is 8 chars, far below `GOAL_TYPE_CHUNK_THRESHOLD` and sent by
     `send_continue` as one `-l --` burst, so the collapsed-paste shapes
@@ -852,7 +856,13 @@ def _compact_submit_verified(pid, run, sleep_fn, log_fn):
     mirroring `_undo_and_release_slot`'s own logging."""
     cap = watchdog.capture_pane(pid, run, lines=40)
     if watchdog._input_line_text(cap) != "":
-        watchdog._draft_rescue_persist(pid, cap)
+        # Forward the rescue's OWN log lines through log_fn (parity with
+        # `_send_goal_verified`, which passes `logs=logs`) — a rescue that FAILS
+        # with a real draft in hand must never be silent (#271/#360).
+        rescue_logs = []
+        watchdog._draft_rescue_persist(pid, cap, logs=rescue_logs)
+        for r in rescue_logs:
+            log_fn(r)
         log_fn("compact-submit raced-busy: box not bare pre-send, not typed")
         return "raced-busy"
     watchdog.send_continue(pid, COMPACT_TEXT, run)

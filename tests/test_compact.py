@@ -972,6 +972,27 @@ class TestCompactSubmitVerify(unittest.TestCase):
         self.assertEqual(keys, [])            # nothing typed, no Enter, no BSpace
         self.assertTrue(any("raced-busy" in r for r in logs), logs)
 
+    def test_raced_busy_forwards_draft_rescue_failure_logs(self):
+        # Round-2 review MINOR-1 (observability parity, #271/#360): a draft
+        # rescue that FAILS on the raced path must not be silent — its own log
+        # lines are forwarded through log_fn (the sibling passes logs=logs).
+        def run(argv, timeout=8):
+            if "capture-pane" in " ".join(argv):
+                return "● x\n❯ draft usera\n  ctx ███░\n"
+            return ""
+
+        def fake_rescue(pid, cap, logs=None, **kw):
+            if isinstance(logs, list):
+                logs.append("draft-rescue: FAILED sentinel")
+            return None
+
+        logs = []
+        with m.patch.object(wd, "_draft_rescue_persist", fake_rescue):
+            compact._compact_submit_verified(
+                "%9", run, lambda *a, **k: None, lambda r: logs.append(r))
+        self.assertTrue(
+            any("draft-rescue: FAILED sentinel" in r for r in logs), logs)
+
 
 # --------------------------------------------------------------------------- #
 # 4b. #425 — the shared exemption predicate + its two consumers' origin
