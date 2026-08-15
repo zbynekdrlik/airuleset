@@ -435,6 +435,7 @@ from watchdog.tmux_io import (  # noqa: E402
     _strip_selected as _strip_selected,
     send_continue as send_continue,
     send_verified as send_verified,
+    submit_own_draft_verified as submit_own_draft_verified,
     _await_submit_confirmed as _await_submit_confirmed,
     _await_typed_landed as _await_typed_landed,
     send_selfcheck as send_selfcheck,
@@ -535,6 +536,7 @@ from watchdog.questions import (  # noqa: E402
 
 from watchdog.pane_text import (  # noqa: E402
     _input_line_text as _input_line_text,
+    _input_box_head_text as _input_box_head_text,
     _classify_boundary as _classify_boundary,
     _above_input_box as _above_input_box,
     _above_box_scan as _above_box_scan,
@@ -709,6 +711,8 @@ from watchdog.stash import (  # noqa: E402
     JANITOR_WATCH_MAX_AGE_S as JANITOR_WATCH_MAX_AGE_S,
     _looks_like_own_payload as _looks_like_own_payload,
     _looks_like_own_stuck_content as _looks_like_own_stuck_content,
+    _OWN_NUDGE_SUBMIT_PREFIXES as _OWN_NUDGE_SUBMIT_PREFIXES,
+    _own_nudge_submit_prefix as _own_nudge_submit_prefix,
 )
 
 

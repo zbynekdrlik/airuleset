@@ -1560,12 +1560,50 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # for THIS pane, and cleared only on success -- the same shape
         # `deliver_goal`'s own draft branch uses.
         watchdog._janitor_mark_watch(state, pid, now)
+        # #501 -- recognize the held draft as our OWN previously-swallowed
+        # nudge (a pre-#490 blind Enter stranded it) and FINISH it by
+        # SUBMITTING the existing draft in place, transcript-verified, instead
+        # of stashing around it and retyping a fresh copy -- which aborts
+        # forever against the persistent swallow that stranded it (the live
+        # cam-box zbynek-4:0.0 incident: stash-abort 1/5 -> ... -> give-up,
+        # nudge never delivered). ONLY the UNAMBIGUOUS machine-diagnostic
+        # prefixes (`_own_nudge_submit_prefix`: lane-check/bounce/gkreq -- a
+        # human PROVABLY never types them) are submitted on content alone; a
+        # FOREIGN draft (and the human-typeable `/goal `/`/compact`) stays on
+        # today's `deliver_with_stash` path BYTE-FOR-BYTE (HARD CONSTRAINT a --
+        # the foreign-draft protection is never weakened). Recognition reads the
+        # box HEAD row (`_input_box_head_text`), NOT `fresh_draft` (which is the
+        # TAIL for a WRAPPED box): every real own nudge is 289-720 chars and
+        # WRAPS, so its prefix is on the head and never the tail -- keying on
+        # `fresh_draft` made this branch DEAD against exactly the wrapped drafts
+        # the incident is about (#501 adversarial review).
+        own_head = watchdog._input_box_head_text(fresh)
+        if watchdog._own_nudge_submit_prefix(own_head):
+            if not watchdog.submit_own_draft_verified(pid, own_head, run,
+                                                      tpath, sleep_fn=sleep_fn,
+                                                      logs=logs):
+                # A recognized own draft that will not submit-verify is a
+                # genuinely wedged pane -- advance the SAME consecutive-abort
+                # streak + backoff park the foreign stash-abort uses, so it
+                # still reaches the give-up ping ("look at the session")
+                # instead of retrying silently forever (#442-review F2). The
+                # own draft is NEVER backspaced/retyped -- it is left in place.
+                rec["lna"] = rec.get("lna", 0) + 1
+                back = _lane_stash_abort_backoff(rec["lna"])
+                rec["lnpark"] = now + back
+                logs.append("lane-occupancy %s own-draft submit-unverified "
+                            "(%d/%d) -> backoff %ds, park until %d"
+                            % (loc, rec["lna"], GOAL_LANE_MAX_STASH_ABORTS,
+                               back, int(rec["lnpark"])))
+                return logs, True
+            watchdog._janitor_clear_watch(state, pid)
+            mode = "own-submit"
         # #488: thread `state` (same as deliver_goal's draft branch) so
         # deliver_with_stash durably records a park it definitively creates and
         # clears it on its own verified success.
-        if not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
-                                           logs=logs, sleep_fn=sleep_fn,
-                                           state=state):
+        elif not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
+                                             logs=logs, sleep_fn=sleep_fn,
+                                             state=state):
             # The abort typed nothing (or provably undid itself) --
             # transient, retried next sweep, and it must NOT consume the
             # ln/llast budget (a refused attempt is not a nudge). It DOES
@@ -1582,8 +1620,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                         % (loc, rec["lna"], GOAL_LANE_MAX_STASH_ABORTS,
                            back, int(rec["lnpark"])))
             return logs, True
-        watchdog._janitor_clear_watch(state, pid)
-        mode = "stash"
+        else:
+            watchdog._janitor_clear_watch(state, pid)
+            mode = "stash"
     else:
         # #490 -- verified transcript-proof send (the piece the raw
         # `send_continue` never had): a swallowed Enter must NOT be booked as

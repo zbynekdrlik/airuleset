@@ -55,6 +55,27 @@ def _input_line_text(captured):
     return tail if wrapped else head[1:].strip()
 
 
+def _input_box_head_text(captured):
+    """#501 — the text on the input box's HEAD row (the row carrying the `❯`
+    glyph), stripped, REGARDLESS of whether the box is WRAPPED. `''` = bare
+    box, None = no input box located. The sibling `_input_line_text` returns
+    the box TAIL (the last wrapped row — the `endswith()` swallowed-tail
+    contract, #193); this returns the HEAD, which is where an own-nudge's
+    LEADING prefix (`lane-check: ` / `bounce-backstop: ` / `gk-request
+    backstop: `) sits. Every real own nudge is 289-720 chars and WRAPS at a
+    live pane width, so its prefix is NEVER on the tail row — own-nudge
+    recognition (`_own_nudge_submit_prefix`) MUST read the head, or it is dead
+    against exactly the wrapped drafts the #501 incident is about. The head
+    row is also the draft's own leading substring, so it doubles as a
+    wrap-safe, far-more-specific transcript verification token than the bare
+    prefix (`submit_own_draft_verified`)."""
+    box = watchdog._find_input_box(captured)
+    if box is None:
+        return None
+    head, tail, wrapped = box
+    return head[1:].strip()
+
+
 def _classify_boundary(captured):
     """Classify the pane's input-box boundary for the keystroke-sending jobs
     (1/9/14/20; jobs 12/15 that once used this are REMOVED, #132/#102) —
