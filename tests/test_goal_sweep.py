@@ -559,6 +559,42 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertEqual(len(writes), goal.GOAL_DARK_REPING_MAX,
                          "re-arm attempts must be hard-capped per episode")
 
+    def test_dry_run_re_arm_records_nothing_and_consumes_no_slot(self):
+        # #478 review MINOR — a dry-run sweep must neither WRITE the request
+        # nor CONSUME an attempt slot (pinged_state is persisted by run_once),
+        # and must log "would record", never "recorded".
+        proj, tmux = self._dark("sess-dry-rearm")
+        reqs = self._dir() / "goal-requests.json"
+        obl = self._obl(5, 1500)
+        state = {}
+
+        def sweep(now):
+            return goal.goal_dark_watch(
+                now, run=tmux, send_fn=lambda m, **k: None, projects_dir=proj,
+                state=state, sleep_fn=lambda s: None, obligation_fn=obl,
+                rearm_fn=_rearm_ok, requests_path=reqs, dry_run=True)
+
+        sweep(1000)                                   # first observation (debounce)
+        logs = sweep(2000)                            # confirmed dark
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "a dry-run sweep must record nothing")
+        self.assertTrue(any("would record" in ln for ln in logs), logs)
+        self.assertFalse(any("recorded (" in ln for ln in logs), logs)
+        self.assertNotIn("sess-dry-rearm", state.get("goal_dark_pinged", {}),
+                         "a dry-run sweep must not consume an attempt slot")
+
+    def test_default_rearm_fn_fails_toward_ping_on_resolve_error(self):
+        # #478 review MINOR — an UNEXPECTED resolve_authority failure returns
+        # NO template (ping fallback), never escalates authority to "full"
+        # (which would type the merge-to-main template into a reduced-
+        # authority stream box).
+        import airuleset
+        with m.patch.object(airuleset, "resolve_authority",
+                            side_effect=RuntimeError("boom")):
+            text, auth = goal._default_rearm_fn("/some/cwd")
+        self.assertIsNone(text)
+        self.assertIsNone(auth)
+
     def test_sweep_deadline_defers_remaining_panes(self):
         # #403 STEP 0's own requirement: this per-pane loop must respect
         # the #172/#255 wall-clock self-bound, since it walks EVERY live
