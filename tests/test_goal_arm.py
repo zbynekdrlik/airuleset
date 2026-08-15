@@ -399,24 +399,25 @@ class TestDeliverGoal(unittest.TestCase):
         self.assertEqual(word, "sent")
         self.assertEqual(seen_marked_at_call_time, [True])
 
-    def test_stash_abort_records_durable_park_for_age_unbounded_reclaim(self):
-        # #488: a stash-delivery abort may have left a park in the single slot
-        # -> record it DURABLY so the shared janitor can reclaim it after ANY
-        # delay, not just within the 6h generic-mark window (the gk `(1d)`).
-        state = {}
-        with m.patch.object(wd, "deliver_with_stash", return_value=False):
+    def test_stash_branch_threads_state_to_deliver_with_stash(self):
+        # #488: the durable park record is written/cleared INSIDE
+        # deliver_with_stash, and ONLY on a definitively-ours STASH_PARKED
+        # (never a pre-existing foreign slot -- review MAJOR). deliver_goal's
+        # only job is to THREAD `state` through so that machinery can run; the
+        # record write/clear itself is proven at the deliver_with_stash level
+        # (test_stash_unconditional.py::Issue488DurableParkRecord).
+        state = {"tag": "sentinel"}
+        seen = []
+
+        def _fake_stash(pid, text, run, **kw):
+            seen.append(kw.get("state"))
+            return False
+
+        with m.patch.object(wd, "deliver_with_stash", side_effect=_fake_stash):
             word, tmux, _ = self._go(GOAL_DRAFT_CAP, state=state)
         self.assertEqual(word, "skip:stash-abort")
-        self.assertIn("%9", state.get("stash_parks", {}))
-
-    def test_stash_success_clears_the_durable_park_record(self):
-        # #488: a verified success means CC owns the async auto-restore -> the
-        # janitor must NOT reclaim, so any prior park record is dropped.
-        state = {"stash_parks": {"%9": 1.0}}
-        with m.patch.object(wd, "deliver_with_stash", return_value=True):
-            word, tmux, _ = self._go(GOAL_DRAFT_CAP, state=state)
-        self.assertEqual(word, "sent")
-        self.assertNotIn("%9", state.get("stash_parks", {}))
+        self.assertEqual(len(seen), 1)
+        self.assertIs(seen[0], state)
 
     def test_hard_age_cap_expires_and_pings_once(self):
         proj = self._dir()

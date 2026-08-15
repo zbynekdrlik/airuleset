@@ -1214,7 +1214,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         calls = []
 
         def fake_stash(pid, text, run, captured=None, logs=None,
-                       sleep_fn=None):
+                       sleep_fn=None, state=None):
             calls.append((pid, text))
             return True
 
@@ -1246,7 +1246,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         calls = []
 
         def fake_stash(pid, text, run, captured=None, logs=None,
-                       sleep_fn=None):
+                       sleep_fn=None, state=None):
             calls.append((pid, text))
             return False
 
@@ -1262,24 +1262,33 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertNotIn("llast", rec)
         self.assertEqual(rec.get("lna"), 1)
         self.assertIn("111", state.get("janitor_watch", {}))
-        # #488: a lane-nudge stash abort ALSO records a durable park so the
-        # shared janitor can reclaim it after ANY delay (not just 6h).
-        self.assertIn("111", state.get("stash_parks", {}))
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs),
                          logs)
 
-    def test_lane_stash_success_clears_the_durable_park_record(self):
-        # #488: a verified lane-nudge success -> CC owns the async restore, so
-        # any prior durable park record for this pane is dropped.
+    def test_lane_nudge_threads_state_to_deliver_with_stash(self):
+        # #488: the durable park record is written/cleared INSIDE
+        # deliver_with_stash (only on a definitively-ours STASH_PARKED, never
+        # a pre-existing foreign slot -- review MAJOR). The lane nudge's job
+        # is only to THREAD `state` through so that machinery runs; the
+        # write/clear itself is proven at the deliver_with_stash level
+        # (test_stash_unconditional.py::Issue488DurableParkRecord).
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        state = {"stash_parks": {"111": 1.0}}
-        with m.patch.object(wd, "deliver_with_stash", return_value=True):
+        seen = []
+
+        def fake_stash(pid, text, run, captured=None, logs=None,
+                       sleep_fn=None, state=None):
+            seen.append(state)
+            return True
+
+        state = {"tag": "sentinel"}
+        with m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
             logs, owns, tmux = self._call(GOAL_ARMED_DRAFT_CAP,
                                           lambda cwd: 5, now, tmtime,
                                           state=state)
         self.assertTrue(owns)
-        self.assertNotIn("111", state.get("stash_parks", {}))
+        self.assertEqual(len(seen), 1, logs)
+        self.assertIs(seen[0], state)
 
     def test_consecutive_stash_aborts_reach_the_give_up_ping(self):
         # #442-review F2: without a bound, a permanently-aborting lane
@@ -1402,7 +1411,8 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         rec = {"lna": 1, "lnpark": now + 200}
         calls = []
 
-        def fake_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
+        def fake_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
+                       state=None):
             calls.append(pid)
             return False
 
@@ -1436,7 +1446,8 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         state = {}
         calls = []
 
-        def fake_stash(pid, text, run, captured=None, logs=None, sleep_fn=None):
+        def fake_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
+                       state=None):
             calls.append(pid)
             return False
 

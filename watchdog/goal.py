@@ -630,23 +630,19 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # (#403-review MAJOR M1: this branch used to mark only on success
         # and never clear, exactly backwards).
         watchdog._janitor_mark_watch(state, pid, now)
+        # #488: thread `state` so deliver_with_stash can DURABLY record a park
+        # it definitively creates (STASH_PARKED) -> the shared janitor reclaims
+        # it after ANY delay, not just the 6h generic-mark window (the gk
+        # `(1d)` gap). The record is written ONLY on an unambiguously-ours park
+        # (slot was free before our own C-s), never a pre-existing foreign one,
+        # and deliver_with_stash clears it on its own verified success.
         ok = watchdog.deliver_with_stash(pid, text, run, captured=captured,
-                                         logs=logs, sleep_fn=sleep_fn)
+                                         logs=logs, sleep_fn=sleep_fn,
+                                         state=state)
         if ok:
             watchdog._janitor_clear_watch(state, pid)
-            # #488: a verified success means CC owns the async auto-restore;
-            # the janitor must NOT reclaim (it would double-restore), so drop
-            # any durable park record for this pane.
-            watchdog._janitor_clear_park(state, pid)
             _log_goal_sync("SEND stash sid=%s cwd=%s" % (sid, cwd))
             return "sent"
-        # #488: an aborted stash delivery may have left a park outstanding in
-        # the single slot -> record it DURABLY so the shared janitor can
-        # reclaim it after ANY delay, not just within the 6h generic-mark
-        # window (the gk `(1d)` gap). Harmless if no park was actually left:
-        # the marker-gone backstop clears the record next sweep, and the pop
-        # action requires the stash marker present anyway.
-        watchdog._janitor_park_record(state, pid, now)
         _log_goal_sync("SKIP stash-abort sid=%s cwd=%s" % (sid, cwd))
         return "skip:stash-abort"
 
@@ -1549,8 +1545,12 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # for THIS pane, and cleared only on success -- the same shape
         # `deliver_goal`'s own draft branch uses.
         watchdog._janitor_mark_watch(state, pid, now)
+        # #488: thread `state` (same as deliver_goal's draft branch) so
+        # deliver_with_stash durably records a park it definitively creates and
+        # clears it on its own verified success.
         if not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
-                                           logs=logs, sleep_fn=sleep_fn):
+                                           logs=logs, sleep_fn=sleep_fn,
+                                           state=state):
             # The abort typed nothing (or provably undid itself) --
             # transient, retried next sweep, and it must NOT consume the
             # ln/llast budget (a refused attempt is not a nudge). It DOES
@@ -1558,10 +1558,6 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             # aborting lane eventually reaches the give-up ping above
             # (#442-review F2) instead of retrying silently forever.
             rec["lna"] = rec.get("lna", 0) + 1
-            # #488: an aborted stash delivery may have left a park in the
-            # single slot -> record it DURABLY (age-unbounded reclaim), same
-            # as deliver_goal's own draft branch.
-            watchdog._janitor_park_record(state, pid, now)
             # #479 -- park the NEXT attempt for a widening window instead of
             # re-typing + re-rescuing this same live draft every ~60s sweep.
             back = _lane_stash_abort_backoff(rec["lna"])
@@ -1572,9 +1568,6 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                            back, int(rec["lnpark"])))
             return logs, True
         watchdog._janitor_clear_watch(state, pid)
-        # #488: verified success -> CC owns the async auto-restore; drop any
-        # durable park record so the janitor does not double-restore.
-        watchdog._janitor_clear_park(state, pid)
         mode = "stash"
     else:
         watchdog.send_continue(pid, text, run)

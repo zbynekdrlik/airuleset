@@ -607,3 +607,70 @@ class UndoSettlePollHasRealTeeth(unittest.TestCase):
         self.assertEqual(len(slept), 1,
                          "converging on the 2nd attempt sleeps exactly "
                          "once, between attempt 1 and attempt 2: %r" % slept)
+
+
+class Issue488DurableParkRecord(unittest.TestCase):
+    """#488 -- deliver_with_stash durably records `state['stash_parks'][pid]`
+    the moment it DEFINITIVELY parks a draft (STASH_PARKED: the box went bare
+    AND the marker lit after our OWN C-s, which the earlier `slot occupied`
+    abort proves the slot did not show before us). This is what lets the
+    shared janitor reclaim a genuinely-ours park after ANY delay while NEVER
+    adopting a pre-existing foreign park (review MAJOR) -- the record is
+    scoped to our own park, not any bare abort outcome."""
+
+    def _deliver(self, pane, state):
+        return wd.deliver_with_stash("%1", TEXT, pane.run, logs=[],
+                                     state=state, sleep_fn=lambda s: None)
+
+    def test_confirmed_park_then_abort_records_a_durable_park(self):
+        # A real draft (free slot) parks on C-s, then the submit is swallowed
+        # twice -> swallowed-submit-not-recovered abort. The park was OURS, so
+        # a durable record is left for the janitor to reclaim after any delay.
+        pane = FakePane(draft="human draft parked by us", swallow_enters=2)
+        state = {}
+        ok = self._deliver(pane, state)
+        self.assertFalse(ok)
+        self.assertIn("%1", state.get("stash_parks", {}))
+
+    def test_verified_success_clears_the_durable_park_record(self):
+        # A normal park+deliver+submit success -> CC owns the async
+        # auto-restore, so the janitor must NOT reclaim; the record we wrote at
+        # STASH_PARKED is dropped on success.
+        pane = FakePane(draft="a real draft")
+        state = {"stash_parks": {"%1": 1.0}}
+        ok = self._deliver(pane, state)
+        self.assertTrue(ok)
+        self.assertNotIn("%1", state.get("stash_parks", {}))
+
+    def test_pre_occupied_foreign_slot_never_records_a_park(self):
+        # THE review MAJOR fix: the slot is ALREADY occupied (a human's own
+        # parked draft) -> deliver_with_stash aborts `slot occupied` before any
+        # C-s and never reaches STASH_PARKED, so NO record is written. The
+        # janitor can therefore never adopt a foreign park via the age-
+        # unbounded path.
+        pane = FakePane(draft="my new draft", stash="a HUMAN's parked draft")
+        state = {}
+        logs = []
+        ok = wd.deliver_with_stash("%1", TEXT, pane.run, logs=logs,
+                                   state=state, sleep_fn=lambda s: None)
+        self.assertFalse(ok)
+        self.assertEqual(logs, ["stash-abort: slot occupied"])
+        self.assertEqual(state.get("stash_parks", {}), {})
+
+    def test_bare_box_noop_records_nothing(self):
+        # A bare box has nothing to park (C-s is a NOOP, no marker lights), so
+        # no park record is written -- the record is scoped to a genuine park,
+        # not merely to "deliver_with_stash was called".
+        pane = FakePane(draft="")
+        state = {}
+        ok = self._deliver(pane, state)
+        self.assertTrue(ok)
+        self.assertNotIn("%1", state.get("stash_parks", {}))
+
+    def test_state_none_is_a_no_op(self):
+        # A caller/test that does not thread state through pays nothing and
+        # never crashes -- mirrors _janitor_mark_watch's None-safety.
+        pane = FakePane(draft="a real draft")
+        ok = wd.deliver_with_stash("%1", TEXT, pane.run, logs=[],
+                                   state=None, sleep_fn=lambda s: None)
+        self.assertTrue(ok)
