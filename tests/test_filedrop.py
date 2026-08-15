@@ -636,6 +636,95 @@ class TestChooseFiledropPort(unittest.TestCase):
             ports[0], ports[1],
             "two users must not share one filedrop port (#493 pileup)")
 
+    def _active_on(self, port):
+        """A _run_systemctl double: our filedrop service is active and its unit
+        bakes FILEDROP_PORT=<port> (what _filedrop_current_served_port reads)."""
+        env_line = f"Environment=FILEDROP_HOST=127.0.0.1 FILEDROP_PORT={port}"
+
+        def _fake(a):
+            if a[:1] == ["is-active"]:
+                return (0, "active\n", "")
+            if a[:1] == ["show"]:
+                return (0, env_line + "\n", "")
+            return (0, "", "")
+        return _fake
+
+    def test_active_service_keeps_its_deterministic_port_even_when_bind_fails(self):
+        # our live service already holds `want`; a bind-test of `want` fails (WE
+        # hold it), but served==want so we keep it — no needless migration.
+        import socket
+        hold = socket.socket()
+        hold.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        hold.bind(("127.0.0.1", 0))
+        hold.listen(1)
+        want = hold.getsockname()[1]
+        self.addCleanup(hold.close)
+        with self.m.patch.object(self.fw, "filedrop_default_port_for_uid",
+                                 lambda: want), \
+                self.m.patch.object(self.fw, "_run_systemctl", self._active_on(want)):
+            self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), want)
+        self.assertFalse(self.port_file.exists())
+
+    def test_active_on_legacy_port_migrates_to_free_deterministic_port(self):
+        # our live service sits on a legacy port; our deterministic `want` is
+        # free → migrate onto it (the restart rebinds), no stale persist.
+        import socket
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        want = probe.getsockname()[1]           # genuinely free
+        probe.close()
+        legacy = 8788                           # our current (different) port
+        with self.m.patch.object(self.fw, "filedrop_default_port_for_uid",
+                                 lambda: want), \
+                self.m.patch.object(self.fw, "_run_systemctl",
+                                    self._active_on(legacy)):
+            self.assertEqual(self.ar._choose_filedrop_port("127.0.0.1"), want)
+
+    def test_active_service_never_bakes_a_foreign_held_deterministic_port(self):
+        # #493 review MAJOR: mid-migration our live service sits on a legacy port
+        # while a FOREIGN account holds `want`. We must NOT bake `want` (that
+        # kills our service + points share at the stranger → the 404 itself);
+        # fall through to a genuinely serveable port instead.
+        import socket
+        foreign = socket.socket()
+        foreign.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        foreign.bind(("127.0.0.1", 0))
+        foreign.listen(1)
+        want = foreign.getsockname()[1]         # a FOREIGN live server holds want
+        self.addCleanup(foreign.close)
+        with self.m.patch.object(self.fw, "filedrop_default_port_for_uid",
+                                 lambda: want), \
+                self.m.patch.object(self.fw, "_run_systemctl",
+                                    self._active_on(8788)):
+            got = self.ar._choose_filedrop_port("127.0.0.1")
+        self.assertNotEqual(
+            got, want,
+            "must never bake a foreign-held want (dead service + 404)")
+        self.assertTrue(
+            got == 8788 or self.fw._filedrop_port_bindable("127.0.0.1", got),
+            "the chosen port must be genuinely serveable by us")
+
+    def test_filedrop_port_bindable_reads_foreign_listen_as_taken(self):
+        # a live FOREIGN LISTEN must read as NOT bindable — else the probe would
+        # treat a stranger's server as a free port and reintroduce #493. A
+        # genuinely free port reads as bindable. (SO_REUSEADDR must not misjudge
+        # a live LISTEN as reclaimable.)
+        import socket
+        srv = socket.socket()
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        taken = srv.getsockname()[1]
+        self.addCleanup(srv.close)
+        self.assertFalse(self.fw._filedrop_port_bindable("127.0.0.1", taken),
+                         "a live foreign LISTEN must read as taken")
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+        probe.close()
+        self.assertTrue(self.fw._filedrop_port_bindable("127.0.0.1", free),
+                        "a free port must read as bindable")
+
 
 class TestDefaultPortForUid(unittest.TestCase):
     """#493: a DETERMINISTIC per-uid file-drop port so N accounts on ONE host
@@ -666,6 +755,23 @@ class TestDefaultPortForUid(unittest.TestCase):
         env = os.getenv("FILEDROP_PORT")
         if env is None and filedrop.persisted_port() is None:
             self.assertEqual(filedrop.PORT, filedrop.default_port_for_uid())
+
+    def test_module_port_fallback_wires_to_per_uid_default(self):
+        # #493 review MINOR: the no-env/no-persist fallback for filedrop.PORT
+        # must derive from default_port_for_uid, never a blind shared
+        # DEFAULT_PORT. A STRUCTURAL lock because the push gate runs as uid 1000,
+        # where the two values are numerically EQUAL, so a behavioral assertion
+        # is a tautology there and a mutation reverting the wiring SURVIVES.
+        import inspect
+
+        import filedrop
+        port_lines = [ln for ln in inspect.getsource(filedrop).splitlines()
+                      if ln.lstrip().startswith("PORT =")]
+        self.assertTrue(port_lines, "filedrop must define a module-level PORT")
+        self.assertIn(
+            "default_port_for_uid", port_lines[0],
+            "PORT fallback must derive from the per-uid port, not a blind "
+            "shared DEFAULT_PORT (#493)")
 
 
 class TestBindIps(unittest.TestCase):
