@@ -1953,14 +1953,42 @@ def _owner_decision_digest_block(tickets, limit=12):
     return "\n".join(lines)
 
 
+def _box_authority():
+    """This BOX's autopilot authority profile (full / branch-merge /
+    fork-no-merge), resolved cwd-INDEPENDENTLY from the OS user's fixed
+    `AUTHORITY_BY_USER` mapping.
+
+    #489: the owner-decision digest is a BOX-WIDE aggregate (every repo in
+    `_cache_repo_roots`) pinged to the BOX OWNER, so the question it gates on is
+    "is THIS BOX's owner the genuine recipient of these decisions" — fixed by the
+    box identity, never by whatever cwd the watchdog happens to run from.
+    Deliberately NOT `resolve_authority()`: that honours a per-repo
+    `airuleset:authority=full` CLAUDE.md marker, and a stray such marker in the
+    watchdog's cwd must NEVER re-open the cross-stream leak this gate closes. This
+    is the SAME `AUTHORITY_BY_USER` map `resolve_authority` itself falls back to
+    (never a parallel derivation). Deferred `import airuleset` (the idiom already
+    used in this package's `goal.py` + `cli_quals.py`) avoids the module-load
+    cycle. An unmapped user (gk = gatekeeper, dev1/dev2 = newlevel) defaults to
+    "full", exactly as the map's own `.get(user, "full")` does everywhere else."""
+    import airuleset
+    return airuleset.AUTHORITY_BY_USER.get(airuleset._current_user(), "full")
+
+
 def reping_owner_decision_tickets(now, send_fn, state, home=None, dry_run=False,
                                   reping=None, account_owner="", fetch=None,
-                                  persist=None):
+                                  persist=None, authority=None):
     """#461 -- see the section comment above OWNER_DECISION_LABELS. Once per
     QUESTION_REPING_S day-bucket, ping the owner with a summary of every open
     owner-decision ticket. No-op unless BOTH send_fn and fetch are wired
     (fetch=None keeps every OTHER job's run_once test network-free, exactly
     like jobs 8/11).
+
+    #489 -- runs ONLY on a full-authority box (box owner = the genuine decision
+    recipient). `authority` is injectable for hermetic tests; it defaults to the
+    box-wide `_box_authority()` (never `resolve_authority()`'s per-repo marker).
+    A reduced-authority sub-dev box skips ENTIRELY (before any fetch or ping) --
+    its box owner is an external sub-dev but the tickets belong to the
+    gatekeeper/boss.
 
     Gated on a state day-bucket stamp BEFORE the network fetch (no 60s query
     storm) and deferred past the sleep window (retried after 06:00, bucket
@@ -1978,6 +2006,27 @@ def reping_owner_decision_tickets(now, send_fn, state, home=None, dry_run=False,
     dd = state.get("owner_decision_digest") or {}
     if dd.get("bucket") == bucket:
         return []                              # already handled this day-bucket
+    # #489 -- the digest is a BOX-WIDE aggregate (every repo in
+    # _cache_repo_roots) pinged to the BOX OWNER. Run it ONLY where the box owner
+    # is the GENUINE decision recipient: a full-authority (zbynek: gk/dev1/dev2)
+    # box. On a reduced-authority sub-dev box the owner is an EXTERNAL sub-dev
+    # (david = CEO slovnormalu) but the tickets belong to the gatekeeper/boss --
+    # so the repo-scoped fetch leaked 24 internal odoo-erp tickets into david's
+    # Discord thread with a false "these N tickets wait on YOUR decision". Skip
+    # ENTIRELY, before any fetch or ping (the sub-dev's own slice is already
+    # surfaced by the footer `U N` badge + the per-ticket ❓ pings -- the digest's
+    # own "critical paths"). The SINGLE authority check (no new heuristic gate,
+    # #486), resolved cwd-independently so no stray marker re-opens the leak.
+    # Placed AFTER the bucket dedup and it stamps the bucket on skip, so a reduced
+    # box logs the skip at most ONCE per day-bucket (dedup silences the rest),
+    # never every 60s sweep.
+    authority = _box_authority() if authority is None else authority
+    if authority != "full":
+        dd["bucket"] = bucket
+        state["owner_decision_digest"] = dd
+        (persist or (lambda: None))()
+        return ["owner-decision-digest skipped: reduced-authority box (%s) -- "
+                "decisions belong to the maintainer, not this box" % authority]
     logs = []
     if _in_sleep_window(now):
         logs.append("owner-decision-digest deferred sleep-window")
