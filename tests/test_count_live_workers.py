@@ -298,6 +298,28 @@ class TestCorruptTolerance(unittest.TestCase):
             self.assertEqual(n, 1)
             self.assertEqual(_states(ev), ["live"])
 
+    def test_a_wrong_typed_text_block_degrades_to_unreadable_never_crashes(self):
+        # valid JSON, but `"text": null` → _entry_text (used by both death-mode
+        # detectors) would TypeError. The content scan must catch it, degrade the
+        # lane to `unreadable` (safe under-count) + warn, and NOT crash the sweep —
+        # and a real sibling worker in the same dir must still count (loop survives).
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            d = _subagents_dir(root, CWD, SID)
+            d.mkdir(parents=True)
+            _write_worker(root, CWD, SID, "real", [_assistant("w")], age_s=2)
+            bad = d / "agent-badtype.jsonl"
+            bad.write_text(json.dumps({"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": None}]}}) + "\n")
+            os.utime(bad, (NOW - 3, NOW - 3))
+            warns = []
+            n, ev = count_live_workers(root, CWD, SID, NOW, FRESH,
+                                       on_warn=warns.append)
+            self.assertEqual(n, 1)  # the real worker still counts; no crash
+            self.assertEqual(_by_id(ev, "badtype").state, "unreadable")
+            self.assertTrue(warns, "a content-scan failure must fire on_warn")
+
     def test_an_empty_fresh_file_counts_live_without_crashing(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
@@ -405,16 +427,37 @@ class TestNeverRaises(unittest.TestCase):
             n, ev = count_live_workers(f.name, CWD, SID, NOW, FRESH)
             self.assertEqual((n, ev), (0, []))
 
-    def test_default_on_warn_writes_to_stderr_and_does_not_raise(self):
-        # An unreadable subagents dir path must warn (default → stderr) and return 0,
-        # never raise. Simulate by making the subagents path a FILE.
+    def test_a_file_where_subagents_should_be_reads_as_no_workers(self):
+        # a FILE at the subagents path → is_dir() False → (0, []), no crash. This is
+        # the not-a-dir behaviour; the default-stderr sink is exercised separately.
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             sub = _subagents_dir(root, CWD, SID)
             sub.parent.mkdir(parents=True)
             sub.write_text("not a dir")  # subagents is a FILE → not.is_dir()
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
-            self.assertEqual((n, ev), (0, []))  # not-a-dir → treated as absent → 0
+            self.assertEqual((n, ev), (0, []))
+
+    def test_the_default_on_warn_sink_writes_to_stderr(self):
+        # genuine coverage of _warn_stderr (the `# airuleset:script-ok` last-resort
+        # sink): trigger the EACCES-is_dir warn path with NO on_warn passed, and
+        # assert the default sink actually wrote to stderr. Without this, a mutant
+        # breaking _warn_stderr survives (every other warn test passes a custom sink).
+        import contextlib
+        import io
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            sid_dir = Path(root) / encode_project_dir(CWD) / SID
+            (sid_dir / "subagents").mkdir(parents=True)
+            os.chmod(sid_dir, 0o000)
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf):
+                    n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
+                self.assertEqual((n, ev), (0, []))
+                self.assertIn("count_live_workers", buf.getvalue())
+            finally:
+                os.chmod(sid_dir, 0o755)  # let TemporaryDirectory clean up
 
     def test_worker_lane_is_the_exported_namedtuple(self):
         self.assertTrue(hasattr(transcripts, "WorkerLane"))

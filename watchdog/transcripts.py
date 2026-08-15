@@ -528,11 +528,14 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
 
     Cost: the stat pass is O(TOTAL subagent files under the session), not O(live
     lanes) — a supervisor's `subagents/` dir accumulates every historical worker
-    (nothing here prunes it). Measured on the real box: ~1010 files → 11 ms warm,
-    with the per-file content scan (the two death-mode detectors) bounded to the
-    ~10 FRESH candidates. Acceptable for a 60 s sweep; the linear stat growth is a
-    noted residual (a session with tens of thousands of historical workers would
-    see a proportionally larger stat pass) — the same property the predecessor
+    (nothing here prunes it). Measured on the real box: ~1010 files → 11 ms warm.
+    The per-file content scan (the two death-mode detectors, each an ≤4 MB tail
+    read) runs ONLY on candidates within `freshness_s` — ~10 with today's 15 min
+    window; a caller that passes a very large `freshness_s` widens that set toward
+    every file and voids the bound, so keep the window small relative to the dir's
+    write cadence. Acceptable for a 60 s sweep; the linear stat growth is a noted
+    residual (a session with tens of thousands of historical workers would see a
+    proportionally larger stat pass) — the same property the predecessor
     `_count_live_subagents` already has, out of scope to optimize here.
     """
     warn = on_warn or _warn_stderr
@@ -580,10 +583,23 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
         # 4a's own high-precision detector). Both are the SAME dangerous direction
         # for the predicate -- a stuck worker counted live suppresses the recovery
         # nudge -- so a liveness COUNT must exclude both, not just the api-error one.
-        atype = _worker_agent_type(p)
-        wedged = transcript_last_error(p)
-        if not wedged and transcript_text_toolcall_stall(p):
-            wedged = "text-toolcall stall"
+        # The content scan is itself guarded: transcript_last_error /
+        # transcript_text_toolcall_stall delegate to _entry_text, which raises
+        # TypeError on a parseable-but-wrong-typed block (e.g. `"text": null`) — a
+        # corrupt fresh transcript that json.loads accepts but _entry_text chokes
+        # on. Degrade to `unreadable` (safe UNDER-count — a lane we can't classify
+        # is not asserted live, so it never suppresses the nudge), never crash the
+        # sweep this reader promises never to break.
+        try:
+            atype = _worker_agent_type(p)
+            wedged = transcript_last_error(p)
+            if not wedged and transcript_text_toolcall_stall(p):
+                wedged = "text-toolcall stall"
+        except Exception as e:
+            warn("content scan failed (%s): %s" % (p, e))
+            evidence.append(WorkerLane(agent_id, "unreadable", age, None,
+                                       str(e)[:80]))
+            continue
         if wedged:
             evidence.append(WorkerLane(agent_id, "wedged", age, atype, wedged[:80]))
             continue
