@@ -135,18 +135,27 @@ class TestReclaimStaleOrphans(TestCase):
         # (`?*`, `?`, `[a-z]*`) has no family anchor and would broadly match a
         # world-writable /tmp; it must be refused just like a bare "*".
         old = self._mk("zzz-some-old-unrelated-file", age_s=7200)
-        for degenerate in ("?*", "?", "[a-z]*", "ab*", "[!x]*"):
+        # incl. round-2 review: a long ENUMERATED char-class interior
+        # ("[abcdefghij]") must not count as a literal anchor.
+        degenerates = ("?*", "?", "[a-z]*", "ab*", "[!x]*", "[abcdefghij]*",
+                       "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*", "[a-z][a-z]*")
+        for degenerate in degenerates:
             reclaim_stale_orphans(degenerate, tmp_dir=self.tmp.name,
                                   max_age_s=3600)
         self.assertTrue(old.exists(), "a degenerate pattern must reclaim nothing")
 
     def test_a_pattern_with_a_real_literal_anchor_is_accepted(self):
         # The complement: a specific-enough pattern (long literal run) still
-        # works, so the guard cannot be satisfied by refusing everything.
-        old = self._mk("airuleset-runcard-gate-gate-old", age_s=7200)
+        # works, so the guard cannot be satisfied by refusing everything —
+        # including one carrying an incidental char-class AFTER a real anchor.
+        a = self._mk("airuleset-runcard-gate-gate-old", age_s=7200)
+        b = self._mk("airuleset9", age_s=7200)
         reclaim_stale_orphans("airuleset-runcard-gate-gate-*",
                               tmp_dir=self.tmp.name, max_age_s=3600)
-        self.assertFalse(old.exists())
+        reclaim_stale_orphans("airuleset[0-9]*",
+                              tmp_dir=self.tmp.name, max_age_s=3600)
+        self.assertFalse(a.exists())
+        self.assertFalse(b.exists(), "a real anchor before a [...] class works")
 
     def test_only_regular_files_never_a_dir_or_symlink(self):
         # Directories and symlinks matching the pattern are left untouched —

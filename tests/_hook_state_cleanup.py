@@ -41,15 +41,18 @@ _MIN_PATTERN_ANCHOR = 8
 
 
 def _pattern_is_specific(pattern):
-    """True iff `pattern` has a literal (non-glob-metachar) run of at least
-    `_MIN_PATTERN_ANCHOR` chars — the anchor that makes an orphan sweep
-    target one family, not the whole directory. Splits on the glob metachar
-    class `* ? [ ]` and measures the longest resulting literal segment, so a
-    pattern made only of metachars/ranges (`*`, `?*`, `[a-z]*`) has no anchor
-    and is refused."""
+    """True iff `pattern` has a literal run of at least `_MIN_PATTERN_ANCHOR`
+    chars — the anchor that makes an orphan sweep target one family, not the
+    whole directory. A `[...]` char-class matches ONE broad position and is
+    never a literal anchor (even a long enumerated `[abcdefghij]`), so whole
+    bracket groups are stripped BEFORE measuring; the longest run left after
+    splitting on `*`/`?` must clear the floor. A pattern made only of
+    metachars/classes (`*`, `?*`, `[a-z]*`, `[abcdefghij]*`) has no anchor and
+    is refused."""
     if not pattern:
         return False
-    return max((len(seg) for seg in re.split(r"[*?\[\]]", pattern)),
+    literal = re.sub(r"\[[^\]]*\]", "", pattern)
+    return max((len(seg) for seg in re.split(r"[*?]", literal)),
                default=0) >= _MIN_PATTERN_ANCHOR
 
 
