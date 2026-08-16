@@ -653,18 +653,26 @@ class TestGoalLaneSweep(unittest.TestCase):
                                         backlog_fetch=lambda cwd: 5)
         self.assertEqual(logs, [])
 
-    def test_not_armed_is_skipped_entirely(self):
+    def test_not_armed_is_skipped_by_render_but_journals_one_glance(self):
         # GOAL_IDLE_CAP -> pane_goal_armed reads DETERMINABLY False (a plain,
-        # readable footer with no ◎ /goal). #475: this stays deliberately
-        # silent -- it is not a lane-occupancy candidate at all, so no decision
-        # line is journalled (contrast the undeterminable case below).
+        # readable footer with no ◎ /goal). #486 G3 OVERTURNS the old #475 "no
+        # decision line for a not-armed candidate" invariant: the render path
+        # still takes no ACTION (no nudge), but the STRUCTURED one-glance line is
+        # now journalled for EVERY candidate pane -- exactly so the #486 case
+        # (footer reads not-armed while a /goal is genuinely armed) can never be
+        # a SILENT skip again. With no heartbeat here, the structured verdict is
+        # honestly `no-heartbeat` (render agrees, no structured armed signal), so
+        # this pane produces ONE one-glance line and NO nudge / keystroke.
         proj = self._dir()
         sid = "sess-lane-1"
         _write_marker_transcript(proj, self.CWD, sid)
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
         logs = goal.goal_lane_sweep(1000, run=tmux, projects_dir=proj,
                                     backlog_fetch=lambda cwd: 5)
-        self.assertEqual(logs, [])
+        self.assertTrue(any(ln.startswith("one-glance ") for ln in logs), logs)
+        self.assertTrue(any("-> no-heartbeat (" in ln for ln in logs), logs)
+        # render path took NO action: no lane-occupancy nudge, no keystroke.
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
     def test_armed_undeterminable_logs_skip_not_silent(self):

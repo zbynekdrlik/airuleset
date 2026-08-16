@@ -131,6 +131,8 @@ from pathlib import Path
 
 import watchdog
 from watchdog import compact as _compact
+from watchdog import one_glance as _one_glance          # #486 G3
+from watchdog import session_status as _session_status  # #486 G3 (reaper)
 
 
 # --------------------------------------------------------------------------- #
@@ -1816,6 +1818,12 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     time_fn = time_fn or time.monotonic
     state = state if state is not None else {}
     recs = state.setdefault("goal_lane", {})
+    # #486 G3 -- once-per-sweep hygiene: reap heartbeat files of long-dead
+    # sessions (G3 is the CONSUMER of these files, so it owns their retention).
+    # Age-gated (7d), regular-files-only, never raises; the session-status dir is
+    # env-isolated in BOTH test runners (conftest autouse + cmd_push test_env),
+    # so this never touches a real developer home.
+    logs += _session_status.reap_stale_status(now=now)
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
@@ -1831,27 +1839,47 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         sid = tpath.stem
         captured = run(["tmux", "capture-pane", "-p", "-t", pid]) or ""
         armed = watchdog.pane_goal_armed(captured)
+        loc = watchdog._pane_location(pid, run) or pid
+        # #486 G3 -- the one-glance STRUCTURED verdict (heartbeat + G2 worker
+        # count + backlog cache; reads NO pane text), emitted for EVERY candidate
+        # pane so the exact render-blindness this redesign targets -- the footer
+        # reads not-armed while a /goal is genuinely armed -- surfaces as ONE
+        # decision line instead of the deliberately-SILENT `armed is False` skip
+        # below. DIAGNOSTIC in G3: the render `armed` verdict stays the
+        # authoritative action gate until G5; the structured line is what G5
+        # will compare against and act on. Guarded so the diagnostic can never
+        # crash the sweep (the injected readers are contractually non-raising,
+        # but the boundary stays defensive).
+        try:
+            _glance, gline = _one_glance.evaluate(
+                now, sid, cwd, projects_dir, state, backlog_fetch, armed, loc,
+                read_status=watchdog.read_status,
+                count_live_workers=watchdog.count_live_workers,
+                cached_backlog_count=watchdog._cached_backlog_count,
+                idle_threshold_s=GOAL_LANE_IDLE_S,
+                freshness_s=GOAL_LANE_LIVE_WINDOW_S)
+            logs.append(gline)
+        except Exception as _e:
+            logs.append("one-glance %s -> error: %s" % (loc, _e))
         if armed is not True:
             if armed is None:
                 # #475: the incident path -- a genuinely-armed supervisor whose
                 # footer is obscured this sweep (busy mid-turn / chrome / a large
-                # unsent draft) reads UNDETERMINABLE, so the driver silently
-                # skipped it and the guard's own every-sweep decision log never
-                # fired (gk 13:10-14:15: 46 of 57 sweeps silent while 7-8 workers
-                # held). Log it: the footer could not be read, so the goal state
-                # cannot be confirmed this sweep.
-                loc = watchdog._pane_location(pid, run) or pid
+                # unsent draft) reads UNDETERMINABLE. The render path cannot
+                # confirm the goal is still armed this sweep, so it skips -- but
+                # the one-glance line above already journalled the STRUCTURED
+                # verdict (from the heartbeat, not the footer), so this is the
+                # render perspective, not a silent drop.
                 logs.append("lane-occupancy %s -> skip:armed-undeterminable "
                             "(footer obscured this sweep -- busy / chrome / "
                             "large unsent draft; cannot confirm the goal is "
                             "still armed)" % loc)
             # armed is False: the footer IS readable and shows no armed /goal, so
-            # this pane is not a lane-occupancy candidate at all (a plain
-            # interactive session, or a cleared/finished loop). Deliberately
-            # silent -- logging every non-armed candidate pane every sweep would
-            # be pure noise.
+            # the RENDER path takes this pane as a non-candidate. No longer a
+            # SILENT skip -- the one-glance line above carries the structured
+            # verdict for this pane (including the #486 case where structure says
+            # STUCK while the footer read not-armed).
             continue
-        loc = watchdog._pane_location(pid, run) or pid
         rec = recs.get(sid)
         if not isinstance(rec, dict):
             rec = {}
