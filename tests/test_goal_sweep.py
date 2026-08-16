@@ -927,21 +927,23 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("no measurable open backlog" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
-    def test_live_worker_present_small_backlog_now_nudges(self):
-        # #481: floor = min(5, backlog). (2 workers, backlog 5) -> floor 5,
-        # 2 < 5 -> NUDGE. This INVERTS the old #442 behaviour (the old
-        # backlog>10 hard gate made this skip:backlog-small); the owner's
-        # semantics is `active_workers < min(5, workable_backlog)`, so a
-        # small-but-real backlog with idle lanes must be filled.
+    def test_live_worker_present_small_backlog_backs_off_509(self):
+        # #509 OVERTURNS #481's tiny-backlog fill: (2 workers, backlog 5) has
+        # surplus 5-2=3 < GOAL_LANE_UNDERSAT_SURPLUS(5), so the guard no longer
+        # pushes for a 5th lane against a workable count too small to fill it -- it
+        # skips:surplus-floor. #481's real-backlog filling survives at a genuine
+        # surplus (test_undersaturated_large_surplus_still_nudges_509). This test
+        # locked the pre-#509 "small-but-real backlog must be filled" invariant,
+        # which is exactly what #509 deliberately narrows.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         with m.patch.object(wd, "_count_live_subagents", return_value=2), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 5,
                                           now, tmtime)
-        self.assertTrue(owns)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+        self.assertTrue(any("skip:surplus-floor" in ln for ln in logs), logs)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
 
     # ---------------------------------------------------------------- #
     # #442 re-fix 2 (REOPEN č.2 + owner directives 2026-08-14) -- the
@@ -1095,10 +1097,14 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
     def test_undersaturated_cooldown_logs_remaining(self):
         # Under-saturated but within the per-fire cooldown window -> skip, and
         # the skip is journalled with the remaining seconds (item 3), not the
-        # old numberless "rate-limited".
+        # old numberless "rate-limited". #509: the under-saturated cooldown is now
+        # the effectiveness-backoff gate; at streak 0 the interval EQUALS
+        # GOAL_LANE_INTERVAL_S (15 min), so the timing is byte-identical (840s
+        # remaining), only the message names the mechanism (skip:ineffective-backoff
+        # streak=0). No prior baseline in `rec` -> streak stays 0, no reset/advance.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        rec = {"llast": now - 60}  # fired 60s ago, inside GOAL_LANE_INTERVAL_S
+        rec = {"llast": now - 60}  # fired 60s ago, inside the base interval
         with m.patch.object(wd, "_count_live_subagents", return_value=2), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
@@ -1106,10 +1112,9 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(owns)
         # #442-review F2: assert the VALUE, not just the substring, so a
         # sign-flip mutant (remaining=-840s) is caught. Fired 60s ago into a
-        # 15-min window -> 840s remaining.
-        self.assertTrue(any("skip:cooldown remaining=%ds"
-                            % (goal.GOAL_LANE_INTERVAL_S - 60) in ln
-                            for ln in logs), logs)
+        # 15-min base interval -> 840s remaining.
+        self.assertTrue(any("skip:ineffective-backoff remaining=%ds" % (
+            goal.GOAL_LANE_INTERVAL_S - 60) in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
     def test_min_floor_saturates_below_five_when_backlog_is_small(self):
