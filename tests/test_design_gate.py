@@ -1448,6 +1448,24 @@ class TestRejectReasonIO(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(dg.marker_exists("airuleset", 41, "design"))
 
+class TestIssueRefsAfterShellQuote(unittest.TestCase):
+    """Regression: a commit SUBJECT starting with #N evades the gate when the
+    hook scans the full `git commit -m "#N ..."` command string — the ref's
+    `#` is preceded by the shell QUOTE, which the boundary class did not
+    accept (batch-32 corpus-replay catch, 2026-08-16: the L-E extraction
+    commit passed the ON arm markerless)."""
+
+    def test_double_quote_before_hash_counts(self):
+        self.assertEqual(
+            dg.issue_refs('git commit -m "#433 cluster L-E: promote"'), [433])
+
+    def test_single_quote_before_hash_counts(self):
+        self.assertEqual(
+            dg.issue_refs("git commit -m '#77 fix thing'"), [77])
+
+    def test_html_entity_still_ignored(self):
+        self.assertEqual(dg.issue_refs("a &#123 b"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
