@@ -63,7 +63,7 @@
     "tests/test_delegation_meter.py": 653,
     "tests/test_delivery_stall.py": 362,
     "tests/test_design_before_code.py": 137,
-    "tests/test_design_gate.py": 1453,
+    "tests/test_design_gate.py": 1471,
     "tests/test_dev_env_provisioning.py": 1371,
     "tests/test_discord_notify_check.py": 106,
     "tests/test_discord_reply.py": 1845,
