@@ -336,12 +336,34 @@ USER_WAITING_LABELS = ("needs-answer", "needs-decision")
 # stale, PERMANENT hand-off comment — the gatekeeper removes the LABEL when it
 # processes a hand-off, but the COMMENT stays in history. So a ticket carrying
 # any of these labels is EXCLUDED from the comment-fallback candidate walk: its
-# stale hand-off comment can never re-flip it back to parked-with-gk. A genuine
-# post-acceptance RE-hand-off carries a fresh `ready-for-review`/`needs-gatekeeper`
-# LABEL (the repo's subdev-handoff-label workflow re-adds it — live-observed on
-# odoo-erp#3068), so it is caught by the label-check BEFORE the fallback and is
-# never dropped by this suppression. Streams without a needs-acceptance model
-# simply never match — zero behaviour change there.
+# stale hand-off comment can never re-flip it back to parked-with-gk.
+#
+# The common re-park case is still caught correctly: a genuine post-acceptance
+# RE-hand-off normally carries a fresh `ready-for-review`/`needs-gatekeeper`
+# LABEL (the repo's subdev-handoff-label workflow re-adds it server-side on the
+# hand-off comment — live-observed on odoo-erp#3068), so `label_handed=True`
+# and it is counted via the label-check BEFORE the fallback, never reaching this
+# suppression.
+#
+# #507 review MAJOR (accepted, SAFE-direction residual — the claim is NOT
+# absolute): the label is a DELIBERATELY unreliable hand-off signal (that is the
+# whole reason the #313 comment fallback exists — a fork-no-merge label-add
+# 403s, and the auto-labeller can itself be broken). So a re-hand-off that is
+# COMMENT-ONLY (fresh READY-FOR-REVIEW comment, no fresh label added) AND leaves
+# `needs-acceptance` in place is indistinguishable, by label alone, from a
+# processed ticket with a stale comment — telling them apart needs a per-ticket
+# timeline query (was the comment newer than the needs-acceptance labeling?),
+# the exact cost this fix rejected (issue #507, ~1 extra gh call per candidate
+# into the shared graphql bucket, #370). Such a ticket is UNDER-counted (shown
+# as the stream's own workable `I N` instead of gk). This is the SAFE failure
+# direction: it moves the ticket INTO the loop's workable set, so the /goal
+# stop-proof keeps it alive and never falsely declares "backlog empty" — a
+# bounded, self-healing under-count (it resolves the moment the auto-labeller
+# lands the label), replacing the reported PERMANENT over-count. A precise
+# timeline-based fix is tracked as a needs-user-decision follow-up.
+#
+# Streams without a needs-acceptance model simply never match — zero behaviour
+# change there.
 GATEKEEPER_PROCESSED_LABELS = ("needs-acceptance",)
 
 
@@ -755,9 +777,10 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
         # ready-for-review/needs-gatekeeper), and the comment-fallback walk
         # below EXCLUDES it (via `processed_numbers`) so its stale, permanent
         # READY-FOR-REVIEW comment can never re-flip it back to parked. See
-        # GATEKEEPER_PROCESSED_LABELS for why a genuine re-hand-off (fresh
-        # label) is still caught by the label-check above, never dropped here.
-        if labels & set(GATEKEEPER_PROCESSED_LABELS):
+        # GATEKEEPER_PROCESSED_LABELS for why the COMMON re-hand-off (fresh
+        # label) is still caught by the label-check above, and the accepted
+        # SAFE-direction residual for the comment-only-re-hand-off edge.
+        if any(lb in labels for lb in GATEKEEPER_PROCESSED_LABELS):
             processed_numbers.add(n_num)
         handed[n_num] = label_handed
 
@@ -837,9 +860,11 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
         # stream's court), and its stale, permanent READY-FOR-REVIEW comment
         # must never re-flip it to parked-with-gk. Excluding it here (rather
         # than fetching its comments and refusing the upgrade) also skips a
-        # pointless `gh api .../comments` call per such ticket. A genuine
+        # pointless `gh api .../comments` call per such ticket. The COMMON
         # re-hand-off carries a fresh ready-for-review/needs-gatekeeper LABEL,
-        # so it is already handed via the label-check and never reaches here.
+        # so it is already handed via the label-check and never reaches here;
+        # the comment-only-re-hand-off edge is the accepted SAFE-direction
+        # residual documented on GATEKEEPER_PROCESSED_LABELS.
         unhandled_candidates = sorted(
             (n_num for n_num in rows
              if not handed.get(n_num) and n_num not in processed_numbers),
