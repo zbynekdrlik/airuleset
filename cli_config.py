@@ -13,11 +13,11 @@ read_file_safe) are all routed through the airuleset facade for merge-order
 robustness. See internals-cli.md for the full lesson.
 """
 
-import os  # noqa: F401  (used by moved functions: symlink_global_rules, cmd_diff)
-import sys  # noqa: F401  (parse_profile, cmd_validate)
-import json  # noqa: F401  (load_hooks_json, cmd_validate, cmd_diff)
-import shutil  # noqa: F401  (symlink_global_rules)
-import difflib  # noqa: F401  (unified_diff)
+import os        # symlink_global_rules, cmd_diff
+import sys       # parse_profile, cmd_validate
+import json      # load_hooks_json, cmd_validate, cmd_diff
+import shutil    # symlink_global_rules
+import difflib   # unified_diff
 from pathlib import Path
 
 # 1-line leaf-dup of airuleset.REPO_DIR: identical value (this leaf is a sibling
