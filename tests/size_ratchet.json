@@ -252,7 +252,7 @@
     "watchdog/cross_stream.py::gk_request_backstop": 235,
     "watchdog/discord_replies.py::deliver_discord_replies": 488,
     "watchdog/goal.py::goal_dark_watch": 226,
-    "watchdog/goal.py::goal_lane_occupancy_nudge": 440,
+    "watchdog/goal.py::goal_lane_occupancy_nudge": 411,
     "watchdog/stash.py::deliver_with_stash": 220,
     "watchdog/wedge.py::prompt_wedge_check": 235
   },
