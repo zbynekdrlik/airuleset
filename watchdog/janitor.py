@@ -30,7 +30,7 @@ this module mid-init. Exactly the established idiom `watchdog/goal.py` and
 `watchdog/compact.py` already use for the same back-reference.
 
 Monkeypatch seam note (for cluster D + test authors): a test that patches one of
-the eleven resident symbols by attribute (`patch.object(watchdog,
+the twelve resident symbols by attribute (`patch.object(watchdog,
 "capture_pane")`, already live in `tests/test_goal_sweep.py`) still reaches
 these functions — they read `watchdog.__dict__[name]` at call time, the exact
 dict the patch writes. A test patching a janitor function itself sets the facade
