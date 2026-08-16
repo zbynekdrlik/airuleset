@@ -240,10 +240,13 @@ class TestPrePushTestCheckExemptsBackupRef(unittest.TestCase):
         (self.repo / "a.py").write_text("x = 1\n")
         _git(self.repo, "add", "-A")
         _git(self.repo, "commit", "-q", "-m", "init")
-        # a bug-fix commit with NO preceding test commit -> Gate 2 blocks
+        # a bug-fix commit (a `fix:` subject -> IS_BUGFIX) with NO preceding
+        # test commit -> Gate 2 (RED-before-GREEN) blocks a normal push. The
+        # `fix:` subject alone trips it; deliberately NO `Closes/Fixes #N` here,
+        # to keep any close-trigger substring out of the repo entirely.
         (self.repo / "a.py").write_text("x = 2\n")
         _git(self.repo, "add", "-A")
-        _git(self.repo, "commit", "-q", "-m", "fix: correct value\n\nCloses #1")
+        _git(self.repo, "commit", "-q", "-m", "fix: correct value")
 
     def test_normal_push_still_blocks_on_red_before_green(self):
         r = _run_hook("pre-push-test-check.sh", self.repo, "git push origin dev")
