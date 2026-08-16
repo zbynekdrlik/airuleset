@@ -38,7 +38,12 @@ repo/issue(s), stop and report — do not guess.
 **Authority profile (the dispatch prompt names it — obey it absolutely):** `full` = the default
 flow below (PR to main, merge, deploy-verify). `branch-merge` = your PR targets and merges into the
 project's INTEGRATION branch (develop unless the project CLAUDE.md names another) and your job ENDS
-there — never promote to staging/main, never deploy. `fork-no-merge` = you push YOUR fork branch,
+there — never promote to staging/main, never deploy. `fork-no-merge` = you push YOUR fork branch
+(as your HAND-OFF, when the work is clean — report its EXACT name, #503 case 1; your DURABILITY in
+the meantime is the universal `refs/autopilot-wip/<branch>` backup in WORKTREE AWARENESS, which is
+exempt+CI-neutral and preserves finished work even if you die on the account cap before the
+hand-off — so the fork branch itself stays a clean reviewable branch, never a lint-dirty mid-work
+push that its own CI/pre-push gates would block),
 prove local verification green (tests/lint), then hand off with a COMMENT starting
 `READY-FOR-REVIEW:` (branch name + the verification evidence) — the comment is the PRIMARY signal
 (it works at read role; a fork-derived collaborator often cannot add labels, #17); ALSO try
@@ -215,13 +220,44 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   remedy (scope every filename with the issue number, and verify a scratch file's content
   immediately before feeding it to `git commit -F`/`gh issue comment -F`) still applies fully
   inside your own per-worker subdirectory, and is not replaced by having one.
-- **NEVER `push`, NEVER run `airuleset.py push`/`install`, NEVER fire your own run-card, NEVER
-  open or merge the PR yourself.** All of that is INTEGRATION, and integration is the
+- **NEVER push to the INTEGRATION flow (`dev`/`main`, or opening/merging a PR), NEVER run
+  `airuleset.py push`/`install`, NEVER fire your own run-card, NEVER open or merge the PR
+  yourself.** All of that is INTEGRATION, and integration is the
   SUPERVISOR's job, done CONTINUOUSLY under the #8 integration mutex — each returned branch is
   integrated in its own merge→gates→push cycle, one integration cycle at a time, as it becomes
   ready, never held for the whole round to finish (`skills/autopilot/SKILL.md` Step 4). Doing any
   of it yourself from inside a worktree would race or duplicate whatever the other workers in the
-  same round are doing.
+  same round are doing. (The ONE push you DO make is the durability BACKUP below — it integrates
+  nothing and triggers no CI.)
+- **Push a durability BACKUP of your branch to origin after your FIRST commit — and again after
+  every later commit — so finished, committed work survives even if this worktree AND the local
+  `.git` are lost (#503).** EVERY worktree worker does this, regardless of authority (full /
+  fork-no-merge / branch-merge) — it is your DURABILITY layer, separate from your authority's own
+  DELIVERY push (full authority: the supervisor merges your LOCAL branch ref; fork-no-merge: your
+  fork branch at hand-off; branch-merge: your PR into the integration branch — each happens per your
+  normal flow, when the work is clean). The backup is NOT the banned INTEGRATION push above: it goes
+  to a dedicated ref namespace `refs/autopilot-wip/<branch>` (with `<branch>` your OWN worktree
+  branch name), it integrates NOTHING (read ONLY on recovery — for full authority the supervisor
+  still merges from your LOCAL branch ref), and a push to any ref OUTSIDE `refs/heads/*` and
+  `refs/tags/*` triggers NO GitHub Actions workflow (the fleet is all-GitHub) whatever the repo's
+  push-trigger config, so it burns ZERO CI, needs no per-repo reasoning, and needs no branch-ignore
+  edit. Concretely, right after the version-bump commit and after every subsequent commit run
+  `git push origin HEAD:refs/autopilot-wip/<branch>` (append-only — normally a fast-forward; if it
+  is ever REJECTED non-fast-forward, `--force-with-lease` it, the backup ref is yours alone). The
+  pre-push CI-protection hooks (lint / test-order / conflict / test-skip) are exempt for this ref
+  namespace, so a mid-work snapshot that is lint-dirty, RED, or behind is never blocked; if a backup
+  push ever FAILS (a non-GitHub remote, a push ruleset), say so in your evidence block — do not
+  assume it landed. Cleanup: for full authority the supervisor deletes this backup ref when it
+  integrates your branch (Step 4); a reduced-authority worker deletes its OWN backup at hand-off
+  (`git push origin --delete refs/autopilot-wip/<branch>`, best-effort). A dead worker's backup ref
+  that is never integrated nor deleted is a harmless orphan (a custom ref, invisible to `git branch
+  -r` and the GitHub branch UI, no CI) reclaimed by a later watchdog sweep, not by Step 4. WHY it
+  matters: the window between "work done + committed locally" and "work on origin" is otherwise your
+  ENTIRE lifetime (origin is written only at delivery), and the account-cap death that kills
+  workers lands squarely in it — the branch ref alone survives `git worktree remove`, but NOT a
+  `.git` loss / branch deletion / box re-clone (#503 case 2). It NARROWS that window to a single
+  commit (a death in the gap between a commit and its following backup push loses only that one
+  un-backed-up commit), it does not close it fully.
 - **Your job stops at a green LOCAL result on your OWN branch**, committed inside your worktree:
   version bump → per-issue TDD (RED→GREEN, each member its own `Closes #<n>` commit) → local
   `/review` + `/requesting-code-review` clean (via CYCLE step 6's dispatch shape below — never the
@@ -231,7 +267,10 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
 - **Return your branch name AND worktree path in your evidence block**, not a PR link or merge
   SHA — the supervisor merges directly from your branch REF (a worktree's branch is a normal git
   ref, visible and mergeable from the main checkout via the shared `.git` even without your
-  worktree still existing) and does not need your worktree to still be present to do it.
+  worktree still existing) and does not need your worktree to still be present to do it. Report the
+  EXACT ref name you pushed — never a vague "my branch": the worktree DIRECTORY name
+  (`agent-<id>`) and your BRANCH name (`worktree-agent-<id>`) can DIFFER, and naming the wrong one
+  is exactly how a rescuer pushed a stale, wrong branch (#503 case 1).
 - **The serial-fallback (single-worker, no `isolation:`) shape is UNCHANGED** — if your dispatch
   prompt does not mention a worktree/isolation and your `cwd` is the repo's ordinary main
   checkout, you are running the old fully self-contained cycle: push, open, merge, deploy, and
@@ -358,6 +397,9 @@ or fire a run-card yourself. Report your branch name + worktree path and RETURN;
 Step 4 (`skills/autopilot/SKILL.md`) does steps 5–10 below for your branch as it returns — one
 integration cycle at a time under the #8 integration mutex, never held for the whole round to
 finish. Continue with steps 5–10 yourself ONLY in the documented serial fallback (no `isolation:`).
+The ONE push you DO make in worktree mode is the durability BACKUP to `refs/autopilot-wip/<branch>`
+after each commit (WORKTREE AWARENESS above — #503); the "do NOT push" here bans the INTEGRATION
+push / PR / merge / deploy, never that backup.
 
 5. Commit each member on `dev` with its own `Closes #<n>` message. After ALL members are committed,
    push **once** (one push for the whole batch — `ci-push-discipline.md`), then wait for CI.
@@ -527,7 +569,7 @@ validated: <per issue: how you proved each is still real, ALSO posted as its own
 approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a" — CYCLE step 2 is unconditional.>
 review: <per issue: local `/review` + `/requesting-code-review` result before hand-off, ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED locally — verbatim into each --handoff card's Dosiahnuté>
-branch: <your fork branch name, pushed>
+branch: <your fork branch name — the EXACT name, pushed after your FIRST commit (#503), never a vague "my branch">
 local_verify: <tests + lint command → result (green), the proof the maintainer will re-check>
 ready_for_review: <#A: comment posted ✓, label added/403; #B: …>  (the READY-FOR-REVIEW: hand-off)
 cards_fired: <#A ✓, #B ✓  (notify --run-card --handoff, one per issue)>
@@ -575,7 +617,7 @@ approach: <per issue, the design-step artifact: the `gh issue comment` URL/id ca
 review: <per issue: LOCAL `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supervisor relays this verbatim into your ticket's own run-card at its integration cycle>
 worktree: <your worktree's absolute path>
-branch: <your worktree branch name — the supervisor merges directly from this ref>
+branch: <your worktree branch name (the EXACT name, #503 case 1) — the supervisor merges directly from this ref; also state the refs/autopilot-wip/<branch> durability backup you pushed to origin>
 local_verify: <local test suite + lint command → result (green) — the proof the supervisor's integration cycle will re-check before merging>
 dropped: <#K split out mid-flight (gate violation), issue left OPEN, re-dispatched solo | "none">
 obsolete_closed: <#K closed-as-obsolete in STEP 0 with evidence | "none">

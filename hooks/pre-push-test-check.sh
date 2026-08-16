@@ -24,6 +24,16 @@ if ! echo "$INPUT" | grep -qE 'git\s+push'; then
     exit 0
 fi
 
+# #503 -- a durability BACKUP push to refs/autopilot-wip/* (the worktree
+# worker's one push, so finished work survives a lost worktree) triggers NO CI
+# (a ref outside refs/heads/*/refs/tags/* fires no GitHub Actions run), so this
+# test-order gate -- which exists to protect a CI-triggering push -- must not
+# block it. A backup snapshot is legitimately mid-work (a RED-before-GREEN
+# intermediate); its whole job is to preserve that state AS-IS. Anchor on the
+# push DESTINATION refspec, not a bare substring, so a real push that merely
+# MENTIONS the namespace stays gated (#503 review).
+echo "$INPUT" | grep -qE ':refs/autopilot-wip/|(--delete|[[:space:]]-d)[[:space:]]+refs/autopilot-wip/' && exit 0
+
 # Must be in a git repo
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
     exit 0
