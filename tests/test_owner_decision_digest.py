@@ -386,10 +386,28 @@ class TestReducedAuthorityBoxSkipsDigest(unittest.TestCase):
 
 
 class TestOwnerDecisionLabelsInSync(unittest.TestCase):
-    def test_labels_match_cli_quals_user_waiting(self):
+    def test_owner_decision_is_the_decision_subset_of_user_waiting(self):
+        # #512 DIVERGED these two sets, intentionally. `USER_WAITING_LABELS`
+        # (the footer `U N` / stop-proof family) GAINED `needs-acceptance` — but
+        # the watchdog owner-DECISION re-ping (`OWNER_DECISION_LABELS`) is a
+        # re-ask job the #512 owner decision scoped EXPLICITLY UNCHANGED
+        # ("watchdog re-ask joby bežia nezmenené"): needs-acceptance is an
+        # ACCEPTANCE (done, awaiting sign-off), not a blocked DECISION that would
+        # rot silently without a daily "please answer" nudge, so it does NOT
+        # belong in that backstop. The invariant is now a SUBSET one: every
+        # owner-decision re-ping label is a user-waiting label (so the re-ping
+        # never nags about something the footer wouldn't call owner-parked), and
+        # the ONLY user-waiting label NOT re-pinged is `needs-acceptance`.
         import cli_quals
-        self.assertEqual(tuple(wd.OWNER_DECISION_LABELS),
-                         tuple(cli_quals.USER_WAITING_LABELS))
+        self.assertTrue(set(wd.OWNER_DECISION_LABELS)
+                        <= set(cli_quals.USER_WAITING_LABELS),
+                        "every re-ping label must be a user-waiting label")
+        self.assertEqual(
+            set(cli_quals.USER_WAITING_LABELS) - set(wd.OWNER_DECISION_LABELS),
+            {"needs-acceptance"},
+            "needs-acceptance is the one user-waiting label deliberately NOT in "
+            "the owner-decision re-ping (#512: an acceptance, not a decision; "
+            "watchdog re-ask jobs are scoped unchanged)")
 
 
 class TestRunOnceWiring(unittest.TestCase):

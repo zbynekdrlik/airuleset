@@ -642,12 +642,19 @@ QUESTION_REPING_S = 24 * 3600
 # extension of the SAME #368 daily-reask section of run_once -- NEVER a new
 # numbered job, NEVER a new hook (the FREEZE).
 #
-# OWNER_DECISION_LABELS is the SAME set cli_quals.USER_WAITING_LABELS feeds the
-# footer/stop-proof (#468) -- kept as a flat literal here (never a module-level
-# `from cli_quals import`) because the import direction is airuleset -> watchdog
-# and watchdog is a 60s systemd timer; a reverse import would add import-time
-# cost to every sweep. The EXACT AUTOPILOT_SKIP_EXCL precedent, pinned equal by
-# TestOwnerDecisionLabelsInSync.
+# OWNER_DECISION_LABELS is the DECISION SUBSET of cli_quals.USER_WAITING_LABELS
+# (the footer/stop-proof `U N` family, #468). #512 DIVERGED the two on purpose:
+# USER_WAITING_LABELS gained `needs-acceptance` (a DONE ticket awaiting the
+# owner's/client's sign-off), but this owner-DECISION re-ping is a re-ask job
+# the #512 owner decision scoped EXPLICITLY UNCHANGED ("watchdog re-ask joby
+# bežia nezmenené") — a needs-acceptance ticket is an ACCEPTANCE, not a blocked
+# DECISION that rots silently without a daily "please answer" nudge, so it is
+# deliberately NOT re-pinged (it still surfaces on the footer's `U N`). Kept as
+# a flat literal here (never a module-level `from cli_quals import`) because the
+# import direction is airuleset -> watchdog and watchdog is a 60s systemd timer;
+# a reverse import would add import-time cost to every sweep. The SUBSET
+# invariant (every re-ping label ∈ USER_WAITING_LABELS; the only excluded one is
+# needs-acceptance) is pinned by TestOwnerDecisionLabelsInSync.
 OWNER_DECISION_LABELS = ("needs-answer", "needs-decision")
 
 
