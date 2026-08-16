@@ -705,6 +705,108 @@ class RefreshCLI(unittest.TestCase):
                 "comment is visible anywhere in the thread")
             self.assertEqual(cache["gk"], 0)
 
+    def test_refresh_a_processed_needs_acceptance_handoff_is_not_counted_as_gk(self):
+        # #507: the READY-FOR-REVIEW comment fallback (#313 pt 2) keys on the
+        # comment's PERMANENT existence, so a hand-off the gatekeeper ALREADY
+        # processed -- moved `ready-for-review` -> `needs-acceptance` (the
+        # "done = client saw it" doctrine, odoo-erp #3145: the ticket stays
+        # OPEN pending client acceptance) -- still carries its old
+        # READY-FOR-REVIEW comment forever and was counted as parked-with-gk
+        # indefinitely (montalu3 live: gk=19, 0 genuinely parked, ALL 19
+        # carrying needs-acceptance). A `needs-acceptance` ticket is the
+        # STREAM's court (acceptance is the stream's work -- owner ruling
+        # 2026-08-15), NOT parked with the gatekeeper, so it must fall to
+        # handed=False (own workable I N) regardless of a stale hand-off
+        # comment. The discriminator proven in ONE slice: #1 processed
+        # (needs-acceptance + stale READY-FOR-REVIEW comment) must NOT count;
+        # #2 genuinely parked (ready-for-review) MUST.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            comments = json.dumps([
+                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
+            ])
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,'
+                '"labels":[{"name":"needs-acceptance"}]},'
+                '{"number":2,"labels":[{"name":"ready-for-review"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(
+                cache["gk"], 1,
+                "only the genuinely-parked ready-for-review ticket (#2) is "
+                "gk; the processed needs-acceptance ticket (#1) must not be "
+                "re-counted by its stale READY-FOR-REVIEW comment")
+            self.assertEqual(
+                cache["open"], 1,
+                "the processed needs-acceptance ticket (#1) is the stream's "
+                "own workable, not parked with the gatekeeper")
+
+    def test_refresh_a_needs_acceptance_ticket_still_labeled_ready_for_review_stays_gk(self):
+        # #507 adversarial defense: the needs-acceptance suppression must
+        # NEVER drop a ticket that is GENUINELY still parked with the
+        # gatekeeper. A genuine (re-)hand-off carries the `ready-for-review`
+        # (or `needs-gatekeeper`) LABEL -- the repo's subdev-handoff-label
+        # workflow re-adds it on the hand-off comment (live-observed on
+        # odoo-erp#3068, github-actions[bot] labeled needs-gatekeeper) -- so
+        # it is handed via the LABEL path (label_handed=True) and never even
+        # reaches the comment-fallback candidate loop the suppression guards.
+        # A ticket carrying BOTH needs-acceptance AND ready-for-review is
+        # therefore still counted as gk (label wins); the suppression only
+        # affects handed=False tickets.
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            fake_gh = Path(bindir) / "gh"
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
+                '  *assignee:@me*) echo \'[{"number":1,'
+                '"labels":[{"name":"needs-acceptance"},'
+                '{"name":"ready-for-review"}]}]\';;\n'
+                '  *author:@me*)   echo "[]";;\n'
+                '  *label:stream:*) echo "[]";;\n'
+                '  *) echo 16;;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(
+                cache["gk"], 1,
+                "a genuinely-parked ticket (ready-for-review label) must stay "
+                "gk even when it also carries needs-acceptance -- the "
+                "suppression must not drop a labeled hand-off")
+            self.assertEqual(cache["open"], 0)
+
     def test_footer_refresh_actually_calls_the_shared_handed_derivation(self):
         # MAJOR-2 (fresh-context adversarial review of #391): mirrors the
         # sibling cmd_slice_quals sentinel test (#181 I7's own shape) for
