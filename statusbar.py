@@ -148,22 +148,25 @@ def _stream_split_sfx(cache):
     return ""
 
 
-def _user_waiting_sfx(cache):
-    """The '· U N' suffix — tickets parked on the USER's answer
-    (`needs-answer`/`needs-decision`), split OUT of the workable `I N` so
-    `I` = only what THIS box must action and `U` = what is on the user (#468,
-    the 2026-08-14 directive "v I by nemali byť tie čo sú Q — nech je jasné kto za
-    čo zodpovedá"). Orange-adjacent (208), distinct from the grey gk/skip
-    exclusion badges, hidden at 0 (badge semantics like gk/skip). Rendered on
-    BOTH scopes: a full box's core tickets and a sub-dev's own slice can each be
-    parked on the user, so this reads `user_waiting` regardless of scope.
+def _user_waiting_sfx(cache, ping_count=0):
+    """The '· U N' suffix — everything WAITING ON THE OWNER, split OUT of the
+    workable `I N` so `I` = only what THIS box must action and `U` = what is on
+    the owner (#468 for answer/decision; #512 consolidates in needs-acceptance
+    AND the standalone `Q` badge). `N` = the label-based `user_waiting`
+    (needs-answer/needs-decision/needs-acceptance, from the cache) PLUS
+    `ping_count` — the live count of ticketless ❓ pings the caller computed via
+    `question_ping_count` (the merged-in `Q`, deduped so a ping tied to a labeled
+    ticket is not counted twice). Orange-adjacent (208), distinct from the grey
+    gk/skip exclusion badges, hidden at 0. Rendered on BOTH scopes.
 
-    Schema-compatible: a stale/legacy cache written before #468 carries no
-    `user_waiting` key at all, so `.get(...)` is None → hidden (never a crash,
-    never a wrong `U 0`)."""
+    Schema-compatible: a stale/legacy cache with no `user_waiting` key reads the
+    label part as 0; a valid int adds to `ping_count`. Hidden only when the TOTAL
+    is 0 — so a fresh ❓ ping shows `U 1` even with zero user-waiting labels."""
     u = cache.get("user_waiting")
-    if isinstance(u, int) and u > 0:
-        return " \033[38;5;208m· U %d\033[0m" % u
+    total = (u if isinstance(u, int) else 0) + \
+            (ping_count if isinstance(ping_count, int) else 0)
+    if total > 0:
+        return " \033[38;5;208m· U %d\033[0m" % total
     return ""
 
 
@@ -255,8 +258,12 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
 
     open_n = cache.get("open")
     if isinstance(open_n, int):
+        # #512: the standalone `Q` segment is gone — its ticketless pings fold
+        # into `U N`, read LIVE here (as the old `Q` badge was) so a fresh ❓
+        # shows immediately, not only after the next detached refresh.
+        ping_count = question_ping_count(cwd, home=home)
         return "\033[38;5;75mI %d\033[0m%s%s%s%s" % (
-            open_n, _user_waiting_sfx(cache), _ops_wait_sfx(cache),
+            open_n, _user_waiting_sfx(cache, ping_count), _ops_wait_sfx(cache),
             _stream_split_sfx(cache), skip_sfx)
     return ""
 
@@ -436,58 +443,65 @@ def model_segment(payload, managed_model=None):
     return "\033[38;5;%dm%s\033[0m" % (color, tier)
 
 
-def questions_segment(cwd, now=None, home=None):
-    """Unanswered-❓ badge, SCOPED to the session's project (user complaint
-    2026-07-22: the airuleset footer showed the machine-global 14 — "custe
-    hluposti"; every map entry carries the asking session's cwd, so the badge
-    must attribute questions to their stream):
+# #512: a ticket reference inside a ❓ ping's own text — a `#<digits>` token.
+# A ping whose question REFERENCES a ticket is assumed already counted in the
+# label-based `user_waiting` (that ticket carries needs-answer/needs-decision/
+# needs-acceptance — the ask-and-continue flow labels the ticket AND pings), so
+# it must NOT be double-counted in the `U N` ping-merge. A ping with NO ticket
+# reference is a session-level question that no label counts → +1 to U.
+_TICKET_REF_RE = re.compile(r"#\d+")
 
-      - 'Q N'  — pending ❓ asked from THIS cwd (orange, label shortened
-                 'otazky' -> 'Q', #223), hidden at 0 (badge semantics, like
-                 `skipped`).
-      - ''     — none here.
 
-    #313 pt 5 REMOVED the cross-project '· inde M' / 'Q inde M' forms
-    entirely (user: "na co ja potrebujem byt obtazovany ze niekde inde je
-    otazka, ved to si mam riesit tam kde je ta otazka a nie tu" — a pending
-    question anywhere already pings the phone via Discord regardless of
-    which project's footer happens to be on screen, so a second project's
-    footer repeating the count was pure noise, never actionable from there).
-    Only the LOCAL count is computed/rendered now.
+def _question_same_project(here, q):
+    """Either-direction cwd containment — the session may run at the LAUNCH dir
+    (…/odoo) while its ❓ hook recorded a subdir (…/odoo/odoo-slovnormal), same
+    project tree either way (montalu 2026-07-22). `here`/`q` are the caller's
+    session cwd and the ping entry's recorded cwd. Extracted from the old
+    `questions_segment` closure (#512) so the footer ping-merge and
+    `core-quals --waiting`'s own ping listing scope pings identically."""
+    here = str(here or "").rstrip("/")
+    q = str(q or "").rstrip("/")
+    return bool(here and q) and (
+        q == here or q.startswith(here + "/") or here.startswith(q + "/"))
 
-    Source: ~/.claude/discord-questions.json — notify.record_question adds an
-    entry per ❓ ping; the watchdog drops it when the user's reply is routed
-    into the asking session (job 7), when the session got a later HUMAN
-    prompt (answered at the terminal — prune_answered_questions), or once the
-    hard cap trims the oldest. #368: the map no longer age-prunes an
-    unanswered entry (the watchdog RE-ASKS it daily instead of letting it
-    expire), so anything still IN the map is by definition still open — no
-    age filter here any more either; showing 'Q 0' while Discord is actively
-    re-pinging about an open question would be actively misleading. `now` is
-    kept as a parameter for call-site/test-signature compatibility (no age
-    comparison is left to need it any more)."""
+
+def ticketless_question_pings(cwd, home=None):
+    """The unanswered ❓ pings SCOPED to the session's project (`cwd`) that carry
+    NO ticket reference (`#N`) in their own question text — the session-level
+    questions that fold into `U N` (#512: the standalone `Q` segment was removed;
+    its count merges into `U`, "waiting on the OWNER"). Returns a list of the map
+    ENTRIES (dicts), so both the footer count and `core-quals --waiting`'s ping
+    listing use the SAME derivation.
+
+    Dedup rationale: a ping whose text references a ticket is already counted in
+    the label-based `user_waiting` (its ticket carries a USER_WAITING label), so
+    it is EXCLUDED here — never double-counted.
+
+    Source (unchanged): ~/.claude/discord-questions.json — notify.record_question
+    adds an entry per ❓ ping; the watchdog drops it when answered/routed. #368:
+    no age filter (an entry still in the map is still open, re-asked daily). The
+    map + re-ask jobs are UNTOUCHED by #512 — this is render/count only."""
     d = _load(_claude_dir(home) / "discord-questions.json")
     if not d:
-        return ""
+        return []
     here = str(cwd or "").rstrip("/")
-
-    def _same_project(q):
-        # either-direction containment: the session may run at the LAUNCH dir
-        # (…/odoo) while its ❓ hook recorded a subdir (…/odoo/odoo-slovnormal)
-        # — same project tree = LOCAL (there is no other bucket any more).
-        q = str(q or "").rstrip("/")
-        return bool(here and q) and (
-            q == here or q.startswith(here + "/") or here.startswith(q + "/"))
-
-    local = 0
+    out = []
     for v in d.values():
         if not isinstance(v, dict):
             continue
-        if _same_project(v.get("cwd")):
-            local += 1
-    if local:
-        return "\033[38;5;214mQ %d\033[0m" % local
-    return ""
+        if not _question_same_project(here, v.get("cwd")):
+            continue
+        text = "%s %s" % (v.get("block") or "", v.get("question") or "")
+        if _TICKET_REF_RE.search(text):
+            continue   # references a ticket -> already in the label U count
+        out.append(v)
+    return out
+
+
+def question_ping_count(cwd, home=None):
+    """The number of ticketless ❓ pings scoped to `cwd` (#512) — folded into the
+    footer's `U N` count. See `ticketless_question_pings` for the derivation."""
+    return len(ticketless_question_pings(cwd, home=home))
 
 
 # --------------------------------------------------------------------------- #

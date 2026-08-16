@@ -52,19 +52,57 @@ def _row_action(row, own_stream=None):
     return airuleset.ROW_IMPLEMENT
 
 
-def _print_issue_rows(rows, own_stream=None):
+def _print_issue_rows(rows, own_stream=None, reason_fn=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
     The action column is third, ahead of the title, so a title containing a
     tab cannot shift it. It is the #181-round-4 fix for the SELECTION source
     emitting no ownership discriminator: `action-only` = only this box can act
-    on it and it must never write its code; `implement` = ordinary work."""
+    on it and it must never write its code; `implement` = ordinary work.
+
+    `reason_fn` (#512, `--waiting` only): when given, a per-member REASON column
+    is inserted BEFORE the title — `number<TAB>createdAt<TAB>action<TAB>reason
+    <TAB>title` — so a `--waiting` reader sees WHY each parked ticket waits
+    (answer/decision/acceptance). Field 0 stays the issue number, so existing
+    `split("\\t", 1)[0]` number-parsing is unaffected."""
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
-        print("%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
-                                  _row_action(row, own_stream),
-                                  row.get("title") or ""))
+        action = _row_action(row, own_stream)
+        if reason_fn is None:
+            print("%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
+                                      action, row.get("title") or ""))
+        else:
+            print("%s\t%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
+                                          action, reason_fn(row.get("labels")),
+                                          row.get("title") or ""))
+
+
+def _print_ping_rows(ping_entries):
+    """Print the ticketless ❓ pings that fold into `U N` (#512), one per member,
+    each tagged `ping` in the reason column — so `--waiting`'s member list
+    matches the footer's `U N` count (label members + ticketless pings). A ping
+    has no issue number / createdAt / action, so those columns render `-`; the
+    last column is a short one-line snippet of the question text."""
+    for v in ping_entries:
+        snippet = " ".join(
+            str(v.get("question") or v.get("block") or "").split())[:120]
+        print("-\t%s\t-\tping\t%s" % (v.get("ts") or "", snippet))
+
+
+def _waiting_ping_entries(cwd=None):
+    """The ticketless ❓ pings scoped to the session cwd, for `--waiting`'s ping
+    listing (#512) — the SAME `statusbar.ticketless_question_pings` derivation
+    the footer's `U N` count uses, so the list and the count agree. `cwd`
+    defaults to the process cwd (the /goal loop runs `--waiting` from the
+    session's own cwd, the same one the footer keys on). Fail-safe: any error
+    (statusbar unimportable, unreadable map) yields no ping rows, never a crash
+    of the stop-proof list."""
+    try:
+        import statusbar
+        return statusbar.ticketless_question_pings(cwd or os.getcwd())
+    except Exception:
+        return []
 
 
 def _refuse_unless_empty_is_trustworthy(cmd, quals, cwd=None):
@@ -385,7 +423,12 @@ def cmd_slice_quals(args):
         _print_issue_rows(ops_wait, own_stream=user)
         return
     if want_waiting:
-        _print_issue_rows(waiting, own_stream=user)
+        # #512: each labeled member gets a reason tag (answer/decision/
+        # acceptance), then the ticketless ❓ pings (reason=ping) so the list
+        # matches the footer's `U N` count.
+        _print_issue_rows(waiting, own_stream=user,
+                          reason_fn=airuleset._user_waiting_reason)
+        _print_ping_rows(_waiting_ping_entries())
         return
     if want_count:
         print(len(unhandled))
@@ -557,8 +600,12 @@ def cmd_core_quals(args):
         return
     if want_waiting:
         # own_stream=None: a full-authority box owns no stream, so EVERY
-        # stream-labelled row is action-only.
-        _print_issue_rows(waiting, own_stream=None)
+        # stream-labelled row is action-only. #512: reason tag per labeled
+        # member (answer/decision/acceptance) + the ticketless ❓ pings
+        # (reason=ping), matching the footer's `U N` count.
+        _print_issue_rows(waiting, own_stream=None,
+                          reason_fn=airuleset._user_waiting_reason)
+        _print_ping_rows(_waiting_ping_entries())
         return
     if want_count:
         print(len(workable))
