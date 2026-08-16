@@ -324,6 +324,26 @@ def _ticket_is_stream_labeled(labels):
 # (skills/autopilot/SKILL.md's Step-1 backlog-scope bullet, #468 reconciliation).
 USER_WAITING_LABELS = ("needs-answer", "needs-decision")
 
+# #507: labels that mark a hand-off the gatekeeper has ALREADY PROCESSED, so the
+# ticket is no longer parked with the gatekeeper — it is back in the STREAM's
+# court. `needs-acceptance` is the odoo-erp/montalu state applied when the
+# gatekeeper reviews + merges a hand-off and moves it OUT of `ready-for-review`
+# but leaves it OPEN pending client acceptance ("done = client saw it", odoo-erp
+# #3145 — acceptance is the stream's own work, owner ruling 2026-08-15). The
+# label-check below already gives such a ticket `handed=False` (it carries no
+# `ready-for-review`/`needs-gatekeeper`), but the READY-FOR-REVIEW comment
+# fallback (`_slice_mine_and_handed`, #313 pt 2) re-upgraded it forever off its
+# stale, PERMANENT hand-off comment — the gatekeeper removes the LABEL when it
+# processes a hand-off, but the COMMENT stays in history. So a ticket carrying
+# any of these labels is EXCLUDED from the comment-fallback candidate walk: its
+# stale hand-off comment can never re-flip it back to parked-with-gk. A genuine
+# post-acceptance RE-hand-off carries a fresh `ready-for-review`/`needs-gatekeeper`
+# LABEL (the repo's subdev-handoff-label workflow re-adds it — live-observed on
+# odoo-erp#3068), so it is caught by the label-check BEFORE the fallback and is
+# never dropped by this suppression. Streams without a needs-acceptance model
+# simply never match — zero behaviour change there.
+GATEKEEPER_PROCESSED_LABELS = ("needs-acceptance",)
+
 
 def _row_is_user_waiting(labels):
     """True if `labels` (a gh --json labels value: a list of {'name': ...}
@@ -710,6 +730,7 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     rows, failed = _union_open_issues(quals, base, cwd=root)
     handed = {}
     bounce_numbers = set()
+    processed_numbers = set()
     for n_num, row in rows.items():
         labels = {(lb or {}).get("name") for lb in (row.get("labels") or [])}
         # #191 Part A ("different lane"): needs-gatekeeper is airuleset's OWN
@@ -727,6 +748,17 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
         if "prio:bounce" in labels:
             label_handed = False
             bounce_numbers.add(n_num)
+        # #507: a ticket carrying a GATEKEEPER_PROCESSED_LABELS label
+        # (`needs-acceptance`) is a hand-off the gatekeeper has ALREADY
+        # processed — it is back in the STREAM's court, NOT parked with the
+        # gatekeeper. It already reads `handed=False` here (it carries no
+        # ready-for-review/needs-gatekeeper), and the comment-fallback walk
+        # below EXCLUDES it (via `processed_numbers`) so its stale, permanent
+        # READY-FOR-REVIEW comment can never re-flip it back to parked. See
+        # GATEKEEPER_PROCESSED_LABELS for why a genuine re-hand-off (fresh
+        # label) is still caught by the label-check above, never dropped here.
+        if labels & set(GATEKEEPER_PROCESSED_LABELS):
+            processed_numbers.add(n_num)
         handed[n_num] = label_handed
 
     if extra is not None:
@@ -799,8 +831,18 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     # bare-label bounce with no comment at all (which must never re-flip a
     # stale pre-bounce hand-off comment back to handed).
     if slug and not failed:
+        # #507: a `processed_numbers` ticket (needs-acceptance — a hand-off the
+        # gatekeeper already processed) is EXCLUDED from the candidate walk
+        # entirely: it must stay handed=False (own workable, back in the
+        # stream's court), and its stale, permanent READY-FOR-REVIEW comment
+        # must never re-flip it to parked-with-gk. Excluding it here (rather
+        # than fetching its comments and refusing the upgrade) also skips a
+        # pointless `gh api .../comments` call per such ticket. A genuine
+        # re-hand-off carries a fresh ready-for-review/needs-gatekeeper LABEL,
+        # so it is already handed via the label-check and never reaches here.
         unhandled_candidates = sorted(
-            (n_num for n_num in rows if not handed.get(n_num)),
+            (n_num for n_num in rows
+             if not handed.get(n_num) and n_num not in processed_numbers),
             reverse=True)
         for n_num in unhandled_candidates[:airuleset._HANDOFF_COMMENT_CHECK_LIMIT]:
             raw = airuleset._gh_out("api",
