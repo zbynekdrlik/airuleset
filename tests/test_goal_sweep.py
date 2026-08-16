@@ -1657,6 +1657,50 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("workers=0" in ln for ln in logs), logs)
         self.assertFalse(any("surplus-floor" in ln for ln in logs), logs)
 
+    # ---------------------------------------------------------------- #
+    # #511 -- the STASH-ABORT give-up must NOT latch permanently on an
+    # under-saturated box. Its only reset (the 0-worker idle branch) is
+    # unreachable while >=1 worker runs, so once `lna` hit the cap and the
+    # one-shot ping fired the lane went permanently silent -- even after the
+    # wedged draft that caused the aborts cleared and a huge surplus opened
+    # (gk 2026-08-16: lna=5/lpinged, park elapsed 10h, I 20 vs 2 workers,
+    # `skip:gave-up` every sweep for hours across backlog GROWTH 7->8, 11->15).
+    # The give-up escalates ONCE then re-probes via the #479 abort-backoff
+    # park; the 0-worker count give-up stays permanent (its reset IS reachable).
+    # ---------------------------------------------------------------- #
+
+    def test_stash_abort_giveup_reprobes_and_delivers_after_park_511(self):
+        # The gk latch: aborts at the cap, already pinged, park long elapsed,
+        # pane now a clean deliverable idle prompt, huge surplus. The nudge must
+        # RE-PROBE and DELIVER, never latch on skip:gave-up forever.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": 4, "lna": goal.GOAL_LANE_MAX_STASH_ABORTS, "lpinged": True,
+               "lnpark": now - 10000, "llast": now - 40000}
+        logs, owns, tmux = self._undersat_call(37, now, tmtime, rec, 2, 2)
+        self.assertFalse(any("skip:gave-up" in ln for ln in logs), logs)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+        # reset-on-progress: a landed nudge clears the give-up latch so a
+        # genuinely-new future abort storm re-escalates instead of re-probing
+        # silently forever.
+        self.assertNotIn("lna", rec)
+        self.assertFalse(rec.get("lpinged"))
+
+    def test_stash_abort_giveup_within_park_logs_backoff_not_giveup_511(self):
+        # Same latch but the abort-backoff park is still ACTIVE: the sweep must
+        # fall through to the #479 park (skip:abort-backoff, re-probe pending),
+        # never the permanent skip:gave-up short-circuit. Proves the fall-through
+        # reaches the park instead of returning early.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": 4, "lna": goal.GOAL_LANE_MAX_STASH_ABORTS, "lpinged": True,
+               "lnpark": now + 500, "llast": now - 40000}
+        logs, owns, tmux = self._undersat_call(37, now, tmtime, rec, 2, 2)
+        self.assertFalse(any("skip:gave-up" in ln for ln in logs), logs)
+        self.assertTrue(any("skip:abort-backoff" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
 
 class TestGoalLaneNudgeDoctrine(unittest.TestCase):
     """#442 — the nudge TEXT must teach the fleet-dispatch doctrine

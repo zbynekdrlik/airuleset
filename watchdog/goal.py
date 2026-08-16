@@ -1472,6 +1472,11 @@ def _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, moved, n, n
     ABORT never over-advances the effectiveness streak (that has its own `lna`)."""
     rec.pop("lna", None)
     rec.pop("lnpark", None)
+    # #511 -- a LANDED nudge means the delivery-mechanics failure that drove the
+    # stash-abort give-up has genuinely cleared, so drop the one-shot give-up
+    # ping flag: a genuinely-new future abort storm must be able to re-escalate
+    # to the owner, never re-probe silently forever behind a stale lpinged.
+    rec.pop("lpinged", None)
     if under_saturated:
         if moved is False:
             rec["lineff"] = rec.get("lineff", 0) + 1
@@ -1514,6 +1519,72 @@ def _lane_skip(logs, loc, reason):
     every-sweep logging contract). The early skips below run before
     `live_workers`/`backlog_n` are counted, so they name the gate, not counts."""
     logs.append("lane-occupancy %s -> %s" % (loc, reason))
+
+
+def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
+                          backlog_n, idle, cwd, sid, tmtime, pid, run, send_fn,
+                          dry_run):
+    """#442-review F2 / #511 -- the give-up branch, extracted to keep
+    `goal_lane_occupancy_nudge` under its function-line cap (the #509
+    "never grow the capped function" rule). Returns `(skip, logs)`:
+
+    * The one-shot owner ping fires on the `lpinged` False->True transition for
+      EITHER give-up kind (a permanently-aborting / fully-stalled lane must
+      escalate to a human once).
+    * `count_gaveup` (0-worker EMPTY-lane, fully-stalled box): a genuine
+      PERMANENT give-up -> `skip=True` every sweep. Its counters DO reset at the
+      reachable 0-worker idle branch once the box goes quiet, and a dead box
+      needs a human.
+    * stash-abort give-up (already pinged): `skip=False` -- the caller FALLS
+      THROUGH to the #479 abort-backoff park, which re-probes delivery on the
+      capped (30-min) schedule. This is the #511 fix: the stash-abort give-up's
+      only reset (the 0-worker idle branch) is unreachable on an under-saturated
+      box that never drains to 0 live workers, so the pre-#511 unconditional
+      `return` left it permanently silent even after the wedged draft cleared
+      and a huge surplus opened (gk 2026-08-16: lna=5/lpinged, park elapsed 10h,
+      I 20 vs 2 workers, skip:gave-up every sweep for hours incl. across backlog
+      GROWTH). Re-probing restores the #479/#502/#509 "hold at cap, re-probe
+      forever, never permanently silent" invariant. The every-sweep decision
+      contract is preserved downstream by the park's own skip:abort-backoff log
+      (still parked) or the delivery attempt's log (park elapsed)."""
+    logs = []
+    if count_gaveup:
+        why = ("ani po %d štúchnutiach sa lány nezaplnili"
+               % GOAL_LANE_MAX_NUDGES)
+        gave = "GAVE UP after %d nudges" % GOAL_LANE_MAX_NUDGES
+    else:
+        why = ("%d pokusov o doručenie štuchnutia za sebou zlyhalo "
+               "(stash abort)" % aborts)
+        gave = "GAVE UP after %d consecutive stash aborts" % aborts
+    if not rec.get("lpinged"):
+        if send_fn is not None and not dry_run:
+            rec["lpinged"] = True
+            from notify import stream_redirect
+            # #442 re-fix 2: the give-up is now reachable in the
+            # UNDER-SATURATED state (1-4 workers), so the text names the
+            # real count instead of the old "nebeží ani jeden worker".
+            send_fn("⚠️ **%s** — backlog=%d otvorených (nie všetky "
+                    "rozpracovateľné), "
+                    "`/goal` armovaný, ale %d min sa lány nezaplnili na "
+                    "fill cap (beží len %d workerov, waiterov: %d) a %s "
+                    "(%s). Pozri sa na reláciu, prosím."
+                    % (watchdog.project_label(cwd), backlog_n,
+                       int(idle // 60), live_workers, waiters, why, loc),
+                    owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
+                    dedup_key="lanestall:%s:%d" % (sid, int(tmtime or 0)),
+                    dry_run=dry_run)
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
+                    "idle=%dm -> %s"
+                    % (loc, live_workers, waiters, backlog_n, idle // 60, gave))
+        return True, logs
+    # The one-shot owner ping has already fired (`lpinged`).
+    if count_gaveup:
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                    "skip:gave-up (already escalated, holding)"
+                    % (loc, live_workers, waiters, backlog_n))
+        return True, logs
+    # #511 stash-abort give-up: re-probe -> fall through (skip=False).
+    return False, logs
 
 
 def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
@@ -1736,47 +1807,18 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # that permanently FAILS) stays for BOTH branches -- it is a
     # delivery-mechanics bound, not a "stop nudging" decision.
     count_gaveup = (not under_saturated) and n >= GOAL_LANE_MAX_NUDGES
-    if count_gaveup or aborts >= GOAL_LANE_MAX_STASH_ABORTS:
-        # #442-review F2: a lane whose delivery ABORTS consecutively
-        # reaches this give-up (and its one-shot ping) too -- previously
-        # only landed nudges could, so a permanently-aborting lane
-        # retried silently forever with the escalation unreachable.
-        if count_gaveup:
-            why = ("ani po %d štúchnutiach sa lány nezaplnili"
-                   % GOAL_LANE_MAX_NUDGES)
-            gave = "GAVE UP after %d nudges" % GOAL_LANE_MAX_NUDGES
-        else:
-            why = ("%d pokusov o doručenie štuchnutia za sebou zlyhalo "
-                   "(stash abort)" % aborts)
-            gave = "GAVE UP after %d consecutive stash aborts" % aborts
-        if not rec.get("lpinged"):
-            if send_fn is not None and not dry_run:
-                rec["lpinged"] = True
-                from notify import stream_redirect
-                # #442 re-fix 2: the give-up is now reachable in the
-                # UNDER-SATURATED state (1-4 workers), so the text names the
-                # real count instead of the old "nebeží ani jeden worker".
-                send_fn("⚠️ **%s** — backlog=%d otvorených (nie všetky "
-                        "rozpracovateľné), "
-                        "`/goal` armovaný, ale %d min sa lány nezaplnili na "
-                        "fill cap (beží len %d workerov, waiterov: %d) a %s "
-                        "(%s). Pozri sa na reláciu, prosím."
-                        % (watchdog.project_label(cwd), backlog_n,
-                           int(idle // 60), live_workers, waiters, why, loc),
-                        owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
-                        dedup_key="lanestall:%s:%d" % (sid, int(tmtime or 0)),
-                        dry_run=dry_run)
-            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
-                        "idle=%dm -> %s"
-                        % (loc, live_workers, waiters, backlog_n, idle // 60, gave))
-        else:
-            # #475: after the one-shot GAVE UP ping has fired, later sweeps used
-            # to return silently -- log the held give-up state so the every-sweep
-            # contract still shows WHY no nudge is happening.
-            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                        "skip:gave-up (already escalated, holding)"
-                        % (loc, live_workers, waiters, backlog_n))
-        return logs, True
+    stash_gaveup = aborts >= GOAL_LANE_MAX_STASH_ABORTS
+    if count_gaveup or stash_gaveup:
+        giveup_skip, giveup_logs = _lane_giveup_decision(
+            rec, count_gaveup, aborts, loc, live_workers, waiters, backlog_n,
+            idle, cwd, sid, tmtime, pid, run, send_fn, dry_run)
+        logs += giveup_logs
+        if giveup_skip:
+            return logs, True
+        # #511 -- the STASH-ABORT give-up did NOT return: after its one-shot
+        # escalation ping it FALLS THROUGH to the #479 abort-backoff park below,
+        # which re-probes delivery on the capped (30-min) schedule instead of
+        # latching on `skip:gave-up` forever. See _lane_giveup_decision.
     # #479 -- abort-backoff park (next to the cooldown gate, after the
     # give-up check so a MAX-abort lane still escalates). A stash-abort
     # against a persistently-parked live draft parks the NEXT attempt for a
