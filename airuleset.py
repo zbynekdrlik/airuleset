@@ -2037,12 +2037,22 @@ def cmd_tickets_status(args):
                 entry["open"] = None
                 entry["gk"] = None
                 entry["user_waiting"] = None
+                entry["ops_wait"] = None
             else:
-                workable_rows, waiting = _partition_user_waiting(rows)
+                # #510: partition ops-wait (external-event/evidence) tickets OUT
+                # of the workable slice too, alongside #468's user-waiting split —
+                # both leave `I N`/`gk`, surfacing as `U N`/`W N`. ONE partition of
+                # the SAME fetch `slice-quals --count` uses (#367/#468 guard). `gk`
+                # is the handed-off subset of the WORKABLE remainder only, so a
+                # ticket that is BOTH handed-off AND parked (user-waiting/ops-wait)
+                # is counted in its parked bucket (`U`/`W`), never `gk` — the same
+                # surface treatment #468 already gives a handed + user-waiting row.
+                workable_rows, waiting, ops_wait = _partition_workable(rows)
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
                 entry["user_waiting"] = len(waiting)
+                entry["ops_wait"] = len(ops_wait)
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
@@ -2088,10 +2098,16 @@ def cmd_tickets_status(args):
             if u_failed:
                 entry["open"] = None
                 entry["user_waiting"] = None
+                entry["ops_wait"] = None
             else:
-                workable, waiting = _partition_user_waiting(seen)
+                # #510: ops-wait leaves the workable `I N` alongside #468's
+                # user-waiting split (both surface as their own footer buckets —
+                # `U N`/`W N`). ONE partition of the SAME fetch the /goal
+                # stop-proof (`core-quals --count`) uses (#367/#468 guard).
+                workable, waiting, ops_wait = _partition_workable(seen)
                 entry["open"] = len(workable)
                 entry["user_waiting"] = len(waiting)
+                entry["ops_wait"] = len(ops_wait)
             # Skipped bucket (2026-07-16): the POSITIVE label query over the
             # CORE partition — how many tickets are excluded from autopilot.
             # #367 left this scoped to the core partition (unchanged) rather
@@ -4143,6 +4159,9 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     USER_WAITING_LABELS as USER_WAITING_LABELS,
     _row_is_user_waiting as _row_is_user_waiting,
     _partition_user_waiting as _partition_user_waiting,
+    OPS_WAIT_LABELS as OPS_WAIT_LABELS,
+    _row_is_ops_wait as _row_is_ops_wait,
+    _partition_workable as _partition_workable,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,
@@ -4839,6 +4858,10 @@ def main():
         "--waiting", action="store_true",
         help="List the user-waiting remainder (needs-answer/needs-decision) "
              "parked on the user's answer — excluded from --count/--list (#468)")
+    p_slice.add_argument(
+        "--ops-wait", action="store_true",
+        help="List the ops-wait remainder (ops-wait label) parked on an "
+             "external event/evidence — excluded from --count/--list (#510)")
     p_slice.add_argument("--extra", default=None,
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")
@@ -4860,6 +4883,10 @@ def main():
         "--waiting", action="store_true",
         help="List the user-waiting remainder (needs-answer/needs-decision) "
              "parked on the user's answer — excluded from --count/--list (#468)")
+    p_core.add_argument(
+        "--ops-wait", action="store_true",
+        help="List the ops-wait remainder (ops-wait label) parked on an "
+             "external event/evidence — excluded from --count/--list (#510)")
     p_core.add_argument("--extra", default=None,
                         help="Extra search qualifier ANDed onto every query "
                              "(e.g. label:prio:bounce for the bounce seed)")

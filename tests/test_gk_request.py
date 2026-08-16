@@ -1231,7 +1231,7 @@ class TestCmdGkRequest(unittest.TestCase):
                 m.patch.object(airuleset, "_gh_out", side_effect=gh):
             with contextlib.redirect_stdout(buf):
                 airuleset.cmd_slice_quals(
-                    m.Mock(count=True, list=False, waiting=False, extra=None))
+                    m.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "0")
 
     def test_issue_mode_also_applies_origin_handoff_label(self):
