@@ -1728,3 +1728,32 @@ class TestGoalLaneParallelMismatch(unittest.TestCase):
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
+    def test_footer_flicker_does_not_re_arm_a_fresh_mismatch_episode(self):
+        # Integration proof of the review-fixed anti-spam hole: a render-blind
+        # pane whose footer blinks UNDETERMINABLE (busy mid-turn -> pane_goal_armed
+        # None) between two divergent sweeps must NOT re-emit a fresh
+        # parallel-mismatch line. The None gap preserves the episode across
+        # sweeps, so the return-to-divergence stays deduped.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, "sess-mismatch-flicker")
+        idle = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP)       # render not-armed
+        busy = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_BUSY_CAP)        # render undeterminable
+        rs, clw, cbc = self._patch_readers(self._hb("stale", True, "working"),
+                                           0, 43)
+        state = {}
+        with rs, clw, cbc:
+            l1 = goal.goal_lane_sweep(1000, run=idle, projects_dir=proj,
+                                      backlog_fetch=lambda cwd: 43, state=state)
+            l2 = goal.goal_lane_sweep(1060, run=busy, projects_dir=proj,
+                                      backlog_fetch=lambda cwd: 43, state=state)
+            l3 = goal.goal_lane_sweep(1120, run=idle, projects_dir=proj,
+                                      backlog_fetch=lambda cwd: 43, state=state)
+        m1 = [ln for ln in l1 if ln.startswith("parallel-mismatch ")]
+        m2 = [ln for ln in l2 if ln.startswith("parallel-mismatch ")]
+        m3 = [ln for ln in l3 if ln.startswith("parallel-mismatch ")]
+        self.assertEqual(len(m1), 1, l1)    # episode starts
+        self.assertEqual(len(m2), 0, l2)    # gap: no line, episode PRESERVED
+        self.assertEqual(len(m3), 0, l3)    # back to render-blind: deduped, NOT re-armed
+

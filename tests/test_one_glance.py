@@ -8,6 +8,7 @@ it) plus the `evaluate` resolver's composition of the three injected readers
 and its render<->structured divergence annotation.
 """
 
+import json
 import os
 import time
 import unittest
@@ -398,12 +399,90 @@ class TestMismatchEvidence(unittest.TestCase):
         self.assertIn("-> render-blind", line2)
         self.assertNotEqual(st2[0], st1[0])         # signature changed
 
-    def test_resolved_mismatch_drops_state(self):
-        # paths agree again -> (None, None) so the caller drops the dedup entry
-        # and a later re-occurrence counts as a FRESH episode.
+    def test_definite_agreement_resolves_and_drops_state(self):
+        # ONLY a definite agreement (both sides definite, no contradiction) drops
+        # the episode -> (None, None), so a later re-occurrence is a FRESH episode.
         line, st = self._ev("working", True, ("render-blind|x|-", 1000), 1200)
         self.assertIsNone(line)
         self.assertIsNone(st)
+
+    def test_render_undeterminable_gap_preserves_the_episode(self):
+        # THE anti-spam hole both #486 G5 reviews reproduced: a diverging pane
+        # blinks render=None mid-turn (footer undeterminable). That is a
+        # CONFIDENCE GAP, not a resolution -- it must PRESERVE the episode so the
+        # flicker never re-arms a fresh one. Mutation teeth: dropping the gap
+        # branch returns (None, None) here, the episode is lost, and the next
+        # divergent sweep re-emits.
+        _l1, st1 = self._ev("stuck", False, None, 1000)         # episode starts
+        line_gap, st_gap = self._ev("no-heartbeat", None, st1, 1060,
+                                    goal_armed=None)             # footer -> None
+        self.assertIsNone(line_gap)                             # no new line ...
+        self.assertEqual(st_gap, st1)                           # ... episode PRESERVED
+        # back to the same render-blind mismatch, still inside the window ->
+        # suppressed because the ORIGINAL ts survived the gap (no re-arm).
+        line_back, _st = self._ev("stuck", False, st_gap, 1120)
+        self.assertIsNone(line_back)
+
+    def test_heartbeat_gap_also_preserves_the_episode(self):
+        # The other confidence gap: the heartbeat lacks a definite armed read
+        # (goal_armed None) -- also preserved, never a reset.
+        _l1, st1 = self._ev("stuck", False, None, 1000)
+        _line, st2 = self._ev("armed-unknown", False, st1, 1060, goal_armed=None)
+        self.assertEqual(st2, st1)
+
+
+class TestPruneMismatchState(unittest.TestCase):
+    """#486 G5 review 🟡 -- the dead-session dedup-entry reaper (age-gated)."""
+
+    TTL = 6 * 3600
+
+    def test_reaps_only_entries_older_than_ttl(self):
+        now = 1_000_000
+        mrecs = {"dead": ("render-blind|x|-", now - self.TTL - 1),
+                 "live": ("render-blind|x|-", now - 60)}
+        reaped = og.prune_mismatch_state(mrecs, now, self.TTL)
+        self.assertEqual(reaped, 1)
+        self.assertNotIn("dead", mrecs)
+        self.assertIn("live", mrecs)
+
+    def test_boundary_at_exactly_ttl_is_reaped(self):
+        now = 1_000_000
+        mrecs = {"edge": ("k", now - self.TTL)}
+        og.prune_mismatch_state(mrecs, now, self.TTL)
+        self.assertNotIn("edge", mrecs)
+
+    def test_a_live_diverging_session_within_the_reassert_window_is_kept(self):
+        # ts refreshed within one re-assert window (<< TTL) -> never pruned.
+        now = 1_000_000
+        mrecs = {"s": ("k", now - 3600)}
+        og.prune_mismatch_state(mrecs, now, self.TTL)
+        self.assertIn("s", mrecs)
+
+    def test_malformed_entry_is_dropped_and_never_raises(self):
+        now = 1_000_000
+        mrecs = {"bad_ts": ("k", "not-a-number"), "no_ts": ("k",), "junk": None}
+        reaped = og.prune_mismatch_state(mrecs, now, self.TTL)
+        self.assertEqual(mrecs, {})
+        self.assertEqual(reaped, 3)
+
+
+class TestMismatchStateJsonBoundary(unittest.TestCase):
+    """#486 G5 review 🔵 -- the dedup state round-trips through save_state /
+    load_state (JSON), where the (sig, ts) TUPLE becomes a LIST. The dedup only
+    indexes prev[0]/prev[1], so it must still work; lock that boundary."""
+
+    def _og(self):
+        return og.OneGlance("stuck", 0, 43, True, "working", "stale", True,
+                            1387, "")
+
+    def test_dedup_survives_a_json_round_trip(self):
+        _l1, st = og.mismatch_evidence("loc", self._og(), False, prev=None,
+                                       now=1000, reassert_s=3600)
+        prev = json.loads(json.dumps({"s": st}))["s"]     # tuple -> list
+        self.assertIsInstance(prev, list)
+        line2, _st2 = og.mismatch_evidence("loc", self._og(), False, prev=prev,
+                                           now=1060, reassert_s=3600)
+        self.assertIsNone(line2)                          # still deduped after JSON
 
 
 if __name__ == "__main__":

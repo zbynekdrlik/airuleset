@@ -1096,6 +1096,12 @@ GOAL_LANE_LIVE_WINDOW_S = 15 * 60
 # without the per-sweep journal spam that made the old pane-text guard
 # unreadable -- the exact "could the mismatch logger itself spam?" hazard.
 GOAL_LANE_MISMATCH_REASSERT_S = 3600
+# #486 G5 -- age-gate the per-sid mismatch dedup dict so a session that DIED
+# while still diverging (its pane vanishes, so it is never revisited to resolve)
+# cannot leak its entry for the box's lifetime. Set well above the re-assert
+# window (a live diverging session refreshes its ts at least every re-assert, so
+# this never prunes a live one); reaped once per sweep.
+GOAL_LANE_MISMATCH_STATE_TTL_S = 6 * 3600
 
 # #442 -- the lane-fill path's OWN "live conversation" definition. The
 # shared check's default window (`GOAL_AUTOARM_RECENT_HUMAN_S`, 30 min) is
@@ -1840,6 +1846,10 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # Persists across sweeps via load_state/save_state, so the dedup + re-assert
     # window work cross-sweep.
     mrecs = state.setdefault("goal_mismatch", {})
+    # Reap dead-session entries once per sweep (a session that died while still
+    # diverging is never revisited to resolve, so its entry would otherwise leak
+    # forever -- #486 G5 review 🟡). Age-gated well above the re-assert window.
+    _one_glance.prune_mismatch_state(mrecs, now, GOAL_LANE_MISMATCH_STATE_TTL_S)
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:

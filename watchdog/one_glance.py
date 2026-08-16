@@ -253,11 +253,17 @@ def evaluate(now, sid, cwd, projects_dir, state, backlog_fetch, render_armed,
 #                         not-armed. Subject to the KNOWN 4 MB-tail caveat: the
 #                         heartbeat's `goal_armed` comes from a single-shot ~4 MB
 #                         transcript-tail scan, so a /goal armed >4 MB back reads
-#                         `goal_armed=False` -- indistinguishable from a genuinely
-#                         cleared goal (no cheap on-disk signal separates them).
-#                         Flagged `caveat=4mb-tail` so the G6 reader treats this
-#                         CLASS as the known heartbeat limitation, never as proof
-#                         the structured path is unreliable.
+#                         `goal_armed=False` -- and this reader alone cannot tell
+#                         that apart from a genuinely cleared goal. Flagged
+#                         `caveat=4mb-tail` so the G6 reader treats this CLASS as
+#                         the known heartbeat limitation, never as proof the
+#                         structured path is unreliable. (A DISAMBIGUATION does
+#                         exist for a future G6 refinement -- goal_dark_watch
+#                         persists an INCREMENTAL-offset `state["goal_mark"]`
+#                         marker that survives the 4 MB tail across sweeps -- but
+#                         G5 stays a pure diagnostic over the heartbeat and does
+#                         not consult another job's state; the conservative class
+#                         label is the correct scope here.)
 # `differ` embeds the structured verdict for render-blind, so a meaningful
 # transition (warming -> stuck as a worker drops away) re-emits rather than
 # dedups; `caveat` is None unless the 4 MB-tail class applies.
@@ -321,13 +327,35 @@ def mismatch_evidence(loc, g, render_armed, *, prev, now, reassert_s):
     re-emits at most once per ``reassert_s`` (bounded -- the point of a
     parallel-run evidence log is one line per divergence EPISODE plus a periodic
     "still diverging" heartbeat, never a line every 60 s sweep, which is exactly
-    the per-sweep spam that made the old pane-text guard unreadable). Returns
-    ``(None, None)`` when the two paths AGREE (no contradiction), so the caller
-    DROPS the pane's dedup state and a later re-occurrence counts as a fresh
-    episode. Pure: no I/O, deterministic, never raises (it reads only the
-    already-resolved ``OneGlance``)."""
+    the per-sweep spam that made the old pane-text guard unreadable).
+
+    The bound holds per STABLE episode: a genuinely flapping verdict CLASS
+    (``warming`` <-> ``stuck`` as a worker appears/vanishes, or the idle
+    threshold crossing) is a MEANINGFUL transition that re-emits by design (its
+    signature embeds the verdict) -- "never spams" therefore means "for a stable
+    divergence", not "at most one line ever". A transient render/heartbeat
+    CONFIDENCE GAP is NOT such a transition and must never reset the episode
+    (see below).
+
+    Returns ``(None, None)`` ONLY on a genuine RESOLUTION -- both the render
+    footer AND the heartbeat give a DEFINITE read and they AGREE -- so the
+    caller drops the pane's dedup state and a later re-occurrence is a fresh
+    episode. A transient CONFIDENCE GAP (footer undeterminable this sweep, or the
+    heartbeat lacks a definite armed read) returns ``(None, prev)`` instead,
+    PRESERVING the episode. Pure: no I/O, deterministic, never raises (reads only
+    the already-resolved ``OneGlance``)."""
     mm = classify_mismatch(g, render_armed)
     if mm is None:
+        # No contradiction -- but a transient CONFIDENCE GAP is not a RESOLUTION.
+        # `pane_goal_armed` returns None mid-turn (busy / chrome / a large unsent
+        # draft), so a genuinely-diverging pane blinks render=None every few
+        # sweeps; likewise the heartbeat can read goal_armed=None. Treating that
+        # as "resolved" would drop the episode and re-arm a fresh one when the
+        # definite read returns -- defeating the re-assert bound (the anti-spam
+        # hole both #486 G5 reviews reproduced: ~1 line/120 s indefinitely).
+        # Preserve the episode on a gap; drop it ONLY on a definite agreement.
+        if render_armed is None or g.goal_armed is None:
+            return None, prev
         return None, None
     sig = mismatch_signature(mm)
     if prev is not None and prev[0] == sig and (now - prev[1]) < reassert_s:
@@ -336,3 +364,28 @@ def mismatch_evidence(loc, g, render_armed, *, prev, now, reassert_s):
         # after each suppressed sweep) and journal nothing.
         return None, prev
     return format_mismatch_line(loc, g, render_armed, mm), (sig, now)
+
+
+def prune_mismatch_state(mrecs, now, ttl_s):
+    """Drop dead-session entries from the per-sid mismatch dedup dict, in place,
+    returning the count reaped. A session that dies WHILE still diverging never
+    gets revisited (its pane vanishes from the sweep), so its ``mrecs`` entry
+    would otherwise leak for the box's lifetime -- #486 G5 review 🟡. Age-gated
+    like ``session_status.reap_stale_status``: a genuinely-live diverging session
+    refreshes its ``emit_ts`` at least every ``reassert_s`` (it re-emits), so a
+    ``ttl_s`` set well above ``reassert_s`` never prunes a live one; a mis-pruned
+    entry would only cost one extra "fresh episode" line, never a wrong action.
+    A malformed/JSON-degraded entry (non-numeric ts) is dropped too -- it can
+    never correctly dedup anything. Never raises."""
+    reaped = 0
+    for sid in list(mrecs):
+        entry = mrecs.get(sid)
+        try:
+            ts = entry[1]
+            stale = not isinstance(ts, (int, float)) or (now - ts) >= ttl_s
+        except (TypeError, IndexError, KeyError):
+            stale = True
+        if stale:
+            mrecs.pop(sid, None)
+            reaped += 1
+    return reaped
