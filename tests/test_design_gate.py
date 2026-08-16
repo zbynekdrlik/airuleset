@@ -1468,12 +1468,18 @@ class TestIssueRefsAfterShellQuote(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# #514 -- a NEGATED nontrivial keyword in the DESCRIPTIVE TAIL of a genuinely
-# trivial Triage line ("Triage: trivial -- ... no cross-cutting change") must
-# NOT flip the whole comment to non-trivial. The classifier reads the VERDICT
-# (the leading segment of the Triage line), never the prose tail -- the tail
-# may legitimately name any complexity keyword in any polarity. The mirror of
-# the already-handled MAJOR-1 "not trivial" case, for the reverse direction.
+# #514 -- a NEGATED nontrivial keyword in a trivial Triage line's descriptive
+# tail ("Triage: trivial -- ... no cross-cutting change") must NOT flip the
+# comment to non-trivial. But an AFFIRMATIVE complexity keyword ANYWHERE in the
+# tail -- incl. a hedge-then-reveal line ("scoped fix -- but cross-cutting") --
+# MUST still classify non-trivial: a depth gate fails SAFE (over-block +
+# reword), never silently waiving depth (the #514-review MAJOR: a leading-
+# verdict-only fix that ignored the tail re-opened exactly that dangerous
+# direction). The negation is recognised only when IMMEDIATELY adjacent to the
+# keyword (no/not/without/nie/bez/žiadn) -- a bounded guard; an intervening word
+# ("without ANY cross-cutting") is left as a fail-safe over-block, because
+# allowing intervening words would misread the non-trivial "nie, je to
+# komplexná" as negated (the dangerous direction).
 # --------------------------------------------------------------------------- #
 
 
@@ -1490,24 +1496,52 @@ class TestTriageNegatedNontrivialKeywordInTrivialLine(unittest.TestCase):
         self.assertTrue(ok, reason)
         self.assertEqual(reason, "ok (trivial)")
 
-    def test_negated_keyword_in_trivial_tail_across_separators(self):
-        # Every natural separator this fleet uses -- em-dash, the repo's own
-        # "--" convention, comma, paren, spaced hyphen -- with a negated (or
-        # merely mentioned) nontrivial keyword in the descriptive tail: all
-        # still trivial. RED before the fix for the keyword-bearing tails.
+    def test_negated_keyword_in_trivial_tail_stays_trivial(self):
+        # A complexity keyword IMMEDIATELY negated in a trivial line's tail,
+        # across every separator this fleet uses (em-dash, the repo's own "--"
+        # convention, comma, paren, semicolon) and in both languages: all still
+        # trivial. Two negated keywords in one tail (`no architectural ... not
+        # cross-cutting`) also stay trivial.
         for tail in (
             "trivial — docs/pin reconciliation, no cross-cutting change",
             "trivial -- no cross-cutting change",
             "trivial, no cross-cutting change",
             "trivial (no architectural impact)",
-            "trivial - rename inside the cross-cutting module",     # affirmative tail keyword
-            "trivial -- žiadna krížová zmena, len drobná oprava",   # Slovak negated keyword
+            "trivial -- without cross-cutting impact",
+            "trivial -- žiadna krížová zmena, len drobná oprava",   # Slovak negated (žiadna)
+            "trivial; bez krížovej zmeny",                          # Slovak negated (bez)
+            "trivial (no architectural impact, not cross-cutting)",  # two negated keywords
         ):
             body = GOOD_SCOPED + "\n\nTriage: " + tail
             self.assertEqual(dg.triage_class(body), "trivial", tail)
             ok, reason = dg.classify_triage_and_approaches(body)
             self.assertTrue(ok, "%r -> %r" % (tail, reason))
             self.assertEqual(reason, "ok (trivial)", tail)
+
+    def test_affirmative_keyword_in_tail_fails_safe_to_nontrivial(self):
+        # #514-review MAJOR (adversarial): a genuinely non-trivial line that
+        # LEADS with a trivial word but reveals complexity later (hedge-then-
+        # reveal) must NOT be silently waived to trivial -- a depth gate fails
+        # SAFE. An AFFIRMATIVE (non-negated) complexity keyword ANYWHERE in the
+        # tail keeps the line non-trivial. RED against a leading-verdict-only
+        # fix that ignored the tail (which classified all of these trivial).
+        for tail in (
+            "trivial - rename inside the cross-cutting module",
+            "jednoduchý na prvý pohľad, no v skutočnosti krížová zmena naprieč modulmi",
+            "drobná zmena v kóde, ale krížová naprieč 8 modulmi",
+            "vyzerá triviálne, ale je to architektonická zmena",
+            "scoped fix, but cross-cutting: touches auth and sessions",
+            "scoped fix — but this is a design-heavy refactor",
+            "not scoped to one module — cross-cutting change",
+            "triviálne? nie, je to komplexná zmena",
+            "trivial. Actually this is cross-cutting.",
+            "jednoduché — ale komplexné",
+            "trivial -- without any cross-cutting impact",   # intervening word -> fail-safe over-block
+        ):
+            body = GOOD_SCOPED + "\n\nTriage: " + tail
+            self.assertEqual(dg.triage_class(body), "non-trivial", tail)
+            ok, reason = dg.classify_triage_and_approaches(body)
+            self.assertNotEqual(reason, "ok (trivial)", tail)
 
     def test_genuinely_nontrivial_verdicts_still_nontrivial(self):
         # Negative controls -- a genuinely non-trivial line MUST STILL classify
