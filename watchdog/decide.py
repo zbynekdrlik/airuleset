@@ -169,10 +169,15 @@ def is_usage_cap(text):
 # dies on the same cap at Step 0). Kept SEPARATE from `is_usage_cap` on purpose:
 # that narrow set drives job 6's ping-once-wait-for-reset dance, which a no-reset
 # spend/org block (no clock to wait for) would mishandle.
-_MONTHLY_SPEND_RX = re.compile(r"monthly spend limit|spend limit", re.I)
+# #502 review 🔵 -- anchored to the banner phrasing, not a bare `spend limit` /
+# `subscription access … disabled` substring (which matched benign sentences like
+# "spend limit budgets are configured" / "subscription access was not disabled").
+# The input is always an `isApiErrorMessage`, so the blast radius was contained,
+# but the tighter phrasing removes the false-positive surface entirely.
+_MONTHLY_SPEND_RX = re.compile(
+    r"monthly spend limit|(?:hit|reached|exceeded)[^.\n]{0,20}spend limit", re.I)
 _ORG_DISABLED_RX = re.compile(
-    r"organization has disabled|disabled Claude subscription"
-    r"|subscription access[^.\n]{0,40}disabled", re.I)
+    r"disabled Claude subscription|disabled[^.\n]{0,30}subscription access", re.I)
 
 
 def is_account_dispatch_block(text):

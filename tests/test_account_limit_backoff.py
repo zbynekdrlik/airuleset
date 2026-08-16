@@ -90,32 +90,67 @@ class TestAccountLimitDecisionHelper(unittest.TestCase):
 
     def test_block_within_window_backs_off_and_seeds(self):
         rec = {}
-        back_off, log = goal._account_limit_decision(rec, 100000, WEEKLY, "loc", 0)
+        back_off, log, notify = goal._account_limit_decision(
+            rec, 100000, WEEKLY, "loc", 0)
         self.assertTrue(back_off)
         self.assertIn("skip:account-limit", log)
         self.assertEqual(rec["alim"]["first_seen"], 100000)
 
     def test_not_a_block_clears_the_episode(self):
         rec = {"alim": {"first_seen": 1, "resets_at": None}}
-        back_off, log = goal._account_limit_decision(rec, 100000, "", "loc", 0)
+        back_off, log, notify = goal._account_limit_decision(
+            rec, 100000, "", "loc", 0)
         self.assertFalse(back_off)
         self.assertIsNone(log)
+        self.assertFalse(notify)
         self.assertNotIn("alim", rec)
 
     def test_transient_throttle_is_not_a_block_and_clears(self):
         rec = {"alim": {"first_seen": 1, "resets_at": None}}
-        back_off, _ = goal._account_limit_decision(
+        back_off, _, notify = goal._account_limit_decision(
             rec, 100000, "overloaded, please try again", "loc", 0)
         self.assertFalse(back_off)
+        self.assertFalse(notify)
         self.assertNotIn("alim", rec)
 
     def test_elapsed_window_reprobes_once_and_rearms(self):
         now = 100000
         rec = {"alim": {"first_seen": now - 7 * 3600, "resets_at": None}}
-        back_off, log = goal._account_limit_decision(rec, now, ORG, "loc", 0)
+        back_off, log, notify = goal._account_limit_decision(rec, now, ORG, "loc", 0)
         self.assertFalse(back_off)                          # re-probe (do NOT skip)
         self.assertIn("back-off elapsed", log)
+        self.assertFalse(notify)                            # re-arm is not a new episode
         self.assertEqual(rec["alim"]["first_seen"], now)    # re-armed
+
+    def test_monthly_org_seed_notifies_but_weekly_session_defer_to_job6(self):
+        # #502 review 🟡 -- the lane guard pings ONLY the shapes job 6's is_usage_cap
+        # misses (monthly-spend / org-disable), and stays silent for weekly/session
+        # (job 6 pings those) to avoid a double ping.
+        for err, want in [(MONTHLY, True), (ORG, True),
+                          (WEEKLY, False), (SESSION, False)]:
+            rec = {}
+            _, _, notify = goal._account_limit_decision(rec, 100000, err, "loc", 0)
+            self.assertEqual(notify, want, err)
+
+    def test_persistent_cap_fires_at_most_once_per_window_over_many_sweeps(self):
+        # #502 review 🔵 -- multi-sweep proof: a persistent no-reset cap re-probes
+        # only at the ACCOUNT_LIMIT_BACKOFF_MAX_S boundary, never every sweep.
+        rec = {}
+        now = 100000
+        reprobes = 0
+        skips = 0
+        span = 13 * 3600           # 13h at 60s sweeps
+        for _ in range(span // 60):
+            back_off, _, _ = goal._account_limit_decision(rec, now, ORG, "loc", 0)
+            if back_off:
+                skips += 1
+            else:
+                reprobes += 1      # a re-probe (fall-through to the normal nudge)
+            now += 60
+        # 13h / 6h cap -> exactly 2 re-probes; the guard is neither silent forever
+        # nor storming every sweep.
+        self.assertEqual(reprobes, span // goal.ACCOUNT_LIMIT_BACKOFF_MAX_S)
+        self.assertGreater(skips, 700)      # the vast majority of sweeps back off
 
 
 class TestAccountLimitBackoff(unittest.TestCase):
@@ -165,6 +200,40 @@ class TestAccountLimitBackoff(unittest.TestCase):
             self.assertEqual(tmux.sent, [], (err, tmux.sent))
             self.assertTrue(any("skip:account-limit" in ln for ln in logs),
                             (err, logs))
+
+    def _call_send(self, now, tmtime, err_text):
+        """Same as `_call` but with a RECORDING send_fn, returning the pings."""
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=tpath)
+        pings = []
+
+        def rec_send(body, **kw):
+            pings.append((body, kw))
+            return "ok"
+
+        with m.patch("airuleset.resolve_authority", return_value="full"), \
+             m.patch.object(wd, "transcript_last_error", return_value=err_text):
+            goal.goal_lane_occupancy_nudge(
+                now, tmux, {}, self.SID, self.CWD, "111", GOAL_ARMED_CAP, tpath,
+                tmtime, "loc", rec_send, False, None, proj,
+                backlog_fetch=lambda cwd: 5, state={}, sleep_fn=lambda s: None)
+        return pings
+
+    def test_monthly_org_block_pings_owner_but_weekly_defers_to_job6(self):
+        # #502 review 🟡 -- the lane guard is the ONLY surviving notifier for a
+        # monthly-spend / org-disable cap (job 6's is_usage_cap misses both), so it
+        # pings once; a weekly cap (job 6 pings it) fires NO lane ping (no double).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        for err in (MONTHLY, ORG):
+            pings = self._call_send(now, tmtime, err)
+            self.assertEqual(len(pings), 1, (err, pings))
+            self.assertIn("acctblock:", pings[0][1].get("dedup_key", ""), pings)
+        self.assertEqual(self._call_send(now, tmtime, WEEKLY), [])   # job 6's job
 
     def test_recovered_transcript_clears_the_episode_and_nudges(self):
         now = 100000

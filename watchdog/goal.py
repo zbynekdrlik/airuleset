@@ -1177,19 +1177,28 @@ def _account_limit_release_at(first_seen, resets_at):
 def _account_limit_decision(rec, now, err, loc, waiters):
     """#502 -- the lane nudge's account-limit back-off decision from the
     supervisor's CURRENT transcript error text `err`. Mutates `rec['alim']` (the
-    caller persists `rec`); returns `(back_off, logline)`:
+    caller persists `rec`); returns `(back_off, logline, notify)`:
 
       * NOT an account-level dispatch block (`is_account_dispatch_block` False --
-        never a transient throttle) -> clears any episode, `(False, None)`: the
-        moment genuine progress recovers, `transcript_last_error` returns '' and
+        never a transient throttle) -> clears any episode, `(False, None, False)`:
+        the moment genuine progress recovers, `transcript_last_error` returns '' and
         the nudge resumes automatically (structured state, #486 -- never pane text).
-      * A block, still inside the bounded window -> `(True, <skip decision log>)`:
-        do NOT dispatch into the dead cap.
+      * A block, still inside the bounded window -> `(True, <skip decision log>,
+        notify)`: do NOT dispatch into the dead cap.
       * A block, but the bounded window ELAPSED -> re-probe ONCE, re-arm the
-        episode for the NEXT window, `(False, <re-probe log>)`: a persistent cap
-        fires at most once per ACCOUNT_LIMIT_BACKOFF_MAX_S (never the 90-min storm
-        the ticket reports) yet the guard is NEVER permanently silent, and every
-        sweep still journals a decision line.
+        episode for the NEXT window, `(False, <re-probe log>, False)`: a persistent
+        cap fires at most once per ACCOUNT_LIMIT_BACKOFF_MAX_S (never the 90-min
+        storm the ticket reports) yet the guard is NEVER permanently silent, and
+        every sweep still journals a decision line.
+
+    `notify` is True ONLY on the FIRST detection (episode seed) of a block that
+    job 6's own session-limit ping does NOT cover -- i.e. `is_account_dispatch_block`
+    is True but `is_usage_cap` is False, exactly the MONTHLY-SPEND / ORG-DISABLE
+    shapes this fix newly recognizes (#502 review 🟡). Weekly/session caps
+    (`is_usage_cap` True) are pinged by job 6, so the lane guard stays silent for
+    them to avoid a double ping; but a no-reset spend/org block otherwise had NO
+    surviving phone-ping path at all (the #134 anti-silence class), so the caller
+    pings the owner once when `notify` is set.
 
     A background subagent dying on the account's cap surfaces as the PARENT
     session's own next `isApiErrorMessage` (decide.py's
@@ -1197,12 +1206,16 @@ def _account_limit_decision(rec, now, err, loc, waiters):
     exactly what `transcript_last_error` reads, so this covers subagent deaths too."""
     if not (err and watchdog.is_account_dispatch_block(err)):
         rec.pop("alim", None)
-        return False, None
+        return False, None, False
     alim = rec.get("alim")
+    notify = False
     if not isinstance(alim, dict):
         alim = {"first_seen": now,
                 "resets_at": watchdog.parse_reset_epoch_from_error_text(err, now)}
         rec["alim"] = alim
+        # First detection of an episode job 6 will NOT ping (not a usage cap) ->
+        # the lane guard is the only surviving notifier for it.
+        notify = not watchdog.is_usage_cap(err)
     release = _account_limit_release_at(alim.get("first_seen", now),
                                         alim.get("resets_at"))
     if now < release:
@@ -1210,12 +1223,33 @@ def _account_limit_decision(rec, now, err, loc, waiters):
         when = watchdog._human_clock(ra, now=now) if ra else "neznámy reset"
         return True, ("lane-occupancy %s waiters=%d -> skip:account-limit "
                       "(dispatch by teraz zomrel na strope účtu; back-off do %s, "
-                      "zostáva %ds)" % (loc, waiters, when, int(release - now)))
-    # Window elapsed -> re-probe ONCE and re-arm for the next window.
+                      "zostáva %ds)" % (loc, waiters, when, int(release - now))), notify
+    # Window elapsed -> re-probe ONCE and re-arm for the next window. (A re-arm is
+    # never a new episode, so it never re-notifies.)
     alim["first_seen"] = now
     alim["resets_at"] = watchdog.parse_reset_epoch_from_error_text(err, now)
     return False, ("lane-occupancy %s -> account-limit back-off elapsed, "
-                   "re-probing once (re-armed)" % loc)
+                   "re-probing once (re-armed)" % loc), notify
+
+
+def _account_limit_notify_owner(send_fn, pid, run, sid, cwd, dry_run,
+                                first_seen, loc):
+    """#502 review 🟡 -- one-shot owner ping for a MONTHLY-SPEND / ORG-DISABLE
+    account block: the shapes job 6's `is_usage_cap` does NOT cover, so nothing
+    else pings them, and both need HUMAN action (no auto-reset). Backing off
+    silently for them would be the #134 anti-silence class, so the lane guard is
+    their only surviving notifier. Deduped per episode on `first_seen`. Returns a
+    decision log line for the caller to journal."""
+    from notify import stream_redirect
+    send_fn("⛔ **%s** — účet je zablokovaný (mesačný spend limit alebo vypnutý "
+            "prístup k predplatnému) — dispatch nových workerov je pozastavený a "
+            "toto NEMÁ automatický reset, treba tvoj zásah. Skontroluj prosím účet."
+            % watchdog.project_label(cwd),
+            owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
+            dedup_key="acctblock:%s:%d" % (sid, int(first_seen)),
+            dry_run=dry_run)
+    return ("lane-occupancy %s -> account-block owner PINGED "
+            "(no-reset cap, job-6-unhandled)" % loc)
 
 
 # #442 -- the text TEACHES the fleet-dispatch doctrine
@@ -1399,10 +1433,14 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # at Step 0). `_account_limit_decision` reads the signal FRESH from the
     # transcript, mutates rec['alim'] (persisted by the caller), and returns a
     # bounded skip / re-probe / clear decision -- see its docstring.
-    back_off, alim_log = _account_limit_decision(
+    back_off, alim_log, alim_notify = _account_limit_decision(
         rec, now, watchdog.transcript_last_error(tpath), loc, waiters)
     if alim_log:
         logs.append(alim_log)
+    if alim_notify and send_fn is not None and not dry_run:
+        logs.append(_account_limit_notify_owner(
+            send_fn, pid, run, sid, cwd, dry_run,
+            rec.get("alim", {}).get("first_seen", now), loc))
     if back_off:
         return logs, False
 
