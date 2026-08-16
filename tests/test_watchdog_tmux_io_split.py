@@ -3,7 +3,8 @@
 The tmux I/O shims + pane keystroke helpers (the only impure part of the
 watchdog: socket-recovery + sudo-hosted-pane discovery in
 `list_claude_panes`, the `capture_pane`/`pane_in_mode`/`pane_owner` reads, the
-`send_continue`/`send_selfcheck`/`send_subagent_nudge` keystroke senders, and
+`send_continue`/`send_subagent_nudge` keystroke senders (`send_selfcheck` was
+later removed when job 4 adopted `send_verified`, #497 batch 3), and
 the shared dying-subagent nudge logic) were moved VERBATIM out of
 `watchdog/__init__.py` into `watchdog.tmux_io`, then re-exported IN PLACE by a
 positional facade import. These tests lock the two invariants that keep every
@@ -55,7 +56,6 @@ MOVED_NAMES = [
     "pane_owner",
     "_strip_selected",
     "send_continue",
-    "send_selfcheck",
     "send_subagent_nudge",
     "_subagent_transcript_unsalvageable",
     "_nudge_dying_subagent",

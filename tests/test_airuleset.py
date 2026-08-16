@@ -8558,6 +8558,25 @@ class TestApiWatchdog(TestCase):
         # ~/.claude/airuleset-usage-cache.json during the suite (it did once).
         self._orig_usage_cache = self.w.usage._USAGE_CACHE_PATH
         self.w.usage._USAGE_CACHE_PATH = str(Path(self.tmp) / "usage-cache.json")
+        # #497 batch 3 — jobs 1/4/4a route their bare nudge through the
+        # transcript-proof `send_verified`. These tests assert JOB LOGIC (which
+        # pane is nudged, keystroke/ping discipline, the state machine), not the
+        # keystroke MECHANICS (covered in test_send_verified.py) or the swallowed
+        # path (covered with a recorder in test_send_verified_adoption.py). Replace
+        # `send_verified` with a happy-path fake that byte-mirrors the old
+        # send_continue/send_selfcheck (type `-l --` + Enter, returns True), so a
+        # static `_FakeTmux` — which cannot echo a typed draft, so the real
+        # primitive would read the type as un-landed and abort — does not make the
+        # nudge look swallowed. The chunk-typed job-4/4a texts also avoid the real
+        # inter-chunk `time.sleep` this way.
+        def _typing_send_verified(pid, text, run=None, tpath=None,
+                                  sleep_fn=None, logs=None):
+            run(["tmux", "send-keys", "-t", pid, "-l", "--", text])
+            run(["tmux", "send-keys", "-t", pid, "Enter"])
+            return True
+        p = m.patch.object(self.w, "send_verified", _typing_send_verified)
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         self.w.usage._USAGE_CACHE_PATH = self._orig_usage_cache
