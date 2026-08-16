@@ -245,8 +245,22 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     cache = _load(cache_dir(home) / (cwd_key(cwd) + ".json"))
     if spawn and (cache is None or now - (cache.get("ts") or 0) > TICKETS_TTL_S):
         _spawn_refresh(cwd, home)
-    if not cache:
-        return ""
+
+    # #512: the standalone `Q` ❓ badge folded into `U N`, read LIVE here (as the
+    # old `Q` badge was) so a fresh ❓ shows immediately. The old badge was ALSO
+    # gh-INDEPENDENT — it rendered from the local question map even with NO
+    # tickets cache or a gh error. Preserve that (both #512 adversarial reviews
+    # caught its loss): when there is no renderable `I` count — a missing/cold
+    # cache, or `open` not an int on a gh error / non-repo cwd / SliceUnresolved
+    # (`cmd_tickets_status` writes open=user_waiting=ops_wait=None together on
+    # any failure) — still surface a pending ping as a STANDALONE `U N`, so a
+    # question the user must answer is never invisible in the footer.
+    ping_count = question_ping_count(cwd, home=home)
+    if not isinstance(cache, dict) or not isinstance(cache.get("open"), int):
+        u = cache.get("user_waiting") if isinstance(cache, dict) else None
+        total = (u if isinstance(u, int) else 0) + \
+                (ping_count if isinstance(ping_count, int) else 0)
+        return "\033[38;5;208mU %d\033[0m" % total if total > 0 else ""
 
     # Skipped bucket (2026-07-16): tickets labeled autopilot-skip. An EXCLUSION
     # count, not a partition of the visible tickets (unlike gk, whose zero must
@@ -256,16 +270,9 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     skip_sfx = (" \033[38;5;245m· skip %d\033[0m" % skipped
                 if isinstance(skipped, int) and skipped > 0 else "")
 
-    open_n = cache.get("open")
-    if isinstance(open_n, int):
-        # #512: the standalone `Q` segment is gone — its ticketless pings fold
-        # into `U N`, read LIVE here (as the old `Q` badge was) so a fresh ❓
-        # shows immediately, not only after the next detached refresh.
-        ping_count = question_ping_count(cwd, home=home)
-        return "\033[38;5;75mI %d\033[0m%s%s%s%s" % (
-            open_n, _user_waiting_sfx(cache, ping_count), _ops_wait_sfx(cache),
-            _stream_split_sfx(cache), skip_sfx)
-    return ""
+    return "\033[38;5;75mI %d\033[0m%s%s%s%s" % (
+        cache["open"], _user_waiting_sfx(cache, ping_count), _ops_wait_sfx(cache),
+        _stream_split_sfx(cache), skip_sfx)
 
 
 def _fmt_tokens(n):

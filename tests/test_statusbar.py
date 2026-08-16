@@ -2120,6 +2120,33 @@ class QuestionPingMerge(unittest.TestCase):
         self._seed({})
         self.assertNotIn("U ", statusbar.tickets_segment(cwd, home=self.home, spawn=False))
 
+    def test_ping_stays_visible_when_open_is_none_gh_error(self):
+        # #512 review (both adversaries, live-reproduced): the old `Q` badge was
+        # gh-INDEPENDENT. On a gh error / non-repo cwd / SliceUnresolved the cache
+        # carries open=None (and user_waiting=None), so `tickets_segment` used to
+        # return "" and a pending ❓ vanished from the footer. It must still
+        # surface a STANDALONE `U N` from the live pings.
+        cwd = self.CWD
+        _seed_cache(self.home, cwd, open_n=None, name="demo")  # gh-failure cache
+        self._seed({"1": {"cwd": cwd, "block": "otazka bez ticketu", "ts": 1}})
+        seg = statusbar.tickets_segment(cwd, home=self.home, spawn=False)
+        self.assertIn("U 1", seg)
+        self.assertNotIn("I ", seg)          # no renderable I count during a gh error
+        self.assertNotIn("· U", seg)         # standalone U, no leading "· "
+
+    def test_ping_stays_visible_with_no_tickets_cache(self):
+        # A cold/first-render session with no tickets cache yet must still show a
+        # pending ❓ (the old badge rendered from the local map with no cache).
+        cwd = self.CWD
+        self._seed({"1": {"cwd": cwd, "block": "otazka bez ticketu", "ts": 1}})
+        seg = statusbar.tickets_segment(cwd, home=self.home, spawn=False)
+        self.assertIn("U 1", seg)
+
+    def test_no_cache_and_no_pings_renders_nothing(self):
+        cwd = self.CWD
+        self._seed({})
+        self.assertEqual(statusbar.tickets_segment(cwd, home=self.home, spawn=False), "")
+
     def test_shim_no_longer_renders_a_standalone_Q_segment(self):
         # #512: the Q ❓ badge is gone from the render — the shim must not call
         # a standalone questions_segment; the pings fold into U via
