@@ -682,43 +682,40 @@ _TRIAGE_LINE_RE = re.compile(
 # explicit negation alternative here, it would fall through and match
 # _TRIAGE_TRIVIAL_RE instead, silently waiving the whole 2-3-approaches
 # depth requirement on entirely natural phrasing in both languages.
-_TRIAGE_NONTRIVIAL_RE = re.compile(
+#
+# #514: the non-trivial signal is split into TWO regexes because a genuinely
+# trivial line's descriptive tail may NEGATE a complexity keyword ("Triage:
+# trivial -- ... no cross-cutting change") and that must NOT flip it to
+# non-trivial -- while an AFFIRMATIVE keyword anywhere ("scoped fix -- but
+# cross-cutting") MUST still classify non-trivial (a depth gate fails SAFE,
+# never silently waiving depth). See `_triage_class` + the ticket design comment.
+#
+# _EXPLICIT: full non-trivial VERDICTS, incl. the MAJOR-1 negated-trivial forms
+# (they ARE the non-trivial signal), matched wherever they appear -- never
+# negation-guarded.
+_TRIAGE_NONTRIVIAL_EXPLICIT_RE = re.compile(
     r"not\s+trivial|nie\s+(?:je\s+(?:to\s+)?)?trivi[aá]ln\w*|"
-    r"non-?\s?trivial|netrivi[aá]ln\w*|design-?heavy|designov[ýy]\w*|"
-    r"architektonick\w*|komplexn\w*|cross-?cutting|kr[íi][žz]ov\w*|zlo[žz]it\w*",
+    r"non-?\s?trivial|netrivi[aá]ln\w*",
+    re.IGNORECASE,
+)
+# _KEYWORD: complexity keywords, counted ONLY when AFFIRMATIVE. Python's re has
+# no variable-width lookbehind, so a preceding negation is captured as an
+# OPTIONAL `neg` group and `_triage_class` rejects any match whose `neg` fired.
+# The guard is IMMEDIATE-adjacency only (bounded on purpose): an intervening
+# word ("without ANY cross-cutting") is left as a fail-safe over-block, because
+# allowing intervening words would misread the non-trivial "nie, je to
+# komplexná" ("no[t trivial], it IS complex") as negated -- the dangerous
+# direction. The negation set is English no/not/without + Slovak nie/bez/žiadn*.
+_TRIAGE_NONTRIVIAL_KEYWORD_RE = re.compile(
+    r"(?P<neg>\b(?:no|not|without|nie|bez|žiadn\w*)\s+)?"
+    r"(?:design-?heavy|designov[ýy]\w*|architektonick\w*|komplexn\w*|"
+    r"cross-?cutting|kr[íi][žz]ov\w*|zlo[žz]it\w*)",
     re.IGNORECASE,
 )
 _TRIAGE_TRIVIAL_RE = re.compile(
     r"\btrivial\b|trivi[aá]ln\w*|jednoduch\w*|\bscoped\b|drobn\w*",
     re.IGNORECASE,
 )
-# #514: classify on the LEADING VERDICT of the Triage line, never its
-# descriptive tail. `_triage_class` used to run the two regexes above against
-# the WHOLE captured `cls` tail -- so a complexity keyword sitting in a trivial
-# line's prose tail (esp. NEGATED, e.g. `Triage: trivial -- ... no cross-cutting
-# change`) matched _TRIAGE_NONTRIVIAL_RE and flipped an honestly-trivial comment
-# to non-trivial, demanding 2-3 approaches and blocking the commit. The verdict
-# is the segment up to the first CLAUSE delimiter; the tail is prose that may
-# legitimately name any keyword in any polarity and is ignored. This is the
-# structural mirror of MAJOR-1 (which handles a negated TRIVIAL) for the reverse
-# negated-NONTRIVIAL direction -- see the ticket's design comment for the
-# rejected per-keyword-lookbehind alternative and the accepted residuals.
-#
-# A hyphen is a delimiter ONLY as a run of 2+ ("--", this fleet's own Triage
-# convention) or as a single WHITESPACE-FLANKED "-", so the intra-word hyphen in
-# "non-trivial" / "cross-cutting" / "design-heavy" is preserved as part of the
-# verdict rather than splitting it.
-_TRIAGE_VERDICT_DELIM_RE = re.compile(r"—|–|-{2,}|(?<=\s)-(?=\s)|[,;:(]|\.(?:\s|$)")
-
-
-def _leading_verdict(value):
-    """The verdict segment of a `Triage:` value -- everything up to the first
-    clause delimiter -- stripped. Isolates the stated verdict from the
-    descriptive tail so a keyword in the tail (in any polarity) never drives the
-    classification. See `_TRIAGE_VERDICT_DELIM_RE` (#514)."""
-    return _TRIAGE_VERDICT_DELIM_RE.split(value, 1)[0].strip()
-
-
 _APPROACH_MARKER_RE = re.compile(
     r"\b(?:Approach|Option|Variant|Pr[íi]stup|Mo[žz]nos[ťt]\w*)\s*#?\s*([1-3])\b",
     re.IGNORECASE,
@@ -740,12 +737,18 @@ def _triage_class(text):
     m = _TRIAGE_LINE_RE.search(text)
     if not m:
         return None
-    # #514: match only the leading VERDICT segment, not the whole tail -- a
-    # complexity keyword in the descriptive tail (esp. negated) must not flip
-    # a trivial line to non-trivial.
-    value = _leading_verdict(m.group("cls"))
-    if _TRIAGE_NONTRIVIAL_RE.search(value):
+    value = m.group("cls")
+    # #514: an EXPLICIT non-trivial verdict (incl. the MAJOR-1 negated-trivial
+    # forms) OR any AFFIRMATIVE complexity keyword anywhere in the tail means
+    # non-trivial -- a depth gate fails SAFE (over-block), never silently
+    # waiving depth on a hedge-then-reveal line. A NEGATED keyword ("no
+    # cross-cutting", "žiadna krížová") is not an affirmative signal and must
+    # NOT flip a trivial line -- that reverse of MAJOR-1 was the reported bug.
+    if _TRIAGE_NONTRIVIAL_EXPLICIT_RE.search(value):
         return "non-trivial"
+    for km in _TRIAGE_NONTRIVIAL_KEYWORD_RE.finditer(value):
+        if not km.group("neg"):
+            return "non-trivial"
     if _TRIAGE_TRIVIAL_RE.search(value):
         return "trivial"
     return None
