@@ -137,6 +137,22 @@ class TestG6StructuredArmedGate(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
 
+    def test_unknown_armed_fails_closed_at_the_sweep_gate_never_types(self):
+        # SAFETY-CRITICAL (review 🔵): an UNKNOWN armed signal (no goal_mark AND
+        # no heartbeat read of goal_armed) must FAIL CLOSED at the sweep gate --
+        # `if glance.goal_armed is not True: continue` -- even on an otherwise
+        # nudge-eligible (idle, backlog, 0-worker) obscured pane. This locks the
+        # fail-closed direction at the SWEEP level: a future `is not True` ->
+        # `is False` regression would fire a keystroke into an unconfirmed-armed
+        # session (armed=None is `not False`), and this asserts it must not.
+        logs, tmux = self._run_sweep(goal_mark_state=None, hb_goal_armed=None,
+                                     backlog=5, cap=OBSCURED_IDLE_CAP)
+        self.assertEqual(tmux.sent, [], "unknown-armed must never be nudged")
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        # the skip is still OBSERVABLE (armed-unknown is journalled, never silent)
+        self.assertTrue(any(ln.startswith("one-glance ") and "armed=?" in ln
+                            for ln in logs), logs)
+
     def test_presend_readable_not_armed_footer_still_vetoes(self):
         # 1867 defense-in-depth: the structured gate armed this pane (goal_mark
         # set), but the FRESH pre-send capture reads the footer READABLE with NO
