@@ -268,6 +268,7 @@ from watchdog.decide import (  # noqa: E402
     _USAGE_CAP_RX as _USAGE_CAP_RX,
     _TRANSIENT_RX as _TRANSIENT_RX,
     is_usage_cap as is_usage_cap,
+    is_account_dispatch_block as is_account_dispatch_block,
     _SESSION_LIMIT_RX as _SESSION_LIMIT_RX,
     _RESET_TIME_RX as _RESET_TIME_RX,
     _RESET_MONTH_NUM as _RESET_MONTH_NUM,
