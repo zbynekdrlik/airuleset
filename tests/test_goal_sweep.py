@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd
 from watchdog import goal
+from watchdog import one_glance as og  # noqa: E402  (#486 G5)
+from watchdog import session_status as ss  # noqa: E402  (#486 G5)
 
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
@@ -1599,4 +1601,65 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
 #    crash on a line that would have needed `_entry_asks_to_arm`/
 #    `_GOAL_ASK_PROBE` (both deleted).
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# 8. #486 G5 — the DEDICATED, deduped parallel-mismatch evidence line. The
+#    render path and the STRUCTURED predicate run in PARALLEL every sweep; a
+#    genuine render<->structured CONTRADICTION emits ONE greppable
+#    `parallel-mismatch` line (deduped across sweeps so a persistent divergence
+#    never spams), which G6 reads to retire the render heuristics on real
+#    fleet evidence. The render `armed` verdict stays the sole ACTION gate —
+#    parallel-run OBSERVES, never acts.
+# --------------------------------------------------------------------------- #
+
+class TestGoalLaneParallelMismatch(unittest.TestCase):
+    CWD = "/home/newlevel/devel/lanemismatch"
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _hb(self, state, goal_armed, marker, age_s=1387):
+        # A SessionStatus the sweep's injected `read_status` returns — the
+        # STRUCTURED heartbeat read, independent of the rendered footer.
+        return ss.SessionStatus(state, age_s, {}, "sid", "main", marker,
+                                goal_armed, self.CWD, None, None, "stop", None)
+
+    def _patch_readers(self, hb, workers, backlog):
+        # goal_lane_sweep injects `watchdog.read_status`/`count_live_workers`/
+        # `_cached_backlog_count` into one_glance.evaluate; patch those exact
+        # package attrs to drive the STRUCTURED verdict deterministically.
+        def rs(**kw):
+            return hb
+
+        def clw(*a, **k):
+            return workers, []
+
+        def cbc(*a, **k):
+            return backlog
+        return (m.patch.object(wd, "read_status", rs),
+                m.patch.object(wd, "count_live_workers", clw),
+                m.patch.object(wd, "_cached_backlog_count", cbc))
+
+    def test_render_blind_divergence_emits_exactly_one_parallel_mismatch(self):
+        # GOAL_IDLE_CAP -> pane_goal_armed reads DETERMINABLY False, while the
+        # heartbeat says a /goal IS armed (stale + 0 workers + backlog -> stuck).
+        # This is the #486 render-blind case: the render path skips this pane
+        # SILENTLY, structure catches it. G5 must journal EXACTLY ONE dedicated
+        # `parallel-mismatch` line for it (the one-glance line already fires;
+        # this is the deduped, greppable evidence stream G6 keys on).
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, "sess-mismatch-rb")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP)
+        rs, clw, cbc = self._patch_readers(self._hb("stale", True, "working"),
+                                           0, 43)
+        with rs, clw, cbc:
+            logs = goal.goal_lane_sweep(1000, run=tmux, projects_dir=proj,
+                                        backlog_fetch=lambda cwd: 43, state={})
+        mismatches = [ln for ln in logs if ln.startswith("parallel-mismatch ")]
+        self.assertEqual(len(mismatches), 1, logs)
+        self.assertIn("-> render-blind", mismatches[0])
 
