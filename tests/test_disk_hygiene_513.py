@@ -397,5 +397,104 @@ class TestWiring(unittest.TestCase):
         self.assertIn("42", text)
 
 
+# ---------------------------------------------------------------------------
+# Adversarial-review fixes (2x fresh-context review, #513)
+# ---------------------------------------------------------------------------
+
+class TestReviewFixes(unittest.TestCase):
+    def setUp(self):
+        self._tmp = TemporaryDirectory(prefix="airuleset-513-rev-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_intra_sweep_race_worktree_created_after_now_is_kept(self):
+        """Worktree-half MINOR: a worktree whose mtimes are in the near
+        FUTURE relative to `now` (created after `now` was captured, before
+        discovery listed it -- a real multi-repo race) is a brand-new LIVE
+        worker. Absolute-distance recency protects it. RED before the fix
+        (past-only age → rec None → removed)."""
+        repo = _mkrepo(self.root)
+        wt = _add_worktree(repo, "worktree-agent-raced")
+        now = time.time() - 60      # sweep 'started' 60s before this worktree's mtimes
+        results = airuleset.sweep_stale_worktrees(
+            home=self.root, dry_run=False, force=True, now=now,
+            log_path=self.root / "l", state_path=self.root / "s")
+        row = next(r for r in results if r.get("branch") == "worktree-agent-raced")
+        self.assertFalse(row["removed"], "a just-created (near-future-mtime) worktree must be kept")
+        self.assertTrue(wt.exists())
+
+    def test_overnight_blocked_worker_within_24h_is_kept(self):
+        """Worktree-half MAJOR: the idle window comfortably exceeds an
+        overnight/sleep-window wait. A 0-ahead clean worktree idle 12h is
+        still protected (< 24h default)."""
+        self.assertGreaterEqual(cli_worktree_sweep.STALE_WORKTREE_IDLE_MIN_AGE_S, 24 * 3600)
+        repo = _mkrepo(self.root)
+        wt = _add_worktree(repo, "worktree-agent-overnight")
+        now = time.time() + 12 * 3600      # idle 12h -- an overnight-question wait
+        results = airuleset.sweep_stale_worktrees(
+            home=self.root, dry_run=False, force=True, now=now,
+            log_path=self.root / "l", state_path=self.root / "s")
+        row = next(r for r in results if r.get("branch") == "worktree-agent-overnight")
+        self.assertFalse(row["removed"], "a worker idle 12h (overnight) must be kept")
+        self.assertTrue(wt.exists())
+
+    def test_scan_live_tmp_tops_total_lockout_returns_None(self):
+        """tmp-half MAJOR-1: a /proc that lists pids but exposes NO readable
+        cwd/exe/fd link (hardened hidepid) must return None (undeterminable
+        → fail safe), not an empty set read as 'nothing live'."""
+        fake_proc = self.root / "proc"
+        (fake_proc / "1234").mkdir(parents=True)   # a pid dir with no cwd/exe/fd at all
+        out = cli_scratch_sweep._scan_live_tmp_tops(tmp_dir="/tmp", proc_dir=str(fake_proc))
+        self.assertIsNone(out, "total lockout must be undeterminable (None), not empty set")
+
+    def test_total_lockout_skips_every_stray_tmp_candidate(self):
+        d = self.root / "tmp"
+        d.mkdir()
+        p = d / "tmpaged0001"
+        p.mkdir()
+        (p / "f").write_text("x")
+        t = time.time() - 10 * DAY
+        os.utime(p / "f", (t, t))
+        os.utime(p, (t, t))
+        fake_proc = self.root / "proc"
+        (fake_proc / "1").mkdir(parents=True)
+        disc = cli_scratch_sweep.discover_stray_tmp_candidates(
+            tmp_dir=d, uid=os.getuid(), now=time.time(), min_age_days=7,
+            proc_dir=str(fake_proc))
+        self.assertIn("in live use", disc["examined"][0]["reason"])
+
+    def test_scandir_failure_sets_examined_error_and_blocks_cadence(self):
+        """tmp-half MINOR: a total scandir failure marks examined_error so
+        sweep_stray_tmp does NOT advance its 24h cadence (which would
+        suppress a retry for a day)."""
+        d = self.root / "tmp"
+        d.mkdir()
+        state = self.root / "st"
+        with m.patch.object(cli_scratch_sweep.os, "scandir", side_effect=OSError("boom")):
+            disc = cli_scratch_sweep.discover_stray_tmp_candidates(tmp_dir=d, proc_dir="/proc")
+            self.assertTrue(disc.get("examined_error"))
+            cli_scratch_sweep.sweep_stray_tmp(tmp_dir=d, now=time.time(), force=True,
+                                              proc_dir="/proc", log_path=self.root / "log",
+                                              state_path=state)
+        self.assertFalse(state.exists(), "cadence state must not advance after a scan failure")
+
+    def test_reclaimed_bytes_reflects_tree_size_not_dir_entry(self):
+        """tmp-half NIT: reclaimed_bytes must count the tree, not the ~4KB
+        dir entry."""
+        d = self.root / "tmp"
+        d.mkdir()
+        p = d / "tmpbig00001"
+        p.mkdir()
+        (p / "big").write_text("Z" * 50000)
+        t = time.time() - 10 * DAY
+        os.utime(p / "big", (t, t))
+        os.utime(p, (t, t))
+        s = cli_scratch_sweep.sweep_stray_tmp(
+            tmp_dir=d, uid=os.getuid(), now=time.time(), min_age_days=7, force=True,
+            proc_dir="/proc", live=True, log_path=self.root / "log", state_path=self.root / "st")
+        self.assertEqual(s["removed"], 1)
+        self.assertGreaterEqual(s["reclaimed_bytes"], 50000, "must count the file, not the dir entry")
+
+
 if __name__ == "__main__":
     unittest.main()

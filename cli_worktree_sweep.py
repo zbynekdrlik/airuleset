@@ -95,7 +95,15 @@ STALE_LOCKED_DEAD_MIN_AGE_S = 3 * 24 * 3600    # env AIRULESET_WORKTREE_LOCKED_D
 # least this window -- an additive skip that can never CAUSE a removal, only
 # prevent one, on top of the existing 0-ahead + clean-tree-refusal criteria
 # (so even the rare clock-skew edge loses zero work).
-STALE_WORKTREE_IDLE_MIN_AGE_S = 6 * 3600       # env AIRULESET_WORKTREE_IDLE_MIN_AGE_S
+# 24h, not 6h (#513 adversarial-review MAJOR): a live 0-ahead+clean worker
+# BLOCKED on a `❓` question the ruleset explicitly supports parking overnight
+# (sleep window 00:00-06:00 -> an evening->morning wait is ~8-15h) has zero
+# git/file activity while it waits; a 6h window let an install/push sweep
+# remove its worktree mid-wait. 24h comfortably exceeds every documented
+# overnight/sleep-window wait yet stays ~100x the measured 13-min live-idle
+# max, so a genuinely-dead worktree (idle days) is still reclaimed. Env-
+# tunable for a one-off aggressive reclaim.
+STALE_WORKTREE_IDLE_MIN_AGE_S = 24 * 3600      # env AIRULESET_WORKTREE_IDLE_MIN_AGE_S
 
 
 def _worktree_env_age_s(env_key, default_s):
@@ -397,25 +405,27 @@ def _worktree_is_clean(worktree_path, git_run):
 
 
 def _worktree_recency_age_s(root, worktree_path, now):
-    """Smallest age (`now - mtime`) of the worktree's OWN most-recent
-    activity -- the newest of its git-admin metadata (`HEAD`/`index`/
-    `logs/HEAD`/`ORIG_HEAD`, updated on every git op the worker runs) and
-    its top-level directory entries (updated on every file write) -- but
-    counting ONLY mtimes AT OR BEFORE `now`.
+    """Smallest ABSOLUTE distance `|now - mtime|` of the worktree's OWN
+    most-recent activity -- the newest of its git-admin metadata (`HEAD`/
+    `index`/`logs/HEAD`/`ORIG_HEAD`, updated on every git op the worker
+    runs) and its top-level directory entries (updated on every file
+    write). Returns the smallest such distance, or None when NO mtime is
+    measurable at all (no admin dir + unreadable worktree).
 
-    A mtime AFTER `now` is deliberately NOT "recent past activity": it is
-    outside the `[now - idle_threshold, now]` lookback window this age
-    feeds. In production `now` is `time.time()`, so a live worker's fresh
-    mtimes give a small positive age (protected); a dead worker's give a
-    large one (reclaimable). A future mtime only arises from clock skew --
-    and even then removal still independently requires 0-ahead + clean (no
-    work to lose). This at-or-before-`now` rule is also exactly what a test
-    with a fixed PAST `now` means: at simulated time `now`, activity that
-    (relative to it) has not happened yet is correctly not "recent".
-
-    Returns the smallest such age, or None when there is no measurable
-    at-or-before-`now` activity at all (caller treats None as 'not
-    recently active' -- nothing in the lookback window)."""
+    ABSOLUTE distance, not `now - mtime` (#513 adversarial-review MINOR):
+    an at-or-before-`now`-only age treated an mtime AFTER `now` as "no
+    recent activity" and let the worktree be removed. That is reachable
+    WITHOUT clock skew -- `now` is captured once, then `discover_stale_
+    worktrees` runs `git worktree prune`+`list` per repo, so a worktree
+    CREATED after `now` was captured but before its repo is listed has all
+    mtimes > `now` (a real sub-second-to-seconds race on a multi-repo box);
+    that worktree is a brand-new LIVE worker -- exactly the case GAP A must
+    protect. Using `|now - mtime|` protects it (its offset from `now` is
+    tiny) AND still reclaims a genuinely-dead worktree (its mtimes sit days
+    from `now` in EITHER direction, so the distance is large). A test with
+    a fixed PAST `now` (worktree mtimes ~days in the future) still yields a
+    large distance → correctly not recent → still reclaimed, so no existing
+    test changes. Clock skew folds in for free."""
     def _mtime(p):
         try:
             return os.lstat(str(p)).st_mtime
@@ -435,8 +445,8 @@ def _worktree_recency_age_s(root, worktree_path, now):
         names = []           # worktree dir gone/unreadable -- admin signals still count
     for name in names:
         mtimes.append(_mtime(name))
-    ages = [now - m for m in mtimes if m is not None and m <= now]
-    return min(ages) if ages else None
+    distances = [abs(now - m) for m in mtimes if m is not None]
+    return min(distances) if distances else None
 
 
 def _worktree_in_live_use(worktree_path):

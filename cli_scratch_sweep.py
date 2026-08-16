@@ -446,7 +446,7 @@ def cmd_sweep_claude_scratch(args):
 # only targets `/tmp/claude-<uid>/*` + `/tmp/wt-*`, never these. This is the
 # same discovery/action-split, own-log+state, cadence-gated shape, but with
 # THREE deliberate differences forced by scale + breadth:
-#   - the precise Python-tempfile signature regex `^tmp[A-Za-z0-9_]{8}$` (NOT
+#   - the precise Python-tempfile signature regex `^tmp[a-z0-9_]{8}$` (NOT
 #     a bare `tmp*` glob -- that also matches tmux-*, tmp.* and any app's
 #     tempfile) + uid-ownership = "clearly-owned stale artifact" (constraint #3);
 #   - a SINGLE inverted /proc live-use scan (`_scan_live_tmp_tops`) instead of
@@ -475,9 +475,27 @@ def _scan_live_tmp_tops(tmp_dir=None, proc_dir=None):
     inside them). This inverts `_target_in_live_use` (which walks all of
     /proc PER target -- infeasible for 500k candidates): scan /proc once,
     membership-test each candidate against the returned set. Returns None
-    when liveness cannot be determined at all (no /proc / unreadable) --
-    the caller treats None as 'every candidate is in live use' (fail-safe,
-    exactly `_target_in_live_use`'s own total-failure contract)."""
+    when liveness cannot be determined -- the caller treats None as 'every
+    candidate is in live use' (fail-safe), exactly `_target_in_live_use`'s
+    own total-failure contract.
+
+    None on TOTAL failure (no /proc, unreadable /proc dir) AND on TOTAL
+    LOCKOUT (#513 adversarial-review MAJOR-1): pids were listed but NOT A
+    SINGLE cwd/exe/fd link was readable across ALL of them -- a hardened
+    /proc (`hidepid=2`) where this account can see no process's links at
+    all, so an empty result would be a FALSE 'nothing live' rather than a
+    real one. Returning None there fails safe (skip everything) instead of
+    reclaiming a dir some unreadable process is using.
+
+    Accepted residual (identical to `_target_in_live_use`'s own): a PARTIAL
+    lockout -- a FOREIGN-uid process (whose `/proc/<pid>/fd` this account
+    cannot read) holding one of THIS uid's `tmp[a-z0-9_]{8}` dirs open --
+    is not detected, so under live=True that aged dir could be reclaimed
+    while the foreign process holds it. Bounded harm: deletion is uid-gated
+    so only THIS account's own dirs are ever touched and this account's OWN
+    pids ARE readable (so its own currently-open tempdirs stay protected);
+    the foreign holder's open fd survives the unlink on Linux (it keeps
+    working on the now-unlinked inode); and the default is report-only."""
     tmp_root = os.path.realpath(str(tmp_dir)) if tmp_dir else "/tmp"
     prefix = tmp_root.rstrip("/") + os.sep
     proc = Path(proc_dir) if proc_dir is not None else Path("/proc")
@@ -488,6 +506,7 @@ def _scan_live_tmp_tops(tmp_dir=None, proc_dir=None):
     except OSError:
         return None
     tops = set()
+    reads_ok = 0        # any successful cwd/exe/fd readlink at all (#513 MAJOR-1)
 
     def _consider(link):
         if link == tmp_root or link.startswith(prefix):
@@ -500,31 +519,38 @@ def _scan_live_tmp_tops(tmp_dir=None, proc_dir=None):
         pdir = proc / pid
         for name in ("cwd", "exe"):
             try:
-                _consider(os.readlink(pdir / name))
+                link = os.readlink(pdir / name)
             except OSError:
                 continue     # a vanished/foreign-uid pid -- skip it, never guess
+            reads_ok += 1
+            _consider(link)
         try:
             fds = os.listdir(pdir / "fd")
         except OSError:
             continue
         for fd in fds:
             try:
-                _consider(os.readlink(pdir / "fd" / fd))
+                link = os.readlink(pdir / "fd" / fd)
             except OSError:
                 continue
+            reads_ok += 1
+            _consider(link)
+    if pids and reads_ok == 0:
+        return None          # total lockout -- undeterminable, fail safe
     return tops
 
 
 def discover_stray_tmp_candidates(tmp_dir=None, uid=None, now=None,
                                   min_age_days=None, proc_dir=None, max_scan=None):
-    """Classify `<tmp_dir>/tmp[A-Za-z0-9_]{8}` entries owned by THIS uid.
+    """Classify `<tmp_dir>/tmp[a-z0-9_]{8}` entries owned by THIS uid.
     ONE `os.scandir` pass: counts EVERY name-regex match (`total_matched`,
     the loud problem size), and for up to `max_scan` of them records a row
     `{path, reason, size?, age_days?}` (`reason` None = genuine candidate).
     Safety quad-gate per entry: precise tempfile regex (already matched) +
     uid-owned + symlink-refused + top-level mtime age >= floor + not in the
     `_scan_live_tmp_tops` live set. Returns
-    `{total_matched, examined:[rows], capped, scanned}`."""
+    `{total_matched, examined:[rows], capped}` (+ `examined_error: True`
+    only when the top-level `os.scandir` itself failed)."""
     import time as _time
     now = _time.time() if now is None else now
     min_age_days = _min_age_days_env(min_age_days, "AIRULESET_CLAUDE_SCRATCH_MIN_AGE_DAYS",
@@ -541,6 +567,10 @@ def discover_stray_tmp_candidates(tmp_dir=None, uid=None, now=None,
     try:
         scanner = os.scandir(tmp_dir)
     except OSError as e:
+        # #513 adversarial-review MINOR: mark the discovery as errored so
+        # sweep_stray_tmp does NOT advance its 24h cadence state on a total
+        # scan failure (it would otherwise suppress a retry for a day).
+        result["examined_error"] = True
         result["examined"].append({"path": None, "reason": "could not scandir %s: %s" % (tmp_dir, e)})
         return result
     with scanner:
@@ -598,7 +628,7 @@ def sweep_stray_tmp(tmp_dir=None, uid=None, dry_run: bool = False, now=None,
                     log_path=None, state_path=None, force: bool = False,
                     min_age_days=None, proc_dir=None, max_scan=None, live=None):
     """Reclaim aged, uid-owned `tempfile.mkdtemp/mkstemp` litter
-    (`/tmp/tmp[A-Za-z0-9_]{8}`) -- the ext4 htree ENOSPC source (#513).
+    (`/tmp/tmp[a-z0-9_]{8}`) -- the ext4 htree ENOSPC source (#513).
 
     REPORT-ONLY by default: deletion runs ONLY when `live` is True (from
     `AIRULESET_TMP_PYTEST_RECLAIM_LIVE=1` when `live` is left None) AND not
@@ -659,14 +689,18 @@ def sweep_stray_tmp(tmp_dir=None, uid=None, dry_run: bool = False, now=None,
                 key = os.path.realpath(str(p))
                 if live_tops is None or key in live_tops:
                     continue      # raced into live use since discovery -- refuse
-                sz = 0
-                try:
-                    sz = lst.st_size
-                except OSError:
-                    sz = 0
+                # #513 adversarial-review NIT: a directory's own st_size is
+                # the ~4KB dir-entry, not the tree it holds. Measure the real
+                # recursive size just before removing (bounded -- only the
+                # genuine, <= max_scan reclaimables, and only under live=True).
                 if p.is_dir():
+                    sz = _dir_stats(p)[0]
                     shutil.rmtree(p)
                 else:
+                    try:
+                        sz = lst.st_size
+                    except OSError:
+                        sz = 0
                     p.unlink()
                 summary["removed"] += 1
                 summary["reclaimed_bytes"] += sz
