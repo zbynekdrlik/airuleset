@@ -692,6 +692,33 @@ _TRIAGE_TRIVIAL_RE = re.compile(
     r"\btrivial\b|trivi[aá]ln\w*|jednoduch\w*|\bscoped\b|drobn\w*",
     re.IGNORECASE,
 )
+# #514: classify on the LEADING VERDICT of the Triage line, never its
+# descriptive tail. `_triage_class` used to run the two regexes above against
+# the WHOLE captured `cls` tail -- so a complexity keyword sitting in a trivial
+# line's prose tail (esp. NEGATED, e.g. `Triage: trivial -- ... no cross-cutting
+# change`) matched _TRIAGE_NONTRIVIAL_RE and flipped an honestly-trivial comment
+# to non-trivial, demanding 2-3 approaches and blocking the commit. The verdict
+# is the segment up to the first CLAUSE delimiter; the tail is prose that may
+# legitimately name any keyword in any polarity and is ignored. This is the
+# structural mirror of MAJOR-1 (which handles a negated TRIVIAL) for the reverse
+# negated-NONTRIVIAL direction -- see the ticket's design comment for the
+# rejected per-keyword-lookbehind alternative and the accepted residuals.
+#
+# A hyphen is a delimiter ONLY as a run of 2+ ("--", this fleet's own Triage
+# convention) or as a single WHITESPACE-FLANKED "-", so the intra-word hyphen in
+# "non-trivial" / "cross-cutting" / "design-heavy" is preserved as part of the
+# verdict rather than splitting it.
+_TRIAGE_VERDICT_DELIM_RE = re.compile(r"—|–|-{2,}|(?<=\s)-(?=\s)|[,;:(]|\.(?:\s|$)")
+
+
+def _leading_verdict(value):
+    """The verdict segment of a `Triage:` value -- everything up to the first
+    clause delimiter -- stripped. Isolates the stated verdict from the
+    descriptive tail so a keyword in the tail (in any polarity) never drives the
+    classification. See `_TRIAGE_VERDICT_DELIM_RE` (#514)."""
+    return _TRIAGE_VERDICT_DELIM_RE.split(value, 1)[0].strip()
+
+
 _APPROACH_MARKER_RE = re.compile(
     r"\b(?:Approach|Option|Variant|Pr[íi]stup|Mo[žz]nos[ťt]\w*)\s*#?\s*([1-3])\b",
     re.IGNORECASE,
@@ -713,7 +740,10 @@ def _triage_class(text):
     m = _TRIAGE_LINE_RE.search(text)
     if not m:
         return None
-    value = m.group("cls")
+    # #514: match only the leading VERDICT segment, not the whole tail -- a
+    # complexity keyword in the descriptive tail (esp. negated) must not flip
+    # a trivial line to non-trivial.
+    value = _leading_verdict(m.group("cls"))
     if _TRIAGE_NONTRIVIAL_RE.search(value):
         return "non-trivial"
     if _TRIAGE_TRIVIAL_RE.search(value):
