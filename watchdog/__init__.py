@@ -1657,7 +1657,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
              progress_dir=None, questions_path=None,
              owner_decision_fetch=None):
-    """Scan every `claude` pane once. 29 numbered jobs per poll — 23 LIVE and 6
+    """Scan every `claude` pane once. 30 numbered jobs per poll — 24 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
