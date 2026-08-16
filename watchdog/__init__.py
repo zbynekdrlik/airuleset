@@ -438,7 +438,6 @@ from watchdog.tmux_io import (  # noqa: E402
     submit_own_draft_verified as submit_own_draft_verified,
     _await_submit_confirmed as _await_submit_confirmed,
     _await_typed_landed as _await_typed_landed,
-    send_selfcheck as send_selfcheck,
     _subagent_nudge_signature as _subagent_nudge_signature,
     send_subagent_nudge as send_subagent_nudge,
     _subagent_transcript_unsalvageable as _subagent_transcript_unsalvageable,
@@ -1331,6 +1330,29 @@ def _apierr_stashabort_skip(state, logs, send_fn, project, pid, key, now, idle,
                 owner=owner,
                 dedup_key="apierr-stashabort:%s:%s" % (key, sb["first_seen"]),
                 dry_run=dry_run)
+
+
+def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
+    """#497 batch 3 — the shared janitor-marked transcript-proof send for the
+    CHUNK-typed decide_working-family nudges (jobs 4 working, 4a textcall). The
+    sibling of batch-1's `_send_bare_nudge_verified`, minus the tpath
+    re-resolution: jobs 4/4a already hold `tpath` as the owners[0] local, so it
+    is passed IN rather than resolved from a cwd.
+
+    Marks #372 janitor provenance BEFORE the keystroke so a swallowed chunk-typed
+    residue (a wrapped/collapsed partial `send_verified`'s own undo cannot back
+    off) is reclaimable by the janitor via the shared `"stuck-check: "`
+    own-payload prefix; `send_verified`; clears the mark on a transcript-VERIFIED
+    submit and returns True. On an unverified/swallowed submit the mark is LEFT
+    as the residue backstop and False is returned — the caller does NO persist
+    reorder (decide_working's own interval/re-sighting cadence retries a
+    swallowed nudge, and its after-max_nudges escalation is correct on a repeated
+    swallow), it only logs the delivery result honestly."""
+    _janitor_mark_watch(state, pid, now)
+    if send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs):
+        _janitor_clear_watch(state, pid)
+        return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -2730,7 +2752,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         _nudge_dying_subagent(state, logs, send_fn, pid, run, captured,
                                               project, owner, now, sub_path, sub_idle,
                                               "api-error", "apierr", interval, max_nudges,
-                                              dry_run)
+                                              dry_run, tpath=tpath, sleep_fn=sleep_fn)
                         continue
 
             # --- (2) WAITING ON THE USER (AskUserQuestion / permission) → PING ONLY ---
@@ -2803,10 +2825,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 fs = int(entry.get("first_seen", now))
                 if action == "nudge":
                     n = len(entry["nudges"])
-                    logs.append("textcall-nudge#%d %s [%s] idle=%dm"
-                                % (n, project, key, int(idle // 60)))
+                    # #497 batch 3 — transcript-proof send + #372 janitor mark
+                    # (271c CHUNK); see _send_stuckcheck_verified.
+                    ok = True
                     if not dry_run:
-                        send_continue(pid, TEXTCALL_NUDGE_TEXT, run)
+                        ok = _send_stuckcheck_verified(
+                            state, pid, TEXTCALL_NUDGE_TEXT, run, tpath, now,
+                            sleep_fn, logs)
+                    logs.append("textcall-nudge#%d %s [%s] idle=%dm%s"
+                                % (n, project, key, int(idle // 60),
+                                   "" if ok else " (submit-unverified)"))
                 elif action == "escalate":
                     logs.append("textcall-escalate %s [%s] — wedged after %d nudges"
                                 % (project, key, max_working_nudges))
@@ -2846,7 +2874,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     _nudge_dying_subagent(state, logs, send_fn, pid, run, captured,
                                           project, owner, now, sub_path, sub_idle,
                                           "text-toolcall-stall", "textcall",
-                                          working_interval, max_working_nudges, dry_run)
+                                          working_interval, max_working_nudges, dry_run,
+                                          tpath=tpath, sleep_fn=sleep_fn)
                     continue
 
             # --- (4) ⏳ WORKING, long-idle, NO live subagent → NUDGE the session ---------
@@ -2974,10 +3003,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                 fs = int(entry.get("first_seen", now))
                 if action == "nudge":
                     n = len(entry["nudges"])
-                    logs.append("working-nudge#%d %s [%s] idle=%dm"
-                                % (n, project, key, int(idle // 60)))
+                    # #497 batch 3 — transcript-proof send + #372 janitor mark
+                    # (WORKING_NUDGE_TEXT 431c CHUNK); see _send_stuckcheck_verified.
+                    ok = True
                     if not dry_run:
-                        send_selfcheck(pid, run)
+                        ok = _send_stuckcheck_verified(
+                            state, pid, WORKING_NUDGE_TEXT, run, tpath, now,
+                            sleep_fn, logs)
+                    logs.append("working-nudge#%d %s [%s] idle=%dm%s"
+                                % (n, project, key, int(idle // 60),
+                                   "" if ok else " (submit-unverified)"))
                 elif action == "escalate":
                     logs.append("working-escalate %s [%s] — wedged after %d nudges"
                                 % (project, key, max_working_nudges))

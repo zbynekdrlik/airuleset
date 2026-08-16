@@ -5,7 +5,7 @@ definitive module split (issue #433). Everything here shells out to ``tmux``
 (injectable as ``run``, defaulting to :func:`_default_run`) or walks ``/proc``:
 the tmux socket-recovery + sudo-hosted-pane discovery (:func:`list_claude_panes`
 and friends), pane capture / mode / owner reads, and the keystroke senders
-(:func:`send_continue`, :func:`send_selfcheck`, :func:`send_subagent_nudge`) plus
+(:func:`send_continue`, :func:`send_subagent_nudge`) plus
 the shared dying-subagent nudge logic. Every name here is re-exported into the
 ``watchdog`` namespace by the positional facade import in ``__init__.py``, so all
 existing ``watchdog.<name>`` seams (goal / compact / cross_stream / janitor,
@@ -45,7 +45,12 @@ import re
 import time
 
 import watchdog
-from watchdog import NUDGE_TEXT, WORKING_NUDGE_TEXT
+# WORKING_NUDGE_TEXT is no longer USED here (its `send_selfcheck` caller was
+# removed when job 4 adopted send_verified, #497 batch 3) but is deliberately
+# RE-EXPORTED — the module-split invariant test locks tmux_io.WORKING_NUDGE_TEXT
+# is watchdog.WORKING_NUDGE_TEXT (it stays resident in __init__.py). The `as`
+# alias marks it an intentional re-export so ruff does not flag F401.
+from watchdog import NUDGE_TEXT, WORKING_NUDGE_TEXT as WORKING_NUDGE_TEXT
 
 # #490 — transcript-proof submit verification (`send_verified`, below). CC
 # writes the accepted `user` turn near-instantly, so most confirms land on the
@@ -358,13 +363,6 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None):
     run(["tmux", "send-keys", "-t", pane_id, "Enter"])
 
 
-def send_selfcheck(pane_id, run=None):
-    """Job 4's self-check nudge — the autonomous form of the user's manual 'stucked?'.
-    Types WORKING_NUDGE_TEXT into the pane and submits it, prompting the session to
-    verify the liveness of its launched work and intervene if it died silently."""
-    watchdog.send_continue(pane_id, WORKING_NUDGE_TEXT, run)
-
-
 def _subagent_nudge_signature(worker_id):
     """(#491) The stable, per-worker substring that identifies our dead-worker
     stuck-check nudge in a supervisor transcript `user` turn. Built once, used
@@ -375,16 +373,32 @@ def _subagent_nudge_signature(worker_id):
     return "background worker %s vyzerá mŕtvy" % worker_id
 
 
-def send_subagent_nudge(pane_id, worker_id, kind, run=None):
+def send_subagent_nudge(pane_id, worker_id, kind, run=None, tpath=None,
+                        sleep_fn=None, logs=None):
     """(issue #6) Nudge the SUPERVISOR pane about a dying BACKGROUND WORKER —
     `kind` is a short human label ('api-error' or 'text-toolcall-stall'). Types a
     stuck-check-style self-check message naming the worker's own transcript file,
     so the supervisor — the only thing that can decide resume vs re-dispatch —
-    investigates. Never acts on the worker's behalf directly."""
+    investigates. Never acts on the worker's behalf directly. Returns True on a
+    delivered/verified submit, False on a swallowed one.
+
+    #497 batch 3: the text embeds the worker-id (a 36-char UUID on real boxes)
+    TWICE, so it runs 238-248c → CHUNK-typed. When a `tpath` is supplied it is
+    the SUPERVISOR's transcript — the pane typed into, NEVER the dying worker's
+    `sub_path` — so route through the transcript-proof `send_verified` and verify
+    the submit landed. The `_nudge_dying_subagent` caller marks/clears the #372
+    janitor provenance around this call, so a swallowed chunk-typed residue is
+    reclaimable via the shared `"stuck-check: "` own-payload prefix. Without a
+    tpath, fall back to the raw `send_continue` (backward-compatible; a caller
+    that cannot resolve the supervisor transcript still delivers, unverified)."""
     text = ("stuck-check: %s (%s v subagents/%s.jsonl) "
             "— over jeho transcript a zasiahni (dispatchni znova alebo naň nadviaž), "
             "nič nerob naslepo." % (_subagent_nudge_signature(worker_id), kind, worker_id))
+    if tpath is not None:
+        return watchdog.send_verified(pane_id, text, run, tpath,
+                                      sleep_fn=sleep_fn, logs=logs)
     watchdog.send_continue(pane_id, text, run)
+    return True
 
 
 def _subagent_transcript_unsalvageable(sub_path):
@@ -428,7 +442,7 @@ def _subagent_transcript_unsalvageable(sub_path):
 
 def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, owner,
                           now, sub_path, sub_idle, kind, dedup_prefix,
-                          interval, max_nudges, dry_run):
+                          interval, max_nudges, dry_run, tpath=None, sleep_fn=None):
     """(issue #6) Shared busy/idle nudge-or-ping logic for a detected dying SUBAGENT
     (jobs 1b / 4a-sub). `kind` is a human label for the nudge/ping text; `dedup_prefix`
     namespaces the state/dedup keys per detector ('apierr' / 'textcall'). Mutates
@@ -514,9 +528,22 @@ def _nudge_dying_subagent(state, logs, send_fn, pid, run, captured, project, own
     state[wkey] = entry
     if action == "nudge":
         n = len(entry["nudges"])
-        logs.append("subagent-%s-nudge#%d %s [%s]" % (dedup_prefix, n, project, wid))
+        # #497 batch 3 — transcript-proof send (238-248c CHUNK) against the
+        # SUPERVISOR's own `tpath` (the pane typed into — threaded from the
+        # run_once caller, NEVER `sub_path`, the dying worker's transcript), plus
+        # the #372 janitor mark BEFORE the keystroke so a swallowed chunk-typed
+        # residue is reclaimable via the shared "stuck-check: " own-payload
+        # prefix; cleared on a verified submit. decide_working's own cadence
+        # retries a swallowed nudge, so no persist reorder — log honestly.
+        ok = True
         if not dry_run:
-            send_subagent_nudge(pid, wid, kind, run)
+            watchdog._janitor_mark_watch(state, pid, now)
+            ok = send_subagent_nudge(pid, wid, kind, run, tpath, sleep_fn, logs)
+            if ok:
+                watchdog._janitor_clear_watch(state, pid)
+        logs.append("subagent-%s-nudge#%d %s [%s]%s"
+                    % (dedup_prefix, n, project, wid,
+                       "" if ok else " (submit-unverified)"))
     elif action == "escalate":
         logs.append("subagent-%s-escalate %s [%s] — gave up after %d nudges"
                     % (dedup_prefix, project, wid, effective_max_nudges))

@@ -933,15 +933,25 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
 # → _janitor_recover), never left to be mis-read as a draft and re-injected.
 # Used ONLY to recognize a box's content as PROVABLY our own — never to
 # guess about a genuine foreign draft that merely starts with a slash.
-# (#497) the cross_stream transcript-proof nudges adopted alongside the lane-
-# fill one — each an unambiguous OWN diagnostic prefix no human ever starts a
-# prompt with, so a chunk-typed partial residue left by a swallowed send is
-# reclaimed by the #372 janitor instead of being mis-read as a draft and re-
-# injected (the #490 Round-2 re-injection class, same fix, sibling sites):
-#   "bounce-backstop: "     — the cross_stream bounce nudge (job 8)
-#   "gk-request backstop: " — the cross_stream gk-request nudge
+# (#497) the transcript-proof nudges adopted alongside the lane-fill one — each
+# an unambiguous OWN diagnostic prefix no human ever starts a prompt with, so a
+# chunk-typed partial residue left by a swallowed send is reclaimed by the #372
+# janitor instead of being mis-read as a draft and re-injected (the #490 Round-2
+# re-injection class, same fix, sibling sites):
+#   "bounce-backstop: "     — the cross_stream bounce nudge (job 8)      [batch 1]
+#   "gk-request backstop: " — the cross_stream gk-request nudge          [batch 1]
+#   "stuck-check: "         — the working (job 4, 431c) + textcall (job 4a, 271c)
+#                             + dying-subagent (jobs 1b/4a-sub, 238-248c) nudges,
+#                             all three chunk-typed and all sharing this exact
+#                             leading prefix (batch 3). Deliberately NOT in
+#                             `_OWN_NUDGE_SUBMIT_PREFIXES` below: a swallowed
+#                             stuck-check is RECLAIMED by the janitor (decide_working
+#                             re-fires it next sweep), never SUBMITTED in place —
+#                             the #501 own-submit path stays scoped to the
+#                             supervisor's own lane/bounce/gkreq nudges.
 _JANITOR_OWN_PREFIXES = ("/goal ", "/compact", "lane-check: ",
-                         "bounce-backstop: ", "gk-request backstop: ")
+                         "bounce-backstop: ", "gk-request backstop: ",
+                         "stuck-check: ")
 
 JANITOR_CLEAR_MAX_ITER = 25       # bounds the observed-state clear loop
 JANITOR_CLEAR_BATCH_MAX = 200     # per-iteration backspace batch, sized to
