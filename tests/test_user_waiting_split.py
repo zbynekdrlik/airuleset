@@ -44,6 +44,34 @@ class PartitionHelpers(unittest.TestCase):
     def test_needs_decision_is_user_waiting(self):
         self.assertTrue(airuleset._row_is_user_waiting(_labels("needs-decision")))
 
+    def test_bare_needs_acceptance_is_user_waiting(self):
+        # #512: a BARE needs-acceptance ticket (done, awaiting owner acceptance)
+        # now waits on the OWNER -> U, no longer the stream's own workable I N.
+        self.assertTrue(airuleset._row_is_user_waiting(_labels("needs-acceptance")))
+
+    def test_needs_acceptance_with_ready_for_review_is_not_user_waiting(self):
+        # #507 precedence preserved: a needs-acceptance ticket that is ALSO a
+        # genuine re-hand-off (ready-for-review / needs-gatekeeper) is back in the
+        # gatekeeper's court -> stays workable so the gk/handed logic counts it,
+        # NEVER U.
+        self.assertFalse(airuleset._row_is_user_waiting(
+            _labels("needs-acceptance", "ready-for-review")))
+        self.assertFalse(airuleset._row_is_user_waiting(
+            _labels("needs-acceptance", "needs-gatekeeper")))
+
+    def test_needs_acceptance_with_bounce_is_not_user_waiting(self):
+        # #507/#313 precedence: a needs-acceptance ticket returned via prio:bounce
+        # is reworkable by the stream -> stays workable (the stream's I), NEVER U.
+        self.assertFalse(airuleset._row_is_user_waiting(
+            _labels("needs-acceptance", "prio:bounce")))
+
+    def test_answer_override_does_not_apply_to_needs_answer(self):
+        # The gk/bounce override is scoped to needs-acceptance ONLY — a
+        # needs-answer ticket that also carries ready-for-review stays U (its
+        # #468 routing is unchanged; the override never applies to it).
+        self.assertTrue(airuleset._row_is_user_waiting(
+            _labels("needs-answer", "ready-for-review")))
+
     def test_an_unrelated_label_is_not_user_waiting(self):
         self.assertFalse(airuleset._row_is_user_waiting(_labels("bug", "needs-design")))
 
@@ -73,9 +101,32 @@ class PartitionHelpers(unittest.TestCase):
         self.assertEqual(set(workable), {9})
         self.assertEqual(waiting, {})
 
-    def test_labels_constant_is_exactly_the_two_user_waiting_labels(self):
+    def test_labels_constant_is_the_three_owner_waiting_labels(self):
+        # #512 (owner decision 2026-08-16): the "waiting on the OWNER" family is
+        # consolidated to answer + decision + acceptance (was the two #468
+        # labels; needs-acceptance folded in, its A-bucket never shipped).
         self.assertEqual(set(airuleset.USER_WAITING_LABELS),
-                         {"needs-answer", "needs-decision"})
+                         {"needs-answer", "needs-decision", "needs-acceptance"})
+
+    def test_bare_needs_acceptance_partitions_into_user_waiting(self):
+        # #512: the ONE derivation routes a bare needs-acceptance row to the
+        # user_waiting bucket (leaves workable), while a re-hand-off / bounce
+        # variant stays workable (#507 precedence).
+        rows = {
+            1: {"number": 1, "labels": _labels("needs-acceptance")},
+            2: {"number": 2, "labels": _labels("needs-acceptance", "ready-for-review")},
+            3: {"number": 3, "labels": _labels("needs-acceptance", "prio:bounce")},
+            4: {"number": 4, "labels": _labels("bug")},
+        }
+        workable, waiting = airuleset._partition_user_waiting(rows)
+        self.assertEqual(set(waiting), {1})
+        self.assertEqual(set(workable), {2, 3, 4})
+
+    def test_user_waiting_reason_maps_each_label(self):
+        self.assertEqual(airuleset._user_waiting_reason(_labels("needs-answer")), "answer")
+        self.assertEqual(airuleset._user_waiting_reason(_labels("needs-decision")), "decision")
+        self.assertEqual(airuleset._user_waiting_reason(_labels("needs-acceptance")), "acceptance")
+        self.assertEqual(airuleset._user_waiting_reason(_labels("bug")), "")
 
 
 def _run_quals(subcmd, flag, repo, home, bindir, marker=None):

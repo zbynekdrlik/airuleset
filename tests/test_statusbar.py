@@ -713,13 +713,16 @@ class RefreshCLI(unittest.TestCase):
         # OPEN pending client acceptance) -- still carries its old
         # READY-FOR-REVIEW comment forever and was counted as parked-with-gk
         # indefinitely (montalu3 live: gk=19, 0 genuinely parked, ALL 19
-        # carrying needs-acceptance). A `needs-acceptance` ticket is the
-        # STREAM's court (acceptance is the stream's work -- owner ruling
-        # 2026-08-15), NOT parked with the gatekeeper, so it must fall to
-        # handed=False (own workable I N) regardless of a stale hand-off
-        # comment. The discriminator proven in ONE slice: #1 processed
-        # (needs-acceptance + stale READY-FOR-REVIEW comment) must NOT count;
-        # #2 genuinely parked (ready-for-review) MUST.
+        # carrying needs-acceptance). A `needs-acceptance` ticket must NOT fall
+        # to gk regardless of a stale hand-off comment.
+        #
+        # #512 (owner decision 2026-08-16) SUPERSEDES #507's FOOTER placement of
+        # a BARE `needs-acceptance` ticket: instead of the stream's own workable
+        # `I N` it now lands in `U N` (waiting on the OWNER's acceptance) — but
+        # it still must NOT count as gk. The discriminator proven in ONE slice:
+        # #1 processed (needs-acceptance + stale READY-FOR-REVIEW comment) must
+        # NOT be gk and now leaves `I N` into `U N`; #2 genuinely parked
+        # (ready-for-review) MUST stay gk.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -757,9 +760,14 @@ class RefreshCLI(unittest.TestCase):
                 "gk; the processed needs-acceptance ticket (#1) must not be "
                 "re-counted by its stale READY-FOR-REVIEW comment")
             self.assertEqual(
-                cache["open"], 1,
-                "the processed needs-acceptance ticket (#1) is the stream's "
-                "own workable, not parked with the gatekeeper")
+                cache["open"], 0,
+                "#512: the bare processed needs-acceptance ticket (#1) leaves "
+                "the workable I N — it waits on the owner's acceptance (U N), "
+                "not the stream's active work")
+            self.assertEqual(
+                cache.get("user_waiting"), 1,
+                "#512: the bare needs-acceptance ticket (#1) is now U (waiting "
+                "on the OWNER), the 'done = client saw it' state")
 
     def test_refresh_a_needs_acceptance_ticket_still_labeled_ready_for_review_stays_gk(self):
         # #507 adversarial defense: the needs-acceptance suppression must
@@ -806,6 +814,12 @@ class RefreshCLI(unittest.TestCase):
                 "gk even when it also carries needs-acceptance -- the "
                 "suppression must not drop a labeled hand-off")
             self.assertEqual(cache["open"], 0)
+            # #512 negative control: the gk/bounce override keeps a
+            # needs-acceptance + ready-for-review ticket OUT of U — it is a
+            # genuine re-hand-off (gk), never "waiting on the owner's acceptance".
+            self.assertEqual(cache.get("user_waiting"), 0,
+                             "needs-acceptance + ready-for-review must stay gk, "
+                             "never fold into U (#507 precedence, #512)")
 
     def test_refresh_processed_needs_acceptance_not_gk_on_the_shared_account_slice(self):
         # #507 review MINOR (test fidelity): the two tests above exercise the
@@ -858,7 +872,10 @@ class RefreshCLI(unittest.TestCase):
                 "is gk; the processed needs-acceptance ticket (#1) must not be "
                 "re-counted by its stale comment nor re-added by the recovery "
                 "block")
-            self.assertEqual(cache["open"], 1)
+            # #512: the bare needs-acceptance ticket (#1) leaves I N into U N on
+            # the shared-account topology too (waiting on the owner's acceptance).
+            self.assertEqual(cache["open"], 0)
+            self.assertEqual(cache.get("user_waiting"), 1)
 
     def test_refresh_a_comment_only_re_handoff_of_needs_acceptance_is_a_known_safe_under_count(self):
         # #507 review MAJOR (accepted, SAFE-direction residual): the label-based
@@ -913,12 +930,23 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(
                 cache["gk"], 0,
                 "KNOWN #507 residual (safe direction): a comment-only "
-                "re-hand-off of a needs-acceptance ticket is under-counted -- "
-                "it must NOT falsely stop the loop, so it lands in open, not gk")
+                "re-hand-off of a needs-acceptance ticket is not re-counted as "
+                "gk by label alone (the auto-labeller unreliability #313 exists "
+                "for) -- so it must NOT falsely stop the loop")
+            # #512 SUPERSEDES the pre-#512 "stays workable open to keep the loop
+            # alive" framing: a BARE needs-acceptance ticket (from the label
+            # perspective, which is all this comment-only case has) now parks in
+            # `U N` (waiting on the owner's acceptance), NOT the workable I N. It
+            # is still SURFACED and the loop still parks on it (U leaves the
+            # count but the loop never claims backlog-empty past a U member) --
+            # the safe direction is preserved, only the bucket moved I N -> U N.
             self.assertEqual(
-                cache["open"], 1,
-                "the under-counted re-hand-off stays the stream's own workable "
-                "so the /goal loop keeps it alive (never a false backlog-empty)")
+                cache["open"], 0,
+                "#512: a bare needs-acceptance ticket leaves the workable I N")
+            self.assertEqual(
+                cache.get("user_waiting"), 1,
+                "#512: it parks in U N (waiting on the owner's acceptance), "
+                "still surfaced so the loop parks on it, never a false empty")
 
     def test_footer_refresh_actually_calls_the_shared_handed_derivation(self):
         # MAJOR-2 (fresh-context adversarial review of #391): mirrors the
