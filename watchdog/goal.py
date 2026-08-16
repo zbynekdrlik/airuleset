@@ -1354,6 +1354,159 @@ def _mem_available_mb():
     return None
 
 
+# #509 -- SURPLUS FLOOR for the UNDER-SATURATED (fill-more-lanes) nudge. The
+# workable-backlog count (core-quals/slice-quals) over-represents genuinely-
+# DISPATCHABLE units -- held green branches awaiting CI, umbrella/tracking
+# tickets, ops-wait / evidence-gated items (e.g. #499) the count cannot
+# structurally distinguish yet -- so `live_workers < min(5, backlog)` is true even
+# when there is nothing real to lift (the live incident: the guard pushing for a
+# 5th lane against a workable count that could not fill it, ~8 nudges/night). Push
+# for MORE lanes only when the backlog exceeds the running lanes by this margin:
+# with 1-4 workers this lands the absolute floor at 6-9, matching the owner's
+# "~10+ open for the target" intuition, while NEVER silencing the stalled 0-worker
+# EMPTY-lane branch (anti-silence -- it ignores this floor entirely). The
+# effectiveness backoff below handles the residual (a real surplus that still
+# can't be lifted).
+GOAL_LANE_UNDERSAT_SURPLUS = 5
+
+# #509 -- effectiveness (feedback) backoff for the UNDER-SATURATED fill nudge. The
+# fixed 15-min cooldown re-nudged "fill more lanes" every 15 min for HOURS even
+# when every nudge produced NO new lane (the supervisor answering "everything
+# covered, nothing to lift" -- the live incident). A nudge is EFFECTIVE iff the
+# STRUCTURED live-worker count (`count_live_workers` -- wedged-excluding, #486 G2,
+# NEVER pane text) ROSE since it fired; an ineffective nudge widens the NEXT
+# interval along this schedule, holding at the cap FOREVER (re-probes at the widest
+# stage, never permanently silent -- #134 anti-silence). Mirrors the repo's
+# staged-schedule PATTERN (GOAL_LANE_STASH_ABORT_BACKOFF_S / #502 limit-backoff):
+# an explicit tuple of widening intervals, min(streak, len-1) indexing. The FIRST
+# stage equals GOAL_LANE_INTERVAL_S so the first repeat is unchanged; the streak
+# resets the moment a nudge DID produce a lane (the worker count ROSE) or the
+# backlog GREW. A bare lane DROP does NOT reset -- a worker completing on an
+# un-liftable backlog with nothing to replace it is the normal "nothing to lift"
+# churn, and resetting on it would re-open the burn (#509 adversarial review). NO
+# phone ping (unlike the
+# stash-abort give-up): a fleet as full as its workable backlog allows is the
+# healthy steady state, not an error -- pinging it would be the exact noise this
+# fix removes; the journalled decision line every sweep is the anti-silence.
+GOAL_LANE_INEFFECTIVE_BACKOFF_S = (15 * 60, 30 * 60, 60 * 60, 120 * 60)
+
+
+def _lane_effective_interval(ineffective_streak):
+    """#509 -- cooldown seconds before the next UNDER-SATURATED fill nudge, given
+    the count of consecutive nudges that produced no new lane. Widens with the
+    streak and holds at the final stage forever -- see
+    GOAL_LANE_INEFFECTIVE_BACKOFF_S."""
+    sched = GOAL_LANE_INEFFECTIVE_BACKOFF_S
+    idx = min(max(int(ineffective_streak), 0), len(sched) - 1)
+    return sched[idx]
+
+
+def _lane_effectiveness(rec, eff_workers, backlog_n):
+    """#509 -- did the LAST under-saturated nudge make PROGRESS worth re-probing?
+    None when there is no comparable prior nudge (rec carries no baseline). Else
+    True when a lane genuinely APPEARED (the structured live-worker count ROSE --
+    the nudge worked) OR the backlog GREW (genuine new work): reset the streak.
+    False otherwise -- workers flat, OR a lane DROPPED, AND the backlog did not
+    grow -> the nudge produced no new lane, keep backing off.
+
+    A bare DROP deliberately does NOT reset (#509 adversarial review, both
+    reviewers converged): on a large un-liftable backlog a worker COMPLETING with
+    nothing to replace it (count N->N-1) is the normal "nothing to lift" churn, so
+    resetting on it would re-open the every-15-min burn this fix exists to kill.
+    Genuinely-new work is caught by the backlog-grow arm; a freed lane the
+    supervisor keeps declining to fill is not new dispatchable work, and the
+    120-min cap re-probe bounds how long a newly-liftable backlog waits."""
+    prev_w = rec.get("lnw")
+    prev_b = rec.get("lnb")
+    if prev_w is None or prev_b is None:
+        return None
+    return (eff_workers > prev_w) or (backlog_n > prev_b)
+
+
+def _lane_cooldown_decision(rec, now, under_saturated, eff_workers, backlog_n,
+                            loc, live_workers, waiters):
+    """#509 -- effectiveness-aware cooldown gate. Returns (skip, logline, moved):
+    whether to hold this sweep, its decision line, and the prior nudge's
+    effectiveness verdict (`_lane_effectiveness`, handed back so the CALLER
+    advances the streak ONLY on a real delivery, never a delivery abort).
+
+    Empty-lane (not under_saturated): the original fixed GOAL_LANE_INTERVAL_S
+    cooldown, unchanged -- that branch keeps its own GOAL_LANE_MAX_NUDGES give-up.
+
+    Under-saturated: the interval widens along GOAL_LANE_INEFFECTIVE_BACKOFF_S per
+    consecutive ineffective nudge; a nudge that MOVED the fleet resets the streak
+    to 0 HERE (so the interval narrows back at once), holding at the cap forever --
+    never permanently silent."""
+    last = rec.get("llast")
+    if last is None:
+        return False, None, None
+    if not under_saturated:
+        if (now - last) < GOAL_LANE_INTERVAL_S:
+            return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                          "skip:cooldown remaining=%ds"
+                          % (loc, live_workers, waiters, backlog_n,
+                             int(GOAL_LANE_INTERVAL_S - (now - last)))), None
+        return False, None, None
+    moved = _lane_effectiveness(rec, eff_workers, backlog_n)
+    if moved is True:
+        rec["lineff"] = 0
+    streak = rec.get("lineff", 0)
+    interval = _lane_effective_interval(streak)
+    if (now - last) < interval:
+        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                      "skip:ineffective-backoff remaining=%ds "
+                      "(streak=%d interval=%dm eff_workers=%d)"
+                      % (loc, live_workers, waiters, backlog_n,
+                         int(interval - (now - last)), streak, interval // 60,
+                         eff_workers)), moved
+    return False, None, moved
+
+
+def _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, moved, n, now):
+    """#479/#509 -- commit a LANDED nudge's state. Clears the abort-backoff (#479),
+    and for the under-saturated fill nudge advances the #509 ineffective streak
+    when the PREVIOUS nudge produced no new lane (`moved is False`) and records
+    this nudge's effectiveness baseline (eff_workers/backlog for the next sweep to
+    measure against), then stamps the nudge counter + cooldown clock. The advance
+    lives HERE (a real delivery), never in the cooldown decision, so a delivery
+    ABORT never over-advances the effectiveness streak (that has its own `lna`)."""
+    rec.pop("lna", None)
+    rec.pop("lnpark", None)
+    if under_saturated:
+        if moved is False:
+            rec["lineff"] = rec.get("lineff", 0) + 1
+        rec["lnw"] = eff_workers
+        rec["lnb"] = backlog_n
+    rec["ln"] = n + 1
+    rec["llast"] = now
+
+
+def _lane_clear_effectiveness(rec):
+    """#509 -- drop the effectiveness-backoff baseline/streak. Called when the box
+    is NOT under-saturated (fully saturated, or drained to 0 workers): the streak
+    is an under-saturated concept, and a lane-count change to either extreme is
+    itself a reset condition."""
+    for k in ("lineff", "lnw", "lnb"):
+        rec.pop(k, None)
+
+
+def _lane_boundary_ok(cap):
+    """#509 -- extracted from the nested `_boundary_ok` (keeps
+    `goal_lane_occupancy_nudge` under its size cap). Returns (ok, kind, draft): is
+    `cap` a deliverable input boundary this sweep? An AT-REST draft is deliverable
+    (`deliver_with_stash` parks it -- single slot, auto-restores once the delivered
+    turn completes), so it stopped being a reason to skip; at-rest-ness for a draft
+    is the draft-admitting free-prompt shape (`bare_only=False`), the same
+    precondition deliver_with_stash re-verifies internally before its first
+    keystroke. A bare box must be settled at an idle prompt."""
+    kind, draft = watchdog._classify_boundary(cap)
+    if kind != "input":
+        return False, kind, draft
+    if draft:
+        return watchdog._has_free_prompt(cap, bare_only=False), kind, draft
+    return watchdog.pane_at_idle_prompt(cap), kind, draft
+
+
 def _lane_skip(logs, loc, reason):
     """#475: append a lane-occupancy DECISION line for a previously-silent
     early-return path, mirroring the existing `lane-occupancy <pane> ... ->
@@ -1459,21 +1612,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     if back_off:
         return logs, False
 
-    def _boundary_ok(cap):
-        kind, draft = watchdog._classify_boundary(cap)
-        if kind != "input":
-            return False, kind, draft
-        if draft:
-            # #442: an AT-REST draft is deliverable -- `deliver_with_stash`
-            # parks it (single slot, auto-restores once the delivered turn
-            # completes), so it stopped being a reason to skip. At-rest-ness
-            # for a draft is the draft-admitting free-prompt shape
-            # (`bare_only=False`), the same precondition deliver_with_stash
-            # re-verifies internally before its first keystroke.
-            return watchdog._has_free_prompt(cap, bare_only=False), kind, draft
-        return watchdog.pane_at_idle_prompt(cap), kind, draft
-
-    ok, kind, draft = _boundary_ok(captured)
+    ok, kind, draft = _lane_boundary_ok(captured)
     if not ok:
         if kind != "input" or draft:
             logs.append("skip %s (lane-occupancy) %s"
@@ -1532,11 +1671,21 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     mem_mb = None
     floor = min(GOAL_LANE_SATURATION_WORKERS, backlog_n)
     if live_workers >= floor:
+        _lane_clear_effectiveness(rec)   # #509: filled -> re-probe fresh on next dip
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                     "saturated (>= %d workers), skip"
                     % (loc, live_workers, waiters, backlog_n, floor))
         return logs, False
     under_saturated = live_workers > 0
+    if not under_saturated:
+        _lane_clear_effectiveness(rec)   # #509: a lane-drop reset condition
+    elif (backlog_n - live_workers) < GOAL_LANE_UNDERSAT_SURPLUS:
+        # #509 SURPLUS FLOOR (under-saturated only; see GOAL_LANE_UNDERSAT_SURPLUS).
+        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                    "skip:surplus-floor (backlog-workers=%d < %d)"
+                    % (loc, live_workers, waiters, backlog_n,
+                       backlog_n - live_workers, GOAL_LANE_UNDERSAT_SURPLUS))
+        return logs, True
     if under_saturated:
         # The fill-lanes nudge dispatches MORE parallel workers -- only fire when
         # the box has real memory headroom, else another worktree worker risks the
@@ -1642,12 +1791,17 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     % (loc, live_workers, waiters, backlog_n,
                        int(park - now), aborts, int(park)))
         return logs, True
-    last = rec.get("llast")
-    if last is not None and (now - last) < GOAL_LANE_INTERVAL_S:
-        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                    "skip:cooldown remaining=%ds"
-                    % (loc, live_workers, waiters, backlog_n,
-                       int(GOAL_LANE_INTERVAL_S - (now - last))))
+    # #509 -- STRUCTURED effectiveness signal + effectiveness-aware cooldown.
+    eff_workers = live_workers
+    if under_saturated:
+        eff_workers, _ev = watchdog.count_live_workers(
+            projects_dir, cwd, sid, now, GOAL_LANE_LIVE_WINDOW_S)
+    cd_skip, cd_log, cd_moved = _lane_cooldown_decision(
+        rec, now, under_saturated, eff_workers, backlog_n, loc, live_workers,
+        waiters)
+    if cd_log:
+        logs.append(cd_log)
+    if cd_skip:
         return logs, True
     # #442: the SAME shared check job 9's virgin-arm gate uses, but through
     # the lane path's OWN short window (never the 30-min default -- see
@@ -1667,7 +1821,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                                              backlog_n, idle // 60))
         return logs, True
     fresh = watchdog.capture_pane(pid, run, lines=40)
-    ok, kind, fresh_draft = _boundary_ok(fresh)
+    ok, kind, fresh_draft = _lane_boundary_ok(fresh)
     if not ok or watchdog.pane_goal_armed(fresh) is not True:
         logs.append("skip raced (lane-occupancy) %s -> pane moved since "
                     "the sweep" % loc)
@@ -1787,10 +1941,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             return logs, True
         watchdog._janitor_clear_watch(state, pid)
         mode = "typed"
-    rec.pop("lna", None)
-    rec.pop("lnpark", None)   # #479 -- successful delivery clears abort backoff
-    rec["ln"] = n + 1
-    rec["llast"] = now
+    # #479/#509 -- commit the LANDED nudge; see _lane_record_nudge.
+    _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, cd_moved, n,
+                       now)
     # #442 re-fix 2: log the real worker count and (for the under-saturated fill
     # nudge) the measured MemAvailable, so an under-saturated firing is diagnosable.
     mem_suffix = "" if mem_mb is None else " MemAvailable=%dMB" % mem_mb
