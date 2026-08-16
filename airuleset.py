@@ -598,6 +598,7 @@ from cli_worktree_sweep import (  # noqa: E402
     _STALE_WORKTREE_PROTECTED_BRANCHES as _STALE_WORKTREE_PROTECTED_BRANCHES,
     STALE_ORPHAN_BRANCH_MIN_AGE_S as STALE_ORPHAN_BRANCH_MIN_AGE_S,
     STALE_LOCKED_DEAD_MIN_AGE_S as STALE_LOCKED_DEAD_MIN_AGE_S,
+    STALE_WORKTREE_IDLE_MIN_AGE_S as STALE_WORKTREE_IDLE_MIN_AGE_S,
     _worktree_env_age_s as _worktree_env_age_s,
     _worktree_git as _worktree_git,
     _worktree_porcelain_entries as _worktree_porcelain_entries,
@@ -609,10 +610,13 @@ from cli_worktree_sweep import (  # noqa: E402
     _worktree_admin_dir as _worktree_admin_dir,
     _worktree_lock_age_s as _worktree_lock_age_s,
     _worktree_is_clean as _worktree_is_clean,
+    _worktree_recency_age_s as _worktree_recency_age_s,
+    _worktree_in_live_use as _worktree_in_live_use,
     _classify_locked_worktree as _classify_locked_worktree,
     _worktree_branch_ref_age_s as _worktree_branch_ref_age_s,
     discover_orphaned_worktree_branches as discover_orphaned_worktree_branches,
     discover_stale_worktrees as discover_stale_worktrees,
+    discover_salvage_worktrees as discover_salvage_worktrees,
     _log_stale_worktree_results as _log_stale_worktree_results,
     sweep_stale_worktrees as sweep_stale_worktrees,
     cmd_sweep_worktrees as cmd_sweep_worktrees,
@@ -650,6 +654,17 @@ from cli_scratch_sweep import (  # noqa: E402
     _log_claude_scratch_results as _log_claude_scratch_results,
     sweep_claude_scratch as sweep_claude_scratch,
     cmd_sweep_claude_scratch as cmd_sweep_claude_scratch,
+    _TMP_MKDTEMP_RX as _TMP_MKDTEMP_RX,
+    TMP_STRAY_LOG_PATH as TMP_STRAY_LOG_PATH,
+    TMP_STRAY_STATE_PATH as TMP_STRAY_STATE_PATH,
+    TMP_STRAY_MIN_INTERVAL_S as TMP_STRAY_MIN_INTERVAL_S,
+    TMP_STRAY_MAX_SCAN_DEFAULT as TMP_STRAY_MAX_SCAN_DEFAULT,
+    TMP_STRAY_LIVE_ENV as TMP_STRAY_LIVE_ENV,
+    _scan_live_tmp_tops as _scan_live_tmp_tops,
+    discover_stray_tmp_candidates as discover_stray_tmp_candidates,
+    _log_tmp_stray_summary as _log_tmp_stray_summary,
+    sweep_stray_tmp as sweep_stray_tmp,
+    cmd_sweep_stray_tmp as cmd_sweep_stray_tmp,
 )
 
 
@@ -1022,6 +1037,27 @@ def cmd_install(args):
                   f"{_human_size(total)} reclaimed (log: {CLAUDE_SCRATCH_LOG_PATH})")
     except Exception as e:
         print(f"  claude-scratch sweep error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 11b. Stray tempfile.mkdtemp litter sweep (#513) -- the ext4 htree
+    # ENOSPC source (batch-38 `/tmp/tmpuoq3_vff`; 503k uid-owned
+    # tmp[a-z0-9_]{8} entries measured on dev1). REPORT-ONLY is the wired
+    # DEFAULT -- it prints the loud count/reclaimable summary so the
+    # supervisor can review, and reclaims live ONLY under
+    # AIRULESET_TMP_PYTEST_RECLAIM_LIVE=1 (never set by this PR, on any box),
+    # mirroring the transcript-compress LIVE gate. Cadence-gated, non-fatal.
+    try:
+        stray = sweep_stray_tmp()
+        if stray.get("total_matched"):
+            if stray.get("live") and stray.get("removed"):
+                print(f"  Removed {stray['removed']} stray /tmp tempfile dir(s), "
+                      f"{_human_size(stray['reclaimed_bytes'])} reclaimed "
+                      f"(log: {TMP_STRAY_LOG_PATH})")
+            else:
+                print(f"  Stray /tmp tempfile litter: {stray['total_matched']} entries "
+                      f"({stray['reclaimable']} reclaimable) -- REPORT-ONLY, set "
+                      f"{TMP_STRAY_LIVE_ENV}=1 to reclaim (log: {TMP_STRAY_LOG_PATH})")
+    except Exception as e:
+        print(f"  stray-tmp sweep error (non-fatal): {e}", file=sys.stderr)
 
     # --- 12. Disk-usage visibility (#380 point 4) -- one more line in the
     # SAME print block every sweep step above already writes summaries
@@ -4448,6 +4484,18 @@ def main():
                                  help=f"Age threshold in days "
                                       f"(default {CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT})")
 
+    # --- Stray tempfile.mkdtemp litter sweep: manual entry point (#513) ----
+    p_sweep_stray = sub.add_parser(
+        "sweep-stray-tmp",
+        help="Reclaim aged, uid-owned /tmp/tmp[a-z0-9_]{8} tempfile litter "
+             "(ext4 htree ENOSPC source) -- REPORT-ONLY unless "
+             "AIRULESET_TMP_PYTEST_RECLAIM_LIVE=1 (#513)")
+    p_sweep_stray.add_argument("--dry-run", dest="dry_run", action="store_true",
+                               help="Report the count/reclaimable summary without deleting anything")
+    p_sweep_stray.add_argument("--min-age-days", dest="min_age_days", type=int, default=None,
+                               help=f"Age threshold in days "
+                                    f"(default {CLAUDE_SCRATCH_MIN_AGE_DAYS_DEFAULT})")
+
     # --- Transcript gzip-at-rest sweep: manual/testable entry point (#410) --
     p_sweep_transcripts = sub.add_parser(
         "sweep-transcripts",
@@ -4927,6 +4975,7 @@ SUBCOMMANDS = {
     "sweep-cli-versions": cmd_sweep_cli_versions,
     "sweep-autopilot-locks": cmd_sweep_autopilot_locks,
     "sweep-claude-scratch": cmd_sweep_claude_scratch,
+    "sweep-stray-tmp": cmd_sweep_stray_tmp,
     "sweep-transcripts": cmd_sweep_transcripts,
     "share": cmd_share,
     "filedrop": cmd_filedrop,
