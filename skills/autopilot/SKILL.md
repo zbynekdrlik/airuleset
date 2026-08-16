@@ -680,7 +680,14 @@ gap in either.
    > commits exist on it, name that branch explicitly in the fresh worker's dispatch prompt
    > (`Resume from existing branch <name> — it already has: <one-line summary of what's
    > committed>`) so it continues from that tip instead of starting a fresh RED→GREEN cycle from
-   > scratch — nothing lost, nothing duplicated. If no commits exist yet (the worker died before
+   > scratch — nothing lost, nothing duplicated. **If even the LOCAL branch ref is gone too — a
+   > `.git` loss / branch deletion / box re-clone, not just a removed worktree directory (#503 case
+   > 2) — the finished commits still exist on origin at the worker's durability backup
+   > `refs/autopilot-wip/<branch>`** (the worker pushed it after each commit exactly for this): run
+   > `git fetch origin 'refs/autopilot-wip/<branch>:refs/heads/<branch>'` to restore the branch
+   > locally, then integrate it normally. This is the recovery the origin backup exists for; without
+   > it, a worker that died before the supervisor merged (and whose local ref was then lost) would
+   > have left nothing to recover. If no commits exist yet (the worker died before
    > its first commit — the common shape for a rate-limit kill during Step 0/1b, before any code
    > was written), there is nothing to resume: dispatch fresh in a NEW worktree exactly as
    > documented above, no special handling needed. Either way the round is NOT blocked waiting on
@@ -753,7 +760,12 @@ gap in either.
    >    integrates the branches that have since returned, the same way — never held for the fleet.
    > 5. `git worktree remove` each worker's worktree once its branch is safely merged (or leave it
    >    for salvage per `salvage-before-discarding-work.md` if anything looked wrong — never delete
-   >    a worktree whose branch you have not yet confirmed merged).
+   >    a worktree whose branch you have not yet confirmed merged). Then delete that worker's origin
+   >    durability backup ref (#503): `git push origin --delete refs/autopilot-wip/<branch>`
+   >    (best-effort — a missing ref is a harmless no-op; a serial-fallback worker made none). The
+   >    worker pushed this CI-neutral backup after each commit so its finished work survived a lost
+   >    worktree; once the branch is merged the backup is redundant remote litter, so remove it in
+   >    the SAME integration cycle that merged the branch.
    > A worker KILLED mid-round (API error / session limit) leaves a worktree + branch this step
    > never reaches at all (its branch was never merged) — that leak is now cleaned SYSTEMICALLY,
    > not by you: `sweep_stale_worktrees()` (#345) runs fleet-wide, non-fatal, on every

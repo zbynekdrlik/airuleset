@@ -164,10 +164,14 @@ class TestSupervisorCleansUpAndRecoversTheBackup(unittest.TestCase):
     def test_recovery_note_falls_back_to_the_origin_backup(self):
         # The #332 dead-worker branch-finding gains a fallback: if the LOCAL
         # branch ref is gone too, the commits still exist on origin at the
-        # backup ref -- fetch it.
-        self.assertIn("#332", self.text)
-        idx = self.text.index("#332")
-        window = _norm(self.text[max(0, idx - 200):idx + 2600])
+        # backup ref -- fetch it. Anchor on a phrase UNIQUE to that recovery
+        # note (per #498) -- NOT a bare "#332", which also appears in the
+        # unrelated no-fixed-cap section far above.
+        anchor = "dead worker's branch is NOT self-discovering"
+        self.assertIn(anchor, self.text,
+                      "expected the #332 dead-worker recovery note")
+        idx = self.text.index(anchor)
+        window = _norm(self.text[idx:idx + 2600])
         self.assertIn("refs/autopilot-wip", window,
                       "the #332 recovery note must fall back to fetching the "
                       "origin backup ref when the local branch ref is also "

@@ -23,6 +23,14 @@ if ! printf '%s' "$CMD_NOQUOTES" | grep -qE 'git([[:space:]]+-[^[:space:]]+)*[[:
     exit 0
 fi
 
+# #503 -- a durability BACKUP push to the refs/autopilot-wip/* namespace (the
+# ONE push a worktree worker makes, to survive a lost worktree) triggers NO CI
+# (a push to any ref outside refs/heads/*/refs/tags/* fires no GitHub Actions
+# workflow), so this lint gate -- which exists solely to keep a CI-triggering
+# push clean -- must not block it. A mid-work snapshot is legitimately
+# lint-dirty; the backup's whole job is to preserve it AS-IS.
+printf '%s' "$INPUT" | grep -q 'refs/autopilot-wip/' && exit 0
+
 # Must be in a git repo
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
     exit 0
