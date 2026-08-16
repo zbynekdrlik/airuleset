@@ -49,17 +49,23 @@ def _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
     flag-cluster sites (the exact-session flag prompt + the repo-pane fallback /
     card-reopen nudge). The sibling of batch-1's `_send_bare_nudge_verified` and
     batch-3's `_send_stuckcheck_verified`: MARK #372 janitor provenance BEFORE
-    the keystroke so a swallowed WRAPPED chunk-typed flag-prompt residue
-    (`send_verified`'s own undo cannot back a non-full-literal residue off) is
-    reclaimable via the flag prompt's OWN stable head (`_FLAG_PROMPT_HEAD`, in
-    `_JANITOR_OWN_PREFIXES` — never prepended to the text), then `send_verified`;
-    CLEAR the mark on a transcript-VERIFIED submit and return True.
-
-    On an unverified/swallowed submit the mark is LEFT as the residue backstop
+    the keystroke, then `send_verified`; CLEAR the mark on a transcript-VERIFIED
+    submit and return True. On an unverified/swallowed submit the mark is LEFT
     and False is returned — the caller does NOT book the delivery (the flag
     react's `dreact_done` dedup is only set on a True return, so the react
-    RE-FIRES whole next sweep), and the janitor reclaims any residue before the
-    next sweep re-reads the pane.
+    RE-FIRES whole next sweep).
+
+    Swallowed-residue handling (adversarial-review-corrected #505): the flag
+    prompt has NO machine-only prefix registerable in `_JANITOR_OWN_PREFIXES`,
+    AND `_janitor_recover` reads the box TAIL (`_input_line_text`), so a wrapped
+    residue's head is invisible to it — a head-prefix would be a #501-class dead
+    branch. Instead a swallowed WRAPPED residue is cleaned by `send_verified`'s
+    OWN `_undo_and_release_slot` (its `_typed_landed` matches the wrapped tail via
+    `endswith`), leaving the box bare for a clean re-fire; the janitor mark backs
+    up the narrower COLLAPSED-paste case, reclaimed prefix-free by
+    `_PASTED_PLACEHOLDER_RX` under this provenance mark. Either way no residue is
+    re-injected (the head is deliberately absent from `_OWN_NUDGE_SUBMIT_PREFIXES`)
+    and none is lost (`_draft_rescue_persist` snapshots before any clear).
 
     `tpath` is the target pane's transcript, resolved by the caller via
     `_transcript_for_session(projects_dir, sid, cwd)` — keyed on the UNIQUE
