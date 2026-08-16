@@ -354,6 +354,32 @@ class TestWiring(unittest.TestCase):
                      "_scan_live_tmp_tops", "_TMP_MKDTEMP_RX"):
             self.assertTrue(hasattr(airuleset, name), name)
 
+    def test_salvage_is_opt_in_not_run_without_flag(self):
+        """A plain `sweep-worktrees` (no --salvage) must NOT trigger the
+        fleet-wide + network salvage scan -- keeps the default path fast and
+        the existing wiring tests hermetic."""
+        with m.patch.object(cli_worktree_sweep, "sweep_stale_worktrees", return_value=[]):
+            with m.patch.object(cli_worktree_sweep, "discover_salvage_worktrees") as sal:
+                from io import StringIO
+                with m.patch("sys.stdout", StringIO()):
+                    airuleset.cmd_sweep_worktrees(SimpleNamespace(dry_run=True))   # no salvage attr
+        sal.assert_not_called()
+
+    def test_salvage_flag_runs_the_report(self):
+        with m.patch.object(cli_worktree_sweep, "sweep_stale_worktrees", return_value=[]):
+            with m.patch.object(cli_worktree_sweep, "discover_salvage_worktrees",
+                                return_value=[{"path": "/r/wt", "branch": "b", "repo": "/r",
+                                               "ahead": 2, "dirty": 0, "size": 1024,
+                                               "age_s": 20 * 3600.0, "wip_backup": False}]) as sal:
+                from io import StringIO
+                out = StringIO()
+                with m.patch("sys.stdout", out):
+                    airuleset.cmd_sweep_worktrees(SimpleNamespace(dry_run=True, salvage=True))
+        sal.assert_called_once()
+        text = out.getvalue()
+        self.assertIn("SALVAGE", text)
+        self.assertIn("wip-backup=NO", text)
+
     def test_cmd_stray_tmp_report_only_prints_instruction(self):
         with TemporaryDirectory() as d:
             (Path(d) / "tmpzzzz9999").mkdir()

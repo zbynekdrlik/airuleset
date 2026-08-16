@@ -1082,6 +1082,11 @@ def cmd_sweep_worktrees(args):
     # #513 constraint #2 -- surface abandoned worktrees carrying real work
     # (unmerged commits or a dirty tree) LOUDLY. NEVER auto-removed: the
     # supervisor/human decides (integrate, park the branch, or discard).
+    # OPT-IN via --salvage: the scan walks EVERY managed repo + does a network
+    # `git ls-remote` per candidate, so it is off by default (a plain sweep
+    # stays fast + hermetic; existing wiring tests never trigger it).
+    if not getattr(args, "salvage", False):
+        return
     try:
         salvage = discover_salvage_worktrees()
     except Exception as e:      # noqa: BLE001 -- report is best-effort
@@ -1102,3 +1107,6 @@ def cmd_sweep_worktrees(args):
             print("  %s (branch %s, repo %s) -- %d ahead, %d dirty, %s, idle %.1fh, %s"
                   % (s["path"], s["branch"], s["repo"], s["ahead"], s["dirty"],
                      size, s["age_s"] / 3600.0, backup))
+    else:
+        print()
+        print("SALVAGE: no abandoned worktrees carrying unmerged/dirty work.")

@@ -4449,6 +4449,10 @@ def main():
              "unlocked, clean) fleet-wide (#345)")
     p_sweep_wt.add_argument("--dry-run", dest="dry_run", action="store_true",
                             help="Report what would be removed without deleting anything")
+    p_sweep_wt.add_argument("--salvage", dest="salvage", action="store_true",
+                            help="Also LOUDLY report abandoned worktrees carrying unmerged/"
+                                 "dirty work (never auto-removed) -- scans every managed repo "
+                                 "+ a network ls-remote per candidate, so it is opt-in (#513)")
 
     # --- Old Claude CLI binary sweep: manual/testable entry point (#355) --
     p_sweep_cli = sub.add_parser(
