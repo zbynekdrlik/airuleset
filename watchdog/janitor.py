@@ -11,12 +11,16 @@ existing caller (`watchdog/goal.py`'s dark-watch, `watchdog/compact.py`,
 `__init__.py`'s own bare `_pane_location` sites) reaches them unchanged.
 
 This is the FIRST watchdog leaf with a back-dependency into `__init__.py`
-(clusters A/B/E/F were zero-coupling). Eleven resident symbols stay in
+(clusters A/B/E/F were zero-coupling). Twelve resident symbols stay in
 `__init__.py`: the janitor-private tuning constants (`JANITOR_CLEAR_MAX_ITER`/
 `JANITOR_CLEAR_BATCH_MAX`/`JANITOR_CLEAR_SETTLE_S`/`JANITOR_WATCH_MAX_AGE_S`),
 the shared stash marker (`STASH_MARKER`), and the shared pane/stash primitives
-(`capture_pane`, `_input_line_text`, `pane_owner`, `project_label`,
-`_draft_rescue_persist`, `_looks_like_own_stuck_content`). This file's own
+(`capture_pane`, `_input_line_text`, `_input_box_head_text`, `pane_owner`,
+`project_label`, `_draft_rescue_persist`, `_looks_like_own_stuck_content`).
+`_input_line_text` returns the box TAIL (still read by `_janitor_clear_box`/
+`_janitor_pop_stash`); `_input_box_head_text` returns the box HEAD and is what
+`_janitor_recover` reads for own-content recognition (#506 -- a wrapped own
+nudge's prefix is on the head, absent from the tail). This file's own
 top-level `import watchdog` (never `from watchdog import <name>`) is how it
 reaches them: the import binds the (possibly still-initializing) package object
 at load time WITHOUT touching any attribute, and every `watchdog.<name>` read
@@ -293,7 +297,23 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     silent, indefinite retry-forever (criterion 1c)."""
     logs = []
     now = now if now is not None else time.time()
-    itext = watchdog._input_line_text(captured)
+    # #506 -- recognize the own residue on the box HEAD row
+    # (`_input_box_head_text`), NEVER the TAIL (`_input_line_text`). The tail is
+    # the #193 `endswith` swallowed-tail contract (`_input_line_text` returns the
+    # LAST wrapped row); but every real own nudge (289-720c: `lane-check: ` #490,
+    # `stuck-check: ` #497, `bounce-backstop: `/`gk-request backstop: `, and the
+    # /goal | /compact re-arm/compact residues) WRAPS at a live pane width, so
+    # its leading prefix sits on the HEAD row and is ABSENT from the tail --
+    # keying `_looks_like_own_stuck_content` on the tail made the clear /
+    # clear-and-pop reclaim a DEAD branch for exactly the wrapped residue it
+    # exists to reclaim (#506; the #501 head-read fix, one path over -- the
+    # lane-guard submit path was repointed to the head, the janitor reclaim was
+    # not). The provenance gate below is UNCHANGED and stays the ownership
+    # decision; this only fixes WHICH ROW the content shape is read from. A bare
+    # box reads `""` on BOTH head and tail, so the `itext == ""` pop branch is
+    # byte-for-byte, and a foreign draft whose head carries no own prefix is
+    # still left untouched (`_draft_rescue_persist` snapshots before any clear).
+    itext = watchdog._input_box_head_text(captured)
     occupied = watchdog.STASH_MARKER in (captured or "")
 
     # #488 -- the DURABLE, age-unbounded park record. Written by

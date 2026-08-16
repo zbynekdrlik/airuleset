@@ -313,5 +313,51 @@ class WrappedOwnResidueReclaim(unittest.TestCase):
             "head-read): %r" % logs)
 
 
+class WrappedForeignResidueRefused(unittest.TestCase):
+    """#506 invariant (the foreign-draft protection): the head-read must NOT
+    widen what the janitor claims as its own. A WRAPPED FOREIGN draft whose HEAD
+    carries no own prefix (a human's own long draft) — even with a fresh
+    provenance mark AND the stash slot occupied — is left COMPLETELY untouched
+    (no reclaim, no keystroke). The ownership decision stays the provenance
+    gate; head-read only changes which ROW the content SHAPE is read from."""
+
+    def test_wrapped_foreign_occupant_is_never_reclaimed(self):
+        cap = render_box(FOREIGN_LONG, stashed=True)
+        self.assertIs(wd._find_input_box(cap)[2], True)     # genuinely wraps
+        self.assertIsNone(wd._own_nudge_submit_prefix(wd._input_box_head_text(cap)))
+        state = {"janitor_watch": {PID: NOW - 60},          # fresh provenance
+                 "stash_parks": {PID: NOW - 40 * 3600}}      # + a park record
+        logs, _rec, run = _recover(state, captured=cap, dry_run=False)
+        self.assertEqual(logs, [], "a foreign wrapped occupant must be left "
+                         "untouched — head-read must not widen ownership: %r"
+                         % logs)
+        self.assertFalse(any(a[1] == "send-keys" for a in run.state["sent"]),
+                         "zero keystrokes into a foreign wrapped draft")
+
+    def test_wrapped_foreign_head_read_matches_tail_read_refusal(self):
+        # Belt-and-braces: BOTH the head read and the (old) tail read of a
+        # foreign wrapped draft fail `_looks_like_own_stuck_content` — the fix
+        # cannot make the janitor claim a draft the tail-read would have spared.
+        cap = render_box(FOREIGN_LONG, stashed=True)
+        head = wd._input_box_head_text(cap)
+        tail = wd._input_line_text(cap)
+        self.assertFalse(wd._looks_like_own_stuck_content(head), head[:40])
+        self.assertFalse(wd._looks_like_own_stuck_content(tail), tail[:40])
+
+
+class WrappedHeadReadPreservesTheBarePopPath(unittest.TestCase):
+    """#506 regression guard: the head-read must not disturb the `occupied and
+    itext == ""` → "pop" branch. A bare box reads `""` on BOTH head and tail, so
+    an occupied stash + bare box still pops the parked draft back."""
+
+    def test_bare_box_occupied_stash_still_pops(self):
+        cap = render_box("", stashed=True)                  # bare box, stash set
+        self.assertEqual(wd._input_box_head_text(cap), "")
+        self.assertEqual(wd._input_line_text(cap), "")
+        state = {"janitor_watch": {PID: NOW - 60}}
+        logs, _rec, _run = _recover(state, captured=cap)    # dry-run
+        self.assertTrue(any("would attempt pop" in ln for ln in logs), logs)
+
+
 if __name__ == "__main__":
     unittest.main()
