@@ -88,7 +88,7 @@
     "tests/test_goal_header_stash_day_granularity.py": 137,
     "tests/test_goal_indicator_above_box.py": 96,
     "tests/test_goal_strictness_clause.py": 51,
-    "tests/test_goal_sweep.py": 1759,
+    "tests/test_goal_sweep.py": 1878,
     "tests/test_goal_sweep_hermeticity.py": 74,
     "tests/test_goal_turn_boundary.py": 112,
     "tests/test_goal_undeterminable_pane.py": 111,
