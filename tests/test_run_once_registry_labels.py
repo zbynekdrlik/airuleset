@@ -40,9 +40,9 @@ def _registry_labels():
     return re.findall(r'_add\(\s*"([^"]+)"', src)
 
 
-# The 22 standalone entries in CANONICAL_SWEEP order (the step-15 contract, i.e.
+# The 23 standalone entries in CANONICAL_SWEEP order (the step-15 contract, i.e.
 # everything the sweep runs AFTER the pane loop's `list_claude_panes` entry).
-# Jobs 3/5/7 + their #368/#461 extensions come first, then jobs 8->29 in
+# Jobs 3/5/7 + their #368/#461 extensions come first, then jobs 8->30 in
 # literal call order.
 EXPECTED_STANDALONE = [
     "check_usage",                      # (3)
@@ -67,6 +67,7 @@ EXPECTED_STANDALONE = [
     "stuck_main_sweep",                 # (28)
     "cleanup_stale_exec_markers",       # (22)
     "vault_purge_job",                  # (29)
+    "wip_ref_sweep",                    # (30) — #504 orphaned wip-ref reclaimer
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at

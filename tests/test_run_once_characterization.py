@@ -123,7 +123,7 @@ CANONICAL_SWEEP = [
     JobSpec("reping_owner_decision_tickets", "wd", "reping_owner_decision_tickets",
             "owner_decision_fetch", _stub_fetch, "list", "owner-decision-digest error"),
 
-    # jobs 8 → 29 (standalone registry)
+    # jobs 8 → 30 (standalone registry)
     JobSpec("bounce_backstop", "wd", "bounce_backstop",
             "bounce_fetch", _stub_fetch, "list", "bounce-backstop error"),
     JobSpec("gk_request_backstop", "wd", "gk_request_backstop",
@@ -156,6 +156,8 @@ CANONICAL_SWEEP = [
             None, None, "list", "exec-marker-cleanup error"),
     JobSpec("vault_purge_job", "wd", "vault_purge_job",
             "vault_purge", _stub_fetch, "list", "vault-purge error"),
+    JobSpec("wip_ref_sweep", "wd", "sweep_orphaned_wip_refs",
+            "repo_roots", _stub_roots, "list", "wip-ref-sweep error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

@@ -1572,6 +1572,22 @@ from watchdog.janitor import (  # noqa: E402
 )
 
 
+# #504 — orphaned refs/autopilot-wip/* backup-ref reclaimer (the origin-ref
+# counterpart of cli_worktree_sweep.py's LOCAL worktree sweep). A watchdog
+# run_once job wired below via `_add`; re-exported here so `run_once`'s
+# dispatch resolves `sweep_orphaned_wip_refs` by bare name. The leaf reaches
+# `_sweep_due`/`_repo_sweep_batch` (re-exported above from repo_health) back
+# through its own top-level `import watchdog` (call-time, no cycle).
+from watchdog.wip_ref_sweep import (  # noqa: E402
+    sweep_orphaned_wip_refs as sweep_orphaned_wip_refs,
+    discover_orphaned_wip_refs as discover_orphaned_wip_refs,
+    classify_wip_ref as classify_wip_ref,
+    WIP_REF_PREFIX as WIP_REF_PREFIX,
+    WIP_REF_MAX_AGE_S as WIP_REF_MAX_AGE_S,
+    WIP_REF_SWEEP_INTERVAL_S as WIP_REF_SWEEP_INTERVAL_S,
+)
+
+
 # #433 cluster D — cross-stream backstops (job 8 bounce / job 11 gk-request / the
 # shared backlog-cache read jobs 10/20 consult). Extracted verbatim to
 # `watchdog/cross_stream.py`; re-exported here so `run_once`'s job-8/11 dispatch,
@@ -2048,6 +2064,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           it again) left a credential 0600 on disk indefinitely — the exact
           property the channel exists to provide. Delete-only: no pane, no
           keystrokes, no ping, and it removes only what is already expired.
+      (30) (only when `repo_roots` is given) ORPHANED WIP-REF RECLAIMER
+          (#504) — the origin-ref counterpart of `sweep_stale_worktrees`'s
+          LOCAL worktree sweep. Reclaims leaked `refs/autopilot-wip/*`
+          durability-backup refs (a dead-and-fresh-redispatched #503 worker
+          leaves one on origin forever, the Step-4 delete never firing for its
+          old branch). Own generous cadence (6h) + repo batching; deletes ONLY
+          a ref proven MERGED into an origin base or aged past 7d, every delete
+          lease-guarded — never a young/uncertain ref (salvage-before-
+          discarding). See `watchdog/wip_ref_sweep.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -3668,6 +3693,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
          lambda: vault_purge_job(now, state, purge_fn=vault_purge,
                                  dry_run=dry_run),
          "vault-purge error")
+
+    # Job 30 — ORPHANED refs/autopilot-wip/* RECLAIMER (#504): only when
+    # `repo_roots` is given (same per-repo scoping + injected `git_fetch` as job
+    # 28). Internally cadence-gated (own `wip_ref_last_sweep` key, generous 6h
+    # default) + repo-batched, so the 60s tmux cadence never hammers origin.
+    # Best-effort; the never-delete-a-salvageable-copy invariant lives in the
+    # job (merged OR aged-past-7d only; lease-guarded deletes).
+    _add("wip_ref_sweep", lambda: repo_roots is not None,
+         lambda: sweep_orphaned_wip_refs(now, state, repo_roots=repo_roots,
+                                         git_fetch=git_fetch, dry_run=dry_run,
+                                         persist=lambda: save_state(state_path, state)),
+         "wip-ref-sweep error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
