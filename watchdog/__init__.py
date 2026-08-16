@@ -1610,6 +1610,10 @@ from watchdog.cross_stream import (  # noqa: E402
     _gkreq_supervisor_root as _gkreq_supervisor_root,
     _fetch_gkreq_tickets as _fetch_gkreq_tickets,
     gk_request_backstop as gk_request_backstop,
+    _selfservice_bounce_decide as _selfservice_bounce_decide,
+    _fetch_gk_action_requests as _fetch_gk_action_requests,
+    _apply_selfservice_bounce as _apply_selfservice_bounce,
+    gk_selfservice_bounce as gk_selfservice_bounce,
     _cached_backlog_open as _cached_backlog_open,
     _cached_backlog_count as _cached_backlog_count,
 )
@@ -1656,8 +1660,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              vault_purge=None, log_fn=None, reopen_fetch=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
              progress_dir=None, questions_path=None,
-             owner_decision_fetch=None):
-    """Scan every `claude` pane once. 30 numbered jobs per poll — 24 LIVE and 6
+             owner_decision_fetch=None, gk_selfservice_fetch=None):
+    """Scan every `claude` pane once. 31 numbered jobs per poll — 25 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2073,6 +2077,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           a ref proven MERGED into an origin base or aged past 7d, every delete
           lease-guarded — never a young/uncertain ref (salvage-before-
           discarding). See `watchdog/wip_ref_sweep.py`.
+      (31) (only when `gk_selfservice_fetch` is given) GK SELF-SERVICE
+          AUTO-BOUNCE (#516) — the gatekeeper-side mirror of side A's filing
+          hook. On a SUPERVISOR box, for a cross-stream repo, an open
+          `needs-gatekeeper` ACTION request that carries NO `Self-service-
+          checked:` line and is attributable to a reduced stream
+          (`handed-by:<stream>`) is AUTO-BOUNCED back to that stream (Slovak
+          template comment + `prio:bounce` + `stream:<stream>` + drop
+          needs-gatekeeper) so gk is never overloaded by a self-serviceable
+          prod-STATE READ. MECHANICAL only (falsifiable no-line check, never a
+          prose classifier); a code-review hand-off (`stream:`/ready-for-review)
+          is never touched; every candidate's verdict is logged (#486). See
+          `gk_selfservice_bounce` in `watchdog/cross_stream.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -3705,6 +3721,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                          git_fetch=git_fetch, dry_run=dry_run,
                                          persist=lambda: save_state(state_path, state)),
          "wip-ref-sweep error")
+
+    # Job 31 — GK SELF-SERVICE AUTO-BOUNCE (#516). Appended LAST (keeps the
+    # kill-switch NOTICE pinned between job 11 and job 13). Only when a fetch is
+    # wired (cmd_watchdog passes the real one; other jobs' unit tests stay
+    # network-free); cadence-gated internally; best-effort. Runs before the next
+    # sweep's job 11, so a request bounced here (needs-gatekeeper removed) is out
+    # of job 11's fetch set from the next sweep on — at worst ONE transient
+    # supervisor nudge (which itself resolves to the same manual-triage bounce),
+    # never gk actually working a self-serviceable read.
+    _add("gk_selfservice_bounce", lambda: gk_selfservice_fetch is not None,
+         lambda: gk_selfservice_bounce(
+             now, run, state, dry_run=dry_run,
+             gh_fetch=gk_selfservice_fetch,
+             persist=lambda: save_state(state_path, state)),
+         "gk-selfservice-bounce error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

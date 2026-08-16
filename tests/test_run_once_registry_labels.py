@@ -68,6 +68,7 @@ EXPECTED_STANDALONE = [
     "cleanup_stale_exec_markers",       # (22)
     "vault_purge_job",                  # (29)
     "wip_ref_sweep",                    # (30) — #504 orphaned wip-ref reclaimer
+    "gk_selfservice_bounce",            # (31) — #516 gk self-service auto-bounce
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at

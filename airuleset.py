@@ -3160,6 +3160,15 @@ def _watchdog_gkreq_fetch(root):
     return _fetch_gkreq_tickets(root)
 
 
+def _watchdog_gk_selfservice_fetch(root):
+    """Job 31's real gh fetch (#516) — the gk self-service auto-bounce
+    candidate set (open needs-gatekeeper / GATEKEEPER-ACTION action requests
+    with their labels + Self-service-checked-line + origin-stream facts). Same
+    network-free-tests wiring as jobs 8/11."""
+    from watchdog import _fetch_gk_action_requests
+    return _fetch_gk_action_requests(root)
+
+
 def _watchdog_owner_decision_fetch(home=None):
     """#461 daily owner-decision digest fetch — the box-wide aggregate of open
     `needs-answer`/`needs-decision` tickets. Wired here (not inside run_once) so
@@ -3603,6 +3612,9 @@ def cmd_watchdog(args):
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
                     gkreq_fetch=_watchdog_gkreq_fetch,
+                    # #516 — job 31 gk self-service auto-bounce, gated on this
+                    # fetch being wired (network-free tests for every other job).
+                    gk_selfservice_fetch=_watchdog_gk_selfservice_fetch,
                     # #461 — the daily owner-decision ticket digest fires from
                     # run_once's #368 daily-reask section, gated on this fetch
                     # being wired (network-free tests for every other job).

@@ -158,6 +158,9 @@ CANONICAL_SWEEP = [
             "vault_purge", _stub_fetch, "list", "vault-purge error"),
     JobSpec("wip_ref_sweep", "wd", "sweep_orphaned_wip_refs",
             "repo_roots", _stub_roots, "list", "wip-ref-sweep error"),
+    JobSpec("gk_selfservice_bounce", "wd", "gk_selfservice_bounce",
+            "gk_selfservice_fetch", _stub_fetch, "list",
+            "gk-selfservice-bounce error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

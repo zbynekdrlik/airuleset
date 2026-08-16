@@ -900,6 +900,272 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
     return logs
 
 
+# --------------------------------------------------------------------------- #
+# #516 — GK-SIDE SELF-SERVICE AUTO-BOUNCE (job 31). The mirror-image half of
+# the #516 pair: side A (hooks/block-gk-request-without-selfservice.sh) forces
+# a sub-dev stream's gk ACTION request to carry a falsifiable
+# `Self-service-checked:` line at FILING time; this side is the gatekeeper's
+# MECHANICAL backstop — an open needs-gatekeeper ACTION request that carries no
+# such line (a request that BYPASSED the filing hook, or predates it) is
+# AUTO-BOUNCED back to the owning sub-dev stream instead of the gatekeeper
+# working it, so gk is never overloaded by a self-serviceable prod-STATE READ.
+#
+# Deliberately MECHANICAL and CONSERVATIVE, never a semantic classifier of
+# prose (the exact thing #516 bans): it bounces ONLY the falsifiable "no
+# Self-service-checked line" case, and only for a request positively
+# attributable to a reduced sub-dev stream (a `handed-by:<stream>` label). The
+# "line-is-present-but-it-is-a-pure-read" case is NOT mechanized (it would be a
+# banned prose classifier) — it stays the gatekeeper's own manual triage step
+# (documented in skills/process-subdev). A code-review hand-off
+# (`stream:<x>`/`ready-for-review`) is NEVER bounced (rule 8).
+# --------------------------------------------------------------------------- #
+
+_SELFSERVICE_LINE_RE = re.compile(r'Self-service-checked:\s*\S', re.IGNORECASE)
+_HANDED_BY_RE = re.compile(r'^handed-by:([A-Za-z0-9_-]+)$', re.I)
+
+# The Slovak bounce template. `%(stream)s` is the owning reduced stream. Posted
+# via subprocess argv (never a shell), so its backticks / newlines are literal.
+_SELFSERVICE_BOUNCE_TEMPLATE = (
+    "🔄 **Automaticky vrátené (prio:bounce) — chýba `Self-service-checked:` riadok**\n\n"
+    "Táto požiadavka na gatekeepera nemá riadok `Self-service-checked:`, takže "
+    "nevieme, či ide o prod-STATE READ (skupinové členstvo, počet riadkov, "
+    "hodnota configu, obsah odoslaného mailu) — a ten si **rieši stream sám**, "
+    "nie gatekeeper:\n\n"
+    "1. **Vlastný read-only kanál** na PROD inštancii (`has_group` / `search_read`; "
+    "Money RO tunel pre Money). Pri HTTP chybe čítaj TELO chyby a skús užšiu "
+    "metódu — nikdy sa nevzdaj po jednom 500.\n"
+    "2. **Čerstvá kópia PRODu** na vlastnom boxe — napíš `REFRESH-DEV-BOX-FROM-PROD: "
+    "%(stream)s` na sledovací ticket → do ~20–40 min máš aktuálny rsync/pg_dump s "
+    "plným psql prístupom (autoritatívne pre STATE otázky).\n\n"
+    "Gatekeeper robí **len ŽIVÉ zásahy do PRODu** (reštart zaseknutej fronty, "
+    "inštalácia balíka do RUNTIME_DEPS, migrácia…). Ak po self-service naozaj "
+    "potrebuješ živý zásah, **znova to zadaj** s riadkom:\n"
+    "`Self-service-checked: skúsil som <RO kanál / čerstvá PROD kópia> — <výsledok>; "
+    "živý zásah, ktorý potrebujem od gk, je <…>`\n\n"
+    "Podrobne: `modules/core/autonomous-verification.md` → „What's on PROD? is a "
+    "SELF-SERVICE question\"."
+)
+
+
+def _origin_reduced_stream(labels):
+    """The reduced sub-dev stream that FILED this gk request, read from a
+    `handed-by:<stream>` label whose <stream> is a known reduced stream user,
+    or None. `handed-by:<user>` is the origin-provenance marker cmd_gk_request
+    stamps (#191 Part C) — deliberately NOT `stream:<user>` (which is the
+    REVIEW-queue ownership primitive, rule 8). None when no such label is
+    present (e.g. a read-only fork that could apply no label — that case is a
+    documented residual the gatekeeper's manual triage handles, never
+    auto-bounced, since its stream is not attributable from labels)."""
+    for lb in (labels or []):
+        m = _HANDED_BY_RE.match(str(lb))
+        if m and m.group(1) in watchdog._REDUCED_STREAM_USERS:
+            return m.group(1)
+    return None
+
+
+def _selfservice_bounce_decide(labels, has_line, origin_stream):
+    """PURE facts-in / verdict-out decision (#486 direction — no silent
+    branches; the caller LOGS the verdict for EVERY candidate). Returns
+    (should_bounce: bool, reason: str). Bounce a gk ACTION request (the
+    caller's candidate set is already the needs-gatekeeper ∪ GATEKEEPER-ACTION
+    set) iff ALL hold:
+      - it is NOT already bounced (no `prio:bounce` label),
+      - it is NOT a code-review hand-off (no `ready-for-review`, no
+        `stream:<x>` label — rule 8),
+      - it is positively attributable to a reduced sub-dev stream
+        (`origin_stream` is not None),
+      - it carries NO `Self-service-checked:` line (the falsifiable, mechanical
+        signal — a pure-read request that DOES carry a line is left for the
+        gatekeeper's manual triage, never mechanically judged here).
+    Every non-bounce returns an explicit reason, so the sweep's journal shows
+    exactly why each candidate was or was not bounced."""
+    label_set = {str(x) for x in (labels or [])}
+    if "prio:bounce" in label_set:
+        return False, "already-bounced"
+    if "ready-for-review" in label_set:
+        return False, "review-handoff:ready-for-review"
+    if any(re.match(r'^stream:[A-Za-z0-9_-]+$', x, re.I) for x in label_set):
+        return False, "review-handoff:stream-label"
+    if origin_stream is None:
+        return False, "origin-not-attributable-to-a-reduced-stream"
+    if has_line:
+        return False, "has-self-service-line"    # gk judges a pure read manually
+    return True, "no-self-service-line"
+
+
+def _fetch_gk_action_requests(root, home=None):
+    """Open gk ACTION-request tickets for the repo at `root` — the SAME set job
+    11 nudges (needs-gatekeeper label ∪ `GATEKEEPER-ACTION:` title), each with
+    the facts `_selfservice_bounce_decide` needs: its labels, whether its body
+    OR any comment carries a `Self-service-checked:` line, and the reduced
+    stream that filed it (`handed-by:<stream>`). Returns a list of dicts, or
+    None on ANY error (fail-safe — an auth/network hiccup must never look like
+    'nothing to bounce'). The `GATEKEEPER-ACTION:` title fallback is filtered
+    client-side (GitHub search TOKENIZES, so `in:title` also matches titles
+    merely CONTAINING the words — the same #1768 guard `_fetch_gkreq_tickets`
+    applies)."""
+    import subprocess
+    env = _gh_env(home)
+    nums = set()
+    queries = (
+        (["gh", "issue", "list", "--state", "open", "--label",
+          "needs-gatekeeper", "--search", watchdog.AUTOPILOT_SKIP_EXCL,
+          "-L", "100", "--json", "number"], None),
+        (["gh", "issue", "list", "--state", "open", "--search",
+          '"GATEKEEPER-ACTION:" in:title ' + watchdog.AUTOPILOT_SKIP_EXCL,
+          "-L", "100", "--json", "number,title"],
+         lambda x: str(x.get("title", "")).startswith("GATEKEEPER-ACTION:")),
+    )
+    for argv, keep in queries:
+        try:
+            r = subprocess.run(argv, cwd=root, env=env, capture_output=True,
+                               text=True, timeout=8)
+            if r.returncode != 0:
+                return None
+            for x in json.loads(r.stdout):
+                if keep is not None and not keep(x):
+                    continue
+                nums.add(x["number"])
+        except Exception:
+            return None
+    out = []
+    for num in sorted(nums):
+        try:
+            r = subprocess.run(
+                ["gh", "issue", "view", str(num), "--json",
+                 "number,labels,body,comments"],
+                cwd=root, env=env, capture_output=True, text=True, timeout=8)
+            if r.returncode != 0:
+                return None
+            d = json.loads(r.stdout or "{}")
+        except Exception:
+            return None
+        labels = [str((lb or {}).get("name", ""))
+                  for lb in (d.get("labels") or []) if isinstance(lb, dict)]
+        texts = [str(d.get("body") or "")]
+        texts += [str((c or {}).get("body") or "")
+                  for c in (d.get("comments") or []) if isinstance(c, dict)]
+        has_line = any(_SELFSERVICE_LINE_RE.search(t) for t in texts)
+        out.append({"number": num, "labels": labels, "has_line": has_line,
+                    "origin_stream": _origin_reduced_stream(labels)})
+    return out
+
+
+def _apply_selfservice_bounce(root, num, stream, home=None, dry_run=False):
+    """Perform the bounce for ONE ticket: post the Slovak template comment, add
+    `prio:bounce`, add `stream:<stream>` (routes the ticket back into the owning
+    sub-dev's OWN bounce lane — job 8's stream-scoped nudge + its footer/goal
+    slice — exactly where a bounced ticket belongs, #307), and remove
+    `needs-gatekeeper` (leaves the gatekeeper's workable set). Returns True iff
+    the COMMENT (the durable record + guidance) landed; the label edits are
+    best-effort (a stale label failure never re-bounces, since the comment
+    anchors the dedup). `needs-gatekeeper` is removed LAST so a partial failure
+    leaves the ticket discoverable rather than orphaned. Never raises."""
+    if dry_run:
+        return True
+    import subprocess
+    env = _gh_env(home)
+
+    def _gh(*args):
+        try:
+            return subprocess.run(["gh"] + list(args), cwd=root, env=env,
+                                  capture_output=True, text=True, timeout=15)
+        except Exception:
+            return None
+
+    body = _SELFSERVICE_BOUNCE_TEMPLATE % {"stream": stream}
+    c = _gh("issue", "comment", str(num), "--body", body)
+    if c is None or c.returncode != 0:
+        return False
+    _gh("issue", "edit", str(num), "--add-label", "prio:bounce")
+    _gh("issue", "edit", str(num), "--add-label", "stream:%s" % stream)
+    _gh("issue", "edit", str(num), "--remove-label", "needs-gatekeeper")
+    return True
+
+
+def gk_selfservice_bounce(now, run, state, home=None, dry_run=False,
+                          gh_fetch=None, bounce_apply=None, interval=None,
+                          persist=None, user=None):
+    """Job 31 (#516) — see the section comment. Runs ONLY on a supervisor
+    (full-authority) box (`_gkreq_supervisor_root`), for cross-stream repos
+    (`_repo_in_cross_stream_flow`); a reduced-stream box never bounces (it is
+    the REQUESTER). Mutates state['gk_selfservice_bounce']; `persist` is invoked
+    BEFORE the GitHub mutation (the job-8/11 kill-safe-dedup lesson: a
+    TimeoutStartSec kill after the bounce but before save must not re-bounce).
+    Best-effort (never raises). Returns log lines — EVERY candidate's verdict is
+    logged (bounce or skip+reason), the #486 explicit-decision-log direction."""
+    interval = watchdog.GKREQ_INTERVAL if interval is None else interval
+    if user is None:
+        import getpass
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = ""
+    if user in watchdog._FOREIGN_TMUX_USERS:
+        return []                              # pane lives in another user's tmux
+    g = state.get("gk_selfservice_bounce") or {}
+    if (now - g.get("last_check", 0)) < interval:
+        return []
+    g["last_check"] = int(now)
+    seen = dict(g.get("seen") or {})
+    g["seen"] = seen
+    state["gk_selfservice_bounce"] = g
+    fetch = gh_fetch or (lambda root: _fetch_gk_action_requests(root, home))
+    apply_bounce = bounce_apply or (
+        lambda root, num, stream: _apply_selfservice_bounce(
+            root, num, stream, home, dry_run))
+    persist = persist or (lambda: None)
+    persist()                                  # cadence stamp survives a kill
+    logs = []
+
+    # Target repos: the SAME derivation job 11 uses (live pane cwds + recently-
+    # cached roots), so the bounce only touches repos this box actually
+    # supervises. We act on GitHub directly, so a pane id is not needed.
+    panes = watchdog.list_claude_panes(run, logs=logs, dry_run=dry_run)
+    roots = {c for _p, c in panes}
+    roots.update(_cache_repo_roots(home, max_age_s=watchdog.GKREQ_CACHE_MAX_AGE_S))
+
+    for root in sorted(roots):
+        if not _gkreq_supervisor_root(root):
+            continue                           # requester homes never bounce
+        if not _repo_in_cross_stream_flow(root):
+            continue                           # not a gatekeeper<->sub-dev repo
+        name = os.path.basename(root.rstrip("/"))
+        candidates = fetch(root)
+        if candidates is None:
+            continue                           # gh error → keep prior state
+        for c in candidates:
+            num = c.get("number")
+            should, reason = _selfservice_bounce_decide(
+                c.get("labels"), c.get("has_line"), c.get("origin_stream"))
+            key = "%s#%s" % (name, num)
+            if not should:
+                logs.append("gk-selfservice-skip %s (%s)" % (key, reason))
+                continue
+            if key in seen:
+                logs.append("gk-selfservice-already %s" % key)
+                continue
+            stream = c.get("origin_stream")
+            # #193 kill-safe: record the dedup BEFORE the mutation; undo it only
+            # if the bounce could not even post its comment (retry next sweep).
+            seen[key] = int(now)
+            persist()
+            if dry_run:
+                logs.append("gk-selfservice-bounce %s -> stream:%s (dry-run)"
+                            % (key, stream))
+                continue
+            ok = apply_bounce(root, num, stream)
+            if ok:
+                logs.append("gk-selfservice-bounce %s -> stream:%s (bounced)"
+                            % (key, stream))
+            else:
+                seen.pop(key, None)
+                persist()
+                logs.append("gk-selfservice-bounce-failed %s (comment did not "
+                            "post; retry next sweep)" % key)
+    return logs
+
+
 def _cached_backlog_open(cwd, backlog_fetch, state, now, ttl=None):
     """True/False/None -- does the repo at `cwd` have an open, actionable
     (non-`autopilot-skip`) issue backlog right now? Cached per `cwd` in
