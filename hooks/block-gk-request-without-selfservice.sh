@@ -262,9 +262,48 @@ def all_flag_values(tk, names):
     return out
 
 
-def resolve_body(tk, seg_line):
+def _cd_target(tk):
+    """The directory a leading `cd` segment changes into, or None when the
+    target cannot be known statically (#483) — no argument ($HOME), or an
+    unexpandable $VAR / ~ / glob / command-substitution target. `tk[0]` is
+    already known to be `cd`."""
+    target = None
+    for t in tk[1:]:
+        if t == "--":
+            continue
+        if t.startswith("-"):
+            continue
+        target = t
+        break
+    if target is None:
+        return None
+    if any(ch in target for ch in "$~*?`"):
+        return None
+    return target
+
+
+def _apply_cd(base, tk):
+    """Fold one `cd <dir>` segment into the running effective cwd (#483).
+    Absolute target replaces it; a relative one is normpath-joined onto the
+    current effective cwd; an unknowable target -> None (a later relative -F
+    then degrades to 'not readable' rather than a WRONG resolution)."""
+    target = _cd_target(tk)
+    if target is None:
+        return None
+    if os.path.isabs(target):
+        return os.path.normpath(target)
+    if base is None:
+        return None
+    return os.path.normpath(os.path.join(base, target))
+
+
+def resolve_body(tk, seg_line, eff_cwd):
     """Body text for this segment: --body-file/-F (heredoc or disk),
-    --body/--comment inline. None when nothing resolvable."""
+    --body/--comment inline. None when nothing resolvable. `eff_cwd` (#483) is
+    the command's effective cwd after any leading `cd <dir>` — a relative -F is
+    resolved against IT, not the hook's own process cwd (which a `cd` prefix
+    would otherwise make wrong — the sibling block-ungated-issue-filing.sh
+    #483 fix, which this hook's header claims parity with)."""
     bf = flag_value(tk, ("-F", "--body-file"))
     if bf is not None:
         if bf == "-":
@@ -274,12 +313,19 @@ def resolve_body(tk, seg_line):
             return None
         if bf in file_bodies:
             return file_bodies[bf]
-        path = bf if os.path.isabs(bf) else os.path.join(cwd, bf)
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                return fh.read()
-        except OSError:
-            return None
+        if os.path.isabs(bf):
+            path = bf
+        elif eff_cwd is not None:
+            path = os.path.join(eff_cwd, bf)
+        else:
+            path = None
+        if path is not None:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    return fh.read()
+            except OSError:
+                pass
+        return None
     inline = flag_value(tk, ("--body", "--comment"))
     if inline is not None:
         return inline
@@ -287,10 +333,21 @@ def resolve_body(tk, seg_line):
 
 
 def is_gk_request(tk):
-    """`airuleset(.py) gk-request` — the primary CLI channel."""
-    if "gk-request" not in tk:
-        return False
-    return any(t == "airuleset" or t.endswith("airuleset.py") for t in tk)
+    """`airuleset(.py) gk-request` — the primary CLI channel, ONLY when
+    `gk-request` is the SUBCOMMAND immediately following the airuleset script
+    token (not merely co-present with it). This refuses read-only exploration
+    that just NAMES the file — `grep gk-request airuleset.py` (airuleset.py is
+    the last token, nothing after it) and `grep -n gk-request /p/airuleset.py`
+    — which the earlier 'any token is airuleset.py AND gk-request anywhere'
+    shape false-blocked (#516 adversarial review F2). A bare `--help`/`-h`
+    query files nothing, so it is not gated either."""
+    for i, t in enumerate(tk):
+        if t == "airuleset" or t.endswith("airuleset.py"):
+            if i + 1 < len(tk) and tk[i + 1] == "gk-request":
+                if "-h" in tk or "--help" in tk:
+                    return False
+                return True
+    return False
 
 
 def is_gh_issue_cmd(tk):
@@ -300,6 +357,13 @@ def is_gh_issue_cmd(tk):
 
 results = []   # (verdict, kind, reason)
 
+# #483 — the effective cwd a relative `-F` body path resolves against. Starts
+# as the hook's own cwd and is folded forward by every leading `cd <dir>`
+# segment, so `cd /dir && gh issue create ... -F body.md` reads body.md from
+# /dir, not from the hook's cwd (adversarial review F1: a compliant request
+# with a cd-relative -F body was false-blocked).
+effective_cwd = cwd
+
 for seg in split_top_level(skeleton):
     if not seg.strip():
         continue
@@ -307,12 +371,18 @@ for seg in split_top_level(skeleton):
     if not tk:
         continue
 
+    # a `cd` segment changes where a later relative `-F` lives; fold it into
+    # effective_cwd (unknowable target -> None) and move on — never a filing.
+    if tk[0] == "cd":
+        effective_cwd = _apply_cd(effective_cwd, tk)
+        continue
+
     gkreq = is_gk_request(tk)
     gh_issue = is_gh_issue_cmd(tk)
     if not (gkreq or gh_issue):
         continue
 
-    body = resolve_body(tk, seg)
+    body = resolve_body(tk, seg, effective_cwd)
     labels = all_flag_values(tk, ("-l", "--label", "--add-label"))
     label_set = set(labels)
 

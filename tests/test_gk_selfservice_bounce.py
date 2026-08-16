@@ -14,6 +14,7 @@ deliberately mechanical/conservative — it NEVER classifies prose:
 Every candidate's verdict is logged (the #486 explicit-decision-log direction).
 """
 
+import json as _json
 import unittest
 from unittest import mock
 
@@ -100,7 +101,7 @@ class _Recorder:
 
 
 def _run(candidates, apply_rec, roots=None, state=None, now=10 ** 9,
-         seen=None):
+         seen=None, dry_run=False):
     """Drive gk_selfservice_bounce with list_claude_panes/_cache_repo_roots
     patched to a single supervisor-box cross-stream repo, an injected fetch
     returning `candidates`, and an injected bounce_apply recorder."""
@@ -113,7 +114,7 @@ def _run(candidates, apply_rec, roots=None, state=None, now=10 ** 9,
                            lambda *a, **k: []), \
          mock.patch.object(cs, "_cache_repo_roots", lambda *a, **k: roots):
         logs = cs.gk_selfservice_bounce(
-            now, run=None, state=st, user="newlevel",
+            now, run=None, state=st, user="newlevel", dry_run=dry_run,
             gh_fetch=lambda root: candidates,
             bounce_apply=apply_rec)
     return logs, st
@@ -211,6 +212,26 @@ class JobBehaviour(unittest.TestCase):
         self.assertEqual(rec.calls, [])
         self.assertEqual(logs, [])
 
+    def test_dry_run_does_not_latch_dedup_so_a_later_real_sweep_bounces(self):
+        # #516 review F1: a diagnostic --dry-run must NOT persist the one-shot
+        # `seen` latch, else the next real timer sweep skips the ticket forever.
+        cand = [{"number": 3316,
+                 "labels": ["needs-gatekeeper", "handed-by:montalu"],
+                 "has_line": False, "origin_stream": "montalu"}]
+        st = {}
+        rec_dry = _Recorder()
+        _run(cand, rec_dry, state=st, now=10 ** 9, dry_run=True)
+        self.assertEqual(rec_dry.calls, [])                      # nothing bounced
+        # the dry run must NOT have latched the dedup
+        self.assertNotIn("odoo-erp#3316",
+                         st.get("gk_selfservice_bounce", {}).get("seen", {}))
+        # a REAL sweep later (past the cadence interval) DOES bounce it
+        rec_real = _Recorder()
+        logs, st = _run(cand, rec_real, state=st, now=10 ** 9 + 2000)
+        self.assertEqual(rec_real.calls,
+                         [("/home/gatekeeper/devel/odoo-erp", 3316, "montalu")])
+
+
 
 # --------------------------------------------------------------------------- #
 # _apply_selfservice_bounce: verify the concrete gh mutations it performs.
@@ -272,6 +293,107 @@ class ApplyBounce(unittest.TestCase):
                 "/repo", 3316, "montalu", home=None, dry_run=True)
         self.assertTrue(ok)
         self.assertEqual(calls, [])
+
+
+# --------------------------------------------------------------------------- #
+# _fetch_gk_action_requests: the REAL fetch's parsing (#516 review F5 coverage).
+# subprocess.run is patched to return canned gh JSON per argv.
+# --------------------------------------------------------------------------- #
+class _R:
+    def __init__(self, rc, stdout=""):
+        self.returncode = rc
+        self.stdout = stdout
+        self.stderr = ""
+
+
+class RealFetch(unittest.TestCase):
+    def _fake_gh(self, view_by_num, nglist=None, ga_list=None, fail=None):
+        def run(argv, **kw):
+            if fail == "list" and "list" in argv:
+                return _R(1)
+            if "list" in argv:
+                # distinguish the two list queries by their --search arg
+                search = argv[argv.index("--search") + 1]
+                if "GATEKEEPER-ACTION" in search:
+                    return _R(0, _json.dumps(ga_list or []))
+                return _R(0, _json.dumps(nglist or []))
+            if "view" in argv:
+                num = argv[argv.index("view") + 1]
+                if fail == "view":
+                    return _R(1)
+                return _R(0, _json.dumps(view_by_num.get(num, {})))
+            return _R(1)
+        return run
+
+    def test_parses_labels_body_and_line_in_a_COMMENT(self):
+        # has_line must be True when the Self-service-checked line is in a
+        # COMMENT (not the body) — the --issue-mode gk-request shape.
+        view = {"3316": {"number": 3316,
+                         "labels": [{"name": "needs-gatekeeper"},
+                                    {"name": "handed-by:montalu"}],
+                         "body": "Zaseknutá fronta.",
+                         "comments": [{"body": "GATEKEEPER-ACTION: reštart. "
+                                       "Self-service-checked: čítal som z PROD "
+                                       "kópie; potrebujem živý reštart."}]}}
+        with mock.patch("subprocess.run",
+                        self._fake_gh(view, nglist=[{"number": 3316}])), \
+             mock.patch.object(cs, "_gh_env", lambda *a, **k: {}):
+            out = cs._fetch_gk_action_requests("/repo")
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0]["has_line"])
+        self.assertEqual(out[0]["origin_stream"], "montalu")
+
+    def test_no_line_anywhere_is_has_line_false(self):
+        view = {"5": {"number": 5,
+                      "labels": [{"name": "needs-gatekeeper"},
+                                 {"name": "handed-by:david2"}],
+                      "body": "Prečítaj počet riadkov.",
+                      "comments": [{"body": "ešte raz prosím"}]}}
+        with mock.patch("subprocess.run",
+                        self._fake_gh(view, nglist=[{"number": 5}])), \
+             mock.patch.object(cs, "_gh_env", lambda *a, **k: {}):
+            out = cs._fetch_gk_action_requests("/repo")
+        self.assertFalse(out[0]["has_line"])
+        self.assertEqual(out[0]["origin_stream"], "david2")
+
+    def test_gatekeeper_action_title_filter_excludes_mere_mention(self):
+        # the in:title fallback client-side keeps ONLY titles that literally
+        # START with GATEKEEPER-ACTION: (GitHub search tokenizes, #1768).
+        view = {"9": {"number": 9, "labels": [{"name": "handed-by:montalu"}],
+                      "body": "x", "comments": []}}
+        ga = [{"number": 9, "title": "GATEKEEPER-ACTION: do X"},
+              {"number": 99, "title": "a gatekeeper action runner note"}]
+        with mock.patch("subprocess.run", self._fake_gh(view, ga_list=ga)), \
+             mock.patch.object(cs, "_gh_env", lambda *a, **k: {}):
+            out = cs._fetch_gk_action_requests("/repo")
+        nums = {c["number"] for c in out}
+        self.assertIn(9, nums)
+        self.assertNotIn(99, nums)          # mere-mention title excluded
+
+    def test_fail_safe_none_on_gh_error(self):
+        with mock.patch("subprocess.run", self._fake_gh({}, fail="list")), \
+             mock.patch.object(cs, "_gh_env", lambda *a, **k: {}):
+            self.assertIsNone(cs._fetch_gk_action_requests("/repo"))
+
+    def test_candidate_cap_bounds_the_per_sweep_view_fetches(self):
+        # F3: the fetch only VIEWs the first _SELFSERVICE_MAX_CANDIDATES.
+        cap = cs._SELFSERVICE_MAX_CANDIDATES
+        nglist = [{"number": n} for n in range(1, cap + 6)]
+        view = {str(n): {"number": n, "labels": [{"name": "needs-gatekeeper"}],
+                         "body": "x", "comments": []}
+                for n in range(1, cap + 6)}
+        viewed = []
+        fake = self._fake_gh(view, nglist=nglist)
+
+        def counting(argv, **kw):
+            if "view" in argv:
+                viewed.append(argv[argv.index("view") + 1])
+            return fake(argv, **kw)
+        with mock.patch("subprocess.run", counting), \
+             mock.patch.object(cs, "_gh_env", lambda *a, **k: {}):
+            out = cs._fetch_gk_action_requests("/repo")
+        self.assertEqual(len(viewed), cap)          # never more than the cap
+        self.assertEqual(len(out), cap)
 
 
 if __name__ == "__main__":

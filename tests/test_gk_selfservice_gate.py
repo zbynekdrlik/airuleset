@@ -168,6 +168,45 @@ class BypassAndInert(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class AdversarialReviewFixes(TestCase):
+    """Regressions for the #516 side-A adversarial review findings F1/F2."""
+
+    def test_cd_relative_body_file_with_line_passes(self):
+        # F1 (#483 class): a compliant request with a cd-relative -F disk body
+        # that DOES carry the line must PASS — resolved against the effective
+        # cwd after `cd`, not the hook's own cwd.
+        d = tempfile.mkdtemp(prefix="airuleset-selfservice-cd-")
+        with open(os.path.join(d, "body.md"), "w") as f:
+            f.write("Zaseknutá fronta.\nSelf-service-checked: čítal som z čerstvej "
+                    "PROD kópie; potrebujem živý reštart odosielača.\n")
+        r = run("cd %s && python3 ~/devel/airuleset/airuleset.py gk-request "
+                '--title "restart" --body-file body.md' % d)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_cd_relative_body_file_no_line_blocks(self):
+        d = tempfile.mkdtemp(prefix="airuleset-selfservice-cd-")
+        with open(os.path.join(d, "body.md"), "w") as f:
+            f.write("Prečítaj mi počet riadkov v tabuľke X na PRODe.\n")
+        r = run("cd %s && python3 ~/devel/airuleset/airuleset.py gk-request "
+                '--title "read" --body-file body.md' % d)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_grep_exploration_not_blocked(self):
+        # F2: `grep gk-request airuleset.py` names the file but is NOT an
+        # escalation — gk-request must be the SUBCOMMAND, not merely co-present.
+        r = run("grep gk-request airuleset.py")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_grep_absolute_path_exploration_not_blocked(self):
+        r = run("grep -n gk-request /home/newlevel/devel/airuleset/airuleset.py")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_gk_request_help_not_blocked(self):
+        # a --help query files nothing, so it is not gated.
+        r = run("python3 ~/devel/airuleset/airuleset.py gk-request --help")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 class HookRegistered(TestCase):
     def test_hook_file_exists_executable_and_registered(self):
         self.assertTrue(HOOK.is_file(), "hook script missing: %s" % HOOK)

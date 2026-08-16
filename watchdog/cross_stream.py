@@ -923,6 +923,13 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
 _SELFSERVICE_LINE_RE = re.compile(r'Self-service-checked:\s*\S', re.IGNORECASE)
 _HANDED_BY_RE = re.compile(r'^handed-by:([A-Za-z0-9_-]+)$', re.I)
 
+# #516 adversarial review F3 — per-sweep cap on the per-candidate `gh issue
+# view` detail fetches (each needs `comments`, unavailable in the list query),
+# so a large open-request backlog can never blow the 120s systemd sweep budget
+# (the #172/#504 class). Candidates are processed oldest-first (sorted number
+# ascending) and drop out as they bounce, so the backlog drains across sweeps.
+_SELFSERVICE_MAX_CANDIDATES = 25
+
 # The Slovak bounce template. `%(stream)s` is the owning reduced stream. Posted
 # via subprocess argv (never a shell), so its backticks / newlines are literal.
 _SELFSERVICE_BOUNCE_TEMPLATE = (
@@ -1029,7 +1036,7 @@ def _fetch_gk_action_requests(root, home=None):
         except Exception:
             return None
     out = []
-    for num in sorted(nums):
+    for num in sorted(nums)[:_SELFSERVICE_MAX_CANDIDATES]:
         try:
             r = subprocess.run(
                 ["gh", "issue", "view", str(num), "--json",
@@ -1146,14 +1153,20 @@ def gk_selfservice_bounce(now, run, state, home=None, dry_run=False,
                 logs.append("gk-selfservice-already %s" % key)
                 continue
             stream = c.get("origin_stream")
-            # #193 kill-safe: record the dedup BEFORE the mutation; undo it only
-            # if the bounce could not even post its comment (retry next sweep).
-            seen[key] = int(now)
-            persist()
+            # A dry-run mutates NOTHING, so it must NOT persist the one-shot
+            # dedup latch — the check goes BEFORE the `seen` write (#516
+            # adversarial review F1: unlike job 11's re-fireable nudge dedup,
+            # this `seen` never re-evaluates, so a `watchdog --once --dry-run`
+            # that latched `seen[key]` to the REAL state file would suppress the
+            # ticket's genuine bounce on every later timer sweep, forever).
             if dry_run:
                 logs.append("gk-selfservice-bounce %s -> stream:%s (dry-run)"
                             % (key, stream))
                 continue
+            # #193 kill-safe: record the dedup BEFORE the mutation; undo it only
+            # if the bounce could not even post its comment (retry next sweep).
+            seen[key] = int(now)
+            persist()
             ok = apply_bounce(root, num, stream)
             if ok:
                 logs.append("gk-selfservice-bounce %s -> stream:%s (bounced)"
