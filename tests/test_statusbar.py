@@ -713,13 +713,16 @@ class RefreshCLI(unittest.TestCase):
         # OPEN pending client acceptance) -- still carries its old
         # READY-FOR-REVIEW comment forever and was counted as parked-with-gk
         # indefinitely (montalu3 live: gk=19, 0 genuinely parked, ALL 19
-        # carrying needs-acceptance). A `needs-acceptance` ticket is the
-        # STREAM's court (acceptance is the stream's work -- owner ruling
-        # 2026-08-15), NOT parked with the gatekeeper, so it must fall to
-        # handed=False (own workable I N) regardless of a stale hand-off
-        # comment. The discriminator proven in ONE slice: #1 processed
-        # (needs-acceptance + stale READY-FOR-REVIEW comment) must NOT count;
-        # #2 genuinely parked (ready-for-review) MUST.
+        # carrying needs-acceptance). A `needs-acceptance` ticket must NOT fall
+        # to gk regardless of a stale hand-off comment.
+        #
+        # #512 (owner decision 2026-08-16) SUPERSEDES #507's FOOTER placement of
+        # a BARE `needs-acceptance` ticket: instead of the stream's own workable
+        # `I N` it now lands in `U N` (waiting on the OWNER's acceptance) — but
+        # it still must NOT count as gk. The discriminator proven in ONE slice:
+        # #1 processed (needs-acceptance + stale READY-FOR-REVIEW comment) must
+        # NOT be gk and now leaves `I N` into `U N`; #2 genuinely parked
+        # (ready-for-review) MUST stay gk.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -757,9 +760,14 @@ class RefreshCLI(unittest.TestCase):
                 "gk; the processed needs-acceptance ticket (#1) must not be "
                 "re-counted by its stale READY-FOR-REVIEW comment")
             self.assertEqual(
-                cache["open"], 1,
-                "the processed needs-acceptance ticket (#1) is the stream's "
-                "own workable, not parked with the gatekeeper")
+                cache["open"], 0,
+                "#512: the bare processed needs-acceptance ticket (#1) leaves "
+                "the workable I N — it waits on the owner's acceptance (U N), "
+                "not the stream's active work")
+            self.assertEqual(
+                cache.get("user_waiting"), 1,
+                "#512: the bare needs-acceptance ticket (#1) is now U (waiting "
+                "on the OWNER), the 'done = client saw it' state")
 
     def test_refresh_a_needs_acceptance_ticket_still_labeled_ready_for_review_stays_gk(self):
         # #507 adversarial defense: the needs-acceptance suppression must
@@ -806,6 +814,12 @@ class RefreshCLI(unittest.TestCase):
                 "gk even when it also carries needs-acceptance -- the "
                 "suppression must not drop a labeled hand-off")
             self.assertEqual(cache["open"], 0)
+            # #512 negative control: the gk/bounce override keeps a
+            # needs-acceptance + ready-for-review ticket OUT of U — it is a
+            # genuine re-hand-off (gk), never "waiting on the owner's acceptance".
+            self.assertEqual(cache.get("user_waiting"), 0,
+                             "needs-acceptance + ready-for-review must stay gk, "
+                             "never fold into U (#507 precedence, #512)")
 
     def test_refresh_processed_needs_acceptance_not_gk_on_the_shared_account_slice(self):
         # #507 review MINOR (test fidelity): the two tests above exercise the
@@ -858,7 +872,10 @@ class RefreshCLI(unittest.TestCase):
                 "is gk; the processed needs-acceptance ticket (#1) must not be "
                 "re-counted by its stale comment nor re-added by the recovery "
                 "block")
-            self.assertEqual(cache["open"], 1)
+            # #512: the bare needs-acceptance ticket (#1) leaves I N into U N on
+            # the shared-account topology too (waiting on the owner's acceptance).
+            self.assertEqual(cache["open"], 0)
+            self.assertEqual(cache.get("user_waiting"), 1)
 
     def test_refresh_a_comment_only_re_handoff_of_needs_acceptance_is_a_known_safe_under_count(self):
         # #507 review MAJOR (accepted, SAFE-direction residual): the label-based
@@ -913,12 +930,23 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(
                 cache["gk"], 0,
                 "KNOWN #507 residual (safe direction): a comment-only "
-                "re-hand-off of a needs-acceptance ticket is under-counted -- "
-                "it must NOT falsely stop the loop, so it lands in open, not gk")
+                "re-hand-off of a needs-acceptance ticket is not re-counted as "
+                "gk by label alone (the auto-labeller unreliability #313 exists "
+                "for) -- so it must NOT falsely stop the loop")
+            # #512 SUPERSEDES the pre-#512 "stays workable open to keep the loop
+            # alive" framing: a BARE needs-acceptance ticket (from the label
+            # perspective, which is all this comment-only case has) now parks in
+            # `U N` (waiting on the owner's acceptance), NOT the workable I N. It
+            # is still SURFACED and the loop still parks on it (U leaves the
+            # count but the loop never claims backlog-empty past a U member) --
+            # the safe direction is preserved, only the bucket moved I N -> U N.
             self.assertEqual(
-                cache["open"], 1,
-                "the under-counted re-hand-off stays the stream's own workable "
-                "so the /goal loop keeps it alive (never a false backlog-empty)")
+                cache["open"], 0,
+                "#512: a bare needs-acceptance ticket leaves the workable I N")
+            self.assertEqual(
+                cache.get("user_waiting"), 1,
+                "#512: it parks in U N (waiting on the owner's acceptance), "
+                "still surfaced so the loop parks on it, never a false empty")
 
     def test_footer_refresh_actually_calls_the_shared_handed_derivation(self):
         # MAJOR-2 (fresh-context adversarial review of #391): mirrors the
@@ -2003,16 +2031,14 @@ class SharedAccountSliceScoping(unittest.TestCase):
             self.assertEqual(cache["open"], 7)
 
 
-class QuestionsSegment(unittest.TestCase):
-    """'Q N' badge — unanswered ❓ pings SCOPED to the session's project
-    (2026-07-22 complaint: a machine-global count showed 14 questions in a
-    project that had zero). Hidden at 0. #368: no age filter any more —
-    the map itself no longer age-prunes an unanswered entry (it is
-    re-asked daily instead of expiring), so anything still in the map is
-    still open and must still be counted, however old. #313 pt 5 REMOVED
-    the cross-project '· inde M' form entirely — a pending question
-    anywhere already pings the phone via Discord regardless of which
-    project's footer is on screen."""
+class QuestionPingMerge(unittest.TestCase):
+    """#512: the standalone `Q N` ❓ badge is REMOVED from the footer render;
+    its count folds into `U N` ("waiting on the OWNER"), deduped so a ping that
+    references a ticket (`#N` in its text — already counted in the label-based
+    `user_waiting`) is NOT double-counted. The scoping (this-project-only,
+    either-direction cwd containment) is preserved from the old badge. The
+    question map + watchdog re-ask jobs are untouched — this is render/count
+    only."""
 
     CWD = "/home/x/devel/demo"
 
@@ -2026,77 +2052,109 @@ class QuestionsSegment(unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         (d / "discord-questions.json").write_text(json.dumps(entries))
 
-    def _seg(self, cwd=None, now=None):
-        return statusbar.questions_segment(self.CWD if cwd is None else cwd,
-                                           now=now, home=self.home)
+    def _count(self, cwd=None):
+        return statusbar.question_ping_count(self.CWD if cwd is None else cwd,
+                                             home=self.home)
 
-    def test_counts_only_this_projects_questions(self):
-        # #313 pt 5: a question recorded against a DIFFERENT project must
-        # not be counted at all -- no 'inde' bucket any more, it is simply
-        # invisible from here (it already pinged its own project's phone).
-        now = time.time()
-        self._seed({"1": {"cwd": self.CWD, "ts": now - 60},
-                    "2": {"cwd": self.CWD, "ts": now - 3600},
-                    "3": {"cwd": "/home/x/devel/other", "ts": now - 60}})
-        seg = self._seg(now=now)
-        self.assertIn("Q 2", seg)
-        self.assertNotIn("inde", seg)
-        self.assertIn("38;5;214m", seg)               # local count = orange
+    def test_counts_only_this_projects_ticketless_pings(self):
+        # A question recorded against a DIFFERENT project is invisible here
+        # (it pinged its own project's phone). Same project = counted.
+        self._seed({"1": {"cwd": self.CWD, "block": "co s tym", "ts": 1},
+                    "2": {"cwd": self.CWD, "block": "a s tamtym", "ts": 2},
+                    "3": {"cwd": "/home/x/devel/other", "block": "iny", "ts": 3}})
+        self.assertEqual(self._count(), 2)
 
-    def test_foreign_project_questions_render_nothing(self):
-        # #313 pt 5: with ZERO local questions and one foreign one, the
-        # segment is now simply empty -- no 'Q inde M' fallback form.
-        now = time.time()
-        self._seed({"3": {"cwd": "/home/x/devel/other", "ts": now - 60}})
-        self.assertEqual(self._seg(now=now), "")
+    def test_a_ping_referencing_a_ticket_is_not_counted_dedup(self):
+        # #512 dedup: a ping whose text carries a `#N` ticket reference is
+        # assumed already in the label-based U count (its ticket carries a
+        # needs-answer/needs-decision/needs-acceptance label), so it must NOT
+        # be counted here — only the ticketless session question is.
+        self._seed({
+            "1": {"cwd": self.CWD, "block": "otazka bez ticketu", "ts": 1},
+            "2": {"cwd": self.CWD, "block": "otazka k ticketu #742", "ts": 2},
+            "3": {"cwd": self.CWD, "question": "kratka o #900", "ts": 3},
+        })
+        self.assertEqual(self._count(), 1)
 
-    def test_trailing_slash_cwd_still_matches(self):
-        now = time.time()
-        self._seed({"1": {"cwd": self.CWD + "/", "ts": now - 60}})
-        self.assertIn("Q 1", self._seg(cwd=self.CWD + "/", now=now))
+    def test_foreign_project_pings_count_zero(self):
+        self._seed({"3": {"cwd": "/home/x/devel/other", "block": "iny", "ts": 3}})
+        self.assertEqual(self._count(), 0)
 
-    def test_old_entries_still_pending_daily_reping_are_still_counted(self):
-        # #368: an entry the map still tracks is by definition still open
-        # (it is being re-asked daily, never silently expired) — an old
-        # `ts` must NOT drop it from the badge any more.
-        now = time.time()
-        self._seed({"1": {"cwd": self.CWD, "ts": now - 30 * 24 * 3600},
-                    "2": {"cwd": self.CWD, "ts": now - 60}})
-        self.assertIn("Q 2", self._seg(now=now))
-
-    def test_hidden_at_zero_and_when_map_missing(self):
-        self.assertEqual(self._seg(), "")
+    def test_zero_when_map_missing_or_empty(self):
+        self.assertEqual(self._count(), 0)
         self._seed({})
-        self.assertEqual(self._seg(), "")
+        self.assertEqual(self._count(), 0)
 
     def test_garbage_entries_are_safe(self):
-        now = time.time()
-        self._seed({"1": "not-a-dict", "2": {"cwd": self.CWD, "ts": now}})
-        self.assertIn("Q 1", self._seg(now=now))
+        self._seed({"1": "not-a-dict", "2": {"cwd": self.CWD, "block": "ok", "ts": 1}})
+        self.assertEqual(self._count(), 1)
 
-    def test_no_ttl_constant_survives_the_368_removal(self):
-        # #368: the badge's own age filter (and its mirrored TTL constant)
-        # is gone — nothing left to keep in sync with notify's own map.
-        self.assertFalse(hasattr(statusbar, "QUESTIONS_TTL_S"))
+    def test_subdir_and_trailing_slash_containment(self):
+        # Either-direction containment (montalu launch-dir vs recorded subdir).
+        self._seed({"1": {"cwd": self.CWD + "/subrepo", "block": "sub", "ts": 1}})
+        self.assertEqual(self._count(), 1)
+        self._seed({"1": {"cwd": self.CWD, "block": "parent", "ts": 1}})
+        self.assertEqual(self._count(cwd=self.CWD + "/subrepo"), 1)
 
-    def test_shim_renders_the_badge(self):
+    def test_tickets_segment_folds_pings_into_U(self):
+        # The footer render combines the cache's label-based user_waiting with
+        # the LIVE ticketless ping count into ONE `U N`.
+        cwd = self.CWD
+        _seed_cache(self.home, cwd, open_n=3, name="demo", user_waiting=2)
+        self._seed({"1": {"cwd": cwd, "block": "otazka bez ticketu", "ts": 1}})
+        seg = statusbar.tickets_segment(cwd, home=self.home, spawn=False)
+        self.assertIn("I 3", seg)
+        self.assertIn("U 3", seg)          # 2 labels + 1 ticketless ping
+
+    def test_tickets_segment_shows_U_from_pings_alone(self):
+        # A fresh ❓ with ZERO user-waiting labels still surfaces `U 1`.
+        cwd = self.CWD
+        _seed_cache(self.home, cwd, open_n=5, name="demo", user_waiting=0)
+        self._seed({"1": {"cwd": cwd, "block": "len ping", "ts": 1}})
+        seg = statusbar.tickets_segment(cwd, home=self.home, spawn=False)
+        self.assertIn("U 1", seg)
+
+    def test_tickets_segment_hides_U_when_labels_and_pings_both_zero(self):
+        cwd = self.CWD
+        _seed_cache(self.home, cwd, open_n=5, name="demo", user_waiting=0)
+        self._seed({})
+        self.assertNotIn("U ", statusbar.tickets_segment(cwd, home=self.home, spawn=False))
+
+    def test_ping_stays_visible_when_open_is_none_gh_error(self):
+        # #512 review (both adversaries, live-reproduced): the old `Q` badge was
+        # gh-INDEPENDENT. On a gh error / non-repo cwd / SliceUnresolved the cache
+        # carries open=None (and user_waiting=None), so `tickets_segment` used to
+        # return "" and a pending ❓ vanished from the footer. It must still
+        # surface a STANDALONE `U N` from the live pings.
+        cwd = self.CWD
+        _seed_cache(self.home, cwd, open_n=None, name="demo")  # gh-failure cache
+        self._seed({"1": {"cwd": cwd, "block": "otazka bez ticketu", "ts": 1}})
+        seg = statusbar.tickets_segment(cwd, home=self.home, spawn=False)
+        self.assertIn("U 1", seg)
+        self.assertNotIn("I ", seg)          # no renderable I count during a gh error
+        self.assertNotIn("· U", seg)         # standalone U, no leading "· "
+
+    def test_ping_stays_visible_with_no_tickets_cache(self):
+        # A cold/first-render session with no tickets cache yet must still show a
+        # pending ❓ (the old badge rendered from the local map with no cache).
+        cwd = self.CWD
+        self._seed({"1": {"cwd": cwd, "block": "otazka bez ticketu", "ts": 1}})
+        seg = statusbar.tickets_segment(cwd, home=self.home, spawn=False)
+        self.assertIn("U 1", seg)
+
+    def test_no_cache_and_no_pings_renders_nothing(self):
+        cwd = self.CWD
+        self._seed({})
+        self.assertEqual(statusbar.tickets_segment(cwd, home=self.home, spawn=False), "")
+
+    def test_shim_no_longer_renders_a_standalone_Q_segment(self):
+        # #512: the Q ❓ badge is gone from the render — the shim must not call
+        # a standalone questions_segment; the pings fold into U via
+        # tickets_segment instead.
         import airuleset
-        self.assertIn("questions_segment", airuleset.CAVEMAN_SHIM_CONTENT)
-
-    def test_subdir_question_counts_as_local_for_parent_session(self):
-        # montalu 2026-07-22: the session runs at .../odoo (launch dir) while
-        # its ❓ hook records .../odoo/odoo-slovnormal — same project tree,
-        # must count as LOCAL (either-direction containment), never 'inde'
-        now = time.time()
-        self._seed({"1": {"cwd": self.CWD + "/subrepo", "ts": now - 60}})
-        self.assertIn("Q 1", self._seg(now=now))
-        self.assertNotIn("inde", self._seg(now=now))
-        # and the reverse: session in the subdir, question recorded at parent
-        self._seed({"1": {"cwd": self.CWD, "ts": now - 60}})
-        seg = statusbar.questions_segment(self.CWD + "/subrepo", now=now,
-                                          home=self.home)
-        self.assertIn("Q 1", seg)
-        self.assertNotIn("inde", seg)
+        self.assertNotIn("questions_segment", airuleset.CAVEMAN_SHIM_CONTENT)
+        self.assertFalse(hasattr(statusbar, "questions_segment"),
+                         "questions_segment is dead after #512 (folded into U)")
 
 
 class ContextCostSegment(unittest.TestCase):

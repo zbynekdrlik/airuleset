@@ -104,3 +104,48 @@ parking reason — an external event/evidence instead of the user's answer):
   default), leaving only the ONE multi-line direct `mk.Mock(...)` to hand-fix.
   `test_stash_delivery.py`'s `waiting=` is an UNRELATED pane-state param — don't
   touch it. `grep -c 'waiting=False, extra=None'` per file to confirm the count.
+
+## Consolidating a gh-INDEPENDENT footer segment INTO a gh-DEPENDENT one (#512, 2026-08-16)
+
+Learned consolidating the 5-segment footer (`I · U · W · gk · skip`): `needs-acceptance`
+joins `USER_WAITING_LABELS` (→ `U N`) with a needs-acceptance-scoped
+`NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS` override preserving #507's gk precedence; the
+standalone `Q` ❓ badge is removed and its ticketless pings fold LIVE into `U N`.
+
+- **When you fold a gh-INDEPENDENT segment (the old `questions_segment` `Q` badge, which
+  read ONLY the local `~/.claude/discord-questions.json` and rendered even with NO tickets
+  cache / a gh error) INTO a gh-DEPENDENT one (`U N`, read from the tickets cache), you MUST
+  preserve the source segment's INDEPENDENCE — a naive fold that nests the ping read inside
+  `tickets_segment`'s `if isinstance(cache.get("open"), int):` gate silently loses the ❓
+  indicator during a gh error / cold-or-missing cache / non-repo cwd (`cmd_tickets_status`
+  writes `open=user_waiting=ops_wait=None` TOGETHER on any failure, so `open` not-int ⟺ the
+  whole ticket half is unrenderable).** BOTH #512 adversarial reviews live-reproduced the
+  exact loss (`tickets_segment(...)` → `''` while `question_ping_count(...)` → `1`). Fix:
+  read `question_ping_count` LIVE and, when there is no renderable `I` count, emit a
+  STANDALONE `U N` (label part 0 + pings, colour 208, NO leading `· `) so a pending question
+  is never invisible. The tell a reviewer catches it: the design comment PROMISED the
+  independence ("read LIVE here, as the old `Q` badge was") but the placement inside the
+  `open`-int gate defeated it. General rule for ANY segment-merge: enumerate the source
+  segment's rendering PRECONDITIONS and re-check the merged form still renders under each —
+  a fold that adds a precondition the source never had is a silent visibility regression.
+- **The `#N`-in-text ping dedup (`_TICKET_REF_RE = #\d+` over a ping's `block`+`question`) is
+  a phrasing-dependent HEURISTIC, not a mechanical guarantee — both reviewers flagged it as a
+  bounded, accepted residual.** It can UNDER-count (a genuinely ticketless session question
+  whose prose mentions an incidental `#N` — a PR number, "step #3" — is dropped from `U`) or
+  DOUBLE-count (a per-ticket ask-and-continue ping whose block omits any `#N` is counted in
+  BOTH the label `user_waiting` AND the ping part). The `**Otázka — projekt …:**` head line
+  carries no `#N`, so correctness rests on the `issue-reference-context.md` prose discipline
+  putting the ticket number in the block. Acceptable ONLY because the owner explicitly
+  approved this exact dedup rule ("a ping whose text has a `#N` must not be counted twice");
+  a mechanical dedup would need a structured ticket field on the question-map entry (there is
+  none today). Record it as a design residual, never silently "fix" the heuristic.
+- **A cross-module label-set invariant (`watchdog.OWNER_DECISION_LABELS` pinned equal to
+  `cli_quals.USER_WAITING_LABELS` by `TestOwnerDecisionLabelsInSync`) can DIVERGE deliberately
+  when a footer/count label is added that must NOT change a watchdog re-ask job.** #512 added
+  `needs-acceptance` to the footer `U N` family but the owner scoped the watchdog re-ask jobs
+  UNCHANGED — `needs-acceptance` is an ACCEPTANCE (done, awaiting sign-off), not a blocked
+  DECISION that rots without a daily "please answer" nudge, so it must NOT join the
+  owner-decision re-ping. Convert the exact-equal invariant to a SUBSET one (every re-ping
+  label ∈ USER_WAITING_LABELS; assert the excluded set is exactly `{needs-acceptance}`) with
+  the divergence reason in both the test and the `OWNER_DECISION_LABELS` comment — an honest
+  divergence with a named reason, never a silent drift.

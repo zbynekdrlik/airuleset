@@ -262,12 +262,9 @@ try:
     mdl = statusbar.model_segment(d, managed_model="{{MANAGED_MODEL}}")
     if mdl:
         segs.append(mdl)
-    seg = statusbar.tickets_segment(cwd)
-    if seg:
+    seg = statusbar.tickets_segment(cwd)   # I/U/W/gk/skip; #512 folds the old
+    if seg:                                # standalone `Q` ❓ badge into `U N`
         segs.append(seg)
-    q = statusbar.questions_segment(cwd)   # unanswered-❓ badge (this project only, #313 pt 5)
-    if q:
-        segs.append(q)
     # --- session context/cost: 'ctx 570K ~$0.57' (2026-07-25, #37; shortened #223) ---
     cc_full = statusbar.context_cost_segment(d)
     cc_short = statusbar.context_cost_segment(d, show_cost=False) if cc_full else ""
