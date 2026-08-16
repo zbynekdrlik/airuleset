@@ -183,6 +183,7 @@
     "tests/test_tmux_socket_recovery.py": 369,
     "tests/test_transcript_compress.py": 631,
     "tests/test_upload_url.py": 1165,
+    "tests/test_ops_wait_split.py": 317,
     "tests/test_usage_cache.py": 369,
     "tests/test_user_waiting_split.py": 204,
     "tests/test_vault_channel.py": 1382,
