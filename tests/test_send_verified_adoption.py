@@ -310,6 +310,30 @@ class JanitorPrefixReclaim(unittest.TestCase):
         self.assertFalse(wd._looks_like_own_payload(
             "chekni ci nemas nieco nove"))
 
+    def test_stuckcheck_prefix_is_recognized_own_payload(self):
+        # #497 batch 3 — the three chunk-typed nudges (working 431c, textcall
+        # 271c, subagent 238-248c) all start with the identical "stuck-check: "
+        # prefix, so a swallowed WRAPPED residue is reclaimable by the #372
+        # janitor exactly like bounce/gkreq. RED until "stuck-check: " is
+        # registered in _JANITOR_OWN_PREFIXES.
+        self.assertTrue(wd._looks_like_own_payload(wd.WORKING_NUDGE_TEXT),
+                        "working nudge residue reclaimable")
+        self.assertTrue(wd._looks_like_own_payload(wd.TEXTCALL_NUDGE_TEXT),
+                        "textcall nudge residue reclaimable")
+        self.assertTrue(wd._looks_like_own_payload(
+            "stuck-check: background worker abc vyzerá mŕtvy — over jeho transcript"),
+            "subagent nudge residue reclaimable")
+
+    def test_stuckcheck_is_reclaimed_never_submitted_in_place(self):
+        # deliberate design decision: "stuck-check: " goes ONLY in
+        # _JANITOR_OWN_PREFIXES (janitor RECLAIM), NOT in the #501
+        # _OWN_NUDGE_SUBMIT_PREFIXES submit-in-place strict subset — a swallowed
+        # diagnostic self-check is re-fired by decide_working's own cadence, and
+        # the lane-guard submit-in-place path stays scoped to the supervisor's
+        # OWN lane/bounce/gkreq nudges.
+        self.assertIsNone(wd._own_nudge_submit_prefix(wd.WORKING_NUDGE_TEXT))
+        self.assertIsNone(wd._own_nudge_submit_prefix(wd.TEXTCALL_NUDGE_TEXT))
+
 
 # ------------------------------------------------------------------------- #
 # #497 batch 2 — the three SHORT-text bare-box sites (jobs 1, 6, 7). Each is
@@ -556,6 +580,181 @@ class ReplyPointerAdoption(unittest.TestCase):
         self._go(proj, state, now, result=False)
         self.assertIn(self.SID, state.get("dreply_pointer", {}),
                       "a swallowed pointer must be retried, not lost")
+
+
+# ------------------------------------------------------------------------- #
+# #497 batch 3 — the three CHUNK-typed bare-box sites (jobs 4 working, 4a
+# textcall, 8 dying-subagent nudge). Each is >=200c so a swallowed send can
+# leave a wrapped/collapsed residue send_verified's own undo cannot back off;
+# the #372 janitor reclaims it via the shared "stuck-check: " own-payload
+# prefix, so each site MARKS janitor provenance before the send and CLEARS it
+# on a verified submit. The tests drive the REAL site with send_verified PATCHED
+# to a recorder: the per-site TPATH (owners[0] for 4/4a; the SUPERVISOR
+# transcript — NOT the worker's sub_path — for 8), the honest swallowed log, and
+# the janitor mark (set on swallow, cleared on success). On the pre-adoption
+# code the site calls the raw send_selfcheck/send_continue/send_subagent_nudge,
+# so the recorder is never called (and the mark never set) and every assertion
+# here is RED.
+# ------------------------------------------------------------------------- #
+
+
+def _working_row():
+    return _assistant_row("Spustil som verdict proces.\n\n⏳ WORKING: dekódujem strih")
+
+
+def _textcall_row():
+    return _assistant_row(
+        'court <invoke name="Read"><parameter name="file_path">'
+        '/tmp/x/tasks/b0kqzh3do.output</parameter></invoke>')
+
+
+class WorkingNudgeAdoption(unittest.TestCase):
+    """Site #4 — the job-4 working self-check nudge (run_once inline, 431c CHUNK)."""
+
+    def _harness(self):
+        now = time.time()
+        return _RunOnceAdoptHarness(
+            self, [_working_row()], mtime_age=2000,   # > STALL_WORKING_SECONDS (1800)
+            capture=NO_BANNER_IDLE, seed_state=None, now=now)
+
+    def test_verified_submit_uses_pane_tpath_and_clears_the_mark(self):
+        h = self._harness()
+        logs, _sent, keys, state, rec = h.run(sv_result=True)
+        self.assertTrue(any("working-nudge#1" in ln for ln in logs), logs)
+        self.assertEqual(len(rec.calls), 1, logs)
+        self.assertEqual(rec.calls[0]["text"], wd.WORKING_NUDGE_TEXT)
+        self.assertEqual(rec.tpaths[0], str(h.tpath),
+                         "job 4 must verify against the pane's own transcript")
+        self.assertFalse(
+            any("send-keys" in " ".join(a) and wd.WORKING_NUDGE_TEXT in a for a in keys),
+            "site must go through send_verified, not a raw type")
+        self.assertNotIn(_RunOnceAdoptHarness.PANE, state.get("janitor_watch", {}),
+                         "a verified submit clears the #372 provenance mark")
+
+    def test_swallowed_submit_marks_janitor_and_logs_honestly(self):
+        h = self._harness()
+        logs, _sent, _keys, state, _rec = h.run(sv_result=False)
+        self.assertIn(_RunOnceAdoptHarness.PANE, state.get("janitor_watch", {}),
+                      "a swallowed chunk-typed nudge leaves the janitor mark as "
+                      "the residue backstop")
+        self.assertTrue(any("(submit-unverified)" in ln for ln in logs), logs)
+
+
+class TextcallNudgeAdoption(unittest.TestCase):
+    """Site #4a — the job-4a textcall stall nudge (run_once inline, 271c CHUNK)."""
+
+    def _harness(self):
+        now = time.time()
+        return _RunOnceAdoptHarness(
+            self, [_assistant_row("Skorší turn."), _textcall_row()],
+            mtime_age=300,   # > STALL_TEXTCALL_SECONDS (120)
+            capture=NO_BANNER_IDLE, seed_state=None, now=now)
+
+    def test_verified_submit_uses_pane_tpath_and_clears_the_mark(self):
+        h = self._harness()
+        logs, _sent, keys, state, rec = h.run(sv_result=True)
+        self.assertTrue(any("textcall-nudge#1" in ln for ln in logs), logs)
+        self.assertEqual(len(rec.calls), 1, logs)
+        self.assertEqual(rec.calls[0]["text"], wd.TEXTCALL_NUDGE_TEXT)
+        self.assertEqual(rec.tpaths[0], str(h.tpath))
+        self.assertFalse(
+            any("send-keys" in " ".join(a) and wd.TEXTCALL_NUDGE_TEXT in a for a in keys))
+        self.assertNotIn(_RunOnceAdoptHarness.PANE, state.get("janitor_watch", {}))
+
+    def test_swallowed_submit_marks_janitor_and_logs_honestly(self):
+        h = self._harness()
+        logs, _sent, _keys, state, _rec = h.run(sv_result=False)
+        self.assertIn(_RunOnceAdoptHarness.PANE, state.get("janitor_watch", {}))
+        self.assertTrue(any("(submit-unverified)" in ln for ln in logs), logs)
+
+
+class SubagentNudgeAdoption(unittest.TestCase):
+    """Site #8 — the dying-subagent nudge (jobs 1b/4a-sub). The keystroke goes to
+    the SUPERVISOR pane, so it MUST verify against the SUPERVISOR's transcript
+    (owners[0]), NEVER the dying worker's sub_path — the whole risk this site
+    names. 238-248c CHUNK (real 36-char UUID stems)."""
+
+    CWD = "/home/newlevel/devel/demo-sub"
+    PANE = "%7"
+    SID = "supsess1"
+    WORKER = "0595c939-3be6-4930-a233-894df58db5ad"   # a real 36-char UUID stem
+    IDLE = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
+
+    def _build(self, now):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        import notify
+        p = m.patch.object(notify, "_questions_path",
+                           lambda: str(Path(tmp.name) / "q.json"))
+        p.start()
+        self.addCleanup(p.stop)
+        proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        self.sup_tpath = proj / enc / (self.SID + ".jsonl")
+        _write_jsonl_rows(
+            self.sup_tpath,
+            [_assistant_row("Bežím ďalej.\n\n⏳ WORKING: čaká na workera.")])
+        os.utime(self.sup_tpath, (now - 10, now - 10))
+        subdir = proj / enc / self.SID / "subagents"
+        subdir.mkdir(parents=True)
+        self.sub_path = subdir / (self.WORKER + ".jsonl")
+        _write_jsonl_rows(self.sub_path, [_apierror_row()])
+        os.utime(self.sub_path, (now - 400, now - 400))   # > GRACE_SECONDS (300)
+        self.proj = proj
+        self.state_path = Path(tmp.name) / "state.json"
+        self.pending = str(Path(tmp.name) / "pending-")
+
+    def _run(self, sv_result):
+        now = time.time()
+        self._build(now)
+        keys = []
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "capture-pane" in j:
+                return self.IDLE
+            if "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if "session_group" in j or argv[-1] == "#S":
+                    return "zbynek"
+                return ""
+            if "send-keys" in j:
+                keys.append(argv)
+                return ""
+            return ""
+
+        rec = _SendVerifiedRecorder(result=sv_result)
+        with m.patch.object(wd, "send_verified", rec):
+            logs = wd.run_once(
+                now=now, dry_run=False, run=fake_run,
+                send_fn=lambda body, **k: None,
+                projects_dir=self.proj, state_path=self.state_path,
+                pending_prefix=self.pending)
+        state = json.loads(self.state_path.read_text())
+        return logs, keys, state, rec
+
+    def test_verifies_against_the_supervisor_transcript_not_the_worker(self):
+        logs, _keys, state, rec = self._run(sv_result=True)
+        self.assertTrue(any(ln.startswith("subagent-apierr-nudge#1") for ln in logs),
+                        logs)
+        self.assertEqual(len(rec.calls), 1, logs)
+        self.assertTrue(rec.calls[0]["text"].startswith("stuck-check: "))
+        self.assertIn(self.WORKER, rec.calls[0]["text"])
+        self.assertEqual(rec.tpaths[0], str(self.sup_tpath),
+                         "must verify against the SUPERVISOR transcript, never sub_path")
+        self.assertNotEqual(rec.tpaths[0], str(self.sub_path))
+        self.assertNotIn(self.PANE, state.get("janitor_watch", {}),
+                         "a verified submit clears the #372 provenance mark")
+
+    def test_swallowed_submit_marks_janitor_and_logs_honestly(self):
+        logs, _keys, state, _rec = self._run(sv_result=False)
+        self.assertIn(self.PANE, state.get("janitor_watch", {}),
+                      "a swallowed chunk-typed subagent nudge leaves the mark")
+        self.assertTrue(any("(submit-unverified)" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
