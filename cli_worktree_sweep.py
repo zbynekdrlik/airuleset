@@ -921,6 +921,26 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
         if c.get("reason"):
             results.append(entry)
             continue
+        # #513 LIVE-WORKER guard -- applied to a registered worktree (kind
+        # "worktree") in BOTH dry-run and live, so the two agree. NOT applied
+        # to `orphan_branch` (no checkout to protect; already ref-age-gated)
+        # or `locked_dead` (already passed the #348 dead-session + lock-age +
+        # clean chain). A recently-active OR in-live-use worktree is kept --
+        # this can only ever turn a candidate into a skip, never the reverse.
+        if kind == "worktree":
+            idle_min = _worktree_env_age_s("AIRULESET_WORKTREE_IDLE_MIN_AGE_S",
+                                           STALE_WORKTREE_IDLE_MIN_AGE_S)
+            rec = _worktree_recency_age_s(c.get("repo"), c.get("path"), now)
+            if rec is not None and rec <= idle_min:
+                entry["reason"] = ("active within %.1fh (idle threshold %.1fh) "
+                                   "-- kept (live-worker guard)"
+                                   % (rec / 3600.0, idle_min / 3600.0))
+                results.append(entry)
+                continue
+            if _worktree_in_live_use(c.get("path")):
+                entry["reason"] = "in live use (process rooted in tree) -- kept (live-worker guard)"
+                results.append(entry)
+                continue
         if dry_run:
             entry["reason"] = "would remove (dry-run)"
             results.append(entry)
