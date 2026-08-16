@@ -54,3 +54,53 @@ now exclude `needs-answer`/`needs-decision` tickets, which surface as `· U N`):
   bullet, and prefer a net-neutral/shrinking edit to the first sentence.
 - **The `gk` bucket's `READY-FOR-REVIEW` comment-fallback (#313 pt 2, in `cli_quals._slice_mine_and_handed`) keys on a PERMANENT signal — the comment's EXISTENCE — so any hand-off the gatekeeper processed by moving the LABEL while leaving the COMMENT stays counted as parked-with-gk FOREVER (#507).** Live: montalu3 `gk=19` while 0 tickets were genuinely parked; all 19 carried `needs-acceptance` (the odoo-erp "done = client saw it" state, #3145 — the gatekeeper moves `ready-for-review`→`needs-acceptance` and leaves the ticket OPEN, but the READY-FOR-REVIEW comment is never removed, and its needs-acceptance transition leaves NO recognized `**GATEKEEPER`/`## Gatekeeper` comment, so the fallback's last-signal-False invalidation never fires). Fix pattern: a `GATEKEEPER_PROCESSED_LABELS` tuple (mirror `USER_WAITING_LABELS`) whose members are EXCLUDED from the comment-fallback candidate walk (`processed_numbers`, mirror `bounce_numbers`) — the label-check already gives them `handed=False`, so they correctly become the stream's own workable `I N` (owner ruling "acceptance je práca streamu"), never gk. This is ONE derivation feeding footer + `/goal` stop-proof (#367), so it also raises the stop-proof count — intended, not a regression. **Accepted SAFE-direction residual (#507 review MAJOR, tracked as #508):** the label is a DELIBERATELY unreliable hand-off signal (the whole reason the comment fallback exists — a fork-no-merge label-add 403s, the auto-labeller can be broken), so a COMMENT-ONLY re-hand-off (fresh comment, no fresh label, needs-acceptance persists) is under-counted — but SAFELY (it lands in workable, so the loop keeps it alive, never a false backlog-empty; bounded + self-healing vs the permanent over-count). Distinguishing stale-vs-fresh needs a per-ticket timeline query (the #370 quota cost the fix rejected).
 - **The footer-refresh subprocess tests default to the OWN-account 3-qual slice, NOT the shared-account 1-qual slice the montalu incidents actually hit — a regression test for a shared-account footer bug MUST force the shared-account path or it silently tests the wrong topology (#507 review MINOR).** `_slice_quals` branches on `_gh_login(cwd) == MAINTAINER_GH_LOGIN`: the existing fake-`gh` scripts have no `*"api user"*` case, so `gh api user -q .login` falls to the catch-all `echo 16` → login `"16"` ≠ maintainer → the 3-qual `assignee/author/stream` path (which does NOT run the `len(quals)==1 and startswith("label:stream:")` recovery block). To exercise the REAL montalu (shared-account) topology — 1 qual `label:stream:<user>` + the recovery block — add `*"api user"*) echo "<maintainer>"` to the fake (`airuleset.MAINTAINER_GH_LOGIN`), plus a `*needs-gatekeeper,ready-for-review*) echo "[]"` case for the recovery candidate query. A shared-account test PASSING (non-None gk) is itself proof it took the 1-qual path: the 3-qual path would `failed=True` on the missing `assignee:@me` case (→ gk `None`).
+
+## Adding a THIRD parked bucket, mirroring the #468 U-bucket (#510, 2026-08-16)
+
+Learned adding the `W N` ops-wait bucket (a supervisor-set `ops-wait` label that
+leaves the workable count like the #468 `U N` user-waiting bucket, for a different
+parking reason — an external event/evidence instead of the user's answer):
+
+- **EVERY "workable backlog" number flows through ONE derivation, so a new parked
+  bucket costs ZERO `watchdog/goal.py` change — the dispatch's "keep your goal.py
+  touch minimal" was really "touch it NOT AT ALL".** The lane-guard nudge count
+  (`goal_lane_occupancy_nudge` → `_cached_backlog_count` → `backlog_fetch` =
+  `airuleset._watchdog_backlog_fetch`, which runs `core-quals`/`slice-quals
+  --count` as a SUBPROCESS), the footer `I N` (`cmd_tickets_status`), and the
+  `/goal` stop-proof ALL read the SAME `cli_quals` partition. So making a label
+  leave the partition's `workable` bucket excludes it from all three at once. The
+  extension is exactly the #468 shape: a label tuple (`OPS_WAIT_LABELS`, mirror
+  `USER_WAITING_LABELS`), a `_row_is_ops_wait` predicate, and a 3-way
+  `_partition_workable(rows) -> (workable, user_waiting, ops_wait)` that supersedes
+  the 2-way `_partition_user_waiting` at all 4 production call sites (footer×2 in
+  `airuleset.py`, `cmd_core_quals`/`cmd_slice_quals` in `cli_quals_cmd.py`);
+  KEEP `_partition_user_waiting` as a thin delegate `{**workable, **ops_wait},
+  waiting` so the existing #468 tests + facade stay byte-identical (for the
+  pre-#510 domain `ops_wait` is always empty → same result, same key order).
+  New footer flags: `entry["ops_wait"]` + a `statusbar._ops_wait_sfx` (`· W N`,
+  grey 245, hidden at 0) + `--ops-wait` list flags on both quals subcommands
+  (parallel to `--waiting`, which stays user-waiting-only — a #468 test locks that).
+- **The `/goal STOP CONDITIONS` templates in `skills/autopilot/SKILL.md` have TWO
+  caps, not one — a 4000-char HARD cap AND a ≥150-char HEALTHY-HEADROOM floor
+  (`test_goal_backlog_proof.py::TheTemplatesHaveHealthyCapHeadroom`, MIN_HEADROOM
+  =150, #384).** The full-authority template is the TIGHTEST (measured 160
+  headroom before this ticket) — an 86-char addition to it was BLOCKED at 74
+  headroom even though it was nowhere near 4000. Measure with Python `len()`
+  (CODE POINTS), never `awk length`/bytes (a `🏁` is 4 UTF-8 bytes but 1 code
+  point, so a byte count over-reads the headroom by ~3 per emoji × ~3 emoji per
+  template). With only ~10 chars to spend on the full-auth template, fold the new
+  flag into the EXISTING paste hint char-neutrally: `(paste \`core-quals
+  --waiting\` to list them)` → `(paste \`core-quals --waiting\`/\`--ops-wait\`)`
+  (drop " to list them" −13, add "/\`--ops-wait\`" +13). The reduced templates
+  auto-surface a new footer bucket via their `tickets-status` paste, so they only
+  need the parked-clause prose (`a \`gk N\`/\`U N\`/\`W N\` in it is parked`).
+- **The Mock-auto-vivify class (this file's own `getattr(args,"ops_wait",False)`
+  bullet) has its fix point at the HELPER DEFAULT DICTS, not just the inline
+  Mocks.** `test_authority_profiles.py`'s `_run`/`_drive` both build
+  `dict(count=True, list=False, waiting=False, extra=None)` then `.update(flags)`
+  — a single `replace_all` of `waiting=False, extra=None` → `waiting=False,
+  ops_wait=False, extra=None` fixes the ~29 inline `mk.Mock(...)` calls AND both
+  helper defaults in one edit (the helper-driven multi-line calls inherit the
+  default), leaving only the ONE multi-line direct `mk.Mock(...)` to hand-fix.
+  `test_stash_delivery.py`'s `waiting=` is an UNRELATED pane-state param — don't
+  touch it. `grep -c 'waiting=False, extra=None'` per file to confirm the count.
