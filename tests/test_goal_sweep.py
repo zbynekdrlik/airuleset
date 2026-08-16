@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd
 from watchdog import goal
-from watchdog import one_glance as og  # noqa: E402  (#486 G5)
 from watchdog import session_status as ss  # noqa: E402  (#486 G5)
 
 from _goal_arm_helpers import (  # noqa: E402
@@ -1662,4 +1661,70 @@ class TestGoalLaneParallelMismatch(unittest.TestCase):
         mismatches = [ln for ln in logs if ln.startswith("parallel-mismatch ")]
         self.assertEqual(len(mismatches), 1, logs)
         self.assertIn("-> render-blind", mismatches[0])
+
+    def test_structured_blind_divergence_flags_the_4mb_tail_caveat(self):
+        # GOAL_ARMED_CAP -> pane_goal_armed reads determinably True, while the
+        # heartbeat reads not-armed (goal_armed=False) -- the 4 MB-tail-
+        # susceptible direction the G1 follow-up predicted would surface here.
+        # Exactly one parallel-mismatch line, flagged caveat=4mb-tail so G6 reads
+        # it as the KNOWN heartbeat limitation, not "structure is unreliable".
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, "sess-mismatch-sb")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP)
+        rs, clw, cbc = self._patch_readers(self._hb("fresh", False, "working"),
+                                           0, 43)
+        with rs, clw, cbc:
+            logs = goal.goal_lane_sweep(1000, run=tmux, projects_dir=proj,
+                                        backlog_fetch=lambda cwd: 43, state={})
+        mismatches = [ln for ln in logs if ln.startswith("parallel-mismatch ")]
+        self.assertEqual(len(mismatches), 1, logs)
+        self.assertIn("-> structured-blind", mismatches[0])
+        self.assertIn("caveat=4mb-tail", mismatches[0])
+
+    def test_persistent_mismatch_is_deduped_across_sweeps_never_spams(self):
+        # THE adversarial "could the mismatch logger itself spam?" bound at the
+        # sweep level: a persistent render-blind divergence across two
+        # consecutive sweeps (60s apart, WELL inside the 1h re-assert window)
+        # with a SHARED state dict emits the dedicated parallel-mismatch line
+        # ONCE, not once per sweep.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, "sess-mismatch-persist")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP)
+        rs, clw, cbc = self._patch_readers(self._hb("stale", True, "working"),
+                                           0, 43)
+        state = {}
+        with rs, clw, cbc:
+            logs1 = goal.goal_lane_sweep(1000, run=tmux, projects_dir=proj,
+                                         backlog_fetch=lambda cwd: 43,
+                                         state=state)
+            logs2 = goal.goal_lane_sweep(1060, run=tmux, projects_dir=proj,
+                                         backlog_fetch=lambda cwd: 43,
+                                         state=state)
+        m1 = [ln for ln in logs1 if ln.startswith("parallel-mismatch ")]
+        m2 = [ln for ln in logs2 if ln.startswith("parallel-mismatch ")]
+        self.assertEqual(len(m1), 1, logs1)     # first sweep: one episode line
+        self.assertEqual(len(m2), 0, logs2)     # second sweep: deduped, no spam
+
+    def test_render_blind_mismatch_never_triggers_an_action(self):
+        # G5 is DIAGNOSTIC: the render `armed` verdict stays the sole ACTION
+        # gate. The #486 render-blind pane (footer not-armed while structure is
+        # stuck) is exactly where G5's evidence matters most -- and the render
+        # path still takes NO action there (armed is False -> the sweep skips the
+        # nudge). The mismatch line is pure evidence, never a keystroke.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, "sess-mismatch-noact")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP)
+        rs, clw, cbc = self._patch_readers(self._hb("stale", True, "working"),
+                                           0, 43)
+        with rs, clw, cbc:
+            logs = goal.goal_lane_sweep(1000, run=tmux, projects_dir=proj,
+                                        backlog_fetch=lambda cwd: 43, state={})
+        self.assertTrue(any(ln.startswith("parallel-mismatch ") for ln in logs),
+                        logs)
+        # render took NO action: no lane-occupancy nudge, and ZERO keystrokes.
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
 

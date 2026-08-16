@@ -227,3 +227,112 @@ def evaluate(now, sid, cwd, projects_dir, state, backlog_fetch, render_armed,
                   hb.goal_armed, hb.age_s, "")
     g = g._replace(line=format_line(loc, g, render_armed))
     return g, g.line
+
+
+# --------------------------------------------------------------------------- #
+# #486 G5 -- parallel-run mismatch evidence (DIAGNOSTIC; never gates an action)
+# --------------------------------------------------------------------------- #
+#
+# G3 made the structured predicate emit ONE decision line per candidate pane,
+# annotating the render footer's own read so a render<->structured divergence
+# is VISIBLE on the `one-glance` line. G5 runs both paths in parallel for a few
+# days on the live boxes and accumulates DEDICATED, DEDUPED evidence of every
+# genuine CONTRADICTION between them -- one greppable `parallel-mismatch` line
+# per divergence EPISODE (plus a bounded "still diverging" re-assert), carrying
+# which inputs differed -- so G6 can retire the render heuristics on real fleet
+# evidence, not a green suite. The render path stays the sole action gate here:
+# parallel-run OBSERVES, it never acts on the structured path.
+
+# A genuine render<->structured CONTRADICTION -- the two paths POSITIVELY
+# disagree about whether a /goal is armed on this pane. `kind`:
+#   "render-blind"     -- footer read not-armed (False) but the structured
+#                         state is armed (the #486 case: the render path would
+#                         SKIP this pane, missing a genuinely-armed -- possibly
+#                         STUCK -- session). The critical evidence for G6.
+#   "structured-blind" -- footer read armed (True) but the heartbeat read
+#                         not-armed. Subject to the KNOWN 4 MB-tail caveat: the
+#                         heartbeat's `goal_armed` comes from a single-shot ~4 MB
+#                         transcript-tail scan, so a /goal armed >4 MB back reads
+#                         `goal_armed=False` -- indistinguishable from a genuinely
+#                         cleared goal (no cheap on-disk signal separates them).
+#                         Flagged `caveat=4mb-tail` so the G6 reader treats this
+#                         CLASS as the known heartbeat limitation, never as proof
+#                         the structured path is unreliable.
+# `differ` embeds the structured verdict for render-blind, so a meaningful
+# transition (warming -> stuck as a worker drops away) re-emits rather than
+# dedups; `caveat` is None unless the 4 MB-tail class applies.
+Mismatch = namedtuple("Mismatch", "kind differ caveat")
+
+
+def classify_mismatch(g, render_armed):
+    """Return a ``Mismatch`` when the render footer and the STRUCTURED verdict
+    POSITIVELY contradict each other on armed-ness, else ``None``.
+
+    ONLY a genuine contradiction counts -- one side positively armed, the other
+    positively not. A side that merely LACKS DATA (render undeterminable /
+    heartbeat absent / goal_armed unknown) is a confidence GAP, not a
+    contradiction: the one-glance line and #475's `skip:armed-undeterminable`
+    already surface it, and logging it as a mismatch would flood the evidence
+    stream with exactly the non-signal G6 must not act on.
+    """
+    if render_armed is False and g.verdict in _STRUCTURED_ARMED:
+        # #486: the render path skips this pane silently; the structured state
+        # sees an armed lane candidate (possibly stuck).
+        return Mismatch("render-blind",
+                        "render=not-armed vs structured=%s" % g.verdict, None)
+    if render_armed is True and g.verdict == "not-armed":
+        # The heartbeat read not-armed while the footer read armed. This is the
+        # 4 MB-tail-susceptible direction (`goal_armed=False` also covers "arm
+        # is past the scanned tail"), so tag the class, never claim the cause.
+        return Mismatch("structured-blind",
+                        "render=armed vs structured=not-armed", "4mb-tail")
+    return None
+
+
+def mismatch_signature(mm):
+    """A stable dedup key for a mismatch's SEMANTIC state. Includes ``differ``
+    (which carries the structured verdict for render-blind) so a meaningful
+    transition re-emits, and ``caveat`` so a class change is never dedup'd
+    away."""
+    return "%s|%s|%s" % (mm.kind, mm.differ, mm.caveat or "-")
+
+
+def format_mismatch_line(loc, g, render_armed, mm):
+    """The single greppable ``parallel-mismatch`` evidence line -- pane, the
+    mismatch kind, both paths' reads, every structured number, which inputs
+    differed, and any known caveat. The G6 deletion decision reads THIS stream
+    to judge whether the structured path can retire the render one."""
+    line = ("parallel-mismatch %s -> %s (render=%s structured=%s hb=%s armed=%s "
+            "workers=%s backlog=%s idle=%s marker=%s; differ=%s" % (
+                loc, mm.kind, _render_word(render_armed), g.verdict,
+                g.heartbeat_state, _armed_word(g.goal_armed),
+                _num_word(g.live_workers), _num_word(g.backlog),
+                _idle_word(g.idle_s), g.marker, mm.differ))
+    if mm.caveat:
+        line += "; caveat=%s" % mm.caveat
+    return line + ")"
+
+
+def mismatch_evidence(loc, g, render_armed, *, prev, now, reassert_s):
+    """Deduped ``(line, new_state)`` for the parallel-run mismatch evidence.
+
+    ``prev`` is the pane's prior ``(signature, emit_ts)`` state or ``None``. A
+    NEW or CHANGED mismatch emits a line immediately; a PERSISTENT unchanged one
+    re-emits at most once per ``reassert_s`` (bounded -- the point of a
+    parallel-run evidence log is one line per divergence EPISODE plus a periodic
+    "still diverging" heartbeat, never a line every 60 s sweep, which is exactly
+    the per-sweep spam that made the old pane-text guard unreadable). Returns
+    ``(None, None)`` when the two paths AGREE (no contradiction), so the caller
+    DROPS the pane's dedup state and a later re-occurrence counts as a fresh
+    episode. Pure: no I/O, deterministic, never raises (it reads only the
+    already-resolved ``OneGlance``)."""
+    mm = classify_mismatch(g, render_armed)
+    if mm is None:
+        return None, None
+    sig = mismatch_signature(mm)
+    if prev is not None and prev[0] == sig and (now - prev[1]) < reassert_s:
+        # Persistent, unchanged, within the re-assert window -> keep the ORIGINAL
+        # emit ts (so re-assert fires reassert_s after the episode began, not
+        # after each suppressed sweep) and journal nothing.
+        return None, prev
+    return format_mismatch_line(loc, g, render_armed, mm), (sig, now)
