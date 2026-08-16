@@ -1600,15 +1600,36 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertEqual(rec.get("lineff"), 0, rec)
         self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
 
-    def test_backoff_resets_when_a_lane_drops_509(self):
-        # A deep-backoff lane whose live-worker count DROPPED (freed capacity)
-        # resets (re-probe).
+    def test_backoff_does_not_reset_on_a_bare_lane_drop_509(self):
+        # #509 adversarial review (both reviewers converged): a bare lane DROP does
+        # NOT reset the streak. On an un-liftable backlog a worker completing with
+        # nothing to replace it (count 3->1) is the normal "nothing to lift" churn;
+        # resetting on it would re-open the every-15-min burn. So at streak 3 the
+        # interval stays 120 min: 20 min elapsed -> still backed off (skip), streak
+        # unchanged, NO nudge. (Under the rejected drop=reset the interval would
+        # collapse to 15 min and it would fire at 20 min.)
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {"ln": 3, "llast": now, "lineff": 3, "lnw": 3, "lnb": 37}
         logs, owns, tmux = self._undersat_call(37, now + 20 * 60, tmtime, rec, 1, 1)
-        self.assertEqual(rec.get("lineff"), 0, rec)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(rec.get("lineff"), 3, rec)   # streak NOT reset by a drop
+        self.assertTrue(any("skip:ineffective-backoff" in ln for ln in logs), logs)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
+    def test_surplus_floor_boundary_is_exactly_five_509(self):
+        # #509 review MINOR-2 (both reviewers): lock GOAL_LANE_UNDERSAT_SURPLUS==5
+        # at the boundary so a `<`->`<=` off-by-one is caught. surplus 4 (backlog
+        # 6, 2 workers) skips; surplus 5 (backlog 7, 2 workers) nudges (design:
+        # backlog exceeds lanes by >=5 fills).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        logs4, _, tmux4 = self._undersat_call(6, now, tmtime, {}, 2, 2)
+        self.assertTrue(any("skip:surplus-floor" in ln for ln in logs4), logs4)
+        self.assertEqual(tmux4.sent, [])
+        logs5, _, tmux5 = self._undersat_call(7, now, tmtime, {}, 2, 2)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs5), logs5)
+        self.assertFalse(any("skip:surplus-floor" in ln for ln in logs5), logs5)
 
     def test_backoff_holds_at_cap_never_silent_509(self):
         # Anti-silence (#134): at the widest schedule stage the interval HOLDS and

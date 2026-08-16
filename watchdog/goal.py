@@ -1380,8 +1380,11 @@ GOAL_LANE_UNDERSAT_SURPLUS = 5
 # staged-schedule PATTERN (GOAL_LANE_STASH_ABORT_BACKOFF_S / #502 limit-backoff):
 # an explicit tuple of widening intervals, min(streak, len-1) indexing. The FIRST
 # stage equals GOAL_LANE_INTERVAL_S so the first repeat is unchanged; the streak
-# resets the moment a nudge DID produce a lane, the backlog GREW, or a lane DROPPED
-# (spare capacity) -- the #509 reset conditions. NO phone ping (unlike the
+# resets the moment a nudge DID produce a lane (the worker count ROSE) or the
+# backlog GREW. A bare lane DROP does NOT reset -- a worker completing on an
+# un-liftable backlog with nothing to replace it is the normal "nothing to lift"
+# churn, and resetting on it would re-open the burn (#509 adversarial review). NO
+# phone ping (unlike the
 # stash-abort give-up): a fleet as full as its workable backlog allows is the
 # healthy steady state, not an error -- pinging it would be the exact noise this
 # fix removes; the journalled decision line every sweep is the anti-silence.
@@ -1399,17 +1402,25 @@ def _lane_effective_interval(ineffective_streak):
 
 
 def _lane_effectiveness(rec, eff_workers, backlog_n):
-    """#509 -- did the LAST under-saturated nudge move the fleet? None when there
-    is no comparable prior nudge (rec carries no baseline). Else True when STATE
-    MOVED (the structured live-worker count CHANGED -- a lane appeared OR dropped
-    -- or the backlog grew: all "re-probe / making progress" -> reset the streak)
-    or False (workers flat AND backlog not grown -> the nudge produced no new
-    lane)."""
+    """#509 -- did the LAST under-saturated nudge make PROGRESS worth re-probing?
+    None when there is no comparable prior nudge (rec carries no baseline). Else
+    True when a lane genuinely APPEARED (the structured live-worker count ROSE --
+    the nudge worked) OR the backlog GREW (genuine new work): reset the streak.
+    False otherwise -- workers flat, OR a lane DROPPED, AND the backlog did not
+    grow -> the nudge produced no new lane, keep backing off.
+
+    A bare DROP deliberately does NOT reset (#509 adversarial review, both
+    reviewers converged): on a large un-liftable backlog a worker COMPLETING with
+    nothing to replace it (count N->N-1) is the normal "nothing to lift" churn, so
+    resetting on it would re-open the every-15-min burn this fix exists to kill.
+    Genuinely-new work is caught by the backlog-grow arm; a freed lane the
+    supervisor keeps declining to fill is not new dispatchable work, and the
+    120-min cap re-probe bounds how long a newly-liftable backlog waits."""
     prev_w = rec.get("lnw")
     prev_b = rec.get("lnb")
     if prev_w is None or prev_b is None:
         return None
-    return (eff_workers != prev_w) or (backlog_n > prev_b)
+    return (eff_workers > prev_w) or (backlog_n > prev_b)
 
 
 def _lane_cooldown_decision(rec, now, under_saturated, eff_workers, backlog_n,
