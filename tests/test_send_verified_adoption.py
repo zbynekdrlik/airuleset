@@ -779,5 +779,19 @@ class SubagentNudgeAdoption(unittest.TestCase):
         self.assertNotIn(self.PANE, state.get("janitor_watch", {}))
 
 
+# #505 — the two card_flags.py flag-cluster bare-box sites (_nudge_repo_pane /
+# _deliver_flag_prompt_to_exact_session) adopt send_verified. The end-to-end
+# caller-threading + janitor-mark tests (WHICH transcript, True vs False ->
+# dreact_done, mark set-on-swallow / cleared-on-success) live in
+# test_discord_reply.py::DeliverDiscordRepliesFlagReactSendVerified. No
+# _JANITOR_OWN_PREFIXES registration for the flag prompt: its head is a
+# natural-language sentence and `_janitor_recover` reads the box TAIL
+# (_input_line_text), so a wrapped flag prompt's head is invisible to it — a
+# head-prefix would be a #501-class dead branch (the two adversarial reviews of
+# #505 verified this empirically). The wrapped residue is instead cleaned by
+# send_verified's own _undo_and_release_slot; the systemic janitor head-read
+# fix is tracked in #506.
+
+
 if __name__ == "__main__":
     unittest.main()

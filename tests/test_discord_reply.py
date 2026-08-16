@@ -1584,6 +1584,29 @@ class CardReopenFlow(unittest.TestCase):
 IDLE_298 = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
 
 
+def _write_session_transcript(projects_dir, sid, cwd):
+    """A real session transcript at `_transcript_for_session(projects_dir, sid,
+    cwd)` so the #505 flag-cluster sites resolve a tpath (the file need only
+    EXIST — send_verified is faked in these tests)."""
+    d = Path(projects_dir) / wd.encode_project_dir(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    p.write_text('{"type":"assistant","message":{"content":"prev"}}\n')
+    return p
+
+
+def _sv_recorder(result=True):
+    """Stand-in for `watchdog.send_verified` (#505 caller-threading tests):
+    records every call's pid/text/tpath, returns a fixed result."""
+    calls = []
+
+    def sv(pid, text, run=None, tpath=None, sleep_fn=None, logs=None):
+        calls.append({"pid": pid, "text": text, "tpath": tpath})
+        return result
+    sv.calls = calls
+    return sv
+
+
 class DeliverDiscordRepliesCardReopen(unittest.TestCase):
     OWNER = "773451844110385193"
 
@@ -1592,6 +1615,8 @@ class DeliverDiscordRepliesCardReopen(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.qpath = str(Path(self.tmp.name) / "q.json")
         self.cpath = str(Path(self.tmp.name) / "cards.json")
+        self.proj = str(Path(self.tmp.name) / "projects")
+        Path(self.proj).mkdir(parents=True, exist_ok=True)
         import unittest.mock as m
         self.env = {"DISCORD_BOT_TOKEN": "tok",
                     "DISCORD_MENTION_ZBYNEK": self.OWNER,
@@ -1689,13 +1714,21 @@ class DeliverDiscordRepliesCardReopen(unittest.TestCase):
         state = {}
         cwd_by_sid = {"sid-live": "/home/x/airuleset"}
         panes = {"sid-live": ("%1", IDLE_298)}
-        with m.patch.object(notify, "repo_name_for", lambda cwd, run=None: "airuleset"):
+        # #505: the reopen nudge now sends transcript-proof (send_verified),
+        # NOT a raw `send-keys -l`, so this asserts the site verifies against
+        # the found pane's OWN sid-resolved transcript (the tpath the caller
+        # threads) and carries the card-reopen text.
+        tpath = _write_session_transcript(self.proj, "sid-live", "/home/x/airuleset")
+        sv = _sv_recorder(result=True)
+        with m.patch.object(notify, "repo_name_for", lambda cwd, run=None: "airuleset"), \
+             m.patch.object(wd, "send_verified", sv):
             wd.deliver_discord_replies(
                 time.time(), self._run, state, panes, dry_run=False,
                 discord_fetch=lambda ch, t: [msg], card_gh_fn=self._gh,
-                cwd_by_sid=cwd_by_sid)
-        literal = [a for a in self.sent if "-l" in a]
-        self.assertTrue(any("9" in a[-1] for a in literal), self.sent)
+                cwd_by_sid=cwd_by_sid, projects_dir=self.proj)
+        self.assertEqual(len(sv.calls), 1, sv.calls)
+        self.assertEqual(str(sv.calls[0]["tpath"]), str(tpath))
+        self.assertIn("9", sv.calls[0]["text"])
 
     def test_no_cards_no_questions_is_a_noop(self):
         logs = wd.deliver_discord_replies(
@@ -1839,6 +1872,109 @@ class DeliverDiscordRepliesFlagReact(unittest.TestCase):
             discord_fetch=lambda ch, t: [self._flagged_msg()],
             reaction_fetch=self._react_fetch([{"id": self.OWNER}]))
         self.assertEqual(self.react_calls, [])
+
+
+class DeliverDiscordRepliesFlagReactSendVerified(unittest.TestCase):
+    """(#505) The two card_flags flag-cluster bare-box sites now send
+    transcript-proof (`send_verified`) and MARK #372 janitor provenance. These
+    caller-level tests lock, end to end, that `deliver_discord_replies` threads
+    the EXACT-sid transcript into each delivery path (the B#1 dropped-`tpath=`
+    coverage-gap guard) and only BOOKS the react on a VERIFIED submit — a
+    swallow leaves it un-booked so the next sweep re-fires it whole. On the
+    pre-adoption code the site calls raw `send_continue`, so the recorder is
+    never called and every assertion here is RED."""
+
+    OWNER = "773451844110385193"
+    IDLE = "● Hotovo.\n❯ \n  ctx ███░\n"
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.qpath = str(Path(self.tmp.name) / "q.json")
+        self.cpath = str(Path(self.tmp.name) / "cards.json")
+        self.proj = str(Path(self.tmp.name) / "projects")
+        Path(self.proj).mkdir(parents=True, exist_ok=True)
+        self.env = {"DISCORD_BOT_TOKEN": "tok",
+                    "DISCORD_MENTION_ZBYNEK": self.OWNER,
+                    "DISCORD_NOTIFICATION_CHANNEL_ZBYNEK": "777001"}
+        for tgt, val in [("_questions_path", lambda: self.qpath),
+                         ("_cards_path", lambda: self.cpath),
+                         ("_read_env", lambda: dict(self.env))]:
+            p = m.patch.object(notify, tgt, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _flagged(self, mid, content="stará správa"):
+        return {"id": mid, "content": content,
+                "reactions": [{"emoji": {"name": "❓"}, "count": 1}]}
+
+    def _owner_reacted(self):
+        return lambda ch, mid, emoji, token: [{"id": self.OWNER}]
+
+    def _drive(self, sid, panes, cwd_by_sid, discord_fetch, sv, run=None):
+        run = run or (lambda a, *x, **k: "")
+        with m.patch.object(wd, "capture_pane", return_value=self.IDLE), \
+             m.patch.object(wd, "pane_in_mode", return_value=False), \
+             m.patch.object(wd, "_safe_to_bounce_nudge", return_value=True), \
+             m.patch.object(wd, "pane_at_idle_prompt", return_value=True), \
+             m.patch.object(wd, "send_verified", sv):
+            state = {}
+            logs = wd.deliver_discord_replies(
+                time.time(), run, state, panes, dry_run=False,
+                discord_fetch=discord_fetch, reaction_fetch=self._owner_reacted(),
+                cwd_by_sid=cwd_by_sid, projects_dir=self.proj)
+        return state, logs
+
+    # ---- exact-asking-session flag prompt (site: _deliver_flag_prompt...) ----
+    def test_exact_session_verifies_against_the_sid_transcript_and_books(self):
+        sid, cwd = "sidexact1", "/home/newlevel/devel/proj-a"
+        tpath = _write_session_transcript(self.proj, sid, cwd)
+        notify.record_question("888010", "777001", sid, cwd, path=self.qpath)
+        sv = _sv_recorder(result=True)
+        state, logs = self._drive(sid, {sid: ("%9", self.IDLE)}, {sid: cwd},
+                                  lambda ch, t: [self._flagged("888010")], sv)
+        self.assertEqual(len(sv.calls), 1, logs)
+        self.assertEqual(str(sv.calls[0]["tpath"]), str(tpath),
+                         "the exact-session flag prompt must verify against the "
+                         "asking session's own sid-resolved transcript")
+        self.assertTrue(sv.calls[0]["text"].startswith(
+            "Užívateľ označil túto tvoju Discord správu"))
+        self.assertIn("888010", state.get("dreact_done", []),
+                      "a verified flag react is booked done")
+        self.assertNotIn("%9", state.get("janitor_watch", {}),
+                         "a verified submit clears the #372 provenance mark")
+
+    def test_exact_session_swallow_does_not_book_the_react(self):
+        sid, cwd = "sidexact2", "/home/newlevel/devel/proj-b"
+        _write_session_transcript(self.proj, sid, cwd)
+        notify.record_question("888011", "777001", sid, cwd, path=self.qpath)
+        sv = _sv_recorder(result=False)
+        state, _ = self._drive(sid, {sid: ("%9", self.IDLE)}, {sid: cwd},
+                               lambda ch, t: [self._flagged("888011")], sv)
+        self.assertNotIn("888011", state.get("dreact_done", []),
+                         "a swallowed flag prompt must NOT be booked — it re-fires")
+        self.assertIn("%9", state.get("janitor_watch", {}),
+                      "a swallowed submit leaves the janitor mark as the residue backstop")
+
+    # ---- repo-fallback flag prompt (card kind -> _nudge_repo_pane) ----
+    def test_repo_fallback_verifies_against_the_found_pane_transcript(self):
+        sid, cwd = "sidrepo1", "/home/newlevel/devel/proj-c"
+        tpath = _write_session_transcript(self.proj, sid, cwd)
+        notify.record_card_message("888012", "777001", "zbynekdrlik/airuleset",
+                                   9, now=time.time(), path=self.cpath)
+        sv = _sv_recorder(result=True)
+
+        def run(argv, *a, **k):
+            if list(argv[:2]) == ["git", "-C"] and "remote" in argv:
+                return "git@github.com:zbynekdrlik/airuleset.git"
+            return ""
+        state, logs = self._drive(sid, {sid: ("%9", self.IDLE)}, {sid: cwd},
+                                  lambda ch, t: [self._flagged("888012")], sv, run=run)
+        self.assertEqual(len(sv.calls), 1, logs)
+        self.assertEqual(str(sv.calls[0]["tpath"]), str(tpath),
+                         "the repo-fallback flag prompt must verify against the "
+                         "found pane's own sid-resolved transcript")
+        self.assertIn("888012", state.get("dreact_done", []))
 
 
 if __name__ == "__main__":

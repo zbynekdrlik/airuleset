@@ -215,12 +215,17 @@ class ResidentBackReferencesResolveAtCallTime(unittest.TestCase):
     catches it (step-4(c) lesson)."""
 
     def test_nudge_repo_pane_delivers_through_the_tmux_pane_seams(self):
+        # #505: the bare-box branch now sends transcript-proof (send_verified),
+        # NOT a raw send_continue, so a swallowed Enter is no longer booked
+        # delivered. This asserts the site routes through send_verified.
         with mock.patch.object(watchdog, "capture_pane", return_value="CAP") as cp, \
              mock.patch.object(watchdog, "pane_in_mode", return_value=False) as pim, \
              mock.patch.object(watchdog, "_safe_to_bounce_nudge",
                                return_value=True) as sb, \
              mock.patch.object(watchdog, "pane_at_idle_prompt",
                                return_value=True) as idle, \
+             mock.patch.object(watchdog, "send_verified",
+                               return_value=True) as sv, \
              mock.patch.object(watchdog, "send_continue") as sc:
             ok = watchdog._nudge_repo_pane("%1", "/cwd", None, "hi", False, "/proj")
         self.assertTrue(ok)
@@ -228,7 +233,10 @@ class ResidentBackReferencesResolveAtCallTime(unittest.TestCase):
         pim.assert_called_once()
         sb.assert_called_once()
         idle.assert_called_once_with("CAP")
-        sc.assert_called_once_with("%1", "hi", None)
+        sc.assert_not_called()
+        self.assertEqual(sv.call_count, 1)
+        self.assertEqual(sv.call_args.args[0], "%1")
+        self.assertEqual(sv.call_args.args[1], "hi")
 
     def test_nudge_repo_pane_stashes_when_not_at_idle_prompt(self):
         with mock.patch.object(watchdog, "capture_pane", return_value="CAP"), \
@@ -244,17 +252,23 @@ class ResidentBackReferencesResolveAtCallTime(unittest.TestCase):
     def test_deliver_flag_prompt_to_exact_session_uses_job7_gate_seams(self):
         # This delivery path uses job 7's OWN gate (pane_at_idle_prompt /
         # _try_stash_nudge) — NOT _safe_to_bounce_nudge. Patch the seams and drive
-        # the send branch.
+        # the send branch. #505: the bare-box branch sends transcript-proof
+        # (send_verified), NOT a raw send_continue.
         with mock.patch.object(watchdog, "capture_pane", return_value="CAP") as cp, \
              mock.patch.object(watchdog, "pane_in_mode", return_value=False), \
              mock.patch.object(watchdog, "pane_at_idle_prompt",
                                return_value=True), \
+             mock.patch.object(watchdog, "send_verified",
+                               return_value=True) as sv, \
              mock.patch.object(watchdog, "send_continue") as sc:
             ok = watchdog._deliver_flag_prompt_to_exact_session(
                 "%2", None, "flag prompt", False)
         self.assertTrue(ok)
         cp.assert_called_once_with("%2", None)
-        sc.assert_called_once_with("%2", "flag prompt", None)
+        sc.assert_not_called()
+        self.assertEqual(sv.call_count, 1)
+        self.assertEqual(sv.call_args.args[0], "%2")
+        self.assertEqual(sv.call_args.args[1], "flag prompt")
 
     def test_deliver_flag_prompt_stashes_when_not_at_idle_prompt(self):
         with mock.patch.object(watchdog, "capture_pane", return_value="CAP"), \

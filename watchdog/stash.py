@@ -949,6 +949,19 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
 #                             re-fires it next sweep), never SUBMITTED in place —
 #                             the #501 own-submit path stays scoped to the
 #                             supervisor's own lane/bounce/gkreq nudges.
+# (#505) the #297 flag prompt (chunk-typed, up to 1183c) was NOT registered here.
+# Its head is a NATURAL-LANGUAGE Slovak sentence, so the only registerable
+# fingerprint is that head itself — but `_janitor_recover` recognizes an own
+# residue via `_input_line_text` (the box TAIL, the #193 endswith contract), and
+# a wrapped flag prompt's head sits on the HEAD row, ABSENT from the tail: a
+# head-prefix here would be a #501-class DEAD branch (verified empirically — the
+# same tail-vs-head bug the `lane-check: `/`stuck-check: ` prefixes above ALSO
+# latently carry against a wrapped residue). The wrapped flag-prompt residue is
+# instead cleaned by `send_verified`'s OWN `_undo_and_release_slot` (its
+# `_typed_landed` matches the wrapped tail via `endswith`), and a collapsed-paste
+# residue is reclaimed prefix-free by `_PASTED_PLACEHOLDER_RX` under the per-send
+# janitor mark — so no prefix is needed. The systemic janitor head-read fix (which
+# would revive the wrapped reclaim for ALL these prefixes) is tracked in #506.
 _JANITOR_OWN_PREFIXES = ("/goal ", "/compact", "lane-check: ",
                          "bounce-backstop: ", "gk-request backstop: ",
                          "stuck-check: ")
