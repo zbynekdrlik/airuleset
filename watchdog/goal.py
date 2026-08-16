@@ -1089,6 +1089,19 @@ GOAL_LANE_IDLE_S = 15 * 60
 GOAL_LANE_INTERVAL_S = 15 * 60
 GOAL_LANE_MAX_NUDGES = 2
 GOAL_LANE_LIVE_WINDOW_S = 15 * 60
+# #486 G5 -- a PERSISTENT render<->structured mismatch re-emits its dedicated
+# `parallel-mismatch` evidence line at most once per hour (a state CHANGE always
+# emits at once). Bounded so a long-lived divergence (e.g. the 4 MB-tail caveat
+# on a long armed loop, live on this box) leaves periodic episode evidence
+# without the per-sweep journal spam that made the old pane-text guard
+# unreadable -- the exact "could the mismatch logger itself spam?" hazard.
+GOAL_LANE_MISMATCH_REASSERT_S = 3600
+# #486 G5 -- age-gate the per-sid mismatch dedup dict so a session that DIED
+# while still diverging (its pane vanishes, so it is never revisited to resolve)
+# cannot leak its entry for the box's lifetime. Set well above the re-assert
+# window (a live diverging session refreshes its ts at least every re-assert, so
+# this never prunes a live one); reaped once per sweep.
+GOAL_LANE_MISMATCH_STATE_TTL_S = 6 * 3600
 
 # #442 -- the lane-fill path's OWN "live conversation" definition. The
 # shared check's default window (`GOAL_AUTOARM_RECENT_HUMAN_S`, 30 min) is
@@ -1826,6 +1839,17 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     time_fn = time_fn or time.monotonic
     state = state if state is not None else {}
     recs = state.setdefault("goal_lane", {})
+    # #486 G5 -- per-sid dedup state for the parallel-run mismatch evidence
+    # (sid -> (signature, emit_ts)). Its own namespace next to `goal_lane`
+    # because a mismatch can fire on a pane the render path treats as a
+    # non-candidate (armed is False/None), which never gets a `recs[sid]` entry.
+    # Persists across sweeps via load_state/save_state, so the dedup + re-assert
+    # window work cross-sweep.
+    mrecs = state.setdefault("goal_mismatch", {})
+    # Reap dead-session entries once per sweep (a session that died while still
+    # diverging is never revisited to resolve, so its entry would otherwise leak
+    # forever -- #486 G5 review 🟡). Age-gated well above the re-assert window.
+    _one_glance.prune_mismatch_state(mrecs, now, GOAL_LANE_MISMATCH_STATE_TTL_S)
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
@@ -1866,6 +1890,24 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 freshness_s=GOAL_LANE_LIVE_WINDOW_S)
             if _one_glance.is_informative(_glance, armed):
                 logs.append(gline)
+            # #486 G5 -- the DEDICATED, deduped parallel-run mismatch evidence.
+            # When the render footer and the structured verdict POSITIVELY
+            # contradict each other on armed-ness, journal ONE greppable
+            # `parallel-mismatch` line per divergence EPISODE (+ a bounded hourly
+            # re-assert), so G6 retires the render heuristics on real fleet
+            # evidence rather than a green suite. Still DIAGNOSTIC: the render
+            # `armed` verdict below stays the sole ACTION gate until G6. A
+            # resolved mismatch DROPS the pane's dedup state so a re-occurrence
+            # counts as a fresh episode.
+            mline, mstate = _one_glance.mismatch_evidence(
+                loc, _glance, armed, prev=mrecs.get(sid), now=now,
+                reassert_s=GOAL_LANE_MISMATCH_REASSERT_S)
+            if mstate is None:
+                mrecs.pop(sid, None)
+            else:
+                mrecs[sid] = mstate
+            if mline:
+                logs.append(mline)
         except Exception as _e:
             logs.append("one-glance %s -> error: %s" % (loc, _e))
         if armed is not True:
