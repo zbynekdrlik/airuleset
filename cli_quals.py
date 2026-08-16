@@ -383,23 +383,85 @@ def _row_is_user_waiting(labels):
     return any(lb in names for lb in USER_WAITING_LABELS)
 
 
-def _partition_user_waiting(rows):
-    """Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
-    (`{number: {"number","title","createdAt","labels"}}`) into
-    `(workable, waiting)` by USER_WAITING_LABELS on each row.
+# The label a stream/supervisor applies to an OPS-WAIT / evidence-gated ticket:
+# open + technically "workable", but really BLOCKED on an external event or
+# evidence (multi-day evidence collection, a foreign-session relaunch, an
+# operational confirmation) with NO dispatchable code lane AND no automated
+# completion signal (#510; concrete origin: #499-class ops tickets the #509
+# lane-nudge surplus-floor comment already named as un-distinguishable). Advisory
+# state the SUPERVISOR sets AND clears itself with evidence — never auto-applied.
+#
+# Mirrors the #468 U-bucket's SURFACE-ONLY treatment EXACTLY: like
+# USER_WAITING_LABELS it LEAVES the workable `I N` / `core-quals --count` /
+# lane-guard count (which runs those commands) and surfaces as its OWN `W N`
+# footer bucket + `core-quals --ops-wait`; the loop PARKS on it (tracked, listed,
+# never claimed backlog-empty past it, never blocks 🏁) — the only difference from
+# the U-bucket being WHY it is parked (an external event/evidence vs the user's
+# answer). UNLIKE the fully-EXCLUDED AUTOPILOT_SKIP_EXCL / ops-channel it stays
+# tracked, listed and counted (in W N). A one-member tuple mirroring
+# USER_WAITING_LABELS's shape, so a future second ops-wait synonym is a one-line add.
+#
+# 🏁/re-entry (resolved on #510, the user's 2026-08-16 decision "mirror the
+# U-bucket exactly"): ops-wait LEAVES the count, so when it is the ONLY remaining
+# backlog the 🏁 proof CAN fire and the loop disarms. Unlike the U-bucket (whose
+# re-entry trigger is the user's routed Discord answer), ops-wait has no automatic
+# re-entry — the SUPERVISOR clearing the label with evidence re-enters the ticket,
+# a human action exactly parallel to the user answering a U-bucket question. The
+# ticket is never lost (open + surfaced in W N / --ops-wait / the disarm report).
+OPS_WAIT_LABELS = ("ops-wait",)
 
-    ONE derivation, never two queries: both halves come from the SAME
-    already-fetched set, so the footer's `I N`/`U N` and the /goal stop-proof's
-    workable count / user-waiting list cannot silently drift (#367 lesson — the
-    exact reason a search-exclusion + separate positive query was rejected).
-    Extends the repo's own established client-side-partition pattern
-    (`_slice_mine_and_handed` splits handed/unhandled from one fetch;
-    `_row_action`/`_stream_owner_of` partition by ownership) — no new mechanism."""
-    workable, waiting = {}, {}
+
+def _row_is_ops_wait(labels):
+    """True if `labels` (a gh --json labels value: a list of {'name': ...} dicts,
+    or None/malformed) carries any OPS_WAIT_LABELS label. Same
+    unreadable→workable SAFE-SIDE convention as `_row_is_user_waiting`: a
+    missing/unreadable value reads as NOT ops-wait (→ workable), so a failed
+    label read never hides a ticket from this box's own responsibility."""
+    names = {(lb or {}).get("name") for lb in (labels or [])
+             if isinstance(lb, dict)}
+    return any(lb in names for lb in OPS_WAIT_LABELS)
+
+
+def _partition_workable(rows):
+    """Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
+    (`{number: {"number","title","createdAt","labels"}}`) THREE ways:
+    `(workable, user_waiting, ops_wait)`. Both the user-waiting (#468) and the
+    ops-wait (#510) buckets LEAVE `workable` — they are parked (on the user's
+    answer / on an external event) and surface as the footer's `U N` / `W N`
+    buckets and `--waiting` / `--ops-wait`, never in the workable count.
+
+    ONE derivation, never independent queries: all three halves come from the
+    SAME already-fetched rows, so the footer's `I N`/`U N`/`W N`, the /goal
+    stop-proof's workable count, and the lane guard (which runs `core-quals`/
+    `slice-quals --count`) cannot silently drift (#367/#468 lesson — the exact
+    reason a search-exclusion + separate positive query was rejected). Extends
+    the repo's own established client-side-partition pattern — no new mechanism.
+
+    PRECEDENCE: a row carrying BOTH a user-waiting AND an ops-wait label goes to
+    `user_waiting` (checked first). Both leave `workable`, so the COUNT is
+    identical either way; the precedence only decides which DISPLAY bucket the
+    row lands in, and a pending user answer is the more actionable of the two."""
+    workable, user_waiting, ops_wait = {}, {}, {}
     for number, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None
-        (waiting if _row_is_user_waiting(labels) else workable)[number] = row
-    return workable, waiting
+        if _row_is_user_waiting(labels):
+            user_waiting[number] = row
+        elif _row_is_ops_wait(labels):
+            ops_wait[number] = row
+        else:
+            workable[number] = row
+    return workable, user_waiting, ops_wait
+
+
+def _partition_user_waiting(rows):
+    """Back-compat 2-way split `(workable, waiting)` by USER_WAITING_LABELS,
+    where `workable` still includes any ops-wait rows (the caller that needs the
+    3-way split — footer/count/lane — uses `_partition_workable` directly). Kept
+    as a thin delegate over `_partition_workable` so the user-waiting label logic
+    has ONE definition (#468). `workable | ops_wait` is byte-for-byte the pre-#510
+    behaviour for any caller that only cares about the user-waiting axis."""
+    workable, waiting, ops_wait = _partition_workable(rows)
+    return {**workable, **ops_wait}, waiting
 
 
 def _authority_marker(cwd=None):

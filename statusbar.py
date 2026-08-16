@@ -167,6 +167,22 @@ def _user_waiting_sfx(cache):
     return ""
 
 
+def _ops_wait_sfx(cache):
+    """The '· W N' suffix — tickets parked on an external event / evidence
+    (`ops-wait`), split OUT of the workable `I N` like the #468 `U N` bucket but
+    for a DIFFERENT parking reason: blocked on an external event / evidence with
+    no dispatchable code lane and no automated completion signal, not on the
+    user's answer (#510). Its OWN bucket (pattern `skip K` / `U N`), grey (245,
+    the exclusion-badge family — not this box's urgent workable), hidden at 0.
+
+    Schema-compatible: a stale/legacy cache written before #510 carries no
+    `ops_wait` key, so `.get(...)` is None → hidden (never a crash, never W 0)."""
+    w = cache.get("ops_wait")
+    if isinstance(w, int) and w > 0:
+        return " \033[38;5;245m· W %d\033[0m" % w
+    return ""
+
+
 def tickets_segment(cwd, now=None, home=None, spawn=True):
     """The GitHub-tickets statusline segment for the session at `cwd`
     (label shortened 'Issues' -> 'I', #223): 'I N' where N is the LIVE
@@ -239,8 +255,9 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
 
     open_n = cache.get("open")
     if isinstance(open_n, int):
-        return "\033[38;5;75mI %d\033[0m%s%s%s" % (
-            open_n, _user_waiting_sfx(cache), _stream_split_sfx(cache), skip_sfx)
+        return "\033[38;5;75mI %d\033[0m%s%s%s%s" % (
+            open_n, _user_waiting_sfx(cache), _ops_wait_sfx(cache),
+            _stream_split_sfx(cache), skip_sfx)
     return ""
 
 

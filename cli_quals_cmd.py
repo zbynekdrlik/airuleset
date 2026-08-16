@@ -324,7 +324,8 @@ def cmd_slice_quals(args):
     want_count = getattr(args, "count", False)
     want_list = getattr(args, "list", False)
     want_waiting = getattr(args, "waiting", False)
-    if not (want_count or want_list or want_waiting):
+    want_ops_wait = getattr(args, "ops_wait", False)
+    if not (want_count or want_list or want_waiting or want_ops_wait):
         for q in quals:
             print(q)
         return
@@ -371,11 +372,18 @@ def cmd_slice_quals(args):
     # the workable `--count` (never double-counted as handed-off) and surface via
     # `--waiting` / the footer's `U N`. DEFAULT path only, mirroring core-quals
     # and the `not extra`-scoping of `_slice_mine_and_handed`'s own enrichment.
+    # #510: also partition ops-wait (external-event/evidence) tickets out of the
+    # workable slice, alongside #468's user-waiting split — both leave `--count`/
+    # `--list` and surface via `--waiting`/`--ops-wait`. DEFAULT path only,
+    # mirroring the `not extra`-scoping of `_slice_mine_and_handed`'s enrichment.
     if extra:
-        workable_rows, waiting = rows, {}
+        workable_rows, waiting, ops_wait = rows, {}, {}
     else:
-        workable_rows, waiting = airuleset._partition_user_waiting(rows)
+        workable_rows, waiting, ops_wait = airuleset._partition_workable(rows)
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
+    if want_ops_wait:
+        _print_issue_rows(ops_wait, own_stream=user)
+        return
     if want_waiting:
         _print_issue_rows(waiting, own_stream=user)
         return
@@ -460,7 +468,8 @@ def cmd_core_quals(args):
     want_count = getattr(args, "count", False)
     want_list = getattr(args, "list", False)
     want_waiting = getattr(args, "waiting", False)
-    if not (want_count or want_list or want_waiting):
+    want_ops_wait = getattr(args, "ops_wait", False)
+    if not (want_count or want_list or want_waiting or want_ops_wait):
         for q in quals:
             print(q)
         return
@@ -503,10 +512,15 @@ def cmd_core_quals(args):
     # axis and keeps its full set, mirroring the `not extra`-scoping of the
     # empty-refusal and hand-off-health gates below. ONE partition of the SAME
     # already-fetched rows — never a second gh query that could drift (#367).
+    # #510: ops-wait (external-event/evidence) tickets also leave the workable
+    # obligation set, alongside #468's user-waiting split — both surface via
+    # `--waiting`/`--ops-wait`, never the workable-0 stop-proof. ONE partition of
+    # the SAME already-fetched rows; DEFAULT path only (a `--extra` bounce-seed
+    # query is a different axis, keeping its full set, per the gates below).
     if extra:
-        workable, waiting = seen, {}
+        workable, waiting, ops_wait = seen, {}, {}
     else:
-        workable, waiting = airuleset._partition_user_waiting(seen)
+        workable, waiting, ops_wait = airuleset._partition_workable(seen)
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:
@@ -536,6 +550,11 @@ def cmd_core_quals(args):
                 "Refusing (#181 round 4)." % (health, detail),
                 file=sys.stderr)
             sys.exit(1)
+    if want_ops_wait:
+        # own_stream=None: a full-authority box owns no stream, so EVERY
+        # stream-labelled row is action-only.
+        _print_issue_rows(ops_wait, own_stream=None)
+        return
     if want_waiting:
         # own_stream=None: a full-authority box owns no stream, so EVERY
         # stream-labelled row is action-only.
