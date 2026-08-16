@@ -682,10 +682,37 @@ _TRIAGE_LINE_RE = re.compile(
 # explicit negation alternative here, it would fall through and match
 # _TRIAGE_TRIVIAL_RE instead, silently waiving the whole 2-3-approaches
 # depth requirement on entirely natural phrasing in both languages.
-_TRIAGE_NONTRIVIAL_RE = re.compile(
+#
+# #514: the non-trivial signal is split into TWO regexes because a genuinely
+# trivial line's descriptive tail may NEGATE a complexity keyword ("Triage:
+# trivial -- ... no cross-cutting change") and that must NOT flip it to
+# non-trivial -- while an AFFIRMATIVE keyword anywhere ("scoped fix -- but
+# cross-cutting") MUST still classify non-trivial (a depth gate fails SAFE,
+# never silently waiving depth). See `_triage_class` + the ticket design comment.
+#
+# _EXPLICIT: full non-trivial VERDICTS, incl. the MAJOR-1 negated-trivial forms
+# (they ARE the non-trivial signal), matched wherever they appear -- never
+# negation-guarded.
+_TRIAGE_NONTRIVIAL_EXPLICIT_RE = re.compile(
     r"not\s+trivial|nie\s+(?:je\s+(?:to\s+)?)?trivi[aá]ln\w*|"
-    r"non-?\s?trivial|netrivi[aá]ln\w*|design-?heavy|designov[ýy]\w*|"
-    r"architektonick\w*|komplexn\w*|cross-?cutting|kr[íi][žz]ov\w*|zlo[žz]it\w*",
+    r"non-?\s?trivial|netrivi[aá]ln\w*",
+    re.IGNORECASE,
+)
+# _KEYWORD: complexity keywords, counted ONLY when AFFIRMATIVE. Python's re has
+# no variable-width lookbehind, so a preceding negation is captured as an
+# OPTIONAL `neg` group and `_triage_class` rejects any match whose `neg` fired.
+# The guard is IMMEDIATE-adjacency only (bounded on purpose): an intervening
+# word ("without ANY cross-cutting") is left as a fail-safe over-block, because
+# allowing intervening words would misread the non-trivial "nie, je to
+# komplexná" ("no[t trivial], it IS complex") as negated -- the dangerous
+# direction. The negation set is English no/not/without + Slovak nie/bez/žiadn*.
+_TRIAGE_NONTRIVIAL_KEYWORD_RE = re.compile(
+    r"(?P<neg>\b(?:no|not|without|nie|bez|žiadn\w*)\s+)?"
+    # English keywords kept SYMMETRIC with the Slovak set (#514 follow-up):
+    # complex<->komplexn, architectural<->architektonick (cross-cutting<->krížov
+    # and design-heavy<->designov already had both sides).
+    r"(?:design-?heavy|designov[ýy]\w*|architektonick\w*|architectural\w*|"
+    r"komplexn\w*|complex\w*|cross-?cutting|kr[íi][žz]ov\w*|zlo[žz]it\w*)",
     re.IGNORECASE,
 )
 _TRIAGE_TRIVIAL_RE = re.compile(
@@ -714,8 +741,17 @@ def _triage_class(text):
     if not m:
         return None
     value = m.group("cls")
-    if _TRIAGE_NONTRIVIAL_RE.search(value):
+    # #514: an EXPLICIT non-trivial verdict (incl. the MAJOR-1 negated-trivial
+    # forms) OR any AFFIRMATIVE complexity keyword anywhere in the tail means
+    # non-trivial -- a depth gate fails SAFE (over-block), never silently
+    # waiving depth on a hedge-then-reveal line. A NEGATED keyword ("no
+    # cross-cutting", "žiadna krížová") is not an affirmative signal and must
+    # NOT flip a trivial line -- that reverse of MAJOR-1 was the reported bug.
+    if _TRIAGE_NONTRIVIAL_EXPLICIT_RE.search(value):
         return "non-trivial"
+    for km in _TRIAGE_NONTRIVIAL_KEYWORD_RE.finditer(value):
+        if not km.group("neg"):
+            return "non-trivial"
     if _TRIAGE_TRIVIAL_RE.search(value):
         return "trivial"
     return None

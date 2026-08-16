@@ -1467,5 +1467,122 @@ class TestIssueRefsAfterShellQuote(unittest.TestCase):
         self.assertEqual(dg.issue_refs("a &#123 b"), [])
 
 
+# --------------------------------------------------------------------------- #
+# #514 -- a NEGATED nontrivial keyword in a trivial Triage line's descriptive
+# tail ("Triage: trivial -- ... no cross-cutting change") must NOT flip the
+# comment to non-trivial. But an AFFIRMATIVE complexity keyword ANYWHERE in the
+# tail -- incl. a hedge-then-reveal line ("scoped fix -- but cross-cutting") --
+# MUST still classify non-trivial: a depth gate fails SAFE (over-block +
+# reword), never silently waiving depth (the #514-review MAJOR: a leading-
+# verdict-only fix that ignored the tail re-opened exactly that dangerous
+# direction). The negation is recognised only when IMMEDIATELY adjacent to the
+# keyword (no/not/without/nie/bez/žiadn) -- a bounded guard; an intervening word
+# ("without ANY cross-cutting") is left as a fail-safe over-block, because
+# allowing intervening words would misread the non-trivial "nie, je to
+# komplexná" as negated (the dangerous direction).
+# --------------------------------------------------------------------------- #
+
+
+class TestTriageNegatedNontrivialKeywordInTrivialLine(unittest.TestCase):
+
+    def test_ticket_exact_line_stays_trivial(self):
+        # The exact line from the ticket -- reproduced live as classifying
+        # non-trivial (so demanding 2-3 approaches + blocking the commit)
+        # against the shipped code. RED before the fix, GREEN after.
+        body = GOOD_SCOPED + (
+            "\n\nTriage: trivial — docs/pin reconciliation, no cross-cutting change")
+        self.assertEqual(dg.triage_class(body), "trivial")
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "ok (trivial)")
+
+    def test_negated_keyword_in_trivial_tail_stays_trivial(self):
+        # A complexity keyword IMMEDIATELY negated in a trivial line's tail,
+        # across every separator this fleet uses (em-dash, the repo's own "--"
+        # convention, comma, paren, semicolon) and in both languages: all still
+        # trivial. Two negated keywords in one tail (`no architectural ... not
+        # cross-cutting`) also stay trivial.
+        for tail in (
+            "trivial — docs/pin reconciliation, no cross-cutting change",
+            "trivial -- no cross-cutting change",
+            "trivial, no cross-cutting change",
+            "trivial (no architectural impact)",
+            "trivial -- without cross-cutting impact",
+            "trivial -- žiadna krížová zmena, len drobná oprava",   # Slovak negated (žiadna)
+            "trivial; bez krížovej zmeny",                          # Slovak negated (bez)
+            "trivial (no architectural impact, not cross-cutting)",  # two negated keywords
+        ):
+            body = GOOD_SCOPED + "\n\nTriage: " + tail
+            self.assertEqual(dg.triage_class(body), "trivial", tail)
+            ok, reason = dg.classify_triage_and_approaches(body)
+            self.assertTrue(ok, "%r -> %r" % (tail, reason))
+            self.assertEqual(reason, "ok (trivial)", tail)
+
+    def test_affirmative_keyword_in_tail_fails_safe_to_nontrivial(self):
+        # #514-review MAJOR (adversarial): a genuinely non-trivial line that
+        # LEADS with a trivial word but reveals complexity later (hedge-then-
+        # reveal) must NOT be silently waived to trivial -- a depth gate fails
+        # SAFE. An AFFIRMATIVE (non-negated) complexity keyword ANYWHERE in the
+        # tail keeps the line non-trivial. RED against a leading-verdict-only
+        # fix that ignored the tail (which classified all of these trivial).
+        for tail in (
+            "trivial - rename inside the cross-cutting module",
+            "jednoduchý na prvý pohľad, no v skutočnosti krížová zmena naprieč modulmi",
+            "drobná zmena v kóde, ale krížová naprieč 8 modulmi",
+            "vyzerá triviálne, ale je to architektonická zmena",
+            "scoped fix, but cross-cutting: touches auth and sessions",
+            "scoped fix — but this is a design-heavy refactor",
+            "not scoped to one module — cross-cutting change",
+            "triviálne? nie, je to komplexná zmena",
+            "trivial. Actually this is cross-cutting.",
+            "jednoduché — ale komplexné",
+            "trivial -- without any cross-cutting impact",   # intervening word -> fail-safe over-block
+        ):
+            body = GOOD_SCOPED + "\n\nTriage: " + tail
+            self.assertEqual(dg.triage_class(body), "non-trivial", tail)
+            ok, reason = dg.classify_triage_and_approaches(body)
+            self.assertNotEqual(reason, "ok (trivial)", tail)
+
+    def test_genuinely_nontrivial_verdicts_still_nontrivial(self):
+        # Negative controls -- a genuinely non-trivial line MUST STILL classify
+        # non-trivial (no false-negative / silent-depth-waive regression). Each
+        # names its class, or a complexity keyword, AS the leading verdict, so
+        # the structural anchor still sees it. These pass before AND after the
+        # fix; they lock that non-trivial detection is not weakened.
+        for tail in (
+            "non-trivial -- new daemon",
+            "not trivial -- new daemon",
+            "nie je to triviálne — nový daemon",
+            "nie triviálne",
+            "netriviálne",
+            "cross-cutting change — touches 9 modules",   # keyword AS the verdict
+            "design-heavy -- whole new subsystem",         # internal hyphen preserved
+            "komplexná architektonická zmena naprieč modulmi",
+            "architektonická zmena, dotýka sa 8 modulov",  # keyword before a comma
+        ):
+            body = GOOD_SCOPED + "\n\nTriage: " + tail
+            self.assertEqual(dg.triage_class(body), "non-trivial", tail)
+            # Correctly non-trivial: GOOD_SCOPED carries no numbered approaches,
+            # so it fails on approach count -- never silently "ok (trivial)".
+            ok, reason = dg.classify_triage_and_approaches(body)
+            self.assertNotEqual(reason, "ok (trivial)", tail)
+
+    def test_english_keyword_parity_with_slovak_set(self):
+        # #514 follow-up: the English complexity keywords must be symmetric with
+        # the Slovak set (complex<->komplexn, architectural<->architektonick), so
+        # an English author is held to the same depth bar as a Slovak one. An
+        # AFFIRMATIVE English keyword classifies non-trivial; a NEGATED one stays
+        # trivial (same neg-guard as the rest of the keyword set).
+        for tail, expected in (
+            ("complex refactor", "non-trivial"),                       # the required case
+            ("complex — spans the whole scheduler", "non-trivial"),
+            ("architectural change across the auth layer", "non-trivial"),
+            ("trivial -- no complex logic here", "trivial"),           # negated English complex
+            ("trivial (not architectural)", "trivial"),                # negated English architectural
+        ):
+            body = GOOD_SCOPED + "\n\nTriage: " + tail
+            self.assertEqual(dg.triage_class(body), expected, tail)
+
+
 if __name__ == "__main__":
     unittest.main()
