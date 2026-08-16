@@ -38,6 +38,9 @@ from collections import namedtuple
 
 # The verdict a single glance produces, plus the resolved facts behind it (so a
 # caller / a later G5 comparison never has to re-parse the formatted line).
+# `live_workers` / `backlog` are `None` when the verdict was resolvable from the
+# heartbeat ALONE (the cheap short-circuit in `evaluate` never consults those
+# readers for them -- see the cost note there).
 OneGlance = namedtuple(
     "OneGlance",
     "verdict live_workers backlog idle_over_threshold marker heartbeat_state "
@@ -58,8 +61,28 @@ VERDICTS = (
 )
 
 # The verdicts that mean "the structured state says a /goal IS armed here" (a
-# genuine lane candidate). Used to detect the render<->structured divergence.
+# genuine lane candidate). Used to detect the render<->structured divergence and
+# to decide which lines are worth journalling every sweep.
 _STRUCTURED_ARMED = ("awaiting-user", "working", "no-backlog", "warming", "stuck")
+
+
+def heartbeat_only_verdict(heartbeat_state, goal_armed, marker):
+    """The verdict when it is resolvable from the HEARTBEAT ALONE -- i.e. before
+    the worker count or the backlog is ever consulted -- or ``None`` when the
+    heartbeat says "a /goal is armed and the session is not awaiting the user",
+    which is the only case that genuinely needs the (more expensive) worker +
+    backlog readers. Single source of truth shared by ``one_glance_verdict``
+    (which continues past ``None``) and ``evaluate`` (which uses ``None`` to
+    decide whether to pay for those two readers at all)."""
+    if heartbeat_state in ("absent", "corrupt"):
+        return "no-heartbeat"
+    if goal_armed is None:
+        return "armed-unknown"
+    if goal_armed is False:
+        return "not-armed"
+    if marker == "needs_you":
+        return "awaiting-user"     # ❓-blocked -> never "stuck"
+    return None                    # armed + not awaiting -> needs workers/backlog
 
 
 def one_glance_verdict(*, heartbeat_state, goal_armed, marker,
@@ -73,16 +96,17 @@ def one_glance_verdict(*, heartbeat_state, goal_armed, marker,
     to do / just-recently active), and only what survives all of those is
     ``stuck``. Every "not stuck" branch is a POSITIVE reason, never silence.
     """
-    if heartbeat_state in ("absent", "corrupt"):
-        return "no-heartbeat"
-    if goal_armed is None:
-        return "armed-unknown"
-    if goal_armed is False:
-        return "not-armed"
-    # goal_armed is True from here -- a genuine lane candidate.
-    if marker == "needs_you":
-        return "awaiting-user"
-    if isinstance(live_workers, int) and live_workers > 0:
+    cheap = heartbeat_only_verdict(heartbeat_state, goal_armed, marker)
+    if cheap is not None:
+        return cheap
+    # goal_armed is True and not awaiting-user -- a genuine lane candidate.
+    if not isinstance(live_workers, int):
+        # DEFENSIVE symmetry with the backlog guard below (count_live_workers
+        # contractually returns an int today): an UNMEASURABLE worker count can
+        # never confirm workers==0, so it must never assert `stuck` -- the safe
+        # direction (a spurious `warming` at worst, never a false nudge).
+        return "warming"
+    if live_workers > 0:
         return "working"
     if not isinstance(backlog, int) or backlog <= 0:
         # None = unmeasurable backlog -> never guessed as work-to-do (the
@@ -108,6 +132,12 @@ def _idle_word(idle_s):
     return "%ds" % int(idle_s)
 
 
+def _num_word(v):
+    # `n/a` for a reader that was never consulted (cheap heartbeat-only verdict)
+    # or genuinely unmeasurable -- honest, never a misleading "0"/"None".
+    return str(v) if isinstance(v, int) else "n/a"
+
+
 def format_line(loc, g, render_armed):
     """The single ``one-glance <loc> -> <VERDICT> (...)`` decision line, in the
     same greppable shape as the existing ``lane-occupancy <loc> -> ...`` lines.
@@ -119,23 +149,42 @@ def format_line(loc, g, render_armed):
     line = ("one-glance %s -> %s (hb=%s armed=%s workers=%s backlog=%s idle=%s "
             "marker=%s; render=%s)" % (
                 loc, g.verdict, g.heartbeat_state, _armed_word(g.goal_armed),
-                g.live_workers, g.backlog, _idle_word(g.idle_s),
-                g.marker, _render_word(render_armed)))
-    # Make the render<->structured disagreement explicit -- this is the whole
-    # point of G3: a render footer that read not-armed/undeterminable while the
-    # structured predicate reached an ARMED verdict would have been the SILENT
-    # skip the old code did. Now it is a logged divergence.
-    if g.verdict in _STRUCTURED_ARMED and render_armed is not True:
-        line += (" -- render footer read %s but structured state is armed; "
-                 "the render path skipped this pane SILENTLY before #486 G3"
-                 % _render_word(render_armed))
+                _num_word(g.live_workers), _num_word(g.backlog),
+                _idle_word(g.idle_s), g.marker, _render_word(render_armed)))
+    # The #486 divergence: the footer POSITIVELY read not-armed (False) while
+    # the structured predicate reached an ARMED verdict -- that is the exact
+    # silent skip the old code did (`armed is False` -> bare `continue`). Gate
+    # STRICTLY on `is False`, never `is not True`: `render_armed is None`
+    # (undeterminable footer) is NOT this case -- the render path has journalled
+    # `skip:armed-undeterminable` for it since #475, so it was never silent, and
+    # "undeterminable" is not a contradiction with armed.
+    if g.verdict in _STRUCTURED_ARMED and render_armed is False:
+        line += (" -- render footer read not-armed but structured state is "
+                 "armed; the render path skipped this pane SILENTLY before "
+                 "#486 G3")
     return line
+
+
+def is_informative(g, render_armed):
+    """Whether this one-glance line carries SIGNAL worth journalling on THIS
+    sweep, or is pure per-sweep noise. Emit for every genuine lane candidate
+    (structured-armed, which includes ``stuck`` and the #486 render-blind case)
+    and for any render<->structured DISAGREEMENT; stay SILENT only when the
+    heartbeat and the footer BOTH positively agree the pane is not a candidate
+    (``not-armed`` + a footer that also read not-armed -- a plain interactive
+    session), which the pre-G3 render path deliberately silenced too as "pure
+    noise". A missing/unknown heartbeat (``no-heartbeat``/``armed-unknown``) is
+    NOT suppressed -- it could hide a genuinely-armed-but-heartbeatless session,
+    the exact class this redesign must never go blind on."""
+    if g.verdict in _STRUCTURED_ARMED:
+        return True
+    return not (g.verdict == "not-armed" and render_armed is False)
 
 
 def evaluate(now, sid, cwd, projects_dir, state, backlog_fetch, render_armed,
              loc, *, read_status, count_live_workers, cached_backlog_count,
              idle_threshold_s, freshness_s, on_warn=None):
-    """Resolve the four STRUCTURED inputs and return ``(OneGlance, line)``.
+    """Resolve the STRUCTURED inputs and return ``(OneGlance, line)``.
 
     ``read_status`` / ``count_live_workers`` / ``cached_backlog_count`` are
     INJECTED (the caller passes ``watchdog.read_status`` etc.) so this function
@@ -143,6 +192,16 @@ def evaluate(now, sid, cwd, projects_dir, state, backlog_fetch, render_armed,
     is contractually non-raising (the G1 reader / G2 reader / the backlog cache
     all fail toward a safe verdict, never an exception), so ``evaluate`` never
     raises either.
+
+    COST: the heartbeat is resolved FIRST, and the two EXPENSIVE readers
+    (``count_live_workers`` = an O(subagent-files) disk stat pass;
+    ``cached_backlog_count`` = a ``gh`` subprocess on a cache miss) are consulted
+    ONLY when the verdict genuinely needs them -- i.e. NOT for the cheap
+    heartbeat-only verdicts (``no-heartbeat`` / ``armed-unknown`` / ``not-armed``
+    / ``awaiting-user``). A plain non-armed candidate pane therefore costs ONE
+    heartbeat file read per sweep, never a per-sweep ``gh`` fetch, honouring
+    #486's "supervision cost DOWN" thesis and the repo's gh-rate-limit
+    discipline.
 
     ``idle_threshold_s`` is passed straight to ``read_status`` as its
     ``stale_after_s``, so the heartbeat's own ``fresh``/``stale`` verdict IS
@@ -153,13 +212,17 @@ def evaluate(now, sid, cwd, projects_dir, state, backlog_fetch, render_armed,
     """
     hb = read_status(sid=sid, now=now, stale_after_s=idle_threshold_s,
                      on_warn=on_warn)
-    workers, _evidence = count_live_workers(projects_dir, cwd, sid, now,
-                                            freshness_s, on_warn=on_warn)
-    backlog = cached_backlog_count(cwd, backlog_fetch, state, now)
     idle_over = hb.state == "stale"   # stale_after_s == idle_threshold_s
-    verdict = one_glance_verdict(
-        heartbeat_state=hb.state, goal_armed=hb.goal_armed, marker=hb.marker,
-        idle_over_threshold=idle_over, live_workers=workers, backlog=backlog)
+    cheap = heartbeat_only_verdict(hb.state, hb.goal_armed, hb.marker)
+    if cheap is not None:
+        verdict, workers, backlog = cheap, None, None
+    else:
+        workers, _evidence = count_live_workers(projects_dir, cwd, sid, now,
+                                                freshness_s, on_warn=on_warn)
+        backlog = cached_backlog_count(cwd, backlog_fetch, state, now)
+        verdict = one_glance_verdict(
+            heartbeat_state=hb.state, goal_armed=hb.goal_armed, marker=hb.marker,
+            idle_over_threshold=idle_over, live_workers=workers, backlog=backlog)
     g = OneGlance(verdict, workers, backlog, idle_over, hb.marker, hb.state,
                   hb.goal_armed, hb.age_s, "")
     g = g._replace(line=format_line(loc, g, render_armed))

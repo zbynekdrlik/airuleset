@@ -72,6 +72,58 @@ class TestOneGlanceVerdict(unittest.TestCase):
         self.assertEqual(og.one_glance_verdict(**_facts(idle_over_threshold=False)),
                          "warming")
 
+    def test_unmeasurable_worker_count_never_reads_stuck(self):
+        # DEFENSIVE symmetry with the backlog guard: a non-int (unmeasurable)
+        # worker count can't confirm workers==0, so it must never assert stuck
+        # (the dangerous direction). Mutation teeth: dropping the guard reads
+        # `stuck` here (backlog>0, idle over) instead of the safe `warming`.
+        self.assertEqual(og.one_glance_verdict(**_facts(live_workers=None)),
+                         "warming")
+
+
+class TestHeartbeatOnlyVerdict(unittest.TestCase):
+    def test_cheap_verdicts_resolvable_from_heartbeat_alone(self):
+        self.assertEqual(og.heartbeat_only_verdict("absent", None, None),
+                         "no-heartbeat")
+        self.assertEqual(og.heartbeat_only_verdict("corrupt", None, None),
+                         "no-heartbeat")
+        self.assertEqual(og.heartbeat_only_verdict("fresh", None, "working"),
+                         "armed-unknown")
+        self.assertEqual(og.heartbeat_only_verdict("fresh", False, "working"),
+                         "not-armed")
+        self.assertEqual(og.heartbeat_only_verdict("stale", True, "needs_you"),
+                         "awaiting-user")
+
+    def test_none_means_needs_the_expensive_readers(self):
+        # armed + not awaiting-user -> can't decide without workers/backlog.
+        self.assertIsNone(og.heartbeat_only_verdict("stale", True, "working"))
+
+
+class TestIsInformative(unittest.TestCase):
+    def _g(self, verdict):
+        return og.OneGlance(verdict, 0, 43, True, "working", "stale", True,
+                            1387, "")
+
+    def test_every_structured_armed_verdict_is_informative(self):
+        for v in ("stuck", "working", "warming", "no-backlog", "awaiting-user"):
+            self.assertTrue(og.is_informative(self._g(v), False), v)
+
+    def test_not_armed_agreeing_with_the_footer_is_silenced(self):
+        # heartbeat says not-armed AND the footer also read not-armed -> a plain
+        # interactive session, pure noise, the pre-G3 render path silenced it too.
+        self.assertFalse(og.is_informative(self._g("not-armed"), False))
+
+    def test_not_armed_disagreeing_with_the_footer_is_informative(self):
+        # footer read armed while the heartbeat says not-armed -> a real
+        # divergence worth journalling.
+        self.assertTrue(og.is_informative(self._g("not-armed"), True))
+
+    def test_missing_heartbeat_is_never_silenced(self):
+        # no-heartbeat / armed-unknown could hide a genuinely-armed session, so
+        # they are NEVER suppressed (the class #486 must not go blind on).
+        self.assertTrue(og.is_informative(self._g("no-heartbeat"), False))
+        self.assertTrue(og.is_informative(self._g("armed-unknown"), False))
+
 
 class TestEvaluate(unittest.TestCase):
     def _readers(self, hb, workers, backlog):
@@ -125,6 +177,41 @@ class TestEvaluate(unittest.TestCase):
             idle_threshold_s=900, freshness_s=900)
         self.assertFalse(g.idle_over_threshold)
         self.assertEqual(g.verdict, "warming")   # fresh -> not idle -> warming
+
+    def test_cheap_verdict_never_calls_the_expensive_readers(self):
+        # THE cost fix (review 🟡): a heartbeat-only verdict (here not-armed)
+        # must NOT resolve count_live_workers (a disk scan) or the backlog cache
+        # (a gh subprocess on a miss). Record calls and assert zero.
+        calls = {"workers": 0, "backlog": 0}
+
+        def clw(*a, **k):
+            calls["workers"] += 1
+            return 0, []
+
+        def cbc(*a, **k):
+            calls["backlog"] += 1
+            return 43
+        g, line = og.evaluate(
+            1000, "sid1", "/x", "/proj", {}, lambda c: 43, False, "loc-D",
+            read_status=lambda **kw: self._hb("fresh", False, "working", 30),
+            count_live_workers=clw, cached_backlog_count=cbc,
+            idle_threshold_s=900, freshness_s=900)
+        self.assertEqual(g.verdict, "not-armed")
+        self.assertEqual(calls, {"workers": 0, "backlog": 0})
+        # honest: readers never consulted -> n/a, not a misleading "0".
+        self.assertIn("workers=n/a backlog=n/a", line)
+
+    def test_divergence_note_only_for_render_positively_not_armed(self):
+        # render=None (undeterminable footer) is NOT the #486 silent case
+        # (#475 logs skip:armed-undeterminable), so no "SILENTLY" suffix.
+        rs, clw, cbc = self._readers(
+            self._hb("stale", True, "working", 1387), 0, 43)
+        _g, line = og.evaluate(
+            1000, "sid1", "/x", "/proj", {}, lambda c: 43, None, "loc-E",
+            read_status=rs, count_live_workers=clw, cached_backlog_count=cbc,
+            idle_threshold_s=900, freshness_s=900)
+        self.assertIn("render=undeterminable", line)
+        self.assertNotIn("SILENTLY", line)
 
 
 class TestReapStaleStatus(unittest.TestCase):

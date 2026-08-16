@@ -1809,6 +1809,14 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     the first statement of each pane's iteration, mirroring
     `bounce_backstop`'s placement exactly."""
     logs = []
+    # #486 G3 -- once-per-sweep hygiene: reap heartbeat files of long-dead
+    # sessions (G3 is the CONSUMER of these files, so it owns their retention).
+    # Runs BEFORE the disable/unwired early returns below so heartbeat-dir
+    # retention is independent of whether the goal lane is enabled on this box.
+    # Age-gated (7d), regular-files-only, never raises; the session-status dir is
+    # env-isolated in BOTH test runners (conftest autouse + cmd_push test_env),
+    # so this never touches a real developer home.
+    logs += _session_status.reap_stale_status(now=now)
     if watchdog._owner_disabled("goal"):
         return logs
     if backlog_fetch is None:
@@ -1818,12 +1826,6 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     time_fn = time_fn or time.monotonic
     state = state if state is not None else {}
     recs = state.setdefault("goal_lane", {})
-    # #486 G3 -- once-per-sweep hygiene: reap heartbeat files of long-dead
-    # sessions (G3 is the CONSUMER of these files, so it owns their retention).
-    # Age-gated (7d), regular-files-only, never raises; the session-status dir is
-    # env-isolated in BOTH test runners (conftest autouse + cmd_push test_env),
-    # so this never touches a real developer home.
-    logs += _session_status.reap_stale_status(now=now)
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
@@ -1841,15 +1843,19 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         armed = watchdog.pane_goal_armed(captured)
         loc = watchdog._pane_location(pid, run) or pid
         # #486 G3 -- the one-glance STRUCTURED verdict (heartbeat + G2 worker
-        # count + backlog cache; reads NO pane text), emitted for EVERY candidate
-        # pane so the exact render-blindness this redesign targets -- the footer
-        # reads not-armed while a /goal is genuinely armed -- surfaces as ONE
-        # decision line instead of the deliberately-SILENT `armed is False` skip
-        # below. DIAGNOSTIC in G3: the render `armed` verdict stays the
-        # authoritative action gate until G5; the structured line is what G5
-        # will compare against and act on. Guarded so the diagnostic can never
-        # crash the sweep (the injected readers are contractually non-raising,
-        # but the boundary stays defensive).
+        # count + backlog cache; reads NO pane text). Evaluated for EVERY
+        # candidate pane so the exact render-blindness this redesign targets --
+        # the footer reads not-armed while a /goal is genuinely armed -- surfaces
+        # as ONE decision line instead of the deliberately-SILENT `armed is
+        # False` skip below. The line is journalled when it carries SIGNAL
+        # (`is_informative`: any lane candidate incl. stuck, any render<->
+        # structured divergence, any missing heartbeat) and stays silent only
+        # when the heartbeat and the footer BOTH agree the pane is not a
+        # candidate -- exactly the "pure noise" the pre-G3 render path silenced.
+        # DIAGNOSTIC in G3: the render `armed` verdict stays the authoritative
+        # action gate until G5. Guarded so the diagnostic can never crash the
+        # sweep (the injected readers are contractually non-raising, but the
+        # boundary stays defensive).
         try:
             _glance, gline = _one_glance.evaluate(
                 now, sid, cwd, projects_dir, state, backlog_fetch, armed, loc,
@@ -1858,7 +1864,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 cached_backlog_count=watchdog._cached_backlog_count,
                 idle_threshold_s=GOAL_LANE_IDLE_S,
                 freshness_s=GOAL_LANE_LIVE_WINDOW_S)
-            logs.append(gline)
+            if _one_glance.is_informative(_glance, armed):
+                logs.append(gline)
         except Exception as _e:
             logs.append("one-glance %s -> error: %s" % (loc, _e))
         if armed is not True:

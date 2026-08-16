@@ -147,6 +147,35 @@ class TestGoalLaneOneGlance(unittest.TestCase):
         self.assertTrue(og, logs)
         self.assertTrue(any("render=armed" in ln for ln in og), og)
 
+    def test_not_armed_agreeing_with_the_footer_is_silenced(self):
+        # review 🔵 noise fix: a heartbeat that says goal_armed=False + a footer
+        # that also read not-armed = a plain interactive session. The pre-G3
+        # render path silenced this as "pure noise"; the one-glance line must
+        # NOT fire every sweep for it. (Contrast the no-heartbeat case above,
+        # which IS journalled since it could hide an armed session.)
+        logs, tmux = self._sweep(
+            GOAL_IDLE_CAP, goal_armed=False, marker="working",
+            age_s=30, backlog=43)
+        self.assertEqual(self._one_glance_lines(logs), [],
+                         "a not-armed pane agreeing with the footer must be silent")
+        self.assertEqual(tmux.sent, [])
+
+    def test_reaper_runs_even_when_goal_lane_is_disabled(self):
+        # review 🔵 reaper-coupling fix: heartbeat-dir retention must not depend
+        # on the goal lane being enabled. Seed a >TTL heartbeat, disable the
+        # goal lane, and confirm the reaper still reaps it.
+        now = 1_000_000
+        p = ss.status_path("sess-dead")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}", encoding="utf-8")
+        old = now - (ss.SESSION_STATUS_TTL_S + 3600)
+        os.utime(p, (old, old))
+        with m.patch.object(wd, "_owner_disabled", return_value=True):
+            logs = goal.goal_lane_sweep(now, run=lambda *a, **k: "",
+                                        backlog_fetch=lambda cwd: 5)
+        self.assertFalse(p.exists(), "reaper must run before the disable gate")
+        self.assertTrue(any("reaped 1" in ln for ln in logs), logs)
+
 
 if __name__ == "__main__":
     unittest.main()
