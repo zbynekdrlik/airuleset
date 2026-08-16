@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import re
+import stat as _stat
 import sys
 import time
 from collections import namedtuple
@@ -44,6 +45,15 @@ SCHEMA_VERSION = 1
 # threshold; the reader's staleness verdict is always parameterised, never
 # hard-wired to this number.
 DEFAULT_STALE_AFTER_S = 300
+
+# #486 G3 -- retention for the reaper below. A heartbeat file's mtime is bumped
+# on EVERY turn boundary of its session (Stop / SubagentStop / SessionStart), so
+# a file untouched for 7 days is a definitively-dead session: no live session
+# runs a full week without a single turn boundary, and a genuinely idle-but-alive
+# session that later resumes simply re-creates its file on the next turn. 7 days
+# is deliberately generous -- the reaper must never remove a file the one-glance
+# predicate might still read as an active session's idle signal.
+SESSION_STATUS_TTL_S = 7 * 24 * 60 * 60
 
 # Short, per-#486-review (MINOR-5): a ~500-byte prose block in every file was
 # pure redundancy. This keeps only point (d) — staleness semantics in-file — and
@@ -296,6 +306,65 @@ def read_status(path=None, sid=None, agent_id=None, base_dir=None, now=None,
         data.get("agent_id"), data.get("agent_type"), data.get("last_turn"),
         None,
     )
+
+
+# --------------------------------------------------------------------------- #
+# reaper (#486 G3 -- the consumer owns retention)
+# --------------------------------------------------------------------------- #
+
+def reap_stale_status(*, now=None, base_dir=None, ttl_s=SESSION_STATUS_TTL_S,
+                      on_warn=None):
+    """Delete heartbeat files whose mtime is older than ``ttl_s`` (definitively
+    dead sessions) and return a one-line summary list (``[]`` when nothing was
+    reaped, so a per-sweep caller stays silent on the common no-op path).
+
+    The G1 producer writes one file per main session (overwritten each turn) and
+    one per ``(sid, agent_id)`` subagent (never removed), so the directory grows
+    unbounded over a box's lifetime. G3 is the CONSUMER of these files (the
+    one-glance predicate reads them), so it owns their retention -- this mirrors
+    the sibling compact-boundary dir's ``find … -mtime +N -delete`` sweep and
+    the ``reclaim_stale_orphans`` age-gated discipline: REGULAR files only, an
+    ``mtime`` strictly older than ``now - ttl_s`` (so a concurrent LIVE session's
+    freshly-rewritten file is NEVER touched), and it NEVER raises -- a dir it
+    can't list, a file it can't stat or unlink, is warned (loudly, default
+    stderr) and skipped, never allowed to crash the sweep it runs inside.
+    """
+    def _warn(msg):
+        _emit_warn(on_warn, "session-status reaper: %s" % msg)
+
+    warn = _warn
+    now = time.time() if now is None else now
+    cutoff = now - ttl_s
+    base = status_dir(base_dir)
+    try:
+        entries = list(base.iterdir())
+    except FileNotFoundError:
+        return []          # no dir yet -> nothing to reap, not an error
+    except OSError as exc:
+        warn("dir unreadable (%s): %s" % (base, exc))
+        return []
+    reaped = 0
+    for p in entries:
+        try:
+            st = p.stat()
+        except OSError as exc:
+            warn("stat failed (%s): %s" % (p, exc))
+            continue
+        if not _stat.S_ISREG(st.st_mode):
+            continue       # never a dir/socket -- only the heartbeat files
+        if st.st_mtime >= cutoff:
+            continue       # still within the retention window -- keep
+        try:
+            p.unlink()
+            reaped += 1
+        except FileNotFoundError:
+            continue       # a concurrent reaper won the race -- fine
+        except OSError as exc:
+            warn("unlink failed (%s): %s" % (p, exc))
+    if reaped:
+        return ["session-status: reaped %d stale heartbeat file(s) "
+                "(mtime > %dd old) from %s" % (reaped, ttl_s // 86400, base)]
+    return []
 
 
 # --------------------------------------------------------------------------- #

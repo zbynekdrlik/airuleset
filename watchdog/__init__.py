@@ -376,6 +376,7 @@ from watchdog.transcripts import (  # noqa: E402
     _entry_text as _entry_text,
     transcript_last_error as transcript_last_error,
     _submit_confirmed as _submit_confirmed,
+    count_live_workers as count_live_workers,   # #486 G2 -> consumed by G3
     transcript_current_context as transcript_current_context,
     transcript_last_marker as transcript_last_marker,
     transcript_last_marker_line as transcript_last_marker_line,
@@ -1079,6 +1080,20 @@ from watchdog.goal_scan import (  # noqa: E402
     scan_goal_markers as scan_goal_markers,
     pane_goal_armed as pane_goal_armed,
     GOAL_MARK_TAIL_BYTES as GOAL_MARK_TAIL_BYTES,
+)
+
+# #486 G3 -- the G1 session-heartbeat reader + reaper, now CONSUMED (G1/G2 left
+# these unwired; G3 is the consumer). Re-exported so the render lane path
+# (watchdog/goal.py) reaches them through the same `watchdog.<name>` seam every
+# other reader uses, and tests patch them at the package level. This block sits
+# AFTER `scan_goal_markers` above BY NECESSITY: session_status.py does a guarded
+# top-level `from watchdog import scan_goal_markers`, so importing it before that
+# name is bound here would degrade its goal-armed read to `None` (the import
+# would silently fail into the module's own `except`).
+from watchdog.session_status import (  # noqa: E402
+    read_status as read_status,
+    reap_stale_status as reap_stale_status,
+    status_dir as status_dir,
 )
 
 
