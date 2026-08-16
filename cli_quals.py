@@ -324,6 +324,48 @@ def _ticket_is_stream_labeled(labels):
 # (skills/autopilot/SKILL.md's Step-1 backlog-scope bullet, #468 reconciliation).
 USER_WAITING_LABELS = ("needs-answer", "needs-decision")
 
+# #507: labels that mark a hand-off the gatekeeper has ALREADY PROCESSED, so the
+# ticket is no longer parked with the gatekeeper — it is back in the STREAM's
+# court. `needs-acceptance` is the odoo-erp/montalu state applied when the
+# gatekeeper reviews + merges a hand-off and moves it OUT of `ready-for-review`
+# but leaves it OPEN pending client acceptance ("done = client saw it", odoo-erp
+# #3145 — acceptance is the stream's own work, owner ruling 2026-08-15). The
+# label-check below already gives such a ticket `handed=False` (it carries no
+# `ready-for-review`/`needs-gatekeeper`), but the READY-FOR-REVIEW comment
+# fallback (`_slice_mine_and_handed`, #313 pt 2) re-upgraded it forever off its
+# stale, PERMANENT hand-off comment — the gatekeeper removes the LABEL when it
+# processes a hand-off, but the COMMENT stays in history. So a ticket carrying
+# any of these labels is EXCLUDED from the comment-fallback candidate walk: its
+# stale hand-off comment can never re-flip it back to parked-with-gk.
+#
+# The common re-park case is still caught correctly: a genuine post-acceptance
+# RE-hand-off normally carries a fresh `ready-for-review`/`needs-gatekeeper`
+# LABEL (the repo's subdev-handoff-label workflow re-adds it server-side on the
+# hand-off comment — live-observed on odoo-erp#3068), so `label_handed=True`
+# and it is counted via the label-check BEFORE the fallback, never reaching this
+# suppression.
+#
+# #507 review MAJOR (accepted, SAFE-direction residual — the claim is NOT
+# absolute): the label is a DELIBERATELY unreliable hand-off signal (that is the
+# whole reason the #313 comment fallback exists — a fork-no-merge label-add
+# 403s, and the auto-labeller can itself be broken). So a re-hand-off that is
+# COMMENT-ONLY (fresh READY-FOR-REVIEW comment, no fresh label added) AND leaves
+# `needs-acceptance` in place is indistinguishable, by label alone, from a
+# processed ticket with a stale comment — telling them apart needs a per-ticket
+# timeline query (was the comment newer than the needs-acceptance labeling?),
+# the exact cost this fix rejected (issue #507, ~1 extra gh call per candidate
+# into the shared graphql bucket, #370). Such a ticket is UNDER-counted (shown
+# as the stream's own workable `I N` instead of gk). This is the SAFE failure
+# direction: it moves the ticket INTO the loop's workable set, so the /goal
+# stop-proof keeps it alive and never falsely declares "backlog empty" — a
+# bounded, self-healing under-count (it resolves the moment the auto-labeller
+# lands the label), replacing the reported PERMANENT over-count. A precise
+# timeline-based fix is tracked as a needs-user-decision follow-up.
+#
+# Streams without a needs-acceptance model simply never match — zero behaviour
+# change there.
+GATEKEEPER_PROCESSED_LABELS = ("needs-acceptance",)
+
 
 def _row_is_user_waiting(labels):
     """True if `labels` (a gh --json labels value: a list of {'name': ...}
@@ -710,6 +752,7 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     rows, failed = _union_open_issues(quals, base, cwd=root)
     handed = {}
     bounce_numbers = set()
+    processed_numbers = set()
     for n_num, row in rows.items():
         labels = {(lb or {}).get("name") for lb in (row.get("labels") or [])}
         # #191 Part A ("different lane"): needs-gatekeeper is airuleset's OWN
@@ -727,6 +770,18 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
         if "prio:bounce" in labels:
             label_handed = False
             bounce_numbers.add(n_num)
+        # #507: a ticket carrying a GATEKEEPER_PROCESSED_LABELS label
+        # (`needs-acceptance`) is a hand-off the gatekeeper has ALREADY
+        # processed — it is back in the STREAM's court, NOT parked with the
+        # gatekeeper. It already reads `handed=False` here (it carries no
+        # ready-for-review/needs-gatekeeper), and the comment-fallback walk
+        # below EXCLUDES it (via `processed_numbers`) so its stale, permanent
+        # READY-FOR-REVIEW comment can never re-flip it back to parked. See
+        # GATEKEEPER_PROCESSED_LABELS for why the COMMON re-hand-off (fresh
+        # label) is still caught by the label-check above, and the accepted
+        # SAFE-direction residual for the comment-only-re-hand-off edge.
+        if any(lb in labels for lb in GATEKEEPER_PROCESSED_LABELS):
+            processed_numbers.add(n_num)
         handed[n_num] = label_handed
 
     if extra is not None:
@@ -799,8 +854,20 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     # bare-label bounce with no comment at all (which must never re-flip a
     # stale pre-bounce hand-off comment back to handed).
     if slug and not failed:
+        # #507: a `processed_numbers` ticket (needs-acceptance — a hand-off the
+        # gatekeeper already processed) is EXCLUDED from the candidate walk
+        # entirely: it must stay handed=False (own workable, back in the
+        # stream's court), and its stale, permanent READY-FOR-REVIEW comment
+        # must never re-flip it to parked-with-gk. Excluding it here (rather
+        # than fetching its comments and refusing the upgrade) also skips a
+        # pointless `gh api .../comments` call per such ticket. The COMMON
+        # re-hand-off carries a fresh ready-for-review/needs-gatekeeper LABEL,
+        # so it is already handed via the label-check and never reaches here;
+        # the comment-only-re-hand-off edge is the accepted SAFE-direction
+        # residual documented on GATEKEEPER_PROCESSED_LABELS.
         unhandled_candidates = sorted(
-            (n_num for n_num in rows if not handed.get(n_num)),
+            (n_num for n_num in rows
+             if not handed.get(n_num) and n_num not in processed_numbers),
             reverse=True)
         for n_num in unhandled_candidates[:airuleset._HANDOFF_COMMENT_CHECK_LIMIT]:
             raw = airuleset._gh_out("api",
