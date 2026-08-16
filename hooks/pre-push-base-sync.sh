@@ -46,9 +46,11 @@ echo "$CMD_NOCMT" | grep -qE '(^|[;&|]|&&)[[:space:]]*(sudo[[:space:]]+|env[[:sp
 # namespace triggers NO CI (a ref outside refs/heads/*/refs/tags/* fires no
 # GitHub Actions run), so there is no CI cycle to protect from a conflicting
 # PR -- and the fetch+merge-tree this hook runs otherwise would add latency to
-# every per-commit backup. Exempt it (covers both HEAD:refs/autopilot-wip/x and
-# --delete refs/autopilot-wip/x).
-echo "$CMD_NOCMT" | grep -q 'refs/autopilot-wip/' && exit 0
+# every per-commit backup. Anchor on the push DESTINATION refspec (covers both
+# HEAD:refs/autopilot-wip/x and --delete refs/autopilot-wip/x), NOT a bare
+# substring, so a real push merely MENTIONING the namespace stays gated (#503
+# review).
+echo "$CMD_NOCMT" | grep -qE ':refs/autopilot-wip/|(--delete|[[:space:]]-d)[[:space:]]+refs/autopilot-wip/' && exit 0
 
 # Explicit bypasses.
 echo "$INPUT" | grep -q 'airuleset:push-behind-ok' && exit 0

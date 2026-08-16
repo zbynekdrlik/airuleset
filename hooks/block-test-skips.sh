@@ -48,6 +48,13 @@ if ! printf '%s' "$CMD_NOQUOTES" | grep -qE 'git([[:space:]]+-[^[:space:]]+)*[[:
     exit 0
 fi
 
+# #503 -- a durability BACKUP push to refs/autopilot-wip/* (the worktree
+# worker's CI-neutral snapshot, so finished work survives a lost worktree) is a
+# preserve-AS-IS mid-work push and triggers no CI run, so this test-skip gate --
+# which protects a CI-triggering push -- must not block it. Anchor on the push
+# DESTINATION refspec, not a bare substring (#503 review 🔵-2).
+printf '%s' "$INPUT" | grep -qE ':refs/autopilot-wip/|(--delete|[[:space:]]-d)[[:space:]]+refs/autopilot-wip/' && exit 0
+
 # Must be in a git repo
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
     exit 0

@@ -131,20 +131,39 @@ class TestWorkerContractMandatesTheDurabilityBackup(unittest.TestCase):
                       "durability backup as the ONE push a worker does make "
                       "(#503)")
 
-    def test_fork_no_merge_pushes_its_branch_early(self):
-        # Case 1 was literally a fork-no-merge worker that pushed at the END.
-        # Its fork branch IS the durable + hand-off copy, so it must push
-        # after the FIRST commit, not at the end.
+    def test_backup_is_universal_across_authorities(self):
+        # #503 review 🟡-3/🟡-4: the durability backup is the UNIFORM layer for
+        # EVERY worktree worker; reduced-authority (fork-no-merge / branch-merge)
+        # get durability from it, NOT from an early push of their real (gated)
+        # delivery branch. The backup bullet must say so.
+        w = _bullet_window(self.text, "durability BACKUP of your branch to origin")
+        # Lock the operative universality phrase (unique to this statement),
+        # not just the presence of the authority NAMES (which recur in the
+        # delivery clause, giving a partial-revert no teeth) -- #498/#500.
+        self.assertIn("regardless of authority", w,
+                      "the backup bullet must declare itself the durability "
+                      "layer for EVERY worktree worker regardless of authority "
+                      "(#503 review 🟡-3/🟡-4)")
+        for tok in ("fork-no-merge", "branch-merge"):
+            self.assertIn(tok, w,
+                          "the backup bullet must name the reduced-authority "
+                          "profiles it covers (missing %r) -- #503 review" % tok)
+
+    def test_fork_no_merge_durability_is_the_wip_backup_not_a_gated_fork_push(self):
+        # The fork-no-merge line must point durability at the universal WIP
+        # backup and keep its fork-branch push as a CLEAN hand-off (not a
+        # mid-work push its own gates would block) -- #503 review 🟡-2/🟡-3.
         w = _norm(self.text)
-        # The fork-no-merge early-push guidance must exist and cite #503.
-        m = w.find("fork branch")
-        self.assertNotEqual(m, -1)
-        self.assertRegex(
-            w,
-            r"fork branch[^.]*FIRST commit|after the FIRST commit[^.]*fork|"
-            r"push (?:your )?fork branch (?:right )?after (?:your )?FIRST",
-            "fork-no-merge must push its fork branch after the FIRST commit "
-            "(not at the end) -- #503")
+        idx = w.find("`fork-no-merge` = you push YOUR fork branch")
+        self.assertNotEqual(idx, -1, "expected the fork-no-merge authority line")
+        window = w[idx:idx + 700]
+        self.assertIn("refs/autopilot-wip", window,
+                      "fork-no-merge must get durability from the universal "
+                      "refs/autopilot-wip backup (#503 review)")
+        self.assertRegex(window, r"HAND-OFF|hand off|hand-off",
+                         "fork-no-merge's fork-branch push is its clean "
+                         "HAND-OFF, not an early mid-work durability push "
+                         "(#503 review)")
 
 
 # --------------------------------------------------------------------------- #
@@ -202,6 +221,7 @@ def _run_hook(hook, repo, command):
                           env=dict(os.environ), timeout=30)
 
 
+@unittest.skipUnless(shutil.which("ruff"), "ruff not installed")
 class TestPrePushLintExemptsBackupRef(unittest.TestCase):
     """A mid-work backup snapshot is legitimately lint-dirty; the CI-protection
     lint gate must not block a push to the backup ref (it triggers no CI)."""
@@ -228,10 +248,28 @@ class TestPrePushLintExemptsBackupRef(unittest.TestCase):
                       "git push origin HEAD:refs/autopilot-wip/worktree-agent-x")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_a_mere_mention_of_the_ns_does_NOT_exempt_a_real_push(self):
+        # #503 review 🟡-1/B🔵-5: the exemption must anchor to the push
+        # DESTINATION refspec, not a bare substring anywhere in the command --
+        # a normal push whose commit message / echo merely MENTIONS the
+        # namespace must STILL be gated (a real lint error, waved through, is
+        # the bug).
+        for cmd in (
+            "git commit -m 'doc refs/autopilot-wip/ backup' && git push origin main",
+            "git push origin main # note: refs/autopilot-wip/ ns",
+            'git push origin main && echo "backed up to refs/autopilot-wip/x"',
+        ):
+            r = _run_hook("pre-push-lint.sh", self.repo, cmd)
+            self.assertEqual(r.returncode, 2, "must NOT exempt: %s\n%s"
+                             % (cmd, r.stdout + r.stderr))
+
 
 class TestPrePushTestCheckExemptsBackupRef(unittest.TestCase):
-    """A mid-work backup can be a RED-before-GREEN intermediate; the
-    RED->GREEN order gate must not block a push to the backup ref."""
+    """A mid-work backup can be a not-yet-tested intermediate; pre-push-test-
+    check must not block a push to the backup ref. (Note #503 review B🔵-4:
+    this fixture blocks at Gate 1 -- feature code changed, no test file yet --
+    which fires BEFORE the Gate-2 RED->GREEN check; the exemption exits before
+    ALL gates, so the teeth hold at whichever gate fires first.)"""
 
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp(prefix="airuleset-503-tc-"))
@@ -240,20 +278,56 @@ class TestPrePushTestCheckExemptsBackupRef(unittest.TestCase):
         (self.repo / "a.py").write_text("x = 1\n")
         _git(self.repo, "add", "-A")
         _git(self.repo, "commit", "-q", "-m", "init")
-        # a bug-fix commit (a `fix:` subject -> IS_BUGFIX) with NO preceding
-        # test commit -> Gate 2 (RED-before-GREEN) blocks a normal push. The
-        # `fix:` subject alone trips it; deliberately NO `Closes/Fixes #N` here,
+        # feature code changed with NO test file -> Gate 1 (feature-needs-test)
+        # blocks a normal push. Deliberately NO `Closes/Fixes #N` in the message,
         # to keep any close-trigger substring out of the repo entirely.
         (self.repo / "a.py").write_text("x = 2\n")
         _git(self.repo, "add", "-A")
         _git(self.repo, "commit", "-q", "-m", "fix: correct value")
 
-    def test_normal_push_still_blocks_on_red_before_green(self):
+    def test_normal_push_still_blocks_on_missing_test(self):
         r = _run_hook("pre-push-test-check.sh", self.repo, "git push origin dev")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
     def test_backup_ref_push_is_exempt(self):
         r = _run_hook("pre-push-test-check.sh", self.repo,
+                      "git push origin HEAD:refs/autopilot-wip/worktree-agent-x")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class TestBlockTestSkipsExemptsBackupRef(unittest.TestCase):
+    """#503 review 🔵-2: block-test-skips.sh also gates `git push`; a backup
+    snapshot that happens to contain a skip pattern mid-work must not be
+    blocked (it triggers no CI), while a normal push adding one still blocks."""
+
+    def setUp(self):
+        root = Path(tempfile.mkdtemp(prefix="airuleset-503-skip-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        bare = root / "rem.git"
+        _git(root, "init", "-q", "--bare", str(bare))
+        self.repo = root / "repo"
+        _git(root, "clone", "-q", str(bare), str(self.repo))
+        _git(self.repo, "config", "user.email", "t@t")
+        _git(self.repo, "config", "user.name", "t")
+        (self.repo / "test_x.py").write_text("def test_ok():\n    assert 1 == 1\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "init")
+        # push init as origin/main so the added-skip diff has a base to resolve
+        _git(self.repo, "push", "-q", "origin", "HEAD:main")
+        _git(self.repo, "branch", "--set-upstream-to=origin/main")
+        # add a banned skip pattern in a test file (NOT pushed)
+        (self.repo / "test_x.py").write_text(
+            "import unittest\n\n\n@unittest.skip('wip')\n"
+            "def test_ok():\n    assert 1 == 1\n")
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "wip skip")
+
+    def test_normal_push_still_blocks_on_added_skip(self):
+        r = _run_hook("block-test-skips.sh", self.repo, "git push origin main")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_backup_ref_push_is_exempt(self):
+        r = _run_hook("block-test-skips.sh", self.repo,
                       "git push origin HEAD:refs/autopilot-wip/worktree-agent-x")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 

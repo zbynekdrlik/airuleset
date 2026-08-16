@@ -28,8 +28,11 @@ fi
 # (a push to any ref outside refs/heads/*/refs/tags/* fires no GitHub Actions
 # workflow), so this lint gate -- which exists solely to keep a CI-triggering
 # push clean -- must not block it. A mid-work snapshot is legitimately
-# lint-dirty; the backup's whole job is to preserve it AS-IS.
-printf '%s' "$INPUT" | grep -q 'refs/autopilot-wip/' && exit 0
+# lint-dirty; the backup's whole job is to preserve it AS-IS. Anchor on the push
+# DESTINATION refspec (`:refs/autopilot-wip/` or `--delete`/`-d refs/autopilot-wip/`),
+# NOT a bare substring anywhere in the command -- a real push whose commit
+# message / echo merely MENTIONS the namespace must stay gated (#503 review).
+printf '%s' "$INPUT" | grep -qE ':refs/autopilot-wip/|(--delete|[[:space:]]-d)[[:space:]]+refs/autopilot-wip/' && exit 0
 
 # Must be in a git repo
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
