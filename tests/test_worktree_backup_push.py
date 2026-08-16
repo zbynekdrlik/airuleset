@@ -172,13 +172,15 @@ class TestSupervisorCleansUpAndRecoversTheBackup(unittest.TestCase):
                       "expected the #332 dead-worker recovery note")
         idx = self.text.index(anchor)
         window = _norm(self.text[idx:idx + 2600])
-        self.assertIn("refs/autopilot-wip", window,
-                      "the #332 recovery note must fall back to fetching the "
-                      "origin backup ref when the local branch ref is also "
-                      "gone (#503)")
-        self.assertRegex(window, r"fetch",
-                         "the recovery fallback must FETCH the backup ref "
-                         "(#503)")
+        # Teeth: lock the literal recovery COMMAND (a single strong token) so a
+        # partial revert of either the `fetch` or the ref namespace breaks it --
+        # a bare `refs/autopilot-wip`/`fetch` window check has no teeth because
+        # the backup ref is mentioned twice in the note (#498/#500 lesson).
+        self.assertIn("git fetch origin 'refs/autopilot-wip/", window,
+                      "the #332 recovery note must fall back to FETCHING the "
+                      "origin backup ref (git fetch origin "
+                      "'refs/autopilot-wip/<branch>:...') when the local branch "
+                      "ref is also gone (#503)")
 
 
 # --------------------------------------------------------------------------- #
