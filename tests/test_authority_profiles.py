@@ -328,12 +328,13 @@ class TestAutopilotSkillCarriesProfiles(TestCase):
         self.assertIn("Neither profile ever closes the ticket itself", t)
 
     def test_authority_profiles_canonical_comment_states_the_hand_off_too(self):
-        # #349 round-2-review m1: the canonical AUTHORITY_PROFILES comment in
-        # airuleset.py described branch-merge with strictly LESS detail than
-        # its fork-no-merge sibling bullet right below it (no hand-off
-        # mention at all) — the canonical definition every other doc points
-        # back to must not itself omit the invariant.
-        t = read("airuleset.py")
+        # #349 round-2-review m1: the canonical AUTHORITY_PROFILES comment
+        # (promoted VERBATIM with AUTHORITY_PROFILES/AUTHORITY_BY_USER into the
+        # cli_fleet.py constants leaf, #433 L-E) described branch-merge with
+        # strictly LESS detail than its fork-no-merge sibling bullet right
+        # below it (no hand-off mention at all) — the canonical definition
+        # every other doc points back to must not itself omit the invariant.
+        t = read("cli_fleet.py")
         idx = t.index("branch-merge  — own PR merged into the project INTEGRATION branch")
         end = t.index("fork-no-merge — fork branch pushed", idx)
         window = t[idx:end]

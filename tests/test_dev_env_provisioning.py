@@ -32,6 +32,7 @@ from unittest import TestCase, main
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+import cli_remote  # noqa: E402  (#433 L-E seam re-target)
 # #433 cluster L: the installers moved here; a leaf→leaf internal call
 # (ensure_claude_cli_installed → _claude_cli_installed → _claude_cli_env)
 # resolves in this leaf, so those helpers are patched via cli_binary_installers.
@@ -1196,7 +1197,7 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
-                m.patch.object(airuleset, "_soniox_key_line",
+                m.patch.object(cli_remote, "_soniox_key_line",
                                 return_value="SONIOX_API_KEY=fake"):
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
@@ -1227,7 +1228,7 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
-                m.patch.object(airuleset, "_soniox_key_line",
+                m.patch.object(cli_remote, "_soniox_key_line",
                                 return_value="SONIOX_API_KEY=fake"):
             airuleset.cmd_push(args)   # must NOT raise
         marek_calls = [c for c in calls if any("marek@" in str(a) for a in c)]
@@ -1269,7 +1270,7 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
-                m.patch.object(airuleset, "_soniox_key_line",
+                m.patch.object(cli_remote, "_soniox_key_line",
                                 return_value="SONIOX_API_KEY=fake"):
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
@@ -1324,7 +1325,7 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
-                m.patch.object(airuleset, "_soniox_key_line",
+                m.patch.object(cli_remote, "_soniox_key_line",
                                 return_value="SONIOX_API_KEY=fake"):
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
@@ -1356,7 +1357,7 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", fake_hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER", fake_authority), \
-                m.patch.object(airuleset, "_soniox_key_line",
+                m.patch.object(cli_remote, "_soniox_key_line",
                                 return_value="SONIOX_API_KEY=fake"), \
                 m.patch("sys.stderr", out):
             with self.assertRaises(SystemExit):

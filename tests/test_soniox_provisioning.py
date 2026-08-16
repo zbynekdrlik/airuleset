@@ -37,6 +37,7 @@ from unittest import TestCase, main
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+import cli_remote  # noqa: E402  (#433 L-E seam re-target)
 # #433 cluster L: ensure_ffmpeg_static_binary + _ffmpeg_available moved here;
 # the leaf→leaf internal call resolves in this leaf, so _ffmpeg_available is
 # patched via cli_binary_installers.
@@ -148,7 +149,7 @@ class TestProvisionSubdevSonioxKey(TestCase):
 
         non_stream_hosts = [FAKE_HOSTS[0]]  # dev2 only
         with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY), \
-                m.patch.object(airuleset, "_soniox_key_line") as line_fn:
+                m.patch.object(cli_remote, "_soniox_key_line") as line_fn:
             failed = airuleset.provision_subdev_soniox_key(
                 hosts=non_stream_hosts, run=run)
         line_fn.assert_not_called()
@@ -323,7 +324,7 @@ class TestProvisionSubdevSonioxKey(TestCase):
 
         with m.patch.object(airuleset, "AUTHORITY_BY_USER",
                              {"montalu": "branch-merge"}), \
-                m.patch.object(airuleset, "_soniox_key_line") as line_fn:
+                m.patch.object(cli_remote, "_soniox_key_line") as line_fn:
             failed = airuleset.provision_subdev_soniox_key(
                 hosts=[FAKE_HOSTS[1]], run=run,
                 skip_names={"montalu@subdev"})
@@ -438,7 +439,7 @@ class TestSonioxFlaggedNonSubdevHost(TestCase):
             return _fake_cp()
 
         with m.patch.object(airuleset, "AUTHORITY_BY_USER", FAKE_AUTHORITY), \
-                m.patch.object(airuleset, "_soniox_key_line") as line_fn:
+                m.patch.object(cli_remote, "_soniox_key_line") as line_fn:
             failed = airuleset.provision_subdev_soniox_key(
                 hosts=[plain], run=run, source=src)
         line_fn.assert_not_called()

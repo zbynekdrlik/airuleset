@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset
+import cli_remote  # noqa: E402  (#433 L-E seam re-target)
 from _hook_state_cleanup import sweep_session_files  # noqa: E402
 
 
@@ -11428,7 +11429,7 @@ class TestCmdPushTargetLevelSshRetry(TestCase):
                     m.patch.object(airuleset, "REMOTE_HOSTS",
                                     self._fake_hosts()), \
                     m.patch("time.sleep"), \
-                    m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                    m.patch.object(cli_remote, "_ssh_control_dir_for_push",
                                     return_value=control_dir):
                 try:
                     airuleset.cmd_push(args)
@@ -11477,7 +11478,7 @@ class TestCmdPushTargetLevelSshRetry(TestCase):
                     m.patch.object(airuleset, "cmd_install"), \
                     m.patch.object(airuleset, "REMOTE_HOSTS",
                                     self._fake_hosts()), \
-                    m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                    m.patch.object(cli_remote, "_ssh_control_dir_for_push",
                                     return_value=None):
                 with self.assertRaises(SystemExit):
                     airuleset.cmd_push(args)
@@ -11534,7 +11535,7 @@ class TestCmdPushTargetLevelSshRetry(TestCase):
                     m.patch.object(airuleset, "cmd_install"), \
                     m.patch.object(airuleset, "REMOTE_HOSTS",
                                     self._fake_hosts()), \
-                    m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                    m.patch.object(cli_remote, "_ssh_control_dir_for_push",
                                     return_value=None), \
                     m.patch.dict(os.environ,
                                   {"AIRULESET_SSH_RETRY_BACKOFF_S": "7"}):
@@ -11556,7 +11557,7 @@ class TestCmdPushTargetLevelSshRetry(TestCase):
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
                 m.patch("time.sleep"), \
-                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                m.patch.object(cli_remote, "_ssh_control_dir_for_push",
                                 return_value=None), \
                 contextlib.redirect_stdout(buf):
             with self.assertRaises(SystemExit):
@@ -11585,7 +11586,7 @@ class TestCmdPushSshMultiplexing(TestCase):
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
-                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                m.patch.object(cli_remote, "_ssh_control_dir_for_push",
                                 return_value="/tmp/arsshcm-fake"):
             airuleset.cmd_push(args)
         ssh_call = next(c for c in calls if c and c[0] == "ssh")
@@ -11610,7 +11611,7 @@ class TestCmdPushSshMultiplexing(TestCase):
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
-                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                m.patch.object(cli_remote, "_ssh_control_dir_for_push",
                                 return_value="/tmp/arsshcm-fake-sshpass"):
             airuleset.cmd_push(args)
         ssh_call = next(c for c in calls if c and c[0] == "sshpass")
@@ -11626,7 +11627,7 @@ class TestCmdPushSshMultiplexing(TestCase):
                                            stderr="")), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", []), \
-                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                m.patch.object(cli_remote, "_ssh_control_dir_for_push",
                                 return_value=real_dir):
             airuleset.cmd_push(args)
         self.assertFalse(os.path.isdir(real_dir))
@@ -11646,7 +11647,7 @@ class TestCmdPushSshMultiplexing(TestCase):
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
-                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                m.patch.object(cli_remote, "_ssh_control_dir_for_push",
                                 return_value=real_dir):
             with self.assertRaises(SystemExit):
                 airuleset.cmd_push(args)
@@ -11668,9 +11669,9 @@ class TestCmdPushSshMultiplexing(TestCase):
                 m.patch.object(airuleset, "REMOTE_HOSTS", hosts), \
                 m.patch.object(airuleset, "AUTHORITY_BY_USER",
                                 {"david": "fork-no-merge"}), \
-                m.patch.object(airuleset, "_soniox_key_line",
+                m.patch.object(cli_remote, "_soniox_key_line",
                                 return_value="SONIOX_API_KEY=x"), \
-                m.patch.object(airuleset, "_ssh_control_dir_for_push",
+                m.patch.object(cli_remote, "_ssh_control_dir_for_push",
                                 return_value="/tmp/arsshcm-fake2"):
             airuleset.cmd_push(args)
         deploy_call = next(
@@ -11905,7 +11906,7 @@ class TestCmdPushSubdevRegistrationAudit(TestCase):
         with m.patch("subprocess.run", side_effect=self._fake_run(calls, homes)), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
-                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                m.patch.object(cli_remote, "provision_subdev_soniox_key",
                                 return_value=[]):
             airuleset.cmd_push(args)
 
@@ -12011,7 +12012,7 @@ class TestCmdPushSubdevRegistrationAuditRetryOnFailure(TestCase):
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
-                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                m.patch.object(cli_remote, "provision_subdev_soniox_key",
                                 return_value=[]), \
                 contextlib.redirect_stderr(buf_err):
             with self.assertRaises(SystemExit):
@@ -12047,7 +12048,7 @@ class TestCmdPushSubdevRegistrationAuditRetryOnFailure(TestCase):
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
-                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                m.patch.object(cli_remote, "provision_subdev_soniox_key",
                                 return_value=[]), \
                 contextlib.redirect_stderr(buf_err):
             with self.assertRaises(SystemExit):
@@ -12093,7 +12094,7 @@ class TestCmdPushSubdevRegistrationAuditRetryOnFailure(TestCase):
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", self._fake_hosts()), \
-                m.patch.object(airuleset, "provision_subdev_soniox_key",
+                m.patch.object(cli_remote, "provision_subdev_soniox_key",
                                 return_value=[]):
             with contextlib.redirect_stderr(buf_err):
                 airuleset.cmd_push(args)   # must NOT raise (both ssh calls "succeed")
