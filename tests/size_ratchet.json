@@ -21,7 +21,7 @@
     "cli_tmux_provisioning.py": 800,
     "cli_vault.py": 663,
     "cli_worktree_sweep.py": 913,
-    "design_gate.py": 834,
+    "design_gate.py": 840,
     "filedrop/__init__.py": 281,
     "filedrop/server.py": 193,
     "filedrop/share.py": 103,
