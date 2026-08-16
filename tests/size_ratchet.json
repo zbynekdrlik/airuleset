@@ -214,7 +214,7 @@
     "tests/test_working_liveness.py": 332,
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 3669,
+    "watchdog/__init__.py": 3684,
     "watchdog/burn_jobs.py": 306,
     "watchdog/card_flags.py": 248,
     "watchdog/cards.py": 535,
