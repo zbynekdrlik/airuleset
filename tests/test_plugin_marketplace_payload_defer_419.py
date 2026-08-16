@@ -39,6 +39,11 @@ AIRULESET = REPO / "airuleset.py"
 # re-exported by airuleset.py — a relocation is not a deletion, so the #419
 # skill-subset lock below checks the leaf owns the def AND airuleset.py re-exports it.
 CLI_DEPLOYER_GLUE = REPO / "cli_deployer_glue.py"
+# #433 L-D: generate_claude_md / symlink_global_rules / apply_managed_settings_defaults
+# were relocated VERBATIM into this leaf, still re-exported by airuleset.py — same
+# relocation-is-not-deletion rule: the locks below check the leaf owns the def AND
+# airuleset.py re-exports it (both must hold — a future migration deleting either re-opens #419).
+CLI_CONFIG = REPO / "cli_config.py"
 
 # Distinctive substrings of the #419 decision bullet — sampled from its head,
 # the decisive capability facts (no always-on component, settings-defaults not
@@ -93,20 +98,37 @@ class TestKeptDeployerStillExists(unittest.TestCase):
 
     def test_always_on_claude_md_generator_kept(self):
         # Fact 1: no declarative always-on-rules plugin component exists, so
-        # the @import CLAUDE.md generator stays in the deployer.
+        # the @import CLAUDE.md generator stays in the deployer. #433 L-D
+        # relocated the def VERBATIM into cli_config.py, still re-exported by
+        # airuleset.py — the lock now checks the leaf owns it AND airuleset.py
+        # re-exports it (a relocation is not a deletion; deleting either re-opens #419).
+        leaf = CLI_CONFIG.read_text(encoding="utf-8")
         self.assertTrue(
-            "def generate_claude_md" in self._airuleset(),
+            "def generate_claude_md" in leaf,
             "the always-on ~/.claude/CLAUDE.md generator the #419 decision "
-            "keeps is gone from airuleset.py — re-open #419",
+            "keeps is gone from the deployer (cli_config.py) — re-open #419",
+        )
+        self.assertTrue(
+            "generate_claude_md as generate_claude_md" in self._airuleset(),
+            "airuleset.py no longer re-exports the CLAUDE.md generator the #419 "
+            "decision keeps — re-open #419",
         )
 
     def test_path_scoped_rules_symlinker_kept(self):
         # Fact 2: no native plugin-sourced path-scoped .claude/rules/ — the
-        # deployer's own symlinker stays.
+        # deployer's own symlinker stays. #433 L-D relocated it VERBATIM into
+        # cli_config.py, still re-exported by airuleset.py (leaf owns def AND
+        # airuleset.py re-exports; deleting either re-opens #419).
+        leaf = CLI_CONFIG.read_text(encoding="utf-8")
         self.assertTrue(
-            "def symlink_global_rules" in self._airuleset(),
+            "def symlink_global_rules" in leaf,
             "the path-scoped-rules symlinker the #419 decision keeps is gone "
-            "from airuleset.py — re-open #419",
+            "from the deployer (cli_config.py) — re-open #419",
+        )
+        self.assertTrue(
+            "symlink_global_rules as symlink_global_rules" in self._airuleset(),
+            "airuleset.py no longer re-exports the path-scoped-rules symlinker "
+            "the #419 decision keeps — re-open #419",
         )
 
     def test_per_box_skill_subset_kept(self):
@@ -139,10 +161,19 @@ class TestKeptDeployerStillExists(unittest.TestCase):
     def test_managed_settings_defaults_kept(self):
         # Fact 3: a plugin's settings.json honors only agent+subagentStatusLine,
         # so the managed fleet-policy settings defaults stay in the deployer.
+        # #433 L-D relocated the def VERBATIM into cli_config.py, still
+        # re-exported by airuleset.py (leaf owns def AND airuleset.py
+        # re-exports; deleting either re-opens #419).
+        leaf = CLI_CONFIG.read_text(encoding="utf-8")
         self.assertTrue(
-            "def apply_managed_settings_defaults" in self._airuleset(),
+            "def apply_managed_settings_defaults" in leaf,
             "the managed settings.json defaults the #419 decision keeps are "
-            "gone from airuleset.py — a plugin cannot set them, re-open #419",
+            "gone from the deployer (cli_config.py) — a plugin cannot set them, re-open #419",
+        )
+        self.assertTrue(
+            "apply_managed_settings_defaults as apply_managed_settings_defaults" in self._airuleset(),
+            "airuleset.py no longer re-exports the managed settings.json defaults "
+            "the #419 decision keeps — re-open #419",
         )
 
 
