@@ -634,11 +634,15 @@ gap in either.
    > `/requesting-code-review` + the local test suite, ALL on its OWN worktree branch — via ONE
    > self-contained fresh-context `general-purpose` review dispatch per `agents/autopilot-worker.md`
    > CYCLE step 6, NEVER the built-in review/code-review Skill (#363) — then
-   > RETURNS (branch name + worktree path in its evidence block). It does **NOT** push, does
+   > RETURNS (branch name + worktree path in its evidence block). It does **NOT** push to the
+   > INTEGRATION flow, does
    > **NOT** open or merge the PR, does **NOT** deploy, and does **NOT** fire its own run-card —
    > it cannot: it never sees the final merged/deployed state, because that only exists
    > after the supervisor integrates the worker's branch under the integration mutex (Step 4 below
-   > does the merge → gates → push → deploy for each returned branch). In the documented serial
+   > does the merge → gates → push → deploy for each returned branch). (The worker DOES make ONE
+   > push: a durability BACKUP of its branch to `refs/autopilot-wip/<branch>` after each commit,
+   > #503 — CI-neutral, integrates nothing, deleted by Step 4 after the branch merges.) In the
+   > documented serial
    > fallback (no `isolation:`), the
    > worker's full self-contained cycle above — push → PR → merge → deploy → its own run-card —
    > is UNCHANGED, exactly as it always was.
