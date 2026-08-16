@@ -779,5 +779,51 @@ class SubagentNudgeAdoption(unittest.TestCase):
         self.assertNotIn(self.PANE, state.get("janitor_watch", {}))
 
 
+# ------------------------------------------------------------------------- #
+# #505 — the two card_flags.py flag-cluster bare-box sites
+# (_nudge_repo_pane / _deliver_flag_prompt_to_exact_session). Unlike batch 3's
+# three sites, the flag prompt is a CHUNK-typed (up to 1183c) NATURAL-LANGUAGE
+# payload with NO machine-only leading prefix — so it cannot borrow the shared
+# `"stuck-check: "` reclaim key. Instead the flag prompt's OWN stable head
+# (`_FLAG_PROMPT_HEAD`) is registered in `_JANITOR_OWN_PREFIXES`, so a swallowed
+# WRAPPED residue is reclaimable by the #372 janitor WITHOUT prepending any
+# marker to the human-readable instruction the session reads. Registered for
+# RECLAIM only, deliberately NOT in `_OWN_NUDGE_SUBMIT_PREFIXES` (a wrapped/
+# partial instruction must never be submitted in place — the react re-fires
+# whole next sweep). The end-to-end caller-threading tests (WHICH transcript,
+# True vs False -> dreact_done) live in test_discord_reply.py; these lock the
+# janitor-prefix contract, which is pure. On the pre-adoption code the head is
+# not registered, so every assertion here is RED.
+# ------------------------------------------------------------------------- #
+
+
+class FlagPromptJanitorPrefix(unittest.TestCase):
+    def test_head_is_a_janitor_own_prefix_that_recognizes_the_flag_prompt(self):
+        self.assertIn(wd.stash._FLAG_PROMPT_HEAD, wd.stash._JANITOR_OWN_PREFIXES)
+        # the janitor's own-payload recognizer must see a swallowed flag-prompt
+        # residue as OURS (provenance-gated), so `_janitor_recover` reclaims it
+        # instead of a sibling job re-injecting it as a foreign draft.
+        self.assertTrue(wd._looks_like_own_payload(wd.compose_flag_prompt("hi")))
+
+    def test_head_matches_the_template_it_fingerprints(self):
+        # Drift-lock: an edit to `_FLAG_PROMPT_TEMPLATE` that broke this prefix
+        # match would SILENTLY disable the reclaim (no test, no crash) — the
+        # exact class of gap this whole ticket exists to close. The head is the
+        # template's OWN leading text, never a marker prepended to it.
+        self.assertTrue(wd.card_flags._FLAG_PROMPT_TEMPLATE.startswith(
+            wd.stash._FLAG_PROMPT_HEAD))
+        self.assertTrue(wd.compose_flag_prompt("y" * 900).startswith(
+            wd.stash._FLAG_PROMPT_HEAD))
+
+    def test_head_is_NOT_a_submit_in_place_prefix(self):
+        # Deliberate-exclusion negative control (batch-3 shape): submitting a
+        # WRAPPED/partial flag prompt in place pushes a truncated instruction
+        # into the session — a swallowed flag react RE-FIRES whole next sweep
+        # (the dreact_done dedup only books on a verified True), never submitted.
+        self.assertNotIn(wd.stash._FLAG_PROMPT_HEAD,
+                         wd.stash._OWN_NUDGE_SUBMIT_PREFIXES)
+        self.assertIsNone(wd._own_nudge_submit_prefix(wd.compose_flag_prompt("z")))
+
+
 if __name__ == "__main__":
     unittest.main()
