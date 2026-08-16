@@ -78,6 +78,33 @@ _STALE_WORKTREE_PROTECTED_BRANCHES = ("main", "dev", "master")
 STALE_ORPHAN_BRANCH_MIN_AGE_S = 3 * 24 * 3600  # env AIRULESET_WORKTREE_ORPHAN_MIN_AGE_S
 STALE_LOCKED_DEAD_MIN_AGE_S = 3 * 24 * 3600    # env AIRULESET_WORKTREE_LOCKED_DEAD_MIN_AGE_S
 
+# #513 -- the LIVE-WORKER guard. The #345/#348 chain protected a live worker
+# only via the harness worktree LOCK, but in-session `isolation:"worktree"`
+# workers are NOT lock-registered (live-measured: 0 of 11 registered
+# worktrees locked on dev1). An unlocked live worker is legitimately
+# 0-commits-ahead-of-base AND clean until its first commit -- byte-for-byte
+# indistinguishable from a dead, merged one -- so the LIVE install/push sweep
+# classified it a genuine candidate and could `git worktree remove` it out
+# from under the running worker (the likely cause of a live worktree
+# vanishing mid-work during a session-limit re-dispatch). `_target_in_live_use`
+# cannot rescue it: the agent process's cwd is the MAIN checkout, not the
+# worktree, so NOTHING in /proc points inside a live worktree (verified live).
+# The defensible signal that DOES separate them is recency: measured on dev1,
+# live worktrees had activity 2-13 min old, dead ones 22-35 h old. So an
+# UNLOCKED registered worktree is reclaimed only if it is ALSO idle for at
+# least this window -- an additive skip that can never CAUSE a removal, only
+# prevent one, on top of the existing 0-ahead + clean-tree-refusal criteria
+# (so even the rare clock-skew edge loses zero work).
+# 24h, not 6h (#513 adversarial-review MAJOR): a live 0-ahead+clean worker
+# BLOCKED on a `❓` question the ruleset explicitly supports parking overnight
+# (sleep window 00:00-06:00 -> an evening->morning wait is ~8-15h) has zero
+# git/file activity while it waits; a 6h window let an install/push sweep
+# remove its worktree mid-wait. 24h comfortably exceeds every documented
+# overnight/sleep-window wait yet stays ~100x the measured 13-min live-idle
+# max, so a genuinely-dead worktree (idle days) is still reclaimed. Env-
+# tunable for a one-off aggressive reclaim.
+STALE_WORKTREE_IDLE_MIN_AGE_S = 24 * 3600      # env AIRULESET_WORKTREE_IDLE_MIN_AGE_S
+
 
 def _worktree_env_age_s(env_key, default_s):
     """`int(os.environ.get(env_key, default_s))` -- an unparseable override
@@ -377,6 +404,69 @@ def _worktree_is_clean(worktree_path, git_run):
     return out.strip() == ""
 
 
+def _worktree_recency_age_s(root, worktree_path, now):
+    """Smallest ABSOLUTE distance `|now - mtime|` of the worktree's OWN
+    most-recent activity -- the newest of its git-admin metadata (`HEAD`/
+    `index`/`logs/HEAD`/`ORIG_HEAD`, updated on every git op the worker
+    runs) and its top-level directory entries (updated on every file
+    write). Returns the smallest such distance, or None when NO mtime is
+    measurable at all (no admin dir + unreadable worktree).
+
+    ABSOLUTE distance, not `now - mtime` (#513 adversarial-review MINOR):
+    an at-or-before-`now`-only age treated an mtime AFTER `now` as "no
+    recent activity" and let the worktree be removed. That is reachable
+    WITHOUT clock skew -- `now` is captured once, then `discover_stale_
+    worktrees` runs `git worktree prune`+`list` per repo, so a worktree
+    CREATED after `now` was captured but before its repo is listed has all
+    mtimes > `now` (a real sub-second-to-seconds race on a multi-repo box);
+    that worktree is a brand-new LIVE worker -- exactly the case GAP A must
+    protect. Using `|now - mtime|` protects it (its offset from `now` is
+    tiny) AND still reclaims a genuinely-dead worktree (its mtimes sit days
+    from `now` in EITHER direction, so the distance is large). A test with
+    a fixed PAST `now` (worktree mtimes ~days in the future) still yields a
+    large distance → correctly not recent → still reclaimed, so no existing
+    test changes. Clock skew folds in for free."""
+    def _mtime(p):
+        try:
+            return os.lstat(str(p)).st_mtime
+        except OSError:
+            return None      # unreadable/absent signal -- simply not counted
+    mtimes = []
+    admin = _worktree_admin_dir(root, worktree_path)
+    if admin is not None:
+        for rel in ("HEAD", "index", "logs/HEAD", "ORIG_HEAD"):
+            mtimes.append(_mtime(Path(admin) / rel))
+    wt = Path(worktree_path)
+    mtimes.append(_mtime(wt))
+    try:
+        with os.scandir(wt) as it:
+            names = [e.path for e in it]
+    except OSError:
+        names = []           # worktree dir gone/unreadable -- admin signals still count
+    for name in names:
+        mtimes.append(_mtime(name))
+    distances = [abs(now - m) for m in mtimes if m is not None]
+    return min(distances) if distances else None
+
+
+def _worktree_in_live_use(worktree_path):
+    """True if any live process holds this worktree directory (cwd/fd/exe)
+    -- reuses `cli_target_purge._target_in_live_use` (deferred import keeps
+    this module's stdlib-only top level). A WEAK signal here (an in-session
+    worker's own agent process cwd is the MAIN checkout, not the worktree,
+    so this reads False for most live workers -- recency is the primary
+    guard), but it DOES catch a process actively rooted in the tree (a
+    running test with cwd inside it). Fail-safe: any error → True (treat as
+    live, never remove)."""
+    try:
+        from cli_target_purge import _target_in_live_use
+        return _target_in_live_use(worktree_path)
+    except Exception as e:      # noqa: BLE001 -- fail-safe: unknown → treat as live
+        print("  worktree-sweep: live-use check failed for %s: %s"
+              % (worktree_path, e), file=sys.stderr)
+        return True
+
+
 def _classify_locked_worktree(root, path, branch, lock_reason, git_run, now,
                               pid_is_dead=None, min_age_s=None):
     """A LOCKED worktree is normally NEVER a candidate (#345's own
@@ -668,6 +758,73 @@ def discover_stale_worktrees(home=None, git_run=None, now=None, pid_is_dead=None
     return out
 
 
+def discover_salvage_worktrees(home=None, git_run=None, now=None):
+    """Read-only (#513, constraint #2). Every registered worktree across
+    managed repos under `home` that the SAFE sweep can NEVER reclaim
+    because it carries real work -- commits ahead of base OR an
+    uncommitted (dirty) tree -- AND is genuinely ABANDONED (idle beyond the
+    live-worker window AND not in live use). These are SALVAGE material:
+    disk the safe sweep can never free, needing a supervisor/human decision
+    (integrate, park the branch, or discard) -- NEVER auto-removed by any
+    sweep. A worktree still being actively worked (real work but recently
+    touched, or in live use) is EXCLUDED -- that is in-flight work.
+
+    Rows: {path, branch, repo, ahead, dirty, size, age_s, wip_backup} --
+    `ahead` commits ahead of base, `dirty` porcelain lines, `size` bytes,
+    `age_s` idle age, `wip_backup` True/False/None (a
+    `refs/autopilot-wip/<branch>` origin backup exists / does not / unknown)."""
+    git_run = git_run or _worktree_git
+    import time as _time
+    now = _time.time() if now is None else now
+    idle_min = _worktree_env_age_s("AIRULESET_WORKTREE_IDLE_MIN_AGE_S",
+                                   STALE_WORKTREE_IDLE_MIN_AGE_S)
+    out = []
+    import airuleset
+    for root in airuleset._checkout_roots(home):
+        if not (Path(root) / ".git").is_dir():
+            continue
+        entries = _worktree_porcelain_entries(root, git_run=git_run)
+        base = _worktree_sweep_base_branch(root, git_run=git_run)
+        for i, e in enumerate(entries):
+            if i == 0:
+                continue                     # primary checkout -- never salvage
+            branch = e.get("branch")
+            path = e.get("path")
+            if branch in _STALE_WORKTREE_PROTECTED_BRANCHES or not path:
+                continue
+            ahead = 0
+            if branch is not None and base:
+                a = git_run(["rev-list", "--count",
+                            "refs/heads/%s..refs/heads/%s" % (base, branch)], root)
+                if a is not None and a.strip().isdigit():
+                    ahead = int(a.strip())
+            clean = _worktree_is_clean(path, git_run)
+            dirty = 0
+            if clean is False:
+                st = git_run(["status", "--porcelain"], path)
+                dirty = len([ln for ln in (st or "").splitlines() if ln.strip()])
+            if ahead <= 0 and dirty <= 0:
+                continue                     # no real work -- the safe sweep handles it
+            rec = _worktree_recency_age_s(root, path, now)
+            if rec is None or rec <= idle_min or _worktree_in_live_use(path):
+                continue                     # still active / in-flight -- not salvage
+            wip_backup = None
+            ls = git_run(["ls-remote", "origin", "refs/autopilot-wip/%s" % branch], root)
+            if ls is not None:
+                wip_backup = bool(ls.strip())
+            size = None
+            try:
+                from cli_target_purge import _dir_stats
+                size = _dir_stats(path)[0]
+            except Exception as ex:          # noqa: BLE001 -- size is best-effort
+                print("  worktree-salvage: size unmeasurable for %s: %s"
+                      % (path, ex), file=sys.stderr)
+            out.append({"path": path, "branch": branch, "repo": root,
+                        "ahead": ahead, "dirty": dirty, "size": size,
+                        "age_s": rec, "wip_backup": wip_backup})
+    return out
+
+
 def _log_stale_worktree_results(results, log_path, now, dry_run: bool):
     import time as _time
     lines = []
@@ -774,6 +931,26 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
         if c.get("reason"):
             results.append(entry)
             continue
+        # #513 LIVE-WORKER guard -- applied to a registered worktree (kind
+        # "worktree") in BOTH dry-run and live, so the two agree. NOT applied
+        # to `orphan_branch` (no checkout to protect; already ref-age-gated)
+        # or `locked_dead` (already passed the #348 dead-session + lock-age +
+        # clean chain). A recently-active OR in-live-use worktree is kept --
+        # this can only ever turn a candidate into a skip, never the reverse.
+        if kind == "worktree":
+            idle_min = _worktree_env_age_s("AIRULESET_WORKTREE_IDLE_MIN_AGE_S",
+                                           STALE_WORKTREE_IDLE_MIN_AGE_S)
+            rec = _worktree_recency_age_s(c.get("repo"), c.get("path"), now)
+            if rec is not None and rec <= idle_min:
+                entry["reason"] = ("active within %.1fh (idle threshold %.1fh) "
+                                   "-- kept (live-worker guard)"
+                                   % (rec / 3600.0, idle_min / 3600.0))
+                results.append(entry)
+                continue
+            if _worktree_in_live_use(c.get("path")):
+                entry["reason"] = "in live use (process rooted in tree) -- kept (live-worker guard)"
+                results.append(entry)
+                continue
         if dry_run:
             entry["reason"] = "would remove (dry-run)"
             results.append(entry)
@@ -911,3 +1088,35 @@ def cmd_sweep_worktrees(args):
     verb = "would be " if dry_run else ""
     print("%d worktree(s) %sremoved." % (len(acted_rows), verb))
     print("Log: %s" % STALE_WORKTREE_LOG_PATH)
+
+    # #513 constraint #2 -- surface abandoned worktrees carrying real work
+    # (unmerged commits or a dirty tree) LOUDLY. NEVER auto-removed: the
+    # supervisor/human decides (integrate, park the branch, or discard).
+    # OPT-IN via --salvage: the scan walks EVERY managed repo + does a network
+    # `git ls-remote` per candidate, so it is off by default (a plain sweep
+    # stays fast + hermetic; existing wiring tests never trigger it).
+    if not getattr(args, "salvage", False):
+        return
+    try:
+        salvage = discover_salvage_worktrees()
+    except Exception as e:      # noqa: BLE001 -- report is best-effort
+        print("  salvage report unavailable: %s" % e, file=sys.stderr)
+        salvage = []
+    if salvage:
+        print()
+        print("SALVAGE (abandoned worktrees with real work -- NOT auto-removed, needs a decision):")
+        try:
+            from cli_target_purge import _human_size
+        except Exception:       # noqa: BLE001
+            _human_size = lambda n: "%s B" % n      # noqa: E731
+        for s in salvage:
+            backup = ("wip-backup=yes" if s["wip_backup"] is True
+                      else "wip-backup=NO" if s["wip_backup"] is False
+                      else "wip-backup=?")
+            size = _human_size(s["size"]) if s.get("size") is not None else "?"
+            print("  %s (branch %s, repo %s) -- %d ahead, %d dirty, %s, idle %.1fh, %s"
+                  % (s["path"], s["branch"], s["repo"], s["ahead"], s["dirty"],
+                     size, s["age_s"] / 3600.0, backup))
+    else:
+        print()
+        print("SALVAGE: no abandoned worktrees carrying unmerged/dirty work.")
