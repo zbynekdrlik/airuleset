@@ -1467,5 +1467,72 @@ class TestIssueRefsAfterShellQuote(unittest.TestCase):
         self.assertEqual(dg.issue_refs("a &#123 b"), [])
 
 
+# --------------------------------------------------------------------------- #
+# #514 -- a NEGATED nontrivial keyword in the DESCRIPTIVE TAIL of a genuinely
+# trivial Triage line ("Triage: trivial -- ... no cross-cutting change") must
+# NOT flip the whole comment to non-trivial. The classifier reads the VERDICT
+# (the leading segment of the Triage line), never the prose tail -- the tail
+# may legitimately name any complexity keyword in any polarity. The mirror of
+# the already-handled MAJOR-1 "not trivial" case, for the reverse direction.
+# --------------------------------------------------------------------------- #
+
+
+class TestTriageNegatedNontrivialKeywordInTrivialLine(unittest.TestCase):
+
+    def test_ticket_exact_line_stays_trivial(self):
+        # The exact line from the ticket -- reproduced live as classifying
+        # non-trivial (so demanding 2-3 approaches + blocking the commit)
+        # against the shipped code. RED before the fix, GREEN after.
+        body = GOOD_SCOPED + (
+            "\n\nTriage: trivial — docs/pin reconciliation, no cross-cutting change")
+        self.assertEqual(dg.triage_class(body), "trivial")
+        ok, reason = dg.classify_triage_and_approaches(body)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "ok (trivial)")
+
+    def test_negated_keyword_in_trivial_tail_across_separators(self):
+        # Every natural separator this fleet uses -- em-dash, the repo's own
+        # "--" convention, comma, paren, spaced hyphen -- with a negated (or
+        # merely mentioned) nontrivial keyword in the descriptive tail: all
+        # still trivial. RED before the fix for the keyword-bearing tails.
+        for tail in (
+            "trivial — docs/pin reconciliation, no cross-cutting change",
+            "trivial -- no cross-cutting change",
+            "trivial, no cross-cutting change",
+            "trivial (no architectural impact)",
+            "trivial - rename inside the cross-cutting module",     # affirmative tail keyword
+            "trivial -- žiadna krížová zmena, len drobná oprava",   # Slovak negated keyword
+        ):
+            body = GOOD_SCOPED + "\n\nTriage: " + tail
+            self.assertEqual(dg.triage_class(body), "trivial", tail)
+            ok, reason = dg.classify_triage_and_approaches(body)
+            self.assertTrue(ok, "%r -> %r" % (tail, reason))
+            self.assertEqual(reason, "ok (trivial)", tail)
+
+    def test_genuinely_nontrivial_verdicts_still_nontrivial(self):
+        # Negative controls -- a genuinely non-trivial line MUST STILL classify
+        # non-trivial (no false-negative / silent-depth-waive regression). Each
+        # names its class, or a complexity keyword, AS the leading verdict, so
+        # the structural anchor still sees it. These pass before AND after the
+        # fix; they lock that non-trivial detection is not weakened.
+        for tail in (
+            "non-trivial -- new daemon",
+            "not trivial -- new daemon",
+            "nie je to triviálne — nový daemon",
+            "nie triviálne",
+            "netriviálne",
+            "cross-cutting change — touches 9 modules",   # keyword AS the verdict
+            "design-heavy -- whole new subsystem",         # internal hyphen preserved
+            "komplexná architektonická zmena naprieč modulmi",
+            "architektonická zmena, dotýka sa 8 modulov",  # keyword before a comma
+        ):
+            body = GOOD_SCOPED + "\n\nTriage: " + tail
+            self.assertEqual(dg.triage_class(body), "non-trivial", tail)
+            # Correctly non-trivial: GOOD_SCOPED carries no numbered approaches,
+            # so it fails on approach count -- never silently "ok (trivial)".
+            ok, reason = dg.classify_triage_and_approaches(body)
+            self.assertNotEqual(reason, "ok (trivial)", tail)
+
+
 if __name__ == "__main__":
     unittest.main()
