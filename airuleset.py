@@ -2042,7 +2042,11 @@ def cmd_tickets_status(args):
                 # #510: partition ops-wait (external-event/evidence) tickets OUT
                 # of the workable slice too, alongside #468's user-waiting split —
                 # both leave `I N`/`gk`, surfacing as `U N`/`W N`. ONE partition of
-                # the SAME fetch `slice-quals --count` uses (#367/#468 guard).
+                # the SAME fetch `slice-quals --count` uses (#367/#468 guard). `gk`
+                # is the handed-off subset of the WORKABLE remainder only, so a
+                # ticket that is BOTH handed-off AND parked (user-waiting/ops-wait)
+                # is counted in its parked bucket (`U`/`W`), never `gk` — the same
+                # surface treatment #468 already gives a handed + user-waiting row.
                 workable_rows, waiting, ops_wait = _partition_workable(rows)
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
