@@ -327,7 +327,13 @@ def classify_review_comment(body):
 # low (an over-strict block costs one extra `gh issue comment`; a missed
 # reference just leaves the gate silent for that commit, exactly like any
 # other "unmeasurable -> never guess" case in this repo).
-ISSUE_REF_RE = re.compile(r"(?:^|[\s(/])#([0-9]+)\b")
+# The boundary class includes the shell QUOTE chars: the commit-gate hook
+# scans the raw `git commit -m "<subject>"` COMMAND string, so a subject
+# whose ref is its very first token arrives as `"#433 ...` — with only
+# whitespace/(/ in the class that ref was invisible and the gate silently
+# passed a markerless worker commit (batch-32 corpus-replay catch,
+# 2026-08-16). `&#123`-style HTML entities stay excluded (no `&` in class).
+ISSUE_REF_RE = re.compile(r"(?:^|[\s(/\"'])#([0-9]+)\b")
 
 
 def issue_refs(text):
