@@ -27,6 +27,7 @@ so a resurrected worker's new push is REFUSED, never destroyed.
 import subprocess
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -49,8 +50,17 @@ class FakeGit:
     * ``wip``       : {full-ref: sha} — what ``ls-remote`` reports on origin.
     * ``merged``    : set of shas that ARE ancestors of a base (rc 0 for
                       ``merge-base --is-ancestor``); anything else → rc 1.
-    * ``local_ct``  : {sha: committer-epoch} readable by a LOCAL ``git show``.
-    * ``fetch_ct``  : {ref: committer-epoch} readable only AFTER a per-ref fetch.
+    * ``local_ct``  : {sha: committer-epoch} readable NOW by a local ``git show``.
+    * ``fetch_ct``  : {ref: committer-epoch} — a ``git fetch origin <ref>`` makes
+                      ``wip[ref]``'s object local at this date (models a real
+                      fetch bringing the object; the age is then read off the
+                      CLASSIFIED sha, never FETCH_HEAD).
+    * ``fetch_fail``: refs whose ``git fetch`` returns rc≠0.
+    * ``fetch_head_ct``: what ``git show FETCH_HEAD`` returns — models a
+                      CLOBBERED FETCH_HEAD (a concurrent fetch left an unrelated,
+                      possibly old, tip there). The module must NEVER read it;
+                      it exists so the #504-review FETCH_HEAD-clobber regression
+                      test has teeth (a mutant that reads FETCH_HEAD mis-ages).
     * ``bases``     : the origin/* refs that ``rev-parse --verify`` resolves.
     * ``push_fail`` : refs whose delete push always fails (models a lease-stale
                       refusal or any other push failure).
@@ -60,7 +70,8 @@ class FakeGit:
     """
 
     def __init__(self, wip=None, merged=(), local_ct=None, fetch_ct=None,
-                 bases=("refs/remotes/origin/main",), push_fail=(), ls_rc=0):
+                 bases=("refs/remotes/origin/main",), push_fail=(), ls_rc=0,
+                 fetch_fail=(), fetch_head_ct=None):
         self.wip = dict(wip or {})
         self.merged = set(merged)
         self.local_ct = dict(local_ct or {})
@@ -68,10 +79,11 @@ class FakeGit:
         self.bases = set(bases)
         self.push_fail = set(push_fail)
         self.ls_rc = ls_rc
+        self.fetch_fail = set(fetch_fail)
+        self.fetch_head_ct = fetch_head_ct
         self.deleted = []
         self.fetched = []
         self.calls = []
-        self._fetch_head = None
 
     def __call__(self, args, cwd, timeout=None):
         a = list(args)
@@ -86,18 +98,23 @@ class FakeGit:
             return (0, ref + "\n") if ref in self.bases else (1, "")
         if a[:2] == ["merge-base", "--is-ancestor"]:
             return (0, "") if a[2] in self.merged else (1, "")
-        if a[0] == "show" and a[-1] != "FETCH_HEAD":
+        if a[0] == "show" and a[-1] == "FETCH_HEAD":
+            return (0, "%d\n" % self.fetch_head_ct) if self.fetch_head_ct is not None else (128, "")
+        if a[0] == "show":
             sha = a[-1]
             return (0, "%d\n" % self.local_ct[sha]) if sha in self.local_ct else (128, "")
         if a[0] == "fetch":
             ref = a[-1]
             self.fetched.append(ref)
-            if ref in self.fetch_ct:
-                self._fetch_head = self.fetch_ct[ref]
-                return (0, "")
-            return (1, "")
-        if a[0] == "show" and a[-1] == "FETCH_HEAD":
-            return (0, "%d\n" % self._fetch_head) if self._fetch_head is not None else (128, "")
+            if ref in self.fetch_fail:
+                return (1, "")
+            # a successful fetch brings THIS ref's object local (if we know its
+            # date); a fetch that doesn't localize the classified sha (ref not in
+            # fetch_ct) still succeeds — models "remote moved, fetch brought a
+            # different tip", which must read as NOT-local → keep.
+            if ref in self.fetch_ct and ref in self.wip:
+                self.local_ct[self.wip[ref]] = self.fetch_ct[ref]
+            return (0, "")
         if a[0] == "push":
             # ["push","origin","--force-with-lease=<ref>:<sha>", ":<ref>"]
             lease = a[2]
@@ -119,117 +136,142 @@ def _ref(name):
 
 
 # ---------------------------------------------------------------------------
-# classify_wip_ref — the pure decision, one ref at a time.
+# classify_wip_ref — the PURE decision (no git I/O; merged + age passed in).
 # ---------------------------------------------------------------------------
 class TestClassifyWipRef(unittest.TestCase):
-    def _classify(self, sha, ref, git):
-        bases = wrs._resolve_base_refs("repo", git)
-        return wrs.classify_wip_ref("repo", sha, ref, bases, NOW, git, MAX_AGE)
+    def _c(self, merged, age, max_age_s=MAX_AGE):
+        return wrs.classify_wip_ref("aaaaaaaa", _ref("b"), merged, age, max_age_s)
 
-    def test_merged_ref_is_deleted_immediately(self):
-        g = FakeGit(merged={"aaa"})
-        c = self._classify("aaa", _ref("b1"), g)
-        self.assertEqual(c["action"], "delete-merged")
+    def test_merged_is_deleted_immediately(self):
+        self.assertEqual(self._c(True, None)["action"], "delete-merged")
 
-    def test_unmerged_young_local_is_kept(self):
-        g = FakeGit(local_ct={"bbb": int(NOW - 2 * DAY)})     # 2 days old
-        c = self._classify("bbb", _ref("b2"), g)
-        self.assertEqual(c["action"], "keep")
+    def test_merged_takes_precedence_over_a_young_age(self):
+        self.assertEqual(self._c(True, 60)["action"], "delete-merged")
 
-    def test_unmerged_old_local_is_deleted_aged(self):
-        g = FakeGit(local_ct={"ccc": int(NOW - 9 * DAY)})     # 9 days old
-        c = self._classify("ccc", _ref("b3"), g)
-        self.assertEqual(c["action"], "delete-aged")
+    def test_unmerged_young_is_kept(self):
+        self.assertEqual(self._c(False, 2 * DAY)["action"], "keep")
+
+    def test_unmerged_old_is_deleted_aged(self):
+        self.assertEqual(self._c(False, 9 * DAY)["action"], "delete-aged")
 
     def test_unmerged_unknown_age_is_kept(self):
-        # not local, and the per-ref fetch fails too → age unknown → KEEP.
-        g = FakeGit()
-        c = self._classify("ddd", _ref("b4"), g)
+        c = self._c(False, None)
         self.assertEqual(c["action"], "keep")
         self.assertIn("age unknown", c["reason"])
 
-    def test_unmerged_foreign_aged_via_fetch_is_deleted(self):
-        # not local; only readable after a per-ref fetch; old → delete-aged.
-        g = FakeGit(fetch_ct={_ref("b5"): int(NOW - 30 * DAY)})
-        c = self._classify("eee", _ref("b5"), g)
-        self.assertEqual(c["action"], "delete-aged")
-        self.assertIn(_ref("b5"), g.fetched)
-
-    def test_unmerged_foreign_young_via_fetch_is_kept(self):
-        g = FakeGit(fetch_ct={_ref("b6"): int(NOW - 1 * DAY)})
-        c = self._classify("fff", _ref("b6"), g)
-        self.assertEqual(c["action"], "keep")
-
     def test_exactly_at_gate_is_deleted(self):
-        # age == max_age_s → >= gate → delete-aged (boundary).
-        g = FakeGit(local_ct={"ggg": int(NOW - MAX_AGE)})
-        c = self._classify("ggg", _ref("b7"), g)
-        self.assertEqual(c["action"], "delete-aged")
+        self.assertEqual(self._c(False, MAX_AGE)["action"], "delete-aged")
 
     def test_just_under_gate_is_kept(self):
-        g = FakeGit(local_ct={"hhh": int(NOW - MAX_AGE + 60)})
-        c = self._classify("hhh", _ref("b8"), g)
-        self.assertEqual(c["action"], "keep")
+        self.assertEqual(self._c(False, MAX_AGE - 60)["action"], "keep")
 
     def test_future_dated_commit_is_kept(self):
         # clock skew: committer date in the future → negative age → KEEP.
-        g = FakeGit(local_ct={"iii": int(NOW + 5 * DAY)})
-        c = self._classify("iii", _ref("b9"), g)
-        self.assertEqual(c["action"], "keep")
-
-    def test_no_base_falls_through_to_age_gate(self):
-        # no origin base resolves → merged check skipped → age gate only.
-        # An old one is still deletable; a young one is still kept.
-        g = FakeGit(bases=(), local_ct={"jjj": int(NOW - 9 * DAY)})
-        c = self._classify("jjj", _ref("b10"), g)
-        self.assertEqual(c["action"], "delete-aged")
-
-    def test_merged_takes_precedence_over_a_young_age(self):
-        # a merged ref is deleted even if its tip is brand new.
-        g = FakeGit(merged={"kkk"}, local_ct={"kkk": int(NOW - 60)})
-        c = self._classify("kkk", _ref("b11"), g)
-        self.assertEqual(c["action"], "delete-merged")
+        self.assertEqual(self._c(False, -5 * DAY)["action"], "keep")
 
 
 # ---------------------------------------------------------------------------
-# discover_orphaned_wip_refs — enumeration + fetch-degrade.
+# discover_orphaned_wip_refs — enumeration, merged/age resolution, fetch budget.
 # ---------------------------------------------------------------------------
 class TestDiscover(unittest.TestCase):
+    def _discover(self, g, **kw):
+        return wrs.discover_orphaned_wip_refs("repo", NOW, git_run=g, **kw)
+
+    def _action(self, g, **kw):
+        out = self._discover(g, **kw)
+        self.assertEqual(len(out), 1)
+        return out[0]["action"]
+
     def test_no_wip_refs_returns_empty(self):
-        g = FakeGit(wip={})
-        self.assertEqual(wrs.discover_orphaned_wip_refs("repo", NOW, git_run=g), [])
+        self.assertEqual(self._discover(FakeGit(wip={})), [])
 
     def test_ls_remote_failure_returns_empty(self):
-        g = FakeGit(wip={_ref("x"): "aaa"}, ls_rc=128)
-        self.assertEqual(wrs.discover_orphaned_wip_refs("repo", NOW, git_run=g), [])
+        self.assertEqual(self._discover(FakeGit(wip={_ref("x"): "aaa"}, ls_rc=128)), [])
+
+    def test_merged_ref_is_delete_merged(self):
+        g = FakeGit(wip={_ref("m"): "m0"}, merged={"m0"})
+        self.assertEqual(self._action(g), "delete-merged")
+
+    def test_unmerged_local_young_is_kept(self):
+        g = FakeGit(wip={_ref("y"): "y0"}, local_ct={"y0": int(NOW - 2 * DAY)})
+        self.assertEqual(self._action(g), "keep")
+
+    def test_unmerged_local_old_is_delete_aged(self):
+        g = FakeGit(wip={_ref("o"): "o0"}, local_ct={"o0": int(NOW - 9 * DAY)})
+        self.assertEqual(self._action(g), "delete-aged")
+
+    def test_unmerged_foreign_aged_via_fetch_is_deleted(self):
+        # not local; a fetch brings the object → old → delete-aged.
+        g = FakeGit(wip={_ref("f"): "f0"}, fetch_ct={_ref("f"): int(NOW - 30 * DAY)})
+        self.assertEqual(self._action(g), "delete-aged")
+        self.assertIn(_ref("f"), g.fetched)
+
+    def test_unmerged_foreign_young_via_fetch_is_kept(self):
+        g = FakeGit(wip={_ref("f"): "f0"}, fetch_ct={_ref("f"): int(NOW - 1 * DAY)})
+        self.assertEqual(self._action(g), "keep")
+
+    def test_unmerged_fetch_fails_age_unknown_is_kept(self):
+        g = FakeGit(wip={_ref("f"): "f0"}, fetch_fail={_ref("f")})
+        c = self._discover(g)[0]
+        self.assertEqual(c["action"], "keep")
+        self.assertIn("age unknown", c["reason"])
+
+    def test_no_base_falls_through_to_age_gate(self):
+        # no origin base resolves → merged check can't fire → age gate only.
+        g = FakeGit(wip={_ref("o"): "o0"}, bases=(), local_ct={"o0": int(NOW - 9 * DAY)})
+        self.assertEqual(self._action(g), "delete-aged")
+
+    def test_FETCH_HEAD_clobber_never_mis_ages_a_young_ref(self):
+        # #504 review 🟡: a foreign tip whose per-ref fetch SUCCEEDS but does not
+        # bring THIS sha local (remote moved), while FETCH_HEAD carries an
+        # unrelated OLD (30d) commit from a concurrent fetch. Reading FETCH_HEAD
+        # would delete this salvageable ref; reading the classified sha keeps it.
+        g = FakeGit(wip={_ref("z"): "young0"},
+                    fetch_head_ct=int(NOW - 30 * DAY))   # clobbered FETCH_HEAD
+        c = self._discover(g)[0]
+        self.assertEqual(c["action"], "keep",
+                         "a young ref must never be aged off a clobbered FETCH_HEAD")
+        self.assertIn(_ref("z"), g.fetched)              # it DID try the fetch
+
+    def test_age_fetches_are_budgeted_per_repo(self):
+        # 3 foreign refs, budget 1 → exactly one age-fetch; the rest kept
+        # (age unknown), never deleted, re-aged next sweep.
+        wip = {_ref("a"): "a0", _ref("b2"): "b0", _ref("c"): "c0"}
+        fetch_ct = {r: int(NOW - 30 * DAY) for r in wip}   # all OLD if fetched
+        g = FakeGit(wip=wip, fetch_ct=fetch_ct)
+        out = self._discover(g, max_age_fetches=1)
+        self.assertEqual(len(g.fetched), 1, "the per-repo age-fetch budget was not enforced")
+        actions = sorted(c["action"] for c in out)
+        self.assertEqual(actions, ["delete-aged", "keep", "keep"])
+
+    def test_env_max_age_below_a_day_is_clamped_up(self):
+        # #504 review 🔵: AIRULESET_WIP_REF_MAX_AGE_S=5 means 5 SECONDS (units
+        # error). A 1-hour-old unmerged ref must be KEPT (clamped to the 1-day
+        # floor), never deleted.
+        import os as _os
+        g = FakeGit(wip={_ref("h"): "h0"}, local_ct={"h0": int(NOW - 3600)})
+        with unittest.mock.patch.dict(_os.environ,
+                                      {"AIRULESET_WIP_REF_MAX_AGE_S": "5"}):
+            self.assertEqual(self._action(g), "keep")
 
     def test_ignores_non_wip_and_peeled_lines(self):
-        g = FakeGit()
-        # inject a peeled-tag line + a non-wip line into ls-remote output
-        g.wip = {}
-
         def fake(args, cwd, timeout=None):
             if args[0] == "ls-remote":
                 return (0, "aaa\t%s\nbbb\t%s^{}\nccc\trefs/heads/main\n"
                         % (_ref("real"), _ref("real")))
-            return FakeGit.__call__(g, args, cwd, timeout)
+            return (0, "")
         refs = wrs._ls_remote_wip_refs("repo", fake)
         self.assertEqual(refs, [("aaa", _ref("real"))])
 
     def test_fetch_is_called_once_when_refs_present(self):
         calls = []
-
-        def fetcher(root):
-            calls.append(root)
         g = FakeGit(wip={_ref("x"): "aaa"}, merged={"aaa"})
-        wrs.discover_orphaned_wip_refs("repo", NOW, git_run=g, git_fetch=fetcher)
+        self._discover(g, git_fetch=lambda r: calls.append(r))
         self.assertEqual(calls, ["repo"])
 
     def test_fetch_never_called_when_no_refs(self):
         calls = []
-        g = FakeGit(wip={})
-        wrs.discover_orphaned_wip_refs("repo", NOW, git_run=g,
-                                       git_fetch=lambda r: calls.append(r))
+        self._discover(FakeGit(wip={}), git_fetch=lambda r: calls.append(r))
         self.assertEqual(calls, [])
 
     def test_fetch_failure_is_logged_not_swallowed_and_degrades(self):
@@ -239,8 +281,7 @@ class TestDiscover(unittest.TestCase):
             raise RuntimeError("network down")
         # unmerged, but a LOCAL date exists → still classifiable after degrade.
         g = FakeGit(wip={_ref("x"): "aaa"}, local_ct={"aaa": int(NOW - 1 * DAY)})
-        out = wrs.discover_orphaned_wip_refs("repo", NOW, git_run=g,
-                                             git_fetch=boom, logs=logs)
+        out = self._discover(g, git_fetch=boom, logs=logs)
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["action"], "keep")
         self.assertTrue(any("fetch-degraded" in ln for ln in logs),
@@ -357,7 +398,7 @@ class TestSafetyInvariant(unittest.TestCase):
         self.assertNotIn(_ref("z"), g.wip)
 
     def test_a_git_error_during_merge_check_never_deletes(self):
-        # merge-base errors (rc 128, not local) → not merged; no date → keep.
+        # merge-base non-ancestor / bad-object → not merged; no date → keep.
         g = FakeGit(wip={_ref("z"): "aaa"})     # nothing merged, no dates
         state = {}
         out = wrs.sweep_orphaned_wip_refs(NOW, state, repo_roots=["r"], git_run=g,

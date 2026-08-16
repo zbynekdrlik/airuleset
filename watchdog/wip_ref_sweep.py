@@ -58,6 +58,18 @@ import watchdog
 
 WIP_REF_PREFIX = "refs/autopilot-wip/"
 WIP_REF_MAX_AGE_S = 7 * 24 * 3600        # env AIRULESET_WIP_REF_MAX_AGE_S
+WIP_REF_MIN_MAX_AGE_S = 24 * 3600        # floor for the env override (#504 review 🔵):
+                                          # a value below a day is almost certainly a
+                                          # seconds/days units error (e.g. `=7` meaning
+                                          # 7 DAYS = 7 seconds) — clamp UP rather than
+                                          # delete every unmerged ref, mirroring
+                                          # `_repo_sweep_batch`'s own knob clamp
+WIP_REF_MAX_AGE_FETCHES_PER_REPO = 20    # env AIRULESET_WIP_REF_MAX_AGE_FETCHES —
+                                          # bound the per-repo age-fetches so ONE
+                                          # heavily-leaked repo can't blow the sweep's
+                                          # systemd time budget (#172-class; #504 review
+                                          # 🔵); a ref past the budget is simply KEPT and
+                                          # aged next sweep (safe — never a delete)
 WIP_REF_SWEEP_INTERVAL_S = 6 * 3600      # env AIRULESET_WIP_REF_SWEEP_S — orphan
                                           # cleanup is low-urgency; no hourly need
 WIP_GIT_TIMEOUT_S = 30                    # network ops (ls-remote/fetch/push)
@@ -148,36 +160,38 @@ def _is_merged(root, sha, bases, git_run):
     return False
 
 
-def _commit_age_s(root, sha, ref, now, git_run):
-    """Age in seconds of ``sha``'s committer date, or ``None`` if it can't be
-    determined at all (caller then KEEPS the ref — never guess an age). Tries a
-    local ``git show`` first (``sha`` is local for a merged ref or one this box
-    itself created); on failure fetches ONLY this ref into ``FETCH_HEAD`` and
-    reads that (the minimum network to age a foreign, not-yet-local tip)."""
+def _local_commit_age_s(root, sha, now, git_run):
+    """Age in seconds of ``sha``'s committer date IF ``sha`` is a LOCAL object,
+    else ``None`` — a plain ``git show -s --format=%ct <sha>``, NO network.
+
+    Reads the CLASSIFIED ``sha`` — NEVER a process-global ``FETCH_HEAD`` (#504
+    review 🟡): ``FETCH_HEAD`` is shared across the whole checkout and a
+    concurrent ``git fetch`` (a human, ``session-start-fetch.sh``, or this
+    sweep's own base fetch) can clobber it between our per-ref fetch and our
+    read, making a genuinely YOUNG foreign tip read as aged → deleting a
+    salvageable backup. Reading ``<sha>`` directly is immune: if the remote
+    moved / the object was never fetched, ``git show <sha>`` returns rc 128 →
+    ``None`` → the caller KEEPS the ref (never mis-ages it)."""
     rc, out = git_run(["show", "-s", "--format=%ct", sha], root)
     ct = (out or "").strip()
     if rc != 0 or not ct.isdigit():
-        frc, _ = git_run(["fetch", "origin", ref], root)
-        if frc != 0:
-            return None
-        rc2, out2 = git_run(["show", "-s", "--format=%ct", "FETCH_HEAD"], root)
-        ct = (out2 or "").strip()
-        if rc2 != 0 or not ct.isdigit():
-            return None
+        return None
     return now - int(ct)
 
 
-def classify_wip_ref(root, sha, ref, bases, now, git_run, max_age_s):
-    """Pure decision for ONE wip ref → ``{ref, sha, action, reason}`` where
-    ``action`` ∈ {``delete-merged``, ``delete-aged``, ``keep``}. Never mutates
-    anything. The safety invariant lives here: a delete verdict requires a
-    POSITIVE merged proof or a POSITIVE age past ``max_age_s``; every uncertain
-    or young case returns ``keep``."""
+def classify_wip_ref(sha, ref, merged, age, max_age_s):
+    """PURE decision from already-resolved facts → ``{ref, sha, action,
+    reason}`` where ``action`` ∈ {``delete-merged``, ``delete-aged``, ``keep``}.
+    NO git I/O — the caller (``discover_orphaned_wip_refs``) resolves ``merged``
+    (bool) and ``age`` (seconds, or ``None`` = could-not-determine, owning the
+    per-repo fetch budget), so the safety invariant is a trivially-auditable
+    pure function: a delete verdict requires a POSITIVE ``merged`` proof or a
+    POSITIVE ``age`` past ``max_age_s``; every uncertain (``age is None``) or
+    young case returns ``keep``."""
     short = sha[:8]
-    if _is_merged(root, sha, bases, git_run):
+    if merged:
         return {"ref": ref, "sha": sha, "action": "delete-merged",
                 "reason": "merged into an origin base (%s) — backup redundant" % short}
-    age = _commit_age_s(root, sha, ref, now, git_run)
     if age is None:
         return {"ref": ref, "sha": sha, "action": "keep",
                 "reason": "unmerged, commit age unknown — kept (never guess)"}
@@ -191,20 +205,35 @@ def classify_wip_ref(root, sha, ref, bases, now, git_run, max_age_s):
 
 
 def discover_orphaned_wip_refs(root, now, git_run=None, git_fetch=None,
-                               max_age_s=None, logs=None):
+                               max_age_s=None, logs=None, max_age_fetches=None):
     """Classify every ``refs/autopilot-wip/*`` on ``root``'s origin → a list of
     ``{ref, sha, action, reason}`` dicts (``[]`` if the repo has none / can't be
-    listed). Pure discovery+classification — ``sweep_orphaned_wip_refs`` is the
-    only function that ever pushes a delete.
+    listed). Owns ALL the git I/O; ``classify_wip_ref`` is the pure decision.
+    ``sweep_orphaned_wip_refs`` is the only function that ever pushes a delete.
 
     Freshens origin (best-effort ``git_fetch``) ONLY when there is at least one
     wip ref to classify — the merged check needs a fresh ``origin/<base>`` + the
     merged objects local; a fetch failure is APPENDED to ``logs`` (never
     silently swallowed) and degrades to age-gate-only, which is still safe (an
-    un-fetched merged ref just reads as unmerged and waits for the age gate)."""
+    un-fetched merged ref just reads as unmerged and waits for the age gate).
+
+    For each ref: MERGED (ancestor of an origin base) → delete-merged; else the
+    age is read from the LOCAL object if present, and ONLY a foreign, not-yet-
+    local tip triggers a single ``git fetch origin <ref>`` (to bring the object)
+    + a re-read of the CLASSIFIED ``sha``. Those per-ref fetches are BUDGETED
+    (``max_age_fetches``): once the budget is spent, a still-unaged ref is left
+    at ``age=None`` → KEPT and re-aged next sweep, so one heavily-leaked repo
+    can never blow the systemd time budget (#504 review 🔵)."""
     git_run = git_run or _wip_git
     if max_age_s is None:
-        max_age_s = _env_int("AIRULESET_WIP_REF_MAX_AGE_S", WIP_REF_MAX_AGE_S)
+        # #504 review 🔵: clamp the env override up to a 1-day floor (a sub-day
+        # value is a units error, and this module's whole job is "never delete a
+        # salvageable copy").
+        max_age_s = max(_env_int("AIRULESET_WIP_REF_MAX_AGE_S", WIP_REF_MAX_AGE_S),
+                        WIP_REF_MIN_MAX_AGE_S)
+    if max_age_fetches is None:
+        max_age_fetches = _env_int("AIRULESET_WIP_REF_MAX_AGE_FETCHES",
+                                   WIP_REF_MAX_AGE_FETCHES_PER_REPO)
     refs = _ls_remote_wip_refs(root, git_run)
     if not refs:
         return []
@@ -217,8 +246,25 @@ def discover_orphaned_wip_refs(root, now, git_run=None, git_fetch=None,
                             "(merged check may be stale — kept conservative)"
                             % (_repo_label(root), e))
     bases = _resolve_base_refs(root, git_run)
-    return [classify_wip_ref(root, sha, ref, bases, now, git_run, max_age_s)
-            for sha, ref in refs]
+    out = []
+    fetches_left = max_age_fetches
+    for sha, ref in refs:
+        if _is_merged(root, sha, bases, git_run):
+            out.append(classify_wip_ref(sha, ref, True, None, max_age_s))
+            continue
+        age = _local_commit_age_s(root, sha, now, git_run)
+        if age is None and fetches_left > 0:
+            # a foreign, not-yet-local tip — fetch ONLY this ref (brings the
+            # object) then re-read the CLASSIFIED sha (now local, never
+            # FETCH_HEAD). Budgeted so a heavily-leaked repo can't exhaust the
+            # sweep's time budget; a moved remote tip that the fetch didn't
+            # bring still reads not-local → age None → KEEP (fail-safe).
+            frc, _ = git_run(["fetch", "origin", ref], root)
+            if frc == 0:
+                fetches_left -= 1
+                age = _local_commit_age_s(root, sha, now, git_run)
+        out.append(classify_wip_ref(sha, ref, False, age, max_age_s))
+    return out
 
 
 def _delete_wip_ref(root, ref, sha, git_run):
