@@ -1342,8 +1342,8 @@ def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs)
     Marks #372 janitor provenance BEFORE the keystroke so a swallowed chunk-typed
     residue (a wrapped/collapsed partial `send_verified`'s own undo cannot back
     off) is reclaimable by the janitor via the shared `"stuck-check: "`
-    own-payload prefix; `send_verified`; clears the mark on a transcript-VERIFIED
-    submit and returns True. On an unverified/swallowed submit the mark is LEFT
+    own-payload prefix, then calls `send_verified` and clears the mark on a
+    transcript-VERIFIED submit, returning True. On an unverified/swallowed submit the mark is LEFT
     as the residue backstop and False is returned — the caller does NO persist
     reorder (decide_working's own interval/re-sighting cadence retries a
     swallowed nudge, and its after-max_nudges escalation is correct on a repeated

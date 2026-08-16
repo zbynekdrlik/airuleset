@@ -154,7 +154,7 @@
     "tests/test_schedule_wakeup_loop_only.py": 66,
     "tests/test_scope_gate.py": 1503,
     "tests/test_send_verified.py": 224,
-    "tests/test_send_verified_adoption.py": 761,
+    "tests/test_send_verified_adoption.py": 783,
     "tests/test_served_compact_boundary.py": 228,
     "tests/test_shadow_box_fresh_refresh.py": 98,
     "tests/test_situational_injection.py": 617,

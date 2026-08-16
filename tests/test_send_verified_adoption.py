@@ -680,7 +680,7 @@ class SubagentNudgeAdoption(unittest.TestCase):
     WORKER = "0595c939-3be6-4930-a233-894df58db5ad"   # a real 36-char UUID stem
     IDLE = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
 
-    def _build(self, now):
+    def _build(self, now, sub_rows=None):
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         import notify
@@ -699,15 +699,21 @@ class SubagentNudgeAdoption(unittest.TestCase):
         subdir = proj / enc / self.SID / "subagents"
         subdir.mkdir(parents=True)
         self.sub_path = subdir / (self.WORKER + ".jsonl")
-        _write_jsonl_rows(self.sub_path, [_apierror_row()])
-        os.utime(self.sub_path, (now - 400, now - 400))   # > GRACE_SECONDS (300)
+        # api-error sub (default) triggers the job-1b caller; a textcall-stall
+        # sub triggers the job-4a-sub caller — BOTH thread `tpath`/`sleep_fn`
+        # into `_nudge_dying_subagent`, so each caller needs its own lock (the
+        # #497-b3 adversarial-review coverage-gap finding: only the 1b caller
+        # was exercised, so a dropped `tpath=` at the 4a-sub call site went
+        # uncaught). sub_age 400 > GRACE_SECONDS (300) and > STALL_TEXTCALL (120).
+        _write_jsonl_rows(self.sub_path, sub_rows or [_apierror_row()])
+        os.utime(self.sub_path, (now - 400, now - 400))
         self.proj = proj
         self.state_path = Path(tmp.name) / "state.json"
         self.pending = str(Path(tmp.name) / "pending-")
 
-    def _run(self, sv_result):
+    def _run(self, sv_result, sub_rows=None):
         now = time.time()
-        self._build(now)
+        self._build(now, sub_rows=sub_rows)
         keys = []
 
         def fake_run(argv, timeout=8):
@@ -755,6 +761,22 @@ class SubagentNudgeAdoption(unittest.TestCase):
         self.assertIn(self.PANE, state.get("janitor_watch", {}),
                       "a swallowed chunk-typed subagent nudge leaves the mark")
         self.assertTrue(any("(submit-unverified)" in ln for ln in logs), logs)
+
+    def test_textcall_sub_caller_also_threads_the_supervisor_tpath(self):
+        # The SECOND `_nudge_dying_subagent` caller (job 4a-sub, the text-toolcall
+        # -stall subagent path) must thread the supervisor `tpath` exactly like the
+        # 1b caller — a dropped `tpath=` there would route through the send_continue
+        # fallback and go uncaught by the api-error test alone (#497-b3 review gap).
+        logs, _keys, state, rec = self._run(sv_result=True, sub_rows=[_textcall_row()])
+        self.assertTrue(any(ln.startswith("subagent-textcall-nudge#1") for ln in logs),
+                        logs)
+        self.assertEqual(len(rec.calls), 1, logs)
+        self.assertTrue(rec.calls[0]["text"].startswith("stuck-check: "))
+        self.assertEqual(rec.tpaths[0], str(self.sup_tpath),
+                         "the 4a-sub caller must ALSO verify against the SUPERVISOR "
+                         "transcript, never sub_path")
+        self.assertNotEqual(rec.tpaths[0], str(self.sub_path))
+        self.assertNotIn(self.PANE, state.get("janitor_watch", {}))
 
 
 if __name__ == "__main__":
