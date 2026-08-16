@@ -97,11 +97,38 @@ re-review and no pickup).
    gets the `gk-request backstop:` machine nudge; a BUSY supervisor loop needs nothing (the label
    alone queues it — the master loop's lane scheduler picks it next turn); no live supervisor
    session → ONE deduped Discord ping. The `gk-req N` statusline badge shows the open-request
-   count on full-authority boxes. **Supervisor pickup protocol:** ACK-comment the ticket (add the
-   label if only the GATEKEEPER-ACTION: title carries it), perform the action, comment the
-   result, remove the label or close, then nudge the requesting stream's pane (rule 6 mechanics)
-   so it resumes without polling. Session-local pollers for this lane are FORBIDDEN — the
-   watchdog owns the cadence (the odoo-erp master-loop interim poller is superseded).
+   count on full-authority boxes. **Supervisor pickup protocol:** FIRST the SELF-SERVICE TRIAGE
+   (rule 9 below) — a prod-STATE READ the stream can answer itself is BOUNCED, never worked; then
+   ACK-comment the ticket (add the label if only the GATEKEEPER-ACTION: title carries it), perform
+   the LIVE intervention, comment the result, remove the label or close, then nudge the requesting
+   stream's pane (rule 6 mechanics) so it resumes without polling. Session-local pollers for this
+   lane are FORBIDDEN — the watchdog owns the cadence (the odoo-erp master-loop interim poller is
+   superseded).
+9. **SELF-SERVICE TRIAGE — bounce a prod-STATE READ the stream could do itself (airuleset #516).**
+   The recurring overload: a sub-dev files gk an action request for a prod-STATE READ (a group
+   membership, a row count, a config value, sent-mail content) it could read itself from its own
+   fresh PROD copy — `autonomous-verification.md`'s "What's on PROD? is a SELF-SERVICE question".
+   Both sides are now MECHANICALLY gated. **At FILING** (side A): `hooks/block-gk-request-without-
+   selfservice.sh` BLOCKS a reduced-stream gk action request that carries no
+   `Self-service-checked: <what I tried — RO channel / fresh prod copy — and what LIVE PROD
+   intervention I need from gk>` line. **At RECEIPT** (side B): the api-watchdog job 31
+   (`gk_selfservice_bounce`) AUTO-BOUNCES any needs-gatekeeper action request that has NO such
+   line and is attributable to a reduced stream (`handed-by:<stream>`) — it removes
+   `needs-gatekeeper`, adds `prio:bounce` + `stream:<stream>` (routing it back into the stream's
+   own bounce lane, rule 4), and posts the template comment; every candidate's verdict is logged.
+   **Your MANUAL triage step (the semantic case the watchdog cannot mechanize):** when a request
+   DOES carry a `Self-service-checked:` line but that line names only a READ with NO live PROD
+   intervention (a pure read dressed up), BOUNCE it yourself with the SAME template — remove
+   `needs-gatekeeper`, add `prio:bounce` + `stream:<stream>`, and comment (Slovak):
+   > 🔄 Automaticky/ručne vrátené (prio:bounce) — toto je prod-STATE READ, ktorý si vieš spraviť
+   > sám z čerstvej PROD kópie (`REFRESH-DEV-BOX-FROM-PROD: <stream>`) alebo cez vlastný read-only
+   > kanál (`has_group`/`search_read`). Gatekeeper robí len ŽIVÉ zásahy do PRODu. Ak naozaj
+   > potrebuješ živý zásah, znova to zadaj s riadkom `Self-service-checked:` menujúcim ten zásah.
+
+   Only a request naming a genuine LIVE intervention (a stuck queue restart, a `RUNTIME_DEPS`
+   install, a migration) is WORKED. Never mechanize the pure-read judgement in a hook/watchdog —
+   that would be a banned prose classifier; the watchdog only ever bounces the falsifiable
+   "no line at all" case.
 8. **Carve-out HAND-OFF vs. ACTION request — the SAME `needs-gatekeeper` label, told apart by
    `stream:<user>` (airuleset #498, live incident odoo-erp #3244).** `needs-gatekeeper` is
    OVERLOADED. A stream carved OUT of the hand-off gate (a phase-1 stream with no shadow box,
