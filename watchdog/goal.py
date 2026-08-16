@@ -1089,19 +1089,6 @@ GOAL_LANE_IDLE_S = 15 * 60
 GOAL_LANE_INTERVAL_S = 15 * 60
 GOAL_LANE_MAX_NUDGES = 2
 GOAL_LANE_LIVE_WINDOW_S = 15 * 60
-# #486 G5 -- a PERSISTENT render<->structured mismatch re-emits its dedicated
-# `parallel-mismatch` evidence line at most once per hour (a state CHANGE always
-# emits at once). Bounded so a long-lived divergence (e.g. the 4 MB-tail caveat
-# on a long armed loop, live on this box) leaves periodic episode evidence
-# without the per-sweep journal spam that made the old pane-text guard
-# unreadable -- the exact "could the mismatch logger itself spam?" hazard.
-GOAL_LANE_MISMATCH_REASSERT_S = 3600
-# #486 G5 -- age-gate the per-sid mismatch dedup dict so a session that DIED
-# while still diverging (its pane vanishes, so it is never revisited to resolve)
-# cannot leak its entry for the box's lifetime. Set well above the re-assert
-# window (a live diverging session refreshes its ts at least every re-assert, so
-# this never prunes a live one); reaped once per sweep.
-GOAL_LANE_MISMATCH_STATE_TTL_S = 6 * 3600
 
 # #442 -- the lane-fill path's OWN "live conversation" definition. The
 # shared check's default window (`GOAL_AUTOARM_RECENT_HUMAN_S`, 30 min) is
@@ -1587,6 +1574,32 @@ def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
     return False, logs
 
 
+def _lane_pre_send_race(ok, fresh_armed, loc):
+    """#486 G6 -- the pre-send race re-check over the FRESH capture, taken right
+    before the keystroke. The STRUCTURED signal already gated this pane armed;
+    this final RENDER read only VETOES a genuine change SINCE the sweep. Returns
+    ``(should_skip, log_lines)`` (`log_lines` is a 0/1-element list).
+
+    A readable footer that lost the glyph (`is False` = a real clear right now,
+    the render is the freshest truth there) or a lost/unreadable input box
+    (`not ok`) vetoes. An UNREADABLE footer (`None`, the #486 obscured case) NO
+    LONGER vetoes: re-vetoing on the same undeterminable footer the structured
+    gate just overrode is what re-silenced the incident one layer down. It
+    proceeds, logged. The `is False` veto is also the safety net for a 60s-stale
+    goal_mark "set" (a goal cleared THIS sweep leaves the footer readable without
+    the glyph) and a stale heartbeat-True -- defense in depth."""
+    if not ok:
+        return True, ["skip raced (lane-occupancy) %s -> pane moved since "
+                      "the sweep" % loc]
+    if fresh_armed is False:
+        return True, ["skip raced (lane-occupancy) %s -> footer readable, goal "
+                      "cleared since the sweep" % loc]
+    if fresh_armed is None:
+        return False, ["race-check (lane-occupancy) %s -> render footer "
+                       "unreadable; structured-armed stands" % loc]
+    return False, []
+
+
 def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               tmtime, loc, send_fn, dry_run, handled,
                               projects_dir, backlog_fetch=None, state=None,
@@ -1864,9 +1877,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         return logs, True
     fresh = watchdog.capture_pane(pid, run, lines=40)
     ok, kind, fresh_draft = _lane_boundary_ok(fresh)
-    if not ok or watchdog.pane_goal_armed(fresh) is not True:
-        logs.append("skip raced (lane-occupancy) %s -> pane moved since "
-                    "the sweep" % loc)
+    raced, rlog = _lane_pre_send_race(ok, watchdog.pane_goal_armed(fresh), loc)
+    logs += rlog
+    if raced:
         return logs, True
     if fresh_draft != draft:
         # #442-review F1: the box CONTENT changed between the sweep-top
@@ -2034,17 +2047,10 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     time_fn = time_fn or time.monotonic
     state = state if state is not None else {}
     recs = state.setdefault("goal_lane", {})
-    # #486 G5 -- per-sid dedup state for the parallel-run mismatch evidence
-    # (sid -> (signature, emit_ts)). Its own namespace next to `goal_lane`
-    # because a mismatch can fire on a pane the render path treats as a
-    # non-candidate (armed is False/None), which never gets a `recs[sid]` entry.
-    # Persists across sweeps via load_state/save_state, so the dedup + re-assert
-    # window work cross-sweep.
-    mrecs = state.setdefault("goal_mismatch", {})
-    # Reap dead-session entries once per sweep (a session that died while still
-    # diverging is never revisited to resolve, so its entry would otherwise leak
-    # forever -- #486 G5 review 🟡). Age-gated well above the re-assert window.
-    _one_glance.prune_mismatch_state(mrecs, now, GOAL_LANE_MISMATCH_STATE_TTL_S)
+    # #486 G6 -- dark_watch's tail-proof `state["goal_mark"]` marker (populated
+    # BEFORE this job in the same run_once, sharing `state`) is the authoritative
+    # structured armed signal. Read-only here: dark_watch owns its lifecycle.
+    gmarks = state.get("goal_mark", {})
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
@@ -2059,70 +2065,34 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         tpath, tmtime = tinfo
         sid = tpath.stem
         captured = run(["tmux", "capture-pane", "-p", "-t", pid]) or ""
-        armed = watchdog.pane_goal_armed(captured)
         loc = watchdog._pane_location(pid, run) or pid
-        # #486 G3 -- the one-glance STRUCTURED verdict (heartbeat + G2 worker
-        # count + backlog cache; reads NO pane text). Evaluated for EVERY
-        # candidate pane so the exact render-blindness this redesign targets --
-        # the footer reads not-armed while a /goal is genuinely armed -- surfaces
-        # as ONE decision line instead of the deliberately-SILENT `armed is
-        # False` skip below. The line is journalled when it carries SIGNAL
-        # (`is_informative`: any lane candidate incl. stuck, any render<->
-        # structured divergence, any missing heartbeat) and stays silent only
-        # when the heartbeat and the footer BOTH agree the pane is not a
-        # candidate -- exactly the "pure noise" the pre-G3 render path silenced.
-        # DIAGNOSTIC in G3: the render `armed` verdict stays the authoritative
-        # action gate until G5. Guarded so the diagnostic can never crash the
-        # sweep (the injected readers are contractually non-raising, but the
-        # boundary stays defensive).
+        # #486 G6 -- the ARMED action gate is the STRUCTURED one-glance verdict,
+        # NOT the render footer. `resolve_goal_armed` (inside evaluate) keys on
+        # dark_watch's tail-proof `state["goal_mark"]` marker first (persisted
+        # past the 4 MB tail the render footer AND the heartbeat's own single-
+        # shot `goal_armed` scan BOTH go blind on -- the exact gk incident: a
+        # day-old arm), the heartbeat only as fallback. Every candidate pane gets
+        # ONE decision line (is_informative gates pure not-armed noise) -- the
+        # deliberately-SILENT `skip:armed-undeterminable` render skip this
+        # redesign removed. Guarded so a reader fault can never crash the sweep;
+        # on a (contractually impossible) raise, skip this pane this sweep,
+        # logged, never silent.
         try:
-            _glance, gline = _one_glance.evaluate(
-                now, sid, cwd, projects_dir, state, backlog_fetch, armed, loc,
+            glance, gline = _one_glance.evaluate(
+                now, sid, cwd, projects_dir, state, backlog_fetch,
+                gmarks.get(sid), loc,
                 read_status=watchdog.read_status,
                 count_live_workers=watchdog.count_live_workers,
                 cached_backlog_count=watchdog._cached_backlog_count,
                 idle_threshold_s=GOAL_LANE_IDLE_S,
                 freshness_s=GOAL_LANE_LIVE_WINDOW_S)
-            if _one_glance.is_informative(_glance, armed):
-                logs.append(gline)
-            # #486 G5 -- the DEDICATED, deduped parallel-run mismatch evidence.
-            # When the render footer and the structured verdict POSITIVELY
-            # contradict each other on armed-ness, journal ONE greppable
-            # `parallel-mismatch` line per divergence EPISODE (+ a bounded hourly
-            # re-assert), so G6 retires the render heuristics on real fleet
-            # evidence rather than a green suite. Still DIAGNOSTIC: the render
-            # `armed` verdict below stays the sole ACTION gate until G6. A
-            # resolved mismatch DROPS the pane's dedup state so a re-occurrence
-            # counts as a fresh episode.
-            mline, mstate = _one_glance.mismatch_evidence(
-                loc, _glance, armed, prev=mrecs.get(sid), now=now,
-                reassert_s=GOAL_LANE_MISMATCH_REASSERT_S)
-            if mstate is None:
-                mrecs.pop(sid, None)
-            else:
-                mrecs[sid] = mstate
-            if mline:
-                logs.append(mline)
         except Exception as _e:
-            logs.append("one-glance %s -> error: %s" % (loc, _e))
-        if armed is not True:
-            if armed is None:
-                # #475: the incident path -- a genuinely-armed supervisor whose
-                # footer is obscured this sweep (busy mid-turn / chrome / a large
-                # unsent draft) reads UNDETERMINABLE. The render path cannot
-                # confirm the goal is still armed this sweep, so it skips -- but
-                # the one-glance line above already journalled the STRUCTURED
-                # verdict (from the heartbeat, not the footer), so this is the
-                # render perspective, not a silent drop.
-                logs.append("lane-occupancy %s -> skip:armed-undeterminable "
-                            "(footer obscured this sweep -- busy / chrome / "
-                            "large unsent draft; cannot confirm the goal is "
-                            "still armed)" % loc)
-            # armed is False: the footer IS readable and shows no armed /goal, so
-            # the RENDER path takes this pane as a non-candidate. No longer a
-            # SILENT skip -- the one-glance line above carries the structured
-            # verdict for this pane (including the #486 case where structure says
-            # STUCK while the footer read not-armed).
+            logs.append("one-glance %s -> error (skipping pane this sweep): %s"
+                        % (loc, _e))
+            continue
+        if _one_glance.is_informative(glance):
+            logs.append(gline)
+        if glance.goal_armed is not True:
             continue
         rec = recs.get(sid)
         if not isinstance(rec, dict):

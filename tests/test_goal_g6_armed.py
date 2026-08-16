@@ -36,7 +36,6 @@ from watchdog import session_status as ss
 
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
-    _encode,
     _write_marker_transcript,
 )
 
@@ -45,6 +44,10 @@ from _goal_arm_helpers import (  # noqa: E402
 # `pane_goal_armed` reads None -- while the `❯ ` input box is a settled, typeable
 # idle prompt. Probed live: pane_goal_armed=None, _lane_boundary_ok=(True,input).
 OBSCURED_IDLE_CAP = "● Predošlá práca hotová.\n❯ \n"
+
+# A pane whose footer IS readable (a ctx statusline row is in view) and shows NO
+# ◎ /goal glyph -> pane_goal_armed reads a CONFIDENT False (a genuine clear).
+READABLE_NOT_ARMED_CAP = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
 
 
 class TestG6StructuredArmedGate(unittest.TestCase):
@@ -115,6 +118,37 @@ class TestG6StructuredArmedGate(unittest.TestCase):
                         "expected real keystrokes typed: %r" % tmux.sent)
         # the pre-G6 render gate must be GONE -- no armed-undeterminable skip
         self.assertFalse(any("armed-undeterminable" in ln for ln in logs), logs)
+
+    def test_goal_mark_cleared_never_types_even_with_a_backlog(self):
+        # SAFETY INVERSE (fail-open-overshoot guard): goal_mark says the /goal was
+        # CLEARED. Even with a heartbeat that lies armed + a backlog + idle, the
+        # structured gate must skip and NEVER type a lane-fill keystroke into a
+        # session that no longer has a /goal loop.
+        logs, tmux = self._run_sweep(goal_mark_state="cleared", hb_goal_armed=True,
+                                     backlog=5, cap=OBSCURED_IDLE_CAP)
+        self.assertEqual(tmux.sent, [], "a cleared goal must never be nudged")
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_no_structured_signal_and_heartbeat_not_armed_never_types(self):
+        # No goal_mark verdict + heartbeat reads not-armed -> resolve = not-armed
+        # -> skip, no keystroke (the definite not-armed pane, correctly silent).
+        logs, tmux = self._run_sweep(goal_mark_state=None, hb_goal_armed=False,
+                                     backlog=5, cap=OBSCURED_IDLE_CAP)
+        self.assertEqual(tmux.sent, [])
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_presend_readable_not_armed_footer_still_vetoes(self):
+        # 1867 defense-in-depth: the structured gate armed this pane (goal_mark
+        # set), but the FRESH pre-send capture reads the footer READABLE with NO
+        # glyph (GOAL_IDLE_CAP -> pane_goal_armed False = a genuine clear THIS
+        # sweep, the freshest truth). The `is False` veto must STILL fire -- G6
+        # removed only the None-suppression, never the genuine race guard.
+        self.assertIs(wd.pane_goal_armed(READABLE_NOT_ARMED_CAP), False)
+        logs, tmux = self._run_sweep(goal_mark_state="set", hb_goal_armed=True,
+                                     backlog=5, cap=READABLE_NOT_ARMED_CAP)
+        self.assertEqual(tmux.sent, [], "readable not-armed footer must veto")
+        self.assertTrue(any("skip raced" in ln and "goal cleared" in ln
+                            for ln in logs), logs)
 
 
 if __name__ == "__main__":

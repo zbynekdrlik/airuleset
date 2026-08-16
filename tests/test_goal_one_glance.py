@@ -85,25 +85,26 @@ class TestGoalLaneOneGlance(unittest.TestCase):
     def _one_glance_lines(self, logs):
         return [ln for ln in logs if ln.startswith("one-glance ")]
 
-    def test_render_blind_but_structurally_stuck_is_no_longer_silent(self):
-        # THE #486 CASE: footer reads not-armed (pane_goal_armed -> False), but
-        # the heartbeat says a /goal IS armed, 0 workers, big backlog, idle over
-        # the threshold. The render path skips (no nudge, correct in G3), but the
-        # structured one-glance line MUST journal `stuck` -- the exact
-        # observability the silent branch destroyed.
+    def test_heartbeat_armed_journals_the_structured_verdict_never_silent(self):
+        # G6: GOAL_IDLE_CAP is READABLE and shows NO ◎ /goal glyph
+        # (pane_goal_armed -> False), but the heartbeat reads armed, so the
+        # STRUCTURED gate is what decides -- it journals the `stuck` verdict
+        # naming its source (never the silent render skip this redesign removed).
+        # No wrong keystroke is sent (the structured verdict is diagnostic here;
+        # the actual delivery is gated by the nudge's own idle/race checks -- the
+        # pre-send readable-not-armed veto is proven end-to-end in
+        # test_goal_g6_armed.py where the transcript mtime is controlled).
         self.assertIs(wd.pane_goal_armed(GOAL_IDLE_CAP), False)
         logs, tmux = self._sweep(
             GOAL_IDLE_CAP, goal_armed=True, marker="working",
             age_s=goal.GOAL_LANE_IDLE_S + 500, backlog=43)
         og = self._one_glance_lines(logs)
         self.assertTrue(og, "no one-glance decision line emitted: %r" % logs)
-        self.assertTrue(any("-> stuck (" in ln for ln in og),
-                        "expected a STUCK one-glance verdict: %r" % og)
-        # the line must name the render<->structured DIVERGENCE
-        self.assertTrue(any("render=not-armed" in ln and "structured state is armed"
-                            in ln for ln in og), og)
-        # DIAGNOSTIC in G3: render path stays authoritative -> no keystroke sent
-        self.assertEqual(tmux.sent, [], "G3 must not act -- render path skipped")
+        self.assertTrue(any("-> stuck (" in ln and "armed=yes src=heartbeat" in ln
+                            for ln in og),
+                        "expected a STUCK one-glance verdict naming the source: %r"
+                        % og)
+        self.assertEqual(tmux.sent, [], "no wrong keystroke on a not-armed footer")
 
     def test_render_blind_working_when_the_structured_count_sees_workers(self):
         # A render-blind pane whose structured state shows LIVE workers is
@@ -133,9 +134,9 @@ class TestGoalLaneOneGlance(unittest.TestCase):
         self.assertTrue(any("-> no-heartbeat (" in ln for ln in og), og)
         self.assertFalse(any("-> stuck" in ln for ln in og), og)
 
-    def test_armed_footer_also_gets_a_one_glance_line(self):
-        # An armed footer (render agrees) proceeds to the nudge path AND gets a
-        # one-glance line -- two distinct evaluations, each one line. Here the
+    def test_armed_session_gets_a_one_glance_line_naming_the_source(self):
+        # An armed session proceeds to the nudge path AND gets a one-glance line
+        # naming the structured armed source (heartbeat here, no goal_mark). The
         # structured state also shows workers, so the verdict is `working`.
         def _count(*a, **k):
             return 2, []
@@ -145,7 +146,8 @@ class TestGoalLaneOneGlance(unittest.TestCase):
                 age_s=30, backlog=43)
         og = self._one_glance_lines(logs)
         self.assertTrue(og, logs)
-        self.assertTrue(any("render=armed" in ln for ln in og), og)
+        self.assertTrue(any("-> working (" in ln and "armed=yes src=heartbeat" in ln
+                            for ln in og), og)
 
     def test_not_armed_agreeing_with_the_footer_is_silenced(self):
         # review 🔵 noise fix: a heartbeat that says goal_armed=False + a footer
