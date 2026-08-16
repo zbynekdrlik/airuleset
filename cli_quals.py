@@ -303,26 +303,56 @@ def _ticket_is_stream_labeled(labels):
     return any(("stream:%s" % u) in names for u in airuleset.AUTHORITY_BY_USER)
 
 
-# The labels that mark a ticket as WAITING ON THE USER's answer — a question
-# asked and hanging: `needs-answer` (the ask-and-continue durable marker, pinged)
-# and `needs-decision` (the sleep-window deferral, queued for after 06:00). Such
-# a ticket is genuine open work, but it is NOT this box's ACTIVE responsibility:
-# the loop can do nothing with it until the user answers (the question already
-# pinged the phone), so it LEAVES the workable "I N" count and the /goal
-# stop-proof's workable-0 proof — and surfaces SEPARATELY as `U N` + the
-# stop-proof's user-waiting remainder, so nothing is hidden and the loop parks on
-# it rather than claiming "backlog empty" past it (#468, the user's directive
-# 2026-08-14: "v I by nemali byť tie čo sú Q — nech je jasné kto za čo zodpovedá").
+# The labels that mark a ticket as WAITING ON THE OWNER — the consolidated
+# "on your court" family (#512, owner decision 2026-08-16 comment 5308903157):
+# `needs-answer` (the ask-and-continue durable marker, pinged), `needs-decision`
+# (the sleep-window deferral, queued for after 06:00), AND `needs-acceptance`
+# (a hand-off the gatekeeper already processed — DONE, OPEN pending the owner's/
+# client's acceptance, "done = client saw it", odoo-erp #3145). Such a ticket is
+# genuine open work, but it is NOT this box's ACTIVE responsibility: the loop can
+# do nothing with it until the OWNER acts (answers / decides / accepts), so it
+# LEAVES the workable "I N" count and the /goal stop-proof's workable-0 proof —
+# and surfaces SEPARATELY as `U N` + the stop-proof's user-waiting remainder, so
+# nothing is hidden and the loop parks on it rather than claiming "backlog empty"
+# past it (#468 for answer/decision; the user's directive 2026-08-14 "v I by
+# nemali byť tie čo sú Q — nech je jasné kto za čo zodpovedá"; #512 folds
+# `needs-acceptance` in so the owner sees "done, len sprocesovať odovzdanie" and
+# "mám nezodpovedané otázky" as ONE "waiting on ME" number, not two letters).
+#
+# #512 supersedes #507's FOOTER placement of a BARE `needs-acceptance` ticket
+# (was the stream's own workable `I N`) — it now lands in `U N`. #507's gk
+# EXCLUSION mechanism (`GATEKEEPER_PROCESSED_LABELS`, the comment-fallback
+# suppression in `_slice_mine_and_handed`) is UNTOUCHED, and #507's precedence
+# invariant "a `needs-acceptance` ticket that is ALSO a re-hand-off/bounce stays
+# gk/workable, never U" is preserved by the `needs-acceptance`-scoped override in
+# `_row_is_user_waiting` (see NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS below).
 #
 # Deliberately DISTINCT from AUTOPILOT_SKIP_EXCL/ops-channel (which fully EXCLUDE
 # a ticket from every consideration): a user-waiting ticket stays tracked,
 # listed (`--waiting`) and counted (`U N`) — only PARTITIONED out of "mine to
 # action right now". And distinct from `needs-design`/`question`/`blocked`
 # (filing-time "needs input" labels that stay fully WORKABLE and get worked — the
-# worker raises the question): these two are applied ONLY AFTER a question has
-# already been raised, so partitioning them never risks a question going unasked
-# (skills/autopilot/SKILL.md's Step-1 backlog-scope bullet, #468 reconciliation).
-USER_WAITING_LABELS = ("needs-answer", "needs-decision")
+# worker raises the question): these are applied ONLY AFTER a question has been
+# raised (or, for needs-acceptance, after the work is DONE), so partitioning them
+# never risks a question going unasked (skills/autopilot/SKILL.md's Step-1
+# backlog-scope bullet, #468 reconciliation).
+USER_WAITING_LABELS = ("needs-answer", "needs-decision", "needs-acceptance")
+
+# #512: the gk-processed / bounce labels that OVERRIDE a `needs-acceptance`
+# ticket's routing to the `U N` user-waiting bucket. A `needs-acceptance` ticket
+# is "waiting on the owner" (→ U) ONLY when it is NOT simultaneously:
+#   - a genuine RE-hand-off (`ready-for-review`/`needs-gatekeeper`) → back in the
+#     gatekeeper's court → stays `workable` so `_slice_mine_and_handed`'s
+#     `handed`/gk logic counts it as `gk` (#507's "label wins" invariant), OR
+#   - a returned bounce (`prio:bounce`) → reworkable by the stream → stays
+#     `workable` with `handed=False` (the #313 bounce override) → the stream's I.
+# A pure LABEL check, mirroring `_slice_mine_and_handed`'s own `label_handed`/
+# `prio:bounce` checks, so the two derivations agree by construction. Scoped to
+# `needs-acceptance` ONLY: `needs-answer`/`needs-decision` are not hand-off
+# states, so their #468 routing (a handed + user-waiting row goes to U) is left
+# byte-identical — this override applies solely to the one POST-hand-off label.
+NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = (
+    "ready-for-review", "needs-gatekeeper", "prio:bounce")
 
 # #507: labels that mark a hand-off the gatekeeper has ALREADY PROCESSED, so the
 # ticket is no longer parked with the gatekeeper — it is back in the STREAM's
@@ -369,7 +399,15 @@ GATEKEEPER_PROCESSED_LABELS = ("needs-acceptance",)
 
 def _row_is_user_waiting(labels):
     """True if `labels` (a gh --json labels value: a list of {'name': ...}
-    dicts, or None/malformed) carries any USER_WAITING_LABELS label.
+    dicts, or None/malformed) marks the ticket as WAITING ON THE OWNER — i.e. it
+    carries a USER_WAITING_LABELS label, WITH the #512 `needs-acceptance`-scoped
+    gk/bounce override: a `needs-acceptance` ticket that ALSO carries a
+    NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS label (a re-hand-off `ready-for-review`/
+    `needs-gatekeeper`, or a returned `prio:bounce`) is NOT user-waiting — it
+    stays `workable` so `_slice_mine_and_handed`'s `handed`/gk logic picks it up
+    (#507's precedence: "label wins", preserved). `needs-answer`/`needs-decision`
+    carry no such override (they are not hand-off states), so their #468 routing
+    is unchanged.
 
     A missing/unreadable `labels` value reads as NOT user-waiting (→ workable) —
     the SAFE side: never hide a ticket from THIS box's own responsibility because
@@ -380,7 +418,31 @@ def _row_is_user_waiting(labels):
     workable) — both pick the non-harmful side of their own asymmetry."""
     names = {(lb or {}).get("name") for lb in (labels or [])
              if isinstance(lb, dict)}
-    return any(lb in names for lb in USER_WAITING_LABELS)
+    for lb in USER_WAITING_LABELS:
+        if lb not in names:
+            continue
+        if lb == "needs-acceptance" and any(
+                ov in names for ov in NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS):
+            continue   # re-hand-off / bounce overrides — stays workable (#507)
+        return True
+    return False
+
+
+def _user_waiting_reason(labels):
+    """The plain-word REASON a row is user-waiting — `answer` (needs-answer),
+    `decision` (needs-decision), or `acceptance` (needs-acceptance) — for the
+    `--waiting` per-member reason tag (#512). Returns "" for a row that is not
+    user-waiting (defensive; callers only pass the `user_waiting` bucket). A row
+    carrying several user-waiting labels reports the FIRST by the fixed
+    precedence answer > decision > acceptance, so the tag is deterministic."""
+    names = {(lb or {}).get("name") for lb in (labels or [])
+             if isinstance(lb, dict)}
+    for label, reason in (("needs-answer", "answer"),
+                          ("needs-decision", "decision"),
+                          ("needs-acceptance", "acceptance")):
+        if label in names:
+            return reason
+    return ""
 
 
 # The label a stream/supervisor applies to an OPS-WAIT / evidence-gated ticket:
