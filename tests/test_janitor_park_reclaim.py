@@ -21,6 +21,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd
 from watchdog import goal
+# #506 — reuse the SAME validated wrapped-box renderer the #193/#501 tests use
+# (BOX_WIDTH 176, the real dev1 pane width; glyph on the HEAD row, greedy word
+# wrap, continuation rows indented) instead of copying it — one implementation.
+from test_wrapped_draft import render_box
+
+# Real own-nudge payloads that register in `_JANITOR_OWN_PREFIXES`. Both are
+# 400-700c and WRAP at 176 col, so their leading prefix (`lane-check: ` /
+# `stuck-check: `) sits on the box HEAD row, ABSENT from the wrapped TAIL — the
+# #506 dead-branch input (`_janitor_recover` read the tail).
+OWN_LANE_NUDGE = goal.GOAL_LANE_NUDGE_TEXT % (5, 0)      # 691c, "lane-check: "
+OWN_STUCK_NUDGE = wd.WORKING_NUDGE_TEXT                  # 431c, "stuck-check: "
+# A long FOREIGN draft that WRAPS but does NOT start with any own prefix — the
+# invariant control (head-read must not widen what the janitor claims as ours).
+FOREIGN_LONG = ("toto je moja vlastná dlhá rozpísaná správa ktorú práve píšem "
+                "do prompta a vôbec nechcem aby mi ju ktokoľvek zmazal ani "
+                "reklamoval lebo je to čisto môj vlastný text bez akéhokoľvek "
+                "strojového prefixu na začiatku riadka wrapuje sa cez viac "
+                "riadkov ale ostáva mojou vlastnou správou od prvého po posledné slovo")
 
 # gk-shaped capture: box bare (`_input_line_text` == ""), single stash slot
 # occupied, a goal armed (1d) — the exact live shape #488 reproduced.
@@ -251,6 +269,48 @@ class PruneWiredIntoDarkWatch(unittest.TestCase):
         goal.goal_dark_watch(1000, run=self._run("%1\n"), state=state,
                              dry_run=True, sleep_fn=lambda *a, **k: None)
         self.assertIn("%9", state["stash_parks"])   # dry-run mutates nothing
+
+
+class WrappedOwnResidueReclaim(unittest.TestCase):
+    """#506 (RED): a WRAPPED own-nudge residue occupying the box (with the
+    stash slot occupied) must be recognized as OURS and reclaimed
+    (clear-and-pop). `_janitor_recover` read the box TAIL (`_input_line_text`,
+    the #193 `endswith` swallowed-tail contract), but every real own nudge
+    (289-720c) WRAPS at a live pane width, so its `lane-check: `/`stuck-check: `
+    prefix is on the HEAD row and ABSENT from the tail —
+    `_looks_like_own_stuck_content(tail)` is False and the reclaim never fired.
+    The exact tail-vs-head bug #501 fixed for the lane-guard submit path
+    (`_input_box_head_text`), one path over. Mutation: revert the janitor to the
+    tail-read and these two tests fail."""
+
+    def _wrapped_occupied(self, payload):
+        # occupied stash slot + a WRAPPED own residue in the box
+        cap = render_box(payload, stashed=True)
+        self.assertIn(wd.STASH_MARKER, cap)                 # stash occupied
+        self.assertIs(wd._find_input_box(cap)[2], True)     # box genuinely wraps
+        return cap
+
+    @staticmethod
+    def _fresh_provenance():
+        # a fresh generic delivery-attempt mark (<6h) — the janitor's provenance
+        return {"janitor_watch": {PID: NOW - 60}}
+
+    def test_wrapped_lane_check_residue_is_reclaimed(self):
+        cap = self._wrapped_occupied(OWN_LANE_NUDGE)
+        logs, _rec, _run = _recover(self._fresh_provenance(), captured=cap)
+        self.assertTrue(
+            any("would attempt clear-and-pop" in ln for ln in logs),
+            "a WRAPPED own lane-check residue must be reclaimed, not read as a "
+            "foreign occupant — the janitor must read the box HEAD, not the "
+            "wrapped tail: %r" % logs)
+
+    def test_wrapped_stuck_check_residue_is_reclaimed(self):
+        cap = self._wrapped_occupied(OWN_STUCK_NUDGE)
+        logs, _rec, _run = _recover(self._fresh_provenance(), captured=cap)
+        self.assertTrue(
+            any("would attempt clear-and-pop" in ln for ln in logs),
+            "a WRAPPED own stuck-check residue must be reclaimed (janitor "
+            "head-read): %r" % logs)
 
 
 if __name__ == "__main__":
