@@ -1567,6 +1567,22 @@ class TestTriageNegatedNontrivialKeywordInTrivialLine(unittest.TestCase):
             ok, reason = dg.classify_triage_and_approaches(body)
             self.assertNotEqual(reason, "ok (trivial)", tail)
 
+    def test_english_keyword_parity_with_slovak_set(self):
+        # #514 follow-up: the English complexity keywords must be symmetric with
+        # the Slovak set (complex<->komplexn, architectural<->architektonick), so
+        # an English author is held to the same depth bar as a Slovak one. An
+        # AFFIRMATIVE English keyword classifies non-trivial; a NEGATED one stays
+        # trivial (same neg-guard as the rest of the keyword set).
+        for tail, expected in (
+            ("complex refactor", "non-trivial"),                       # the required case
+            ("complex — spans the whole scheduler", "non-trivial"),
+            ("architectural change across the auth layer", "non-trivial"),
+            ("trivial -- no complex logic here", "trivial"),           # negated English complex
+            ("trivial (not architectural)", "trivial"),                # negated English architectural
+        ):
+            body = GOOD_SCOPED + "\n\nTriage: " + tail
+            self.assertEqual(dg.triage_class(body), expected, tail)
+
 
 if __name__ == "__main__":
     unittest.main()

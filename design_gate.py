@@ -708,8 +708,11 @@ _TRIAGE_NONTRIVIAL_EXPLICIT_RE = re.compile(
 # direction. The negation set is English no/not/without + Slovak nie/bez/žiadn*.
 _TRIAGE_NONTRIVIAL_KEYWORD_RE = re.compile(
     r"(?P<neg>\b(?:no|not|without|nie|bez|žiadn\w*)\s+)?"
-    r"(?:design-?heavy|designov[ýy]\w*|architektonick\w*|komplexn\w*|"
-    r"cross-?cutting|kr[íi][žz]ov\w*|zlo[žz]it\w*)",
+    # English keywords kept SYMMETRIC with the Slovak set (#514 follow-up):
+    # complex<->komplexn, architectural<->architektonick (cross-cutting<->krížov
+    # and design-heavy<->designov already had both sides).
+    r"(?:design-?heavy|designov[ýy]\w*|architektonick\w*|architectural\w*|"
+    r"komplexn\w*|complex\w*|cross-?cutting|kr[íi][žz]ov\w*|zlo[žz]it\w*)",
     re.IGNORECASE,
 )
 _TRIAGE_TRIVIAL_RE = re.compile(
