@@ -949,9 +949,26 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
 #                             re-fires it next sweep), never SUBMITTED in place —
 #                             the #501 own-submit path stays scoped to the
 #                             supervisor's own lane/bounce/gkreq nudges.
+# (#505) `_FLAG_PROMPT_HEAD` — the #297 flag prompt (up to 1183c, chunk-typed) is
+# a NATURAL-LANGUAGE Slovak instruction with NO machine-only prefix a human never
+# types, so it cannot borrow `"stuck-check: "`; and it is typed as a live
+# instruction a session READS + acts on, so prepending a marker would pollute the
+# text it surfaces to the user. Instead its OWN stable head (the fixed
+# `_FLAG_PROMPT_TEMPLATE` text before the variable «%s» slot) IS the fingerprint —
+# nothing is prepended, the instruction stays byte-for-byte human-readable. Safe
+# in the janitor set for the SAME reason as `"stuck-check: "`: reclaim is DOUBLE-
+# gated (the per-send `_janitor_mark_watch` provenance mark AND this content
+# match), so a 42-char exact Slovak fragment leading a marked pane's box is
+# unambiguously OUR swallowed flag prompt; a collapsed-paste residue is covered
+# prefix-free by `_PASTED_PLACEHOLDER_RX`. Deliberately NOT in
+# `_OWN_NUDGE_SUBMIT_PREFIXES`: a swallowed flag react RE-FIRES whole next sweep
+# (the `dreact_done` dedup books only on a verified submit), never submitted in
+# place (that would push a wrapped/partial instruction into the session).
+# Drift-locked to `card_flags._FLAG_PROMPT_TEMPLATE` by test_send_verified_adoption.py.
+_FLAG_PROMPT_HEAD = "Užívateľ označil túto tvoju Discord správu"
 _JANITOR_OWN_PREFIXES = ("/goal ", "/compact", "lane-check: ",
                          "bounce-backstop: ", "gk-request backstop: ",
-                         "stuck-check: ")
+                         "stuck-check: ", _FLAG_PROMPT_HEAD)
 
 JANITOR_CLEAR_MAX_ITER = 25       # bounds the observed-state clear loop
 JANITOR_CLEAR_BATCH_MAX = 200     # per-iteration backspace batch, sized to

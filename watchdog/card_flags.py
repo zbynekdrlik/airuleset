@@ -44,14 +44,51 @@ def _repo_live_pane(repo_name, cwd_by_sid, panes_by_sid, run=None):
     return None
 
 
-def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None):
+def _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
+    """#505 — the shared BARE-box transcript-proof send for the two #297/#298
+    flag-cluster sites (the exact-session flag prompt + the repo-pane fallback /
+    card-reopen nudge). The sibling of batch-1's `_send_bare_nudge_verified` and
+    batch-3's `_send_stuckcheck_verified`: MARK #372 janitor provenance BEFORE
+    the keystroke so a swallowed WRAPPED chunk-typed flag-prompt residue
+    (`send_verified`'s own undo cannot back a non-full-literal residue off) is
+    reclaimable via the flag prompt's OWN stable head (`_FLAG_PROMPT_HEAD`, in
+    `_JANITOR_OWN_PREFIXES` — never prepended to the text), then `send_verified`;
+    CLEAR the mark on a transcript-VERIFIED submit and return True.
+
+    On an unverified/swallowed submit the mark is LEFT as the residue backstop
+    and False is returned — the caller does NOT book the delivery (the flag
+    react's `dreact_done` dedup is only set on a True return, so the react
+    RE-FIRES whole next sweep), and the janitor reclaims any residue before the
+    next sweep re-reads the pane.
+
+    `tpath` is the target pane's transcript, resolved by the caller via
+    `_transcript_for_session(projects_dir, sid, cwd)` — keyed on the UNIQUE
+    session id, so (unlike batch-1's cwd-keyed `find_active_transcript`) two
+    sessions sharing a cwd cannot resolve the wrong transcript. A falsy `tpath`
+    makes `send_verified` refuse (never types blind); `state`/`now` are no-op
+    marks when absent (a direct caller/test that does not thread them)."""
+    watchdog._janitor_mark_watch(state, pid, now)
+    if watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs):
+        watchdog._janitor_clear_watch(state, pid)
+        return True
+    return False
+
+
+def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None,
+                     tpath=None, state=None, now=None, sleep_fn=None):
     """Best-effort: type `text` into a live pane at TRUE REST — job 8's own
     at-rest discipline (`_safe_to_bounce_nudge`), reused verbatim so a
     genuinely mid-work pane is NEVER interrupted (never a new mechanism, the
     exact same check `bounce_backstop` already relies on). A pane holding a
     foreign draft is stashed around (issue #35); a busy/copy-mode/live-work
     pane gets NOTHING this sweep. Returns True when delivered (or, in
-    dry-run, would have been)."""
+    dry-run, would have been).
+
+    #505: the bare-box branch sends transcript-proof (`_send_flag_verified` →
+    `send_verified`), NOT a raw `send_continue`, so a swallowed Enter is no
+    longer booked delivered — it returns False and the caller re-fires next
+    sweep. `tpath` is threaded IN by the caller (the exact-sid transcript of
+    the pane); a falsy `tpath` refuses to send rather than type blind."""
     captured = watchdog.capture_pane(pid, run)
     if watchdog.pane_in_mode(pid, run):
         return False
@@ -60,7 +97,7 @@ def _nudge_repo_pane(pid, cwd, run, text, dry_run, projects_dir, logs=None):
     if not watchdog.pane_at_idle_prompt(captured):
         return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs)
     if not dry_run:
-        watchdog.send_continue(pid, text, run)
+        return _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs)
     return True
 
 
@@ -209,7 +246,9 @@ def _flag_delivery_target(target, panes_by_sid, cwd_by_sid, run=None):
     return (found[0], found[1], found[2], False) if found else None
 
 
-def _deliver_flag_prompt_to_exact_session(pid, run, text, dry_run, logs=None):
+def _deliver_flag_prompt_to_exact_session(pid, run, text, dry_run, logs=None,
+                                          tpath=None, state=None, now=None,
+                                          sleep_fn=None):
     """Deliver a #297 flag-prompt into the EXACT session that is (or was)
     asking the flagged question — job 7's OWN idle/draft delivery gate
     (`pane_at_idle_prompt`/`deliver_with_stash` via `_try_stash_nudge`),
@@ -223,14 +262,21 @@ def _deliver_flag_prompt_to_exact_session(pid, run, text, dry_run, logs=None):
     for delivering a REPLY, so the same gate is correct here too — a
     genuinely BUSY (mid-turn / dialog / copy-mode) pane still gets
     nothing, via `pane_in_mode`/`pane_at_idle_prompt` exactly as job 7's
-    reply flow already enforces."""
+    reply flow already enforces.
+
+    #505: the bare-box branch sends transcript-proof (`_send_flag_verified` →
+    `send_verified`), NOT a raw `send_continue`, so a swallowed Enter returns
+    False and the caller re-fires the flag react next sweep instead of booking
+    a napísané-≠-odoslané delivery. `tpath` (the asking session's sid-resolved
+    transcript) is threaded IN by the caller — this function has no cwd/sid/
+    projects_dir in scope of its own."""
     captured = watchdog.capture_pane(pid, run)
     if watchdog.pane_in_mode(pid, run):
         return False
     if not watchdog.pane_at_idle_prompt(captured):
         return watchdog._try_stash_nudge(pid, captured, text, run, dry_run, logs=logs)
     if not dry_run:
-        watchdog.send_continue(pid, text, run)
+        return _send_flag_verified(state, pid, text, run, tpath, now, sleep_fn, logs)
     return True
 
 

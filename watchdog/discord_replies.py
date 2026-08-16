@@ -514,6 +514,12 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                         if deliver is not None:
                             d_sid, d_pid, d_cwd, d_exact = deliver
                             prompt = watchdog.compose_flag_prompt(msg.get("content"))
+                            # #505: verify the flag-prompt delivery against the
+                            # TARGET pane's OWN transcript (keyed on the exact
+                            # sid — precise, never a cwd-collision sibling), so a
+                            # swallowed Enter is retried next sweep, not booked.
+                            d_tpath = watchdog._transcript_for_session(
+                                projects_dir, d_sid, d_cwd)
                             # MAJOR-1 (adversarial review): the EXACT
                             # asking session's own ❓ marker must never
                             # block delivery of the flag ABOUT that very
@@ -522,11 +528,15 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                             # any ❓-marker session outright.
                             if d_exact:
                                 ok = watchdog._deliver_flag_prompt_to_exact_session(
-                                    d_pid, run, prompt, dry_run, logs=logs)
+                                    d_pid, run, prompt, dry_run, logs=logs,
+                                    tpath=d_tpath, state=state, now=now,
+                                    sleep_fn=sleep_fn)
                             else:
                                 ok = watchdog._nudge_repo_pane(d_pid, d_cwd, run, prompt,
                                                       dry_run, projects_dir,
-                                                      logs=logs)
+                                                      logs=logs, tpath=d_tpath,
+                                                      state=state, now=now,
+                                                      sleep_fn=sleep_fn)
                             if ok and not dry_run:
                                 react_done_set.add(mid)
                                 react_done.append(mid)
@@ -581,10 +591,15 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                                               run=run)
                     if ctarget is not None:
                         c_sid, c_pid, c_cwd = ctarget
+                        # #505: transcript-proof the reopen nudge against the
+                        # found pane's OWN sid-resolved transcript.
+                        c_tpath = watchdog._transcript_for_session(
+                            projects_dir, c_sid, c_cwd)
                         watchdog._nudge_repo_pane(
                             c_pid, c_cwd, run,
                             watchdog.compose_card_reopen_nudge(cr["issue"]),
-                            dry_run, projects_dir, logs=logs)
+                            dry_run, projects_dir, logs=logs, tpath=c_tpath,
+                            state=state, now=now, sleep_fn=sleep_fn)
                 elif reopened:
                     logs.append("card-reopen (dry-run) #%s (%s)"
                                 % (cr["issue"], cr["repo"]))
