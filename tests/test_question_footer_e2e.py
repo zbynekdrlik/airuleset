@@ -6,7 +6,9 @@ records an entry in `~/.claude/discord-questions.json` via
 called from `hooks/notify-discord-pending.sh`'s `send_q()`); (2) the entry is
 dropped on the right events (answered, later human prompt, 24h TTL) — that
 half is covered by `tests/test_discord_reply.py` and
-`tests/test_question_prune.py`; (3) `statusbar.questions_segment` renders it.
+`tests/test_question_prune.py`; (3) `statusbar.question_ping_count` counts it
+for the footer's `U N` merge (#512 removed the standalone `Q` badge — a
+ticketless ❓ now folds into `U`, "waiting on the OWNER").
 
 Before this file, ONLY the SOURCE TEXT of the wiring was asserted
 (`TestSendPathRecordsQuestion` in `tests/test_airuleset.py` — `assertIn`
@@ -14,7 +16,7 @@ over the hook's own bytes, never executed). This file runs the REAL Stop
 hook as a real subprocess, with a faked `curl` standing in for Discord (never
 touches the network), against a real temp `HOME`, and asserts the FULL
 chain: the hook runs -> `discord-questions.json` gets a real entry ->
-`statusbar.questions_segment` renders it non-empty. The production hook
+`statusbar.question_ping_count` counts it non-zero. The production hook
 chain itself needed no fix — every link was already correct.
 
 The FIRST version of this file did need one, though (#161-review CRITICAL
@@ -148,15 +150,14 @@ class QuestionFooterEndToEnd(unittest.TestCase):
         self.assertIn("777002", qmap, qmap)
         self.assertEqual(qmap["777002"]["session"], sid)
 
-    def test_the_recorded_question_then_renders_in_the_footer(self):
+    def test_the_recorded_question_then_folds_into_the_footer_U(self):
         # The FULL chain, not just the write: after a real confirmed ❓ POST,
-        # statusbar.questions_segment (the shim's own `Q N` badge) must
-        # render it non-empty for this exact project — the missing half of
-        # the proof #161 asked for.
+        # the ticketless ping must be COUNTED for the footer's `U N` merge
+        # (#512 removed the standalone `Q` badge; its count folds into `U`).
         sid = self._sid("footer")
         self._fire(sid, "❓ NEEDS YOU: nasadiť teraz?", msg_id="777003")
-        seg = statusbar.questions_segment(str(self.cwd), home=self.home)
-        self.assertIn("Q 1", seg, seg)
+        self.assertEqual(
+            statusbar.question_ping_count(str(self.cwd), home=self.home), 1)
 
     def test_a_different_project_renders_nothing(self):
         # #313 pt 5: the cross-project 'inde' bucket was removed entirely --
@@ -166,8 +167,8 @@ class QuestionFooterEndToEnd(unittest.TestCase):
         self._fire(sid, "❓ NEEDS YOU: nasadiť teraz?", msg_id="777004")
         other_cwd = tempfile.mkdtemp(prefix="airuleset-q-e2e-other-")
         try:
-            seg = statusbar.questions_segment(other_cwd, home=self.home)
-            self.assertEqual(seg, "")
+            self.assertEqual(
+                statusbar.question_ping_count(other_cwd, home=self.home), 0)
         finally:
             shutil.rmtree(other_cwd, ignore_errors=True)
 
@@ -190,8 +191,8 @@ class QuestionFooterEndToEnd(unittest.TestCase):
         subprocess.run(["bash", str(PENDING_HOOK)], input=payload, text=True,
                        capture_output=True, env=env)
         self.assertEqual(self._questions_map(), {})
-        seg = statusbar.questions_segment(str(self.cwd), home=self.home)
-        self.assertEqual(seg, "")
+        self.assertEqual(
+            statusbar.question_ping_count(str(self.cwd), home=self.home), 0)
 
 
 if __name__ == "__main__":

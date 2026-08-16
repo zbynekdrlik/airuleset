@@ -251,5 +251,63 @@ class SliceQualsExcludesUserWaiting(unittest.TestCase):
                              "slice-quals --waiting must list ONLY the user-waiting tickets")
 
 
+class WaitingReasonAndPingMerge(unittest.TestCase):
+    """#512: `core-quals --waiting` tags each labeled member with a reason
+    (answer/decision/acceptance) AND lists the ticketless ❓ pings (reason=ping),
+    so the `--waiting` member list matches the footer's `U N` count."""
+
+    def _fake_gh(self, bindir):
+        gh = Path(bindir) / "gh"
+        gh.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  *"repo view"*|repo*) echo "zbynekdrlik/demo";;\n'
+            '  *"--search label:autopilot-skip"*) echo 0;;\n'
+            "  *) echo '%s';;\n" % _CORE_FIVE +
+            'esac\n')
+        gh.chmod(0o755)
+
+    def _seed_questions(self, home, entries):
+        import statusbar
+        d = statusbar._claude_dir(home)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "discord-questions.json").write_text(json.dumps(entries))
+
+    def test_waiting_tags_each_labeled_member_with_a_reason(self):
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            self._fake_gh(bindir)
+            r = _run_quals("core-quals", "--waiting", repo, home, bindir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # column 4 (0-based index 3) is the reason tag.
+            reasons = {}
+            for ln in r.stdout.splitlines():
+                if not ln.strip():
+                    continue
+                f = ln.split("\t")
+                reasons[f[0]] = f[3]
+            self.assertEqual(reasons.get("4"), "answer")     # #4 needs-answer
+            self.assertEqual(reasons.get("5"), "decision")   # #5 needs-decision
+
+    def test_waiting_lists_ticketless_pings_but_not_ticket_referencing_ones(self):
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            self._fake_gh(bindir)
+            # scoped to the subprocess cwd (= repo); one ticketless, one with #N.
+            self._seed_questions(home, {
+                "1": {"cwd": repo, "block": "otazka bez ticketu", "ts": 1},
+                "2": {"cwd": repo, "block": "otazka k #742", "ts": 2},
+            })
+            r = _run_quals("core-quals", "--waiting", repo, home, bindir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            ping_lines = [ln for ln in r.stdout.splitlines()
+                          if ln.split("\t")[3:4] == ["ping"]]
+            self.assertEqual(len(ping_lines), 1,
+                             "exactly the ONE ticketless ping is listed as a "
+                             "ping member; the #742-referencing ping is deduped")
+
+
 if __name__ == "__main__":
     unittest.main()
