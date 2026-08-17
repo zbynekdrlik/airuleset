@@ -59,6 +59,7 @@ EXPECTED_STANDALONE = [
     "burn_alert_job",                   # (19)
     "goal_sweep",                       # (9)
     "goal_dark_watch",                  # (20)
+    "goal_question_repoke_watch",       # (32) — #522 stuck-❓ disarm
     "goal_lane_sweep",                  # (20)
     "long_turn_watch",                  # (21)
     "delivery_stall_watch",             # (24)

@@ -311,6 +311,105 @@ def transcript_last_assistant_text(path):
     return ""
 
 
+# #522 -- the BLOCKED-on-my-answer status marker line the `/goal` stop-condition
+# (A) keys on: an assistant turn whose LAST marker is `❓ NEEDS YOU`. Deliberately
+# NOT a bare `❓` (that also matches a `❓ ASKED:` body line — but an ask-and-
+# continue turn's LAST marker is `⏳ WORKING`, so `_turn_marker_line` resolves it
+# to `⏳`, never `❓`, and never trips this detector).
+_NEEDS_YOU_RX = re.compile(r"^\s*❓\s*NEEDS YOU\b")
+
+
+def _turn_marker_line(text):
+    """The status-marker LINE (⏳/✅/❓ …) of an assistant turn's `text`, scanning
+    the last <=3 nonblank lines in reverse for the FIRST marker match -- the SAME
+    extraction `transcript_last_marker_line` uses, factored out for per-turn reuse
+    by `question_repoke_run`. '' when the turn carries no marker."""
+    nonblank = [ln for ln in text.splitlines() if ln.strip()]
+    for ln in reversed(nonblank[-3:]):
+        if _MARKER_RX.match(ln):
+            return ln
+    return ""
+
+
+def question_repoke_run(entries, is_human_fn):
+    """#522 -- PURE facts-in/verdict-out detector (#504 shape) for a `/goal` loop
+    STUCK re-poking an unanswered `❓ NEEDS YOU` question (the native evaluator
+    ignoring stop-condition (A) -- the 17+ re-poke incident). `entries` is a
+    transcript tail as `_iter_jsonl_tail` returns it (oldest -> newest). Returns
+    `(streak:int, question_line:str)`: the number of consecutive NEWEST REAL
+    assistant turns that each END with a `❓ NEEDS YOU` marker line BYTE-IDENTICAL
+    to the newest one, with NO genuine human answer interleaved.
+
+    The streak is BROKEN (walk stops) by, walking newest -> oldest:
+      * a genuine human user turn (`is_human_fn(entry)` True) -- the user answered;
+      * a real assistant turn whose marker line is NOT `❓ NEEDS YOU`, or is a
+        DIFFERENT `❓ NEEDS YOU` question (byte-differs from the newest) -- the loop
+        did something else / moved to another question.
+    TRANSPARENT (skipped, never break the streak, never count):
+      * a MACHINE user turn -- a `/goal` re-poke, `continue`, `<task-notification>`,
+        a bounce/backstop nudge (`is_human_fn` False) -- exactly the injections
+        that sit BETWEEN two re-poked assistant turns;
+      * a synthetic / tool-only / api-error assistant turn, and any system /
+        bookkeeping entry.
+
+    The transcript is the AUTHORITATIVE, non-flickering record (unlike the render
+    footer #524 must sweep-accumulate), so a single read of `streak >= N` is a
+    sound confirmation -- the caller still gates the keystroke on recent-human +
+    a 24h attempt cap. Never raises (only reads plain dict fields)."""
+    streak = 0
+    question_line = ""
+    for entry in reversed(entries):
+        if not isinstance(entry, dict):
+            continue
+        etype = entry.get("type")
+        if etype == "user":
+            if is_human_fn(entry):
+                break                  # a genuine human answer -- streak ends
+            continue                   # machine injection (goal re-poke / continue) -- transparent
+        if etype != "assistant":
+            continue                   # system / bookkeeping -- transparent
+        if entry.get("isApiErrorMessage") is True:
+            continue                   # api error mid-loop -- not a real turn, transparent
+        text = (_entry_text(entry) or "").strip()
+        if text in _SENTINELS:
+            continue                   # synthetic / tool-only assistant turn -- transparent
+        line = _turn_marker_line(text)
+        if not _NEEDS_YOU_RX.match(line):
+            break                      # a real turn NOT blocked on ❓ NEEDS YOU -- streak ends
+        if streak == 0:
+            question_line, streak = line, 1
+        elif line == question_line:
+            streak += 1
+        else:
+            break                      # a DIFFERENT ❓ NEEDS YOU question -- streak ends
+    return streak, question_line
+
+
+def question_repoke_streak(tpath, is_human_fn, tail_bytes=1_000_000, max_entries=200):
+    """#522 -- thin I/O wrapper for `question_repoke_run`: read the last
+    `tail_bytes` of the transcript at `tpath` via a BOUNDED SEEK (never a
+    whole-file read -- montalu's transcript is 240 MB), parse up to the newest
+    `max_entries` JSONL entries, and return the pure detector's verdict. `(0, "")`
+    on any read failure. The partial first line after a mid-file seek fails
+    json.loads and is dropped."""
+    try:
+        with open(tpath, "rb") as f:
+            try:
+                f.seek(-tail_bytes, 2)
+            except OSError:
+                f.seek(0)
+            raw = f.read()
+    except OSError:
+        return 0, ""
+    entries = []
+    for ln in raw.splitlines()[-max_entries:]:
+        try:
+            entries.append(json.loads(ln))
+        except Exception:
+            continue
+    return question_repoke_run(entries, is_human_fn)
+
+
 def supervisor_responded_to_nudge(path, nudge_signature, max_lines=200):
     """(#491) True iff the supervisor transcript at `path` shows a CAUSAL
     acknowledgement of our dead-worker stuck-check nudge: a LANDED `user` turn

@@ -395,9 +395,20 @@ GOAL_REQUEST_MAX_AGE_S = 30 * 60   # a request older than this is DISCARDED
 # protected nothing real: `_classify_boundary`/`pane_waiting_on_user`/
 # `pane_in_mode` (below) already cover every genuinely unsafe pane state
 # (can't locate the input box, an open dialog, copy-mode), and the
-# template's own condition (A) already refuses to let the loop proceed
+# template's own condition (A) is meant to refuse to let the loop proceed
 # past an unanswered ❓ regardless of whether it's armed -- so arming
-# during ❓/⏳ is harmless, never unsafe.
+# during ❓/⏳ is harmless.
+#
+# #522 UPDATE (the premise "never unsafe" was too strong): the native `/goal`
+# evaluator is an LLM and can IGNORE condition (A), re-poking an unanswered
+# `❓ NEEDS YOU` turn-after-turn (the 17+ re-poke incident) -- so an armed loop
+# at a ❓ IS a real failure mode, not "never unsafe". It is now BACKSTOPPED, not
+# re-gated at arm time: `goal_question_repoke_watch` reads the AUTHORITATIVE
+# transcript for N consecutive byte-identical re-pokes and DISARMS the loop
+# (`/goal clear`), and `goal_dark_watch` honours the resulting `goal_disarmed_q`
+# veto. Arming during ❓/⏳ stays allowed (this removed gate was still the right
+# call); the newly-recognized unsafe case is caught after the fact, never by
+# refusing to arm.
 
 
 def _safe_age(now, ts):
@@ -850,6 +861,68 @@ GOAL_DARK_CONFIRM_STATE_TTL_S = 24 * 3600   # reap a confirm window untouched th
 # never reaped before it is re-visited.
 GOAL_MARK_ORPHAN_TTL_S = 24 * 3600
 
+# #522 -- backstop for a `/goal` loop STUCK re-poking an unanswered `❓ NEEDS YOU`
+# (the native evaluator ignoring stop-condition (A) -- the 17+ re-poke incident,
+# with the only historical mechanical guard `_goal_blocked_on_unanswered_question`
+# deleted in #403). Unlike #524's death-CONFIRMATION run (which sweep-accumulates
+# because the render footer flickers), the STREAK here is read from the
+# AUTHORITATIVE transcript (`question_repoke_run`) -- N byte-identical consecutive
+# re-pokes with no genuine human answer between them is a sound confirmation in a
+# SINGLE read. The disarm keystroke (`/goal clear`, the symmetric inverse of the
+# arm keystroke, via the SAME `_send_goal_verified`/`deliver_with_stash`
+# primitives) is still recent-human-gated and 24h-capped exactly like #524's
+# re-arm. A successful disarm writes a `goal_disarmed_q` veto that `goal_dark_watch`
+# HONOURS (never re-arm a goal we just deliberately cleared) until the transcript
+# shows a genuine human answer AFTER the disarm.
+GOAL_QUESTION_REPOKE_MIN = 5            # consecutive ❓ NEEDS YOU re-pokes to disarm
+GOAL_QDISARM_MAX_PER_DAY = 2           # attempt cap: max /goal-clear auto-types per sid / 24h
+GOAL_QDISARM_STATE_TTL_S = 24 * 3600   # reap a disarm veto / attempts entry untouched this long
+GOAL_CLEAR_TEXT = "/goal clear"        # CC writes a `Goal cleared:` marker for this
+
+
+def _qdisarm_attempt_ok(attempts, now):
+    """#522 per-sid attempt cap, sibling of `_dark_rearm_attempt_ok`: at most
+    GOAL_QDISARM_MAX_PER_DAY `/goal clear` auto-types per session per rolling 24 h,
+    so a swallowed disarm can never become a keystorm. `attempts` is the prior
+    list of type timestamps (a JSON list; non-number entries dropped). Returns
+    `(ok, pruned)` -- `ok` False once the cap is hit; `pruned` is the list with
+    entries older than 24 h removed. Counts ATTEMPTS that reached the type step
+    (sent OR swallowed), not just landed ones -- the #524 fail-safe (fewer real
+    disarms than the cap allows) that keeps a persistently-wedged box bounded."""
+    day = 24 * 3600
+    pruned = [t for t in (attempts or [])
+              if isinstance(t, (int, float)) and 0 <= (now - t) <= day]
+    return (len(pruned) < GOAL_QDISARM_MAX_PER_DAY), pruned
+
+
+def _qdisarm_veto(qveto, sid, tpath, now, human_ts_fn, loc):
+    """#522 re-entry veto, called from `goal_dark_watch`'s per-sid path. `qveto`
+    is the shared `state["goal_disarmed_q"]` dict. Returns `(vetoed, logline)`:
+      * vetoed=True  -- a disarm veto is ACTIVE for `sid` and NO genuine human
+                        answer has landed since it (`disarmed_ts`); dark_watch must
+                        NOT re-arm / accumulate a death run / ping for this sid.
+      * vetoed=False -- either no veto, or a genuine human answer landed AFTER the
+                        disarm -> the veto is POPPED here (re-entry) and the
+                        standard re-arm path resumes.
+    Pure except the one `qveto.pop` on re-entry; never raises (a read failure
+    from `human_ts_fn` returns None -> veto stays active, the safe direction)."""
+    vrec = qveto.get(sid)
+    if not isinstance(vrec, dict):
+        return False, None
+    d_ts = vrec.get("disarmed_ts")
+    try:
+        hts = human_ts_fn(tpath)
+    except Exception:
+        hts = None
+    if hts is not None and isinstance(d_ts, (int, float)) and hts > d_ts:
+        qveto.pop(sid, None)
+        return False, ("dark-watch %s sid=%s -> #522 disarm veto CLEARED "
+                       "(human answered after disarm) -- standard re-arm resumes"
+                       % (loc, sid))
+    return True, ("dark-watch %s sid=%s -> #522 disarm veto ACTIVE (goal was "
+                  "cleared on a stuck ❓; no re-arm until the user answers)"
+                  % (loc, sid))
+
 
 def _prune_goal_mark_orphans(off_state, visited_sids, now,
                              ttl_s=GOAL_MARK_ORPHAN_TTL_S):
@@ -1044,7 +1117,7 @@ def _default_rearm_fn(cwd):
 def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                     projects_dir=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, obligation_fn=None, rearm_fn=None,
-                    requests_path=None):
+                    requests_path=None, human_ts_fn=None):
     """#403 STEP 0 confirmed #172's own sweep_deadline/tail_deadline
     budget-sharing mechanism must survive this collapse -- unlike
     `goal_sweep` (bounded by the tiny pending-arm-request count),
@@ -1098,6 +1171,11 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     # entry forever (the #486-G5 dedup-dict-leak lesson).
     confirm_state = state.setdefault("goal_dark_confirm", {})
     attempts_state = state.setdefault("goal_dark_rearm_attempts", {})
+    # #522 -- the disarm-on-question veto (written by goal_question_repoke_watch,
+    # READ + re-entry-popped here). Reaped by that job; setdefault only so a pop
+    # below always targets the real state dict even on the first sweep.
+    qveto = state.setdefault("goal_disarmed_q", {})
+    human_ts_fn = human_ts_fn or watchdog._last_human_prompt_ts
     for _csid in [k for k, v in list(confirm_state.items())
                   if not (isinstance(v, dict)
                           and isinstance(v.get("last"), (int, float))
@@ -1183,6 +1261,14 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # docstring promises.
         mark = new_mark if new_mark is not None else prior_mark
         off_state[sid] = {"off": new_off, "mark": mark, "tmtime": tmtime}
+
+        # #522 -- honour the disarm-on-question veto (see `_qdisarm_veto`): never
+        # re-arm / accumulate / ping a loop just deliberately cleared for a stuck ❓.
+        vetoed, vlog = _qdisarm_veto(qveto, sid, tpath, now, human_ts_fn, loc)
+        if vlog:
+            logs.append(vlog)
+        if vetoed:
+            continue
 
         armed = watchdog.pane_goal_armed(captured)
 
@@ -1338,6 +1424,190 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
 
     if not dry_run:   # #519 -- prune goal_mark for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_mark_orphans(off_state, visited_sids, now)
+    return logs
+
+
+# --------------------------------------------------------------------------- #
+# #522 QUESTION-REPOKE DISARM -- the backstop for a `/goal` loop STUCK re-poking
+# an unanswered `❓ NEEDS YOU` (the native evaluator ignoring stop-condition (A)).
+# Watchdog-INITIATED keystroke, mirroring the LANE nudge's own architecture
+# (recent-human gate + 24h cap + explicit decision log), NOT dark_watch's
+# keystroke-free record-a-request shape -- the disarm is a bounded, self-limiting
+# `/goal clear` typed directly via the shared verified-delivery primitives.
+# --------------------------------------------------------------------------- #
+
+_QDISARM_TRANSIENT_SKIPS = frozenset(("skip:busy", "skip:no-input-line"))
+
+
+def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs):
+    """#522 -- deliver the `/goal clear` disarm keystroke to pane `pid`, mirroring
+    `deliver_goal`'s own draft/bare delivery tail with the SAME primitives (the
+    'symmetric inverse' of the arm keystroke): a foreign draft is parked + typed
+    around via `deliver_with_stash`, a bare box gets a verified typed send via
+    `_send_goal_verified`, both with the shared janitor (#372) provenance mark so
+    a stuck send is recoverable (`/goal ` is already an own-prefix). Returns
+    'sent' | 'skip:busy' | 'skip:no-input-line' | 'skip:stash-abort' |
+    'skip:verify-failed'. The two transient skips (busy / no-input-line) mean NO
+    keystroke was attempted (retry next sweep, free); the others mean a type was
+    attempted (consumes an attempt-cap slot -- the #524 fail-safe)."""
+    kind, draft = watchdog._classify_boundary(captured)
+    if kind == "no-input-line":
+        return "skip:no-input-line"
+    if kind == "busy":
+        return "skip:busy"
+    if draft:
+        watchdog._janitor_mark_watch(state, pid, now)
+        ok = watchdog.deliver_with_stash(pid, text, run, captured=captured,
+                                         logs=logs, sleep_fn=sleep_fn, state=state)
+        if ok:
+            watchdog._janitor_clear_watch(state, pid)
+            return "sent"
+        return "skip:stash-abort"
+    watchdog._janitor_mark_watch(state, pid, now)
+    ok = _send_goal_verified(pid, text, run, captured=captured,
+                             sleep_fn=sleep_fn, logs=logs)
+    if ok:
+        watchdog._janitor_clear_watch(state, pid)
+        return "sent"
+    return "skip:verify-failed"
+
+
+def _reap_qdisarm_state(qveto, attempts, now, ttl_s=GOAL_QDISARM_STATE_TTL_S):
+    """#522/#486-G5 -- age-gated reaper for BOTH per-sid dicts this job writes, so
+    a session that vanished cannot leak an entry forever. `qveto` entries carry a
+    `disarmed_ts`; reap one untouched beyond `ttl_s` (a stale veto is moot -- the
+    goal is long cleared -- and a wrongly-reaped one just means the standard
+    re-arm path is no longer vetoed, which after 24h is correct). `attempts`
+    entries are rolling-window lists; reap one whose newest ts is older than 24h
+    OR is empty/malformed (a REAPER, never a per-episode pop, so a live capped sid
+    -- which refreshes its newest ts -- is never reaped). Never raises."""
+    day = 24 * 3600
+    for sid in [k for k, v in list(qveto.items())
+                if not (isinstance(v, dict)
+                        and isinstance(v.get("disarmed_ts"), (int, float))
+                        and 0 <= (now - v["disarmed_ts"]) <= ttl_s)]:
+        qveto.pop(sid, None)
+    for sid in [k for k, v in list(attempts.items())
+                if not (isinstance(v, list)
+                        and any(isinstance(t, (int, float))
+                                and 0 <= (now - t) <= day for t in v))]:
+        attempts.pop(sid, None)
+
+
+def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
+                               dry_run=False, projects_dir=None, sleep_fn=None,
+                               time_fn=None, sweep_deadline=None, human_fn=None,
+                               human_ts_fn=None, repoke_fn=None):
+    """#522 -- disarm a `/goal` loop STUCK re-poking an unanswered `❓ NEEDS YOU`.
+
+    Per live candidate pane (`_reconcile_candidate_panes`, budget-shared exactly
+    like `goal_dark_watch`): resolve the transcript, and
+
+      1. HONOUR / re-enter an existing disarm veto (`state["goal_disarmed_q"]`):
+         if a genuine human answer landed after the disarm the veto is cleared
+         (re-entry, log); otherwise this sid is already disarmed -> skip (log).
+      2. Only an ARMED pane (`pane_goal_armed is True`) is a candidate -- a
+         non-armed / obscured pane, and a served (non-`/goal`) session that merely
+         ended one turn on `❓ NEEDS YOU`, are skipped (the latter also never
+         reaches the N-consecutive-repoke threshold anyway).
+      3. Read the STREAK via `repoke_fn` (`question_repoke_streak`): N consecutive
+         byte-identical re-pokes with no human answer between. Below N -> log the
+         accumulation (never silent), no action.
+      4. At/above N: gate the keystroke on recent-human (never type into a pane a
+         human just touched) and a 24h/2 attempt cap, then deliver `/goal clear`
+         via `_deliver_goal_clear`. A landed disarm writes the veto (1).
+
+    `human_fn`/`human_ts_fn`/`repoke_fn` are injected for tests; the defaults are
+    the real `_is_genuine_human_prompt` / `_last_human_prompt_ts` /
+    `question_repoke_streak`. Returns the decision-log lines."""
+    logs = []
+    if watchdog._owner_disabled("goal"):
+        logs.append("goal jobs DISABLED by owner flag "
+                    "~/.claude/watchdog-disable-goal (rm to re-enable)")
+        return logs
+    run = run or watchdog._default_run
+    projects_dir = projects_dir or watchdog.PROJECTS_DIR
+    time_fn = time_fn or time.monotonic
+    sleep_fn = sleep_fn or time.sleep
+    state = state if state is not None else {}
+    human_fn = human_fn or watchdog._is_genuine_human_prompt
+    human_ts_fn = human_ts_fn or watchdog._last_human_prompt_ts
+    repoke_fn = repoke_fn or watchdog.question_repoke_streak
+    qveto = state.setdefault("goal_disarmed_q", {})
+    attempts = state.setdefault("goal_qdisarm_attempts", {})
+    _reap_qdisarm_state(qveto, attempts, now)
+
+    for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
+        if sweep_deadline is not None and time_fn() >= sweep_deadline:
+            logs.append("qrepoke-budget-exceeded — deferring remaining panes "
+                        "to next sweep")
+            break
+        if watchdog.pane_in_mode(pid, run):
+            continue
+        tinfo = watchdog.find_active_transcript(projects_dir, cwd)
+        if not tinfo:
+            continue
+        tpath, _tmtime = tinfo
+        sid = tpath.stem
+        loc = watchdog._pane_location(pid, run) or pid
+
+        # (1) an existing veto short-circuits detection (already disarmed / re-entry).
+        vrec = qveto.get(sid)
+        if isinstance(vrec, dict):
+            vetoed, vlog = _qdisarm_veto(qveto, sid, tpath, now, human_ts_fn, loc)
+            logs.append(vlog.replace("dark-watch", "qrepoke") if vlog else
+                        "qrepoke %s sid=%s -> already disarmed" % (loc, sid))
+            continue
+
+        captured = watchdog.capture_pane(pid, run, lines=40)
+        # (2) only an armed goal loop is disarmable -- a served session that asked
+        # once (streak 1) or a cleared/obscured footer is not our target.
+        if watchdog.pane_goal_armed(captured) is not True:
+            continue
+
+        # (3) authoritative transcript streak.
+        streak, _qline = repoke_fn(tpath, human_fn)
+        if streak < GOAL_QUESTION_REPOKE_MIN:
+            if streak > 0:
+                logs.append("qrepoke %s sid=%s -> %d/%d re-pokes, accumulating "
+                            "(no action)" % (loc, sid, streak,
+                                             GOAL_QUESTION_REPOKE_MIN))
+            continue
+
+        # (4) CONFIRMED stuck -- gate the keystroke.
+        recent, reason = watchdog._goal_autoarm_recent_human_activity(
+            sid, tpath, now)
+        if recent:
+            logs.append("qrepoke %s sid=%s -> CONFIRMED stuck (%d re-pokes) but "
+                        "recent human (%s) -- skip" % (loc, sid, streak, reason))
+            continue
+        ok_cap, pruned = _qdisarm_attempt_ok(attempts.get(sid), now)
+        attempts[sid] = pruned
+        if not ok_cap:
+            logs.append("qrepoke %s sid=%s -> CONFIRMED stuck but ATTEMPT-CAP "
+                        "(%d/24h) -- ping-free skip" % (loc, sid,
+                                                        GOAL_QDISARM_MAX_PER_DAY))
+            continue
+        if dry_run:
+            logs.append("qrepoke %s sid=%s -> CONFIRMED stuck (%d re-pokes) -- "
+                        "would disarm (dry-run)" % (loc, sid, streak))
+            continue
+        word = _deliver_goal_clear(pid, GOAL_CLEAR_TEXT, run, captured, state,
+                                   now, sleep_fn, logs)
+        if word in _QDISARM_TRANSIENT_SKIPS:
+            logs.append("qrepoke %s sid=%s -> disarm deferred (%s), retry next "
+                        "sweep" % (loc, sid, word))
+            continue
+        attempts[sid] = pruned + [now]        # a type was attempted -> consume a slot
+        if word == "sent":
+            qveto[sid] = {"disarmed_ts": now, "streak": streak}
+            logs.append("qrepoke %s sid=%s -> DISARMED: /goal clear typed "
+                        "(%d re-pokes, attempt=%d/%d)"
+                        % (loc, sid, streak, len(attempts[sid]),
+                           GOAL_QDISARM_MAX_PER_DAY))
+        else:
+            logs.append("qrepoke %s sid=%s -> disarm delivery FAILED (%s, "
+                        "slot consumed)" % (loc, sid, word))
     return logs
 
 
