@@ -486,19 +486,26 @@ def _row_is_ops_wait(labels):
 
 def _ops_wait_reason(labels):
     """The plain-word REASON a row sits in the ops-wait (W) bucket, for the
-    `--ops-wait` per-member tag (#526): `acceptance` when the row carries
-    `needs-acceptance` (a hand-off whose client acceptance thread was SENT, so it
-    is waiting on the CLIENT — routed to W by `_partition_workable`'s
-    acceptance-scoped override), else `ops-wait` (a ticket parked on an external
-    event/evidence via the `ops-wait` label). Lets a `--ops-wait` reader tell the
-    two W populations apart. A missing/malformed labels value reads as `ops-wait`
-    (the safe generic tag). Deliberately keyed on the `needs-acceptance` label
-    directly, not `_user_waiting_reason`: every row that reaches the ops_wait
-    bucket carrying `needs-acceptance` belongs to the acceptance sub-population,
-    and a pure ops-wait row never carries it."""
+    `--ops-wait` per-member tag (#526): `acceptance` when the row is a genuine
+    SENT acceptance (carries `needs-acceptance` AND is NOT simultaneously a
+    re-hand-off/bounce — `NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS`), so it is waiting
+    on the CLIENT — routed to W by `_partition_workable`'s acceptance-scoped
+    override; else `ops-wait` (a ticket parked on an external event/evidence via
+    the `ops-wait` label). Lets a `--ops-wait` reader tell the two W populations
+    apart. A missing/malformed labels value reads as `ops-wait` (the safe generic
+    tag). The gk-override exclusion mirrors `_row_is_user_waiting`'s own
+    acceptance-scoping EXACTLY (#526 review 🔵): a contradictory
+    `needs-acceptance`+`ready-for-review`/`needs-gatekeeper`/`prio:bounce`+
+    `ops-wait` row (a re-hand-off/bounce that also carries ops-wait, reaching the
+    ops_wait bucket via the plain `_row_is_ops_wait` branch, NOT the
+    acceptance-override one) is tagged `ops-wait`, never mislabelled
+    `acceptance`."""
     names = {(lb or {}).get("name") for lb in (labels or [])
              if isinstance(lb, dict)}
-    return "acceptance" if "needs-acceptance" in names else "ops-wait"
+    if "needs-acceptance" in names and not any(
+            ov in names for ov in NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS):
+        return "acceptance"
+    return "ops-wait"
 
 
 def _partition_workable(rows):

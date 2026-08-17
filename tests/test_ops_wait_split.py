@@ -155,6 +155,19 @@ class PartitionHelpers(unittest.TestCase):
         self.assertEqual(fn(None), "ops-wait")
         self.assertEqual(fn([]), "ops-wait")
 
+    def test_ops_wait_reason_gk_override_row_is_not_acceptance(self):
+        # #526 review 🔵: a contradictory needs-acceptance + re-hand-off/bounce +
+        # ops-wait row (reaching the ops_wait bucket via the plain _row_is_ops_wait
+        # branch, NOT the acceptance override) is a re-hand-off/bounce, NOT a sent
+        # acceptance — it must be tagged `ops-wait`, never mislabelled `acceptance`.
+        # Mirrors _row_is_user_waiting's own NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS
+        # scoping exactly (#507 precedence).
+        fn = airuleset._ops_wait_reason
+        for override in ("ready-for-review", "needs-gatekeeper", "prio:bounce"):
+            self.assertEqual(
+                fn(_labels("needs-acceptance", override, "ops-wait")), "ops-wait",
+                "needs-acceptance + %s + ops-wait must NOT tag acceptance" % override)
+
     def test_partition_row_with_no_labels_key_is_workable(self):
         part = getattr(airuleset, "_partition_workable", None)
         self.assertIsNotNone(part, "_partition_workable must exist")
