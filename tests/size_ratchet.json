@@ -251,7 +251,7 @@
         "airuleset.py::main": 545,
         "cli_remote.py::cmd_push": 367,
         "cli_vault.py::cmd_secret": 300,
-        "watchdog/__init__.py::run_once": 2086,
+        "watchdog/__init__.py::run_once": 2113,
         "watchdog/cards.py::card_reconcile": 314,
         "watchdog/cross_stream.py::gk_request_backstop": 235,
         "watchdog/discord_replies.py::deliver_discord_replies": 488,
@@ -272,6 +272,5 @@
         ".claude/rules/internals-statusbar.md": 51200,
         ".claude/rules/internals-tests.md": 51200,
         ".claude/rules/internals-watchdog.md": 51200
-    },
-    "watchdog/__init__.py::run_once": 2113
+    }
 }
