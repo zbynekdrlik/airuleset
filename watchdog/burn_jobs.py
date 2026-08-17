@@ -90,13 +90,16 @@ def burn_snapshot_job(now, state, snapshot_path=None, transcripts_root=None,
 # --------------------------------------------------------------------------- #
 
 
-def vault_purge_job(now, state, purge_fn=None, dry_run=False):
-    """Job 29 — delete every stored credential past its TTL, at most hourly.
+def vault_purge_job(now, state, purge_fn=None, backstop_fn=None, dry_run=False):
+    """Job 29 — delete every stored credential past its TTL, at most hourly,
+    AND (#529) flag a credential whose promised durable copy never landed.
 
     `purge_fn` is injected (cmd_watchdog passes `filedrop.vault.purge`) so the
     job never imports a store path in a test, and so an existing caller that
     knows nothing about it sees no behavior change — the same "wired = on"
-    convention as jobs 3/7/8/11/13.
+    convention as jobs 3/7/8/11/13. `backstop_fn` (cmd_watchdog passes
+    `filedrop.vault.durable_backstop`) is the same-shape opt-in for the
+    durable-persistence artifact-gate.
 
     THE GRANULARITY IS THE HONEST TTL (#153 finding 3). The gate is an HOUR
     bucket, so a value whose `keep` is SHORTER than an hour outlives its own
@@ -106,19 +109,40 @@ def vault_purge_job(now, state, purge_fn=None, dry_run=False):
     one-off shape of this feature is usually never. The guarantee is "a value
     does not lie on disk indefinitely" — never "it is gone the second its TTL
     passes". Anything needing the stricter property must call `secret forget`.
+
+    THE BACKSTOP (#529) is the #134 artifact-gate for "delivery without
+    persistence": a credential requested with `--persist` whose durable
+    ~/.secrets/<name> file never materialised (paste-time persist failed, or
+    the file was deleted). It is a PURE READ (`backstop_fn` never opens the
+    credential value), so it runs even in a dry run — it mutates nothing — and
+    it re-fires every hour while the file is missing (never a one-shot latch),
+    so a diagnostic dry run can never silence it (contrast the #516 trap).
+    Shares this job's hour gate: the artifact check is slow-changing, so hourly
+    is plenty.
     """
     if purge_fn is None:
         return []
     hour_bucket = int(now // 3600)
     if state.get("vault_purge_hour") == hour_bucket:
         return []
+    logs = []
+    if backstop_fn is not None:
+        try:
+            missing = backstop_fn() or []
+        except Exception:               # best-effort telemetry, same as any job
+            missing = []
+        for name, path in missing:
+            logs.append(
+                "vault-durable MISSING: %s promised %s but no file landed "
+                "(delivery without persistence)" % (name, path))
     if dry_run:
-        return ["[dry-run] vault-purge (not swept)"]
+        logs.append("[dry-run] vault-purge (not swept)")
+        return logs
     gone = purge_fn() or []
     state["vault_purge_hour"] = hour_bucket
-    if not gone:
-        return []
-    return ["vault-purge expired %d: %s" % (len(gone), ", ".join(gone))]
+    if gone:
+        logs.append("vault-purge expired %d: %s" % (len(gone), ", ".join(gone)))
+    return logs
 
 
 # --------------------------------------------------------------------------- #

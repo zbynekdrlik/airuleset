@@ -329,7 +329,7 @@ def _secret_apply_remainder(args):
     field argparse left unset.
     """
     ints = {"--ttl": "ttl", "--keep": "keep", "--port": "port"}
-    strs = {"--env": "env"}
+    strs = {"--env": "env", "--persist": "persist"}
     rest = list(getattr(args, "cmd", None) or [])
     while rest:
         tok = rest[0]
@@ -359,6 +359,42 @@ def _secret_apply_remainder(args):
             setattr(args, dest, value)      # an explicit value always wins
         del rest[:width]
     args.cmd = rest
+
+
+def _secret_resolve_persist(args):
+    """Validate `--persist PATH` (#529) and return the RESOLVED absolute string,
+    or None when not given. Fail-fast: a git-tracked or symlinked target is an
+    operator error, so exit 2 before standing up an endpoint (request) or
+    touching the value (exec). Shared by both branches so the check is
+    identical."""
+    from filedrop import vault as st
+    persist = getattr(args, "persist", None)
+    if not persist:
+        return None
+    try:
+        return str(st.validate_durable_path(persist))
+    except st.SecretError as e:
+        print("secret: --persist %s" % e, file=sys.stderr)
+        sys.exit(2)
+
+
+def _secret_exec_self_heal(nm, value, persist):
+    """Write the durable ~/.secrets/<name> copy from the vault value if it is
+    ABSENT (never overwrite a copy that is the source of truth), record the
+    target, and report (#529). LOUD but NEVER fatal on a write failure: the
+    child still gets the value, and the periodic backstop + `secret status`
+    surface a missing file. `persist` is already resolved by
+    `_secret_resolve_persist`; no credential value ever reaches these prints."""
+    from filedrop import vault as st
+    try:
+        wrote = st.persist_durable(persist, value, overwrite=False)
+        st.set_durable_target(nm, persist)
+        if wrote:
+            print("secret exec: persisted %s -> %s (durable)" % (nm, persist),
+                  file=sys.stderr)
+    except st.SecretError as e:
+        print("secret exec: durable persist to %s failed: %s" % (persist, e),
+              file=sys.stderr)
 
 
 def cmd_secret(args):
@@ -484,6 +520,16 @@ def cmd_secret(args):
                 extra += "  templated=%s" % shlex.join(st.read_template(nm))
         except st.SecretError as e:
             extra += "  templated=<error: %s>" % e
+        # #529: surface the durable target + whether its file actually landed,
+        # so a "delivery without persistence" is visible from the CLI (the
+        # session-visible half of the periodic watchdog backstop).
+        dpath = st.durable_target(nm)
+        if dpath:
+            try:
+                present = Path(dpath).expanduser().exists()
+            except OSError:
+                present = False
+            extra += "  durable=%s (%s)" % (dpath, "present" if present else "MISSING")
         print("%s %s%s" % (nm, state, extra))
         return
 
@@ -523,12 +569,20 @@ def cmd_secret(args):
         if not cmd:
             print("secret exec: needs a command after `--`", file=sys.stderr)
             sys.exit(2)
+        # #529: --persist PATH self-heals the durable ~/.secrets/<name> copy
+        # from the vault value BEFORE running the child, so a durable-first
+        # consumer that read a MISS falls back to the vault ONCE and is
+        # vault-independent thereafter. Validate the path FIRST (fail-fast on a
+        # bad path, before touching the value); self-heal AFTER read_value.
+        persist = _secret_resolve_persist(args)
         try:
             value = st.read_value(nm)
         except st.SecretError as e:
             print("secret exec: %s" % e, file=sys.stderr)
             sys.exit(1)
         st.log_event("used", nm)
+        if persist:
+            _secret_exec_self_heal(nm, value, persist)
         # NEVER let the child inherit fd 1/2: those are the agent's transcript.
         # Capture, filter, then re-emit — so a child that echoes its own
         # environment or config cannot write the credential into a file nobody
@@ -567,6 +621,11 @@ def cmd_secret(args):
 
     # --- request -----------------------------------------------------------
     nm = _need_name()
+    # #529: --persist PATH marks this credential DURABLE — the value is written
+    # to that mode-600 file at the moment it is pasted (store_value's
+    # paste-time persist), so it survives the vault's <=24h retention. Validate
+    # the path NOW (fail fast, before standing up the endpoint).
+    persist = _secret_resolve_persist(args)
     state = st.state(nm)
     if state == "ready":
         print("%s is already stored — `secret forget %s` first" % (nm, nm),
@@ -608,7 +667,8 @@ def cmd_secret(args):
         sys.exit(1)
 
     token = _secrets.token_urlsafe(24)
-    nonce = st.register_request(nm, endpoint_ttl_s=ttl, keep_s=keep)
+    nonce = st.register_request(nm, endpoint_ttl_s=ttl, keep_s=keep,
+                                durable_path=persist)
     # The endpoint's own diagnostics (bind failures) — NOT the value log, and
     # the server deliberately never writes the token or the body here.
     endpoint_log = st.log_path().parent / ("endpoint-%d.log" % port)
@@ -659,5 +719,8 @@ def cmd_secret(args):
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))
     print("name=%s  endpoint-ttl=%ds  keep=%ds" % (nm, ttl, keep))
+    if persist:
+        print("durable=%s  (persisted 0600 at paste — survives the vault TTL)"
+              % persist)
     print("Otvor URL v prehliadači a vlož hodnotu — do chatu ju NEPÍŠ. "
           "Stav: `airuleset.py secret status %s`." % nm)

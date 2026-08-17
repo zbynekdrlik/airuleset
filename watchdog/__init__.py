@@ -1708,7 +1708,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              goal_requests_path=None, delivery_probe=None, card_probe=None,
              closed_fetch=None,
              repo_roots=None, issue_counts_fetch=None, git_fetch=None,
-             vault_purge=None, log_fn=None, reopen_fetch=None,
+             vault_purge=None, vault_backstop=None, log_fn=None, reopen_fetch=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
              progress_dir=None, questions_path=None,
              owner_decision_fetch=None, gk_selfservice_fetch=None,
@@ -2120,6 +2120,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           it again) left a credential 0600 on disk indefinitely — the exact
           property the channel exists to provide. Delete-only: no pane, no
           keystrokes, no ping, and it removes only what is already expired.
+          When `vault_backstop` is ALSO wired (#529), the same hourly gate
+          ALSO flags a `ready` credential whose registered durable
+          ~/.secrets/<name> file never landed (delivery without persistence)
+          — a PURE READ (never opens the value), so it warns without deleting.
       (30) (only when `repo_roots` is given) ORPHANED WIP-REF RECLAIMER
           (#504) — the origin-ref counterpart of `sweep_stale_worktrees`'s
           LOCAL worktree sweep. Reclaims leaked `refs/autopilot-wip/*`
@@ -3808,12 +3812,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                             dry_run=dry_run),
          "exec-marker-cleanup error")
 
-    # Job 29 — HOURLY CREDENTIAL-STORE SWEEP (#144): only when `vault_purge`
-    # is given (cmd_watchdog passes filedrop.vault.purge). Best-effort and
-    # internally hour-gated; deletes only what is already past its own TTL.
+    # Job 29 — HOURLY CREDENTIAL-STORE SWEEP (#144) + DURABLE-PERSISTENCE
+    # BACKSTOP (#529): only when `vault_purge` is given (cmd_watchdog passes
+    # filedrop.vault.purge). Best-effort and internally hour-gated; deletes
+    # only what is already past its own TTL, and — when `vault_backstop` is
+    # also wired — flags any `ready` credential that registered a durable
+    # ~/.secrets/<name> target whose file never landed (delivery without
+    # persistence — a PURE READ, so dry-run safe and never a one-shot latch).
     _add("vault_purge_job", lambda: vault_purge,
          lambda: vault_purge_job(now, state, purge_fn=vault_purge,
-                                 dry_run=dry_run),
+                                 backstop_fn=vault_backstop, dry_run=dry_run),
          "vault-purge error")
 
     # Job 30 — ORPHANED refs/autopilot-wip/* RECLAIMER (#504): only when
