@@ -874,6 +874,40 @@ class TestGoalDarkWatch(unittest.TestCase):
         self.assertIn("recent-orphan-519", state["goal_mark"],
                       "a not-visited but RECENT entry is kept by the age gate")
 
+    # ----------------------------------------------------------------- #
+    # #517 -- first-sight tail-limit: a state-loss / >tail-downtime first
+    # sight of a session whose `Goal set:` marker sits BEYOND the 4 MB tail
+    # must still seed goal_mark = armed (the bounded reverse-scan seed), or
+    # the lane gate reads not-armed and silences a genuinely-armed loop.
+    # ----------------------------------------------------------------- #
+
+    def test_517_first_sight_seeds_a_goal_set_marker_beyond_the_tail(self):
+        # RED today: dark_watch first-sights (empty state) a transcript whose
+        # only `Goal set:` marker is > GOAL_MARK_TAIL_BYTES back. The tail
+        # bootstrap misses it -> goal_mark seeds NOT armed. The reverse-scan
+        # seed must find it -> mark.state == "set". A genuine >4 MB transcript
+        # is used so the real def-time 4 MB tail (unpatchable) actually misses.
+        proj = self._dir()
+        sid = "sess-517-deep"
+        _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: /goal x", ts_epoch=500)
+        tpath = proj / _encode(self.CWD) / (sid + ".jsonl")
+        with open(tpath, "a", encoding="utf-8") as f:
+            # ~4.2 MB of non-marker filler AFTER the marker -> the marker is
+            # beyond the 4 MB tail. Raw lines (not JSON) are fine: the byte
+            # pre-filter skips them without a json.loads.
+            f.write(("padding-line " + "x" * 180 + "\n") * 22000)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        state = {}
+        goal.goal_dark_watch(100000, run=tmux, send_fn=lambda mm, **k: None,
+                             projects_dir=proj, state=state, sleep_fn=lambda s: None)
+        entry = state.get("goal_mark", {}).get(sid)
+        self.assertIsNotNone(entry, state)
+        mark = entry.get("mark") if isinstance(entry, dict) else None
+        self.assertTrue(isinstance(mark, dict) and mark.get("state") == "set",
+                        "first-sight must seed the deep Goal set: marker "
+                        "(reverse-scan), got mark=%r" % (mark,))
+
 
 # --------------------------------------------------------------------------- #
 # 6. goal_lane_sweep / goal_lane_occupancy_nudge — job 20 half 2: the ONE
