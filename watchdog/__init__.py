@@ -1553,6 +1553,16 @@ from watchdog.cards import (  # noqa: E402
     _normalize_closed as _normalize_closed,
     _commits_in_window as _commits_in_window,
     card_reconcile as card_reconcile,
+    REPORT_GRACE_S as REPORT_GRACE_S,
+    REPORT_MAX_SWALLOWS as REPORT_MAX_SWALLOWS,
+    REPORT_REPROBE_S as REPORT_REPROBE_S,
+    REPORT_MAX_LISTED as REPORT_MAX_LISTED,
+    REPORT_TAIL_LINES as REPORT_TAIL_LINES,
+    _iso_epoch as _iso_epoch,
+    report_boundary_after as report_boundary_after,
+    _self_callback_records as _self_callback_records,
+    _autopilot_mutex_held as _autopilot_mutex_held,
+    report_reconcile as report_reconcile,
 )
 
 
@@ -3730,13 +3740,22 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # "wired = on" convention and the same confirm-then-announce contract.
     # Detection only, no tmux round-trip (the cwd map came from the pane
     # sweep above). Best-effort — a failure here must never cost a sweep.
+    # Job 25 also runs REPORT reconciliation (#525) — the SAME registry entry
+    # (no new job), a second check over the same closed set for a saturated
+    # supervisor that merged tickets but never wrote their per-ticket report.
+    # It early-returns on empty `cwd_by_sid` (a no-op in the characterization
+    # sweep) and types in-band, so it takes panes_by_sid/projects_dir/sleep_fn.
     _add("card_reconcile", lambda: card_probe is not None,
          lambda: card_reconcile(now, run, state, cwd_by_sid,
                                 send_fn=send_fn, dry_run=dry_run,
                                 card_probe=card_probe,
                                 closed_fetch=closed_fetch,
                                 reopen_fetch=reopen_fetch,
-                                owner_by_sid=owner_by_sid),
+                                owner_by_sid=owner_by_sid)
+                 + report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
+                                    send_fn=send_fn, dry_run=dry_run,
+                                    owner_by_sid=owner_by_sid,
+                                    projects_dir=projects_dir, sleep_fn=sleep_fn),
          "card-reconcile error")
 
     # Job 26 — COMPACT-STALL WATCH — REMOVED (#402, 2026-08-12). Used to
