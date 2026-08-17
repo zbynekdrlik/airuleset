@@ -295,6 +295,45 @@ class TestGoalDarkWatch(unittest.TestCase):
         """A fake obligation_fn returning a fixed (open, ts) for any cwd."""
         return lambda cwd: (open_n, ts)
 
+    def test_524_idle_alive_flicker_is_never_typed(self):
+        # #524 RED: montalu 2026-08-16 — a 75-min idle-but-ALIVE session whose
+        # footer glyph flickered (dark reads, then back to ARMED) was auto-typed
+        # /goal after a 1-sweep debounce. HARDENED (owner decision B): the TYPE
+        # now requires K clean-dark reads over >=10 min, and ANY armed read
+        # VETOES the run. Two dark sweeps (montalu's 22:31/22:32, ~71s apart)
+        # must NOT type; the glyph flickering back to armed proves it alive.
+        proj = self._dir()
+        sid = "sess-524-idle-alive"
+        _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: /goal x", ts_epoch=500)
+        idle = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP)       # pane_goal_armed -> False
+        armed = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                    GOAL_ARMED_CAP)     # pane_goal_armed -> True
+        obl = self._obl(53, 100000)                     # workable, fresh
+        reqs = self._dir() / "goal-requests.json"
+
+        def rearm(cwd):
+            return ("/goal DONE or stop after 50", "branch-merge")
+
+        state, sent = {}, []
+        self._sweep(idle, proj, state, sent, 100000, obl, rearm, reqs)   # 1st obs
+        self._sweep(idle, proj, state, sent, 100071, obl, rearm, reqs)   # 2nd sweep
+        self.assertEqual(
+            goal.load_goal_requests(reqs), {},
+            "2 dark sweeps must NOT type — the montalu 1-sweep-debounce bug")
+        # The glyph flickers back to ARMED (montalu 22:34) -> VETO-ALIVE, the
+        # confirmation run is reset; the True read proves the loop alive.
+        goal.goal_dark_watch(100142, run=armed,
+                             send_fn=lambda mm, **k: sent.append(mm),
+                             projects_dir=proj, state=state,
+                             sleep_fn=lambda s: None, obligation_fn=obl,
+                             rearm_fn=rearm, requests_path=reqs)
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "an idle-alive flicker is NEVER auto-typed")
+        self.assertEqual(idle.sent, [], "zero keystrokes (idle capture)")
+        self.assertEqual(armed.sent, [], "zero keystrokes (armed capture)")
+
     def test_persistently_dark_goal_with_work_remaining_is_re_armed(self):
         # #478 (reverses #403 for THIS dark-died branch): a still-dark goal
         # whose cwd still has genuinely WORKABLE obligations must be AUTO-
