@@ -188,7 +188,18 @@ def is_account_dispatch_block(text):
     `is_usage_cap`'s own `_TRANSIENT_RX`) is NEVER one of these — a retry CAN clear
     it, so it must not back off the lane nudge. This is the lane-back-off
     classifier (`goal.goal_lane_occupancy_nudge`), deliberately BROADER than
-    `is_usage_cap` (job 6's reset-clock driver) and independent of it."""
+    `is_usage_cap` (job 6's reset-clock driver) and independent of it.
+
+    SESSION-guidance reconcile (#520): the SAME two classes get DIFFERENT
+    probe-first handling in the `verify-launched-work-liveness` skill — a
+    SESSION LIMIT (`is_usage_cap` / `pane_session_limited`) is probe-first /
+    early-probe (the printed reset is a HINT, the window may free earlier, and a
+    session idle-parking because it BELIEVES a stale limit is banned); a
+    MONTHLY-SPEND / ORG block (`_MONTHLY_SPEND_RX` / `_ORG_DISABLED_RX`) has NO
+    reset clock, so the session stops dispatch, pings the owner ONCE (raising the
+    cap is user-only), then bounded periodic re-probes — never a permanent
+    "won't work". This classifier stays the SINGLE source of truth for those
+    classes; the skill reconciles WITH it, never a parallel classification."""
     if not text:
         return False
     if is_usage_cap(text):
