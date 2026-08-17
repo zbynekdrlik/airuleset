@@ -362,7 +362,7 @@ def read_meta(name):
 
 
 def register_request(name, endpoint_ttl_s=DEFAULT_ENDPOINT_TTL_S,
-                     keep_s=DEFAULT_KEEP_S, now=None):
+                     keep_s=DEFAULT_KEEP_S, now=None, durable_path=None):
     """Record that a value has been REQUESTED (state `pending`); return its NONCE.
 
     A pending request expires with its endpoint: once the one-shot server is
@@ -372,16 +372,26 @@ def register_request(name, endpoint_ttl_s=DEFAULT_ENDPOINT_TTL_S,
     `forget` printed "forgotten" while a live endpoint could still repopulate
     the name — the O_EXCL that stops a double-store is freed by the very
     deletion that was supposed to revoke the credential.
+
+    `durable_path` (#529, OPT-IN): when set (`secret request --persist PATH`),
+    the value is ALSO written to that mode-600 durable file at the moment it is
+    received (`store_value`'s paste-time persist), so the credential survives
+    the vault's <=24h retention. Recorded in the metadata so the periodic
+    backstop can gate on the resulting file. A name requested WITHOUT it is a
+    one-shot secret and is never persisted.
     """
     check_name(name)
     ts = _now(now)
     nonce = _secrets.token_urlsafe(12)
-    _write_json_0600(meta_path(name), {
+    meta = {
         "requested": ts,
         "keep_s": int(keep_s),
         "expires_at": ts + int(endpoint_ttl_s),
         "nonce": nonce,
-    })
+    }
+    if durable_path:
+        meta["durable_path"] = str(durable_path)
+    _write_json_0600(meta_path(name), meta)
     log_event("request", name, ttl=int(endpoint_ttl_s))
     return nonce
 
@@ -468,6 +478,13 @@ def store_value(name, data, keep_s=DEFAULT_KEEP_S, now=None, nonce=None):
                  "expires_at": ts + int(keep_s)})
     _write_json_0600(meta_path(name), meta)
     log_event("received", name)
+    # #529 — persist AT RECEIPT to the durable ~/.secrets/<name> target the
+    # request registered (`secret request --persist`), so the credential
+    # survives the vault's <=24h retention. A fresh paste is authoritative
+    # (overwrite), so a rotation replaces a prior generation.
+    dpath = meta.get("durable_path")
+    if isinstance(dpath, str) and dpath:
+        _persist_at_receipt(name, dpath, bytes(data))
 
 
 def state(name):
@@ -493,6 +510,175 @@ def read_value(name):
         return value_path(name).read_bytes()
     except OSError as e:
         raise SecretError("%s is not stored (state=%s)" % (name, state(name))) from e
+
+
+# --------------------------------------------------------------------------- #
+# DURABLE PERSISTENCE (#529) — the vault is a DELIVERY channel with a <=24h
+# retention (DEFAULT_KEEP_S / the CLI's SECRET_MAX_KEEP_S). A credential meant
+# for REPEATED future use must ALSO be written to durable storage at receipt,
+# or it is lost when the vault ages out. The fleet-standard durable home is a
+# mode-600 file under `~/.secrets/<name>` (raw value + one trailing newline;
+# READ it, never `source` it) — a SEPARATE tree from the vault store
+# `~/.claude/secrets/`, so `hooks/block-vault-store-read.sh` (which guards the
+# vault store) does not touch it, and — deliberately — the vault lifecycle
+# (`forget`/`purge`) NEVER deletes it: the durable copy is the whole point, it
+# outlives the delivery buffer. Opt-in per credential (`secret request/exec
+# --persist PATH`); a one-shot secret (a rotation bootstrap used once) is never
+# persisted. See modules/core/receive-files-via-upload-url.md.
+# --------------------------------------------------------------------------- #
+
+
+def validate_durable_path(path):
+    """The resolved absolute Path a durable credential may live at, or raise.
+
+    Two refusals, the same reasoning `assert_safe_store_dir` applies to the
+    vault store: a SYMLINK at the final component (a redirectable target is not
+    a store), and any location INSIDE a git repository (a value there is one
+    `git add` from being committed — exactly what the `~/.secrets/` convention
+    exists to avoid). The file itself need not exist yet; only the location is
+    validated. The PATH is chosen by the operator (`--persist`), because the
+    on-disk filename keeps its natural hyphens while the vault NAME is
+    underscore-only — the two are never mechanically derived from one another.
+    """
+    p = Path(path).expanduser()
+    if p.is_symlink():
+        raise SecretError(
+            "refusing a durable credential path at %s — it is a symlink, and a "
+            "target that can be redirected is not a store" % p)
+    try:
+        real = p.resolve()
+    except (OSError, RuntimeError) as e:
+        raise SecretError("cannot resolve durable path %s: %s" % (p, e)) from e
+    for parent in real.parents:
+        if (parent / ".git").exists():
+            raise SecretError(
+                "refusing a durable credential path inside a git repository "
+                "(%s) — a value there is one `git add` from being committed"
+                % parent)
+    return real
+
+
+def _durable_bytes(value):
+    """The bytes a durable file holds: the raw value plus exactly ONE trailing
+    newline (the `~/.secrets/<name>` convention). A value that already ends in a
+    newline is NOT doubled, so an SSH key (which ends in one) round-trips
+    without a spurious blank line."""
+    b = bytes(value)
+    return b if b.endswith(b"\n") else b + b"\n"
+
+
+def persist_durable(path, value, overwrite=False):
+    """Write `value` (+ one trailing newline) to `path`, mode 0600.
+
+    Same on-disk discipline as the vault store (#271): the location is
+    validated (no symlink, no git repo), the parent dir is created 0700
+    (best-effort chmod, since `~/.secrets/` is a shared pre-existing dir), and
+    the write itself is O_NOFOLLOW so a symlink planted at the path after
+    validation is still refused rather than followed.
+
+    `overwrite=False` (the self-heal default, `secret exec --persist`): O_EXCL,
+    so an existing durable file is LEFT UNTOUCHED and this returns False — the
+    durable copy is the source of truth, exec only ever FILLS a gap.
+    `overwrite=True` (the paste-time default, `secret request --persist`):
+    O_TRUNC, so a fresh paste is authoritative and replaces any prior
+    generation. Returns True when it wrote, False when it skipped an existing
+    file. Raises SecretError on a real failure.
+    """
+    real = validate_durable_path(path)
+    if not isinstance(value, (bytes, bytearray)):
+        raise SecretError("durable value must be bytes")
+    if not value:
+        raise SecretError("empty durable value")
+    try:
+        real.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(str(real.parent), 0o700)
+    except OSError:
+        # airuleset:script-ok best-effort tightening of a shared dir; the
+        # per-FILE 0600 below is the mode that actually protects the value.
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+    flags |= os.O_TRUNC if overwrite else os.O_EXCL
+    try:
+        fd = os.open(str(real), flags, 0o600)
+    except FileExistsError:
+        return False                     # durable-first: leave the existing copy
+    except OSError as e:
+        raise SecretError(
+            "could not write durable credential %s: %s (a symlink at a durable "
+            "path is never followed)" % (real, e)) from e
+    with os.fdopen(fd, "wb") as f:
+        f.write(_durable_bytes(value))
+    try:
+        # O_TRUNC keeps a pre-existing file's mode; re-tighten to 0600.
+        os.chmod(str(real), 0o600)
+    except OSError:
+        # airuleset:script-ok created 0600 via os.open; this only re-tightens.
+        pass
+    return True
+
+
+def durable_target(name):
+    """The durable path recorded for `name` (via `secret request --persist` or
+    `set_durable_target`), or None. A plain metadata read — never the value."""
+    v = read_meta(name).get("durable_path")
+    return v if isinstance(v, str) and v else None
+
+
+def set_durable_target(name, path):
+    """Record `path` as `name`'s durable target in its metadata (idempotent),
+    so the backstop and any later paste can find it. Used by `secret exec
+    --persist` for a name not requested with --persist. Returns False (no-op)
+    when the name has no metadata yet."""
+    check_name(name)
+    meta = read_meta(name)
+    if not meta:
+        return False
+    if meta.get("durable_path") == str(path):
+        return True
+    meta["durable_path"] = str(path)
+    _write_json_0600(meta_path(name), meta)
+    return True
+
+
+def _persist_at_receipt(name, dpath, value):
+    """Persist a just-received value to its registered durable path.
+
+    LOUD but NEVER fatal: the vault copy already succeeded, so a durable-write
+    failure must not report the credential as unstored. It warns (the periodic
+    backstop and `secret status` surface the missing file too) and returns."""
+    try:
+        persist_durable(dpath, value, overwrite=True)
+    except SecretError as e:
+        sys.stderr.write("vault: %s: durable persist to %s failed: %s\n"
+                         % (name, dpath, e))
+
+
+def durable_backstop():
+    """Names whose durable copy was PROMISED but is MISSING — the #134
+    artifact-gate for "delivery without persistence".
+
+    For every `ready` name (a value is on disk) that recorded a durable target,
+    return `(name, path)` when the file at that path does NOT exist. Pure READ:
+    it never reads the credential value (so `read_value`'s single-caller
+    invariant is untouched) and mutates nothing (dry-run safe by construction).
+    A `pending` name has no value yet, so no durable file is expected; a name
+    with no durable target opted out (a one-shot secret) and is skipped. It
+    re-fires every sweep while the file is missing — not a one-shot latch — so
+    a diagnostic dry run never silences it."""
+    out = []
+    for name in _entry_names():
+        if state(name) != "ready":
+            continue
+        dpath = durable_target(name)
+        if not dpath:
+            continue
+        try:
+            missing = not Path(dpath).expanduser().exists()
+        except OSError:
+            missing = True
+        if missing:
+            out.append((name, dpath))
+    return sorted(out)
 
 
 def has_template(name):

@@ -287,6 +287,47 @@ class TestExecPersistSelfHeal(TestCase):
         self.assertNotIn("should not run", out.stdout)
 
 
+class TestRequestPersistValidation(_StoreCase):
+    def _ns(self, **kw):
+        base = dict(action="request", name="K", ttl=None, keep=None, port=None,
+                    env=None, persist=None, stdin=False, replace=False,
+                    allow_plain=False, cmd=[])
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_a_git_repo_persist_path_fails_fast_before_the_endpoint(self):
+        repo = Path(self.tmp.name) / "arepo"
+        (repo / ".git").mkdir(parents=True)
+        with self.assertRaises(SystemExit) as cm:
+            airuleset.cmd_secret(self._ns(persist=str(repo / "leak")))
+        self.assertEqual(cm.exception.code, 2)
+        # Exited before register_request — nothing pending, no endpoint stood up.
+        self.assertEqual(st.state("K"), "absent")
+
+
+class TestStatusShowsDurable(_StoreCase):
+    def _status(self, name):
+        import contextlib
+        import io
+        ns = argparse.Namespace(action="status", name=name, ttl=None, keep=None,
+                                port=None, env=None, persist=None, stdin=False,
+                                replace=False, allow_plain=False, cmd=[])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            airuleset.cmd_secret(ns)
+        return buf.getvalue()
+
+    def test_status_shows_durable_present_then_missing(self):
+        p = self._dpath("k")
+        nonce = st.register_request("K", durable_path=p)
+        st.store_value("K", VAL, keep_s=600, nonce=nonce)
+        out = self._status("K")
+        self.assertIn("durable=", out)
+        self.assertIn("present", out)
+        Path(p).unlink()
+        self.assertIn("MISSING", self._status("K"))
+
+
 class TestVaultPurgeJobBackstop(TestCase):
     """Job 29 gains the durable-persistence backstop via an injected
     `backstop_fn`, the same "wired = on" convention as `purge_fn`."""

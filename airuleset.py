@@ -3512,6 +3512,16 @@ def _watchdog_vault_purge():
     return purge()
 
 
+def _watchdog_vault_backstop():
+    """Job 29's durable-persistence backstop (#529) — the injection point so
+    run_once never imports the store in a test. Returns [(name, path)] for every
+    `ready` credential that registered a durable ~/.secrets/<name> target whose
+    FILE is missing (delivery without persistence — the #134 artifact-gate).
+    Pure read: it never touches the credential value."""
+    from filedrop.vault import durable_backstop
+    return durable_backstop()
+
+
 def _watchdog_repo_roots():
     """Jobs 27/28's repo enumeration (#137) — every `.git` this box hosts,
     per #138's own corrected lesson that the corpus is `$HOME`, never a
@@ -3701,6 +3711,7 @@ def cmd_watchdog(args):
                     # internally, so wiring them costs nothing on the 59
                     # sweeps out of 60 that skip.
                     vault_purge=_watchdog_vault_purge,
+                    vault_backstop=_watchdog_vault_backstop,
                     repo_roots=_watchdog_repo_roots,
                     issue_counts_fetch=_watchdog_issue_counts_fetch,
                     git_fetch=_watchdog_git_fetch,
@@ -4884,6 +4895,11 @@ def main():
     p_sec.add_argument("--stdin", action="store_true",
                        help="exec: feed the value on the child's stdin instead "
                             "of through the environment")
+    p_sec.add_argument("--persist", default=None,
+                       help="request/exec: DURABLE opt-in — a mode-600 file "
+                            "(e.g. ~/.secrets/<name>) written at paste (request) "
+                            "or self-healed on use (exec), so the credential "
+                            "survives the vault's <=24h TTL (#529)")
     p_sec.add_argument("cmd", nargs=argparse.REMAINDER,
                        help="exec: the command to run, after `--`")
 

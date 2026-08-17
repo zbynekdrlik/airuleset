@@ -193,7 +193,12 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # trailing line as `owner_decision_fetch=None`, right before the
         # closing `):` — the anchor moved again; the guard and the mutation
         # target did not.)
-        old = ("             vault_purge=None, log_fn=None, reopen_fetch=None,\n"
+        # (#529 re-pin: `vault_backstop=None` was inserted right AFTER the
+        # `vault_purge=None` mutation target on this same first line — the
+        # anchor's first line grew; the mutation target `vault_purge=None`
+        # itself is untouched.)
+        old = ("             vault_purge=None, vault_backstop=None, "
+               "log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
                "backlog_fetch=None,\n"
                "             progress_dir=None, questions_path=None,\n"
