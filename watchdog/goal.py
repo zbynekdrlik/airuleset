@@ -1436,19 +1436,29 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
 # `/goal clear` typed directly via the shared verified-delivery primitives.
 # --------------------------------------------------------------------------- #
 
-_QDISARM_TRANSIENT_SKIPS = frozenset(("skip:busy", "skip:no-input-line"))
+_QDISARM_TRANSIENT_SKIPS = frozenset(
+    ("skip:busy", "skip:no-input-line", "skip:draft"))
 
 
 def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs):
-    """#522 -- deliver the `/goal clear` disarm keystroke to pane `pid`, mirroring
-    `deliver_goal`'s own draft/bare delivery tail with the SAME primitives (the
-    'symmetric inverse' of the arm keystroke): a foreign draft is parked + typed
-    around via `deliver_with_stash`, a bare box gets a verified typed send via
-    `_send_goal_verified`, both with the shared janitor (#372) provenance mark so
-    a stuck send is recoverable (`/goal ` is already an own-prefix). Returns
-    'sent' | 'skip:busy' | 'skip:no-input-line' | 'skip:stash-abort' |
-    'skip:verify-failed'. The two transient skips (busy / no-input-line) mean NO
-    keystroke was attempted (retry next sweep, free); the others mean a type was
+    """#522 -- deliver the `/goal clear` disarm keystroke to a BARE input box via
+    a verified typed send (`_send_goal_verified`, the 'symmetric inverse' of the
+    arm keystroke), with the shared janitor (#372) provenance mark so a stuck send
+    is recoverable (`/goal ` is already an own-prefix; the 11-char payload never
+    wraps, so a swallowed send is backed off by `_undo_and_release_slot`).
+
+    A FOREIGN DRAFT is DEFERRED, never stash-parked: a genuinely stuck away-user
+    loop waits at a BARE box, so a draft means the user is actively composing an
+    answer RIGHT NOW (the streak's `_is_genuine_human_prompt` only breaks on a
+    LANDED turn, not mid-composition) -- disarming then is both pointless (they
+    are about to resolve the ❓) and a keystroke into an active pane, which this
+    codebase forbids. Unlike `deliver_goal`'s arm (which DOES park a draft), the
+    disarm defers and retries once the box is bare.
+
+    Returns 'sent' | 'skip:busy' | 'skip:no-input-line' | 'skip:draft' |
+    'skip:verify-failed'. The three transient skips (busy / no-input-line / draft)
+    mean NO keystroke was attempted (retry next sweep, free -- see
+    `_QDISARM_TRANSIENT_SKIPS`); 'sent'/'skip:verify-failed' mean a type was
     attempted (consumes an attempt-cap slot -- the #524 fail-safe)."""
     kind, draft = watchdog._classify_boundary(captured)
     if kind == "no-input-line":
@@ -1456,13 +1466,7 @@ def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs):
     if kind == "busy":
         return "skip:busy"
     if draft:
-        watchdog._janitor_mark_watch(state, pid, now)
-        ok = watchdog.deliver_with_stash(pid, text, run, captured=captured,
-                                         logs=logs, sleep_fn=sleep_fn, state=state)
-        if ok:
-            watchdog._janitor_clear_watch(state, pid)
-            return "sent"
-        return "skip:stash-abort"
+        return "skip:draft"          # user is composing -- never disturb, retry next sweep
     watchdog._janitor_mark_watch(state, pid, now)
     ok = _send_goal_verified(pid, text, run, captured=captured,
                              sleep_fn=sleep_fn, logs=logs)
@@ -1552,11 +1556,11 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
         loc = watchdog._pane_location(pid, run) or pid
 
         # (1) an existing veto short-circuits detection (already disarmed / re-entry).
-        vrec = qveto.get(sid)
-        if isinstance(vrec, dict):
-            vetoed, vlog = _qdisarm_veto(qveto, sid, tpath, now, human_ts_fn, loc)
-            logs.append(vlog.replace("dark-watch", "qrepoke") if vlog else
-                        "qrepoke %s sid=%s -> already disarmed" % (loc, sid))
+        #     `_qdisarm_veto` always returns a logline for a dict vrec (ACTIVE or
+        #     CLEARED); relabel its "dark-watch" prefix to this job's "qrepoke".
+        if isinstance(qveto.get(sid), dict):
+            _vetoed, vlog = _qdisarm_veto(qveto, sid, tpath, now, human_ts_fn, loc)
+            logs.append(vlog.replace("dark-watch", "qrepoke", 1))
             continue
 
         captured = watchdog.capture_pane(pid, run, lines=40)
@@ -1581,8 +1585,11 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
             logs.append("qrepoke %s sid=%s -> CONFIRMED stuck (%d re-pokes) but "
                         "recent human (%s) -- skip" % (loc, sid, streak, reason))
             continue
+        # The rolling 24h cap is computed from `pruned` (the age-pruned window);
+        # it is only WRITTEN BACK on a real slot-consume below, so a transient
+        # skip (busy / draft) never leaves a spurious empty/stale entry (the
+        # top-of-sweep reaper drops fully-aged ones).
         ok_cap, pruned = _qdisarm_attempt_ok(attempts.get(sid), now)
-        attempts[sid] = pruned
         if not ok_cap:
             logs.append("qrepoke %s sid=%s -> CONFIRMED stuck but ATTEMPT-CAP "
                         "(%d/24h) -- ping-free skip" % (loc, sid,

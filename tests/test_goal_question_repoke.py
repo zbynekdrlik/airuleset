@@ -26,6 +26,7 @@ from watchdog import goal, transcripts
 
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
+    GOAL_ARMED_DRAFT_CAP,
     GOAL_IDLE_CAP,
     _encode,
     _isolate_goal_state,
@@ -199,6 +200,23 @@ class TestQuestionRepokeDisarm(_Base):
         self._run_watch(proj, tmux, state)
         self.assertNotIn("/goal clear", tmux.typed_texts())
 
+    def test_foreign_draft_defers_disarm(self):
+        # an ARMED pane with a draft = the user is composing an answer -> DEFER,
+        # never stash-park the answer-in-progress, never type into an active pane.
+        proj = self._dir()
+        sid = "sess-disarm-draft"
+        tpath = _write_entries(proj, self.CWD, sid, _repoke_entries(6))
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_DRAFT_CAP, model_type=True,
+                                   transcript_path=str(tpath))
+        state = {}
+        logs = self._run_watch(proj, tmux, state)
+        self.assertNotIn("/goal clear", tmux.typed_texts())
+        self.assertNotIn(sid, state.get("goal_disarmed_q", {}))
+        self.assertNotIn(sid, state.get("goal_qdisarm_attempts", {}),
+                         "a deferred draft must NOT consume an attempt-cap slot")
+        self.assertTrue(any("deferred (skip:draft)" in ln for ln in logs))
+
     def test_recent_human_skips_disarm(self):
         proj = self._dir()
         sid = "sess-disarm-5"
@@ -303,7 +321,12 @@ class TestDarkWatchHonoursVeto(_Base):
         now = 100000.0
         state = {"goal_disarmed_q": {sid: {"disarmed_ts": now - 10}}}
         logs = self._dark(proj, tmux, state, now, human_ts_fn=lambda tp: None)
-        # no death-confirmation run started for a vetoed sid
+        # TEETH: the veto `continue`s BEFORE the armed/mark branch, so a vetoed
+        # sid never reaches the debounce that writes `goal_dark_seen` (nor the
+        # death-confirmation run). Removing the veto lets dark_watch reach the
+        # debounce -> `goal_dark_seen[sid]` appears -> this assertion fails.
+        self.assertNotIn(sid, state.get("goal_dark_seen", {}),
+                         "a vetoed sid must not reach dark_watch's debounce")
         self.assertNotIn(sid, state.get("goal_dark_confirm", {}))
         self.assertTrue(any("disarm veto ACTIVE" in ln for ln in logs))
 
