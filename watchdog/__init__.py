@@ -79,7 +79,7 @@
       Probe-first reconcile (#520): job 6 waits for the PRINTED reset before its
       first `continue` BY DESIGN — a `continue` before the window frees re-hits
       the limit (the frozen rationale above) — and its SESSLIMIT_RETRY_S
-      post-reset retries ARE the bounded periodic re-probes, not a tight hammer.
+      post-reset retries are bounded (5-min spacing, capped), not a tight hammer.
       The "the window may free EARLIER, and idle-parking a session that BELIEVES
       a stale limit is banned" half of probe-first is covered by the
       reset-time-AGNOSTIC job-4 stuck-check nudge (its text now carries the

@@ -175,9 +175,10 @@ class TestJob6DocstringReconcile(unittest.TestCase):
         self.assertTrue("Probe-first reconcile (#520)" in w,
                         "the job-6 docstring must carry the probe-first "
                         "reconcile note")
-        self.assertTrue("bounded periodic re-probes, not a tight hammer" in w,
-                        "the reconcile must state the SESSLIMIT_RETRY_S retries "
-                        "ARE the bounded re-probes, not a hammer")
+        self.assertTrue("post-reset retries are bounded" in w
+                        and "not a tight hammer" in w,
+                        "the reconcile must state the SESSLIMIT_RETRY_S "
+                        "post-reset retries are bounded, not a tight hammer")
         self.assertTrue("reset-time-AGNOSTIC job-4 stuck-check nudge" in w,
                         "the reconcile must point at the job-4 stuck-check as "
                         "the covering mechanism, not a new job-6 behaviour")
