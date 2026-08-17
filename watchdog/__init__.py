@@ -393,6 +393,8 @@ from watchdog.transcripts import (  # noqa: E402
     transcript_last_marker as transcript_last_marker,
     transcript_last_marker_line as transcript_last_marker_line,
     transcript_last_assistant_text as transcript_last_assistant_text,
+    question_repoke_run as question_repoke_run,           # #522
+    question_repoke_streak as question_repoke_streak,     # #522
     supervisor_responded_to_nudge as supervisor_responded_to_nudge,
     subagent_active as subagent_active,
     _count_live_subagents as _count_live_subagents,
@@ -536,6 +538,7 @@ from watchdog.questions import (  # noqa: E402
     _foreign_questions as _foreign_questions,
     _foreign_drop_question as _foreign_drop_question,
     _last_human_prompt_ts as _last_human_prompt_ts,
+    _is_genuine_human_prompt as _is_genuine_human_prompt,   # #522
     _last_real_turn_ts as _last_real_turn_ts,
     _transcript_for_session as _transcript_for_session,
     prune_answered_questions as prune_answered_questions,
@@ -1700,7 +1703,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              progress_dir=None, questions_path=None,
              owner_decision_fetch=None, gk_selfservice_fetch=None,
              u_reconcile_clear=None):
-    """Scan every `claude` pane once. 32 numbered jobs per poll — 26 LIVE and 6
+    """Scan every `claude` pane once. 33 numbered jobs per poll — 27 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2141,6 +2144,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           THIS box asked+answered (local capture = ownership proof), so it runs
           on EVERY box; every candidate's verdict is logged (#486). See
           `reconcile_u_labels` in `watchdog/u_labels.py`.
+      (33) (only when goal jobs are enabled) QUESTION-REPOKE DISARM (#522) —
+          a `/goal` loop STUCK re-poking an unanswered `❓ NEEDS YOU` (the native
+          evaluator ignoring stop-condition (A)) is DISARMED. Reads the
+          AUTHORITATIVE transcript for GOAL_QUESTION_REPOKE_MIN (5) consecutive
+          byte-identical re-pokes with NO genuine human answer between them, then
+          — only on an ARMED pane, recent-human-gated and 24h/2 capped — types
+          `/goal clear` (the symmetric inverse of the arm keystroke, via the same
+          verified-delivery primitives). A landed disarm writes a
+          `goal_disarmed_q` veto that job 20's `goal_dark_watch` honours (no
+          disarm<->re-arm ping-pong) until a genuine human answer lands after it.
+          See `goal_question_repoke_watch` in `watchdog/goal.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -3652,6 +3666,25 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             requests_path=goal_requests_path)
     _add("goal_dark_watch", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_dark_watch, "goal-dark-watch error")
+
+    # #522 -- disarm a `/goal` loop STUCK re-poking an unanswered `❓ NEEDS YOU`
+    # (the native evaluator ignoring stop-condition (A)). Reads the AUTHORITATIVE
+    # transcript for N consecutive byte-identical re-pokes and types `/goal clear`
+    # (recent-human-gated + 24h/2 capped, the LANE-nudge keystroke discipline),
+    # writing a `goal_disarmed_q` veto that `goal_dark_watch` (registered ABOVE,
+    # so the veto it reads is already this sweep's) honours to prevent a
+    # disarm<->re-arm ping-pong. Shares `state` + `tail_deadline` budget with the
+    # other goal jobs; never types when goal jobs are disabled.
+    def _job_goal_question_repoke_watch():
+        from watchdog import goal as _goal_mod
+        return _goal_mod.goal_question_repoke_watch(
+            now, run=run, state=state, send_fn=send_fn,
+            dry_run=dry_run, projects_dir=projects_dir,
+            sleep_fn=sleep_fn, time_fn=time_fn,
+            sweep_deadline=tail_deadline)
+    _add("goal_question_repoke_watch",
+         lambda: goal_jobs_enabled and not _goal_jobs_disabled,
+         _job_goal_question_repoke_watch, "goal-question-repoke-watch error")
 
     def _job_goal_lane_sweep():
         from watchdog import goal as _goal_mod

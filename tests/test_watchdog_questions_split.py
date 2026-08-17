@@ -61,6 +61,7 @@ MOVED_NAMES = [
     "_foreign_questions",
     "_foreign_drop_question",
     "_last_human_prompt_ts",
+    "_is_genuine_human_prompt",   # #522
     "_last_real_turn_ts",
     "_transcript_for_session",
     "prune_answered_questions",

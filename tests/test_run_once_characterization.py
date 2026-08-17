@@ -140,6 +140,8 @@ CANONICAL_SWEEP = [
             "goal_jobs_enabled", True, "list", "goal-sweep error"),
     JobSpec("goal_dark_watch", "wd.goal", "goal_dark_watch",
             "goal_jobs_enabled", True, "list", "goal-dark-watch error"),
+    JobSpec("goal_question_repoke_watch", "wd.goal", "goal_question_repoke_watch",
+            "goal_jobs_enabled", True, "list", "goal-question-repoke-watch error"),  # (33) #522
     JobSpec("goal_lane_sweep", "wd.goal", "goal_lane_sweep",
             "goal_jobs_enabled", True, "list", "goal-lane-sweep error"),
     JobSpec("long_turn_watch", "wd", "long_turn_watch",
@@ -336,15 +338,16 @@ class TestJobOutputAccumulation(unittest.TestCase):
 
 
 class TestOwnerKillSwitchGates(unittest.TestCase):
-    """COMPOUND GATES — jobs 14 (compact_sweep) and 9/20 (goal_sweep /
-    goal_dark_watch / goal_lane_sweep) are gated `<param> and not
-    _<x>_jobs_disabled`. Pins the SECOND conjunct: when the owner kill-switch
+    """COMPOUND GATES — jobs 14 (compact_sweep) and 9/20/32 (goal_sweep /
+    goal_dark_watch / goal_question_repoke_watch / goal_lane_sweep) are gated
+    `<param> and not _<x>_jobs_disabled`. Pins the SECOND conjunct: when the owner kill-switch
     is on, those jobs must NOT fire even with their param open. Dropping the
     `and not ...` conjunct goes RED here."""
 
     def test_owner_disabled_suppresses_only_the_compound_gated_jobs(self):
         suppressed = {"compact_sweep", "goal_sweep",
-                      "goal_dark_watch", "goal_lane_sweep"}
+                      "goal_dark_watch", "goal_question_repoke_watch",
+                      "goal_lane_sweep"}
         # Drive with both "goal" and "compact" reporting owner-disabled.
         labels, _, logs = _drive(
             _all_open_kwargs(),

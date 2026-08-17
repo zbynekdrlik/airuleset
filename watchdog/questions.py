@@ -260,6 +260,59 @@ def _last_human_prompt_ts(tpath, tail_bytes=2_000_000, extra_human_prefixes=()):
     return best
 
 
+# #522 -- a Discord-relayed answer IS a genuine user answer (the human answered,
+# just via the phone), so for the "did the user actually answer" question it
+# counts as human -- mirrors `compact._COMPACT_DISCORD_ANSWER_PREFIXES` /
+# `_compact_recent_human_activity`'s own `extra_human_prefixes` choice. This is
+# the OPPOSITE of `_goal_autoarm_recent_human_activity`'s stricter "typed
+# DIRECTLY at the terminal" question (which deliberately excludes them).
+_DISCORD_ANSWER_PREFIXES = (
+    "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku")
+
+
+def _is_genuine_human_prompt(entry, extra_human_prefixes=_DISCORD_ANSWER_PREFIXES):
+    """#522 -- per-ENTRY sibling of `_last_human_prompt_ts`'s own inner filter:
+    True iff `entry` is a genuinely-HUMAN user answer (direct terminal typing OR
+    a Discord relay by default), NOT a machine injection. A `/goal` re-poke, a
+    bare `continue`, a `<task-notification>`, a bounce/backstop/park nudge, a
+    `/goal ` echo, a Stop-hook rejection, a `/compact` continuation summary, an
+    isMeta / isCompactSummary / tool_result `user` entry are all transparent
+    (return False) -- the #491/#366 causal discipline that keeps a goal re-poke
+    from ever reading as "the user answered". Reuses the SAME
+    `watchdog._MACHINE_PROMPT_*` constants as `_last_human_prompt_ts`, so a new
+    machine prefix added there applies here too (no divergent copy). NEVER raises.
+
+    `extra_human_prefixes` names entries in `_MACHINE_PROMPT_PREFIXES` to treat
+    as HUMAN for THIS call -- default the two Discord-answer prefixes (a phone
+    answer breaks a repoke streak just as a typed one does), exactly the choice
+    `_compact_recent_human_activity` makes."""
+    if not isinstance(entry, dict) or entry.get("type") != "user" or entry.get("isMeta"):
+        return False
+    if entry.get("isCompactSummary"):
+        return False
+    c = (entry.get("message") or {}).get("content")
+    if isinstance(c, str):
+        text = c
+    elif isinstance(c, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in c):
+            return False
+        text = " ".join(b.get("text", "") for b in c
+                        if isinstance(b, dict) and b.get("type") == "text")
+    else:
+        return False
+    t = text.strip()
+    if not t:
+        return False
+    machine_prefixes = (watchdog._MACHINE_PROMPT_PREFIXES if not extra_human_prefixes
+                        else tuple(p for p in watchdog._MACHINE_PROMPT_PREFIXES
+                                   if p not in extra_human_prefixes))
+    if (t in watchdog._MACHINE_PROMPT_EXACT
+            or any(t.startswith(p) for p in machine_prefixes)
+            or t.startswith(watchdog._COMPACT_CONTINUATION_PREFIX)):
+        return False
+    return True
+
+
 def _last_real_turn_ts(tpath, tail_bytes=2_000_000):
     """Epoch of the newest transcript entry whose top-level `type` is
     `user` or `assistant` — a genuine conversational turn, never a
