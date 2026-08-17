@@ -1248,6 +1248,64 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("saturated (>= 5 workers)" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
+    # ---------------------------------------------------------------- #
+    # #518 -- the gating worker count converts from the render-dependent
+    # `_count_live_subagents` + `_pane_has_bg_agent` render floor to the
+    # structured G2 `count_live_workers`. RED: a strip-visible box whose
+    # structured count is 0 (all workers silently dead) must fire the
+    # EMPTY-LANE recovery nudge, not the render-floored under-saturated skip.
+    # The two lock tests hold the empty-lane / saturated decision semantics
+    # (both count sources patched consistently -> green before AND after the
+    # conversion, so the DECISION is what is locked, not the source).
+    # ---------------------------------------------------------------- #
+
+    def test_518_dead_workers_with_visible_strip_fire_empty_lane(self):
+        # RED today: the render floor (`_pane_has_bg_agent(strip)`) floors a
+        # strip-visible, transcript-0 box to 1 worker -> under-saturated ->
+        # skip:surplus-floor, suppressing the empty-lane recovery nudge for a
+        # box whose "workers" are all silently dead. The structured count is 0,
+        # so the converted gate fires the EMPTY-LANE nudge. Mutation-lock: a
+        # revert to `_count_live_subagents` + the render floor goes RED here.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_count_live_subagents", return_value=0), \
+             m.patch.object(wd, "count_live_workers", return_value=(0, [])):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 5,
+                                          now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("workers=0" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+        # never the render-floored under-saturated skip (the pre-#518 behavior)
+        self.assertFalse(any("surplus-floor" in ln for ln in logs), logs)
+
+    def test_518_lock_empty_lane_decision_preserved(self):
+        # LOCK (green before AND after): with both count sources agreeing on 0,
+        # an idle box with backlog fires the empty-lane nudge exactly as today.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_count_live_subagents", return_value=0), \
+             m.patch.object(wd, "count_live_workers", return_value=(0, [])):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5,
+                                          now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("workers=0" in ln for ln in logs), logs)
+
+    def test_518_lock_saturated_decision_preserved(self):
+        # LOCK (green before AND after): with both count sources agreeing on 5
+        # (>= the floor of min(5, backlog)), the box is saturated -> silent.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_count_live_subagents", return_value=5), \
+             m.patch.object(wd, "count_live_workers", return_value=(5, [])), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
+                                          now, tmtime)
+        self.assertFalse(owns)
+        self.assertTrue(any("saturated (>= 5 workers)" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
     def test_zero_workers_small_backlog_still_nudges(self):
         # Regression: the 0-worker empty-lane nudge is UNCHANGED -- fires on ANY
         # open backlog (backlog 3 here), with no memory gate.
