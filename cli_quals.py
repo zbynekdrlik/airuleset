@@ -484,6 +484,30 @@ def _row_is_ops_wait(labels):
     return any(lb in names for lb in OPS_WAIT_LABELS)
 
 
+def _ops_wait_reason(labels):
+    """The plain-word REASON a row sits in the ops-wait (W) bucket, for the
+    `--ops-wait` per-member tag (#526): `acceptance` when the row is a genuine
+    SENT acceptance (carries `needs-acceptance` AND is NOT simultaneously a
+    re-hand-off/bounce — `NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS`), so it is waiting
+    on the CLIENT — routed to W by `_partition_workable`'s acceptance-scoped
+    override; else `ops-wait` (a ticket parked on an external event/evidence via
+    the `ops-wait` label). Lets a `--ops-wait` reader tell the two W populations
+    apart. A missing/malformed labels value reads as `ops-wait` (the safe generic
+    tag). The gk-override exclusion mirrors `_row_is_user_waiting`'s own
+    acceptance-scoping EXACTLY (#526 review 🔵): a contradictory
+    `needs-acceptance`+`ready-for-review`/`needs-gatekeeper`/`prio:bounce`+
+    `ops-wait` row (a re-hand-off/bounce that also carries ops-wait, reaching the
+    ops_wait bucket via the plain `_row_is_ops_wait` branch, NOT the
+    acceptance-override one) is tagged `ops-wait`, never mislabelled
+    `acceptance`."""
+    names = {(lb or {}).get("name") for lb in (labels or [])
+             if isinstance(lb, dict)}
+    if "needs-acceptance" in names and not any(
+            ov in names for ov in NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS):
+        return "acceptance"
+    return "ops-wait"
+
+
 def _partition_workable(rows):
     """Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
     (`{number: {"number","title","createdAt","labels"}}`) THREE ways:
@@ -499,15 +523,32 @@ def _partition_workable(rows):
     reason a search-exclusion + separate positive query was rejected). Extends
     the repo's own established client-side-partition pattern — no new mechanism.
 
-    PRECEDENCE: a row carrying BOTH a user-waiting AND an ops-wait label goes to
-    `user_waiting` (checked first). Both leave `workable`, so the COUNT is
-    identical either way; the precedence only decides which DISPLAY bucket the
-    row lands in, and a pending user answer is the more actionable of the two."""
+    PRECEDENCE (#526, ROZHODNUTÉ v3): a row carrying BOTH a user-waiting AND an
+    ops-wait label normally goes to `user_waiting` (a pending owner answer is the
+    more actionable of the two) — EXCEPT a `needs-acceptance`-ONLY user-waiting
+    row (reason == "acceptance": no needs-answer/needs-decision), which routes to
+    `ops_wait` (W) instead. Once the stream has SENT the client acceptance thread
+    and added `ops-wait`, the ticket is waiting on a THIRD PARTY, not a question
+    for the owner — U is "čo sa ťa Claude pýta / čo máš schváliť", W is
+    "odoslané, čaká tretia strana". needs-answer/needs-decision + ops-wait STAY
+    in U (a pending owner answer beats a sent thread), so the override is
+    acceptance-scoped. Both buckets leave `workable`, so the COUNT is identical
+    either way; the precedence only decides which DISPLAY bucket (U vs W) the row
+    lands in."""
     workable, user_waiting, ops_wait = {}, {}, {}
     for number, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None
         if _row_is_user_waiting(labels):
-            user_waiting[number] = row
+            # #526: a needs-acceptance-ONLY user-waiting row (its acceptance
+            # thread already sent, marked by the stream's `ops-wait`) is waiting
+            # on the CLIENT, not the owner → route it to W. A pending owner
+            # answer (needs-answer/needs-decision → reason != "acceptance")
+            # keeps the row in U regardless of ops-wait.
+            if (_user_waiting_reason(labels) == "acceptance"
+                    and _row_is_ops_wait(labels)):
+                ops_wait[number] = row
+            else:
+                user_waiting[number] = row
         elif _row_is_ops_wait(labels):
             ops_wait[number] = row
         else:

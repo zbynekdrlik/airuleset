@@ -94,8 +94,10 @@ class PartitionHelpers(unittest.TestCase):
         self.assertEqual(set(ops_wait), {5})
 
     def test_partition_user_waiting_wins_when_both_labels_present(self):
-        # A ticket carrying BOTH a user-waiting and an ops-wait label goes to
-        # user_waiting (both leave workable; only the display bucket is chosen).
+        # A needs-answer/needs-decision ticket carrying ALSO an ops-wait label
+        # stays user_waiting (a pending owner ANSWER is more actionable than a
+        # sent thread); both leave workable, only the display bucket is chosen.
+        # (needs-acceptance + ops-wait is the ONE exception — see #526 below.)
         part = getattr(airuleset, "_partition_workable", None)
         self.assertIsNotNone(part, "_partition_workable must exist")
         rows = {7: {"number": 7, "labels": _labels("ops-wait", "needs-answer")}}
@@ -103,6 +105,68 @@ class PartitionHelpers(unittest.TestCase):
         self.assertEqual(set(workable), set())
         self.assertEqual(set(user_waiting), {7})
         self.assertEqual(set(ops_wait), set())
+
+    def test_partition_acceptance_plus_ops_wait_routes_to_ops_wait(self):
+        # #526 (ROZHODNUTÉ v3): a needs-acceptance ticket whose client thread was
+        # already SENT (the stream added ops-wait) is waiting on a THIRD PARTY —
+        # it routes to W (ops_wait), NOT U (user_waiting). The acceptance-scoped
+        # override reverses the U-first precedence for THIS label only, so the
+        # acceptance automat's step 2 (sent thread → W) is reachable. RED before
+        # the fix (current U-first precedence lands it in user_waiting); GREEN
+        # after. This IS the mutation-lock: removing the acceptance override
+        # turns this red.
+        part = getattr(airuleset, "_partition_workable", None)
+        self.assertIsNotNone(part, "_partition_workable must exist")
+        rows = {8: {"number": 8, "labels": _labels("needs-acceptance", "ops-wait")}}
+        workable, user_waiting, ops_wait = part(rows)
+        self.assertEqual(set(workable), set())
+        self.assertEqual(set(user_waiting), set(),
+                         "#526: needs-acceptance + ops-wait must NOT stay in U")
+        self.assertEqual(set(ops_wait), {8},
+                         "#526: needs-acceptance + ops-wait routes to W (thread sent)")
+
+    def test_partition_needs_decision_plus_ops_wait_stays_user_waiting(self):
+        # #526: the acceptance override is SCOPED to needs-acceptance — a pending
+        # owner DECISION beats a sent thread, so needs-decision + ops-wait stays U.
+        rows = {9: {"number": 9, "labels": _labels("needs-decision", "ops-wait")}}
+        workable, user_waiting, ops_wait = airuleset._partition_workable(rows)
+        self.assertEqual(set(user_waiting), {9})
+        self.assertEqual(set(ops_wait), set())
+
+    def test_partition_acceptance_with_answer_plus_ops_wait_stays_user_waiting(self):
+        # #526: needs-acceptance AND needs-answer AND ops-wait — the ANSWER wins
+        # (a pending owner answer is more actionable than a sent thread), so the
+        # override does NOT fire and it stays U. (_user_waiting_reason returns
+        # "answer" here, not "acceptance", so the acceptance-only override skips.)
+        rows = {10: {"number": 10,
+                     "labels": _labels("needs-acceptance", "needs-answer", "ops-wait")}}
+        workable, user_waiting, ops_wait = airuleset._partition_workable(rows)
+        self.assertEqual(set(user_waiting), {10})
+        self.assertEqual(set(ops_wait), set())
+
+    def test_ops_wait_reason_distinguishes_acceptance_from_ops_wait(self):
+        # #526: the `--ops-wait` listing tags an acceptance-in-W member
+        # `acceptance` (routed to W because its client thread was sent) vs a pure
+        # ops-wait-label member `ops-wait`, so a reader can tell them apart.
+        fn = getattr(airuleset, "_ops_wait_reason", None)
+        self.assertIsNotNone(fn, "_ops_wait_reason must exist (#526)")
+        self.assertEqual(fn(_labels("needs-acceptance", "ops-wait")), "acceptance")
+        self.assertEqual(fn(_labels("ops-wait")), "ops-wait")
+        self.assertEqual(fn(None), "ops-wait")
+        self.assertEqual(fn([]), "ops-wait")
+
+    def test_ops_wait_reason_gk_override_row_is_not_acceptance(self):
+        # #526 review 🔵: a contradictory needs-acceptance + re-hand-off/bounce +
+        # ops-wait row (reaching the ops_wait bucket via the plain _row_is_ops_wait
+        # branch, NOT the acceptance override) is a re-hand-off/bounce, NOT a sent
+        # acceptance — it must be tagged `ops-wait`, never mislabelled `acceptance`.
+        # Mirrors _row_is_user_waiting's own NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS
+        # scoping exactly (#507 precedence).
+        fn = airuleset._ops_wait_reason
+        for override in ("ready-for-review", "needs-gatekeeper", "prio:bounce"):
+            self.assertEqual(
+                fn(_labels("needs-acceptance", override, "ops-wait")), "ops-wait",
+                "needs-acceptance + %s + ops-wait must NOT tag acceptance" % override)
 
     def test_partition_row_with_no_labels_key_is_workable(self):
         part = getattr(airuleset, "_partition_workable", None)
@@ -191,6 +255,58 @@ class CoreQualsExcludesOpsWait(unittest.TestCase):
             nums = {ln.split("\t", 1)[0] for ln in r.stdout.splitlines() if ln.strip()}
             self.assertEqual(nums, {"1", "2"},
                              "core-quals --list must be workable-only (exclude ops-wait)")
+
+
+class OpsWaitListingTagsAcceptance(unittest.TestCase):
+    """#526: `core-quals --ops-wait` tags each W member with a reason —
+    `acceptance` (a needs-acceptance ticket whose client thread was sent) vs
+    `ops-wait` (a pure ops-wait-label ticket) — so the acceptance-in-W members
+    are distinguishable from the ops-wait-label members."""
+
+    # #11 pure ops-wait (W, reason ops-wait), #12 needs-acceptance + ops-wait
+    # (W, reason acceptance), #13 workable.
+    _MIX = json.dumps([
+        {"number": 11, "labels": _labels("ops-wait")},
+        {"number": 12, "labels": _labels("needs-acceptance", "ops-wait")},
+        {"number": 13, "labels": _labels("bug")},
+    ])
+
+    def _fake_gh(self, bindir):
+        gh = Path(bindir) / "gh"
+        gh.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  *"repo view"*|repo*) echo "zbynekdrlik/demo";;\n'
+            '  *"--search label:autopilot-skip"*) echo 0;;\n'
+            "  *) echo '%s';;\n" % self._MIX +
+            'esac\n')
+        gh.chmod(0o755)
+
+    def _prep(self, home, repo, bindir):
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        self._fake_gh(bindir)
+
+    def test_ops_wait_listing_tags_the_acceptance_member(self):
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            self._prep(home, repo, bindir)
+            r = _run_quals("core-quals", "--ops-wait", repo, home, bindir)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            reason = {}
+            for ln in r.stdout.splitlines():
+                if not ln.strip():
+                    continue
+                parts = ln.split("\t")
+                # number<TAB>createdAt<TAB>action<TAB>reason<TAB>title
+                self.assertGreaterEqual(len(parts), 5,
+                                        "--ops-wait must carry a reason column (#526): %r" % ln)
+                reason[parts[0]] = parts[3]
+            self.assertEqual(set(reason), {"11", "12"},
+                             "--ops-wait must list BOTH W members")
+            self.assertEqual(reason["11"], "ops-wait",
+                             "#11 (pure ops-wait label) tagged ops-wait")
+            self.assertEqual(reason["12"], "acceptance",
+                             "#12 (needs-acceptance + ops-wait) tagged acceptance (#526)")
 
 
 class SliceQualsExcludesOpsWait(unittest.TestCase):

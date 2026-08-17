@@ -125,23 +125,31 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   teardown/refresh loop, an automated alert log, e.g. odoo-erp #1861/#3037) is excluded from this
   set at the SAME tier as `autopilot-skip`, never workable regardless of age (#362; documented in
   `statusline-vocabulary.md`). A ticket parked on the OWNER — `needs-answer`/`needs-decision` (applied
-  only AFTER a question was already raised) or `needs-acceptance` (DONE, awaiting the owner's/client's
-  acceptance, "done = client saw it") — is a DIFFERENT case: not fully excluded, but PARTITIONED into
-  the user-waiting bucket. It leaves the workable `I N` / `core-quals --count` (the OWNER's court now,
-  not this box's) and surfaces as `U N` / `core-quals --waiting` (each member tagged
-  answer/decision/acceptance/ping); the loop PARKS on it — still tracked, never lost, never blocking 🏁
-  (#468/#512). The standalone `Q` ❓-pings badge folds into `U N` too (#512: a ticketless session ping
-  is a thing waiting on the owner; a ping that references a `#N` ticket is already counted via that
-  ticket's label, never twice). **#507 precedence:** a `needs-acceptance` ticket that is ALSO a
+  only AFTER a question was already raised) or a NOT-YET-SENT `needs-acceptance` (Claude must still get
+  the owner to approve+send the client acceptance thread — a real question ON the owner) — is a
+  DIFFERENT case: not fully excluded, but PARTITIONED into the user-waiting bucket. It leaves the
+  workable `I N` / `core-quals --count` (the OWNER's court now, not this box's) and surfaces as `U N` /
+  `core-quals --waiting` (each member tagged answer/decision/acceptance/ping); the loop PARKS on it —
+  still tracked, never lost, never blocking 🏁 (#468/#512). **`U` = only what Claude ASKS / the owner
+  must APPROVE** ("čo sa ťa Claude pýta / čo máš schváliť"). The standalone `Q` ❓-pings badge folds
+  into `U N` too (#512: a ticketless session ping is a thing waiting on the owner; a ping that
+  references a `#N` ticket is already counted via that ticket's label, never twice). **#526 acceptance
+  automat:** `needs-acceptance` is a STATE MACHINE — while its client thread has NOT yet been
+  approved+sent it sits in `U`/`--waiting` (above); once the stream SENDS the thread and adds
+  `ops-wait` it moves to `W`/`--ops-wait` (below, tagged `acceptance` there) — now waiting on the
+  CLIENT/third party, not the owner. **#507 precedence:** a `needs-acceptance` ticket that is ALSO a
   re-hand-off (`ready-for-review`/`needs-gatekeeper`) stays `gk`, or a returned bounce (`prio:bounce`)
-  stays workable — never `U`. An `ops-wait` ticket (a supervisor-set advisory state — open but blocked
-  on an external event/evidence with no dispatchable code lane) is the SAME surface-only case for a
-  DIFFERENT reason: it leaves `I N` / `core-quals --count` and surfaces as `W N` / `core-quals
-  --ops-wait`; the loop PARKS on it identically — never blocking 🏁, cleared by the SUPERVISOR (not
-  you, and no auto-labelling) when the event/evidence lands (#510). The canonical `W` workflow: ask a
-  THIRD PARTY (e.g. "zisti X od človeka Y cez Odoo discussion") → post the question in that thread,
-  label the ticket `ops-wait` (it leaves `I N` into `W N`), check the thread as you work others, and
-  CLEAR the label when they reply so the ticket re-enters `I N`.
+  stays workable — never `U`. A `W`/`ops-wait` ticket (a supervisor-set advisory state — open but blocked
+  on an external event/evidence with no dispatchable code lane, OR a SENT `needs-acceptance` per the
+  automat above) is the SAME surface-only case for a DIFFERENT reason: it leaves `I N` / `core-quals
+  --count` and surfaces as `W N` / `core-quals --ops-wait` (each member tagged `acceptance` for a sent
+  acceptance vs `ops-wait` for a pure event-parked one); the loop PARKS on it identically — never
+  blocking 🏁, cleared by the SUPERVISOR (not you, and no auto-labelling) when the event/evidence (or
+  the client's acceptance) lands (#510/#526). **`W` = SENT, waiting on a THIRD PARTY** ("odoslané,
+  čaká tretia strana"). The canonical `W` workflow: ask a THIRD PARTY (e.g. "zisti X od človeka Y cez
+  Odoo discussion") → post the question in that thread, label the ticket `ops-wait` (it leaves `I N`
+  into `W N`), check the thread as you work others, and CLEAR the label when they reply so the ticket
+  re-enters `I N`.
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do
@@ -161,7 +169,9 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   — never hardcode `--assignee @me`, which silently returns 0 on a shared-gh-account stream box
   (montalu/marek/simap: `@me` there is the maintainer, matching nothing assigned). Shared trackers:
   marek + david both work odoo-erp; never grab another stream's tickets.
-- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · authority=<profile> · N issues · solving the whole backlog`.
+- **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · authority=<profile> · I N · U M · W K · solving the whole backlog` — the workable count PLUS the parked `U`/`W` counts (`M`/`K` from the SAME `--count`/footer derivation), so the owner sees the split up front, not a bare `N`.
+- **Surface the U/W BREAKDOWN, never just the counts (#527).** Whenever `U > 0` or `W > 0` — at the banner AND in every per-cycle `## ✅ Work Complete` report (Step 4) — print the actual parked MEMBERS, not only the numbers, so the owner SEES what waits without having to ask "máš na mňa otázku?": run `python3 ~/devel/airuleset/airuleset.py core-quals --waiting` (reduced-authority: `slice-quals --waiting`) and list each `U` member with its tag (`answer`/`decision`/`acceptance`/`ping`) + title, then `core-quals --ops-wait` (or `slice-quals --ops-wait`) for each `W` member with its tag (`acceptance`/`ops-wait`) + title. `U` = "čo sa ťa Claude pýta / čo máš schváliť" (a not-yet-sent acceptance is a real approve-the-thread question); `W` = "odoslané, čaká tretia strana".
+- **Invariant — `U > 0` ⟹ every `U` member ALREADY carries a DELIVERED question (#527, owner directive "keď je U väčšie ako nula sa stále musím pýtať či má Claude na mňa otázku").** On EVERY cycle, for each `U` member from `--waiting`, confirm it has a delivered question the owner can act on: a fired ❓ ping (question map) OR a `needs-answer`/`needs-decision` comment that CARRIES the actual question (not a bare label). A `U` member WITHOUT one is a defect — ASK its question now (`❓ ASKED` + a `needs-answer` comment on the issue), **ONE AT A TIME, SEQUENTIALLY** (never a pile — `user-questions-slovak.md`), so the owner never has to prompt "do you have a question for me?". (`acceptance`-tagged `U` members: the question is "approve + send the client acceptance thread"; once sent, the stream adds `ops-wait` and it moves to `W`.) The goal: the owner NEVER asks whether Claude has a question — a positive `U` always means the questions are already on their phone.
 - **Version-on-dashboard foundation gate** (web projects): no version label → that foundation
   issue is the FIRST work item (`version-on-dashboard.md`).
 
@@ -833,7 +843,9 @@ gap in either.
    `code-review` invocation either, per #363), `✅ Deploy: <version>`, `✅ Výstup: <observed values>` (RELAYS each worker's Step-4 read-back of its member's real OUTPUT artifact — an explicit `n/a — <prečo>` when a member has no user-facing output; `completion-report.md` blocks a report missing this line)
    — then Goal/What changed in plain language (covering every member integrated in this cycle), the
    🌐 URL(s) from the workers' `--url`, and the PR title/link/merge SHA (this cycle's ONE PR, per the
-   repo-flow policy) — terminating in the marker `message-status-marker.md` prescribes: a genuine
+   repo-flow policy). **On `U > 0`/`W > 0` the report ALSO prints the parked BREAKDOWN** (Step-1
+   `--waiting`/`--ops-wait` members + tags, #527), never a bare `U N`.
+   Terminating in the marker `message-status-marker.md` prescribes: a genuine
    `✅ DONE: <plain outcome, e.g. "#41+#43+#317 merged -> v1.2.3, CI green">` when no lane is left
    running, or `⏳ WORKING` when this turn still has dispatched lanes in flight (background work IS
    running — never claim idleness). This IS a real completion of the integrated members (merged,

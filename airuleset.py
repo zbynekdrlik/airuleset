@@ -4211,6 +4211,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _partition_user_waiting as _partition_user_waiting,
     OPS_WAIT_LABELS as OPS_WAIT_LABELS,
     _row_is_ops_wait as _row_is_ops_wait,
+    _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,
