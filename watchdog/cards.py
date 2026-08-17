@@ -149,6 +149,17 @@ CARD_GRACE_S = 1200               # a ticket younger than this hasn't had time
                                    # seconds on every clean run
 CARD_MAX_LISTED = 8               # the phone gets numbers, not a wall
 
+# --- #525 REPORT reconciliation knobs (see report_reconcile below) --- #
+REPORT_GRACE_S = 600              # ~10 min: a supervisor's post-merge sequence
+                                   # (deploy → verify → the report itself) takes
+                                   # minutes; only past this is a report OWED
+REPORT_MAX_SWALLOWS = 3           # consecutive-swallow give-up before escalating
+                                   # the owner (#442-F2 anti-silence)
+REPORT_MAX_LISTED = 8             # phone/pane gets numbers, not a wall
+REPORT_TAIL_LINES = 400          # a fresh (un-compacted) report sits near the
+                                   # tail — the compact-sync.log covers a report
+                                   # already compacted OUT of this window
+
 _CLOSES_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
                         re.I)
 
@@ -532,4 +543,334 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
 
     if not dry_run:
         state["card_unreported"] = {k: v for k, v in seen.items() if k in live}
+    return logs
+
+
+# --------------------------------------------------------------------------- #
+# Job 25 — REPORT RECONCILIATION (#525, the report-emission side of #523).
+#
+# A saturated `/process-subdev` (or `/autopilot`) SUPERVISOR consumes a worker
+# return (task-notification) and continues `⏳ WORKING` WITHOUT writing the
+# per-ticket `## ✅ Work Complete` report. The only compact request that fires
+# for that boundary is `origin=subagent-stop`, which legitimately LAPSES on the
+# `⏳` veto (`_compact_self_reported_complete` is `self-callback`-ONLY, #425
+# by-design — #523 root cause). So the ticket gets neither a report NOR its
+# per-ticket compact (the #411 `--self` path is a CONSEQUENCE of the report).
+#
+# Job 25 already computes "closed/merged tickets of this box" for missing CARDS
+# (`card_reconcile` above). This is the SECOND check over the SAME closed set:
+# a closed ticket whose closing SUPERVISOR session has NO subsequent report
+# boundary since the close → after grace → ONE deduplicated in-band nudge into
+# the supervisor pane (transcript-verified `send_verified`), with a
+# consecutive-swallow give-up that escalates to the owner so a permanently
+# swallowed delivery is never silent (#442-F2 / #502 / #509 / #511).
+#
+# It changes NOTHING about the compact veto (#425/#523 stay): the supervisor
+# writing the report re-arms the per-ticket compact through the existing #411
+# `--self` path all on its own.
+# --------------------------------------------------------------------------- #
+
+# The SAME canonical heading `hooks/stop-check-prose-violations.sh` and
+# `watchdog/compact.py::_COMPACT_COMPLETION_HEADING_RX` anchor on — imported
+# lazily at call time (below) rather than copied, so a genuine report is read
+# by the identical rule that enforces it, never a parallel drifting spelling.
+
+
+def _iso_epoch(s):
+    """A CC transcript / compact-sync ISO-8601 timestamp -> epoch float, or
+    None on anything unparseable. Handles both the transcript `…Z` form and
+    the compact-sync `…+00:00` form."""
+    if not s or not isinstance(s, str):
+        return None
+    t = s.strip()
+    if t.endswith("Z"):
+        t = t[:-1] + "+00:00"
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(t).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def report_boundary_after(rows, since_ts):
+    """PURE (facts-in / verdict-out, #504): True iff any REAL assistant turn in
+    `rows` dated `>= since_ts` carries the canonical `## ✅ Work Complete`
+    heading. `rows` are already-parsed transcript jsonl dicts — the caller
+    decides how many to read. An `isApiErrorMessage` turn and a turn with no
+    parseable timestamp are skipped; a tool-only turn has empty text so the
+    heading regex never matches it. Never reads the transcript itself, so a
+    reviewer can attack the decision directly."""
+    from watchdog.compact import _COMPACT_COMPLETION_HEADING_RX as _RX
+    from watchdog.transcripts import _entry_text
+    for e in rows or ():
+        if not isinstance(e, dict) or e.get("type") != "assistant":
+            continue
+        if e.get("isApiErrorMessage") is True:
+            continue
+        ts = _iso_epoch(e.get("timestamp"))
+        if ts is None or ts < since_ts:
+            continue
+        if _RX.search(_entry_text(e) or ""):
+            return True
+    return False
+
+
+def _self_callback_records(log_lines):
+    """`{sid: [epoch_ts, …]}` for every compact-sync.log line carrying
+    `origin=self-callback` (a SEND / NOT-DELIVERED / SKIP-expired line — the
+    only lines that name the origin). A `self-callback` origin arises ONLY
+    from a well-formed `## ✅ Work Complete` report (the #411 Stop-hook /
+    `compact-request --self` path), so such a line dated after a ticket's
+    close is compaction-SURVIVING proof the report was written even after the
+    heading itself scrolled out of the transcript. Cheap + bounded: the log is
+    capped at `COMPACT_SYNC_LOG_LINES_MAX` lines."""
+    out = {}
+    for ln in log_lines or ():
+        ts_str, _, payload = ln.partition(" ")
+        if "origin=self-callback" not in payload:
+            continue
+        m = re.search(r"\bsid=(\S+)", payload)
+        if not m:
+            continue
+        ep = _iso_epoch(ts_str)
+        if ep is None:
+            continue
+        out.setdefault(m.group(1), []).append(ep)
+    return out
+
+
+def _autopilot_mutex_held(root):
+    """True iff a LIVE session holds the #8 integration mutex for `root` right
+    now — the supervisor is mid-integration (merge → gates → push), so a
+    per-ticket report is not yet legitimately owed (#456: the lock guards only
+    that critical section). Best-effort; any failure -> False (a lock-read
+    error must never permanently suppress the check — the grace already covers
+    a normal integration cycle, and the lock file existing+readable is the
+    common case whenever it is genuinely held)."""
+    try:
+        from cli_autopilot_lock import (_autopilot_lock_path,
+                                        _autopilot_lock_read, _pid_alive)
+        holder = _autopilot_lock_read(_autopilot_lock_path(root))
+        pid = holder.get("pid") if isinstance(holder, dict) else None
+        return bool(pid) and _pid_alive(int(pid))
+    except Exception:
+        return False
+
+
+def _report_escalate_ping(send_fn, root, owed, shown, owner, dry_run):
+    """Fire ONE owner Discord ping when the in-band report nudge is
+    PERMANENTLY swallowed (#442-F2 anti-silence — a wedged pane must never
+    silently strand the owed report). Returns the send status, or None when
+    there is no `send_fn`. Best-effort repo-name / project resolution: an
+    unresolvable name degrades to the root path, never a raise."""
+    if send_fn is None:
+        return None
+    name = ""
+    try:
+        from notify import repo_name_for
+        name = repo_name_for(root) or ""
+    except Exception:
+        name = ""
+    try:
+        from notify import stream_qualified
+        project = stream_qualified(name) if name else None
+    except Exception:
+        project = None
+    return send_fn(
+        "\U0001f4ee **%s** — supervisor nenapísal report a in-band "
+        "pripomienku sa nedá doručiť\n"
+        "> Tieto tickety sa dokončili a zavreli, ale supervisor pre ne "
+        "nenapísal `## ✅ Work Complete` a nedá sa mu to napísať do panela: "
+        "%s.\n> Skontroluj ten panel." % (name or root, shown),
+        owner=owner or None,
+        dedup_key="report-owed:%s:%s" % (name or root,
+                                         "-".join(str(n) for n in owed)),
+        dry_run=dry_run, project=project)
+
+
+def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
+                     send_fn=None, dry_run=False, git_run=None,
+                     owner_by_sid=None, projects_dir=None, sleep_fn=None,
+                     window=None, grace=None, max_swallows=None,
+                     mutex_held=None, recent_human=None,
+                     transcript_fn=None, rows_fn=None,
+                     verified_send=None, compact_log_path=None):
+    """The #525 report-owed reconciliation — see the section comment.
+
+    Iterates ONLY the SUPERVISOR (main-checkout) sessions in `cwd_by_sid` (a
+    worker worktree owes no report). For each repo it re-derives the closed set
+    the same way `card_reconcile` does — `merged_closes`, LOCAL git, which
+    directly names what THIS supervisor merged (the right signal for "who owes
+    the report", and free of a gh call). A ticket is OWED when it closed past
+    `grace`, is not already handled (dedup per ticket, forever), and neither
+    signal shows a report boundary since its close: a `## ✅ Work Complete`
+    heading in the supervisor transcript (fresh, un-compacted report) OR a
+    `origin=self-callback` compact-sync.log record for the sid (a report that
+    was written+compacted out of the transcript). Delivery is ONE in-band
+    nudge into the supervisor pane via `send_verified`; a persistent swallow
+    streak escalates to the owner once (#442-F2 anti-silence).
+
+    #516: `nudged`/`escalated` are ONE-SHOT latches (a handled ticket is never
+    re-evaluated), so the persisted `state["report_owed"]` write is gated on
+    `not dry_run` — a diagnostic `--once --dry-run` mutates only a local copy
+    and can never suppress the genuine nudge on a later real timer sweep."""
+    if not cwd_by_sid:
+        return []
+    window = CARD_WINDOW_S if window is None else window
+    grace = REPORT_GRACE_S if grace is None else grace
+    max_swallows = REPORT_MAX_SWALLOWS if max_swallows is None else max_swallows
+    owner_by_sid = owner_by_sid or {}
+    panes_by_sid = panes_by_sid or {}
+
+    if mutex_held is None:
+        mutex_held = _autopilot_mutex_held
+    if recent_human is None:
+        def recent_human(cwd, sid):
+            try:
+                from watchdog.compact import _compact_recent_human_activity
+                return bool(_compact_recent_human_activity(
+                    cwd, sid, now, projects_dir=projects_dir))
+            except Exception:
+                return False
+    if transcript_fn is None:
+        def transcript_fn(pd, sid, cwd):
+            try:
+                import watchdog
+                return watchdog._transcript_for_session(pd, sid, cwd)
+            except Exception:
+                return None
+    if rows_fn is None:
+        def rows_fn(tpath):
+            if not tpath:
+                return []
+            try:
+                from watchdog.transcripts import _iter_jsonl_tail
+                return _iter_jsonl_tail(str(tpath), REPORT_TAIL_LINES)
+            except Exception:
+                return []
+    if verified_send is None:
+        def verified_send(pane_id, text, tpath):
+            try:
+                import watchdog
+                return bool(watchdog.send_verified(
+                    pane_id, text, run, tpath, sleep_fn=sleep_fn))
+            except Exception:
+                return False
+
+    # compact-sync.log self-callback records — read ONCE per sweep.
+    records = {}
+    try:
+        if compact_log_path is None:
+            from watchdog.compact import compact_sync_log_path
+            compact_log_path = compact_sync_log_path()
+        if compact_log_path:
+            from pathlib import Path
+            lines = Path(compact_log_path).read_text(
+                encoding="utf-8").splitlines()
+            records = _self_callback_records(lines)
+    except OSError:
+        records = {}                       # no log yet -> transcript alone
+
+    owed_state = dict(state.get("report_owed") or {})
+    logs, live, examined = [], set(), set()
+
+    for sid, cwd in sorted((cwd_by_sid or {}).items()):
+        root = _git_first_line(cwd, ["rev-parse", "--show-toplevel"], git_run)
+        if not root or root in examined:
+            continue
+        if "/.claude/worktrees/" in root:
+            continue                       # a worker worktree owes no report
+        examined.add(root)
+        base = _git_base_ref(root, git_run)
+        if not base:
+            continue                       # unmeasurable — never a finding
+        live.add(root)
+        closed = merged_closes(root, base, now - window, git_run)
+        if not closed:
+            owed_state.pop(root, None)
+            continue
+
+        prev = owed_state.get(root) or {}
+        nudged = {k: v for k, v in (prev.get("nudged") or {}).items()
+                  if int(k) in closed}
+        escalated = {k: v for k, v in (prev.get("escalated") or {}).items()
+                     if int(k) in closed}
+        swallows = int(prev.get("swallows") or 0)
+
+        pane = panes_by_sid.get(sid)
+        pane_id = pane[0] if pane else None
+        tpath = transcript_fn(projects_dir, sid, cwd)
+        rows = rows_fn(tpath) if tpath else []
+        sc_ts = records.get(sid) or ()
+
+        owed = []
+        for n in sorted(closed):
+            if str(n) in nudged or str(n) in escalated:
+                continue                   # dedup per ticket, forever
+            ts_close = closed[n]
+            if ts_close is not None and now - ts_close < grace:
+                continue                   # still inside its own grace
+            if any(t >= ts_close for t in sc_ts) or \
+                    report_boundary_after(rows, ts_close):
+                continue                   # report present (fresh or compacted)
+            owed.append(n)
+
+        # detection is logged unconditionally (issue #36 print-always).
+        if owed:
+            logs.append("report-owed %s sid=%s issues=%s"
+                        % (root, sid,
+                           ",".join(str(n) for n in owed[:REPORT_MAX_LISTED])))
+
+        if not owed:
+            owed_state[root] = {"nudged": nudged, "escalated": escalated,
+                                "swallows": 0}
+            continue
+
+        # vetoes that suppress DELIVERY this sweep, never mark a ticket handled.
+        if mutex_held(root):
+            logs.append("report-owed SKIP mutex-held %s" % root)
+            owed_state[root] = {"nudged": nudged, "escalated": escalated,
+                                "swallows": swallows}
+            continue
+        if recent_human(cwd, sid):
+            logs.append("report-owed SKIP recent-human %s" % root)
+            owed_state[root] = {"nudged": nudged, "escalated": escalated,
+                                "swallows": swallows}
+            continue
+
+        if dry_run or pane_id is None:
+            owed_state[root] = {"nudged": nudged, "escalated": escalated,
+                                "swallows": swallows}
+            continue
+
+        shown = ", ".join("#%d" % n for n in owed[:REPORT_MAX_LISTED])
+        text = ("report-owed: %s — napíš per-ticket ## ✅ Work Complete report "
+                "+ spusti compact-request --self" % shown)
+        ok = verified_send(pane_id, text, tpath)
+        if ok:
+            for n in owed:
+                nudged[str(n)] = now
+            swallows = 0
+            logs.append("report-owed NUDGE %s -> ok issues=%s" % (root, shown))
+        else:
+            swallows += 1
+            if swallows >= max_swallows:
+                status = _report_escalate_ping(
+                    send_fn, root, owed, shown,
+                    owner_by_sid.get(sid), dry_run)
+                if status is not None:
+                    logs.append("report-owed ESCALATE %s -> %s issues=%s"
+                                % (root, status, shown))
+                for n in owed:
+                    escalated[str(n)] = now
+                swallows = 0               # a new storm can re-escalate
+            else:
+                logs.append("report-owed swallowed %s (streak=%d) issues=%s"
+                            % (root, swallows, shown))
+        owed_state[root] = {"nudged": nudged, "escalated": escalated,
+                            "swallows": swallows}
+
+    if not dry_run:
+        state["report_owed"] = {k: v for k, v in owed_state.items()
+                                if k in live}
     return logs
