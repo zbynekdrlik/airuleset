@@ -1,6 +1,6 @@
 ---
 name: odoo-discuss-xmlrpc
-description: Posting a message to an Odoo Discuss channel over XML-RPC / JSON-RPC (discuss.channel.message_post) from stream automation. The verified recipe — body_is_html=True for any HTML body (NEVER post-then-rewrite: the bus push already delivered the escaped body to live clients), address the channel BY NAME as a sub-thread, always include the owner as a control-ping recipient, then post-verify. Load before writing or reviewing ANY Odoo Discuss message_post call.
+description: Posting a message to an Odoo Discuss channel over XML-RPC / JSON-RPC (discuss.channel.message_post) from stream automation, AND composing the client handover proposal that message carries. The verified recipe — body_is_html=True for any HTML body (NEVER post-then-rewrite: the bus push already delivered the escaped body to live clients), address the channel BY NAME as a sub-thread, always include the owner as a control-ping recipient, then post-verify. The canonical cross-stream handover-proposal rules (complete proposal in the chat, a direct deep-link URL to the live feature, explicit owner membership, only functions already live on PROD, the self-blame reassurance) live in the companion handover-compose.md. Load before writing or reviewing ANY Odoo Discuss message_post call, and before drafting a handover Discuss thread for a client.
 user-invocable: false
 ---
 
@@ -114,6 +114,17 @@ message_id = res[0] if isinstance(res, list) else res
    check them for the owner + recipients, but do not read them as proof the
    in-channel bus render succeeded.
 3. If (1) fails, the post is broken — fix the call, do not rewrite the DB.
+
+## Composing the client handover proposal (before you post)
+
+The recipe above is the SEND. Before you post a client PROD Discuss handover
+thread, its PROPOSAL (shown to the owner for approval) and its message body must
+follow the canonical cross-stream rules in the companion file
+**`handover-compose.md`** (same directory): complete proposal in the chat, a
+direct deep-link URL to the live feature, explicit owner thread membership, only
+functions already live on PROD, and the named-recipients self-blame reassurance.
+That file auto-loads at proposal time via its own situational trigger; kept
+separate from this recipe so the recipe stays lean.
 
 ## Related
 

@@ -218,6 +218,11 @@ repo's own CLAUDE.md / playbook is what names the command.
      --goal "<plain Slovak>" --achieved "<plain Slovak>" --version "<version read from
      the live DOM>" --url "<Label=URL>"` — one call per ticket, same mechanism
      `agents/autopilot-worker.md` uses, never a hand-fired `reply`/`PushNotification`.
+     When the release tail includes a client-facing PROD Discuss handover
+     message, COMPOSE it per the canonical cross-stream rules in the
+     `odoo-discuss-xmlrpc` skill's `handover-compose.md` companion (the single
+     source of truth for handover-proposal completeness, deep-link URL, and
+     owner membership).
      THEN close the stream's tickets with merge evidence and remove whichever hand-off
      label was applied (`ready-for-review` and/or `needs-gatekeeper` — a carve-out
      stream's hand-off carries `needs-gatekeeper`, not `ready-for-review`).
