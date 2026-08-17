@@ -420,7 +420,10 @@ def cmd_slice_quals(args):
         workable_rows, waiting, ops_wait = airuleset._partition_workable(rows)
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
     if want_ops_wait:
-        _print_issue_rows(ops_wait, own_stream=user)
+        # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
+        # (external event/evidence) so they are distinguishable in the listing.
+        _print_issue_rows(ops_wait, own_stream=user,
+                          reason_fn=airuleset._ops_wait_reason)
         return
     if want_waiting:
         # #512: each labeled member gets a reason tag (answer/decision/
@@ -595,8 +598,10 @@ def cmd_core_quals(args):
             sys.exit(1)
     if want_ops_wait:
         # own_stream=None: a full-authority box owns no stream, so EVERY
-        # stream-labelled row is action-only.
-        _print_issue_rows(ops_wait, own_stream=None)
+        # stream-labelled row is action-only. #526: tag each W member
+        # `acceptance` (client thread sent) vs `ops-wait` (external event).
+        _print_issue_rows(ops_wait, own_stream=None,
+                          reason_fn=airuleset._ops_wait_reason)
         return
     if want_waiting:
         # own_stream=None: a full-authority box owns no stream, so EVERY
