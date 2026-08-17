@@ -807,6 +807,107 @@ class TestGoalDarkWatch(unittest.TestCase):
                                     sleep_fn=lambda s: None)
         self.assertFalse(any("budget-exceeded" in ln for ln in logs), logs)
 
+    # ----------------------------------------------------------------- #
+    # #519 -- orphan-prune for state["goal_mark"] (off_state). G6 made
+    # goal_mark load-bearing (resolve_goal_armed / the lane gate read it), so a
+    # gone session's entry must not leak forever. Reaped ONLY when the sid is
+    # NOT a live candidate pane this sweep AND its stored tmtime is aged; a live
+    # pane's entry is NEVER reaped (even with a stale transcript mtime -- the
+    # silently-dead-loop case dark_watch is still confirming, whose tail-proof
+    # persisted mark must survive).
+    # ----------------------------------------------------------------- #
+
+    def test_519_orphan_goal_mark_entry_is_reaped(self):
+        # A goal_mark entry for a session with NO live candidate pane (gone /
+        # superseded by a newer transcript) and an OLD stored tmtime is an
+        # orphan -> reaped. A live session's entry, visited this sweep, is kept.
+        proj = self._dir()
+        live = "sess-519-live"
+        _write_marker_transcript(proj, self.CWD, live)
+        _write_goal_marker(proj, self.CWD, live, "Goal set: /goal x", ts_epoch=500)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        now = 100000
+        state = {"goal_mark": {
+            "orphan-519": {"off": 0, "mark": {"state": "set", "ts": 500},
+                           "tmtime": now - 3 * 24 * 3600}}}   # 3 days old, gone
+        goal.goal_dark_watch(now, run=tmux, send_fn=lambda mm, **k: None,
+                             projects_dir=proj, state=state, sleep_fn=lambda s: None)
+        gm = state["goal_mark"]
+        self.assertNotIn("orphan-519", gm,
+                         "an aged, gone-session orphan must be reaped")
+        self.assertIn(live, gm, "a live session's entry must be kept")
+
+    def test_519_live_entry_never_reaped_even_with_stale_tmtime(self):
+        # The visited-this-sweep gate is PRIMARY: a live candidate pane whose
+        # transcript mtime is OLD (a silently-dead loop dark_watch is confirming)
+        # must NEVER be reaped -- an age-only reaper would lose its tail-proof
+        # persisted mark. Mutation-lock for the visited gate: an age-only prune
+        # would reap this (now - tmtime = 90000 > 24h).
+        proj = self._dir()
+        live = "sess-519-stale-live"
+        p = _write_marker_transcript(proj, self.CWD, live)
+        _write_goal_marker(proj, self.CWD, live, "Goal set: /goal x", ts_epoch=500)
+        os.utime(p, (10000, 10000))    # transcript mtime far older than the TTL
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        now = 100000
+        state = {}
+        goal.goal_dark_watch(now, run=tmux, send_fn=lambda mm, **k: None,
+                             projects_dir=proj, state=state, sleep_fn=lambda s: None)
+        self.assertIn(live, state["goal_mark"],
+                      "a visited live pane is never reaped, even stale-tmtime")
+
+    def test_519_recent_orphan_kept_by_age_gate(self):
+        # The tmtime age gate is the secondary safety for a budget-DEFERRED live
+        # pane: a not-visited entry with a RECENT tmtime is KEPT (only an AGED
+        # orphan is reaped). Mutation-lock for the age gate: a visited-only prune
+        # with no age check would reap this recent, not-visited entry.
+        proj = self._dir()
+        live = "sess-519-live2"
+        _write_marker_transcript(proj, self.CWD, live)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        now = 100000
+        state = {"goal_mark": {
+            "recent-orphan-519": {"off": 0, "mark": {"state": "set", "ts": 500},
+                                  "tmtime": now - 60}}}       # just 60s old
+        goal.goal_dark_watch(now, run=tmux, send_fn=lambda mm, **k: None,
+                             projects_dir=proj, state=state, sleep_fn=lambda s: None)
+        self.assertIn("recent-orphan-519", state["goal_mark"],
+                      "a not-visited but RECENT entry is kept by the age gate")
+
+    # ----------------------------------------------------------------- #
+    # #517 -- first-sight tail-limit: a state-loss / >tail-downtime first
+    # sight of a session whose `Goal set:` marker sits BEYOND the 4 MB tail
+    # must still seed goal_mark = armed (the bounded reverse-scan seed), or
+    # the lane gate reads not-armed and silences a genuinely-armed loop.
+    # ----------------------------------------------------------------- #
+
+    def test_517_first_sight_seeds_a_goal_set_marker_beyond_the_tail(self):
+        # RED today: dark_watch first-sights (empty state) a transcript whose
+        # only `Goal set:` marker is > GOAL_MARK_TAIL_BYTES back. The tail
+        # bootstrap misses it -> goal_mark seeds NOT armed. The reverse-scan
+        # seed must find it -> mark.state == "set". A genuine >4 MB transcript
+        # is used so the real def-time 4 MB tail (unpatchable) actually misses.
+        proj = self._dir()
+        sid = "sess-517-deep"
+        _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: /goal x", ts_epoch=500)
+        tpath = proj / _encode(self.CWD) / (sid + ".jsonl")
+        with open(tpath, "a", encoding="utf-8") as f:
+            # ~4.2 MB of non-marker filler AFTER the marker -> the marker is
+            # beyond the 4 MB tail. Raw lines (not JSON) are fine: the byte
+            # pre-filter skips them without a json.loads.
+            f.write(("padding-line " + "x" * 180 + "\n") * 22000)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        state = {}
+        goal.goal_dark_watch(100000, run=tmux, send_fn=lambda mm, **k: None,
+                             projects_dir=proj, state=state, sleep_fn=lambda s: None)
+        entry = state.get("goal_mark", {}).get(sid)
+        self.assertIsNotNone(entry, state)
+        mark = entry.get("mark") if isinstance(entry, dict) else None
+        self.assertTrue(isinstance(mark, dict) and mark.get("state") == "set",
+                        "first-sight must seed the deep Goal set: marker "
+                        "(reverse-scan), got mark=%r" % (mark,))
+
 
 # --------------------------------------------------------------------------- #
 # 6. goal_lane_sweep / goal_lane_occupancy_nudge — job 20 half 2: the ONE
@@ -1119,7 +1220,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # which is exactly what #509 deliberately narrows.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 5,
                                           now, tmtime)
@@ -1136,13 +1237,14 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
     # ---------------------------------------------------------------- #
 
     def test_two_workers_big_backlog_with_memory_nudges(self):
-        # THE live-box lock: the pane SHOWS the agent strip (2 `◯` rows), so the
-        # OLD code's `_pane_has_bg_agent` early-skip would have refused here --
-        # the exact reopen-2 root cause. `_count_live_subagents`=2 + backlog 37 +
-        # healthy memory must now NUDGE.
+        # THE live-box lock: 2 live workers (structured `count_live_workers`) +
+        # backlog 37 + healthy memory must NUDGE (under-saturated fill). The pane
+        # SHOWS the agent strip; post-#518 the count is the structured G2 count,
+        # not the render strip, so the reopen-2 root cause (the old
+        # `_pane_has_bg_agent` early-skip) can no longer suppress it.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
@@ -1160,7 +1262,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # NUDGE (was silent under the earlier <3 draft).
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=4), \
+        with m.patch.object(wd, "count_live_workers", return_value=(4, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
@@ -1173,7 +1275,65 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # 5 workers >= GOAL_LANE_SATURATION_WORKERS -> saturated -> silent.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "count_live_workers", return_value=(5, [])), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
+                                          now, tmtime)
+        self.assertFalse(owns)
+        self.assertTrue(any("saturated (>= 5 workers)" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
+    # ---------------------------------------------------------------- #
+    # #518 -- the gating worker count converts from the render-dependent
+    # `_count_live_subagents` + `_pane_has_bg_agent` render floor to the
+    # structured G2 `count_live_workers`. RED: a strip-visible box whose
+    # structured count is 0 (all workers silently dead) must fire the
+    # EMPTY-LANE recovery nudge, not the render-floored under-saturated skip.
+    # The two lock tests hold the empty-lane / saturated decision semantics
+    # (both count sources patched consistently -> green before AND after the
+    # conversion, so the DECISION is what is locked, not the source).
+    # ---------------------------------------------------------------- #
+
+    def test_518_dead_workers_with_visible_strip_fire_empty_lane(self):
+        # RED today: the render floor (`_pane_has_bg_agent(strip)`) floors a
+        # strip-visible, transcript-0 box to 1 worker -> under-saturated ->
+        # skip:surplus-floor, suppressing the empty-lane recovery nudge for a
+        # box whose "workers" are all silently dead. The structured count is 0,
+        # so the converted gate fires the EMPTY-LANE nudge. Mutation-lock: a
+        # revert to `_count_live_subagents` + the render floor goes RED here.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_count_live_subagents", return_value=0), \
+             m.patch.object(wd, "count_live_workers", return_value=(0, [])):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 5,
+                                          now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("workers=0" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+        # never the render-floored under-saturated skip (the pre-#518 behavior)
+        self.assertFalse(any("surplus-floor" in ln for ln in logs), logs)
+
+    def test_518_lock_empty_lane_decision_preserved(self):
+        # LOCK (green before AND after): with both count sources agreeing on 0,
+        # an idle box with backlog fires the empty-lane nudge exactly as today.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "_count_live_subagents", return_value=0), \
+             m.patch.object(wd, "count_live_workers", return_value=(0, [])):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5,
+                                          now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("workers=0" in ln for ln in logs), logs)
+
+    def test_518_lock_saturated_decision_preserved(self):
+        # LOCK (green before AND after): with both count sources agreeing on 5
+        # (>= the floor of min(5, backlog)), the box is saturated -> silent.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         with m.patch.object(wd, "_count_live_subagents", return_value=5), \
+             m.patch.object(wd, "count_live_workers", return_value=(5, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
@@ -1197,7 +1357,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # is journaled with the measured value so a tight box stays diagnosable.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=812):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
@@ -1236,7 +1396,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # nothing typed); this is the reopen-3 root cause.
         now = 100000
         tmtime = now - 30  # fresh: transcript written 30s ago, idle << 15min
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
                                           now, tmtime)
@@ -1267,7 +1427,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {"ln": goal.GOAL_LANE_MAX_NUDGES}
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
                                           now, tmtime, rec=rec)
@@ -1287,7 +1447,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {"llast": now - 60}  # fired 60s ago, inside the base interval
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
                                           now, tmtime, rec=rec)
@@ -1306,7 +1466,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # using a fixed 5 would read 3 < 5 -> under-saturated -> fire.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=3):
+        with m.patch.object(wd, "count_live_workers", return_value=(3, [])):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 3,
                                           now, tmtime)
         self.assertFalse(owns)
@@ -1341,7 +1501,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         sent = []
         all_logs = []
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "_count_live_subagents", return_value=2), \
+             m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192), \
              m.patch.object(wd, "deliver_with_stash", return_value=False):
             for i in range(goal.GOAL_LANE_MAX_STASH_ABORTS + 3):
@@ -1680,7 +1840,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         _write_marker_transcript(proj, self.CWD, self.SID)
         tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "_count_live_subagents", return_value=2), \
+             m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192), \
              m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
             for i in range(10):                     # 10 sweeps, 60s apart
@@ -1711,10 +1871,12 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
 
     def _undersat_call(self, backlog, now, tmtime, rec, subagents, eff_workers,
                        mem=8192):
-        # Drive the under-saturated fill path deterministically: `subagents` =
-        # `_count_live_subagents` (the floor signal), `eff_workers` =
-        # `count_live_workers` (the #509 structured effectiveness signal), healthy
-        # memory, recent-human gate neutralized.
+        # Drive the under-saturated fill path deterministically. Post-#518 the
+        # gating count AND the #509 effectiveness signal are BOTH
+        # `count_live_workers` (= `eff_workers`); the `subagents` patch of the
+        # now-unused `_count_live_subagents` is a harmless no-op kept only so the
+        # existing #509 call sites (which pass `subagents == eff_workers`) stay
+        # byte-identical. Healthy memory, recent-human gate neutralized.
         with m.patch.object(wd, "_count_live_subagents", return_value=subagents), \
              m.patch.object(wd, "count_live_workers",
                             return_value=(eff_workers, [])), \

@@ -843,6 +843,70 @@ GOAL_DARK_REARM_MAX_PER_DAY = 2         # attempt cap: max auto-types per sid / 
 # check catches a loop that recovered inside the window).
 GOAL_DARK_REARM_STALE_S = 300           # drop a dark-rearm request older than this
 GOAL_DARK_CONFIRM_STATE_TTL_S = 24 * 3600   # reap a confirm window untouched this long
+# #519 -- orphan-prune TTL for state["goal_mark"] (off_state). The visited-this-
+# sweep gate is the PRIMARY protection (a live pane is never reaped); this age
+# floor is only the secondary safety for a not-visited-this-sweep entry (a
+# budget-DEFERRED live pane), set WELL above the sweep interval so such a pane is
+# never reaped before it is re-visited.
+GOAL_MARK_ORPHAN_TTL_S = 24 * 3600
+
+
+def _prune_goal_mark_orphans(off_state, visited_sids, now,
+                             ttl_s=GOAL_MARK_ORPHAN_TTL_S):
+    """#519 -- age/live-gated orphan prune for `state["goal_mark"]` (dark_watch's
+    `off_state`, keyed on `sid = tpath.stem`). G6 made goal_mark LOAD-BEARING
+    (`resolve_goal_armed` / the lane gate read it), so a gone session's entry
+    must not leak forever -- yet the marker-gone backstop only pops
+    seen/pinged/confirm for a VISITED pane, never `off_state`.
+
+    Reap an entry ONLY when BOTH: (1) its sid was NOT a live candidate pane THIS
+    sweep (`visited_sids` -- session gone / superseded by a newer transcript),
+    AND (2) it is malformed OR its stored transcript mtime is older than
+    `ttl_s`. The visited gate is PRIMARY: a live pane whose loop body reaches
+    `sid = tpath.stem` -- INCLUDING a silently-dead-loop pane dark_watch is still
+    confirming, whose transcript mtime is legitimately STALE -- is added to
+    `visited_sids` and never reaped, so its tail-proof persisted mark (the
+    #517/#486-G6 signal) is safe from an age check. The two live paths that
+    DON'T reach that line this sweep -- the janitor-recover `continue` and the
+    sweep-budget `break` (a deferred pane) -- fall to `tmtime` (the SECONDARY
+    safety); harmless and self-healing: reaping additionally needs `tmtime`
+    >= `ttl_s` (24h) stale, by which point a dead loop's #459/#524 episode has
+    long resolved, `confirm_state` (untouched here) preserves death-detection
+    continuity, and a wrongly-reaped entry is simply re-seeded via #517 on the
+    next clean sweep. An entry with a FUTURE mtime (clock skew) is kept (the
+    safe direction). A reaper (run once per sweep), never a per-episode pop;
+    never raises. Mirrors `_janitor_prune_parks` / the #524 confirm reaper."""
+    if not isinstance(off_state, dict):
+        return
+    for sid in [k for k, v in list(off_state.items())
+                if k not in visited_sids
+                and not (isinstance(v, dict)
+                         and isinstance(v.get("tmtime"), (int, float))
+                         and (now - v["tmtime"]) < ttl_s)]:
+        off_state.pop(sid, None)
+
+
+def _seed_or_scan_marker(tpath, off, loc, sid):
+    """#517 -- resolve a session's newest `/goal` marker for dark_watch. FIRST
+    SIGHT (`off is None`: state loss / fresh install / >tail-downtime) uses the
+    bounded reverse-scan seed so an arm deeper than the 4 MB tail is still
+    captured; every later sweep resumes incrementally from the stored offset.
+    Returns `(new_off, new_mark, log_or_None)` -- the log is the
+    deduped-per-sid `unknown-past-cap` observability line (an arm deeper than the
+    seed cap: observability only, NEVER a silent not-armed and never a fabricated
+    armed marker). Dedup is by construction: the seed runs only at first sight,
+    then `off` is a real offset and this takes the incremental path."""
+    if off is not None:
+        new_off, new_mark = watchdog.scan_goal_markers(tpath, off=off)
+        return new_off, new_mark, None
+    new_off, new_mark, seed_status = watchdog.seed_goal_marker(tpath)
+    log = None
+    if seed_status == "unknown-past-cap":
+        log = ("dark-watch %s sid=%s -> armed=? src=unknown-past-cap (no /goal "
+               "marker within %d bytes of EOF at first sight; an arm deeper than "
+               "the seed cap is not seedable -- observability only, treated "
+               "not-armed)" % (loc, sid, watchdog.GOAL_MARK_SEED_CAP_BYTES))
+    return new_off, new_mark, log
 
 
 def _dark_confirm_advance(win, mark_ts, now):
@@ -1066,6 +1130,7 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             live_pids = []
         watchdog._janitor_prune_parks(state, live_pids)
 
+    visited_sids = set()   # #519 -- live candidate sids kept by the orphan prune below
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
             logs.append("dark-watch-budget-exceeded — deferring remaining "
@@ -1092,6 +1157,7 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             continue
         tpath, tmtime = tinfo
         sid = tpath.stem
+        visited_sids.add(sid)   # #519 -- live this sweep -> never orphan-reaped
 
         rec = off_state.get(sid)
         off = rec.get("off") if isinstance(rec, dict) else None
@@ -1100,7 +1166,9 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # structured LIVENESS proof (the session wrote a turn) -> VETO a
         # death-confirmation run: never type /goal into a loop that is alive.
         prior_tmtime = rec.get("tmtime") if isinstance(rec, dict) else None
-        new_off, new_mark = watchdog.scan_goal_markers(tpath, off=off)
+        new_off, new_mark, _seedlog = _seed_or_scan_marker(tpath, off, loc, sid)
+        if _seedlog:
+            logs.append(_seedlog)   # #517 -- deduped-per-sid unknown-past-cap
         # `scan_goal_markers`'s incremental contract means a sweep that
         # produced no NEW appended lines legitimately returns `None` even
         # when the transcript's real newest marker is still the one an
@@ -1267,6 +1335,9 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                 owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
                 dedup_key=dkey,
                 dry_run=dry_run)
+
+    if not dry_run:   # #519 -- prune goal_mark for gone+aged sessions (dry-run: no state mutation)
+        _prune_goal_mark_orphans(off_state, visited_sids, now)
     return logs
 
 
@@ -1906,17 +1977,16 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                                   "draft, but not settled at an idle prompt "
                                   "this sweep)")
         return logs, False
-    live_workers = watchdog._count_live_subagents(tpath, now, GOAL_LANE_LIVE_WINDOW_S)
-    # Pane-strip corroboration (#442 re-fix 2): the strip is a boolean ">=1 bg
-    # agent visible" view; the transcript count is authoritative for HOW MANY.
-    # When the strip shows a worker but the transcript momentarily reads 0 (a
-    # just-dispatched worker whose subagents/*.jsonl mtime is not fresh yet), floor
-    # the count at 1 so a visible-but-uncounted worker never reads as a truly empty
-    # box -- pure count reconciliation of two signals the guard already reads, no
-    # transcript-content parse. This preserves the old `_pane_has_bg_agent`
-    # early-gate's false-0 protection for the empty-lane nudge exactly.
-    if live_workers == 0 and watchdog._pane_has_bg_agent(captured):
-        live_workers = 1
+    # #518 -- the gating worker count is the STRUCTURED G2 `count_live_workers`
+    # (transcripts.py), replacing the render-dependent `_count_live_subagents`
+    # primary count + its `_pane_has_bg_agent(captured)` render floor. G2 EXCLUDES
+    # both silent-death modes (api-error + text-toolcall-stall), so a box whose
+    # "workers" are all dead reads 0 and fires the empty-lane recovery nudge --
+    # the render floor's stale-strip over-count used to SUPPRESS exactly that
+    # (#486-G2 dangerous direction). It is the SAME structured count the #509
+    # effectiveness signal already uses below, so the two now agree by construction.
+    live_workers, _ev = watchdog.count_live_workers(
+        projects_dir, cwd, sid, now, GOAL_LANE_LIVE_WINDOW_S)
     backlog_n = watchdog._cached_backlog_count(cwd, backlog_fetch, state, now)
     if not isinstance(backlog_n, int) or backlog_n <= 0:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%r -> "
@@ -2043,10 +2113,11 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                        int(park - now), aborts, int(park)))
         return logs, True
     # #509 -- STRUCTURED effectiveness signal + effectiveness-aware cooldown.
+    # #518: live_workers IS count_live_workers now (the gating count converted),
+    # so eff_workers == live_workers by construction -- the pre-#518
+    # under-saturated re-sample of the identical call (a redundant per-sweep
+    # subagents disk scan) is dropped.
     eff_workers = live_workers
-    if under_saturated:
-        eff_workers, _ev = watchdog.count_live_workers(
-            projects_dir, cwd, sid, now, GOAL_LANE_LIVE_WINDOW_S)
     cd_skip, cd_log, cd_moved = _lane_cooldown_decision(
         rec, now, under_saturated, eff_workers, backlog_n, loc, live_workers,
         waiters)
