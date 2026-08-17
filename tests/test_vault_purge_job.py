@@ -193,12 +193,16 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # trailing line as `owner_decision_fetch=None`, right before the
         # closing `):` — the anchor moved again; the guard and the mutation
         # target did not.)
+        # (#515 re-pin: `u_reconcile_clear=None` was added on a NEW trailing
+        # line after `gk_selfservice_fetch=None,` — the closing `):` moved off
+        # that line again. The anchor and mutation target did not.)
         old = ("             vault_purge=None, log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
                "backlog_fetch=None,\n"
                "             progress_dir=None, questions_path=None,\n"
                "             owner_decision_fetch=None, "
-               "gk_selfservice_fetch=None):")
+               "gk_selfservice_fetch=None,\n"
+               "             u_reconcile_clear=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

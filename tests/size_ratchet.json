@@ -195,7 +195,7 @@
     "tests/test_user_waiting_split.py": 313,
     "tests/test_vault_channel.py": 1382,
     "tests/test_vault_disclosures.py": 165,
-    "tests/test_vault_purge_job.py": 251,
+    "tests/test_vault_purge_job.py": 254,
     "tests/test_vault_read_guard.py": 1268,
     "tests/test_vault_templates.py": 322,
     "tests/test_vystup_readback_skill_step4.py": 122,
