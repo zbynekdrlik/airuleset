@@ -528,6 +528,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                         request's own earlier delivery, a
                                         manual paste, or a foreign one) is
                                         already armed.
+      "drop:stale-rearm"            -- #524: a `dark-rearm`-origin request
+                                        older than GOAL_DARK_REARM_STALE_S;
+                                        the dark read it acted on has gone
+                                        stale, so never type it late.
       "skip:<reason>"               -- not safe right now; the caller
                                         LEAVES the request pending for the
                                         next periodic sweep.
@@ -831,7 +835,13 @@ GOAL_DARK_CACHE_MAX_AGE_S = 3 * 24 * 3600   # ignore an obligation cache older t
 GOAL_DARK_CONFIRM_MIN_READS = 8         # K consecutive clean-dark reads to TYPE
 GOAL_DARK_CONFIRM_MIN_SPAN_S = 600      # AND the run must span >= 10 min
 GOAL_DARK_REARM_MAX_PER_DAY = 2         # attempt cap: max auto-types per sid / 24h
-GOAL_DARK_REARM_STALE_S = 180           # drop a dark-rearm request older than this
+# #524-review: ~4 sweeps, not ~2.5 -- a single delayed/missed sweep (120s
+# TimeoutStartSec, #365 contention, a memory-pressure reap) between the record
+# sweep and job 9's first delivery must not false-drop an otherwise-fresh
+# rearm and re-cost the full ~11-min confirmation. Still tight enough that a
+# genuinely stale dark read is never typed (and delivery's own already-armed
+# check catches a loop that recovered inside the window).
+GOAL_DARK_REARM_STALE_S = 300           # drop a dark-rearm request older than this
 GOAL_DARK_CONFIRM_STATE_TTL_S = 24 * 3600   # reap a confirm window untouched this long
 
 
@@ -868,7 +878,11 @@ def _dark_rearm_attempt_ok(attempts, now):
     timestamps (a JSON list; any non-number entry is dropped). Returns
     `(ok, pruned)` -- `ok` False once the cap is hit; `pruned` is the list with
     entries older than 24 h removed (the caller appends `now` only on a real
-    type)."""
+    type). The cap counts CONFIRMED RECORDS, not landed keystrokes: a record
+    that `deliver_goal` later drops as `drop:stale-rearm` still consumed a slot
+    without any `/goal` typed -- this fails SAFE (fewer real re-arms than the
+    cap allows, so the ping escalates sooner) and correlates with a present
+    human, so it is deliberate, not a defect."""
     day = 24 * 3600
     pruned = [t for t in (attempts or [])
               if isinstance(t, (int, float)) and 0 <= (now - t) <= day]
@@ -989,12 +1003,18 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
 
     `rearm_fn(cwd) -> (text, authority)` / `requests_path` (#478; defaults
     `_default_rearm_fn` and `goal_requests_path()`) drive the auto-re-arm of
-    the dark-DIED branch: on a genuinely WORKABLE cache (the SAME `open > 0
-    AND fresh` gate), instead of pinging, this WRITES a goal-arm request for
-    job 9 (`goal_sweep`) to deliver via the verified keystroke path -- this
-    function itself STILL types nothing. Reverses #403 for the dark-died
-    branch ONLY; a user-CLEARED goal (mark != "set") never reaches this
-    branch at all."""
+    the dark-DIED branch. #524 (owner decision B) HARDENS it: on a genuinely
+    WORKABLE cache the loop is only RE-ARMED (a goal-arm request WRITTEN for
+    job 9 to type) once a death-CONFIRMATION run completes -- K clean-dark
+    footer reads over >= MIN_SPAN, with ANY armed read / advancing transcript
+    mtime / undeterminable read VETOING the run -- and under a 24h attempt cap;
+    an idle-but-ALIVE session whose glyph merely flickers never reaches it
+    (montalu 2026-08-16). A workable loop the watchdog cannot yet confirm (or
+    cannot self-heal: no template / cap exhausted) accumulates SILENTLY or
+    falls to the #459 ping. This function STILL types nothing -- it only WRITES
+    the request; the keystroke + its recent-human + delivery-freshness gates
+    live in `deliver_goal`. A user-CLEARED goal (mark != "set") never reaches
+    this branch at all."""
     logs = []
     if watchdog._owner_disabled("goal"):
         logs.append("goal jobs DISABLED by owner flag "
@@ -1019,6 +1039,17 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                           and isinstance(v.get("last"), (int, float))
                           and 0 <= (now - v["last"]) <= GOAL_DARK_CONFIRM_STATE_TTL_S)]:
         confirm_state.pop(_csid, None)
+    # #524-review -- the attempt-cap store leaks the SAME way (a `[]` is written
+    # on every workable-dark sweep, never popped) -> reap a sid whose newest
+    # attempt ts is older than the 24h cap window, and any empty/malformed
+    # entry. A REAPER, never a pop-on-episode-end (that would reset the rolling
+    # cap); a live capped sid refreshes its newest ts, so it is never reaped.
+    _day = 24 * 3600
+    for _asid in [k for k, v in list(attempts_state.items())
+                  if not (isinstance(v, list)
+                          and any(isinstance(t, (int, float))
+                                  and 0 <= (now - t) <= _day for t in v))]:
+        attempts_state.pop(_asid, None)
 
     # #488 review-1 -- GC the age-unbounded stash_parks records for panes that
     # no longer exist. The per-pane marker-gone backstop below only sees panes

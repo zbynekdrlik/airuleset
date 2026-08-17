@@ -369,6 +369,76 @@ class TestGoalDarkWatch(unittest.TestCase):
                          "an alive (mtime-advancing) loop is NEVER auto-typed")
         self.assertEqual(tmux.sent, [], "zero keystrokes")
 
+    def _flicker_run(self, sid, flicker_cap, n=24):
+        # A dark loop whose footer reads `flicker_cap` (armed True / busy None)
+        # on every 4th sweep and GOAL_IDLE_CAP (dark) otherwise -- the run never
+        # gets MIN_READS consecutive clean-dark reads, so it must NEVER type.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: /goal x", ts_epoch=500)
+        idle = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        flick = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], flicker_cap)
+        obl = self._obl(5, 900)
+        reqs = self._dir() / "goal-requests.json"
+        state, sent, now = {}, [], 1000
+        for i in range(n):
+            now += 100
+            self._sweep(flick if (i % 4 == 3) else idle, proj, state, sent, now,
+                        obl, _rearm_ok, reqs)
+        return reqs, idle, flick, sent
+
+    def test_armed_flicker_during_accumulation_never_types(self):
+        # #524-review (B, mutation-locked): the armed-True VETO is the single
+        # most safety-critical check -- a glyph flickering back armed = the loop
+        # is ALIVE (the exact montalu incident). A dark loop that shows the glyph
+        # before its confirmation run completes must NEVER be auto-typed, because
+        # each armed read RESETS the run. TEETH: removing `confirm_state.pop` on
+        # the armed-True branch makes this type (proven RED in review).
+        reqs, idle, armed, sent = self._flicker_run("sess-armed-flicker",
+                                                    GOAL_ARMED_CAP)
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "a periodically-armed (alive) loop is NEVER auto-typed")
+        self.assertEqual(idle.sent, [], "zero keystrokes")
+        self.assertEqual(armed.sent, [], "zero keystrokes")
+
+    def test_none_read_breaks_the_consecutive_confirmation_run(self):
+        # #524-review (B, mutation-locked): an undeterminable footer (busy /
+        # chrome / dialog -> pane_goal_armed None) is NOT a clean-dark read, so
+        # it must BREAK the consecutive confirmation run. A dark loop that reads
+        # None before confirmation is never typed. TEETH: removing the
+        # clean_run reset in the None branch makes this type.
+        reqs, idle, busy, sent = self._flicker_run("sess-none-reset",
+                                                   GOAL_BUSY_CAP)
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "a periodically-undeterminable loop never reaches a run")
+        self.assertEqual(idle.sent, [], "zero keystrokes")
+
+    def test_stale_attempt_cap_entries_are_reaped(self):
+        # #524-review -- the attempt-cap store (goal_dark_rearm_attempts) must
+        # not leak: a sid whose newest auto-type ts is older than the 24h cap
+        # window, or an empty/malformed list, is reaped on the next sweep; a
+        # fresh entry SURVIVES so the rolling cap is preserved (a reaper, never
+        # a pop-on-episode-end). TEETH: removing the reaper leaks the stale sids.
+        proj, tmux = self._dark("sess-live")
+        obl = self._obl(5, 900)
+        reqs = self._dir() / "goal-requests.json"
+        now = 1_000_000
+        state = {"goal_dark_rearm_attempts": {
+            "gone-stale": [now - 25 * 3600],   # older than 24h -> reap
+            "gone-empty": [],                  # empty -> reap
+            "gone-bad": "corrupt",             # malformed -> reap, never raise
+            "still-live": [now - 60],          # fresh -> keep
+        }}
+        goal.goal_dark_watch(now, run=tmux, send_fn=lambda m, **k: None,
+                             projects_dir=proj, state=state,
+                             sleep_fn=lambda s: None, obligation_fn=obl,
+                             rearm_fn=_rearm_ok, requests_path=reqs)
+        att = state["goal_dark_rearm_attempts"]
+        self.assertNotIn("gone-stale", att, "a >24h attempt entry is reaped")
+        self.assertNotIn("gone-empty", att, "an empty attempt entry is reaped")
+        self.assertNotIn("gone-bad", att, "a malformed attempt entry is reaped")
+        self.assertIn("still-live", att, "a fresh attempt entry survives")
+
     def test_persistently_dark_goal_with_work_remaining_is_re_armed(self):
         # #478 (reverses #403 for THIS dark-died branch): a still-dark goal
         # whose cwd still has genuinely WORKABLE obligations must be AUTO-
