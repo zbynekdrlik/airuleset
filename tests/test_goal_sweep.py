@@ -162,8 +162,9 @@ class TestGoalSweep(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 5. goal_dark_watch — job 20 half 1: NEVER types, 2-sweep debounce, silent
-#    on cleared/no-marker, and the shared janitor recovery runs first.
+# 5. goal_dark_watch — job 20 half 1: records a re-arm ONLY on a #524 CONFIRMED
+#    death (else pings / stays silent), itself types nothing (the keystroke is
+#    job 9's), silent on cleared/no-marker, shared janitor recovery runs first.
 # --------------------------------------------------------------------------- #
 
 class TestGoalDarkWatch(unittest.TestCase):

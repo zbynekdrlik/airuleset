@@ -15,10 +15,10 @@ single source of truth for the design this file locks:
     every SKIP leaves the request pending for the next sweep.
   - `goal_sweep` (job 9's new body) re-evaluates every still-pending
     request through that SAME function, clearing only on a TERMINAL word.
-  - `goal_dark_watch` (job 20, half 1) NEVER types a keystroke — a
-    2-sweep-debounced Discord ping only, and only for the transcript-says-
-    armed/footer-says-dark mismatch; a `cleared` marker or no marker at
-    all stays silent by construction.
+  - `goal_dark_watch` (job 20, half 1) itself types no keystroke, but for a
+    transcript-says-armed/footer-says-dark mismatch it either RECORDS a
+    re-arm for job 9 to type (only on a #524 CONFIRMED death) or sends a
+    Discord ping; a `cleared` marker or no marker at all stays silent.
   - `goal_lane_occupancy_nudge` (job 20, half 2) is the ONE remaining
     watchdog-INITIATED keystroke action, and is the only one of the two
     that DOES apply the recent-human-activity gate (arm delivery
