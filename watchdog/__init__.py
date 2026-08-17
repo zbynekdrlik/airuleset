@@ -76,6 +76,15 @@
       transcript too whenever the pane doesn't currently show the banner, and
       every delivery attempt is gated on `session_user_stopped` (the user's
       own `/exit` since the limit hit always wins, never auto-resumed).
+      Probe-first reconcile (#520): job 6 waits for the PRINTED reset before its
+      first `continue` BY DESIGN — a `continue` before the window frees re-hits
+      the limit (the frozen rationale above) — and its SESSLIMIT_RETRY_S
+      post-reset retries are bounded (5-min spacing, capped), not a tight hammer.
+      The "the window may free EARLIER, and idle-parking a session that BELIEVES
+      a stale limit is banned" half of probe-first is covered by the
+      reset-time-AGNOSTIC job-4 stuck-check nudge (its text now carries the
+      probe-first instruction) + the `verify-launched-work-liveness` skill
+      (the session-limit vs monthly-spend-cap classes) — NOT a new behaviour here.
   (7) DISCORD REPLY → THE ASKING SESSION: when a ❓ ping is delivered, the send path
       records the ping's Discord message id → the asking session
       (notify.record_question). The user ANSWERS by REPLYING to that ping in Discord;
@@ -221,7 +230,10 @@ WORKING_NUDGE_TEXT = (
     "logu/transcriptu podagenta, dashboard, gh run. AK ešte žije, len to potvrď a "
     "pokračuj v bounded sledovaní — NIČ nereštartuj. LEN AK je smrť potvrdená dôkazom, "
     "zasiahni (reštart / re-route / re-dispatch). Nikdy nečakaj slepo na success-only "
-    "signál, ale ani neintervenuj bez dôkazu o smrti."
+    "signál, ale ani neintervenuj bez dôkazu o smrti. A AK je dôvod ticha 429 limit "
+    "(vypísaný reset) — PROBNI / re-dispatchni HNEĎ, tvoj vlastný turn je dôkaz voľnej "
+    "kapacity; nikdy slepé čakanie na vypísaný čas, pri vrátenom 429 bounded ~10–15 min "
+    "re-proby, medzitým rob všetku ne-dispatch prácu (#520)."
 )
 # After the first nudge, re-nudge only this often — and only if the session produced
 # NO response (a successful nudge resets idle below the threshold, so job 4 stops
