@@ -63,10 +63,12 @@ MOVED_FUNCTIONS = [
     "goal_templates_path",
     "_goal_marker_content",
     "_parse_goal_marker",
+    "_newest_marker",
     "scan_goal_markers",
+    "seed_goal_marker",
     "pane_goal_armed",
 ]
-MOVED_CONSTANTS = ["GOAL_MARK_TAIL_BYTES"]
+MOVED_CONSTANTS = ["GOAL_MARK_TAIL_BYTES", "GOAL_MARK_SEED_CAP_BYTES"]
 MOVED_NAMES = MOVED_FUNCTIONS + MOVED_CONSTANTS
 
 
@@ -230,6 +232,103 @@ class BackRefSeamsAreLive(unittest.TestCase):
         self.assertIsNot(watchdog.pane_goal_armed(cap), True)
         with mock.patch.object(watchdog, "GOAL_INDICATOR", "ZZQGOAL"):
             self.assertIs(watchdog.pane_goal_armed(cap), True)
+
+
+class SeedGoalMarker(unittest.TestCase):
+    """#517 -- the first-sight bounded reverse-block-scan seed. All tests use
+    small explicit tail/cap/block so they are fast and can exercise the deep,
+    straddle, past-cap and BOF paths without a real >4 MB file."""
+
+    def _marker_line(self, state="set", ts=500):
+        from datetime import datetime, timezone
+        iso = datetime.fromtimestamp(ts, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z")
+        wrapped = "<local-command-stdout>Goal %s: /goal x</local-command-stdout>" % state
+        return json.dumps({"type": "system", "subtype": "local_command",
+                           "timestamp": iso, "content": wrapped})
+
+    def _tmpfile(self):
+        fd, name = tempfile.mkstemp(suffix=".jsonl")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(name) and os.unlink(name))
+        return name
+
+    def _write(self, before="", marker=None, after=""):
+        """A file = `before` + (marker line + \\n) + `after`."""
+        p = self._tmpfile()
+        with open(p, "w", encoding="utf-8") as f:
+            if before:
+                f.write(before)
+            if marker is not None:
+                f.write(marker + "\n")
+            if after:
+                f.write(after)
+        return p
+
+    def test_marker_within_the_tail_is_found_like_scan(self):
+        # Marker in the tail window -> found, and new_off matches
+        # scan_goal_markers(off=None) exactly (incremental resume unchanged).
+        p = self._write(marker=self._marker_line("set"), after="padding\n" * 3)
+        seed_off, mark, status = watchdog.seed_goal_marker(
+            p, tail_bytes=10000, cap_bytes=100000, block=10000)
+        self.assertEqual(status, "found")
+        self.assertEqual(mark.get("state"), "set")
+        scan_off, scan_mark = watchdog.scan_goal_markers(
+            p, off=None, tail_bytes=10000)
+        self.assertEqual(seed_off, scan_off)
+        self.assertEqual(mark.get("state"), scan_mark.get("state"))
+
+    def test_marker_beyond_tail_within_cap_is_found_by_reverse_scan(self):
+        # Marker before a tiny tail but within the cap -> the reverse scan finds
+        # it. MUTATION-LOCK: without the reverse scan this reads not-armed.
+        p = self._write(marker=self._marker_line("set"), after="padding-x\n" * 60)
+        seed_off, mark, status = watchdog.seed_goal_marker(
+            p, tail_bytes=40, cap_bytes=100000, block=40)
+        self.assertEqual(status, "found", (status, mark))
+        self.assertEqual(mark.get("state"), "set")
+
+    def test_cleared_marker_beyond_tail_is_found_not_unknown(self):
+        # A Goal cleared: marker deeper than the tail resolves DEFINITIVELY
+        # not-armed (state "cleared"), never the ambiguous unknown-past-cap.
+        p = self._write(marker=self._marker_line("cleared"),
+                        after="padding-x\n" * 60)
+        _off, mark, status = watchdog.seed_goal_marker(
+            p, tail_bytes=40, cap_bytes=100000, block=40)
+        self.assertEqual(status, "found")
+        self.assertEqual(mark.get("state"), "cleared")
+
+    def test_marker_straddling_block_boundaries_is_reassembled(self):
+        # The one marker line (~130 B) spans several 40-byte blocks -> the carry
+        # must reassemble it. MUTATION-LOCK for the straddle handling.
+        p = self._write(marker=self._marker_line("set"), after="pad\n" * 5)
+        _off, mark, status = watchdog.seed_goal_marker(
+            p, tail_bytes=40, cap_bytes=100000, block=40)
+        self.assertEqual(status, "found", (status, mark))
+        self.assertEqual(mark.get("state"), "set")
+
+    def test_marker_deeper_than_cap_is_unknown_never_armed(self):
+        # The arm is deeper than the cap -> honest unknown-past-cap, and NEVER a
+        # fabricated armed marker (mark is None so resolve_goal_armed can't read
+        # armed=True from it).
+        p = self._write(marker=self._marker_line("set"),
+                        after="padding-x\n" * 200)
+        off, mark, status = watchdog.seed_goal_marker(
+            p, tail_bytes=50, cap_bytes=100, block=50)
+        self.assertEqual(status, "unknown-past-cap", (status, mark))
+        self.assertIsNone(mark)
+
+    def test_no_marker_at_all_reaches_bof_not_unknown(self):
+        # A never-armed file scanned to BOF -> none-bof (definitively not armed),
+        # NOT unknown-past-cap (which would spam a first-sight observability log).
+        p = self._write(before="line-a\n" * 5, after="line-b\n" * 5)
+        off, mark, status = watchdog.seed_goal_marker(
+            p, tail_bytes=40, cap_bytes=100000, block=40)
+        self.assertEqual(status, "none-bof", (status, mark))
+        self.assertIsNone(mark)
+
+    def test_unreadable_path_is_fail_safe(self):
+        off, mark, status = watchdog.seed_goal_marker("/no/such/seed/path")
+        self.assertEqual((off, mark, status), (0, None, "none-bof"))
 
 
 if __name__ == "__main__":

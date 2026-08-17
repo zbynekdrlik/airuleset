@@ -1084,9 +1084,12 @@ from watchdog.goal_scan import (  # noqa: E402
     goal_templates_path as goal_templates_path,
     _goal_marker_content as _goal_marker_content,
     _parse_goal_marker as _parse_goal_marker,
+    _newest_marker as _newest_marker,
     scan_goal_markers as scan_goal_markers,
+    seed_goal_marker as seed_goal_marker,
     pane_goal_armed as pane_goal_armed,
     GOAL_MARK_TAIL_BYTES as GOAL_MARK_TAIL_BYTES,
+    GOAL_MARK_SEED_CAP_BYTES as GOAL_MARK_SEED_CAP_BYTES,
 )
 
 # #486 G3 -- the G1 session-heartbeat reader + reaper, now CONSUMED (G1/G2 left

@@ -880,6 +880,29 @@ def _prune_goal_mark_orphans(off_state, visited_sids, now,
         off_state.pop(sid, None)
 
 
+def _seed_or_scan_marker(tpath, off, loc, sid):
+    """#517 -- resolve a session's newest `/goal` marker for dark_watch. FIRST
+    SIGHT (`off is None`: state loss / fresh install / >tail-downtime) uses the
+    bounded reverse-scan seed so an arm deeper than the 4 MB tail is still
+    captured; every later sweep resumes incrementally from the stored offset.
+    Returns `(new_off, new_mark, log_or_None)` -- the log is the
+    deduped-per-sid `unknown-past-cap` observability line (an arm deeper than the
+    seed cap: observability only, NEVER a silent not-armed and never a fabricated
+    armed marker). Dedup is by construction: the seed runs only at first sight,
+    then `off` is a real offset and this takes the incremental path."""
+    if off is not None:
+        new_off, new_mark = watchdog.scan_goal_markers(tpath, off=off)
+        return new_off, new_mark, None
+    new_off, new_mark, seed_status = watchdog.seed_goal_marker(tpath)
+    log = None
+    if seed_status == "unknown-past-cap":
+        log = ("dark-watch %s sid=%s -> armed=? src=unknown-past-cap (no /goal "
+               "marker within %d bytes of EOF at first sight; an arm deeper than "
+               "the seed cap is not seedable -- observability only, treated "
+               "not-armed)" % (loc, sid, watchdog.GOAL_MARK_SEED_CAP_BYTES))
+    return new_off, new_mark, log
+
+
 def _dark_confirm_advance(win, mark_ts, now):
     """Pure #524 death-confirmation advance for ONE session, called ONLY on a
     genuinely clean-dark sweep (`pane_goal_armed is False`, `mark == "set"`,
@@ -1137,7 +1160,9 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # structured LIVENESS proof (the session wrote a turn) -> VETO a
         # death-confirmation run: never type /goal into a loop that is alive.
         prior_tmtime = rec.get("tmtime") if isinstance(rec, dict) else None
-        new_off, new_mark = watchdog.scan_goal_markers(tpath, off=off)
+        new_off, new_mark, _seedlog = _seed_or_scan_marker(tpath, off, loc, sid)
+        if _seedlog:
+            logs.append(_seedlog)   # #517 -- deduped-per-sid unknown-past-cap
         # `scan_goal_markers`'s incremental contract means a sweep that
         # produced no NEW appended lines legitimately returns `None` even
         # when the transcript's real newest marker is still the one an

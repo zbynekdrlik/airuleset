@@ -150,6 +150,14 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
 # sweeps read ONLY the bytes appended since the stored offset, so the steady
 # state costs ~nothing regardless of how long ago the goal was armed.
 GOAL_MARK_TAIL_BYTES = 4_000_000
+# #517 -- the FIRST-SIGHT reverse-scan seed cap. `seed_goal_marker` scans
+# block-wise backward from EOF until it hits the newest `Goal set:`/`Goal
+# cleared:` marker, BOF, or this many bytes. It bounds the one-time cost paid
+# only at first sight of a new sid (state loss / fresh install / >tail-downtime);
+# an arm DEEPER than this is honestly reported `unknown-past-cap`, never a silent
+# not-armed. Block-wise so an armed-within-tail session still exits at ~one 4 MB
+# block and memory stays one block, not the whole cap.
+GOAL_MARK_SEED_CAP_BYTES = 32_000_000
 
 
 def goal_templates_path():
@@ -236,7 +244,6 @@ def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
     would drop a real marker on the next pass.
 
     Fail-safe: an unreadable file returns `(off or 0, None)`; never raises."""
-    from datetime import datetime
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -267,6 +274,14 @@ def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
     # driven entirely by an EXPLICIT `goal-arm --self` callback, never by
     # scanning the transcript for a printed question, so this function's
     # only remaining job is finding the newest marker itself.
+    return (new_off, _newest_marker(body))
+
+
+def _newest_marker(body):
+    """The NEWEST (last-in-order) `/goal` marker in `body` (bytes), or None.
+    Shared by `scan_goal_markers` (tail/incremental) and `seed_goal_marker`
+    (#517 reverse-scan) so the parse is ONE implementation."""
+    from datetime import datetime
     best = None
     for ln in body.splitlines():
         # cheap pre-filter over the raw bytes — either of the TWO shapes CC
@@ -290,7 +305,90 @@ def scan_goal_markers(path, off=None, tail_bytes=GOAL_MARK_TAIL_BYTES):
             ts = None
         mark["ts"] = ts
         best = mark
-    return (new_off, best)
+    return best
+
+
+def seed_goal_marker(path, tail_bytes=None, cap_bytes=None, block=None):
+    """#517 -- FIRST-SIGHT seed of a session's newest `/goal` marker, reading
+    block-wise BACKWARD from EOF so an arm sitting arbitrarily far back (state
+    loss / fresh install / >tail-downtime) is still captured, up to a byte CAP.
+
+    Returns `(new_off, marker_or_None, status)`:
+      * ``"found"``            -- a marker was captured (in the tail or deeper).
+      * ``"none-bof"``         -- no marker AND the scan reached BOF (the whole
+                                  file was read -> definitively NOT armed).
+      * ``"unknown-past-cap"`` -- no marker AND the scan was cap-truncated (an
+                                  arm, if any, is deeper than `cap_bytes` back).
+                                  The CALLER emits a deduped observability line;
+                                  NEVER a silent not-armed, and never a fabricated
+                                  armed=True.
+
+    `new_off` is EOF-anchored EXACTLY like `scan_goal_markers(off=None)` (from
+    the FIRST block == the tail), so incremental resume is byte-identical: the
+    common armed-within-tail first sight exits at the first block and behaves
+    identically to today. Only a deep-armed or never-armed session scans further.
+    Straddling marker lines across block boundaries are reassembled via a carry.
+    Fail-safe: an unreadable file returns `(0, None, "none-bof")`; never raises.
+
+    Params default (call-time) to the module caps so a test can shrink them."""
+    if tail_bytes is None:
+        tail_bytes = GOAL_MARK_TAIL_BYTES
+    if cap_bytes is None:
+        cap_bytes = GOAL_MARK_SEED_CAP_BYTES
+    if block is None:
+        block = tail_bytes
+    block = max(1, block)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return (0, None, "none-bof")
+    try:
+        f = open(path, "rb")
+    except OSError:
+        return (0, None, "none-bof")
+    try:
+        new_off = 0
+        carry = b""            # incomplete HEAD fragment of the block just read
+        hi = size
+        scanned = 0
+        lo = size
+        first_block = True
+        while hi > 0 and scanned < cap_bytes:
+            lo = max(0, hi - block)
+            try:
+                f.seek(lo)
+                chunk = f.read(hi - lo)
+            except OSError:
+                return (new_off, None, "none-bof")
+            scanned += hi - lo
+            if first_block:
+                # Mirror scan_goal_markers(off=None): new_off after the LAST
+                # complete line near EOF; drop the trailing (half-written) line.
+                cut = chunk.rfind(b"\n")
+                new_off = (lo + cut + 1) if cut >= 0 else lo
+                buf = chunk[:cut] if cut >= 0 else b""
+                first_block = False
+            else:
+                buf = chunk + carry     # reattach the straddling line's tail
+            if lo > 0:
+                nl = buf.find(b"\n")
+                if nl < 0:
+                    carry = buf         # whole buf is one incomplete line
+                    hi = lo
+                    continue
+                carry = buf[:nl]        # incomplete head fragment (started < lo)
+                body = buf[nl + 1:]     # complete lines (incl. the straddler)
+            else:
+                carry = b""
+                body = buf              # BOF: every line is complete
+            mark = _newest_marker(body)
+            if mark is not None:
+                return (new_off, mark, "found")
+            hi = lo
+    finally:
+        f.close()
+    reached_bof = (lo == 0)
+    return (new_off, None, "none-bof" if reached_bof else "unknown-past-cap")
 
 
 def pane_goal_armed(captured):
