@@ -807,6 +807,73 @@ class TestGoalDarkWatch(unittest.TestCase):
                                     sleep_fn=lambda s: None)
         self.assertFalse(any("budget-exceeded" in ln for ln in logs), logs)
 
+    # ----------------------------------------------------------------- #
+    # #519 -- orphan-prune for state["goal_mark"] (off_state). G6 made
+    # goal_mark load-bearing (resolve_goal_armed / the lane gate read it), so a
+    # gone session's entry must not leak forever. Reaped ONLY when the sid is
+    # NOT a live candidate pane this sweep AND its stored tmtime is aged; a live
+    # pane's entry is NEVER reaped (even with a stale transcript mtime -- the
+    # silently-dead-loop case dark_watch is still confirming, whose tail-proof
+    # persisted mark must survive).
+    # ----------------------------------------------------------------- #
+
+    def test_519_orphan_goal_mark_entry_is_reaped(self):
+        # A goal_mark entry for a session with NO live candidate pane (gone /
+        # superseded by a newer transcript) and an OLD stored tmtime is an
+        # orphan -> reaped. A live session's entry, visited this sweep, is kept.
+        proj = self._dir()
+        live = "sess-519-live"
+        _write_marker_transcript(proj, self.CWD, live)
+        _write_goal_marker(proj, self.CWD, live, "Goal set: /goal x", ts_epoch=500)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        now = 100000
+        state = {"goal_mark": {
+            "orphan-519": {"off": 0, "mark": {"state": "set", "ts": 500},
+                           "tmtime": now - 3 * 24 * 3600}}}   # 3 days old, gone
+        goal.goal_dark_watch(now, run=tmux, send_fn=lambda mm, **k: None,
+                             projects_dir=proj, state=state, sleep_fn=lambda s: None)
+        gm = state["goal_mark"]
+        self.assertNotIn("orphan-519", gm,
+                         "an aged, gone-session orphan must be reaped")
+        self.assertIn(live, gm, "a live session's entry must be kept")
+
+    def test_519_live_entry_never_reaped_even_with_stale_tmtime(self):
+        # The visited-this-sweep gate is PRIMARY: a live candidate pane whose
+        # transcript mtime is OLD (a silently-dead loop dark_watch is confirming)
+        # must NEVER be reaped -- an age-only reaper would lose its tail-proof
+        # persisted mark. Mutation-lock for the visited gate: an age-only prune
+        # would reap this (now - tmtime = 90000 > 24h).
+        proj = self._dir()
+        live = "sess-519-stale-live"
+        p = _write_marker_transcript(proj, self.CWD, live)
+        _write_goal_marker(proj, self.CWD, live, "Goal set: /goal x", ts_epoch=500)
+        os.utime(p, (10000, 10000))    # transcript mtime far older than the TTL
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        now = 100000
+        state = {}
+        goal.goal_dark_watch(now, run=tmux, send_fn=lambda mm, **k: None,
+                             projects_dir=proj, state=state, sleep_fn=lambda s: None)
+        self.assertIn(live, state["goal_mark"],
+                      "a visited live pane is never reaped, even stale-tmtime")
+
+    def test_519_recent_orphan_kept_by_age_gate(self):
+        # The tmtime age gate is the secondary safety for a budget-DEFERRED live
+        # pane: a not-visited entry with a RECENT tmtime is KEPT (only an AGED
+        # orphan is reaped). Mutation-lock for the age gate: a visited-only prune
+        # with no age check would reap this recent, not-visited entry.
+        proj = self._dir()
+        live = "sess-519-live2"
+        _write_marker_transcript(proj, self.CWD, live)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], GOAL_IDLE_CAP)
+        now = 100000
+        state = {"goal_mark": {
+            "recent-orphan-519": {"off": 0, "mark": {"state": "set", "ts": 500},
+                                  "tmtime": now - 60}}}       # just 60s old
+        goal.goal_dark_watch(now, run=tmux, send_fn=lambda mm, **k: None,
+                             projects_dir=proj, state=state, sleep_fn=lambda s: None)
+        self.assertIn("recent-orphan-519", state["goal_mark"],
+                      "a not-visited but RECENT entry is kept by the age gate")
+
 
 # --------------------------------------------------------------------------- #
 # 6. goal_lane_sweep / goal_lane_occupancy_nudge — job 20 half 2: the ONE
