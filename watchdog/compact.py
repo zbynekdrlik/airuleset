@@ -929,7 +929,17 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     if request_ts is not None:
         age = _safe_age(now, request_ts)
         if age is not None and age > COMPACT_REQUEST_MAX_AGE_S:
-            _log_compact_sync("SKIP expired sid=%s cwd=%s" % (sid, cwd))
+            # #523: name the ORIGIN on the discard record. A lapsed
+            # `subagent-stop` request is the BY-DESIGN #425 outcome — a
+            # `⏳` supervisor that never self-declared its own
+            # `## ✅ Work Complete` boundary, so veto (c) correctly refused
+            # it every sweep until this cap. Surfacing the origin here (the
+            # #486 "silent suppression -> explicit decision log" guardrail,
+            # logging-only) turns "half my per-ticket compacts lapse" triage
+            # into a read instead of a re-investigation, without touching any
+            # delivery decision.
+            _log_compact_sync("SKIP expired sid=%s cwd=%s origin=%s"
+                              % (sid, cwd, origin or "-"))
             return "expired"
 
     pid = _find_pane_for_session(sid, cwd, run=run, projects_dir=projects_dir)
@@ -1146,7 +1156,13 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
             if handled is not None:
                 handled.add(sid)
         elif word == "expired":
-            logs.append("LAPSE (compact-sweep) sid=%s (age > cap, discarded)" % sid)
+            # #523: name the ORIGIN on the LAPSE journal line too (the
+            # `deliver_compact` sync-log record above already does). A
+            # `subagent-stop` LAPSE is the expected #425 by-design outcome on
+            # a saturated `⏳` supervisor, not a failure — the origin is what
+            # lets triage tell the two apart at a glance.
+            logs.append("LAPSE (compact-sweep) sid=%s origin=%s "
+                        "(age > cap, discarded)" % (sid, origin or "-"))
         else:
             logs.append("SKIP (compact-sweep) sid=%s -> %s" % (sid, word))
     return logs

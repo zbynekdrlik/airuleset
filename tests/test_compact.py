@@ -786,6 +786,19 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(word, "expired")
         self.assertEqual(tmux.sent, [])
 
+    def test_expired_decision_record_names_the_origin(self):
+        # #523: a lapsed request's decision record must name its ORIGIN, so a
+        # by-design subagent-stop lapse (a `⏳` supervisor that never
+        # self-declared a boundary — #425) is distinguishable in triage from a
+        # self-callback one. The #486 "silent suppression -> explicit decision
+        # log" guardrail; logging-only, no delivery-behaviour change.
+        now = time.time()
+        self._go(CB_IDLE_CAP, origin="subagent-stop", now=now,
+                 request_ts=now - compact.COMPACT_REQUEST_MAX_AGE_S - 1)
+        log = self.syncp.read_text()
+        self.assertIn("SKIP expired", log)
+        self.assertIn("origin=subagent-stop", log)
+
     def test_request_exactly_at_the_cap_is_not_expired(self):
         now = time.time()
         word, tmux, _ = self._go(CB_IDLE_CAP, now=now,
@@ -1309,6 +1322,23 @@ class TestCompactSweep(unittest.TestCase):
                               requests_path=self.reqp, delivered_path=self.delp)
         self.assertNotIn("sess-c", compact.load_compact_requests(self.reqp))
         self.assertEqual(tmux.sent, [])
+
+    def test_expired_lapse_log_names_the_origin(self):
+        # #523: the journal LAPSE line for a discarded request must name its
+        # origin, so a lapsed subagent-stop request (the by-design #425
+        # outcome on a saturated `⏳` supervisor) is a 30-second triage read
+        # rather than a re-investigation. #486 explicit-decision-log guardrail.
+        proj = self._dir()
+        now = time.time()
+        compact.record_compact_request("sess-lapse", self.CWD,
+                                       now=now - compact.COMPACT_REQUEST_MAX_AGE_S - 1,
+                                       path=self.reqp, origin="subagent-stop")
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        logs = compact.compact_sweep(now, run=tmux, projects_dir=proj,
+                                     requests_path=self.reqp, delivered_path=self.delp)
+        self.assertTrue(any("LAPSE" in ln and "origin=subagent-stop" in ln
+                            for ln in logs),
+                        "LAPSE line must name the request origin: %r" % logs)
 
     def test_dry_run_sends_nothing(self):
         proj = self._dir()
