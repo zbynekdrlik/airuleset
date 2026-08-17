@@ -278,6 +278,24 @@ class SeedGoalMarker(unittest.TestCase):
         self.assertEqual(seed_off, scan_off)
         self.assertEqual(mark.get("state"), scan_mark.get("state"))
 
+    def test_new_off_matches_scan_when_start_gt_zero(self):
+        # #517-review: lock the byte-identical new_off for the start>0 case (file
+        # bigger than tail_bytes, so the first-line bootstrap-drop is active),
+        # not just the small-file start==0 case above. Both derive new_off from
+        # rfind(b"\n") over the identical [size-tail:size] window, so they must
+        # agree exactly -- incremental resume is unchanged for a large file too.
+        p = self._write(before="head-line\n" * 3,
+                        marker=self._marker_line("set"),
+                        after="tail-pad\n" * 30)
+        seed_off, mark, status = watchdog.seed_goal_marker(
+            p, tail_bytes=80, cap_bytes=100000, block=80)   # start = size-80 > 0
+        scan_off, _scan_mark = watchdog.scan_goal_markers(
+            p, off=None, tail_bytes=80)
+        self.assertEqual(seed_off, scan_off)
+        # the marker is beyond the 80-byte tail -> seed finds it via reverse scan
+        self.assertEqual(status, "found")
+        self.assertEqual(mark.get("state"), "set")
+
     def test_marker_beyond_tail_within_cap_is_found_by_reverse_scan(self):
         # Marker before a tiny tail but within the cap -> the reverse scan finds
         # it. MUTATION-LOCK: without the reverse scan this reads not-armed.

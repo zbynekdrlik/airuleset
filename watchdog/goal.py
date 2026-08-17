@@ -862,14 +862,20 @@ def _prune_goal_mark_orphans(off_state, visited_sids, now,
     Reap an entry ONLY when BOTH: (1) its sid was NOT a live candidate pane THIS
     sweep (`visited_sids` -- session gone / superseded by a newer transcript),
     AND (2) it is malformed OR its stored transcript mtime is older than
-    `ttl_s`. The visited gate is PRIMARY and irreplaceable: a live pane --
-    INCLUDING a silently-dead-loop pane dark_watch is still confirming, whose
-    transcript mtime is legitimately STALE -- is visited every sweep, so its
-    tail-proof persisted mark (the #517/#486-G6 signal) is NEVER lost to an
-    age check. `tmtime` is the secondary safety for a budget-DEFERRED live pane.
-    An entry with a FUTURE mtime (clock skew) is kept (the safe direction). A
-    reaper (run once per sweep), never a per-episode pop; never raises. Mirrors
-    the sibling `_janitor_prune_parks` / the #524 confirm-state reaper."""
+    `ttl_s`. The visited gate is PRIMARY: a live pane whose loop body reaches
+    `sid = tpath.stem` -- INCLUDING a silently-dead-loop pane dark_watch is still
+    confirming, whose transcript mtime is legitimately STALE -- is added to
+    `visited_sids` and never reaped, so its tail-proof persisted mark (the
+    #517/#486-G6 signal) is safe from an age check. The two live paths that
+    DON'T reach that line this sweep -- the janitor-recover `continue` and the
+    sweep-budget `break` (a deferred pane) -- fall to `tmtime` (the SECONDARY
+    safety); harmless and self-healing: reaping additionally needs `tmtime`
+    >= `ttl_s` (24h) stale, by which point a dead loop's #459/#524 episode has
+    long resolved, `confirm_state` (untouched here) preserves death-detection
+    continuity, and a wrongly-reaped entry is simply re-seeded via #517 on the
+    next clean sweep. An entry with a FUTURE mtime (clock skew) is kept (the
+    safe direction). A reaper (run once per sweep), never a per-episode pop;
+    never raises. Mirrors `_janitor_prune_parks` / the #524 confirm reaper."""
     if not isinstance(off_state, dict):
         return
     for sid in [k for k, v in list(off_state.items())
@@ -2107,10 +2113,11 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                        int(park - now), aborts, int(park)))
         return logs, True
     # #509 -- STRUCTURED effectiveness signal + effectiveness-aware cooldown.
+    # #518: live_workers IS count_live_workers now (the gating count converted),
+    # so eff_workers == live_workers by construction -- the pre-#518
+    # under-saturated re-sample of the identical call (a redundant per-sweep
+    # subagents disk scan) is dropped.
     eff_workers = live_workers
-    if under_saturated:
-        eff_workers, _ev = watchdog.count_live_workers(
-            projects_dir, cwd, sid, now, GOAL_LANE_LIVE_WINDOW_S)
     cd_skip, cd_log, cd_moved = _lane_cooldown_decision(
         rec, now, under_saturated, eff_workers, backlog_n, loc, live_workers,
         waiters)
