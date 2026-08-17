@@ -159,7 +159,7 @@
     "tests/test_ruleset_conversion_wave2.py": 278,
     "tests/test_run_card_content_validation.py": 474,
     "tests/test_run_card_enforcement.py": 2201,
-    "tests/test_run_once_characterization.py": 433,
+    "tests/test_run_once_characterization.py": 436,
     "tests/test_run_once_registry_labels.py": 170,
     "tests/test_runtime_deps.py": 210,
     "tests/test_schedule_wakeup_loop_only.py": 66,
