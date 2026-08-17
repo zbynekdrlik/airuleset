@@ -843,6 +843,41 @@ GOAL_DARK_REARM_MAX_PER_DAY = 2         # attempt cap: max auto-types per sid / 
 # check catches a loop that recovered inside the window).
 GOAL_DARK_REARM_STALE_S = 300           # drop a dark-rearm request older than this
 GOAL_DARK_CONFIRM_STATE_TTL_S = 24 * 3600   # reap a confirm window untouched this long
+# #519 -- orphan-prune TTL for state["goal_mark"] (off_state). The visited-this-
+# sweep gate is the PRIMARY protection (a live pane is never reaped); this age
+# floor is only the secondary safety for a not-visited-this-sweep entry (a
+# budget-DEFERRED live pane), set WELL above the sweep interval so such a pane is
+# never reaped before it is re-visited.
+GOAL_MARK_ORPHAN_TTL_S = 24 * 3600
+
+
+def _prune_goal_mark_orphans(off_state, visited_sids, now,
+                             ttl_s=GOAL_MARK_ORPHAN_TTL_S):
+    """#519 -- age/live-gated orphan prune for `state["goal_mark"]` (dark_watch's
+    `off_state`, keyed on `sid = tpath.stem`). G6 made goal_mark LOAD-BEARING
+    (`resolve_goal_armed` / the lane gate read it), so a gone session's entry
+    must not leak forever -- yet the marker-gone backstop only pops
+    seen/pinged/confirm for a VISITED pane, never `off_state`.
+
+    Reap an entry ONLY when BOTH: (1) its sid was NOT a live candidate pane THIS
+    sweep (`visited_sids` -- session gone / superseded by a newer transcript),
+    AND (2) it is malformed OR its stored transcript mtime is older than
+    `ttl_s`. The visited gate is PRIMARY and irreplaceable: a live pane --
+    INCLUDING a silently-dead-loop pane dark_watch is still confirming, whose
+    transcript mtime is legitimately STALE -- is visited every sweep, so its
+    tail-proof persisted mark (the #517/#486-G6 signal) is NEVER lost to an
+    age check. `tmtime` is the secondary safety for a budget-DEFERRED live pane.
+    An entry with a FUTURE mtime (clock skew) is kept (the safe direction). A
+    reaper (run once per sweep), never a per-episode pop; never raises. Mirrors
+    the sibling `_janitor_prune_parks` / the #524 confirm-state reaper."""
+    if not isinstance(off_state, dict):
+        return
+    for sid in [k for k, v in list(off_state.items())
+                if k not in visited_sids
+                and not (isinstance(v, dict)
+                         and isinstance(v.get("tmtime"), (int, float))
+                         and (now - v["tmtime"]) < ttl_s)]:
+        off_state.pop(sid, None)
 
 
 def _dark_confirm_advance(win, mark_ts, now):
@@ -1066,6 +1101,7 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             live_pids = []
         watchdog._janitor_prune_parks(state, live_pids)
 
+    visited_sids = set()   # #519 -- live candidate sids kept by the orphan prune below
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
             logs.append("dark-watch-budget-exceeded — deferring remaining "
@@ -1092,6 +1128,7 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             continue
         tpath, tmtime = tinfo
         sid = tpath.stem
+        visited_sids.add(sid)   # #519 -- live this sweep -> never orphan-reaped
 
         rec = off_state.get(sid)
         off = rec.get("off") if isinstance(rec, dict) else None
@@ -1267,6 +1304,9 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                 owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
                 dedup_key=dkey,
                 dry_run=dry_run)
+
+    if not dry_run:   # #519 -- prune goal_mark for gone+aged sessions (dry-run: no state mutation)
+        _prune_goal_mark_orphans(off_state, visited_sids, now)
     return logs
 
 
