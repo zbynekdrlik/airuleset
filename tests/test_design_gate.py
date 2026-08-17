@@ -308,6 +308,17 @@ class TestIssueRefs(unittest.TestCase):
     def test_multiple_distinct_refs_in_order(self):
         self.assertEqual(dg.issue_refs("docs: entry for #137/#139"), [137, 139])
 
+    def test_bracket_prefixed_ref(self):
+        # 2026-08-17 corpus-replay catch: a real commit subject
+        # "test: [#516 re-pin] vault-purge guard anchor ..." was issue-shaped
+        # (`#\d` matched) yet extracted ZERO refs -- '[' was missing from
+        # ISSUE_REF_RE's allowed-preceding-char class, unlike '(' which has
+        # always been in it. A bracketed [#N ...] tag is the same
+        # deliberate-reference family as a parenthetical (#N).
+        self.assertEqual(
+            dg.issue_refs("test: [#516 re-pin] vault-purge guard anchor"),
+            [516])
+
     def test_repeated_ref_deduped(self):
         self.assertEqual(dg.issue_refs("(#80) and again (#80)"), [80])
 
