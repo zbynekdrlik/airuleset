@@ -15,10 +15,10 @@ single source of truth for the design this file locks:
     every SKIP leaves the request pending for the next sweep.
   - `goal_sweep` (job 9's new body) re-evaluates every still-pending
     request through that SAME function, clearing only on a TERMINAL word.
-  - `goal_dark_watch` (job 20, half 1) NEVER types a keystroke — a
-    2-sweep-debounced Discord ping only, and only for the transcript-says-
-    armed/footer-says-dark mismatch; a `cleared` marker or no marker at
-    all stays silent by construction.
+  - `goal_dark_watch` (job 20, half 1) itself types no keystroke, but for a
+    transcript-says-armed/footer-says-dark mismatch it either RECORDS a
+    re-arm for job 9 to type (only on a #524 CONFIRMED death) or sends a
+    Discord ping; a `cleared` marker or no marker at all stays silent.
   - `goal_lane_occupancy_nudge` (job 20, half 2) is the ONE remaining
     watchdog-INITIATED keystroke action, and is the only one of the two
     that DOES apply the recent-human-activity gate (arm delivery
@@ -336,6 +336,37 @@ class TestDeliverGoal(unittest.TestCase):
         word, tmux, _ = self._go(GOAL_ARMED_CAP)
         self.assertEqual(word, "drop:already-armed")
         self.assertEqual(tmux.sent, [])
+
+    def test_stale_dark_rearm_request_is_dropped_at_delivery(self):
+        # #524 -- a dark-rearm decision goes stale FAST (recorded from a dark
+        # READ; the loop's state changes within a sweep or two). A dark-rearm
+        # request older than GOAL_DARK_REARM_STALE_S is DROPPED at delivery,
+        # never typed late (the H1 "stale request delivered late" concern,
+        # closed on the ONE origin that can spontaneously TYPE).
+        now = 1_000_000
+        old_ts = now - goal.GOAL_DARK_REARM_STALE_S - 1
+        word, tmux, _ = self._go(GOAL_IDLE_CAP, now=now, request_ts=old_ts,
+                                 origin=goal._GOAL_REARM_ORIGIN)
+        self.assertEqual(word, "drop:stale-rearm")
+        self.assertEqual(tmux.sent, [])
+
+    def test_fresh_dark_rearm_request_still_delivers(self):
+        # The freshness gate is TIGHT, not a blanket refusal: a just-recorded
+        # dark-rearm still types.
+        now = 1_000_000
+        word, tmux, _ = self._go(GOAL_IDLE_CAP, now=now, request_ts=now - 10,
+                                 origin=goal._GOAL_REARM_ORIGIN)
+        self.assertEqual(word, "sent")
+
+    def test_dark_rearm_freshness_gate_is_origin_scoped(self):
+        # A NON-rearm origin at the SAME stale age is NOT dropped by this gate
+        # (only the 30-min generic age cap governs it) -- the tight staleness
+        # is dark-rearm-ONLY, never applied to a user self-callback arm.
+        now = 1_000_000
+        old_ts = now - goal.GOAL_DARK_REARM_STALE_S - 1   # < 30-min generic cap
+        word, tmux, _ = self._go(GOAL_IDLE_CAP, now=now, request_ts=old_ts,
+                                 origin="self-callback")
+        self.assertEqual(word, "sent")
 
     def test_draft_pane_delivers_via_stash(self):
         # A draft in the box must be delivered through deliver_with_stash,

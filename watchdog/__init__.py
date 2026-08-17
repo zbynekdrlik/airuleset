@@ -1184,15 +1184,16 @@ from watchdog.long_turn import (  # noqa: E402
 #
 # #403's REPLACEMENT for everything below this line: rather than bounding a
 # RETRY loop (the old `GOAL_REARM_MAX_ATTEMPTS`/`GOAL_REARM_STREAK_S` shape),
-# `watchdog.goal.goal_dark_watch` never retypes a dark goal at all -- it
-# debounces the dark observation across >= 2 sweeps, then sends ONE Discord
-# ping asking the user to re-run `/autopilot` (which re-arms via the SAME
-# proven callback every fresh arm goes through). Zero keystrokes, so none of
-# the old delivery-discipline concerns (fresh-capture verify, the #36
-# truncation hazard, `deliver_with_stash` coordination) apply to this branch
-# any more -- they still apply, unchanged, to `goal_sweep`'s own delivery of
-# a genuinely PENDING (explicitly recorded) request, and to
-# `goal_lane_sweep`'s watchdog-initiated nudge.
+# `watchdog.goal.goal_dark_watch` either RE-ARMS a CONFIRMED-dead loop
+# (#478/#524 -- records a request for job 9 to type, ONLY after a hardened
+# death-confirmation run; an idle-but-alive flicker never reaches it) or, when
+# it cannot self-heal the loop, sends ONE Discord ping asking the user to
+# re-run `/autopilot`. `goal_dark_watch` ITSELF still types nothing -- the
+# keystroke happens in `goal_sweep`/`deliver_goal`, so the delivery-discipline
+# concerns (fresh-capture verify, the #36 truncation hazard,
+# `deliver_with_stash` coordination) apply to `goal_sweep`'s own delivery of a
+# genuinely PENDING (explicitly recorded) request -- INCLUDING a `dark-rearm`
+# one -- and to `goal_lane_sweep`'s watchdog-initiated nudge.
 # --------------------------------------------------------------------------- #
 
 GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
@@ -3572,9 +3573,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     #   * `goal_dark_watch` runs the shared janitor recovery for every live
     #     candidate pane FIRST (the one sweep still guaranteed to visit
     #     every pane every ~60s regardless of pending requests, matching
-    #     job 20's old visit cadence), then pings — NEVER types — a
-    #     session whose transcript says armed but whose footer has gone
-    #     dark, debounced across >= 2 sweeps before it ever pings.
+    #     job 20's old visit cadence), then, for a session whose transcript
+    #     says armed but whose footer has gone dark, either RE-ARMS a
+    #     CONFIRMED-dead loop (#478/#524 -- records a request for job 9 to
+    #     type, gated on a hardened death-confirmation run) or pings the user;
+    #     `goal_dark_watch` itself never types (the keystroke is job 9's).
     #   * `goal_lane_sweep` is the ONE watchdog-INITIATED keystroke left in
     #     the whole family (#365/#351's own lane-occupancy nudge,
     #     functionally unchanged) and needs `compact_handled_this_sweep`
