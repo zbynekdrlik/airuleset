@@ -259,7 +259,7 @@ def _clear_owner_question_labels(cwd, num, home=None, run=None):
 
 
 def reconcile_u_labels(now, state, dry_run=False, projects_dir=None,
-                       clear_fn=None, persist=None, home=None, run=None):
+                       clear_fn=None, persist=None):
     """Job 32 (#515) -- the mechanical U-label reconciliation sweep. For every
     captured answered question (job-7 Discord `_delivered` -> `state`), KEEP the
     ticket's owner-question label while the question is still live (a fresh
@@ -290,6 +290,12 @@ def reconcile_u_labels(now, state, dry_run=False, projects_dir=None,
 
     recs = state.get(U_RECONCILE_STATE_KEY)
     recs = dict(recs) if isinstance(recs, dict) else {}
+    # Point `state` at the working copy UP FRONT (never on a dry-run, which must
+    # mutate nothing) so every in-loop `persist()` genuinely saves the current
+    # popped state -- a reassignment only at the end would make each persist save
+    # the PRE-pop dict, silently defeating the kill-safe claim (#516).
+    if not dry_run:
+        state[U_RECONCILE_STATE_KEY] = recs
 
     reask_pairs = _main_map_reask_pairs()
 
@@ -354,11 +360,10 @@ def reconcile_u_labels(now, state, dry_run=False, projects_dir=None,
         else:
             logs.append("u-label already-clear %s (no owner-question label)" % tag)
         if key in recs:
-            recs.pop(key, None)
+            recs.pop(key, None)               # mutates the persisted dict directly
             changed = True
         persist()                             # a landed clear survives a kill
 
     if changed:
-        state[U_RECONCILE_STATE_KEY] = recs
         persist()
     return logs

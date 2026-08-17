@@ -187,7 +187,7 @@
     "tests/test_tier0_local_build_hook.py": 865,
     "tests/test_tmux_socket_recovery.py": 369,
     "tests/test_transcript_compress.py": 631,
-    "tests/test_u_labels.py": 360,
+    "tests/test_u_labels.py": 384,
     "tests/test_upload_url.py": 1165,
     "tests/test_usage_cache.py": 369,
     "tests/test_user_waiting_split.py": 313,
@@ -243,7 +243,7 @@
     "watchdog/sweep_jobs.py": 263,
     "watchdog/tmux_io.py": 852,
     "watchdog/transcripts.py": 848,
-    "watchdog/u_labels.py": 364,
+    "watchdog/u_labels.py": 369,
     "watchdog/usage.py": 380,
     "watchdog/wedge.py": 297
   },

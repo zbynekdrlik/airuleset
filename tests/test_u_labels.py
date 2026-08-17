@@ -207,6 +207,30 @@ class ReconcileULabels(unittest.TestCase):
                          self.state.get(ul.U_RECONCILE_STATE_KEY, {}))
         self.assertTrue(any("CLEARED" in ln and "#4199" in ln for ln in logs), logs)
 
+    def test_in_loop_persist_reflects_the_pop(self):
+        # kill-safe: the persist() fired right after a clear must SAVE the popped
+        # state (a reassignment only at the end would persist the PRE-pop dict).
+        import copy
+        _write_transcript(self.proj, self.cwd, self.sid, "⏳ WORKING")
+        snaps = []
+        ul.reconcile_u_labels(
+            2000, self.state, projects_dir=self.proj,
+            clear_fn=self._clear_fn(),
+            persist=lambda: snaps.append(
+                copy.deepcopy(self.state.get(ul.U_RECONCILE_STATE_KEY, {}))))
+        self.assertTrue(snaps, "persist must fire after a clear")
+        self.assertNotIn("%s:4199" % self.sid, snaps[-1],
+                         "the persisted snapshot must reflect the pop")
+
+    def test_dry_run_does_not_reassign_state_key(self):
+        # a dry-run must mutate NOTHING it would persist — never even reassign
+        # the state key to a fresh copy.
+        _write_transcript(self.proj, self.cwd, self.sid, "⏳")
+        before = self.state[ul.U_RECONCILE_STATE_KEY]
+        self._run(dry_run=True)
+        self.assertIs(self.state[ul.U_RECONCILE_STATE_KEY], before,
+                      "dry-run must not replace the persisted dict object")
+
     def test_no_transcript_clears(self):
         # session ended (no transcript) -> not visibly parked -> answered -> clear
         logs = self._run()
