@@ -161,6 +161,9 @@ CANONICAL_SWEEP = [
     JobSpec("gk_selfservice_bounce", "wd", "gk_selfservice_bounce",
             "gk_selfservice_fetch", _stub_fetch, "list",
             "gk-selfservice-bounce error"),
+    JobSpec("reconcile_u_labels", "wd", "reconcile_u_labels",
+            "u_reconcile_clear", _stub_fetch, "list",
+            "u-label-reconcile error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

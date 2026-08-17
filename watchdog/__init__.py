@@ -767,6 +767,21 @@ from watchdog.card_flags import (  # noqa: E402
 )
 
 
+# #515 -- the mechanical U-label lifecycle (job 32 `reconcile_u_labels` + the
+# job-7 `_delivered` capture `capture_answered_ticket`). u_labels.py has ONE
+# top-level `import watchdog` and reaches every resident name as
+# `watchdog.<name>` at CALL time (the cluster-C idiom), so this re-export can
+# land anywhere in the sequence with no load-time dependency on another leaf.
+from watchdog.u_labels import (  # noqa: E402
+    reconcile_u_labels as reconcile_u_labels,
+    capture_answered_ticket as capture_answered_ticket,
+    _clear_owner_question_labels as _clear_owner_question_labels,
+    _u_reconcile_decide as _u_reconcile_decide,
+    U_RECONCILE_STATE_KEY as U_RECONCILE_STATE_KEY,
+    U_RECONCILE_TTL_S as U_RECONCILE_TTL_S,
+)
+
+
 # --- #298: reply on a completion CARD -> reopen the ticket ----------------
 
 # --- #297: ❓/❔ reaction on a TRACKED bot message -> ask the session -------
@@ -1683,8 +1698,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              vault_purge=None, log_fn=None, reopen_fetch=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
              progress_dir=None, questions_path=None,
-             owner_decision_fetch=None, gk_selfservice_fetch=None):
-    """Scan every `claude` pane once. 31 numbered jobs per poll — 25 LIVE and 6
+             owner_decision_fetch=None, gk_selfservice_fetch=None,
+             u_reconcile_clear=None):
+    """Scan every `claude` pane once. 32 numbered jobs per poll — 26 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2112,6 +2128,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           prose classifier); a code-review hand-off (`stream:`/ready-for-review)
           is never touched; every candidate's verdict is logged (#486). See
           `gk_selfservice_bounce` in `watchdog/cross_stream.py`.
+      (32) (only when `u_reconcile_clear` is given) MECHANICAL U-LABEL
+          LIFECYCLE (#515) — a `needs-answer`/`needs-decision` label whose
+          question the owner ALREADY ANSWERED on Discord is cleared
+          mechanically, instead of relying on the asking session's prose
+          discipline to remove it (the phantom-`U` incidents miva1/dev1). Job 7
+          `_delivered` captures the (session, cwd, #N) of each routed answer
+          into `state`; this job clears the ticket's owner-question label once
+          the asking session has demonstrably moved PAST the `❓` (tail != `❓`,
+          no fresh re-ask in the map). Clears ONLY needs-answer/needs-decision
+          (never needs-acceptance, the #526 W lane); acts only on questions
+          THIS box asked+answered (local capture = ownership proof), so it runs
+          on EVERY box; every candidate's verdict is logged (#486). See
+          `reconcile_u_labels` in `watchdog/u_labels.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -3761,6 +3790,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              gh_fetch=gk_selfservice_fetch,
              persist=lambda: save_state(state_path, state)),
          "gk-selfservice-bounce error")
+
+    # Job 32 (#515) — mechanical U-label lifecycle: clear a needs-answer /
+    # needs-decision label whose question the owner already ANSWERED on Discord
+    # (job-7 `_delivered` captured it into `state`), once the asking session
+    # moved past the `❓`. Gated on `u_reconcile_clear` being wired (network-free
+    # tests for every other job, exactly like jobs 8/11/31). Best-effort.
+    _add("reconcile_u_labels", lambda: u_reconcile_clear is not None,
+         lambda: reconcile_u_labels(
+             now, state, dry_run=dry_run, projects_dir=projects_dir,
+             clear_fn=u_reconcile_clear,
+             persist=lambda: save_state(state_path, state)),
+         "u-label-reconcile error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
