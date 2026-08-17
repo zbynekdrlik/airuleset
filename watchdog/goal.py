@@ -61,12 +61,20 @@ through a callback in the /autopilot command." Concretely:
              lane-occupancy nudge below, a genuinely watchdog-INITIATED
              action.
 
-  RE-ARM  -- ONLY by another genuine `/autopilot` invocation (the SAME
-             `goal-arm --self` callback, called fresh). A session that goes
-             dark, dies, or gets its goal cleared is NEVER automatically
-             re-armed -- see `goal_dark_watch()` below, which replaces
-             essentially all of job 20's old body with a single, debounced,
-             keystroke-free Discord ping.
+  RE-ARM  -- a genuine `/autopilot` invocation (the SAME `goal-arm --self`
+             callback, called fresh), OR -- since #478/#524 -- the watchdog
+             itself for a GENUINELY DEAD loop only. A user-CLEARED goal is
+             NEVER re-armed (the mark != "set" gate). #403 originally left a
+             dark/dead loop to a keystroke-free ping; #478 (owner, 2026-08-15)
+             let `goal_dark_watch()` AUTO-RE-ARM a dark-DIED loop with a
+             workable backlog by RECORDING a goal-arm request for job 9 to
+             type; #524 (owner decision B, 2026-08-17) HARDENED that auto-type
+             so it fires ONLY on a CONFIRMED death -- K clean-dark footer reads
+             over >= MIN_SPAN, ANY armed/mtime-advanced read VETOING the run,
+             under a 24h attempt cap -- and NEVER on an idle-but-ALIVE session
+             (glyph merely flickering; montalu 2026-08-16). An idle/dark loop
+             the watchdog cannot self-heal still gets the #459 ping, keystroke-
+             free. See `goal_dark_watch()` below.
 
   JANITOR -- the shared stuck-stash-slot recovery driver (`#372`,
              `watchdog._janitor_recover` -- renamed from
@@ -493,6 +501,7 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
 
 _GOAL_TERMINAL_WORDS = frozenset((
     "sent", "expired", "drop:cleared-after-request", "drop:already-armed",
+    "drop:stale-rearm",   # #524 -- a dark-rearm too old to type (delivery gate)
 ))
 
 
@@ -559,6 +568,20 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                     dedup_key="goalarm-expired:%s:%d" % (sid, int(request_ts)),
                     dry_run=dry_run)
             return "expired"
+
+    # #524 -- a dark-rearm decision goes stale FAST: goal_dark_watch recorded it
+    # from a dark READ, and the loop's dark/idle state changes within a sweep or
+    # two. A dark-rearm not delivered within GOAL_DARK_REARM_STALE_S is acting on
+    # outdated darkness -> DROP (terminal), never type it late (this is the H1
+    # "stale request delivered late" concern from #524, closed on the ONE origin
+    # that can spontaneously TYPE). The 30-min age cap above stays the generic
+    # backstop; this is the tighter, dark-rearm-only freshness gate.
+    if origin == _GOAL_REARM_ORIGIN and request_ts is not None:
+        age = _safe_age(now, request_ts)
+        if age is not None and age > GOAL_DARK_REARM_STALE_S:
+            _log_goal_sync("DROP-AT-DELIVERY:stale-request sid=%s cwd=%s age=%ds"
+                           % (sid, cwd, int(age)))
+            return "drop:stale-rearm"
 
     pid = _compact._find_pane_for_session(sid, cwd, run=run, projects_dir=projects_dir)
     if not pid:
@@ -754,13 +777,19 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
 
 
 # --------------------------------------------------------------------------- #
-# DARK-WATCH -- job 20's new body. NO keystrokes, ever. Cross-checks each
-# session's transcript marker (INTENT) against CC's own footer indicator
-# (REALITY) and, on a genuine, DEBOUNCED mismatch, sends ONE Discord ping
-# telling the user to re-run `/autopilot` -- never re-types the payload
-# back in. Also runs the shared janitor recovery (#372) at the top of its
-# per-pane loop, since it is the one sweep that still visits every live
-# pane every tick regardless of pending requests.
+# DARK-WATCH -- job 20's new body. Cross-checks each session's transcript
+# marker (INTENT) against CC's own footer indicator (REALITY). On a genuine,
+# DEBOUNCED mismatch it either RE-ARMS a CONFIRMED-dead loop (#478/#524 --
+# records a goal-arm request for job 9 to TYPE, ONLY after K clean-dark reads
+# over >= MIN_SPAN with any armed/mtime-advanced read vetoing the run, under a
+# 24h attempt cap; an idle-but-ALIVE flicker never reaches it) or, when it
+# cannot self-heal the loop (not workable / no template / cap hit / not yet
+# confirmed), sends ONE keystroke-free Discord ping telling the user to re-run
+# `/autopilot`. This function itself types NOTHING -- the keystroke happens at
+# the delivery point (`deliver_goal`, origin-gated + delivery-freshness gated).
+# Also runs the shared janitor recovery (#372) at the top of its per-pane loop,
+# since it is the one sweep that visits every live pane every tick regardless
+# of pending requests.
 # --------------------------------------------------------------------------- #
 
 # #459 -- STAGED dark-goal re-ping. Root cause (CC research, binary 2.1.232
@@ -784,6 +813,94 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
 GOAL_DARK_REPING_SCHEDULE_S = (3600, 3 * 3600, 6 * 3600, 24 * 3600)
 GOAL_DARK_REPING_MAX = 10               # hard cap on total pings per dark episode
 GOAL_DARK_CACHE_MAX_AGE_S = 3 * 24 * 3600   # ignore an obligation cache older than this
+
+# #524 (owner decision B, 2026-08-17) -- HARDENED death-confirmation for the
+# #478 auto-re-arm. The KEYSTROKE re-arm (the harmful action) may fire ONLY on
+# a genuinely CONFIRMED dead loop: K consecutive clean-dark footer reads AND a
+# >= MIN_SPAN unbroken run, with ANY armed read OR a liveness proof (transcript
+# mtime advanced) VETOING the whole run. An idle-but-alive session (glyph
+# flickers back within ~3 min, montalu 2026-08-16) never accumulates the run,
+# so it is NEVER auto-typed -- the timely #459 ping still fires (owner never
+# objected to the ping; a 75-min-idle loop SHOULD prompt the human, #403
+# philosophy "watchdog pings, human decides"), only the TYPE is gated. Root
+# cause: montalu typed /goal over a 75-min-idle-but-alive session after a
+# SINGLE-sweep debounce. Structured facts can only VETO a re-arm, never CONFIRM
+# one -- the only positive death evidence is persistent, unanimous glyph
+# absence (heartbeat/mark/mtime are all shared by dead AND idle; the heartbeat
+# even read goal_armed=no for a session whose transcript mark was `set`).
+GOAL_DARK_CONFIRM_MIN_READS = 8         # K consecutive clean-dark reads to TYPE
+GOAL_DARK_CONFIRM_MIN_SPAN_S = 600      # AND the run must span >= 10 min
+GOAL_DARK_REARM_MAX_PER_DAY = 2         # attempt cap: max auto-types per sid / 24h
+GOAL_DARK_REARM_STALE_S = 180           # drop a dark-rearm request older than this
+GOAL_DARK_CONFIRM_STATE_TTL_S = 24 * 3600   # reap a confirm window untouched this long
+
+
+def _dark_confirm_advance(win, mark_ts, now):
+    """Pure #524 death-confirmation advance for ONE session, called ONLY on a
+    genuinely clean-dark sweep (`pane_goal_armed is False`, `mark == "set"`,
+    and NO liveness veto -- the armed/None/mtime-advanced cases are handled by
+    the caller ABOVE and never reach here). `win` is the persisted window dict
+    (or None/malformed for a fresh episode):
+        {"mark_ts", "clean_run", "run_start", "last"}
+    Returns `(confirmed, new_win)`:
+        confirmed=True  -- >= K clean reads AND run span >= MIN_SPAN -> TYPE
+        confirmed=False -- still accumulating -> the #459 ping path, never TYPE
+    A DIFFERENT `mark_ts` (a fresh arm) OR a malformed `win` restarts the run at
+    1 (fail toward MORE observation, never a fast false confirm). JSON round-trip
+    safe: `win` is a flat dict of scalars, indexed by key, never unpacked."""
+    same = isinstance(win, dict) and win.get("mark_ts") == mark_ts
+    run = win.get("clean_run") if same else 0
+    run = (run + 1) if isinstance(run, int) and run >= 0 else 1
+    start = win.get("run_start") if same else None
+    if not isinstance(start, (int, float)):
+        start = now
+    new_win = {"mark_ts": mark_ts, "clean_run": run,
+               "run_start": start, "last": now}
+    confirmed = (run >= GOAL_DARK_CONFIRM_MIN_READS
+                 and (now - start) >= GOAL_DARK_CONFIRM_MIN_SPAN_S)
+    return confirmed, new_win
+
+
+def _dark_rearm_attempt_ok(attempts, now):
+    """Pure per-sid attempt cap (#524): at most GOAL_DARK_REARM_MAX_PER_DAY
+    auto-types per session per rolling 24 h, so a typed `/goal` that does not
+    stick can never become a keystorm. `attempts` is the prior list of type
+    timestamps (a JSON list; any non-number entry is dropped). Returns
+    `(ok, pruned)` -- `ok` False once the cap is hit; `pruned` is the list with
+    entries older than 24 h removed (the caller appends `now` only on a real
+    type)."""
+    day = 24 * 3600
+    pruned = [t for t in (attempts or [])
+              if isinstance(t, (int, float)) and 0 <= (now - t) <= day]
+    return (len(pruned) < GOAL_DARK_REARM_MAX_PER_DAY), pruned
+
+
+def _dark_record_rearm(sid, cwd, text, auth, now, loc, open_n, dry_run,
+                       confirm_state, pinged_state, attempts_state,
+                       requests_path):
+    """#524 -- perform a CONFIRMED-dead auto-re-arm and return its ONE log
+    line. Extracted to a module-level helper (the #502/#511 pattern) so
+    `goal_dark_watch` stays under its line ceiling. On a dry-run it ONLY logs
+    "would record" (no state mutation, no attempt slot -- #478 honest dry-run);
+    otherwise it consumes a 24h attempt slot, resets the confirmation run + ping
+    episode, and records the dark-rearm request for job 9 to type. Calls the
+    module-global `record_goal_request` so a test patching it still observes the
+    write."""
+    win = confirm_state.get(sid) or {}
+    reads = win.get("clean_run")
+    span = int(now - (win.get("run_start") or now))
+    if dry_run:
+        return ("dark-watch %s sid=%s -> CONFIRMED-DEAD would record "
+                "(dry-run, open=%s authority=%s reads=%s span=%ss)"
+                % (loc, sid, open_n, auth, reads, span))
+    attempts_state[sid] = list(attempts_state.get(sid) or []) + [now]
+    confirm_state.pop(sid, None)       # run consumed by the type
+    pinged_state.pop(sid, None)        # episode resolved by the type
+    record_goal_request(sid, cwd, text, auth, now=now,
+                        origin=_GOAL_REARM_ORIGIN, path=requests_path)
+    return ("dark-watch %s sid=%s -> CONFIRMED-DEAD: recording re-arm "
+            "(open=%s authority=%s reads=%s span=%ss attempt=%d)"
+            % (loc, sid, open_n, auth, reads, span, len(attempts_state[sid])))
 
 
 def _goal_dark_reping_due(prev, now, schedule):
@@ -891,6 +1008,17 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     seen_state = state.setdefault("goal_dark_seen", {})
     pinged_state = state.setdefault("goal_dark_pinged", {})
     janitor_recs = state.setdefault("janitor_pinged_rec", {})
+    # #524 -- the death-CONFIRMATION run per sid (clean-dark reads + span) and
+    # the per-sid 24h auto-type attempt cap. Reap a confirm window untouched
+    # beyond its TTL so a session that vanished mid-accumulation cannot leak an
+    # entry forever (the #486-G5 dedup-dict-leak lesson).
+    confirm_state = state.setdefault("goal_dark_confirm", {})
+    attempts_state = state.setdefault("goal_dark_rearm_attempts", {})
+    for _csid in [k for k, v in list(confirm_state.items())
+                  if not (isinstance(v, dict)
+                          and isinstance(v.get("last"), (int, float))
+                          and 0 <= (now - v["last"]) <= GOAL_DARK_CONFIRM_STATE_TTL_S)]:
+        confirm_state.pop(_csid, None)
 
     # #488 review-1 -- GC the age-unbounded stash_parks records for panes that
     # no longer exist. The per-pane marker-gone backstop below only sees panes
@@ -931,12 +1059,16 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         tinfo = watchdog.find_active_transcript(projects_dir, cwd)
         if not tinfo:
             continue
-        tpath, _tmtime = tinfo
+        tpath, tmtime = tinfo
         sid = tpath.stem
 
         rec = off_state.get(sid)
         off = rec.get("off") if isinstance(rec, dict) else None
         prior_mark = rec.get("mark") if isinstance(rec, dict) else None
+        # #524 -- the transcript mtime from the PRIOR sweep. An advance is a
+        # structured LIVENESS proof (the session wrote a turn) -> VETO a
+        # death-confirmation run: never type /goal into a loop that is alive.
+        prior_tmtime = rec.get("tmtime") if isinstance(rec, dict) else None
         new_off, new_mark = watchdog.scan_goal_markers(tpath, off=off)
         # `scan_goal_markers`'s incremental contract means a sweep that
         # produced no NEW appended lines legitimately returns `None` even
@@ -951,48 +1083,116 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # cost stays the same one-small-read-per-sweep this function's own
         # docstring promises.
         mark = new_mark if new_mark is not None else prior_mark
-        off_state[sid] = {"off": new_off, "mark": mark}
+        off_state[sid] = {"off": new_off, "mark": mark, "tmtime": tmtime}
 
         armed = watchdog.pane_goal_armed(captured)
 
         if mark is None or mark.get("state") != "set":
             seen_state.pop(sid, None)
             pinged_state.pop(sid, None)
+            confirm_state.pop(sid, None)   # #524 -- episode over (clear/no marker)
             continue
         mark_ts = mark.get("ts")
 
         if armed is True:
             seen_state.pop(sid, None)
             pinged_state.pop(sid, None)
+            # #524 -- the glyph is present: the loop is ALIVE. If a death-
+            # confirmation run was accumulating, this is a VETO-ALIVE reset
+            # (the montalu idle-alive flicker) -- logged only when a run
+            # actually existed, so a healthy armed pane is silent every sweep.
+            if confirm_state.pop(sid, None) is not None:
+                logs.append("dark-watch %s sid=%s -> VETO-ALIVE:render-armed "
+                            "(glyph present, confirmation run reset)"
+                            % (loc, sid))
             continue
         if armed is None:
-            continue   # undeterminable -- never guess, retry next sweep
+            # #524 -- undeterminable footer (busy / chrome / dialog -> None):
+            # never a clean-dark read, so it breaks the CONSECUTIVE run. Reset
+            # only an already-accumulating run (never mints a new entry for a
+            # never-suspected pane). No type, no new ping -- retry next sweep.
+            crec = confirm_state.get(sid)
+            if isinstance(crec, dict) and crec.get("clean_run"):
+                crec["clean_run"] = 0
+                crec["run_start"] = None
+                crec["last"] = now
+            continue
 
         # armed is False, mark == "set" -- the silently-dead-loop shape.
+        # #524 LIVENESS VETO: the transcript mtime advanced since the prior
+        # sweep -> the session wrote a turn -> it is ALIVE, only its footer read
+        # dark this sweep. Reset the confirmation run and never type.
+        if (isinstance(prior_tmtime, (int, float))
+                and isinstance(tmtime, (int, float)) and tmtime > prior_tmtime):
+            if confirm_state.pop(sid, None) is not None:
+                logs.append("dark-watch %s sid=%s -> VETO-ALIVE:mtime-advanced "
+                            "(session wrote a turn, confirmation run reset)"
+                            % (loc, sid))
+            seen_state.pop(sid, None)
+            pinged_state.pop(sid, None)
+            continue
         prior = seen_state.get(sid)
         if not isinstance(prior, dict) or prior.get("mark_ts") != mark_ts:
             seen_state[sid] = {"mark_ts": mark_ts, "first_seen": now}
             logs.append("dark-watch %s sid=%s -> first observation, debouncing"
                         % (loc, sid))
             continue
-        # #459/#478 -- CONFIRMED silently-dead loop. #459 shipped a staged
-        # Discord re-ping here; #478 (user 2026-08-15) reverses #403 for THIS
-        # dark-died branch ONLY: when the per-cwd obligation cache proves
-        # genuinely WORKABLE tickets remain, AUTO-RE-ARM the loop (record a
-        # goal-arm request for job 9 to deliver via the verified keystroke
-        # path) instead of merely pinging. The safeguard is the SAME #459
-        # cache gate reused verbatim (open>0 AND fresh) -- which since #468
-        # already excludes an empty backlog, a user-waiting-only (U-bucket)
-        # backlog, AND skip-only tickets, so it IS the mandated poistka by
-        # construction. A user-CLEARED goal never reaches here (the
-        # mark != "set" gate above already skipped it), so #478 revives ONLY
-        # the death-by-outage path, never a deliberate user clear. This
-        # function STILL types nothing -- it only WRITES the request; the
-        # recent-human keystroke gate lives at the delivery point
-        # (`deliver_goal`, origin-gated). The FIRST ping of the ping-FALLBACK
-        # fires ALWAYS; a LATER re-ping needs a fresh workable cache -- else
+        # #459/#478/#524 -- CONFIRMED silently-dead loop (full rationale in this
+        # module's header docstring + #524's design comment). Advance the
+        # death-CONFIRMATION run FIRST -- BEFORE the ping-backoff below -- so it
+        # accumulates on EVERY clean-dark sweep, not only ping-due ones.
+        confirmed, confirm_state[sid] = _dark_confirm_advance(
+            confirm_state.get(sid), mark_ts, now)
+        open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
+        fresh = (cts is not None
+                 and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
+        workable = isinstance(open_n, int) and open_n > 0 and fresh
+
+        # Can the watchdog SELF-HEAL this loop via an auto-type? Only a workable
+        # backlog + a resolvable /goal template + an un-exhausted 24h cap. A
+        # self-healing loop accumulates SILENTLY toward a CONFIRMED type (no
+        # spurious #459 ping -- montalu); one that CANNOT self-heal falls to the
+        # ping so the human is told.
+        rearm_text = rearm_auth = None
+        attempt_ok = False
+        if workable:
+            rearm_text, rearm_auth = (rearm_fn or _default_rearm_fn)(cwd)
+            attempt_ok, attempts_state[sid] = _dark_rearm_attempt_ok(
+                attempts_state.get(sid), now)
+        can_self_heal = bool(workable and rearm_text and attempt_ok)
+
+        # TYPE only on a CONFIRMED-dead, self-healing run (the montalu flicker
+        # never reaches confirmation). NEVER a keystroke otherwise.
+        if confirmed and can_self_heal:
+            logs.append(_dark_record_rearm(
+                sid, cwd, rearm_text, rearm_auth, now, loc, open_n, dry_run,
+                confirm_state, pinged_state, attempts_state, requests_path))
+            continue
+
+        # A self-healing loop that is not yet CONFIRMED accumulates SILENTLY --
+        # no spurious ping (the montalu case). EXPLICIT decision log (#486
+        # direction, never a silent suppression), at the same density as the
+        # "first observation, debouncing" line above.
+        if can_self_heal:
+            _win = confirm_state.get(sid) or {}
+            logs.append(
+                "dark-watch %s sid=%s -> ACCUMULATING (workable, reads=%s/%d "
+                "span=%ss/%ds — silent until CONFIRMED, no ping)"
+                % (loc, sid, _win.get("clean_run"), GOAL_DARK_CONFIRM_MIN_READS,
+                   int(now - (_win.get("run_start") or now)),
+                   GOAL_DARK_CONFIRM_MIN_SPAN_S))
+            continue
+
+        if workable and rearm_text and not attempt_ok:
+            logs.append(
+                "dark-watch %s sid=%s -> ATTEMPT-CAP: %d auto-types in 24h, "
+                "ping only" % (loc, sid, GOAL_DARK_REARM_MAX_PER_DAY))
+
+        # #459 ping FALLBACK (staged schedule): reached for a NON-workable dark
+        # backlog, an unresolvable template, OR an exhausted attempt cap -- the
+        # cases the watchdog cannot self-heal, so the human must act. The FIRST
+        # ping fires ALWAYS; a LATER re-ping needs a fresh workable cache -- else
         # stay SILENT (an achieved loop is transcript-identical to a stall).
-        # Both actions share the SAME widening schedule + per-episode cap.
         prec = pinged_state.get(sid)
         is_first = not (isinstance(prec, dict) and prec.get("mark_ts") == mark_ts)
         if is_first:
@@ -1006,41 +1206,6 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             if not due:
                 continue                          # too soon this stage
 
-        open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
-        fresh = (cts is not None
-                 and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
-        workable = isinstance(open_n, int) and open_n > 0 and fresh
-
-        # #478 -- workable backlog AND a resolvable /goal template: RE-ARM.
-        # A None `text` (template unresolvable -- SKILL.md gone / over the
-        # char cap) means we cannot auto-fix, so fall through to the ping.
-        rearm_text = rearm_auth = None
-        if workable:
-            rearm_text, rearm_auth = (rearm_fn or _default_rearm_fn)(cwd)
-        if workable and rearm_text:
-            if dry_run:
-                # Honest dry-run (#478 review MINOR): a diagnostic sweep must
-                # neither WRITE the request nor CONSUME an attempt slot
-                # (`pinged_state` is persisted by run_once's unconditional
-                # save_state), nor claim "recorded" when nothing was.
-                logs.append(
-                    "dark-watch %s sid=%s -> AUTO-RE-ARM (#478) would record "
-                    "(dry-run, open=%s authority=%s)"
-                    % (loc, sid, open_n, rearm_auth))
-                continue
-            pinged_state[sid] = {"mark_ts": mark_ts, "count": count, "last": now}
-            logs.append(
-                "dark-watch %s sid=%s -> AUTO-RE-ARM (#478) recorded "
-                "(open=%s authority=%s attempt #%d)"
-                % (loc, sid, open_n, rearm_auth, count))
-            record_goal_request(sid, cwd, rearm_text, rearm_auth, now=now,
-                                origin=_GOAL_REARM_ORIGIN, path=requests_path)
-            continue
-
-        # Ping FALLBACK: not workable (empty / user-waiting-only / stale-or-
-        # missing cache) OR workable-but-template-unresolvable (can't auto-fix
-        # -> tell the user). A subsequent re-ping still requires a fresh
-        # workable cache; otherwise stay SILENT.
         if not is_first and not workable:
             continue                              # can't confirm work -- no nag
         pinged_state[sid] = {"mark_ts": mark_ts, "count": count, "last": now}

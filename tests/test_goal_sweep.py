@@ -333,6 +333,41 @@ class TestGoalDarkWatch(unittest.TestCase):
                          "an idle-alive flicker is NEVER auto-typed")
         self.assertEqual(idle.sent, [], "zero keystrokes (idle capture)")
         self.assertEqual(armed.sent, [], "zero keystrokes (armed capture)")
+        # A WORKABLE dark loop self-heals via the confirmed auto-type, so it
+        # accumulates SILENTLY -- montalu got neither a type NOR a spurious
+        # "loop died" ping (owner decision B: idle-but-alive is left alone).
+        self.assertEqual(sent, [], "no spurious ping for a workable idle-alive flicker")
+
+    def test_mtime_advance_vetoes_the_confirmation_run(self):
+        # #524 -- an advancing transcript mtime is a structured LIVENESS proof
+        # (the session wrote a turn). Even when the footer reads dark, a run
+        # that sees mtime advance is VETOED (logged VETO-ALIVE:mtime-advanced),
+        # reset, and NEVER typed -- a genuine dead loop keeps a FROZEN mtime.
+        import os
+        proj, tmux = self._dark("sess-mtime-veto")
+        tpath = next(proj.rglob("sess-mtime-veto.jsonl"))
+        sent, state = [], {}
+        reqs = self._dir() / "goal-requests.json"
+        obl = self._obl(5, 900)
+        rearm = _rearm_ok
+
+        def sweep(now, mtime):
+            os.utime(tpath, (mtime, mtime))
+            return goal.goal_dark_watch(
+                now, run=tmux, send_fn=lambda mm, **k: sent.append(mm),
+                projects_dir=proj, state=state, sleep_fn=lambda s: None,
+                obligation_fn=obl, rearm_fn=rearm, requests_path=reqs)
+
+        sweep(1000, 500)           # debounce (first observation), mtime frozen
+        sweep(1100, 500)           # clean_run=1
+        sweep(1200, 500)           # clean_run=2
+        logs = sweep(1300, 550)    # mtime ADVANCED -> VETO-ALIVE, run reset
+        self.assertTrue(any("VETO-ALIVE:mtime-advanced" in ln for ln in logs), logs)
+        self.assertNotIn("sess-mtime-veto", state.get("goal_dark_confirm", {}),
+                         "the liveness veto resets the confirmation run")
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "an alive (mtime-advancing) loop is NEVER auto-typed")
+        self.assertEqual(tmux.sent, [], "zero keystrokes")
 
     def test_persistently_dark_goal_with_work_remaining_is_re_armed(self):
         # #478 (reverses #403 for THIS dark-died branch): a still-dark goal
@@ -342,21 +377,39 @@ class TestGoalDarkWatch(unittest.TestCase):
         # #459 ping-only behaviour this deliberately replaces. dark-watch
         # STILL types nothing (it only WRITES the request; the keystroke and
         # its recent-human gate live in deliver_goal).
+        # #524 UPDATE: the OLD assertion (re-arm on the SECOND sweep) is exactly
+        # the 1-sweep-debounce behaviour owner decision B overturns. A workable
+        # dark loop is now RE-ARMED only after a CONFIRMED death run (K clean
+        # reads over >= MIN_SPAN), and stays SILENT (no #459 ping) while
+        # accumulating -- it self-heals via the auto-type. mtime stays frozen
+        # (the _dark fixture writes the transcript once), so no liveness veto.
         proj, tmux = self._dark("sess-dark-rearm")
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
-        obl = self._obl(5, 1500)                        # workable, fresh
+        obl = self._obl(5, 900)          # workable, fresh (cts < the 1000 start)
 
         def rearm(cwd):
             return ("/goal DONE or stop after 50", "full")
 
-        self._sweep(tmux, proj, state, sent, 1000, obl, rearm, reqs)   # debounce
+        now = 1000
+        self._sweep(tmux, proj, state, sent, now, obl, rearm, reqs)     # debounce
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "no re-arm on the first (debounce) observation")
-        self._sweep(tmux, proj, state, sent, 2000, obl, rearm, reqs)   # confirmed
-        self.assertEqual(sent, [], "a workable dark goal is RE-ARMED, never pinged")
+        # A short clean-dark run (2 sweeps -- the OLD trigger) must NOT type.
+        for _ in range(2):
+            now += 100
+            self._sweep(tmux, proj, state, sent, now, obl, rearm, reqs)
+        self.assertEqual(goal.load_goal_requests(reqs), {},
+                         "2 clean-dark sweeps must NOT type (confirmation not reached)")
+        # Keep accumulating clean-dark reads until the run is CONFIRMED
+        # (>= GOAL_DARK_CONFIRM_MIN_READS reads AND >= MIN_SPAN span).
+        while not goal.load_goal_requests(reqs):
+            now += 100
+            self._sweep(tmux, proj, state, sent, now, obl, rearm, reqs)
+            self.assertLess(now, 100000, "must confirm within a bounded run")
+        self.assertEqual(sent, [], "a workable dark goal accumulates SILENTLY, never pinged")
         reqs_d = goal.load_goal_requests(reqs)
-        self.assertIn("sess-dark-rearm", reqs_d, "re-arm request recorded")
+        self.assertIn("sess-dark-rearm", reqs_d, "re-arm request recorded once CONFIRMED")
         entry = reqs_d["sess-dark-rearm"]
         self.assertEqual(entry["origin"], "dark-rearm")
         self.assertEqual(entry["text"], "/goal DONE or stop after 50")
@@ -568,12 +621,16 @@ class TestGoalDarkWatch(unittest.TestCase):
                 self.assertEqual(goal.load_goal_requests(reqs), {},
                                  "%s cache must never re-arm" % label)
 
-    def test_re_arm_backs_off_and_is_hard_capped(self):
-        # Repeated re-arm ATTEMPTS (a session that keeps sitting dark because
-        # delivery keeps hitting recent-human) back off on the SAME widening
-        # schedule and are hard-capped per episode, reusing the #459 ping
-        # machinery. Counted via a record_goal_request spy, since the record
-        # overwrites the SAME sid each time.
+    def test_re_arm_is_hard_capped_per_day_then_pings(self):
+        # #524 UPDATE: the OLD model (re-arm ATTEMPTS back off on the #459 ping
+        # schedule, hard-capped at GOAL_DARK_REPING_MAX per episode) is replaced
+        # by a per-sid 24h ATTEMPT CAP. A session that keeps confirming dead
+        # (delivery, not modelled here, never sticks) is auto-typed at most
+        # GOAL_DARK_REARM_MAX_PER_DAY times per rolling 24h; a further CONFIRMED
+        # cycle PINGS instead (fail toward the human). Each confirmed run resets
+        # the confirmation window, so the cap -- not a ping schedule -- bounds
+        # the total. Counted via a record_goal_request spy (it overwrites the
+        # SAME sid each time). mtime stays frozen -> no liveness veto.
         proj, tmux = self._dark("sess-dark-rearm-cap")
         sent, state = [], {}
         reqs = self._dir() / "goal-requests.json"
@@ -591,21 +648,27 @@ class TestGoalDarkWatch(unittest.TestCase):
             return (5, now[0] - 60)                     # always workable + fresh
 
         with m.patch.object(goal, "record_goal_request", side_effect=spy):
-            self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)  # debounce
-            for _ in range(goal.GOAL_DARK_REPING_MAX + 8):
-                now[0] += 30 * 3600                     # > final stage (24h)
+            # Many clean-dark sweeps within ONE 24h window (100s apart, ~1.7h
+            # total): several confirmed cycles, but only the first
+            # GOAL_DARK_REARM_MAX_PER_DAY of them TYPE; the rest ping.
+            for _ in range(80):
+                now[0] += 100
                 self._sweep(tmux, proj, state, sent, now[0], obl, rearm, reqs)
-        self.assertEqual(sent, [], "the re-arm path never pings")
-        self.assertEqual(len(writes), goal.GOAL_DARK_REPING_MAX,
-                         "re-arm attempts must be hard-capped per episode")
+        self.assertEqual(len(writes), goal.GOAL_DARK_REARM_MAX_PER_DAY,
+                         "auto-types are hard-capped per sid per rolling 24h")
+        self.assertTrue(sent,
+                        "a CONFIRMED dark loop past the attempt cap PINGS the human")
 
     def test_dry_run_re_arm_records_nothing_and_consumes_no_slot(self):
-        # #478 review MINOR — a dry-run sweep must neither WRITE the request
-        # nor CONSUME an attempt slot (pinged_state is persisted by run_once),
-        # and must log "would record", never "recorded".
+        # #478/#524 review MINOR — a dry-run sweep must never WRITE the request
+        # nor CONSUME an attempt slot, and must log "would record", never the
+        # real "recording re-arm". #524: the re-arm decision now requires a
+        # CONFIRMED death run, so drive enough clean-dark dry-run sweeps to
+        # confirm (the confirm window is tracking state, advanced in dry-run
+        # exactly like seen_state/off_state already are).
         proj, tmux = self._dark("sess-dry-rearm")
         reqs = self._dir() / "goal-requests.json"
-        obl = self._obl(5, 1500)
+        obl = self._obl(5, 900)          # workable, fresh (cts < the 1000 start)
         state = {}
 
         def sweep(now):
@@ -614,14 +677,20 @@ class TestGoalDarkWatch(unittest.TestCase):
                 state=state, sleep_fn=lambda s: None, obligation_fn=obl,
                 rearm_fn=_rearm_ok, requests_path=reqs, dry_run=True)
 
-        sweep(1000)                                   # first observation (debounce)
-        logs = sweep(2000)                            # confirmed dark
+        now, logs = 1000, []
+        while not any("would record" in ln for ln in logs):
+            now += 100
+            logs = sweep(now)
+            self.assertLess(now, 100000, "must reach the would-record branch")
         self.assertEqual(goal.load_goal_requests(reqs), {},
                          "a dry-run sweep must record nothing")
-        self.assertTrue(any("would record" in ln for ln in logs), logs)
-        self.assertFalse(any("recorded (" in ln for ln in logs), logs)
+        self.assertTrue(any("CONFIRMED-DEAD would record" in ln for ln in logs), logs)
+        self.assertFalse(any("recording re-arm" in ln for ln in logs), logs)
+        self.assertFalse(
+            state.get("goal_dark_rearm_attempts", {}).get("sess-dry-rearm"),
+            "a dry-run sweep must not consume an attempt slot")
         self.assertNotIn("sess-dry-rearm", state.get("goal_dark_pinged", {}),
-                         "a dry-run sweep must not consume an attempt slot")
+                         "a dry-run confirmed sweep pings nothing")
 
     def test_default_rearm_fn_fails_toward_ping_on_resolve_error(self):
         # #478 review MINOR — an UNEXPECTED resolve_authority failure returns
