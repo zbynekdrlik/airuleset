@@ -539,17 +539,42 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
         self.assertIn("Using Cloudflare API Tokens", ctx)
 
     def test_odoo_message_post_write_injects_the_skill(self):
-        ctx = injected(
+        # #521: the odoo skill grew (its "Composing the handover proposal"
+        # section), so on a real feature-code (.py) write it no longer co-fits
+        # under MAX_TOTAL with comprehensive-logging (which fires FIRST on any
+        # .py file). That is the injector's DESIGNED defer-not-consume behavior
+        # (already locked by test_unconsumed_topics_stay_available_for_their_own_action):
+        # odoo's marker is left UNSET so it loads on its own next action. This
+        # test proves the message_post trigger loads the odoo recipe, tolerant of
+        # that co-fire — immediately, or on the next message_post action in the
+        # same session — without hard-locking the two skills' current sizes/order.
+        sess = "odoo-mp"
+        first = injected(
             run(
                 {"file_path": "/repo/importer.py",
                  "content": "channel.message_post(body=html, body_is_html=True)"},
                 tool_name="Write",
+                session_id=sess,
                 tmpdir=self.tmpdir,
             )
         )
-        self.assertIsNotNone(ctx, "writing a message_post call must load the odoo recipe")
         # a string that exists ONLY in odoo-discuss-xmlrpc' own body
-        self.assertIn("Odoo Discuss over XML-RPC", ctx)
+        if first is not None and "Odoo Discuss over XML-RPC" in first:
+            return
+        # deferred behind comprehensive-logging on the .py write -> its own next
+        # message_post action (a non-.py path, so no comprehensive co-fire) must
+        # still load it, because the deferred marker was left unset.
+        second = injected(
+            run(
+                {"file_path": "/repo/notes.md",
+                 "content": "reminder: verify the message_post call is correct"},
+                tool_name="Write",
+                session_id=sess,
+                tmpdir=self.tmpdir,
+            )
+        )
+        self.assertIsNotNone(second, "the odoo recipe must load on its own next action")
+        self.assertIn("Odoo Discuss over XML-RPC", second)
 
     def test_claude_code_log_export_prompt_injects_the_skill(self):
         r = self._prompt("Please export this session as HTML so I can share it")
