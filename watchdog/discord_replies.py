@@ -449,6 +449,12 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
             # the idle-pane fast path must not silently wipe a REAL clock a
             # concurrent/earlier real sweep already started.
             blocked.pop(r["reply_id"], None)
+            # #515: this delivered answer is the RELIABLE "the owner answered"
+            # signal -- capture (session, cwd, #N) so job 32 can clear the
+            # ticket's needs-answer/needs-decision label once the asking session
+            # moves past the `❓`. Cheap (no I/O); a question with no #N is a
+            # no-op. Inside `not dry_run` so a dry-run never mutates state.
+            watchdog.capture_answered_ticket(state, r, now)
         qmap.pop(r["referenced"], None)     # same-batch 2nd reply won't re-fire
         if via_ticket:
             logs.append("reply→ticket #%s [%s]" % (via_ticket, r["session"][:12]))

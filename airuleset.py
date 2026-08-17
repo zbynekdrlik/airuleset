@@ -3214,6 +3214,16 @@ def _watchdog_owner_decision_fetch(home=None):
     return _fetch_owner_decision_tickets(home)
 
 
+def _watchdog_u_reconcile_clear(cwd, num):
+    """Job 32's real gh side-effect (#515) — remove needs-answer/needs-decision
+    from open ticket #`num` in the repo at `cwd`. Wired here (not inside
+    run_once) so every OTHER job's run_once unit test stays network-free,
+    exactly like the job 8/11/31 fetches. Returns the removed-label list (`[]`
+    = nothing to clear / closed) or None (unmeasurable → keep + retry)."""
+    from watchdog import _clear_owner_question_labels
+    return _clear_owner_question_labels(cwd, num)
+
+
 def _watchdog_card_probe(root, base):
     """Job 25's confirming fetch (#134).
 
@@ -3655,6 +3665,11 @@ def cmd_watchdog(args):
                     # run_once's #368 daily-reask section, gated on this fetch
                     # being wired (network-free tests for every other job).
                     owner_decision_fetch=_watchdog_owner_decision_fetch,
+                    # #515 — job 32 mechanical U-label lifecycle, gated on this
+                    # clear-fn being wired (network-free tests for every other
+                    # job). Clears a needs-answer/needs-decision label whose
+                    # question the owner already answered on Discord.
+                    u_reconcile_clear=_watchdog_u_reconcile_clear,
                     # Job 24 (#138) runs on EVERY managed box — a loop whose
                     # merges have stopped is a per-repo failure, not a
                     # coordinator-only one, and the box that hosts the loop
