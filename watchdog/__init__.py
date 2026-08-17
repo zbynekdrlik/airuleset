@@ -1522,6 +1522,7 @@ from watchdog.cards import (  # noqa: E402
     card_reconcile as card_reconcile,
     REPORT_GRACE_S as REPORT_GRACE_S,
     REPORT_MAX_SWALLOWS as REPORT_MAX_SWALLOWS,
+    REPORT_REPROBE_S as REPORT_REPROBE_S,
     REPORT_MAX_LISTED as REPORT_MAX_LISTED,
     REPORT_TAIL_LINES as REPORT_TAIL_LINES,
     _iso_epoch as _iso_epoch,

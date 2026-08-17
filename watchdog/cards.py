@@ -155,6 +155,9 @@ REPORT_GRACE_S = 600              # ~10 min: a supervisor's post-merge sequence
                                    # minutes; only past this is a report OWED
 REPORT_MAX_SWALLOWS = 3           # consecutive-swallow give-up before escalating
                                    # the owner (#442-F2 anti-silence)
+REPORT_REPROBE_S = 600           # #511: after a swallow, re-probe the pane on
+                                   # this bounded interval (never every sweep,
+                                   # never a permanent stop) until it lands
 REPORT_MAX_LISTED = 8             # phone/pane gets numbers, not a wall
 REPORT_TAIL_LINES = 400          # a fresh (un-compacted) report sits near the
                                    # tail — the compact-sync.log covers a report
@@ -579,15 +582,22 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
 def _iso_epoch(s):
     """A CC transcript / compact-sync ISO-8601 timestamp -> epoch float, or
     None on anything unparseable. Handles both the transcript `…Z` form and
-    the compact-sync `…+00:00` form."""
+    the compact-sync `…+00:00` form. A tz-NAIVE value (no offset) is read as
+    UTC, never local time — `datetime.timestamp()` on a naive datetime would
+    otherwise shift the epoch by the box's local offset (a 2h error on a
+    UTC+2 box), silently mis-ordering a boundary vs a close ts. Real sources
+    are always tz-aware, so this is defensive, not a live path."""
     if not s or not isinstance(s, str):
         return None
     t = s.strip()
     if t.endswith("Z"):
         t = t[:-1] + "+00:00"
     try:
-        from datetime import datetime
-        return datetime.fromisoformat(t).timestamp()
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(t)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
     except (ValueError, TypeError):
         return None
 
@@ -691,7 +701,7 @@ def _report_escalate_ping(send_fn, root, owed, shown, owner, dry_run):
 def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
                      send_fn=None, dry_run=False, git_run=None,
                      owner_by_sid=None, projects_dir=None, sleep_fn=None,
-                     window=None, grace=None, max_swallows=None,
+                     window=None, grace=None, max_swallows=None, reprobe=None,
                      mutex_held=None, recent_human=None,
                      transcript_fn=None, rows_fn=None,
                      verified_send=None, compact_log_path=None):
@@ -702,15 +712,22 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
     the same way `card_reconcile` does — `merged_closes`, LOCAL git, which
     directly names what THIS supervisor merged (the right signal for "who owes
     the report", and free of a gh call). A ticket is OWED when it closed past
-    `grace`, is not already handled (dedup per ticket, forever), and neither
+    `grace`, is not already DELIVERED (the `nudged` dedup, forever), and neither
     signal shows a report boundary since its close: a `## ✅ Work Complete`
     heading in the supervisor transcript (fresh, un-compacted report) OR a
     `origin=self-callback` compact-sync.log record for the sid (a report that
-    was written+compacted out of the transcript). Delivery is ONE in-band
-    nudge into the supervisor pane via `send_verified`; a persistent swallow
-    streak escalates to the owner once (#442-F2 anti-silence).
+    was written+compacted out of the transcript). Delivery is an in-band nudge
+    into the supervisor pane via `send_verified`, throttled by `reprobe`.
 
-    #516: `nudged`/`escalated` are ONE-SHOT latches (a handled ticket is never
+    #511 anti-silence: a PERSISTENTLY swallowed nudge is a DELIVERY-mechanics
+    failure (a wedged pane that may clear). It escalates to the owner ONCE (the
+    per-ticket `pinged` one-shot suppresses re-pinging) but then FALLS THROUGH
+    to the bounded `reprobe` re-probe — the ticket is NEVER permanently stopped,
+    so the moment the pane un-wedges the nudge lands (→ `nudged`, done). A
+    landed nudge (verified) clears the swallow streak so a genuinely-new storm
+    re-escalates. Only `nudged` (delivered) is a permanent per-ticket latch.
+
+    #516: `nudged`/`pinged` are ONE-SHOT latches (a handled ticket is never
     re-evaluated), so the persisted `state["report_owed"]` write is gated on
     `not dry_run` — a diagnostic `--once --dry-run` mutates only a local copy
     and can never suppress the genuine nudge on a later real timer sweep."""
@@ -719,6 +736,7 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
     window = CARD_WINDOW_S if window is None else window
     grace = REPORT_GRACE_S if grace is None else grace
     max_swallows = REPORT_MAX_SWALLOWS if max_swallows is None else max_swallows
+    reprobe = REPORT_REPROBE_S if reprobe is None else reprobe
     owner_by_sid = owner_by_sid or {}
     panes_by_sid = panes_by_sid or {}
 
@@ -790,85 +808,106 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
             owed_state.pop(root, None)
             continue
 
-        prev = owed_state.get(root) or {}
-        nudged = {k: v for k, v in (prev.get("nudged") or {}).items()
-                  if int(k) in closed}
-        escalated = {k: v for k, v in (prev.get("escalated") or {}).items()
-                     if int(k) in closed}
-        swallows = int(prev.get("swallows") or 0)
+        try:
+            prev = owed_state.get(root) or {}
+            nudged = {k: v for k, v in (prev.get("nudged") or {}).items()
+                      if int(k) in closed}
+            pinged = {k: v for k, v in (prev.get("pinged") or {}).items()
+                      if int(k) in closed}
+            swallows = int(prev.get("swallows") or 0)
+            last_try = float(prev.get("last_try") or 0)
 
-        pane = panes_by_sid.get(sid)
-        pane_id = pane[0] if pane else None
-        tpath = transcript_fn(projects_dir, sid, cwd)
-        rows = rows_fn(tpath) if tpath else []
-        sc_ts = records.get(sid) or ()
+            def _save(sw=None, lt=None):
+                owed_state[root] = {
+                    "nudged": nudged, "pinged": pinged,
+                    "swallows": swallows if sw is None else sw,
+                    "last_try": last_try if lt is None else lt}
 
-        owed = []
-        for n in sorted(closed):
-            if str(n) in nudged or str(n) in escalated:
-                continue                   # dedup per ticket, forever
-            ts_close = closed[n]
-            if ts_close is not None and now - ts_close < grace:
-                continue                   # still inside its own grace
-            if any(t >= ts_close for t in sc_ts) or \
-                    report_boundary_after(rows, ts_close):
-                continue                   # report present (fresh or compacted)
-            owed.append(n)
+            pane = panes_by_sid.get(sid)
+            pane_id = pane[0] if pane else None
+            tpath = transcript_fn(projects_dir, sid, cwd)
+            rows = rows_fn(tpath) if tpath else []
+            sc_ts = records.get(sid) or ()
 
-        # detection is logged unconditionally (issue #36 print-always).
-        if owed:
-            logs.append("report-owed %s sid=%s issues=%s"
-                        % (root, sid,
-                           ",".join(str(n) for n in owed[:REPORT_MAX_LISTED])))
+            owed = []
+            for n in sorted(closed):
+                if str(n) in nudged:
+                    continue               # already DELIVERED — permanent dedup
+                ts_close = closed[n]
+                if ts_close is not None and now - ts_close < grace:
+                    continue               # still inside its own grace
+                if any(t >= ts_close for t in sc_ts) or \
+                        report_boundary_after(rows, ts_close):
+                    continue               # report present (fresh or compacted)
+                owed.append(n)
 
-        if not owed:
-            owed_state[root] = {"nudged": nudged, "escalated": escalated,
-                                "swallows": 0}
-            continue
+            # detection is logged unconditionally (issue #36 print-always).
+            if owed:
+                logs.append("report-owed %s sid=%s issues=%s"
+                            % (root, sid,
+                               ",".join(str(n) for n in owed[:REPORT_MAX_LISTED])))
 
-        # vetoes that suppress DELIVERY this sweep, never mark a ticket handled.
-        if mutex_held(root):
-            logs.append("report-owed SKIP mutex-held %s" % root)
-            owed_state[root] = {"nudged": nudged, "escalated": escalated,
-                                "swallows": swallows}
-            continue
-        if recent_human(cwd, sid):
-            logs.append("report-owed SKIP recent-human %s" % root)
-            owed_state[root] = {"nudged": nudged, "escalated": escalated,
-                                "swallows": swallows}
-            continue
+            if not owed:
+                _save(sw=0)                 # nothing owed -> streak clears
+                continue
 
-        if dry_run or pane_id is None:
-            owed_state[root] = {"nudged": nudged, "escalated": escalated,
-                                "swallows": swallows}
-            continue
+            # vetoes suppress DELIVERY this sweep, never mark a ticket handled.
+            if mutex_held(root):
+                logs.append("report-owed SKIP mutex-held %s" % root)
+                _save()
+                continue
+            if recent_human(cwd, sid):
+                logs.append("report-owed SKIP recent-human %s" % root)
+                _save()
+                continue
 
-        shown = ", ".join("#%d" % n for n in owed[:REPORT_MAX_LISTED])
-        text = ("report-owed: %s — napíš per-ticket ## ✅ Work Complete report "
-                "+ spusti compact-request --self" % shown)
-        ok = verified_send(pane_id, text, tpath)
-        if ok:
-            for n in owed:
-                nudged[str(n)] = now
-            swallows = 0
-            logs.append("report-owed NUDGE %s -> ok issues=%s" % (root, shown))
-        else:
-            swallows += 1
-            if swallows >= max_swallows:
-                status = _report_escalate_ping(
-                    send_fn, root, owed, shown,
-                    owner_by_sid.get(sid), dry_run)
-                if status is not None:
-                    logs.append("report-owed ESCALATE %s -> %s issues=%s"
-                                % (root, status, shown))
+            # #511: after a swallow, RE-PROBE on a bounded interval (never a
+            # permanent stop). The FIRST attempt (swallows==0) is immediate.
+            if swallows > 0 and (now - last_try) < reprobe:
+                logs.append("report-owed backoff %s (streak=%d)"
+                            % (root, swallows))
+                _save()
+                continue
+
+            if dry_run or pane_id is None:
+                _save()
+                continue
+
+            shown = ", ".join("#%d" % n for n in owed[:REPORT_MAX_LISTED])
+            text = ("report-owed: %s — napíš per-ticket ## ✅ Work Complete "
+                    "report + spusti compact-request --self" % shown)
+            ok = verified_send(pane_id, text, tpath)
+            last_try = now
+            if ok:
                 for n in owed:
-                    escalated[str(n)] = now
-                swallows = 0               # a new storm can re-escalate
+                    nudged[str(n)] = now
+                swallows = 0
+                logs.append("report-owed NUDGE %s -> ok issues=%s"
+                            % (root, shown))
             else:
-                logs.append("report-owed swallowed %s (streak=%d) issues=%s"
-                            % (root, swallows, shown))
-        owed_state[root] = {"nudged": nudged, "escalated": escalated,
-                            "swallows": swallows}
+                swallows += 1
+                to_ping = [n for n in owed if str(n) not in pinged]
+                if swallows >= max_swallows and to_ping:
+                    shown_ping = ", ".join("#%d" % n
+                                           for n in to_ping[:REPORT_MAX_LISTED])
+                    status = _report_escalate_ping(
+                        send_fn, root, to_ping, shown_ping,
+                        owner_by_sid.get(sid), dry_run)
+                    if status is not None:
+                        logs.append("report-owed ESCALATE %s -> %s issues=%s"
+                                    % (root, status, shown_ping))
+                    # ONE-SHOT owner ping; the pane nudge KEEPS re-probing (#511)
+                    for n in to_ping:
+                        pinged[str(n)] = now
+                else:
+                    logs.append("report-owed swallowed %s (streak=%d) issues=%s"
+                                % (root, swallows, shown))
+            _save()
+        except Exception as e:
+            # one bad root must never crash the sweep or lose card_reconcile's
+            # own logs (this runs concatenated after it in the job-25 lambda).
+            logs.append("report-reconcile error %s: %r" % (root, e))
+            continue
 
     if not dry_run:
         state["report_owed"] = {k: v for k, v in owed_state.items()

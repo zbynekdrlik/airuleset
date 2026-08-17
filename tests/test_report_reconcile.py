@@ -148,7 +148,7 @@ def _tmp_log(lines):
 
 def run_report(now, state, rows, closes, *, dry_run=False,
                vs_result=True, mutex=False, recent=False,
-               send_fn=None, grace=None, max_swallows=None,
+               send_fn=None, grace=None, max_swallows=None, reprobe=0,
                compact_lines=None, cwd=SUP_CWD, sid=SID):
     vs = _Recorder(vs_result)
     tmp = _tmp_log(compact_lines) if compact_lines is not None else None
@@ -157,7 +157,7 @@ def run_report(now, state, rows, closes, *, dry_run=False,
         send_fn=send_fn, dry_run=dry_run,
         git_run=make_git(SUP_ROOT, closes),
         owner_by_sid={sid: "zbynek"}, projects_dir="/p",
-        grace=grace, max_swallows=max_swallows,
+        grace=grace, max_swallows=max_swallows, reprobe=reprobe,
         mutex_held=lambda root: mutex,
         recent_human=lambda c, s: recent,
         transcript_fn=lambda pd, s, c: "/p/%s.jsonl" % s,
@@ -255,7 +255,7 @@ class ReportReconcileAntiSilence(unittest.TestCase):
         self.assertEqual(1, len(pings), "exactly one escalation ping")
         self.assertIn("#41", pings[0][0])
         self.assertEqual("zbynek", pings[0][1])
-        self.assertIn("41", state["report_owed"][SUP_ROOT]["escalated"])
+        self.assertIn("41", state["report_owed"][SUP_ROOT]["pinged"])
 
     def test_verified_delivery_clears_swallow_streak(self):
         now = 100000
@@ -268,6 +268,49 @@ class ReportReconcileAntiSilence(unittest.TestCase):
         run_report(now + 60, state, rows, closes, vs_result=True, max_swallows=3)
         self.assertEqual(0, state["report_owed"][SUP_ROOT]["swallows"])
         self.assertIn("41", state["report_owed"][SUP_ROOT]["nudged"])
+
+    def test_escalation_does_not_permanently_stop_the_reprobe(self):
+        # #511: a swallow give-up escalates ONCE (owner pinged) but must NOT
+        # permanently stop nudging — the moment the pane un-wedges the nudge
+        # must still land. Marking the ticket handled-forever on escalation is
+        # the stranded-re-probe anti-silence bug this locks against.
+        now = 100000
+        closes = {41: now - 3600}
+        rows = [arow(iso(now - 100), "⏳ next")]
+        pings = []
+
+        def send_fn(text, owner=None, dedup_key=None, dry_run=False, project=None):
+            pings.append(text)
+            return "sent"
+
+        state = {}
+        for i in range(4):     # swallow to escalation (pinged at sweep 3)
+            run_report(now + i * 60, state, rows, closes,
+                       vs_result=False, send_fn=send_fn, max_swallows=3)
+        self.assertEqual(1, len(pings))
+        self.assertIn("41", state["report_owed"][SUP_ROOT]["pinged"])
+        self.assertNotIn("41", state["report_owed"][SUP_ROOT]["nudged"])
+        # pane un-wedges: the re-probe still fires and NOW lands the nudge
+        _logs, vs = run_report(now + 400, state, rows, closes, vs_result=True,
+                               send_fn=send_fn, max_swallows=3)
+        self.assertEqual(1, len(vs.calls), "re-probe must still nudge post-escalation")
+        self.assertIn("41", state["report_owed"][SUP_ROOT]["nudged"])
+
+    def test_reprobe_backoff_throttles_retries_within_the_window(self):
+        now = 100000
+        closes = {41: now - 3600}
+        rows = [arow(iso(now - 100), "⏳ next")]
+        state = {}
+        # sweep 1 swallows (streak 1, last_try set); sweep 2 is 60s later,
+        # well inside a 600s reprobe -> backed off, no second send attempt.
+        run_report(now, state, rows, closes, vs_result=False, reprobe=600)
+        _logs, vs2 = run_report(now + 60, state, rows, closes,
+                                vs_result=False, reprobe=600)
+        self.assertEqual(0, len(vs2.calls), "within reprobe window -> no retry")
+        # past the window it retries again
+        _logs, vs3 = run_report(now + 700, state, rows, closes,
+                                vs_result=False, reprobe=600)
+        self.assertEqual(1, len(vs3.calls), "past reprobe window -> retry")
 
 
 class ReportReconcileDryRun(unittest.TestCase):
