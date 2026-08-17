@@ -1186,7 +1186,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # which is exactly what #509 deliberately narrows.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 5,
                                           now, tmtime)
@@ -1203,13 +1203,14 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
     # ---------------------------------------------------------------- #
 
     def test_two_workers_big_backlog_with_memory_nudges(self):
-        # THE live-box lock: the pane SHOWS the agent strip (2 `◯` rows), so the
-        # OLD code's `_pane_has_bg_agent` early-skip would have refused here --
-        # the exact reopen-2 root cause. `_count_live_subagents`=2 + backlog 37 +
-        # healthy memory must now NUDGE.
+        # THE live-box lock: 2 live workers (structured `count_live_workers`) +
+        # backlog 37 + healthy memory must NUDGE (under-saturated fill). The pane
+        # SHOWS the agent strip; post-#518 the count is the structured G2 count,
+        # not the render strip, so the reopen-2 root cause (the old
+        # `_pane_has_bg_agent` early-skip) can no longer suppress it.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
@@ -1227,7 +1228,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # NUDGE (was silent under the earlier <3 draft).
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=4), \
+        with m.patch.object(wd, "count_live_workers", return_value=(4, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
@@ -1240,7 +1241,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # 5 workers >= GOAL_LANE_SATURATION_WORKERS -> saturated -> silent.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=5), \
+        with m.patch.object(wd, "count_live_workers", return_value=(5, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
@@ -1322,7 +1323,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # is journaled with the measured value so a tight box stays diagnosable.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=812):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 37,
                                           now, tmtime)
@@ -1361,7 +1362,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # nothing typed); this is the reopen-3 root cause.
         now = 100000
         tmtime = now - 30  # fresh: transcript written 30s ago, idle << 15min
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
                                           now, tmtime)
@@ -1392,7 +1393,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {"ln": goal.GOAL_LANE_MAX_NUDGES}
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
                                           now, tmtime, rec=rec)
@@ -1412,7 +1413,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {"llast": now - 60}  # fired 60s ago, inside the base interval
-        with m.patch.object(wd, "_count_live_subagents", return_value=2), \
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
                                           now, tmtime, rec=rec)
@@ -1431,7 +1432,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # using a fixed 5 would read 3 < 5 -> under-saturated -> fire.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch.object(wd, "_count_live_subagents", return_value=3):
+        with m.patch.object(wd, "count_live_workers", return_value=(3, [])):
             logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 3,
                                           now, tmtime)
         self.assertFalse(owns)
@@ -1466,7 +1467,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         sent = []
         all_logs = []
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "_count_live_subagents", return_value=2), \
+             m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192), \
              m.patch.object(wd, "deliver_with_stash", return_value=False):
             for i in range(goal.GOAL_LANE_MAX_STASH_ABORTS + 3):
@@ -1805,7 +1806,7 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         _write_marker_transcript(proj, self.CWD, self.SID)
         tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
         with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "_count_live_subagents", return_value=2), \
+             m.patch.object(wd, "count_live_workers", return_value=(2, [])), \
              m.patch.object(goal, "_mem_available_mb", return_value=8192), \
              m.patch.object(wd, "deliver_with_stash", side_effect=fake_stash):
             for i in range(10):                     # 10 sweeps, 60s apart
@@ -1836,10 +1837,12 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
 
     def _undersat_call(self, backlog, now, tmtime, rec, subagents, eff_workers,
                        mem=8192):
-        # Drive the under-saturated fill path deterministically: `subagents` =
-        # `_count_live_subagents` (the floor signal), `eff_workers` =
-        # `count_live_workers` (the #509 structured effectiveness signal), healthy
-        # memory, recent-human gate neutralized.
+        # Drive the under-saturated fill path deterministically. Post-#518 the
+        # gating count AND the #509 effectiveness signal are BOTH
+        # `count_live_workers` (= `eff_workers`); the `subagents` patch of the
+        # now-unused `_count_live_subagents` is a harmless no-op kept only so the
+        # existing #509 call sites (which pass `subagents == eff_workers`) stay
+        # byte-identical. Healthy memory, recent-human gate neutralized.
         with m.patch.object(wd, "_count_live_subagents", return_value=subagents), \
              m.patch.object(wd, "count_live_workers",
                             return_value=(eff_workers, [])), \

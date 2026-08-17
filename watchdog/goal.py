@@ -1946,17 +1946,16 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                                   "draft, but not settled at an idle prompt "
                                   "this sweep)")
         return logs, False
-    live_workers = watchdog._count_live_subagents(tpath, now, GOAL_LANE_LIVE_WINDOW_S)
-    # Pane-strip corroboration (#442 re-fix 2): the strip is a boolean ">=1 bg
-    # agent visible" view; the transcript count is authoritative for HOW MANY.
-    # When the strip shows a worker but the transcript momentarily reads 0 (a
-    # just-dispatched worker whose subagents/*.jsonl mtime is not fresh yet), floor
-    # the count at 1 so a visible-but-uncounted worker never reads as a truly empty
-    # box -- pure count reconciliation of two signals the guard already reads, no
-    # transcript-content parse. This preserves the old `_pane_has_bg_agent`
-    # early-gate's false-0 protection for the empty-lane nudge exactly.
-    if live_workers == 0 and watchdog._pane_has_bg_agent(captured):
-        live_workers = 1
+    # #518 -- the gating worker count is the STRUCTURED G2 `count_live_workers`
+    # (transcripts.py), replacing the render-dependent `_count_live_subagents`
+    # primary count + its `_pane_has_bg_agent(captured)` render floor. G2 EXCLUDES
+    # both silent-death modes (api-error + text-toolcall-stall), so a box whose
+    # "workers" are all dead reads 0 and fires the empty-lane recovery nudge --
+    # the render floor's stale-strip over-count used to SUPPRESS exactly that
+    # (#486-G2 dangerous direction). It is the SAME structured count the #509
+    # effectiveness signal already uses below, so the two now agree by construction.
+    live_workers, _ev = watchdog.count_live_workers(
+        projects_dir, cwd, sid, now, GOAL_LANE_LIVE_WINDOW_S)
     backlog_n = watchdog._cached_backlog_count(cwd, backlog_fetch, state, now)
     if not isinstance(backlog_n, int) or backlog_n <= 0:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%r -> "
