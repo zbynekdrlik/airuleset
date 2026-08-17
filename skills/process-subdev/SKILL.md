@@ -77,6 +77,15 @@ so a hand-off carries no label at all, that is a repo-automation failure to fix 
 (the gate above exists precisely so a structural strip GUARANTEES a `needs-gatekeeper`
 label) — never a comment fallback here.
 
+**Self-service triage for a bare ACTION request (Cross-stream protocol rule 9, airuleset
+#516).** A bare `needs-gatekeeper` ACTION request (the `handed-by:<stream>` kind that is NOT
+in this review queue) is TRIAGED before it is worked: a prod-STATE READ the stream could do
+itself (`autonomous-verification.md` "What's on PROD?") is BOUNCED, never worked. A request
+with NO `Self-service-checked:` line is auto-bounced by the watchdog (job 31); a request
+whose line names only a pure READ (no live PROD intervention) you bounce yourself (remove
+`needs-gatekeeper`, add `prio:bounce` + `stream:<stream>`, template comment) — the full
+mechanics + Slovak template are in Cross-stream protocol rule 9.
+
 One fork branch (fork-no-merge) or one release-batch of merged integration PRs
 (branch-merge) = one processing run. Queue empty → say so, but check the RELEASE debt
 first: merged-but-unreleased slices and open `prio:bounce` tickets of this stream are
