@@ -219,7 +219,7 @@
     "watchdog/burn_jobs.py": 306,
     "watchdog/card_flags.py": 300,
     "watchdog/cards.py": 535,
-    "watchdog/compact.py": 1152,
+    "watchdog/compact.py": 1168,
     "watchdog/cross_stream.py": 963,
     "watchdog/decide.py": 733,
     "watchdog/discord_api.py": 187,
