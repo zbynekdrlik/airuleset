@@ -333,7 +333,7 @@ def classify_review_comment(body):
 # whitespace/(/ in the class that ref was invisible and the gate silently
 # passed a markerless worker commit (batch-32 corpus-replay catch,
 # 2026-08-16). `&#123`-style HTML entities stay excluded (no `&` in class).
-ISSUE_REF_RE = re.compile(r"(?:^|[\s(/\"'])#([0-9]+)\b")
+ISSUE_REF_RE = re.compile(r"(?:^|[\s(/\"'\[])#([0-9]+)\b")
 
 
 def issue_refs(text):
