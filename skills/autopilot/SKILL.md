@@ -843,11 +843,8 @@ gap in either.
    `code-review` invocation either, per #363), `✅ Deploy: <version>`, `✅ Výstup: <observed values>` (RELAYS each worker's Step-4 read-back of its member's real OUTPUT artifact — an explicit `n/a — <prečo>` when a member has no user-facing output; `completion-report.md` blocks a report missing this line)
    — then Goal/What changed in plain language (covering every member integrated in this cycle), the
    🌐 URL(s) from the workers' `--url`, and the PR title/link/merge SHA (this cycle's ONE PR, per the
-   repo-flow policy). **When `U > 0` or `W > 0`, ALSO print the parked BREAKDOWN (#527)** — the
-   `core-quals`/`slice-quals --waiting` members (each with its `answer`/`decision`/`acceptance`/`ping`
-   tag + title) and the `--ops-wait` members (each with its `acceptance`/`ops-wait` tag + title) — so
-   the report itself shows the owner exactly what waits on THEM (`U`) vs a third party (`W`), never a
-   bare `U N`; and run the Step-1 invariant so every `U` member already carries a delivered question.
+   repo-flow policy). **On `U > 0`/`W > 0` the report ALSO prints the parked BREAKDOWN** (Step-1
+   `--waiting`/`--ops-wait` members + tags, #527), never a bare `U N`.
    Terminating in the marker `message-status-marker.md` prescribes: a genuine
    `✅ DONE: <plain outcome, e.g. "#41+#43+#317 merged -> v1.2.3, CI green">` when no lane is left
    running, or `⏳ WORKING` when this turn still has dispatched lanes in flight (background work IS
