@@ -740,6 +740,215 @@ def cmd_sweep_stray_tmp(args):
     print("Log: %s" % TMP_STRAY_LOG_PATH)
 
 
+# --- Stray hook-state litter sweep: /tmp/airuleset-* (#548) -----------------
+# The SIBLING of `sweep_stray_tmp` above, for the OTHER half of the dev1
+# inode-exhaustion incident: 136,516 `/tmp/airuleset-*` entries (measured
+# 2026-08-18) -- per-session hook state (dedup/poll/block-count markers, run
+# files, plus test-suite `mkdtemp(prefix="airuleset-...")` dirs), which mostly
+# HARDCODE `/tmp/airuleset-*` (e.g. block-main-implementation.sh's
+# `RUN_FILE="/tmp/airuleset-main-bash-run-<sid>"`, 46k on dev1) so the #548 CORE
+# TMPDIR redirect never catches them. Dead sessions leave them forever; nothing
+# fleet-wide reaped them (#494's age-reclaim lives only in a test helper).
+# `sweep_stray_tmp`'s `^tmp[a-z0-9_]{8}$` regex never matches them; job 22
+# (`cleanup_stale_exec_markers`) covers only the 2 EXEC-PERMISSION prefixes.
+#
+# SAME proven quad-gate as `sweep_stray_tmp` (precise-prefix + uid-owned +
+# symlink-refused + top-mtime age >= floor + `_scan_live_tmp_tops` single
+# inverted /proc scan) + a TOCTOU re-check before EACH delete. TWO deliberate
+# differences from the tmp* sibling:
+#   - the age FLOOR defaults to 3 DAYS (not 7): a live session re-writes its
+#     hook state within minutes, so a 3-day-old marker is overwhelmingly a dead
+#     session's -- the mtime gate IS the liveness signal here (a state file is
+#     NOT held open by its live session, so the /proc scan only backstops a
+#     mid-write file, which is <3d anyway);
+#   - the EXEC-PERMISSION marker families (`airuleset-main-exec-*`,
+#     `airuleset-fable-exec-*`) are EXCLUDED outright -- job 22 owns them with a
+#     per-file live-SESSION check (revoking a live session's deliberately
+#     granted exec exception mid-work is the one hazard mtime alone can't gate).
+#   Reaps FILES and DIRS both (markers are files; `mkdtemp(prefix=)` state is a
+#   dir). Regular-file/dir only via `os.lstat`, NEVER a content read (#409 FIFO
+#   lesson -- this reaper never opens a candidate at all).
+
+_AIRULESET_STATE_RX = re.compile(r"^airuleset-")
+# Excluded: the exec-permission markers that job 22 (cleanup_stale_exec_markers)
+# reaps with a per-file live-session check. A prefix match (not a bare
+# `-exec-` substring) so an unrelated future `airuleset-execution-*` is unaffected.
+AIRULESET_STATE_EXCLUDE_PREFIXES = ("airuleset-main-exec-", "airuleset-fable-exec-")
+AIRULESET_STATE_LOG_PATH = CLAUDE_DIR / "airuleset-state-sweep.log"
+AIRULESET_STATE_STATE_PATH = CLAUDE_DIR / "airuleset-state-sweep-state.json"
+AIRULESET_STATE_MIN_INTERVAL_S = 24 * 3600     # env AIRULESET_STATE_SWEEP_INTERVAL_S
+AIRULESET_STATE_MIN_AGE_DAYS_DEFAULT = 3       # env AIRULESET_STATE_MIN_AGE_DAYS
+AIRULESET_STATE_MAX_SCAN_DEFAULT = 20000       # per-run classify cap
+AIRULESET_STATE_LIVE_ENV = "AIRULESET_STATE_RECLAIM_LIVE"
+
+
+def _is_excluded_airuleset_state(name):
+    return any(name.startswith(p) for p in AIRULESET_STATE_EXCLUDE_PREFIXES)
+
+
+def discover_stray_airuleset_state_candidates(tmp_dir=None, uid=None, now=None,
+                                              min_age_days=None, proc_dir=None,
+                                              max_scan=None):
+    """Classify `<tmp_dir>/airuleset-*` entries owned by THIS uid, EXCLUDING the
+    exec-permission marker families. Same ONE-`os.scandir`-pass + `{total_matched,
+    examined:[rows], capped}` return shape as `discover_stray_tmp_candidates`;
+    `reason` None = genuine candidate. Reaps both files and dirs."""
+    import time as _time
+    now = _time.time() if now is None else now
+    min_age_days = _min_age_days_env(min_age_days, "AIRULESET_STATE_MIN_AGE_DAYS",
+                                     AIRULESET_STATE_MIN_AGE_DAYS_DEFAULT)
+    uid = os.getuid() if uid is None else uid
+    tmp_dir = Path(tmp_dir) if tmp_dir else Path("/tmp")
+    max_scan = AIRULESET_STATE_MAX_SCAN_DEFAULT if max_scan is None else max_scan
+    result = {"total_matched": 0, "examined": [], "capped": False}
+    if not tmp_dir.is_dir():
+        return result
+    tmp_root = os.path.realpath(str(tmp_dir))
+    live_tops = _scan_live_tmp_tops(tmp_dir, proc_dir)
+    min_age_s = min_age_days * 86400.0
+    try:
+        scanner = os.scandir(tmp_dir)
+    except OSError as e:
+        result["examined_error"] = True
+        result["examined"].append({"path": None, "reason": "could not scandir %s: %s" % (tmp_dir, e)})
+        return result
+    with scanner:
+        for e in scanner:
+            name = e.name
+            if not _AIRULESET_STATE_RX.match(name) or _is_excluded_airuleset_state(name):
+                continue
+            result["total_matched"] += 1
+            if len(result["examined"]) >= max_scan:
+                result["capped"] = True
+                continue        # keep counting the true total; stop classifying
+            row = {"path": e.path, "reason": None}
+            result["examined"].append(row)
+            try:
+                if e.is_symlink():
+                    row["reason"] = "symlink -- never followed, never deleted through"
+                    continue
+                st = e.stat(follow_symlinks=False)
+            except OSError as ex:
+                row["reason"] = "could not stat: %s" % ex
+                continue
+            if st.st_uid != uid:
+                row["reason"] = "owned by another uid -- never touched"
+                continue
+            age_s = now - st.st_mtime
+            row["age_days"] = age_s / 86400.0
+            if st.st_mtime > now or age_s < min_age_s:
+                row["reason"] = "too recent (%.1fd < %sd)" % (row["age_days"], min_age_days)
+                continue
+            live_key = os.path.join(tmp_root, name)
+            if live_tops is None or live_key in live_tops:
+                row["reason"] = "in live use (or undeterminable) -- skipped"
+                continue
+            # reason stays None -- genuine candidate
+    return result
+
+
+def _log_airuleset_state_summary(summary, log_path, now):
+    import time as _time
+    ts = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(now))
+    line = ("%s total_matched=%d classified=%d reclaimable=%d removed=%d "
+            "in_use=%d too_recent=%d capped=%s live=%s"
+            % (ts, summary["total_matched"], summary["classified"],
+               summary["reclaimable"], summary["removed"], summary["in_use"],
+               summary["too_recent"], summary["capped"], summary["live"]))
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        print("  airuleset-state-sweep: could not write log %s: %s" % (log_path, e), file=sys.stderr)
+
+
+def sweep_airuleset_state(tmp_dir=None, uid=None, dry_run: bool = False, now=None,
+                          log_path=None, state_path=None, force: bool = False,
+                          min_age_days=None, proc_dir=None, max_scan=None, live=None):
+    """Reclaim aged, uid-owned `/tmp/airuleset-*` hook-state litter (>3d) --
+    #548. REPORT-ONLY unless `live` is True (from `AIRULESET_STATE_RECLAIM_LIVE=1`
+    when `live` is left None). Re-verifies "still not a symlink, still exists,
+    still uid-owned, still not in live use" immediately before EACH delete (a
+    TOCTOU re-check via a fresh `_scan_live_tmp_tops`). Cadence-gated via its own
+    state file; `force`/`dry_run` bypasses the gate. Returns a SUMMARY dict
+    (never a row per entry). Mirror of `sweep_stray_tmp`, for a DIFFERENT prefix
+    + a 3d floor + files-and-dirs both."""
+    import time as _time
+    now = _time.time() if now is None else now
+    log_path = Path(log_path) if log_path else AIRULESET_STATE_LOG_PATH
+    state_path = Path(state_path) if state_path else AIRULESET_STATE_STATE_PATH
+    if live is None:
+        live = os.environ.get(AIRULESET_STATE_LIVE_ENV) == "1"
+    uid = os.getuid() if uid is None else uid
+
+    if not force and not dry_run:
+        try:
+            st = json.loads(state_path.read_text())
+            last = float(st.get("last_run", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            last = 0
+        if last > now:
+            last = 0
+        interval = AIRULESET_STATE_MIN_INTERVAL_S
+        try:
+            interval = int(os.environ.get("AIRULESET_STATE_SWEEP_INTERVAL_S", interval))
+        except ValueError:
+            interval = AIRULESET_STATE_MIN_INTERVAL_S
+        if now - last < interval:
+            return {"total_matched": 0, "classified": 0, "reclaimable": 0,
+                    "removed": 0, "in_use": 0, "too_recent": 0, "capped": False,
+                    "live": live, "reclaimed_bytes": 0, "skipped_cadence": True}
+
+    disc = discover_stray_airuleset_state_candidates(
+        tmp_dir, uid=uid, now=now, min_age_days=min_age_days, proc_dir=proc_dir,
+        max_scan=max_scan)
+    examined = [r for r in disc["examined"] if r.get("path") is not None]
+    genuine = [r for r in examined if r.get("reason") is None]
+    in_use = sum(1 for r in examined if "in live use" in str(r.get("reason", "")))
+    too_recent = sum(1 for r in examined if "too recent" in str(r.get("reason", "")))
+    summary = {"total_matched": disc["total_matched"], "classified": len(examined),
+               "reclaimable": len(genuine), "removed": 0, "in_use": in_use,
+               "too_recent": too_recent, "capped": disc["capped"], "live": live,
+               "reclaimed_bytes": 0}
+
+    if live and not dry_run and genuine:
+        live_tops = _scan_live_tmp_tops(tmp_dir, proc_dir)
+        for r in genuine:
+            p = Path(r["path"])
+            try:
+                if p.is_symlink() or not p.exists():
+                    continue
+                lst = os.lstat(str(p))
+                if lst.st_uid != uid:
+                    continue
+                key = os.path.realpath(str(p))
+                if live_tops is None or key in live_tops:
+                    continue      # raced into live use since discovery -- refuse
+                if p.is_dir():
+                    sz = _dir_stats(p)[0]
+                    shutil.rmtree(p)
+                else:
+                    try:
+                        sz = lst.st_size
+                    except OSError:
+                        sz = 0
+                    p.unlink()
+                summary["removed"] += 1
+                summary["reclaimed_bytes"] += sz
+            except OSError as e:
+                print("  airuleset-state-sweep: delete failed %s: %s" % (p, e), file=sys.stderr)
+
+    _log_airuleset_state_summary(summary, log_path, now)
+    if not dry_run and not disc.get("examined_error"):
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"last_run": now}))
+        except OSError as e:
+            print("  airuleset-state-sweep: could not write state %s: %s" % (state_path, e), file=sys.stderr)
+    return summary
+
+
 # --- Transcript gzip-at-rest retention (#410, split from #380 point 3) -----
 # #376 force-set `cleanupPeriodDays=3650` fleet-wide, disabling Claude
 # Code's own native transcript auto-delete (the previous 30-day default)

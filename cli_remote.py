@@ -41,6 +41,35 @@ from pathlib import Path
 REPO_DIR = Path(__file__).resolve().parent
 
 
+# #548 point 3 — push-gate TMPDIR litter guard (anti-recidivism). After the full
+# suite runs inside its own per-run TMPDIR (redirected via `test_env["TMPDIR"]`
+# below, then removed), count the entries it left behind: the per-run dir is
+# unique + private to THIS push's subprocess, so its leftover count IS the
+# suite's raw-mkdtemp leak with zero interference from the shared box's other
+# workers. Beyond a calibrated cap that is a mkdtemp-without-cleanup regression
+# (the exact class that reached 465k on dev1) — fail the push LOUD. Env-tunable;
+# calibrated ABOVE the measured full-suite baseline so the current suite passes
+# and only a gross regression trips it.
+PUSH_TMPDIR_LITTER_CAP = 6000       # env AIRULESET_PUSH_TMPDIR_LITTER_CAP
+
+
+def _check_push_tmpdir_litter(run_dir, cap=None):
+    """Return `(ok, count)` — `ok=False` when the test suite left more than
+    `cap` top-level entries in its per-run TMPDIR (a leak regression, #548).
+    Never raises: a missing/unreadable dir counts 0 and passes."""
+    if cap is None:
+        try:
+            cap = int(os.environ.get("AIRULESET_PUSH_TMPDIR_LITTER_CAP",
+                                     PUSH_TMPDIR_LITTER_CAP))
+        except (TypeError, ValueError):
+            cap = PUSH_TMPDIR_LITTER_CAP
+    try:
+        count = len(os.listdir(str(run_dir)))
+    except OSError:
+        return (True, 0)
+    return (count <= cap, count)
+
+
 # Per-remote SSH deploy timeout (#263): `cmd_install()` now includes best-
 # effort network-heavy provisioning that can legitimately take well over the
 # old 60s bound on a first-time run — the sum of the INNER timeouts a single
@@ -637,7 +666,8 @@ def cmd_push(args):
     # is `draft_rescue_dir()`'s own env-override, so this is the single
     # place that has to know it exists.
     with tempfile.TemporaryDirectory() as _rescue_tmp, \
-            tempfile.TemporaryDirectory() as _lock_tmp:
+            tempfile.TemporaryDirectory() as _lock_tmp, \
+            tempfile.TemporaryDirectory() as _suite_tmp:
         test_env = dict(os.environ)
         test_env["AIRULESET_DRAFT_RESCUE_DIR"] = str(
             Path(_rescue_tmp) / "draft-rescue")
@@ -665,12 +695,30 @@ def cmd_push(args):
         # rule as the two env-overrides above.
         test_env["AIRULESET_SESSION_STATUS_DIR"] = str(
             Path(_lock_tmp) / "session-status")
+        # #548 CORE (dual-coverage): conftest.py's session-scoped tempfile
+        # redirect is pytest-only and is NEVER read by `unittest discover`, so
+        # this is the single place the push gate's own ~459 raw
+        # `tempfile.mkdtemp`/`mkstemp` call sites are contained — point the
+        # WHOLE subprocess at a per-run TMPDIR removed on context exit.
+        test_env["TMPDIR"] = str(_suite_tmp)
         test_result = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
             cwd=str(REPO_DIR), env=test_env,
         )
+        # #548 point 3 — measure the leak INSIDE the with (before _suite_tmp is
+        # removed); the per-run dir is unique + private to this subprocess, so
+        # its leftover count is the suite's litter with zero shared-box noise.
+        _litter_ok, _litter_count = _check_push_tmpdir_litter(_suite_tmp)
     if test_result.returncode != 0:
         print("  TESTS FAILED — refusing to push untested code.", file=sys.stderr)
+        sys.exit(1)
+    if not _litter_ok:
+        print("  TMPDIR LITTER GUARD: the test suite leaked %d entries into its "
+              "per-run TMPDIR (cap %d) — a `tempfile.mkdtemp` without cleanup "
+              "regression (#548). Fix the leaking test(s) (addCleanup / "
+              "TemporaryDirectory) or raise AIRULESET_PUSH_TMPDIR_LITTER_CAP "
+              "deliberately." % (_litter_count, PUSH_TMPDIR_LITTER_CAP),
+              file=sys.stderr)
         sys.exit(1)
     print("  Tests passed.")
 
