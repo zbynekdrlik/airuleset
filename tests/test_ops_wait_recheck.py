@@ -516,5 +516,31 @@ class TestDoctrineContentLock(unittest.TestCase):
                           "autopilot SKILL W paragraph lost %r (#547 drift)" % tok)
 
 
+class TestPhase2DeferralDecisionLock(unittest.TestCase):
+    """#550 — the source-aware probe (phase 2) was EVALUATED and DEFERRED. The
+    decision + its named REOPEN triggers must live durably in THIS module's
+    docstring (the first thing a future engineer reads on touching the file),
+    not only in a GitHub comment that ages out of view — the #486 'explicit
+    decision log' direction. A partial revert dropping the decision, a load-
+    bearing reason, or the triggers fails this lock, so a future session cannot
+    silently re-open the same evaluated-and-rejected work."""
+
+    # Tokens UNIQUE to the phase-2 DECISION, never one the phase-1 core docstring
+    # above already carries (so the finder never begs the question, #498):
+    # the verdict, the two load-bearing reasons, the already-tunable latency knob,
+    # and the machine-readable REOPEN trigger the probe would first require.
+    TOKENS = ("EVALUATED (#550)", "DEFERRED", "REOPEN",
+              "AIRULESET_OPS_WAIT_RECHECK_CADENCE_S", "fail2ban",
+              "waiting-on:")
+
+    def test_module_docstring_records_phase2_deferral(self):
+        doc = " ".join((owr.__doc__ or "").split())
+        for tok in self.TOKENS:
+            self.assertIn(
+                tok, doc,
+                "ops_wait_recheck docstring lost the #550 phase-2 deferral "
+                "marker %r (decision-log drift)" % tok)
+
+
 if __name__ == "__main__":
     unittest.main()
