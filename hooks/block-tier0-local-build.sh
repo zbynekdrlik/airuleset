@@ -222,25 +222,50 @@ anchor = re.compile(r"(^|[;&|(\s])cargo\s+" + re.escape(sub) + r"(\s|$|[;&|)(<>]
 # followed by `-`, still does NOT match and stays heavy).
 norun = re.compile(r"(^|\s)--no-run(\s|$|[;&|)(<>])")
 # #544: a `cargo test/bench --no-run` is the allowed Tier-0 cheap check ONLY when
-# it is SCOPED to one package/target -- a FULL-WORKSPACE compile-only build (no
-# narrowing flag) compiles every test binary in the workspace (dantesync 6.9 GB)
-# and is heavy in spirit ("heavy compiles run in CI"), so it blocks -> CI just
-# like `cargo build`. Narrowing flags, word-boundary EXACT (same trailing
-# metachar class as the anchors above, so a `--lib;`/`-p x|tee` stays scoped):
-# -p / --package / --lib / --bin / --test / --example / --bench / --doc. The
-# BROAD plurals (--bins/--tests/--examples) and --workspace/--all are NOT in
-# this set, so they stay heavy -- fail-SAFE: a disk gate over-blocks a broad
-# compile rather than under-blocking one (a positional test-NAME filter narrows
-# which tests RUN, never which COMPILE, so it is correctly NOT a narrowing flag).
+# it is SCOPED -- a WHOLE-WORKSPACE compile-only build compiles every test binary
+# in the workspace (dantesync 6.9 GB) and is heavy in spirit ("heavy compiles run
+# in CI"), so it blocks -> CI just like `cargo build`. A segment carrying
+# `--no-run` is HEAVY iff ANY of:
+#   - an explicit whole-workspace flag `--workspace`/`--all` (overrides any
+#     narrowing flag -- `--workspace --lib` compiles every member's lib tests);
+#   - a BROAD PLURAL target selector `--bins`/`--tests`/`--examples` with NO
+#     `-p`/`--package` scope (all-of-kind across the whole workspace); a
+#     PACKAGE-scoped plural `-p x --tests` stays allowed -- same weight as the
+#     already-allowed `-p x`, so we never block one while allowing the other;
+#   - NO narrowing flag at all (the bare/default whole-workspace compile).
+# Narrowing flags, word-boundary EXACT (same trailing metachar class as the
+# anchors above, so `--lib;`/`-p x|tee` stay scoped): -p / --package / --lib /
+# --bin / --test / --example / --bench / --doc. A positional test-NAME filter
+# narrows which tests RUN, never which COMPILE, so it is correctly NOT narrowing.
+# #544-review: the scan stops at the first standalone `--` (harness separator),
+# so a libtest arg after `--` (`-- --lib`, `-- --workspace`) is NEVER read as a
+# cargo target/scope flag -- this both blocks `cargo test --no-run -- --lib` (a
+# real full compile) and avoids false-BLOCKING `-p x -- --workspace` (a scoped
+# build whose harness arg merely spells a broadening flag). Accepted residuals
+# (fail-SAFE over-block or monotonic vs pre-#544, all rare): a narrowing token
+# as the unquoted VALUE of a non-narrowing flag (`--config --lib`) false-allows
+# (needs flag-value parsing); a glued `-pmycrate` / a quoted bare `"--lib"`
+# over-block (safe; the common `-p x`/`-p=x`/`-p "my-crate"` all allow).
 narrowing = re.compile(
     r"(^|\s)(--package|--lib|--bin|--test|--example|--bench|--doc|-p)(=|\s|$|[;&|)(<>])")
+explicit_broad = re.compile(r"(^|\s)(--workspace|--all)(=|\s|$|[;&|)(<>])")
+broad_plural = re.compile(r"(^|\s)(--bins|--tests|--examples)(=|\s|$|[;&|)(<>])")
+pkg_scope = re.compile(r"(^|\s)(--package|-p)(=|\s|$|[;&|)(<>])")
+double_dash = re.compile(r"(^|\s)--(\s|$)")
 for seg in split_top_level(cmd):
     if not anchor.search(seg):
         continue
     if not norun.search(seg):
         sys.exit(0)   # heavy: a real run with no --no-run in its own segment
-    if not narrowing.search(seg):
-        sys.exit(0)   # heavy: full-workspace compile-only build (#544)
+    # only cargo flags BEFORE a harness `--` separator count as scope/breadth
+    dd = double_dash.search(seg)
+    pre = seg[:dd.start()] if dd else seg
+    if explicit_broad.search(pre):
+        sys.exit(0)   # heavy: explicit whole-workspace compile (#544-review)
+    if broad_plural.search(pre) and not pkg_scope.search(pre):
+        sys.exit(0)   # heavy: all-of-kind across the whole workspace, no -p scope
+    if not narrowing.search(pre):
+        sys.exit(0)   # heavy: unscoped -> whole-workspace default compile (#544)
 sys.exit(1)
 PYEOF
 }

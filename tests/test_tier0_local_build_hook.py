@@ -1093,5 +1093,112 @@ class FullSuiteNoRunBlockedTest(_Runner):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
+class ReviewFindingsBroadeningTest(_Runner):
+    """#544 adversarial-review findings (2x fresh-context general-purpose):
+
+    MAJOR (reviewer 1): the presence-based narrowing exemption let a compile
+    carrying BOTH an explicit whole-workspace flag (`--workspace`/`--all`) or a
+    broad plural target selector (`--bins`/`--tests`/`--examples`) AND a
+    narrowing flag slip through as "scoped" -- `cargo test --no-run --workspace
+    --lib` compiles every workspace member's lib tests (whole-workspace codegen,
+    the exact incident class), and it was live on camera-box too (the helper
+    exits 0 before the camera-box check). Fix: a segment with `--no-run` is
+    heavy if it carries `--workspace`/`--all`, OR a broad plural with NO `-p`/
+    `--package` scope, OR no narrowing flag at all. A package-scoped broad plural
+    (`-p x --tests`) stays ALLOWED -- it is consistent with the already-allowed
+    `-p x` (both compile package x's test targets).
+
+    MINOR (both reviewers): a narrowing-looking token AFTER a harness `--`
+    separator (`cargo test --no-run -- --lib`) is a libtest arg, not a cargo
+    target selector, so it false-exempted a full-workspace compile. Fix: the
+    narrowing/broadening scan stops at the first standalone `--` in the segment,
+    so only real cargo flags (before `--`) count -- which ALSO prevents a
+    `-p x -- --workspace` harness arg from false-BLOCKING a genuinely scoped
+    build.
+
+    Accepted residuals (documented, not fixed -- fail-SAFE over-block or
+    monotonic, all rare, none a regression vs pre-#544): a narrowing token as
+    the unquoted VALUE of a non-narrowing flag (`--config --lib`) false-allows
+    (needs flag-value parsing); a glued short flag `-pmycrate` and a quoted bare
+    flag `"--lib"` over-block (safe direction; the common `-p x`/`-p=x`/`-p
+    "my-crate"` forms all allow).
+    """
+
+    # ---- MAJOR: whole-workspace / broad-plural flag OVERRIDES a narrowing flag ----
+
+    def test_workspace_with_narrowing_flag_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --workspace --lib", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_all_with_narrowing_flag_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --all --bin server", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_broad_plural_with_narrowing_flag_no_pkg_is_blocked(self):
+        # `--tests` (all integration tests across the workspace) + `--lib`, no
+        # -p scope -> whole-workspace compile
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --tests --lib", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_bench_all_with_narrowing_flag_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench --no-run --workspace --bench b", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_camera_box_workspace_plus_lib_is_blocked(self):
+        # reviewer 1: the false-allow reopened a bypass on the ONE repo the gate
+        # most protects (camera-box), since the helper exits 0 before the
+        # camera-box check
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo test --no-run --workspace --lib", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_all_targets_full_compile_is_blocked(self):
+        # `--all-targets` is neither narrowing nor broadening -> no narrowing ->
+        # heavy (a full compile of every target kind). Must not crash on the
+        # `--all`-prefix either.
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --all-targets", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- MINOR: harness `--` separator awareness ----
+
+    def test_narrowing_token_after_harness_double_dash_is_blocked(self):
+        # `-- --lib` is a libtest arg, not a cargo target selector -> full compile
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run -- --lib", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_broad_harness_arg_does_not_false_block_a_scoped_build(self):
+        # `-p x` scopes to package x; `-- --workspace` is a harness arg (not a
+        # cargo flag) and must NOT flip the scoped build to heavy
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run -p x -- --workspace", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_lib_with_harness_args_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --lib -- --nocapture --test-threads=1", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- consistency: a package-scoped broad plural stays ALLOWED ----
+
+    def test_pkg_scoped_broad_plural_is_allowed(self):
+        # `-p x --tests` compiles package x's test targets -- the SAME weight as
+        # the already-allowed `-p x`, so it must stay allowed (never block one
+        # while allowing the other)
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run -p x --tests", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_pkg_scoped_alone_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run -p x", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
