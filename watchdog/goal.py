@@ -141,6 +141,7 @@ import watchdog
 from watchdog import compact as _compact
 from watchdog import one_glance as _one_glance          # #486 G3
 from watchdog import session_status as _session_status  # #486 G3 (reaper)
+from watchdog import ops_wait_recheck as _ops_wait_recheck  # #547 (W re-check)
 
 
 # --------------------------------------------------------------------------- #
@@ -2670,7 +2671,7 @@ def _prune_goal_lane_orphans(recs, visited_sids, now,
 def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
-                    sweep_deadline=None):
+                    sweep_deadline=None, ops_wait_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
