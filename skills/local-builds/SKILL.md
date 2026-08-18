@@ -20,21 +20,23 @@ user-invocable: false
 
 | Language | Cheap-compile commands (run before push) |
 |---|---|
-| Rust | `cargo fmt --all --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --no-run --workspace` |
+| Rust | `cargo fmt --all --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings` |
 | Python | `ruff check .`, `ruff format`, `mypy --no-incremental` |
 | Node.js | `npm run lint`, `prettier --check`, `tsc --noEmit` |
 | Go | `gofmt -l .`, `go vet ./...` |
 
-`cargo check` parses + typechecks + borrow-checks (no codegen, no linking). Cost: ~90s cold, ~15s warm. Disk delta ~150-200 MB. `cargo clippy --workspace -- -D warnings` adds ~50 MB. `cargo test --no-run` compiles tests without running them, adds ~300 MB. Total Tier-0 disk: ~500 MB per Rust project — acceptable trade-off vs 15-min CI roundtrips.
+`cargo check --workspace --all-targets` parses + typechecks + borrow-checks EVERY target — lib, bins, AND tests/benches/examples — with no codegen and no linking, so it catches test-code compile errors too. Cost: ~90s cold, ~15s warm. Disk delta ~150-200 MB. `cargo clippy --workspace --all-targets -- -D warnings` adds ~50 MB (it also compiles all targets). Total Tier-0 disk: ~250 MB per Rust project — acceptable trade-off vs 15-min CI roundtrips. A FULL `cargo test --no-run --workspace` additionally does CODEGEN + linking of every test binary (~300 MB and up — dantesync's whole suite is 6.9 GB), so it is now CI-only (#544); `--all-targets` surfaces the front-end (E0xxx) compile errors it would, minus the disk blowup — LINK-time errors (undefined refs, missing FFI/C symbols) and post-monomorphization codegen errors still surface only in CI or a scoped `cargo test --no-run -p <crate>`. If you genuinely need a test BINARY built locally, use the genuinely-narrow `cargo test --no-run -p <crate>` (one package). NOTE: `--lib`/`--bin`/`--test`/`--example`/`--doc` are target-KIND selectors, not package selectors — from a virtual-workspace root a bare `cargo test --no-run --lib` still compiles EVERY member's lib, so on a large workspace only `-p <crate>` is truly light; and `--workspace`/`--all` or a broad plural `--tests`/`--bins`/`--examples` (without `-p`) block regardless of a co-present `--lib` (#544-review).
 
 **MANDATORY pre-push gate after multi-file refactor:**
 
 ```bash
 # Rust
 cargo fmt --all --check && \
-cargo check --workspace && \
-cargo clippy --workspace --all-targets -- -D warnings && \
-cargo test --no-run --workspace
+cargo check --workspace --all-targets && \
+cargo clippy --workspace --all-targets -- -D warnings
+# (--all-targets compile-checks tests/benches too, no codegen. A FULL
+#  `cargo test --no-run --workspace` is CI-only (#544, disk blowup) — a
+#  SCOPED `cargo test --no-run -p <crate>` stays allowed if you need the binary.)
 ```
 
 If ANY of these fail → fix locally, NEVER push the broken code. Each E0xxx caught locally saves a 15-min CI cycle.
@@ -43,7 +45,7 @@ If ANY of these fail → fix locally, NEVER push the broken code. Each E0xxx cau
 
 - `cargo build`, `cargo build --release` — produces deployable binary; CI builds it
 - `cargo tauri build`, `trunk build`, `wasm-pack build` — heavy bundler builds
-- `cargo test` (runs the tests; compile-only via `--no-run` is allowed) — let CI run them
+- `cargo test` (runs the tests) — let CI run them; a full-workspace `cargo test --no-run` (compile-only but whole-suite codegen) is ALSO CI-only (#544), while a SCOPED `cargo test --no-run -p <crate>` / `--lib` is allowed
 - `npm run build`, `vite build`, `next build`, `webpack`, `rollup`, `esbuild --bundle`
 - `docker build` of project images
 - `pyinstaller`, `nuitka`, any Python freezer
@@ -163,17 +165,17 @@ Tier 1 + Tier 2 projects are EXEMPT — their `target/` is a working asset, not 
 
 - **Tier 0:** "Skip `cargo check`, just push and let CI tell me" — **WRONG.** 90s local vs 15 min CI cycle. Run check + clippy first.
 - **Tier 0:** "I'll just `cargo build` to verify it compiles" — **WRONG.** Use `cargo check` (no codegen, no linking, 10× faster).
-- **Tier 0:** "I ran `cargo test` locally, ready to push" — **WRONG.** Use `cargo test --no-run` (compile-only). Let CI run the tests.
+- **Tier 0:** "I ran `cargo test` locally, ready to push" — **WRONG.** Use `cargo check --workspace --all-targets` (compile-checks tests too, no codegen); a full `cargo test --no-run` is CI-only (#544). Let CI run the tests.
 - **Tier 2:** "Push each iteration to let CI build the Windows binary" — **WRONG.** Cross-compile locally with `cargo-xwin`. Push when feature works end-to-end.
 - **Tier 2:** Leaving fast-iterate on after feature stabilises — **WRONG.** `/fast-iterate off` once green on dev for ≥1 day.
 - "5 GB target/ is fine, I have 500 GB" — **WRONG.** Across 10 projects = 50 GB silently accumulating. Purge per Tier-0 rules.
 
 #### Enforcement
 
-- **`block-tier0-local-build.sh` PreToolUse(Bash) hook HARD-BLOCKS a heavy local build** (`cargo build` / `cargo test` (runs) / `cargo tauri build` / `trunk build` / `wasm-pack build`) in a Tier-0 project — the rule alone let presenter's `target/` balloon to 97 GB on dev2. Tier-1/2 (allow / fast-iterate marker), the cheap checks (`cargo check` / `clippy` / `cargo test --no-run`), and an inline `# airuleset:build-ok` / `AIRULESET_ALLOW_LOCAL_BUILD=1` bypass are exempt; an unmanaged dir (no CLAUDE.md) is not enforced.
+- **`block-tier0-local-build.sh` PreToolUse(Bash) hook HARD-BLOCKS a heavy local build** (`cargo build` / `cargo test` (runs) / `cargo run`/`mutants`/`nextest run` / `cmake --build` / `cargo tauri build` / `trunk build` / `wasm-pack build`, AND a FULL-workspace `cargo test`/`bench --no-run` — #544) in a Tier-0 project — the rule alone let presenter's `target/` balloon to 97 GB on dev2. Tier-1/2 (allow / fast-iterate marker), the cheap checks (`cargo check --all-targets` / `clippy --all-targets` / a SCOPED `cargo test --no-run -p <crate>`/`--lib`), and an inline `# airuleset:build-ok` / `AIRULESET_ALLOW_LOCAL_BUILD=1` bypass are exempt (both bypasses DISABLED for camera-box, #477); an unmanaged dir (no CLAUDE.md) is not enforced.
 - `/issue-planner` step 1e audits `~/devel/*/target` etc. before issue selection. Tier 1 (`=allowed`) AND Tier 2 (`=fast-iterate`) projects are EXEMPT from the waste calculation.
 - `/fast-iterate` skill toggles the Tier 2 marker on/off in the current project's CLAUDE.md.
-- Pre-push hook runs Tier-0 fmt check; agent runs `cargo check` + `cargo clippy` + `cargo test --no-run` manually before invoking `git push`.
+- Pre-push hook runs Tier-0 fmt check; agent runs `cargo check --workspace --all-targets` + `cargo clippy --workspace --all-targets` manually before invoking `git push` (both compile-check tests without codegen; a full `cargo test --no-run` is CI-only, #544).
 
 #### The principle
 

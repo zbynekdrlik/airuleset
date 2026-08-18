@@ -6,7 +6,7 @@ user-invocable: true
 
 # /fast-iterate — Toggle Tier-2 Local Build Mode
 
-Per `no-local-builds.md`, projects default to Tier 0 (cheap-compile only — fmt/check/clippy/test --no-run). This skill toggles **Tier 2 (fast-iterate)** in the current project's `CLAUDE.md` — enabling full local builds, cross-compile, and an iterate-locally-before-push workflow.
+Per `no-local-builds.md`, projects default to Tier 0 (cheap-compile only — fmt/check --all-targets/clippy --all-targets, and a SCOPED `test --no-run -p <crate>`; a full-workspace `test --no-run` is CI-only, #544). This skill toggles **Tier 2 (fast-iterate)** in the current project's `CLAUDE.md` — enabling full local builds, cross-compile, and an iterate-locally-before-push workflow.
 
 ## When to use
 
@@ -85,7 +85,7 @@ if grep -qE '<!--\s*airuleset:local-builds=fast-iterate\s*-->' "$CLAUDE_MD" 2>/d
 elif grep -qE '<!--\s*airuleset:local-builds=allowed\s*-->' "$CLAUDE_MD" 2>/dev/null; then
     echo "Tier 1 (allowed) — permanent local-build mode ACTIVE"
 elif [ -f "$CLAUDE_MD" ]; then
-    echo "Tier 0 (default) — cheap-compile only locally (fmt + check + clippy + test --no-run)"
+    echo "Tier 0 (default) — cheap-compile only locally (fmt + check --all-targets + clippy --all-targets + scoped test --no-run -p <crate>; full-workspace test --no-run is CI-only)"
 else
     echo "Tier 0 (default) — no CLAUDE.md found at $PROJECT_ROOT"
 fi
