@@ -97,6 +97,76 @@ class TestRecheckDecision(unittest.TestCase):
         self.assertEqual(out["first_seen"], NOW)
 
 
+class _CountingFetch:
+    """A fetch that records how many times it was actually invoked — the teeth
+    for the #547-review cache fix (a raw per-sweep fetch would call it N times)."""
+
+    def __init__(self, result):
+        self.result = result
+        self.calls = 0
+
+    def __call__(self, cwd):
+        self.calls += 1
+        return self.result
+
+
+class TestCachedOpsWait(unittest.TestCase):
+    def test_second_read_within_ttl_hits_cache_no_refetch(self):
+        # THE fix's teeth: two reads inside the TTL -> ONE fetch. A raw
+        # (uncached) fetch would call it twice — the per-sweep regression.
+        f = _CountingFetch([41, 43])
+        state = {}
+        m1 = owr._cached_ops_wait("/r", f, state, NOW)
+        m2 = owr._cached_ops_wait("/r", f, state, NOW + 60)   # next sweep
+        self.assertEqual(m1, [41, 43])
+        self.assertEqual(m2, [41, 43])
+        self.assertEqual(f.calls, 1, "second read within TTL must hit the cache")
+
+    def test_read_past_ttl_refetches(self):
+        f = _CountingFetch([41])
+        state = {}
+        owr._cached_ops_wait("/r", f, state, NOW, ttl=100)
+        owr._cached_ops_wait("/r", f, state, NOW + 200, ttl=100)   # past TTL
+        self.assertEqual(f.calls, 2)
+
+    def test_none_failure_cached_only_for_fail_ttl(self):
+        f = _CountingFetch(None)
+        state = {}
+        owr._cached_ops_wait("/r", f, state, NOW, fail_ttl=30)
+        # within fail_ttl -> cached None, no refetch
+        owr._cached_ops_wait("/r", f, state, NOW + 10, fail_ttl=30)
+        self.assertEqual(f.calls, 1)
+        # past fail_ttl -> refetch (a transient gh hiccup re-checks soon)
+        owr._cached_ops_wait("/r", f, state, NOW + 40, fail_ttl=30)
+        self.assertEqual(f.calls, 2)
+
+    def test_wired_none_returns_none_no_cache_write(self):
+        state = {}
+        self.assertIsNone(owr._cached_ops_wait("/r", None, state, NOW))
+        self.assertNotIn("ops_wait_cache", state)
+
+    def test_fetch_exception_is_none_and_cached(self):
+        def boom(cwd):
+            raise RuntimeError("gh down")
+        state = {}
+        self.assertIsNone(owr._cached_ops_wait("/r", boom, state, NOW))
+        self.assertIsNone(state["ops_wait_cache"]["/r"]["members"])
+
+    def test_malformed_entry_reads_as_expired(self):
+        f = _CountingFetch([7])
+        state = {"ops_wait_cache": {"/r": {"ts": "notanumber", "members": [1]}}}
+        m = owr._cached_ops_wait("/r", f, state, NOW)
+        self.assertEqual(m, [7])   # refetched, not the malformed [1]
+        self.assertEqual(f.calls, 1)
+
+    def test_per_cwd_keyed(self):
+        f = _CountingFetch([1])
+        state = {}
+        owr._cached_ops_wait("/a", f, state, NOW)
+        owr._cached_ops_wait("/b", f, state, NOW)   # different repo -> own fetch
+        self.assertEqual(f.calls, 2)
+
+
 class TestHelpers(unittest.TestCase):
     def test_fmt_age_hours_then_days(self):
         self.assertEqual(owr._fmt_age(3 * 3600), "~3h")
@@ -196,13 +266,18 @@ class _OrchBase(unittest.TestCase):
 
 class TestOrchestrator(_OrchBase):
     def test_fetch_error_is_undetermined_no_state_change(self):
+        # A raising fetch is absorbed by `_cached_ops_wait` (-> None), so the
+        # orchestrator sees undetermined -> skip, with NO nudge and NO state
+        # write. (The orchestrator's own `skip:fetch-error` branch remains a
+        # defensive backstop for a `_cached_ops_wait` raise.)
         wrecs = {}
 
         def boom(cwd):
             raise RuntimeError("gh down")
 
         logs = self._run(wrecs, boom, self._tmux())
-        self.assertTrue(any("skip:fetch-error" in ln for ln in logs))
+        self.assertTrue(any("skip:" in ln for ln in logs))
+        self.assertFalse(any("nudge" in ln for ln in logs))
         self.assertEqual(wrecs, {})
 
     def test_none_members_undetermined(self):
@@ -374,6 +449,18 @@ class TestLaneSweepWiring(unittest.TestCase):
                                       dry_run=True)
         self.assertEqual(tmux.typed_texts(), [])
         self.assertIsNone(state["ops_wait_recheck"][sid]["last_nudge"])
+
+    def test_fetch_is_cached_across_sweeps(self):
+        # #547 review: the --ops-wait fetch must be per-repo-TTL-cached, not
+        # per-sweep. Two sweeps sharing state (within the TTL) -> ONE fetch.
+        state = {"ops_wait_recheck": {
+            "sess-547-lane": {"first_seen": NOW - 5 * DAY, "last_nudge": None}}}
+        f = _CountingFetch([41])
+        self._armed_sweep(state, ops_wait_fetch=f)
+        self._armed_sweep(state, ops_wait_fetch=f)
+        self.assertEqual(f.calls, 1,
+                         "the --ops-wait fetch must be cached across sweeps, "
+                         "never one gh subprocess per sweep per pane")
 
 
 # --------------------------------------------------------------------------- #

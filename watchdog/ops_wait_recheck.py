@@ -58,6 +58,20 @@ OPS_WAIT_RECHECK_MIN_S = 6 * 3600
 # gate is PRIMARY (a live pane is never reaped regardless of age), this is only
 # the SECONDARY safety for a budget-deferred pane.
 OPS_WAIT_RECHECK_ORPHAN_TTL_S = 24 * 3600
+# env AIRULESET_OPS_WAIT_FETCH_TTL_S — how long a `--ops-wait` member-list read is
+# CACHED per repo (`state["ops_wait_cache"]`, keyed by cwd, shared across every
+# armed pane on that repo). This is what stops the fetch from firing every 60s
+# sweep per pane: the sibling `_watchdog_backlog_fetch` is likewise cached (10 min,
+# `_cached_backlog_count`). 30 min here (a bit longer — the NUDGE cadence is
+# ~daily, so the member list never needs to be minute-fresh; a resolved W is
+# re-detected within ≤1 TTL). Floored so a units error can't turn it into a
+# per-sweep gh union again.
+OPS_WAIT_FETCH_TTL_S = 30 * 60
+OPS_WAIT_FETCH_TTL_MIN_S = 5 * 60
+# a FAILED/unmeasurable fetch (None) is cached only briefly so a transient gh
+# hiccup re-checks soon rather than suppressing detection for a whole TTL —
+# mirrors BACKLOG_CHECK_FAILURE_TTL_S.
+OPS_WAIT_FETCH_FAIL_TTL_S = 60
 
 
 def _env_int(key, default_s):
@@ -75,9 +89,60 @@ def _cadence():
                         OPS_WAIT_RECHECK_CADENCE_S), OPS_WAIT_RECHECK_MIN_S)
 
 
+def _fetch_ttl():
+    """The cache TTL for a real member-list read, floored so an env units error
+    can't collapse it back to a per-sweep fetch."""
+    return max(_env_int("AIRULESET_OPS_WAIT_FETCH_TTL_S", OPS_WAIT_FETCH_TTL_S),
+               OPS_WAIT_FETCH_TTL_MIN_S)
+
+
+def _cached_ops_wait(cwd, ops_wait_fetch, state, now, ttl=None, fail_ttl=None):
+    """The parked W member NUMBERS for the repo at `cwd`, CACHED per-cwd in
+    `state["ops_wait_cache"]` for `ttl` (a real list) / `fail_ttl` (a None
+    failure) — the faithful sibling of `_cached_backlog_count` (#365). This is
+    the load-bearing fix (#547 review): without it the fetch would spawn a
+    `--ops-wait` gh union subprocess EVERY 60s sweep for EVERY armed pane, on the
+    120s-budgeted sweep's critical path — the exact per-sweep-gh class the backlog
+    cache exists to prevent. Bounds it to at most one subprocess per repo per TTL,
+    shared across every armed pane on that repo.
+
+    `ops_wait_fetch is None` (not wired) -> None, no cache write (the "wired = on"
+    convention). A fetch exception -> None. A `ts` crossing the JSON persistence
+    boundary is type-checked (a malformed/legacy entry reads as EXPIRED, never
+    raises). None (unmeasurable) is cached only for `fail_ttl` so a transient gh
+    hiccup re-checks soon. Returns a `list[int]` or None — never a guessed []."""
+    if ops_wait_fetch is None:
+        return None
+    ttl = _fetch_ttl() if ttl is None else ttl
+    fail_ttl = OPS_WAIT_FETCH_FAIL_TTL_S if fail_ttl is None else fail_ttl
+    cache = state.setdefault("ops_wait_cache", {})
+    entry = cache.get(cwd)
+    if isinstance(entry, dict):
+        try:
+            age = now - float(entry.get("ts", 0))
+        except (TypeError, ValueError):
+            age = None
+        if age is not None:
+            members = entry.get("members")
+            entry_ttl = ttl if isinstance(members, list) else fail_ttl
+            if age < entry_ttl:
+                return members if isinstance(members, list) else None
+    try:
+        members = ops_wait_fetch(cwd)
+    except Exception:
+        members = None
+    if not (members is None or isinstance(members, list)):
+        members = None
+    cache[cwd] = {"ts": now, "members": members}
+    return members
+
+
 def _fmt_age(seconds):
     """Human age of a parked W ticket for the nudge text — hours under 48h, days
-    beyond (so a fresh-ish park reads honestly rather than rounding to `0d`)."""
+    beyond (so a fresh-ish park reads honestly rather than rounding to `0d`). A
+    negative age (a future `first_seen` under clock skew) clamps to 0 so the text
+    never reads `~-1h` (#547 review 🔵)."""
+    seconds = max(0, seconds)
     if seconds < 48 * 3600:
         return "~%dh" % int(seconds // 3600)
     return "~%dd" % int(seconds // 86400)
@@ -198,20 +263,25 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
 
     `ops_wait_fetch(cwd)` is the injected seam (network call kept out of run_once
     unit tests, exactly like `backlog_fetch`): returns the parked W numbers
-    (`list[int]`), or None when unmeasurable — None fails safe to `skip`.
+    (`list[int]`), or None when unmeasurable — None fails safe to `skip`. It is
+    read through `_cached_ops_wait` (per-repo TTL cache) so the gh subprocess
+    fires at most once per repo per TTL, never every sweep per pane (#547 review).
 
     Keystroke coordination reuses the sibling machinery verbatim: `send_verified`
     (transcript-proof submit; a swallowed Enter is NOT booked, its text restored),
     `_janitor_mark_watch`/`_janitor_clear_watch` (a residual stuck send stays
     reclaimable via the shared `stuck-check: ` prefix), and the per-sweep
-    `handled` set (at most ONE keystroke per pane per sweep across all jobs — this
-    job runs AFTER the lane nudge in the loop, so a pane the lane nudge already
-    typed is deferred to next sweep, and a nudge WE send adds the sid so job 14's
-    compact never double-types it)."""
+    `handled` set (at most ONE keystroke per pane per sweep across the keystroke
+    jobs — this job runs AFTER the lane nudge in the loop, so a pane the lane
+    nudge already typed is deferred to next sweep, and a nudge WE send claims the
+    sid so any keystroke job later in the SAME sweep skips it)."""
     logs = []
     cadence = cadence or _cadence()
+    # CACHED per-repo (#547 review): the fetch fires at most once per repo per
+    # OPS_WAIT_FETCH_TTL_S, NOT every sweep per pane — the sibling of
+    # `_cached_backlog_count`. A cache/fetch error reads as None -> skip.
     try:
-        members = ops_wait_fetch(cwd)
+        members = _cached_ops_wait(cwd, ops_wait_fetch, state, now)
     except Exception as e:
         logs.append("ops-wait-recheck %s -> skip:fetch-error (%r) — undetermined, "
                     "no nudge" % (loc, e))

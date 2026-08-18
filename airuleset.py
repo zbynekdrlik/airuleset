@@ -3555,7 +3555,10 @@ def _watchdog_ops_wait_fetch(cwd):
     (`core-quals`/`slice-quals`), same `_repo_root(cwd=cwd)` resolution so the
     child subprocess resolves authority exactly as it would inside that session's
     own pane, same refuse→None contract — only the flag differs (`--ops-wait`
-    instead of `--count`) and the parse (member numbers, not a count).
+    instead of `--count`) and the parse (member numbers, not a count). This RAW
+    fetch is uncached; the caller reads it through `ops_wait_recheck._cached_ops_wait`
+    (a per-repo TTL cache, the sibling of `_cached_backlog_count`) so it fires at
+    most once per repo per TTL, never every sweep.
 
     The members come from the SAME `_partition_workable` derivation the footer's
     `W N`, the `/goal` stop-proof's `--ops-wait` list, and the count all use —
@@ -3855,10 +3858,11 @@ def cmd_watchdog(args):
                     # goal-achieved backstop and job 10's widened wedge ping.
                     backlog_fetch=_watchdog_backlog_fetch,
                     # #547 — job 20's W/ops-wait re-check nudge reads the parked
-                    # W member numbers per repo (a per-cwd `gh` read, same 10-min
-                    # cache/authority shape as backlog_fetch). Cadence-gated
-                    # per-session inside, so at most one `--ops-wait` subprocess
-                    # per armed pane per ~day.
+                    # W member numbers per repo. The raw fetch is a per-cwd `gh`
+                    # read, but the orchestrator reads it through the module's own
+                    # per-repo TTL cache (`_cached_ops_wait`, the sibling of
+                    # `_cached_backlog_count`), so it fires at most once per repo
+                    # per OPS_WAIT_FETCH_TTL_S — never every sweep per pane.
                     ops_wait_fetch=_watchdog_ops_wait_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
