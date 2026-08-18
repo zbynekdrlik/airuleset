@@ -200,6 +200,11 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # `vault_purge=None` mutation target on this same first line — the
         # anchor's first line grew; the mutation target `vault_purge=None`
         # itself is untouched.)
+        # (#535 re-pin: `conformance_root=None` was added on the SAME trailing
+        # line as `u_reconcile_clear=None`; the review-fix then added
+        # `conformance_is_target=None` on a NEW trailing line, so the closing `):`
+        # moved off that line again — the anchor's LAST line grew; the mutation
+        # target `vault_purge=None` did not.)
         old = ("             vault_purge=None, vault_backstop=None, "
                "log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
@@ -207,7 +212,8 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                "             progress_dir=None, questions_path=None,\n"
                "             owner_decision_fetch=None, "
                "gk_selfservice_fetch=None,\n"
-               "             u_reconcile_clear=None):")
+               "             u_reconcile_clear=None, conformance_root=None,\n"
+               "             conformance_is_target=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a
