@@ -166,6 +166,26 @@ _is_camera_box_repo() {
 # trunk / wasm-pack / cmake -- are still plain bash grep, so cargo detection
 # degrading toward allow on a broken python3 is the same fail-direction the
 # deleted `_gated_shape_is_heavy` used, never a false block).
+#
+# Accepted residuals (documented per the #319 convention; all rare, off the
+# well-meaning-agent threat model, and either fail-SAFE over-block or a
+# pre-#557-INHERITED under-block -- never a NEW leak of a natural cargo compile):
+#   - a wrapper's NON-numeric VALUE flag (`sudo -u builder cargo build`,
+#     `xargs -I {} cargo build`) -- the wrapper-value skip only consumes flags +
+#     NUMERIC values, so the value token is mistaken for the command word and the
+#     compile is missed. The COMMON forms (`sudo cargo`, `xargs cargo build`,
+#     `timeout 300 cargo`, `nice -n 19 cargo`) all block.
+#   - a cargo compile hidden inside a nested interpreter (`bash -c "cargo build"`,
+#     `eval "cargo build"`) -- `strip_quotes` (the CALLER) removes the quoted
+#     invocation before this ever runs, so it is invisible. PRE-EXISTING (the old
+#     blocklist hook missed it identically); closing it needs interpreter-body
+#     parsing (cf. block-fork-no-merge-issue-close.sh #540), out of scope here.
+#   - the `cargo-<sub>` HYPHEN standalone-binary form (`cargo-nextest run`) is
+#     only caught for the space form (`cargo nextest run`) -- same as the
+#     pre-#557 nextest grep; `cargo(?=\s|$)` deliberately does not match a hyphen.
+#   - `cargo build --help` / `cargo test --help` OVER-block (they print help, no
+#     compile) -- INFO-flag detection only fires when the info flag PRECEDES the
+#     subcommand; fail-SAFE and pre-#557 (the old hook blocked these too).
 _cargo_compiles() {
     python3 - "$1" 2>/dev/null <<'PYEOF'
 import re
@@ -193,7 +213,7 @@ VALUED_FLAGS = {"--color", "--config"}
 # real command word is NONE of these AND not cargo is some OTHER command
 # (`grep cargo file`, `man cargo build`, `which cargo`) -> NOT a cargo compile.
 PREFIX_CMDS = {"sudo", "env", "time", "nice", "timeout", "nohup", "stdbuf",
-               "setsid", "ionice", "chrt", "command", "exec", "doas"}
+               "setsid", "ionice", "chrt", "command", "exec", "doas", "xargs"}
 # shell keywords / group openers that precede a command in a segment
 # (`do cargo run`, `then cargo build`, `{ cargo test`, `! cargo run`).
 SHELL_KW = {"do", "then", "else", "elif", "{", "!"}

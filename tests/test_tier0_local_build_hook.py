@@ -945,7 +945,8 @@ class Tier0ZeroCargoCompilationTest(_Runner):
         out = self.run_hook("cargo test --no-run --test a --test b --test c", proj)
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
-    # ---- every scoped / broad `--no-run` compile now BLOCKS (was #544-allowed) ----
+    # ---- every `--no-run` compile now BLOCKS (the SCOPED forms were #544-allowed;
+    # the whole-workspace form was already #544-blocked -- #557 unifies them) ----
 
     def test_scoped_p_no_run_is_blocked(self):
         proj = self._mkproj()
@@ -998,6 +999,27 @@ class Tier0ZeroCargoCompilationTest(_Runner):
         proj = self._mkproj()
         out = self.run_hook("cargo test --no-run -p x -- --nocapture", proj)
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- command-position (wrapped) compiles BLOCK; cargo-as-argument does NOT ----
+
+    def test_wrapper_prefixed_compiles_block(self):
+        # env-assignment + value-taking shell wrappers must not let a compile slip
+        # (the owner's core complaint is a LEAKED compile). #557-review added xargs.
+        proj = self._mkproj()
+        for cmd in ("RUSTFLAGS=x cargo build", "timeout 300 cargo test --no-run --lib",
+                    "nice -n 19 cargo build", "sudo cargo build", "xargs cargo build",
+                    "(cargo run)", "for i in 1 2; do cargo run; done", "x=$(cargo build)"):
+            out = self.run_hook(cmd, proj)
+            self.assertEqual(out.returncode, 2, cmd + "\n" + out.stdout + out.stderr)
+
+    def test_cargo_as_argument_is_not_blocked(self):
+        # command-position awareness: `cargo` as an ARGUMENT to another command is
+        # not a compile and must NOT be over-blocked (the allowlist-inversion risk).
+        proj = self._mkproj()
+        for cmd in ("grep cargo Cargo.toml", "man cargo build", "which cargo",
+                    "cat cargo.log", "rg -n cargo src"):
+            out = self.run_hook(cmd, proj)
+            self.assertEqual(out.returncode, 0, cmd + "\n" + out.stdout + out.stderr)
 
     # ---- non-test compiling subcommands now BLOCK (were never matched) ----
 
