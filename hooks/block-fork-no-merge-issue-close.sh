@@ -37,21 +37,56 @@ INPUT=$(cat)
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
 [ -z "$CMD" ] && exit 0
 
-# Is this an issue-CLOSE action? Match `gh issue close` at a command boundary, plus
-# the REST-API PATCH form `gh api .../issues/<N> ... state ... closed`. (A quoted
-# mention of the phrase inside e.g. a commit message could false-positive; that is
-# fail-SAFE — the worker simply rephrases — and far cheaper than missing a real close.)
+# #540 (was #533 review M3): a `gh api` PATCH to the ISSUE resource is a
+# close-shaped WRITE. `state=closed` may be VISIBLE in argv (bare OR value-quoted
+# — the ordinary `-f state="closed"` / `state='closed'` shell shape, #540 review
+# FINDING 1), OR HIDDEN in the request BODY — a `--input <file|->` body, or a
+# `=@file`-valued field — where the literal never appears in argv at all (the
+# escape #540 exists for). Treat all of these as a close. It never READS the body
+# (a `--input -` stdin body is fundamentally invisible to a PreToolUse argv
+# scan; the `--input` TOKEN is the fail-safe marker instead). A visible non-close
+# write (a `-f state=open`/`state="open"` reopen, a non-state field with no
+# --input/@file) stays a non-close, so a `issues/N` mention inside a field VALUE
+# on a NON-issue endpoint is NOT over-blocked. The GET/read predicate (`gh api
+# …/issues/N --jq '.state=="closed"'`, no PATCH method) is excluded by the method
+# requirement. The method separator class `[[:space:]=]` catches the GLUED
+# `--method=PATCH` (#533 review M3) as well as `-X PATCH`. This covers the argv
+# shapes a well-meaning stream uses; genuinely out-of-band close routes (a
+# GraphQL `closeIssue` mutation, obfuscation) are documented residuals on the
+# ticket, NOT claimed complete here (#540 review FINDING 1/3). Called ONLY from
+# `if`/`elif` conditions below, so `set -e` is ignored inside the body — the
+# `grep && return 0` chain never aborts the hook on a no-match.
+_is_patch_close_cmd() {
+    printf '%s' "$1" | grep -qE 'gh[[:space:]]+api[^|]*issues/[0-9]+' || return 1
+    printf '%s' "$1" | grep -qE '(-X|--method)[[:space:]=]*[Pp][Aa][Tt][Cc][Hh]' || return 1
+    printf '%s' "$1" | grep -qE 'state=["'\'']?closed' && return 0             # visible (bare or value-quoted, #540 F1)
+    printf '%s' "$1" | grep -qE '(^|[[:space:]])--input([[:space:]=]|$)' && return 0  # hidden body (file/-/=file)
+    printf '%s' "$1" | grep -qE '(-F|--field)[[:space:]=]+[^[:space:]]*=@' && return 0  # -F state=@file
+    return 1
+}
+
+# #540 (was #533 review M3): the `gh issue close` boundary class now includes the
+# quote chars ' and " (widened SYMMETRICALLY on the opening AND closing anchor per
+# the #471 lesson) so a close opening an interpreter's quoted argument
+# (`bash -c 'gh issue close N'`, `sh -c "…"`, `eval "…"`) is a boundary match —
+# otherwise is_close stays 0 and the WHOLE guard is bypassed at the top. Once
+# is_close=1, #533's HAS_INTERP (below) blanks ISSUE_NUM so a nested close can
+# never ride a carve-out. N_CLOSE (the single-action top-level count, below)
+# DELIBERATELY keeps the narrow class — it counts TOP-LEVEL closes only, and a
+# quoted close is nested, not top-level (handled by HAS_INTERP): the two greps
+# answer different questions. The pre-existing fail-safe on a NON-executing quoted
+# mention of the phrase (e.g. inside a `--body "…"` comment) is unchanged in kind,
+# only slightly wider (the phrase at the very start of a quoted string now matches
+# too) — the worker simply rephrases, far cheaper than missing a real close.
+_CLOSE_OPEN='(^|[;&|[:space:]('\''"])'
+_CLOSE_END='([[:space:]]|$|['\''");&|()])'
+
+# Is this an issue-CLOSE action? Match `gh issue close` at a command boundary
+# (quote-aware, #540), plus the REST-API PATCH close forms (`_is_patch_close_cmd`).
 is_close=0
-if printf '%s' "$CMD" | grep -qE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space:]]+close([[:space:]]|$)'; then
+if printf '%s' "$CMD" | grep -qE "${_CLOSE_OPEN}gh[[:space:]]+issue[[:space:]]+close${_CLOSE_END}"; then
     is_close=1
-# REST-API PATCH form: require BOTH the PATCH method AND `state=closed` (the field-set
-# form) — so a READ predicate like `gh api .../issues/N --jq '.state=="closed"'`
-# (which has neither `-X PATCH` nor a bare `state=closed`) is NOT mistaken for a write.
-# The method separator class is `[[:space:]=]` so the GLUED `--method=PATCH` form is
-# caught too (#533 review M3) — `-X PATCH` (space) still matches unchanged.
-elif printf '%s' "$CMD" | grep -qE 'gh[[:space:]]+api[^|]*issues/[0-9]+' \
-     && printf '%s' "$CMD" | grep -qE '(-X|--method)[[:space:]=]*[Pp][Aa][Tt][Cc][Hh]' \
-     && printf '%s' "$CMD" | grep -qE 'state=closed'; then
+elif _is_patch_close_cmd "$CMD"; then
     is_close=1
 fi
 [ "$is_close" -eq 0 ] && exit 0
@@ -122,10 +157,11 @@ REPO_ARG=$(printf '%s' "$CMD" | grep -oE "(-R|--repo)[[:space:]=]+[\"']?[A-Za-z0
 # separately; this guard closes the CHAINED smuggle, the #533-activated path.
 CLOSE_HITS=$(printf '%s' "$CMD" | grep -oE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space:]]+close([[:space:]]|$)' 2>/dev/null || true)
 N_CLOSE=$(printf '%s' "$CLOSE_HITS" | grep -c . 2>/dev/null || true)
+# #540: uses the SAME `_is_patch_close_cmd` predicate as the front gate above —
+# one definition, so the single-action guard and the detector can never drift on
+# what a PATCH-close is (incl. the #540 hidden-body `--input`/`=@file` forms).
 HAS_PATCH_CLOSE=0
-if printf '%s' "$CMD" | grep -qE 'gh[[:space:]]+api[^|]*issues/[0-9]+' \
-   && printf '%s' "$CMD" | grep -qE '(-X|--method)[[:space:]=]*[Pp][Aa][Tt][Cc][Hh]' \
-   && printf '%s' "$CMD" | grep -qE 'state=closed'; then
+if _is_patch_close_cmd "$CMD"; then
     HAS_PATCH_CLOSE=1
 fi
 HAS_INTERP=0
