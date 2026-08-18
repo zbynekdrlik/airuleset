@@ -727,12 +727,12 @@ def cmd_install(args):
             backup = CLAUDE_MD.with_suffix(".md.bak")
             shutil.copy2(CLAUDE_MD, backup)
             print(f"  Backed up: {CLAUDE_MD} -> {backup}")
-            CLAUDE_MD.write_text(new_claude_md)
+            CLAUDE_MD.write_text(new_claude_md, encoding="utf-8")
             print(f"  Updated:   {CLAUDE_MD}")
         else:
             print(f"  No change: {CLAUDE_MD}")
     else:
-        CLAUDE_MD.write_text(new_claude_md)
+        CLAUDE_MD.write_text(new_claude_md, encoding="utf-8")
         print(f"  Created:   {CLAUDE_MD}")
 
     # --- 1b. Record the conformance baseline ({md5, HEAD}) for job 34 (#535) ---

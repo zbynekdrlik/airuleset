@@ -47,11 +47,17 @@ CONFORMANCE_CHECK_INTERVAL_S = 24 * 3600      # env AIRULESET_CONFORMANCE_CHECK_
                                                # daily; the bounded ``git fetch`` for
                                                # the HEAD dimension rides this cadence,
                                                # so at most 1 fetch/day
+CONFORMANCE_CHECK_MIN_S = 3600                 # floor for the env override (#504/#172
+                                               # pattern): a sub-hour value is a units
+                                               # error that would `git fetch` every
+                                               # 60s sweep — clamp UP, never honor 0
 CONFORMANCE_REPING_S = 3 * 24 * 3600          # env AIRULESET_CONFORMANCE_REPING_S —
                                                # re-remind cadence for an UNCHANGED
                                                # divergence: >1 day (never a daily
                                                # re-spam), but finite (never
                                                # permanently silent — the #134 class)
+CONFORMANCE_REPING_MIN_S = 24 * 3600          # floor: a sub-daily re-remind would
+                                               # re-spam every daily check — clamp UP
 WATCHDOG_TIMER_UNIT = "api-watchdog.timer"
 CONF_GIT_TIMEOUT_S = 15                         # network op (fetch) bound (#172 class)
 
@@ -182,9 +188,20 @@ def classify_head(local_sha, origin_sha, behind):
             "alarm" % (local_sha[:8], origin_sha[:8]))
 
 
-def classify_dirty(porcelain, error):
-    """``git status --porcelain`` empty = conformant; non-empty = DRIFT (a
-    hand-edited repo); a git error = UNDETERMINED."""
+def classify_dirty(porcelain, error, at_baseline):
+    """A clean working tree is only EXPECTED on a box that is AT the fleet
+    baseline (HEAD == origin/main). ``at_baseline`` False (HEAD ahead/diverged =
+    local development on dev1, HEAD behind = a stale box the HEAD dimension already
+    owns, or origin unreadable) → UNDETERMINED, never a drift — the same local-dev
+    exemption ``classify_head`` gives an ahead HEAD (#535 review MAJOR-1: without
+    it, job 34 false-alarms on dev1, the live dev/integration checkout, whose tree
+    is legitimately dirty during any airuleset session). AT baseline: empty =
+    conformant; non-empty = DRIFT (a hand-edited deployed box); a git error =
+    UNDETERMINED."""
+    if not at_baseline:
+        return ("dirty", None,
+                "box nie je na fleet baseline (HEAD != origin/main alebo origin "
+                "nečitateľné) — dirty check preskočený (lokálny vývoj/stale)")
     if error:
         return ("dirty", None, "git status zlyhal — preskočené")
     n = len([ln for ln in (porcelain or "").splitlines() if ln.strip()])
@@ -216,16 +233,25 @@ def classify_md5(on_disk_md5, recorded_md5, recorded_head, current_head):
             "edit" % (on_disk_md5[:8], recorded_md5[:8]))
 
 
+_TIMER_DRIFT_STATES = ("inactive", "failed")
+_TIMER_TRANSIENT_STATES = ("activating", "deactivating", "reloading", "maintenance")
+
+
 def classify_timer(status):
-    """``api-watchdog.timer`` active = conformant; any other state = DRIFT (the
-    watchdog is not firing on schedule); an unreadable status = UNDETERMINED."""
+    """``api-watchdog.timer`` active = conformant; only the genuinely-stopped states
+    (``inactive``/``failed``) = DRIFT (the watchdog is not firing on schedule). A
+    TRANSIENT state (``activating``/``reloading``/``deactivating`` — a sweep landing
+    during a ``systemctl --user daemon-reload``/restart) → UNDETERMINED, never a
+    spurious ping (#535 review NIT-1); an unreadable status = UNDETERMINED."""
     if status is None:
         return ("timer", None, "systemctl nedostupné — preskočené")
     if status == "active":
         return ("timer", True, "api-watchdog.timer active")
-    return ("timer", False,
-            "api-watchdog.timer je '%s' (nie active) — watchdog nebeží pravidelne"
-            % status)
+    if status in _TIMER_DRIFT_STATES:
+        return ("timer", False,
+                "api-watchdog.timer je '%s' — watchdog nebeží pravidelne" % status)
+    return ("timer", None,
+            "api-watchdog.timer prechodný stav '%s' — preskočené" % status)
 
 
 # --- ORCHESTRATOR ----------------------------------------------------------
@@ -266,9 +292,11 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
     if baseline_path is None:
         baseline_path = default_baseline_path()
     if interval is None:
-        interval = _env_int("AIRULESET_CONFORMANCE_CHECK_S", CONFORMANCE_CHECK_INTERVAL_S)
+        interval = max(_env_int("AIRULESET_CONFORMANCE_CHECK_S",
+                                CONFORMANCE_CHECK_INTERVAL_S), CONFORMANCE_CHECK_MIN_S)
     if reping is None:
-        reping = _env_int("AIRULESET_CONFORMANCE_REPING_S", CONFORMANCE_REPING_S)
+        reping = max(_env_int("AIRULESET_CONFORMANCE_REPING_S",
+                              CONFORMANCE_REPING_S), CONFORMANCE_REPING_MIN_S)
 
     logs = []
     if not watchdog._sweep_due(state, "conformance_last_check", now, interval):
@@ -306,6 +334,11 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
     else:
         behind = False
     head_facts = {"local": local, "origin": origin}
+    # A clean tree / matching CLAUDE.md is only EXPECTED at the fleet baseline
+    # (HEAD == origin/main). dev1 (the dev checkout) is legitimately ahead/dirty;
+    # the `dirty` dimension is skipped off-baseline (#535 review MAJOR-1). The md5
+    # dimension already has its own equivalent guard (recorded_head != HEAD).
+    at_baseline = bool(local and origin and local == origin)
 
     rc_st, out_st = git_run(["status", "--porcelain"], repo_root)
     dirty_error = (rc_st != 0)
@@ -324,7 +357,7 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
     # --- decide (pure) ---
     decisions = [
         (classify_head(local, origin, behind), head_facts),
-        (classify_dirty(porcelain, dirty_error), dirty_facts),
+        (classify_dirty(porcelain, dirty_error, at_baseline), dirty_facts),
         (classify_md5(on_disk_md5, recorded_md5, recorded_head, local), md5_facts),
         (classify_timer(status), timer_facts),
     ]
@@ -363,7 +396,16 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
             "\U0001f527 **conformance drift** na boxe `%s` — airuleset sa rozišiel "
             "s fleetom:\n> %s\n> Skontroluj deploy / hand-edit; na dev1 spusti "
             "`python3 airuleset.py push` alebo over tento box." % (host, detail),
-            dedup_key="conformance:%s:%s:%d" % (host, dim, int(now // reping)),
+            # FRESH per real decision INSTANT, never a `now // reping` BUCKET
+            # (#535 review MAJOR-2): the per-dimension `seen` dedup above is the
+            # authoritative gate — it already skips a same-sig ping within `reping`
+            # and allows a changed-sig / re-divergence ping immediately. A bucketed,
+            # sig-independent dedup_key would SWALLOW exactly those allowed re-pings
+            # inside notify's own (longer) dedup TTL. `int(now)` is unique per
+            # genuine decision (daily cadence + per-dim `seen` gate = never two in
+            # one second), so it only ever dedups an exact re-fire of the same
+            # decision (the gk_request_backstop "fresh per decision instant" lesson).
+            dedup_key="conformance:%s:%s:%d" % (host, dim, int(now)),
             dry_run=dry_run)
         logs.append("conformance %s [%s] PING -> %s" % (host, dim, status_word))
     return logs

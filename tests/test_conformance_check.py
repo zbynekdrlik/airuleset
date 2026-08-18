@@ -64,10 +64,20 @@ def fake_timer(status="active"):
 
 
 def collect_send():
-    """A recording ``send_fn(body, dedup_key=, dry_run=) -> 'sent'``."""
+    """A recording ``send_fn`` that HONORS ``dedup_key`` exactly like the real
+    ``notify.send`` (persistent per-key dedup with a TTL far longer than the job's
+    own reping): a second call with a dedup_key already seen returns ``"dedup"`` and
+    does NOT deliver. This is what makes the dedup tests genuine teeth — a fake that
+    ignored dedup_key would false-green a bucketed key that swallows real re-pings
+    (#535 review MAJOR-2). ``calls`` records only DELIVERED sends."""
     calls = []
+    seen_keys = set()
 
     def send(body, dedup_key=None, dry_run=False):
+        if dedup_key is not None and dedup_key in seen_keys:
+            return "dedup"
+        if dedup_key is not None:
+            seen_keys.add(dedup_key)
         calls.append({"body": body, "dedup_key": dedup_key})
         return "sent"
     return calls, send
@@ -134,16 +144,21 @@ class TestClassifyHead(unittest.TestCase):
 
 class TestClassifyDirty(unittest.TestCase):
     def test_empty_is_conformant(self):
-        self.assertIs(conf.classify_dirty("", False)[1], True)
-        self.assertIs(conf.classify_dirty("   \n", False)[1], True)
+        self.assertIs(conf.classify_dirty("", False, True)[1], True)
+        self.assertIs(conf.classify_dirty("   \n", False, True)[1], True)
 
     def test_nonempty_is_drift(self):
-        dim, ok, detail = conf.classify_dirty(" M airuleset.py\n?? x\n", False)
+        dim, ok, detail = conf.classify_dirty(" M airuleset.py\n?? x\n", False, True)
         self.assertEqual((dim, ok), ("dirty", False))
         self.assertIn("2", detail)
 
     def test_git_error_undetermined(self):
-        self.assertIsNone(conf.classify_dirty("", True)[1])
+        self.assertIsNone(conf.classify_dirty("", True, True)[1])
+
+    def test_not_at_baseline_undetermined(self):
+        # dev1 / a stale box: a dirty tree off the fleet baseline is local dev, not
+        # drift (#535 MAJOR-1) — even a genuinely dirty tree must NOT alarm.
+        self.assertIsNone(conf.classify_dirty(" M airuleset.py\n", False, False)[1])
 
 
 class TestClassifyMd5(unittest.TestCase):
@@ -174,6 +189,12 @@ class TestClassifyTimer(unittest.TestCase):
 
     def test_unavailable_undetermined(self):
         self.assertIsNone(conf.classify_timer(None)[1])
+
+    def test_transient_state_undetermined(self):
+        # a sweep landing during a daemon-reload/restart must not false-alarm (NIT-1)
+        self.assertIsNone(conf.classify_timer("activating")[1])
+        self.assertIsNone(conf.classify_timer("reloading")[1])
+        self.assertIsNone(conf.classify_timer("deactivating")[1])
 
 
 # --------------------------------------------------------------------------
@@ -231,6 +252,14 @@ class TestRunConformance(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertIn("dirty", calls[0]["dedup_key"])
 
+    def test_dirty_tree_off_baseline_does_not_ping(self):
+        # dev1 (HEAD ahead of origin = local dev) with a dirty tree must be SILENT
+        # on the dirty dimension — the MAJOR-1 false-alarm the review caught.
+        with TemporaryDirectory() as d:
+            _, calls = _run({}, d, status=" M airuleset.py\n",
+                            head="aaa11111", origin="bbb22222", ancestor_rc=1)
+            self.assertEqual(calls, [], "a dirty dev-box tree off baseline must not alarm")
+
     def test_md5_mismatch_pings(self):
         with TemporaryDirectory() as d:
             _, calls = _run({}, d, baseline_md5="DIFFERENT_HASH")
@@ -286,6 +315,23 @@ class TestRunConformance(unittest.TestCase):
             _, calls2 = _run(state, d, timer=fake_timer("inactive"),
                              now=NOW + 4 * DAY)   # past the 3-day reping
             self.assertEqual(len(calls2), 1, "never permanently silent: re-remind past reping")
+
+    def test_send_layer_dedup_key_is_fresh_per_decision_not_bucketed(self):
+        # MAJOR-2: a changed-sig re-ping the primary `seen` ALLOWS must not be
+        # swallowed by the send-layer dedup_key. Share ONE send fake (persistent
+        # seen_keys, like real notify) across two divergences in the SAME reping
+        # bucket — both must DELIVER because the key is fresh per decision instant
+        # (int(now)); a bucketed int(now//reping) key would collide and swallow the
+        # second. This is the send-LAYER teeth the per-_run fresh fakes cannot give.
+        with TemporaryDirectory() as d:
+            state = {}
+            calls, send = collect_send()
+            _run(state, d, send=send, timer=fake_timer("inactive"), now=NOW)
+            state["conformance_last_check"] = 0
+            _run(state, d, send=send, timer=fake_timer("failed"), now=NOW + DAY)
+            self.assertEqual(len(calls), 2,
+                             "both drifts in one reping bucket must deliver — the send "
+                             "dedup_key must be fresh per decision, not bucketed")
 
     def test_resolved_clears_dedup_so_redivergence_repings(self):
         with TemporaryDirectory() as d:
