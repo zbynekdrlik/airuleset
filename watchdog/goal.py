@@ -2767,14 +2767,18 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         if handled is not None and any(ln.startswith("lane-occupancy nudge")
                                        for ln in llogs):
             handled.add(sid)
-        # #547 -- W/ops-wait re-check for this SAME armed pane. Runs AFTER the
-        # lane nudge so a pane the lane nudge already typed (sid in `handled`)
-        # is deferred to next sweep; the orchestrator owns its own `handled`
-        # check + send + state writes (verified delivery, dry-run safe).
+        # #547 W→I + #552 I→W/U -- partition-audit re-check for this SAME armed
+        # pane. Runs AFTER the lane nudge so a pane the lane nudge already typed
+        # (sid in `handled`) is deferred to next sweep; the orchestrator owns its
+        # own `handled` check + send + state writes (verified delivery, dry-run
+        # safe). The I count is the ALREADY-cached `glance.backlog` the one-glance
+        # verdict resolved above (`_cached_backlog_count`) -- ZERO new fetch; None
+        # on a cheap/awaiting-user verdict, which fails the I direction safe.
         if ops_wait_fetch is not None:
             logs += _ops_wait_recheck.goal_ops_wait_recheck(
                 now, run, wrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
-                ops_wait_fetch=ops_wait_fetch, state=state, sleep_fn=sleep_fn)
+                ops_wait_fetch=ops_wait_fetch, state=state, sleep_fn=sleep_fn,
+                i_count=glance.backlog)
     if not dry_run:   # #531 -- prune goal_lane for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_lane_orphans(recs, visited_sids, now)
         # #547 -- the same orphan prune for the ops-wait re-check namespace.
