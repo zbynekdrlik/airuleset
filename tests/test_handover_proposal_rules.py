@@ -274,5 +274,53 @@ class TestProcessSubdevPointer(TestCase):
         self.assertNotIn("only functions already live on PROD", self.t)
 
 
+class TestThreadNameEndsWithStreamNumber(TestCase):
+    """#532 — every client PROD handover thread title ENDS with the owning
+    stream's number (montalu3 → "… 3"), so the owner sees at a glance which
+    stream owns the thread. Locks the STABLE core (the numbered-stream rule +
+    the owner's own canonical example), NOT the interim base-stream suffix,
+    which is pending the owner's decision on #532 and may still change.
+
+    Teeth per #498/#500: the new rule wraps across several physical lines, so
+    a per-line _teeth mixin cannot apply — bound a norm()-collapsed WINDOW to
+    the bullet (its unique start anchor → the next `- **` marker) and assert
+    the operative tokens inside it, so a PARTIAL revert of the bullet (not
+    just a full deletion) fails."""
+
+    START = "The thread NAME ends with the owning stream's NUMBER"
+
+    def setUp(self):
+        self.raw = read(COMPOSE)
+        self.t = norm(self.raw)
+
+    def _bullet_window(self):
+        # The start anchor sits on ONE physical line (verified against the raw
+        # file); index on it, then take the raw slice up to the NEXT bullet
+        # marker and normalize so the markdown line-wrap collapses away.
+        i = self.raw.index(self.START)
+        j = self.raw.find("\n- **", i + len(self.START))
+        self.assertNotEqual(j, -1, "new bullet must be followed by another `- **` bullet")
+        return norm(self.raw[i:j])
+
+    def test_operative_rule_present_whole_file(self):
+        # coarse full-deletion guard (clean assertIn message)
+        self.assertIn(self.START, self.t)
+
+    def test_numbered_stream_rule_has_teeth(self):
+        w = self._bullet_window()
+        self.assertIn("ends with the owning stream's NUMBER", w)
+        # the owner's own canonical example (montalu3 → "… 3")
+        self.assertIn('montalu3 → "Kontrola zákazníckych e-mailov 3"', w)
+        # NUMBERED stream = the trailing digits of the stream name
+        self.assertIn("trailing digits of the stream name", w)
+        self.assertIn("montalu2..8", w)
+
+    def test_unnumbered_base_streams_named(self):
+        # the unnumbered set is stable regardless of which suffix the owner
+        # finally picks for it on #532 — lock only that they are addressed.
+        w = self._bullet_window()
+        self.assertIn("UNNUMBERED base stream (montalu, marek, david, simap)", w)
+
+
 if __name__ == "__main__":
     main()
