@@ -1639,6 +1639,24 @@ from watchdog.wip_ref_sweep import (  # noqa: E402
 )
 
 
+# #535 — job 34, per-box cross-target conformance check. Extracted to
+# `watchdog/conformance.py`; re-exported here so `run_once`'s job-34 dispatch and
+# airuleset.py's `cmd_install` baseline recording resolve unchanged. The leaf
+# reaches the resident `_sweep_due` cadence gate through its own top-level
+# `import watchdog` (call-time attribute access, no cycle — it dereferences NO
+# `watchdog` attribute at load time).
+from watchdog.conformance import (  # noqa: E402
+    run_conformance_check as run_conformance_check,
+    record_conformance_baseline as record_conformance_baseline,
+    default_baseline_path as default_baseline_path,
+    classify_head as classify_head,
+    classify_dirty as classify_dirty,
+    classify_md5 as classify_md5,
+    classify_timer as classify_timer,
+    CONFORMANCE_BASELINE_NAME as CONFORMANCE_BASELINE_NAME,
+)
+
+
 # #433 cluster D — cross-stream backstops (job 8 bounce / job 11 gk-request / the
 # shared backlog-cache read jobs 10/20 consult). Extracted verbatim to
 # `watchdog/cross_stream.py`; re-exported here so `run_once`'s job-8/11 dispatch,
@@ -1712,8 +1730,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
              progress_dir=None, questions_path=None,
              owner_decision_fetch=None, gk_selfservice_fetch=None,
-             u_reconcile_clear=None):
-    """Scan every `claude` pane once. 33 numbered jobs per poll — 27 LIVE and 6
+             u_reconcile_clear=None, conformance_root=None):
+    """Scan every `claude` pane once. 34 numbered jobs per poll — 28 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2169,6 +2187,25 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           `goal_disarmed_q` veto that job 20's `goal_dark_watch` honours (no
           disarm<->re-arm ping-pong) until a genuine human answer lands after it.
           See `goal_question_repoke_watch` in `watchdog/goal.py`.
+      (34) (only when `conformance_root` is given) PER-BOX CONFORMANCE CHECK
+          (#535) — a DAILY self-check that this box's airuleset config/repo has
+          not drifted from the fleet, across four PURE deciders (True conformant /
+          False drift / None undetermined): (1) HEAD vs origin/main after a
+          bounded ≤1×/day fetch (drift only when strictly BEHIND — a missed
+          deploy; ahead/diverged = local dev, no alarm), (2) `git status
+          --porcelain` empty, (3) md5 of `~/.claude/CLAUDE.md` vs the install-
+          recorded `{md5, HEAD}` baseline (skipped when baseline HEAD != current
+          HEAD — install pending after a repo move, so immune to a mid-push false
+          alarm), (4) `api-watchdog.timer` active. ANYTHING uncertain (a git/fetch
+          error, a missing baseline, a systemctl gap) is None → logged, NEVER a
+          false alarm (#486). Drift → LOUD owner ping via `send_fn`, deduped
+          per-dimension (bounded set of 4, no leak): a re-remind cadence (3d)
+          surfaces an unchanged divergence without daily re-spam yet is never
+          permanently silent (#134), an UNDETERMINED sweep never drops a prior
+          episode (#486-G5), resolution clears the dedup. No ssh, no central
+          fan-out (works even when dev1 sleeps); the dead-box gap is a filed
+          central-heartbeat follow-up. See `run_conformance_check` in
+          `watchdog/conformance.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -3862,6 +3899,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              clear_fn=u_reconcile_clear,
              persist=lambda: save_state(state_path, state)),
          "u-label-reconcile error")
+
+    # Job 34 (#535) — PER-BOX CONFORMANCE CHECK. Appended LAST (keeps the
+    # kill-switch NOTICE pinned between job 11 and job 13). Gated on
+    # `conformance_root` being wired (cmd_watchdog passes REPO_DIR; network-free
+    # tests for every other job). Internally cadence-gated (own
+    # `conformance_last_check` key, daily) + fully injectable I/O seams; best-
+    # effort. Every dimension fails safe to UNDETERMINED, never a false alarm.
+    _add("conformance_check", lambda: conformance_root is not None,
+         lambda: run_conformance_check(
+             now, state, send_fn=send_fn, dry_run=dry_run,
+             repo_root=conformance_root,
+             persist=lambda: save_state(state_path, state)),
+         "conformance-check error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

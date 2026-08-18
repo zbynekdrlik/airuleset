@@ -166,6 +166,9 @@ CANONICAL_SWEEP = [
     JobSpec("reconcile_u_labels", "wd", "reconcile_u_labels",
             "u_reconcile_clear", _stub_fetch, "list",
             "u-label-reconcile error"),
+    JobSpec("conformance_check", "wd", "run_conformance_check",
+            "conformance_root", _stub_roots, "list",
+            "conformance-check error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

@@ -30,7 +30,6 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import watchdog as wd                    # noqa: E402
 import watchdog.conformance as conf      # noqa: E402
 
 NOW = 1786000000.0
@@ -364,6 +363,35 @@ class TestRealGit(unittest.TestCase):
             rc, out = gr(["status", "--porcelain"], d)
             self.assertEqual(rc, 0)
             self.assertNotEqual(out.strip(), "")
+
+
+class TestInstallWiring(unittest.TestCase):
+    """The install-baseline step is EXTRACTED (#410-F2) so this exercises the REAL
+    cmd_install step function (dest computation + REPO_DIR passing), not a
+    re-implementation — a mutation to the dest/repo wiring fails it."""
+    def test_step_computes_dest_and_passes_repo_dir(self):
+        import airuleset
+        calls = []
+
+        def rec(content, repo, dest):
+            calls.append((content, repo, dest))
+            return {"claude_md_md5": "x"}
+        out = airuleset._record_conformance_baseline_step("MANAGED\n", record_fn=rec)
+        self.assertEqual(len(calls), 1)
+        content, repo, dest = calls[0]
+        self.assertEqual(content, "MANAGED\n")
+        self.assertEqual(repo, airuleset.REPO_DIR)
+        self.assertEqual(str(dest),
+                         str(airuleset.CLAUDE_DIR / conf.CONFORMANCE_BASELINE_NAME))
+        self.assertEqual(out, {"claude_md_md5": "x"})
+
+    def test_cmd_install_source_calls_the_step(self):
+        # cheap guard that the one-line call site is not dropped (the step is only
+        # useful if cmd_install actually invokes it).
+        import inspect
+        import airuleset
+        src = inspect.getsource(airuleset.cmd_install)
+        self.assertIn("_record_conformance_baseline_step(", src)
 
 
 if __name__ == "__main__":
