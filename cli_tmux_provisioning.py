@@ -431,13 +431,20 @@ def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
     )
 
 
-def _clean_tmux_block_spans(existing):
+def _clean_tmux_block_spans(existing, start=TMUX_MARK_START, end=TMUX_MARK_END):
     """[(start, end)] for every CLEAN (non-crossing) START...END marker
     pair in `existing`, left to right. "Clean" means no OTHER marker
     literal (START or END) falls strictly between a pair's own START and
     its END -- this deliberately refuses to treat an externally-corrupted
     or reordered marker set (e.g. END appearing before START) as a
     replaceable block.
+
+    `start`/`end` default to the managed history-block markers (the #235
+    caller), but are parameterized so the #554 stream-window block reuses
+    the SAME proven scanner rather than a third hardcoded copy (F1
+    review): passing its own `# >>> airuleset tmux stream-window >>>` /
+    `<<<` markers is safe because the two marker sets are mutually
+    non-substring, so each call only ever matches its own block.
 
     Why this matters (#235 adversarial-review finding): a naive whole-file
     `START.*?END` regex would, on a LATER run once a fresh clean block has
@@ -449,20 +456,20 @@ def _clean_tmux_block_spans(existing):
     and left as inert literal text, never merged with anything else."""
     spans = []
     pos = 0
-    s_len = len(TMUX_MARK_START)
+    s_len = len(start)
     while True:
-        s = existing.find(TMUX_MARK_START, pos)
+        s = existing.find(start, pos)
         if s == -1:
             break
-        e = existing.find(TMUX_MARK_END, s + s_len)
+        e = existing.find(end, s + s_len)
         if e == -1:
             pos = s + s_len  # no END anywhere after this START -- skip it
             continue
         inner = existing[s + s_len:e]
-        if TMUX_MARK_START in inner or TMUX_MARK_END in inner:
+        if start in inner or end in inner:
             pos = s + s_len  # another marker crosses this pair -- not clean
             continue
-        e_full = e + len(TMUX_MARK_END)
+        e_full = e + len(end)
         spans.append((s, e_full))
         pos = e_full
     return spans
@@ -639,11 +646,23 @@ def render_stream_tmux_window_block(stream):
     windows after the stream. `stream` is the baked linux username (already
     validated against `_SAFE_STREAM_NAME_RE` by the caller).
 
-    `after-new-window` is DELIBERATELY not emitted -- it CRASHES tmux 3.7b at
-    conf-parse ("server exited unexpectedly", live-verified on the real 3.7b
-    binary) and never names the session's FIRST (claude) window anyway; the
-    `session-created` hook + `automatic-rename off` pair is proven clean on
-    BOTH the fleet's tmux 3.4 and 3.7b."""
+    `after-new-window` is DELIBERATELY not emitted: it fires ONLY on windows
+    opened AFTER the initial one, so it never names the session's FIRST
+    (claude) window -- the one the owner sees on attach -- which
+    `session-created` does. (An earlier probe saw a tmux "server exited
+    unexpectedly" with it, but a fresh-socket re-check showed that was a
+    probe socket-reuse race, not the hook: `after-new-window` parses rc=0
+    on both 3.4 and 3.7b -- it is simply the WRONG hook for the first
+    window.) The `session-created` hook + `automatic-rename off` pair is
+    proven clean on BOTH the fleet's tmux 3.4 and 3.7b (a scratch conf
+    starts rc=0 with `#{window_name}` = the stream on both).
+
+    KNOWN LIMITATION (review F3): `session-created` names only the FIRST
+    window of a NEW session. A second window opened later inside a stream
+    session keeps its own name (with `automatic-rename off` it does not
+    track the command either). Acceptable -- a stream account runs a single
+    claude window -- and the live-apply below is more thorough, renaming
+    EVERY existing window of the primary session on each install."""
     return (
         f"{STREAM_TMUX_WINDOW_MARK_START}\n"
         "# #554: window name = stream account name so the owner sees WHICH\n"
@@ -655,33 +674,6 @@ def render_stream_tmux_window_block(stream):
         f'set-hook -g session-created "rename-window {stream}"\n'
         f"{STREAM_TMUX_WINDOW_MARK_END}"
     )
-
-
-def _stream_window_block_spans(existing):
-    """[(start, end)] for every CLEAN (non-crossing) marker pair in
-    `existing`, left to right -- the same positional-span scan as
-    `_clean_tmux_block_spans` (#235: never a lazy `START.*?END` regex, which
-    on a later run silently deletes real content between a stray leftover
-    START and a genuine block's END), hardcoded to this block's own markers."""
-    spans = []
-    pos = 0
-    s_len = len(STREAM_TMUX_WINDOW_MARK_START)
-    while True:
-        s = existing.find(STREAM_TMUX_WINDOW_MARK_START, pos)
-        if s == -1:
-            break
-        e = existing.find(STREAM_TMUX_WINDOW_MARK_END, s + s_len)
-        if e == -1:
-            pos = s + s_len
-            continue
-        inner = existing[s + s_len:e]
-        if STREAM_TMUX_WINDOW_MARK_START in inner or STREAM_TMUX_WINDOW_MARK_END in inner:
-            pos = s + s_len
-            continue
-        e_full = e + len(STREAM_TMUX_WINDOW_MARK_END)
-        spans.append((s, e_full))
-        pos = e_full
-    return spans
 
 
 def _live_apply_stream_window_name(stream, run=None):
@@ -739,8 +731,9 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, run=None):
     block on a human account (dev1/dev2/gatekeeper).
 
     Same overall shape as apply_stream_ssh_attach (#264): positional-span
-    rewrite (`_stream_window_block_spans`), create-file-if-absent, no-op on
-    a second run. Additionally live-applies the same directives on any
+    rewrite (the shared `_clean_tmux_block_spans`, parameterized with this
+    block's own markers), create-file-if-absent, no-op on a second run.
+    Additionally live-applies the same directives on any
     running server for a stream account (`_live_apply_stream_window_name`)
     so an attached session updates immediately. Returns True iff
     ~/.tmux.conf changed."""
@@ -750,7 +743,8 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, run=None):
     should_have = bool(u) and u in airuleset.AUTHORITY_BY_USER \
         and bool(_SAFE_STREAM_NAME_RE.match(u))
     existing = path.read_text() if path.exists() else ""
-    spans = _stream_window_block_spans(existing)
+    spans = _clean_tmux_block_spans(
+        existing, STREAM_TMUX_WINDOW_MARK_START, STREAM_TMUX_WINDOW_MARK_END)
     if should_have:
         block = render_stream_tmux_window_block(u)
         if spans:

@@ -1397,9 +1397,11 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertIn('set-hook -g session-created "rename-window montalu1"', block)
 
     def test_after_new_window_hook_is_never_emitted(self):
-        # LIVE-VERIFIED (#554): an `after-new-window` hook in the conf CRASHES
-        # tmux 3.7b at parse ("server exited unexpectedly"), and never names
-        # the session's first window anyway -- so it must never appear.
+        # #554: `after-new-window` fires ONLY on windows opened after the
+        # initial one, so it never names the session's FIRST (claude)
+        # window -- the one the owner sees on attach. `session-created` is
+        # the right hook (live-verified rc=0 on tmux 3.4 + 3.7b), so
+        # after-new-window must never appear in the block.
         block = airuleset.render_stream_tmux_window_block("david1")
         self.assertNotIn("after-new-window", block)
 
@@ -1498,6 +1500,43 @@ class TestApplyStreamTmuxWindowName(TestCase):
         p = self._tmp("# existing content\n")
         airuleset.apply_stream_tmux_window_name(p, user="newlevel", run=calls.append)
         self.assertEqual(calls, [], "a human box must get NO tmux mutation")
+
+    def test_marker_sets_are_mutually_non_substring(self):
+        # #554 review F2: apply_tmux_history_limit and this feature share the
+        # SAME positional-span scanner (_clean_tmux_block_spans), so their
+        # correctness across repeated installs rests on neither marker being
+        # a substring of the other -- else one scanner would match the other's
+        # block. Lock it so a future marker rename can't silently corrupt.
+        hs, he = airuleset.TMUX_MARK_START, airuleset.TMUX_MARK_END
+        ss, se = (airuleset.STREAM_TMUX_WINDOW_MARK_START,
+                  airuleset.STREAM_TMUX_WINDOW_MARK_END)
+        self.assertNotIn(hs, ss)
+        self.assertNotIn(ss, hs)
+        self.assertNotIn(he, se)
+        self.assertNotIn(se, he)
+
+    def test_coexists_with_the_history_block_across_repeated_installs(self):
+        # #554 review F2: both managed blocks live in ONE ~/.tmux.conf. Apply
+        # both, then re-apply both, and assert each survives intact with the
+        # user's own content preserved -- neither scanner eats the other.
+        p = self._tmp("set -g mouse on\n")
+        airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
+        # a second install of BOTH must be a byte-for-byte no-op
+        before = p.read_text()
+        c1 = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        c2 = airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", run=lambda argv: None)
+        after = p.read_text()
+        self.assertFalse(c1)
+        self.assertFalse(c2)
+        self.assertEqual(before, after)
+        # both managed blocks + the user's own line all present, exactly once
+        self.assertEqual(after.count(airuleset.TMUX_MARK_START), 1)
+        self.assertEqual(after.count(airuleset.STREAM_TMUX_WINDOW_MARK_START), 1)
+        self.assertIn("set -g mouse on", after)
+        self.assertIn("set-option -g history-limit", after)
+        self.assertIn('rename-window montalu2', after)
 
 
 if __name__ == "__main__":
