@@ -278,7 +278,7 @@
   "rule_bytes": {
     ".claude/rules/airuleset-internals.md": 8192,
     ".claude/rules/internals-burn.md": 51200,
-    ".claude/rules/internals-cli.md": 53300,
+    ".claude/rules/internals-cli.md": 50639,
     ".claude/rules/internals-filedrop.md": 51200,
     ".claude/rules/internals-hooks.md": 51200,
     ".claude/rules/internals-notify.md": 51200,
