@@ -966,6 +966,19 @@ def cmd_install(args):
     except Exception as e:
         print(f"  managed plugins setup error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 6c. subagent status line: model+effort in the agent strip (#538) ---
+    # Native subagentStatusLine (CC v2.1.205+): surfaces each inline
+    # subagent's RESOLVED model per strip row. Runs AFTER caveman's settings
+    # write (step 6) so it reconciles the already-updated settings.json.
+    # Non-fatal — a status-line shim must never fail the whole install (a
+    # broken one just leaves CC's default rows), matching the discord-check
+    # step below.
+    try:
+        import subagent_statusline
+        subagent_statusline.setup(REPO_DIR, CLAUDE_DIR, str(SETTINGS_JSON))
+    except Exception as e:
+        print(f"  subagent status line setup error (non-fatal): {e}", file=sys.stderr)
+
     # --- 7. Discord notify config: warn LOUDLY if this host has no .env ---
     try:
         check_discord_notify_config()

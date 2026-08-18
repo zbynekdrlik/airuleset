@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 5061,
+    "airuleset.py": 5074,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 793,
@@ -30,6 +30,7 @@
     "filedrop/vault_server.py": 385,
     "notify/__init__.py": 2396,
     "statusbar.py": 685,
+    "subagent_statusline.py": 300,
     "tests/_goal_arm_helpers.py": 261,
     "tests/_hook_state_cleanup.py": 164,
     "tests/conftest.py": 129,
@@ -181,6 +182,7 @@
     "tests/test_strip_selection.py": 491,
     "tests/test_stuckcheck_sensitivity.py": 114,
     "tests/test_subagent_bg_work.py": 956,
+    "tests/test_subagent_statusline.py": 254,
     "tests/test_subagent_stop_check_design.py": 315,
     "tests/test_subdev_cross_stream_validation.py": 125,
     "tests/test_subdev_handoff_match.py": 309,
@@ -253,7 +255,7 @@
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
-    "airuleset.py::cmd_install": 430,
+    "airuleset.py::cmd_install": 443,
     "airuleset.py::cmd_notify": 318,
     "airuleset.py::main": 558,
     "cli_remote.py::cmd_push": 367,
