@@ -2255,9 +2255,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           nothing. See `run_conformance_heartbeat_check` in
           `watchdog/conformance_heartbeat.py`.
       (36) (only when `gkorphan_fetch` is given) ORPHANED gk HAND-OFF MARKER
-          BACKSTOP (#551) — the SUPERVISOR-side detection mirror of the
-          prevention hook `block-raw-gatekeeper-action-comment.sh`. The miva1
-          incident: a stream HAND-WROTE a MUTATED `GATEKEEPER-ACTION
+          BACKSTOP (#551) — the SUPERVISOR-side detection complement of the
+          verified-delivery guidance in `cmd_gk_request`'s docstring (item 2 =
+          docs + this backstop, NOT a hook — see the ticket's design-refinement).
+          The miva1 incident: a stream HAND-WROTE a MUTATED `GATEKEEPER-ACTION
           (spresnenie …):` marker COMMENT (a parenthetical before the colon)
           instead of using `airuleset.py gk-request`; the repo auto-label
           workflow matches only line-start `GATEKEEPER-ACTION:` so no
@@ -2265,21 +2266,23 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           COMMENTS — the hand-off was invisible to every layer and the stream
           parked for hours on a NEVER-DELIVERED request. On a supervisor box,
           for a cross-stream repo, ONE cheap `in:comments` search narrows the
-          field; each candidate is then verified from its own comments/labels
-          against a FALSIFIABLE five-condition orphan gate biased hard to
-          SILENCE (a MUTATED marker ∧ NO proper `GATEKEEPER-ACTION:` sibling ∧
-          not currently labeled ∧ `needs-gatekeeper` NEVER in the PAGINATED
-          label timeline ∧ no GA-title). The token is pervasive in this repo's
-          comment history (every gk-request leaves a marker forever), so a
-          naive "token + no label = orphan" rule would false-accuse ~44
-          processed tickets (measured live) — hence the narrow gate. A genuine
-          orphan is RECONCILED supervisor-side (evidence comment + add
-          `needs-gatekeeper` → job 11 nudges the supervisor), a label-add
-          failure surfaces via ONE deduped ping. Every candidate's verdict is
-          logged (#486); a gh error reports nothing (never a false accusation);
-          the `seen` dedup is dry-run-safe (#516 F1). Generous 6h cadence,
-          candidates capped freshest-first. See `gk_orphan_marker_sweep` in
-          `watchdog/cross_stream.py`.
+          field; each candidate (ALL ≤60 fetched, once per 6h) is then verified
+          from its own comments/labels against a FALSIFIABLE SIX-condition
+          orphan gate biased hard to SILENCE (a MUTATED bracketed-annotation
+          marker ∧ NO proper `GATEKEEPER-ACTION:` sibling ∧ NO downstream
+          `ready-for-review`/`needs-acceptance` flow label ∧ not currently
+          labeled ∧ `needs-gatekeeper` NEVER in the PAGINATED label timeline ∧
+          no GA-title; fenced code pastes stripped). The token is pervasive in
+          this repo's comment history (every gk-request leaves a marker
+          forever), so a naive "token + no label = orphan" rule would
+          false-accuse ~44 processed tickets (measured live) — hence the narrow
+          gate. A genuine orphan is RECONCILED supervisor-side (evidence comment
+          + add `needs-gatekeeper` → job 11 nudges the supervisor); a label-add
+          failure keeps the comment (never re-posted) and surfaces via ONE
+          deduped ping. Every candidate's verdict is logged (#486); a gh error
+          reports nothing (never a false accusation); the `seen` dedup is
+          dry-run-safe (#516 F1). Generous 6h cadence. See
+          `gk_orphan_marker_sweep` in `watchdog/cross_stream.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the

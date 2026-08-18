@@ -19,6 +19,7 @@ false-accuse ~44 processed tickets — hence the ANDed gate.
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
@@ -96,6 +97,37 @@ class MarkerKinds(unittest.TestCase):
         self.assertFalse(has_mutated)
         self.assertFalse(has_proper)
 
+    def test_col0_prose_status_line_is_not_a_marker(self):
+        # adversarial review F1: a benign col-0 status note that opens with the
+        # token and merely CONTAINS a colon (no bracketed annotation) must NOT
+        # read as a mutated marker — else it is a reachable false accusation.
+        for prose in ("GATEKEEPER-ACTION tasks remaining: agent deploy, MCP",
+                      "GATEKEEPER-ACTION items to finish before release: two"):
+            has_mutated, has_proper = cs._gk_marker_kinds([prose])
+            self.assertFalse(has_mutated, prose)
+            self.assertFalse(has_proper, prose)
+
+    def test_bracket_variant_is_mutated(self):
+        # a square-bracket annotation is the same hand-off shape as a paren.
+        has_mutated, has_proper = cs._gk_marker_kinds(
+            ["GATEKEEPER-ACTION [urgent]: restart the stuck queue"])
+        self.assertTrue(has_mutated)
+        self.assertFalse(has_proper)
+
+    def test_fenced_marker_paste_is_not_a_marker(self):
+        # adversarial review F2: a marker pasted inside a ```-fenced block is a
+        # documentation/incident write-up, not a live hand-off.
+        body = ("Toto je incident writeup:\n\n```\n"
+                "GATEKEEPER-ACTION (spresnenie): deploy X\n```\n\nhotovo")
+        has_mutated, has_proper = cs._gk_marker_kinds([body])
+        self.assertFalse(has_mutated)
+        self.assertFalse(has_proper)
+
+    def test_tilde_fenced_marker_paste_is_not_a_marker(self):
+        body = "~~~\nGATEKEEPER-ACTION (x): do it\n~~~"
+        has_mutated, has_proper = cs._gk_marker_kinds([body])
+        self.assertFalse(has_mutated)
+
 
 # --------------------------------------------------------------------------- #
 # The PURE decider (facts-in / verdict-out).
@@ -122,6 +154,14 @@ class OrphanDecide(unittest.TestCase):
             True, True, False, False, False)
         self.assertFalse(is_orphan)
         self.assertEqual(reason, "has-proper-marker")
+
+    def test_handoff_flow_never_orphan(self):
+        # #4128: a ready-for-review / needs-acceptance ticket has already
+        # engaged the gatekeeper via the review/acceptance flow.
+        is_orphan, reason = cs._gk_orphan_decide(
+            True, False, False, False, False, handoff_flow=True)
+        self.assertFalse(is_orphan)
+        self.assertEqual(reason, "in-gatekeeper-flow")
 
     def test_ga_title_never_orphan(self):
         is_orphan, reason = cs._gk_orphan_decide(
@@ -156,13 +196,16 @@ class OrphanDecide(unittest.TestCase):
 # The JOB, driven with an injected fetch + a recording reconcile.
 # --------------------------------------------------------------------------- #
 class _Recorder:
-    def __init__(self, ok=True):
+    """Injected reconcile stub — returns the TRI-STATE the real
+    `_apply_gk_orphan_reconcile` returns ("labeled"/"label-failed"/
+    "comment-failed")."""
+    def __init__(self, status="labeled"):
         self.calls = []
-        self.ok = ok
+        self.status = status
 
     def __call__(self, root, num):
         self.calls.append((root, num))
-        return self.ok
+        return self.status
 
 
 class _SendRec:
@@ -175,10 +218,17 @@ class _SendRec:
 
 
 _ORPHAN = {"number": 3244, "has_mutated": True, "has_proper": False,
-           "currently_labeled": False, "ga_title": False, "ever_labeled": False}
+           "handoff_flow": False, "currently_labeled": False,
+           "ga_title": False, "ever_labeled": False}
 _PROCESSED = {"number": 10, "has_mutated": True, "has_proper": True,
-              "currently_labeled": False, "ga_title": False,
-              "ever_labeled": True}
+              "handoff_flow": False, "currently_labeled": False,
+              "ga_title": False, "ever_labeled": True}
+# The #4128 live false-positive shape: a GENUINE mutated marker on a ticket
+# already worked via the review/acceptance flow (needs-acceptance) — must be
+# SILENT ("in-gatekeeper-flow"), never reconciled.
+_FLOW = {"number": 4128, "has_mutated": True, "has_proper": False,
+         "handoff_flow": True, "currently_labeled": False,
+         "ga_title": False, "ever_labeled": False}
 
 
 def _run(candidates, rec=None, send=None, roots=None, state=None, now=10 ** 9,
@@ -229,14 +279,40 @@ class JobBehaviour(unittest.TestCase):
         self.assertTrue(any("gk-orphan-already odoo-erp#3244" in ln
                             for ln in logs), logs)
 
-    def test_label_add_failure_pings_and_undoes_dedup(self):
-        rec = _Recorder(ok=False)
+    def test_flow_ticket_is_not_reconciled(self):
+        # #4128: a genuine mutated marker on a review/acceptance-flow ticket →
+        # SILENT (the gatekeeper already engaged).
+        logs, _, rec, _ = _run([_FLOW])
+        self.assertEqual(rec.calls, [])
+        self.assertTrue(any("gk-orphan-skip odoo-erp#4128 (in-gatekeeper-flow)"
+                            in ln for ln in logs), logs)
+
+    def test_label_failed_keeps_dedup_pings_and_does_not_repost(self):
+        # F2: comment posted (durable record) but label failed → KEEP the dedup
+        # (never re-post the comment) + ping once.
+        rec = _Recorder(status="label-failed")
         logs, st, _, send = _run([_ORPHAN], rec=rec)
-        self.assertEqual(len(rec.calls), 1)          # it TRIED to reconcile
-        self.assertNotIn("odoo-erp#3244", st["gkorphan"]["seen"])  # undone
-        self.assertEqual(len(send.calls), 1)         # pinged once
+        self.assertEqual(len(rec.calls), 1)
+        self.assertIn("odoo-erp#3244", st["gkorphan"]["seen"])   # KEPT (no re-post)
+        self.assertEqual(len(send.calls), 1)                     # pinged once
         self.assertIn("orphaned gk hand-off", send.calls[0][0])
-        self.assertTrue(any("gk-orphan-reconcile-failed" in ln for ln in logs),
+        self.assertTrue(any("label add failed" in ln for ln in logs), logs)
+        # a SECOND sweep does NOT re-reconcile (would re-post the comment)
+        logs2, _, rec2, send2 = _run(
+            [_ORPHAN], seen={"odoo-erp#3244": 1})
+        self.assertEqual(rec2.calls, [])
+        self.assertEqual(send2.calls, [])
+
+    def test_comment_failed_undoes_dedup_for_retry_no_ping(self):
+        # nothing posted → safe to undo the dedup and retry; no ping (nothing
+        # to surface yet).
+        rec = _Recorder(status="comment-failed")
+        logs, st, _, send = _run([_ORPHAN], rec=rec)
+        self.assertEqual(len(rec.calls), 1)
+        self.assertNotIn("odoo-erp#3244", st["gkorphan"]["seen"])  # undone
+        self.assertEqual(send.calls, [])
+        self.assertTrue(any("gk-orphan-reconcile-failed" in ln
+                            and "comment did not post" in ln for ln in logs),
                         logs)
 
     def test_reduced_stream_box_never_reconciles(self):
@@ -275,6 +351,50 @@ class JobBehaviour(unittest.TestCase):
         self.assertTrue(any("gk-orphan-skip odoo-erp#10" in ln for ln in logs))
         self.assertTrue(any("gk-orphan-reconcile odoo-erp#3244" in ln
                             for ln in logs))
+
+
+# --------------------------------------------------------------------------- #
+# The REAL reconcile apply — the comment-then-label tri-state (F2 was invisible
+# to the injected-stub job tests: the real comment-then-label split must be
+# exercised so a persistent label failure is proven to post the comment ONCE).
+# --------------------------------------------------------------------------- #
+class RealApply(unittest.TestCase):
+    def _run_apply(self, returncodes, dry_run=False):
+        calls = []
+        seq = iter(returncodes)
+
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            return SimpleNamespace(returncode=next(seq), stdout="", stderr="")
+
+        with mock.patch.object(cs, "_gh_env", lambda *a, **k: {}), \
+             mock.patch("subprocess.run", fake_run):
+            result = cs._apply_gk_orphan_reconcile("/root", 42, dry_run=dry_run)
+        return result, calls
+
+    def test_comment_and_label_ok_returns_labeled(self):
+        result, calls = self._run_apply([0, 0])
+        self.assertEqual(result, "labeled")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("comment", calls[0])
+        self.assertIn("--add-label", calls[1])
+
+    def test_label_fail_returns_label_failed_and_posts_comment_once(self):
+        result, calls = self._run_apply([0, 1])   # comment ok, label fails
+        self.assertEqual(result, "label-failed")
+        self.assertEqual(sum(1 for c in calls if "comment" in c), 1)  # ONCE (F2)
+
+    def test_comment_fail_returns_comment_failed_no_label_attempt(self):
+        result, calls = self._run_apply([1])       # comment fails
+        self.assertEqual(result, "comment-failed")
+        self.assertEqual(len(calls), 1)            # no label edit attempted
+        self.assertNotIn("--add-label",
+                         [x for c in calls for x in c])
+
+    def test_dry_run_mutates_nothing(self):
+        result, calls = self._run_apply([], dry_run=True)
+        self.assertEqual(result, "labeled")
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
