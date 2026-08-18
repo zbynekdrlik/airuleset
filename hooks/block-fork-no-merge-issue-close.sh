@@ -126,6 +126,63 @@ if [ -n "$ISSUE_NUM" ]; then
     fi
 fi
 
+# #533: acceptance-close carve-out (ADDITIVE — the author carve-out above is
+# BYTE-UNTOUCHED; the `gh api PATCH` form is NEVER exempted here, since ISSUE_NUM
+# is empty for it). Authorship is a DEAD ownership signal on a shared-bot-identity
+# box (every montalu-stream ticket is authored by the maintainer, so the author
+# carve-out refuses even a genuine stream close). Ownership is instead the
+# `stream:<user>` LABEL — the SAME signal cli_quals.py's `_ticket_is_stream_labeled`
+# / `_slice_quals` already use, and it survives a shared gh identity. A
+# REDUCED-authority stream may CLOSE its OWN stream-labeled `needs-acceptance`
+# ticket WITH an evidence --comment. Allowed IFF ALL of:
+#   (1) `authority --stream-label` is non-empty (this box's own stream label —
+#       empty on a full-authority box, so the exemption never fires there);
+#   (2) the ticket carries THAT label AND `needs-acceptance` AND NONE of the #512
+#       re-hand-off/bounce override labels (ready-for-review / needs-gatekeeper /
+#       prio:bounce — a re-hand-off/bounce is NOT an acceptance state);
+#   (3) the command carries --comment/-c (close WITH a citation of the acceptance
+#       evidence — a static presence check, deliberately no content grading).
+# Every failure (empty stream label, unreadable labels, foreign/absent label,
+# missing needs-acceptance, any override label present, missing --comment) falls
+# through to the BLOCK below — fail toward hand-off, the SAME direction as the
+# fail-safe above (#349/#463), never toward a wrong-allow. Why the #349 hole stays
+# closed: `needs-acceptance` is applied EXCLUSIVELY by the gatekeeper AFTER the
+# /process-subdev release pipeline, so a verbatim montalu3 replay (merged into the
+# integration branch, no release yet) carries no such label and still blocks.
+ACCEPTANCE_MISSING_COMMENT=0
+if [ -n "$ISSUE_NUM" ]; then
+    STREAM_LABEL=$(python3 "$REPO_DIR/airuleset.py" authority --stream-label 2>/dev/null || echo "")
+    if [ -n "$STREAM_LABEL" ]; then
+        GH_RC=0
+        if [ -n "$REPO_ARG" ]; then
+            LABEL_NAMES=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json labels -q '.labels[].name' 2>/dev/null) || GH_RC=$?
+        else
+            LABEL_NAMES=$(gh issue view "$ISSUE_NUM" --json labels -q '.labels[].name' 2>/dev/null) || GH_RC=$?
+        fi
+        # A gh error reading labels is fail-SAFE: never exempt on an unverifiable
+        # label set (mirror of the empty-AUTH / empty-AUTHOR fail direction).
+        if [ "$GH_RC" -eq 0 ]; then
+            # Whole-line fixed-string membership (label names carry `:`; never a
+            # regex). Defined here (reachable, LABEL_NAMES in scope); only ever
+            # called inside `if`/`&&`/`!` conditions, so `set -e` never aborts on
+            # a grep no-match.
+            _has_label() { printf '%s\n' "$LABEL_NAMES" | grep -qxF "$1"; }
+            if _has_label "$STREAM_LABEL" && _has_label "needs-acceptance" \
+               && ! _has_label "ready-for-review" \
+               && ! _has_label "needs-gatekeeper" \
+               && ! _has_label "prio:bounce"; then
+                # Conditions 1+2 hold; condition 3 (--comment/-c) is the last gate.
+                if printf '%s' "$CMD" | grep -qE -- '--comment([[:space:]=]|$)' \
+                   || printf '%s' "$CMD" | grep -qE -- '(^|[[:space:]])-c([[:space:]=]|$)'; then
+                    exit 0   # acceptance close WITH evidence citation — allowed (#533)
+                else
+                    ACCEPTANCE_MISSING_COMMENT=1
+                fi
+            fi
+        fi
+    fi
+fi
+
 if [ "$AUTH" = "branch-merge" ]; then
     echo "BLOCKED: branch-merge stream — you may close ONLY your OWN (self-authored) issues." >&2
     echo "" >&2
@@ -162,5 +219,17 @@ else
     echo "    - OBSOLETE ticket: gh issue comment <N> --body \"OBSOLETE: <evidence>\"   (do NOT close)" >&2
     echo "" >&2
     echo "  See agents/autopilot-worker.md (fork-no-merge) + pr-merge-policy.md (reduced-authority scope)." >&2
+fi
+
+# #533: ONLY condition 3 failed — ownership + acceptance state were both OK, the
+# close was refused solely because it carried no evidence citation. Name the
+# acceptance recipe (this hint fires for NO other block reason, so it never
+# invites a workaround on a genuinely foreign/assigned ticket).
+if [ "${ACCEPTANCE_MISSING_COMMENT:-0}" = "1" ]; then
+    echo "" >&2
+    echo "  #533 NOTE: this issue carries YOUR stream label + needs-acceptance and no" >&2
+    echo "  re-hand-off/bounce label — a stream ACCEPTANCE close IS allowed, but ONLY WITH" >&2
+    echo "  a citation of the acceptance evidence. Re-run adding a --comment:" >&2
+    echo "    gh issue close $ISSUE_NUM --comment \"<acceptance evidence — client confirmed, ref …>\"" >&2
 fi
 exit 2

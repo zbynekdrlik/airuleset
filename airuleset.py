@@ -4941,6 +4941,14 @@ def main():
                              "the real gh login. Prints nothing when the "
                              "identity cannot be resolved (the hook then refuses "
                              "the exemption / fails safe).")
+    p_auth.add_argument("--stream-label", action="store_true",
+                        help="Print THIS stream's ownership label "
+                             "`stream:<unix-user>` for the acceptance-close "
+                             "carve-out in block-fork-no-merge-issue-close.sh "
+                             "(#533) — only on a REDUCED-authority box "
+                             "(marker-aware); a full-authority box prints "
+                             "nothing, so the hook's fail-safe refuses the "
+                             "exemption.")
 
     p_slice = sub.add_parser(
         "slice-quals",

@@ -627,6 +627,19 @@ def cmd_authority(args):
         if login:
             print(login)
         return
+    if getattr(args, "stream_label", False):
+        # #533: THIS stream's ownership label `stream:<unix-user>` for the
+        # acceptance-close carve-out in block-fork-no-merge-issue-close.sh.
+        # Printed ONLY on a REDUCED-authority box (marker-aware via
+        # resolve_authority, so a project marker is honored exactly like the
+        # profile print below); a FULL-authority box prints NOTHING, so the
+        # hook's fail-safe refuses the exemption. The label matches the one the
+        # tickets carry (`_ticket_is_stream_labeled`) and the sub-dev slice uses
+        # (`_slice_quals`) — the ownership signal that survives a shared gh
+        # identity, unlike authorship (#463). No network call.
+        if resolve_authority() != "full":
+            print("stream:%s" % airuleset._current_user())
+        return
     profile = resolve_authority()
     print(profile)
     if getattr(args, "explain", False):
