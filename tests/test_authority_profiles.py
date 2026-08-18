@@ -1788,10 +1788,16 @@ class TestSliceQualsRefusesAnUnresolvableIdentity(TestCase):
         import unittest.mock as mk
 
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
+            # #537: montalu is a base-stream rename target, so its shared-account
+            # slice now carries BOTH the old and the new stream label (the
+            # transition alias). The BRANCH selection (shared-account -> label
+            # only) is unchanged; only the label set expanded.
             self.assertEqual(airuleset._slice_quals("montalu"),
-                             ["label:stream:montalu"])
+                             ["label:stream:montalu", "label:stream:montalu1"])
         with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
-            self.assertEqual(len(airuleset._slice_quals("david")), 3)
+            # #537: david's own-account slice keeps assignee/author + BOTH the
+            # old and new stream label (david + david1) -> 4 quals, not 3.
+            self.assertEqual(len(airuleset._slice_quals("david")), 4)
 
     def test_montalu5_8_slice_quals_derive_generically_no_new_map_needed(self):
         # airuleset#378: statusline/`/goal` stop-proof scoping for
@@ -1896,11 +1902,14 @@ class TestSliceQualsHandlesAppTokenBoxes(TestCase):
             with mk.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": str(missing)}):
                 with mk.patch.object(airuleset, "_gh_login",
                                      return_value="zbynekdrlik"):
+                    # #537: the base-stream rename alias expands montalu's
+                    # shared-account slice to both labels; the App-token
+                    # branch selection this test guards is still unaffected.
                     self.assertEqual(airuleset._slice_quals("montalu"),
-                                     ["label:stream:montalu"])
+                                     ["label:stream:montalu", "label:stream:montalu1"])
                 with mk.patch.object(airuleset, "_gh_login",
                                      return_value="kvaskodev"):
-                    self.assertEqual(len(airuleset._slice_quals("david")), 3)
+                    self.assertEqual(len(airuleset._slice_quals("david")), 4)
 
     def test_the_default_token_dir_matches_the_real_deployed_path(self):
         # Locks the ACTUAL path the real scripts/gh-app/*.sh in

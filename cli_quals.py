@@ -137,6 +137,29 @@ def _is_gh_app_token_box():
         return False
 
 
+def _stream_rename_equivalents(name):
+    """All stream names equivalent to `name` under the in-progress base-stream
+    rename (#537): `name` itself FIRST, plus its rename alias in EITHER
+    direction — old->new via `STREAM_RENAME_ALIASES`, or new->old via the
+    reverse lookup. A name not involved in any rename returns just `[name]`.
+
+    The ONE expansion primitive `_slice_quals()` and `_ticket_is_stream_
+    labeled()` both consume, so the transition alias has a single definition.
+    Reads `airuleset.STREAM_RENAME_ALIASES` (the facade re-export) so a test
+    patch is honoured — never `cli_fleet` directly (the L-E rule)."""
+    import airuleset
+    aliases = airuleset.STREAM_RENAME_ALIASES
+    out = [name]
+    if name in aliases:                       # old -> new
+        out.append(aliases[name])
+    else:
+        for old, new in aliases.items():      # new -> old
+            if new == name:
+                out.append(old)
+                break
+    return out
+
+
 def _slice_quals(user, cwd=None):
     """gh search quals for a reduced-authority stream's OWN ticket slice.
     Own-account streams (david/kvaskodev): assigned ∪ authored ∪ stream label.
@@ -150,12 +173,22 @@ def _slice_quals(user, cwd=None):
     BEFORE `_gh_login()` is ever called, so this box never pays for (or
     depends on) a network call that is guaranteed to fail.
 
+    #537: the `stream:<user>` label is EXPANDED via `_stream_rename_
+    equivalents()` — a base-stream rename target (`montalu`/`montalu1`,
+    `david`/`david1`, `simap`/`simap1`) carries BOTH its old and new label so
+    old tickets keep matching during the transition, regardless of which name
+    the box currently runs as. A non-renamed stream expands to itself, so its
+    slice is byte-identical to before. The quals are UNIONED (one query per
+    qual, `_slice_mine_and_handed`), so an extra alias label never narrows
+    the result.
+
     Raises `SliceUnresolved` when the gh login cannot be resolved at all
     (#181 I-2) — an unresolvable identity cannot pick between those two
     branches, and guessing either one is a wrong answer on some box."""
     import airuleset
+    labels = ["label:stream:" + n for n in _stream_rename_equivalents(user)]
     if _is_gh_app_token_box():
-        return ["label:stream:" + user]
+        return labels
     login = airuleset._gh_login(cwd)
     if login is None:
         raise SliceUnresolved(
@@ -164,8 +197,8 @@ def _slice_quals(user, cwd=None):
             "its own (assignee ∪ author ∪ label). Refusing to guess: the two "
             "branches disagree on every shared-account box.")
     if login == airuleset.MAINTAINER_GH_LOGIN:
-        return ["label:stream:" + user]
-    return ["assignee:@me", "author:@me", "label:stream:" + user]
+        return labels
+    return ["assignee:@me", "author:@me"] + labels
 
 
 # An open, non-skip ticket carrying ANY of these labels is an obligation of the
@@ -296,11 +329,21 @@ def _ticket_is_stream_labeled(labels):
     AUTHORITY_BY_USER stream — i.e. this ticket belongs to a sub-dev stream's
     slice, not the full-authority CORE slice (#164 defect 2: the D/T progress
     counter must not let a stream ticket's card inflate a core-scoped 'done'
-    the core-scoped 'remaining' can't back)."""
+    the core-scoped 'remaining' can't back).
+
+    #537: recognition is EXPANDED via `_stream_rename_equivalents()` so a
+    `stream:<name>` label is stream-owned when `<name>` is an
+    AUTHORITY_BY_USER key OR a rename alias of one — this keeps historical
+    `stream:montalu` tickets recognised even after the live-op END state
+    removes the OLD base name from AUTHORITY_BY_USER (the new `montalu1` key
+    expands back to `montalu`), so they never fall into the full-authority
+    CORE slice."""
     import airuleset
     names = {(lb or {}).get("name") for lb in (labels or [])
              if isinstance(lb, dict)}
-    return any(("stream:%s" % u) in names for u in airuleset.AUTHORITY_BY_USER)
+    recognized = {n for u in airuleset.AUTHORITY_BY_USER
+                  for n in _stream_rename_equivalents(u)}
+    return any(("stream:%s" % n) in names for n in recognized)
 
 
 # The labels that mark a ticket as WAITING ON THE OWNER — the consolidated

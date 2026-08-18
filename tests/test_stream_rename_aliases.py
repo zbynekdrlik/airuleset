@@ -24,7 +24,6 @@ per-stream quiet window the supervisor coordinates). Locked here:
   * the C2 false-empty guard tolerates a multi-label (aliased) shared slice.
 """
 
-import os
 import sys
 import tempfile
 import unittest.mock as m
@@ -34,7 +33,6 @@ from unittest import TestCase, main
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
-import cli_remote  # noqa: E402
 
 
 RENAMES = (("montalu", "montalu1"), ("david", "david1"), ("simap", "simap1"))
