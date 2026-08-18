@@ -38,6 +38,27 @@ The verdict logic is a PURE `_recheck_decision(rec, members, now, cadence)` with
 THREE-valued spirit (nudge / wait / clear / skip-undetermined); all I/O
 (fetch, send, state writes) lives in `goal_ops_wait_recheck` behind the same
 injectable seams the sibling jobs use, and `dry_run` mutates nothing (#516).
+
+PHASE 2 (source-aware probes) — EVALUATED (#550) & DEFERRED, not a pending TODO.
+An event-driven variant — poll the Odoo Discuss thread / gk release named in a W
+ticket's park comment and nudge the MOMENT the reply/release lands, instead of on
+cadence — was evaluated in #550 and REJECTED as not cheaply-safe:
+  - the external SOURCE (which thread / which release) lives ONLY in the free-form
+    park COMMENT, never in `--ops-wait`'s structured output (reason is only
+    acceptance|ops-wait), so a probe needs a NEW per-ticket `gh issue view
+    --comments` fetch + a fragile NL parse of prose;
+  - the Odoo RO poll needs the stream's prod credential (the watchdog user lacks
+    it), is fail2ban-sensitive, and is a network call on the 120s sweep critical
+    path (#172/#365 class) — the SESSION already does this poll in-session when
+    nudged, which is where that credential/access belongs;
+  - the latency gap is already tunable via AIRULESET_OPS_WAIT_RECHECK_CADENCE_S
+    (floor OPS_WAIT_RECHECK_MIN_S=6h), so a probe only helps below the hours range
+    — not a real need for inherently multi-hour/multi-day waits.
+REOPEN only when ALL hold: (T1) a machine-readable park convention exists (a
+`waiting-on: odoo-thread:<id>` / `waiting-on: release:<tag>` field sessions
+reliably emit); (T2) a measured need for sub-6h re-check latency; (T3) a safe,
+budgeted RO-poll / push-signal seam OFF the sweep critical path. None hold today.
+Full evidence: issue #550.
 """
 import os
 
