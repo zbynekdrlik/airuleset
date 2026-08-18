@@ -149,9 +149,10 @@ def _tmp_log(lines):
 def run_report(now, state, rows, closes, *, dry_run=False,
                vs_result=True, mutex=False, recent=False,
                send_fn=None, grace=None, max_swallows=None, reprobe=0,
-               compact_lines=None, cwd=SUP_CWD, sid=SID):
+               compact_lines=None, cwd=SUP_CWD, sid=SID, owned_closed=None):
     vs = _Recorder(vs_result)
     tmp = _tmp_log(compact_lines) if compact_lines is not None else None
+    extra = {} if owned_closed is None else {"owned_closed": owned_closed}
     logs = cards.report_reconcile(
         now, None, state, {sid: cwd}, {sid: ("%42", "captured")},
         send_fn=send_fn, dry_run=dry_run,
@@ -163,8 +164,24 @@ def run_report(now, state, rows, closes, *, dry_run=False,
         transcript_fn=lambda pd, s, c: "/p/%s.jsonl" % s,
         rows_fn=lambda tp: rows,
         verified_send=vs,
-        compact_log_path=tmp)
+        compact_log_path=tmp,
+        **extra)
     return logs, vs
+
+
+def reduced_filter(me="montalu", owners=None, authority="branch-merge",
+                   raise_owner=False):
+    """A `make_owned_closed_filter` wired for a REDUCED-authority box, with the
+    gh ownership lookup faked (`owners` = {issue_num: owning_user}). `owners=None`
+    or `raise_owner=True` models an undeterminable lookup (fail-safe: own none)."""
+    def owner_fn(root, nums):
+        if raise_owner:
+            raise RuntimeError("gh down")
+        return dict(owners or {})
+    return cards.make_owned_closed_filter(
+        current_user_fn=lambda: me,
+        authority_fn=lambda root: authority,
+        owner_fn=owner_fn)
 
 
 class ReportReconcileNudge(unittest.TestCase):
@@ -325,6 +342,135 @@ class ReportReconcileDryRun(unittest.TestCase):
         self.assertEqual(0, len(vs.calls), "dry-run sends nothing")
         self.assertNotIn("report_owed", state,
                          "dry-run must not persist the one-shot latch (#516)")
+
+
+# --------------------------------------------------------------------------- #
+# 4. #534 — owner scoping of the owed set.
+#
+# `merged_closes` reads the SHARED base branch (origin/HEAD). On a multi-stream
+# repo (odoo-erp) it carries every stream's + the gatekeeper's merges, so an
+# unscoped owed set nudges a REDUCED-authority stream box for FOREIGN tickets
+# (montalu3 got report-owed nudges for stream:core / stream:miva1). The fix
+# scopes the owed set to the box's OWN slice via `_last_origin_owner`; a
+# full-authority box is unchanged (owns the whole set).
+# --------------------------------------------------------------------------- #
+
+class OwnedClosedFilter(unittest.TestCase):
+    def test_full_authority_owns_everything_unchanged(self):
+        owned = cards.make_owned_closed_filter(
+            current_user_fn=lambda: "gatekeeper",
+            authority_fn=lambda root: "full",
+            owner_fn=lambda root, nums: {})  # never even consulted
+        closed = {41: 1000.0, 42: 2000.0}
+        self.assertEqual(closed, owned("/r", closed))
+
+    def test_reduced_authority_keeps_only_own_slice(self):
+        owned = cards.make_owned_closed_filter(
+            current_user_fn=lambda: "montalu",
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=lambda root, nums: {4373: "miva1", 4379: "montalu"})
+        closed = {4373: 1000.0, 4379: 2000.0}
+        self.assertEqual({4379: 2000.0}, owned("/r", closed),
+                         "only the OWN (stream:montalu) ticket survives")
+
+    def test_reduced_authority_undeterminable_owner_owns_nothing(self):
+        owned = cards.make_owned_closed_filter(
+            current_user_fn=lambda: "montalu",
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=lambda root, nums: (_ for _ in ()).throw(RuntimeError()))
+        # gh lookup raised -> own NOTHING this sweep (fail toward not-nudging)
+        self.assertEqual({}, owned("/r", {4373: 1000.0}))
+
+    def test_reduced_authority_unresolved_identity_owns_nothing(self):
+        owned = cards.make_owned_closed_filter(
+            current_user_fn=lambda: None,   # can't identify this box
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=lambda root, nums: {4379: "montalu"})
+        self.assertEqual({}, owned("/r", {4379: 1000.0}))
+
+    def test_empty_closed_returns_empty_without_a_lookup(self):
+        calls = []
+        owned = cards.make_owned_closed_filter(
+            current_user_fn=lambda: "montalu",
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=lambda root, nums: calls.append(nums) or {})
+        self.assertEqual({}, owned("/r", {}))
+        self.assertEqual([], calls, "no gh lookup for an empty closed set")
+
+    def test_owner_lookup_is_memoized_per_root_within_a_sweep(self):
+        calls = []
+
+        def owner_fn(root, nums):
+            calls.append(nums)
+            return {4379: "montalu"}
+        owned = cards.make_owned_closed_filter(
+            current_user_fn=lambda: "montalu",
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=owner_fn)
+        closed = {4379: 1000.0}
+        owned("/r", closed)   # job 24
+        owned("/r", closed)   # job 25 — same root, must reuse the memo
+        self.assertEqual(1, len(calls),
+                         "one shared GraphQL lookup per repo per sweep")
+
+
+class ReportReconcileOwnerScoping(unittest.TestCase):
+    def test_reduced_box_does_not_nudge_a_foreign_ticket(self):
+        now = 100000
+        closes = {4373: now - 3600,    # stream:miva1 — FOREIGN
+                  4379: now - 3600}    # stream:montalu — OWN
+        rows = [arow(iso(now - 100), "⏳ next")]
+        state = {}
+        owned = reduced_filter(me="montalu",
+                               owners={4373: "miva1", 4379: "montalu"})
+        logs, vs = run_report(now, state, rows, closes, owned_closed=owned)
+        self.assertEqual(1, len(vs.calls), "only the OWN ticket nudges")
+        text = vs.calls[0][1]
+        self.assertIn("#4379", text)
+        self.assertNotIn("#4373", text)   # foreign must NEVER be nudged
+        self.assertIn("4379", state["report_owed"][SUP_ROOT]["nudged"])
+        self.assertNotIn("4373", state["report_owed"][SUP_ROOT]["nudged"])
+
+    def test_reduced_box_owns_the_ticket_still_nudges(self):
+        now = 100000
+        closes = {4379: now - 3600}
+        rows = [arow(iso(now - 100), "⏳ next")]
+        owned = reduced_filter(me="montalu", owners={4379: "montalu"})
+        logs, vs = run_report(now, {}, rows, closes, owned_closed=owned)
+        self.assertEqual(1, len(vs.calls))
+        self.assertIn("#4379", vs.calls[0][1])
+
+    def test_reduced_box_all_foreign_nudges_nothing(self):
+        now = 100000
+        closes = {4373: now - 3600, 4413: now - 3600}   # both foreign/core
+        rows = [arow(iso(now - 100), "⏳ next")]
+        owned = reduced_filter(me="montalu",
+                               owners={4373: "miva1"})   # 4413 has no owner
+        logs, vs = run_report(now, {}, rows, closes, owned_closed=owned)
+        self.assertEqual(0, len(vs.calls), "no own ticket -> no nudge")
+
+    def test_reduced_box_undeterminable_ownership_nudges_nothing(self):
+        now = 100000
+        closes = {4379: now - 3600}      # genuinely own, but gh is down
+        rows = [arow(iso(now - 100), "⏳ next")]
+        owned = reduced_filter(me="montalu", raise_owner=True)
+        logs, vs = run_report(now, {}, rows, closes, owned_closed=owned)
+        self.assertEqual(0, len(vs.calls),
+                         "undeterminable owner -> own nothing this sweep")
+
+    def test_full_authority_box_nudges_the_whole_set(self):
+        now = 100000
+        closes = {41: now - 3600, 42: now - 3600}
+        rows = [arow(iso(now - 100), "⏳ next")]
+        owned = cards.make_owned_closed_filter(
+            current_user_fn=lambda: "gatekeeper",
+            authority_fn=lambda root: "full",
+            owner_fn=lambda root, nums: {})
+        logs, vs = run_report(now, {}, rows, closes, owned_closed=owned)
+        self.assertEqual(1, len(vs.calls))
+        text = vs.calls[0][1]
+        self.assertIn("#41", text)
+        self.assertIn("#42", text)
 
 
 if __name__ == "__main__":
