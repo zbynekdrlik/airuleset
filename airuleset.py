@@ -2087,7 +2087,7 @@ def cmd_tickets_status(args):
                 # stream's own chained work → I, not U (`_acceptance_present_set`,
                 # question map only — the footer already reads that file).
                 workable_rows, waiting, ops_wait = _partition_workable(
-                    rows, acceptance_present=_acceptance_present_set(rows))
+                    rows, acceptance_present=_acceptance_present_set(rows, cwd=cwd))
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
@@ -2146,7 +2146,7 @@ def cmd_tickets_status(args):
                 # stop-proof (`core-quals --count`) uses (#367/#468 guard).
                 # #539: bare needs-acceptance with no delivered draft → I (chained).
                 workable, waiting, ops_wait = _partition_workable(
-                    seen, acceptance_present=_acceptance_present_set(seen))
+                    seen, acceptance_present=_acceptance_present_set(seen, cwd=cwd))
                 entry["open"] = len(workable)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)

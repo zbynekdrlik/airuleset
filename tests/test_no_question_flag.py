@@ -128,7 +128,7 @@ class QuestionMapTicketRefs(unittest.TestCase):
         fn = getattr(statusbar, "question_map_ticket_refs", None)
         self.assertIsNotNone(fn, "question_map_ticket_refs must exist (#539)")
         with TemporaryDirectory() as home:
-            self.assertEqual(fn(home), set(),
+            self.assertEqual(fn("/proj/a", home=home), set(),
                              "an ABSENT map = readable-empty (never pinged), "
                              "NOT unreadable")
 
@@ -137,19 +137,36 @@ class QuestionMapTicketRefs(unittest.TestCase):
         self.assertIsNotNone(fn, "question_map_ticket_refs must exist (#539)")
         with TemporaryDirectory() as home:
             self._write_map(home, "{ not valid json")
-            self.assertIsNone(fn(home),
+            self.assertIsNone(fn("/proj/a", home=home),
                               "a CORRUPT map = UNREADABLE = None (fail-safe)")
 
-    def test_valid_map_collects_referenced_numbers(self):
+    def test_valid_map_collects_same_project_referenced_numbers(self):
         fn = getattr(statusbar, "question_map_ticket_refs", None)
         self.assertIsNotNone(fn, "question_map_ticket_refs must exist (#539)")
         with TemporaryDirectory() as home:
             self._write_map(home, json.dumps({
-                "a": {"cwd": "/x", "block": "otazka k #4 prosim", "ts": 1},
-                "b": {"cwd": "/x", "question": "co s #7 a #4?", "ts": 2},
-                "c": {"cwd": "/x", "block": "ziadny ticket", "ts": 3},
+                "a": {"cwd": "/proj/a", "block": "otazka k #4 prosim", "ts": 1},
+                "b": {"cwd": "/proj/a", "question": "co s #7 a #4?", "ts": 2},
+                "c": {"cwd": "/proj/a", "block": "ziadny ticket", "ts": 3},
             }))
-            self.assertEqual(fn(home), {4, 7})
+            self.assertEqual(fn("/proj/a", home=home), {4, 7})
+
+    def test_cross_project_refs_are_scoped_out(self):
+        # #539 review MAJOR-1: a ping in project B referencing #4 must NOT count
+        # as a delivered draft/question for project A's #4 (issue numbers collide
+        # across repos on a multi-repo supervisor box). Mirrors the sibling
+        # `ticketless_question_pings`' project scoping.
+        fn = getattr(statusbar, "question_map_ticket_refs", None)
+        self.assertIsNotNone(fn, "question_map_ticket_refs must exist (#539)")
+        with TemporaryDirectory() as home:
+            self._write_map(home, json.dumps({
+                "a": {"cwd": "/proj/a", "block": "draft k #4", "ts": 1},
+                "b": {"cwd": "/proj/b", "block": "draft k #9", "ts": 2},
+            }))
+            self.assertEqual(fn("/proj/a", home=home), {4},
+                             "only project A's own #4 ping counts; project B's #9 "
+                             "is scoped OUT")
+            self.assertEqual(fn("/proj/b", home=home), {9})
 
 
 class CommentCarriesQuestion(unittest.TestCase):
@@ -211,12 +228,27 @@ class NoQuestionFlagged(unittest.TestCase):
             self.assertEqual(got, {5},
                              "#4 has a map ping → cleared; #5 has neither → flagged")
 
+    def test_cross_project_ping_does_not_clear_a_member(self):
+        # #539 review MAJOR-1: a question-less #4 in project A must STILL be
+        # flagged even though project B has a ping about #4 (cross-repo number
+        # collision must not suppress the defect).
+        fn = getattr(airuleset, "_no_question_flagged", None)
+        self.assertIsNotNone(fn, "_no_question_flagged must exist (#539)")
+        with TemporaryDirectory() as home:
+            self._write_map(home, json.dumps(
+                {"b": {"cwd": "/proj/b", "block": "otazka k #4", "ts": 1}}))
+            got = fn(self._rows(4), cwd="/proj/a", home=home,
+                     comment_state_fn=lambda n, cwd=None: False)
+            self.assertEqual(got, {4},
+                             "project B's #4 ping is scoped out → #4 in project A "
+                             "still has no delivered question → flagged")
+
     def test_gh_failure_never_flags(self):
         fn = getattr(airuleset, "_no_question_flagged", None)
         self.assertIsNotNone(fn, "_no_question_flagged must exist (#539)")
         with TemporaryDirectory() as home:
             self._write_map(home, json.dumps({}))   # empty but readable
-            got = fn(self._rows(4), cwd="/x", home=home,
+            got = fn(self._rows(4), cwd="/proj/a", home=home,
                      comment_state_fn=lambda n, cwd=None: None)
             self.assertEqual(got, set(),
                              "a FAILED gh comment fetch (None) never flags")
@@ -413,23 +445,37 @@ class AcceptancePresentSet(unittest.TestCase):
             8: {"number": 8, "labels": _labels("needs-acceptance", "ops-wait")},  # W
         }
 
-    def test_only_bare_acceptance_with_a_ping_is_present(self):
+    def test_only_bare_acceptance_with_a_same_project_ping_is_present(self):
         fn = getattr(airuleset, "_acceptance_present_set", None)
         self.assertIsNotNone(fn, "_acceptance_present_set must exist (#539)")
         with TemporaryDirectory() as home:
             self._write_map(home, json.dumps(
-                {"a": {"cwd": "/x", "block": "draft k #4", "ts": 1}}))
-            got = fn(self._rows(), home=home)
+                {"a": {"cwd": "/proj/a", "block": "draft k #4", "ts": 1}}))
+            got = fn(self._rows(), cwd="/proj/a", home=home)
             self.assertEqual(got, {4},
                              "only bare needs-acceptance #4 (has a ping) is present; "
                              "#5 no ping, #6 not acceptance, #8 is W (ops-wait)")
+
+    def test_cross_project_ping_does_not_make_acceptance_present(self):
+        # #539 review MAJOR-1: a bare needs-acceptance #4 in project A must NOT be
+        # routed to U by an unrelated project-B ping about #4 → the invariant
+        # violation on a multi-repo supervisor box.
+        fn = getattr(airuleset, "_acceptance_present_set", None)
+        self.assertIsNotNone(fn, "_acceptance_present_set must exist (#539)")
+        with TemporaryDirectory() as home:
+            self._write_map(home, json.dumps(
+                {"b": {"cwd": "/proj/b", "block": "draft k #4", "ts": 1}}))
+            got = fn(self._rows(), cwd="/proj/a", home=home)
+            self.assertEqual(got, set(),
+                             "project A's #4 has no OWN draft ping; project B's #4 "
+                             "ping is scoped out → not present → routes to I")
 
     def test_unreadable_map_returns_all_bare_acceptance(self):
         fn = getattr(airuleset, "_acceptance_present_set", None)
         self.assertIsNotNone(fn, "_acceptance_present_set must exist (#539)")
         with TemporaryDirectory() as home:
             self._write_map(home, "{ corrupt")
-            got = fn(self._rows(), home=home)
+            got = fn(self._rows(), cwd="/proj/a", home=home)
             self.assertEqual(got, {4, 5},
                              "unreadable map → ALL bare needs-acceptance present "
                              "(fail-safe to the #526 U default; #8 is W, #6 not "

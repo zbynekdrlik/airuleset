@@ -587,7 +587,7 @@ def _partition_workable(rows, acceptance_present=None):
     return workable, user_waiting, ops_wait
 
 
-def _acceptance_present_set(rows, home=None):
+def _acceptance_present_set(rows, cwd=None, home=None):
     """The set of BARE `needs-acceptance` issue numbers in `rows` whose
     acceptance DRAFT has been delivered — a question-map ping references `#N`,
     the "presented for the owner's approval" signal (#539, THIRD branch). Passed
@@ -601,6 +601,9 @@ def _acceptance_present_set(rows, home=None):
     ALWAYS fires a ❓ ping (`notify.record_question`), so the map is the
     authoritative "owner was actually asked" signal. The gh comment fallback
     stays in the `--waiting` DISPLAY tag (`_no_question_flagged`), never here.
+    `cwd` (the caller's repo root) SCOPES the map read to THIS project — a MUST on
+    a multi-repo box, where issue numbers collide across repos (#539 review
+    MAJOR-1); every production call site passes its resolved root.
 
     Fail-safe: an UNREADABLE map (`question_map_ticket_refs` → None) returns ALL
     bare-needs-acceptance numbers — preserving the #526 U default on a map error
@@ -618,7 +621,7 @@ def _acceptance_present_set(rows, home=None):
                 and not _row_is_ops_wait(labels)):
             bare.add(number)
     try:
-        refs = statusbar.question_map_ticket_refs(home)
+        refs = statusbar.question_map_ticket_refs(cwd, home)   # #539 MAJOR-1: cwd-scoped
     except Exception:
         refs = None
     if refs is None:
@@ -655,7 +658,16 @@ def _comment_carries_question(body):
     no-question check: when a per-ticket ask-and-continue ping omitted `#N` from
     its block (the #512 map-dedup residual), the question map misses it, but the
     ticket's own question comment still proves the owner was asked — which is
-    what keeps the `no-question!` tag from FALSELY accusing such a member."""
+    what keeps the `no-question!` tag from FALSELY accusing such a member.
+
+    Marker-based, so the "nikdy falošný" guarantee is STRUCTURAL, not
+    phrasing-level (#539 review MINOR-1): a false accusation is prevented by the
+    map-unreadable / gh-failure fail-safes in the callers, NOT by this predicate
+    recognizing every conceivable question phrasing. This repo's owner questions
+    are the hook-enforced `**Otázka …:**` / `❓ NEEDS YOU`/`ASKED` template
+    (`user-questions-slovak.md`), which always match; a bare English "can you
+    decide X?" with no marker would not (accepted residual, safe direction — the
+    tag is a display hint, and the caller's fail-safes are the real guarantee)."""
     if not isinstance(body, str):
         return False
     return bool(_ASK_MARKER_RE.search(body))
@@ -721,7 +733,7 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
     this catches, not a fail-safe case."""
     import statusbar
     try:
-        refs = statusbar.question_map_ticket_refs(home)
+        refs = statusbar.question_map_ticket_refs(cwd, home)   # #539 MAJOR-1: cwd-scoped
     except Exception:
         refs = None
     if refs is None:
