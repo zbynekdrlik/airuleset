@@ -518,7 +518,7 @@ def _ops_wait_reason(labels):
     return "ops-wait"
 
 
-def _partition_workable(rows):
+def _partition_workable(rows, acceptance_present=None):
     """Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
     (`{number: {"number","title","createdAt","labels"}}`) THREE ways:
     `(workable, user_waiting, ops_wait)`. Both the user-waiting (#468) and the
@@ -544,7 +544,22 @@ def _partition_workable(rows):
     in U (a pending owner answer beats a sent thread), so the override is
     acceptance-scoped. Both buckets leave `workable`, so the COUNT is identical
     either way; the precedence only decides which DISPLAY bucket (U vs W) the row
-    lands in."""
+    lands in.
+
+    `acceptance_present` (#539, THIRD acceptance branch): a set of issue numbers
+    whose BARE `needs-acceptance` has a DELIVERED draft (a question presented for
+    the owner's approval — see `_acceptance_present_set`). When `None` (the
+    default — every unit-test caller), the #526 routing is byte-identical (a bare
+    needs-acceptance → U). When a set IS given (the production callers), a bare
+    `needs-acceptance` (reason == "acceptance", no `ops-wait`, no gk-override)
+    routes to U only if its number is IN the set (a live owner-approval
+    question); otherwise it routes to `workable` (I) — the stream's OWN chained
+    responsibility, e.g. an acceptance whose thread cannot be composed until a
+    sequenced SIBLING ticket the stream is still working completes. That case is
+    neither a live owner question (not U) nor a third-party wait (not W); it is
+    Claude's own chained work → I. This enforces the owner-UX invariant "otázky
+    na mňa?" never truthfully answers NIE while U > 0: a bare needs-acceptance
+    only reaches U once a draft was actually presented (a ❓ ping fired)."""
     workable, user_waiting, ops_wait = {}, {}, {}
     for number, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None
@@ -557,6 +572,12 @@ def _partition_workable(rows):
             if (_user_waiting_reason(labels) == "acceptance"
                     and _row_is_ops_wait(labels)):
                 ops_wait[number] = row
+            elif (acceptance_present is not None
+                  and _user_waiting_reason(labels) == "acceptance"
+                  and number not in acceptance_present):
+                # #539 THIRD branch: a bare needs-acceptance whose draft is NOT
+                # yet delivered is the stream's own chained work → I, not U.
+                workable[number] = row
             else:
                 user_waiting[number] = row
         elif _row_is_ops_wait(labels):
@@ -564,6 +585,45 @@ def _partition_workable(rows):
         else:
             workable[number] = row
     return workable, user_waiting, ops_wait
+
+
+def _acceptance_present_set(rows, home=None):
+    """The set of BARE `needs-acceptance` issue numbers in `rows` whose
+    acceptance DRAFT has been delivered — a question-map ping references `#N`,
+    the "presented for the owner's approval" signal (#539, THIRD branch). Passed
+    as `_partition_workable(..., acceptance_present=...)` so a bare
+    needs-acceptance with NO delivered draft routes to `workable` (I, the
+    stream's own chained work) instead of U.
+
+    Deliberately the question map ALONE (`statusbar.question_map_ticket_refs`,
+    local, no gh) — the partition feeds the HOT footer-count / `/goal` stop-proof
+    path, which must stay off the shared graphql bucket (#370); a presented draft
+    ALWAYS fires a ❓ ping (`notify.record_question`), so the map is the
+    authoritative "owner was actually asked" signal. The gh comment fallback
+    stays in the `--waiting` DISPLAY tag (`_no_question_flagged`), never here.
+
+    Fail-safe: an UNREADABLE map (`question_map_ticket_refs` → None) returns ALL
+    bare-needs-acceptance numbers — preserving the #526 U default on a map error
+    (never HIDE a possible owner-approval from U). A readable-but-ABSENT map
+    yields an empty ref set, so a bare needs-acceptance with no draft correctly
+    routes to I. Only bare needs-acceptance rows are considered — a needs-answer/
+    needs-decision row (→ U by label) and a needs-acceptance+ops-wait row (→ W)
+    are never in the returned set, so the partition's gate never touches them."""
+    import statusbar
+    bare = set()
+    for number, row in rows.items():
+        labels = row.get("labels") if isinstance(row, dict) else None
+        if (_row_is_user_waiting(labels)
+                and _user_waiting_reason(labels) == "acceptance"
+                and not _row_is_ops_wait(labels)):
+            bare.add(number)
+    try:
+        refs = statusbar.question_map_ticket_refs(home)
+    except Exception:
+        refs = None
+    if refs is None:
+        return bare                              # unreadable map -> all stay U
+    return {n for n in bare if n in refs}
 
 
 def _partition_user_waiting(rows):

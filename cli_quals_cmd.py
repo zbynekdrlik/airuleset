@@ -427,7 +427,11 @@ def cmd_slice_quals(args):
     if extra:
         workable_rows, waiting, ops_wait = rows, {}, {}
     else:
-        workable_rows, waiting, ops_wait = airuleset._partition_workable(rows)
+        # #539: a bare needs-acceptance with no DELIVERED draft is the stream's
+        # own chained work → I, not U (`_acceptance_present_set`, question map
+        # only — no gh, safe on the count path).
+        workable_rows, waiting, ops_wait = airuleset._partition_workable(
+            rows, acceptance_present=airuleset._acceptance_present_set(rows))
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
@@ -578,7 +582,9 @@ def cmd_core_quals(args):
     if extra:
         workable, waiting, ops_wait = seen, {}, {}
     else:
-        workable, waiting, ops_wait = airuleset._partition_workable(seen)
+        # #539: bare needs-acceptance with no delivered draft → I (chained).
+        workable, waiting, ops_wait = airuleset._partition_workable(
+            seen, acceptance_present=airuleset._acceptance_present_set(seen))
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:

@@ -160,7 +160,19 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   `needs-acceptance` ticket waiting on a THIRD PARTY (a client / a named person) is `ops-wait` → `W`,
   never a bare `U`. In every branch the supervisor SETS and CLEARS `ops-wait` with evidence — never
   auto-labelled. (montalu3 left 13 fix-class/deferred + 1 third-party acceptances as bare `U` = `U 15`
-  with zero real questions — exactly what these branches prevent.)
+  with zero real questions — exactly what these branches prevent.) **THIRD branch — CHAINED-I (#539,
+  montalu5).** A bare `needs-acceptance` whose acceptance draft cannot be composed yet because it
+  waits on the STREAM'S OWN sequenced work (a sibling ticket a stream worker is still finishing) is
+  NEITHER a live owner question (not `U`) NOR a third-party wait (not `W`) — it is Claude's OWN chained
+  responsibility, so it stays in `I` (workable/chained). MECHANIZED: `_partition_workable` routes a
+  bare `needs-acceptance` to `U` ONLY once a DRAFT has actually been presented for approval (a ❓ ping
+  was fired — the question map references `#N`); until then it stays in `I`. So a bare
+  `needs-acceptance` reaches `U` only when there IS a real owner-approval question. (Release-wait
+  tickets — merged to develop but not yet on PROD, so the handover thread may announce only what lives
+  on PROD — are the deferred-thread branch: `ops-wait` "waiting on release" → `W`.) **Owner-UX
+  invariant (#539): "otázky na mňa?" must NEVER truthfully answer NIE while `U > 0`** — a positive `U`
+  is only ever real, already-delivered questions (a `no-question!`-tagged member is the defect to ask
+  or reclassify NOW).
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do

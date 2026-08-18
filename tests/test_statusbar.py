@@ -759,15 +759,18 @@ class RefreshCLI(unittest.TestCase):
                 "only the genuinely-parked ready-for-review ticket (#2) is "
                 "gk; the processed needs-acceptance ticket (#1) must not be "
                 "re-counted by its stale READY-FOR-REVIEW comment")
+            # #539 REFINES #512: a bare needs-acceptance goes to U only once a
+            # DRAFT has been presented for approval (a ❓ ping references #N). No
+            # question map is seeded here, so #1 is the stream's OWN not-yet-
+            # presented chained work → it stays in the workable I N (open), NOT
+            # U N. (Its gk-suppression — the test's core purpose — is unchanged.)
             self.assertEqual(
-                cache["open"], 0,
-                "#512: the bare processed needs-acceptance ticket (#1) leaves "
-                "the workable I N — it waits on the owner's acceptance (U N), "
-                "not the stream's active work")
+                cache["open"], 1,
+                "#539: a bare needs-acceptance with no delivered draft is "
+                "chained-I (workable), not U — #1 counts in open")
             self.assertEqual(
-                cache.get("user_waiting"), 1,
-                "#512: the bare needs-acceptance ticket (#1) is now U (waiting "
-                "on the OWNER), the 'done = client saw it' state")
+                cache.get("user_waiting"), 0,
+                "#539: #1 reaches U only after a draft ping is fired; none here")
 
     def test_refresh_a_needs_acceptance_ticket_still_labeled_ready_for_review_stays_gk(self):
         # #507 adversarial defense: the needs-acceptance suppression must
@@ -872,10 +875,12 @@ class RefreshCLI(unittest.TestCase):
                 "is gk; the processed needs-acceptance ticket (#1) must not be "
                 "re-counted by its stale comment nor re-added by the recovery "
                 "block")
-            # #512: the bare needs-acceptance ticket (#1) leaves I N into U N on
-            # the shared-account topology too (waiting on the owner's acceptance).
-            self.assertEqual(cache["open"], 0)
-            self.assertEqual(cache.get("user_waiting"), 1)
+            # #539 REFINES #512: with no draft ping seeded, the bare
+            # needs-acceptance ticket (#1) is chained-I (workable), not U, on the
+            # shared-account topology too — it reaches U only once a draft is
+            # presented (a ❓ ping references #N).
+            self.assertEqual(cache["open"], 1)
+            self.assertEqual(cache.get("user_waiting"), 0)
 
     def test_refresh_a_comment_only_re_handoff_of_needs_acceptance_is_a_known_safe_under_count(self):
         # #507 review MAJOR (accepted, SAFE-direction residual): the label-based
@@ -933,20 +938,22 @@ class RefreshCLI(unittest.TestCase):
                 "re-hand-off of a needs-acceptance ticket is not re-counted as "
                 "gk by label alone (the auto-labeller unreliability #313 exists "
                 "for) -- so it must NOT falsely stop the loop")
-            # #512 SUPERSEDES the pre-#512 "stays workable open to keep the loop
-            # alive" framing: a BARE needs-acceptance ticket (from the label
-            # perspective, which is all this comment-only case has) now parks in
-            # `U N` (waiting on the owner's acceptance), NOT the workable I N. It
-            # is still SURFACED and the loop still parks on it (U leaves the
-            # count but the loop never claims backlog-empty past a U member) --
-            # the safe direction is preserved, only the bucket moved I N -> U N.
+            # #539 REFINES #512: with no draft ping, a BARE needs-acceptance
+            # ticket (all this comment-only case has, by label) is the stream's
+            # OWN not-yet-presented chained work → it stays in the workable I N,
+            # NOT U N. This RESTORES the pre-#512 "stays workable to keep the loop
+            # alive" behaviour for the un-presented case (the loop works it —
+            # composing/presenting the draft — rather than parking on the owner),
+            # which is the correct disposition for chained work; it moves to U N
+            # only once a draft ping is fired.
             self.assertEqual(
-                cache["open"], 0,
-                "#512: a bare needs-acceptance ticket leaves the workable I N")
+                cache["open"], 1,
+                "#539: a bare needs-acceptance with no delivered draft stays in "
+                "the workable I N (chained work), not U N")
             self.assertEqual(
-                cache.get("user_waiting"), 1,
-                "#512: it parks in U N (waiting on the owner's acceptance), "
-                "still surfaced so the loop parks on it, never a false empty")
+                cache.get("user_waiting"), 0,
+                "#539: it reaches U N only once a draft is presented (a ❓ ping "
+                "references #N); none is seeded here")
 
     def test_footer_refresh_actually_calls_the_shared_handed_derivation(self):
         # MAJOR-2 (fresh-context adversarial review of #391): mirrors the
