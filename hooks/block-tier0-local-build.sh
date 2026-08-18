@@ -3,15 +3,24 @@ set -euo pipefail
 
 # Hook: PreToolUse(Bash) — BLOCK a heavy LOCAL build in a Tier-0 project.
 #
-# no-local-builds.md: Tier 0 (the default) bans heavy local builds — `cargo build`
-# / `cargo build --release` / `cargo test` (runs tests) / `cargo tauri build` /
-# `trunk build` / `wasm-pack build` — locally; only the cheap compile-checks
-# (`cargo check`, `cargo clippy`, and a SCOPED `cargo test --no-run -p <crate>`/
-# `--lib`/`--test <name>`) are allowed, and full / release builds — INCLUDING a
-# FULL-WORKSPACE `cargo test --no-run` that compiles the whole test suite (#544)
-# — run in CI. Tier 1 (`airuleset:local-builds=allowed`) and Tier 2
+# no-local-builds.md: Tier 0 (the default) bans ALL local cargo COMPILATION —
+# #557 (owner directive 2026-08-18, "reported ~100x"): "Tier-0 = ŽIADNA lokálna
+# cargo kompilácia". EVERY compiling cargo shape blocks -> CI: build/test/bench/
+# run/check/clippy/doc/rustc/install/... , narrow AND whole-workspace, `--no-run`
+# or not. Only a curated NON-compiling class stays local (fmt, clean, metadata,
+# tree, search, update, add, version, help, config, ...). Detection is an
+# ALLOWLIST inversion (`_cargo_compiles`, deny-by-default): an unknown / third-
+# party cargo subcommand (tarpaulin / miri / llvm-cov / nextest / ...) fails SAFE
+# to blocked, so the blocklist coverage gap that let camera-box compile locally
+# even AFTER #544 -- scoped `cargo test --no-run --test <name>` / `--lib`, plus
+# `cargo clippy` / `cargo check` / `cargo doc` which were never matched at all
+# (forensics on issue #557) -- cannot re-open. Non-cargo heavy builds
+# (`cargo tauri build` / `trunk build` / `wasm-pack build` / `cmake --build`)
+# still block too. Tier 1 (`airuleset:local-builds=allowed`) and Tier 2
 # (`airuleset:local-builds=fast-iterate`) projects, declared by a marker in their
-# CLAUDE.md, are EXEMPT.
+# CLAUDE.md, are EXEMPT -- and their behaviour is UNCHANGED by #557: a marker
+# exempts every heavy command AFTER heaviness is decided, and tier-1/2 already
+# blocked nothing, so widening what counts as heavy cannot change what they allow.
 #
 # This ENFORCES the ban (the rule alone let presenter's `target/` balloon to 97 GB
 # on dev2). Reads the tool payload on STDIN (`.tool_input.command` + `.cwd`).
@@ -139,47 +148,65 @@ _is_camera_box_repo() {
     return 1
 }
 
-# #471 (F2): segment-scoped `--no-run` exemption for the `--no-run`-gated cargo
-# shapes (`test`/`bench`). The old whole-command `--no-run` grep wrongly exempted
-# a genuine RUN sitting in a DIFFERENT top-level segment (`cargo test --no-run &&
-# cargo bench`, `cargo bench --no-run && cargo bench`) and matched `--no-run` as a
-# SUBSTRING of an unrelated harness arg (`cargo bench -- --no-run-decoy`). This
-# reuses the repo's quote-aware `split_top_level` splitter (from
-# hooks/block-ungated-issue-filing.sh, itself from block-gh-invalid-json-flag.sh
-# -- copied inline per this repo's per-hook-inline-Python convention; a bash hook
-# has no shared library to import from) to scope the exemption to the segment the
-# invocation actually sits in: HEAVY iff some top-level segment invokes
-# `cargo <sub>` in command position WITHOUT a WHOLE-flag `--no-run` in THAT same
-# segment. It runs ONLY when the caller's outer per-shape grep already matched AND
-# a whole-flag `--no-run` is actually present, so the hot path (every Bash command)
-# pays nothing extra.
+# #557: ALLOWLIST inversion -- on a Tier-0 repo EVERY compiling `cargo` shape is
+# heavy; only a curated NON-compiling class stays local. This REPLACES the old
+# per-verb blocklist (`cargo build`/`test`/`run`/`bench`/`mutants`/`nextest run`)
+# and its scoped-`--no-run` carve-out (`_gated_shape_is_heavy`, #471/#544, now
+# deleted): forensics on issue #557 proved the blocklist kept leaking exactly the
+# narrow/unlisted shapes -- scoped `cargo test --no-run --test <name>` / `--lib`
+# (explicitly exempted by #544), and `cargo clippy` / `cargo check` / `cargo doc`
+# (never matched at all) -- each of which still compiles the whole dep tree into a
+# 1+ GB/lane `target/`. Deny-by-default fails SAFE: any subcommand NOT in the
+# non-compiling allowlist (an unknown / third-party compiling plugin like
+# `tarpaulin` / `miri` / `llvm-cov` / `nextest`, or a future one) blocks -> CI.
 #
-# Accepted residual (#471-review, THEORETICAL/MINOR): a `--no-run` that follows a
-# harness `--` separator (`cargo test -- --no-run>log`) is regex-indistinguishable
-# from the real cargo flag and now exempts. It is a pre-existing decoy class (the
-# space/EOL form `cargo test -- --no-run` already exempted), unrunnable (libtest
-# rejects `--no-run` as a harness arg), and closing it needs `--`-position parsing
-# -- out of scope for this symmetric-widening fix.
-_gated_shape_is_heavy() {
-    # $1 = command (quotes already stripped by the caller); $2 = subcommand
-    # (`test` / `bench`). python exit 0 = heavy. Any python failure returns
-    # non-zero -- the caller then treats this exactly like the pre-#471 exempt
-    # path (allowed), never a fail-toward-block, so a broken python3 can never
-    # false-block a real `cargo test --no-run`.
-    python3 - "$1" "$2" 2>/dev/null <<'PYEOF'
+# python exit 0 = a compiling cargo subcommand is present in command position;
+# non-zero = none. Any python failure returns non-zero -- the caller treats that
+# exactly like the pre-#557 not-heavy path (the OTHER heavy checks -- tauri /
+# trunk / wasm-pack / cmake -- are still plain bash grep, so cargo detection
+# degrading toward allow on a broken python3 is the same fail-direction the
+# deleted `_gated_shape_is_heavy` used, never a false block).
+_cargo_compiles() {
+    python3 - "$1" 2>/dev/null <<'PYEOF'
 import re
 import sys
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-sub = sys.argv[2] if len(sys.argv) > 2 else ""
+
+# The ONLY cargo subcommands that do NOT compile the crate/dep tree. Everything
+# else (build/b/test/t/bench/run/r/check/c/clippy/doc/rustc/rustdoc/install/
+# publish/package/fix/expand/tarpaulin/miri/llvm-cov/nextest/mutants/... AND any
+# unknown subcommand) is compiling -> heavy on Tier-0.
+NONCOMPILING = {
+    "fmt", "clean", "metadata", "tree", "search", "update", "add", "remove",
+    "rm", "generate-lockfile", "locate-project", "pkgid", "verify-project",
+    "read-manifest", "login", "logout", "owner", "yank", "version", "help",
+    "config", "report", "new", "init", "vendor", "fetch", "uninstall",
+}
+# `cargo --version`/`-V`/`--help`/`-h`/`--list`/`--explain <code>` print info and
+# do not compile -> treated as non-compiling.
+INFO_FLAGS = {"--version", "-V", "--help", "-h", "--list", "--explain"}
+# a couple of global flags that take a VALUE -- skip the value so it is not
+# mis-read as the subcommand.
+VALUED_FLAGS = {"--color", "--config"}
+# wrapper commands that may PRECEDE `cargo` in command position; a segment whose
+# real command word is NONE of these AND not cargo is some OTHER command
+# (`grep cargo file`, `man cargo build`, `which cargo`) -> NOT a cargo compile.
+PREFIX_CMDS = {"sudo", "env", "time", "nice", "timeout", "nohup", "stdbuf",
+               "setsid", "ionice", "chrt", "command", "exec", "doas"}
+# shell keywords / group openers that precede a command in a segment
+# (`do cargo run`, `then cargo build`, `{ cargo test`, `! cargo run`).
+SHELL_KW = {"do", "then", "else", "elif", "{", "!"}
+NUMVAL = re.compile(r"^\d+[smhd]?$")   # a timeout/nice numeric value (300, 5m)
+ASSIGN = re.compile(r"^\w+=")          # an env-assignment prefix (RUSTFLAGS=x)
+META = re.compile(r"[;&|()<>]")
 
 
 def split_top_level(text):
-    # QUOTE-AWARE top-level split on &&/||/;/&/|/newline, reused verbatim from
-    # hooks/block-ungated-issue-filing.sh's own split_top_level. The input is
-    # already quote-stripped by the caller, so the quote-awareness is
-    # belt-and-suspenders; reusing the same splitter also inherits its
-    # backslash-escape handling.
+    # QUOTE-AWARE top-level split on &&/||/;/&/|/newline (from
+    # block-ungated-issue-filing.sh; the input is already quote-stripped so the
+    # quote-awareness is belt-and-suspenders, but it also inherits the backslash
+    # handling). Scopes command-word detection to the actual command segment.
     segs, buf, i, n, quote = [], [], 0, len(text), None
     while i < n:
         c = text[i]
@@ -204,7 +231,7 @@ def split_top_level(text):
             buf = []
             i += 2
             continue
-        if c in (";", "&", "|", "\n"):
+        if c in (";", "&", "|", "(", ")", "\n"):   # incl. subshell / cmd-subst boundaries
             segs.append("".join(buf))
             buf = []
             i += 1
@@ -215,114 +242,80 @@ def split_top_level(text):
     return segs
 
 
-anchor = re.compile(r"(^|[;&|(\s])cargo\s+" + re.escape(sub) + r"(\s|$|[;&|)(<>])")
-# #471-review: the --no-run boundary is widened to the SAME metachar class as
-# the heavy-token anchors, so a `--no-run` glued to a trailing `;`/`)`/`|`/... is
-# still recognized as the compile-only flag (a `--no-run-decoy` harness arg,
-# followed by `-`, still does NOT match and stays heavy).
-norun = re.compile(r"(^|\s)--no-run(\s|$|[;&|)(<>])")
-# #544: a `cargo test/bench --no-run` is the allowed Tier-0 cheap check ONLY when
-# it is SCOPED -- a WHOLE-WORKSPACE compile-only build compiles every test binary
-# in the workspace (dantesync 6.9 GB) and is heavy in spirit ("heavy compiles run
-# in CI"), so it blocks -> CI just like `cargo build`. A segment carrying
-# `--no-run` is HEAVY iff ANY of:
-#   - an explicit whole-workspace flag `--workspace`/`--all` (overrides any
-#     narrowing flag -- `--workspace --lib` compiles every member's lib tests);
-#   - a BROAD PLURAL target selector `--bins`/`--tests`/`--examples` with NO
-#     `-p`/`--package` scope (all-of-kind across the whole workspace); a
-#     PACKAGE-scoped plural `-p x --tests` stays allowed -- same weight as the
-#     already-allowed `-p x`, so we never block one while allowing the other;
-#   - NO narrowing flag at all (the bare/default whole-workspace compile).
-# Narrowing flags, word-boundary EXACT (same trailing metachar class as the
-# anchors above, so `--lib;`/`-p x|tee` stay scoped): -p / --package / --lib /
-# --bin / --test / --example / --bench / --doc. A positional test-NAME filter
-# narrows which tests RUN, never which COMPILE, so it is correctly NOT narrowing.
-# #544-review: the scan stops at the first standalone `--` (harness separator),
-# so a libtest arg after `--` (`-- --lib`, `-- --workspace`) is NEVER read as a
-# cargo target/scope flag -- this both blocks `cargo test --no-run -- --lib` (a
-# real full compile) and avoids false-BLOCKING `-p x -- --workspace` (a scoped
-# build whose harness arg merely spells a broadening flag). Accepted residuals
-# (fail-SAFE over-block or monotonic vs pre-#544, all rare): a narrowing token
-# as the unquoted VALUE of a non-narrowing flag (`--config --lib`) false-allows
-# (needs flag-value parsing); a glued `-pmycrate` / a quoted bare `"--lib"`
-# over-block (safe; the common `-p x`/`-p=x`/`-p "my-crate"` all allow).
-narrowing = re.compile(
-    r"(^|\s)(--package|--lib|--bin|--test|--example|--bench|--doc|-p)(=|\s|$|[;&|)(<>])")
-explicit_broad = re.compile(r"(^|\s)(--workspace|--all)(=|\s|$|[;&|)(<>])")
-broad_plural = re.compile(r"(^|\s)(--bins|--tests|--examples)(=|\s|$|[;&|)(<>])")
-pkg_scope = re.compile(r"(^|\s)(--package|-p)(=|\s|$|[;&|)(<>])")
-double_dash = re.compile(r"(^|\s)--(\s|$)")
+def cargo_sub(seg):
+    # Return the effective cargo subcommand of `seg` IFF cargo is the command
+    # word (after env-assignments + wrapper prefixes), else None. "__INFO__" for a
+    # non-compiling info flag (`--version`/`--help`/`--list`/`--explain`).
+    toks = seg.split()
+    n = len(toks)
+    i = 0
+    while i < n:                       # walk the command prefix to the real cmd
+        t = toks[i]
+        if ASSIGN.match(t):            # RUSTFLAGS=x cargo ...
+            i += 1
+            continue
+        if t in SHELL_KW:              # do/then/else/{/! cargo ...
+            i += 1
+            continue
+        if t in PREFIX_CMDS:           # sudo/env/timeout/nice/... cargo ...
+            i += 1
+            while i < n and (toks[i].startswith("-") or NUMVAL.match(toks[i])):
+                i += 1                 # consume the wrapper's flags + numeric vals
+            continue
+        break
+    if i >= n or toks[i] != "cargo":
+        return None                    # some OTHER command, or no command word
+    k = i + 1
+    while k < n:                       # parse the cargo subcommand
+        t = toks[k]
+        if t.startswith("+"):          # +toolchain override
+            k += 1
+            continue
+        if t in INFO_FLAGS:
+            return "__INFO__"
+        if t in VALUED_FLAGS:          # skip the flag AND its value
+            k += 2
+            continue
+        if t.startswith("-"):          # any other leading global flag
+            k += 1
+            continue
+        return META.split(t, 1)[0]     # first non-flag token = subcommand
+    return None                        # bare `cargo` -> prints help, non-compiling
+
+
 for seg in split_top_level(cmd):
-    if not anchor.search(seg):
+    sub = cargo_sub(seg)
+    if not sub or sub == "__INFO__":
         continue
-    if not norun.search(seg):
-        sys.exit(0)   # heavy: a real run with no --no-run in its own segment
-    # only cargo flags BEFORE a harness `--` separator count as scope/breadth
-    dd = double_dash.search(seg)
-    pre = seg[:dd.start()] if dd else seg
-    if explicit_broad.search(pre):
-        sys.exit(0)   # heavy: explicit whole-workspace compile (#544-review)
-    if broad_plural.search(pre) and not pkg_scope.search(pre):
-        sys.exit(0)   # heavy: all-of-kind across the whole workspace, no -p scope
-    if not narrowing.search(pre):
-        sys.exit(0)   # heavy: unscoped -> whole-workspace default compile (#544)
+    if sub in NONCOMPILING:
+        continue
+    sys.exit(0)   # heavy: a compiling cargo subcommand in command position
 sys.exit(1)
 PYEOF
 }
 
-# Is it a HEAVY build? (cargo check / clippy / cargo test --no-run are NOT)
+# Is it a HEAVY build?  Non-cargo heavy builds stay plain bash greps; ALL cargo
+# COMPILATION (#557) is delegated to the allowlist `_cargo_compiles`.
 is_heavy() {
     local c="$1"
-    # #471 (F1): every closing anchor widened `([[:space:]]|$)` ->
-    # `([[:space:]]|$|[;&|)(<>])` so a shell metachar glued directly to the
-    # subcommand token (`cargo run;`, `(cargo run)`, `cargo run|tee`, `cargo run&`)
-    # no longer escapes, while a longer-word decoy (`cargo runner`, `cargo
-    # run-script`) still does not match (the char after `run` there is a letter/
-    # `-`, neither whitespace/EOL nor a metachar). The tauri/trunk/wasm-pack shapes
-    # below have NO closing anchor -- they match a prefix regardless of the
-    # trailing char -- so F1 does not apply to them.
-    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+build([[:space:]]|$|[;&|)(<>])' && return 0
+    # Non-cargo heavy builds. The tauri/trunk/wasm-pack shapes have NO closing
+    # anchor -- they match a prefix regardless of the trailing char. `cargo tauri
+    # build` (space form) ALSO trips `_cargo_compiles` below (sub `tauri` is not
+    # in the allowlist), so this grep is what additionally catches the standalone
+    # `cargo-tauri build` (hyphen) binary that `_cargo_compiles` cannot see.
     printf '%s' "$c" | grep -qE 'cargo[- ]tauri[[:space:]]+build' && return 0
     printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])trunk[[:space:]]+build' && return 0
     printf '%s' "$c" | grep -qE 'wasm-pack[[:space:]]+build' && return 0
-    # `cargo test` that RUNS tests (NOT the compile-only `--no-run`). #471 (F2):
-    # no WHOLE-flag `--no-run` anywhere -> heavy on the fast path (no python); a
-    # whole-flag `--no-run` present -> the segment helper decides (a genuine run
-    # in a different segment, or a `--no-run-decoy` harness arg, still blocks).
-    if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+test([[:space:]]|$|[;&|)(<>])'; then
-        if printf '%s' "$c" | grep -qE '(^|[[:space:]])--no-run([[:space:]]|$|[;&|)(<>])'; then
-            _gated_shape_is_heavy "$c" 'test' && return 0
-        else
-            return 0
-        fi
-    fi
-    # #470: heavy compile/run cargo subcommands that escaped the build/test
-    # regexes and ran SILENTLY (no block, no audit line) -- camera-box provably
-    # runs all of these locally (STEP 0 evidence + the #470 inventory). Same
-    # command-position anchor as above so a quoted mention or an argument is
-    # never matched; the SANCTIONED Tier-0 workarounds (a `--no-run` compile, a
-    # direct `target/.../deps/<bin>` execution, a `gcc`/`cc` harness compile)
-    # stay untouched -- none of them contains one of these command shapes.
-    #
-    #   cargo run     -- compiles + runs the binary (no cheap subcommand)
-    #   cargo mutants -- compiles + runs the whole mutation set
-    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+run([[:space:]]|$|[;&|)(<>])' && return 0
-    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+mutants([[:space:]]|$|[;&|)(<>])' && return 0
-    # `cargo nextest run` -- the real CI test runner (compiles + runs); the
-    # compile-only `cargo nextest list` is a cheap check and is NOT matched.
-    printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+nextest[[:space:]]+run([[:space:]]|$|[;&|)(<>])' && return 0
     # `cmake --build <dir>` -- the vendored-libobs C build documented for local
     # dev1 use (vendor/BUILD.md). The `cmake -S . -B` configure step is light
     # and is NOT matched -- only `--build` is heavy.
     printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cmake[[:space:]]+--build([[:space:]]|$|[;&|)(<>])' && return 0
-    # `cargo bench` that RUNS benches (NOT the compile-only `--no-run`, same #471
-    # (F2) segment-scoped treatment as the `cargo test` carve-out above).
-    if printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cargo[[:space:]]+bench([[:space:]]|$|[;&|)(<>])'; then
-        if printf '%s' "$c" | grep -qE '(^|[[:space:]])--no-run([[:space:]]|$|[;&|)(<>])'; then
-            _gated_shape_is_heavy "$c" 'bench' && return 0
-        else
-            return 0
-        fi
+    # #557: ANY compiling `cargo` subcommand -> heavy (allowlist inversion). Cheap
+    # pre-filter: only spawn python for a command that actually mentions `cargo`
+    # as a word, so the hot path (every Bash command WITHOUT cargo) pays nothing
+    # beyond this one grep and never forks python.
+    if printf '%s' "$c" | grep -qwE 'cargo'; then
+        _cargo_compiles "$c" && return 0
     fi
     return 1
 }
@@ -435,10 +428,10 @@ done
 _log_tier0_event "blocked" || true
 
 if [ "$CAMERA_BOX" = 1 ]; then
-    echo "BLOCKED: heavy local build/test in the camera-box repo (no-local-builds.md, airuleset #477). The '# airuleset:build-ok' marker and AIRULESET_ALLOW_LOCAL_BUILD are DISABLED for camera-box — heavy compilation and tests run in CI ONLY. Locally, run only a cheap check: cargo check / cargo clippy / a SCOPED compile-only build (cargo test --no-run -p <crate> / --lib / --test <name>). A FULL-workspace 'cargo test --no-run' is heavy (#544) — scope it or let CI run it." >&2
+    echo "BLOCKED: local cargo COMPILATION in the camera-box repo (no-local-builds.md, airuleset #477/#557). Tier-0 = ZERO local cargo compilation — EVERY compiling cargo shape (build/test/bench/run/check/clippy/doc/… , scoped or whole-workspace, --no-run or not) runs in CI ONLY. The '# airuleset:build-ok' marker and AIRULESET_ALLOW_LOCAL_BUILD are DISABLED for camera-box. Locally you may run only NON-compiling cargo (cargo fmt / metadata / tree / clean / update); let CI compile + test." >&2
 elif [ -n "$HEAVY_SCRIPT" ]; then
-    echo "BLOCKED: heavy local build hidden inside invoked script '$HEAVY_SCRIPT' in a Tier-0 project (no-local-builds.md). Compilation + release builds run in CI — locally run only a cheap check: cargo check / cargo clippy / a SCOPED compile-only build (cargo test --no-run -p <crate> / --lib). To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
+    echo "BLOCKED: local cargo COMPILATION hidden inside invoked script '$HEAVY_SCRIPT' in a Tier-0 project (no-local-builds.md, #557). Tier-0 = ZERO local cargo compilation — every compiling cargo shape (build/test/bench/run/check/clippy/doc/…) runs in CI. Locally run only NON-compiling cargo (fmt / metadata / tree / clean). To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
 else
-    echo "BLOCKED: heavy local build in a Tier-0 project (no-local-builds.md). Compilation + release builds run in CI — locally run only a cheap check: cargo check / cargo clippy / a SCOPED compile-only build (cargo test --no-run -p <crate> / --lib / --test <name>). A FULL-workspace 'cargo test --no-run' compiles the whole test suite and is heavy (#544) — scope it with -p/--lib or let CI run it. To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
+    echo "BLOCKED: local cargo COMPILATION in a Tier-0 project (no-local-builds.md, #557). Tier-0 = ZERO local cargo compilation — EVERY compiling cargo shape (build/test/bench/run/check/clippy/doc/rustc/install/… , narrow AND whole-workspace, --no-run or not) runs in CI. Locally run only NON-compiling cargo (cargo fmt / metadata / tree / clean / update). To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
 fi
 exit 2
