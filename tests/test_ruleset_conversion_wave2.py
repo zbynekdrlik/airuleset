@@ -210,8 +210,10 @@ class TestMilestoneNotificationsPartialSplit(TestCase):
     def test_moved_sections_present_verbatim_in_skill(self):
         s = read(self.SKILL)
         for anchor in [
-            "the **`notify-api-error.sh` Stop hook** fires ONE Discord ping "
-            "`@owner` when a turn ENDS on a genuine Claude Code API error",
+            # #546: the api-error PING was retired; the skill now documents the
+            # suppression mechanism instead of the old sanctioned-ping wording.
+            "These automated alert classes are owner-suppressed at "
+            "`notify.send()` and no longer ping the device.",
             "Each project runs in a tmux session grouped `zbynek` or "
             "`marek`.",
             "**Parallel mirror recipients (`DISCORD_MIRROR_<OWNER>`).**",
@@ -244,8 +246,13 @@ class TestMilestoneNotificationsPartialSplit(TestCase):
     def test_module_shrank_by_moving_pure_mechanism_sections(self):
         # A real, meaningful reduction (original was 2082 words) — not a
         # rewrite of the kept content, just the pure-mechanism sections gone.
+        # #546 raised the cap 1700 -> 1750: the api-error/limit/burn alert
+        # class was RETIRED, and that is a genuine always-on POLICY inversion
+        # this always-on module must carry (a concise note; the mechanism
+        # detail stays in the notification-mechanics skill) — still 17% below
+        # the 2082-word original, so the "shrank meaningfully" intent holds.
         t = read(self.MOD)
-        self.assertLess(len(t.split()), 1700)
+        self.assertLess(len(t.split()), 1750)
 
 
 class TestDeliberatelyKeptInlineCandidates(TestCase):

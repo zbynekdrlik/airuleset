@@ -1,6 +1,13 @@
 """watchdog/usage.py -- weekly token-usage tracking + the fable-gate budget
 check (#404 point 3, module split).
 
+#546 (owner directive 2026-08-18): the weekly-usage-LIMIT Discord ping below
+(`send_fn(..., dedup_key="usage:...")`) is a limit/subscription alert another
+project now owns -- airuleset does not Discord-alert on it. `notify.send()`
+suppresses the `usage:` alert class (SUPPRESSED_ALERT_PREFIXES): the POST is
+dropped (returns "suppressed", logged to the machine channel), while the
+threshold evaluation + the `fable_gate()` budget check are UNCHANGED.
+
 WHY THIS FILE EXISTS. Extracted VERBATIM (a MOVE, not a rewrite -- unlike
 #402/#403's compact.py/goal.py, which collapsed genuinely obsolete
 machinery, this cluster's behavior is unchanged) from `watchdog/__init__.py`

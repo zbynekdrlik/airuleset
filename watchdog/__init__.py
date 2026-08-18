@@ -1752,8 +1752,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     numbers are kept addressable so historical log lines and code comments
     still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
-      (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`) + ping;
-          past `max_nudges` it does NOT give up — it keeps nudging forever at a
+      (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`).
+          NOTE (#546): every Discord "ping" jobs 1/1b/3/6 describe below is
+          RETIRED — `notify.send()` suppresses the api-error/limit/usage alert
+          classes (machine-channel `suppressed` log, never Discord). Only the
+          SILENT `continue` auto-resume stays; it never routes through send(),
+          so suppression leaves it untouched.
+          Past `max_nudges` it does NOT give up — it keeps nudging forever at a
           widening interval (#175), with a one-shot "gave up" ping alongside.
           #176: a pane idle at `❯` but holding a FOREIGN DRAFT is genuinely idle,
           not busy — `_classify_boundary` tells it apart from a real foreground
