@@ -278,8 +278,9 @@ class TestThreadNameEndsWithStreamNumber(TestCase):
     """#532 — every client PROD handover thread title ENDS with the owning
     stream's number (montalu3 → "… 3"), so the owner sees at a glance which
     stream owns the thread. Locks the STABLE core (the numbered-stream rule +
-    the owner's own canonical example), NOT the interim base-stream suffix,
-    which is pending the owner's decision on #532 and may still change.
+    the owner's own canonical example) plus the base-stream suffix "1", which
+    the owner CONFIRMED on #532 (2026-08-18) — base streams are being renamed
+    to <name>1 (#537), so the numbering is uniform and no longer interim.
 
     Teeth per #498/#500: the new rule wraps across several physical lines, so
     a per-line _teeth mixin cannot apply — bound a norm()-collapsed WINDOW to
@@ -317,10 +318,15 @@ class TestThreadNameEndsWithStreamNumber(TestCase):
         self.assertIn("montalu2..8", w)
 
     def test_unnumbered_base_streams_named(self):
-        # the unnumbered set is stable regardless of which suffix the owner
-        # finally picks for it on #532 — lock only that they are addressed.
         w = self._bullet_window()
         self.assertIn("UNNUMBERED base stream (montalu, marek, david, simap)", w)
+
+    def test_base_stream_suffix_confirmed(self):
+        # owner decision on #532 (2026-08-18): base suffix = "1", renames in #537
+        w = self._bullet_window()
+        self.assertIn('the suffix is "1"', w)
+        self.assertIn("CONFIRMED by the owner", w)
+        self.assertIn("#537", w)
 
 
 if __name__ == "__main__":

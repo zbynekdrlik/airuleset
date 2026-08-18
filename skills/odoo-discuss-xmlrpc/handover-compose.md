@@ -22,10 +22,13 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   rozmerov 2", "Tabula objednavok 1"). The suffix is the STREAM'S NUMBER: for a
   NUMBERED stream it is the trailing digits of the stream name (montalu2..8 →
   2..8, david2..4 → 2..4, miva1 → 1). For an UNNUMBERED base stream (montalu,
-  marek, david, simap) the interim suffix is "1" — the first stream of its client
+  marek, david, simap) the suffix is "1" — the first stream of its client
   family (matches the existing montalu "Tabula objednavok 1" thread and miva1) —
-  PENDING owner confirmation on airuleset #532, where the base-stream suffix
-  (full name / "1" / none) is being settled with the owner.
+  CONFIRMED by the owner on airuleset #532 (2026-08-18): unnumbered base streams
+  are themselves a mistake and will be renamed to <name>1 (airuleset #537:
+  montalu→montalu1, david→david1, simap→simap1; marek stays unnumbered, unused,
+  and does no client handovers), so every active handover stream ends with its
+  number and the rule is uniform.
 - **The message body MUST carry a direct deep-link URL to the LIVE feature** on
   the client's PROD — the actual route / record / page URL the client clicks to
   SEE it, never a menu path ("Predaj → Objednávky → …") and never the bare
