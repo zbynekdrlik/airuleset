@@ -965,6 +965,19 @@ def cmd_install(args):
     except Exception as e:
         print(f"  managed plugins setup error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 6c. subagent status line: model+effort in the agent strip (#538) ---
+    # Native subagentStatusLine (CC v2.1.205+): surfaces each inline
+    # subagent's RESOLVED model per strip row. Runs AFTER caveman's settings
+    # write (step 6) so it reconciles the already-updated settings.json.
+    # Non-fatal — a status-line shim must never fail the whole install (a
+    # broken one just leaves CC's default rows), matching the discord-check
+    # step below.
+    try:
+        import subagent_statusline
+        subagent_statusline.setup(REPO_DIR, CLAUDE_DIR, str(SETTINGS_JSON))
+    except Exception as e:
+        print(f"  subagent status line setup error (non-fatal): {e}", file=sys.stderr)
+
     # --- 7. Discord notify config: warn LOUDLY if this host has no .env ---
     try:
         check_discord_notify_config()
@@ -3145,6 +3158,7 @@ from cli_remote import (  # noqa: E402, F401
     REMOTE_DEPLOY_TIMEOUT_S as REMOTE_DEPLOY_TIMEOUT_S,
     SONIOX_KEY_SOURCE as SONIOX_KEY_SOURCE,
     _soniox_key_line as _soniox_key_line,
+    _deployable_hosts as _deployable_hosts,
     provision_subdev_soniox_key as provision_subdev_soniox_key,
     _SSH_AUTH_DENIED_RX as _SSH_AUTH_DENIED_RX,
     _is_ssh_auth_failure as _is_ssh_auth_failure,
@@ -3860,6 +3874,7 @@ def cmd_goal_arm(args):
 from cli_fleet import (  # noqa: E402, F401
     AUTHORITY_PROFILES as AUTHORITY_PROFILES,
     AUTHORITY_BY_USER as AUTHORITY_BY_USER,
+    STREAM_RENAME_ALIASES as STREAM_RENAME_ALIASES,
 )
 
 
@@ -4224,6 +4239,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _core_search_excl as _core_search_excl,
     _gh_app_token_dir as _gh_app_token_dir,
     _is_gh_app_token_box as _is_gh_app_token_box,
+    _stream_rename_equivalents as _stream_rename_equivalents,
     _slice_quals as _slice_quals,
     MAINTAINER_ACTION_LABELS as MAINTAINER_ACTION_LABELS,
     _obligation_quals as _obligation_quals,

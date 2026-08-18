@@ -69,7 +69,14 @@ _DEDUP_NAME_MAX = 180
 # resolve_owner() and carries the identical value either way.
 STREAM_NOTIFY_OWNER = {
     "david": "david",
+    # david1/montalu1/simap1 (#537): the numbered ALIASES of the unnumbered
+    # base streams (rename prep). Each mirrors its base's routing decision
+    # EXACTLY — same human owner, same thread — so the live rename flips the
+    # linux user without touching Discord routing. marek deliberately stays
+    # unnumbered (and out of this map, per the header comment above).
+    "david1": "david",
     "montalu": "zbynek",
+    "montalu1": "zbynek",
     "montalu2": "zbynek",
     "montalu3": "zbynek",
     "montalu4": "marek",
@@ -84,6 +91,7 @@ STREAM_NOTIFY_OWNER = {
     "montalu7": "zbynek",
     "montalu8": "zbynek",
     "simap": "zbynek",
+    "simap1": "zbynek",   # #537 alias of simap — see the david1 comment above
     # miva1 (airuleset#300, 2026-08-07): phase-1 isolated stream, same shape
     # as simap/montalu -- its own tmux session name carries no Discord
     # identity of its own, so it redirects outright to zbynek's own thread.

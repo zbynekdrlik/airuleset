@@ -2267,7 +2267,15 @@ class TestWatchdogFleetFetch(unittest.TestCase):
         with m.patch("subprocess.run",
                     return_value=m.Mock(returncode=255, stdout="", stderr="down")):
             got = airuleset._watchdog_fleet_fetch()
-        self.assertEqual(set(got.keys()), {h["name"] for h in airuleset.REMOTE_HOSTS})
+        # #537: the default resolves to the LIVE deploy targets — pending
+        # (not-yet-live rename) accounts are filtered out of the fleet-burn
+        # ssh path (fail2ban safety), so it is _deployable_hosts(), not the raw
+        # REMOTE_HOSTS.
+        self.assertEqual(set(got.keys()),
+                         {h["name"] for h in airuleset._deployable_hosts()})
+        # and no pending account leaked into the fetch
+        pending = {h["name"] for h in airuleset.REMOTE_HOSTS if h.get("pending")}
+        self.assertEqual(got.keys() & pending, set())
 
     def test_want_hour_bucket_defaults_to_current_utc_hour_when_not_given(self):
         # exercise the "no want_hour_bucket given" default path directly:

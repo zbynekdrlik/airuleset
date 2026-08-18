@@ -97,6 +97,26 @@ def _soniox_key_line(source: Path = None):
     return None
 
 
+def _deployable_hosts(hosts=None):
+    """`REMOTE_HOSTS` entries that are LIVE ssh/deploy targets — i.e. NOT
+    flagged `"pending": True` (#537). A pending entry names a base-stream
+    rename target (`montalu1`/`david1`/`simap1`) whose LIVE unix rename has
+    not landed yet, so the account does NOT exist on the box. BOTH ssh paths —
+    `cmd_push()`'s deploy loop AND `provision_subdev_soniox_key()` — filter
+    through here so a pending target is NEVER contacted: a password/pubkey
+    attempt against a non-existent account is a fail2ban strike
+    (#341/#300/#326), and the montalu family uses the shared default-key
+    sshpass path. The live-op rename ticket removes the `"pending"` flag (and
+    the old entry) once each account is created + verified.
+
+    Reads `airuleset.REMOTE_HOSTS` (the facade re-export) so a
+    `patch.object(airuleset, "REMOTE_HOSTS", ...)` in a test is honoured (the
+    L-E rule); `hosts` defaults to it, a caller with its own list passes it."""
+    import airuleset  # #433 L-E: REMOTE_HOSTS in cli_fleet, read via facade
+    src = hosts if hosts is not None else airuleset.REMOTE_HOSTS
+    return [h for h in src if not h.get("pending")]
+
+
 def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
                                  skip_names=None, control_opts=None):
     """Deliver `~/.soniox.env` (the meeting-analysis skill's canonical,
@@ -143,7 +163,11 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     run = run or subprocess.run
     control_opts = list(control_opts or [])
     import airuleset  # #433 L-E: REMOTE_HOSTS/AUTHORITY_BY_USER promoted to cli_fleet, read via facade
-    targets = [h for h in (hosts if hosts is not None else airuleset.REMOTE_HOSTS)
+    # #537: filter pending (not-yet-live rename) targets out FIRST — a pending
+    # montalu1 IS in AUTHORITY_BY_USER, so it would otherwise pass the
+    # stream-account filter and get an ssh (fail2ban strike against a
+    # non-existent account).
+    targets = [h for h in _deployable_hosts(hosts)
                if h.get("user") in airuleset.AUTHORITY_BY_USER or h.get("soniox")]
     if not targets:
         return []
@@ -722,7 +746,10 @@ def cmd_push(args):
         # purpose — that is exactly what compounded the fail2ban risk there).
         shared_hosts = _shared_remote_host_ips()
         audited_hosts = set()
-        for remote in airuleset.REMOTE_HOSTS:
+        # #537: iterate only LIVE targets — a `"pending": True` entry (a
+        # not-yet-created base-stream rename account) is never ssh'd until the
+        # live-op rename ticket clears the flag (fail2ban safety, _deployable_hosts).
+        for remote in _deployable_hosts():
             print(f"\n{'=' * 50}")
             print(f"Deploying to {remote['name']} ({remote['host']})...")
             remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
