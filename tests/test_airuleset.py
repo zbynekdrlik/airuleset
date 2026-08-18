@@ -10783,8 +10783,11 @@ class TestTier0BuildBlock(TestCase):
 
     def test_allows_cheap_checks_in_tier0(self):
         d = self._proj()
+        # #544: a SCOPED compile-only build is the cheap check; a FULL-workspace
+        # `cargo test --no-run` now blocks -> CI (see test_tier0_local_build_hook
+        # ::FullSuiteNoRunBlockedTest). Was bare `cargo test --no-run`.
         for cmd in ["cargo check --workspace", "cargo clippy -- -D warnings",
-                    "cargo test --no-run", "cargo fmt --all"]:
+                    "cargo test --no-run --lib", "cargo fmt --all"]:
             self.assertEqual(self._run(cmd, d).returncode, 0, cmd)
 
     def test_allows_heavy_build_in_tier1_and_tier2(self):

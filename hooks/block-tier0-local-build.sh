@@ -6,8 +6,10 @@ set -euo pipefail
 # no-local-builds.md: Tier 0 (the default) bans heavy local builds — `cargo build`
 # / `cargo build --release` / `cargo test` (runs tests) / `cargo tauri build` /
 # `trunk build` / `wasm-pack build` — locally; only the cheap compile-checks
-# (`cargo check`, `cargo clippy`, `cargo test --no-run`) are allowed, and full /
-# release builds run in CI. Tier 1 (`airuleset:local-builds=allowed`) and Tier 2
+# (`cargo check`, `cargo clippy`, and a SCOPED `cargo test --no-run -p <crate>`/
+# `--lib`/`--test <name>`) are allowed, and full / release builds — INCLUDING a
+# FULL-WORKSPACE `cargo test --no-run` that compiles the whole test suite (#544)
+# — run in CI. Tier 1 (`airuleset:local-builds=allowed`) and Tier 2
 # (`airuleset:local-builds=fast-iterate`) projects, declared by a marker in their
 # CLAUDE.md, are EXEMPT.
 #
@@ -219,9 +221,26 @@ anchor = re.compile(r"(^|[;&|(\s])cargo\s+" + re.escape(sub) + r"(\s|$|[;&|)(<>]
 # still recognized as the compile-only flag (a `--no-run-decoy` harness arg,
 # followed by `-`, still does NOT match and stays heavy).
 norun = re.compile(r"(^|\s)--no-run(\s|$|[;&|)(<>])")
+# #544: a `cargo test/bench --no-run` is the allowed Tier-0 cheap check ONLY when
+# it is SCOPED to one package/target -- a FULL-WORKSPACE compile-only build (no
+# narrowing flag) compiles every test binary in the workspace (dantesync 6.9 GB)
+# and is heavy in spirit ("heavy compiles run in CI"), so it blocks -> CI just
+# like `cargo build`. Narrowing flags, word-boundary EXACT (same trailing
+# metachar class as the anchors above, so a `--lib;`/`-p x|tee` stays scoped):
+# -p / --package / --lib / --bin / --test / --example / --bench / --doc. The
+# BROAD plurals (--bins/--tests/--examples) and --workspace/--all are NOT in
+# this set, so they stay heavy -- fail-SAFE: a disk gate over-blocks a broad
+# compile rather than under-blocking one (a positional test-NAME filter narrows
+# which tests RUN, never which COMPILE, so it is correctly NOT a narrowing flag).
+narrowing = re.compile(
+    r"(^|\s)(--package|--lib|--bin|--test|--example|--bench|--doc|-p)(=|\s|$|[;&|)(<>])")
 for seg in split_top_level(cmd):
-    if anchor.search(seg) and not norun.search(seg):
+    if not anchor.search(seg):
+        continue
+    if not norun.search(seg):
         sys.exit(0)   # heavy: a real run with no --no-run in its own segment
+    if not narrowing.search(seg):
+        sys.exit(0)   # heavy: full-workspace compile-only build (#544)
 sys.exit(1)
 PYEOF
 }
@@ -391,10 +410,10 @@ done
 _log_tier0_event "blocked" || true
 
 if [ "$CAMERA_BOX" = 1 ]; then
-    echo "BLOCKED: heavy local build/test in the camera-box repo (no-local-builds.md, airuleset #477). The '# airuleset:build-ok' marker and AIRULESET_ALLOW_LOCAL_BUILD are DISABLED for camera-box — heavy compilation and tests run in CI ONLY. Locally, run only a cheap check: cargo check / cargo clippy / cargo test --no-run." >&2
+    echo "BLOCKED: heavy local build/test in the camera-box repo (no-local-builds.md, airuleset #477). The '# airuleset:build-ok' marker and AIRULESET_ALLOW_LOCAL_BUILD are DISABLED for camera-box — heavy compilation and tests run in CI ONLY. Locally, run only a cheap check: cargo check / cargo clippy / a SCOPED compile-only build (cargo test --no-run -p <crate> / --lib / --test <name>). A FULL-workspace 'cargo test --no-run' is heavy (#544) — scope it or let CI run it." >&2
 elif [ -n "$HEAVY_SCRIPT" ]; then
-    echo "BLOCKED: heavy local build hidden inside invoked script '$HEAVY_SCRIPT' in a Tier-0 project (no-local-builds.md). Compilation + release builds run in CI — locally run only a cheap check: cargo check / cargo clippy / cargo test --no-run. To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
+    echo "BLOCKED: heavy local build hidden inside invoked script '$HEAVY_SCRIPT' in a Tier-0 project (no-local-builds.md). Compilation + release builds run in CI — locally run only a cheap check: cargo check / cargo clippy / a SCOPED compile-only build (cargo test --no-run -p <crate> / --lib). To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
 else
-    echo "BLOCKED: heavy local build in a Tier-0 project (no-local-builds.md). Compilation + release builds run in CI — locally run only a cheap check: cargo check / cargo clippy / cargo test --no-run. To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
+    echo "BLOCKED: heavy local build in a Tier-0 project (no-local-builds.md). Compilation + release builds run in CI — locally run only a cheap check: cargo check / cargo clippy / a SCOPED compile-only build (cargo test --no-run -p <crate> / --lib / --test <name>). A FULL-workspace 'cargo test --no-run' compiles the whole test suite and is heavy (#544) — scope it with -p/--lib or let CI run it. To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
 fi
 exit 2

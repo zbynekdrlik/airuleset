@@ -127,8 +127,11 @@ class DirectHeavyBuildUnchangedTest(_Runner):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_cargo_test_no_run_is_allowed(self):
+        # #544 policy inversion: a SCOPED compile-only check is the allowed
+        # cheap check; a FULL-workspace `cargo test --no-run --workspace` now
+        # blocks -> CI (see FullSuiteNoRunBlockedTest). Was `--workspace`.
         proj = self._mkproj()
-        out = self.run_hook("cargo test --no-run --workspace", proj)
+        out = self.run_hook("cargo test --no-run --lib", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_build_mentioned_inside_a_string_is_not_matched(self):
@@ -416,9 +419,12 @@ class NewlyDetectedHeavyBuildShapesTest(_Runner):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
     def test_cargo_bench_no_run_is_allowed(self):
-        # compile-only, exactly like the existing `cargo test --no-run` carve-out
+        # compile-only, like the SCOPED `cargo test --no-run -p` carve-out.
+        # #544: a FULL-workspace `cargo bench --no-run` now blocks -> CI, so
+        # this asserts the SCOPED form stays allowed (was bare `cargo bench
+        # --no-run`).
         proj = self._mkproj()
-        out = self.run_hook("cargo bench --no-run", proj)
+        out = self.run_hook("cargo bench --no-run --bench mybench", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_cargo_nextest_run_is_blocked(self):
@@ -514,9 +520,12 @@ class AnchorEscapeAndNoRunSegmentScopeTest(_Runner):
     `split_top_level` splitter) and `--no-run` is matched as a WHOLE flag.
 
     Every SANCTIONED Tier-0 workaround stays allowed and is locked below: a
-    `--no-run` compile, a direct `target/.../deps/<bin>` execution, a `gcc`/`cc`
-    harness compile, the `# airuleset:build-ok` marker, a Tier-1/2 project marker,
-    and the longer-word decoys `cargo runner`/`cargo run-script`.
+    SCOPED `--no-run` compile (#544 narrowed the sanctioned compile-only form
+    from a bare/full-workspace `--no-run` to one carrying a `-p`/`--lib`/...
+    NARROWING flag; a full-workspace `--no-run` now blocks -> CI, see
+    FullSuiteNoRunBlockedTest), a direct `target/.../deps/<bin>` execution, a
+    `gcc`/`cc` harness compile, the `# airuleset:build-ok` marker, a Tier-1/2
+    project marker, and the longer-word decoys `cargo runner`/`cargo run-script`.
     """
 
     # ---- F1: trailing-metachar anchor escape (was rc=0, must block) ----
@@ -605,18 +614,21 @@ class AnchorEscapeAndNoRunSegmentScopeTest(_Runner):
     # ---- SANCTIONED workarounds + decoys: MUST stay allowed (before & after) ----
 
     def test_cargo_test_no_run_compile_still_allowed(self):
+        # #544: SCOPED compile-only stays allowed (was bare `--workspace`)
         proj = self._mkproj()
-        out = self.run_hook("cargo test --no-run --workspace", proj)
+        out = self.run_hook("cargo test --no-run --lib", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_cargo_bench_no_run_compile_still_allowed(self):
+        # #544: SCOPED compile-only stays allowed (was bare `cargo bench --no-run`)
         proj = self._mkproj()
-        out = self.run_hook("cargo bench --no-run", proj)
+        out = self.run_hook("cargo bench --no-run --bench mybench", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_two_no_run_compiles_chained_still_allowed(self):
+        # #544: both SCOPED compile-only segments stay allowed (was two bare)
         proj = self._mkproj()
-        out = self.run_hook("cargo test --no-run && cargo bench --no-run", proj)
+        out = self.run_hook("cargo test --no-run --lib && cargo bench --no-run --bench b", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_cargo_runner_decoy_still_allowed(self):
@@ -670,38 +682,41 @@ class AnchorEscapeAndNoRunSegmentScopeTest(_Runner):
         self.assertIn("project=camera-box", lines[0])
         self.assertIn("cargo bench;", lines[0])
 
-    # ---- #471-review: F1 must widen the `--no-run` EXEMPT-flag boundary too,
-    # symmetrically with the heavy-token anchors -- else a sanctioned
-    # compile-only workaround with a trailing metachar wrongly BLOCKS (rc=2). ----
+    # ---- #471-review F1 (the `--no-run` EXEMPT-flag boundary must widen with
+    # the heavy-token anchors) still holds, but #544 narrowed the sanctioned
+    # compile-only workaround to a SCOPED `--no-run` -- so these lock that a
+    # SCOPED compile-only build with a trailing metachar stays allowed (rc=0);
+    # the narrowing-flag boundary reuses the SAME metachar class. A bare
+    # `--no-run<metachar>` now blocks -> CI (see FullSuiteNoRunBlockedTest). ----
 
     def test_no_run_compile_with_trailing_semicolon_still_allowed(self):
         proj = self._mkproj()
-        out = self.run_hook("cargo test --no-run;", proj)
+        out = self.run_hook("cargo test --no-run --lib;", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_bench_no_run_compile_with_trailing_semicolon_still_allowed(self):
         proj = self._mkproj()
-        out = self.run_hook("cargo bench --no-run;", proj)
+        out = self.run_hook("cargo bench --no-run --bench b;", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_no_run_compile_in_parens_still_allowed(self):
         proj = self._mkproj()
-        out = self.run_hook("(cargo test --no-run)", proj)
+        out = self.run_hook("(cargo test --no-run --lib)", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_no_run_compile_piped_still_allowed(self):
         proj = self._mkproj()
-        out = self.run_hook("cargo test --no-run|tee log", proj)
+        out = self.run_hook("cargo test --no-run --lib|tee log", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_no_run_compile_backgrounded_still_allowed(self):
         proj = self._mkproj()
-        out = self.run_hook("cargo test --no-run&", proj)
+        out = self.run_hook("cargo test --no-run --lib&", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_no_run_compile_redirected_still_allowed(self):
         proj = self._mkproj()
-        out = self.run_hook("cargo test --no-run>log", proj)
+        out = self.run_hook("cargo test --no-run --lib>log", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_glued_semicolon_chain_no_run_then_real_bench_still_blocks(self):
@@ -819,8 +834,11 @@ class CameraBoxBypassDisabledTest(_Runner):
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_camera_box_no_run_compile_still_allowed(self):
+        # #544: even on camera-box a SCOPED compile-only stays the allowed cheap
+        # check; a FULL-workspace `cargo test --no-run --workspace` now blocks
+        # -> CI (see FullSuiteNoRunBlockedTest). Was `--workspace`.
         proj = self._mkproj(name="camera-box")
-        out = self.run_hook("cargo test --no-run --workspace", proj)
+        out = self.run_hook("cargo test --no-run -p rig", proj)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_camera_box_non_heavy_command_with_marker_untouched(self):
