@@ -50,8 +50,10 @@ Staršie/hlbšie tests/ lekcie (archív) sú v `.claude/rules-reference/internal
   confirmed: dev1's `~/.claude/settings.json` had playwright=>False pre-#542).
   Consequences: the whole per-project opt-in list is gone (#452's one-line
   `enabledPlugins.playwright=true` writes into 11 repos are now REDUNDANT but
-  harmless — a low-priority cleanup follow-up), and #453 (needs-user-decision:
-  which MORE projects need the opt-in) is OBSOLETE — every project has it.
+  HARMLESS — project-scope true on top of user-scope true — a cosmetic
+  zero-behavior residual, not worth a chained cleanup ticket), and #453
+  (needs-user-decision: which MORE projects need the opt-in) is already CLOSED
+  and OBSOLETE — every project has it.
   `autonomous-verification.md`'s "Note (#542)" and `cli_caveman_plugins.py`'s
   `MANAGED_PLUGINS` comment carry the same reversal. **Still-reusable
   technique (from #452):** to classify whether a project genuinely USES the
