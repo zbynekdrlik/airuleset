@@ -3562,6 +3562,31 @@ def _watchdog_repo_roots():
     return discover_managed_repos()
 
 
+def _watchdog_is_deploy_target():
+    """Job 34 (#535 review MAJOR-A): True iff THIS box is a fleet DEPLOY TARGET —
+    its tailscale IP is one of the REMOTE_HOSTS `host` values — i.e. a box that
+    receives read-only `git pull --ff-only` deploys and NEVER develops airuleset,
+    so a dirty airuleset tree there is unambiguously a hand-edit (DRIFT). The DEPLOY
+    SOURCE (dev1) is NOT in REMOTE_HOSTS and develops airuleset directly, so its main
+    checkout is legitimately dirty even at HEAD==origin; the conformance dirty
+    dimension must skip it. Username matching (`_current_remote_host_entry`) is
+    INSUFFICIENT — dev1 + dev2 + spinbike all share `newlevel`, so it would
+    misclassify dev1 as dev2's entry — the tailscale IP is the reliable box identity.
+    Fail-safe: any error (no tailscale, non-zero rc, parse failure) → False → the
+    dirty dimension is SKIPPED (never a false alarm), the module's prime invariant."""
+    import subprocess
+    try:
+        r = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
+                           text=True, timeout=5)
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    my_ips = {ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()}
+    target_hosts = {e.get("host") for e in REMOTE_HOSTS if e.get("host")}
+    return bool(my_ips & target_hosts)
+
+
 def _watchdog_git_fetch(root):
     """Job 28's best-effort ref refresh — same shape as job 24's own probe
     fetch, minus the enrichment half (job 28 needs no blocker lookup, only
@@ -3762,6 +3787,11 @@ def cmd_watchdog(args):
                     # REPO_DIR is this box's airuleset repo (the systemd unit
                     # runs the watchdog from it). Internally daily-cadenced.
                     conformance_root=REPO_DIR,
+                    # #535 review MAJOR-A: a CALLABLE (invoked only on the daily
+                    # check, not every 60s sweep) so the dirty dimension runs ONLY
+                    # on a confirmed deploy target — the dev1 SOURCE box is
+                    # legitimately dirty and must not false-alarm.
+                    conformance_is_target=_watchdog_is_deploy_target,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

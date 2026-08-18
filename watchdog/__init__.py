@@ -1730,7 +1730,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
              progress_dir=None, questions_path=None,
              owner_decision_fetch=None, gk_selfservice_fetch=None,
-             u_reconcile_clear=None, conformance_root=None):
+             u_reconcile_clear=None, conformance_root=None,
+             conformance_is_target=None):
     """Scan every `claude` pane once. 34 numbered jobs per poll — 28 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -2193,7 +2194,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           False drift / None undetermined): (1) HEAD vs origin/main after a
           bounded ≤1×/day fetch (drift only when strictly BEHIND — a missed
           deploy; ahead/diverged = local dev, no alarm), (2) `git status
-          --porcelain` empty, (3) md5 of `~/.claude/CLAUDE.md` vs the install-
+          --porcelain` empty (deploy TARGETS only — the dev1 source is
+          legitimately dirty), (3) md5 of `~/.claude/CLAUDE.md` vs the install-
           recorded `{md5, HEAD}` baseline (skipped when baseline HEAD != current
           HEAD — install pending after a repo move, so immune to a mid-push false
           alarm), (4) `api-watchdog.timer` active. ANYTHING uncertain (a git/fetch
@@ -3909,7 +3911,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     _add("conformance_check", lambda: conformance_root is not None,
          lambda: run_conformance_check(
              now, state, send_fn=send_fn, dry_run=dry_run,
-             repo_root=conformance_root,
+             repo_root=conformance_root, is_target_check=conformance_is_target,
              persist=lambda: save_state(state_path, state)),
          "conformance-check error")
 

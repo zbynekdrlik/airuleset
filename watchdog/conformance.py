@@ -188,20 +188,25 @@ def classify_head(local_sha, origin_sha, behind):
             "alarm" % (local_sha[:8], origin_sha[:8]))
 
 
-def classify_dirty(porcelain, error, at_baseline):
-    """A clean working tree is only EXPECTED on a box that is AT the fleet
-    baseline (HEAD == origin/main). ``at_baseline`` False (HEAD ahead/diverged =
-    local development on dev1, HEAD behind = a stale box the HEAD dimension already
-    owns, or origin unreadable) → UNDETERMINED, never a drift — the same local-dev
-    exemption ``classify_head`` gives an ahead HEAD (#535 review MAJOR-1: without
-    it, job 34 false-alarms on dev1, the live dev/integration checkout, whose tree
-    is legitimately dirty during any airuleset session). AT baseline: empty =
-    conformant; non-empty = DRIFT (a hand-edited deployed box); a git error =
-    UNDETERMINED."""
-    if not at_baseline:
+def classify_dirty(porcelain, error, clean_expected):
+    """A clean working tree is only EXPECTED — and a dirty one only DRIFT — on a
+    box that (a) is a fleet DEPLOY TARGET (receives read-only ``git pull --ff-only``
+    deploys and never develops airuleset) AND (b) is AT the fleet baseline
+    (HEAD == origin/main). ``clean_expected`` False → UNDETERMINED, never a drift:
+
+      * the DEPLOY SOURCE (dev1, the airuleset dev checkout, NOT in REMOTE_HOSTS)
+        is legitimately dirty during any airuleset session — even at HEAD==origin,
+        with uncommitted edits before the next commit (#535 review MAJOR-A);
+      * a box off baseline (HEAD ahead/diverged = local dev, behind = a stale box
+        the HEAD dimension already owns, or origin unreadable) — the same local-dev
+        exemption ``classify_head`` gives an ahead HEAD (#535 review MAJOR-1).
+
+    On a deploy target at baseline: empty = conformant; non-empty = DRIFT (a
+    hand-edited deployed box); a git error = UNDETERMINED."""
+    if not clean_expected:
         return ("dirty", None,
-                "box nie je na fleet baseline (HEAD != origin/main alebo origin "
-                "nečitateľné) — dirty check preskočený (lokálny vývoj/stale)")
+                "clean tree sa neočakáva (deploy-source box alebo mimo fleet "
+                "baseline) — dirty check preskočený (lokálny vývoj/stale)")
     if error:
         return ("dirty", None, "git status zlyhal — preskočené")
     n = len([ln for ln in (porcelain or "").splitlines() if ln.strip()])
@@ -234,15 +239,17 @@ def classify_md5(on_disk_md5, recorded_md5, recorded_head, current_head):
 
 
 _TIMER_DRIFT_STATES = ("inactive", "failed")
-_TIMER_TRANSIENT_STATES = ("activating", "deactivating", "reloading", "maintenance")
 
 
 def classify_timer(status):
-    """``api-watchdog.timer`` active = conformant; only the genuinely-stopped states
-    (``inactive``/``failed``) = DRIFT (the watchdog is not firing on schedule). A
-    TRANSIENT state (``activating``/``reloading``/``deactivating`` — a sweep landing
-    during a ``systemctl --user daemon-reload``/restart) → UNDETERMINED, never a
-    spurious ping (#535 review NIT-1); an unreadable status = UNDETERMINED."""
+    """``api-watchdog.timer`` active = conformant; ONLY the genuinely-stopped states
+    in ``_TIMER_DRIFT_STATES`` (``inactive``/``failed``) = DRIFT (the watchdog is not
+    firing on schedule). Every OTHER non-active word — a TRANSIENT state
+    (``activating``/``reloading``/``deactivating`` — a sweep landing during a
+    ``systemctl --user daemon-reload``/restart) or any unknown future state — falls to
+    the catch-all → UNDETERMINED, never a spurious ping (#535 review NIT-1); an
+    unreadable status = UNDETERMINED. Drift is an ALLOWLIST of known-bad states, so a
+    novel state is fail-safe (no alarm), never a guess."""
     if status is None:
         return ("timer", None, "systemctl nedostupné — preskočené")
     if status == "active":
@@ -251,7 +258,7 @@ def classify_timer(status):
         return ("timer", False,
                 "api-watchdog.timer je '%s' — watchdog nebeží pravidelne" % status)
     return ("timer", None,
-            "api-watchdog.timer prechodný stav '%s' — preskočené" % status)
+            "api-watchdog.timer stav '%s' (prechodný/neznámy) — preskočené" % status)
 
 
 # --- ORCHESTRATOR ----------------------------------------------------------
@@ -274,7 +281,7 @@ def _sig_for(dim, facts):
 
 def run_conformance_check(now, state, send_fn=None, dry_run=False,
                           repo_root=None, claude_md_path=None, baseline_path=None,
-                          git_run=None, timer_check=None,
+                          git_run=None, timer_check=None, is_target_check=None,
                           interval=None, reping=None, persist=None):
     """Job 34: the daily per-box conformance sweep. Cadence-gated on its OWN state
     key ``conformance_last_check`` (``_sweep_due``); the cadence marker is stamped +
@@ -320,6 +327,11 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
     local = (out_local or "").strip() if rc_local == 0 else None
     # bounded daily fetch; on failure SKIP the origin comparison (never measure the
     # HEAD dimension on stale refs — #172-F5), the head decider handles origin=None.
+    # Not sweep_deadline-gated (#535 review MINOR-B, accepted residual): it is ONE
+    # fetch at most once per DAY (the check is cadence-gated), the cadence marker is
+    # already persisted above so a systemd TimeoutStartSec kill mid-fetch can never
+    # re-run it (no loop), and CONF_GIT_TIMEOUT_S=15 bounds a single hung fetch —
+    # so at worst it defers other jobs to the next sweep, never a livelock.
     rc_fetch, _ = git_run(["fetch", "--quiet", "--no-tags", "origin", "main"], repo_root)
     if rc_fetch == 0:
         rc_o, out_o = git_run(["rev-parse", "origin/main"], repo_root)
@@ -334,11 +346,18 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
     else:
         behind = False
     head_facts = {"local": local, "origin": origin}
-    # A clean tree / matching CLAUDE.md is only EXPECTED at the fleet baseline
-    # (HEAD == origin/main). dev1 (the dev checkout) is legitimately ahead/dirty;
-    # the `dirty` dimension is skipped off-baseline (#535 review MAJOR-1). The md5
-    # dimension already has its own equivalent guard (recorded_head != HEAD).
-    at_baseline = bool(local and origin and local == origin)
+    # A clean working tree is EXPECTED only where it is the invariant: a DEPLOY
+    # TARGET (receives read-only `git pull --ff-only`, never develops airuleset —
+    # `is_target_check`, POSITIVELY confirmed via the tailscale-IP∈REMOTE_HOSTS
+    # membership cmd_watchdog wires) AND AT the fleet baseline (HEAD == origin/main).
+    # The DEPLOY SOURCE (dev1) is legitimately dirty even at HEAD==origin (#535
+    # review MAJOR-A), and any off-baseline box is local dev / stale (#535 review
+    # MAJOR-1) — both silence the dirty dimension. Fail-safe: an unconfirmed target
+    # (no tailscale / error) → is_target False → dirty SKIPPED, never a false alarm.
+    # (The md5 dimension needs no such gate — its own `recorded_head != HEAD` guard
+    # already exempts the source's uncommitted-but-not-installed edits.)
+    is_target = bool(is_target_check()) if is_target_check else False
+    clean_expected = bool(local and origin and local == origin) and is_target
 
     rc_st, out_st = git_run(["status", "--porcelain"], repo_root)
     dirty_error = (rc_st != 0)
@@ -357,7 +376,7 @@ def run_conformance_check(now, state, send_fn=None, dry_run=False,
     # --- decide (pure) ---
     decisions = [
         (classify_head(local, origin, behind), head_facts),
-        (classify_dirty(porcelain, dirty_error, at_baseline), dirty_facts),
+        (classify_dirty(porcelain, dirty_error, clean_expected), dirty_facts),
         (classify_md5(on_disk_md5, recorded_md5, recorded_head, local), md5_facts),
         (classify_timer(status), timer_facts),
     ]

@@ -100,10 +100,12 @@ def _claude_md(tmp, content="managed content\n"):
 
 def _run(state, tmp, send=None, dry_run=False, git=None, timer=None,
          claude_content="managed content\n", baseline_md5="MATCH",
-         baseline_head="aaaaaaaa1111", now=NOW, **git_kw):
+         baseline_head="aaaaaaaa1111", now=NOW, is_target=True, **git_kw):
     """Drive ``run_conformance_check`` with fully-controlled I/O seams. By default
     every dimension is CONFORMANT (uniform state): HEAD==origin, clean, timer
-    active, and the baseline md5 is stamped to the on-disk file's real md5."""
+    active, and the baseline md5 is stamped to the on-disk file's real md5.
+    ``is_target`` defaults True (a DEPLOY TARGET, where the dirty dimension runs);
+    pass False to model the deploy SOURCE box (dev1), where dirty is skipped."""
     cmd = _claude_md(tmp, claude_content)
     real_md5 = conf._md5_file(cmd)
     md5 = real_md5 if baseline_md5 == "MATCH" else baseline_md5
@@ -116,6 +118,7 @@ def _run(state, tmp, send=None, dry_run=False, git=None, timer=None,
         claude_md_path=cmd, baseline_path=base,
         git_run=git or fake_git(**git_kw),
         timer_check=timer or fake_timer(),
+        is_target_check=lambda: is_target,
         persist=lambda: None)
     return logs, calls
 
@@ -259,6 +262,15 @@ class TestRunConformance(unittest.TestCase):
             _, calls = _run({}, d, status=" M airuleset.py\n",
                             head="aaa11111", origin="bbb22222", ancestor_rc=1)
             self.assertEqual(calls, [], "a dirty dev-box tree off baseline must not alarm")
+
+    def test_dirty_on_source_box_does_not_ping(self):
+        # MAJOR-A: the deploy SOURCE box (dev1, not a REMOTE_HOSTS target) sits at
+        # HEAD==origin with a dirty main checkout during normal dev — is_target=False
+        # must silence the dirty dimension even though it is at baseline and dirty.
+        with TemporaryDirectory() as d:
+            _, calls = _run({}, d, status=" M airuleset.py\n", is_target=False)
+            self.assertEqual(calls, [],
+                             "a dirty deploy-SOURCE box at baseline must not alarm")
 
     def test_md5_mismatch_pings(self):
         with TemporaryDirectory() as d:
@@ -438,6 +450,37 @@ class TestInstallWiring(unittest.TestCase):
         import airuleset
         src = inspect.getsource(airuleset.cmd_install)
         self.assertIn("_record_conformance_baseline_step(", src)
+
+
+class TestIsDeployTarget(unittest.TestCase):
+    """`_watchdog_is_deploy_target` (#535 review MAJOR-A) — positively confirms a
+    deploy TARGET by tailscale-IP∈REMOTE_HOSTS membership, fail-safe to False (skip
+    the dirty dimension, never a false alarm) on any error."""
+    def _run_ips(self, stdout, rc=0):
+        import airuleset
+        import unittest.mock as m
+        fake = m.Mock(returncode=rc, stdout=stdout)
+        with m.patch("subprocess.run", return_value=fake):
+            return airuleset._watchdog_is_deploy_target()
+
+    def test_target_when_ip_in_remote_hosts(self):
+        import airuleset
+        host = next(e["host"] for e in airuleset.REMOTE_HOSTS if e.get("host"))
+        self.assertTrue(self._run_ips(host + "\n"),
+                        "a box whose tailscale IP is a REMOTE_HOSTS host is a target")
+
+    def test_source_when_ip_not_in_remote_hosts(self):
+        # dev1 (the source) — an IP not in any REMOTE_HOSTS entry
+        self.assertFalse(self._run_ips("192.168.99.99\n"))
+
+    def test_failsafe_on_error(self):
+        import airuleset
+        import unittest.mock as m
+        with m.patch("subprocess.run", side_effect=OSError("no tailscale")):
+            self.assertFalse(airuleset._watchdog_is_deploy_target())
+
+    def test_failsafe_on_nonzero_rc(self):
+        self.assertFalse(self._run_ips("", rc=1))
 
 
 if __name__ == "__main__":
