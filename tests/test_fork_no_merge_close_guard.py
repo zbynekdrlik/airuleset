@@ -550,5 +550,150 @@ class TestStreamLabelAcceptanceClose(TestCase):
                          "stream:%s" % airuleset._current_user(), r.stdout)
 
 
+class TestIsCloseDetectorHardening(TestCase):
+    """#540 — harden the `is_close` FRONT gate against two close forms that
+    escaped the WHOLE guard (surfaced by #533's Fable adversarial review, M3):
+
+      FORM 1 — a `gh api -X PATCH …/issues/N --input body.json` (or `--input -`,
+      or `-F state=@file`): the `state=closed` lives in the request BODY, not
+      argv, so the literal-`state=closed` grep missed it → is_close=0 → the hook
+      exited 0 at the top, bypassing everything. Chosen fix (Approach 3): the
+      PATCH branch fires on `state=closed` visible OR a HIDDEN body (`--input`
+      token / a `=@`-valued field). The `gh api PATCH` form is NEVER exempted, so
+      detection == block for a reduced-authority stream. A visible non-close
+      PATCH (a `-f state=open` reopen, or an `issues/N` mention inside a field
+      value on a NON-issue endpoint) stays allowed — no new false-positive.
+
+      FORM 2 — a STANDALONE `bash -c 'gh issue close N'` / `sh -c "…"` /
+      `eval "…"`: the boundary class excluded the quote chars `'`/`"`, so a close
+      opening an interpreter's quoted argument was not a boundary match →
+      is_close=0. Chosen fix (Approach 3): widen the boundary class symmetrically
+      to include the quotes; #533's existing HAS_INTERP then blanks ISSUE_NUM so
+      the nested close can never ride a carve-out → BLOCK.
+
+    All cases run under a REDUCED-authority cwd with a FOREIGN author so neither
+    #533 carve-out can fire — detection alone must reach the BLOCK.
+    """
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.full = _cwd_with_authority("full")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    def _self_stream(self):
+        return "stream:%s" % airuleset._current_user()
+
+    # --- FORM 1: --input / @file-body PATCH must be DETECTED → BLOCK ---
+
+    def test_blocks_patch_close_via_input_body_file(self):
+        # state=closed lives in body.json, not argv — the escape #540 exists for.
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 "
+                "--input body.json", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_blocks_patch_close_via_input_stdin(self):
+        # `--input -` reads the body from stdin — invisible to the hook, but the
+        # `--input` TOKEN is the argv marker that fails safe.
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 --input -",
+                self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_patch_close_via_input_equals_form(self):
+        # `--input=body.json` (glued) must be treated identically to `--input f`.
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 "
+                "--input=body.json", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_patch_close_via_glued_method_and_input(self):
+        # The glued `--method=PATCH` (already detected by #533) combined with a
+        # hidden --input body — both #540 residual shapes at once.
+        r = run("gh api --method=PATCH repos/zbynekdrlik/odoo-erp/issues/3313 "
+                "--input body.json", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_patch_close_via_at_file_state_field(self):
+        # `-F state=@state.txt` reads the state value from a file (a `=@` field),
+        # hiding `state=closed` from argv — the 5th body-hiding shape.
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 "
+                "-F state=@state.txt", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_input_body_patch_blocks_even_with_acceptance_labels(self):
+        # The `gh api PATCH` form is NEVER exempted — even a perfect acceptance
+        # label set cannot allow the --input body form (mirror of
+        # test_blocks_the_api_patch_close_form_even_with_acceptance_labels).
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 --input b.json",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- FORM 1 precision: a visible NON-close PATCH must stay ALLOWED ---
+
+    def test_allows_visible_state_open_reopen_patch(self):
+        # A visible `-f state=open` reopen (no state=closed, no hidden body) is
+        # NOT a close → allowed. Confirms Approach 3 does not over-block reopens.
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 -f state=open",
+                self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_patch_to_non_issue_endpoint_mentioning_issues_in_body(self):
+        # A PATCH to a PR that merely MENTIONS `issues/N` inside a field value,
+        # with no state=closed and no hidden body, must NOT be read as a close —
+        # the false-positive Approach 1 (drop state=closed) would have caused.
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/pulls/5 "
+                "-f body='fixes issues/3 somehow'", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- FORM 2: quoted-interpreter close must be DETECTED → BLOCK ---
+
+    def test_blocks_standalone_bash_c_close(self):
+        r = run("bash -c 'gh issue close 3313 --comment done'", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_blocks_standalone_sh_c_close_double_quoted(self):
+        r = run('sh -c "gh issue close 3313"', self.fork,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("fork-no-merge", r.stderr)
+
+    def test_blocks_standalone_eval_close(self):
+        r = run('eval "gh issue close 3313"', self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_standalone_dash_c_close(self):
+        r = run("dash -c 'gh issue close 3313'", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_standalone_interpreter_close_blocks_even_with_acceptance_labels(self):
+        # A perfect acceptance label set cannot rescue a quoted-interpreter close
+        # — HAS_INTERP blanks ISSUE_NUM so no carve-out fires → BLOCK.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("bash -c 'gh issue close 3313 -R zbynekdrlik/odoo-erp --comment ok'",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    # --- FORM 2 precision: a bash -c with a NON-close gh command stays ALLOWED ---
+
+    def test_allows_bash_c_with_a_non_close_gh_command(self):
+        # A `bash -c 'gh issue list'` carries no close phrase → is_close=0 →
+        # allowed, even though it is a nested interpreter. Confirms the widened
+        # boundary does not over-block every quoted gh command.
+        r = run("bash -c 'gh issue list --state open'", self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     main()
