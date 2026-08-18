@@ -17,8 +17,10 @@ suggested carrier). Every managed box already writes an hourly burn snapshot
 ``~/.claude/burn-history/fleet.jsonl`` hourly (job 16, ``fleet_burn_job`` via
 ``_watchdog_fleet_fetch``, which filters ``"pending"`` rename targets out via
 ``_deployable_hosts`` — #537). A box present as a FRESH (no ``"error"`` key)
-per-host entry in a fleet row WAS alive that hour; a dead box shows as
-``{"error": ...}`` / ``{"stale": True}`` or is absent. So each fleet row's own
+per-host entry in a fleet row WAS alive that hour; a dead/unreachable box shows
+as ``{"error": ...}`` (with an optional ``"stale": True`` co-flag on a wrong-hour
+row — ``merge_fleet_row`` only ever sets ``stale`` INSIDE the error branch, never
+bare), or is absent. So each fleet row's own
 ``ts`` is a per-box liveness heartbeat, already centrally collected — NO new
 producer, NO new ssh (fail2ban-safe). This detector detects WATCHDOG liveness
 (via the burn snapshot), which is precisely the ticket's gap (watchdog dead =
@@ -79,14 +81,30 @@ CONFORMANCE_HB_COLLECTION_STALE_S = 6 * 3600   # env
                                             # collector. Kept well UNDER the per-box
                                             # stale threshold so a genuine collector
                                             # outage is caught long before it could
-                                            # false-alarm every box.
-CONFORMANCE_HB_LOOKBACK_S = 4 * 24 * 3600  # how far back to scan fleet rows for a
-                                            # box's last-fresh + presence: > the stale
-                                            # threshold so a box fresh within it is
-                                            # always found, bounded so the scan stays
-                                            # cheap on a long fleet.jsonl
+                                            # false-alarm every box. HARD-CLAMPED
+                                            # below `stale` at use (#543 review F2):
+                                            # a value >= stale would judge a stalled
+                                            # collector "fresh" and re-open the
+                                            # whole-fleet false alarm via the per-box
+                                            # path — the invariant, not just a doc.
+CONFORMANCE_HB_COLLECTION_STALE_MIN_S = 3600  # floor for the env override (#504): a
+                                            # units-error sub-hour value would flag a
+                                            # HEALTHY collector as stalled and silently
+                                            # disable per-box dead-box detection
+CONFORMANCE_HB_LOOKBACK_S = 4 * 24 * 3600  # how far back a host must APPEAR (fresh or
+                                            # error) to be a KNOWN box vs a brand-new
+                                            # one not yet fetched (the grace gate); a
+                                            # host absent from every row this recent is
+                                            # UNDETERMINED, never a false alarm. NOTE
+                                            # (#543 review F3): the last-fresh instant
+                                            # itself is scanned UNBOUNDED (all rows, see
+                                            # `_scan`) so a stably-dead box's dedup sig
+                                            # never flips just because its last-fresh
+                                            # evidence slid out of this window.
 
-_COLLECTION_KEY = "__collection__"          # reserved dedup key for the collector ping
+_COLLECTION_KEY = "__collection__"          # reserved dedup key: collector-stalled ping
+_ALLFLEET_KEY = "__allfleet__"              # reserved dedup key: whole-fleet-down ping
+                                            # (#543 review F1 aggregate — see below)
 
 
 def _env_int(key, default_s):
@@ -148,9 +166,15 @@ def classify_box(host, last_fresh_ts, present, now, stale_s):
       * not present            → UNDETERMINED (brand-new box not yet fetched —
                                   NEVER a false alarm);
       * present, never fresh    → DEAD (its watchdog has never produced a fresh
-                                  snapshot in the whole window);
+                                  snapshot in the whole history);
       * present, last fresh > stale → DEAD (silent past the threshold);
       * else                    → ALIVE.
+
+    OPERATOR NOTE (#543 review F4): a deploy target registered in ``REMOTE_HOSTS``
+    but whose account/box is not live yet MUST carry ``"pending": True`` (#537) —
+    ``_deployable_hosts`` then filters it out, so it is never fetched and never
+    ``present``; without that flag it would be present-only-as-error → an
+    immediate false dead-box ping on its first sweep.
     """
     if not present:
         return ("host", None,
@@ -182,10 +206,17 @@ def _sig_for_box(last_fresh_ts):
 # --- ORCHESTRATOR ----------------------------------------------------------
 
 def _scan(rows, now, lookback_s):
-    """One pass over the fleet rows within ``lookback_s`` of ``now``:
-    ``(latest_row_ts, {host: last_fresh_ts}, {present hosts})``. ``last_fresh_ts``
-    is the newest row-ts where the host was FRESH; ``present`` is every host seen
-    (fresh or error) in the window. Rows with an unparsable ts are skipped."""
+    """One pass over the fleet rows → ``(latest_row_ts, {host: last_fresh_ts},
+    {present hosts})``. THREE different scopes, deliberately (#543 review F3):
+      * ``latest``     — newest row ts across ALL rows (feeds classify_collection);
+      * ``last_fresh`` — newest row-ts where the host was FRESH, across ALL rows
+        (UNBOUNDED): a stably-dead box keeps its true last-fresh instant so its
+        dedup sig never flips just because the evidence slid out of ``lookback_s``;
+      * ``present``    — every host seen (fresh OR error) WITHIN ``lookback_s`` of
+        ``now``: the brand-new-vs-known gate, so a box absent from every recent row
+        is UNDETERMINED (grace), and a box REMOVED from the fleet long ago stops
+        being ``present`` and never alarms.
+    Rows with an unparsable ts are skipped."""
     latest = None
     last_fresh = {}
     present = set()
@@ -195,14 +226,14 @@ def _scan(rows, now, lookback_s):
             continue
         if latest is None or rts > latest:
             latest = rts
-        if now - rts > lookback_s:
-            continue
         per_host = row.get("per_host") if isinstance(row, dict) else None
         if not isinstance(per_host, dict):
             continue
+        recent = (now - rts <= lookback_s)
         for name, entry in per_host.items():
-            present.add(name)
-            if _is_fresh(entry):
+            if recent:
+                present.add(name)                 # presence is lookback-bounded
+            if _is_fresh(entry):                  # last-fresh is UNBOUNDED
                 if name not in last_fresh or rts > last_fresh[name]:
                     last_fresh[name] = rts
     return latest, last_fresh, present
@@ -269,8 +300,15 @@ def run_conformance_heartbeat_check(now, state, send_fn=None, dry_run=False,
         reping = max(_env_int("AIRULESET_CONFORMANCE_HB_REPING_S",
                               CONFORMANCE_HB_REPING_S), CONFORMANCE_HB_REPING_MIN_S)
     if collection_stale is None:
-        collection_stale = _env_int("AIRULESET_CONFORMANCE_HB_COLLECTION_STALE_S",
-                                    CONFORMANCE_HB_COLLECTION_STALE_S)
+        # #543 review F2: floor AND hard-clamp BELOW `stale`. The whole-fleet
+        # fail-safe only holds while collection_stale < stale — a value >= stale
+        # would judge a genuinely stalled collector "fresh" and re-open the
+        # per-box false alarm; a units-error sub-hour value would flag a healthy
+        # collector as stalled and disable dead-box detection.
+        collection_stale = max(
+            min(_env_int("AIRULESET_CONFORMANCE_HB_COLLECTION_STALE_S",
+                         CONFORMANCE_HB_COLLECTION_STALE_S), stale - 1),
+            CONFORMANCE_HB_COLLECTION_STALE_MIN_S)
     if lookback is None:
         lookback = CONFORMANCE_HB_LOOKBACK_S
 
@@ -322,21 +360,50 @@ def run_conformance_heartbeat_check(now, state, send_fn=None, dry_run=False,
     except Exception as e:
         logs.append("conformance-hb hosts read zlyhal (%r) — preskočené" % (e,))
         return logs
+    # Pass 1: classify every deployable box. `checked` = every present+judged box
+    # (ok is not None — ALIVE and DEAD both); `dead` = the DRIFT subset only. A box
+    # alive → pop its dedup (a re-death re-pings). A brand-new/absent box → grace
+    # (None), neither checked nor pinged.
+    checked = 0        # count of present+judged boxes (alive + dead)
+    dead = []          # (name, detail, sig) for the DEAD subset
     for h in hosts:
         name = h.get("name") if isinstance(h, dict) else None
-        if not name:
-            continue
+        if not name or name in (_COLLECTION_KEY, _ALLFLEET_KEY):
+            continue          # skip a host colliding with a reserved dedup key
         lf = last_fresh.get(name)
         hname, ok, detail = classify_box(name, lf, name in present, now, stale)
         logs.append("conformance-hb [%s] %s -- %s"
                     % (name, {True: "OK", False: "DEAD", None: "unknown"}[ok],
                        detail))
+        if ok is None:
+            continue                              # brand-new / not fetched — grace
+        checked += 1
         if ok is True:
             if name in seen and not dry_run:
                 seen.pop(name, None)              # alive — re-death re-pings
             continue
-        if ok is None:
-            continue                              # brand-new / not fetched — grace
-        _ping(send_fn, seen, name, _sig_for_box(lf), detail, now, reping,
+        dead.append((name, detail, _sig_for_box(lf)))
+    # Pass 2 — #543 review F1 (the collection-freshness fail-safe's blind spot):
+    # a SIMULTANEOUS total-fleet death is overwhelmingly a dev1-SIDE failure (job
+    # 16 keeps writing FRESH-ts rows, so classify_collection passes, but dev1 has
+    # lost the tailnet so EVERY remote is `{"error":...}` — content, not ts, is the
+    # real signal), NOT N genuine box deaths. Suppress the N per-box pings and emit
+    # ONE aggregate — the whole point is to never false-alarm the whole fleet.
+    if checked > 1 and len(dead) == checked:
+        _ping(send_fn, seen, _ALLFLEET_KEY, "allfleet:%d" % checked,
+              "celý fleet (%d boxov) naraz neodpovedá — takmer isto výpadok siete "
+              "alebo fleet-zberu na dev1 (job 16 stále píše čerstvé riadky, ale "
+              "každý box je v chybe), nie %d skutočných úmrtí. Skontroluj sieť / "
+              "tailscale na dev1 a či boxy žijú." % (checked, checked),
+              now, reping, dry_run, persist, logs, "allfleet",
+              "🔴 **fleet nedostupný**")
+        return logs
+    # Not all-dead → the fleet is (at least partially) reachable, so re-arm the
+    # aggregate latch (a future total death re-pings immediately) and fire the
+    # genuine per-box dead pings.
+    if _ALLFLEET_KEY in seen and not dry_run:
+        seen.pop(_ALLFLEET_KEY, None)
+    for name, detail, sig in dead:
+        _ping(send_fn, seen, name, sig, detail, now, reping,
               dry_run, persist, logs, name, "🔴 **dead-box**")
     return logs
