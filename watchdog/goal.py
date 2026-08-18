@@ -2128,9 +2128,11 @@ def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
       EITHER give-up kind (a permanently-aborting / fully-stalled lane must
       escalate to a human once).
     * `count_gaveup` (0-worker EMPTY-lane, fully-stalled box): a genuine
-      PERMANENT give-up -> `skip=True` every sweep. Its counters DO reset at the
-      reachable 0-worker idle branch once the box goes quiet, and a dead box
-      needs a human.
+      PERMANENT give-up -> `skip=True` every sweep. #530: its counters reset at
+      the reachable 0-worker idle branch (`_lane_idle_reset`) only once the box
+      goes quiet AND the backlog has CHANGED since the last nudge -- transcript
+      freshness alone no longer re-arms it (that was the bug that made
+      GOAL_LANE_MAX_NUDGES structurally unreachable); a dead box needs a human.
     * stash-abort give-up (already pinged): `skip=False` -- the caller FALLS
       THROUGH to the #479 abort-backoff park, which re-probes delivery on the
       capped (30-min) schedule. This is the #511 fix: the stash-abort give-up's
