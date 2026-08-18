@@ -73,6 +73,7 @@ EXPECTED_STANDALONE = [
     "reconcile_u_labels",               # (32) — #515 mechanical U-label lifecycle
     "conformance_check",                # (34) — #535 per-box conformance check
     "conformance_heartbeat_check",      # (35) — #543 central dead-box detector
+    "gk_orphan_marker_sweep",           # (36) — #551 orphaned gk hand-off marker
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at

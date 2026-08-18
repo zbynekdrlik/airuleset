@@ -1179,6 +1179,367 @@ def gk_selfservice_bounce(now, run, state, home=None, dry_run=False,
     return logs
 
 
+# --------------------------------------------------------------------------- #
+# #551 — ORPHANED gk HAND-OFF MARKER BACKSTOP (job 36). The miva1 incident
+# (odoo-erp #3244): a stream HAND-WROTE a gk hand-off marker COMMENT in a
+# MUTATED shape — `GATEKEEPER-ACTION (spresnenie …):` (a parenthetical BEFORE
+# the colon) — instead of using `airuleset.py gk-request`. The odoo-erp
+# auto-label workflow matches only a line-start `GATEKEEPER-ACTION:` (colon
+# immediately after the token), so the mutated shape triggered no
+# `needs-gatekeeper` label; and job 11's own candidate queries
+# (`needs-gatekeeper` label ∪ `GATEKEEPER-ACTION:` in:title) never scan
+# COMMENTS at all — so the hand-off was invisible to every existing layer and
+# the stream parked on a NEVER-DELIVERED request for hours.
+#
+# This backstop closes that gap on the SUPERVISOR side. It is the DETECTION-
+# side complement of the verified-delivery guidance in `cmd_gk_request`'s
+# docstring (item 2 = docs + this backstop, NOT a prevention hook — see the
+# ticket's design-refinement comment for why a hook was rejected: it would
+# duplicate ~200 lines of the #516 hook's body-extraction machinery, against
+# #486's net-LOC direction).
+#
+# The design-critical fact (measured live on the real repo, 60 candidates): the
+# token `GATEKEEPER-ACTION` is PERVASIVE in this repo's comment history (every
+# gk-request leaves a `GATEKEEPER-ACTION:` marker forever; the label is removed
+# after processing), so a naive "token in a comment + no label = orphan" rule
+# would FALSE-ACCUSE ~44 already-processed tickets. The FALSIFIABLE orphan
+# signature is narrow and ANDed from six conditions, biased hard toward
+# SILENCE (never a false accusation — the ticket's own hard requirement):
+#   (a) a comment carries a MUTATED marker (line-start token + a BRACKETED
+#       annotation `(...)`/`[...]` before the colon — the exact shape the
+#       workflow misses; requiring a bracket, NOT arbitrary prose, keeps a
+#       benign col-0 status line `GATEKEEPER-ACTION tasks remaining: …` from
+#       reading as a marker — adversarial review F1; a fenced code PASTE of a
+#       marker is stripped before scanning — review F2),
+#   (b) NO comment carries a PROPER `GATEKEEPER-ACTION:` marker (which the
+#       workflow WOULD have labeled — a processed-then-cleared hand-off),
+#   (c) the ticket carries NO downstream gatekeeper-flow label
+#       (`ready-for-review` / `needs-acceptance`) — those prove the gatekeeper
+#       ALREADY engaged via the review/acceptance flow and never needed
+#       `needs-gatekeeper` (the #4128 live false-positive: a genuine mutated
+#       marker on a reviewed ticket),
+#   (d) `needs-gatekeeper` is NOT currently a label (authoritative live read),
+#   (e) `needs-gatekeeper` was NEVER in the label timeline (PAGINATED — a
+#       manually-labeled-then-cleared ticket is not an orphan),
+#   (f) the title does not carry the `GATEKEEPER-ACTION` prefix (job 11's
+#       in:title query already surfaces those).
+# A "proper marker present but never labeled" case (gk may have worked it
+# directly from the comment) is deliberately LEFT to manual triage — that is
+# the exact "line-present-but-pure-read" judgement #516 forbids mechanizing.
+# --------------------------------------------------------------------------- #
+
+# Marker classifiers, applied PER LINE (re.match anchors each line's start).
+# `_GK_PROPER_MARKER_RE`: the workflow-matched proper shape (token, optional
+# horizontal ws, colon) — GENEROUS (a trailing-space `GATEKEEPER-ACTION :`
+# counts as proper) so the gate biases toward SILENCE. `_GK_MUTATED_MARKER_RE`:
+# the workflow-MISSED shape the miva1 incident used — token, optional ws, then
+# a BRACKETED annotation `(...)`/`[...]` before the colon (e.g.
+# `GATEKEEPER-ACTION (spresnenie …):`). Requiring a bracket, NOT arbitrary
+# prose, is what stops a benign col-0 status line
+# (`GATEKEEPER-ACTION tasks remaining: …`) from reading as a hand-off marker
+# (adversarial review F1). A line is MUTATED iff it matches the bracketed shape
+# and is NOT proper. `[ \t]` (never `\s`, which matches newlines and spans
+# lines). Fenced code blocks are stripped before scanning (a fenced PASTE of a
+# marker is documentation, not a live hand-off — review F2).
+_GK_PROPER_MARKER_RE = re.compile(r'[ \t]{0,3}GATEKEEPER-ACTION[ \t]*:')
+_GK_MUTATED_MARKER_RE = re.compile(
+    r'[ \t]{0,3}GATEKEEPER-ACTION[ \t]*[(\[][^\n:]{0,80}:')
+_GK_FENCE_RE = re.compile(r'[ \t]{0,3}(```|~~~)')
+
+_GKORPHAN_EVIDENCE_TEMPLATE = (
+    "gk hand-off backstop (airuleset#551): tento tiket nesie MUTOVANÝ "
+    "`GATEKEEPER-ACTION` hand-off marker v komente, ktorý repo auto-label "
+    "workflow (matchuje len line-start `GATEKEEPER-ACTION:`) nezachytil — takže "
+    "`needs-gatekeeper` label nikdy nedopadol a gk fronta o tomto hand-offe "
+    "nevedela. Doplnil som `needs-gatekeeper` label zo supervisor strany, aby "
+    "job 11 hand-off zdvihol. Ak je to omyl (hand-off je už vybavený), label "
+    "odober. Stream: nabudúce použi `airuleset.py gk-request`, nie ručný "
+    "komentár — CLA cesta label doručí spoľahlivo.")
+
+_GKORPHAN_PING_TEMPLATE = (
+    "⚠️ **%(name)s: orphaned gk hand-off #%(num)d**\n> Tiket nesie mutovaný "
+    "`GATEKEEPER-ACTION` komentár bez `needs-gatekeeper` labelu (workflow ho "
+    "minul), ale label sa nepodarilo doplniť automaticky. Skontroluj #%(num)d "
+    "v `%(root)s` — hand-off pravdepodobne nebol nikdy doručený gk fronte.")
+
+
+def _gk_non_fenced_lines(body):
+    """Lines of `body` OUTSIDE a ```/~~~ fenced code block. A fenced PASTE of a
+    marker (an incident write-up, a docs example) is documentation, not a live
+    hand-off, so it must not read as a marker (adversarial review F2)."""
+    out, in_fence = [], False
+    for line in str(body or "").split("\n"):
+        if _GK_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            out.append(line)
+    return out
+
+
+def _gk_marker_kinds(comment_bodies):
+    """PURE classifier: does ANY comment carry a MUTATED marker (bracketed
+    annotation before the colon), and does ANY carry a PROPER marker? Returns
+    (has_mutated: bool, has_proper: bool). Scanned PER LINE (outside fenced
+    code) so a body with both a proper marker on one line and a mutated one on
+    another is classified correctly on both axes."""
+    has_mutated = has_proper = False
+    for b in (comment_bodies or []):
+        for line in _gk_non_fenced_lines(b):
+            if _GK_PROPER_MARKER_RE.match(line):
+                has_proper = True
+            elif _GK_MUTATED_MARKER_RE.match(line):
+                has_mutated = True
+    return has_mutated, has_proper
+
+
+def _gk_orphan_decide(has_mutated, has_proper, currently_labeled, ga_title,
+                      ever_labeled, handoff_flow=False):
+    """PURE facts-in / verdict-out decision (#486 — no silent branch; the
+    caller LOGS the verdict for EVERY candidate). Returns (is_orphan, reason).
+    A candidate is an ORPHANED hand-off iff ALL six hold; every exclusion
+    returns an explicit reason, so the sweep journal shows exactly why each
+    candidate was or was not reconciled. `ever_labeled is None` (timeline
+    unreadable) is treated as NOT-orphan — the fail-safe direction (never a
+    false accusation on an unmeasurable fact). `handoff_flow` (a
+    `ready-for-review` / `needs-acceptance` label) means the gatekeeper ALREADY
+    engaged via the review/acceptance flow and never needed `needs-gatekeeper`
+    — NOT an orphan (the #4128 live false-positive)."""
+    if not has_mutated:
+        return False, "no-mutated-marker"
+    if has_proper:
+        return False, "has-proper-marker"        # workflow would have labeled
+    if handoff_flow:
+        return False, "in-gatekeeper-flow"       # review/acceptance engaged
+    if ga_title:
+        return False, "ga-title-already-discoverable"
+    if currently_labeled:
+        return False, "already-labeled"
+    if ever_labeled is None:
+        return False, "timeline-undeterminable"   # fail-safe: never accuse
+    if ever_labeled:
+        return False, "was-labeled-then-cleared"
+    return True, "orphaned-mutated-marker"
+
+
+def _fetch_gk_orphan_candidates(root, home=None):
+    """Live candidate facts for the orphan sweep at `root`, or None on ANY
+    error (fail-safe — an auth/network hiccup must never look like a real
+    orphan). Returns a list of dicts, each with the facts `_gk_orphan_decide`
+    needs: `{number, has_mutated, has_proper, handoff_flow, currently_labeled,
+    ga_title, ever_labeled}`.
+
+    ONE cheap search narrows the field (the token in a comment, no label; `-L
+    60` bounds it); then per candidate a single `gh issue view` supplies the
+    authoritative labels/title/comments — the search's own `-label` filter and
+    `in:comments` match both LAG the index and TOKENIZE, so nothing the search
+    says is trusted, it only bounds the set. Candidates are freshest-first
+    (updatedAt DESC — a live orphan is a fresh waiting hand-off). ALL fetched
+    (≤60) are classified — at the deliberately-generous 6h cadence, ~60 `gh
+    issue view` calls once every 6h is well inside the 120s sweep budget and
+    GitHub rate limits, and classifying only the freshest N would silently
+    blind ~35 candidates on this 60-candidate repo (adversarial review F3/F4;
+    no per-candidate verdict cache is needed at this cadence). The PAGINATED
+    timeline read (the `ever_labeled` fact) fires ONLY for a candidate already
+    past the cheap gate (mutated ∧ ¬proper ∧ ¬flow ∧ ¬labeled ∧ ¬ga_title) —
+    ≈0 per sweep on real data — so its cost is negligible. Honest residual: a
+    LONG-parked orphan (frozen updatedAt) on a repo with >60 token-bearing open
+    tickets can sink past the search's own `-L 60` and be unseen; job 11's own
+    stale-handoff alarm is a separate backstop for a parked hand-off."""
+    import subprocess
+    env = _gh_env(home)
+    try:
+        r = subprocess.run(
+            ["gh", "issue", "list", "--state", "open", "--search",
+             '"GATEKEEPER-ACTION" in:comments -label:needs-gatekeeper '
+             + watchdog.AUTOPILOT_SKIP_EXCL,
+             "-L", "60", "--json", "number,title,updatedAt"],
+            cwd=root, env=env, capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return None
+        rows = json.loads(r.stdout or "[]")
+    except Exception:
+        return None
+    # Drop title-discoverable rows cheaply; freshest first.
+    rows = [x for x in rows
+            if not str(x.get("title", "")).startswith("GATEKEEPER-ACTION")]
+    rows.sort(key=lambda x: str(x.get("updatedAt") or ""), reverse=True)
+    out = []
+    for x in rows:
+        num = x.get("number")
+        try:
+            v = subprocess.run(
+                ["gh", "issue", "view", str(num), "--json",
+                 "number,title,labels,comments"],
+                cwd=root, env=env, capture_output=True, text=True, timeout=15)
+            if v.returncode != 0:
+                return None
+            d = json.loads(v.stdout or "{}")
+        except Exception:
+            return None
+        labels = {str((lb or {}).get("name", ""))
+                  for lb in (d.get("labels") or []) if isinstance(lb, dict)}
+        title = str(d.get("title") or "")
+        bodies = [str((c or {}).get("body") or "")
+                  for c in (d.get("comments") or []) if isinstance(c, dict)]
+        has_mutated, has_proper = _gk_marker_kinds(bodies)
+        handoff_flow = bool(labels & {"ready-for-review", "needs-acceptance"})
+        currently_labeled = "needs-gatekeeper" in labels
+        ga_title = title.startswith("GATEKEEPER-ACTION")
+        ever_labeled = None
+        if has_mutated and not has_proper and not handoff_flow \
+                and not currently_labeled and not ga_title:
+            ever_labeled = _gk_ever_labeled(root, num, env)
+        out.append({"number": num, "has_mutated": has_mutated,
+                    "has_proper": has_proper, "handoff_flow": handoff_flow,
+                    "currently_labeled": currently_labeled,
+                    "ga_title": ga_title, "ever_labeled": ever_labeled})
+    return out
+
+
+def _gk_ever_labeled(root, num, env):
+    """Was `needs-gatekeeper` EVER applied to issue `num` (PAGINATED timeline —
+    a labeled event can sit past the first page, #551 live finding)? True /
+    False / None (unreadable → fail-safe not-orphan). `gh api` substitutes
+    {owner}/{repo} from the checkout at `root`."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["gh", "api", "--paginate",
+             "repos/{owner}/{repo}/issues/%d/timeline" % int(num),
+             "--jq", '.[]|select(.event=="labeled" and '
+                     '.label.name=="needs-gatekeeper")|.label.name'],
+            cwd=root, env=env, capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return None
+        return "needs-gatekeeper" in (r.stdout or "")
+    except Exception:
+        return None
+
+
+def _apply_gk_orphan_reconcile(root, num, home=None, dry_run=False):
+    """Reconcile ONE orphaned hand-off: post the evidence comment (durable
+    record FIRST), then add `needs-gatekeeper` (queue re-insertion — job 11
+    then nudges the supervisor). Returns a TRI-STATE (never raises):
+      "comment-failed" — nothing posted; the caller undoes the dedup + retries,
+      "labeled"        — comment + label both landed (the normal supervisor case),
+      "label-failed"   — the comment (durable record) posted but the label did
+                         NOT; the caller KEEPS the dedup (never re-posting the
+                         comment — adversarial review F2) and pings once.
+    Job 31's `_apply_selfservice_bounce` latches on the comment for exactly this
+    reason; a return of False-then-retry would re-post an identical comment
+    every 6h on a persistent label-permission failure."""
+    if dry_run:
+        return "labeled"
+    import subprocess
+    env = _gh_env(home)
+
+    def _gh(*args):
+        try:
+            return subprocess.run(["gh"] + list(args), cwd=root, env=env,
+                                  capture_output=True, text=True, timeout=15)
+        except Exception:
+            return None
+
+    body = _GKORPHAN_EVIDENCE_TEMPLATE
+    c = _gh("issue", "comment", str(num), "--body", body)
+    if c is None or c.returncode != 0:
+        return "comment-failed"
+    lab = _gh("issue", "edit", str(num), "--add-label", "needs-gatekeeper")
+    if lab is not None and lab.returncode == 0:
+        return "labeled"
+    return "label-failed"
+
+
+def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
+                           gh_fetch=None, apply_fn=None, interval=None,
+                           persist=None, user=None):
+    """Job 36 (#551) — see the section comment. Runs ONLY on a supervisor
+    (full-authority) box (`_gkreq_supervisor_root`), for cross-stream repos
+    (`_repo_in_cross_stream_flow`); a reduced-stream box never reconciles (it
+    is the REQUESTER). Mutates state['gkorphan']; `persist` is invoked BEFORE
+    the GitHub mutation (the job-8/11/31 kill-safe-dedup lesson). The `seen`
+    dedup is a ONE-SHOT latch (a reconciled ticket gets the label → the next
+    sweep's decider returns `already-labeled`), so `dry_run` must NOT persist
+    it (#516 F1). Every candidate's verdict is logged (#486). Best-effort
+    (never raises). Returns log lines."""
+    interval = watchdog.GKORPHAN_INTERVAL if interval is None else interval
+    if user is None:
+        import getpass
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = ""
+    if user in watchdog._FOREIGN_TMUX_USERS:
+        return []                              # pane lives in another user's tmux
+    g = state.get("gkorphan") or {}
+    if (now - g.get("last_check", 0)) < interval:
+        return []
+    g["last_check"] = int(now)
+    seen = dict(g.get("seen") or {})
+    g["seen"] = seen
+    state["gkorphan"] = g
+    fetch = gh_fetch or (lambda root: _fetch_gk_orphan_candidates(root, home))
+    apply_reconcile = apply_fn or (
+        lambda root, num: _apply_gk_orphan_reconcile(root, num, home, dry_run))
+    persist = persist or (lambda: None)
+    persist()                                  # cadence stamp survives a kill
+    logs = []
+
+    panes = watchdog.list_claude_panes(run, logs=logs, dry_run=dry_run)
+    roots = {c for _p, c in panes}
+    roots.update(_cache_repo_roots(home, max_age_s=watchdog.GKREQ_CACHE_MAX_AGE_S))
+
+    for root in sorted(roots):
+        if not _gkreq_supervisor_root(root):
+            continue                           # requester homes never reconcile
+        if not _repo_in_cross_stream_flow(root):
+            continue                           # not a gatekeeper<->sub-dev repo
+        name = os.path.basename(root.rstrip("/"))
+        candidates = fetch(root)
+        if candidates is None:
+            continue                           # gh error → keep prior state
+        for c in candidates:
+            num = c.get("number")
+            is_orphan, reason = _gk_orphan_decide(
+                c.get("has_mutated"), c.get("has_proper"),
+                c.get("currently_labeled"), c.get("ga_title"),
+                c.get("ever_labeled"), c.get("handoff_flow"))
+            key = "%s#%s" % (name, num)
+            if not is_orphan:
+                logs.append("gk-orphan-skip %s (%s)" % (key, reason))
+                continue
+            if key in seen:
+                logs.append("gk-orphan-already %s" % key)
+                continue
+            # #516 F1: a one-shot latch must NOT persist under a dry run, else
+            # a diagnostic --dry-run suppresses the real reconcile forever.
+            if dry_run:
+                logs.append("gk-orphan-reconcile %s (dry-run)" % key)
+                continue
+            seen[key] = int(now)               # dedup BEFORE the mutation (#193)
+            persist()
+            result = apply_reconcile(root, num)
+            if result == "labeled":
+                logs.append("gk-orphan-reconcile %s (labeled + evidence)" % key)
+            elif result == "label-failed":
+                # The comment (durable record) posted but the label did not.
+                # KEEP the dedup so the comment is NEVER re-posted (F2); surface
+                # the un-queued hand-off once via a ping so a human labels it.
+                send_fn(_GKORPHAN_PING_TEMPLATE
+                        % {"name": name, "num": num, "root": root},
+                        dedup_key="gkorphan:%s:%d" % (key, int(now)),
+                        dry_run=dry_run, project=name)
+                logs.append("gk-orphan-reconcile %s (evidence posted; label add "
+                            "failed — pinged, not re-posted)" % key)
+            else:  # "comment-failed" — nothing posted, so retry is safe.
+                seen.pop(key, None)
+                persist()
+                logs.append("gk-orphan-reconcile-failed %s (comment did not "
+                            "post; retry next sweep)" % key)
+    return logs
+
+
 def _cached_backlog_open(cwd, backlog_fetch, state, now, ttl=None):
     """True/False/None -- does the repo at `cwd` have an open, actionable
     (non-`autopilot-skip`) issue backlog right now? Cached per `cwd` in

@@ -173,6 +173,9 @@ CANONICAL_SWEEP = [
             "run_conformance_heartbeat_check",
             "conformance_hb_enabled", True, "list",
             "conformance-heartbeat error"),
+    JobSpec("gk_orphan_marker_sweep", "wd", "gk_orphan_marker_sweep",
+            "gkorphan_fetch", _stub_fetch, "list",
+            "gk-orphan-marker-sweep error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

@@ -2377,7 +2377,28 @@ def cmd_gk_request(args):
     three of those ownership consumers by construction, so a gk-request
     ticket is recoverable in the FOOTER (via `_last_origin_owner`) without
     ever entering the stop-proof's own slice or the gatekeeper's own core
-    count (#191 M2)."""
+    count (#191 M2).
+
+    VERIFIED DELIVERY — always use THIS command, NEVER hand-write a
+    `GATEKEEPER-ACTION` comment (#551). This is the delivery-verified-by-
+    construction hand-off path: it applies `needs-gatekeeper` DIRECTLY
+    (`gh issue edit --add-label` — a direct API write, immediately
+    observable, NOT dependent on the repo's comment-triggered auto-label
+    workflow), and on a label-permission 403 it degrades to a PROPER
+    `GATEKEEPER-ACTION: ` prefix in BOTH a comment and the TITLE, which the
+    watchdog's job-11 `in:title` query catches. A hand-written raw comment
+    delivers NONE of that: the repo auto-label workflow matches ONLY a
+    line-start `GATEKEEPER-ACTION:` (so a MUTATED shape like
+    `GATEKEEPER-ACTION (spresnenie …):` — a parenthetical before the colon —
+    silently produces no label), and job 11 never scans comment bodies, so
+    the request is invisible to the gatekeeper queue and the stream parks on
+    a NEVER-DELIVERED hand-off (the miva1 incident, odoo-erp issue 3244).
+    If a raw marker comment is ever unavoidable, do a bounded post-check:
+    confirm `needs-gatekeeper` (or the `GATEKEEPER-ACTION:` title) is
+    observable within a few minutes, and re-file via this command if not.
+    The watchdog's job-36 orphan-marker backstop
+    (`watchdog/cross_stream.py::gk_orphan_marker_sweep`) is a supervisor-side
+    safety net for a slip, not a substitute for using this command."""
     import subprocess
 
     def _gh(argv):
@@ -3349,6 +3370,15 @@ def _watchdog_gk_selfservice_fetch(root):
     return _fetch_gk_action_requests(root)
 
 
+def _watchdog_gkorphan_fetch(root):
+    """Job 36's real gh fetch (#551) — the orphaned gk-hand-off-marker
+    candidate facts (an `in:comments` search narrowed by per-candidate
+    comment/label/timeline reads). Same network-free-tests wiring as jobs
+    8/11/31."""
+    from watchdog import _fetch_gk_orphan_candidates
+    return _fetch_gk_orphan_candidates(root)
+
+
 def _watchdog_owner_decision_fetch(home=None):
     """#461 daily owner-decision digest fetch — the box-wide aggregate of open
     `needs-answer`/`needs-decision` tickets. Wired here (not inside run_once) so
@@ -3984,6 +4014,12 @@ def cmd_watchdog(args):
                     # the SAME coordinator host check job 16/19 use (only dev1
                     # has the fleet.jsonl it reads). Internally cadence-gated.
                     conformance_hb_enabled=conformance_hb_enabled,
+                    # Job 36 (#551) — orphaned gk hand-off marker backstop.
+                    # Runs on the SUPERVISOR box only (internally gated), for
+                    # cross-stream repos; gated on this fetch being wired
+                    # (network-free tests for every other job, like jobs
+                    # 8/11/31). Internally 6h-cadenced.
+                    gkorphan_fetch=_watchdog_gkorphan_fetch,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
