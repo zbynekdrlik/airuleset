@@ -1658,6 +1658,18 @@ from watchdog.conformance import (  # noqa: E402
     CONFORMANCE_BASELINE_NAME as CONFORMANCE_BASELINE_NAME,
 )
 
+# #543 — job 35, central dead-box heartbeat-missing detector (dev1-only). The
+# per-box conformance check (job 34) cannot report a DEAD box; this reads the
+# already-collected fleet.jsonl liveness and pings when a box goes silent past a
+# threshold. Extracted to `watchdog/conformance_heartbeat.py`; re-exported here
+# so `run_once`'s job-35 dispatch resolves unchanged. Same circular-import-safe
+# idiom as conformance.py (its own `import watchdog`, call-time attribute access).
+from watchdog.conformance_heartbeat import (  # noqa: E402
+    run_conformance_heartbeat_check as run_conformance_heartbeat_check,
+    classify_collection as classify_collection,
+    classify_box as classify_box,
+)
+
 
 # #433 cluster D — cross-stream backstops (job 8 bounce / job 11 gk-request / the
 # shared backlog-cache read jobs 10/20 consult). Extracted verbatim to
@@ -1733,8 +1745,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              progress_dir=None, questions_path=None,
              owner_decision_fetch=None, gk_selfservice_fetch=None,
              u_reconcile_clear=None, conformance_root=None,
-             conformance_is_target=None):
-    """Scan every `claude` pane once. 34 numbered jobs per poll — 28 LIVE and 6
+             conformance_is_target=None, conformance_hb_enabled=False):
+    """Scan every `claude` pane once. 35 numbered jobs per poll — 29 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2210,6 +2222,24 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           fan-out (works even when dev1 sleeps); the dead-box gap is a filed
           central-heartbeat follow-up. See `run_conformance_check` in
           `watchdog/conformance.py`.
+
+      (35) (only on dev1 — `conformance_hb_enabled`) CENTRAL DEAD-BOX HEARTBEAT
+          DETECTOR (#543) — closes job 34's structural gap: a DEAD box's own
+          self-check sends NOTHING (its watchdog stopped), so silence looks like
+          health. dev1 (the always-on deploy source) reads the already-collected
+          `fleet.jsonl` liveness (each box's hourly burn snapshot, job 16) — a box
+          FRESH in a fleet row was alive that hour, a dead box is `{"error": ...}`
+          — derives each deployable box's last-fresh instant, and LOUD-pings the
+          owner when one goes silent past ~36h (env-tunable, generous — survives a
+          reboot / brief job-16 hiccup). PURE deciders (True alive / False dead /
+          None undetermined). FAIL-SAFE: if the COLLECTION itself is stale (dev1's
+          job 16 degraded), the per-box check would false-alarm the WHOLE fleet —
+          so a stale collection pings ONCE about the collector and SKIPS the
+          per-box check. Deduped per-box + reping (3d) + fresh dedup_key (#535
+          patterns); `pending` rename targets filtered via `_deployable_hosts`
+          (#537); UNDETERMINED never drops an episode (#486-G5); dry_run mutates
+          nothing. See `run_conformance_heartbeat_check` in
+          `watchdog/conformance_heartbeat.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -3924,6 +3954,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              repo_root=conformance_root, is_target_check=conformance_is_target,
              persist=lambda: save_state(state_path, state)),
          "conformance-check error")
+
+    # Job 35 (#543) — CENTRAL DEAD-BOX HEARTBEAT-MISSING DETECTOR, dev1-only.
+    # The per-box conformance check (job 34) cannot report a DEAD box (its own
+    # watchdog sends nothing); this reads the already-collected fleet.jsonl
+    # liveness (burn snapshot per box, job 16) and LOUD-pings the owner when a
+    # box goes silent past ~36h — with a collection-stale fail-safe (never
+    # false-alarm the whole fleet). Coordinator-only (`conformance_hb_enabled`
+    # = dev1, the SAME host gate job 16/19 use — only dev1 collects fleet.jsonl).
+    # Internally cadence-gated (own `conformance_hb_last_check` key) + injectable
+    # I/O seams; best-effort, every verdict fails safe to UNDETERMINED.
+    _add("conformance_heartbeat_check", lambda: conformance_hb_enabled,
+         lambda: run_conformance_heartbeat_check(
+             now, state, send_fn=send_fn, dry_run=dry_run,
+             persist=lambda: save_state(state_path, state)),
+         "conformance-heartbeat error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

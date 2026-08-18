@@ -169,6 +169,10 @@ CANONICAL_SWEEP = [
     JobSpec("conformance_check", "wd", "run_conformance_check",
             "conformance_root", _stub_roots, "list",
             "conformance-check error"),
+    JobSpec("conformance_heartbeat_check", "wd",
+            "run_conformance_heartbeat_check",
+            "conformance_hb_enabled", True, "list",
+            "conformance-heartbeat error"),
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

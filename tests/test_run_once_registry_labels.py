@@ -72,6 +72,7 @@ EXPECTED_STANDALONE = [
     "gk_selfservice_bounce",            # (31) — #516 gk self-service auto-bounce
     "reconcile_u_labels",               # (32) — #515 mechanical U-label lifecycle
     "conformance_check",                # (34) — #535 per-box conformance check
+    "conformance_heartbeat_check",      # (35) — #543 central dead-box detector
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at
