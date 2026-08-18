@@ -180,5 +180,52 @@ class TestReconcileSettings(unittest.TestCase):
         self.assertNotIn("subagentStatusLine", src)
 
 
+class TestSetup(unittest.TestCase):
+    """The install step: writes the managed shim (executable) + reconciles
+    the setting into settings.json, fail-safe and idempotent."""
+
+    def _dirs(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="ss538-")
+        self.addCleanup(__import__("shutil").rmtree, d, ignore_errors=True)
+        claude = Path(d) / ".claude"
+        claude.mkdir()
+        return d, str(claude), str(claude / "settings.json")
+
+    def test_writes_executable_shim_with_repo_dir_substituted(self):
+        repo, claude, settings = self._dirs()
+        ok = ss.setup(repo, claude, settings)
+        self.assertTrue(ok)
+        shim = Path(ss.shim_dest(claude))
+        self.assertTrue(shim.is_file())
+        self.assertTrue(shim.stat().st_mode & 0o111)      # executable
+        body = shim.read_text()
+        self.assertIn(str(repo), body)
+        self.assertNotIn("{{REPO_DIR}}", body)
+
+    def test_wires_setting_and_preserves_existing(self):
+        repo, claude, settings = self._dirs()
+        Path(settings).write_text(json.dumps(
+            {"statusLine": {"type": "command", "command": "keep"}}))
+        ss.setup(repo, claude, settings)
+        d = json.loads(Path(settings).read_text())
+        self.assertEqual(d["subagentStatusLine"]["command"], ss.command_for(claude))
+        self.assertEqual(d["statusLine"], {"type": "command", "command": "keep"})
+
+    def test_idempotent_second_run_reports_already_correct(self):
+        repo, claude, settings = self._dirs()
+        ss.setup(repo, claude, settings)
+        before = Path(settings).read_text()
+        ss.setup(repo, claude, settings)
+        self.assertEqual(before, Path(settings).read_text())
+
+    def test_invalid_settings_json_is_non_fatal(self):
+        repo, claude, settings = self._dirs()
+        Path(settings).write_text("{ not json")
+        # must not raise; returns False (couldn't reconcile), shim still written
+        self.assertFalse(ss.setup(repo, claude, settings))
+        self.assertTrue(Path(ss.shim_dest(claude)).is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
