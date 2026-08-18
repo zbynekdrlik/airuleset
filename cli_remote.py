@@ -53,16 +53,23 @@ REPO_DIR = Path(__file__).resolve().parent
 PUSH_TMPDIR_LITTER_CAP = 6000       # env AIRULESET_PUSH_TMPDIR_LITTER_CAP
 
 
+def _effective_push_tmpdir_cap():
+    """The cap actually in force — `AIRULESET_PUSH_TMPDIR_LITTER_CAP` override,
+    else the `PUSH_TMPDIR_LITTER_CAP` default. Single source so the guard and
+    its failure MESSAGE never disagree (#548 review A-MINOR-1)."""
+    try:
+        return int(os.environ.get("AIRULESET_PUSH_TMPDIR_LITTER_CAP",
+                                  PUSH_TMPDIR_LITTER_CAP))
+    except (TypeError, ValueError):
+        return PUSH_TMPDIR_LITTER_CAP
+
+
 def _check_push_tmpdir_litter(run_dir, cap=None):
     """Return `(ok, count)` — `ok=False` when the test suite left more than
     `cap` top-level entries in its per-run TMPDIR (a leak regression, #548).
     Never raises: a missing/unreadable dir counts 0 and passes."""
     if cap is None:
-        try:
-            cap = int(os.environ.get("AIRULESET_PUSH_TMPDIR_LITTER_CAP",
-                                     PUSH_TMPDIR_LITTER_CAP))
-        except (TypeError, ValueError):
-            cap = PUSH_TMPDIR_LITTER_CAP
+        cap = _effective_push_tmpdir_cap()
     try:
         count = len(os.listdir(str(run_dir)))
     except OSError:
@@ -717,7 +724,7 @@ def cmd_push(args):
               "per-run TMPDIR (cap %d) — a `tempfile.mkdtemp` without cleanup "
               "regression (#548). Fix the leaking test(s) (addCleanup / "
               "TemporaryDirectory) or raise AIRULESET_PUSH_TMPDIR_LITTER_CAP "
-              "deliberately." % (_litter_count, PUSH_TMPDIR_LITTER_CAP),
+              "deliberately." % (_litter_count, _effective_push_tmpdir_cap()),
               file=sys.stderr)
         sys.exit(1)
     print("  Tests passed.")

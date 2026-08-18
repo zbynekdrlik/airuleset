@@ -770,10 +770,24 @@ def cmd_sweep_stray_tmp(args):
 #   lesson -- this reaper never opens a candidate at all).
 
 _AIRULESET_STATE_RX = re.compile(r"^airuleset-")
-# Excluded: the exec-permission markers that job 22 (cleanup_stale_exec_markers)
-# reaps with a per-file live-session check. A prefix match (not a bare
-# `-exec-` substring) so an unrelated future `airuleset-execution-*` is unaffected.
-AIRULESET_STATE_EXCLUDE_PREFIXES = ("airuleset-main-exec-", "airuleset-fable-exec-")
+# Excluded families -- everything here shares the ONE property mtime alone
+# cannot gate: a LIVE session/subagent can HOLD one for arbitrarily long while
+# its mtime stays frozen, so reaping it at >3d would revoke a still-needed
+# grant. A prefix match (not a bare `-exec-`/`-bgtasks-` substring) so an
+# unrelated future `airuleset-execution-*` is unaffected.
+#   - `airuleset-main-exec-`/`airuleset-fable-exec-`: the exec-permission
+#     markers job 22 (`cleanup_stale_exec_markers`) reaps with a per-file
+#     live-SESSION check (revoking a live session's exec exception mid-work).
+#   - `airuleset-bgtasks-`: the #28 bg-work gate ledger
+#     (`post-record-subagent-bg-launch.sh` writes it; `subagent-stop-check-
+#     bg-work.sh` reads it to BLOCK a subagent stop while its bg task is live).
+#     Its mtime FREEZES at bg-launch and is never refreshed while blocking, so a
+#     long-lived (>3d) subagent still holding a live bg task would have its gate
+#     ledger reaped, defeating the gate (#548 review B-MINOR). Practical harm is
+#     ~nil (subagents are short-lived) but the exclusion keeps the safety
+#     symmetry with the exec markers.
+AIRULESET_STATE_EXCLUDE_PREFIXES = ("airuleset-main-exec-", "airuleset-fable-exec-",
+                                    "airuleset-bgtasks-")
 AIRULESET_STATE_LOG_PATH = CLAUDE_DIR / "airuleset-state-sweep.log"
 AIRULESET_STATE_STATE_PATH = CLAUDE_DIR / "airuleset-state-sweep-state.json"
 AIRULESET_STATE_MIN_INTERVAL_S = 24 * 3600     # env AIRULESET_STATE_SWEEP_INTERVAL_S

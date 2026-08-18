@@ -140,6 +140,19 @@ class TestPushTmpdirLitterGuard(unittest.TestCase):
         self.assertIn('"TMPDIR"', src)
         self.assertIn("env=test_env", src)
         self.assertIn("_check_push_tmpdir_litter", src)
+        # review A-MINOR-2: lock the ENFORCEMENT branch too, not just the call —
+        # deleting `if not _litter_ok: sys.exit(1)` would silently turn the
+        # guard into measure-but-don't-enforce with every other test still green.
+        self.assertIn("if not _litter_ok", src)
+
+    def test_guard_message_reports_the_effective_cap(self):
+        """review A-MINOR-1: the failure message must interpolate the EFFECTIVE
+        (env-overridable) cap, never the bare constant — else `cap=5` overridden
+        prints a self-contradictory `cap 6000`."""
+        src = inspect.getsource(cli_remote.cmd_push)
+        self.assertIn("_effective_push_tmpdir_cap()", src)
+        with m.patch.dict(os.environ, {"AIRULESET_PUSH_TMPDIR_LITTER_CAP": "42"}):
+            self.assertEqual(cli_remote._effective_push_tmpdir_cap(), 42)
 
 
 # --------------------------------------------------------------------------- #
@@ -190,16 +203,30 @@ class TestAirulesetStateReaper(unittest.TestCase):
             tmp_dir=self.d, uid=self.uid, now=self.now, min_age_days=3, proc_dir="/proc")
         self.assertIn("too recent", disc["examined"][0]["reason"])
 
-    def test_exec_permission_markers_are_excluded(self):
-        """The exec-permission markers (main-exec-ok / fable-exec-ok) are job
-        22's live-checked domain — never reaped here, so a live session's
-        deliberately-granted exception is never revoked mid-work."""
+    def test_live_holder_families_are_excluded(self):
+        """The exec-permission markers (job 22's live-checked domain) AND the
+        #28 bg-work gate ledger (`airuleset-bgtasks-*`, mtime frozen while
+        blocking, review B-MINOR) are never reaped here — a live session's
+        deliberately-granted exception / a live subagent's bg-work gate is
+        never revoked at >3d."""
         self._mkfile("airuleset-main-exec-ok-sid1", age_days=10)
         self._mkfile("airuleset-fable-exec-ok-sid2", age_days=10)
+        self._mkfile("airuleset-main-exec-block-sid3", age_days=10)
+        self._mkfile("airuleset-bgtasks-sid4-agent5", age_days=10)
         disc = cli_scratch_sweep.discover_stray_airuleset_state_candidates(
             tmp_dir=self.d, uid=self.uid, now=self.now, min_age_days=3, proc_dir="/proc")
         self.assertEqual(disc["total_matched"], 0,
-                         "exec-permission markers must not even be matched by this reaper")
+                         "live-holder families must not even be matched by this reaper")
+
+    def test_max_scan_caps_classification_keeps_the_remainder(self):
+        for i in range(5):
+            self._mkfile("airuleset-poll-%03d" % i, age_days=10)
+        disc = cli_scratch_sweep.discover_stray_airuleset_state_candidates(
+            tmp_dir=self.d, uid=self.uid, now=self.now, min_age_days=3,
+            proc_dir="/proc", max_scan=2)
+        self.assertEqual(disc["total_matched"], 5, "true total counted past the cap")
+        self.assertEqual(len(disc["examined"]), 2, "classification capped")
+        self.assertTrue(disc["capped"])
 
     def test_non_airuleset_entry_is_ignored(self):
         self._mkdir("tmpabcd1234", age_days=10)     # #513's domain, not this reaper's
