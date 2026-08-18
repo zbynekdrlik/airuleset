@@ -861,5 +861,219 @@ class CameraBoxBypassDisabledTest(_Runner):
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
 
+class FullSuiteNoRunBlockedTest(_Runner):
+    """#544: a FULL-WORKSPACE compile-only test/bench build (`cargo test
+    --no-run` / `cargo bench --no-run` with no package/target NARROWING flag)
+    is HEAVY on Tier-0 and blocked -> CI, while a SCOPED `--no-run` stays the
+    allowed cheap check. The letter of Tier-0 permitted the whole-suite compile
+    (dantesync 6.9 GB -- it compiles every test binary in the workspace) with
+    the identical ALLOW verdict as a narrow `-p crate --no-run`; this closes
+    the gap at the enforcement point ("heavy compiles run in CI").
+
+    Narrowing flags (word-boundary exact): -p / --package / --lib / --bin /
+    --test / --example / --bench / --doc. The broad plurals (--bins/--tests/
+    --examples) and --workspace/--all are NOT narrowing and stay blocked
+    (fail-safe: a disk gate over-blocks a broad compile rather than under-
+    blocking it). Fail-open: any python parse failure in the segment helper
+    falls through to ALLOW, never a false block on a real scoped --no-run.
+    """
+
+    # ---- full-suite compile-only builds now BLOCK (were rc=0) ----
+
+    def test_full_suite_cargo_test_no_run_is_blocked(self):
+        # the dantesync 6.9 GB shape
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("BLOCKED", out.stderr)
+
+    def test_full_suite_cargo_test_no_run_workspace_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --workspace", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_full_suite_cargo_test_no_run_all_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --all", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_full_suite_cargo_bench_no_run_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench --no-run", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_full_suite_no_run_with_features_but_no_scope_is_blocked(self):
+        # --features/--release do NOT narrow WHICH targets compile
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --release --all-features", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_full_suite_no_run_with_positional_filter_is_blocked(self):
+        # a test-NAME filter narrows which tests RUN, never which COMPILE --
+        # the whole suite still compiles, so it must still block
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run some_test_name", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- broad plural target selectors are NOT narrowing -> still block ----
+
+    def test_bins_plural_no_run_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --bins", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_tests_plural_no_run_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --tests", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_examples_plural_no_run_is_blocked(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --examples", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    # ---- SCOPED compile-only builds stay ALLOWED (the cheap check) ----
+
+    def test_scoped_p_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run -p mycrate", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_package_long_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --package mycrate", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_package_equals_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --package=mycrate", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_lib_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --lib", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_bin_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --bin server", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_test_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --test integration", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_example_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --example demo", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_doc_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --doc", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_bench_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo bench --no-run --bench mybench", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_p_with_features_no_run_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run -p mycrate --all-features", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- scoped + trailing metachar boundary (mirrors #471 F1 on the
+    # narrowing flag) -- a scoped compile-only workaround with a glued metachar
+    # must stay allowed ----
+
+    def test_scoped_lib_no_run_trailing_semicolon_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --lib;", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_p_no_run_piped_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run -p x|tee log", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_scoped_no_run_flag_before_norun_is_allowed(self):
+        # flag ordering must not matter: scope before --no-run
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --lib --no-run", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- segment-scoping: a narrowing flag in a DIFFERENT top-level segment
+    # must NOT exempt a full-suite compile in another ----
+
+    def test_narrowing_flag_in_unrelated_segment_does_not_exempt_full_suite(self):
+        proj = self._mkproj()
+        out = self.run_hook("echo --lib && cargo test --no-run", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_scoped_compile_then_full_suite_compile_still_blocks(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run -p a && cargo test --no-run", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_two_scoped_compiles_chained_is_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run --lib && cargo bench --no-run --bench b", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- controls: the run/build detection is unchanged ----
+
+    def test_running_scoped_test_still_blocks(self):
+        # a SCOPED test that RUNS (no --no-run) is still a run -> still heavy
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --lib", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_cargo_check_still_allowed(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo check --workspace", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    # ---- messaging + audit + bypass + camera-box ----
+
+    def test_full_suite_no_run_block_message_points_to_scoped_and_ci(self):
+        proj = self._mkproj()
+        out = self.run_hook("cargo test --no-run", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("-p", out.stderr)   # names the scoped escape
+        self.assertIn("CI", out.stderr)
+
+    def test_full_suite_no_run_block_is_audit_logged(self):
+        proj = self._mkproj(name="dantesync")
+        out = self.run_hook("cargo test --no-run", proj)
+        self.assertEqual(out.returncode, 2)
+        lines = self.audit_lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("blocked", lines[0])
+        self.assertIn("project=dantesync", lines[0])
+
+    def test_non_camera_box_marker_bypasses_full_suite_no_run(self):
+        # the sanctioned one-off escape still works on a non-camera-box repo
+        proj = self._mkproj(name="spinbike")
+        out = self.run_hook("cargo test --no-run # airuleset:build-ok one-off", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_tier1_marker_exempts_full_suite_no_run(self):
+        proj = self._mkproj(marker="allowed")
+        out = self.run_hook("cargo test --no-run", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_camera_box_full_suite_no_run_is_blocked(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo test --no-run --workspace", proj)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_camera_box_scoped_no_run_still_allowed(self):
+        proj = self._mkproj(name="camera-box")
+        out = self.run_hook("cargo test --no-run -p rig", proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
