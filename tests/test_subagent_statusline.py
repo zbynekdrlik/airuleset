@@ -117,6 +117,29 @@ class TestRenderRow(unittest.TestCase):
         self.assertIn("opus-4.8", content)
         self.assertIn("autopilot-worker", content)
 
+    def test_lead_exceeding_budget_is_hard_clamped(self):
+        # review #538 (🔵): the last-resort clamp — badge+name lead alone
+        # exceeds `columns`, no activity — must still keep visible width <= budget.
+        t = self._task(name="a" * 200, label="", description="", status="")
+        content = _plain(ss.render_row(t, 20)["content"])
+        self.assertLessEqual(len(content), 20)
+
+    def test_control_chars_never_break_the_row(self):
+        # review #538 (🔵): a label/name with a raw newline or ESC must not
+        # produce a multi-line / cursor-moving row (CC renders content as-is).
+        content = ss.render_row(self._task(label="Reading\nfoo\x1b[2Jbar"), 120)["content"]
+        # strip only OUR trailing colour resets; the DATA newline/ESC must be gone
+        body = content.replace("\x1b[0m", "").replace("\x1b[2m", "")
+        body = re.sub(r"\x1b\[38;5;\d+m", "", body)
+        self.assertNotIn("\n", body)
+        self.assertNotIn("\x1b[2J", body)
+        self.assertIn("Reading foo", _plain(content))
+
+    def test_control_chars_in_name_are_sanitised(self):
+        content = _plain(ss.render_row(self._task(name="bad\nname"), 120)["content"])
+        self.assertNotIn("\n", content)
+        self.assertIn("bad name", content)
+
 
 class TestRender(unittest.TestCase):
     def test_emits_one_json_line_per_overridable_task(self):

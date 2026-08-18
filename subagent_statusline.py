@@ -51,6 +51,18 @@ _SEP = " · "                 # " · " — the same middot CC's default row uses
 _ELLIPSIS = "…"             # "…"
 
 _CTX_SUFFIX_RE = re.compile(r"\[.*?\]\s*$")   # drop a "[1m]" context-window tag
+# CC renders `content` as-is, so a raw newline / cursor-moving escape smuggled
+# in via a `label`/`description`/`name` field would break the strip's
+# one-row-per-task invariant. Collapse ALL C0/C7F control chars (incl. our own
+# ESC, which never legitimately arrives in a DATA field — colour is added by us
+# AFTER assembly) to a space before the content is built. Review #538 (🔵).
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _clean(s):
+    """Collapse any control char in a CC-supplied string to a space, so it can
+    never break the one-row-per-task strip. Non-str → "" (caller-safe)."""
+    return _CTRL_RE.sub(" ", s) if isinstance(s, str) else ""
 
 
 def short_model(model_id):
@@ -97,7 +109,7 @@ def _activity(task):
     for key in ("label", "description", "status"):
         v = task.get(key)
         if isinstance(v, str) and v.strip():
-            return v.strip()
+            return _clean(v).strip()
     return ""
 
 
@@ -128,7 +140,7 @@ def render_row(task, columns):
     badge = _badge_text(task)
     if not badge:                       # nothing to add over CC's default row
         return None
-    name = task.get("name") or task.get("type") or "agent"
+    name = _clean(task.get("name") or task.get("type") or "agent") or "agent"
     tok = _compact_tokens(task.get("tokenCount"))
     activity = _activity(task)
 
