@@ -71,6 +71,7 @@ EXPECTED_STANDALONE = [
     "wip_ref_sweep",                    # (30) — #504 orphaned wip-ref reclaimer
     "gk_selfservice_bounce",            # (31) — #516 gk self-service auto-bounce
     "reconcile_u_labels",               # (32) — #515 mechanical U-label lifecycle
+    "conformance_check",                # (34) — #535 per-box conformance check
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at

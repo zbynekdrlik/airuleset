@@ -686,6 +686,23 @@ from cli_scratch_sweep import (  # noqa: E402
 )
 
 
+def _record_conformance_baseline_step(claude_md_content, record_fn=None):
+    """cmd_install step 1b (#535): record the ``{claude_md_md5, head_sha}`` baseline
+    the per-box conformance check (watchdog job 34) reads. Called AFTER CLAUDE.md is
+    written, with the EXACT bytes on disk, so the md5 and the file agree atomically
+    and the recorded HEAD lets the check skip the md5 dimension on a mid-push box
+    (repo advanced but install not yet re-run) — the mid-push false-alarm immunity.
+
+    Extracted with an injectable ``record_fn`` (#410-F2) so the wiring is testable
+    without a real install; best-effort (``record_conformance_baseline`` never
+    raises, so a baseline write failure can never crash install)."""
+    from watchdog.conformance import (record_conformance_baseline,
+                                      CONFORMANCE_BASELINE_NAME)
+    record_fn = record_fn or record_conformance_baseline
+    dest = CLAUDE_DIR / CONFORMANCE_BASELINE_NAME
+    return record_fn(claude_md_content, REPO_DIR, dest)
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     print("airuleset install")
@@ -710,13 +727,16 @@ def cmd_install(args):
             backup = CLAUDE_MD.with_suffix(".md.bak")
             shutil.copy2(CLAUDE_MD, backup)
             print(f"  Backed up: {CLAUDE_MD} -> {backup}")
-            CLAUDE_MD.write_text(new_claude_md)
+            CLAUDE_MD.write_text(new_claude_md, encoding="utf-8")
             print(f"  Updated:   {CLAUDE_MD}")
         else:
             print(f"  No change: {CLAUDE_MD}")
     else:
-        CLAUDE_MD.write_text(new_claude_md)
+        CLAUDE_MD.write_text(new_claude_md, encoding="utf-8")
         print(f"  Created:   {CLAUDE_MD}")
+
+    # --- 1b. Record the conformance baseline ({md5, HEAD}) for job 34 (#535) ---
+    _record_conformance_baseline_step(new_claude_md)
 
     # --- 2. Symlink skills (per-box set — see skill_names_for_user) ---
     box_skills = skill_names_for_user()
@@ -3556,6 +3576,31 @@ def _watchdog_repo_roots():
     return discover_managed_repos()
 
 
+def _watchdog_is_deploy_target():
+    """Job 34 (#535 review MAJOR-A): True iff THIS box is a fleet DEPLOY TARGET —
+    its tailscale IP is one of the REMOTE_HOSTS `host` values — i.e. a box that
+    receives read-only `git pull --ff-only` deploys and NEVER develops airuleset,
+    so a dirty airuleset tree there is unambiguously a hand-edit (DRIFT). The DEPLOY
+    SOURCE (dev1) is NOT in REMOTE_HOSTS and develops airuleset directly, so its main
+    checkout is legitimately dirty even at HEAD==origin; the conformance dirty
+    dimension must skip it. Username matching (`_current_remote_host_entry`) is
+    INSUFFICIENT — dev1 + dev2 + spinbike all share `newlevel`, so it would
+    misclassify dev1 as dev2's entry — the tailscale IP is the reliable box identity.
+    Fail-safe: any error (no tailscale, non-zero rc, parse failure) → False → the
+    dirty dimension is SKIPPED (never a false alarm), the module's prime invariant."""
+    import subprocess
+    try:
+        r = subprocess.run(["tailscale", "ip", "-4"], capture_output=True,
+                           text=True, timeout=5)
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    my_ips = {ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()}
+    target_hosts = {e.get("host") for e in REMOTE_HOSTS if e.get("host")}
+    return bool(my_ips & target_hosts)
+
+
 def _watchdog_git_fetch(root):
     """Job 28's best-effort ref refresh — same shape as job 24's own probe
     fetch, minus the enrichment half (job 28 needs no blocker lookup, only
@@ -3750,6 +3795,17 @@ def cmd_watchdog(args):
                     # extra call per window) consulted by job 20's
                     # goal-achieved backstop and job 10's widened wedge ping.
                     backlog_fetch=_watchdog_backlog_fetch,
+                    # Job 34 (#535) — per-box conformance check runs on EVERY
+                    # managed box: config/repo drift is a per-box failure, and
+                    # each box holds the airuleset checkout it can measure.
+                    # REPO_DIR is this box's airuleset repo (the systemd unit
+                    # runs the watchdog from it). Internally daily-cadenced.
+                    conformance_root=REPO_DIR,
+                    # #535 review MAJOR-A: a CALLABLE (invoked only on the daily
+                    # check, not every 60s sweep) so the dirty dimension runs ONLY
+                    # on a confirmed deploy target — the dev1 SOURCE box is
+                    # legitimately dirty and must not false-alarm.
+                    conformance_is_target=_watchdog_is_deploy_target,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
