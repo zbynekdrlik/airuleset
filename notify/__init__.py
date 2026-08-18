@@ -2294,6 +2294,46 @@ def _post_discord(token, channel, content):
         return False
 
 
+# --------------------------------------------------------------------------- #
+# #546 (2026-08-18, owner directive comment 5333914691, verbatim: "ty sa mas
+# starat len aby sa pokusili agenti rozbehnut cez continue … zaspamovat ma do
+# discordu je ciste kontraproduktivne … stara sa teraz o limit a subscription
+# iny project"). The automated ALERT classes below are "alerts for the agent"
+# that reach a channel no agent reads — pure phone noise for the owner. They no
+# longer POST to Discord: the watchdog's ONLY job on them is the SILENT
+# `continue` auto-resume (send_verified / deliver_with_stash / tmux — none of
+# which routes through send(), so suppression here leaves auto-resume 100%
+# untouched). The signal is NOT lost — it stays in the machine channel (the
+# watchdog sweep journal + this delivery log's explicit `suppressed` decision),
+# the #546 audience split. Deliberately NARROW + EXACT (owning job in the
+# comment); ❓ (`waiting:`/`❓:`), ✅ (`done:`), run-cards (`<repo>#<n>`),
+# bounce/gkreq, job-4 `busypane:`, and the genuine one-shot `acctblock:` alarm
+# (no auto-reset, needs a human) all use OTHER key namespaces and keep sending.
+SUPPRESSED_ALERT_PREFIXES = (
+    ("apierr", "api-error"),             # watchdog job 1 (stall / busy / giveup / stashabort)
+    ("sesslimit", "session-limit"),      # watchdog job 6 (5h limit / giveup / resume)
+    ("usage", "usage-limit"),            # watchdog usage.py (weekly usage %)
+    ("burn-alert", "token-burn"),        # watchdog job 19 (hourly token-burn)
+    ("fleet-burn-budget", "fleet-budget"),  # watchdog job 16 (fleet spend budget)
+)
+
+
+def _suppressed_alert_class(dedup_key):
+    """The human label of the #546 owner-suppressed alert class `dedup_key`
+    belongs to, or None if it is not a suppressed class (so it POSTs normally).
+    Boundary-matched (`prefix:` / `prefix-`) so `busypane:` (job 4, NOT
+    api-error), `fleet-burn-budget` vs `burn-alert`, and a same-letters-but-
+    different-namespace key never collide. A keyless send is never a suppressed
+    alert — every suppressed class carries one of these keys by construction."""
+    if not dedup_key:
+        return None
+    k = str(dedup_key)
+    for prefix, label in SUPPRESSED_ALERT_PREFIXES:
+        if k == prefix or k.startswith(prefix + ":") or k.startswith(prefix + "-"):
+            return label
+    return None
+
+
 def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
         return_message_id=False, kind="default", project=None):
     """Prepend the owner @mention to `body` and POST it to the Discord notification
@@ -2324,7 +2364,21 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     project=project)` instead, so repeatedly previewing/testing a send can
     never spawn background self-heal processes or write fallback log lines.
     `project=None` (the default) is byte-for-byte the pre-#369 behaviour for
-    every existing caller."""
+    every existing caller.
+
+    #546: a `dedup_key` belonging to an owner-suppressed ALERT class
+    (`SUPPRESSED_ALERT_PREFIXES` — api-error / limit / token-burn) POSTs
+    NOTHING and returns "suppressed" — logged as an explicit decision (never a
+    silent drop), never dry-run-mutating. The gate runs FIRST so a suppressed
+    class never claims a dedup marker, resolves a channel, or reaches the
+    network — and it covers every caller of this one chokepoint (watchdog jobs
+    1/6/16/19 + usage.py + the CLI `--api-error`) at once."""
+    suppressed = _suppressed_alert_class(dedup_key)
+    if suppressed is not None:
+        if not dry_run:
+            log_delivery("suppressed", kind="alert-class", key=dedup_key,
+                         reason="#546 owner-directed: %s" % suppressed)
+        return ("suppressed", None) if return_message_id else "suppressed"
     env = _read_env() if env is None else env
     # Resolve the owner ONCE so the @mention and the per-owner thread target agree
     # (a tmux re-query between them could otherwise disagree).
