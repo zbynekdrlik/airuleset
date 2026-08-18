@@ -947,6 +947,21 @@ class TestCardReconcile(unittest.TestCase):
         import inspect
         self.assertIn("card_reconcile", inspect.getsource(wd.run_once))
 
+    def test_owner_scoping_filter_is_built_and_passed_to_both_jobs(self):
+        # #534 review MINOR-1: the job-internal scoping is mutation-locked, but
+        # the run_once seam that INSTANTIATES the real filter and passes it to
+        # BOTH jobs was not — a refactor could silently revert either job to the
+        # own-everything default (the original foreign-nudge bug) with a green
+        # suite. `_owned_scope = make_owned_closed_filter()` must be built once
+        # and passed to BOTH jobs; removing it from either site drops the count.
+        import inspect
+        src = inspect.getsource(wd.run_once)
+        self.assertIn("make_owned_closed_filter()", src,
+                      "run_once must build the real owner-scoping filter")
+        self.assertEqual(2, src.count("owned_closed=_owned_scope"),
+                         "both jobs (card_reconcile + report_reconcile) must "
+                         "receive the real filter, not the identity default")
+
 
 class TestCardReconcile_NoOverlapWithJob24(unittest.TestCase):
     """Checked as the dispatch asked. Job 24 fires when the base branch is
@@ -1031,6 +1046,55 @@ class TestCardReconcileReopenClear(unittest.TestCase):
         kw.setdefault("marker_ok", notify.marker_delivered)
         kw.setdefault("send_fn", self.send)
         return wd.card_reconcile(NOW, None, self.state, {"s": str(r)}, **kw)
+
+    def test_reduced_authority_box_does_not_ping_a_foreign_ticket(self):
+        # #534: on a reduced-authority box, merged_closes reads the SHARED base
+        # branch (every stream's merges), so a FOREIGN ticket's missing card
+        # must NOT ping the owner — only an OWN-slice ticket does. This is the
+        # card_reconcile (job 24) call-site lock for the shared owner filter.
+        r = self.repo(closes=(4373, 4379))    # both closed on main, no cards
+        owned = wd.make_owned_closed_filter(
+            current_user_fn=lambda: "montalu",
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=lambda root, nums: {4373: "miva1", 4379: "montalu"})
+        self.reconcile(r, owned_closed=owned)
+        msgs = " ".join(x["msg"] for x in self.sent)
+        self.assertIn("#4379", msgs, "own ticket's missing card DOES ping")
+        self.assertNotIn("#4373", msgs, "foreign ticket must NEVER ping")
+
+    def test_full_authority_box_still_pings_every_missing_card(self):
+        # The gatekeeper owns the whole merged set — scoping must not break it.
+        r = self.repo(closes=(4373, 4379))
+        owned = wd.make_owned_closed_filter(
+            current_user_fn=lambda: "gatekeeper",
+            authority_fn=lambda root: "full",
+            owner_fn=lambda root, nums: {})
+        self.reconcile(r, owned_closed=owned)
+        msgs = " ".join(x["msg"] for x in self.sent)
+        self.assertIn("#4373", msgs)
+        self.assertIn("#4379", msgs)
+
+    def test_gh_flake_does_not_re_ping_an_own_ticket(self):
+        # #534 review MINOR-2 (card call site): an undeterminable-ownership sweep
+        # (gh flake) must NOT drop the per-ticket pinged dedup — else gh
+        # recovering re-pings. Against the pre-fix {} filter, sweep 2's seen.pop
+        # makes sweep 3 re-ping.
+        r = self.repo(closes=(4379,))
+        ok = wd.make_owned_closed_filter(
+            current_user_fn=lambda: "montalu",
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=lambda root, nums: {4379: "montalu"})
+        self.reconcile(r, owned_closed=ok)          # sweep 1: pings #4379
+        self.assertIn("#4379", " ".join(x["msg"] for x in self.sent))
+        n1 = len(self.sent)
+        flake = wd.make_owned_closed_filter(
+            current_user_fn=lambda: "montalu",
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=lambda root, nums: (_ for _ in ()).throw(RuntimeError()))
+        self.reconcile(r, owned_closed=flake)       # sweep 2: undeterminable -> skip
+        self.reconcile(r, owned_closed=ok)          # sweep 3: recovered
+        self.assertEqual(n1, len(self.sent),
+                         "a gh flake must not cause a re-ping after recovery")
 
     def test_same_round_the_marker_survives_untouched(self):
         r = self.repo(closes=(3,))

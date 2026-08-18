@@ -101,6 +101,100 @@ def _git_base_ref(cwd, git_run=None):
     return None
 
 
+def _owned_identity(root, closed):
+    """The default owned-set filter for a caller that wires no owner scoping (a
+    direct call / test): own EVERYTHING — the pre-#534 behaviour a full-authority
+    box also keeps. Returns a copy so the caller may mutate it freely."""
+    return dict(closed)
+
+
+def make_owned_closed_filter(current_user_fn=None, authority_fn=None,
+                             owner_fn=None):
+    """#534 — the per-sweep OWNER-SCOPING filter run_once passes to BOTH job 24
+    (`card_reconcile`) and job 25 (`report_reconcile`).
+
+    Both jobs derive their owed set from `merged_closes(root, base, ...)`, which
+    reads the SHARED base branch (origin/HEAD). On a multi-stream repo (odoo-erp)
+    that branch carries every stream's + the gatekeeper's merges, so an unscoped
+    owed set nudges/pings a REDUCED-authority stream box for FOREIGN tickets
+    (montalu3 got report-owed nudges for stream:core / stream:miva1 it does not
+    own). This scopes the owed set to what THIS box actually owes:
+
+      * FULL-authority (gatekeeper) box -> `closed` unchanged: it owns the whole
+        merged set, #534 is exclusively a reduced-authority defect, and re-scoping
+        the gatekeeper risks newly SUPPRESSING a legitimate nudge for a ticket it
+        did close.
+      * REDUCED-authority stream box -> only candidates whose TEMPORALLY-LAST
+        origin-shaped label (`stream:<user>` / `handed-by:<user>`) names THIS
+        box's own stream, via `_last_origin_owner` — the SAME ownership oracle
+        `_slice_mine_and_handed` / `cmd_gk_request` use (never a parallel
+        derivation, #181). ONE batched GraphQL timeline read for the whole
+        candidate set, so it survives a relabel and works on a shared-gh-account
+        stream (montalu authenticates as the maintainer, so @me is meaningless —
+        the label event is the only sound signal).
+      * UNDETERMINABLE owner (gh failure / unresolved identity) -> NOT owned.
+        Fail toward NOT nudging: a false nudge is the reported bug, a missed one
+        is re-evaluated next sweep (nothing is latched here).
+
+    The per-root ownership lookup is memoized so the two jobs (same registry
+    entry, same `closed` for a given root) share ONE GraphQL call. The memo lives
+    exactly one sweep (run_once builds a fresh filter per sweep), so a gh-failure
+    sweep re-queries next sweep rather than latching a wrong answer.
+
+    The seams (`current_user_fn` / `authority_fn` / `owner_fn`) default to the
+    real gh-backed resolvers and are injected only by tests, so the jobs stay
+    gh-free by default and the whole mechanism is testable without a network."""
+    if current_user_fn is None:
+        def current_user_fn():
+            import airuleset
+            return airuleset._current_user()
+    if authority_fn is None:
+        def authority_fn(root):
+            from cli_quals import resolve_authority
+            return resolve_authority(cwd=root)
+    if owner_fn is None:
+        def owner_fn(root, numbers):
+            from cli_quals import _last_origin_owner
+            return _last_origin_owner(numbers, cwd=root)
+
+    memo = {}                              # root -> {issue_num: owning_user}
+    auth = {}                              # root -> authority (once per root/sweep)
+
+    def owned(root, closed):
+        # Returns the owned subset (a dict) to ACT on, or None to SKIP this root
+        # this sweep WITHOUT disturbing its dedup state. UNDETERMINABLE ownership
+        # (gh failure / unresolved identity / a reduced box that owns none of the
+        # candidates) must return None, never {} — the caller pops the permanent
+        # nudged/pinged dedup on an empty result, so returning {} on a transient
+        # gh hiccup would RE-nudge an already-delivered ticket the next sweep
+        # (#534 review MINOR-2). Only a genuinely-empty `closed` returns {} so
+        # the caller still cleans up when nothing merged. `_last_origin_owner`
+        # cannot tell a gh failure from a genuine no-owner (both {}), so a
+        # reduced box owning nothing skips too — a lingering empty dedup entry is
+        # the harmless, spam-free trade for never re-nudging on a flake.
+        if not closed:
+            return dict(closed)            # nothing merged -> caller pops (clean)
+        if root not in auth:
+            auth[root] = authority_fn(root)
+        if auth[root] == "full":
+            return dict(closed)            # full-authority owns the whole set
+        me = current_user_fn()
+        if not me:
+            return None                    # can't identify box -> skip, keep dedup
+        if root not in memo:
+            try:
+                memo[root] = owner_fn(root, sorted(closed))
+            except Exception:
+                memo[root] = None          # gh failure -> undeterminable this sweep
+        owners = memo[root]
+        if owners is None:
+            return None                    # skip, keep dedup
+        scoped = {n: ts for n, ts in closed.items() if owners.get(n) == me}
+        return scoped or None              # own-nothing/flake -> skip, keep dedup
+
+    return owned
+
+
 # --------------------------------------------------------------------------- #
 # Job 25 — CARD RECONCILIATION (#134, marek's stream 2026-07-23 → 2026-07-28).
 #
@@ -236,7 +330,7 @@ def _commits_in_window(root, base, since_ts, git_run=None):
 def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
                    git_run=None, card_probe=None, marker_ok=None,
                    owner_by_sid=None, window=None, grace=None,
-                   closed_fetch=None, reopen_fetch=None):
+                   closed_fetch=None, reopen_fetch=None, owned_closed=None):
     """Job 25 — see the section comment.
 
     Gated on `card_probe` (the "wired = on" convention of jobs 8/11/16/24):
@@ -283,6 +377,7 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         except ImportError:
             return []
     owner_by_sid = owner_by_sid or {}
+    owned_closed = owned_closed or _owned_identity   # #534 owner scoping
     seen = dict(state.get("card_unreported") or {})
     logs, live, examined = [], set(), set()
 
@@ -372,6 +467,17 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
                     logs.append("card-reconcile closed-fetch-failed %s: %r"
                                 % (root, e))
                     closed = {}
+        # #534: scope to tickets THIS box owns a card for — a reduced-authority
+        # stream box reads the SHARED base branch, which carries every stream's
+        # merges, so an unscoped set pings the owner about FOREIGN tickets.
+        # Full-authority box -> unchanged. None = UNDETERMINABLE ownership (gh
+        # flake / unresolved identity): skip WITHOUT popping the pinged dedup, or
+        # gh recovering next sweep would re-ping an already-pinged own ticket
+        # (#534 review MINOR-2).
+        scoped = owned_closed(root, closed)
+        if scoped is None:
+            continue
+        closed = scoped
         if not closed:
             seen.pop(root, None)
             continue
@@ -704,7 +810,8 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
                      window=None, grace=None, max_swallows=None, reprobe=None,
                      mutex_held=None, recent_human=None,
                      transcript_fn=None, rows_fn=None,
-                     verified_send=None, compact_log_path=None):
+                     verified_send=None, compact_log_path=None,
+                     owned_closed=None):
     """The #525 report-owed reconciliation — see the section comment.
 
     Iterates ONLY the SUPERVISOR (main-checkout) sessions in `cwd_by_sid` (a
@@ -739,6 +846,7 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
     reprobe = REPORT_REPROBE_S if reprobe is None else reprobe
     owner_by_sid = owner_by_sid or {}
     panes_by_sid = panes_by_sid or {}
+    owned_closed = owned_closed or _owned_identity   # #534 owner scoping
 
     if mutex_held is None:
         mutex_held = _autopilot_mutex_held
@@ -804,6 +912,14 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
             continue                       # unmeasurable — never a finding
         live.add(root)
         closed = merged_closes(root, base, now - window, git_run)
+        # #534: scope to the box's own slice. None = UNDETERMINABLE ownership (gh
+        # flake / unresolved identity): skip WITHOUT popping the nudged dedup, or
+        # gh recovering next sweep would re-nudge an already-nudged own ticket
+        # (review MINOR-2). A real empty subset still returns {} (caller cleans up).
+        scoped = owned_closed(root, closed)
+        if scoped is None:
+            continue
+        closed = scoped
         if not closed:
             owed_state.pop(root, None)
             continue
