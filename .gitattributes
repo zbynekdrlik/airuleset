@@ -1,0 +1,13 @@
+# Bookkeeping merge drivers (#553) — deterministic conflict resolution for the
+# files every fleet integration round writes. See scripts/ratchet_union_merge.py
+# and .claude/rules/internals-scripts.md.
+#
+# The size ratchet is a {section: {path: ceiling}} JSON reconciled per-key
+# union-max. The custom driver is registered per-clone by airuleset.py
+# cmd_install (git will not run a driver from committed config); a clone that
+# has not run install falls back to git's default text merge — safe, not broken.
+tests/size_ratchet.json merge=ratchet-union
+
+# The internals archive is APPEND-ONLY by contract — the built-in union driver
+# keeps both sides' appended lines and never deletes, which is exactly right.
+.claude/rules-reference/internals-archive.md merge=union

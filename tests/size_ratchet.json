@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 5247,
+    "airuleset.py": 5290,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 793,
@@ -262,7 +262,7 @@
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
-    "airuleset.py::cmd_install": 465,
+    "airuleset.py::cmd_install": 472,
     "airuleset.py::cmd_notify": 318,
     "airuleset.py::main": 566,
     "cli_remote.py::cmd_push": 370,

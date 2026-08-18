@@ -711,6 +711,42 @@ def _record_conformance_baseline_step(claude_md_content, record_fn=None):
     return record_fn(claude_md_content, REPO_DIR, dest)
 
 
+def _configure_ratchet_merge_driver(repo_dir=REPO_DIR, run=None):
+    """cmd_install step 1c (#553): idempotently register the ``ratchet-union``
+    git merge driver in the repo-local (worktree-shared) ``.git/config`` so
+    every fleet integration round auto-merges ``tests/size_ratchet.json``
+    per-key union-max instead of conflicting on ceilings a machine can
+    reconcile. The driver is versioned as ``scripts/ratchet_union_merge.py`` and
+    wired via the committed ``.gitattributes``; git refuses to run a driver
+    named only in committed config (security), so install writes the LOCAL
+    config — worktrees share the common ``.git/config``, so one write covers
+    every lane. ``git config <k> <v>`` overwrites in place, so this is
+    inherently idempotent.
+
+    Returns the driver command string, or ``None`` when *repo_dir* is not a git
+    checkout (nothing to configure — a safe no-op; a clone without the driver
+    simply falls back to git's default text merge). Best-effort: never raises,
+    so a git/config failure can never crash install."""
+    if run is None:
+        import subprocess
+        run = subprocess.run
+    try:
+        inside = run(["git", "-C", str(repo_dir), "rev-parse",
+                      "--is-inside-work-tree"], capture_output=True, text=True)
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return None
+        driver_script = Path(repo_dir) / "scripts" / "ratchet_union_merge.py"
+        value = f'python3 "{driver_script}" %O %A %B %P'
+        run(["git", "-C", str(repo_dir), "config",
+             "merge.ratchet-union.name", "ratchet per-key union-max (#553)"],
+            capture_output=True, text=True)
+        run(["git", "-C", str(repo_dir), "config",
+             "merge.ratchet-union.driver", value], capture_output=True, text=True)
+        return value
+    except OSError:
+        return None
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     print("airuleset install")
@@ -745,6 +781,13 @@ def cmd_install(args):
 
     # --- 1b. Record the conformance baseline ({md5, HEAD}) for job 34 (#535) ---
     _record_conformance_baseline_step(new_claude_md)
+
+    # --- 1c. Register the ratchet-union git merge driver (#553): auto-merge
+    # tests/size_ratchet.json union-max instead of a manual conflict each round. ---
+    if _configure_ratchet_merge_driver():
+        print("  Merge driver: ratchet-union registered (tests/size_ratchet.json)")
+    else:
+        print("  Merge driver: skipped (not a git checkout)")
 
     # --- 2. Symlink skills (per-box set — see skill_names_for_user) ---
     box_skills = skill_names_for_user()
