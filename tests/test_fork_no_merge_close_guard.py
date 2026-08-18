@@ -16,9 +16,23 @@ either. The guard now gates ANY reduced-authority stream (authority != `full`) �
 only `full` authority passes untouched, resolved via `airuleset.py authority`
 (marker-aware).
 
+#349 shared-identity refinement + #533 stream-label acceptance-close carve-out
+(2026-08-18, montalu3 acceptance-doctrine): authorship is a DEAD ownership signal
+on a shared-bot-identity box (every ticket a montalu stream files/works is authored
+by the maintainer, so the author carve-out refuses even a genuine stream close).
+The #533 additive exemption lets a REDUCED-authority stream CLOSE its OWN
+`stream:<user>`-labeled `needs-acceptance` ticket WITH an evidence `--comment`
+(the `gh issue close` form only; the `gh api PATCH` form stays blocked forever),
+gated on the stream label (survives shared identity), the acceptance state (a
+gatekeeper-applied post-pipeline label), and NONE of the #512 re-hand-off/bounce
+override labels. Every failure fails toward hand-off (#349/#463 direction).
+
 Tests are hermetic: a fake `gh` is PATH-injected so no network/auth is needed —
 FAKE_GH_ME controls `gh api user`, FAKE_GH_AUTHOR controls `gh issue view --json
-author`, FAKE_GH_FAIL=1 makes every gh call fail (the fail-safe path).
+author`, FAKE_GH_LABELS (space-separated) controls `gh issue view --json labels
+-q .labels[].name`, FAKE_GH_LABELS_FAIL=1 makes ONLY the labels read fail (models
+an unreadable label set with a still-readable author), FAKE_GH_FAIL=1 makes every
+gh call fail (the global fail-safe path).
 """
 
 import json
@@ -45,7 +59,17 @@ case "$1 $2" in
     [ "${FAKE_GH_API_USER_403:-0}" = "1" ] && \
       { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
     echo "${FAKE_GH_ME:-}";;
-  "issue view") echo "${FAKE_GH_AUTHOR:-}";;
+  "issue view")
+    # #533: distinguish the labels read (`--json labels -q .labels[].name`) from
+    # the author read (`--json author -q .author.login`). The labels read honors
+    # FAKE_GH_LABELS_FAIL (an unreadable label set) and emits one name per line,
+    # exactly what gh's own -q '.labels[].name' produces.
+    if printf '%s ' "$@" | grep -q -- '--json labels'; then
+      [ "${FAKE_GH_LABELS_FAIL:-0}" = "1" ] && exit 1
+      for lbl in ${FAKE_GH_LABELS:-}; do echo "$lbl"; done
+    else
+      echo "${FAKE_GH_AUTHOR:-}"
+    fi;;
   *) exit 1;;
 esac
 """
@@ -67,7 +91,7 @@ def _fake_gh_dir():
 
 
 def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
-        app_token_dir=None, api_user_403=False):
+        app_token_dir=None, api_user_403=False, labels="", labels_fail=False):
     payload = json.dumps({"tool_input": {"command": cmd}})
     env = dict(os.environ)
     env["PATH"] = _fake_gh_dir() + os.pathsep + env.get("PATH", "")
@@ -75,6 +99,8 @@ def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
     env["FAKE_GH_AUTHOR"] = author
     env["FAKE_GH_FAIL"] = "1" if gh_fail else "0"
     env["FAKE_GH_API_USER_403"] = "1" if api_user_403 else "0"
+    env["FAKE_GH_LABELS"] = labels
+    env["FAKE_GH_LABELS_FAIL"] = "1" if labels_fail else "0"
     if app_token_dir is not None:
         # An existing dir here makes cli_quals._is_gh_app_token_box() true, so
         # `authority --self-login` returns STREAM_APP_BOT_LOGIN with no gh call
@@ -276,6 +302,252 @@ class TestForkNoMergeCloseGuard(TestCase):
         r = run("gh issue close 1408", self.full, hook=fake)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("fail-safe", r.stderr)
+
+
+class TestStreamLabelAcceptanceClose(TestCase):
+    """#533 — a reduced-authority stream may CLOSE its OWN `stream:<user>`-labeled
+    `needs-acceptance` ticket WITH an evidence `--comment`, even though the ticket
+    is authored by the maintainer (shared bot identity), so the #349 author
+    carve-out refuses it. Ownership is the stream LABEL, not authorship (Fable
+    synthesis Variant 1). The `gh api PATCH` form stays blocked forever; every
+    failure fails toward hand-off.
+
+    The stream label the hook resolves is `stream:<the subprocess's own unix
+    user>` (airuleset.py `authority --stream-label`), so the tests derive it from
+    the SAME `airuleset._current_user()` the subprocess reads, not a hardcoded
+    name — portable across boxes."""
+
+    def setUp(self):
+        self.fork = _cwd_with_authority("fork-no-merge")
+        self.full = _cwd_with_authority("full")
+        self.branch = _cwd_with_authority("branch-merge")
+
+    def _self_stream(self):
+        return "stream:%s" % airuleset._current_user()
+
+    # --- ALLOW: the live acceptance-close case ---
+
+    def test_allows_acceptance_close_of_own_stream_labeled_needs_acceptance(self):
+        # Case 1 (the live case, odoo-erp #3313/#3785/#3333): author IS the
+        # maintainer (shared identity → author carve-out refuses), but the ticket
+        # carries THIS stream's label + needs-acceptance + a --comment. RED on
+        # current code (author==maintainer → BLOCK); GREEN allows.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp "
+                "--comment 'fixed on PROD, client confirmed'",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_acceptance_close_with_short_c_comment_flag(self):
+        # The `-c` short form of --comment must be honored identically.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp -c 'client confirmed'",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_acceptance_close_with_comment_equals_form(self):
+        # The `--comment=X` glued form must be honored identically.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment=confirmed",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_acceptance_close_under_fork_no_merge_too(self):
+        # The carve-out is UNIFORM across reduced profiles (in practice a
+        # fork-no-merge stream carries no such labels, so this never matches for
+        # real — but the hook must behave the same when it does).
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 4006 -R kvaskodev/odoo-erp --comment 'accepted'",
+                self.fork, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- BLOCK: every failure path fails toward hand-off ---
+
+    def test_blocks_close_without_needs_acceptance(self):
+        # Case 2 (the #349 replay lock): own stream label but NO needs-acceptance
+        # → not an acceptance state → BLOCK. A verbatim replay of the montalu3
+        # regression (a merged-into-integration ticket has the stream label but
+        # not yet needs-acceptance) still blocks.
+        labels = self._self_stream()   # no needs-acceptance
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_blocks_close_with_foreign_stream_label(self):
+        # Case 3: needs-acceptance but a DIFFERENT stream's label → not THIS
+        # stream's ticket → BLOCK.
+        labels = "stream:someoneelse needs-acceptance"
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_close_when_ready_for_review_also_present(self):
+        # Case 4 (#512 mirror): a re-hand-off (`ready-for-review`) overrides the
+        # acceptance state — the gatekeeper owns it again → BLOCK.
+        labels = "%s needs-acceptance ready-for-review" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_close_when_needs_gatekeeper_also_present(self):
+        # Case 4b (#512 mirror): `needs-gatekeeper` is the other re-hand-off
+        # override label → BLOCK.
+        labels = "%s needs-acceptance needs-gatekeeper" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_close_when_prio_bounce_also_present(self):
+        # Case 4c (#512 mirror): `prio:bounce` (a returned bounce, reworkable by
+        # the stream) is not an acceptance state → BLOCK.
+        labels = "%s needs-acceptance prio:bounce" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_close_when_labels_unreadable(self):
+        # Case 5: a gh error reading labels must fail SAFE (BLOCK), never exempt
+        # on an unverifiable label set (#349/#463 fail direction). The AUTHOR
+        # read still succeeds (returns the maintainer), only the LABELS read fails.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels,
+                labels_fail=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_close_without_comment_and_hints_the_recipe(self):
+        # Case 6: ownership + acceptance state OK but NO --comment → BLOCK, and
+        # the stderr NAMES the acceptance recipe (only condition 3 failed).
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("--comment", r.stderr)
+        self.assertIn("acceptance", r.stderr.lower())
+        self.assertIn("533", r.stderr)
+
+    def test_blocks_the_api_patch_close_form_even_with_acceptance_labels(self):
+        # Case 7: the REST PATCH form is NEVER exempted, even with a perfect
+        # acceptance label set — legit acceptance closes use `gh issue close`.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 "
+                "-f state=closed -f body=done",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_no_acceptance_hint_when_ownership_state_itself_failed(self):
+        # The acceptance recipe hint fires ONLY when conditions 1+2 passed and
+        # ONLY the --comment was missing — not for an ordinary foreign/assigned
+        # block (where naming the recipe would wrongly invite a workaround).
+        labels = "stream:someoneelse"   # neither ownership nor acceptance
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertNotIn("533", r.stderr)
+
+    # --- #533 review C1 (CRITICAL): compound/batch smuggle must BLOCK ---
+
+    def test_blocks_batch_close_smuggling_a_foreign_close(self):
+        # The exemption used to exit 0 on the FIRST close and allow the WHOLE
+        # command — so a batch closed a foreign/assigned 2nd ticket too. Even
+        # though ticket 3313 carries a perfect acceptance label set, a second
+        # top-level `gh issue close` makes it NOT a single close action → BLOCK.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment accepted "
+                "&& gh issue close 3320 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_patch_chained_after_a_qualifying_acceptance_close(self):
+        # A PATCH close chained after a qualifying `gh issue close` must NOT ride
+        # the exemption through — "the PATCH form is never exempted" must hold even
+        # when chained.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment ok "
+                "&& gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/999 -f state=closed",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_interpreter_chained_after_a_qualifying_acceptance_close(self):
+        # A nested interpreter (bash -c) could hide another close; fail safe.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment ok "
+                "&& bash -c 'gh issue close 999 -R zbynekdrlik/odoo-erp'",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_acceptance_close_with_a_benign_cd_prefix(self):
+        # The single-action guard must NOT over-block a benign `cd dir &&` prefix
+        # — exactly one close, no PATCH, no interpreter → still ALLOWED.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("cd /tmp && gh issue close 3313 -R zbynekdrlik/odoo-erp --comment accepted",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- #533 review M3 / m5: PATCH-method + repo-flag parsing edges ---
+
+    def test_blocks_glued_method_patch_form(self):
+        # The glued `--method=PATCH` form is now DETECTED as a close (is_close) and,
+        # being the PATCH form, is never exempted → BLOCK (even with acceptance labels).
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh api --method=PATCH repos/zbynekdrlik/odoo-erp/issues/3313 -f state=closed",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_glued_repo_flag_failsafe(self):
+        # A glued `-Rowner/repo` yields an empty REPO_ARG (no separator); rather
+        # than read labels against the CWD repo (a theoretical wrong-allow), fail
+        # SAFE → BLOCK.
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -Rzbynekdrlik/odoo-erp --comment accepted",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_single_quoted_repo_flag(self):
+        # A single-quoted `-R 'owner/repo'` now parses correctly → the labels read
+        # targets the right repo → ALLOW (no more false-block on single quotes).
+        labels = "%s needs-acceptance" % self._self_stream()
+        r = run("gh issue close 3313 -R 'zbynekdrlik/odoo-erp' --comment accepted",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    # --- Case 8: the `authority --stream-label` CLI flag itself ---
+
+    def test_stream_label_flag_is_empty_under_full_authority(self):
+        r = subprocess.run(
+            ["python3", str(ROOT / "airuleset.py"), "authority", "--stream-label"],
+            capture_output=True, text=True, cwd=self.full)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "", r.stdout)
+
+    def test_stream_label_flag_prints_stream_user_under_reduced_authority(self):
+        r = subprocess.run(
+            ["python3", str(ROOT / "airuleset.py"), "authority", "--stream-label"],
+            capture_output=True, text=True, cwd=self.branch)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(),
+                         "stream:%s" % airuleset._current_user(), r.stdout)
 
 
 if __name__ == "__main__":
