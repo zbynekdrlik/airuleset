@@ -431,13 +431,20 @@ def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
     )
 
 
-def _clean_tmux_block_spans(existing):
+def _clean_tmux_block_spans(existing, start=TMUX_MARK_START, end=TMUX_MARK_END):
     """[(start, end)] for every CLEAN (non-crossing) START...END marker
     pair in `existing`, left to right. "Clean" means no OTHER marker
     literal (START or END) falls strictly between a pair's own START and
     its END -- this deliberately refuses to treat an externally-corrupted
     or reordered marker set (e.g. END appearing before START) as a
     replaceable block.
+
+    `start`/`end` default to the managed history-block markers (the #235
+    caller), but are parameterized so the #554 stream-window block reuses
+    the SAME proven scanner rather than a third hardcoded copy (F1
+    review): passing its own `# >>> airuleset tmux stream-window >>>` /
+    `<<<` markers is safe because the two marker sets are mutually
+    non-substring, so each call only ever matches its own block.
 
     Why this matters (#235 adversarial-review finding): a naive whole-file
     `START.*?END` regex would, on a LATER run once a fresh clean block has
@@ -449,20 +456,20 @@ def _clean_tmux_block_spans(existing):
     and left as inert literal text, never merged with anything else."""
     spans = []
     pos = 0
-    s_len = len(TMUX_MARK_START)
+    s_len = len(start)
     while True:
-        s = existing.find(TMUX_MARK_START, pos)
+        s = existing.find(start, pos)
         if s == -1:
             break
-        e = existing.find(TMUX_MARK_END, s + s_len)
+        e = existing.find(end, s + s_len)
         if e == -1:
             pos = s + s_len  # no END anywhere after this START -- skip it
             continue
         inner = existing[s + s_len:e]
-        if TMUX_MARK_START in inner or TMUX_MARK_END in inner:
+        if start in inner or end in inner:
             pos = s + s_len  # another marker crosses this pair -- not clean
             continue
-        e_full = e + len(TMUX_MARK_END)
+        e_full = e + len(end)
         spans.append((s, e_full))
         pos = e_full
     return spans
@@ -598,6 +605,175 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
             # the rest (#267).
             print(f"  tmux live-apply skipped (non-fatal): {e}", file=sys.stderr)
 
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# #554: the tmux WINDOW name carries the subdev stream account's name, so the
+# owner -- attached to one of many subdev sessions -- can tell at a glance
+# WHICH stream they are in. Root cause (verified live on montalu@subdev,
+# tmux 3.7b): the default status-left already shows the SESSION name
+# (`[#{session_name}]`) and the owner STILL could not tell -- the identity
+# has to go where the owner actually looks, the window-status list in the
+# middle of the status bar, which `automatic-rename on` keeps filling with
+# the running command (`bash`/`node`). So: name the window after the stream
+# and turn `automatic-rename` off so it STICKS.
+#
+# Same idempotent per-account marker-block shape as apply_stream_ssh_attach
+# (#264): present ONLY for AUTHORITY_BY_USER stream accounts, actively
+# STRIPPED on dev1/dev2/gatekeeper -- a human box does varied work and the
+# command-tracking window name is USEFUL there (and the box's HOST, not the
+# user which is always `newlevel`, is what distinguishes dev1 from dev2).
+# The stream name is BAKED at install time from `_current_user()` -- 100%
+# predictable, testable, and (unlike `#{session_name}`) constant across the
+# ssh grouped-attach survivor path (`new-session -t`), so the session-created
+# hook always renames the shared window to the SAME literal instead of a
+# grouped session's auto-generated name.
+# ---------------------------------------------------------------------------
+
+STREAM_TMUX_WINDOW_MARK_START = "# >>> airuleset tmux stream-window >>>"
+STREAM_TMUX_WINDOW_MARK_END = "# <<< airuleset tmux stream-window <<<"
+
+# The stream name is interpolated as a LITERAL into a tmux `rename-window`
+# argument -- constrain it to a shell/tmux-safe unix-username shape so a
+# hypothetical exotic account name can never inject tmux command syntax.
+# Every real AUTHORITY_BY_USER key already matches this.
+_SAFE_STREAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def render_stream_tmux_window_block(stream):
+    """The managed ~/.tmux.conf block that names this stream account's tmux
+    windows after the stream. `stream` is the baked linux username (already
+    validated against `_SAFE_STREAM_NAME_RE` by the caller).
+
+    `after-new-window` is DELIBERATELY not emitted: it fires ONLY on windows
+    opened AFTER the initial one, so it never names the session's FIRST
+    (claude) window -- the one the owner sees on attach -- which
+    `session-created` does. (An earlier probe saw a tmux "server exited
+    unexpectedly" with it, but a fresh-socket re-check showed that was a
+    probe socket-reuse race, not the hook: `after-new-window` parses rc=0
+    on both 3.4 and 3.7b -- it is simply the WRONG hook for the first
+    window.) The `session-created` hook + `automatic-rename off` pair is
+    proven clean on BOTH the fleet's tmux 3.4 and 3.7b (a scratch conf
+    starts rc=0 with `#{window_name}` = the stream on both).
+
+    KNOWN LIMITATION (review F3): `session-created` names only the FIRST
+    window of a NEW session. A second window opened later inside a stream
+    session keeps its own name (with `automatic-rename off` it does not
+    track the command either). Acceptable -- a stream account runs a single
+    claude window -- and the live-apply below is more thorough, renaming
+    EVERY existing window of the primary session on each install."""
+    return (
+        f"{STREAM_TMUX_WINDOW_MARK_START}\n"
+        "# #554: window name = stream account name so the owner sees WHICH\n"
+        "# subdev stream they are attached to. automatic-rename off makes it\n"
+        "# STICK (a stream account only runs claude; a command-tracking name\n"
+        "# -- 'node'/'bash' -- has no value and hides the identity). Present\n"
+        "# only for subdev stream accounts; stripped on dev1/dev2/gatekeeper.\n"
+        "set-option -gw automatic-rename off\n"
+        f'set-hook -g session-created "rename-window {stream}"\n'
+        f"{STREAM_TMUX_WINDOW_MARK_END}"
+    )
+
+
+def _live_apply_stream_window_name(stream, run=None):
+    """Best-effort live-apply on any RUNNING tmux server for this stream
+    account, so an ALREADY-running/attached session updates on the next
+    push WITHOUT waiting for a session re-create. Purely configuration-path
+    (`set-option` / `set-hook` / `rename-window` -- NEVER a `send-keys`
+    keystroke into any pane), failure-tolerant (no server / no matching
+    session -> no-op), and it NEVER creates or resurrects a session (the
+    standing 'never touch a session the user deliberately stopped' rule):
+    `rename-window` only relabels a window that already exists.
+
+    A `rename-window` is safe to live-apply for the same reason
+    `destroy-unattached` is (apply_tmux_history_limit): it changes a server
+    option / a window's own name label, not any window's geometry, and does
+    not read or rewrite anything CC's renderer has drawn."""
+    runner = run or _default_tmux_run
+    for argv in (["tmux", "set-option", "-gw", "automatic-rename", "off"],
+                 ["tmux", "set-hook", "-g", "session-created",
+                  "rename-window %s" % stream]):
+        try:
+            runner(argv)
+        except Exception as e:
+            print("  tmux stream-window live-apply skipped (non-fatal): %s" % e,
+                  file=sys.stderr)
+    # Rename every window of the PRIMARY session (=<stream>) so an attached
+    # session updates immediately. A missing session makes list-windows exit
+    # non-zero (or the injected test `run` returns None) -> no rename at all.
+    try:
+        result = runner(["tmux", "list-windows", "-t", "=%s" % stream,
+                         "-F", "#{window_id}"])
+    except Exception as e:
+        print("  tmux stream-window live-apply (list) skipped (non-fatal): %s" % e,
+              file=sys.stderr)
+        return
+    if getattr(result, "returncode", 1) != 0:
+        return
+    for wid in (getattr(result, "stdout", "") or "").splitlines():
+        wid = wid.strip()
+        if not wid:
+            continue
+        try:
+            runner(["tmux", "rename-window", "-t", wid, stream])
+        except Exception:
+            # one window's failure never skips the rest
+            pass
+
+
+def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, run=None):
+    """Idempotently add/remove the #554 stream-window naming marker block in
+    ~/.tmux.conf, scoped STRICTLY to subdev stream accounts
+    (AUTHORITY_BY_USER's keys -- the exact registry #263/#264 key off). The
+    block is PRESENT for a stream account and actively STRIPPED on every
+    other box, so a future AUTHORITY_BY_USER edit can never leave a stale
+    block on a human account (dev1/dev2/gatekeeper).
+
+    Same overall shape as apply_stream_ssh_attach (#264): positional-span
+    rewrite (the shared `_clean_tmux_block_spans`, parameterized with this
+    block's own markers), create-file-if-absent, no-op on a second run.
+    Additionally live-applies the same directives on any
+    running server for a stream account (`_live_apply_stream_window_name`)
+    so an attached session updates immediately. Returns True iff
+    ~/.tmux.conf changed."""
+    import airuleset
+    path = tmux_conf_path or TMUX_CONF
+    u = user or airuleset._current_user()
+    should_have = bool(u) and u in airuleset.AUTHORITY_BY_USER \
+        and bool(_SAFE_STREAM_NAME_RE.match(u))
+    existing = path.read_text() if path.exists() else ""
+    spans = _clean_tmux_block_spans(
+        existing, STREAM_TMUX_WINDOW_MARK_START, STREAM_TMUX_WINDOW_MARK_END)
+    if should_have:
+        block = render_stream_tmux_window_block(u)
+        if spans:
+            out, cursor = [], 0
+            for s, e in spans:
+                out.append(existing[cursor:s])
+                out.append(block)
+                cursor = e
+            out.append(existing[cursor:])
+            new = "".join(out)
+        else:
+            sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+            new = f"{existing}{sep}\n{block}\n"
+    else:
+        if not spans:
+            new = existing
+        else:
+            out, cursor = [], 0
+            for s, e in spans:
+                out.append(existing[cursor:s])
+                cursor = e
+            out.append(existing[cursor:])
+            new = "".join(out)
+    changed = new != existing
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new)
+    if should_have:
+        _live_apply_stream_window_name(u, run)
     return changed
 
 

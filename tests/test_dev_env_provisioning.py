@@ -1367,5 +1367,177 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
                       "failed() entries it produced: %r" % out.getvalue())
 
 
+class TestApplyStreamTmuxWindowName(TestCase):
+    """#554: the tmux WINDOW name carries the stream account's name so the
+    owner, attached to one of many subdev sessions, can tell at a glance
+    which stream they are in. Root cause (verified live on montalu@subdev):
+    the default status-left already shows the SESSION name and the owner
+    still could not tell -- the identity has to go where the owner looks
+    (the window-status list), which `automatic-rename on` fills with the
+    running command (`bash`/`node`). Same idempotent per-account marker-block
+    shape as apply_stream_ssh_attach (#264): present ONLY for
+    AUTHORITY_BY_USER stream accounts, actively stripped everywhere else."""
+
+    def _tmp(self, content=None):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        if content is not None:
+            p.write_text(content)
+        return p
+
+    def test_renders_the_window_naming_directives_with_the_baked_stream_name(self):
+        block = airuleset.render_stream_tmux_window_block("montalu1")
+        self.assertIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, block)
+        self.assertIn(airuleset.STREAM_TMUX_WINDOW_MARK_END, block)
+        # automatic-rename off makes the name STICK against a command change.
+        self.assertIn("set-option -gw automatic-rename off", block)
+        # session-created hook renames every (primary AND grouped-attach)
+        # new session's window to the baked stream literal -- verified live
+        # to converge on both tmux 3.4 and 3.7b.
+        self.assertIn('set-hook -g session-created "rename-window montalu1"', block)
+
+    def test_after_new_window_hook_is_never_emitted(self):
+        # #554: `after-new-window` fires ONLY on windows opened after the
+        # initial one, so it never names the session's FIRST (claude)
+        # window -- the one the owner sees on attach. `session-created` is
+        # the right hook (live-verified rc=0 on tmux 3.4 + 3.7b), so
+        # after-new-window must never appear in the block.
+        block = airuleset.render_stream_tmux_window_block("david1")
+        self.assertNotIn("after-new-window", block)
+
+    def test_adds_block_for_a_stream_account(self):
+        p = self._tmp("# existing content\n")
+        changed = airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", run=lambda argv: None)
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, text)
+        self.assertIn('set-hook -g session-created "rename-window montalu2"', text)
+
+    def test_never_added_for_dev1_style_user(self):
+        p = self._tmp("# existing content\n")
+        changed = airuleset.apply_stream_tmux_window_name(
+            p, user="newlevel", run=lambda argv: None)
+        self.assertFalse(changed)
+        self.assertNotIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, p.read_text())
+
+    def test_removes_block_from_a_non_stream_account_if_ever_present(self):
+        block = airuleset.render_stream_tmux_window_block("montalu2")
+        p = self._tmp(f"# before\n{block}\n# after\n")
+        changed = airuleset.apply_stream_tmux_window_name(
+            p, user="newlevel", run=lambda argv: None)
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertNotIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, text)
+        self.assertIn("# before", text)
+        self.assertIn("# after", text)
+
+    def test_idempotent_second_call_is_a_no_op(self):
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
+        changed = airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", run=lambda argv: None)
+        self.assertFalse(changed)
+
+    def test_never_touches_content_outside_the_markers(self):
+        p = self._tmp("set -g mouse on\nset -g status-bg colour234\n")
+        airuleset.apply_stream_tmux_window_name(p, user="david", run=lambda argv: None)
+        text = p.read_text()
+        self.assertIn("set -g mouse on", text)
+        self.assertIn("set -g status-bg colour234", text)
+
+    def test_creates_file_when_absent(self):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        changed = airuleset.apply_stream_tmux_window_name(
+            p, user="marek", run=lambda argv: None)
+        self.assertTrue(changed)
+        self.assertTrue(p.exists())
+
+    def test_a_stray_unpaired_start_does_not_eat_content_up_to_a_later_end(self):
+        block = airuleset.render_stream_tmux_window_block("montalu2")
+        corrupted = (
+            f"{airuleset.STREAM_TMUX_WINDOW_MARK_START}\n"
+            "# stray leftover start with no matching end anywhere before this\n"
+            "IMPORTANT_UNRELATED_LINE=1\n"
+            f"{block}\n"
+        )
+        p = self._tmp(corrupted)
+        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
+        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
+        self.assertIn("IMPORTANT_UNRELATED_LINE=1", p.read_text())
+
+    def test_live_applies_the_server_options_for_a_stream_account(self):
+        calls = []
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=calls.append)
+        # server-option sets (no keystrokes) -- automatic-rename off + the
+        # session-created rename hook, exactly what the conf block carries.
+        self.assertIn(["tmux", "set-option", "-gw", "automatic-rename", "off"], calls)
+        self.assertIn(
+            ["tmux", "set-hook", "-g", "session-created", "rename-window montalu2"],
+            calls)
+
+    def test_live_apply_renames_existing_windows_of_the_primary_session(self):
+        # A run that returns two window ids for the primary session `=montalu2`,
+        # then records the rename calls. Proves an ALREADY-running session
+        # updates immediately (config-path rename-window, never send-keys).
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-t"] and argv[3] == "=montalu2":
+                return _FakeCP(returncode=0, stdout="@0\n@3\n")
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=run)
+        self.assertIn(["tmux", "rename-window", "-t", "@0", "montalu2"], seen)
+        self.assertIn(["tmux", "rename-window", "-t", "@3", "montalu2"], seen)
+
+    def test_no_live_apply_calls_for_a_non_stream_account(self):
+        calls = []
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(p, user="newlevel", run=calls.append)
+        self.assertEqual(calls, [], "a human box must get NO tmux mutation")
+
+    def test_marker_sets_are_mutually_non_substring(self):
+        # #554 review F2: apply_tmux_history_limit and this feature share the
+        # SAME positional-span scanner (_clean_tmux_block_spans), so their
+        # correctness across repeated installs rests on neither marker being
+        # a substring of the other -- else one scanner would match the other's
+        # block. Lock it so a future marker rename can't silently corrupt.
+        hs, he = airuleset.TMUX_MARK_START, airuleset.TMUX_MARK_END
+        ss, se = (airuleset.STREAM_TMUX_WINDOW_MARK_START,
+                  airuleset.STREAM_TMUX_WINDOW_MARK_END)
+        self.assertNotIn(hs, ss)
+        self.assertNotIn(ss, hs)
+        self.assertNotIn(he, se)
+        self.assertNotIn(se, he)
+
+    def test_coexists_with_the_history_block_across_repeated_installs(self):
+        # #554 review F2: both managed blocks live in ONE ~/.tmux.conf. Apply
+        # both, then re-apply both, and assert each survives intact with the
+        # user's own content preserved -- neither scanner eats the other.
+        p = self._tmp("set -g mouse on\n")
+        airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
+        # a second install of BOTH must be a byte-for-byte no-op
+        before = p.read_text()
+        c1 = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        c2 = airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", run=lambda argv: None)
+        after = p.read_text()
+        self.assertFalse(c1)
+        self.assertFalse(c2)
+        self.assertEqual(before, after)
+        # both managed blocks + the user's own line all present, exactly once
+        self.assertEqual(after.count(airuleset.TMUX_MARK_START), 1)
+        self.assertEqual(after.count(airuleset.STREAM_TMUX_WINDOW_MARK_START), 1)
+        self.assertIn("set -g mouse on", after)
+        self.assertIn("set-option -g history-limit", after)
+        self.assertIn('rename-window montalu2', after)
+
+
 if __name__ == "__main__":
     main()
