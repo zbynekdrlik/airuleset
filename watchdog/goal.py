@@ -1682,6 +1682,14 @@ GOAL_LANE_LIVE_CONVO_S = 3 * 60
 # successful delivery and on the session-active idle reset.
 GOAL_LANE_MAX_STASH_ABORTS = 5
 
+# #531 -- orphan-reap TTL for state["goal_lane"] per-sid records. Same 24h
+# magnitude as GOAL_MARK_ORPHAN_TTL_S, deliberately well above the 1h nudge
+# interval + the 4h max ineffective backoff, so a live armed pane -- whose rec
+# is re-stamped (`lts`) on every ~60s sweep it is visited-and-armed -- is never
+# reaped by the SECONDARY age gate; only a genuinely gone session's aged,
+# not-visited entry is.
+GOAL_LANE_ORPHAN_TTL_S = 24 * 3600
+
 # #479 -- escalating backoff for a lane whose stash delivery keeps ABORTING
 # against the SAME persistently-parked live draft. The single reactions were
 # already correct (never overwrite a live draft, rescue before any keystroke);
@@ -2621,6 +2629,44 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     return logs, True
 
 
+def _prune_goal_lane_orphans(recs, visited_sids, now,
+                             ttl_s=GOAL_LANE_ORPHAN_TTL_S):
+    """#531 -- age/live-gated orphan prune for `state["goal_lane"]` (the per-sid
+    `recs` dict, keyed on `sid = tpath.stem`). `goal_lane_sweep` writes
+    `recs[sid] = rec` for every ARMED candidate pane but never popped it, so a
+    gone session's entry leaked forever (the #519/#524 per-sid-dict-leak class).
+
+    Reap an entry ONLY when BOTH: (1) its sid was NOT a live candidate pane THIS
+    sweep (`visited_sids` -- session gone / superseded), AND (2) it is malformed
+    OR its stored write-time `lts` is older than `ttl_s`. The visited gate is
+    PRIMARY, exactly as in `_prune_goal_mark_orphans` (#519): a live pane that
+    reaches `sid = tpath.stem` this sweep -- INCLUDING an ARMED one whose nudge
+    early-returns AND a temporarily not-armed one that keeps a dormant rec -- is
+    added to `visited_sids` and never reaped. The two live paths that DON'T
+    reach that line this sweep (the `sweep_deadline` budget `break` and the
+    `pane_in_mode` `continue`, both budget-deferred / transient) fall to the
+    `lts` SECONDARY safety: a goal_lane rec has no guaranteed timestamp of its
+    own (an early-return nudge persists `{}`, unlike goal_mark's always-present
+    `tmtime`), so the sweep stamps `lts = now` at every persist, giving a
+    guaranteed age anchor -- "when the sweep last saw this rec as an armed
+    candidate". Reaping additionally needs `lts >= ttl_s` (24h) stale, by which
+    point any live budget-deferred pane has long been re-visited-and-stamped,
+    and a wrongly-reaped entry is simply re-seeded on the next armed sweep
+    (goal_lane state is not death-detection-critical; losing it only resets the
+    nudge counter/cooldown). An entry with a FUTURE `lts` (clock skew) is kept
+    (`< ttl_s`, the safe direction, matching #519). A reaper (run once per
+    sweep), never a per-episode pop; never raises. Mirrors
+    `_prune_goal_mark_orphans` / the #524 `_reap_qdisarm_state`."""
+    if not isinstance(recs, dict):
+        return
+    for sid in [k for k, v in list(recs.items())
+                if k not in visited_sids
+                and not (isinstance(v, dict)
+                         and isinstance(v.get("lts"), (int, float))
+                         and (now - v["lts"]) < ttl_s)]:
+        recs.pop(sid, None)
+
+
 def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
@@ -2659,6 +2705,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # BEFORE this job in the same run_once, sharing `state`) is the authoritative
     # structured armed signal. Read-only here: dark_watch owns its lifecycle.
     gmarks = state.get("goal_mark", {})
+    visited_sids = set()   # #531 -- live candidate sids kept by the orphan prune below
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
@@ -2672,6 +2719,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             continue
         tpath, tmtime = tinfo
         sid = tpath.stem
+        visited_sids.add(sid)   # #531 -- live this sweep -> never orphan-reaped
         captured = run(["tmux", "capture-pane", "-p", "-t", pid]) or ""
         loc = watchdog._pane_location(pid, run) or pid
         # #486 G6 -- the ARMED action gate is the STRUCTURED one-glance verdict,
@@ -2709,9 +2757,12 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             now, run, rec, sid, cwd, pid, captured, tpath, tmtime, loc,
             send_fn, dry_run, handled, projects_dir,
             backlog_fetch=backlog_fetch, state=state, sleep_fn=sleep_fn)
+        rec["lts"] = now   # #531 -- write-time age anchor for the orphan reaper
         recs[sid] = rec
         logs += llogs
         if handled is not None and any(ln.startswith("lane-occupancy nudge")
                                        for ln in llogs):
             handled.add(sid)
+    if not dry_run:   # #531 -- prune goal_lane for gone+aged sessions (dry-run: no state mutation)
+        _prune_goal_lane_orphans(recs, visited_sids, now)
     return logs

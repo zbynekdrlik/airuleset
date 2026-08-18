@@ -233,7 +233,7 @@
     "watchdog/decide.py": 744,
     "watchdog/discord_api.py": 187,
     "watchdog/discord_replies.py": 780,
-    "watchdog/goal.py": 2717,
+    "watchdog/goal.py": 2768,
     "watchdog/goal_scan.py": 524,
     "watchdog/handoff_alarm.py": 139,
     "watchdog/janitor.py": 416,
