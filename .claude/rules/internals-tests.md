@@ -31,99 +31,36 @@ Staršie/hlbšie tests/ lekcie (archív) sú v `.claude/rules-reference/internal
 - **A name-prefix-matching cleanup sweep that reads FILE CONTENT to classify a candidate (any future `discover_*_litter`/`discover_*_candidates`-shaped function) must guard against non-regular-file types (FIFO/socket/device node) BEFORE the content read, not just permission/existence errors — and the honest proof this hangs FOREVER (not just "slow") needs a REAL SEPARATE subprocess with a hard wall-clock kill, never an in-process SIGALRM.** #409-review finding 1: `discover_autopilot_lock_litter`'s regular-`.lock` branch called `_autopilot_lock_read(p)` (a `Path.read_text()`) on ANY non-symlink, non-directory path matching the name pattern — a FIFO planted at that name (world-writable+sticky `/tmp`, matched by prefix only) blocks `open()`/`read()` forever waiting for a writer that never comes. An in-process SIGALRM guard around the test's OWN call was tried first and gave a FALSE NEGATIVE: the blocked read raises (from the signal interrupt) an `OSError`/`TimeoutError`-family exception that `_autopilot_lock_read`'s own `except Exception: return {}` SWALLOWS, so the caller sees a fast, clean "not alive" result indistinguishable from "never hung at all" — the alarm just silently caps the delay instead of proving anything. The only reliable proof: `subprocess.run([...], timeout=N)` in a SEPARATE process — against the pre-fix code it genuinely raised `TimeoutExpired` and needed no further evidence. Fix: `stat.S_ISREG(os.lstat(p).st_mode)` gate before the content read; the correct TEST asserts the reader function is never even CALLED for a non-regular path (`unittest.mock.patch.object(..., side_effect=AssertionError(...))`) — zero timing dependency, cannot itself hang, and directly proves the short-circuit rather than inferring it from elapsed time.
 - **Agentom volaný mandát-skill nemá čo robiť v slash pickeri (`user-invocable: true` je preň len mis-selection hazard, nie feature) — nové takéto skilly rovno `user-invocable: false`; existujúce viditeľné (napr. plan-check) prechádzajú verdiktom mdreview B2 auditu, nie hromadným flipom (#447, 2026-08-13).** CC picker pri Enteri vykonáva ZVÝRAZNENÝ riadok, ranking je nezdokumentovaný a mis-selectuje aj BEZ zhody písmen (upstream anthropics/claude-code issues 11431 — `/com` spustil `/pr_comments`; 26307 — stale filtering; 41828): presne tak `/exit` opakovane spúšťal `/playbook-review` — transcript-proven (spinbike: user doslova „co to je za prikaz playbook-review? lebo to sa len omylom stlacilo namiesto /exit"; camera-box: invokácia + skutočný `/exit` o 15 s; pomer 392 model-side Skill volaní vs 3 user-typed). Fix je jednoriadkový: `user-invocable: false` (dokumentované pole, code.claude.com/docs/en/skills.md) skryje skill z pickera na každom boxe, model Skill-tool volanie NEOVPLYVNÍ — post-ticket mandát aj `stop-check-playbook-review.sh` gate (kotví na `📔 Playbook:` riadok, nikdy na command name) bežia ďalej nezmenené. Rename adresára je horšia mitigácia (sweep všetkých referencií + skill v pickeri OSTÁVA a ďalej podlieha vadnému rankingu). Lock: `tests/test_slash_surface_hygiene.py`; systematickú prevenciu do budúcna robí mdreview **Step B2** (slash-surface inventár + collision check + quality-command coverage, verdikty cez Step F).
 - **A POLICY-INVERSION ticket (a directive overturning a lineup/default the test suite deliberately LOCKS — #440's Opus 5 ban, #445's ultracode standing default) has its stale locks scattered in test files named for OTHER features, and the FULL suite is the only reliable finder — a scoped run of the "obviously related" files is guaranteed to miss some.** #440/#445 live inventory: beyond the expected `tests/test_model_tiering.py`, stale locks on the old policy turned up in `test_workflow_cost_discipline.py` (mechanical-tier phrase), `test_dynamic_application.py` (validator frontmatter alias, plus a `[:400]` char-window too tight for the full-id spelling), `test_main_implementation_guard.py` (a `#54`/"armed /goal" pointer the module rewrite dropped), `test_compact.py` (a hardcoded stale `claude-opus-5[1m]` literal where `airuleset.MANAGED_MODEL` was always the honest assertion), and `test_context_diet_tier1.py` (a behavioural-anchor phrase from the OLD tiering wording). Protocol for the next such ticket: `grep -rn -F '<the exact old literal/value>' tests/` for every value being inverted BEFORE writing the RED commit, invert each found lock with stated justification in the RED/GREEN pair it belongs to — and still treat the full-suite run as the real gate, since phrase-anchors (not literals) only surface there.
-- **`OPTIONAL_PLUGINS`** (playwright) — force-DISABLED in user scope BUT still
-  INSTALLED + marketplace-registered + browser-cache-provisioned on every box.
-  Off by default; opted-in PER PROJECT.
-
-**Why #415 inverted Playwright from `MANAGED_PLUGINS` to `OPTIONAL_PLUGINS`:**
-force-enabling it fleet-wide spawned a resident ~144MB headless Chrome tree per
-session per box on the first `browser_*` call, in projects with zero
-browser-testing footprint (~400MB reclaimed live on dev1 by killing two idle
-trees, but they respawn every session). The #158 "baseline-installed AND ENABLED
-everywhere" decision is SUPERSEDED — see the superseding comment block right
-above `MANAGED_PLUGINS`'s definition.
-
-**Force-DISABLE, not drop-the-write, is load-bearing.** Every already-pushed box
-carries a stale `playwright: true` from the pre-#415 force-enable regime. Merely
-removing playwright from `MANAGED_PLUGINS` and leaving the key absent would leave
-that stale `true` in place — the resident-Chrome behaviour would be unchanged on
-exactly the fleet the fix exists to help. `reconcile_managed_plugins()` writes
-`enabled[key]=False` for every `OPTIONAL_PLUGINS` key, which idempotently flips
-the stale `true` off on the next push. (A per-project allowlist keyed on project
-name is architecturally impossible here: airuleset writes USER-scope
-`enabledPlugins`, which is global, not per-project; a per-project map would need
-airuleset to write each project's own git-tracked `.claude/settings.json`, a
-write surface it deliberately never touches — see #415's design comment.)
-
-**The per-project OPT-IN (one line, in the PROJECT's own repo, not airuleset):**
-a project that genuinely needs the browser adds to its OWN
-`<repo>/.claude/settings.json`:
-
-```json
-{"enabledPlugins": {"playwright@claude-plugins-official": true}}
-```
-
-Project scope resolves ABOVE the user-scope `false`, so that one project gets
-Playwright while every other project on the box stays browser-free. The plugin
-is already installed and the browser cache is already warm (both tiers are
-installed by `setup_managed_plugins()`, and `ensure_playwright_browsers()`'s
-guard keys on `MANAGED_PLUGINS + OPTIONAL_PLUGINS`), so the opt-in needs no
-install step. airuleset does NOT make this edit for those repos in #415 — it
-writes only `~/.claude/`, and having it iterate over managed repos to write each
-project's own git-tracked `.claude/settings.json` would be a bigger, separately-
-scoped mechanism (new machinery, out of #415's scope + against the FREEZE), not
-"impossible" outright: a `.claude/settings.json` edit IS governance, not project
-CODE, so a FUTURE deliberate change could do it. The projects #415's SOURCE-LEVEL
-scan flagged as Playwright-needing (audiotester, songplayer, spinbike, restreamer,
-devbridge, automatizacie-montalu, tvdole, audiomatrix, media-bridge, reaperiem)
-each opt in themselves; that migration was DONE in #452 (2026-08-13) — the
-one-line `enabledPlugins.playwright=true` key was written into all 10 projects'
-own `<repo>/.claude/settings.json` on dev1 (all 10 are dev1-local; none
-dev2-only), MERGED into the two that already had a settings.json (audiotester,
-reaperiem — both preserving their existing `hooks` key), created fresh for the
-other eight, and read back per project (playwright == true, valid JSON). Of the
-two BORDERLINE candidates named in #452, one was INCLUDED and one EXCLUDED after
-a live `.playwright-mcp/` check (the MCP server's own `browser_snapshot`/console
-output dir — a runtime signature #415's source-only scan structurally could not
-see): claudy WAS opted in — despite its pytest-playwright test suite
-(`from playwright.sync_api import sync_playwright`, which spawns its own Chromium),
-its `.playwright-mcp/page-*.yml` output from the SAME day as the migration proves
-it genuinely uses the Playwright MCP too; ekasagrabber stays EXCLUDED (Node
-Playwright library directly via `require("playwright")`, no `.playwright-mcp/` at
-all, and not even a git repo). This makes 11 opted-in projects, not 10.
-`autonomous-verification.md`'s Playwright duty is fully intact for an opted-in
-project; the inversion removes a default, never a capability. **Completeness
-caveat:** the set above is #415's source-scan set, NOT an exhaustive list of every
-MCP-using project — a live `.playwright-mcp/` audit found FOUR more projects with
-genuine, recent MCP output that #415's scan missed (camera-box, forestshop_app,
-ziadosti-mesto, windows-machines — #415 had even explicitly named three of them
-"no footprint"), tracked as a needs-user-decision follow-up in #453 (it
-contradicts #415's own reviewed exclusions, so a human adjudicates rather than a
-worker silently overriding them).
-
-**Verify the inversion on a box:** `pgrep -fc playwright-mcp` before/after a
-session start in a NON-opted-in project should stay 0. A project's own
-`disabledMcpServers` entries in `~/.claude.json` are untouched (airuleset has
-zero writes to `~/.claude.json`).
-
-**Deciding whether a project genuinely needs the opt-in — check `.playwright-mcp/`,
-not a source grep (#452, the migration's own core discriminator):** the Playwright
-MCP server writes its `browser_snapshot`/console-capture output into
-`<repo>/.playwright-mcp/` (`page-*.yml`, `console-*.log`) — a runtime signature
-(usually gitignored) that a self-spawned pytest-playwright / Node `require("playwright")`
-library browser NEVER produces. So `grep -rIl playwright <repo>` (config/deps/CLAUDE.md
-footprint) CANNOT tell an MCP user (an agent driving the browser via `browser_*` to
-verify a UI — the case the opt-in serves) apart from a project that merely spawns its
-own test-framework browser (the case the opt-in must NOT pay for, per #415's whole
-point). This is exactly how #415's source-only live scan misclassified projects in both
-directions: claudy (`from playwright.sync_api import sync_playwright` in fixtures) was a
-borderline the source-grep read as pytest-only, yet its `.playwright-mcp/page-*.yml` from
-the migration day itself proved genuine MCP use (→ opted IN, 11th project); and #415 named
-camera-box/forestshop/windows-machines "no footprint" while all three carry live
-`.playwright-mcp/` output the source scan couldn't see (→ #453, a needs-user-decision
-follow-up). Reuse `python3 -c` over `glob(<repo>/**/.playwright-mcp)` + newest file mtime
-(`~/devel/ekasagrabber` etc. have none → confidently NOT MCP) as the fast, reliable
-per-project classifier for any future opt-in decision.
+- **`OPTIONAL_PLUGINS` is REMOVED (#542, 2026-08-18) — playwright is a
+  force-enabled `MANAGED_PLUGINS` baseline plugin again, reversing #415's
+  default-off.** #415 had force-DISABLED playwright user-scope (opt-in per
+  project) to avoid a resident ~144MB Chrome fleet-wide, but left the opt-in
+  to CHANCE — streams reported "nemám playwright" and skipped the UNTOUCHABLE
+  browser verification. The #415 premise was empirically WRONG and this is the
+  reusable finding: on dev1, SIX running `@playwright/mcp` node MCP servers
+  coexisted with only ONE Chrome tree (parked on about:blank). If Chrome
+  launched eagerly at MCP-server start there would be six — so **Chrome is
+  LAZY**, spawned only on the first `browser_*` tool call and only in the
+  session that makes it. Force-enabling everywhere therefore costs a
+  browser-free project only the cheap always-on node MCP server (~5-20MB RSS),
+  never a resident Chrome; a browser-duty project gets Chrome on demand with
+  zero user step. `reconcile_managed_plugins()` force-writes playwright True,
+  which FLIPS the stale user-scope `false` every #415-pushed box carries back
+  to true on the next push (symmetric to #415's own true→false flip; live-
+  confirmed: dev1's `~/.claude/settings.json` had playwright=>False pre-#542).
+  Consequences: the whole per-project opt-in list is gone (#452's one-line
+  `enabledPlugins.playwright=true` writes into 11 repos are now REDUNDANT but
+  harmless — a low-priority cleanup follow-up), and #453 (needs-user-decision:
+  which MORE projects need the opt-in) is OBSOLETE — every project has it.
+  `autonomous-verification.md`'s "Note (#542)" and `cli_caveman_plugins.py`'s
+  `MANAGED_PLUGINS` comment carry the same reversal. **Still-reusable
+  technique (from #452):** to classify whether a project genuinely USES the
+  Playwright MCP (vs merely spawning its own pytest-playwright / Node
+  `require("playwright")` browser), check for `<repo>/.playwright-mcp/`
+  (`page-*.yml`, `console-*.log`) — a runtime signature a source grep cannot
+  see — not `grep -rIl playwright <repo>`. That discriminator no longer gates
+  an opt-in decision (there is none), but it stays the right MCP-usage
+  classifier for any future audit.
 - **An audit #416 "native-now" EVALUATION ticket that concludes KEEP-custom has a fixed, FREEZE-safe deliverable SHAPE — reuse it, don't re-derive from scratch (proven by #418 + #419):** (a) record the capability table + verdict + a `Re-audit trigger` line as ONE bullet in THIS rule (the durable path-scoped surface, auto-loads on `tests/**`); (b) lock it with `tests/test_<area>_defer_<N>.py` — a real `unittest.TestCase` (a bare `def test_x()` file is SILENTLY skipped by `python3 -m unittest discover -s tests`, cmd_push's gate) asserting BOTH that the decision anchors are present verbatim in the rule AND that the custom machinery the decision KEEPS still exists in code, so a future re-audit re-validates against the record instead of re-litigating and "KEPT" can never quietly become a lie. Two gotchas both exemplars hit: (1) pick decision anchors UNIQUE to THIS ticket's bullet — the generic `Re-audit trigger (per #423's permanent native-now process)` header is shared verbatim across sibling bullets, so anchor the ticket-specific trigger CONDITION instead (#419 review 🔵); (2) use `assertTrue(needle in text, msg)`, never `assertIn(needle, text, msg)`, so a failing anchor check does not dump the ~1MB rule file as the mismatch haystack. The design comment for such a ticket is NON-TRIVIAL by `design_gate` (needs a `Triage:` line + 2-3 numbered approaches + trade-off language + an `Architektúra:` section naming structure + framework/why-none-fits) — self-check it with `python3 -c "import design_gate as d; print(d.classify_design_comment(open('X').read()), d.classify_triage_and_approaches(...), d.classify_architecture_section(...))"` BEFORE posting, since `block-commit-without-design.sh` blocks the first code commit until the comment passes all three.
 - **The #8 `autopilot-lock` NARROWED from round-scope to the integration critical section only (#456, 2026-08-14).** The cross-session `fcntl.flock`/steal machinery (`cli_autopilot_lock.py`, `_campaign_pid` two-Bash-call liveness token) is UNCHANGED — only WHAT it guards changed. Old model: the supervisor acquired the lock before dispatching ANY worker of a ROUND and held it through integration, which is exactly what let a round's live-lane count DECAY to 1–2 (fast lanes finish, the round-lock blocks refill until the slow lane's 2h CI ends — the ~20×-reported gk under-saturation). New model: **DISPATCH is never gated** (continuous refill — every workable unit gets a worktree lane immediately, bounded only by real resource signals, never a fixed number); the lock is acquired ONLY around each merge→gates→push INTEGRATION cycle and released the moment that cycle's push lands, so at most one integration runs per repo across ALL sessions while dispatch keeps saturating. The canonical, self-consistent semantics live in the two loop SKILLS (`skills/autopilot/SKILL.md` "Integration mutex (hard)" bullet + "Continuous lane refill" + the fleet-integration box; `skills/autopilot-master/SKILL.md` LANE 3 CORE + Collision guards + the `/goal MASTER LOOP` LANES-FULL reminder) and are locked by `tests/test_fleet_concurrency_doctrine.py` (`TestNoFixedAgentCap`, `TestAccountWideCapScopeNotPerRound`, `TestAutopilotMasterPointsAtTheCanonicalHome`) + `tests/test_goal_backlog_proof.py::TestContinuousRefillMandate`. Aligned by #462/#469: `cli_autopilot_lock.py`'s docstring, header comment and acquire-failure (`exit 1`) BLOCKED stderr were all reworded to the narrowed semantics (the message now states the #8 lock guards INTEGRATION exclusivity ONLY and tells the reader to KEEP DISPATCHING new lanes, never to stop dispatching — locked by `tests/test_autopilot_lock.py::TestAcquireRelease::test_blocked_message_reflects_narrowed_integration_mutex`), and #469 then removed the now-stale "IGNORE that stderr phrasing" mitigation from the `skills/autopilot/SKILL.md` integration-mutex bullet (locked by `TestWiring::test_skill_doc_has_no_stale_ignore_cli_phrasing_residual`), because the CLI text and the bullet now agree.
 - **Extracting a module and removing a now-DEAD top-level stdlib import breaks any test that patched `<oldmod>.<stdlib>.<attr>` in STRING form — a seam class the standard `patch.object(mod, "MOVEDNAME")` grep structurally misses (#433 cluster L2, 2026-08-14).** After moving `_compress_transcript_file` into `cli_scratch_sweep.py` and removing `airuleset.py`'s now-dead top-level `import gzip` (ruff F401 correctly flags it — ruff can't see a runtime `patch(...)` STRING reference), `test_transcript_compress.py:375`'s `m.patch("airuleset.gzip.open")` broke with `AttributeError: module 'airuleset' has no attribute 'gzip'`: the string-form patch relied on `gzip` being a module ATTRIBUTE of `airuleset`, which the removed import had provided. The moved function resolves `gzip.open` in its NEW module's namespace, so the fix is `patch("cli_scratch_sweep.gzip.open")` (the module where the function now lives + top-level-imports gzip). Removing the dead import is still correct (never keep a genuinely-unused import just so a test can patch its attribute — repoint the test instead). The seam-sweep that certifies a leaf extraction complete must grep for BOTH shapes: (1) `patch.object(<oldmod>, "MOVEDNAME")` / `patch("<oldmod>.MOVEDNAME")` for every moved function/const (the #1482 K-lesson class), AND (2) `patch("<oldmod>.<stdlib>.<attr>")` for EVERY stdlib module a moved function uses — a targeted `grep -rnE 'patch\(["'"'"']<oldmod>\.(gzip|zlib|shutil|json|os|re|sys|tempfile|subprocess)\.' tests/` plus a bare `grep -rnE '<oldmod>\.(gzip|zlib)' tests/` finds the string-form stdlib-attr patches the moved-NAME sweep cannot. The original miss happened because the seam-search regex only matched `patch` calls whose argument was a QUOTED moved-name; a `patch("airuleset.gzip.open")` (stdlib attribute, not one of the 51 moved names) was invisible to it. Do this string-form sweep BEFORE claiming the seams are all repointed — the touched-file suite green ≠ the whole suite green, and this exact miss shipped a RED full suite past a green targeted run once.

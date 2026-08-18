@@ -19,7 +19,7 @@ formed the cleanest contiguous L region: (1) the per-box skill SUBSET selector
 (`ensure_marketplace_registered` + `MARKETPLACE_SOURCES` and their sources), and
 (3) the caveman statusline-shim RENDERING (`CAVEMAN_SHIM_CONTENT` +
 `render_caveman_shim`). The caveman/plugin-management WIRING that CONSUMES these
-(`setup_caveman`, `reconcile_managed_plugins`, `MANAGED_PLUGINS`/`OPTIONAL_PLUGINS`,
+(`setup_caveman`, `reconcile_managed_plugins`, `MANAGED_PLUGINS`,
 the caveman-mode toggles, `CAVEMAN_SHIM_DEST` + `CAVEMAN_STATUSLINE_COMMAND`)
 stays resident in airuleset.py — it is #433 step L-C, and `CAVEMAN_SHIM_DEST` /
 `CAVEMAN_STATUSLINE_COMMAND` in particular derive from the resident `CLAUDE_DIR`
