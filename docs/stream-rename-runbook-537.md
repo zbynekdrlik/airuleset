@@ -75,7 +75,7 @@ AUTHORITY_BY_USER + the alias. The rest are live-op:
 |---|------|---------------------|--------|
 | 14 | Deploy + re-provision the renamed account | `python3 airuleset.py push` | push log shows `<new>@subdev` deployed, no FAILED; soniox key delivered |
 | 15 | Soniox key present | `ssh <new>@100.118.174.27 'test -s ~/.soniox.env && echo OK'` | `OK` |
-| 16 | Watchdog timer active | `ssh <new>@100.118.174.27 'systemctl --user is-active airuleset-watchdog.timer'` | `active` |
+| 16 | Watchdog timer active | `ssh <new>@100.118.174.27 'systemctl --user is-active api-watchdog.timer'` (the unit is `api-watchdog.timer` — verified live during the simap1 rename; an earlier draft named a nonexistent `airuleset-watchdog.timer`) | `active` |
 | 17 | `slice-quals` works on the new name (the base activity gate) | `ssh <new>@100.118.174.27 'cd ~/devel/odoo-erp && python3 ~/devel/airuleset/airuleset.py slice-quals --count'` | an integer, no refusal — proves the alias slice resolves both `stream:<old>` and `stream:<new>` |
 | 18 | Statusline footer scopes correctly on `<new>` | open a `<new>` session, check the `I N` count | counts the stream's own slice |
 

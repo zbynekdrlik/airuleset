@@ -632,6 +632,15 @@ from cli_worktree_sweep import (  # noqa: E402
     _log_stale_worktree_results as _log_stale_worktree_results,
     sweep_stale_worktrees as sweep_stale_worktrees,
     cmd_sweep_worktrees as cmd_sweep_worktrees,
+    LANE_TARGET_LOG_PATH as LANE_TARGET_LOG_PATH,
+    LANE_TARGET_STATE_PATH as LANE_TARGET_STATE_PATH,
+    LANE_TARGET_MIN_INTERVAL_S as LANE_TARGET_MIN_INTERVAL_S,
+    LANE_TARGET_MERGED_MIN_IDLE_S as LANE_TARGET_MERGED_MIN_IDLE_S,
+    _branch_reflog_has_authored_commit as _branch_reflog_has_authored_commit,
+    _iter_lane_target_dirs as _iter_lane_target_dirs,
+    _log_lane_target_results as _log_lane_target_results,
+    purge_merged_lane_targets as purge_merged_lane_targets,
+    cmd_purge_lane_targets as cmd_purge_lane_targets,
 )
 
 
@@ -677,6 +686,14 @@ from cli_scratch_sweep import (  # noqa: E402
     _log_tmp_stray_summary as _log_tmp_stray_summary,
     sweep_stray_tmp as sweep_stray_tmp,
     cmd_sweep_stray_tmp as cmd_sweep_stray_tmp,
+    _AIRULESET_STATE_RX as _AIRULESET_STATE_RX,
+    AIRULESET_STATE_EXCLUDE_PREFIXES as AIRULESET_STATE_EXCLUDE_PREFIXES,
+    AIRULESET_STATE_LOG_PATH as AIRULESET_STATE_LOG_PATH,
+    AIRULESET_STATE_STATE_PATH as AIRULESET_STATE_STATE_PATH,
+    AIRULESET_STATE_MIN_AGE_DAYS_DEFAULT as AIRULESET_STATE_MIN_AGE_DAYS_DEFAULT,
+    AIRULESET_STATE_LIVE_ENV as AIRULESET_STATE_LIVE_ENV,
+    discover_stray_airuleset_state_candidates as discover_stray_airuleset_state_candidates,
+    sweep_airuleset_state as sweep_airuleset_state,
 )
 
 
@@ -1060,6 +1077,25 @@ def cmd_install(args):
     except Exception as e:
         print(f"  worktree sweep error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 9b. Merged worktree-lane target/ reclaim (#545) -------------------
+    # A worktree LANE's target/ (1-2 GB of cargo build output) is NOT
+    # reclaimed by the #315 target-purge (its 7-day newest-mtime floor is
+    # defeated by cargo fingerprint churn) nor by step 9 (which waits the full
+    # 24h idle floor to remove the WHOLE lane). This reclaims ONLY the target/
+    # of a lane whose branch is MERGED (0-ahead + authored-commit reflog),
+    # idle + not in live use -- pure regenerable waste (6.3 GB measured on
+    # dev1, #545). Cadence-gated by its own state file, non-fatal, best-
+    # effort -- matches every other step above.
+    try:
+        lane_results = purge_merged_lane_targets()
+        lane_purged = [r for r in lane_results if r.get("purged")]
+        if lane_purged:
+            total = sum(r.get("size", 0) or 0 for r in lane_purged)
+            print(f"  Reclaimed {len(lane_purged)} merged-lane target/ dir(s), "
+                  f"{_human_size(total)} freed (log: {LANE_TARGET_LOG_PATH})")
+    except Exception as e:
+        print(f"  merged-lane target reclaim error (non-fatal): {e}", file=sys.stderr)
+
     # --- 10. Old Claude CLI binary sweep: keep current + previous only (#355)
     # Every native `claude` auto-update leaves the OLD versioned binary
     # behind (~280-300MB each) under ~/.local/share/claude/versions/ --
@@ -1090,26 +1126,35 @@ def cmd_install(args):
     except Exception as e:
         print(f"  claude-scratch sweep error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 11b. Stray tempfile.mkdtemp litter sweep (#513) -- the ext4 htree
-    # ENOSPC source (batch-38 `/tmp/tmpuoq3_vff`; 503k uid-owned
-    # tmp[a-z0-9_]{8} entries measured on dev1). REPORT-ONLY is the wired
-    # DEFAULT -- it prints the loud count/reclaimable summary so the
-    # supervisor can review, and reclaims live ONLY under
-    # AIRULESET_TMP_PYTEST_RECLAIM_LIVE=1 (never set by this PR, on any box),
-    # mirroring the transcript-compress LIVE gate. Cadence-gated, non-fatal.
+    # --- 11b. Fleet age-gated /tmp litter reaper (#548, flips #513's report-
+    # only default) -- the dev1 inode-exhaustion incident (721k /tmp entries:
+    # 465k `tmp[a-z0-9_]{8}` mkdtemp litter + 136k `airuleset-*` hook state).
+    # This install step runs on EVERY managed box at every push/install (the
+    # deploy loop), so it is the fleet-wide reaper. LIVE reaping is #548's owner
+    # sign-off; both sweeps are mtime-gated (tmp* >24h, airuleset-* >3d --
+    # anything live is <2h), regular-file/dir only, /proc live-scan + TOCTOU
+    # re-checked, cadence-gated (own 24h state), non-fatal. Camera-box runs on
+    # dev1, so the same reaper covers it (its target/ class is #544/#545).
     try:
-        stray = sweep_stray_tmp()
+        stray = sweep_stray_tmp(live=True, min_age_days=1)
         if stray.get("total_matched"):
-            if stray.get("live") and stray.get("removed"):
-                print(f"  Removed {stray['removed']} stray /tmp tempfile dir(s), "
-                      f"{_human_size(stray['reclaimed_bytes'])} reclaimed "
-                      f"(log: {TMP_STRAY_LOG_PATH})")
-            else:
-                print(f"  Stray /tmp tempfile litter: {stray['total_matched']} entries "
-                      f"({stray['reclaimable']} reclaimable) -- REPORT-ONLY, set "
-                      f"{TMP_STRAY_LIVE_ENV}=1 to reclaim (log: {TMP_STRAY_LOG_PATH})")
+            print(f"  Stray /tmp tempfile litter: {stray['total_matched']} matched, "
+                  f"removed {stray['removed']} ({_human_size(stray['reclaimed_bytes'])}"
+                  f" reclaimed) (log: {TMP_STRAY_LOG_PATH})")
     except Exception as e:
         print(f"  stray-tmp sweep error (non-fatal): {e}", file=sys.stderr)
+    # --- 11c. Stray /tmp/airuleset-* hook-state litter reaper (#548) -- the
+    # OTHER half of the incident (hardcoded-/tmp session markers the CORE TMPDIR
+    # redirect never catches). Same LIVE mtime/uid/proc/TOCTOU quad-gate, 3-day
+    # floor, exec-permission markers EXCLUDED (job 22's live-checked domain).
+    try:
+        astate = sweep_airuleset_state(live=True, min_age_days=3)
+        if astate.get("total_matched"):
+            print(f"  Stray /tmp/airuleset-* state litter: {astate['total_matched']} matched, "
+                  f"removed {astate['removed']} ({_human_size(astate['reclaimed_bytes'])}"
+                  f" reclaimed) (log: {AIRULESET_STATE_LOG_PATH})")
+    except Exception as e:
+        print(f"  airuleset-state sweep error (non-fatal): {e}", file=sys.stderr)
 
     # --- 12. Disk-usage visibility (#380 point 4) -- one more line in the
     # SAME print block every sweep step above already writes summaries
@@ -3568,6 +3613,59 @@ def _watchdog_backlog_fetch(cwd):
         return None
 
 
+def _watchdog_ops_wait_fetch(cwd):
+    """#547 — the parked W (`ops-wait`) member NUMBERS for THIS box's slice of
+    the repo at `cwd`, or None on any failure/refusal. The 1:1 sibling of
+    `_watchdog_backlog_fetch`: same authority-aware command choice
+    (`core-quals`/`slice-quals`), same `_repo_root(cwd=cwd)` resolution so the
+    child subprocess resolves authority exactly as it would inside that session's
+    own pane, same refuse→None contract — only the flag differs (`--ops-wait`
+    instead of `--count`) and the parse (member numbers, not a count). This RAW
+    fetch is uncached; the caller reads it through `ops_wait_recheck._cached_ops_wait`
+    (a per-repo TTL cache, the sibling of `_cached_backlog_count`) so it fires at
+    most once per repo per TTL, never every sweep.
+
+    The members come from the SAME `_partition_workable` derivation the footer's
+    `W N`, the `/goal` stop-proof's `--ops-wait` list, and the count all use —
+    NEVER a parallel query (#367/#181). The job-20 W re-check nudge (via
+    `goal_lane_sweep`'s `ops_wait_fetch` seam) reads these to re-surface a
+    long-parked W ticket into an armed loop's attention.
+
+    `--ops-wait` prints `number<TAB>createdAt<TAB>action<TAB>reason<TAB>title`
+    per member (oldest-first); field 0 is the issue number. A None return
+    (non-zero exit — the #181 untrustworthy-empty refusal — or an unparsable
+    line) is UNDETERMINED and the nudge job fails safe to no-nudge. An empty but
+    SUCCESSFUL result (exit 0, no lines) returns `[]` (genuinely no W parked),
+    which the job treats as "clear the tracking state". Wired HERE, like every
+    other network call in this file, so run_once's unit tests stay network-free."""
+    import subprocess
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
+    except Exception:
+        return None
+    cmd_name = "core-quals" if authority == "full" else "slice-quals"
+    try:
+        r = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), cmd_name, "--ops-wait"],
+            cwd=cwd, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    members = []
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        head = line.split("\t", 1)[0]
+        try:
+            members.append(int(head))
+        except ValueError:
+            return None   # a malformed line -> undetermined, never a partial set
+    return members
+
+
 def _watchdog_vault_purge():
     """Job 29's credential-store sweep (#144) — the injection point so run_once
     never imports the store (or touches a real `~/.claude/secrets/`) in a test.
@@ -3824,6 +3922,13 @@ def cmd_watchdog(args):
                     # extra call per window) consulted by job 20's
                     # goal-achieved backstop and job 10's widened wedge ping.
                     backlog_fetch=_watchdog_backlog_fetch,
+                    # #547 — job 20's W/ops-wait re-check nudge reads the parked
+                    # W member numbers per repo. The raw fetch is a per-cwd `gh`
+                    # read, but the orchestrator reads it through the module's own
+                    # per-repo TTL cache (`_cached_ops_wait`, the sibling of
+                    # `_cached_backlog_count`), so it fires at most once per repo
+                    # per OPS_WAIT_FETCH_TTL_S — never every sweep per pane.
+                    ops_wait_fetch=_watchdog_ops_wait_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
                     # each box holds the airuleset checkout it can measure.
@@ -4604,6 +4709,14 @@ def main():
                                  "dirty work (never auto-removed) -- scans every managed repo "
                                  "+ a network ls-remote per candidate, so it is opt-in (#513)")
 
+    # --- Merged worktree-lane target/ reclaim: manual/testable entry (#545) --
+    p_sweep_lane = sub.add_parser(
+        "sweep-lane-targets",
+        help="Reclaim the target/ of a worktree LANE whose branch is MERGED "
+             "(0-ahead + authored-commit reflog), idle + not in live use (#545)")
+    p_sweep_lane.add_argument("--dry-run", dest="dry_run", action="store_true",
+                              help="Report what would be reclaimed without deleting anything")
+
     # --- Old Claude CLI binary sweep: manual/testable entry point (#355) --
     p_sweep_cli = sub.add_parser(
         "sweep-cli-versions",
@@ -5139,6 +5252,7 @@ SUBCOMMANDS = {
     "push": cmd_push,
     "purge-targets": cmd_purge_targets,
     "sweep-worktrees": cmd_sweep_worktrees,
+    "sweep-lane-targets": cmd_purge_lane_targets,
     "sweep-cli-versions": cmd_sweep_cli_versions,
     "sweep-autopilot-locks": cmd_sweep_autopilot_locks,
     "sweep-claude-scratch": cmd_sweep_claude_scratch,
