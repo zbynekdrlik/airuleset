@@ -376,7 +376,8 @@ class TestLaneSweepWiring(unittest.TestCase):
              "ts": NOW, "cwd": self.CWD, "marker": "working",
              "goal_armed": True}), encoding="utf-8")
 
-    def _armed_sweep(self, state, *, ops_wait_fetch, dry_run=False, handled=None):
+    def _armed_sweep(self, state, *, ops_wait_fetch, dry_run=False, handled=None,
+                     backlog=0, authority="full"):
         proj = Path(self._proj.name)
         tpath = _write_marker_transcript(proj, self.CWD, "sess-547-lane")
         sid = tpath.stem
@@ -388,16 +389,21 @@ class TestLaneSweepWiring(unittest.TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
                                    GOAL_ARMED_CAP, model_type=True,
                                    transcript_path=tpath)
-        with m.patch("airuleset.resolve_authority", return_value="full"), \
+        with m.patch("airuleset.resolve_authority", return_value=authority), \
                 m.patch.object(wd, "_owner_disabled", return_value=False):
-            # backlog 0 -> the lane-occupancy nudge skips (no-backlog), so this
-            # sweep's ONLY possible keystroke is the ops-wait re-check under test
-            # (clean isolation from the sibling lane nudge; the `handled`
-            # coordination when the lane nudge DOES fire is locked by
-            # TestOrchestrator.test_due_but_already_handled_defers).
+            # backlog 0 + full authority (the DEFAULT) -> the lane-occupancy
+            # nudge skips (no-backlog), so this sweep's ONLY possible keystroke
+            # is the partition-audit re-check under test (clean isolation from
+            # the sibling lane nudge; the `handled` coordination when the lane
+            # nudge DOES fire is locked by
+            # TestOrchestrator.test_due_but_already_handled_defers). A caller
+            # exercising the #552 I-direction passes backlog>0 (so
+            # glance.backlog>0 = I>0) together with a NON-full authority, which
+            # makes the full-authority-only lane nudge skip WITHOUT claiming the
+            # pane, isolating the partition-audit I clause under test.
             goal.goal_lane_sweep(
                 NOW, run=tmux, projects_dir=proj, state=state, dry_run=dry_run,
-                handled=handled, backlog_fetch=lambda cwd: 0,
+                handled=handled, backlog_fetch=lambda cwd: backlog,
                 ops_wait_fetch=ops_wait_fetch, sleep_fn=lambda *a, **k: None)
         return sid, tmux
 
@@ -411,6 +417,28 @@ class TestLaneSweepWiring(unittest.TestCase):
                       "an armed pane with W parked past cadence must be nudged "
                       "(RED before goal_lane_sweep wires goal_ops_wait_recheck)")
         self.assertIn("#41", typed)
+        self.assertEqual(state["ops_wait_recheck"][sid]["last_nudge"], NOW)
+
+    def test_i_only_partition_past_cadence_is_nudged(self):
+        # #552 I->W/U freshness: an armed pane with I>0 but W EMPTY, past the
+        # cadence, must be nudged to re-audit its I list against the #526/#539
+        # parking shapes. RED on the pre-#552 tree (W==[] -> `clear` -> no
+        # keystroke; the I count is never consulted). GREEN once goal_lane_sweep
+        # passes glance.backlog and goal_ops_wait_recheck folds i_count into the
+        # partition-audit decider. Non-full authority so the full-authority-only
+        # lane-occupancy nudge skips WITHOUT claiming the pane (isolating the
+        # partition-audit I clause; backlog>0 alone would make a full pane
+        # "stuck" and fire the lane nudge, which would defer this job).
+        state = {"ops_wait_recheck": {
+            "sess-547-lane": {"first_seen": NOW - 5 * DAY, "last_nudge": None}}}
+        sid, tmux = self._armed_sweep(state, ops_wait_fetch=lambda cwd: [],
+                                      backlog=3, authority="branch-merge")
+        typed = " ".join(tmux.typed_texts())
+        self.assertIn("re-audituj", typed,
+                      "an armed pane with I>0 (W empty) past cadence must be "
+                      "nudged to re-audit I->W/U (RED before #552 folds i_count "
+                      "into the partition-audit decider)")
+        self.assertIn("stuck-check:", typed)
         self.assertEqual(state["ops_wait_recheck"][sid]["last_nudge"], NOW)
 
     def test_no_w_members_clears_state(self):
