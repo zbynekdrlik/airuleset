@@ -10756,10 +10756,12 @@ class TestWatchdogBacklogFetch(TestCase):
 
 
 class TestTier0BuildBlock(TestCase):
-    """PreToolUse(Bash) hook block-tier0-local-build.sh — heavy local builds
-    (cargo build / cargo test / cargo tauri build / trunk build) are BLOCKED in a
-    Tier-0 project (a CLAUDE.md with no local-builds marker); Tier-1/2 markers,
-    cheap checks, the inline bypass, and unmanaged dirs are allowed."""
+    """PreToolUse(Bash) hook block-tier0-local-build.sh — ALL local cargo
+    COMPILATION (build / test / bench / run / check / clippy / doc / …, narrow
+    AND whole-workspace) plus non-cargo heavy builds (cargo tauri build / trunk
+    build) are BLOCKED in a Tier-0 project (#557, owner directive 2026-08-18); a
+    CLAUDE.md with no local-builds marker. Tier-1/2 markers, NON-compiling cargo
+    (fmt/metadata/tree/clean), the inline bypass, and unmanaged dirs are allowed."""
 
     HOOK = airuleset.REPO_DIR / "hooks" / "block-tier0-local-build.sh"
 
@@ -10781,14 +10783,23 @@ class TestTier0BuildBlock(TestCase):
             self.assertEqual(r.returncode, 2, cmd)
             self.assertIn("BLOCKED", r.stderr)
 
-    def test_allows_cheap_checks_in_tier0(self):
+    def test_allows_only_non_compiling_cargo_in_tier0(self):
         d = self._proj()
-        # #544: a SCOPED compile-only build is the cheap check; a FULL-workspace
-        # `cargo test --no-run` now blocks -> CI (see test_tier0_local_build_hook
-        # ::FullSuiteNoRunBlockedTest). Was bare `cargo test --no-run`.
-        for cmd in ["cargo check --workspace", "cargo clippy -- -D warnings",
-                    "cargo test --no-run --lib", "cargo fmt --all"]:
+        # #557: only NON-compiling cargo is allowed locally on Tier-0.
+        for cmd in ["cargo fmt --all", "cargo fmt --all --check", "cargo metadata",
+                    "cargo tree", "cargo clean", "cargo --version"]:
             self.assertEqual(self._run(cmd, d).returncode, 0, cmd)
+
+    def test_blocks_all_cargo_compilation_in_tier0(self):
+        d = self._proj()
+        # #557 policy inversion: check/clippy/doc AND scoped test/bench --no-run
+        # all COMPILE the dep tree into target/, so all block -> CI (were the
+        # pre-#557 "cheap checks"). Full coverage in test_tier0_local_build_hook
+        # ::Tier0ZeroCargoCompilationTest.
+        for cmd in ["cargo check --workspace", "cargo clippy -- -D warnings",
+                    "cargo test --no-run --lib", "cargo bench --no-run --bench b",
+                    "cargo doc", "cargo nextest list"]:
+            self.assertEqual(self._run(cmd, d).returncode, 2, cmd)
 
     def test_allows_heavy_build_in_tier1_and_tier2(self):
         for marker in ("allowed", "fast-iterate"):
