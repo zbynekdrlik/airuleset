@@ -8,7 +8,7 @@ description: How to VIEW a URL the user pasted when it must be SEEN, or when Web
 
 **When the user pastes a URL and wants you to SEE or READ it, the FIRST move for an IMAGE/screenshot needs NO browser: download the image to a local file with `curl` and open that file with the Read tool — the Read tool renders local image pixels, so you never needed a browser to SEE a picture. A browser (Playwright) is only for a genuinely hostile JS-gated CDN, or for a JS-walled social page (X/Twitter, Instagram, Facebook, LinkedIn) whose CONTENT is client-rendered. WebFetch is still wrong for all of these — it returns raw HTML/text or an empty JS shell — but the fix is download-and-Read for images, browser for JS-walled pages, never a giving-up "I can't read X".**
 
-This is the rule that ends the inconsistency AND the friction #415 introduced: an owner-pasted screenshot is read by downloading it and Read-ing it, with zero browser and zero per-project setup.
+This is the rule that ends the inconsistency (WebFetch cannot read an image): an owner-pasted screenshot is read by downloading it and Read-ing it, with zero browser and zero per-project setup — the cheapest path even now that Playwright is force-enabled in every managed project (#542, which reversed #415's default-off).
 
 #### Trigger — any of these
 
@@ -20,7 +20,7 @@ This is the rule that ends the inconsistency AND the friction #415 introduced: a
 
 #### FIRST path — images (wrapper pages AND direct images): download locally, then Read (NO browser)
 
-The Read tool renders local image files — so the whole job is: get the real image bytes onto a local scratch file (pick a unique path — e.g. `mktemp --suffix=.png` — on a shared, many-workers box; `/tmp/shot.png` below is only illustrative), then Read that file. No browser, no plugin, no per-project opt-in.
+The Read tool renders local image files — so the whole job is: get the real image bytes onto a local scratch file (pick a unique path — e.g. `mktemp --suffix=.png` — on a shared, many-workers box; `/tmp/shot.png` below is only illustrative), then Read that file. No browser needed for a screenshot.
 
 1. **Direct image URL** (ends in `.png`/`.jpg`/`.webp`/...) — download it straight to a scratch file and Read it:
    ```bash
@@ -45,22 +45,18 @@ The Read tool renders local image files — so the whole job is: get the real im
 
 #### If the no-browser path genuinely fails (a hostile JS-gated CDN) — browser fallback
 
-A rare CDN gates the raw image behind JavaScript / a per-request token so `curl` cannot reach the bytes. THEN, and only then, use a browser — two sanctioned ways, in order:
+A rare CDN gates the raw image behind JavaScript / a per-request token so `curl` cannot reach the bytes. THEN, and only then, use a browser — Playwright is force-ENABLED in every managed project (#542), so no setup is needed:
 
-1. **Per-project one-line opt-in** — add to THIS project's OWN `<repo>/.claude/settings.json` (git-tracked, the project's own repo — never airuleset's):
-   ```json
-   {"enabledPlugins": {"playwright@claude-plugins-official": true}}
-   ```
-   Project scope resolves above the user-scope default-off, so this one project gets Playwright while every other stays browser-free. The plugin is already installed and the browser cache is already warm (#415), so no install step — then `browser_navigate` the CDN URL and `browser_take_screenshot`.
-2. **Dispatch a general-purpose agent that has bundled Chromium** — the sanctioned fallback (this is exactly what montalu3 did, correctly): dispatch a fresh agent whose environment carries a bundled-Chromium Playwright, have it open the URL and return the screenshot/description. Use this when you cannot or should not edit the current project's settings.
+1. **`browser_navigate` the CDN URL directly, then `browser_take_screenshot`** — no opt-in, no settings edit: the plugin is installed AND enabled in every project, the browser cache is warm, and Chrome spawns lazily on this first browser call.
+2. **Dispatch a general-purpose agent that has bundled Chromium** — the sanctioned fallback (this is exactly what montalu3 did, correctly) for when even the local Playwright genuinely cannot reach the CDN: dispatch a fresh agent whose environment carries a bundled-Chromium Playwright, have it open the URL and return the screenshot/description.
 
-**#415-aware messaging — never lie about the tool state.** On a managed box **Playwright is INSTALLED and its browser cache is provisioned; it is only DEFAULT-DISABLED per project (#415)** — force-enabling it fleet-wide kept a resident ~144MB headless Chrome tree alive in browser-free projects, so it was switched to per-project opt-in. Therefore:
-- **NEVER say "Playwright is not installed" / "Playwright nie je nainštalovaný"** — it is installed; it is disabled-by-default, and for a screenshot you don't need it at all (download-and-Read). That phrasing is BANNED because it is factually false on a managed box.
+**#542-aware messaging — never lie about the tool state.** On a managed box **Playwright is INSTALLED and force-ENABLED in every project (#542, which reversed #415's default-off)** — the browser is lazy (Chrome spawns only on the first browser call), so availability everywhere costs nothing until used. Therefore:
+- **NEVER say "Playwright is not installed" / "Playwright nie je nainštalovaný"** — it is installed AND enabled, and for a screenshot you don't need it at all (download-and-Read). That phrasing is BANNED because it is factually false on a managed box.
 - **NEVER answer "I can't read this"** (or any rewording — "this link isn't accessible", "I don't have access", "requires login") for an image: you can download it and Read it.
 
 #### Procedure — X/Twitter, Instagram, Facebook, LinkedIn posts (JS-walled pages, genuinely need a browser)
 
-These are client-rendered SPAs: the CONTENT (post text, author, replies) is built by JavaScript and there is no static `og:image` of the whole post, so download-and-Read cannot read them — a browser IS required. Use the per-project opt-in / bundled-Chromium agent above to get Playwright, then:
+These are client-rendered SPAs: the CONTENT (post text, author, replies) is built by JavaScript and there is no static `og:image` of the whole post, so download-and-Read cannot read them — a browser IS required. Playwright is enabled in every project (#542), so just drive it directly (bundled-Chromium agent fallback above if the local browser can't reach it), then:
 
 1. **`browser_navigate(url)`** — open the post URL directly. For X/Twitter, use the direct status URL form (`https://x.com/<user>/status/<id>`) rather than a shortened or redirected link, first try.
 2. **Wait for content to load** (`browser_wait_for` on visible text, or a short pause) — the accessibility tree is empty until the client-side render finishes.
@@ -74,13 +70,13 @@ These are client-rendered SPAs: the CONTENT (post text, author, replies) is buil
 
 #### The iron rule
 
-**NEVER answer "I can't read this" (image or page) while you have an untried path.** For an image: download it with `curl` and Read the file first. For a JS-walled page: render it in Playwright first (navigate + snapshot, with one retry on a login wall). Only after a genuine attempt may you report what is actually blocked — and even then, show what you DID get (the placeholder state, or the partial snapshot), never a bare refusal. And never explain a gap with "Playwright is not installed" — it is installed on every managed box, default-disabled, and an image never needed it.
+**NEVER answer "I can't read this" (image or page) while you have an untried path.** For an image: download it with `curl` and Read the file first. For a JS-walled page: render it in Playwright first (navigate + snapshot, with one retry on a login wall). Only after a genuine attempt may you report what is actually blocked — and even then, show what you DID get (the placeholder state, or the partial snapshot), never a bare refusal. And never explain a gap with "Playwright is not installed" — it is installed AND enabled on every managed box (#542), and an image never needed it.
 
 #### Anti-patterns (all banned — these are WHY it fails or adds friction)
 
 - `WebFetch(prnt.sc/...)` or `WebFetch(x.com/.../status/...)` to "read" the content → **WRONG.** Returns wrapper HTML/JS or an empty client-rendered shell / login wall. For an image, curl the `og:image` to a file and Read it; for a JS-walled page, use Playwright.
 - `Read(https://...png)` → **WRONG.** Read opens LOCAL files only — download the image to a local path first, THEN Read that path.
-- "Playwright is not installed, so I can't read the screenshot" → **WRONG and factually false.** Playwright is installed (default-disabled, #415), AND a screenshot needs no browser — download it and Read it.
+- "Playwright is not installed, so I can't read the screenshot" → **WRONG and factually false.** Playwright is installed AND enabled in every project (#542), AND a screenshot needs no browser — download it and Read it.
 - "I cannot read X.com / Twitter / Instagram posts" stated without having tried Playwright at all → **WRONG.** Render it first.
 - Jumping straight to a nitter mirror instead of retrying the direct x.com navigate once → **WRONG.** Nitter instances are unreliable; retry the real site first.
 - "I couldn't open the URL" / asking the user to paste a screenshot instead → **WRONG.** Download it and Read it (image), or render it in Playwright (JS-walled page).

@@ -151,16 +151,18 @@ class TestNoBrowserPathIsFirst(_Teeth, TestCase):
         self.assertIn("#541", t)
 
 
-class Test415AwareMessaging(_Teeth, TestCase):
-    """On a managed box Playwright is INSTALLED but default-disabled (#415);
-    the 'not installed' phrasing is BANNED as factually false, and 'I can't
-    read this' stays banned."""
+class Test542AwareMessaging(_Teeth, TestCase):
+    """On a managed box Playwright is INSTALLED and force-ENABLED in every
+    project (#542, which reversed #415's default-off); the 'not installed'
+    phrasing is BANNED as factually false, and 'I can't read this' stays
+    banned. (Retuned from the pre-#542 'DEFAULT-DISABLED / #415' teeth — a
+    deliberate policy inversion: playwright is no longer opt-in.)"""
 
     def setUp(self):
         self.text = read(SKILL)
 
-    def test_states_installed_but_default_disabled(self):
-        self._teeth("Playwright is INSTALLED", "DEFAULT-DISABLED", "#415")
+    def test_states_installed_and_force_enabled(self):
+        self._teeth("Playwright is INSTALLED", "force-ENABLED", "#542")
 
     def test_bans_not_installed_phrasing(self):
         self._teeth('NEVER say "Playwright is not installed"',
@@ -180,14 +182,18 @@ class Test415AwareMessaging(_Teeth, TestCase):
 
 
 class TestBrowserFallbackNamed(_Teeth, TestCase):
-    """The two sanctioned browser fallbacks for a genuinely hostile CDN:
-    per-project one-line opt-in + a bundled-Chromium agent."""
+    """The browser fallbacks for a genuinely hostile CDN. #542 removed the
+    per-project opt-in (playwright is force-enabled in every project now), so
+    the fallbacks are: drive the enabled Playwright directly, or dispatch a
+    bundled-Chromium agent when even the local browser can't reach the CDN."""
 
     def setUp(self):
         self.text = read(SKILL)
 
-    def test_per_project_one_line_opt_in(self):
-        self._teeth("enabledPlugins", "playwright@claude-plugins-official", "true")
+    def test_direct_browser_drive_no_opt_in(self):
+        # #542: the CDN fallback drives the enabled Playwright directly — no
+        # opt-in / settings edit (the old per-project opt-in teeth are gone).
+        self._teeth("browser_navigate", "no opt-in", "enabled in every project")
 
     def test_bundled_chromium_agent_is_the_sanctioned_fallback(self):
         self._teeth("bundled Chromium", "general-purpose agent", "sanctioned")

@@ -42,7 +42,7 @@ REEXPORTED = [
     "_managed_plugin_built", "_playwright_browsers_installed",
     "ensure_playwright_browsers", "_reconcile_settings_file", "setup_managed_plugins",
     "CAVEMAN_PLUGIN_KEY", "CAVEMAN_DEFAULT_MODE", "VALID_CAVEMAN_MODES",
-    "MANAGED_PLUGINS", "OPTIONAL_PLUGINS", "MANAGED_DISABLED_PLUGINS",
+    "MANAGED_PLUGINS", "MANAGED_DISABLED_PLUGINS",
     "PLAYWRIGHT_PLUGIN_KEY", "PLAYWRIGHT_BROWSER_CACHE",
 ]
 
