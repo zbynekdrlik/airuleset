@@ -745,13 +745,15 @@ def _configure_ratchet_merge_driver(repo_dir=REPO_DIR, run=None):
             return None
         driver_script = Path(repo_dir) / "scripts" / "ratchet_union_merge.py"
         value = f'python3 "{driver_script}" %O %A %B %P'
-        run(["git", "-C", str(repo_dir), "config",
-             "merge.ratchet-union.name", "ratchet per-key union-max (#553)"],
-            capture_output=True, text=True)
-        run(["git", "-C", str(repo_dir), "config",
-             "merge.ratchet-union.driver", value], capture_output=True, text=True)
+        name = run(["git", "-C", str(repo_dir), "config",
+                    "merge.ratchet-union.name", "ratchet per-key union-max (#553)"],
+                   capture_output=True, text=True)
+        drv = run(["git", "-C", str(repo_dir), "config",
+                   "merge.ratchet-union.driver", value], capture_output=True, text=True)
+        if name.returncode != 0 or drv.returncode != 0:
+            return None  # a config write failed -> honestly report "not registered"
         return value
-    except OSError:
+    except Exception:  # best-effort: no git/config failure may ever crash install
         return None
 
 

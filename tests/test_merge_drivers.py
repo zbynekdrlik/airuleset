@@ -175,12 +175,16 @@ class MergeSnapshotLogic(unittest.TestCase):
              "rule_bytes": {"r.md": 45000}})
 
     def test_extra_top_level_key_preserved(self):
-        # A future 4th section must survive the merge (never silently dropped).
-        base = {"files": {}, "future": {"x": 1}}
-        ours = {"files": {"a.py": 5}, "future": {"x": 1}}
-        theirs = {"files": {}, "future": {"x": 1}}
+        # BOTH sides diverge from base on a KNOWN section, so the top-level
+        # _merge_dicts recursion genuinely runs (never the theirs==base
+        # shortcut) — and a future 4th section must still survive it, including
+        # a recursion into that section's own disjoint sub-keys.
+        base = {"files": {"a.py": 10}, "future": {"x": 1}}
+        ours = {"files": {"a.py": 20}, "future": {"x": 1, "y": 2}}
+        theirs = {"files": {"a.py": 15}, "future": {"x": 1, "z": 3}}
         merged = rum.merge_snapshots(base, ours, theirs)
-        self.assertEqual(merged["future"], {"x": 1})
+        self.assertEqual(merged["files"]["a.py"], 20)  # union-max ran
+        self.assertEqual(merged["future"], {"x": 1, "y": 2, "z": 3})
 
 
 # --------------------------------------------------------------------------- #
@@ -325,6 +329,26 @@ class DriverFailSafe(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(json.loads(a.read_text())["files"]["a.py"], 3)
 
+    def test_fallback_forces_nonzero_even_on_a_clean_text_merge(self):
+        # The load-bearing safety guarantee: once the smart merge has FAILED,
+        # the fallback must NEVER report exit 0 — even when git merge-file
+        # happens to merge the text cleanly (disjoint line changes). A silent
+        # "clean" (exit 0) claim after a smart-merge failure is exactly the
+        # wrong-merge this driver forbids. (No test previously exercised the
+        # `else 1` branch, because a corrupt-JSON input also text-conflicts.)
+        o = self.d / "fo"
+        a = self.d / "fa"
+        b = self.d / "fb"
+        o.write_text("l1\nl2\nl3\n")
+        a.write_text("OURS\nl2\nl3\n")    # ours changed line 1 only
+        b.write_text("l1\nl2\nTHEIRS\n")  # theirs changed line 3 only (disjoint)
+        rc = rum._fallback_text_merge(str(o), str(a), str(b))
+        self.assertNotEqual(
+            rc, 0, "a fallback after a smart-merge failure must never claim a clean merge")
+        merged = a.read_text()
+        self.assertIn("OURS", merged)
+        self.assertIn("THEIRS", merged)  # both sides' changes landed in %A
+
 
 # --------------------------------------------------------------------------- #
 # 3. install wiring
@@ -354,6 +378,53 @@ class InstallWiring(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="mergedrv553nogit_") as td:
             self.assertIsNone(
                 airuleset._configure_ratchet_merge_driver(repo_dir=Path(td)))
+
+
+# --------------------------------------------------------------------------- #
+# 4. the REAL committed .gitattributes (integration tests use a SYNTHETIC one)
+# --------------------------------------------------------------------------- #
+
+class GitattributesLock(unittest.TestCase):
+    """The integration tests write their OWN synthetic .gitattributes, and the
+    wiring test only checks git config — so a typo in the SHIPPED
+    .gitattributes (a wrong path, a misspelled driver, the archive path
+    drifting) would silently disable the mechanism with ZERO other test
+    failure. Lock the real file's two entries + the driver-name linkage."""
+
+    def _attr_entries(self):
+        text = (REPO / ".gitattributes").read_text()
+        return [ln.strip() for ln in text.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")]
+
+    def test_committed_gitattributes_maps_both_bookkeeping_files(self):
+        entries = self._attr_entries()
+        self.assertIn("tests/size_ratchet.json merge=ratchet-union", entries)
+        self.assertIn(
+            ".claude/rules-reference/internals-archive.md merge=union", entries)
+
+    def test_gitattributes_ratchet_token_matches_the_configured_driver(self):
+        # the `merge=<token>` on the size_ratchet line MUST be the exact git
+        # config section `_configure_ratchet_merge_driver` writes, or the
+        # committed attribute points at a driver that is never registered.
+        token = None
+        for entry in self._attr_entries():
+            if entry.startswith("tests/size_ratchet.json") and "merge=" in entry:
+                token = entry.split("merge=", 1)[1].strip()
+                break
+        self.assertEqual(token, "ratchet-union")
+        import airuleset
+        with tempfile.TemporaryDirectory(prefix="mergedrv553attr_") as td:
+            repo = Path(td) / "r"
+            repo.mkdir()
+            subprocess.run(["git", "-C", str(repo), "init", "-q", str(repo)],
+                           check=True)
+            airuleset._configure_ratchet_merge_driver(repo_dir=repo)
+            cfg = subprocess.run(
+                ["git", "-C", str(repo), "config", "--get", f"merge.{token}.driver"],
+                capture_output=True, text=True)
+            self.assertEqual(cfg.returncode, 0,
+                             f".gitattributes token {token!r} has no matching git config driver")
+            self.assertIn("ratchet_union_merge.py", cfg.stdout)
 
 
 if __name__ == "__main__":
