@@ -3723,6 +3723,10 @@ def cmd_watchdog(args):
     # collects the merged fleet view), so evaluating it anywhere else would
     # just see an empty file. Same host check, reused verbatim.
     burn_alert_enabled = os.uname().nodename == "dev1"
+    # Job 35 (#543) is coordinator-only for the SAME reason job 16/19 are: only
+    # dev1 collects the merged fleet.jsonl this dead-box detector reads. Same
+    # host check, reused verbatim — every OTHER box would just see an empty file.
+    conformance_hb_enabled = os.uname().nodename == "dev1"
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
@@ -3806,6 +3810,10 @@ def cmd_watchdog(args):
                     # on a confirmed deploy target — the dev1 SOURCE box is
                     # legitimately dirty and must not false-alarm.
                     conformance_is_target=_watchdog_is_deploy_target,
+                    # #543 job 35 — dev1-only central dead-box detector, gated on
+                    # the SAME coordinator host check job 16/19 use (only dev1
+                    # has the fleet.jsonl it reads). Internally cadence-gated.
+                    conformance_hb_enabled=conformance_hb_enabled,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
