@@ -2702,6 +2702,9 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     time_fn = time_fn or time.monotonic
     state = state if state is not None else {}
     recs = state.setdefault("goal_lane", {})
+    # #547 -- the W/ops-wait re-check job's own per-sid namespace, riding this
+    # same armed-pane loop (ZERO new pane walk). Distinct from `goal_lane`.
+    wrecs = state.setdefault("ops_wait_recheck", {}) if ops_wait_fetch else {}
     # #486 G6 -- dark_watch's tail-proof `state["goal_mark"]` marker (populated
     # BEFORE this job in the same run_once, sharing `state`) is the authoritative
     # structured armed signal. Read-only here: dark_watch owns its lifecycle.
@@ -2764,6 +2767,16 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         if handled is not None and any(ln.startswith("lane-occupancy nudge")
                                        for ln in llogs):
             handled.add(sid)
+        # #547 -- W/ops-wait re-check for this SAME armed pane. Runs AFTER the
+        # lane nudge so a pane the lane nudge already typed (sid in `handled`)
+        # is deferred to next sweep; the orchestrator owns its own `handled`
+        # check + send + state writes (verified delivery, dry-run safe).
+        if ops_wait_fetch is not None:
+            logs += _ops_wait_recheck.goal_ops_wait_recheck(
+                now, run, wrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
+                ops_wait_fetch=ops_wait_fetch, state=state, sleep_fn=sleep_fn)
     if not dry_run:   # #531 -- prune goal_lane for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_lane_orphans(recs, visited_sids, now)
+        # #547 -- the same orphan prune for the ops-wait re-check namespace.
+        _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)
     return logs
