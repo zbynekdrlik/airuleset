@@ -10826,12 +10826,14 @@ class TestRemoteHosts(TestCase):
     box, and every managed user is present exactly once."""
 
     GK_HOST = "100.90.94.41"
-    # simap/miva1 share marek/david's identity requirement (airuleset#143/
+    # simap1/miva1 share marek/david's identity requirement (airuleset#143/
     # #300 — same operator keys as marek, registered on the same subdev box).
+    # simap was RENAMED to simap1 (#537 live rename, 2026-08-18) — the old
+    # OS account is gone, so the old entry must NOT be here.
     # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE parallel
     # david streams — additional capacity for the same external developer,
     # same subdev box, same gatekeeper_access identity requirement as david.
-    SUBDEV_USERS = {"marek", "david", "simap", "miva1",
+    SUBDEV_USERS = {"marek", "david", "simap1", "miva1",
                     "david2", "david3", "david4"}
 
     def _subdev_entries(self):
@@ -10842,7 +10844,7 @@ class TestRemoteHosts(TestCase):
         names = [r["name"] for r in airuleset.REMOTE_HOSTS]
         self.assertEqual(len(names), len(set(names)), "duplicate target name")
         for expected in ("dev2", "gatekeeper", "montalu@subdev",
-                         "marek@subdev", "david@subdev", "simap@subdev",
+                         "marek@subdev", "david@subdev", "simap1@subdev",
                          "montalu2@subdev", "montalu3@subdev",
                          "montalu4@subdev", "miva1@subdev",
                          "david2@subdev", "david3@subdev", "david4@subdev",
@@ -10977,17 +10979,23 @@ class TestRemoteHosts(TestCase):
                              "same as montalu" % user)
 
     def test_simap_subdev_target_shape(self):
-        # simap (airuleset#143, 2026-07-28): 4th sub-dev stream, built by
-        # gatekeeper on the SAME subdev box as marek/david, authorized_keys =
-        # the SAME operator keys as marek — so it shares marek/david's
-        # gatekeeper_access identity requirement, never montalu's
-        # default-key path.
+        # simap1 (was simap, airuleset#143; renamed in-place #537, live
+        # 2026-08-18): 4th sub-dev stream, built by gatekeeper on the SAME
+        # subdev box as marek/david, authorized_keys = the SAME operator keys
+        # as marek — so it shares marek/david's gatekeeper_access identity
+        # requirement, never montalu's default-key path. The OLD simap@subdev
+        # entry must be GONE (the OS account no longer exists — pushing to it
+        # would fail + risk fail2ban); the numbered entry is live (no pending).
+        names = [r["name"] for r in airuleset.REMOTE_HOSTS]
+        self.assertNotIn("simap@subdev", names,
+                         "the renamed-away simap account must not be a target")
         entries = [r for r in airuleset.REMOTE_HOSTS
-                   if r["name"] == "simap@subdev"]
-        self.assertEqual(len(entries), 1, "simap@subdev target missing")
+                   if r["name"] == "simap1@subdev"]
+        self.assertEqual(len(entries), 1, "simap1@subdev target missing")
         s = entries[0]
         self.assertEqual(s["host"], "100.118.174.27")
-        self.assertEqual(s["user"], "simap")
+        self.assertEqual(s["user"], "simap1")
+        self.assertNotIn("pending", s, "simap1 is LIVE since the #537 rename")
         self.assertEqual(s.get("identity"),
                          "~/.secrets/gatekeeper_access_ed25519")
 
@@ -13341,8 +13349,10 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_simap_with_gatekeeper_identity(self):
+        # simap renamed to simap1 (#537 live rename 2026-08-18) — the hook
+        # allow-list follows the OS account, so simap1 is the allowed user.
         r = self._run(
-            'ssh -i ~/.secrets/gatekeeper_access_ed25519 simap@subdev "ls"')
+            'ssh -i ~/.secrets/gatekeeper_access_ed25519 simap1@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_miva1_with_gatekeeper_identity(self):

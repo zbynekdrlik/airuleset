@@ -90,8 +90,7 @@ STREAM_NOTIFY_OWNER = {
     "montalu6": "zbynek",
     "montalu7": "zbynek",
     "montalu8": "zbynek",
-    "simap": "zbynek",
-    "simap1": "zbynek",   # #537 alias of simap — see the david1 comment above
+    "simap1": "zbynek",   # #537 rename of simap (live 2026-08-18) — see the david1 comment above
     # miva1 (airuleset#300, 2026-08-07): phase-1 isolated stream, same shape
     # as simap/montalu -- its own tmux session name carries no Discord
     # identity of its own, so it redirects outright to zbynek's own thread.

@@ -37,7 +37,7 @@ set -euo pipefail
 #                          streams, additional capacity for the same
 #                          external developer, so they share david's own
 #                          identity requirement).
-#   - simap@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519
+#   - simap1@<subdev>     — ONLY with -i .../gatekeeper_access_ed25519
 #                          (airuleset#143 — simap's authorized_keys are the
 #                          SAME operator keys as marek, so it shares marek's
 #                          identity requirement, not montalu's default-key
@@ -55,9 +55,9 @@ set -euo pipefail
 # BLOCK everything else, in particular:
 #   - no user at all UNLESS the local ~/.ssh/config resolves it to the
 #     sanctioned root+subdev_admin case above.
-#   - any user other than montalu[2345678]/marek/david[234]/simap/miva1/root
+#   - any user other than montalu[2345678]/marek/david[234]/simap1/miva1/root
 #     (newlevel, gatekeeper,...).
-#   - marek/david[234]/simap/miva1 WITHOUT the gatekeeper_access_ed25519 identity.
+#   - marek/david[234]/simap1/miva1 WITHOUT the gatekeeper_access_ed25519 identity.
 #   - root WITHOUT the subdev_admin identity.
 #
 # A non-subdev target (dev2, gatekeeper, anything else) is completely
@@ -356,7 +356,7 @@ def check_target(user, host, tokens, label):
             return None
         return ("%s to subdev with NO user specified (implicit current "
                 "shell user) — must be montalu[2345678] / marek / "
-                "david[234] / simap / miva1"
+                "david[234] / simap1 / miva1"
                 % label)
     if user == "root":
         # #68: the gatekeeper VPS's own sanctioned root@subdev identity.
@@ -368,7 +368,7 @@ def check_target(user, host, tokens, label):
                 "montalu5", "montalu6", "montalu7", "montalu8"):
         return None
     if user in ("marek", "david", "david2", "david3", "david4",
-               "simap", "miva1"):
+               "simap1", "miva1"):
         if has_gatekeeper_key(tokens):
             return None
         return ("%s as %s@subdev without -i .../%s"
@@ -448,7 +448,7 @@ if [ "$RC" -eq 2 ]; then
     echo "    montalu[2345678]@subdev — default key OR sshpass -p" >&2
     echo "    marek@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    david[234]@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
-    echo "    simap@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
+    echo "    simap1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    miva1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    root@subdev   -i ~/.ssh/subdev_admin (gatekeeper VPS only," >&2
     echo "                  explicit or via its own ~/.ssh/config Host subdev)" >&2

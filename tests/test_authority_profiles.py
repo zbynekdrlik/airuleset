@@ -35,9 +35,12 @@ class TestAuthorityResolution(TestCase):
         self.assertEqual(airuleset.AUTHORITY_BY_USER["david"], "fork-no-merge")
         self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "branch-merge")
         self.assertEqual(airuleset.AUTHORITY_BY_USER["montalu"], "branch-merge")
-        # simap (airuleset#143): phase-1 demo stream that merges NOWHERE —
-        # fork-no-merge is the existing lowest profile, already correct.
-        self.assertEqual(airuleset.AUTHORITY_BY_USER["simap"], "fork-no-merge")
+        # simap1 (was simap, airuleset#143; #537 live rename 2026-08-18):
+        # phase-1 demo stream that merges NOWHERE — fork-no-merge is the
+        # existing lowest profile, already correct. The OLD unix name's row
+        # left the map with the OS account (runbook-537 step 8).
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["simap1"], "fork-no-merge")
+        self.assertNotIn("simap", airuleset.AUTHORITY_BY_USER)
         # miva1 (airuleset#300): phase-1 isolated stream, same shape as
         # simap — merges nowhere, fork-no-merge already correct.
         self.assertEqual(airuleset.AUTHORITY_BY_USER["miva1"], "fork-no-merge")
@@ -66,7 +69,10 @@ class TestAuthorityResolution(TestCase):
                 self.assertEqual(airuleset.resolve_authority(), "branch-merge", u)
 
     def test_resolve_uses_the_map_for_simap(self):
-        with m.patch.object(airuleset, "_current_user", return_value="simap"):
+        # #537 live rename: the box now runs as simap1; the old unix name
+        # cannot run any process (account deleted), so only the numbered
+        # name needs to resolve reduced.
+        with m.patch.object(airuleset, "_current_user", return_value="simap1"):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
     def test_resolve_uses_the_map_for_miva1(self):

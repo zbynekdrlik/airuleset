@@ -132,20 +132,6 @@ REMOTE_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
     {
-        # simap — 4th sub-dev stream, on the same subdev VPS as marek/david
-        # (Odoo 15 -> Odoo 19 demo for the potential SIMAP client; tracking
-        # ticket odoo-erp#2391, registered here via airuleset#143). Built by
-        # gatekeeper 2026-07-28: uid 1003, no sudo, home /home/simap (750),
-        # own fresh id_ed25519 (not copied from anywhere), authorized_keys =
-        # the SAME operator public keys as marek — so it uses the identical
-        # gatekeeper_access identity, not montalu's default-key path.
-        "name": "simap@subdev",
-        "host": "100.118.174.27",
-        "user": "simap",
-        "repo_path": "~/devel/airuleset",
-        "identity": "~/.secrets/gatekeeper_access_ed25519",
-    },
-    {
         # miva1 -- 5th sub-dev stream, phase-1 isolated, on the same subdev
         # VPS as marek/david/simap (airuleset#300; tracking ticket for the
         # account itself is odoo-erp#3223). Built by gatekeeper: bare linux
@@ -317,12 +303,17 @@ REMOTE_HOSTS = [
         "pending": True,
     },
     {
+        # simap1 — the renamed 4th sub-dev stream (was `simap`; #537 live
+        # rename 2026-08-18: in-place usermod on subdev, uid 1003 kept,
+        # home moved to /home/simap1, linger re-enabled; the old
+        # `simap@subdev` entry + its AUTHORITY_BY_USER row are GONE — the
+        # OS account no longer exists). Original build history: airuleset#143
+        # (Odoo 19 demo, gatekeeper_access identity, marek's operator keys).
         "name": "simap1@subdev",
         "host": "100.118.174.27",
         "user": "simap1",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
-        "pending": True,
     },
 ]
 
@@ -349,11 +340,8 @@ AUTHORITY_BY_USER = {
     "david": "fork-no-merge",
     "marek": "branch-merge",
     "montalu": "branch-merge",
-    # simap (airuleset#143, 2026-07-28): phase-1 demo stream that MERGES
-    # NOWHERE — no `develop`, no gatekeeper hand-off. fork-no-merge is the
-    # existing lowest profile and already expresses exactly that ("never
-    # opens/merges a PR, hand-off via comment only") — no new profile needed.
-    "simap": "fork-no-merge",
+    # simap (airuleset#143) was renamed to simap1 (#537, 2026-08-18) — its
+    # row moved to the numbered block below; the OS account `simap` is gone.
     # montalu2/montalu3/montalu4 (airuleset#251, odoo-erp#2961): three MORE
     # full parallel montalu streams — same authority as montalu itself.
     "montalu2": "branch-merge",

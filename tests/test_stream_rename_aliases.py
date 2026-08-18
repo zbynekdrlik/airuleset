@@ -83,17 +83,31 @@ class TestStreamRenameEquivalents(TestCase):
 
 
 class TestAuthorityCoversNewNames(TestCase):
-    def test_new_names_carry_the_same_profile_as_the_base(self):
+    # Transition-aware (runbook-537 step 8): pre-rename the OLD name stays in
+    # AUTHORITY_BY_USER alongside the new; once the live rename lands (simap,
+    # 2026-08-18) the old OS account + its row are gone. Profiles pinned per
+    # base so the check survives the old key's removal.
+    BASE_PROFILE = {"montalu": "branch-merge", "david": "fork-no-merge",
+                    "simap": "fork-no-merge"}
+
+    def _old_still_live(self, old):
+        return any(h["user"] == old for h in airuleset.REMOTE_HOSTS)
+
+    def test_new_names_carry_the_base_profile(self):
         for old, new in RENAMES:
             self.assertIn(new, airuleset.AUTHORITY_BY_USER, new)
-            self.assertEqual(
-                airuleset.AUTHORITY_BY_USER[new],
-                airuleset.AUTHORITY_BY_USER[old],
-                "%s must inherit %s's authority profile" % (new, old))
+            self.assertEqual(airuleset.AUTHORITY_BY_USER[new],
+                             self.BASE_PROFILE[old],
+                             "%s must carry %s's profile" % (new, old))
 
-    def test_old_names_still_present_added_alongside_not_replaced(self):
+    def test_old_names_tracked_with_their_remote_hosts_lifecycle(self):
         for old, _new in RENAMES:
-            self.assertIn(old, airuleset.AUTHORITY_BY_USER, old)
+            if self._old_still_live(old):
+                self.assertIn(old, airuleset.AUTHORITY_BY_USER, old)
+            else:
+                self.assertNotIn(
+                    old, airuleset.AUTHORITY_BY_USER,
+                    "%s renamed away — stale AUTHORITY_BY_USER row" % old)
 
     def test_marek_authority_unchanged_and_no_marek1(self):
         self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "branch-merge")
@@ -170,33 +184,47 @@ class TestTicketIsStreamLabeledAlias(TestCase):
 
 
 class TestPendingRemoteHostsAreRegisteredButNeverSshd(TestCase):
-    def _pending_entries(self):
-        return {h["user"]: h for h in airuleset.REMOTE_HOSTS if h.get("pending")}
+    """The renames land ONE STREAM AT A TIME (runbook-537, per-stream quiet
+    windows), so per stream exactly ONE of two states holds — and this test
+    is transition-aware rather than locking the pre-rename snapshot (the
+    original shape asserted every numbered entry pending, which went stale
+    the moment the first live rename landed — simap1, 2026-08-18):
 
-    def test_new_names_are_registered_as_pending_targets(self):
-        pending = self._pending_entries()
-        for _old, new in RENAMES:
-            self.assertIn(new, pending, new)
-            self.assertEqual(pending[new]["host"], "100.118.174.27", new)
+    - PRE-rename:  <new>@subdev registered with `pending: True` (never
+      ssh'd), <old>@subdev live/deployable.
+    - POST-rename: <new>@subdev live/deployable (no `pending`), <old>@subdev
+      GONE entirely (the OS account no longer exists).
+    Never both live, never both gone, and a pending entry is never ssh'd."""
+
+    def _by_user(self):
+        return {h["user"]: h for h in airuleset.REMOTE_HOSTS}
+
+    def test_each_rename_is_in_exactly_one_valid_transition_state(self):
+        hosts = self._by_user()
+        deployable = {h["user"] for h in airuleset._deployable_hosts()}
+        for old, new in RENAMES:
+            self.assertIn(new, hosts, new)
+            self.assertEqual(hosts[new]["host"], "100.118.174.27", new)
+            if hosts[new].get("pending"):
+                # PRE-rename: old account still live and deployable.
+                self.assertIn(old, hosts, old)
+                self.assertIn(old, deployable, old)
+                self.assertNotIn(new, deployable,
+                                 "a pending account must never be ssh'd")
+            else:
+                # POST-rename: numbered entry live, old entry gone.
+                self.assertNotIn(old, hosts,
+                                 "%s renamed away — stale target" % old)
+                self.assertIn(new, deployable, new)
 
     def test_montalu1_uses_the_default_key_like_montalu(self):
-        pending = self._pending_entries()
-        self.assertNotIn("identity", pending["montalu1"])
+        self.assertNotIn("identity", self._by_user()["montalu1"])
 
     def test_david1_and_simap1_use_the_operator_identity(self):
-        pending = self._pending_entries()
+        hosts = self._by_user()
         for new in ("david1", "simap1"):
-            self.assertEqual(pending[new].get("identity"),
+            self.assertEqual(hosts[new].get("identity"),
                              "~/.secrets/gatekeeper_access_ed25519", new)
-
-    def test_deployable_hosts_excludes_every_pending_entry(self):
-        deployable = airuleset._deployable_hosts()
-        names = {h["user"] for h in deployable}
-        for _old, new in RENAMES:
-            self.assertNotIn(new, names, new)
-        # the base (live) names are still deployable
-        for old, _new in RENAMES:
-            self.assertIn(old, names, old)
 
     def test_soniox_provisioning_never_ssh_a_pending_account(self):
         # A pending montalu1 IS in AUTHORITY_BY_USER, so it would pass the
@@ -271,7 +299,15 @@ class TestFleetBurnSkipsPendingHosts(TestCase):
 
         with m.patch.object(cli_burn, "_fleet_remote_row", side_effect=fake_row):
             airuleset._watchdog_fleet_fetch(hosts=None, want_hour_bucket=123)
-        for pending in ("montalu1", "david1", "simap1"):
+        # Derive the still-pending set live — a landed rename (simap1,
+        # 2026-08-18) moves its numbered name out of pending, and this test
+        # must keep holding for the remaining transitions without relock.
+        still_pending = {h["user"] for h in airuleset.REMOTE_HOSTS
+                         if h.get("pending")}
+        self.assertTrue(
+            still_pending.issubset({new for _o, new in RENAMES}),
+            "unexpected pending entries: %s" % still_pending)
+        for pending in still_pending:
             self.assertNotIn(pending, rowed, pending)
 
 
