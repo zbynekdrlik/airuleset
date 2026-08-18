@@ -234,7 +234,7 @@
     "watchdog/cards.py": 1031,
     "watchdog/compact.py": 1168,
     "watchdog/conformance.py": 430,
-    "watchdog/conformance_heartbeat.py": 339,
+    "watchdog/conformance_heartbeat.py": 342,
     "watchdog/cross_stream.py": 1242,
     "watchdog/decide.py": 744,
     "watchdog/discord_api.py": 187,

@@ -209,11 +209,13 @@ def _scan(rows, now, lookback_s):
 
 
 def _ping(send_fn, seen, key, sig, detail, now, reping, dry_run, persist,
-          logs, label):
+          logs, label, header):
     """Deduped LOUD ping for one dead-box / stalled-collector episode. A ping
     fires only when the episode is NEW (changed sig) or ``reping`` has elapsed
     since the last ping; the dedup memory is persisted BEFORE the send (#172-F3).
-    Returns True iff a ping was actually attempted."""
+    ``header`` is the message's leading emoji + bold tag (a dead box vs a stalled
+    collector are DIFFERENT alarms — the header says which). Returns True iff a
+    ping was actually attempted."""
     prev = seen.get(key) or {}
     same = (prev.get("sig") == sig)
     pinged = prev.get("pinged_ts")
@@ -226,7 +228,7 @@ def _ping(send_fn, seen, key, sig, detail, now, reping, dry_run, persist,
     if not dry_run:
         persist()                          # dedup memory BEFORE the ping (#172-F3)
     status = send_fn(
-        "\U0001f534 **dead-box** -- %s" % detail,
+        "%s -- %s" % (header, detail),
         # FRESH per real decision INSTANT, never a coarser bucket (#535 review
         # MAJOR-2): the per-key `seen` dedup above is the authoritative gate; a
         # bucketed sig-independent dedup_key would swallow exactly the changed-sig
@@ -310,7 +312,8 @@ def run_conformance_heartbeat_check(now, state, send_fn=None, dry_run=False,
         # broken collector never false-alarms every box (the fail-safe).
         _ping(send_fn, seen, _COLLECTION_KEY,
               "collstale:%d" % int(collection_stale), cdetail, now, reping,
-              dry_run, persist, logs, "collection")
+              dry_run, persist, logs, "collection",
+              "⚠️ **fleet zber zastal**")
         return logs
 
     # --- per-box liveness (collection is fresh, so verdicts are trustworthy) ---
@@ -335,5 +338,5 @@ def run_conformance_heartbeat_check(now, state, send_fn=None, dry_run=False,
         if ok is None:
             continue                              # brand-new / not fetched — grace
         _ping(send_fn, seen, name, _sig_for_box(lf), detail, now, reping,
-              dry_run, persist, logs, name)
+              dry_run, persist, logs, name, "🔴 **dead-box**")
     return logs

@@ -127,6 +127,7 @@ class TestOrchestratorDeadBox(unittest.TestCase):
         # boxB was last fresh 48h ago (> 36h) -> dead -> ONE ping naming boxB
         self.assertEqual(len(send.calls), 1)
         self.assertIn("boxB", send.msgs[0])
+        self.assertIn("dead-box", send.msgs[0])  # a dead-box header, not collector
         # boxA is fresh 1h ago -> alive -> no ping about it
         self.assertNotIn("boxA", send.msgs[0])
 
@@ -165,8 +166,9 @@ class TestCollectionFailSafe(unittest.TestCase):
         _run({}, rows, _hosts("boxA", "boxB"), send=send)
         self.assertEqual(len(send.calls), 1)
         self.assertNotIn("boxB", send.msgs[0])  # not a per-box dead ping
-        # the one ping is about the collector / zber
+        # the one ping is about the collector / zber, NOT a "dead-box" header
         self.assertRegex(send.msgs[0].lower(), r"zber|collect|fleet")
+        self.assertNotIn("dead-box", send.msgs[0])
 
     def test_no_fleet_data_is_silent(self):
         send = _Send()
