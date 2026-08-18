@@ -29,7 +29,6 @@ the expected repo-local git config.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -296,8 +295,12 @@ class DriverFailSafe(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run_driver(self, base: str, ours: str, theirs: str):
-        o = self.d / "O"; a = self.d / "A"; b = self.d / "B"
-        o.write_text(base); a.write_text(ours); b.write_text(theirs)
+        o = self.d / "O"
+        a = self.d / "A"
+        b = self.d / "B"
+        o.write_text(base)
+        a.write_text(ours)
+        b.write_text(theirs)
         proc = subprocess.run(
             ["python3", str(SCRIPT), str(o), str(a), str(b), "tests/size_ratchet.json"],
             capture_output=True, text=True)
