@@ -199,6 +199,7 @@ class TestRendering(unittest.TestCase):
         self.assertIn("-i 127.0.0.1", s)
         self.assertIn("-a", s)      # url-arg
         self.assertIn("-W", s)      # writable
+        self.assertIn("-O", s)      # check-origin (CSWSH defence)
         self.assertIn("cli_webterm.py webterm-connect", s)
         self.assertIn(str(w.WEBTERM_CRED_PATH), s)
 
@@ -207,6 +208,81 @@ class TestRendering(unittest.TestCase):
         self.assertNotIn("{{LAUNCH_SCRIPT}}", unit)
         self.assertIn(str(w.WEBTERM_LAUNCH_PATH), unit)
         self.assertIn("WantedBy=default.target", unit)
+
+
+_FAKE_TMUX = r"""#!/usr/bin/env bash
+# Fake tmux: records which session the REAL _ATTACH_BODY snippet selects, driven
+# by FAKETMUX_SESSIONS (newline-separated `group::name`, group may be empty).
+cmd="$1"; shift
+case "$cmd" in
+  has-session)
+    name="${2#=}"
+    while IFS= read -r line; do
+      [ -n "$line" ] && [ "${line#*::}" = "$name" ] && exit 0
+    done <<< "$FAKETMUX_SESSIONS"
+    exit 1 ;;
+  list-sessions)
+    if [ "$2" = "#{session_group}::#{session_name}" ]; then
+      printf '%s\n' "$FAKETMUX_SESSIONS"
+    else
+      while IFS= read -r line; do
+        [ -n "$line" ] && printf '%s\n' "${line#*::}"
+      done <<< "$FAKETMUX_SESSIONS"
+    fi
+    exit 0 ;;
+  new-session)
+    if [ "$1" = "-t" ]; then echo "NEWSESSION_T:$2"; else echo "NEWSESSION_AS:$3"; fi
+    exit 0 ;;
+  attach)
+    echo "ATTACH_T:$2"; exit 0 ;;
+esac
+exit 0
+"""
+
+
+class TestAttachSnippetBehavior(unittest.TestCase):
+    """Run the REAL _ATTACH_BODY snippet against a fake tmux to prove which
+    session it selects across every fleet case (the trickiest correctness
+    surface — the group-survivor awk + the 0/1/2 single-session count)."""
+
+    def setUp(self):
+        import subprocess
+        self.subprocess = subprocess
+        self.d = tempfile.mkdtemp()
+        faketmux = Path(self.d) / "tmux"
+        faketmux.write_text(_FAKE_TMUX, encoding="utf-8")
+        os.chmod(faketmux, 0o755)
+
+    def _select(self, preferred, sessions):
+        env = dict(os.environ, PATH=self.d + ":" + os.environ["PATH"],
+                   FAKETMUX_SESSIONS=sessions)
+        cmd = w._remote_command(preferred)
+        r = self.subprocess.run(["sh", "-c", cmd], capture_output=True,
+                                text=True, env=env, timeout=10)
+        return r.stdout.strip()
+
+    def test_grouped_owner_picks_group_survivor_not_cotenant(self):
+        # dev1: zbynek + marek co-tenant. P=zbynek must pick zbynek-4, NOT marek.
+        out = self._select("zbynek", "zbynek::zbynek-4\nmarek::marek-12")
+        self.assertEqual(out, "NEWSESSION_T:zbynek-4")
+
+    def test_standalone_stream_picks_exact_name(self):
+        out = self._select("david", "::david\n::montalu")
+        self.assertEqual(out, "NEWSESSION_T:david")
+
+    def test_gk_single_unnamed_session_attaches_it(self):
+        # gk: one session "0", empty group, P=zbynek -> single-session fallback.
+        out = self._select("zbynek", "::0")
+        self.assertEqual(out, "ATTACH_T:0")
+
+    def test_no_sessions_creates_preferred(self):
+        out = self._select("zbynek", "")
+        self.assertEqual(out, "NEWSESSION_AS:zbynek")
+
+    def test_two_sessions_no_match_creates_preferred(self):
+        # Two sessions, neither matches P -> must NOT attach a wrong one; create.
+        out = self._select("gatekeeper", "zbynek::zbynek-4\nmarek::marek-12")
+        self.assertEqual(out, "NEWSESSION_AS:gatekeeper")
 
 
 class TestProvisioningGate(unittest.TestCase):

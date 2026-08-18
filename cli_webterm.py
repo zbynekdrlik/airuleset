@@ -133,10 +133,15 @@ def _remote_command(preferred):
 
 
 def _ssh_interactive_prefix(entry):
-    """Match the deploy loop's identity rule (cli_remote): `identity` present ->
+    """Match the deploy loop's identity rule (cli_remote.py cmd_push /
+    provision_subdev_soniox_key, ~lines 204-223 / 770-795): `identity` present ->
     `ssh -i <identity>`; else -> `sshpass -p newlevel ssh` (default-key/shared-
     password path). Interactive variant: force a PTY (-t), never write
-    known_hosts, fast connect timeout so a dead host fails visibly."""
+    known_hosts, fast connect timeout so a dead host fails visibly. DRIFT GUARD:
+    the identity-vs-sshpass DECISION is the same rule those two sites use — if the
+    fleet's auth convention ever changes (password rotation, a new scheme), both
+    those sites AND this one must move together; `test_webterm.py::
+    test_identity_decision_matches_deploy_loop` fails on a decision drift."""
     common = ["-o", "StrictHostKeyChecking=no",
               "-o", "UserKnownHostsFile=/dev/null",
               "-o", "ConnectTimeout=10", "-t"]
@@ -290,23 +295,40 @@ def _ensure_credential():
     + the login, and the box's only other unix users are managed/locked.)"""
     import secrets
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(SECRETS_DIR, 0o700)  # never world-traversable
     if WEBTERM_CRED_PATH.exists():
         cred = WEBTERM_CRED_PATH.read_text(encoding="utf-8").strip()
         if cred and ":" in cred:
             return cred
     cred = "%s:%s" % (WEBTERM_LOGIN_USER, secrets.token_hex(16))
-    WEBTERM_CRED_PATH.write_text(cred + "\n", encoding="utf-8")
-    os.chmod(WEBTERM_CRED_PATH, 0o600)
+    # Atomically create mode-600 (O_EXCL over a fresh temp, then rename) so the
+    # 128-bit shell credential is NEVER briefly world-readable under the umask.
+    tmp = WEBTERM_CRED_PATH.with_suffix(".tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (cred + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(WEBTERM_CRED_PATH))
     return cred
 
 
+# `-O`/--check-origin: reject a cross-origin websocket upgrade (CSWSH). VERIFIED
+# live through tailscale serve — a raw ws upgrade with a foreign Origin gets no
+# 101 (serve surfaces a 502), a same-origin one gets 101, and the legit browser
+# terminal keeps working. This is defence-in-depth on top of the PRIMARY CSWSH
+# defence, which holds even without `-O`: ttyd requires a fixed AuthToken in the
+# ws init message (an empty/wrong token spawns no shell), and its `/token`
+# endpoint sends NO CORS headers, so a browser attacker's cross-origin
+# `fetch("/token")` is blocked from READING the token — it can never construct a
+# valid ws init. `-c` basic-auth gates both /token and the ws.
 _LAUNCH_TEMPLATE = """#!/usr/bin/env bash
 # airuleset-managed (#555) — do NOT edit; regenerate via `python3 airuleset.py install`.
 # Reads the basic-auth credential from a mode-600 file (keeps it out of the unit
 # file) and execs ttyd on loopback; tailscale serve fronts it tailnet-only.
 set -euo pipefail
 cred="$(cat %(cred_path)s)"
-exec ttyd -p %(ttyd_port)d -i 127.0.0.1 -a -W -c "$cred" \\
+exec ttyd -p %(ttyd_port)d -i 127.0.0.1 -a -W -O -c "$cred" \\
   python3 %(repo_dir)s/cli_webterm.py webterm-connect
 """
 
@@ -315,7 +337,7 @@ def render_webterm_launch_script():
     return _LAUNCH_TEMPLATE % {
         "cred_path": shlex.quote(str(WEBTERM_CRED_PATH)),
         "ttyd_port": WEBTERM_TTYD_PORT,
-        "repo_dir": str(REPO_DIR),
+        "repo_dir": shlex.quote(str(REPO_DIR)),
     }
 
 
@@ -374,11 +396,17 @@ def setup_webterm_service(run=None, configure_serve=True):
     non-fatal step — mirrors setup_filedrop_service)."""
     if not is_webterm_gateway():
         return False  # webterm is dev1-only (the single gateway)
-    if shutil.which("ttyd") is None:
-        print("  webterm: ttyd not installed — skipping "
-              "(RUNTIME_DEPS installs it on the next push)", file=sys.stderr)
-        return False
     run = run or subprocess.run
+    if shutil.which("ttyd") is None:
+        # dev1-local install (ttyd is deliberately NOT in the fleet-wide
+        # RUNTIME_DEPS — #555: it would cry wolf on the ~19 no-sudo subdev
+        # accounts where webterm never runs). dev1 has sudo.
+        run(["sudo", "-n", "apt-get", "install", "-y", "ttyd"],
+            capture_output=True, text=True)
+        if shutil.which("ttyd") is None:
+            print("  webterm: ttyd not installed and `sudo -n apt-get install "
+                  "ttyd` failed — skipping the gateway", file=sys.stderr)
+            return False
     from cli_filedrop_watchdog import _run_systemctl, _whoami
 
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
@@ -411,11 +439,27 @@ def setup_webterm_service(run=None, configure_serve=True):
               "enable --now webterm-ttyd.service" % (err or "").strip(),
               file=sys.stderr)
         return False
+    # `enable --now` is a no-op for an already-running service, so a re-install
+    # that changed the launcher/unit (e.g. new ttyd flags) needs an explicit
+    # restart to take effect — mirrors setup_filedrop_service (#555 review).
+    rc, _o, err = _run_systemctl(["restart", "webterm-ttyd.service"])
+    if rc != 0:
+        print("  webterm: systemctl restart FAILED (new ttyd flags may not be "
+              "live): %s" % (err or "").strip(), file=sys.stderr)
 
-    if configure_serve:
-        _configure_tailscale_serve(run=run)
-    print("  webterm: gateway live — http://%s/ (tailnet-only, login user %r)"
-          % (_ts_dns_name(run=run), WEBTERM_LOGIN_USER))
+    serve_ok = _configure_tailscale_serve(run=run) if configure_serve else True
+    if serve_ok:
+        # NOTE (#555 review): the dashboard port (:80) is served UNAUTHENTICATED
+        # over the tailnet — it discloses fleet session labels + user@host to any
+        # tailnet peer (largely `tailscale status`-discoverable already; the shell
+        # port :7682 stays basic-auth-gated). Accepted residual; tighten with a
+        # tailscale ACL restricting dev1:80 to owner devices if desired.
+        print("  webterm: gateway live — http://%s/ (tailnet-only, login user %r)"
+              % (_ts_dns_name(run=run), WEBTERM_LOGIN_USER))
+    else:
+        print("  webterm: ttyd service is up but tailscale serve is NOT "
+              "configured — the gateway is not reachable until serve is set "
+              "(see the manual command above)", file=sys.stderr)
     return True
 
 

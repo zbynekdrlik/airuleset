@@ -481,7 +481,12 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
 # lacks it would silently break the popup with zero warning. This is the
 # sanctioned mechanism (autonomous-verification.md) for closing that gap.
 RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux", "sshpass", "btop",
-                 "node", "npx", "less", "ttyd")
+                 "node", "npx", "less")
+# NOTE (#555): `ttyd` is NOT in the fleet-wide RUNTIME_DEPS — the web terminal
+# gateway is dev1-ONLY, and `check_runtime_deps()` runs on EVERY box (incl. the
+# ~19 no-sudo subdev accounts, where a `sudo -n apt-get install ttyd` would fail
+# every install and cry wolf on the "MISSING RUNTIME DEP" channel). It is
+# installed dev1-locally inside setup_webterm_service() instead.
 
 # The apt PACKAGE name differs from the BINARY name for node/npx (#158):
 # Debian/Ubuntu's real "node" package is an unrelated amateur packet-radio
