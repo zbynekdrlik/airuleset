@@ -307,8 +307,9 @@ class TestThreadNameEndsWithStreamNumber(TestCase):
         self.assertIn(self.START, self.t)
 
     def test_numbered_stream_rule_has_teeth(self):
+        # (the operative phrase is the window's START anchor — a no-teeth
+        # tautology here; it is covered by test_operative_rule_present_whole_file)
         w = self._bullet_window()
-        self.assertIn("ends with the owning stream's NUMBER", w)
         # the owner's own canonical example (montalu3 → "… 3")
         self.assertIn('montalu3 → "Kontrola zákazníckych e-mailov 3"', w)
         # NUMBERED stream = the trailing digits of the stream name
