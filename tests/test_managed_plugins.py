@@ -56,52 +56,41 @@ class TestReconcileManagedPlugins(TestCase):
         self.assertIn("superpowers@claude-plugins-official",
                       airuleset.MANAGED_PLUGINS)
 
-    def test_playwright_is_optional_not_baseline(self):
-        # #415 INVERTS #158: Playwright is no longer a force-enabled baseline
-        # plugin — it force-enabled a resident ~144MB headless Chrome on every
-        # box in every project. It moved to OPTIONAL_PLUGINS: installed +
-        # marketplace-registered everywhere, force-DISABLED in user scope,
-        # opted-in per-project via that project's own settings.json. The old
-        # `test_playwright_is_in_the_baseline` asserted the opposite; this is
-        # a deliberate policy inversion, justified in this test's own body.
-        self.assertNotIn("playwright@claude-plugins-official",
-                         airuleset.MANAGED_PLUGINS)
+    def test_playwright_is_in_the_baseline(self):
+        # #542 REVERTS #415's default-off: Playwright is a force-enabled
+        # baseline plugin again. Force-disabling it fleet-wide made streams
+        # report "nemám playwright" and skip the UNTOUCHABLE browser
+        # verification (autonomous-verification.md). The resident-Chrome cost
+        # #415 cited is empirically LAZY (measured live on dev1: 6 running
+        # @playwright/mcp node servers but only 1 Chrome tree — Chrome spawns
+        # only on the first browser call, only in the session that makes it),
+        # so enabling everywhere restores availability with NO resident
+        # browser in browser-free projects, only the cheap node MCP server.
+        # The old `test_playwright_is_optional_not_baseline` asserted the
+        # opposite; this is a deliberate policy inversion, justified here.
         self.assertIn("playwright@claude-plugins-official",
-                      airuleset.OPTIONAL_PLUGINS)
+                      airuleset.MANAGED_PLUGINS)
 
-    def test_optional_plugins_are_force_disabled_in_user_scope(self):
-        # #415: reconcile writes every OPTIONAL_PLUGINS key False (off by
-        # default) — this is what makes a fresh box start no playwright-mcp
-        # server, and what a per-project opt-in resolves ABOVE.
+    def test_playwright_is_force_enabled_in_user_scope(self):
+        # #542: reconcile writes playwright True (force-enabled fleet-wide),
+        # so a fresh session in ANY managed project has the browser MCP
+        # available with no per-project opt-in step.
         out = airuleset.reconcile_managed_plugins({})
-        for key in airuleset.OPTIONAL_PLUGINS:
-            # assertIs(..., False), not assertFalse (#415 review F5): a mutant
-            # writing None/0/"" would pass assertFalse but produce an
-            # enabledPlugins value CC's docs don't define — the value must be
-            # the JSON literal false.
-            self.assertIs(out["enabledPlugins"][key], False)
-
-    def test_reconcile_flips_a_stale_optional_true(self):
-        # #415 headline acceptance: every already-pushed box carries a stale
-        # `playwright: true` from the pre-#415 force-enable regime. reconcile
-        # must actively FLIP it to False, not merely leave it — otherwise the
-        # inversion never takes effect on the exact fleet it exists to fix.
         pw = "playwright@claude-plugins-official"
-        out = airuleset.reconcile_managed_plugins({"enabledPlugins": {pw: True}})
-        self.assertIs(out["enabledPlugins"][pw], False)
+        # assertIs(..., True), not assertTrue (mirrors the #415 F5 rationale):
+        # the value must be the JSON literal true, not any truthy stand-in.
+        self.assertIs(out["enabledPlugins"][pw], True)
 
-    def test_optional_plugins_never_overlap_either_disabled_set(self):
-        # #415 sanity (review F5/F6): a key cannot be both force-enabled
-        # (MANAGED_PLUGINS) and force-disabled (OPTIONAL_PLUGINS) — the same
-        # invariant test_does_not_disable_the_managed_baseline pins for
-        # MANAGED_DISABLED_PLUGINS. OPTIONAL must ALSO be disjoint from
-        # MANAGED_DISABLED_PLUGINS: both force false, but an OPTIONAL plugin
-        # IS installed (ready for a project opt-in) while a MANAGED_DISABLED
-        # one is not — overlap would be semantically confused.
-        self.assertEqual(set(airuleset.OPTIONAL_PLUGINS)
-                         & set(airuleset.MANAGED_PLUGINS), set())
-        self.assertEqual(set(airuleset.OPTIONAL_PLUGINS)
-                         & set(airuleset.MANAGED_DISABLED_PLUGINS), set())
+    def test_reconcile_flips_a_stale_disabled_false(self):
+        # #542 headline acceptance (symmetric to #415's own flip test): every
+        # box pushed under #415 carries a stale `playwright: false`. reconcile
+        # must actively FLIP it back to True, not merely leave it — otherwise
+        # the restoration never takes effect on the exact fleet it exists to
+        # fix (live-confirmed on dev1: ~/.claude/settings.json had playwright
+        # => False before this change).
+        pw = "playwright@claude-plugins-official"
+        out = airuleset.reconcile_managed_plugins({"enabledPlugins": {pw: False}})
+        self.assertIs(out["enabledPlugins"][pw], True)
 
     def test_preserves_unrelated_keys_and_plugins(self):
         settings = {"model": "sonnet",
