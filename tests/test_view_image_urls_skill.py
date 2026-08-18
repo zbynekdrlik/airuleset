@@ -174,7 +174,9 @@ class Test415AwareMessaging(_Teeth, TestCase):
         # this exact phrase is absent from the rewrite, so assertNotIn has teeth
         # against re-adding it (it is never a token the correct skill contains).
         self.assertNotIn("CDN blocks non-browser referers", self.text)
-        self.assertNotIn("Playwright is not installed, that is a missing-tool", self.text)
+        # the pre-#541 give-up path (present verbatim in the old skill, confirmed
+        # against 4e4f8c6f) — real teeth: a revert that re-adds it fails here.
+        self.assertNotIn("Playwright MCP is not installed in the session", self.text)
 
 
 class TestBrowserFallbackNamed(_Teeth, TestCase):

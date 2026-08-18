@@ -20,7 +20,7 @@ This is the rule that ends the inconsistency AND the friction #415 introduced: a
 
 #### FIRST path — images (wrapper pages AND direct images): download locally, then Read (NO browser)
 
-The Read tool renders local image files — so the whole job is: get the real image bytes onto local disk, then Read that file. No browser, no plugin, no per-project opt-in.
+The Read tool renders local image files — so the whole job is: get the real image bytes onto a local scratch file (pick a unique path — e.g. `mktemp --suffix=.png` — on a shared, many-workers box; `/tmp/shot.png` below is only illustrative), then Read that file. No browser, no plugin, no per-project opt-in.
 
 1. **Direct image URL** (ends in `.png`/`.jpg`/`.webp`/...) — download it straight to a scratch file and Read it:
    ```bash
@@ -41,6 +41,7 @@ The Read tool renders local image files — so the whole job is: get the real im
    - The wrapper HTML has **no `og:image`** meta (a removed/expired Lightshot code redirects to the generic `Lightshot — screenshot tool` landing page, which carries no screenshot `og:image`) → the screenshot is gone; report "removed / expired", download nothing.
    - The wrapper fetch returns a tiny non-HTML body (e.g. bare `error code: 520`) → you sent no browser `User-Agent`; add the `-A "$UA"` above and retry (do NOT conclude the screenshot is unreadable).
    - The downloaded image looks like a "removed / expired" placeholder graphic → say so; never fabricate content.
+   - **Host caveat:** the "no `og:image` → removed" signal is reliable for prnt.sc / Lightshot (a dead code has no screenshot `og:image` at all). Some hosts instead serve a FALLBACK `og:image` on a dead/expired link (gyazo returns a default graphic), so for those the `file` + size + placeholder-graphic checks above are the real backstop — a present `og:image` does NOT prove the screenshot still exists.
 
 #### If the no-browser path genuinely fails (a hostile JS-gated CDN) — browser fallback
 
