@@ -47,8 +47,10 @@ if printf '%s' "$CMD" | grep -qE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space
 # REST-API PATCH form: require BOTH the PATCH method AND `state=closed` (the field-set
 # form) — so a READ predicate like `gh api .../issues/N --jq '.state=="closed"'`
 # (which has neither `-X PATCH` nor a bare `state=closed`) is NOT mistaken for a write.
+# The method separator class is `[[:space:]=]` so the GLUED `--method=PATCH` form is
+# caught too (#533 review M3) — `-X PATCH` (space) still matches unchanged.
 elif printf '%s' "$CMD" | grep -qE 'gh[[:space:]]+api[^|]*issues/[0-9]+' \
-     && printf '%s' "$CMD" | grep -qE '(-X|--method)[[:space:]]*[Pp][Aa][Tt][Cc][Hh]' \
+     && printf '%s' "$CMD" | grep -qE '(-X|--method)[[:space:]=]*[Pp][Aa][Tt][Cc][Hh]' \
      && printf '%s' "$CMD" | grep -qE 'state=closed'; then
     is_close=1
 fi
@@ -94,7 +96,46 @@ fi
 # (fork-no-merge's david, whose gh login is never the maintainer's) is
 # unaffected.
 ISSUE_NUM=$(printf '%s' "$CMD" | grep -oE 'gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?([0-9]+)' | grep -oE '[0-9]+' | head -1 || echo "")
-REPO_ARG=$(printf '%s' "$CMD" | grep -oE '(-R|--repo)[[:space:]=]+"?[A-Za-z0-9._/-]+' | head -1 | sed -E 's/^(-R|--repo)[[:space:]=]+"?//' || echo "")
+# REPO_ARG accepts a single- OR double-quoted value (`["']?`, #533 review m5) — an
+# unquoted `-R owner/repo` is unchanged. A GLUED `-Rowner/repo` still yields empty
+# (no separator); the #533 exemption below fails SAFE on that via the -R-present
+# guard, and the author carve-out's own use is unchanged in direction (empty
+# REPO_ARG -> author read against cwd repo, its pre-existing behaviour).
+REPO_ARG=$(printf '%s' "$CMD" | grep -oE "(-R|--repo)[[:space:]=]+[\"']?[A-Za-z0-9._/-]+" | head -1 | sed -E "s/^(-R|--repo)[[:space:]=]+[\"']?//" || echo "")
+
+# #533 review C1 (CRITICAL): the exemptions below `exit 0` on the FIRST close's
+# issue number and then ALLOW THE WHOLE Bash command — so a compound like
+# `gh issue close <own> --comment ok && gh issue close <foreign>` or
+# `gh issue close <own> --comment ok && gh api -X PATCH .../issues/N -f state=closed`
+# smuggled a SECOND, unguarded mutation (a foreign close, or the PATCH form the
+# hook swears it never exempts) past the guard. Fail SAFE: an exemption may fire
+# ONLY when the command is a SINGLE close action. If there is not EXACTLY one
+# top-level `gh issue close`, OR a PATCH-close segment is also present, OR the
+# command hides a nested interpreter (bash/sh -c, eval) that could carry another
+# close, BLANK ISSUE_NUM — which skips BOTH carve-outs below (each gated on
+# `[ -n "$ISSUE_NUM" ]`, so the author carve-out stays byte-untouched) and falls
+# through to the BLOCK. A benign prefix like `cd dir && gh issue close N` still
+# has exactly one close and no interpreter, so it is unaffected. (A pure PATCH
+# close already has ISSUE_NUM empty — no `gh issue close` — so this only tightens
+# the `gh issue close`-carrying forms.) The residual `bash -c '…'` / `--input`
+# whole-hook detection gaps are pre-existing (is_close untouched) and filed
+# separately; this guard closes the CHAINED smuggle, the #533-activated path.
+CLOSE_HITS=$(printf '%s' "$CMD" | grep -oE '(^|[;&|[:space:](])gh[[:space:]]+issue[[:space:]]+close([[:space:]]|$)' 2>/dev/null || true)
+N_CLOSE=$(printf '%s' "$CLOSE_HITS" | grep -c . 2>/dev/null || true)
+HAS_PATCH_CLOSE=0
+if printf '%s' "$CMD" | grep -qE 'gh[[:space:]]+api[^|]*issues/[0-9]+' \
+   && printf '%s' "$CMD" | grep -qE '(-X|--method)[[:space:]=]*[Pp][Aa][Tt][Cc][Hh]' \
+   && printf '%s' "$CMD" | grep -qE 'state=closed'; then
+    HAS_PATCH_CLOSE=1
+fi
+HAS_INTERP=0
+if printf '%s' "$CMD" | grep -qE '(^|[;&|[:space:](])(bash|sh|dash|zsh)[[:space:]]+-c([[:space:]]|$)|(^|[;&|[:space:](])(eval|xargs)([[:space:]]|$)'; then
+    HAS_INTERP=1
+fi
+if [ "${N_CLOSE:-0}" -ne 1 ] || [ "$HAS_PATCH_CLOSE" -eq 1 ] || [ "$HAS_INTERP" -eq 1 ]; then
+    ISSUE_NUM=""   # not a single simple close — fail toward hand-off (no exemption)
+fi
+
 if [ -n "$ISSUE_NUM" ]; then
     # THIS box's own gh identity. NOT a raw `gh api user` — on a GitHub
     # App-token box (odoo-erp #3284: montalu/2/3/4, marek, david2/3/4) that
@@ -152,7 +193,23 @@ fi
 ACCEPTANCE_MISSING_COMMENT=0
 if [ -n "$ISSUE_NUM" ]; then
     STREAM_LABEL=$(python3 "$REPO_DIR/airuleset.py" authority --stream-label 2>/dev/null || echo "")
-    if [ -n "$STREAM_LABEL" ]; then
+    # #533 review m5: if the command carries a -R/--repo flag but REPO_ARG came
+    # back EMPTY (a glued `-Rowner/repo`, or a form the parser cannot read), the
+    # labels read below would run against the CWD repo instead of the named one —
+    # a potential wrong-allow if the cwd repo happens to carry issue N with this
+    # stream's acceptance labels. Fail SAFE: mark it unparseable and refuse the
+    # exemption. A parseable -R gives a non-empty REPO_ARG, so a legit acceptance
+    # close is unaffected.
+    # Detect a -R/--repo FLAG token in ANY form — separated (`-R foo`, `-R=foo`),
+    # end-of-string, OR GLUED (`-Rfoo`, which the REPO_ARG parser cannot read). If
+    # such a flag is present but REPO_ARG is empty, the labels read would fall back
+    # to the cwd repo → fail SAFE.
+    REPO_UNPARSEABLE=0
+    if printf '%s' "$CMD" | grep -qE '(^|[[:space:]])(-R|--repo)' \
+       && [ -z "$REPO_ARG" ]; then
+        REPO_UNPARSEABLE=1
+    fi
+    if [ -n "$STREAM_LABEL" ] && [ "$REPO_UNPARSEABLE" -eq 0 ]; then
         GH_RC=0
         if [ -n "$REPO_ARG" ]; then
             LABEL_NAMES=$(gh issue view "$ISSUE_NUM" -R "$REPO_ARG" --json labels -q '.labels[].name' 2>/dev/null) || GH_RC=$?
