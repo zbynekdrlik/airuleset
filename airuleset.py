@@ -424,6 +424,10 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
     _clean_tmux_block_spans,
     _default_tmux_run,
     apply_tmux_history_limit,
+    STREAM_TMUX_WINDOW_MARK_START,
+    STREAM_TMUX_WINDOW_MARK_END,
+    render_stream_tmux_window_block,
+    apply_stream_tmux_window_name,
     _sudo_write_root_file,
     setup_tmux_cutover_provisioning,
     setup_tmux_cutover_subdev_via_gatekeeper,
@@ -943,6 +947,15 @@ def cmd_install(args):
             print(f"  Updated:   {BASHRC} (subdev ssh auto-attach, #264)")
     except Exception as e:
         print(f"  ssh auto-attach setup error (non-fatal): {e}", file=sys.stderr)
+    try:
+        # #554: name the tmux WINDOW after the stream so the owner sees which
+        # subdev session they are attached to. Stream accounts only; a true
+        # no-op (and actively strips any stale block) on dev1/dev2/gatekeeper.
+        window_name_changed = apply_stream_tmux_window_name()
+        if window_name_changed:
+            print(f"  Updated:   {TMUX_CONF} (subdev tmux window name, #554)")
+    except Exception as e:
+        print(f"  stream tmux window-name setup error (non-fatal): {e}", file=sys.stderr)
     try:
         report_stream_dev_env()
     except Exception as e:
