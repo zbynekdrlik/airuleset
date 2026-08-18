@@ -1227,7 +1227,7 @@ class TestCmdGkRequest(unittest.TestCase):
 
         buf = io.StringIO()
         with m.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"), \
-                m.patch.object(airuleset, "_current_user", return_value="simap"), \
+                m.patch.object(airuleset, "_current_user", return_value="simap1"), \
                 m.patch.object(airuleset, "_gh_out", side_effect=gh):
             with contextlib.redirect_stdout(buf):
                 airuleset.cmd_slice_quals(
@@ -1258,17 +1258,17 @@ class TestCmdGkRequest(unittest.TestCase):
         # from mocking an attribute the pre-fix module never had.
         with m.patch("subprocess.run", side_effect=run), \
                 m.patch.object(airuleset, "_current_user",
-                               return_value="simap"):
+                               return_value="simap1"):
             airuleset.cmd_gk_request(
                 self._args(issue=2081, comment="obnov docker sock prístup"))
         flat = json.dumps(calls)
         self.assertIn("label", flat)
         self.assertIn("create", flat)           # gh label create (checked-first)
-        self.assertIn("handed-by:simap", flat)
+        self.assertIn("handed-by:simap1", flat)
         self.assertNotIn("stream:simap", flat)  # never the ownership label
         add_label_calls = [c for c in calls if "--add-label" in c]
         self.assertTrue(
-            any("handed-by:simap" in c for c in add_label_calls),
+            any("handed-by:simap1" in c for c in add_label_calls),
             add_label_calls)
 
     def test_ensure_origin_label_never_overwrites_an_existing_label(self):
@@ -1283,13 +1283,13 @@ class TestCmdGkRequest(unittest.TestCase):
         def run(argv, **kw):
             calls.append(argv)
             if "list" in argv:
-                return m.Mock(returncode=0, stdout="handed-by:simap\n",
+                return m.Mock(returncode=0, stdout="handed-by:simap1\n",
                               stderr="")
             return m.Mock(returncode=0, stdout="", stderr="")
 
         with m.patch("subprocess.run", side_effect=run), \
                 m.patch.object(airuleset, "_current_user",
-                               return_value="simap"):
+                               return_value="simap1"):
             airuleset.cmd_gk_request(
                 self._args(issue=3, comment="akcia"))
         create_calls = [c for c in calls
@@ -1297,7 +1297,7 @@ class TestCmdGkRequest(unittest.TestCase):
         self.assertEqual(create_calls, [], create_calls)
         add_label_calls = [c for c in calls if "--add-label" in c]
         self.assertTrue(
-            any("handed-by:simap" in c for c in add_label_calls),
+            any("handed-by:simap1" in c for c in add_label_calls),
             add_label_calls)
 
     def test_create_mode_also_applies_origin_handoff_label(self):
@@ -1316,7 +1316,7 @@ class TestCmdGkRequest(unittest.TestCase):
 
         with m.patch("subprocess.run", side_effect=run), \
                 m.patch.object(airuleset, "_current_user",
-                               return_value="simap"):
+                               return_value="simap1"):
             rc = airuleset.cmd_gk_request(
                 self._args(title="Adopt the pipeline", body="detail"))
         self.assertIn(rc, (0, None))
@@ -1325,13 +1325,13 @@ class TestCmdGkRequest(unittest.TestCase):
         # `--add-label` call now, never baked into create -- same reason
         # as the origin label this test was originally about.
         self.assertNotIn("needs-gatekeeper", create, create)
-        self.assertNotIn("handed-by:simap", create)   # NOT baked into create
+        self.assertNotIn("handed-by:simap1", create)   # NOT baked into create
         edit_calls = [c for c in calls
                      if "issue" in c and "edit" in c and "--add-label" in c]
         self.assertTrue(
             any("needs-gatekeeper" in c for c in edit_calls), edit_calls)
         self.assertTrue(
-            any("40" in c and "handed-by:simap" in c for c in edit_calls),
+            any("40" in c and "handed-by:simap1" in c for c in edit_calls),
             edit_calls)
 
     def test_create_mode_origin_label_failure_never_drops_needs_gatekeeper(self):
@@ -1346,7 +1346,7 @@ class TestCmdGkRequest(unittest.TestCase):
         def run(argv, **kw):
             calls.append(argv)
             if "edit" in argv and "--add-label" in argv \
-                    and "handed-by:simap" in argv:
+                    and "handed-by:simap1" in argv:
                 return m.Mock(returncode=1, stdout="", stderr="403")
             if "issue" in argv and "create" in argv:
                 return m.Mock(returncode=0,
@@ -1356,7 +1356,7 @@ class TestCmdGkRequest(unittest.TestCase):
 
         with m.patch("subprocess.run", side_effect=run), \
                 m.patch.object(airuleset, "_current_user",
-                               return_value="simap"):
+                               return_value="simap1"):
             rc = airuleset.cmd_gk_request(
                 self._args(title="Adopt the pipeline", body="detail"))
         self.assertIn(rc, (0, None))
@@ -1412,13 +1412,13 @@ class TestCmdGkRequest(unittest.TestCase):
 
         with m.patch("subprocess.run", side_effect=run), \
                 m.patch.object(airuleset, "_current_user",
-                               return_value="simap"):
+                               return_value="simap1"):
             rc = airuleset.cmd_gk_request(
                 self._args(issue=5, comment="akcia"))
         self.assertIn(rc, (0, None))
         add_label_calls = [c for c in calls if "--add-label" in c]
         self.assertFalse(
-            any("handed-by:simap" in c for c in add_label_calls),
+            any("handed-by:simap1" in c for c in add_label_calls),
             add_label_calls)
         # needs-gatekeeper itself still went through
         self.assertTrue(any("needs-gatekeeper" in c for c in add_label_calls))

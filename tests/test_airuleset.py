@@ -3998,7 +3998,7 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.notify = notify
 
     def test_stream_users_route_to_the_expected_owner(self):
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["simap"], "zbynek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["simap1"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu2"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu3"], "zbynek")
@@ -4040,7 +4040,7 @@ class TestStreamNotifyOwnerRouting(TestCase):
         # (mirrors a fresh `bash -ic` probe, or any non-interactive hook
         # invocation) -- the mapped owner still resolves.
         with m.patch.dict(os.environ, {}, clear=True), \
-                m.patch.object(self.notify, "_current_user", return_value="simap"):
+                m.patch.object(self.notify, "_current_user", return_value="simap1"):
             self.assertEqual(self.notify.resolve_owner(), "zbynek")
 
     def test_david_routes_to_its_own_owner_not_zbyneks(self):
@@ -4077,7 +4077,7 @@ class TestStreamNotifyOwnerRouting(TestCase):
         # but the precedence itself must hold for a genuinely DIFFERENT
         # override too).
         with m.patch.dict(os.environ, {"AIRULESET_NOTIFY_OWNER": "someoneelse"}), \
-                m.patch.object(self.notify, "_current_user", return_value="simap"):
+                m.patch.object(self.notify, "_current_user", return_value="simap1"):
             self.assertEqual(self.notify.resolve_owner(), "someoneelse")
 
     def test_an_unmapped_user_falls_through_to_tmux_resolution(self):
@@ -4126,7 +4126,7 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.stream_redirect("montalu3"), "zbynek")
         # montalu4 → marek (airuleset#295) — see the sibling assertion above.
         self.assertEqual(self.notify.stream_redirect("montalu4"), "marek")
-        self.assertEqual(self.notify.stream_redirect("simap"), "zbynek")
+        self.assertEqual(self.notify.stream_redirect("simap1"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("miva1"), "zbynek")
         # david is self-mapped — the redirect is a documented no-op for it.
         self.assertEqual(self.notify.stream_redirect("david"), "david")

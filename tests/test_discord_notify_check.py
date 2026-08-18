@@ -69,12 +69,12 @@ class TestDiscordNotifyCheckSshHint(TestCase):
         return buf.getvalue()
 
     def test_hint_includes_pinned_identity_for_simap(self):
-        # simap@subdev pins ~/.secrets/gatekeeper_access_ed25519 in REMOTE_HOSTS.
+        # simap1@subdev pins ~/.secrets/gatekeeper_access_ed25519 in REMOTE_HOSTS.
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(airuleset, "_whoami", return_value="simap"):
+            with mock.patch.object(airuleset, "_whoami", return_value="simap1"):
                 out = self._run(tmp)
         self.assertIn("-i ~/.secrets/gatekeeper_access_ed25519", out)
-        self.assertIn("simap@100.118.174.27", out)
+        self.assertIn("simap1@100.118.174.27", out)
         self.assertNotIn("ssh <this-host>", out)
 
     def test_hint_includes_pinned_identity_for_david(self):
