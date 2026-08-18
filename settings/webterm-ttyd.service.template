@@ -1,0 +1,39 @@
+# airuleset web terminal — ttyd gateway (systemd --user unit, managed by airuleset).
+#
+# Installed ONLY on dev1 (the single gateway that holds every fleet ssh identity)
+# by `airuleset.py install` via setup_webterm_service() — unlike the File-Drop
+# unit, which runs on every box. ExecStart runs the generated launcher script
+# ({{LAUNCH_SCRIPT}} is substituted with the absolute path at install time); the
+# launcher reads the basic-auth credential from a mode-600 file and execs ttyd on
+# 127.0.0.1:7681. tailscale serve fronts it tailnet-only.
+#
+# Deliberately LIGHT hardening: this service spawns interactive ssh + tmux child
+# processes (it needs ~/.ssh, ~/.secrets, AF_UNIX for ssh-agent/control sockets),
+# so the filedrop unit's ProtectSystem=strict / RestrictAddressFamilies would
+# break it. The security boundary is tailnet-only exposure + ttyd basic-auth, not
+# a service sandbox.
+#
+# Do not edit the installed copy in ~/.config/systemd/user/ by hand — edit this
+# template and re-run `python3 airuleset.py install`.
+
+[Unit]
+Description=airuleset web terminal — ttyd fleet gateway (dev1-only)
+Documentation=https://github.com/zbynekdrlik/airuleset
+After=network-online.target
+Wants=network-online.target
+# Restart loop guard: more than StartLimitBurst restarts in the interval = stop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env bash {{LAUNCH_SCRIPT}}
+Restart=on-failure
+RestartSec=5
+# ttyd forks one child (ssh + remote tmux) per connected client — ~20 sessions
+# open at once is the design target; keep the caps generous.
+MemoryMax=512M
+TasksMax=512
+
+[Install]
+WantedBy=default.target
