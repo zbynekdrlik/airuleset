@@ -42,6 +42,19 @@ evidence — this job only SURFACES the audit back into the loop's attention
 Combining both directions into ONE ping (vs a separate I-nudge) is the #552 design
 choice: ONE keystroke/day covering the whole partition audit, not two.
 
+ACCEPTED TRADE-OFF (both #552 adversarial reviews flagged this independently — it is
+INTENDED, not a defect): the I direction fires on `I > 0`, which is the DEFAULT
+state of any productive armed loop, so this delivers a ~daily "re-audit your I
+list" keystroke into EVERY healthy backlog-carrying loop even when nothing is
+actually mislabelled — broader than #547's W-parked-only, drain-on-landing trigger.
+That is the ONLY possible mechanization of an UN-JUDGEABLE audit (the watchdog
+cannot tell a mislabelled `I` member from a correctly-`I` one — that IS the session
+judgment it delegates), and it is bounded to ONE consolidated ping/day, gated to
+armed loops, and env-tunable via `AIRULESET_OPS_WAIT_RECHECK_CADENCE_S` (floored at
+6h). The owner requested exactly this (a daily nudge for `I > 0`, one ping not two —
+the ticket's own §3), so the interruption/token cost is the accepted price of never
+letting the montalu3 inflated-`I` drift recur silently.
+
 DESIGN (#486 reuse, ZERO new delivery/fetch primitives): this rides
 `goal_lane_sweep`'s EXISTING armed-candidate-pane loop (which already resolves
 pid/cwd/sid/tpath/loc + the `glance`, reads the structured `state["goal_mark"]`
