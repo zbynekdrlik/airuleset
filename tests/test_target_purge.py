@@ -1,8 +1,8 @@
 """Tier-0 target/ retention — auto-purge stale build artefacts (#315).
 
-Tier 0 (`no-local-builds.md`'s DEFAULT) bans HEAVY local builds but still
-legitimately fills `target/` via the cheap checks it DOES allow (`cargo
-check`/`clippy`/`test --no-run`) — and nothing ever purged it. The
+Tier 0 (`no-local-builds.md`'s DEFAULT) now bans ALL local cargo compilation
+(#557), but a `target/` can still exist from historical local builds, a prior
+Tier-1/2 stint, or CI-fetched artefacts — and nothing ever purged it. The
 `local-builds` skill's own purge rule is on-demand prose with no caller
 anywhere in this repo, so growth was monotonic: songplayer 10.1G, spinbike
 8.3G, camera-box 4.4G, ~23GB of dead weight on dev1 alone, "znova a znova"

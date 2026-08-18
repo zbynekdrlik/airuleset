@@ -215,7 +215,8 @@ gh pr list --state merged --search "fixes #<number> OR closes #<number> OR resol
 # 5. VERIFY THE CURRENT STATE — reproduce LIVE, don't trust the months-old repro in the issue
 #    — old issue says "function X panics on empty input"; check if X still exists, still panics
 grep -rn "<function or symbol>" src/ 2>/dev/null
-# For Rust: cargo check; for behavioral claims: REPRODUCE with the tools you actually have —
+# For Rust: grep the source above / let CI compile (cargo check et al. are CI-only on Tier-0, #557);
+#   for behavioral claims: REPRODUCE with the tools you actually have —
 #   the running app, MCP tools (e.g. read-only DB/service bridges), curl, SSH, a quick repro test.
 #   A bug that no longer reproduces against current dev is already solved → propose closing it.
 #   (See verify-issue-still-valid.md and autonomous-verification.md — you have eyes, use them.)
