@@ -3289,6 +3289,15 @@ def _watchdog_gk_selfservice_fetch(root):
     return _fetch_gk_action_requests(root)
 
 
+def _watchdog_gkorphan_fetch(root):
+    """Job 36's real gh fetch (#551) — the orphaned gk-hand-off-marker
+    candidate facts (an `in:comments` search narrowed by per-candidate
+    comment/label/timeline reads). Same network-free-tests wiring as jobs
+    8/11/31."""
+    from watchdog import _fetch_gk_orphan_candidates
+    return _fetch_gk_orphan_candidates(root)
+
+
 def _watchdog_owner_decision_fetch(home=None):
     """#461 daily owner-decision digest fetch — the box-wide aggregate of open
     `needs-answer`/`needs-decision` tickets. Wired here (not inside run_once) so
@@ -3924,6 +3933,12 @@ def cmd_watchdog(args):
                     # the SAME coordinator host check job 16/19 use (only dev1
                     # has the fleet.jsonl it reads). Internally cadence-gated.
                     conformance_hb_enabled=conformance_hb_enabled,
+                    # Job 36 (#551) — orphaned gk hand-off marker backstop.
+                    # Runs on the SUPERVISOR box only (internally gated), for
+                    # cross-stream repos; gated on this fetch being wired
+                    # (network-free tests for every other job, like jobs
+                    # 8/11/31). Internally 6h-cadenced.
+                    gkorphan_fetch=_watchdog_gkorphan_fetch,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

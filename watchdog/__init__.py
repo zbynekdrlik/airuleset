@@ -972,6 +972,13 @@ GKREQ_NUDGE = ("gk-request backstop: open needs-gatekeeper tickets %s in %s — 
 # cost per 30-min sweep for marginal precision).
 GKREQ_STALE_HANDOFF_S = 6 * 3600
 
+# (#551) The orphaned gk-hand-off-marker backstop (job 36) runs on a GENEROUS
+# cadence: an orphaned mutated marker is a RARE event, and each sweep bursts up
+# to `_SELFSERVICE_MAX_CANDIDATES` `gh issue view` calls (comments) plus a
+# paginated timeline read for the ≈0 candidates past the cheap gate — too
+# costly for the 30-min gk-request cadence, cheap at 6h (#172/#504 budget).
+GKORPHAN_INTERVAL = 6 * 3600
+
 # (#399) Hand-off rows carrying any of these labels never feed the stale
 # alarm: `prio:bounce` = the ticket is back in the SUB-DEV's court (the same
 # bounce-overrides-a-hand-off direction the footer's own handed-off logic
@@ -1697,6 +1704,11 @@ from watchdog.cross_stream import (  # noqa: E402
     _fetch_gk_action_requests as _fetch_gk_action_requests,
     _apply_selfservice_bounce as _apply_selfservice_bounce,
     gk_selfservice_bounce as gk_selfservice_bounce,
+    _gk_marker_kinds as _gk_marker_kinds,
+    _gk_orphan_decide as _gk_orphan_decide,
+    _fetch_gk_orphan_candidates as _fetch_gk_orphan_candidates,
+    _apply_gk_orphan_reconcile as _apply_gk_orphan_reconcile,
+    gk_orphan_marker_sweep as gk_orphan_marker_sweep,
     _cached_backlog_open as _cached_backlog_open,
     _cached_backlog_count as _cached_backlog_count,
 )
@@ -1746,8 +1758,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              progress_dir=None, questions_path=None,
              owner_decision_fetch=None, gk_selfservice_fetch=None,
              u_reconcile_clear=None, conformance_root=None,
-             conformance_is_target=None, conformance_hb_enabled=False):
-    """Scan every `claude` pane once. 35 numbered jobs per poll — 29 LIVE and 6
+             conformance_is_target=None, conformance_hb_enabled=False,
+             gkorphan_fetch=None):
+    """Scan every `claude` pane once. 36 numbered jobs per poll — 30 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2241,6 +2254,32 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           (#537); UNDETERMINED never drops an episode (#486-G5); dry_run mutates
           nothing. See `run_conformance_heartbeat_check` in
           `watchdog/conformance_heartbeat.py`.
+      (36) (only when `gkorphan_fetch` is given) ORPHANED gk HAND-OFF MARKER
+          BACKSTOP (#551) — the SUPERVISOR-side detection mirror of the
+          prevention hook `block-raw-gatekeeper-action-comment.sh`. The miva1
+          incident: a stream HAND-WROTE a MUTATED `GATEKEEPER-ACTION
+          (spresnenie …):` marker COMMENT (a parenthetical before the colon)
+          instead of using `airuleset.py gk-request`; the repo auto-label
+          workflow matches only line-start `GATEKEEPER-ACTION:` so no
+          `needs-gatekeeper` label landed, and job 11's queries never scan
+          COMMENTS — the hand-off was invisible to every layer and the stream
+          parked for hours on a NEVER-DELIVERED request. On a supervisor box,
+          for a cross-stream repo, ONE cheap `in:comments` search narrows the
+          field; each candidate is then verified from its own comments/labels
+          against a FALSIFIABLE five-condition orphan gate biased hard to
+          SILENCE (a MUTATED marker ∧ NO proper `GATEKEEPER-ACTION:` sibling ∧
+          not currently labeled ∧ `needs-gatekeeper` NEVER in the PAGINATED
+          label timeline ∧ no GA-title). The token is pervasive in this repo's
+          comment history (every gk-request leaves a marker forever), so a
+          naive "token + no label = orphan" rule would false-accuse ~44
+          processed tickets (measured live) — hence the narrow gate. A genuine
+          orphan is RECONCILED supervisor-side (evidence comment + add
+          `needs-gatekeeper` → job 11 nudges the supervisor), a label-add
+          failure surfaces via ONE deduped ping. Every candidate's verdict is
+          logged (#486); a gh error reports nothing (never a false accusation);
+          the `seen` dedup is dry-run-safe (#516 F1). Generous 6h cadence,
+          candidates capped freshest-first. See `gk_orphan_marker_sweep` in
+          `watchdog/cross_stream.py`.
     Returns a list of human-readable action log lines (for --verbose / tests).
     `log_fn` (#172), when given, is called with EACH line as it is decided —
     incrementally, job by job — rather than the caller only ever seeing the
@@ -3970,6 +4009,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              now, state, send_fn=send_fn, dry_run=dry_run,
              persist=lambda: save_state(state_path, state)),
          "conformance-heartbeat error")
+
+    # Job 36 (#551) — orphaned gk hand-off marker backstop. Gated on
+    # `gkorphan_fetch` being wired (network-free tests for every other job,
+    # exactly like jobs 8/11/31). Supervisor-box + cross-stream-repo only;
+    # generous 6h internal cadence; best-effort, never a false accusation.
+    _add("gk_orphan_marker_sweep", lambda: gkorphan_fetch is not None,
+         lambda: gk_orphan_marker_sweep(
+             now, run, state, send_fn=send_fn, dry_run=dry_run,
+             gh_fetch=gkorphan_fetch,
+             persist=lambda: save_state(state_path, state)),
+         "gk-orphan-marker-sweep error")
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
