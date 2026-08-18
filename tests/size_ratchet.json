@@ -28,7 +28,7 @@
     "filedrop/upload_server.py": 309,
     "filedrop/vault.py": 850,
     "filedrop/vault_server.py": 385,
-    "notify/__init__.py": 2396,
+    "notify/__init__.py": 2404,
     "statusbar.py": 685,
     "subagent_statusline.py": 300,
     "tests/_goal_arm_helpers.py": 261,
@@ -274,7 +274,7 @@
   "rule_bytes": {
     ".claude/rules/airuleset-internals.md": 8192,
     ".claude/rules/internals-burn.md": 51200,
-    ".claude/rules/internals-cli.md": 53300,
+    ".claude/rules/internals-cli.md": 50033,
     ".claude/rules/internals-filedrop.md": 51200,
     ".claude/rules/internals-hooks.md": 51200,
     ".claude/rules/internals-notify.md": 51200,
