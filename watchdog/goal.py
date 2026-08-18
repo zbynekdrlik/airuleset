@@ -1630,8 +1630,22 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
 # --------------------------------------------------------------------------- #
 
 GOAL_LANE_IDLE_S = 15 * 60
-GOAL_LANE_INTERVAL_S = 15 * 60
+# #530 -- HARD HOURLY CAP: no single sid gets a second lane-nudge within this
+# window of its last landed one, on EITHER branch. Bumped 15min->1h (owner
+# directive: "nesmie sa to diať častejšie ako raz za hodinu"). The empty-lane
+# cooldown and the under-saturated ineffective-backoff ladder's FIRST stage both
+# equal this value, so the cap is one shared check in `_lane_cooldown_decision`
+# (`skip:hourly-cap`), never a new layer -- `llast` is written only on a landed
+# nudge and no counter reset touches it, so the cap holds regardless of resets.
+GOAL_LANE_INTERVAL_S = 60 * 60
 GOAL_LANE_MAX_NUDGES = 2
+# #530 -- EMPTY-LANE MIN-BACKLOG floor: a fully-stalled box (0 dispatched
+# workers) is nudged only with at least this many genuinely-workable open
+# tickets. A lone open umbrella epic / 1-2 held-or-foreign items reads as
+# "workable" for core-quals but is not dispatchable, and nudging it produced the
+# reported gk storm (nudge -> "nič workable" -> nudge ...). The UNDER-SATURATED
+# branch keeps its own stricter surplus floor (>= GOAL_LANE_UNDERSAT_SURPLUS).
+GOAL_LANE_MIN_BACKLOG = 3
 GOAL_LANE_LIVE_WINDOW_S = 15 * 60
 
 # #442 -- the lane-fill path's OWN "live conversation" definition. The
@@ -1919,7 +1933,11 @@ GOAL_LANE_UNDERSAT_SURPLUS = 5
 # stash-abort give-up): a fleet as full as its workable backlog allows is the
 # healthy steady state, not an error -- pinging it would be the exact noise this
 # fix removes; the journalled decision line every sweep is the anti-silence.
-GOAL_LANE_INEFFECTIVE_BACKOFF_S = (15 * 60, 30 * 60, 60 * 60, 120 * 60)
+# #530: the FIRST stage EQUALS GOAL_LANE_INTERVAL_S (the 1h hourly cap), so an
+# EFFECTIVE under-saturated fleet is bounded to 1 nudge/hour like the empty-lane
+# branch; consecutive INEFFECTIVE nudges widen to 2h then 4h -- never permanently
+# silent (re-probes at the widest stage). Bumped from the pre-#530 15/30/60/120min.
+GOAL_LANE_INEFFECTIVE_BACKOFF_S = (60 * 60, 120 * 60, 240 * 60)
 
 
 def _lane_effective_interval(ineffective_streak):
@@ -1956,31 +1974,41 @@ def _lane_effectiveness(rec, eff_workers, backlog_n):
 
 def _lane_cooldown_decision(rec, now, under_saturated, eff_workers, backlog_n,
                             loc, live_workers, waiters):
-    """#509 -- effectiveness-aware cooldown gate. Returns (skip, logline, moved):
-    whether to hold this sweep, its decision line, and the prior nudge's
+    """#509/#530 -- effectiveness-aware cooldown gate. Returns (skip, logline,
+    moved): whether to hold this sweep, its decision line, and the prior nudge's
     effectiveness verdict (`_lane_effectiveness`, handed back so the CALLER
     advances the streak ONLY on a real delivery, never a delivery abort).
 
-    Empty-lane (not under_saturated): the original fixed GOAL_LANE_INTERVAL_S
-    cooldown, unchanged -- that branch keeps its own GOAL_LANE_MAX_NUDGES give-up.
+    #530 HARD HOURLY CAP: the FIRST timing check applies to BOTH branches -- no
+    sid gets a second lane-nudge within GOAL_LANE_INTERVAL_S (1h) of its last
+    landed one, regardless of branch or any counter reset (`llast` is set only on
+    a landed nudge and no reset touches it). It subsumes the old empty-lane fixed
+    cooldown, so the empty-lane branch is now fully governed by it.
 
-    Under-saturated: the interval widens along GOAL_LANE_INEFFECTIVE_BACKOFF_S per
-    consecutive ineffective nudge; a nudge that MOVED the fleet resets the streak
-    to 0 HERE (so the interval narrows back at once), holding at the cap forever --
-    never permanently silent."""
+    Under-saturated: PAST the hourly cap the interval widens FURTHER along
+    GOAL_LANE_INEFFECTIVE_BACKOFF_S per consecutive ineffective nudge; a nudge
+    that MOVED the fleet resets the streak to 0 (so the interval narrows back).
+    The effectiveness reset is computed BEFORE the hourly-cap early-return so a
+    mid-cooldown recovery still resets the streak (#509 semantics preserved);
+    holds at the cap forever -- never permanently silent."""
     last = rec.get("llast")
     if last is None:
         return False, None, None
-    if not under_saturated:
-        if (now - last) < GOAL_LANE_INTERVAL_S:
-            return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                          "skip:cooldown remaining=%ds"
-                          % (loc, live_workers, waiters, backlog_n,
-                             int(GOAL_LANE_INTERVAL_S - (now - last)))), None
-        return False, None, None
-    moved = _lane_effectiveness(rec, eff_workers, backlog_n)
+    # #530 -- under-saturated effectiveness: an EFFECTIVE prior nudge (a lane
+    # appeared) resets the streak so the interval narrows back. Computed before
+    # the hourly cap so a recovery observed inside the cooldown still resets.
+    moved = _lane_effectiveness(rec, eff_workers, backlog_n) if under_saturated \
+        else None
     if moved is True:
         rec["lineff"] = 0
+    # #530 -- HARD HOURLY CAP, both branches.
+    if (now - last) < GOAL_LANE_INTERVAL_S:
+        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                      "skip:hourly-cap remaining=%ds"
+                      % (loc, live_workers, waiters, backlog_n,
+                         int(GOAL_LANE_INTERVAL_S - (now - last)))), moved
+    if not under_saturated:
+        return False, None, moved
     streak = rec.get("lineff", 0)
     interval = _lane_effective_interval(streak)
     if (now - last) < interval:
@@ -2014,6 +2042,10 @@ def _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, moved, n, n
         rec["lnw"] = eff_workers
         rec["lnb"] = backlog_n
     rec["ln"] = n + 1
+    # #530 -- backlog at this landed nudge, the empty-lane give-up baseline. The
+    # idle-branch reset (`_lane_idle_reset`) clears the count give-up ONLY when
+    # the current backlog differs from this, never on mere transcript freshness.
+    rec["lnbk"] = backlog_n
     rec["llast"] = now
 
 
@@ -2024,6 +2056,39 @@ def _lane_clear_effectiveness(rec):
     itself a reset condition."""
     for k in ("lineff", "lnw", "lnb"):
         rec.pop(k, None)
+
+
+def _lane_idle_reset(rec, backlog_n):
+    """#530 -- the EMPTY-LANE idle-fresh reset, split by what each counter means.
+
+    Pre-#530 this reset (`if rec.get("ln") or rec.get("lna"): rec.update({"ln":0,
+    "lpinged":False,"lna":0})`) fired UNCONDITIONALLY on transcript freshness
+    (`idle < GOAL_LANE_IDLE_S`). Root-cause trace: the nudge's OWN delivery
+    appends a `user` turn (CC writes it on submit), refreshing the transcript
+    mtime, so the very next sweep reads idle < 15min and this reset wiped `ln`
+    ONE sweep after every nudge -- making GOAL_LANE_MAX_NUDGES structurally
+    unreachable on any live supervisor (the give-up ping never fired, nudges
+    kept coming). Split:
+
+    * STASH-ABORT streak (`lna`/`lnpark`): a DELIVERY-mechanics failure against a
+      now-gone draft -- still resets whenever the session is active again
+      (unchanged #442-review F1 behavior).
+    * COUNT give-up (`ln`): resets ONLY when the BACKLOG genuinely changed since
+      the last nudge (`backlog_n != rec["lnbk"]`) -- a fresh backlog situation is
+      new work to (re-)consider; transcript freshness / worker oscillation alone
+      must NOT re-grant the 2-nudge budget.
+    * shared give-up PING flag (`lpinged`): cleared only once NEITHER give-up is
+      still latched (`ln < GOAL_LANE_MAX_NUDGES and lna < GOAL_LANE_MAX_STASH_ABORTS`),
+      so a still-holding count give-up never re-pings the owner every idle sweep.
+    """
+    if rec.get("lna"):
+        rec["lna"] = 0
+        rec.pop("lnpark", None)   # #479 -- clear abort backoff on the streak reset
+    if rec.get("ln") and backlog_n != rec.get("lnbk"):
+        rec["ln"] = 0
+    if (rec.get("ln", 0) < GOAL_LANE_MAX_NUDGES
+            and rec.get("lna", 0) < GOAL_LANE_MAX_STASH_ABORTS):
+        rec.pop("lpinged", None)
 
 
 def _lane_boundary_ok(cap):
@@ -2306,6 +2371,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     under_saturated = live_workers > 0
     if not under_saturated:
         _lane_clear_effectiveness(rec)   # #509: a lane-drop reset condition
+        if backlog_n < GOAL_LANE_MIN_BACKLOG:   # #530 -- empty-lane floor
+            _lane_skip(logs, loc, "skip:min-backlog (backlog=%d < %d)"
+                       % (backlog_n, GOAL_LANE_MIN_BACKLOG))
+            return logs, False
     elif (backlog_n - live_workers) < GOAL_LANE_UNDERSAT_SURPLUS:
         # #509 SURPLUS FLOOR (under-saturated only; see GOAL_LANE_UNDERSAT_SURPLUS).
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
@@ -2338,14 +2407,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # window and the per-fire cooldown below (so a fresh transcript never spams
     # -- it just stops SILENTLY excluding the busy state).
     if not under_saturated and idle < GOAL_LANE_IDLE_S:
-        # #442-review F1: the session-active give-up reset lives HERE now
-        # (0-worker branch only), never at the top -- a BUSY under-saturated
-        # session must NOT re-arm every sweep, or its stash-abort streak never
-        # reaches its cap and the give-up stays unreachable (the give-up is only
-        # ever evaluated at the idle prompt anyway, which is exactly here).
-        if rec.get("ln") or rec.get("lna"):
-            rec.update({"ln": 0, "lpinged": False, "lna": 0})
-            rec.pop("lnpark", None)   # #479 -- clear abort backoff on reset
+        _lane_idle_reset(rec, backlog_n)   # #530 -- backlog-gated give-up reset
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d idle=%ds "
                     "-> skip:idle (empty-lane, < %dm since last transcript write)"
                     % (loc, live_workers, waiters, backlog_n, int(idle),
