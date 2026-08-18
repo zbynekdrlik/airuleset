@@ -623,6 +623,34 @@ class TestIsCloseDetectorHardening(TestCase):
                 me="someoneelse", author="zbynekdrlik")
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    def test_blocks_patch_close_via_value_quoted_state_double(self):
+        # #540 review FINDING 1 (MAJOR): `-f state="closed"` — quoting a shell
+        # VALUE the ordinary way puts a quote between `=` and `closed`, so the
+        # literal `state=closed` grep missed it. This is NOT obfuscation — it is
+        # the most natural way a model writes a shell value, and it escaped.
+        r = run('gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 -f state="closed"',
+                self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("branch-merge", r.stderr)
+
+    def test_blocks_patch_close_via_value_quoted_state_single(self):
+        r = run("gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 -f state='closed'",
+                self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_blocks_patch_close_via_value_quoted_raw_field_state(self):
+        r = run('gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 '
+                '--raw-field state="closed"', self.branch,
+                me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_value_quoted_state_open_reopen(self):
+        # The widened `state=["']?closed` must still NOT match a value-quoted
+        # reopen — precision guard against over-widening FINDING 1's fix.
+        r = run('gh api -X PATCH repos/zbynekdrlik/odoo-erp/issues/3313 -f state="open"',
+                self.branch, me="someoneelse", author="zbynekdrlik")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_input_body_patch_blocks_even_with_acceptance_labels(self):
         # The `gh api PATCH` form is NEVER exempted — even a perfect acceptance
         # label set cannot allow the --input body form (mirror of

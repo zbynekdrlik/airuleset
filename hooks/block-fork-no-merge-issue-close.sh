@@ -38,27 +38,28 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null ||
 [ -z "$CMD" ] && exit 0
 
 # #540 (was #533 review M3): a `gh api` PATCH to the ISSUE resource is a
-# close-shaped WRITE. `state=closed` may be VISIBLE in argv, OR HIDDEN in the
-# request BODY — a `--input <file|->` body, or a `=@file`-valued field — where
-# the literal `state=closed` never appears in argv (the escape #540 exists for).
-# Treat the hidden-body case as a close too. This is COMPLETE at argv level:
-# gh api can set `state` FIVE ways — `-f/-F/--field/--raw-field state=closed`
-# (literal, the `state=closed` grep), `-F state=@file` (the `=@` grep), and
-# `--input file|-` (the `--input` grep) — all covered. It never READS the body
+# close-shaped WRITE. `state=closed` may be VISIBLE in argv (bare OR value-quoted
+# — the ordinary `-f state="closed"` / `state='closed'` shell shape, #540 review
+# FINDING 1), OR HIDDEN in the request BODY — a `--input <file|->` body, or a
+# `=@file`-valued field — where the literal never appears in argv at all (the
+# escape #540 exists for). Treat all of these as a close. It never READS the body
 # (a `--input -` stdin body is fundamentally invisible to a PreToolUse argv
 # scan; the `--input` TOKEN is the fail-safe marker instead). A visible non-close
-# write (a `-f state=open` reopen, a non-state field with no --input/@file) stays
-# a non-close, so a `issues/N` mention inside a field VALUE on a NON-issue
-# endpoint is NOT over-blocked. The GET/read predicate (`gh api …/issues/N --jq
-# '.state=="closed"'`, no PATCH method) is excluded by the method requirement.
-# The method separator class `[[:space:]=]` catches the GLUED `--method=PATCH`
-# (#533 review M3) as well as `-X PATCH`. Called ONLY from `if`/`elif` conditions
-# below, so `set -e` is ignored inside the body — the `grep && return 0` chain
-# never aborts the hook on a no-match.
+# write (a `-f state=open`/`state="open"` reopen, a non-state field with no
+# --input/@file) stays a non-close, so a `issues/N` mention inside a field VALUE
+# on a NON-issue endpoint is NOT over-blocked. The GET/read predicate (`gh api
+# …/issues/N --jq '.state=="closed"'`, no PATCH method) is excluded by the method
+# requirement. The method separator class `[[:space:]=]` catches the GLUED
+# `--method=PATCH` (#533 review M3) as well as `-X PATCH`. This covers the argv
+# shapes a well-meaning stream uses; genuinely out-of-band close routes (a
+# GraphQL `closeIssue` mutation, obfuscation) are documented residuals on the
+# ticket, NOT claimed complete here (#540 review FINDING 1/3). Called ONLY from
+# `if`/`elif` conditions below, so `set -e` is ignored inside the body — the
+# `grep && return 0` chain never aborts the hook on a no-match.
 _is_patch_close_cmd() {
     printf '%s' "$1" | grep -qE 'gh[[:space:]]+api[^|]*issues/[0-9]+' || return 1
     printf '%s' "$1" | grep -qE '(-X|--method)[[:space:]=]*[Pp][Aa][Tt][Cc][Hh]' || return 1
-    printf '%s' "$1" | grep -qE 'state=closed' && return 0                     # visible
+    printf '%s' "$1" | grep -qE 'state=["'\'']?closed' && return 0             # visible (bare or value-quoted, #540 F1)
     printf '%s' "$1" | grep -qE '(^|[[:space:]])--input([[:space:]=]|$)' && return 0  # hidden body (file/-/=file)
     printf '%s' "$1" | grep -qE '(-F|--field)[[:space:]=]+[^[:space:]]*=@' && return 0  # -F state=@file
     return 1
