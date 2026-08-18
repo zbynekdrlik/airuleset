@@ -228,6 +228,53 @@ class TestPendingRemoteHostsAreRegisteredButNeverSshd(TestCase):
                       "the live base account must still be provisioned")
 
 
+class TestFleetBurnSkipsPendingHosts(TestCase):
+    """#537 review 🔴: the pending filter must cover the FLEET-BURN ssh path
+    (watchdog job 16, hourly on dev1) and the burn/delegation `--host all`
+    paths too — `_deployable_hosts()` must guard EVERY REMOTE_HOSTS ssh
+    consumer, not only the deploy loop + soniox. A pending account does not
+    exist, so an hourly ssh to it is the exact fail2ban strike the flag exists
+    to prevent."""
+
+    def _hosts(self):
+        return [
+            {"name": "montalu@subdev", "host": "9.9.9.9", "user": "montalu",
+             "repo_path": "~/devel/airuleset"},
+            {"name": "montalu1@subdev", "host": "9.9.9.9", "user": "montalu1",
+             "repo_path": "~/devel/airuleset", "pending": True},
+        ]
+
+    def test_watchdog_fleet_fetch_never_rows_a_pending_host(self):
+        import cli_burn
+        rowed = []
+
+        def fake_row(remote, want_hour_bucket, timeout=15):
+            rowed.append(remote["name"])
+            return {"error": "stub"}
+
+        with m.patch.object(cli_burn, "_fleet_remote_row", side_effect=fake_row):
+            result = airuleset._watchdog_fleet_fetch(self._hosts(), want_hour_bucket=123)
+        self.assertIn("montalu@subdev", rowed)
+        self.assertNotIn(
+            "montalu1@subdev", rowed,
+            "a pending account must never be ssh'd by the hourly fleet-burn job")
+        self.assertNotIn("montalu1@subdev", result)
+
+    def test_watchdog_fleet_fetch_default_excludes_pending_from_real_registry(self):
+        # hosts=None must resolve to REMOTE_HOSTS MINUS pending (montalu1 etc.).
+        import cli_burn
+        rowed = []
+
+        def fake_row(remote, want_hour_bucket, timeout=15):
+            rowed.append(remote["user"])
+            return {"error": "stub"}
+
+        with m.patch.object(cli_burn, "_fleet_remote_row", side_effect=fake_row):
+            airuleset._watchdog_fleet_fetch(hosts=None, want_hour_bucket=123)
+        for pending in ("montalu1", "david1", "simap1"):
+            self.assertNotIn(pending, rowed, pending)
+
+
 class TestC2GuardWithAliasedSlice(TestCase):
     """The C2 false-empty guard used to key on `len(quals) == 1`. The
     symmetric alias makes a shared-account slice carry TWO labels, so the

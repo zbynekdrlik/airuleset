@@ -146,7 +146,13 @@ def _stream_rename_equivalents(name):
     The ONE expansion primitive `_slice_quals()` and `_ticket_is_stream_
     labeled()` both consume, so the transition alias has a single definition.
     Reads `airuleset.STREAM_RENAME_ALIASES` (the facade re-export) so a test
-    patch is honoured — never `cli_fleet` directly (the L-E rule)."""
+    patch is honoured — never `cli_fleet` directly (the L-E rule).
+
+    Invariant: the table must stay FLAT — no name is both a key AND a value
+    (old names and new names disjoint). The old->new / new->old logic resolves
+    exactly ONE alias edge per name; a CHAINED table (`{a: b, b: c}`) would
+    resolve `b` only forward (`b->c`) and miss the reverse `a->b`, so a rename
+    of a rename must be a new flat entry (`a->c`), never a chain."""
     import airuleset
     aliases = airuleset.STREAM_RENAME_ALIASES
     out = [name]

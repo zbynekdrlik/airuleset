@@ -279,13 +279,19 @@ def _watchdog_fleet_fetch(hosts=None, want_hour_bucket=None):
     `_fleet_remote_row`). Never raises; a single bad or stale host degrades
     to `{"error": ...}` in its own slot rather than dropping the whole
     fleet."""
-    if hosts is None:
-        # #433 cluster J: REMOTE_HOSTS is a shared deploy registry that stays
-        # in airuleset.py; reach it via a deferred import (never a module-top
-        # back-import — CLI-mode partial-init crash). Lazy: fleet_burn_job
-        # always passes `hosts` explicitly, so this never fires in production.
-        import airuleset
-        hosts = airuleset.REMOTE_HOSTS
+    # #433 cluster J: REMOTE_HOSTS is a shared deploy registry that stays in
+    # airuleset.py; reach it via a deferred import (never a module-top
+    # back-import — CLI-mode partial-init crash). #537: `_deployable_hosts()`
+    # both resolves the `hosts is None` default (to REMOTE_HOSTS) AND filters
+    # out `"pending": True` rename targets — a pending account does NOT exist
+    # on the box, so ssh'ing it in this HOURLY fleet-burn (watchdog job 16) is
+    # a fail2ban strike (#341/#300/#326), the exact hazard the pending flag
+    # exists to prevent. The import is no longer lazy, but airuleset is already
+    # resident here in BOTH real call contexts (run_once's own `import
+    # airuleset` in the watchdog path; cmd_burn/cmd_delegation import it too),
+    # so no second-execution cost is added.
+    import airuleset
+    hosts = airuleset._deployable_hosts(hosts)
     if want_hour_bucket is None:
         import datetime
         want_hour_bucket = int(datetime.datetime.now(datetime.timezone.utc).timestamp() // 3600)
@@ -347,12 +353,17 @@ def cmd_burn(args):
     host_arg = getattr(args, "host", None)
     if host_arg:
         import airuleset  # #433 cluster J: REMOTE_HOSTS lives in airuleset.py
+        # #537: a pending (not-yet-live rename) account doesn't exist, so it is
+        # never a valid target — filter it out of `--host all` AND the per-name
+        # lookup (a premature `--host montalu1@subdev` falls to the normal
+        # "unknown host" path, listing only real choices). fail2ban safety.
+        live_hosts = airuleset._deployable_hosts()
         if host_arg == "all":
-            targets = airuleset.REMOTE_HOSTS
+            targets = live_hosts
         else:
-            targets = [h for h in airuleset.REMOTE_HOSTS if h["name"] == host_arg]
+            targets = [h for h in live_hosts if h["name"] == host_arg]
             if not targets:
-                names = ", ".join(h["name"] for h in airuleset.REMOTE_HOSTS)
+                names = ", ".join(h["name"] for h in live_hosts)
                 print(f"ERROR: unknown --host '{host_arg}' — choices: {names}, all",
                       file=sys.stderr)
                 sys.exit(1)
@@ -513,12 +524,17 @@ def cmd_delegation(args):
     host_arg = getattr(args, "host", None)
     if host_arg:
         import airuleset  # #433 cluster J: REMOTE_HOSTS lives in airuleset.py
+        # #537: a pending (not-yet-live rename) account doesn't exist, so it is
+        # never a valid target — filter it out of `--host all` AND the per-name
+        # lookup (a premature `--host montalu1@subdev` falls to the normal
+        # "unknown host" path, listing only real choices). fail2ban safety.
+        live_hosts = airuleset._deployable_hosts()
         if host_arg == "all":
-            targets = airuleset.REMOTE_HOSTS
+            targets = live_hosts
         else:
-            targets = [h for h in airuleset.REMOTE_HOSTS if h["name"] == host_arg]
+            targets = [h for h in live_hosts if h["name"] == host_arg]
             if not targets:
-                names = ", ".join(h["name"] for h in airuleset.REMOTE_HOSTS)
+                names = ", ".join(h["name"] for h in live_hosts)
                 print(f"ERROR: unknown --host '{host_arg}' — choices: {names}, all",
                       file=sys.stderr)
                 sys.exit(1)
