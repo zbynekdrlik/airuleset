@@ -3548,6 +3548,59 @@ def _watchdog_backlog_fetch(cwd):
         return None
 
 
+def _watchdog_ops_wait_fetch(cwd):
+    """#547 — the parked W (`ops-wait`) member NUMBERS for THIS box's slice of
+    the repo at `cwd`, or None on any failure/refusal. The 1:1 sibling of
+    `_watchdog_backlog_fetch`: same authority-aware command choice
+    (`core-quals`/`slice-quals`), same `_repo_root(cwd=cwd)` resolution so the
+    child subprocess resolves authority exactly as it would inside that session's
+    own pane, same refuse→None contract — only the flag differs (`--ops-wait`
+    instead of `--count`) and the parse (member numbers, not a count). This RAW
+    fetch is uncached; the caller reads it through `ops_wait_recheck._cached_ops_wait`
+    (a per-repo TTL cache, the sibling of `_cached_backlog_count`) so it fires at
+    most once per repo per TTL, never every sweep.
+
+    The members come from the SAME `_partition_workable` derivation the footer's
+    `W N`, the `/goal` stop-proof's `--ops-wait` list, and the count all use —
+    NEVER a parallel query (#367/#181). The job-20 W re-check nudge (via
+    `goal_lane_sweep`'s `ops_wait_fetch` seam) reads these to re-surface a
+    long-parked W ticket into an armed loop's attention.
+
+    `--ops-wait` prints `number<TAB>createdAt<TAB>action<TAB>reason<TAB>title`
+    per member (oldest-first); field 0 is the issue number. A None return
+    (non-zero exit — the #181 untrustworthy-empty refusal — or an unparsable
+    line) is UNDETERMINED and the nudge job fails safe to no-nudge. An empty but
+    SUCCESSFUL result (exit 0, no lines) returns `[]` (genuinely no W parked),
+    which the job treats as "clear the tracking state". Wired HERE, like every
+    other network call in this file, so run_once's unit tests stay network-free."""
+    import subprocess
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
+    except Exception:
+        return None
+    cmd_name = "core-quals" if authority == "full" else "slice-quals"
+    try:
+        r = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), cmd_name, "--ops-wait"],
+            cwd=cwd, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    members = []
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        head = line.split("\t", 1)[0]
+        try:
+            members.append(int(head))
+        except ValueError:
+            return None   # a malformed line -> undetermined, never a partial set
+    return members
+
+
 def _watchdog_vault_purge():
     """Job 29's credential-store sweep (#144) — the injection point so run_once
     never imports the store (or touches a real `~/.claude/secrets/`) in a test.
@@ -3804,6 +3857,13 @@ def cmd_watchdog(args):
                     # extra call per window) consulted by job 20's
                     # goal-achieved backstop and job 10's widened wedge ping.
                     backlog_fetch=_watchdog_backlog_fetch,
+                    # #547 — job 20's W/ops-wait re-check nudge reads the parked
+                    # W member numbers per repo. The raw fetch is a per-cwd `gh`
+                    # read, but the orchestrator reads it through the module's own
+                    # per-repo TTL cache (`_cached_ops_wait`, the sibling of
+                    # `_cached_backlog_count`), so it fires at most once per repo
+                    # per OPS_WAIT_FETCH_TTL_S — never every sweep per pane.
+                    ops_wait_fetch=_watchdog_ops_wait_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
                     # each box holds the airuleset checkout it can measure.

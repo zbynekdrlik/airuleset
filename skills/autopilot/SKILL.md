@@ -172,7 +172,12 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   on PROD — are the deferred-thread branch: `ops-wait` "waiting on release" → `W`.) **Owner-UX
   invariant (#539): "otázky na mňa?" must NEVER truthfully answer NIE while `U > 0`** — a positive `U`
   is only ever real, already-delivered questions (a `no-question!`-tagged member is the defect to ask
-  or reclassify NOW).
+  or reclassify NOW). **W re-check is now MECHANICAL (#547):** the `ops-wait` re-entry is no longer
+  prose-only — watchdog job 20 reads each armed loop's `--ops-wait` members and, on a ~daily cadence,
+  types a `stuck-check:` re-check nudge into that session ("W #N parked — re-check the external state,
+  clear `ops-wait` WITH evidence or confirm still waiting"), so a parked W ticket whose reply/release
+  already landed is re-surfaced instead of leaving the loop blind (montalu5). The SUPERVISOR still stays
+  the ONLY one that clears `ops-wait` with evidence — the nudge only surfaces, never auto-unlabels.
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do
