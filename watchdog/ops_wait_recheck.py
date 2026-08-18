@@ -44,9 +44,11 @@ An event-driven variant — poll the Odoo Discuss thread / gk release named in a
 ticket's park comment and nudge the MOMENT the reply/release lands, instead of on
 cadence — was evaluated in #550 and REJECTED as not cheaply-safe:
   - the external SOURCE (which thread / which release) lives ONLY in the free-form
-    park COMMENT, never in `--ops-wait`'s structured output (reason is only
-    acceptance|ops-wait), so a probe needs a NEW per-ticket `gh issue view
-    --comments` fetch + a fragile NL parse of prose;
+    park COMMENT, not as a machine-readable field in `--ops-wait`'s structured
+    output (reason is only acceptance|ops-wait; the title field is free-form
+    prose), so a probe needs a per-ticket `gh issue view --comments` fetch on the
+    SWEEP path (the on-demand `--waiting` comment machinery never runs there) + a
+    fragile NL parse of prose;
   - the Odoo RO poll needs the stream's prod credential (the watchdog user lacks
     it), is fail2ban-sensitive, and is a network call on the 120s sweep critical
     path (#172/#365 class) — the SESSION already does this poll in-session when
