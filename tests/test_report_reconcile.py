@@ -373,20 +373,30 @@ class OwnedClosedFilter(unittest.TestCase):
         self.assertEqual({4379: 2000.0}, owned("/r", closed),
                          "only the OWN (stream:montalu) ticket survives")
 
-    def test_reduced_authority_undeterminable_owner_owns_nothing(self):
+    def test_reduced_authority_undeterminable_owner_returns_none(self):
         owned = cards.make_owned_closed_filter(
             current_user_fn=lambda: "montalu",
             authority_fn=lambda root: "branch-merge",
             owner_fn=lambda root, nums: (_ for _ in ()).throw(RuntimeError()))
-        # gh lookup raised -> own NOTHING this sweep (fail toward not-nudging)
-        self.assertEqual({}, owned("/r", {4373: 1000.0}))
+        # gh lookup raised -> None = skip this sweep WITHOUT popping the dedup
+        # (#534 review MINOR-2), never {} (which would pop it and re-nudge).
+        self.assertIsNone(owned("/r", {4373: 1000.0}))
 
-    def test_reduced_authority_unresolved_identity_owns_nothing(self):
+    def test_reduced_authority_unresolved_identity_returns_none(self):
         owned = cards.make_owned_closed_filter(
             current_user_fn=lambda: None,   # can't identify this box
             authority_fn=lambda root: "branch-merge",
             owner_fn=lambda root, nums: {4379: "montalu"})
-        self.assertEqual({}, owned("/r", {4379: 1000.0}))
+        self.assertIsNone(owned("/r", {4379: 1000.0}))
+
+    def test_reduced_authority_owns_none_returns_none_not_empty(self):
+        # own-nothing is indistinguishable from a gh-{} flake, so it also skips
+        # (None) rather than popping the dedup with a bare {} (#534 MINOR-2).
+        owned = cards.make_owned_closed_filter(
+            current_user_fn=lambda: "montalu",
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=lambda root, nums: {4373: "miva1"})  # all foreign
+        self.assertIsNone(owned("/r", {4373: 1000.0}))
 
     def test_empty_closed_returns_empty_without_a_lookup(self):
         calls = []
@@ -471,6 +481,29 @@ class ReportReconcileOwnerScoping(unittest.TestCase):
         text = vs.calls[0][1]
         self.assertIn("#41", text)
         self.assertIn("#42", text)
+
+    def test_gh_flake_preserves_dedup_and_does_not_renudge(self):
+        # #534 review MINOR-2: an UNDETERMINABLE-ownership sweep (gh flake) must
+        # NOT pop the permanent nudged dedup — gh recovering next sweep would
+        # otherwise re-nudge an already-delivered ticket. (Against the pre-fix
+        # {}-returning filter, sweep 2's pop makes sweep 3 re-nudge.)
+        now = 100000
+        closes = {4379: now - 3600}
+        rows = [arow(iso(now - 100), "⏳ next")]
+        state = {}
+        ok = reduced_filter(me="montalu", owners={4379: "montalu"})
+        _l, vs1 = run_report(now, state, rows, closes, owned_closed=ok)
+        self.assertEqual(1, len(vs1.calls), "sweep 1: own ticket nudged")
+        self.assertIn("4379", state["report_owed"][SUP_ROOT]["nudged"])
+        # sweep 2: gh flakes -> undeterminable -> skip, dedup MUST survive
+        flake = reduced_filter(me="montalu", raise_owner=True)
+        _l, vs2 = run_report(now + 60, state, rows, closes, owned_closed=flake)
+        self.assertEqual(0, len(vs2.calls))
+        self.assertIn("4379", state["report_owed"][SUP_ROOT]["nudged"],
+                      "dedup must survive an undeterminable sweep")
+        # sweep 3: gh recovers -> dedup preserved -> NO re-nudge
+        _l, vs3 = run_report(now + 120, state, rows, closes, owned_closed=ok)
+        self.assertEqual(0, len(vs3.calls), "must not re-nudge after a gh flake")
 
 
 if __name__ == "__main__":

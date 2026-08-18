@@ -158,22 +158,39 @@ def make_owned_closed_filter(current_user_fn=None, authority_fn=None,
             return _last_origin_owner(numbers, cwd=root)
 
     memo = {}                              # root -> {issue_num: owning_user}
+    auth = {}                              # root -> authority (once per root/sweep)
 
     def owned(root, closed):
+        # Returns the owned subset (a dict) to ACT on, or None to SKIP this root
+        # this sweep WITHOUT disturbing its dedup state. UNDETERMINABLE ownership
+        # (gh failure / unresolved identity / a reduced box that owns none of the
+        # candidates) must return None, never {} — the caller pops the permanent
+        # nudged/pinged dedup on an empty result, so returning {} on a transient
+        # gh hiccup would RE-nudge an already-delivered ticket the next sweep
+        # (#534 review MINOR-2). Only a genuinely-empty `closed` returns {} so
+        # the caller still cleans up when nothing merged. `_last_origin_owner`
+        # cannot tell a gh failure from a genuine no-owner (both {}), so a
+        # reduced box owning nothing skips too — a lingering empty dedup entry is
+        # the harmless, spam-free trade for never re-nudging on a flake.
         if not closed:
-            return dict(closed)
-        if authority_fn(root) == "full":
+            return dict(closed)            # nothing merged -> caller pops (clean)
+        if root not in auth:
+            auth[root] = authority_fn(root)
+        if auth[root] == "full":
             return dict(closed)            # full-authority owns the whole set
         me = current_user_fn()
         if not me:
-            return {}                      # can't identify this box -> own nothing
+            return None                    # can't identify box -> skip, keep dedup
         if root not in memo:
             try:
-                memo[root] = owner_fn(root, sorted(closed)) or {}
+                memo[root] = owner_fn(root, sorted(closed))
             except Exception:
-                memo[root] = {}            # gh failure -> own nothing this sweep
+                memo[root] = None          # gh failure -> undeterminable this sweep
         owners = memo[root]
-        return {n: ts for n, ts in closed.items() if owners.get(n) == me}
+        if owners is None:
+            return None                    # skip, keep dedup
+        scoped = {n: ts for n, ts in closed.items() if owners.get(n) == me}
+        return scoped or None              # own-nothing/flake -> skip, keep dedup
 
     return owned
 
@@ -453,8 +470,14 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         # #534: scope to tickets THIS box owns a card for — a reduced-authority
         # stream box reads the SHARED base branch, which carries every stream's
         # merges, so an unscoped set pings the owner about FOREIGN tickets.
-        # Full-authority box -> unchanged.
-        closed = owned_closed(root, closed)
+        # Full-authority box -> unchanged. None = UNDETERMINABLE ownership (gh
+        # flake / unresolved identity): skip WITHOUT popping the pinged dedup, or
+        # gh recovering next sweep would re-ping an already-pinged own ticket
+        # (#534 review MINOR-2).
+        scoped = owned_closed(root, closed)
+        if scoped is None:
+            continue
+        closed = scoped
         if not closed:
             seen.pop(root, None)
             continue
@@ -889,7 +912,14 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
             continue                       # unmeasurable — never a finding
         live.add(root)
         closed = merged_closes(root, base, now - window, git_run)
-        closed = owned_closed(root, closed)   # #534: reduced-authority scoping
+        # #534: scope to the box's own slice. None = UNDETERMINABLE ownership (gh
+        # flake / unresolved identity): skip WITHOUT popping the nudged dedup, or
+        # gh recovering next sweep would re-nudge an already-nudged own ticket
+        # (review MINOR-2). A real empty subset still returns {} (caller cleans up).
+        scoped = owned_closed(root, closed)
+        if scoped is None:
+            continue
+        closed = scoped
         if not closed:
             owed_state.pop(root, None)
             continue
