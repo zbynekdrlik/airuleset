@@ -287,6 +287,43 @@ REMOTE_HOSTS = [
         "repo_path": "~/devel/airuleset",
         "identity": "~/.ssh/spinbike_vps",
     },
+    {
+        # montalu1/david1/simap1 (#537, 2026-08-18): the NUMBERED push targets
+        # for the base-stream rename, registered ALONGSIDE the base entries
+        # above so the fleet table already knows the coming names. They carry
+        # `"pending": True` because the LIVE unix rename has NOT happened yet —
+        # the accounts do NOT exist on subdev, so `_deployable_hosts()`
+        # (cli_remote.py) filters them out of EVERY ssh path (the deploy loop
+        # AND provision_subdev_soniox_key). This is fail2ban-critical:
+        # montalu1 authenticates via the shared default key/sshpass path, and a
+        # password attempt against a non-existent account is a fail2ban strike
+        # (#341/#300/#326). The live-op rename ticket removes the `"pending"`
+        # flag (and the old entry) once each account is created + verified.
+        # Identity mirrors the base: montalu1 = default newlevel key (no
+        # `identity`, like montalu); david1/simap1 = the operator
+        # gatekeeper_access identity (like david/simap).
+        "name": "montalu1@subdev",
+        "host": "100.118.174.27",
+        "user": "montalu1",
+        "repo_path": "~/devel/airuleset",
+        "pending": True,
+    },
+    {
+        "name": "david1@subdev",
+        "host": "100.118.174.27",
+        "user": "david1",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+        "pending": True,
+    },
+    {
+        "name": "simap1@subdev",
+        "host": "100.118.174.27",
+        "user": "simap1",
+        "repo_path": "~/devel/airuleset",
+        "identity": "~/.secrets/gatekeeper_access_ed25519",
+        "pending": True,
+    },
 ]
 
 
@@ -338,4 +375,32 @@ AUTHORITY_BY_USER = {
     "montalu6": "branch-merge",
     "montalu7": "branch-merge",
     "montalu8": "branch-merge",
+    # montalu1/david1/simap1 (#537, 2026-08-18): the NUMBERED names for the
+    # base-stream rename (owner directive on #532 — montalu->montalu1,
+    # david->david1, simap->simap1; marek STAYS marek, deliberately NOT
+    # renamed). Added ALONGSIDE the base entries above (which stay until each
+    # live unix rename lands — removing them is the live-op ticket's job);
+    # each inherits its base's authority profile so the moment a box actually
+    # runs as the new name it resolves correctly. STREAM_RENAME_ALIASES
+    # (below) drives the transition alias so old `stream:<base>` tickets keep
+    # working during the switch, in BOTH directions.
+    "montalu1": "branch-merge",
+    "david1": "fork-no-merge",
+    "simap1": "fork-no-merge",
+}
+
+
+# Base-stream rename map (#537): old base name -> new numbered name. The SINGLE
+# explicit source of truth for the in-progress rename, so `cli_quals`'
+# `_stream_rename_equivalents()` (the alias primitive that `_slice_quals` and
+# `_ticket_is_stream_labeled` both consume) has one table to read, never a
+# scattered set of literals. `marek` is deliberately ABSENT — the owner keeps
+# it un-renamed. Read via `airuleset.STREAM_RENAME_ALIASES` (the facade
+# re-export), NEVER `cli_fleet.STREAM_RENAME_ALIASES` directly, so a
+# `patch.object(airuleset, "STREAM_RENAME_ALIASES", ...)` in a test is honoured
+# (the same L-E rule AUTHORITY_BY_USER above follows).
+STREAM_RENAME_ALIASES = {
+    "montalu": "montalu1",
+    "david": "david1",
+    "simap": "simap1",
 }

@@ -140,19 +140,33 @@ def _refuse_unless_empty_is_trustworthy(cmd, quals, cwd=None):
     Runs ONLY when the union is empty; a non-empty union is itself proof the
     index answers, so the healthy path costs no extra gh call."""
     import airuleset
-    if len(quals) == 1 and quals[0].startswith("label:"):
-        # C2 (round 2) — a shared-account slice's ONLY signal is one label,
-        # and a forgotten/never-created label makes gh search return `[]` with
-        # exit 0 for a query that can never match anything.
-        label_name = quals[0].split(":", 1)[1]     # "label:stream:x" -> "stream:x"
-        exists = airuleset._label_exists_on_repo(label_name, cwd=cwd)
-        if exists is not True:
+    label_quals = [q for q in quals if q.startswith("label:")]
+    if label_quals and len(label_quals) == len(quals):
+        # C2 (round 2; generalised #537) — an ALL-label slice (a shared-account
+        # or App-token stream, whose ONLY signal is its `stream:` label(s))
+        # trusts a 0 only if at least ONE of those labels genuinely exists on
+        # the repo; a slice resting entirely on forgotten/never-created labels
+        # makes gh search return `[]` with exit 0 for a query that can never
+        # match anything. #537's base-stream rename alias makes such a slice
+        # MULTI-label (a rename stream carries both `stream:<old>` and
+        # `stream:<new>`, and the new label may not exist yet on the repo
+        # during the transition), so the guard checks ALL labels and refuses
+        # only when NONE is confirmed — a real `stream:<old>` (with a
+        # transitionally absent `stream:<new>`) is enough to make a genuine 0
+        # trustworthy. For a non-renamed single-label slice this is
+        # byte-identical to the round-2 behaviour (refuse when that one label
+        # is not confirmed).
+        names = [q.split(":", 1)[1] for q in label_quals]  # "label:stream:x" -> "stream:x"
+        checks = [(n, airuleset._label_exists_on_repo(n, cwd=cwd)) for n in names]
+        if not any(exists is True for _n, exists in checks):
+            detail = ", ".join(
+                "%s=%s" % (n, "not-found" if exists is False else "check-failed")
+                for n, exists in checks)
             print(
-                "%s: cannot confirm label '%s' exists on this repo (%s) — a "
-                "single-label slice of 0 resting on an unconfirmed label is "
+                "%s: cannot confirm ANY label of this slice exists on this repo "
+                "(%s) — a slice of 0 resting entirely on unconfirmed labels is "
                 "UNRELIABLE. Refusing rather than reporting it (#181 C2)."
-                % (cmd, label_name,
-                   "not found" if exists is False else "the check itself failed"),
+                % (cmd, detail),
                 file=sys.stderr)
             sys.exit(1)
     healthy = airuleset._search_index_healthy(cwd=cwd)
