@@ -45,34 +45,41 @@ CAD = 1000   # a small test cadence
 # --------------------------------------------------------------------------- #
 
 class TestRecheckDecision(unittest.TestCase):
+    # NOTE (#552): the decider signature is now `(rec, i_count, w_members, now,
+    # cadence)` — the W-only tests below pin i_count=0 (determined-empty I) so
+    # they lock the SAME W behaviour #547 shipped; the #552 I-direction is
+    # covered by TestRecheckDecisionIDirection below.
     def test_undetermined_members_skip_and_never_mutate(self):
-        # None (fetch failed/refused) -> skip, rec returned UNCHANGED, no nudge.
+        # W=None (fetch failed/refused) + I determined-0 -> skip, rec returned
+        # UNCHANGED, no nudge (an undetermined half never clears/nudges).
         rec = {"first_seen": NOW - 5 * DAY, "last_nudge": NOW - 5 * DAY}
-        action, out, reason = owr._recheck_decision(rec, None, NOW, CAD)
+        action, out, reason = owr._recheck_decision(rec, 0, None, NOW, CAD)
         self.assertEqual(action, "skip")
         self.assertEqual(reason, "undetermined")
         self.assertIs(out, rec)
 
     def test_empty_members_clear(self):
+        # BOTH halves determined-empty (I==0 AND W==[]) -> partition drained.
         action, out, reason = owr._recheck_decision(
-            {"first_seen": NOW - 5 * DAY}, [], NOW, CAD)
+            {"first_seen": NOW - 5 * DAY}, 0, [], NOW, CAD)
         self.assertEqual(action, "clear")
         self.assertIsNone(out)
 
     def test_first_sight_seeds_first_seen_and_waits(self):
-        # A never-seen W set: seed first_seen=now, WAIT (grace — never nag a
-        # session about a ticket it just parked).
-        action, out, reason = owr._recheck_decision({}, [43, 41], NOW, CAD)
+        # A never-seen W set (I==0): seed first_seen=now, WAIT (grace — never nag
+        # a session about a partition it just arrived at).
+        action, out, reason = owr._recheck_decision({}, 0, [43, 41], NOW, CAD)
         self.assertEqual(action, "wait")
         self.assertEqual(reason, "grace")
         self.assertEqual(out["first_seen"], NOW)
         self.assertIsNone(out["last_nudge"])
-        self.assertEqual(out["sig"], "41,43")   # numeric sort
+        self.assertEqual(out["w_first_seen"], NOW)   # W-specific park anchor seeded
+        self.assertEqual(out["sig"], "i:0|w:41,43")   # partition sig, numeric sort
 
     def test_past_cadence_from_first_seen_nudges(self):
         # first_seen older than the cadence, never nudged -> DUE.
         rec = {"first_seen": NOW - 2 * CAD}
-        action, out, reason = owr._recheck_decision(rec, [41], NOW, CAD)
+        action, out, reason = owr._recheck_decision(rec, 0, [41], NOW, CAD)
         self.assertEqual(action, "nudge")
         self.assertEqual(reason, "due")
         # a "nudge" verdict is an INTENT — last_nudge is preserved (the caller
@@ -82,19 +89,93 @@ class TestRecheckDecision(unittest.TestCase):
 
     def test_within_reping_window_waits(self):
         rec = {"first_seen": NOW - 5 * DAY, "last_nudge": NOW - CAD // 2}
-        action, out, _ = owr._recheck_decision(rec, [41], NOW, CAD)
+        action, out, _ = owr._recheck_decision(rec, 0, [41], NOW, CAD)
         self.assertEqual(action, "wait")
         self.assertEqual(out["last_nudge"], NOW - CAD // 2)
 
     def test_past_reping_window_nudges(self):
         rec = {"first_seen": NOW - 5 * DAY, "last_nudge": NOW - 2 * CAD}
-        action, out, _ = owr._recheck_decision(rec, [41], NOW, CAD)
+        action, out, _ = owr._recheck_decision(rec, 0, [41], NOW, CAD)
         self.assertEqual(action, "nudge")
 
     def test_malformed_rec_is_seeded_fresh(self):
-        action, out, _ = owr._recheck_decision(None, [7], NOW, CAD)
+        action, out, _ = owr._recheck_decision(None, 0, [7], NOW, CAD)
         self.assertEqual(action, "wait")
         self.assertEqual(out["first_seen"], NOW)
+
+
+class TestRecheckDecisionIDirection(unittest.TestCase):
+    """#552 — the folded-in I→W/U direction: `I > 0` alone is something to audit,
+    even when W is empty; the partition only `clear`s when BOTH halves are
+    determined-empty; an undetermined half never clears/nudges."""
+
+    def test_i_positive_w_empty_past_cadence_nudges(self):
+        # The montalu3 shape: I inflated, W empty, past cadence -> nudge (the
+        # pre-#552 tree would have `clear`ed here and never nudged).
+        rec = {"first_seen": NOW - 2 * CAD}
+        action, out, reason = owr._recheck_decision(rec, 5, [], NOW, CAD)
+        self.assertEqual(action, "nudge")
+        self.assertEqual(reason, "due")
+        # W empty -> no W-park anchor; sig names the I half.
+        self.assertIsNone(out["w_first_seen"])
+        self.assertEqual(out["sig"], "i:5|w:")
+
+    def test_i_positive_w_empty_first_sight_waits(self):
+        action, out, _ = owr._recheck_decision({}, 5, [], NOW, CAD)
+        self.assertEqual(action, "wait")
+        self.assertEqual(out["first_seen"], NOW)
+
+    def test_i_and_w_both_present_nudges_and_seeds_w_anchor(self):
+        rec = {"first_seen": NOW - 2 * CAD}
+        action, out, _ = owr._recheck_decision(rec, 3, [41, 43], NOW, CAD)
+        self.assertEqual(action, "nudge")
+        self.assertEqual(out["w_first_seen"], NOW)   # W first seen this sweep
+        self.assertEqual(out["sig"], "i:3|w:41,43")
+
+    def test_w_park_anchor_preserved_across_sweeps(self):
+        # A continuously-parked W keeps its ORIGINAL w_first_seen (truthful age),
+        # not the partition's own (older) first_seen.
+        rec = {"first_seen": NOW - 5 * DAY, "w_first_seen": NOW - 3 * CAD,
+               "last_nudge": None}
+        action, out, _ = owr._recheck_decision(rec, 2, [41], NOW, CAD)
+        self.assertEqual(action, "nudge")
+        self.assertEqual(out["w_first_seen"], NOW - 3 * CAD)
+
+    def test_w_park_anchor_dropped_when_w_empties(self):
+        # W drains to [] but I still >0 -> keep auditing (I), drop the W anchor.
+        rec = {"first_seen": NOW - 5 * DAY, "w_first_seen": NOW - 3 * CAD}
+        action, out, _ = owr._recheck_decision(rec, 2, [], NOW, CAD)
+        self.assertIn(action, ("nudge", "wait"))
+        self.assertIsNone(out["w_first_seen"])
+
+    def test_i_zero_w_empty_clears(self):
+        action, out, _ = owr._recheck_decision(
+            {"first_seen": NOW - 5 * DAY}, 0, [], NOW, CAD)
+        self.assertEqual(action, "clear")
+        self.assertIsNone(out)
+
+    def test_i_undetermined_w_empty_skips_not_clears(self):
+        # I None (awaiting-user pane) + W determined-empty -> cannot confirm the
+        # partition is drained, so SKIP (leave the rec), never clear/nudge.
+        rec = {"first_seen": NOW - 5 * DAY}
+        action, out, reason = owr._recheck_decision(rec, None, [], NOW, CAD)
+        self.assertEqual(action, "skip")
+        self.assertEqual(reason, "undetermined")
+        self.assertIs(out, rec)
+
+    def test_both_undetermined_skips(self):
+        rec = {"first_seen": NOW - 5 * DAY}
+        action, out, _ = owr._recheck_decision(rec, None, None, NOW, CAD)
+        self.assertEqual(action, "skip")
+        self.assertIs(out, rec)
+
+    def test_i_positive_w_undetermined_nudges_i_only(self):
+        # I>0 is a POSITIVE signal even when the W fetch is undetermined -> nudge
+        # the I direction (the W clause is simply absent from the text).
+        rec = {"first_seen": NOW - 2 * CAD}
+        action, out, _ = owr._recheck_decision(rec, 4, None, NOW, CAD)
+        self.assertEqual(action, "nudge")
+        self.assertEqual(out["sig"], "i:4|w:?")
 
 
 class _CountingFetch:
@@ -256,12 +337,15 @@ class _OrchBase(unittest.TestCase):
                                    GOAL_ARMED_CAP, model_type=True,
                                    transcript_path=self.tpath, **kw)
 
-    def _run(self, wrecs, fetch, tmux, *, dry_run=False, handled=None, state=None):
+    def _run(self, wrecs, fetch, tmux, *, dry_run=False, handled=None, state=None,
+             i_count=0):
+        # i_count defaults to 0 (determined-empty I) so the pre-#552 W-only tests
+        # below lock the SAME behaviour; the #552 I direction passes i_count>0.
         return owr.goal_ops_wait_recheck(
             NOW, tmux, wrecs, self.sid, self.CWD, "%9", self.tpath, "sess:0",
             dry_run, handled, ops_wait_fetch=fetch,
             state=state if state is not None else {},
-            sleep_fn=lambda *a, **k: None, cadence=CAD)
+            sleep_fn=lambda *a, **k: None, cadence=CAD, i_count=i_count)
 
 
 class TestOrchestrator(_OrchBase):
@@ -345,6 +429,77 @@ class TestOrchestrator(_OrchBase):
         self.assertTrue(any("submit-unverified" in ln for ln in logs))
         self.assertIsNone(wrecs[self.sid]["last_nudge"])
         self.assertNotIn(self.sid, handled)
+
+
+class TestNudgeText(unittest.TestCase):
+    """#552 — the composed partition-audit text: the I clause when I>0, the W
+    clause (names + truthful park age) when W non-empty, both when both, and a
+    clean degrade to #547's W-only nudge when I==0."""
+
+    def test_i_only_carries_reaudit_clause_no_w(self):
+        t = owr._nudge_text(3, [], NOW, None)
+        self.assertIn("stuck-check:", t)
+        self.assertIn("re-audituj", t)            # the I->W/U instruction
+        self.assertIn("#526/#539", t)
+        self.assertNotIn("parknuté `ops-wait`", t)   # no W clause when W empty
+
+    def test_w_only_degrades_to_547_shape(self):
+        t = owr._nudge_text(0, [41, 43], NOW, NOW - 3 * 3600)
+        self.assertIn("stuck-check:", t)
+        self.assertNotIn("re-audituj", t)         # no I clause when I==0
+        self.assertIn("#41", t)
+        self.assertIn("#43", t)
+        self.assertIn("~3h", t)                   # truthful W-park age
+
+    def test_both_directions_ride_one_ping(self):
+        t = owr._nudge_text(2, [41], NOW, NOW - 3600)
+        self.assertIn("re-audituj", t)
+        self.assertIn("#41", t)
+        self.assertIn("supervisor", t)            # label-change ownership note
+
+    def test_w_age_uses_w_first_seen_not_partition_age(self):
+        # w_first_seen just now -> ~0h even if the partition is days old.
+        t = owr._nudge_text(0, [7], NOW, NOW)
+        self.assertIn("~0h", t)
+
+
+class TestOrchestratorIDirection(_OrchBase):
+    """#552 — the orchestrator's I direction end-to-end (fetch/decide/deliver)."""
+
+    def test_i_positive_w_empty_due_delivers_reaudit_nudge(self):
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        tmux = self._tmux()
+        handled = set()
+        logs = self._run(wrecs, lambda cwd: [], tmux, handled=handled,
+                         state={}, i_count=4)
+        self.assertTrue(any("ops-wait-recheck nudge" in ln for ln in logs))
+        # chunks CONCATENATED (send_verified splits mid-word) — see the wiring
+        # test's note; a " "-join would inject a chunk-boundary space.
+        typed = "".join(tmux.typed_texts())
+        self.assertIn("re-audituj", typed)
+        self.assertEqual(wrecs[self.sid]["last_nudge"], NOW)
+        self.assertIn(self.sid, handled)
+
+    def test_i_zero_w_empty_clears(self):
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY}}
+        logs = self._run(wrecs, lambda cwd: [], self._tmux(), i_count=0)
+        self.assertTrue(any("clear" in ln for ln in logs))
+        self.assertNotIn(self.sid, wrecs)
+
+    def test_i_undetermined_w_empty_skips_leaves_rec(self):
+        # An awaiting-user pane (i_count None) with no W parked -> skip, rec kept.
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY}}
+        logs = self._run(wrecs, lambda cwd: [], self._tmux(), i_count=None)
+        self.assertTrue(any("skip:undetermined" in ln for ln in logs))
+        self.assertIn(self.sid, wrecs)
+
+    def test_i_positive_w_empty_dry_run_no_mutation(self):
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        tmux = self._tmux()
+        logs = self._run(wrecs, lambda cwd: [], tmux, dry_run=True, i_count=4)
+        self.assertTrue(any("WOULD-NUDGE" in ln for ln in logs))
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertIsNone(wrecs[self.sid]["last_nudge"])
 
 
 # --------------------------------------------------------------------------- #
@@ -433,7 +588,10 @@ class TestLaneSweepWiring(unittest.TestCase):
             "sess-547-lane": {"first_seen": NOW - 5 * DAY, "last_nudge": None}}}
         sid, tmux = self._armed_sweep(state, ops_wait_fetch=lambda cwd: [],
                                       backlog=3, authority="branch-merge")
-        typed = " ".join(tmux.typed_texts())
+        # send_verified chunks the payload across several `send-keys -l` calls
+        # (splitting mid-word), so the faithful landed text is the chunks
+        # CONCATENATED, never " "-joined (which injects a chunk-boundary space).
+        typed = "".join(tmux.typed_texts())
         self.assertIn("re-audituj", typed,
                       "an armed pane with I>0 (W empty) past cadence must be "
                       "nudged to re-audit I->W/U (RED before #552 folds i_count "
@@ -542,6 +700,33 @@ class TestDoctrineContentLock(unittest.TestCase):
         for tok in self.TOKENS:
             self.assertIn(tok, win,
                           "autopilot SKILL W paragraph lost %r (#547 drift)" % tok)
+
+    # --- #552 I→W/U freshness sibling (same surfaces, same shape as #547) ---
+    # The finder is UNIQUE to the #552 sentence; the co-tokens are UNIQUE to it on
+    # the SAME physical statusline line (`partition-audit`/`re-audit`/`OPPOSITE
+    # direction` each occur ONCE there — verified), so a partial revert dropping
+    # ONLY the #552 sentence (leaving #547 intact) genuinely fails the lock, never
+    # begs the question via a token #547 also carries (`job 20`/`supervisor` recur).
+    STATUS_FINDER_552 = "I→W/U freshness audit is MECHANICAL (#552)"
+    SKILL_FINDER_552 = "I→W/U freshness audit is MECHANICAL (#552)"
+    TOKENS_552 = ("partition-audit", "re-audit", "OPPOSITE direction")
+
+    def test_statusline_vocabulary_carries_I_direction_mechanism(self):
+        text = (_REPO / "modules/core/statusline-vocabulary.md").read_text(
+            encoding="utf-8")
+        line = _line_with(text, self.STATUS_FINDER_552)
+        self.assertTrue(line, "the W bullet must carry the #552 I→W/U mechanism "
+                              "sentence")
+        for tok in self.TOKENS_552:
+            self.assertIn(tok, line,
+                          "W bullet lost the #552 operative token %r (drift)" % tok)
+
+    def test_autopilot_skill_carries_I_direction_mechanism(self):
+        text = (_REPO / "skills/autopilot/SKILL.md").read_text(encoding="utf-8")
+        win = _norm_window(text, self.SKILL_FINDER_552)
+        for tok in self.TOKENS_552:
+            self.assertIn(tok, win,
+                          "autopilot SKILL lost the #552 token %r (drift)" % tok)
 
 
 class TestPhase2DeferralDecisionLock(unittest.TestCase):

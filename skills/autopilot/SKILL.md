@@ -178,6 +178,12 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   clear `ops-wait` WITH evidence or confirm still waiting"), so a parked W ticket whose reply/release
   already landed is re-surfaced instead of leaving the loop blind (montalu5). The SUPERVISOR still stays
   the ONLY one that clears `ops-wait` with evidence — the nudge only surfaces, never auto-unlabels.
+  **I→W/U freshness audit is MECHANICAL (#552):** the SAME job 20 partition-audit nudge also covers the
+  OPPOSITE direction — on the ~daily cadence it reminds an armed loop to re-audit each `I` member against
+  the #526/#539 shapes (a ticket already meeting a fix-class / sent-thread / deferred-thread shape →
+  `ops-wait`=W, or carrying a delivered owner-question → U) instead of letting it rot in `I` until the
+  owner asks (montalu3); the JUDGMENT stays in the session, only the scheduler is mechanical — the
+  supervisor still sets/clears every label with evidence.
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do
