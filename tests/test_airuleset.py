@@ -7658,8 +7658,12 @@ class TestDiscordAutopilotNotify(TestCase):
         self.assertIn("API chyba", a)
         self.assertIn("Rate limited", a)              # the ACTUAL error text
 
-    def test_cli_api_error_sends_only_on_real_error(self):
-        # CLI --api-error: a real error → sends; normal prose → nothing.
+    def test_cli_api_error_is_suppressed(self):
+        # #546 (policy inversion): the api-error Discord ping class is
+        # owner-suppressed at notify.send(), so the CLI --api-error path POSTs
+        # NOTHING even for a real error — it prints "suppressed", never the
+        # @mention / "API chyba" body. The is_api_error false-positive guard is
+        # UNCHANGED: normal prose still produces no output at all.
         home = self._env_home()
         env = {**os.environ, "HOME": home, "AIRULESET_NOTIFY_OWNER": "zbynek"}
         real = subprocess.run(
@@ -7667,8 +7671,9 @@ class TestDiscordAutopilotNotify(TestCase):
              "--dry-run", "--project", "odoo-erp", "--session", "s1", "--text",
              "API Error: Server is temporarily limiting requests · Rate limited"],
             capture_output=True, text=True, env=env)
-        self.assertIn("<@111222333>", real.stdout)   # _env_home() zbynek id
-        self.assertIn("API chyba", real.stdout)
+        self.assertEqual(real.stdout.strip(), "suppressed")
+        self.assertNotIn("<@111222333>", real.stdout)   # no owner ping
+        self.assertNotIn("API chyba", real.stdout)      # no alert body
         normal = subprocess.run(
             [sys.executable, str(self.AIRULESET), "notify", "--api-error",
              "--dry-run", "--project", "odoo-erp", "--session", "s1", "--text",
@@ -7676,12 +7681,16 @@ class TestDiscordAutopilotNotify(TestCase):
             capture_output=True, text=True, env=env)
         self.assertEqual(normal.stdout.strip(), "")   # not an error → nothing
 
-    def test_api_error_hook_wired_in_stop(self):
+    def test_api_error_hook_is_a_retired_noop(self):
+        # #546: the api-error Stop-ping is RETIRED. The hook stays WIRED (a
+        # documented no-op — settings/hooks.json untouched) but no longer calls
+        # `notify --api-error` or parses the transcript.
         src = (airuleset.REPO_DIR / "settings" / "hooks.json").read_text()
-        self.assertIn("notify-api-error.sh", src)
+        self.assertIn("notify-api-error.sh", src)          # still wired
         hook = (airuleset.REPO_DIR / "hooks" / "notify-api-error.sh").read_text()
-        self.assertIn("--api-error", hook)
-        self.assertIn("last_assistant_message", hook)
+        self.assertNotIn("--api-error", hook)              # no longer pings
+        self.assertNotIn("last_assistant_message", hook)   # no longer parses
+        self.assertIn("546", hook)                         # documents the retirement
 
     def test_card_header_shows_repo_name_not_owner(self):
         # The @mention already names the person; an "owner/" prefix in the header

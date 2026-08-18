@@ -266,6 +266,14 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
 # Plain JSONL read + comparison (`burn.hourly_burn_alert`) + one Discord
 # POST -- no agent, no model, so it survives the operator being busy
 # fighting whatever incident is actually driving the spend up.
+#
+# #546 (owner directive 2026-08-18): token-BURN / spend-budget is subscription
+# monitoring another project now owns -- airuleset does not Discord-alert on it.
+# So the `send_fn` POST below (job 19 `burn-alert:` AND job 16
+# `fleet-burn-budget:`) is SUPPRESSED at `notify.send()` (SUPPRESSED_ALERT_
+# PREFIXES): it returns "suppressed", posts nothing, and logs a machine-channel
+# decision. The evaluation logic is unchanged (still runs, still journals) --
+# only the phone ping is dropped.
 # --------------------------------------------------------------------------- #
 
 def _env_num(name, default, cast=float):

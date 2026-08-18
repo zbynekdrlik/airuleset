@@ -3,7 +3,7 @@
 **Context gate — related rules you MUST also apply:**
 - `message-status-marker.md` — every message ends with ❓ / ⏳ / ✅; the device ping forwards the ❓ / ✅ content
 - `autopilot` skill — the ONE per-ticket device card (the EXCEPTION below) is fired by the worker directly at merge
-- `notification-mechanics` skill — the API-error watchdog, per-owner thread + `DISCORD_MIRROR` routing, and the per-ticket card's field-by-field composition moved there VERBATIM — load it before authoring/debugging the notify hooks or watchdog
+- `notification-mechanics` skill — the retired api-error/limit/burn alert-class suppression (#546), per-owner thread + `DISCORD_MIRROR` routing, and the per-ticket card's field-by-field composition moved there VERBATIM — load it before authoring/debugging the notify hooks or watchdog
 
 **The device (Discord / phone) is notified like the mobile Claude app: a ping arrives ONLY when Claude genuinely ASKS the user something (`❓ NEEDS YOU`) or has FULLY completed the work (`✅ DONE`) — never on `⏳ WORKING`, never on routine per-phase progress.** This replaces the old "ping every phase" stance — the user found per-merge / per-CI pings to be noise.
 
@@ -27,9 +27,9 @@ A completed ticket/batch inside a `/goal` / `/autopilot` loop ends its own repor
 
 (The `❓ ASKED` / `❓ NEEDS YOU` question ping is UNCHANGED and unaffected by this — a genuine question ALWAYS pings regardless of an armed goal; only the ROUTINE per-ticket `✅` is goal-guarded. Sleep window (00:00–06:00, hours `00..05`, Europe/Bratislava): a question is deferred and nothing pings, but ONLY while other answer-independent work exists; a NECESSARY question is asked as `❓ NEEDS YOU` even at night and DOES ping. Full ask-the-moment policy: `message-status-marker.md` + the autopilot skill.)
 
-#### API-error watchdog — the device pings when a turn ends on a real API error (you do nothing)
+#### API-error / limit / token-burn alerts are RETIRED from Discord (#546, 2026-08-18 owner directive)
 
-A third sanctioned device ping, fully AUTOMATIC (hook-driven, `notify-api-error.sh` — you do nothing, just never strip the hook): a Stop hook fires ONE Discord ping `@owner` when a turn ENDS on a genuine Claude Code API error (rate-limit, overload, socket-closed, usage-limit), deduped per distinct error per session. Full mechanics moved to the `notification-mechanics` skill.
+**The api-error / limit / token-burn alert classes NO LONGER ping the device** — owner-suppressed at `notify.send()` (#546: airuleset does not Discord-alert on api-error / limit / subscription). airuleset's only job on an api-error is the watchdog's SILENT `continue` auto-resume (unchanged); the signal moves to the machine channel (the journal + a `suppressed` delivery-log line, never a silent drop). A genuinely DEAD fleet still alarms (watchdog job 35); a stuck-but-alive give-up is deliberately machine-channel-only; default is SILENCE. Preserved: `❓`/`✅`/run-cards/bounce/gk-req and the one-shot `acctblock:` alarm. Full mechanics in the `notification-mechanics` skill.
 
 #### Per-phase progress is NOT pinged
 
@@ -37,7 +37,7 @@ During long / autonomous runs (`/autopilot`, `/goal` loops, batch work), routine
 
 #### Every device message goes to the owner's OWN thread AND @mentions them (zbynek / marek)
 
-Each project runs in a tmux session grouped `zbynek` or `marek`. EVERY Discord message (the idle `❓`/`✅` ping AND the autopilot card below) is automatically POSTED to that owner's **own thread** (`claude-zbynek` / `claude-marek`, never shared) and prefixed with their `<@id>` — including session-personas PARALLEL-mirrored to a real human via `DISCORD_MIRROR_<OWNER>` (e.g. `david`'s pings also reach `zbynek`'s thread). **Exception (#296): a `❓` question ping routes to a separate per-owner questions thread, `claude-<owner>-q`** — `✅`, the autopilot card and api-error pings stay in the normal `claude-<owner>` thread. You do nothing; never strip the mention. Full thread + mirror + questions-thread routing lives in the `notification-mechanics` skill.
+Each project runs in a tmux session grouped `zbynek` or `marek`. EVERY Discord message (the idle `❓`/`✅` ping AND the autopilot card below) is automatically POSTED to that owner's **own thread** (`claude-zbynek` / `claude-marek`, never shared) and prefixed with their `<@id>` — including session-personas PARALLEL-mirrored to a real human via `DISCORD_MIRROR_<OWNER>` (e.g. `david`'s pings also reach `zbynek`'s thread). **Exception (#296): a `❓` question ping routes to a separate per-owner questions thread, `claude-<owner>-q`** — `✅` and the autopilot card stay in the normal `claude-<owner>` thread (the api-error/limit/burn alert pings that used to share it are retired, #546). You do nothing; never strip the mention. Full thread + mirror + questions-thread routing lives in the `notification-mechanics` skill.
 
 #### EXCEPTION — `/autopilot` per-ticket completion card (the ONE sanctioned per-ticket hand-fire)
 

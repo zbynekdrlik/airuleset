@@ -1678,6 +1678,13 @@ def cmd_notify(args):
         return
 
     if getattr(args, "api_error", False):
+        # #546: RETIRED. The Stop hook that used to call this is now a no-op
+        # (hooks/notify-api-error.sh), so this branch is dead in production and
+        # kept only as defence-in-depth: the `apierr:` dedup_key below is an
+        # owner-suppressed alert class (SUPPRESSED_ALERT_PREFIXES), so send()
+        # POSTs nothing and returns "suppressed". The composition still runs so
+        # the false-positive guard (is_api_error) keeps its "normal prose → say
+        # nothing" contract byte-for-byte.
         from notify import compose_api_error_alert, is_api_error
         text = args.text or ""
         if not is_api_error(text):
@@ -1686,13 +1693,8 @@ def cmd_notify(args):
         project = args.project or ""
         sess = args.session or ""
         h = hashlib.sha1(text.strip().encode()).hexdigest()[:12]
-        # One ping per distinct error text per session (a wedge that keeps showing
-        # the same error across Stop events pings once, not every turn).
         dedup = args.dedup_key or ("apierr:%s:%s" % (sess, h))
         body = compose_api_error_alert(project, text)
-        # #369: route via the SAME --project the caller already computed for
-        # the alert body's own label — routes this alert to its per-project
-        # Discord thread instead of the shared owner channel.
         print(send(body, dedup_key=dedup, dry_run=args.dry_run,
                    project=project or None))
         return
@@ -4916,8 +4918,9 @@ def main():
     # reused by --repo-name; re-declaring it raises ArgumentError at import
     # and breaks EVERY `notify` subcommand.
     p_notify.add_argument("--api-error", dest="api_error", action="store_true",
-                          help="Ping IF --text is a real Claude Code API error "
-                               "(used by the notify-api-error.sh Stop hook)")
+                          help="RETIRED (#546): the api-error Discord ping class "
+                               "is owner-suppressed at notify.send(); this now "
+                               "posts nothing and prints 'suppressed'")
     p_notify.add_argument("--record-question", dest="record_question",
                           action="store_true",
                           help="Record a ❓ ping's Discord message id → the session "
