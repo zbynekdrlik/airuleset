@@ -149,7 +149,30 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   čaká tretia strana"). The canonical `W` workflow: ask a THIRD PARTY (e.g. "zisti X od človeka Y cez
   Odoo discussion") → post the question in that thread, label the ticket `ops-wait` (it leaves `I N`
   into `W N`), check the thread as you work others, and CLEAR the label when they reply so the ticket
-  re-enters `I N`.
+  re-enters `I N`. **#539 acceptance SIDE-BRANCHES — name them so a bare `needs-acceptance` never rots
+  in `U`.** Besides that main "compose → owner approve → send → W" thread path, TWO real acceptance
+  branches skip the thread and belong in `W` immediately: (1) **fix-class** — an owner-ruled NO-THREAD
+  close waiting on an EXTERNAL event (e.g. a foreign-repo fix); the supervisor adds `ops-wait` WITH
+  evidence and it is `W` at once (no thread will ever be sent). (2) **deferred-thread** — the
+  acceptance thread is deliberately DEFERRED to a future event (go-live); park it in `W` with
+  `ops-wait` naming that blocking event until it is time to send. Both are tagged `acceptance` in
+  `--ops-wait`. The THIRD acceptance case is the canonical `W` workflow just above — a
+  `needs-acceptance` ticket waiting on a THIRD PARTY (a client / a named person) is `ops-wait` → `W`,
+  never a bare `U`. In every branch the supervisor SETS and CLEARS `ops-wait` with evidence — never
+  auto-labelled. (montalu3 left 13 fix-class/deferred + 1 third-party acceptances as bare `U` = `U 15`
+  with zero real questions — exactly what these branches prevent.) **THIRD branch — CHAINED-I (#539,
+  montalu5).** A bare `needs-acceptance` whose acceptance draft cannot be composed yet because it
+  waits on the STREAM'S OWN sequenced work (a sibling ticket a stream worker is still finishing) is
+  NEITHER a live owner question (not `U`) NOR a third-party wait (not `W`) — it is Claude's OWN chained
+  responsibility, so it stays in `I` (workable/chained). MECHANIZED: `_partition_workable` routes a
+  bare `needs-acceptance` to `U` ONLY once a DRAFT has actually been presented for approval (a ❓ ping
+  was fired — the question map references `#N`); until then it stays in `I`. So a bare
+  `needs-acceptance` reaches `U` only when there IS a real owner-approval question. (Release-wait
+  tickets — merged to develop but not yet on PROD, so the handover thread may announce only what lives
+  on PROD — are the deferred-thread branch: `ops-wait` "waiting on release" → `W`.) **Owner-UX
+  invariant (#539): "otázky na mňa?" must NEVER truthfully answer NIE while `U > 0`** — a positive `U`
+  is only ever real, already-delivered questions (a `no-question!`-tagged member is the defect to ask
+  or reclassify NOW).
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do
@@ -171,7 +194,7 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   marek + david both work odoo-erp; never grab another stream's tickets.
 - **Print a one-line banner:** `autopilot · merge=auto (no manual marker) · authority=<profile> · I N · U M · W K · solving the whole backlog` — the workable count PLUS the parked `U`/`W` counts (`M`/`K` from the SAME `--count`/footer derivation), so the owner sees the split up front, not a bare `N`.
 - **Surface the U/W BREAKDOWN, never just the counts (#527).** Whenever `U > 0` or `W > 0` — at the banner AND in every per-cycle `## ✅ Work Complete` report (Step 4) — print the actual parked MEMBERS, not only the numbers, so the owner SEES what waits without having to ask "máš na mňa otázku?": run `python3 ~/devel/airuleset/airuleset.py core-quals --waiting` (reduced-authority: `slice-quals --waiting`) and list each `U` member with its tag (`answer`/`decision`/`acceptance`/`ping`) + title, then `core-quals --ops-wait` (or `slice-quals --ops-wait`) for each `W` member with its tag (`acceptance`/`ops-wait`) + title. `U` = "čo sa ťa Claude pýta / čo máš schváliť" (a not-yet-sent acceptance is a real approve-the-thread question); `W` = "odoslané, čaká tretia strana".
-- **Invariant — `U > 0` ⟹ every `U` member ALREADY carries a DELIVERED question (#527, owner directive "keď je U väčšie ako nula sa stále musím pýtať či má Claude na mňa otázku").** On EVERY cycle, for each `U` member from `--waiting`, confirm it has a delivered question the owner can act on: a fired ❓ ping (question map) OR a `needs-answer`/`needs-decision` comment that CARRIES the actual question (not a bare label). A `U` member WITHOUT one is a defect — ASK its question now (`❓ ASKED` + a `needs-answer` comment on the issue), **ONE AT A TIME, SEQUENTIALLY** (never a pile — `user-questions-slovak.md`), so the owner never has to prompt "do you have a question for me?". (`acceptance`-tagged `U` members: the question is "approve + send the client acceptance thread"; once sent, the stream adds `ops-wait` and it moves to `W`.) The goal: the owner NEVER asks whether Claude has a question — a positive `U` always means the questions are already on their phone.
+- **Invariant — `U > 0` ⟹ every `U` member ALREADY carries a DELIVERED question (#527, owner directive "keď je U väčšie ako nula sa stále musím pýtať či má Claude na mňa otázku").** On EVERY cycle, for each `U` member from `--waiting`, confirm it has a delivered question the owner can act on: a fired ❓ ping (question map) OR a `needs-answer`/`needs-decision` comment that CARRIES the actual question (not a bare label). **This is now MECHANIZED (#539): `--waiting` itself tags any `U` member with no delivered question `no-question!` in its reason column** (a question-map `#N` reference OR an ask-flow-marked comment clears it; an unreadable map / gh error tags nothing — never a false accusation). A `U` member tagged `no-question!` (or one you spot without a question) is a defect — ASK its question now (`❓ ASKED` + a `needs-answer` comment on the issue), **ONE AT A TIME, SEQUENTIALLY** (never a pile — `user-questions-slovak.md`), so the owner never has to prompt "do you have a question for me?". (`acceptance`-tagged `U` members: the question is "approve + send the client acceptance thread"; once sent, the stream adds `ops-wait` and it moves to `W`.) The goal: the owner NEVER asks whether Claude has a question — a positive `U` always means the questions are already on their phone.
 - **Version-on-dashboard foundation gate** (web projects): no version label → that foundation
   issue is the FIRST work item (`version-on-dashboard.md`).
 

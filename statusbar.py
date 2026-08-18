@@ -511,6 +511,64 @@ def question_ping_count(cwd, home=None):
     return len(ticketless_question_pings(cwd, home=home))
 
 
+def question_map_ticket_refs(cwd, home=None):
+    """The SET of issue numbers (int) referenced by any ❓ ping recorded in
+    ~/.claude/discord-questions.json AND SCOPED to `cwd`'s project — the
+    DELIVERED-question signal for the #527 `--waiting` no-question check (#539).
+    A ping whose text references `#N` is a question DELIVERED to the owner about
+    `#N` (`notify.record_question` writes an entry per phone ping; #368: an
+    unanswered entry STAYS in the map, re-asked daily), so its target `#N` is
+    covered.
+
+    **Scoped by project, exactly like the sibling `ticketless_question_pings`**
+    (`_question_same_project(cwd, entry.cwd)`) — a MUST, not a nicety: the map
+    is shared across every repo a box works, and low issue numbers COLLIDE
+    across repos (airuleset #300 == odoo-erp #300). Without scoping, a
+    multi-repo supervisor box (dev1/gatekeeper) would clear/route a ticket in
+    repo A off an unrelated ping about `#300` in repo B — reintroducing the very
+    "U > 0 with no real question here" invariant violation this ticket exists to
+    kill (#539 review MAJOR-1). `cwd` is the caller's repo root; an empty cwd
+    matches nothing (returns an empty set on a readable map — the safe degrade).
+
+    The return distinguishes ABSENT from UNREADABLE, which the caller's fail-safe
+    (`cli_quals._acceptance_present_set`/`_no_question_flagged`) depends on — a
+    plain `_load` (which collapses both to None) is deliberately NOT reused here:
+
+      - file ABSENT (no ❓ ever pinged from this box) -> **empty set**: a
+        readable "nothing delivered" state, so a `U` member with no ref is a
+        genuine no-question candidate (checked further via the comment fallback).
+      - file present but CORRUPT / not a dict / unreadable -> **None**: the
+        caller then tags NOTHING (never a false accusation off an unreadable
+        map, "nikdy falošný", #539).
+      - file valid -> the set of every `#N` in any SAME-PROJECT entry's
+        block+question text (the SAME `_TICKET_REF_RE` the ticketless-ping dedup
+        uses, run in the opposite direction — here we COLLECT the numbers)."""
+    path = _claude_dir(home) / "discord-questions.json"
+    if not path.exists():
+        return set()
+    try:
+        with open(path, encoding="utf-8") as h:
+            d = json.load(h)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    here = str(cwd or "").rstrip("/")
+    refs = set()
+    for v in d.values():
+        if not isinstance(v, dict):
+            continue
+        if not _question_same_project(here, v.get("cwd")):
+            continue                         # #539 review MAJOR-1: cross-repo scope
+        text = "%s %s" % (v.get("block") or "", v.get("question") or "")
+        for m in _TICKET_REF_RE.finditer(text):
+            try:
+                refs.add(int(m.group(0)[1:]))   # "#4" -> 4
+            except ValueError:
+                continue
+    return refs
+
+
 # --------------------------------------------------------------------------- #
 # #223 -- account identity: WHICH Claude account is logged in on this box,
 # and WHEN its monthly subscription renews. Both already local

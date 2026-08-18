@@ -2116,7 +2116,11 @@ def cmd_tickets_status(args):
                 # ticket that is BOTH handed-off AND parked (user-waiting/ops-wait)
                 # is counted in its parked bucket (`U`/`W`), never `gk` — the same
                 # surface treatment #468 already gives a handed + user-waiting row.
-                workable_rows, waiting, ops_wait = _partition_workable(rows)
+                # #539: a bare needs-acceptance with no DELIVERED draft is the
+                # stream's own chained work → I, not U (`_acceptance_present_set`,
+                # question map only — the footer already reads that file).
+                workable_rows, waiting, ops_wait = _partition_workable(
+                    rows, acceptance_present=_acceptance_present_set(rows, cwd=cwd))
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
@@ -2173,7 +2177,9 @@ def cmd_tickets_status(args):
                 # user-waiting split (both surface as their own footer buckets —
                 # `U N`/`W N`). ONE partition of the SAME fetch the /goal
                 # stop-proof (`core-quals --count`) uses (#367/#468 guard).
-                workable, waiting, ops_wait = _partition_workable(seen)
+                # #539: bare needs-acceptance with no delivered draft → I (chained).
+                workable, waiting, ops_wait = _partition_workable(
+                    seen, acceptance_present=_acceptance_present_set(seen, cwd=cwd))
                 entry["open"] = len(workable)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
@@ -4311,6 +4317,10 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _row_is_ops_wait as _row_is_ops_wait,
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
+    _acceptance_present_set as _acceptance_present_set,
+    _comment_carries_question as _comment_carries_question,
+    _issue_question_comment_state as _issue_question_comment_state,
+    _no_question_flagged as _no_question_flagged,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,

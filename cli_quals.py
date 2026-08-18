@@ -535,13 +535,23 @@ def _row_is_ops_wait(labels):
 
 def _ops_wait_reason(labels):
     """The plain-word REASON a row sits in the ops-wait (W) bucket, for the
-    `--ops-wait` per-member tag (#526): `acceptance` when the row is a genuine
-    SENT acceptance (carries `needs-acceptance` AND is NOT simultaneously a
-    re-hand-off/bounce — `NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS`), so it is waiting
-    on the CLIENT — routed to W by `_partition_workable`'s acceptance-scoped
-    override; else `ops-wait` (a ticket parked on an external event/evidence via
-    the `ops-wait` label). Lets a `--ops-wait` reader tell the two W populations
-    apart. A missing/malformed labels value reads as `ops-wait` (the safe generic
+    `--ops-wait` per-member tag (#526): `acceptance` when the row carries
+    `needs-acceptance` AND is NOT simultaneously a re-hand-off/bounce
+    (`NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS`) — routed to W by `_partition_workable`'s
+    acceptance-scoped override; else `ops-wait` (a ticket parked on an external
+    event/evidence via the `ops-wait` label). Lets a `--ops-wait` reader tell the
+    two W populations apart.
+
+    #539: `acceptance` now covers THREE sub-cases, all tagged identically (the
+    doctrine names them in statusline-vocabulary.md #526 + skills/autopilot Step 1
+    — a supervisor adds `ops-wait` WITH evidence in each): (1) the client
+    acceptance thread was SENT and is waiting on the client to confirm; (2)
+    FIX-CLASS — an owner-ruled no-thread close waiting on an EXTERNAL event (a
+    foreign-repo fix), where no thread will ever be sent; (3) a deliberately
+    DEFERRED thread, sent only after a future event (go-live). All three are
+    "not the owner's court" (→ W, not U), which is why one tag serves them.
+
+    A missing/malformed labels value reads as `ops-wait` (the safe generic
     tag). The gk-override exclusion mirrors `_row_is_user_waiting`'s own
     acceptance-scoping EXACTLY (#526 review 🔵): a contradictory
     `needs-acceptance`+`ready-for-review`/`needs-gatekeeper`/`prio:bounce`+
@@ -557,7 +567,7 @@ def _ops_wait_reason(labels):
     return "ops-wait"
 
 
-def _partition_workable(rows):
+def _partition_workable(rows, acceptance_present=None):
     """Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
     (`{number: {"number","title","createdAt","labels"}}`) THREE ways:
     `(workable, user_waiting, ops_wait)`. Both the user-waiting (#468) and the
@@ -583,7 +593,22 @@ def _partition_workable(rows):
     in U (a pending owner answer beats a sent thread), so the override is
     acceptance-scoped. Both buckets leave `workable`, so the COUNT is identical
     either way; the precedence only decides which DISPLAY bucket (U vs W) the row
-    lands in."""
+    lands in.
+
+    `acceptance_present` (#539, THIRD acceptance branch): a set of issue numbers
+    whose BARE `needs-acceptance` has a DELIVERED draft (a question presented for
+    the owner's approval — see `_acceptance_present_set`). When `None` (the
+    default — every unit-test caller), the #526 routing is byte-identical (a bare
+    needs-acceptance → U). When a set IS given (the production callers), a bare
+    `needs-acceptance` (reason == "acceptance", no `ops-wait`, no gk-override)
+    routes to U only if its number is IN the set (a live owner-approval
+    question); otherwise it routes to `workable` (I) — the stream's OWN chained
+    responsibility, e.g. an acceptance whose thread cannot be composed until a
+    sequenced SIBLING ticket the stream is still working completes. That case is
+    neither a live owner question (not U) nor a third-party wait (not W); it is
+    Claude's own chained work → I. This enforces the owner-UX invariant "otázky
+    na mňa?" never truthfully answers NIE while U > 0: a bare needs-acceptance
+    only reaches U once a draft was actually presented (a ❓ ping fired)."""
     workable, user_waiting, ops_wait = {}, {}, {}
     for number, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None
@@ -596,6 +621,12 @@ def _partition_workable(rows):
             if (_user_waiting_reason(labels) == "acceptance"
                     and _row_is_ops_wait(labels)):
                 ops_wait[number] = row
+            elif (acceptance_present is not None
+                  and _user_waiting_reason(labels) == "acceptance"
+                  and number not in acceptance_present):
+                # #539 THIRD branch: a bare needs-acceptance whose draft is NOT
+                # yet delivered is the stream's own chained work → I, not U.
+                workable[number] = row
             else:
                 user_waiting[number] = row
         elif _row_is_ops_wait(labels):
@@ -603,6 +634,48 @@ def _partition_workable(rows):
         else:
             workable[number] = row
     return workable, user_waiting, ops_wait
+
+
+def _acceptance_present_set(rows, cwd=None, home=None):
+    """The set of BARE `needs-acceptance` issue numbers in `rows` whose
+    acceptance DRAFT has been delivered — a question-map ping references `#N`,
+    the "presented for the owner's approval" signal (#539, THIRD branch). Passed
+    as `_partition_workable(..., acceptance_present=...)` so a bare
+    needs-acceptance with NO delivered draft routes to `workable` (I, the
+    stream's own chained work) instead of U.
+
+    Deliberately the question map ALONE (`statusbar.question_map_ticket_refs`,
+    local, no gh) — the partition feeds the HOT footer-count / `/goal` stop-proof
+    path, which must stay off the shared graphql bucket (#370); a presented draft
+    ALWAYS fires a ❓ ping (`notify.record_question`), so the map is the
+    authoritative "owner was actually asked" signal. The gh comment fallback
+    stays in the `--waiting` DISPLAY tag (`_no_question_flagged`), never here.
+    `cwd` (the caller's repo root) SCOPES the map read to THIS project — a MUST on
+    a multi-repo box, where issue numbers collide across repos (#539 review
+    MAJOR-1); every production call site passes its resolved root.
+
+    Fail-safe: an UNREADABLE map (`question_map_ticket_refs` → None) returns ALL
+    bare-needs-acceptance numbers — preserving the #526 U default on a map error
+    (never HIDE a possible owner-approval from U). A readable-but-ABSENT map
+    yields an empty ref set, so a bare needs-acceptance with no draft correctly
+    routes to I. Only bare needs-acceptance rows are considered — a needs-answer/
+    needs-decision row (→ U by label) and a needs-acceptance+ops-wait row (→ W)
+    are never in the returned set, so the partition's gate never touches them."""
+    import statusbar
+    bare = set()
+    for number, row in rows.items():
+        labels = row.get("labels") if isinstance(row, dict) else None
+        if (_row_is_user_waiting(labels)
+                and _user_waiting_reason(labels) == "acceptance"
+                and not _row_is_ops_wait(labels)):
+            bare.add(number)
+    try:
+        refs = statusbar.question_map_ticket_refs(cwd, home)   # #539 MAJOR-1: cwd-scoped
+    except Exception:
+        refs = None
+    if refs is None:
+        return bare                              # unreadable map -> all stay U
+    return {n for n in bare if n in refs}
 
 
 def _partition_user_waiting(rows):
@@ -614,6 +687,119 @@ def _partition_user_waiting(rows):
     behaviour for any caller that only cares about the user-waiting axis."""
     workable, waiting, ops_wait = _partition_workable(rows)
     return {**workable, **ops_wait}, waiting
+
+
+# #539: the repo's OWN ask-flow markers — the shape a genuine owner-question
+# comment takes (`❓ NEEDS YOU`/`❓ ASKED`, the `**Otázka …:**` block head, or a
+# plain "otázka" mention). Deliberately NOT a bare `?`: a routine gatekeeper /
+# review comment carries a `?` incidentally ("does this look right?"), so keying
+# on `?` would make the `no-question!` tag toothless (never fire for the very
+# fix-class acceptance tickets this exists to catch). Keying on the ask-flow
+# vocabulary gives it teeth while staying SAFE — a real question comment always
+# carries one of these (user-questions-slovak.md's hook-enforced template).
+_ASK_MARKER_RE = re.compile(r"❓|ot[áa]z|needs you|asked", re.IGNORECASE)
+
+
+def _comment_carries_question(body):
+    """True if `body` (an issue comment body, or None/non-str) is a real
+    OWNER-question comment — it carries one of the repo's ask-flow markers
+    (`_ASK_MARKER_RE`). The durable-record corroboration for the #539
+    no-question check: when a per-ticket ask-and-continue ping omitted `#N` from
+    its block (the #512 map-dedup residual), the question map misses it, but the
+    ticket's own question comment still proves the owner was asked — which is
+    what keeps the `no-question!` tag from FALSELY accusing such a member.
+
+    Marker-based, so the "nikdy falošný" guarantee is STRUCTURAL, not
+    phrasing-level (#539 review MINOR-1): a false accusation is prevented by the
+    map-unreadable / gh-failure fail-safes in the callers, NOT by this predicate
+    recognizing every conceivable question phrasing. This repo's owner questions
+    are the hook-enforced `**Otázka …:**` / `❓ NEEDS YOU`/`ASKED` template
+    (`user-questions-slovak.md`), which always match; a bare English "can you
+    decide X?" with no marker would not (accepted residual, safe direction — the
+    tag is a display hint, and the caller's fail-safes are the real guarantee)."""
+    if not isinstance(body, str):
+        return False
+    return bool(_ASK_MARKER_RE.search(body))
+
+
+def _issue_question_comment_state(number, cwd=None):
+    """The delivered-question COMMENT state of issue `number`, as the #539
+    no-question fallback (used only for a `U` member the question map did not
+    already cover). Returns:
+
+      - True  -> a question-shaped comment (`_comment_carries_question`) exists,
+      - False -> the gh fetch SUCCEEDED and found none,
+      - None  -> the gh fetch FAILED / was unusable — the caller then does NOT
+        flag this member (fail-safe: never a false accusation off a failed gh
+        call, "nikdy falošný", #539).
+
+    `airuleset._gh_out` returns "" on ANY failure OR empty result, but a
+    successful `gh issue view <n> --json comments` always prints a JSON object
+    (`{"comments": [...]}`, non-empty even with zero comments), so "" is
+    unambiguously a FAILURE here → None. `gh issue view` is a graphql call
+    (#370); it runs at most once per map-uncovered `U` member, only on the
+    on-demand `--waiting` listing path (never the hot footer refresh)."""
+    import airuleset
+    raw = airuleset._gh_out("issue", "view", str(number), "--json", "comments",
+                            cwd=cwd, timeout=15)
+    if not raw:
+        return None                              # gh failed -> fail-safe
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return None                              # unparseable -> fail-safe
+    comments = obj.get("comments") if isinstance(obj, dict) else None
+    if not isinstance(comments, list):
+        return None                              # unexpected shape -> fail-safe
+    for c in comments:
+        body = c.get("body") if isinstance(c, dict) else None
+        if _comment_carries_question(body):
+            return True
+    return False
+
+
+def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
+    """The set of `U`-member issue numbers to tag `no-question!` (#539,
+    mechanizing the #527 invariant "U > 0 ⟹ every U member carries a DELIVERED
+    question"). For each member of `rows` (the `user_waiting` bucket):
+
+      - covered if the question map references `#N`
+        (`statusbar.question_map_ticket_refs`, the AUTHORITATIVE delivered-ping
+        signal — cheap, local, no gh), OR
+      - covered if a question-shaped comment exists on it (`comment_state_fn`,
+        default `_issue_question_comment_state`, a bounded gh fallback run ONLY
+        for a map-uncovered member — so a healthy stream pays ZERO gh calls and
+        only the defect population incurs one).
+
+    A member covered by NEITHER — and only when we are CONFIDENT of that — is
+    flagged. Every uncertainty resolves toward NOT flagging (never a false
+    accusation, "nikdy falošný"):
+      - the map is UNREADABLE (corrupt) -> return an empty set, tag NOTHING (a
+        delivered ping we cannot see must never be called absent);
+      - a member's gh comment fetch FAILS (None) -> that member is not flagged.
+    An ABSENT map (never pinged) reads as an empty ref set (readable), so its
+    members ARE checked via the comment fallback — that is the montalu3 defect
+    this catches, not a fail-safe case."""
+    import statusbar
+    try:
+        refs = statusbar.question_map_ticket_refs(cwd, home)   # #539 MAJOR-1: cwd-scoped
+    except Exception:
+        refs = None
+    if refs is None:
+        return set()                             # unreadable map -> tag NOTHING
+    check = comment_state_fn or _issue_question_comment_state
+    flagged = set()
+    for number in rows:
+        if number in refs:
+            continue                             # delivered ping references it
+        try:
+            state = check(number, cwd)
+        except Exception:
+            state = None
+        if state is False:
+            flagged.add(number)                  # ok fetch, no question -> flag
+        # True (has a question) or None (fetch failed) -> never flag
+    return flagged
 
 
 def _authority_marker(cwd=None):

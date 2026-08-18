@@ -52,7 +52,7 @@ def _row_action(row, own_stream=None):
     return airuleset.ROW_IMPLEMENT
 
 
-def _print_issue_rows(rows, own_stream=None, reason_fn=None):
+def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -65,7 +65,14 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None):
     is inserted BEFORE the title — `number<TAB>createdAt<TAB>action<TAB>reason
     <TAB>title` — so a `--waiting` reader sees WHY each parked ticket waits
     (answer/decision/acceptance). Field 0 stays the issue number, so existing
-    `split("\\t", 1)[0]` number-parsing is unaffected."""
+    `split("\\t", 1)[0]` number-parsing is unaffected.
+
+    `flag_numbers` (#539, `--waiting` only): a set of `U`-member numbers that
+    carry NO delivered question — ` no-question!` is APPENDED to their reason
+    column (a space-separated warning WITHIN field 3, so the tab-field layout
+    is unchanged), mechanizing the #527 invariant. Only meaningful alongside
+    `reason_fn`."""
+    flag_numbers = flag_numbers or set()
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
         action = _row_action(row, own_stream)
@@ -73,8 +80,11 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None):
             print("%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
                                       action, row.get("title") or ""))
         else:
+            reason = reason_fn(row.get("labels"))
+            if n in flag_numbers:
+                reason = (reason + " no-question!").strip()
             print("%s\t%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
-                                          action, reason_fn(row.get("labels")),
+                                          action, reason,
                                           row.get("title") or ""))
 
 
@@ -431,7 +441,11 @@ def cmd_slice_quals(args):
     if extra:
         workable_rows, waiting, ops_wait = rows, {}, {}
     else:
-        workable_rows, waiting, ops_wait = airuleset._partition_workable(rows)
+        # #539: a bare needs-acceptance with no DELIVERED draft is the stream's
+        # own chained work → I, not U (`_acceptance_present_set`, question map
+        # only — no gh, safe on the count path).
+        workable_rows, waiting, ops_wait = airuleset._partition_workable(
+            rows, acceptance_present=airuleset._acceptance_present_set(rows, cwd=root))
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
@@ -442,9 +456,11 @@ def cmd_slice_quals(args):
     if want_waiting:
         # #512: each labeled member gets a reason tag (answer/decision/
         # acceptance), then the ticketless ❓ pings (reason=ping) so the list
-        # matches the footer's `U N` count.
+        # matches the footer's `U N` count. #539: tag a member carrying NO
+        # delivered question `no-question!` (the #527 invariant, mechanized).
         _print_issue_rows(waiting, own_stream=user,
-                          reason_fn=airuleset._user_waiting_reason)
+                          reason_fn=airuleset._user_waiting_reason,
+                          flag_numbers=airuleset._no_question_flagged(waiting, cwd=root))
         _print_ping_rows(_waiting_ping_entries())
         return
     if want_count:
@@ -580,7 +596,9 @@ def cmd_core_quals(args):
     if extra:
         workable, waiting, ops_wait = seen, {}, {}
     else:
-        workable, waiting, ops_wait = airuleset._partition_workable(seen)
+        # #539: bare needs-acceptance with no delivered draft → I (chained).
+        workable, waiting, ops_wait = airuleset._partition_workable(
+            seen, acceptance_present=airuleset._acceptance_present_set(seen, cwd=root))
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:
@@ -621,9 +639,11 @@ def cmd_core_quals(args):
         # own_stream=None: a full-authority box owns no stream, so EVERY
         # stream-labelled row is action-only. #512: reason tag per labeled
         # member (answer/decision/acceptance) + the ticketless ❓ pings
-        # (reason=ping), matching the footer's `U N` count.
+        # (reason=ping), matching the footer's `U N` count. #539: tag a member
+        # carrying NO delivered question `no-question!` (#527, mechanized).
         _print_issue_rows(waiting, own_stream=None,
-                          reason_fn=airuleset._user_waiting_reason)
+                          reason_fn=airuleset._user_waiting_reason,
+                          flag_numbers=airuleset._no_question_flagged(waiting, cwd=root))
         _print_ping_rows(_waiting_ping_entries())
         return
     if want_count:
