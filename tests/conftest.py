@@ -25,8 +25,12 @@ primitive, and it composes cleanly with any test's OWN more specific
 `unittest.mock.patch.object(wd, "draft_rescue_dir", ...)` (whichever patch
 is innermost simply wins for its own scope, exactly like any other nested
 `mock.patch`)."""
+import contextlib
 import os
+import shutil
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -36,6 +40,60 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 import watchdog as wd
+
+
+@contextlib.contextmanager
+def _per_run_tempdir(base=None):
+    """#548 CORE: redirect the process's tempfile machinery into ONE throwaway
+    per-run directory, then remove that directory WHOLESALE on exit.
+
+    Root cause it fixes: the suite has ~459 raw `tempfile.mkdtemp()`/`mkstemp()`
+    call sites (many without cleanup — the #385 lock-litter class), which leaked
+    465k `/tmp/tmp*` dirs on dev1 (ext4 htree ENOSPC + inode pressure). Setting
+    BOTH `tempfile.tempdir` (in-process — the module global `gettempdir()`
+    returns, so every raw mkdtemp lands here even after `gettempdir()` cached)
+    AND `$TMPDIR` (for any subprocess a test spawns) catches EVERY call site
+    without editing a single one, and the wholesale `rmtree` on exit means the
+    whole run's litter is gone.
+
+    Composability: the function-scoped isolation fixtures below use their own
+    `TemporaryDirectory()`, which simply nests inside this dir and cleans up as
+    before; a test that patches `$TMPDIR`/`tempfile.tempdir` itself still wins
+    for its own (inner) scope. The per-run dir is named `airuleset-pytest-run-*`
+    so that a KILLED run's one leaked dir is itself reaped by the #548
+    airuleset-* reaper (>3d) — the redirect narrows the leak to one self-healing
+    directory instead of thousands.
+
+    Exposed as a plain context manager (not only the fixture) so it is unit-
+    testable directly — the fixture below is a thin session-scoped wrapper."""
+    orig_tempdir = tempfile.tempdir
+    orig_env = os.environ.get("TMPDIR")
+    root = base if base is not None else tempfile.gettempdir()
+    run_dir = Path(root) / ("airuleset-pytest-run-" + uuid.uuid4().hex)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    tempfile.tempdir = str(run_dir)
+    os.environ["TMPDIR"] = str(run_dir)
+    try:
+        yield run_dir
+    finally:
+        tempfile.tempdir = orig_tempdir
+        if orig_env is None:
+            os.environ.pop("TMPDIR", None)
+        else:
+            os.environ["TMPDIR"] = orig_env
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _redirect_tempdir_per_run():
+    """#548 CORE fixture — wraps `_per_run_tempdir` at SESSION scope so it is
+    established BEFORE any function-scoped fixture or test, and torn down (dir
+    removed) LAST, after every function-scoped `TemporaryDirectory` nested
+    inside it has already cleaned up. The `cmd_push` `unittest discover` gate
+    never reads conftest.py, so it gets the identical redirect via its own
+    `test_env["TMPDIR"]` (#385 dual-coverage)."""
+    with _per_run_tempdir() as run_dir:
+        yield run_dir
 
 
 @pytest.fixture(autouse=True)

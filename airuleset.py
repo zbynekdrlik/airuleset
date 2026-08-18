@@ -673,6 +673,14 @@ from cli_scratch_sweep import (  # noqa: E402
     _log_tmp_stray_summary as _log_tmp_stray_summary,
     sweep_stray_tmp as sweep_stray_tmp,
     cmd_sweep_stray_tmp as cmd_sweep_stray_tmp,
+    _AIRULESET_STATE_RX as _AIRULESET_STATE_RX,
+    AIRULESET_STATE_EXCLUDE_PREFIXES as AIRULESET_STATE_EXCLUDE_PREFIXES,
+    AIRULESET_STATE_LOG_PATH as AIRULESET_STATE_LOG_PATH,
+    AIRULESET_STATE_STATE_PATH as AIRULESET_STATE_STATE_PATH,
+    AIRULESET_STATE_MIN_AGE_DAYS_DEFAULT as AIRULESET_STATE_MIN_AGE_DAYS_DEFAULT,
+    AIRULESET_STATE_LIVE_ENV as AIRULESET_STATE_LIVE_ENV,
+    discover_stray_airuleset_state_candidates as discover_stray_airuleset_state_candidates,
+    sweep_airuleset_state as sweep_airuleset_state,
 )
 
 
@@ -1098,26 +1106,35 @@ def cmd_install(args):
     except Exception as e:
         print(f"  claude-scratch sweep error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 11b. Stray tempfile.mkdtemp litter sweep (#513) -- the ext4 htree
-    # ENOSPC source (batch-38 `/tmp/tmpuoq3_vff`; 503k uid-owned
-    # tmp[a-z0-9_]{8} entries measured on dev1). REPORT-ONLY is the wired
-    # DEFAULT -- it prints the loud count/reclaimable summary so the
-    # supervisor can review, and reclaims live ONLY under
-    # AIRULESET_TMP_PYTEST_RECLAIM_LIVE=1 (never set by this PR, on any box),
-    # mirroring the transcript-compress LIVE gate. Cadence-gated, non-fatal.
+    # --- 11b. Fleet age-gated /tmp litter reaper (#548, flips #513's report-
+    # only default) -- the dev1 inode-exhaustion incident (721k /tmp entries:
+    # 465k `tmp[a-z0-9_]{8}` mkdtemp litter + 136k `airuleset-*` hook state).
+    # This install step runs on EVERY managed box at every push/install (the
+    # deploy loop), so it is the fleet-wide reaper. LIVE reaping is #548's owner
+    # sign-off; both sweeps are mtime-gated (tmp* >24h, airuleset-* >3d --
+    # anything live is <2h), regular-file/dir only, /proc live-scan + TOCTOU
+    # re-checked, cadence-gated (own 24h state), non-fatal. Camera-box runs on
+    # dev1, so the same reaper covers it (its target/ class is #544/#545).
     try:
-        stray = sweep_stray_tmp()
+        stray = sweep_stray_tmp(live=True, min_age_days=1)
         if stray.get("total_matched"):
-            if stray.get("live") and stray.get("removed"):
-                print(f"  Removed {stray['removed']} stray /tmp tempfile dir(s), "
-                      f"{_human_size(stray['reclaimed_bytes'])} reclaimed "
-                      f"(log: {TMP_STRAY_LOG_PATH})")
-            else:
-                print(f"  Stray /tmp tempfile litter: {stray['total_matched']} entries "
-                      f"({stray['reclaimable']} reclaimable) -- REPORT-ONLY, set "
-                      f"{TMP_STRAY_LIVE_ENV}=1 to reclaim (log: {TMP_STRAY_LOG_PATH})")
+            print(f"  Stray /tmp tempfile litter: {stray['total_matched']} matched, "
+                  f"removed {stray['removed']} ({_human_size(stray['reclaimed_bytes'])}"
+                  f" reclaimed) (log: {TMP_STRAY_LOG_PATH})")
     except Exception as e:
         print(f"  stray-tmp sweep error (non-fatal): {e}", file=sys.stderr)
+    # --- 11c. Stray /tmp/airuleset-* hook-state litter reaper (#548) -- the
+    # OTHER half of the incident (hardcoded-/tmp session markers the CORE TMPDIR
+    # redirect never catches). Same LIVE mtime/uid/proc/TOCTOU quad-gate, 3-day
+    # floor, exec-permission markers EXCLUDED (job 22's live-checked domain).
+    try:
+        astate = sweep_airuleset_state(live=True, min_age_days=3)
+        if astate.get("total_matched"):
+            print(f"  Stray /tmp/airuleset-* state litter: {astate['total_matched']} matched, "
+                  f"removed {astate['removed']} ({_human_size(astate['reclaimed_bytes'])}"
+                  f" reclaimed) (log: {AIRULESET_STATE_LOG_PATH})")
+    except Exception as e:
+        print(f"  airuleset-state sweep error (non-fatal): {e}", file=sys.stderr)
 
     # --- 12. Disk-usage visibility (#380 point 4) -- one more line in the
     # SAME print block every sweep step above already writes summaries
