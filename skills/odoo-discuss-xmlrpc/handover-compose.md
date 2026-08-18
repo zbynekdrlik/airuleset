@@ -15,6 +15,17 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   body verbatim, (3) the member list. NEVER "the text is on the ticket / in the
   PR" — the owner does not read tickets, so a proposal that points at a ticket
   instead of carrying the whole text is not a proposal.
+- **The thread NAME ends with the owning stream's NUMBER**, so the owner sees at
+  a glance which stream owns the thread (montalu3 → "Kontrola zákazníckych
+  e-mailov 3"). This formalizes the de-facto IT-support convention already on
+  montalu PROD ("VOP — finálne znenie 3", "Nedoručené e-maily 3", "Oprava filtra
+  rozmerov 2", "Tabula objednavok 1"). The suffix is the STREAM'S NUMBER: for a
+  NUMBERED stream it is the trailing digits of the stream name (montalu2..8 →
+  2..8, david2..4 → 2..4, miva1 → 1). For an UNNUMBERED base stream (montalu,
+  marek, david, simap) the interim suffix is "1" — the first stream of its client
+  family (matches the existing montalu "Tabula objednavok 1" thread and miva1) —
+  PENDING owner confirmation on airuleset #532, where the base-stream suffix
+  (full name / "1" / none) is being settled with the owner.
 - **The message body MUST carry a direct deep-link URL to the LIVE feature** on
   the client's PROD — the actual route / record / page URL the client clicks to
   SEE it, never a menu path ("Predaj → Objednávky → …") and never the bare
