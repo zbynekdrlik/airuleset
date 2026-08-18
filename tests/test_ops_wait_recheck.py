@@ -376,5 +376,58 @@ class TestLaneSweepWiring(unittest.TestCase):
         self.assertIsNone(state["ops_wait_recheck"][sid]["last_nudge"])
 
 
+# --------------------------------------------------------------------------- #
+# 5. Doctrine content-lock (#498/#500 teeth) — the W-bucket re-entry surfaces
+#    must keep pointing at the mechanism, not silently drift back to prose-only.
+# --------------------------------------------------------------------------- #
+
+_REPO = Path(__file__).resolve().parent.parent
+
+
+def _line_with(text, finder):
+    """The single physical line carrying `finder` (an UNIQUE operative token),
+    or "" — per-line teeth for a one-line surface (#500)."""
+    for ln in text.splitlines():
+        if finder in ln:
+            return ln
+    return ""
+
+
+def _norm_window(text, start_token, end_marker="\n- **"):
+    """A whitespace-collapsed window from `start_token` to the next `end_marker`
+    (or EOF) — the #500 shape for content that WRAPS across indented physical
+    lines (a markdown list-item continuation)."""
+    i = text.index(start_token)
+    j = text.find(end_marker, i)
+    return " ".join(text[i:(j if j > 0 else len(text))].split())
+
+
+class TestDoctrineContentLock(unittest.TestCase):
+    # UNIQUE finders (the #547 operative sentence), NEVER a token also under
+    # assertion, so the finder never begs the question (#498).
+    STATUS_FINDER = "W re-entry is MECHANICAL (#547)"
+    SKILL_FINDER = "W re-check is now MECHANICAL (#547)"
+    # Co-tokens the operative statement MUST carry — the mechanism + the
+    # supervisor-only-clears invariant. A partial revert dropping the mechanism
+    # sentence drops these together.
+    TOKENS = ("job 20", "--ops-wait", "stuck-check:", "never auto-unlabels")
+
+    def test_statusline_vocabulary_W_bullet_points_at_mechanism(self):
+        text = (_REPO / "modules/core/statusline-vocabulary.md").read_text(
+            encoding="utf-8")
+        line = _line_with(text, self.STATUS_FINDER)
+        self.assertTrue(line, "the W bullet must carry the #547 mechanism sentence")
+        for tok in self.TOKENS:
+            self.assertIn(tok, line,
+                          "W bullet lost the operative token %r (#547 drift)" % tok)
+
+    def test_autopilot_skill_W_paragraph_points_at_mechanism(self):
+        text = (_REPO / "skills/autopilot/SKILL.md").read_text(encoding="utf-8")
+        win = _norm_window(text, self.SKILL_FINDER)
+        for tok in self.TOKENS:
+            self.assertIn(tok, win,
+                          "autopilot SKILL W paragraph lost %r (#547 drift)" % tok)
+
+
 if __name__ == "__main__":
     unittest.main()

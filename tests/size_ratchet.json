@@ -128,7 +128,7 @@
     "tests/test_notify_question_faildloud.py": 204,
     "tests/test_notify_questions_channel.py": 299,
     "tests/test_notify_repo_resolution.py": 108,
-    "tests/test_ops_wait_recheck.py": 380,
+    "tests/test_ops_wait_recheck.py": 433,
     "tests/test_ops_wait_split.py": 433,
     "tests/test_owner_decision_digest.py": 458,
     "tests/test_per_ticket_completion_marker.py": 151,
