@@ -619,6 +619,15 @@ from cli_worktree_sweep import (  # noqa: E402
     _log_stale_worktree_results as _log_stale_worktree_results,
     sweep_stale_worktrees as sweep_stale_worktrees,
     cmd_sweep_worktrees as cmd_sweep_worktrees,
+    LANE_TARGET_LOG_PATH as LANE_TARGET_LOG_PATH,
+    LANE_TARGET_STATE_PATH as LANE_TARGET_STATE_PATH,
+    LANE_TARGET_MIN_INTERVAL_S as LANE_TARGET_MIN_INTERVAL_S,
+    LANE_TARGET_MERGED_MIN_IDLE_S as LANE_TARGET_MERGED_MIN_IDLE_S,
+    _branch_reflog_has_authored_commit as _branch_reflog_has_authored_commit,
+    _iter_lane_target_dirs as _iter_lane_target_dirs,
+    _log_lane_target_results as _log_lane_target_results,
+    purge_merged_lane_targets as purge_merged_lane_targets,
+    cmd_purge_lane_targets as cmd_purge_lane_targets,
 )
 
 
@@ -1039,6 +1048,25 @@ def cmd_install(args):
                   f"(log: {STALE_WORKTREE_LOG_PATH})")
     except Exception as e:
         print(f"  worktree sweep error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 9b. Merged worktree-lane target/ reclaim (#545) -------------------
+    # A worktree LANE's target/ (1-2 GB of cargo build output) is NOT
+    # reclaimed by the #315 target-purge (its 7-day newest-mtime floor is
+    # defeated by cargo fingerprint churn) nor by step 9 (which waits the full
+    # 24h idle floor to remove the WHOLE lane). This reclaims ONLY the target/
+    # of a lane whose branch is MERGED (0-ahead + authored-commit reflog),
+    # idle + not in live use -- pure regenerable waste (6.3 GB measured on
+    # dev1, #545). Cadence-gated by its own state file, non-fatal, best-
+    # effort -- matches every other step above.
+    try:
+        lane_results = purge_merged_lane_targets()
+        lane_purged = [r for r in lane_results if r.get("purged")]
+        if lane_purged:
+            total = sum(r.get("size", 0) or 0 for r in lane_purged)
+            print(f"  Reclaimed {len(lane_purged)} merged-lane target/ dir(s), "
+                  f"{_human_size(total)} freed (log: {LANE_TARGET_LOG_PATH})")
+    except Exception as e:
+        print(f"  merged-lane target reclaim error (non-fatal): {e}", file=sys.stderr)
 
     # --- 10. Old Claude CLI binary sweep: keep current + previous only (#355)
     # Every native `claude` auto-update leaves the OLD versioned binary
@@ -4644,6 +4672,14 @@ def main():
                                  "dirty work (never auto-removed) -- scans every managed repo "
                                  "+ a network ls-remote per candidate, so it is opt-in (#513)")
 
+    # --- Merged worktree-lane target/ reclaim: manual/testable entry (#545) --
+    p_sweep_lane = sub.add_parser(
+        "sweep-lane-targets",
+        help="Reclaim the target/ of a worktree LANE whose branch is MERGED "
+             "(0-ahead + authored-commit reflog), idle + not in live use (#545)")
+    p_sweep_lane.add_argument("--dry-run", dest="dry_run", action="store_true",
+                              help="Report what would be reclaimed without deleting anything")
+
     # --- Old Claude CLI binary sweep: manual/testable entry point (#355) --
     p_sweep_cli = sub.add_parser(
         "sweep-cli-versions",
@@ -5179,6 +5215,7 @@ SUBCOMMANDS = {
     "push": cmd_push,
     "purge-targets": cmd_purge_targets,
     "sweep-worktrees": cmd_sweep_worktrees,
+    "sweep-lane-targets": cmd_purge_lane_targets,
     "sweep-cli-versions": cmd_sweep_cli_versions,
     "sweep-autopilot-locks": cmd_sweep_autopilot_locks,
     "sweep-claude-scratch": cmd_sweep_claude_scratch,
