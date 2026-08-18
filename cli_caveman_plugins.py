@@ -458,8 +458,8 @@ def _reconcile_settings_file():
     """Read SETTINGS_JSON, apply reconcile_managed_plugins(), write back only
     when it changed (backing up first). Returns "invalid" (unparseable JSON,
     nothing written), "wrote" (reconciled + written), or "unchanged" (already
-    correct). Shared by setup_managed_plugins()'s TWO reconcile passes (see
-    that function) so they can never drift on how the file is written."""
+    correct). Used by setup_managed_plugins()'s reconcile pass (#542 removed
+    the second re-assert-disable pass along with the OPTIONAL tier it guarded)."""
     import airuleset
     raw = airuleset.read_file_safe(airuleset.SETTINGS_JSON)
     try:
