@@ -1032,6 +1032,33 @@ class TestCardReconcileReopenClear(unittest.TestCase):
         kw.setdefault("send_fn", self.send)
         return wd.card_reconcile(NOW, None, self.state, {"s": str(r)}, **kw)
 
+    def test_reduced_authority_box_does_not_ping_a_foreign_ticket(self):
+        # #534: on a reduced-authority box, merged_closes reads the SHARED base
+        # branch (every stream's merges), so a FOREIGN ticket's missing card
+        # must NOT ping the owner — only an OWN-slice ticket does. This is the
+        # card_reconcile (job 24) call-site lock for the shared owner filter.
+        r = self.repo(closes=(4373, 4379))    # both closed on main, no cards
+        owned = wd.make_owned_closed_filter(
+            current_user_fn=lambda: "montalu",
+            authority_fn=lambda root: "branch-merge",
+            owner_fn=lambda root, nums: {4373: "miva1", 4379: "montalu"})
+        self.reconcile(r, owned_closed=owned)
+        msgs = " ".join(x["msg"] for x in self.sent)
+        self.assertIn("#4379", msgs, "own ticket's missing card DOES ping")
+        self.assertNotIn("#4373", msgs, "foreign ticket must NEVER ping")
+
+    def test_full_authority_box_still_pings_every_missing_card(self):
+        # The gatekeeper owns the whole merged set — scoping must not break it.
+        r = self.repo(closes=(4373, 4379))
+        owned = wd.make_owned_closed_filter(
+            current_user_fn=lambda: "gatekeeper",
+            authority_fn=lambda root: "full",
+            owner_fn=lambda root, nums: {})
+        self.reconcile(r, owned_closed=owned)
+        msgs = " ".join(x["msg"] for x in self.sent)
+        self.assertIn("#4373", msgs)
+        self.assertIn("#4379", msgs)
+
     def test_same_round_the_marker_survives_untouched(self):
         r = self.repo(closes=(3,))
         self._fire_card("proj#3")

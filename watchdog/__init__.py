@@ -1563,6 +1563,8 @@ from watchdog.cards import (  # noqa: E402
     _self_callback_records as _self_callback_records,
     _autopilot_mutex_held as _autopilot_mutex_held,
     report_reconcile as report_reconcile,
+    _owned_identity as _owned_identity,
+    make_owned_closed_filter as make_owned_closed_filter,
 )
 
 
@@ -3749,17 +3751,25 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     # supervisor that merged tickets but never wrote their per-ticket report.
     # It early-returns on empty `cwd_by_sid` (a no-op in the characterization
     # sweep) and types in-band, so it takes panes_by_sid/projects_dir/sleep_fn.
+    # #534: ONE owner-scoping filter, shared by both jobs so its per-repo
+    # GraphQL ownership lookup fires at most once per repo per sweep (both jobs
+    # derive the identical `merged_closes` candidate set for a given root). Built
+    # HERE, per sweep, so its memo is fresh each sweep (a gh-failure sweep
+    # re-queries next sweep rather than latching a wrong owner map).
+    _owned_scope = make_owned_closed_filter()
     _add("card_reconcile", lambda: card_probe is not None,
          lambda: card_reconcile(now, run, state, cwd_by_sid,
                                 send_fn=send_fn, dry_run=dry_run,
                                 card_probe=card_probe,
                                 closed_fetch=closed_fetch,
                                 reopen_fetch=reopen_fetch,
-                                owner_by_sid=owner_by_sid)
+                                owner_by_sid=owner_by_sid,
+                                owned_closed=_owned_scope)
                  + report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
                                     send_fn=send_fn, dry_run=dry_run,
                                     owner_by_sid=owner_by_sid,
-                                    projects_dir=projects_dir, sleep_fn=sleep_fn),
+                                    projects_dir=projects_dir, sleep_fn=sleep_fn,
+                                    owned_closed=_owned_scope),
          "card-reconcile error")
 
     # Job 26 — COMPACT-STALL WATCH — REMOVED (#402, 2026-08-12). Used to
