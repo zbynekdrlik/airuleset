@@ -209,10 +209,14 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # was appended AFTER `conformance_is_target=None` on that same LAST line,
         # so the closing `):` moved once more; the anchor's LAST line grew again,
         # the mutation target `vault_purge=None` is still untouched.)
+        # (#547 re-pin: `ops_wait_fetch=None` was inserted on its own NEW line
+        # right after the `backlog_fetch=None,` line — the anchor grew a middle
+        # line; the mutation target `vault_purge=None` is untouched.)
         old = ("             vault_purge=None, vault_backstop=None, "
                "log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
                "backlog_fetch=None,\n"
+               "             ops_wait_fetch=None,\n"
                "             progress_dir=None, questions_path=None,\n"
                "             owner_decision_fetch=None, "
                "gk_selfservice_fetch=None,\n"
