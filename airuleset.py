@@ -2317,7 +2317,28 @@ def cmd_gk_request(args):
     three of those ownership consumers by construction, so a gk-request
     ticket is recoverable in the FOOTER (via `_last_origin_owner`) without
     ever entering the stop-proof's own slice or the gatekeeper's own core
-    count (#191 M2)."""
+    count (#191 M2).
+
+    VERIFIED DELIVERY — always use THIS command, NEVER hand-write a
+    `GATEKEEPER-ACTION` comment (#551). This is the delivery-verified-by-
+    construction hand-off path: it applies `needs-gatekeeper` DIRECTLY
+    (`gh issue edit --add-label` — a direct API write, immediately
+    observable, NOT dependent on the repo's comment-triggered auto-label
+    workflow), and on a label-permission 403 it degrades to a PROPER
+    `GATEKEEPER-ACTION: ` prefix in BOTH a comment and the TITLE, which the
+    watchdog's job-11 `in:title` query catches. A hand-written raw comment
+    delivers NONE of that: the repo auto-label workflow matches ONLY a
+    line-start `GATEKEEPER-ACTION:` (so a MUTATED shape like
+    `GATEKEEPER-ACTION (spresnenie …):` — a parenthetical before the colon —
+    silently produces no label), and job 11 never scans comment bodies, so
+    the request is invisible to the gatekeeper queue and the stream parks on
+    a NEVER-DELIVERED hand-off (the miva1 incident, odoo-erp issue 3244).
+    If a raw marker comment is ever unavoidable, do a bounded post-check:
+    confirm `needs-gatekeeper` (or the `GATEKEEPER-ACTION:` title) is
+    observable within a few minutes, and re-file via this command if not.
+    The watchdog's job-36 orphan-marker backstop
+    (`watchdog/cross_stream.py::gk_orphan_marker_sweep`) is a supervisor-side
+    safety net for a slip, not a substitute for using this command."""
     import subprocess
 
     def _gh(argv):
