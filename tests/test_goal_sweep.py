@@ -2091,6 +2091,19 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(any("skip:min-backlog" in ln for ln in logs), logs)
         self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
+    def test_530_landed_nudge_records_backlog_baseline(self):
+        # A landed empty-lane nudge must record `lnbk` (the give-up baseline) so
+        # the idle-branch reset can tell "backlog unchanged" from "changed".
+        # Mutation lock: without the `_lane_record_nudge` lnbk write, lnbk stays
+        # absent and the give-up would reset on every fresh sweep (the old bug).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {}
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 7, now, tmtime,
+                                      rec=rec)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(rec.get("lnbk"), 7, rec)
+
     def test_530_hourly_cap_empty_lane(self):
         # A second empty-lane nudge 1000s (past the OLD 15-min cooldown, INSIDE
         # the new 1-hour cap) after the last must skip:hourly-cap. RED on the old
