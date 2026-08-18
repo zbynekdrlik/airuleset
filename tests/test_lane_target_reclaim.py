@@ -352,6 +352,33 @@ class TestCadenceGate(_Base):
         # force always runs discovery (even if nothing left to purge)
         self.assertIsInstance(forced, list)
 
+    def test_future_dated_stamp_does_not_wedge_the_gate(self):
+        # A future-dated last_run (NTP correction / restored snapshot) must
+        # not make `now - last` negative and wedge the gate closed forever.
+        import json as _json
+        repo = _mkrepo(self.root)
+        lane = self._merged_lane(repo)
+        tgt = lane / "target"
+        self.state.write_text(_json.dumps({"last_run": NOW + 10 * 24 * 3600}))
+        results = self._run(force=False, dry_run=False)
+        self.assertTrue(any(r.get("purged") for r in results),
+                        "a future-dated stamp must be clamped, not wedge the gate")
+        self.assertFalse(tgt.exists())
+
+    def test_discovery_failure_does_not_stamp_state(self):
+        # When discovery raises, nothing was examined -> the cadence stamp
+        # must NOT be written, so the very next tick retries.
+        import unittest.mock as m
+        repo = _mkrepo(self.root)
+        self._merged_lane(repo)
+        with m.patch.object(cli_worktree_sweep, "_iter_lane_target_dirs",
+                            side_effect=RuntimeError("boom")):
+            results = self._run(force=False, dry_run=False)
+        self.assertTrue(any(r.get("target") is None for r in results),
+                        "a discovery error must be reported as an ERROR row")
+        self.assertFalse(self.state.exists(),
+                         "a failed discovery must NOT stamp the cadence gate")
+
 
 class TestLogging(_Base):
     def test_purge_is_logged(self):

@@ -1158,6 +1158,18 @@ LANE_TARGET_MIN_INTERVAL_S = 6 * 3600            # env AIRULESET_LANE_TARGET_INT
 LANE_TARGET_MERGED_MIN_IDLE_S = 2 * 3600
 
 
+def _lane_human_size(n):
+    """`cli_target_purge._human_size(n)`, with a plain fallback if that
+    disk-helper module is unavailable (the size text is cosmetic, never
+    load-bearing) -- one place for the deferred import + fallback the three
+    #545 call sites would otherwise each repeat (#545 review 🔵)."""
+    try:
+        from cli_target_purge import _human_size
+        return _human_size(n)
+    except Exception:       # noqa: BLE001 -- cosmetic degradation only
+        return "%s B" % n
+
+
 def _branch_reflog_has_authored_commit(repo_root, branch, git_run=None):
     """True iff `branch`'s reflog contains at least one real AUTHORED commit
     (`commit:` / `commit (initial):` / `commit (amend):`) -- the signal #513
@@ -1223,10 +1235,6 @@ def _log_lane_target_results(results, log_path, now, dry_run: bool):
     a log-write failure is reported, never a silent pass, and never blocks the
     reclaim."""
     import datetime as _dt
-    try:
-        from cli_target_purge import _human_size
-    except Exception:       # noqa: BLE001 -- size text is cosmetic
-        _human_size = lambda n: "%s B" % n      # noqa: E731
     ts = _dt.datetime.fromtimestamp(now, tz=_dt.timezone.utc).isoformat()
     lines = []
     for r in results:
@@ -1238,7 +1246,7 @@ def _log_lane_target_results(results, log_path, now, dry_run: bool):
         else:
             action = "SKIP"
         size = r.get("size")
-        size_txt = " size=%s" % _human_size(size) if size is not None else ""
+        size_txt = " size=%s" % _lane_human_size(size) if size is not None else ""
         lines.append("%s %s %s branch=%s repo=%s%s reason=%s" % (
             ts, action, r["target"], r.get("branch"), r.get("repo"),
             size_txt, r.get("reason", "")))
@@ -1319,7 +1327,7 @@ def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
     # `_worktree_in_live_use` already uses -- never a cycle).
     try:
         from cli_target_purge import (_target_in_live_use, _dir_stats,
-                                       _tier0_via_hook, _human_size)
+                                       _tier0_via_hook)
     except Exception as e:      # noqa: BLE001 -- fail-safe: no disk helpers -> reclaim nothing
         print("  lane-target-reclaim: disk helpers unavailable, skipping: %s" % e,
               file=sys.stderr)
@@ -1417,7 +1425,7 @@ def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
                 continue
 
             entry["reason"] = "merged-lane target/ reclaimed (%s idle, %s)" % (
-                "%.1fh" % (rec / 3600.0), _human_size(size_bytes))
+                "%.1fh" % (rec / 3600.0), _lane_human_size(size_bytes))
             if not dry_run:
                 shutil.rmtree(target_dir)
             entry["purged"] = True
@@ -1446,10 +1454,6 @@ def cmd_purge_lane_targets(args):
     -- a deliberate manual call should never be silently skipped)."""
     print("airuleset sweep-lane-targets")
     print("=" * 50)
-    try:
-        from cli_target_purge import _human_size
-    except Exception:       # noqa: BLE001 -- size text is cosmetic
-        _human_size = lambda n: "%s B" % n      # noqa: E731
     dry_run = bool(getattr(args, "dry_run", False))
     results = purge_merged_lane_targets(dry_run=dry_run, force=True)
     for r in results:
@@ -1467,5 +1471,5 @@ def cmd_purge_lane_targets(args):
     print()
     verb = "would be " if dry_run else ""
     print("%d merged-lane target/ dir(s) %sreclaimed, %s %sfreed." % (
-        len(purged), verb, _human_size(total), verb))
+        len(purged), verb, _lane_human_size(total), verb))
     print("Log: %s" % LANE_TARGET_LOG_PATH)
