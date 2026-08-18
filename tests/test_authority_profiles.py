@@ -87,16 +87,16 @@ class TestAuthorityResolution(TestCase):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
     def test_cli_prints_the_profile(self):
-        # #349/#463: `m.Mock` auto-creates any unspecified attribute as a truthy
-        # Mock, so the `--maintainer-login` / `--self-login` early-return
-        # branches would silently hijack this test unless pinned False (the
-        # established `m.Mock(...)`-args gotcha this repo's own dev rules already
-        # document for exactly this shape).
+        # #349/#463/#533: `m.Mock` auto-creates any unspecified attribute as a
+        # truthy Mock, so the `--maintainer-login` / `--self-login` /
+        # `--stream-label` early-return branches would silently hijack this test
+        # unless pinned False (the established `m.Mock(...)`-args gotcha this
+        # repo's own dev rules already document for exactly this shape).
         with m.patch.object(airuleset, "_current_user", return_value="marek"):
             with m.patch("builtins.print") as p:
                 airuleset.cmd_authority(
                     m.Mock(explain=False, maintainer_login=False,
-                           self_login=False))
+                           self_login=False, stream_label=False))
         p.assert_any_call("branch-merge")
 
     def test_cli_prints_maintainer_login(self):
@@ -105,8 +105,42 @@ class TestAuthorityResolution(TestCase):
         # assigned work on a shared-gh-identity reduced-authority box.
         with m.patch("builtins.print") as p:
             airuleset.cmd_authority(
-                m.Mock(explain=False, maintainer_login=True))
+                m.Mock(explain=False, maintainer_login=True,
+                       self_login=False, stream_label=False))
         p.assert_any_call(airuleset.MAINTAINER_GH_LOGIN)
+
+    def test_cli_prints_stream_label_under_reduced_authority(self):
+        # #533: `authority --stream-label` prints `stream:<unix-user>` on a
+        # reduced-authority box, for the close-guard hook's acceptance-close
+        # ownership check. cmd_authority reads the resolver by its cli_quals
+        # global name, so patch it there (the marker-aware end-to-end path is
+        # covered by the subprocess tests in test_fork_no_merge_close_guard.py).
+        import cli_quals
+        with m.patch.object(cli_quals, "resolve_authority",
+                            return_value="branch-merge"):
+            with m.patch.object(airuleset, "_current_user",
+                                return_value="montalu3"):
+                with m.patch("builtins.print") as p:
+                    airuleset.cmd_authority(
+                        m.Mock(explain=False, maintainer_login=False,
+                               self_login=False, stream_label=True))
+        p.assert_any_call("stream:montalu3")
+
+    def test_cli_stream_label_empty_under_full_authority(self):
+        # #533: on a full-authority box the flag prints NOTHING (the hook's
+        # fail-safe then refuses the acceptance exemption).
+        import cli_quals
+        with m.patch.object(cli_quals, "resolve_authority", return_value="full"):
+            with m.patch.object(airuleset, "_current_user",
+                                return_value="newlevel"):
+                with m.patch("builtins.print") as p:
+                    airuleset.cmd_authority(
+                        m.Mock(explain=False, maintainer_login=False,
+                               self_login=False, stream_label=True))
+        for call in p.call_args_list:
+            args = call.args
+            self.assertFalse(args and str(args[0]).startswith("stream:"),
+                             "must not print a stream label under full authority")
 
     def test_project_marker_overrides_the_user_map(self):
         # cmd_authority's explain text has always PROMISED the marker override; it must
