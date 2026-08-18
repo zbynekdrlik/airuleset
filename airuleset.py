@@ -206,6 +206,14 @@ from cli_filedrop_watchdog import (  # noqa: E402
     maybe_setup_watchdog as maybe_setup_watchdog,
 )
 
+# --- web terminal gateway (#555): dev1-only ttyd + tailscale-serve brána.
+# cmd_install calls maybe_setup_webterm() (no-op off dev1). ---
+from cli_webterm import (  # noqa: E402
+    maybe_setup_webterm as maybe_setup_webterm,
+    setup_webterm_service as setup_webterm_service,
+    webterm_inventory as webterm_inventory,
+)
+
 
 # Skills directories in the repo that should be symlinked
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "autopilot-dialog", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master", "fable-advisor",
@@ -478,6 +486,11 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
 # sanctioned mechanism (autonomous-verification.md) for closing that gap.
 RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux", "sshpass", "btop",
                  "node", "npx", "less")
+# NOTE (#555): `ttyd` is NOT in the fleet-wide RUNTIME_DEPS — the web terminal
+# gateway is dev1-ONLY, and `check_runtime_deps()` runs on EVERY box (incl. the
+# ~19 no-sudo subdev accounts, where a `sudo -n apt-get install ttyd` would fail
+# every install and cry wolf on the "MISSING RUNTIME DEP" channel). It is
+# installed dev1-locally inside setup_webterm_service() instead.
 
 # The apt PACKAGE name differs from the BINARY name for node/npx (#158):
 # Debian/Ubuntu's real "node" package is an unrelated amateur packet-radio
@@ -1034,6 +1047,13 @@ def cmd_install(args):
         maybe_setup_watchdog()
     except Exception as e:
         print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 5b. web terminal gateway (#555): dev1-only ttyd + tailscale-serve. ---
+    # No-op off dev1 (setup_webterm_service gates on os.uname().nodename).
+    try:
+        maybe_setup_webterm()
+    except Exception as e:
+        print(f"  webterm setup error (non-fatal): {e}", file=sys.stderr)
 
     # --- 6. caveman plugin: every machine (enable + stable statusline shim) ---
     # A still-failing plugin install (after correct marketplace registration)
