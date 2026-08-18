@@ -122,7 +122,7 @@
     "tests/test_notify_ask_and_continue_delivery.py": 196,
     "tests/test_notify_dedup_long_key.py": 159,
     "tests/test_notify_delivery_log.py": 362,
-    "tests/test_notify_project_channel.py": 673,
+    "tests/test_notify_project_channel.py": 674,
     "tests/test_notify_project_wiring.py": 433,
     "tests/test_notify_question_block.py": 303,
     "tests/test_notify_question_faildloud.py": 204,

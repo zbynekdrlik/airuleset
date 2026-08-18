@@ -1,8 +1,9 @@
 """#369 — separate Discord threads PER PROJECT / per subdev stream, instead of
 one owner pile. Today `notification_channel()` resolves exactly two axes
 (owner, kind ∈ {default, questions}); this adds a THIRD axis — `project` — so
-run-cards / idle ✅ / gk-request-backstop / api-error pings for the SAME
-project always land in `claude-<owner>-<project-slug>`, mirroring #296's own
+run-cards / idle ✅ / gk-request-backstop for the SAME project always land in
+`claude-<owner>-<project-slug>` (the api-error ping this once routed is retired,
+#546), mirroring #296's own
 `kind="questions"` design byte-for-byte:
 
   - `notification_channel(env, owner, project=X)` tries the owner+project key

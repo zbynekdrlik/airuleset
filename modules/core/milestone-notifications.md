@@ -29,7 +29,7 @@ A completed ticket/batch inside a `/goal` / `/autopilot` loop ends its own repor
 
 #### API-error / limit / token-burn alerts are RETIRED from Discord (#546, 2026-08-18 owner directive)
 
-**The api-error / limit / token-burn alert classes NO LONGER ping the device** — owner-suppressed at `notify.send()` (#546: airuleset does not Discord-alert on api-error / limit / subscription). airuleset's only job on an api-error is the watchdog's SILENT `continue` auto-resume (unchanged); the signal moves to the machine channel (the journal + a `suppressed` delivery-log line, never a silent drop). Anti-total-silence stays covered by the existing fleet-death alarm (watchdog job 35); default is SILENCE. Preserved: `❓`/`✅`/run-cards/bounce/gk-req and the one-shot `acctblock:` alarm. Full mechanics in the `notification-mechanics` skill.
+**The api-error / limit / token-burn alert classes NO LONGER ping the device** — owner-suppressed at `notify.send()` (#546: airuleset does not Discord-alert on api-error / limit / subscription). airuleset's only job on an api-error is the watchdog's SILENT `continue` auto-resume (unchanged); the signal moves to the machine channel (the journal + a `suppressed` delivery-log line, never a silent drop). A genuinely DEAD fleet still alarms (watchdog job 35); a stuck-but-alive give-up is deliberately machine-channel-only; default is SILENCE. Preserved: `❓`/`✅`/run-cards/bounce/gk-req and the one-shot `acctblock:` alarm. Full mechanics in the `notification-mechanics` skill.
 
 #### Per-phase progress is NOT pinged
 
