@@ -1602,7 +1602,6 @@ from watchdog.repo_health import (  # noqa: E402
     _sweep_due as _sweep_due,
     _repo_sweep_batch as _repo_sweep_batch,
     REPO_SWEEP_BATCH_MAX as REPO_SWEEP_BATCH_MAX,
-    DEDUP_MEMORY_MAX_AGE_S as DEDUP_MEMORY_MAX_AGE_S,
     net_drift_alarm as net_drift_alarm,
     NET_DRIFT_THRESHOLD as NET_DRIFT_THRESHOLD,
     stuck_main_sweep as stuck_main_sweep,
