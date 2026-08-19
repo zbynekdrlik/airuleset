@@ -44,6 +44,17 @@ _DEDUP_TTL_S = 14 * 24 * 3600
 # future caller might append to the sanitised key (#359).
 _DEDUP_NAME_MAX = 180
 
+# #559: throttle window (seconds) for an AUTO-derived key given to a send that
+# arrived without a dedup_key. A keyless send used to bypass dedup AND trace
+# entirely (logged key=-, 1871 lines / the single largest bucket on dev1); it
+# now gets `auto:<owner>:<sha16(body)>:<bucket>` so identical spam WITHIN the
+# window is throttled while distinct pings (distinct body -> distinct hash) and
+# a legitimate re-send AFTER the window both still deliver. The window (default
+# 300 s, env-overridable) bounds the dedup horizon to minutes rather than the
+# 14-day marker TTL a bare content hash would inherit (cross_stream.py:304's
+# documented "content-stable key swallowed by the 14-day TTL" trap).
+AUTO_DEDUP_WINDOW_S = 300
+
 # Stream personas whose tmux session name has NO Discord identity of its own
 # (airuleset#259, 2026-08-06): montalu/montalu2/montalu3/simap/miva1 (#300)
 # route to zbynek's own thread; montalu4 routes to MAREK's own thread (his dev stream
@@ -2078,6 +2089,141 @@ def drop_grace_question(message_id, path=None):
     return False
 
 
+# --------------------------------------------------------------------------- #
+# #558 -- episode dedup with hysteresis for chronic-condition alerts (546
+# lane 2). An OPT-IN primitive a chronic-condition caller consults BEFORE
+# send(): it decides open/hold/clearing/recover/quiet and NEVER posts, so a
+# chronic condition alerts ONCE per onset + ONE recovery (never the 546
+# `burn-alert:<hour>` per-bucket re-page) and clearing needs N consecutive
+# healthy passes (hysteresis), not one flicker. Deliberately SEPARATE from
+# send() -- send() stays byte-identical, so this can never suppress a
+# legitimate ❓/✅ (the exact concern that deferred lane 2 out of 546 lane 1).
+# 546 lane 1 already suppressed the CURRENT chronic classes at the send()
+# chokepoint; this is the mechanism 546 lane 2 asked for ("the shared throttle
+# gains hysteresis") for any FUTURE or remaining chronic alert. The consuming
+# wiring (repo_health net-drift/stuck-main) is tracked in issue #560 so this
+# opt-in primitive is never orphaned as unconsumed dead code.
+# --------------------------------------------------------------------------- #
+_EPISODES_REL = "notify-episodes.json"
+EPISODE_CLEAR_AFTER = 3               # default consecutive healthy passes to clear
+EPISODE_MAX_AGE_S = 30 * 24 * 3600    # age-reap a stuck-open episode whose caller
+                                       # stopped observing it (so the per-key store
+                                       # never grows unbounded — #519/#531 discipline)
+
+
+def _episodes_path():
+    return os.path.join(_claude_dir(), _EPISODES_REL)
+
+
+def load_episodes(path=None):
+    """The condition_key -> {active, healthy_streak, opened_at, last_seen} map.
+    {} on any error (fail toward alerting, never raise)."""
+    path = path or _episodes_path()
+    try:
+        with open(path, encoding="utf-8") as h:
+            d = json.load(h)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_episodes(d, path=None):
+    path = path or _episodes_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as h:
+            json.dump(d, h)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def _prune_episodes(store, now):
+    """Drop malformed entries and any episode not observed in
+    `EPISODE_MAX_AGE_S` — a caller that stopped calling the gate (its job was
+    removed) must not leak a record forever. A FUTURE `last_seen` (clock skew)
+    is KEPT (the #519 safe direction — `now - last` goes negative, never
+    exceeds the max age). Never raises."""
+    for k in list(store.keys()):
+        v = store.get(k)
+        if not isinstance(v, dict):
+            store.pop(k, None)
+            continue
+        try:
+            last = float(v.get("last_seen", 0) or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if now - last > EPISODE_MAX_AGE_S:
+            store.pop(k, None)
+
+
+def episode_gate(condition_key, healthy, clear_after=None, now=None, path=None):
+    """Decide what a chronic-condition caller should do THIS pass (#558).
+
+    Call it on EVERY pass (healthy or not) with a stable `condition_key` and a
+    boolean `healthy` (True = the condition is absent this pass). Returns:
+      * "open"     — first unhealthy pass of a new episode -> SEND the onset alert
+      * "hold"     — the condition persists -> send NOTHING (no per-pass re-page)
+      * "clearing" — a healthy pass, fewer than `clear_after` in a row -> hysteresis, send NOTHING
+      * "recover"  — `clear_after` consecutive healthy passes -> SEND ONE recovery message
+      * "quiet"    — no active episode and healthy -> nothing to do
+
+    OPT-IN and side-effect-free w.r.t. Discord: it only DECIDES + updates its
+    own JSON store; the caller does the sending, so `send()` is untouched.
+    Best-effort/fail-safe: an unreadable/unwritable store degrades toward
+    ALERTING (a fresh unhealthy pass reads "open"), never raises, never
+    silently swallows an alert. A falsy `condition_key` can't be tracked, so it
+    fails the same way (unhealthy -> "open", healthy -> "quiet")."""
+    now = time.time() if now is None else now
+    try:
+        clear_after = (EPISODE_CLEAR_AFTER if clear_after is None
+                       else int(clear_after))
+    except (TypeError, ValueError):
+        clear_after = EPISODE_CLEAR_AFTER   # non-numeric -> default (never raise)
+    if clear_after < 1:
+        clear_after = 1
+    if not condition_key:
+        return "open" if not healthy else "quiet"
+    store = load_episodes(path)
+    _prune_episodes(store, now)
+    rec = store.get(condition_key)
+    active = bool(rec.get("active")) if isinstance(rec, dict) else False
+
+    if not healthy:
+        if not active:
+            store[condition_key] = {"active": True, "healthy_streak": 0,
+                                    "opened_at": now, "last_seen": now}
+            _save_episodes(store, path)
+            return "open"
+        rec["healthy_streak"] = 0
+        rec["last_seen"] = now
+        store[condition_key] = rec
+        _save_episodes(store, path)
+        return "hold"
+
+    # healthy this pass
+    if not active:
+        if isinstance(rec, dict):        # stale/cleared leftover -> tidy it
+            store.pop(condition_key, None)
+            _save_episodes(store, path)
+        return "quiet"
+    try:
+        streak = int(rec.get("healthy_streak", 0) or 0) + 1
+    except (TypeError, ValueError):
+        streak = 1
+    rec["last_seen"] = now
+    if streak >= clear_after:
+        store.pop(condition_key, None)   # episode closed
+        _save_episodes(store, path)
+        return "recover"
+    rec["healthy_streak"] = streak
+    store[condition_key] = rec
+    _save_episodes(store, path)
+    return "clearing"
+
+
 # --- sent-card map (message id -> repo/issue) — airuleset#297/#298 -------
 # The per-ticket completion CARD's own message id, mapped to which repo/issue
 # it is for. Recorded at SEND time (never parsed back out of the card's
@@ -2308,6 +2454,40 @@ def _post_discord(token, channel, content):
 # comment); ❓ (`waiting:`/`❓:`), ✅ (`done:`), run-cards (`<repo>#<n>`),
 # bounce/gkreq, job-4 `busypane:`, and the genuine one-shot `acctblock:` alarm
 # (no auto-reset, needs a human) all use OTHER key namespaces and keep sending.
+
+
+def _auto_dedup_window_s():
+    """The #559 throttle window (seconds), env-overridable via
+    `AIRULESET_AUTO_DEDUP_WINDOW_S`. A missing / garbage / non-positive value
+    falls back to `AUTO_DEDUP_WINDOW_S`, never raises."""
+    try:
+        v = int(os.environ.get("AIRULESET_AUTO_DEDUP_WINDOW_S") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    return v if v > 0 else AUTO_DEDUP_WINDOW_S
+
+
+def _auto_dedup_key(body, owner, now=None, window_s=None):
+    """#559: a stable, TRACEABLE dedup key for a send that arrived without one.
+
+    `auto:<owner>:<sha16(body)>:<time-bucket>`, so:
+      * identical content sent repeatedly WITHIN the window dedups (a runaway
+        keyless caller is throttled instead of flooding Discord);
+      * legitimately-DISTINCT pings (different body) hash differently and ALL
+        send — never a false dedup of two distinct messages;
+      * the same content re-sent AFTER the window sends again (the time bucket
+        bounds the dedup window to minutes, not the 14-day marker TTL a bare
+        content hash would inherit);
+      * the delivery log carries `key=auto:…` instead of an untraceable `key=-`.
+    `owner` is folded in so two DIFFERENT owners' identical bodies never
+    collide. The result is `auto:`-namespaced, so it never matches a #546
+    `SUPPRESSED_ALERT_PREFIXES` entry."""
+    now = time.time() if now is None else now
+    window = window_s if window_s else _auto_dedup_window_s()
+    digest = hashlib.sha256(str(body or "").encode("utf-8", "replace")).hexdigest()[:16]
+    return "auto:%s:%s:%d" % (owner or "-", digest, int(now // window))
+
+
 SUPPRESSED_ALERT_PREFIXES = (
     ("apierr", "api-error"),             # watchdog job 1 (stall / busy / giveup / stashabort)
     ("sesslimit", "session-limit"),      # watchdog job 6 (5h limit / giveup / resume)
@@ -2371,7 +2551,15 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     silent drop), never dry-run-mutating. The gate runs FIRST so a suppressed
     class never claims a dedup marker, resolves a channel, or reaches the
     network — and it covers every caller of this one chokepoint (watchdog jobs
-    1/6/16/19 + usage.py + the CLI `--api-error`) at once."""
+    1/6/16/19 + usage.py + the CLI `--api-error`) at once.
+
+    #559: a KEYLESS send (`dedup_key` falsy) auto-derives a bounded-window
+    content-hash key (`_auto_dedup_key`, AFTER the #546 gate + owner
+    resolution), so identical content within the window dedups (traceable
+    `key=auto:…` instead of `key=-`) while distinct content always sends. Like
+    the keyed path, a keyless send whose POST fails keeps its claim, so a
+    byte-identical retry is deduped until the window rolls — a caller needing
+    guaranteed retry delivery passes an explicit `dedup_key`."""
     suppressed = _suppressed_alert_class(dedup_key)
     if suppressed is not None:
         if not dry_run:
@@ -2383,6 +2571,16 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     # (a tmux re-query between them could otherwise disagree).
     if owner is None:
         owner = resolve_owner()
+
+    # #559: a keyless send used to bypass dedup AND trace entirely (logged
+    # key=-). Auto-derive a bounded-window content-hash key so it becomes
+    # dedupable + traceable, WITHOUT dropping legitimately-distinct pings. Runs
+    # AFTER the #546 suppression gate (a keyless send is never a suppressed
+    # alert class — every suppressed class carries one of those keys) and AFTER
+    # owner resolution (owner is folded into the key so two owners' identical
+    # bodies never collide).
+    if not dedup_key:
+        dedup_key = _auto_dedup_key(body, owner)
 
     # Build the delivery list ONCE: primary owner first, then the parallel mirror
     # recipients (each gets the SAME body in THEIR OWN thread with THEIR OWN @mention).
