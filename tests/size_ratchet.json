@@ -59,7 +59,7 @@
     "tests/test_cli_deployer_glue.py": 153,
     "tests/test_cli_filedrop_watchdog_split.py": 185,
     "tests/test_cloudflare_api_tokens_skill.py": 138,
-    "tests/test_compact.py": 1648,
+    "tests/test_compact.py": 1686,
     "tests/test_conformance_check.py": 487,
     "tests/test_conformance_heartbeat.py": 405,
     "tests/test_context_diet_tier1.py": 195,

@@ -166,6 +166,15 @@ CB_ALL_CHROME_NO_BOX_CAP = ("  ctx ███░  caveman:lite\n"
 CB_QUEUED_COMPACT_CAP = "● Hotovo.\n❯ /compact\n❯ \n  ctx ███░  caveman:lite\n"
 CB_BG_AGENT_CAP = ("● Working…\nWaiting for 1 background agent to finish\n"
                    "❯ \n  ctx ███░\n")
+# #565: the saturated-supervisor incident shape -- an idle-at-prompt main
+# showing LIVE agent-strip rows (`◯ … local_agent · #N …`) and a bare `❯` box,
+# but NO "Waiting for N background agents" row (that row is not rendered in this
+# state). Signal (a) reads False here even though ~10 lanes are live -- the
+# whole point of #565's structured signal (b).
+CB_IDLE_STRIP_ROWS_CAP = ("● Predošlá práca hotová.\n"
+                          "◯ opus-4.8 local_agent · #4023 handoff E2E · 405k\n"
+                          "◯ opus-4.8 local_agent · #4026 release-PR CI · 817k\n"
+                          "❯ \n  ctx ███░  caveman:lite\n")
 
 # #425: a real supervisor's own turn -- a genuine `## ✅ Work Complete`
 # heading for the ticket that just finished, trailing `⏳ WORKING` for
@@ -565,10 +574,37 @@ class TestDeliverCompact(unittest.TestCase):
                                        now=now)
         self.assertEqual(word, "sent")
 
-    # -- #425: self-callback + a genuine `## ✅ Work Complete` heading
-    #    exempts BOTH live-task signals too, not just the marker check -- #
+    def test_565_saturated_supervisor_live_lanes_not_compacted_on_self_callback(self):
+        # #565 RED -- the reported live incident: a per-ticket
+        # `compact-request --self` on a saturated supervisor with ~10 live
+        # worker lanes typed /compact and killed them all. The subagent
+        # transcript is >120s old (a lane inside a long CI poll), the pane
+        # shows live agent-strip rows but NO "Waiting for N background agents"
+        # row, the last turn carries `## ✅ Work Complete` (a per-ticket
+        # boundary for ONE lane), and origin is self-callback. It MUST skip:
+        # the other lanes are live, unrelated work. Pre-#565 code SENDs (the
+        # 120s subagent_active window reads the 300s-old lane as dead).
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now - 300)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")],
+                                      CB_IDLE_STRIP_ROWS_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp, now=now)
+        self.assertEqual(word, "skip:live-tasks")
+        self.assertEqual(tmux.sent, [])
 
-    def test_heading_plus_tail_exempts_the_pane_text_live_task_signal(self):
+    # -- #565: a `## ✅ Work Complete` heading NO LONGER exempts condition
+    #    (b)'s live-task signals -- one ticket done never means the session
+    #    has no live sibling lanes (the exemption stays only for condition
+    #    (c)'s ⏳-marker veto) -- #
+
+    def test_heading_plus_tail_no_longer_exempts_the_pane_text_live_task_signal(self):
+        # #565 (inverts the pre-#565 exemption): the "Waiting for N background
+        # agents" row is a genuine live signal; a Work Complete heading no
+        # longer overrides it.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")],
@@ -576,9 +612,11 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "sent")
+        self.assertEqual(word, "skip:live-tasks")
 
-    def test_heading_plus_tail_exempts_the_subagent_transcript_live_task_signal(self):
+    def test_heading_plus_tail_no_longer_exempts_the_subagent_transcript_live_task_signal(self):
+        # #565 (inverts the pre-#565 exemption): a fresh, genuinely-live
+        # subagent lane is no longer discarded by a Work Complete heading.
         proj = self._dir()
         now = time.time()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
@@ -587,13 +625,13 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp, now=now)
-        self.assertEqual(word, "sent")
+        self.assertEqual(word, "skip:live-tasks")
 
-    def test_heading_plus_tail_live_task_exemption_honoured_at_the_raced_recheck(self):
-        # the #333 fresh-recapture-before-typing re-check ALSO consults the
-        # exemption -- the SAME live-tasks call, the SAME origin, the SAME
-        # tpath, so a mutant that only exempted the FIRST live-tasks call
-        # site would still be caught here.
+    def test_heading_plus_tail_live_task_veto_at_the_raced_recheck_no_longer_exempted(self):
+        # #565: the #333 fresh-recapture-before-typing re-check re-runs the
+        # live-tasks veto -- which is no longer exempted by a Work Complete
+        # heading either, so a lane that appears in the raced recapture still
+        # blocks. (Was `..._exemption_honoured_at_the_raced_recheck`.)
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP,
@@ -601,7 +639,7 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "sent")
+        self.assertEqual(word, "skip:live-tasks-raced")
 
     # -- condition (c): not on a ⏳/❓ marker; not an unresumed API error - #
 
