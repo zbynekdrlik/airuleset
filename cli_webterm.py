@@ -256,9 +256,12 @@ def connect_main(argv, inventory_path=None):
 # Dashboard — a single-page Windows-Terminal-style tabbed UI generated from the
 # inventory (#579). A top tab bar (one short-alias tab per session) + one lazily
 # created iframe per session pointing at the SAME-ORIGIN ttyd URL (`/t/?arg=<id>`
-# under the #584 gateway). Tabs switch instantly (hide/show; the iframe is kept
-# alive once opened so terminal state persists), and ONE gateway form login
-# (session cookie) covers every tab — no per-tab auth.
+# under the #584 gateway). Tabs switch instantly, and ONE gateway form login
+# (session cookie) covers every tab — no per-tab auth. #585: the iframe ELEMENT
+# is kept once opened, but only the VISIBLE tab holds a LIVE terminal client —
+# every hidden tab is disconnected (its throwaway tmux clone dies), so a hidden
+# tab can never shrink the base session's shared window (`window-size latest`);
+# it reconnects on return and loses nothing (scrollback lives in tmux).
 # --------------------------------------------------------------------------- #
 
 def _html_escape(s):
@@ -413,28 +416,51 @@ body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf
 </head>
 <body>
 <div id="tabbar">
-<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session">&#9654;</button></span>
+<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session">&#9654;</button><button class="cyc" id="fs" title="Fullscreen — Ctrl+W pôjde do terminálu (Keyboard Lock)">&#9974;</button></span>
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
-<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku (funguje aj počas písania v termináli) · prihlásenie raz (tailnet-only)</div>
+<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku (funguje aj počas písania v termináli) · skrytý tab sa odpojí a pri návrate obnoví (história ostáva v tmuxe) · Ctrl+W: v bežnom okne vyskočí potvrdenie, &#9974; Fullscreen zapne Keyboard Lock a Ctrl+W pôjde do terminálu, alebo nainštaluj ako PWA (Chrome → Inštalovať) · prihlásenie raz (tailnet-only)</div>
 <script>
 const CFG = @@CFG_JSON@@;
 const frames = document.getElementById('frames');
 const made = {};
 let current = 0;                          // the active tab index (drives cycle())
+function ttydSrc(s) { return CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id); }
+function connect(f, s) {                   // (re)attach a suspended/new iframe to its terminal
+  if (f.dataset.live === '1') return;      // already live -> never a needless reload
+  f.src = ttydSrc(s);                      // a fresh ttyd client re-attaches to the SAME base
+  f.dataset.live = '1';                    // session; scrollback lives in tmux, not the browser
+}
+function suspend(f) {                       // #585(a): disconnect a HIDDEN tab so its throwaway
+  if (f.dataset.live !== '1') return;      // tmux clone dies (WS close) and can NEVER drive the
+  f.src = 'about:blank';                    // base session's shared window size (window-size latest)
+  f.dataset.live = '0';
+}
+function hasLiveTerminal() {                // gate for the #585(b) beforeunload confirm
+  for (const k in made) if (made[k].dataset.live === '1') return true;
+  return false;
+}
 function activate(idx) {
   const s = CFG.sessions[idx];
   if (!s) return;
   if (!made[idx]) {                       // lazy: one iframe per activated tab, never N eager
     const f = document.createElement('iframe');
     f.className = 'term';
-    f.src = CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id);
+    f.dataset.live = '0';
     f.addEventListener('load', () => attachForwarder(f));  // #584 same-origin keydown
     frames.appendChild(f);
-    made[idx] = f;                        // kept alive; switching only hides/shows
+    made[idx] = f;
   }
-  for (const k in made) made[k].style.display = (+k === idx) ? 'block' : 'none';
+  // #585(a): EXACTLY the visible tab holds a live terminal client — every hidden
+  // tab is disconnected (its clone session dies), so a hidden tab can never
+  // shrink the base session's shared tmux window (window-size latest sizes to the
+  // most-recently-active client). Reconnect on return; scrollback lives in tmux,
+  // so nothing is lost (a brief reconnect flash is the only UX cost).
+  for (const k in made) {
+    if (+k === idx) { connect(made[k], s); made[k].style.display = 'block'; }
+    else { suspend(made[k]); made[k].style.display = 'none'; }
+  }
   document.querySelectorAll('.tab').forEach((t) => {
     const on = +t.dataset.idx === idx;
     t.classList.toggle('active', on);
@@ -481,8 +507,45 @@ function attachForwarder(f) {
 }
 document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
-document.querySelectorAll('.cyc').forEach((b) =>
+document.querySelectorAll('.cyc[data-cyc]').forEach((b) =>   // fs button has no data-cyc
   b.addEventListener('click', () => cycle(+b.dataset.cyc)));
+// #585(b): Ctrl+W is readline delete-word in the terminal but the browser
+// consumes it as close-tab (a reserved shortcut a normal window cannot
+// preventDefault). Layer 1 — a beforeunload confirm armed WHILE a terminal is
+// connected, so a stray Ctrl+W (or any close) shows Chrome's confirm instead of
+// a silent tab loss. Gated on hasLiveTerminal() so nothing warns before a
+// terminal is open.
+window.addEventListener('beforeunload', (e) => {
+  if (!hasLiveTerminal()) return;
+  e.preventDefault();
+  e.returnValue = '';                     // Chrome's standard leave-page confirm
+});
+// Layer 2 — a Fullscreen button that requests fullscreen + Keyboard Lock, so
+// Chrome delivers Ctrl+W (and Ctrl+T/N) to the PAGE => the terminal as
+// delete-word, not the browser. Feature-detected: an unsupported browser gets a
+// disabled button with an honest title (Layer 1 confirm + the PWA hint remain).
+const KB_LOCK_KEYS = ['KeyW', 'KeyT', 'KeyN'];
+function keyboardLockSupported() {
+  return !!(document.documentElement.requestFullscreen
+            && navigator.keyboard && navigator.keyboard.lock);
+}
+async function goFullscreen() {
+  try {
+    await document.documentElement.requestFullscreen();
+    if (navigator.keyboard && navigator.keyboard.lock) {
+      await navigator.keyboard.lock(KB_LOCK_KEYS);
+    }
+  } catch (err) { /* denied/unsupported — the hint documents the fallbacks */ }
+}
+const fsBtn = document.getElementById('fs');
+if (fsBtn) {
+  if (keyboardLockSupported()) {
+    fsBtn.addEventListener('click', goFullscreen);
+  } else {
+    fsBtn.disabled = true;
+    fsBtn.title = 'Fullscreen + Keyboard Lock nie je v tomto prehliadači podporený';
+  }
+}
 window.addEventListener('keydown', onHotkey);   // Ctrl+Alt+1..9 when the bar is focused
 if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page
 </script>
