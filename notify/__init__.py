@@ -91,12 +91,14 @@ STREAM_NOTIFY_OWNER = {
     "montalu3": "zbynek",
     "montalu4": "marek",
     # montalu5/6/7/8 (airuleset#378, odoo-erp#3642): FOUR MORE full parallel
-    # montalu streams. Owner routing decision (2026-08-11): montalu5 is
-    # operated by MAREK (his stream, same as montalu4) -> claude-marek;
-    # montalu6/7/8 are zbynek's -> claude-zbynek. new-subdev.md §0 forbids
-    # guessing this, so it was asked and confirmed; §6a requires verifying
-    # it with a REAL notify-delivery.log ping, not only configuring it.
-    "montalu5": "marek",
+    # montalu streams -> claude-zbynek. Owner routing decision 2026-08-19
+    # (airuleset#572) REVERSED the earlier 2026-08-11 #378 decision that
+    # "montalu5 is operated by MAREK -> claude-marek": the owner directed that
+    # montalu5's notifications go to claude-zbynek, so montalu5 now routes to
+    # zbynek exactly like montalu6/7/8 (montalu4 stays Marek's own stream).
+    # §6a still requires verifying delivery with a REAL notify-delivery.log
+    # ping on the montalu5 box, not only configuring it.
+    "montalu5": "zbynek",
     "montalu6": "zbynek",
     "montalu7": "zbynek",
     "montalu8": "zbynek",
@@ -138,6 +140,34 @@ STREAM_NOTIFY_OWNER = {
     "david2": "david",
     "david3": "david",
     "david4": "david",
+    # admin/stepan (airuleset#572, 2026-08-19): the forestshop-dev box's two
+    # linux accounts (cli_fleet.py -- admin@forestshop-dev /
+    # stepan@forestshop-dev). Owner directive: forestshop-dev notifications
+    # go to claude-marek. Neither account has a Discord identity of its own
+    # and neither is in AUTHORITY_BY_USER (both are full-authority), so
+    # without this redirect resolve_owner() returns "" and
+    # notification_channel() falls back to the shared
+    # DISCORD_NOTIFICATION_CHANNEL_ID thread -- exactly the "chodí do claude"
+    # the owner reported.
+    #
+    # GENERIC-USERNAME CAVEAT: "admin"/"stepan" are generic names that TODAY
+    # exist in the managed fleet ONLY on the forestshop-dev box.
+    # resolve_owner() maps the box's OWN _current_user() (there is no
+    # box-qualified key), so if any FUTURE box ever adds a linux user
+    # "admin"/"stepan" belonging to a DIFFERENT owner, this map MUST be
+    # narrowed at that point. The risk is low (managed boxes use named
+    # accounts -- newlevel/gatekeeper/david/montalu*/simap*/miva*/marek), but
+    # it is real and must be re-checked whenever a new box is onboarded.
+    #
+    # RESIDUAL (routing decision != delivered ping, the #300 gap): this
+    # redirect deploys with the next push, but a real ping still needs the
+    # forestshop-dev box's own local ~/.claude/channels/discord/.env to carry
+    # DISCORD_NOTIFICATION_CHANNEL_MAREK (+ DISCORD_MENTION_MAREK).
+    # check_discord_notify_config() surfaces that gap loudly at install; the
+    # supervisor provisions it and live-verifies with a real notify-delivery.log
+    # ping at integration.
+    "admin": "marek",
+    "stepan": "marek",
 }
 
 
