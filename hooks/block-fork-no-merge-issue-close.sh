@@ -264,16 +264,19 @@ if [ -n "$ISSUE_NUM" ]; then
             # A base-stream rename (montalu -> montalu1) means this box's own
             # tickets can still carry the OLD `stream:montalu` label during the
             # transition, so `authority --stream-label` emits every equivalent.
-            # The acceptance carve-out matches if the ticket carries ANY of
-            # them. Stream labels never contain whitespace (`stream:<unix-user>`),
-            # so word-splitting `$STREAM_LABEL` on IFS (incl. newlines) is safe.
-            # Only ever called inside `if`/`&&` conditions, so `set -e` never
-            # aborts on a grep no-match (same reason `_has_label` is safe).
+            # The acceptance carve-out matches if the ticket carries ANY of them.
+            # Read line-by-line (a here-string runs in THIS shell, so `return`
+            # works; `IFS= read -r` avoids any word-split / glob expansion — a
+            # defensive choice, since `stream:<unix-user>` values never contain
+            # whitespace or glob chars anyway). Only ever called inside `if`/`&&`
+            # conditions, so `set -e` never aborts on a grep no-match (same reason
+            # `_has_label` is safe).
             _has_own_stream_label() {
                 local _lbl
-                for _lbl in $STREAM_LABEL; do
+                while IFS= read -r _lbl; do
+                    [ -n "$_lbl" ] || continue
                     if _has_label "$_lbl"; then return 0; fi
-                done
+                done <<< "$STREAM_LABEL"
                 return 1
             }
             if _has_own_stream_label && _has_label "needs-acceptance" \
