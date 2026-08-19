@@ -328,9 +328,10 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # The disconnect trap fires on EXIT (the fake new-session returns at
         # once) -> the throwaway clone is killed, the BASE session never is.
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertRegex(log, r"kill-session -t zbynek-4-web-\d+")
-        # never a kill of the bare base session
-        self.assertNotRegex(log, r"kill-session -t zbynek-4(?!-web)")
+        # exact-match (`=`) kill of ONLY the throwaway clone
+        self.assertRegex(log, r"kill-session -t =zbynek-4-web-\d+")
+        # never a kill of the bare base session (either `=zbynek-4` or `zbynek-4`)
+        self.assertNotRegex(log, r"kill-session -t =?zbynek-4(?!-web)")
 
     def test_sizes_window_to_active_client(self):
         # window-size latest + aggressive-resize on -> the shared window sizes to

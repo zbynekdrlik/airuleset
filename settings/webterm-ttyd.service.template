@@ -14,8 +14,9 @@
 # Deliberately LIGHT hardening: this service spawns interactive ssh + tmux child
 # processes (it needs ~/.ssh, ~/.secrets, AF_UNIX for ssh-agent/control sockets),
 # so the filedrop unit's ProtectSystem=strict / RestrictAddressFamilies would
-# break it. The security boundary is tailnet-only exposure + ttyd basic-auth, not
-# a service sandbox.
+# break it. The security boundary is the LOOPBACK bind (unreachable from the
+# tailnet) + the same-origin gateway's form login in front of it (#584), not a
+# service sandbox.
 #
 # Do not edit the installed copy in ~/.config/systemd/user/ by hand — edit this
 # template and re-run `python3 airuleset.py install`.

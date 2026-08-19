@@ -161,13 +161,29 @@ class TestParsing(unittest.TestCase):
             [("Upgrade", "WebSocket"), ("Connection", "keep-alive, Upgrade")]))
         self.assertFalse(g.is_websocket_upgrade([("Connection", "keep-alive")]))
 
-    def test_origin_allowed_fail_closed(self):
+    def test_origin_allowed_matches_host_addressing_agnostic(self):
+        # PRIMARY check: Origin authority == Host, so a MagicDNS/hostname access
+        # (http://dev1:8080) works with NO allowlist entry (the #584 review
+        # foot-gun fix) — and so does the raw tailnet IP.
+        self.assertTrue(g.origin_allowed(
+            [("Host", "dev1:8080"), ("Origin", "http://dev1:8080")]))
+        self.assertTrue(g.origin_allowed(
+            [("Host", "100.104.8.125:8080"), ("Origin", "http://100.104.8.125:8080")]))
+        # cross-site Origin (Host mismatch, not in allowlist) -> reject
+        self.assertFalse(g.origin_allowed(
+            [("Host", "dev1:8080"), ("Origin", "http://evil.example")]))
+        # missing Origin -> reject (fail closed)
+        self.assertFalse(g.origin_allowed([("Host", "dev1:8080")]))
+
+    def test_origin_allowed_secondary_allowlist(self):
+        # SECONDARY: an explicit allowlist still works when Host does not match
+        # (e.g. a test harness that sends a placeholder Host).
         allowed = {"http://100.104.8.125:8080"}
         self.assertTrue(g.origin_allowed(
-            [("Origin", "http://100.104.8.125:8080")], allowed))
+            [("Host", "x"), ("Origin", "http://100.104.8.125:8080")], allowed))
         self.assertFalse(g.origin_allowed(
-            [("Origin", "http://evil.example")], allowed))
-        self.assertFalse(g.origin_allowed([], allowed))   # missing Origin -> reject
+            [("Host", "x"), ("Origin", "http://evil.example")], allowed))
+        self.assertFalse(g.origin_allowed([("Host", "x")], allowed))  # no Origin
 
     def test_login_form_parse(self):
         body = b"username=zbynek&password=p%40ss"
@@ -280,6 +296,7 @@ class TestGatewayIntegration(unittest.TestCase):
         # Build a harness whose gateway KNOWS its own origin (needed for the WS
         # Origin check). We must know the port first, so: bind, read port, then
         # start the real gateway with origins=[that origin].
+        origins = kw.pop("origins", None)
         h = _GatewayHarness(**kw)
         h.tmp = tempfile.mkdtemp()
         h.cred_path = Path(h.tmp) / "cred"
@@ -293,10 +310,12 @@ class TestGatewayIntegration(unittest.TestCase):
         probe.close()
         await probe.wait_closed()
         h.origin = "http://127.0.0.1:%d" % port
+        h.host = "127.0.0.1:%d" % port
         h.server = await g.start_gateway(
             "127.0.0.1", port, str(h.dash_path), str(h.cred_path),
             ttyd_host="127.0.0.1", ttyd_port=h.ttyd_port, base_path="/t",
-            origins=[h.origin], sessions=h.sessions, limiter=h.limiter)
+            origins=([h.origin] if origins is None else origins),
+            sessions=h.sessions, limiter=h.limiter)
         h.port = port
         return h
 
@@ -487,6 +506,52 @@ class TestGatewayIntegration(unittest.TestCase):
                        b"Origin: " + h.origin.encode() + b"\r\n\r\n")
                 resp = await h.request(req)
                 self.assertIn(b"401", resp)
+                self.assertEqual(h.fake.seen_targets, [])   # upstream never touched
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_ws_same_origin_via_host_match_no_allowlist(self):
+        # #584 review fix: with an EMPTY allowlist, a WS whose Origin authority
+        # equals its Host (a real browser at any address, incl. MagicDNS) is
+        # allowed -> the terminal works even when the dashboard is opened by
+        # hostname, not just the raw tailscale IP.
+        async def go():
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions, origins=[])
+            try:
+                tok = sessions.create()
+                reader, writer = await asyncio.open_connection("127.0.0.1", h.port)
+                writer.write(
+                    b"GET /t/ws HTTP/1.1\r\nHost: " + h.host.encode() + b"\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                    b"Origin: " + h.origin.encode() + b"\r\n"
+                    b"Cookie: webterm_session=" + tok.encode() + b"\r\n\r\n")
+                await writer.drain()
+                head = await reader.readuntil(b"\r\n\r\n")
+                self.assertIn(b"101", head)         # allowed via Origin==Host
+                writer.close()
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_forged_cookie_is_rejected(self):
+        # A negative end-to-end: an attacker-chosen (never server-minted) cookie
+        # value authenticates nothing — dashboard redirects, WS is 401.
+        async def go():
+            h = await self._harness(sessions=g.SessionStore())
+            try:
+                bogus = b"webterm_session=totally-made-up-token"
+                r1 = await h.request(b"GET / HTTP/1.1\r\nHost: x\r\nCookie: " + bogus
+                                     + b"\r\nConnection: close\r\n\r\n")
+                self.assertIn(b"303", r1)
+                self.assertIn(b"Location: /login", r1)
+                r2 = await h.request(
+                    b"GET /t/ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
+                    b"Connection: Upgrade\r\nOrigin: " + h.origin.encode()
+                    + b"\r\nCookie: " + bogus + b"\r\n\r\n")
+                self.assertIn(b"401", r2)
                 self.assertEqual(h.fake.seen_targets, [])   # upstream never touched
             finally:
                 await self._teardown(h)

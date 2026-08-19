@@ -171,7 +171,10 @@ _ATTACH_BODY = (
     'fi; fi; '
     'if [ -n "$T" ]; then '
     'C="${T}-web-$$"; '
-    "trap 'tmux kill-session -t \"$C\" 2>/dev/null || true' EXIT HUP INT TERM; "
+    # `=$C` = tmux EXACT-match (like `=$P` above): a prefix `kill-session -t
+    # "$C"` could match a live sibling clone whose pid is a numeric extension of
+    # this one (…-web-123 vs …-web-1234) and kill the wrong web view (#584 review).
+    "trap 'tmux kill-session -t \"=$C\" 2>/dev/null || true' EXIT HUP INT TERM; "
     'tmux new-session -t "$T" -s "$C"; '
     'exit; '
     'fi; '
@@ -252,9 +255,10 @@ def connect_main(argv, inventory_path=None):
 # --------------------------------------------------------------------------- #
 # Dashboard — a single-page Windows-Terminal-style tabbed UI generated from the
 # inventory (#579). A top tab bar (one short-alias tab per session) + one lazily
-# created iframe per session pointing at the IP-first ttyd URL. Tabs switch
-# instantly (hide/show; the iframe is kept alive once opened so terminal state
-# persists), and ONE basic-auth login (cached per host:port) covers every tab.
+# created iframe per session pointing at the SAME-ORIGIN ttyd URL (`/t/?arg=<id>`
+# under the #584 gateway). Tabs switch instantly (hide/show; the iframe is kept
+# alive once opened so terminal state persists), and ONE gateway form login
+# (session cookie) covers every tab — no per-tab auth.
 # --------------------------------------------------------------------------- #
 
 def _html_escape(s):
@@ -336,9 +340,10 @@ def _json_for_script(obj):
 
 
 def render_dashboard_html(inventory, ttyd_base=None):
-    """The single-page tabbed terminal UI. `ttyd_base` is the tailnet IP origin
-    of the ttyd port (e.g. `http://100.104.8.125:7682`); the page's JS builds
-    each tab's iframe src as `<ttyd_base>/?arg=<id>` on first activation."""
+    """The single-page tabbed terminal UI. `ttyd_base` is the SAME-ORIGIN ttyd
+    base path under the #584 gateway (`/t`); the page's JS builds each tab's
+    iframe src as `<ttyd_base>/?arg=<id>` on first activation — same-origin, so
+    the per-iframe Ctrl+Alt+N forwarder works while typing."""
     ttyd_base = (ttyd_base or "").rstrip("/")
     tabs = _tab_sessions(inventory)
 

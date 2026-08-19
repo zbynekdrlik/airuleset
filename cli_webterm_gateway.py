@@ -63,6 +63,12 @@ RL_WINDOW_S = 60
 MAX_HEAD_BYTES = 64 * 1024
 MAX_LOGIN_BODY = 8 * 1024
 RELAY_CHUNK = 64 * 1024
+# Slowloris guard (#584 review): bound how long an UNauthenticated peer may take
+# to send its request head / login body. A peer that dribbles bytes forever (or
+# claims a large Content-Length then stalls) is closed instead of holding a
+# coroutine open indefinitely. Not applied to the post-auth WS relay, which is a
+# legitimately long-lived interactive terminal connection.
+READ_TIMEOUT_S = 20
 
 
 def _close_quiet(writer):
@@ -194,11 +200,13 @@ class RateLimiter:
         who mistyped a few times then got it right is not left throttled)."""
         self._fails.pop(ip, None)
 
-    def prune_all(self):
-        """Bound memory: drop every IP whose window has fully elapsed."""
-        now = self._now()
-        for ip in list(self._fails):
-            self._prune(ip, now)
+    # Memory note (#584 review): entries are pruned lazily per-IP on every
+    # `blocked`/`record_failure`, so `_fails` holds at most one (possibly stale)
+    # entry per distinct source IP that has failed a login. On a WireGuard-
+    # authenticated tailnet the source IP cannot be spoofed and the peer set is
+    # small + bounded, so this can never grow unbounded — no periodic sweep is
+    # warranted (a lingering stale entry is a few dozen bytes, cleared on the
+    # IP's next attempt or a service restart).
 
 
 # --------------------------------------------------------------------------- #
@@ -278,15 +286,35 @@ def is_websocket_upgrade(headers):
     return up == "websocket" and "upgrade" in conn
 
 
-def origin_allowed(headers, allowed_origins):
-    """CSWSH guard for a WS upgrade: the `Origin` header must be one of
-    `allowed_origins` (the gateway's own origin(s)). A missing Origin is
-    REJECTED (a real same-origin browser iframe always sends one on a WS
-    handshake) — fail closed."""
+def _authority(url):
+    """The `host[:port]` authority of an Origin/URL — strip the scheme and any
+    path (`http://dev1:8080/x` -> `dev1:8080`)."""
+    if "://" in url:
+        url = url.split("://", 1)[1]
+    return url.split("/", 1)[0]
+
+
+def origin_allowed(headers, allowed_origins=None):
+    """CSWSH guard for a WS upgrade. PRIMARY, addressing-agnostic check: the
+    request's `Origin` authority (host:port) must equal its own `Host` header.
+    A same-origin browser request always has Origin-authority == Host — true
+    whether the dashboard was opened at the raw tailnet IP
+    (`http://100.104.8.125:8080/`) OR a MagicDNS name (`http://dev1:8080/`, the
+    fleet's usual addressing) OR any front — while a cross-site request never
+    does, and a browser page cannot forge either header. This replaces a fixed
+    IP-only allowlist that would have silently 403'd every terminal when the
+    dashboard was reached by hostname (#584 review). SECONDARY: an explicit
+    `allowed_origins` allowlist (kept for callers that pass the known origin,
+    e.g. tests). A missing Origin is REJECTED (fail closed)."""
     origin = header_get(headers, "origin")
     if not origin:
         return False
-    return origin in allowed_origins
+    host = header_get(headers, "host")
+    if host and _authority(origin) == host:
+        return True
+    if allowed_origins and origin in allowed_origins:
+        return True
+    return False
 
 
 def http_response(status_line, body_bytes, extra_headers=None,
@@ -397,9 +425,13 @@ class Gateway:
 
     async def _read_head(self, reader):
         try:
-            head = await reader.readuntil(b"\r\n\r\n")
-        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"),
+                                          timeout=READ_TIMEOUT_S)
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError,
+                asyncio.TimeoutError):
             return None
+        # Belt-and-suspenders: readuntil already raises LimitOverrunError at the
+        # 64 KB stream limit (== MAX_HEAD_BYTES), so this rarely fires.
         if len(head) > MAX_HEAD_BYTES:
             return None
         return head
@@ -416,9 +448,12 @@ class Gateway:
             return b""
         length = min(length, cap)
         try:
-            return await reader.readexactly(length)
+            return await asyncio.wait_for(reader.readexactly(length),
+                                          timeout=READ_TIMEOUT_S)
         except asyncio.IncompleteReadError as e:
             return e.partial
+        except asyncio.TimeoutError:
+            return b""
 
     # -- the connection handler ------------------------------------------ #
 
@@ -579,8 +614,8 @@ class Gateway:
                     break
                 if not data:
                     break
-                writer.write(data)
                 try:
+                    writer.write(data)
                     await writer.drain()
                 except (ConnectionError, asyncio.CancelledError):
                     break
