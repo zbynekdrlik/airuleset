@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -382,6 +383,129 @@ class TestGreetingOnlyInFirstMessage(TestCase):
         # OPENING message, and a follow-up drops the oslovenie
         self.assertIn("OPENING message of the thread", self.t)
         self.assertIn("a follow-up reply drops the oslovenie", self.t)
+
+
+class TestHandoverBareFollowUpRecall(TestHandoverTriggerInjection):
+    """#577 — a BARE follow-up prompt in an existing handover thread (no
+    odovzd/handover word, and carrying only ONE of {client, thread} signal)
+    must ALSO reach the composition rules. The #521/#573 recall arm required
+    BOTH a klient AND a Discuss/vlákno signal (arm 3), or an odovzd/handover
+    verb (arms 1-2); a follow-up like „odpovedz klientovi" (reply + client, no
+    thread) or „napíš im do vlákna" (write + thread, no client) carried neither
+    shape and silently missed handover-compose.md — exactly the scenario the
+    #573 greeting-only-in-first-message rule governs.
+
+    Fix (#577): four new proximity arms — a write/reply verb near a
+    Discuss/vlákno signal (both orderings), and a REPLY verb near a client
+    signal (both orderings). WRITE verbs still require a thread signal, so a
+    write-to-client with no thread stays silent (the existing locked negative);
+    deploy/prod prompts stay silent (no thread/client signal near a follow-up
+    verb). Accepted residuals (a generic non-odoo „vlákno"/„discuss" reply, a
+    reply-to-client out of a thread) are documented per the #319 convention in
+    the ticket design comment.
+
+    #577 review hardening (adversarial review, this ticket): English reply verbs
+    (reply/respond) were DROPPED — the streams work in Slovak and reply/respond
+    over-fired on daily English dev prose + substrings (correspond/respondent/
+    no-reply); and every verb stem lost its trailing backtrackable \\w* (next to
+    the bounded gap it is catastrophic-backtracking ReDoS on a repeated verb-token
+    input, a vuln PRE-EXISTING in arms 1-3 too). Both are locked below.
+    """
+
+    # --- the gap cases: RED under the pre-#577 pattern ---
+    def test_odpovedz_klientovi_injects(self):
+        # reply verb + client, NO thread signal
+        self.assertTrue(self._prompt("odpovedz klientovi", "r577a"))
+
+    def test_napis_im_do_vlakna_injects(self):
+        # write verb + thread, NO client word
+        self.assertTrue(self._prompt(
+            "napíš im do vlákna Augustová dochádzka", "r577b"))
+
+    def test_odpovedz_do_vlakna_injects(self):
+        # reply verb + thread, NO client word
+        self.assertTrue(self._prompt(
+            "odpovedz do vlákna Augustová dochádzka", "r577c"))
+
+    def test_odpis_klientovi_do_vlakna_injects(self):
+        self.assertTrue(self._prompt(
+            "odpíš klientovi do IT-support vlákna že je hotovo", "r577d"))
+
+    def test_reverse_thread_then_verb_injects(self):
+        # „vo vlákne … napíš" — thread -> verb ordering
+        self.assertTrue(self._prompt(
+            "vo vlákne mu napíš že funkcia beží", "r577e"))
+
+    def test_reverse_client_then_reply_injects(self):
+        # „klientovi odpíš" — client -> reply ordering
+        self.assertTrue(self._prompt("klientovi odpíš do vlákna", "r577f"))
+
+    def test_ask_surface_bare_followup_injects(self):
+        # the AskUserQuestion (owner-approval) surface, primed first so
+        # user-questions-slovak's once-per-session marker is set (#521 residual)
+        # — a REPLY-verb follow-up that the pre-#577 arm 3 (write-verb only)
+        # would have missed even though it carries both signals.
+        sid = "r577ask"
+        self._ask("Ktorý variant zvolíme pre layout?", sid)
+        self.assertTrue(self._ask(
+            "Odpovedz klientovi do vlákna že chyba je opravená — schvaľuješ znenie?", sid))
+
+    # --- negatives the widening must NOT break ---
+    def test_deploy_prompt_stays_silent(self):
+        self.assertFalse(self._prompt("odovzdaj na prod a reštartuj službu", "n577a"))
+
+    def test_write_client_no_thread_stays_silent(self):
+        # WRITE verb + client but NO thread signal — write verbs still require
+        # a thread signal, so this stays silent (the locked negative class)
+        self.assertFalse(self._prompt("napíš zákazníkovi faktúru mailom", "n577b"))
+
+    def test_reply_to_pr_comment_stays_silent(self):
+        self.assertFalse(self._prompt("odpovedz na PR komentár v issue #5", "n577c"))
+
+    def test_write_changelog_stays_silent(self):
+        self.assertFalse(self._prompt("napíš changelog a nasaď to na prod", "n577d"))
+
+    def test_unrelated_reply_stays_silent(self):
+        self.assertFalse(self._prompt("odpovedz mi kedy máš čas", "n577e"))
+
+    def test_english_reply_respond_verbs_no_longer_fire(self):
+        # review A M1 / B m2: English reply/respond were dropped — they over-fired
+        # on daily English dev prose and on substrings (correspond / respondent /
+        # no-reply). Slovak recall (odpoved/odpíš/reaguj) is unaffected.
+        self.assertFalse(self._prompt(
+            "reply to the client in the Discuss thread", "n577f"))
+        self.assertFalse(self._prompt(
+            "respond to the reviewer in the discussion", "n577g"))
+        self.assertFalse(self._prompt(
+            "correspondence with the client about the reagent order", "n577h"))
+
+    def test_reaguj_stem_avoids_reagent_substring(self):
+        # `reaguj` (not bare `reag`) keeps the Slovak imperative but no longer
+        # matches the accounting/lab noun "reagent" next to a client signal.
+        self.assertTrue(self._prompt("reaguj klientovi vo vlákne", "n577i"))
+        self.assertFalse(self._prompt("objednaj reagent pre klienta", "n577j"))
+
+    def test_pattern_is_redos_safe_on_repeated_verb_tokens(self):
+        # review B M1: a \w* verb prefix next to the [^\n]{0,N} gap is
+        # catastrophic-backtracking ReDoS on a repeated verb-token input
+        # (measured ~9 s for "odpoved"*1000, ~14 s for "odovzdav"*1000 pre-fix).
+        # Bare stems fix it (<10 ms). Load the REAL conf pattern and assert it
+        # completes far under a generous bound even under heavy box load — the
+        # fixed timing (~8 ms) vs the vulnerable (~13 s) leaves a ~1600x margin.
+        pattern = next(
+            (pat for topic, _t, pat, _b in load_conf_rows() if topic == HANDOVER_TOPIC),
+            None)
+        self.assertIsNotNone(pattern, "handover row not found in the conf")
+        rx = re.compile(pattern)
+        for tok in ("odpoved", "odovzdav", "napis", "informuj"):
+            payload = tok * 1200
+            start = time.perf_counter()
+            rx.search(payload)
+            elapsed = time.perf_counter() - start
+            self.assertLess(
+                elapsed, 2.0,
+                "ReDoS regression: %r*1200 took %.3fs — a backtrackable \\w* verb "
+                "prefix was reintroduced next to the [^\\n]{0,N} gap" % (tok, elapsed))
 
 
 if __name__ == "__main__":
