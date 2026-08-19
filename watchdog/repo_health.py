@@ -473,12 +473,14 @@ def _repo_sweep_batch(repos, state, cursor_key, max_repos=None):
 
 NET_DRIFT_WINDOW_S = 7 * 86400
 NET_DRIFT_THRESHOLD = 10          # net > this pings; env AIRULESET_NET_DRIFT_THRESHOLD
-NET_DRIFT_REPING_S = 86400        # once a day while it persists
+# #560: the old per-`reping`-window re-ping cadence is retired -- episode_gate
+# alerts ONCE at onset + ONE recovery (hysteresis via `notify.EPISODE_CLEAR_AFTER`),
+# so this job no longer has (or needs) a `reping` knob.
 
 
 def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
                     issue_counts_fetch=None, git_run=None, threshold=None,
-                    window=NET_DRIFT_WINDOW_S, reping=NET_DRIFT_REPING_S,
+                    window=NET_DRIFT_WINDOW_S,
                     interval=MANAGED_SWEEP_INTERVAL_S, persist=None,
                     max_repos=None, episode_gate=None):
     """Job 27 -- see the section comment. `issue_counts_fetch(repo_label,
@@ -503,8 +505,8 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
     once the batch is drawn, still before the first `gh` call.
 
     #560: dedup is now the OPT-IN `notify.episode_gate()` primitive (#558),
-    not a per-repo `state['net_drift']` `pinged_ts` memory re-pinged every
-    `reping` window. For each MEASURED repo the gate is consulted with a
+    not a per-repo `state['net_drift']` `pinged_ts` memory re-paged per
+    time-bucket. For each MEASURED repo the gate is consulted with a
     stable `condition_key` ("net-drift:<label>") + a boolean `healthy`
     (net <= threshold), and it decides open/hold/clearing/recover/quiet --
     so a persistent backlog alerts ONCE at onset + ONE recovery message,
@@ -614,7 +616,8 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
 
 STUCK_MAIN_AGE_S = 5 * 86400          # env AIRULESET_STUCK_MAIN_AGE_S
 STUCK_MAIN_AHEAD_MIN = 20             # env AIRULESET_STUCK_MAIN_AHEAD
-STUCK_MAIN_REPING_S = 86400
+# #560: no `reping` re-page cadence any more -- episode_gate (onset + one
+# recovery via hysteresis) replaced the per-window re-ping.
 
 
 def _stuck_main_skip_set():
@@ -629,7 +632,7 @@ def _stuck_main_skip_set():
 
 def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                      git_run=None, git_fetch=None, age_threshold=None,
-                     ahead_threshold=None, reping=STUCK_MAIN_REPING_S,
+                     ahead_threshold=None,
                      interval=MANAGED_SWEEP_INTERVAL_S, persist=None,
                      max_repos=None, episode_gate=None):
     """Job 28 -- see the section comment. `git_fetch(root)` is called (best-
@@ -660,8 +663,8 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
     advance is persisted again once the batch is drawn.
 
     #560: dedup is the OPT-IN `notify.episode_gate()` primitive (#558), not a
-    per-repo `state['stuck_main']` `pinged_ts` memory re-pinged every `reping`
-    window -- see net_drift_alarm's matching #560 note. For each MEASURED repo
+    per-repo `state['stuck_main']` `pinged_ts` memory re-paged per time-bucket
+    -- see net_drift_alarm's matching #560 note. For each MEASURED repo
     (not fork-skipped, fetch OK, `delivery_state` succeeded) the gate is
     consulted with "stuck-main:<label>" + `healthy = not stalled` and decides
     open/hold/clearing/recover/quiet: a persistently stuck main alerts ONCE at

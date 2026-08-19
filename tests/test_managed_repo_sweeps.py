@@ -269,7 +269,11 @@ class TestNetDriftAlarm(_RepoHealthStoreIsolated):
                            repo_roots=["/repos/x"], issue_counts_fetch=fetch)
         self.assertEqual(len(calls), 1)   # second sweep skipped -- not due yet
 
-    def test_reping_dedup_within_window(self):
+    def test_second_consecutive_unhealthy_sweep_holds_no_resend(self):
+        # #560 (was test_reping_dedup_within_window): a second DUE sweep while
+        # the condition persists must NOT re-send -- the gate returns "hold"
+        # after the onset. Same observable (1 send), the mechanism is now
+        # episode_gate hysteresis, not a per-reping-window dedup.
         def fetch(label, window_s):
             return (40, 5)
         wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
@@ -278,7 +282,7 @@ class TestNetDriftAlarm(_RepoHealthStoreIsolated):
         wd.net_drift_alarm(NOW + 2, self.state, send_fn=self.send,
                            repo_roots=["/repos/x"], issue_counts_fetch=fetch,
                            interval=1)
-        self.assertEqual(len(self.sent), 1)   # second sweep due, but re-ping deduped
+        self.assertEqual(len(self.sent), 1)   # onset only; 2nd sweep -> hold
 
 
 class TestStuckMainSweep(_RepoHealthStoreIsolated):
@@ -400,14 +404,19 @@ class TestStuckMainSweep(_RepoHealthStoreIsolated):
         self.assertEqual(self.sent, [])
         self.assertEqual(fetched, [])
 
-    def test_fork_skip_drops_stale_dedup_memory(self):
-        """A fork that once (wrongly) pinged must have that dedup entry cleared
-        so it can never re-ping either."""
+    def test_fork_skip_never_consults_the_gate_or_sends(self):
+        """#560 (was test_fork_skip_drops_stale_dedup_memory): a fork is
+        skipped BEFORE any measurement, so it never sends AND never opens an
+        episode -- the gate is not consulted for a skipped repo. (The old
+        assertion that a stale `state['stuck_main']` dedup entry gets cleared
+        is retired -- that per-repo memory no longer exists; #560 moved dedup
+        to episode_gate's store, and this proves the fork never enters it.)"""
         r = self._fork()
-        self.state["stuck_main"] = {"kvaskodev/odoo-erp": {"pinged_ts": NOW - DAY}}
         wd.stuck_main_sweep(NOW, self.state, send_fn=self.send, repo_roots=[str(r)])
         self.assertEqual(self.sent, [])
-        self.assertNotIn("kvaskodev/odoo-erp", self.state.get("stuck_main", {}))
+        self.assertNotIn(
+            "stuck-main:kvaskodev/odoo-erp", self.episodes(),
+            "a fork-skipped repo must never open an episode (gate not consulted)")
 
     def test_env_skip_list_silences_a_named_repo(self):
         """#441: an operator opt-out via AIRULESET_STUCK_MAIN_SKIP silences a
@@ -777,13 +786,19 @@ class TestBatchingPreservesUntouchedDedup_172(_RepoHealthStoreIsolated):
     def test_net_drift_repo_that_sits_out_the_batch_keeps_its_episode(self):
         # Pre-open an episode for the repo that will sit out this sweep.
         notify.episode_gate("net-drift:untouched", False, now=NOW - 100)
+        fetched = []
 
         def fetch(label, window_s):
-            return (40, 5)   # "touched" is above threshold -> opens
+            fetched.append(label)     # records who was actually MEASURED
+            return (40, 5)            # "touched" is above threshold -> opens
 
         wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
                            repo_roots=["/repos/touched", "/repos/untouched"],
                            issue_counts_fetch=fetch, max_repos=1)
+        # Independent proof of the sit-out (not inferred from episode state):
+        # only "touched" was fetched, "untouched" genuinely sat out.
+        self.assertEqual(fetched, ["touched"],
+                         "only the batched repo is measured; 'untouched' sits out")
         ep = self.episodes()
         self.assertTrue(ep.get("net-drift:touched", {}).get("active"),
                         "the measured repo opened its episode")
@@ -881,7 +896,7 @@ class TestNetDriftEpisodeHysteresis(_EpisodeStoreIsolated):
             wd.net_drift_alarm(NOW + i * DAY, self.state, send_fn=self.send,
                                repo_roots=["/repos/x"],
                                issue_counts_fetch=fetch,
-                               interval=1, reping=DAY)
+                               interval=1)
         self.assertEqual(
             len(self.sent), 1,
             "a persistent chronic condition must alert ONCE at onset, not "
@@ -891,12 +906,12 @@ class TestNetDriftEpisodeHysteresis(_EpisodeStoreIsolated):
         wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
                            repo_roots=["/repos/x"],
                            issue_counts_fetch=self._fetch(40, 5),
-                           interval=1, reping=DAY)                       # onset
+                           interval=1)                       # onset
         for i in range(1, 4):                             # three healthy passes
             wd.net_drift_alarm(NOW + i * DAY, self.state, send_fn=self.send,
                                repo_roots=["/repos/x"],
                                issue_counts_fetch=self._fetch(5, 5),
-                               interval=1, reping=DAY)
+                               interval=1)
         self.assertEqual(
             len(self.sent), 2,
             "onset + exactly ONE recovery after the hysteresis window; the "
@@ -915,7 +930,7 @@ class TestStuckMainEpisodeHysteresis(_EpisodeStoreIsolated):
                        work_ts=NOW - 3600, undelivered=25)
         for i in range(5):
             wd.stuck_main_sweep(NOW + i * DAY, self.state, send_fn=self.send,
-                                repo_roots=[str(r)], interval=1, reping=DAY)
+                                repo_roots=[str(r)], interval=1)
         self.assertEqual(
             len(self.sent), 1,
             "a persistently stuck main must alert ONCE at onset, not re-page "
