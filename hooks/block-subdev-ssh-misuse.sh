@@ -15,18 +15,20 @@ set -euo pipefail
 # sshpass-wrapped) whose target host is one of the subdev VPS's known
 # addresses (MagicDNS name, public FQDN, tailscale IP, public IP).
 #
-# ALLOW-list — mirrors airuleset.py's REMOTE_HOSTS for montalu (+ its family
-# montalu2/3/4/5/6/7/8, airuleset#251 + airuleset#378)/marek/david (+ its
-# family david2/3/4, airuleset#326)/simap/miva1 (airuleset#300 — the single
-# source of truth for THOSE fifteen identities), PLUS one identity
+# ALLOW-list — mirrors airuleset.py's REMOTE_HOSTS for the montalu family
+# montalu1/2/3/4/5/6/7/8 (airuleset#251 + airuleset#378 + #537 base rename
+# montalu->montalu1)/marek/david (+ its family david2/3/4, airuleset#326)/
+# simap1/miva1 (airuleset#300 — the single source of truth for THOSE fifteen
+# identities), PLUS one identity
 # REMOTE_HOSTS structurally cannot express (#68): REMOTE_HOSTS is dev1's own
 # OUTBOUND push-target list, but the gatekeeper VPS reaches subdev INBOUND
 # from ITS OWN box as root, via a locally-deployed ~/.ssh/config `Host
 # subdev` stanza — not something dev1 ever pushes to.
-#   - montalu[2345678]@<subdev> — no identity requirement (default key AND
+#   - montalu[12345678]@<subdev> — no identity requirement (default key AND
 #                          the sshpass -p path are both legitimate per
 #                          REMOTE_HOSTS — the montalu family has no
-#                          `identity` entry; montalu2/3/4 are three MORE
+#                          `identity` entry; montalu1 is the renamed base
+#                          (#537, was `montalu`), montalu2/3/4 are three MORE
 #                          full parallel montalu streams (airuleset#251),
 #                          montalu5/6/7/8 are FOUR MORE (airuleset#378,
 #                          odoo-erp#3642)).
@@ -55,7 +57,7 @@ set -euo pipefail
 # BLOCK everything else, in particular:
 #   - no user at all UNLESS the local ~/.ssh/config resolves it to the
 #     sanctioned root+subdev_admin case above.
-#   - any user other than montalu[2345678]/marek/david[234]/simap1/miva1/root
+#   - any user other than montalu[12345678]/marek/david[234]/simap1/miva1/root
 #     (newlevel, gatekeeper,...).
 #   - marek/david[234]/simap1/miva1 WITHOUT the gatekeeper_access_ed25519 identity.
 #   - root WITHOUT the subdev_admin identity.
@@ -355,7 +357,7 @@ def check_target(user, host, tokens, label):
                                  .rstrip("/")) == SUBDEV_ADMIN_KEY_BASENAME):
             return None
         return ("%s to subdev with NO user specified (implicit current "
-                "shell user) — must be montalu[2345678] / marek / "
+                "shell user) — must be montalu[12345678] / marek / "
                 "david[234] / simap1 / miva1"
                 % label)
     if user == "root":
@@ -364,7 +366,7 @@ def check_target(user, host, tokens, label):
             return None
         return ("%s as root@subdev without -i .../%s"
                 % (label, SUBDEV_ADMIN_KEY_BASENAME))
-    if user in ("montalu", "montalu2", "montalu3", "montalu4",
+    if user in ("montalu1", "montalu2", "montalu3", "montalu4",
                 "montalu5", "montalu6", "montalu7", "montalu8"):
         return None
     if user in ("marek", "david", "david2", "david3", "david4",
@@ -445,7 +447,7 @@ if [ "$RC" -eq 2 ]; then
     echo "" >&2
     echo "  Allowed identities (per airuleset.py REMOTE_HOSTS — the single" >&2
     echo "  source of truth, read it before any ad-hoc subdev ssh):" >&2
-    echo "    montalu[2345678]@subdev — default key OR sshpass -p" >&2
+    echo "    montalu[12345678]@subdev — default key OR sshpass -p" >&2
     echo "    marek@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    david[234]@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2
     echo "    simap1@subdev  -i ~/.secrets/gatekeeper_access_ed25519" >&2

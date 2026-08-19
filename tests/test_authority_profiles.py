@@ -34,7 +34,11 @@ class TestAuthorityResolution(TestCase):
     def test_known_stream_users_map_to_their_profiles(self):
         self.assertEqual(airuleset.AUTHORITY_BY_USER["david"], "fork-no-merge")
         self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "branch-merge")
-        self.assertEqual(airuleset.AUTHORITY_BY_USER["montalu"], "branch-merge")
+        # montalu1 (was montalu; #537 live rename 2026-08-19): same
+        # branch-merge profile as the base. The OLD unix name's row left the
+        # map with the OS account (runbook-537 step 8, live in-place usermod).
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["montalu1"], "branch-merge")
+        self.assertNotIn("montalu", airuleset.AUTHORITY_BY_USER)
         # simap1 (was simap, airuleset#143; #537 live rename 2026-08-18):
         # phase-1 demo stream that merges NOWHERE — fork-no-merge is the
         # existing lowest profile, already correct. The OLD unix name's row
@@ -502,7 +506,7 @@ class TestPerBoxSkillScoping(TestCase):
         self.assertIn("playbook-review", names)
 
     def test_subdev_also_loses_deploy_ssh(self):
-        for user in ("david", "marek", "montalu", "montalu2", "montalu3",
+        for user in ("david", "marek", "montalu1", "montalu2", "montalu3",
                      "montalu4", "montalu5", "montalu6", "montalu7",
                      "montalu8"):
             names = airuleset.skill_names_for_user(user)
@@ -533,7 +537,7 @@ class TestPerBoxSkillScoping(TestCase):
         # meeting recordings IN that stream's session. Per-user extras re-grant a
         # scoped-away skill on exactly the boxes where it IS relevant.
         self.assertIn("meeting-analysis",
-                      airuleset.skill_names_for_user("montalu"))
+                      airuleset.skill_names_for_user("montalu1"))
         # airuleset#251: montalu2/3/4 are full parallel montalu streams —
         # same working style, same meeting-recordings-in-session rationale.
         # airuleset#378: montalu5/6/7/8 are FOUR MORE, same rationale.
@@ -545,7 +549,7 @@ class TestPerBoxSkillScoping(TestCase):
             self.assertNotIn("meeting-analysis",
                              airuleset.skill_names_for_user(user), user)
         # extras never leak anything beyond the named skill
-        self.assertNotIn("mdreview", airuleset.skill_names_for_user("montalu"))
+        self.assertNotIn("mdreview", airuleset.skill_names_for_user("montalu1"))
         # every extras entry must name real skills (typo guard)
         for user, extras in airuleset.SKILLS_EXTRA_BY_USER.items():
             for n in extras:
@@ -838,7 +842,7 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
 
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -922,7 +926,7 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
         import unittest.mock as mk
 
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", return_value="not json"):
                     buf = io.StringIO()
                     with contextlib.redirect_stdout(buf):
@@ -991,7 +995,7 @@ class TestSliceQualsIncludesOwnBounceTickets(TestCase):
 
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -1045,7 +1049,7 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
 
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         with self.assertRaises(SystemExit) as cm:
@@ -1075,7 +1079,7 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
 
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         with self.assertRaises(SystemExit) as cm:
@@ -1102,7 +1106,7 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
 
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
-            with mk.patch.object(airuleset, "_current_user", return_value="montalu"):
+            with mk.patch.object(airuleset, "_current_user", return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -1176,7 +1180,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
             with mk.patch.object(airuleset, "_current_user",
-                                 return_value="montalu"):
+                                 return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -1199,7 +1203,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
             with mk.patch.object(airuleset, "_current_user",
-                                 return_value="montalu"):
+                                 return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -1225,7 +1229,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
             with mk.patch.object(airuleset, "_current_user",
-                                 return_value="montalu"):
+                                 return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -1257,7 +1261,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
             with mk.patch.object(airuleset, "_current_user",
-                                 return_value="montalu"):
+                                 return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -1295,7 +1299,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
             with mk.patch.object(airuleset, "_current_user",
-                                 return_value="montalu"):
+                                 return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -1333,7 +1337,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
             with mk.patch.object(airuleset, "_current_user",
-                                 return_value="montalu"):
+                                 return_value="montalu1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -1364,7 +1368,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="zbynekdrlik"):
             with mk.patch.object(airuleset, "_current_user",
-                                 return_value="montalu"):
+                                 return_value="montalu1"):
                 with mk.patch.object(
                         airuleset, "_slice_mine_and_handed",
                         return_value=(sentinel_rows, sentinel_handed,
@@ -1778,7 +1782,7 @@ class TestSliceQualsRefusesAnUnresolvableIdentity(TestCase):
             with mk.patch.object(airuleset, "resolve_authority",
                                  return_value="branch-merge"):
                 with mk.patch.object(airuleset, "_current_user",
-                                     return_value="montalu"):
+                                     return_value="montalu1"):
                     with mk.patch.object(
                             airuleset, "_gh_out",
                             return_value='[{"number": 1, "title": "t", '
@@ -1992,7 +1996,7 @@ class TestSearchIndexCrossCheckAssertsNonEmpty(TestCase):
             with mk.patch.object(airuleset, "_gh_login",
                                  return_value="zbynekdrlik"):
                 with mk.patch.object(airuleset, "_current_user",
-                                     return_value="montalu"):
+                                     return_value="montalu1"):
                     with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                         with contextlib.redirect_stdout(buf):
                             try:
@@ -2972,7 +2976,7 @@ class TestTheSelectionSourceCarriesTheOwnershipDiscriminator(TestCase):
             return "[]"
 
         out, _, exc = _drive(airuleset.cmd_slice_quals, gh,
-                             authority="branch-merge", user="montalu",
+                             authority="branch-merge", user="montalu1",
                              login="zbynekdrlik", count=False, list=True)
         self.assertIsNone(exc)
         row = [ln for ln in out.splitlines() if ln.startswith("7\t")]

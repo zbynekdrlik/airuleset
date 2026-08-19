@@ -34,7 +34,7 @@ class TestSkillExistsAndScoped(TestCase):
                       airuleset.skill_names_for_user("gatekeeper"))
         self.assertIn("autopilot-master",
                       airuleset.skill_names_for_user("newlevel"))
-        for u in ("david", "marek", "montalu"):
+        for u in ("david", "marek", "montalu1"):
             self.assertNotIn("autopilot-master",
                              airuleset.skill_names_for_user(u), u)
 

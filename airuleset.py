@@ -269,7 +269,9 @@ MAINTAINER_USERS = {"newlevel"}
 # montalu2/3/4 (airuleset#251): three MORE full parallel montalu streams,
 # same working style — same re-grant.
 SKILLS_EXTRA_BY_USER = {
-    "montalu": {"meeting-analysis"},
+    # montalu1 is the renamed base montalu stream (#537, live 2026-08-19) —
+    # it keeps the meeting-analysis re-grant the base montalu had.
+    "montalu1": {"meeting-analysis"},
     "montalu2": {"meeting-analysis"},
     "montalu3": {"meeting-analysis"},
     "montalu4": {"meeting-analysis"},

@@ -843,7 +843,7 @@ BOUNCE_RENUDGE_SECONDS = 6 * 3600    # same ticket set re-nudged at most this of
 # pane about its own gk-request) -- the same montalu2/3/4-style regression
 # item 3 of #326 exists to prevent, just in the watchdog's separate
 # bounce/gkreq registry rather than AUTHORITY_BY_USER's generic one.
-_REDUCED_STREAM_USERS = ("david", "marek", "montalu",
+_REDUCED_STREAM_USERS = ("david", "marek", "montalu1",
                          "montalu2", "montalu3", "montalu4",
                          "david2", "david3", "david4")
 
