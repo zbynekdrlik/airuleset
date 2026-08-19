@@ -98,14 +98,29 @@ def _bounce_quals(cwd):
     have pinged the wrong person; the sub-dev's own box nudges those). The
     GATEKEEPER is skipped ENTIRELY ([] = no query, no nudge): the bounce lane's
     direction is reviewer→sub-dev — nudging the reviewer about bounces IT filed
-    is backwards (the live gatekeeper-pane spam incident, 2026-07-19)."""
+    is backwards (the live gatekeeper-pane spam incident, 2026-07-19).
+
+    #561: the FULL-authority exclusion EXPANDS each reduced stream via
+    `airuleset._stream_rename_equivalents()` (the SAME single alias primitive
+    `_core_search_excl`/`_slice_quals`/`_ticket_is_stream_labeled` use) so a
+    renamed base stream excludes BOTH its old and its new `stream:` label —
+    after the montalu->montalu1 rename `_REDUCED_STREAM_USERS` carries
+    `montalu1` but not `montalu`, so without this a full-authority box's bounce
+    nudge would pick up an old `stream:montalu` bounce and ping the wrong
+    person. The reduced-box's OWN slice (the `/home/<user>/` branch above) is
+    left scoped to its own canonical label — that own-slice narrowing is a
+    separate concern, not a gk leak, and its shape is #537-locked."""
     c = str(cwd or "")
     if c.startswith("/home/gatekeeper/"):
         return []
     for u in watchdog._REDUCED_STREAM_USERS:
         if c.startswith("/home/%s/" % u):
             return ["label:stream:%s" % u]
-    return [" ".join("-label:stream:%s" % u for u in watchdog._REDUCED_STREAM_USERS)]
+    import airuleset
+    names = set()
+    for u in watchdog._REDUCED_STREAM_USERS:
+        names.update(airuleset._stream_rename_equivalents(u))
+    return [" ".join("-label:stream:%s" % n for n in sorted(names))]
 
 
 def _gh_env(home=None, base=None):

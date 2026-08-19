@@ -73,11 +73,25 @@ def _core_search_excl():
     Only entries whose profile is NOT `full` are excluded (#181 M-5): a
     hypothetical `full` entry in AUTHORITY_BY_USER is not a sub-dev stream
     at all, and excluding its label would silently remove a whole population
-    from every full-authority count."""
+    from every full-authority count.
+
+    #561: each excluded stream is EXPANDED via `_stream_rename_equivalents()`
+    — the SAME single alias primitive `_slice_quals()`/`_ticket_is_stream_
+    labeled()` already consume — so a base-stream rename target excludes BOTH
+    its old and its new `stream:` label. This was the THIRD consumer the #537
+    staging missed: after the live montalu->montalu1 rename removed the old
+    `montalu` key from AUTHORITY_BY_USER, this exclusion stopped covering the
+    old `stream:montalu` label the odoo-erp tickets still carry (69 open,
+    0 `stream:montalu1`), leaking ~50 tickets into gk core-quals/footer/goal.
+    The set DEDUPES (`david` and `david1` are both keys pre-rename and each
+    expands to the same pair — a naive nested comprehension would emit
+    duplicate fragments), sorted for a deterministic query string."""
     import airuleset
-    return " ".join("-label:stream:%s" % u
-                    for u, profile in sorted(airuleset.AUTHORITY_BY_USER.items())
-                    if profile != "full")
+    names = set()
+    for u, profile in airuleset.AUTHORITY_BY_USER.items():
+        if profile != "full":
+            names.update(_stream_rename_equivalents(u))
+    return " ".join("-label:stream:%s" % n for n in sorted(names))
 
 
 def _gh_app_token_dir():
@@ -995,12 +1009,24 @@ def _stream_owner_of(labels):
     Only non-`full` AUTHORITY_BY_USER entries count, the same filter
     `_core_search_excl()` applies (#181 M-5): a hypothetical `full` entry is
     not a sub-dev stream, and treating its label as ownership would wrongly
-    mark its tickets untouchable."""
+    mark its tickets untouchable.
+
+    #561: recognition is EXPANDED via `_stream_rename_equivalents()` (the same
+    single alias primitive `_core_search_excl`/`_slice_quals`/`_ticket_is_
+    stream_labeled` use) so a legacy `stream:<old>` label still resolves to its
+    owner after the rename removed the old key from AUTHORITY_BY_USER —
+    otherwise a `stream:montalu`+`needs-gatekeeper` hand-off (still in the
+    obligation union) would render `implement` in `core-quals --list` and
+    invite the gatekeeper to write montalu's code. Returns the AUTHORITY_BY_
+    USER KEY (the current canonical name, e.g. `montalu1`), never the matched
+    alias — so `_row_action`'s `owner == own_stream` comparison keeps a box's
+    own old-labeled ticket reading `implement`."""
     import airuleset
     names = {(lb or {}).get("name") for lb in (labels or [])
              if isinstance(lb, dict)}
     for user, profile in sorted(airuleset.AUTHORITY_BY_USER.items()):
-        if profile != "full" and ("stream:%s" % user) in names:
+        if profile != "full" and any(("stream:%s" % n) in names
+                                      for n in _stream_rename_equivalents(user)):
             return user
     return ""
 
