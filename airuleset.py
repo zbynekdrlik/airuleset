@@ -399,6 +399,7 @@ from cli_bashrc_appliers import (  # noqa: E402, F401
     ULTRACODE_BASHRC_BLOCK as ULTRACODE_BASHRC_BLOCK,
     apply_ultracode_launcher as apply_ultracode_launcher,
     STREAM_DEV_CWD_REL as STREAM_DEV_CWD_REL,
+    STREAM_DEV_CWD_CHAIN as STREAM_DEV_CWD_CHAIN,
     STREAM_SSH_ATTACH_MARK_START as STREAM_SSH_ATTACH_MARK_START,
     STREAM_SSH_ATTACH_MARK_END as STREAM_SSH_ATTACH_MARK_END,
     STREAM_SSH_ATTACH_BLOCK as STREAM_SSH_ATTACH_BLOCK,
@@ -4173,13 +4174,20 @@ from cli_fleet import (  # noqa: E402, F401
 
 # --- #263: subdev stream dev-env bootstrap (claude tmux session + gap report) --
 def _stream_session_cwd() -> Path:
-    """The convention working directory for a subdev stream account's tmux
-    session (see STREAM_DEV_CWD_REL's own comment, above apply_ultracode_
-    launcher). Falls back to $HOME when that checkout doesn't exist yet, so
-    bootstrap never hard-fails on an account gatekeeper hasn't finished
-    Phase 1 for."""
-    p = Path.home() / STREAM_DEV_CWD_REL
-    return p if p.is_dir() else Path.home()
+    """The convention working directory for a subdev/gatekeeper account's tmux
+    session (see STREAM_DEV_CWD_CHAIN's own comment, above apply_ultracode_
+    launcher). #563: a FALLBACK CHAIN -- the first EXISTING dir of
+    STREAM_DEV_CWD_CHAIN wins (odoo-erp, then devel/odoo), else $HOME. The old
+    binary "odoo-erp or $HOME" fallback dropped montalu1 (project dir
+    ~/devel/odoo, no odoo-erp subdir) into $HOME. Falling back to $HOME keeps
+    bootstrap from hard-failing on an account gatekeeper hasn't finished
+    Phase 1 for (and is correct for gatekeeper, which has no odoo checkout)."""
+    home = Path.home()
+    for rel in STREAM_DEV_CWD_CHAIN:
+        p = home / rel
+        if p.is_dir():
+            return p
+    return home
 
 
 def _tmux_session_exists(name, run=None):

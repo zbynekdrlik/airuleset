@@ -146,15 +146,21 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     return False
 
 
-# --- #263/#264: subdev stream account dev-env convention -------------------
-# The convention working directory for a subdev stream account's tmux
-# session: every currently-provisioned account (montalu/marek/david/simap,
-# live-verified; montalu2/montalu3/montalu4 per their own TODO-PROVISIONING.md
-# gatekeeper Phase-1 contract) checks out the odoo-erp repo at exactly this
-# path. Used by both #263's tmux bootstrap (_stream_session_cwd, below
-# AUTHORITY_BY_USER) and #264's ssh auto-attach block (right below) -- ONE
-# literal, not two independently-maintained copies.
+# --- #263/#264/#563: subdev stream account dev-env convention --------------
+# The convention working directory for a subdev/gatekeeper account's tmux
+# session. NOT every account checks out at the same path (#563): montalu1
+# (renamed from montalu, #537) has its project at ~/devel/odoo, other
+# accounts check out ~/devel/odoo/odoo-erp, and gatekeeper has no odoo
+# checkout at all. So the cwd is a FALLBACK CHAIN: the first EXISTING dir of
+# STREAM_DEV_CWD_CHAIN wins, else $HOME. A binary "odoo-erp or $HOME"
+# fallback dropped montalu1 into $HOME, where a claude wrote under the wrong
+# project key (no history/memory -- the owner's complaint). STREAM_DEV_CWD_REL
+# stays the primary (chain[0]). Used by BOTH #263's tmux bootstrap
+# (_stream_session_cwd, below AUTHORITY_BY_USER) and #264's ssh auto-attach
+# block (right below) -- ONE shared chain, not two independently-maintained
+# copies.
 STREAM_DEV_CWD_REL = "devel/odoo/odoo-erp"
+STREAM_DEV_CWD_CHAIN = (STREAM_DEV_CWD_REL, "devel/odoo")
 
 # --- #264: subdev stream ssh auto-attach ------------------------------------
 # One subdev stream account = one tmux session; an interactive ssh login
@@ -178,8 +184,16 @@ STREAM_SSH_ATTACH_BLOCK = (
     # guard keeps that failure mode from ever being reachable).
     'if [[ $- == *i* ]] && [ -n "${SSH_TTY:-}" ] && [ -z "${TMUX:-}" ] '
     '&& command -v tmux >/dev/null 2>&1; then\n'
-    f'  __airuleset_cwd="$HOME/{STREAM_DEV_CWD_REL}"\n'
-    '  [ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"\n'
+    # #563: cwd FALLBACK CHAIN -- first EXISTING dir of STREAM_DEV_CWD_CHAIN
+    # wins, else $HOME. A binary "odoo-erp or $HOME" fallback dropped montalu1
+    # (project dir ~/devel/odoo, no odoo-erp subdir) into $HOME, so a claude
+    # launched there wrote under the wrong project key (no history/memory).
+    '  __airuleset_cwd="$HOME"\n'
+    f'  for __airuleset_rel in {" ".join(STREAM_DEV_CWD_CHAIN)}; do\n'
+    '    if [ -d "$HOME/$__airuleset_rel" ]; then\n'
+    '      __airuleset_cwd="$HOME/$__airuleset_rel"; break\n'
+    '    fi\n'
+    '  done\n'
     '  __airuleset_me="$(whoami)"\n'
     "  # #284: a tmux destroy-unattached sweep (#254) can reduce a\n"
     "  # multi-member session GROUP down to exactly one survivor whose\n"
