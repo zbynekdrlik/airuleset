@@ -505,6 +505,20 @@ class TestStreamOwnerOfAlias(TestCase):
             self.assertEqual(
                 airuleset._stream_owner_of([{"name": "bug"}]), "")
 
+    def test_a_full_profile_entry_is_never_owned(self):
+        # M-5 for the OWNERSHIP path (review A 🔵): a `profile == "full"` entry
+        # is not a sub-dev stream — its label must NEVER read as ownership, or
+        # its tickets would wrongly become untouchable. Mirrors the same guard
+        # `test_a_full_profile_entry_is_still_never_excluded` locks for
+        # `_core_search_excl`.
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                            {"montalu1": "branch-merge", "boss": "full"}):
+            self.assertEqual(
+                airuleset._stream_owner_of([{"name": "stream:boss"}]), "")
+            self.assertEqual(
+                airuleset._stream_owner_of([{"name": "stream:montalu"}]),
+                "montalu1")
+
     def test_a_row_with_a_legacy_stream_handoff_is_marked_action_only(self):
         # End-to-end through `cmd_core_quals --list`: a stream:montalu +
         # needs-gatekeeper ticket surfaces via the obligation union and MUST be
