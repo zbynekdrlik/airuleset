@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -121,11 +122,17 @@ def _sanitize_name(s):
 def derive_repo_name(path, name=None):
     """Deterministic repo name from `path` (or an explicit `--name` override).
     Leaf basename with `_`→`-`, lowercased; a nested path under a
-    CLUSTER_PREFIXES dir gets the `<cluster>-<leaf>` prefix."""
+    CLUSTER_PREFIXES dir gets the `<cluster>-<leaf>` prefix. Raises ValueError
+    for a degenerate path whose derived name would be empty (`/`, ``, `.`)."""
     if name:
-        return _sanitize_name(name)
+        n = _sanitize_name(name)
+        if not n:
+            raise ValueError("empty repo name from --name %r" % name)
+        return n
     p = Path(str(path).rstrip("/"))
     base = _sanitize_name(p.name)
+    if not base:
+        raise ValueError("cannot derive a repo name from path %r" % path)
     parent = p.parent.name
     if parent in CLUSTER_PREFIXES:
         return "%s-%s" % (parent, base)
@@ -255,6 +262,64 @@ def registry_entry_for(registry_path, name):
     return registry_entry_for_entries(load_registry(registry_path), name)
 
 
+def _norm_path(path):
+    return os.path.abspath(os.path.expanduser(str(path or "")))
+
+
+def registry_entry_for_path_in(entries, path):
+    """The registry entry whose `path` resolves to the same absolute path as
+    `path` — the STABLE key (a re-onboard/audit gives a path, not the possibly
+    non-derivable canonical name). #569 review MAJOR-1/M3."""
+    target = _norm_path(path)
+    for e in entries:
+        if _norm_path(e.get("path", "")) == target:
+            return e
+    return None
+
+
+def _find_existing(entries, path, name=None):
+    """Resolve the existing registry entry for a project: by PATH first (the
+    stable key), then by the explicit/derived NAME. Returns None if new."""
+    by_path = registry_entry_for_path_in(entries, path)
+    if by_path is not None:
+        return by_path
+    try:
+        n = _sanitize_name(name) if name else derive_repo_name(path)
+    except ValueError:
+        return None
+    return registry_entry_for_entries(entries, n) if n else None
+
+
+def _registry_present_but_corrupt(registry_path):
+    """True iff the registry file EXISTS and is non-empty but does not parse to
+    a JSON list — the one state where a blind overwrite would DESTROY real
+    entries (#569 review MAJOR-4). A missing or empty file is NOT corrupt (it
+    is a fresh registry, safe to create)."""
+    p = Path(registry_path or default_registry_path())
+    if not p.exists():
+        return False
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError:
+        return True
+    if not raw.strip():
+        return False
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return True
+    return not isinstance(data, list)
+
+
+def _current_host():
+    """This box's identity for the host-scoped audit sweep (#569 review
+    MAJOR-3). Hostname IS the fleet name (dev1/dev2 — machine-identities)."""
+    try:
+        return socket.gethostname()
+    except OSError:
+        return None
+
+
 def upsert_entry(entries, entry):
     out = [e for e in entries if e.get("name") != entry.get("name")]
     out.append(entry)
@@ -274,14 +339,18 @@ def _tilde(path):
     return ap
 
 
-def build_registry_entry(path, host, name, overrides, run, registry_path,
-                         onboarded_date=None):
+def build_registry_entry(path, host, name, overrides, existing,
+                         onboarded_date=None, run=None):
+    """Build the registry entry. `overrides` is the EFFECTIVE set (the caller
+    has already merged in the existing entry's overrides), and `host`/
+    `onboarded` fall back to the existing entry so a BARE re-onboard is a
+    genuine no-op instead of regressing the recorded state (#569 review
+    MAJOR-1/M1: the registry is the reconstructable source of truth)."""
     model = detect_branch_model(path, run=run, overrides=overrides)
-    existing = registry_entry_for(registry_path, name)
     onboarded = (existing or {}).get("onboarded") or onboarded_date or _today()
     return {
         "name": name,
-        "host": host or "dev1",
+        "host": host or (existing or {}).get("host") or "dev1",
         "path": _tilde(path),
         "branch_model": model["branch_model"],
         "default_branch": model["default_branch"],
@@ -295,9 +364,14 @@ def build_registry_entry(path, host, name, overrides, run, registry_path,
 # gh ticket helpers (gated behind run; -R makes them box-agnostic).
 # --------------------------------------------------------------------------- #
 def _issue_exists(name, title, run=None):
+    # #569 review m7/MINOR: list + client-side exact match, NOT `--search`.
+    # The titles carry a colon + Slovak diacritics ("foundation: pridať CI
+    # pipeline"); a GitHub server-search tokenization miss would return no hit
+    # and re-file a duplicate. Listing (state=all, high limit) and matching the
+    # title ourselves is deterministic and search-tokenizer-independent.
     repo = "%s/%s" % (GITHUB_OWNER, name)
-    r = _gh(["issue", "list", "-R", repo, "--state", "all", "--search", title,
-             "--json", "number,title", "--limit", "50"], run=run)
+    r = _gh(["issue", "list", "-R", repo, "--state", "all",
+             "--json", "number,title", "--limit", "200"], run=run)
     try:
         data = json.loads(r.stdout or "[]")
     except ValueError:
@@ -385,8 +459,16 @@ def step_git_init(path, host=None, run=None, dry_run=False):
 
 def _commit_paths(path, message, paths, host=None, run=None):
     """Scoped commit — ONLY the given pathspecs, never `git add -A`, so a
-    project session's other in-progress files are left untouched."""
-    _git(path, ["commit", "-q", "-m", message, "--", *paths], host=host, run=run)
+    project session's other in-progress files are left untouched. Returns the
+    CompletedProcess so the caller can check returncode (#569 review m4)."""
+    return _git(path, ["commit", "-q", "-m", message, "--", *paths],
+                host=host, run=run)
+
+
+def _staged_paths(path, run=None):
+    """Paths already staged in the index (the project session's own work)."""
+    r = _git(path, ["diff", "--cached", "--name-only"], run=run)
+    return [f for f in (r.stdout or "").splitlines() if f.strip()]
 
 
 def step_gitignore(path, stack, host=None, run=None, dry_run=False):
@@ -405,17 +487,35 @@ def step_gitignore(path, stack, host=None, run=None, dry_run=False):
     if existing and not existing.endswith("\n"):
         existing += "\n"
     gi.write_text(existing + "\n".join(missing) + "\n", encoding="utf-8")
+    # Untracking already-tracked artifacts (`git rm --cached`) only STICKS in a
+    # NON-pathspec commit — a pathspec commit re-reads the worktree and re-adds
+    # the still-present artifact, so the old pathspec form was a silent no-op
+    # (#569 review M2). A non-pathspec commit sweeps the whole index, so it is
+    # safe ONLY when the project session has no OTHER staged work; otherwise we
+    # commit .gitignore alone (scoped) and leave the artifacts for a manual
+    # untrack rather than risk sweeping the session's staged files.
+    pre_staged = _staged_paths(path, run=run)
+    arts = ([] if pre_staged
+            else _tracked_ignored_artifacts(path, host=host, run=run))
     _git(path, ["add", ".gitignore"], host=host, run=run)
-    paths = [".gitignore"]
-    arts = _tracked_ignored_artifacts(path, host=host, run=run)
-    for a in arts:
-        _git(path, ["rm", "--cached", "-q", "--", a], host=host, run=run)
-        paths.append(a)
-    _commit_paths(path, "chore: onboard — .gitignore hygiene (#569)", paths,
-                  host=host, run=run)
+    if arts:
+        for a in arts:
+            _git(path, ["rm", "--cached", "-q", "--", a], host=host, run=run)
+        cr = _git(path, ["commit", "-q", "-m",
+                         "chore: onboard — .gitignore hygiene + untrack "
+                         "artifacts (#569)"], host=host, run=run)
+    else:
+        cr = _commit_paths(path, "chore: onboard — .gitignore hygiene (#569)",
+                           [".gitignore"], host=host, run=run)
+    if cr.returncode != 0:
+        return _step("gitignore", "skipped",
+                     "commit failed: " + (cr.stderr or "").strip())
     detail = "appended %d pattern(s)" % len(missing)
     if arts:
         detail += ", untracked %d artifact(s)" % len(arts)
+    elif pre_staged and _tracked_ignored_artifacts(path, host=host, run=run):
+        detail += " (tracked artifacts left — other staged changes present; "
+        detail += "untrack manually)"
     return _step("gitignore", "applied", detail)
 
 
@@ -428,8 +528,12 @@ def step_claude_md(path, name, host=None, run=None, dry_run=False):
                      "would create CLAUDE.md skeleton + Playbook router")
     cm.write_text(_claude_md_skeleton(name), encoding="utf-8")
     _git(path, ["add", "CLAUDE.md"], host=host, run=run)
-    _commit_paths(path, "chore: onboard — CLAUDE.md skeleton + Playbook router (#569)",
-                  ["CLAUDE.md"], host=host, run=run)
+    cr = _commit_paths(
+        path, "chore: onboard — CLAUDE.md skeleton + Playbook router (#569)",
+        ["CLAUDE.md"], host=host, run=run)
+    if cr.returncode != 0:
+        return _step("claude_md", "skipped",
+                     "commit failed: " + (cr.stderr or "").strip())
     return _step("claude_md", "applied", "created CLAUDE.md skeleton + Playbook router")
 
 
@@ -513,6 +617,13 @@ def step_notification_ticket(path, name, host=None, run=None, dry_run=False):
 
 
 def step_registry(path, entry, registry_path, host=None, run=None, dry_run=False):
+    # #569 review MAJOR-4: never overwrite a present-but-unparseable registry —
+    # load_registry() degrades a corrupt file to [], and a blind save would then
+    # DESTROY every real entry it still held. Refuse, don't overwrite.
+    if _registry_present_but_corrupt(registry_path):
+        return _step("registry", "skipped",
+                     "registry file present but unparseable — refusing to "
+                     "overwrite (fix or remove it manually)")
     entries = load_registry(registry_path)
     existing = registry_entry_for_entries(entries, entry["name"])
     if existing == entry:
@@ -532,22 +643,37 @@ def step_registry(path, entry, registry_path, host=None, run=None, dry_run=False
 def onboard_project(path, host=None, name=None, overrides=None,
                     registry_path=None, run=None, dry_run=False,
                     onboarded_date=None):
-    path = str(Path(path))
-    name = derive_repo_name(path, name=name)
+    path = _norm_path(path)
     registry_path = registry_path or default_registry_path()
-    overrides = list(overrides or [])
+    entries = load_registry(registry_path)
+    existing = _find_existing(entries, path, name)
+    # Authoritative name: explicit --name wins; else the recorded registry name
+    # (the stable key — may NOT be path-derivable, e.g. email-extractor from
+    # ~/devel/n8n/email_extract); else derive it (#569 review MAJOR-1/M3).
+    if name:
+        name = derive_repo_name(path, name=name)
+    elif existing is not None:
+        name = existing["name"]
+    else:
+        name = derive_repo_name(path)
+    # Effective overrides inherit from the existing entry when the caller passed
+    # none, so a BARE re-onboard preserves the branch model / overrides instead
+    # of regressing them (and step_branches never creates a spurious dev branch
+    # on a 3-branch project) — #569 review MAJOR-2/M1.
+    eff_overrides = (list(overrides) if overrides
+                     else list((existing or {}).get("overrides", [])))
     stack = detect_stack(path)
     steps = [
         step_git_init(path, host, run, dry_run),
         step_gitignore(path, stack, host, run, dry_run),
         step_claude_md(path, name, host, run, dry_run),
         step_remote(path, name, host, run, dry_run),
-        step_branches(path, overrides, host, run, dry_run),
+        step_branches(path, eff_overrides, host, run, dry_run),
         step_foundation_tickets(path, name, host, run, dry_run),
         step_notification_ticket(path, name, host, run, dry_run),
     ]
-    entry = build_registry_entry(path, host, name, overrides, run,
-                                 registry_path, onboarded_date)
+    entry = build_registry_entry(path, host, name, eff_overrides, existing,
+                                 onboarded_date=onboarded_date, run=run)
     steps.append(step_registry(path, entry, registry_path, host, run, dry_run))
     return {"name": name, "stack": stack, "steps": steps, "entry": entry}
 
@@ -579,10 +705,25 @@ def audit_project(entry, run=None):
     return drift
 
 
-def audit_registry(registry_path=None, run=None):
+def audit_registry(registry_path=None, run=None, local_host=None):
+    """Read-only drift sweep across the registry. A cross-host entry (its `host`
+    is not THIS box) is SKIPPED with a `remote-host` note instead of audited
+    against the local filesystem — otherwise every dev2 entry reads as a false
+    `missing-repo` when the sweep runs on dev1 (#569 review MAJOR-3)."""
     registry_path = registry_path or default_registry_path()
-    return {e["name"]: audit_project(e, run=run)
-            for e in load_registry(registry_path) if e.get("name")}
+    local_host = local_host or _current_host()
+    out = {}
+    for e in load_registry(registry_path):
+        name = e.get("name")
+        if not name:
+            continue
+        host = e.get("host")
+        if host and local_host and host != local_host:
+            out[name] = [{"kind": "remote-host",
+                          "detail": "host=%s — run --audit on that box" % host}]
+        else:
+            out[name] = audit_project(e, run=run)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -600,6 +741,9 @@ def _print_audit(report):
     clean = True
     for name in sorted(report):
         drift = report[name]
+        if drift and all(d.get("kind") == "remote-host" for d in drift):
+            print("  ⇄ %-28s %s" % (name, drift[0]["detail"]))
+            continue
         if not drift:
             print("  ✓ %-28s no drift" % name)
             continue
@@ -613,15 +757,30 @@ def _print_audit(report):
 
 def cmd_onboard_project(args):
     registry_path = getattr(args, "registry", None) or default_registry_path()
+    # #569 review MAJOR-4: abort cleanly on a present-but-corrupt registry
+    # rather than degrade it to [] and overwrite it.
+    if _registry_present_but_corrupt(registry_path):
+        print("onboard-project: registry %s is present but unparseable — "
+              "refusing to read or overwrite it. Fix or remove it manually."
+              % registry_path, file=sys.stderr)
+        return 2
     path = getattr(args, "path", None)
-    if getattr(args, "audit", False) or getattr(args, "check", False):
+    # --audit/--check share dest="audit" (no separate args.check).
+    if getattr(args, "audit", False):
         if path:
-            name = derive_repo_name(path, getattr(args, "name", None))
-            entry = registry_entry_for(registry_path, name) or {
-                "name": name, "path": path,
-                "host": getattr(args, "host", None) or "dev1",
-                "default_branch": None}
-            _print_audit({name: audit_project(entry)})
+            path = _norm_path(path)
+            entry = _find_existing(load_registry(registry_path), path,
+                                   getattr(args, "name", None))
+            if entry is None:
+                try:
+                    name = derive_repo_name(path, getattr(args, "name", None))
+                except ValueError as e:
+                    print("onboard-project: %s" % e, file=sys.stderr)
+                    return 2
+                entry = {"name": name, "path": path,
+                         "host": getattr(args, "host", None) or "dev1",
+                         "default_branch": None}
+            _print_audit({entry["name"]: audit_project(entry)})
         else:
             _print_audit(audit_registry(registry_path))
         return 0
@@ -629,9 +788,15 @@ def cmd_onboard_project(args):
         print("onboard-project: <path> required (or --audit for registry-wide "
               "drift)", file=sys.stderr)
         return 2
-    result = onboard_project(
-        path, host=getattr(args, "host", None), name=getattr(args, "name", None),
-        overrides=getattr(args, "override", None) or [],
-        registry_path=registry_path, dry_run=getattr(args, "dry_run", False))
+    try:
+        result = onboard_project(
+            path, host=getattr(args, "host", None),
+            name=getattr(args, "name", None),
+            overrides=getattr(args, "override", None) or [],
+            registry_path=registry_path,
+            dry_run=getattr(args, "dry_run", False))
+    except ValueError as e:
+        print("onboard-project: %s" % e, file=sys.stderr)
+        return 2
     _print_result(result)
     return 0
