@@ -180,9 +180,11 @@ class TestRendering(unittest.TestCase):
             {"id": "david-subdev", "label": "david@subdev", "kind": "stream",
              "local": False, "host": "10.0.0.5", "user": "david"},
         ]
-        html = w.render_dashboard_html(inv, ttyd_base="http://100.104.8.125:7682")
-        # IP-first ttyd base is embedded (JS builds `?arg=<id>` from it).
-        self.assertIn("100.104.8.125:7682", html)
+        html = w.render_dashboard_html(inv, ttyd_base="/t")
+        # #584: same-origin RELATIVE ttyd base (`/t`); the JS builds `?arg=<id>`
+        # from it. No cross-origin `<ip>:7682` any more.
+        self.assertIn('"ttyd_base": "/t"', html)
+        self.assertNotIn(":7682", html)
         self.assertIn("?arg=", html)              # JS constructs the ttyd URL
         # A top tab bar + lazy iframe container — the SPA, not a card grid.
         self.assertIn('id="tabbar"', html)
@@ -225,20 +227,23 @@ class TestRendering(unittest.TestCase):
         self.assertIn("@@CFG_JSON@@", html)
         self.assertEqual(html.count('"ttyd_base"'), 1)
 
-    def test_launch_script_binds_tailscale_ip_not_loopback(self):
-        # #579: ttyd binds the tailscale IP directly on 7682 (serve is gone);
-        # NEVER loopback, NEVER the old 7681.
-        s = w.render_webterm_launch_script("100.104.8.125")
+    def test_launch_script_binds_loopback_behind_gateway(self):
+        # #584: ttyd binds LOOPBACK only, behind a `-b /t` base path — the
+        # gateway is the sole tailnet entry + authenticator. NO basic-auth
+        # (`-c`), NO `-O` (the gateway does the Origin check; `-O` would break
+        # the proxied WS), NO tailscale-IP bind.
+        s = w.render_webterm_launch_script()
         self.assertIn("exec ttyd", s)
         self.assertIn("-p 7682", s)
-        self.assertIn("-i 100.104.8.125", s)
-        self.assertNotIn("-i 127.0.0.1", s)       # no loopback bind
-        self.assertNotIn("-p 7681", s)            # old fronted port gone
-        self.assertIn("-a", s)      # url-arg
-        self.assertIn("-W", s)      # writable
-        self.assertIn("-O", s)      # check-origin KEPT (iframe is same-origin)
+        self.assertIn("-i 127.0.0.1", s)          # loopback bind
+        self.assertIn("-b /t", s)                 # base path for the gateway proxy
+        self.assertNotIn("-i 100.", s)            # never a tailscale/public IP
+        self.assertNotIn(" -O", s)                # gateway does the Origin check
+        self.assertNotIn(" -c ", s)               # no basic-auth (Bitwarden couldn't fill it)
+        self.assertIn("-a", s)                    # url-arg
+        self.assertIn("-W", s)                    # writable
         self.assertIn("cli_webterm.py webterm-connect", s)
-        self.assertIn(str(w.WEBTERM_CRED_PATH), s)
+        self.assertNotIn(str(w.WEBTERM_CRED_PATH), s)  # ttyd never reads the credential now
 
     def test_unit_substitutes_launch_script_placeholder(self):
         unit = w._render_webterm_unit()
@@ -415,21 +420,25 @@ class TestTailscaleIP(unittest.TestCase):
         self.assertIsNone(w._tailscale_ip(run=_run_returning("100.128.0.1\n")))
 
 
-class TestDashUnit(unittest.TestCase):
-    def test_dash_unit_binds_tailscale_ip_and_directory(self):
-        unit = w._render_webterm_dash_unit("100.104.8.125")
+class TestGatewayUnit(unittest.TestCase):
+    def test_gateway_unit_binds_tailscale_ip_and_wires_ttyd_loopback(self):
+        # #584: the gateway unit runs cli_webterm_gateway.py bound to the
+        # tailscale IP on 8080, proxying to the loopback ttyd.
+        unit = w._render_webterm_gateway_unit("100.104.8.125")
         self.assertNotIn("{{", unit)                       # every placeholder filled
+        self.assertIn("cli_webterm_gateway.py", unit)
         self.assertIn("--bind 100.104.8.125", unit)        # tailnet-only bind
-        self.assertIn("--directory %s" % str(w.WEBTERM_DASH_DIR), unit)
-        self.assertIn("%d" % w.WEBTERM_DASH_PORT, unit)    # 8080
-        self.assertIn("http.server", unit)
+        self.assertIn("--port %d" % w.WEBTERM_GATEWAY_PORT, unit)   # 8080
+        self.assertIn("--ttyd-host 127.0.0.1", unit)       # proxies loopback ttyd
+        self.assertIn("--ttyd-port %d" % w.WEBTERM_TTYD_PORT, unit)
+        self.assertIn("--cred %s" % str(w.WEBTERM_CRED_PATH), unit)
+        self.assertIn("--dash-index %s" % str(w.WEBTERM_DASH_INDEX), unit)
+        self.assertIn("--base-path /t", unit)
         self.assertIn("WantedBy=default.target", unit)
-        # NEVER binds a public / wildcard interface (the actual bind directive;
-        # a doc comment may still spell out "never 0.0.0.0").
-        self.assertNotIn("--bind 0.0.0.0", unit)
-        # The ExecStart bind arg is exactly the tailscale IP passed in.
+        self.assertNotIn("--bind 0.0.0.0", unit)           # never public/wildcard
         exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
         self.assertIn("--bind 100.104.8.125", exec_line)
+        self.assertNotIn("http.server", exec_line)         # not the old static server
 
 
 class TestShortAlias(unittest.TestCase):
@@ -501,7 +510,8 @@ class TestSetupWiring(unittest.TestCase):
             "WEBTERM_LAUNCH_PATH": p / ".claude" / "airuleset-webterm-ttyd.sh",
             "WEBTERM_CRED_PATH": p / ".secrets" / "webterm_credential",
             "WEBTERM_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-ttyd.service",
-            "WEBTERM_DASH_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-dash.service",
+            "WEBTERM_GATEWAY_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-gateway.service",
+            "WEBTERM_OLD_DASH_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-dash.service",
         }
         for name, val in patches.items():
             stack.enter_context(m.patch.object(w, name, val))
@@ -527,7 +537,7 @@ class TestSetupWiring(unittest.TestCase):
                 return _R(0, (self.ip + "\n") if self.ip else "", "")
             return _R(0, "", "")
 
-    def test_install_path_has_no_serve_but_resets_and_writes_ip_first(self):
+    def test_install_path_has_no_serve_but_resets_and_writes_same_origin(self):
         import contextlib
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
             pt = self._isolate(st, tmp)
@@ -540,16 +550,20 @@ class TestSetupWiring(unittest.TestCase):
             # (b) resets any leftover serve config.
             self.assertTrue(any(list(c[:3]) == ["tailscale", "serve", "reset"]
                                 for c in rec.calls), rec.calls)
-            # (c) IP-first tabbed dashboard + dash unit written.
+            # (c) #584: SAME-ORIGIN tabbed dashboard (relative /t, no :7682) +
+            # the GATEWAY unit bound to the tailscale IP + the loopback ttyd launch.
             html = pt["WEBTERM_DASH_INDEX"].read_text()
-            self.assertIn("100.104.8.125:7682", html)
+            self.assertIn('"ttyd_base": "/t"', html)
+            self.assertNotIn(":7682", html)
             self.assertIn('id="tabbar"', html)
             self.assertNotIn('class="card"', html)
-            unit = pt["WEBTERM_DASH_SERVICE_DEST"].read_text()
+            unit = pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text()
             self.assertIn("--bind 100.104.8.125", unit)
+            self.assertIn("cli_webterm_gateway.py", unit)
             launch = pt["WEBTERM_LAUNCH_PATH"].read_text()
-            self.assertIn("-i 100.104.8.125", launch)
-            self.assertNotIn("-i 127.0.0.1", launch)
+            self.assertIn("-i 127.0.0.1", launch)     # ttyd is loopback now
+            self.assertIn("-b /t", launch)
+            self.assertNotIn("-i 100.", launch)
 
     def test_no_tailscale_ip_refuses_and_writes_no_unit(self):
         import contextlib
@@ -559,7 +573,7 @@ class TestSetupWiring(unittest.TestCase):
             ok = w.setup_webterm_service(run=rec)
             self.assertFalse(ok)               # LOUD refusal
             # NEVER writes a unit with a possibly-public bind.
-            self.assertFalse(pt["WEBTERM_DASH_SERVICE_DEST"].exists())
+            self.assertFalse(pt["WEBTERM_GATEWAY_SERVICE_DEST"].exists())
             self.assertFalse(pt["WEBTERM_SERVICE_DEST"].exists())
 
     def test_reinstall_is_idempotent(self):
@@ -568,10 +582,10 @@ class TestSetupWiring(unittest.TestCase):
             pt = self._isolate(st, tmp)
             self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
             first = pt["WEBTERM_DASH_INDEX"].read_text()
-            first_unit = pt["WEBTERM_DASH_SERVICE_DEST"].read_text()
+            first_unit = pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text()
             self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
             self.assertEqual(first, pt["WEBTERM_DASH_INDEX"].read_text())
-            self.assertEqual(first_unit, pt["WEBTERM_DASH_SERVICE_DEST"].read_text())
+            self.assertEqual(first_unit, pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text())
 
 
 class TestTabSwitchingUX(unittest.TestCase):
@@ -636,14 +650,16 @@ class TestTabSwitchingUX(unittest.TestCase):
         self.assertNotIn("ArrowLeft", html)
         self.assertNotIn("ArrowRight", html)
 
-    def test_hint_is_honest_about_keyboard_limitation(self):
-        # The hint must say click always works AND that the shortcut only works
-        # while the bar has focus (never over-promise keyboard-switch-typing).
-        html = w.render_dashboard_html(self._inv(4), ttyd_base="http://b:7682")
+    def test_hint_advertises_click_cycle_and_working_shortcut(self):
+        # #584 fixed the #582 residual: the hint no longer warns of a
+        # focus/origin limitation. It still surfaces the always-works paths
+        # (click + ◀ ▶) AND the now-working Ctrl+Alt shortcut.
+        html = w.render_dashboard_html(self._inv(4), ttyd_base="/t")
         hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
         self.assertIn("klik", hint.lower())          # click always works
-        self.assertIn("fokus", hint.lower())          # shortcut only when the bar is focused
-        self.assertTrue("◀" in hint or "▶" in hint)   # surfaces the new cycle affordance
+        self.assertIn("Ctrl+Alt", hint)              # the shortcut is advertised
+        self.assertTrue("◀" in hint or "▶" in hint)   # cycle affordance
+        self.assertNotIn("iný origin", hint)          # the old limitation note is gone
 
     def test_ux_additions_do_not_break_escaping_or_single_pass(self):
         # The security invariants from #579 must survive the UX additions.

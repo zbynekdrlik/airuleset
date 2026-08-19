@@ -6,17 +6,25 @@ sessions flotily (dev1, dev2, gk, subdev streamy) — klik = pripojený do žij�
 tmux session daného targetu. Sessions žijú v tmuxoch na targetoch (už dnes), táto
 web vrstva je len perzistentné, PC-nezávislé okno do nich.
 
-Architektúra (viď design komentáre na #555 + #579):
+Architektúra (viď design komentáre na #555 + #579 + #584):
   cross-node browser --tailscale(WireGuard)--> dev1 tailscale IP <ip>
-      :8080 /  -> statický tabbed dashboard (webterm-dash/index.html, http.server)
-      :7682 /  -> ttyd(<ip>:7682, basic-auth) -> connect -> ssh -t -> tmux targetu
-#579: obe služby bindnú PRIAMO na dev1 tailscale IP (dynamicky `tailscale ip -4`,
-nikdy hardcode/0.0.0.0) — `tailscale serve` matchoval len MagicDNS meno uzla,
-takže raw-IP request cross-node 404'oval. Dashboard je single-page Windows-
-Terminal tabbed UI (iframe/session, krátke aliasy). Tailnet-only, basic-auth
-login na shell porte. Inventár generovaný z `_deployable_hosts()` + dev1, NIKDY
-ručný zoznam. Provisioning dev1-only (`os.uname().nodename == "dev1"`), systemd
---user unity podľa vzoru `setup_filedrop_service()`, `ttyd` inštalovaný dev1-lokálne.
+      :8080 /        -> gateway: form login (Bitwarden-fillable) -> session cookie
+      :8080 /        -> gateway: tabbed dashboard (authed)
+      :8080 /t/*     -> gateway proxy (HTTP+WS) -> ttyd(127.0.0.1:7682, -b /t)
+                        -> connect -> ssh -t -> tmux targetu
+#584: JEDEN tailnet-only port. `cli_webterm_gateway.py` (stdlib asyncio) binduje
+dev1 tailscale IP na :8080, serví HTML login formulár (autocomplete atribúty ->
+password manager ho vyplní, na rozdiel od natívneho basic-auth dialógu) -> HttpOnly
+SameSite=Strict session cookie, serví dashboard a transparentne proxuje /t/*
+(HTTP aj WebSocket) na loopback ttyd. Iframy sú tým same-origin (Ctrl+Alt+N
+funguje aj s fokusom v termináli). ttyd binduje LEN 127.0.0.1 s `-b /t`, bez
+basic-auth (brána autentizuje). #579 dvoj-portová topológia (samostatný
+NEautentizovaný http.server dashboard + priamo exponovaný ttyd) je nahradená.
+Bind (tailscale IP) sa resolvuje dynamicky (`tailscale ip -4`, validované na
+100.64.0.0/10), inak install REFUSE (nikdy 0.0.0.0/public). Inventár generovaný
+z `_deployable_hosts()` + dev1, NIKDY ručný zoznam. Provisioning dev1-only
+(`os.uname().nodename == "dev1"`), systemd --user unity podľa vzoru
+`setup_filedrop_service()`, `ttyd` inštalovaný dev1-lokálne.
 
 Dve úlohy modulu, oddelené aby CONNECT cesta (beží per-terminal-open, ttyd child)
 mala minimálne importy: (1) INVENTORY/PROVISIONING (install-time, dev1) generuje
@@ -41,31 +49,40 @@ SECRETS_DIR = Path.home() / ".secrets"
 # filedrop/watchdog. Gated exactly like the coordinator-only watchdog jobs
 # (16/19/35) — `os.uname().nodename == "dev1"`.
 WEBTERM_GATEWAY_HOST = "dev1"
-# #579: ttyd binds dev1's tailscale IP DIRECTLY on this port (no reverse proxy,
-# no serve) — the browser reaches it at http://<tailscale-ip>:7682/ from any
-# tailnet node by raw IP. (Was 7681 loopback fronted by `tailscale serve`, whose
-# handler matched only the MagicDNS name → raw-IP request 404'd cross-node.)
+# #584: ttyd is now LOOPBACK-only (127.0.0.1) behind the same-origin gateway —
+# NOT reachable from the tailnet directly, so the gateway (with its form login +
+# session cookie) is the sole entry AND the sole authenticator. It runs under a
+# base path (`-b /t`) so the gateway can front it AND the dashboard on one
+# origin (`/` = dashboard/login, `/t/*` = ttyd). ttyd carries NO basic-auth of
+# its own now (the native dialog is what Bitwarden could not fill — #584).
 WEBTERM_TTYD_PORT = 7682
-# The static tabbed dashboard is served by `python3 -m http.server` bound to the
-# same tailscale IP on this port (a systemd --user unit). Non-privileged, so no
-# CAP_NET_BIND_SERVICE is needed (a privileged :80 would).
-WEBTERM_DASH_PORT = 8080
+WEBTERM_TTYD_BIND = "127.0.0.1"
+WEBTERM_TTYD_BASE = "/t"
+# #584: the ONE tailnet-only port. The gateway (cli_webterm_gateway.py) binds
+# dev1's tailscale IP here, serves the login form + tabbed dashboard, and
+# transparently proxies /t/* (HTTP+WebSocket) to the loopback ttyd. Replaces the
+# #579 two-port topology (a separate unauthenticated http.server dashboard +
+# a directly-exposed ttyd). Non-privileged port, so no CAP_NET_BIND_SERVICE.
+WEBTERM_GATEWAY_PORT = 8080
 # The owner tmux session group on his own boxes (dev1/dev2). A stream account's
 # own session is named after its unix user (#264 whoami auto-attach convention).
 OWNER_GROUP = "zbynek"
 WEBTERM_LOGIN_USER = "zbynek"
 
 WEBTERM_INVENTORY_PATH = CLAUDE_DIR / "webterm-inventory.json"
-# #579: the dashboard is a directory served by http.server (`/` -> index.html),
-# not a single loose HTML file fronted by serve.
+# The dashboard index the gateway serves at `/` for an authed session.
 WEBTERM_DASH_DIR = CLAUDE_DIR / "webterm-dash"
 WEBTERM_DASH_INDEX = WEBTERM_DASH_DIR / "index.html"
 WEBTERM_LAUNCH_PATH = CLAUDE_DIR / "airuleset-webterm-ttyd.sh"
 WEBTERM_CRED_PATH = SECRETS_DIR / "webterm_credential"
+WEBTERM_GATEWAY_MODULE = REPO_DIR / "cli_webterm_gateway.py"
 WEBTERM_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-ttyd.service"
 WEBTERM_SERVICE_TEMPLATE = REPO_DIR / "settings" / "webterm-ttyd.service.template"
-WEBTERM_DASH_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-dash.service"
-WEBTERM_DASH_SERVICE_TEMPLATE = REPO_DIR / "settings" / "webterm-dash.service.template"
+WEBTERM_GATEWAY_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-gateway.service"
+WEBTERM_GATEWAY_SERVICE_TEMPLATE = REPO_DIR / "settings" / "webterm-gateway.service.template"
+# #584: the #579 static-dashboard http.server unit is superseded by the gateway;
+# its stale copy is removed at install (kept as a constant only for that cleanup).
+WEBTERM_OLD_DASH_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-dash.service"
 
 
 # --------------------------------------------------------------------------- #
@@ -119,18 +136,45 @@ def webterm_inventory():
 # inventory allowlist, then execs the ssh/tmux command. No `import airuleset`.
 # --------------------------------------------------------------------------- #
 
-# Universal tmux attach, parameterized only by `$P` (the trusted inventory
-# `preferred`): exact session name -> group survivor -> the single existing
-# session -> create `$P`. Robust for grouped (zbynek-4 / group zbynek) AND
-# standalone (david, gk "0") sessions without per-box knowledge. Reused for
-# local (dev1) and remote (ssh) alike.
+# Universal, multi-attach-safe tmux join, parameterized only by `$P` (the
+# trusted inventory `preferred`). #584: STANDARD tmux multispoj that NEVER
+# disturbs an existing Windows-Terminal/ssh client on the same session (owner
+# report: "rozpadne mi view ked ... sa prepnem do webtermu ... standartny tmux
+# multispoj"):
+#   1. size every window to the ACTIVE viewing client (window-size latest +
+#      aggressive-resize on), so a small web client can never shrink the owner's
+#      WT view (idempotent, benign — `latest` is already the tmux default);
+#   2. resolve the base session to JOIN: exact `=$P` -> group survivor -> the
+#      single existing session -> else create `$P` fresh;
+#   3. an existing base is joined via a THROWAWAY GROUPED clone
+#      (`new-session -t <base> -s <base>-web-$$`) — an independent VIEW onto the
+#      same windows, never a mirror, NEVER `attach -d` (the only verb that
+#      detaches other clients). The clone is killed on disconnect (trap, EXIT +
+#      signals); the base — which holds the group's windows, so the shell
+#      survives — is NEVER killed (the trap targets only the named clone).
+# Mirrors the fleet ssh auto-attach convention
+# (cli_bashrc_appliers.STREAM_SSH_ATTACH_BLOCK). Reused for local (dev1) and
+# remote (ssh) alike. Residual (documented, not chased): if a concurrent
+# destroy-unattached sweep has already reduced the group to just this clone
+# (owner's WT gone), disconnecting the web client ends that ownerless shell —
+# same class the fleet's existing keep-last sweep already produces.
 _ATTACH_BODY = (
-    'if tmux has-session -t "=$P" 2>/dev/null; then exec tmux new-session -t "$P"; fi; '
-    'S=$(tmux list-sessions -F "#{session_group}::#{session_name}" 2>/dev/null '
+    'tmux set-option -gw window-size latest >/dev/null 2>&1 || true; '
+    'tmux set-option -gw aggressive-resize on >/dev/null 2>&1 || true; '
+    'T=""; '
+    'if tmux has-session -t "=$P" 2>/dev/null; then T="$P"; else '
+    'T=$(tmux list-sessions -F "#{session_group}::#{session_name}" 2>/dev/null '
     "| awk -F '::' -v g=\"$P\" '$1==g{print $2; exit}'); "
-    'if [ -n "$S" ]; then exec tmux new-session -t "$S"; fi; '
+    'if [ -z "$T" ]; then '
     'N=$(tmux list-sessions -F "#{session_name}" 2>/dev/null); '
-    'if [ "$(printf %s "$N" | grep -c .)" = "1" ]; then exec tmux attach -t "$N"; fi; '
+    'if [ "$(printf %s "$N" | grep -c .)" = "1" ]; then T="$N"; fi; '
+    'fi; fi; '
+    'if [ -n "$T" ]; then '
+    'C="${T}-web-$$"; '
+    "trap 'tmux kill-session -t \"$C\" 2>/dev/null || true' EXIT HUP INT TERM; "
+    'tmux new-session -t "$T" -s "$C"; '
+    'exit; '
+    'fi; '
     'exec tmux new-session -A -s "$P"'
 )
 
@@ -368,7 +412,7 @@ body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
-<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku keď má fokus lišta (počas písania v termináli je to iný origin — použi klik / ◀ ▶) · prihlásenie raz (tailnet-only)</div>
+<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku (funguje aj počas písania v termináli) · prihlásenie raz (tailnet-only)</div>
 <script>
 const CFG = @@CFG_JSON@@;
 const frames = document.getElementById('frames');
@@ -381,6 +425,7 @@ function activate(idx) {
     const f = document.createElement('iframe');
     f.className = 'term';
     f.src = CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id);
+    f.addEventListener('load', () => attachForwarder(f));  // #584 same-origin keydown
     frames.appendChild(f);
     made[idx] = f;                        // kept alive; switching only hides/shows
   }
@@ -400,29 +445,40 @@ function cycle(delta) {                    // step to prev/next session, wrappin
   if (!n) return;
   activate(((current + delta) % n + n) % n);
 }
+// #584: ONE keydown handler shared by the parent tab bar AND every terminal
+// iframe. Ctrl+Alt+1..9 jumps to a tab. Because the gateway now serves the
+// dashboard AND ttyd on the SAME origin, each ttyd iframe is same-origin, so we
+// can attach this listener INSIDE each terminal's own window (capture phase,
+// before xterm consumes the key) — which is what makes the shortcut work even
+// while focus is IN a terminal, the #582 residual this supersedes.
+// stopPropagation keeps xterm from also acting on the (unused) Ctrl+Alt+digit
+// chord. (Still no Ctrl+Alt+arrow binding: Ctrl+Alt+Left/Right is the Linux
+// desktop workspace-switch shortcut, grabbed by the compositor before the page
+// sees it — advertising it would over-promise; the ◀ ▶ buttons cover cycling.)
+function onHotkey(e) {
+  if (!(e.ctrlKey && e.altKey)) return;
+  if (e.key >= '1' && e.key <= '9') {
+    const idx = parseInt(e.key, 10) - 1;
+    if (idx < CFG.sessions.length) {
+      e.preventDefault(); e.stopPropagation(); activate(idx);
+    }
+  }
+}
+function attachForwarder(f) {
+  // Reach into the terminal iframe's own window (same-origin) and intercept the
+  // hotkey in the CAPTURE phase, before xterm. A cross-origin frame would throw
+  // here — impossible under the gateway, but caught so one frame can never break
+  // the page or the rest of switching.
+  try {
+    const w = f.contentWindow;
+    if (w) w.addEventListener('keydown', onHotkey, true);
+  } catch (err) { /* never same-origin under the gateway; switching stays alive */ }
+}
 document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
 document.querySelectorAll('.cyc').forEach((b) =>
   b.addEventListener('click', () => cycle(+b.dataset.cyc)));
-// Ctrl+Alt+1..9 jumps to a tab — but ONLY while the parent page (tab bar) has
-// focus: once you click INTO a terminal, the ttyd iframe is a DIFFERENT origin
-// (:7682 vs the dashboard's :8080), so the parent window stops receiving its
-// keydowns (a web-platform limit — the parent cannot read keys inside a
-// cross-origin iframe). Clicking a tab or the ◀ ▶ cycle buttons always switches,
-// so those are the reliable path; the number shortcut is a bonus for when the
-// bar is focused. (No Ctrl+Alt+arrow binding: Ctrl+Alt+Left/Right is the Linux
-// desktop workspace-switch shortcut and is grabbed by the compositor before the
-// page sees it — advertising it would over-promise; the ◀ ▶ buttons cover
-// cycling reliably.) Full keyboard-switch-while-typing would need a same-origin
-// reverse proxy or a ttyd-side postMessage bridge — both disproportionate for a
-// shortcut where click works (see the #582 design comment for the alternatives).
-window.addEventListener('keydown', (e) => {
-  if (!(e.ctrlKey && e.altKey)) return;
-  if (e.key >= '1' && e.key <= '9') {
-    const idx = parseInt(e.key, 10) - 1;
-    if (idx < CFG.sessions.length) { e.preventDefault(); activate(idx); }
-  }
-});
+window.addEventListener('keydown', onHotkey);   // Ctrl+Alt+1..9 when the bar is focused
 if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page
 </script>
 </body>
@@ -431,17 +487,20 @@ if (CFG.sessions.length) activate(0);   // land in the first terminal, not a lan
 
 
 # --------------------------------------------------------------------------- #
-# Provisioning — dev1-only. Renders the systemd --user ttyd + dashboard units +
-# launcher + inventory + dashboard (both bound to the tailscale IP), enables the
-# units, and RESETS any stale tailscale serve config (#579). Mirrors
-# `setup_filedrop_service()`.
+# Provisioning — dev1-only. Renders the systemd --user ttyd (loopback) + gateway
+# (tailscale-IP) units + launcher + inventory + dashboard, enables them, removes
+# the superseded #579 http.server dash unit, and RESETS any stale tailscale
+# serve config (#579). Mirrors `setup_filedrop_service()`.
 # --------------------------------------------------------------------------- #
 
 def _ensure_credential():
-    """`zbynek:<random>` basic-auth credential, generated once, mode 600, in
-    ~/.secrets. Returns the `user:pass` string. (ttyd's `-c` shows it in `ps` to
-    local unix users — a documented residual; the real boundary is tailnet-only
-    + the login, and the box's only other unix users are managed/locked.)"""
+    """`zbynek:<random>` login credential, generated once, mode 600, in
+    ~/.secrets. Returns the `user:pass` string. #584: the GATEWAY's login form
+    validates against this (constant-time) — ttyd no longer sees it, so the
+    credential is NO LONGER exposed in `ps` (a security improvement over the
+    #579 `ttyd -c` residual). The owner reads the file ONCE to save it in
+    Bitwarden; thereafter Bitwarden autofills the form. The existing credential
+    (from the basic-auth era) is preserved on re-install."""
     import secrets
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(SECRETS_DIR, 0o700)  # never world-traversable
@@ -462,39 +521,31 @@ def _ensure_credential():
     return cred
 
 
-# `-O`/--check-origin: reject a cross-origin websocket upgrade (CSWSH). KEPT
-# under the #579 iframe topology and it does NOT block the terminal: the ttyd
-# page loads INSIDE the dashboard iframe from `http://<ip>:7682/`, so the iframe
-# document's own origin is `<ip>:7682` and the ws it opens carries `Origin:
-# http://<ip>:7682` — same-origin with the ws Host, so `-O` returns 101. The
-# parent dashboard origin (`<ip>:8080`) never enters the ws Origin header (the ws
-# is initiated by the :7682 document, not the parent). This is defence-in-depth
-# on top of the PRIMARY CSWSH defence, which holds even without `-O`: ttyd
-# requires a fixed AuthToken in the ws init message (an empty/wrong token spawns
-# no shell), and its `/token` endpoint sends NO CORS headers, so a browser
-# attacker's cross-origin `fetch("/token")` is blocked from READING the token —
-# it can never construct a valid ws init. `-c` basic-auth gates both /token and
-# the ws. (ttyd's default responses carry no X-Frame-Options/CSP frame-ancestors
-# — verified live: a 401 from :7682 sends only WWW-Authenticate — so the iframe
-# embeds cleanly; a future ttyd that adds a framing header would need revisiting.)
+# #584: ttyd binds LOOPBACK only (127.0.0.1) behind a `-b /t` base path. The
+# gateway is the sole tailnet entry AND authenticator (cookie-gated), so ttyd
+# needs NO basic-auth of its own (`-c` gone — the native dialog was exactly what
+# Bitwarden could not fill) and NO `-O`/check-origin (the gateway performs the
+# CSWSH Origin check on the WS upgrade; `-O` would in fact break the proxied WS,
+# since ttyd would compare the browser's `Origin: <gateway>` against its own
+# loopback `Host`). A tailnet peer cannot reach ttyd around the gateway (loopback
+# bind), which is the boundary that used to be `-c` + `-O`.
 _LAUNCH_TEMPLATE = """#!/usr/bin/env bash
-# airuleset-managed (#555/#579) — do NOT edit; regenerate via `python3 airuleset.py install`.
-# Reads the basic-auth credential from a mode-600 file (keeps it out of the unit
-# file) and execs ttyd bound DIRECTLY to dev1's tailscale IP (tailnet-only, no
-# reverse proxy — #579: `tailscale serve` matched only the MagicDNS name, so a
-# raw-IP request 404'd cross-node).
+# airuleset-managed (#555/#579/#584) — do NOT edit; regenerate via `python3 airuleset.py install`.
+# Execs ttyd bound LOOPBACK-only (127.0.0.1) behind a `-b /t` base path; the
+# same-origin gateway (cli_webterm_gateway.py) is the tailnet entry + login.
 set -euo pipefail
-cred="$(cat %(cred_path)s)"
-exec ttyd -p %(ttyd_port)d -i %(bind_ip)s -a -W -O -c "$cred" \\
+exec ttyd -p %(ttyd_port)d -i %(ttyd_bind)s -b %(base_path)s -a -W \\
   python3 %(repo_dir)s/cli_webterm.py webterm-connect
 """
 
 
-def render_webterm_launch_script(bind_ip):
+def render_webterm_launch_script():
+    """The ttyd launcher: loopback bind + `-b /t` base path, no basic-auth, no
+    `-O` (#584 — the gateway is the sole entry + authenticator)."""
     return _LAUNCH_TEMPLATE % {
-        "cred_path": shlex.quote(str(WEBTERM_CRED_PATH)),
         "ttyd_port": WEBTERM_TTYD_PORT,
-        "bind_ip": shlex.quote(bind_ip),
+        "ttyd_bind": shlex.quote(WEBTERM_TTYD_BIND),
+        "base_path": shlex.quote(WEBTERM_TTYD_BASE),
         "repo_dir": shlex.quote(str(REPO_DIR)),
     }
 
@@ -504,15 +555,19 @@ def _render_webterm_unit():
     return tmpl.replace("{{LAUNCH_SCRIPT}}", str(WEBTERM_LAUNCH_PATH))
 
 
-def _render_webterm_dash_unit(bind_ip):
-    """The static-dashboard systemd --user unit: `python3 -m http.server` bound
-    to `bind_ip` (dev1's tailscale IP) on WEBTERM_DASH_PORT, serving the
-    generated `webterm-dash/` directory. `bind_ip` MUST be a validated tailscale
-    IP (see `_tailscale_ip`) — never 0.0.0.0/public."""
-    tmpl = WEBTERM_DASH_SERVICE_TEMPLATE.read_text(encoding="utf-8")
+def _render_webterm_gateway_unit(bind_ip):
+    """The same-origin gateway systemd --user unit: runs
+    `cli_webterm_gateway.py` bound to `bind_ip` (dev1's tailscale IP) on the
+    single gateway port, proxying /t/* to the loopback ttyd. `bind_ip` MUST be a
+    validated tailscale IP (see `_tailscale_ip`) — never 0.0.0.0/public."""
+    tmpl = WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
     return (tmpl.replace("{{BIND_IP}}", bind_ip)
-            .replace("{{DASH_DIR}}", str(WEBTERM_DASH_DIR))
-            .replace("{{DASH_PORT}}", str(WEBTERM_DASH_PORT)))
+            .replace("{{GATEWAY_MODULE}}", str(WEBTERM_GATEWAY_MODULE))
+            .replace("{{GATEWAY_PORT}}", str(WEBTERM_GATEWAY_PORT))
+            .replace("{{DASH_INDEX}}", str(WEBTERM_DASH_INDEX))
+            .replace("{{CRED_PATH}}", str(WEBTERM_CRED_PATH))
+            .replace("{{TTYD_PORT}}", str(WEBTERM_TTYD_PORT))
+            .replace("{{TTYD_BASE}}", WEBTERM_TTYD_BASE))
 
 
 # dev1's tailscale IP must be inside the CGNAT block tailscale uses
@@ -585,9 +640,9 @@ def setup_webterm_service(run=None):
                   "ttyd` failed — skipping the gateway", file=sys.stderr)
             return False
 
-    # #579: resolve dev1's tailscale IP ONCE (single source of truth for the
-    # dashboard links, the ttyd `-i` bind, and the dashboard `--bind`). REFUSE
-    # LOUDLY if there is none — NEVER write a unit that could bind 0.0.0.0.
+    # #579/#584: resolve dev1's tailscale IP ONCE — the GATEWAY's bind. ttyd is
+    # loopback now, so this IP is only the gateway's `--bind`. REFUSE LOUDLY if
+    # there is none — NEVER write a unit that could bind 0.0.0.0.
     bind_ip = _tailscale_ip(run=run)
     if not bind_ip:
         print("  webterm: no tailscale IP (`tailscale ip -4` gave nothing in "
@@ -606,26 +661,32 @@ def setup_webterm_service(run=None):
     inv = webterm_inventory()
     WEBTERM_INVENTORY_PATH.write_text(
         json.dumps(inv, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    ttyd_base = "http://%s:%d" % (bind_ip, WEBTERM_TTYD_PORT)
+    # #584: the ttyd base is now RELATIVE (`/t`) — same-origin under the gateway,
+    # so the iframes are same-origin (Ctrl+Alt+N works while typing).
     WEBTERM_DASH_INDEX.write_text(
-        render_dashboard_html(inv, ttyd_base=ttyd_base), encoding="utf-8")
-    # Remove the old serve-fronted single-file dashboard (superseded by the
-    # served webterm-dash/ directory) so no stale copy lingers (#579).
+        render_dashboard_html(inv, ttyd_base=WEBTERM_TTYD_BASE), encoding="utf-8")
+    # Remove the old serve-fronted single-file dashboard (superseded — #579).
     (CLAUDE_DIR / "webterm-dashboard.html").unlink(missing_ok=True)
     _ensure_credential()
-    WEBTERM_LAUNCH_PATH.write_text(render_webterm_launch_script(bind_ip),
-                                   encoding="utf-8")
+    WEBTERM_LAUNCH_PATH.write_text(render_webterm_launch_script(), encoding="utf-8")
     os.chmod(WEBTERM_LAUNCH_PATH, 0o755)
 
     WEBTERM_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
     WEBTERM_SERVICE_DEST.write_text(_render_webterm_unit(), encoding="utf-8")
-    WEBTERM_DASH_SERVICE_DEST.write_text(_render_webterm_dash_unit(bind_ip),
-                                         encoding="utf-8")
+    WEBTERM_GATEWAY_SERVICE_DEST.write_text(
+        _render_webterm_gateway_unit(bind_ip), encoding="utf-8")
 
     try:
         run(["loginctl", "enable-linger", _whoami()], capture_output=True, text=True)
     except Exception as e:
         print("  webterm: loginctl enable-linger skipped (%s)" % e, file=sys.stderr)
+
+    # #584: the #579 static-dashboard http.server unit is superseded by the
+    # gateway — stop + disable + remove any stale copy so it can't keep serving
+    # the OLD unauthenticated dashboard on :8080 alongside the gateway.
+    if WEBTERM_OLD_DASH_SERVICE_DEST.exists():
+        _run_systemctl(["disable", "--now", "webterm-dash.service"])
+        WEBTERM_OLD_DASH_SERVICE_DEST.unlink(missing_ok=True)
 
     rc, _o, err = _run_systemctl(["daemon-reload"])
     if rc != 0:
@@ -633,7 +694,7 @@ def setup_webterm_service(run=None):
               file=sys.stderr)
 
     ok_all = True
-    for svc in ("webterm-ttyd.service", "webterm-dash.service"):
+    for svc in ("webterm-ttyd.service", "webterm-gateway.service"):
         rc, _o, err = _run_systemctl(["enable", "--now", svc])
         if rc != 0:
             print("  webterm: systemctl enable --now %s FAILED: %s\n"
@@ -644,21 +705,18 @@ def setup_webterm_service(run=None):
             continue
         # `enable --now` is a no-op for an already-running service, so a
         # re-install that changed the launcher/unit (new ttyd flags, new bind IP,
-        # new dashboard) needs an explicit restart to take effect.
+        # new dashboard/gateway) needs an explicit restart to take effect.
         rc, _o, err = _run_systemctl(["restart", svc])
         if rc != 0:
             print("  webterm: systemctl restart %s FAILED (new config may not be "
                   "live): %s" % (svc, (err or "").strip()), file=sys.stderr)
 
     if ok_all:
-        # NOTE: the dashboard port is served UNAUTHENTICATED over the tailnet — it
-        # discloses fleet session labels to any tailnet peer (largely `tailscale
-        # status`-discoverable already; the shell port :7682 stays basic-auth-
-        # gated). Accepted residual; tighten with a tailscale ACL if desired.
-        print("  webterm: gateway live — dashboard http://%s:%d/ , shell "
-              "http://%s:%d/ (tailnet-only, login user %r)"
-              % (bind_ip, WEBTERM_DASH_PORT, bind_ip, WEBTERM_TTYD_PORT,
-                 WEBTERM_LOGIN_USER))
+        print("  webterm: gateway live — http://%s:%d/ (tailnet-only, form login "
+              "user %r; credential in %s — read it once to save in Bitwarden). "
+              "ttyd loopback 127.0.0.1:%d behind /t."
+              % (bind_ip, WEBTERM_GATEWAY_PORT, WEBTERM_LOGIN_USER,
+                 WEBTERM_CRED_PATH, WEBTERM_TTYD_PORT))
     return ok_all
 
 
