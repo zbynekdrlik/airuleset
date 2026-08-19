@@ -1,0 +1,44 @@
+# airuleset web terminal — same-origin gateway (systemd --user unit, managed by airuleset).
+#
+# Installed ONLY on dev1 (the single gateway) by `airuleset.py install` via
+# setup_webterm_service(). Runs the stdlib-asyncio gateway (cli_webterm_gateway.py)
+# bound to dev1's tailscale IP ({{BIND_IP}}) on the single gateway port
+# ({{GATEWAY_PORT}}) — the ONE tailnet-only entry point (#584). It serves the
+# Bitwarden-fillable HTML login form + the tabbed dashboard, and transparently
+# proxies /t/* (HTTP + WebSocket) to the loopback ttyd ({{TTYD_PORT}}, base path
+# {{TTYD_BASE}}). Session auth is an HttpOnly SameSite=Strict cookie; the
+# credential ({{CRED_PATH}}) is validated constant-time; failed logins are
+# rate-limited per source IP. The bind IP is resolved dynamically at install
+# time (`tailscale ip -4`, validated to 100.64.0.0/10); if none is available,
+# install REFUSES to provision rather than bind a public interface.
+#
+# This SUPERSEDES the #579 two-port topology (a separate UNAUTHENTICATED
+# http.server dashboard + a directly-exposed ttyd): now BOTH surfaces are behind
+# the login on one origin, and ttyd is loopback-only. Do not edit the installed
+# copy in ~/.config/systemd/user/ by hand — edit this template and re-run
+# `python3 airuleset.py install`.
+#
+# Deliberately LIGHT hardening: the gateway opens a loopback TCP connection to
+# ttyd per client and reads a mode-600 credential file, so a heavy
+# ProtectSystem=strict / RestrictAddressFamilies sandbox is unnecessary here; the
+# security boundary is tailnet-only exposure + the form login + loopback ttyd.
+
+[Unit]
+Description=airuleset web terminal — same-origin gateway (dev1-only)
+Documentation=https://github.com/zbynekdrlik/airuleset
+After=network-online.target webterm-ttyd.service
+Wants=network-online.target
+# Restart loop guard: more than StartLimitBurst restarts in the interval = stop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env python3 {{GATEWAY_MODULE}} --bind {{BIND_IP}} --port {{GATEWAY_PORT}} --dash-index {{DASH_INDEX}} --cred {{CRED_PATH}} --ttyd-host 127.0.0.1 --ttyd-port {{TTYD_PORT}} --base-path {{TTYD_BASE}}
+Restart=on-failure
+RestartSec=5
+MemoryMax=192M
+TasksMax=64
+
+[Install]
+WantedBy=default.target

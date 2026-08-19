@@ -180,9 +180,11 @@ class TestRendering(unittest.TestCase):
             {"id": "david-subdev", "label": "david@subdev", "kind": "stream",
              "local": False, "host": "10.0.0.5", "user": "david"},
         ]
-        html = w.render_dashboard_html(inv, ttyd_base="http://100.104.8.125:7682")
-        # IP-first ttyd base is embedded (JS builds `?arg=<id>` from it).
-        self.assertIn("100.104.8.125:7682", html)
+        html = w.render_dashboard_html(inv, ttyd_base="/t")
+        # #584: same-origin RELATIVE ttyd base (`/t`); the JS builds `?arg=<id>`
+        # from it. No cross-origin `<ip>:7682` any more.
+        self.assertIn('"ttyd_base": "/t"', html)
+        self.assertNotIn(":7682", html)
         self.assertIn("?arg=", html)              # JS constructs the ttyd URL
         # A top tab bar + lazy iframe container — the SPA, not a card grid.
         self.assertIn('id="tabbar"', html)
@@ -225,20 +227,23 @@ class TestRendering(unittest.TestCase):
         self.assertIn("@@CFG_JSON@@", html)
         self.assertEqual(html.count('"ttyd_base"'), 1)
 
-    def test_launch_script_binds_tailscale_ip_not_loopback(self):
-        # #579: ttyd binds the tailscale IP directly on 7682 (serve is gone);
-        # NEVER loopback, NEVER the old 7681.
-        s = w.render_webterm_launch_script("100.104.8.125")
+    def test_launch_script_binds_loopback_behind_gateway(self):
+        # #584: ttyd binds LOOPBACK only, behind a `-b /t` base path — the
+        # gateway is the sole tailnet entry + authenticator. NO basic-auth
+        # (`-c`), NO `-O` (the gateway does the Origin check; `-O` would break
+        # the proxied WS), NO tailscale-IP bind.
+        s = w.render_webterm_launch_script()
         self.assertIn("exec ttyd", s)
         self.assertIn("-p 7682", s)
-        self.assertIn("-i 100.104.8.125", s)
-        self.assertNotIn("-i 127.0.0.1", s)       # no loopback bind
-        self.assertNotIn("-p 7681", s)            # old fronted port gone
-        self.assertIn("-a", s)      # url-arg
-        self.assertIn("-W", s)      # writable
-        self.assertIn("-O", s)      # check-origin KEPT (iframe is same-origin)
+        self.assertIn("-i 127.0.0.1", s)          # loopback bind
+        self.assertIn("-b /t", s)                 # base path for the gateway proxy
+        self.assertNotIn("-i 100.", s)            # never a tailscale/public IP
+        self.assertNotIn(" -O", s)                # gateway does the Origin check
+        self.assertNotIn(" -c ", s)               # no basic-auth (Bitwarden couldn't fill it)
+        self.assertIn("-a", s)                    # url-arg
+        self.assertIn("-W", s)                    # writable
         self.assertIn("cli_webterm.py webterm-connect", s)
-        self.assertIn(str(w.WEBTERM_CRED_PATH), s)
+        self.assertNotIn(str(w.WEBTERM_CRED_PATH), s)  # ttyd never reads the credential now
 
     def test_unit_substitutes_launch_script_placeholder(self):
         unit = w._render_webterm_unit()
@@ -248,8 +253,11 @@ class TestRendering(unittest.TestCase):
 
 
 _FAKE_TMUX = r"""#!/usr/bin/env bash
-# Fake tmux: records which session the REAL _ATTACH_BODY snippet selects, driven
-# by FAKETMUX_SESSIONS (newline-separated `group::name`, group may be empty).
+# Fake tmux: LOGS every invocation's argv to $FAKETMUX_LOG (one line each) and
+# answers has-session/list-sessions from FAKETMUX_SESSIONS (newline-separated
+# `group::name`, group may be empty). Proves the REAL _ATTACH_BODY builds the
+# right grouped-clone multi-attach commands and NEVER detaches another client.
+echo "$*" >> "$FAKETMUX_LOG"
 cmd="$1"; shift
 case "$cmd" in
   has-session)
@@ -267,20 +275,18 @@ case "$cmd" in
       done <<< "$FAKETMUX_SESSIONS"
     fi
     exit 0 ;;
-  new-session)
-    if [ "$1" = "-t" ]; then echo "NEWSESSION_T:$2"; else echo "NEWSESSION_AS:$3"; fi
-    exit 0 ;;
-  attach)
-    echo "ATTACH_T:$2"; exit 0 ;;
 esac
 exit 0
 """
 
 
 class TestAttachSnippetBehavior(unittest.TestCase):
-    """Run the REAL _ATTACH_BODY snippet against a fake tmux to prove which
-    session it selects across every fleet case (the trickiest correctness
-    surface — the group-survivor awk + the 0/1/2 single-session count)."""
+    """#584: standard tmux multi-attach that NEVER disturbs an existing client.
+    Run the REAL _ATTACH_BODY against a logging fake tmux and prove: an existing
+    session is JOINED via a throwaway GROUPED clone (independent view, cleaned
+    up on disconnect, base never touched), the window sizes to the ACTIVE client
+    (window-size latest + aggressive-resize on), and `attach -d` (the only verb
+    that detaches other clients) is NEVER used."""
 
     def setUp(self):
         import subprocess
@@ -289,37 +295,69 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         faketmux = Path(self.d) / "tmux"
         faketmux.write_text(_FAKE_TMUX, encoding="utf-8")
         os.chmod(faketmux, 0o755)
+        self.log = Path(self.d) / "log"
 
-    def _select(self, preferred, sessions):
+    def _run(self, preferred, sessions):
         env = dict(os.environ, PATH=self.d + ":" + os.environ["PATH"],
-                   FAKETMUX_SESSIONS=sessions)
+                   FAKETMUX_SESSIONS=sessions, FAKETMUX_LOG=str(self.log))
         cmd = w._remote_command(preferred)
-        r = self.subprocess.run(["sh", "-c", cmd], capture_output=True,
-                                text=True, env=env, timeout=10)
-        return r.stdout.strip()
+        self.subprocess.run(["sh", "-c", cmd], capture_output=True,
+                            text=True, env=env, timeout=10)
+        return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
 
-    def test_grouped_owner_picks_group_survivor_not_cotenant(self):
-        # dev1: zbynek + marek co-tenant. P=zbynek must pick zbynek-4, NOT marek.
-        out = self._select("zbynek", "zbynek::zbynek-4\nmarek::marek-12")
-        self.assertEqual(out, "NEWSESSION_T:zbynek-4")
+    def test_grouped_owner_joins_survivor_via_grouped_clone(self):
+        # dev1: zbynek + marek co-tenant. P=zbynek joins zbynek-4 (group
+        # survivor) via a NEW grouped clone, never marek, never a bare attach.
+        log = self._run("zbynek", "zbynek::zbynek-4\nmarek::marek-12")
+        self.assertRegex(log, r"new-session -t zbynek-4 -s zbynek-4-web-\d+")
+        self.assertNotIn("attach -d", log)
+        self.assertNotRegex(log, r"\battach -t\b")     # never a shared mirror attach
 
-    def test_standalone_stream_picks_exact_name(self):
-        out = self._select("david", "::david\n::montalu")
-        self.assertEqual(out, "NEWSESSION_T:david")
+    def test_standalone_stream_joins_exact_via_grouped_clone(self):
+        log = self._run("david", "::david\n::montalu")
+        self.assertRegex(log, r"new-session -t david -s david-web-\d+")
 
-    def test_gk_single_unnamed_session_attaches_it(self):
-        # gk: one session "0", empty group, P=zbynek -> single-session fallback.
-        out = self._select("zbynek", "::0")
-        self.assertEqual(out, "ATTACH_T:0")
+    def test_single_session_joins_via_grouped_clone_not_shared_attach(self):
+        # gk: one session "0". Previously a bare `attach -t 0` (shared/mirrored
+        # view); now an independent grouped clone.
+        log = self._run("zbynek", "::0")
+        self.assertRegex(log, r"new-session -t 0 -s 0-web-\d+")
+        self.assertNotRegex(log, r"\battach -t 0\b")
 
-    def test_no_sessions_creates_preferred(self):
-        out = self._select("zbynek", "")
-        self.assertEqual(out, "NEWSESSION_AS:zbynek")
+    def test_cleanup_kills_only_the_clone_never_the_base(self):
+        # The disconnect trap fires on EXIT (the fake new-session returns at
+        # once) -> the throwaway clone is killed, the BASE session never is.
+        log = self._run("zbynek", "zbynek::zbynek-4")
+        # exact-match (`=`) kill of ONLY the throwaway clone
+        self.assertRegex(log, r"kill-session -t =zbynek-4-web-\d+")
+        # never a kill of the bare base session (either `=zbynek-4` or `zbynek-4`)
+        self.assertNotRegex(log, r"kill-session -t =?zbynek-4(?!-web)")
+
+    def test_sizes_window_to_active_client(self):
+        # window-size latest + aggressive-resize on -> the shared window sizes to
+        # whoever is actively viewing, never the smallest client (the owner's WT
+        # view can't be shrunk by a small web client).
+        log = self._run("zbynek", "zbynek::zbynek-4")
+        self.assertIn("window-size latest", log)
+        self.assertIn("aggressive-resize on", log)
+
+    def test_no_sessions_creates_preferred_and_does_not_kill_it(self):
+        # No existing session -> create the owner's own base, which must PERSIST
+        # (never trap-killed — it is not a throwaway clone).
+        log = self._run("zbynek", "")
+        self.assertRegex(log, r"new-session -A -s zbynek")
+        self.assertNotIn("kill-session", log)
 
     def test_two_sessions_no_match_creates_preferred(self):
-        # Two sessions, neither matches P -> must NOT attach a wrong one; create.
-        out = self._select("gatekeeper", "zbynek::zbynek-4\nmarek::marek-12")
-        self.assertEqual(out, "NEWSESSION_AS:gatekeeper")
+        log = self._run("gatekeeper", "zbynek::zbynek-4\nmarek::marek-12")
+        self.assertRegex(log, r"new-session -A -s gatekeeper")
+
+    def test_never_uses_detach_flag_anywhere(self):
+        # `attach -d` is the ONLY tmux verb that detaches OTHER clients; it must
+        # never appear in any resolution path (the owner's WT stays attached).
+        for sess in ("zbynek::zbynek-4\nmarek::marek-12", "::0", ""):
+            log = self._run("zbynek", sess)
+            self.assertNotIn("attach -d", log)
 
 
 class TestProvisioningGate(unittest.TestCase):
@@ -383,21 +421,25 @@ class TestTailscaleIP(unittest.TestCase):
         self.assertIsNone(w._tailscale_ip(run=_run_returning("100.128.0.1\n")))
 
 
-class TestDashUnit(unittest.TestCase):
-    def test_dash_unit_binds_tailscale_ip_and_directory(self):
-        unit = w._render_webterm_dash_unit("100.104.8.125")
+class TestGatewayUnit(unittest.TestCase):
+    def test_gateway_unit_binds_tailscale_ip_and_wires_ttyd_loopback(self):
+        # #584: the gateway unit runs cli_webterm_gateway.py bound to the
+        # tailscale IP on 8080, proxying to the loopback ttyd.
+        unit = w._render_webterm_gateway_unit("100.104.8.125")
         self.assertNotIn("{{", unit)                       # every placeholder filled
+        self.assertIn("cli_webterm_gateway.py", unit)
         self.assertIn("--bind 100.104.8.125", unit)        # tailnet-only bind
-        self.assertIn("--directory %s" % str(w.WEBTERM_DASH_DIR), unit)
-        self.assertIn("%d" % w.WEBTERM_DASH_PORT, unit)    # 8080
-        self.assertIn("http.server", unit)
+        self.assertIn("--port %d" % w.WEBTERM_GATEWAY_PORT, unit)   # 8080
+        self.assertIn("--ttyd-host 127.0.0.1", unit)       # proxies loopback ttyd
+        self.assertIn("--ttyd-port %d" % w.WEBTERM_TTYD_PORT, unit)
+        self.assertIn("--cred %s" % str(w.WEBTERM_CRED_PATH), unit)
+        self.assertIn("--dash-index %s" % str(w.WEBTERM_DASH_INDEX), unit)
+        self.assertIn("--base-path /t", unit)
         self.assertIn("WantedBy=default.target", unit)
-        # NEVER binds a public / wildcard interface (the actual bind directive;
-        # a doc comment may still spell out "never 0.0.0.0").
-        self.assertNotIn("--bind 0.0.0.0", unit)
-        # The ExecStart bind arg is exactly the tailscale IP passed in.
+        self.assertNotIn("--bind 0.0.0.0", unit)           # never public/wildcard
         exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
         self.assertIn("--bind 100.104.8.125", exec_line)
+        self.assertNotIn("http.server", exec_line)         # not the old static server
 
 
 class TestShortAlias(unittest.TestCase):
@@ -469,7 +511,8 @@ class TestSetupWiring(unittest.TestCase):
             "WEBTERM_LAUNCH_PATH": p / ".claude" / "airuleset-webterm-ttyd.sh",
             "WEBTERM_CRED_PATH": p / ".secrets" / "webterm_credential",
             "WEBTERM_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-ttyd.service",
-            "WEBTERM_DASH_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-dash.service",
+            "WEBTERM_GATEWAY_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-gateway.service",
+            "WEBTERM_OLD_DASH_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-dash.service",
         }
         for name, val in patches.items():
             stack.enter_context(m.patch.object(w, name, val))
@@ -495,7 +538,7 @@ class TestSetupWiring(unittest.TestCase):
                 return _R(0, (self.ip + "\n") if self.ip else "", "")
             return _R(0, "", "")
 
-    def test_install_path_has_no_serve_but_resets_and_writes_ip_first(self):
+    def test_install_path_has_no_serve_but_resets_and_writes_same_origin(self):
         import contextlib
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
             pt = self._isolate(st, tmp)
@@ -508,16 +551,20 @@ class TestSetupWiring(unittest.TestCase):
             # (b) resets any leftover serve config.
             self.assertTrue(any(list(c[:3]) == ["tailscale", "serve", "reset"]
                                 for c in rec.calls), rec.calls)
-            # (c) IP-first tabbed dashboard + dash unit written.
+            # (c) #584: SAME-ORIGIN tabbed dashboard (relative /t, no :7682) +
+            # the GATEWAY unit bound to the tailscale IP + the loopback ttyd launch.
             html = pt["WEBTERM_DASH_INDEX"].read_text()
-            self.assertIn("100.104.8.125:7682", html)
+            self.assertIn('"ttyd_base": "/t"', html)
+            self.assertNotIn(":7682", html)
             self.assertIn('id="tabbar"', html)
             self.assertNotIn('class="card"', html)
-            unit = pt["WEBTERM_DASH_SERVICE_DEST"].read_text()
+            unit = pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text()
             self.assertIn("--bind 100.104.8.125", unit)
+            self.assertIn("cli_webterm_gateway.py", unit)
             launch = pt["WEBTERM_LAUNCH_PATH"].read_text()
-            self.assertIn("-i 100.104.8.125", launch)
-            self.assertNotIn("-i 127.0.0.1", launch)
+            self.assertIn("-i 127.0.0.1", launch)     # ttyd is loopback now
+            self.assertIn("-b /t", launch)
+            self.assertNotIn("-i 100.", launch)
 
     def test_no_tailscale_ip_refuses_and_writes_no_unit(self):
         import contextlib
@@ -527,7 +574,7 @@ class TestSetupWiring(unittest.TestCase):
             ok = w.setup_webterm_service(run=rec)
             self.assertFalse(ok)               # LOUD refusal
             # NEVER writes a unit with a possibly-public bind.
-            self.assertFalse(pt["WEBTERM_DASH_SERVICE_DEST"].exists())
+            self.assertFalse(pt["WEBTERM_GATEWAY_SERVICE_DEST"].exists())
             self.assertFalse(pt["WEBTERM_SERVICE_DEST"].exists())
 
     def test_reinstall_is_idempotent(self):
@@ -536,10 +583,10 @@ class TestSetupWiring(unittest.TestCase):
             pt = self._isolate(st, tmp)
             self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
             first = pt["WEBTERM_DASH_INDEX"].read_text()
-            first_unit = pt["WEBTERM_DASH_SERVICE_DEST"].read_text()
+            first_unit = pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text()
             self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
             self.assertEqual(first, pt["WEBTERM_DASH_INDEX"].read_text())
-            self.assertEqual(first_unit, pt["WEBTERM_DASH_SERVICE_DEST"].read_text())
+            self.assertEqual(first_unit, pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text())
 
 
 class TestTabSwitchingUX(unittest.TestCase):
@@ -604,14 +651,16 @@ class TestTabSwitchingUX(unittest.TestCase):
         self.assertNotIn("ArrowLeft", html)
         self.assertNotIn("ArrowRight", html)
 
-    def test_hint_is_honest_about_keyboard_limitation(self):
-        # The hint must say click always works AND that the shortcut only works
-        # while the bar has focus (never over-promise keyboard-switch-typing).
-        html = w.render_dashboard_html(self._inv(4), ttyd_base="http://b:7682")
+    def test_hint_advertises_click_cycle_and_working_shortcut(self):
+        # #584 fixed the #582 residual: the hint no longer warns of a
+        # focus/origin limitation. It still surfaces the always-works paths
+        # (click + ◀ ▶) AND the now-working Ctrl+Alt shortcut.
+        html = w.render_dashboard_html(self._inv(4), ttyd_base="/t")
         hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
         self.assertIn("klik", hint.lower())          # click always works
-        self.assertIn("fokus", hint.lower())          # shortcut only when the bar is focused
-        self.assertTrue("◀" in hint or "▶" in hint)   # surfaces the new cycle affordance
+        self.assertIn("Ctrl+Alt", hint)              # the shortcut is advertised
+        self.assertTrue("◀" in hint or "▶" in hint)   # cycle affordance
+        self.assertNotIn("iný origin", hint)          # the old limitation note is gone
 
     def test_ux_additions_do_not_break_escaping_or_single_pass(self):
         # The security invariants from #579 must survive the UX additions.
@@ -620,6 +669,52 @@ class TestTabSwitchingUX(unittest.TestCase):
         html = w.render_dashboard_html(inv, ttyd_base="http://b:7682")
         self.assertNotIn("</script><script>", html)
         self.assertEqual(html.count('"ttyd_base"'), 1)
+
+
+class TestSameOriginKeyboard(unittest.TestCase):
+    """#584 supersedes #582's residual: the gateway makes the terminal iframes
+    SAME-ORIGIN, so Ctrl+Alt+1..9 now works even while focus is IN a terminal —
+    a per-iframe capture-phase keydown forwarder (only possible same-origin)
+    reaches the parent's switch logic before xterm consumes the keystroke."""
+
+    def _inv(self, n=3):
+        return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
+                 "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
+                for i in range(1, n + 1)]
+
+    def test_dashboard_uses_same_origin_ttyd_base(self):
+        # The caller now passes a RELATIVE base (`/t`) so each iframe is
+        # same-origin with the dashboard — never an absolute `<ip>:7682` origin.
+        html = w.render_dashboard_html(self._inv(2), ttyd_base="/t")
+        self.assertIn('"ttyd_base": "/t"', html)
+        self.assertIn("?arg=", html)              # iframe src still built from it
+        self.assertNotIn(":7682", html)           # no cross-origin ttyd port
+
+    def test_per_iframe_keydown_forwarder_is_wired_on_load(self):
+        # The fix: attach a keydown listener to each terminal iframe's OWN window
+        # when it loads (same-origin makes `contentWindow` reachable), in the
+        # CAPTURE phase so it fires before xterm swallows the key.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("contentWindow", html)
+        self.assertIn("addEventListener('load'", html)
+        # capture-phase keydown forwarder (the `true` 3rd arg is load-bearing)
+        self.assertRegex(html, r"addEventListener\('keydown',\s*\w+,\s*true\)")
+
+    def test_hotkey_handler_shared_and_stops_propagation(self):
+        # ONE shared handler used by BOTH the parent bar AND the per-iframe
+        # forwarder; it stops propagation so xterm never also processes the key.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("e.key >= '1'", html)        # the digit-jump logic
+        self.assertIn("stopPropagation", html)     # xterm must not also get it
+
+    def test_hint_no_longer_says_shortcut_fails_while_typing(self):
+        # The honest #582 residual ("during typing it's a different origin — use
+        # click") is GONE now that the shortcut works while typing.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
+        self.assertNotIn("iný origin", hint)
+        # click / cycle buttons still advertised as the always-works path
+        self.assertIn("klik", hint.lower())
 
 
 if __name__ == "__main__":
