@@ -865,7 +865,7 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "1")
 
     def test_cmd_slice_quals_actually_calls_the_shared_slice_quals_function(self):
@@ -900,7 +900,7 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
                     buf = io.StringIO()
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         sq.assert_called()
         self.assertTrue(
             any("label:__sentinel_qual__" in " ".join(str(x) for x in c)
@@ -934,7 +934,7 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "2")   # {1, 2} unioned, not 3
 
     def test_a_failed_gh_query_never_prints_zero(self):
@@ -951,7 +951,7 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
                     with contextlib.redirect_stdout(buf):
                         with self.assertRaises(SystemExit) as cm:
                             airuleset.cmd_slice_quals(
-                                mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                                mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
                     self.assertNotEqual(cm.exception.code, 0)
         self.assertNotIn("0", buf.getvalue())
 
@@ -992,7 +992,7 @@ class TestSliceQualsIncludesOwnBounceTickets(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "1")
 
     def test_shared_account_stream_slice_still_finds_its_own_bounce_ticket(self):
@@ -1018,7 +1018,7 @@ class TestSliceQualsIncludesOwnBounceTickets(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "1")
 
 
@@ -1051,7 +1051,7 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
                         with contextlib.redirect_stdout(buf):
                             with self.assertRaises(SystemExit) as cm:
                                 airuleset.cmd_slice_quals(
-                                    mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                                    mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
                         self.assertNotEqual(cm.exception.code, 0)
         self.assertNotIn("0", buf.getvalue())
 
@@ -1073,7 +1073,7 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
                     with contextlib.redirect_stdout(buf):
                         with self.assertRaises(SystemExit) as cm:
                             airuleset.cmd_slice_quals(
-                                mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                                mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertNotEqual(cm.exception.code, 0)
         self.assertNotIn("0", buf.getvalue())
 
@@ -1103,7 +1103,7 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
                     with contextlib.redirect_stdout(buf):
                         with self.assertRaises(SystemExit) as cm:
                             airuleset.cmd_slice_quals(
-                                mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                                mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertNotEqual(cm.exception.code, 0)
         self.assertNotIn("0", buf.getvalue())
 
@@ -1129,7 +1129,7 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "0")
 
     def test_a_handed_off_ticket_no_longer_counts_once_handed_off(self):
@@ -1169,7 +1169,7 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "0")
 
 
@@ -1203,7 +1203,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "0")
 
     def test_count_still_includes_a_genuinely_unhandled_ticket(self):
@@ -1226,7 +1226,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "1")
 
     def test_list_omits_a_handed_off_ticket_too(self):
@@ -1252,7 +1252,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=False, list=True, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=False, list=True, waiting=False, ops_wait=False, audit=False, extra=None))
         out = buf.getvalue()
         self.assertNotIn("5\t", out)
         self.assertIn("6\t", out)
@@ -1284,7 +1284,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(
             buf.getvalue().strip(), "1",
             "a returned bounce ticket must stay in the stop-proof's own "
@@ -1322,7 +1322,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(
             buf.getvalue().strip(), "1",
             "a bounce-labeled ticket must not be flipped back to handed "
@@ -1360,7 +1360,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(buf.getvalue().strip(), "0")
 
     def test_slice_quals_actually_calls_the_shared_handed_derivation(self):
@@ -1394,7 +1394,7 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
                                       False)) as sm:
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         sm.assert_called()
         self.assertEqual(
             buf.getvalue().strip(), "1",
@@ -1567,7 +1567,7 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
         gh, searches = _fake_gh_by_search(
             self.POPULATIONS if populations is None else populations)
         buf = io.StringIO()
-        args = dict(count=True, list=False, waiting=False, ops_wait=False, extra=None)
+        args = dict(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None)
         args.update(flags)
         with mk.patch.object(airuleset, "resolve_authority", return_value="full"):
             with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
@@ -1683,7 +1683,7 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
                 with contextlib.redirect_stdout(buf):
                     with self.assertRaises(SystemExit) as cm:
                         airuleset.cmd_core_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertNotEqual(cm.exception.code, 0)
         self.assertEqual(buf.getvalue().strip(), "")
 
@@ -1698,7 +1698,7 @@ class TestCoreQualsCountsTheObligationSet(TestCase):
                 with contextlib.redirect_stdout(buf):
                     with self.assertRaises(SystemExit) as cm:
                         airuleset.cmd_core_quals(
-                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertNotEqual(cm.exception.code, 0)
         self.assertEqual(buf.getvalue().strip(), "")
 
@@ -1745,7 +1745,7 @@ class TestObligationVsDisplayPartition(TestCase):
             with mk.patch.object(airuleset, "_gh_out", return_value="[]"):
                 with contextlib.redirect_stdout(buf):
                     airuleset.cmd_core_quals(
-                        mk.Mock(count=False, list=False, waiting=False, ops_wait=False, extra=None))
+                        mk.Mock(count=False, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         printed = buf.getvalue()
         self.assertIn(airuleset._core_search_excl(), printed)
         for label in ("needs-gatekeeper", "ready-for-review"):
@@ -1809,7 +1809,7 @@ class TestSliceQualsRefusesAnUnresolvableIdentity(TestCase):
                         with contextlib.redirect_stdout(buf):
                             with self.assertRaises(SystemExit) as cm:
                                 airuleset.cmd_slice_quals(
-                                    mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                                    mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertNotEqual(cm.exception.code, 0)
         self.assertEqual(buf.getvalue().strip(), "")
 
@@ -1991,7 +1991,7 @@ class TestSliceQualsHandlesAppTokenBoxes(TestCase):
                                     with self.assertRaises(SystemExit) as cm:
                                         airuleset.cmd_slice_quals(
                                             mk.Mock(count=True, list=False, waiting=False,
-                                                   ops_wait=False, extra=None))
+                                                   ops_wait=False, audit=False, extra=None))
         spy.assert_not_called()
         self.assertNotEqual(cm.exception.code, 0)
         self.assertEqual(buf.getvalue().strip(), "")
@@ -2020,7 +2020,7 @@ class TestSearchIndexCrossCheckAssertsNonEmpty(TestCase):
                         with contextlib.redirect_stdout(buf):
                             try:
                                 airuleset.cmd_slice_quals(
-                                    mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                                    mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
                             except SystemExit as e:
                                 exc = e
         return buf.getvalue(), exc
@@ -2432,7 +2432,7 @@ class TestSliceQualsDoesNotSilentlyCapItsOwnCount(TestCase):
                     with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                         with contextlib.redirect_stdout(io.StringIO()):
                             airuleset.cmd_slice_quals(
-                                mk.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                                mk.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         issue_queries = [q for q in seen if q and q[0] == "issue"]
         self.assertTrue(issue_queries)
         for q in issue_queries:
@@ -2563,7 +2563,7 @@ def _drive(cmd, gh, authority="full", user="newlevel", login="zbynekdrlik",
     import unittest.mock as mk
 
     out, err, exc = io.StringIO(), io.StringIO(), None
-    args = dict(count=True, list=False, waiting=False, ops_wait=False, extra=None)
+    args = dict(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None)
     args.update(flags)
     with mk.patch.object(airuleset, "resolve_authority", return_value=authority):
         with mk.patch.object(airuleset, "_current_user", return_value=user):
@@ -3218,7 +3218,7 @@ class TestQualsExcludePermanentOpsChannelTickets(TestCase):
             with m.patch.object(airuleset, "_gh_out", side_effect=gh):
                 with contextlib.redirect_stdout(buf):
                     airuleset.cmd_core_quals(
-                        m.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                        m.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(
             buf.getvalue().strip(), "1",
             "a permanent ops-channel ticket is still counted as workable "
@@ -3238,7 +3238,7 @@ class TestQualsExcludePermanentOpsChannelTickets(TestCase):
             with m.patch.object(airuleset, "_gh_out", side_effect=gh):
                 with contextlib.redirect_stdout(buf):
                     airuleset.cmd_core_quals(
-                        m.Mock(count=False, list=True, waiting=False, ops_wait=False, extra=None))
+                        m.Mock(count=False, list=True, waiting=False, ops_wait=False, audit=False, extra=None))
         out = buf.getvalue()
         self.assertIn("1\t", out)
         self.assertNotIn("2\t", out)
@@ -3263,7 +3263,7 @@ class TestQualsExcludePermanentOpsChannelTickets(TestCase):
                 with m.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
-                            m.Mock(count=True, list=False, waiting=False, ops_wait=False, extra=None))
+                            m.Mock(count=True, list=False, waiting=False, ops_wait=False, audit=False, extra=None))
         self.assertEqual(
             buf.getvalue().strip(), "1",
             "a permanent ops-channel ticket is still in this stream's own "

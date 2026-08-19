@@ -468,7 +468,7 @@ class TestCoreQualsCountExcludesLegacyStreamTicket(TestCase):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_core_quals(m.Mock(
                             count=True, list=False, waiting=False,
-                            ops_wait=False, extra=None))
+                            ops_wait=False, audit=False, extra=None))
         return buf.getvalue().strip()
 
     def test_a_stream_montalu_ticket_is_not_counted_into_gk_core(self):
@@ -537,7 +537,7 @@ class TestStreamOwnerOfAlias(TestCase):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_core_quals(m.Mock(
                             count=False, list=True, waiting=False,
-                            ops_wait=False, extra=None))
+                            ops_wait=False, audit=False, extra=None))
         out = buf.getvalue()
         row = [ln for ln in out.splitlines() if ln.startswith("2396\t")]
         self.assertTrue(row, out)

@@ -76,6 +76,22 @@ def _core_search_excl():
     at all, and excluding its label would silently remove a whole population
     from every full-authority count.
 
+    #578 counting audit — `stream:core` is DELIBERATELY NOT excluded (and is
+    the reason this filter keys on AUTHORITY_BY_USER membership, not on "carries
+    ANY `stream:` label"): `core` is not a reduced-authority sub-dev stream, it
+    is the full-authority box's OWN work marker (odoo-erp #4520-shape umbrella/
+    tracking tickets), so a `stream:core` ticket STAYS in the core obligation
+    set and IS counted in `I` — correct, because only this box acts on it. A
+    `stream:core` ticket gated on another ticket/release belongs in `W` via an
+    `ops-wait` label (the #578 pipeline-gated/umbrella doctrine), never dropped
+    from the count by this exclusion. Conversely a FOREIGN stream's bare
+    `needs-acceptance` (a reduced-authority `stream:<user>` in AUTHORITY_BY_USER,
+    with NO `ready-for-review`/`needs-gatekeeper`) IS excluded here, so it never
+    reaches the core obligation `seen` — the ONE mechanical guard against a
+    foreign acceptance being routed to `I` by `_partition_workable`'s #539
+    chained-I branch (which cannot see box authority and would treat any bare
+    needs-acceptance with no delivered draft as this box's own chained work).
+
     #561: each excluded stream is EXPANDED via `_stream_rename_equivalents()`
     — the SAME single alias primitive `_slice_quals()`/`_ticket_is_stream_
     labeled()` already consume — so a base-stream rename target excludes BOTH

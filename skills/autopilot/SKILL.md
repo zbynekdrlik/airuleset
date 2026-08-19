@@ -201,6 +201,15 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   stream-authored comment, so a content-free ack would silence the tag while the third party stays
   genuinely un-nudged (the exact "never actually nudged them" failure in tag-compliant disguise). A
   concrete ask is a real povzbudenie, not status noise.
+  **Pipeline-gated tail + umbrella = W (#578)** — dva tvary ktoré #526/#539 NEpomenovali, a preto
+  sedeli v bare `I` a nafukovali ho (gk `I 16`): (1) **release-gated tail** vlastnej pipeline
+  (merged/queued, čaká na pomenovaný INTERNÝ release event — napr. „2.180 stage-3") je `ops-wait` → W
+  s tým pomenovaným eventom (supervisor SETuje s dôkazom, CLEARuje pri landnutí stage), NIKDY bare
+  `I`; (2) **umbrella/tracking ticket gated na INÝ ticket** je `ops-wait` → W s odkazom na blocker
+  ticket, nikdy bare `I`. ODLÍŠ od #539 chained-I (nezamieňaj ich): chained-I je bare
+  `needs-acceptance` ktorého acceptance DRAFT sa NEDÁ zložiť, lebo čaká na stream-ovho SIBLING workera
+  (sibling ticket) — žiadny externý release event, žiadny blocker ticket → OSTÁVA `I` (Claudova
+  vlastná sekvenčná práca); pipeline-gated/umbrella čaká na RELEASE stage ALEBO na BLOCKER ticket → W.
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do
