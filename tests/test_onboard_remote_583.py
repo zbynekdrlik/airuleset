@@ -87,6 +87,12 @@ class RemoteRunner:
         if head == "test":
             return self._test(cmd)
         if head == "cat":
+            path = cmd[-1]
+            if path.endswith("CLAUDE.md"):
+                if not self.claude_present:
+                    return CP(cmd, 1, "", "cat: No such file or directory")
+                # a healthy CLAUDE.md carries the Playbook router (no drift)
+                return CP(cmd, 0, "# proj\n\n## Playbook router\n- x\n", "")
             if not self.gitignore_present:
                 return CP(cmd, 1, "", "cat: No such file or directory")
             content = self.gitignore_content

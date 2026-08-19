@@ -15,7 +15,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project <path> [--host dev1|dev2]
 ```
 
 - `<path>` — the project directory. Repo name is derived deterministically from the path (leaf dir, `_`→`-`; a nested path under a client-cluster dir like `montalu/` gets the `montalu-<leaf>` prefix). Pass `--name` for an exception.
-- `--host` — where the project lives (`dev1` = local default; a `REMOTE_HOSTS` name runs the steps over ssh).
+- `--host` — where the project lives (`dev1` = local default; a `REMOTE_HOSTS` name runs EVERY step — detect AND act — over ssh on that box, expanding `~` against the REMOTE home; nothing local is created). Fail-safe: an unreachable host or a missing remote directory REFUSES the run (real and dry-run) rather than proceeding on local false-negatives (#583).
 - `--override` — a convention tag, repeatable: `3-branch` (odoo develop/staging/main), `merge=manual`, `local-builds=allowed`.
 - `--dry-run` — report would-apply for every step, change nothing.
 
@@ -39,7 +39,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project --audit          # whole 
 python3 ~/devel/airuleset/airuleset.py onboard-project <path> --audit   # one project
 ```
 
-`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry — and changes NOTHING. The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
+`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry — and changes NOTHING. A cross-host entry on a known `REMOTE_HOSTS` box is audited OVER SSH (a healthy remote project reads clean); a host that is neither this box nor a known remote target reads `unreachable`, never a false drift (#583). The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
 
 ## Rules
 
