@@ -1270,6 +1270,15 @@ class SendReturnMessageId(unittest.TestCase):
         p = m.patch.object(notify, "_read_env", lambda: dict(self.env))
         p.start()
         self.addCleanup(p.stop)
+        # #559: keyless send()s now auto-derive a content-hash dedup key, so
+        # repeated identical keyless sends (every test here uses body "hi")
+        # would collide via the SHARED dedup dir. Isolate the dedup/delivery
+        # state per test (and off the real ~/.claude) so each send is fresh.
+        self._td = TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        cd = m.patch.object(notify, "_claude_dir", lambda: self._td.name)
+        cd.start()
+        self.addCleanup(cd.stop)
 
     def test_default_stays_a_bare_string(self):
         import unittest.mock as m
@@ -1317,6 +1326,13 @@ class SendKindRouting(unittest.TestCase):
         p = m.patch.object(notify, "_read_env", lambda: dict(self.env))
         p.start()
         self.addCleanup(p.stop)
+        # #559: isolate the auto-derived-keyless-send dedup state per test
+        # (each test here posts the same body "hi") so no cross-test collision.
+        self._td = TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        cd = m.patch.object(notify, "_claude_dir", lambda: self._td.name)
+        cd.start()
+        self.addCleanup(cd.stop)
         self.posted = []
 
     def _post(self, token, channel, content):
