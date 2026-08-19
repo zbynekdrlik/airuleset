@@ -136,6 +136,25 @@ class TestAuthorityResolution(TestCase):
                                self_login=False, stream_label=True))
         p.assert_any_call("stream:montalu3")
 
+    def test_cli_stream_label_emits_rename_equivalents(self):
+        # #564: on a box whose base stream was RENAMED (montalu -> montalu1),
+        # `authority --stream-label` must emit BOTH the current label AND the
+        # legacy one, so the close-guard hook still recognizes THIS stream's
+        # OWN tickets that still carry the old `stream:montalu` label during the
+        # transition. RED before the fix (only `stream:montalu1` is printed).
+        import cli_quals
+        with m.patch.object(cli_quals, "resolve_authority",
+                            return_value="branch-merge"):
+            with m.patch.object(airuleset, "_current_user",
+                                return_value="montalu1"):
+                with m.patch("builtins.print") as p:
+                    airuleset.cmd_authority(
+                        m.Mock(explain=False, maintainer_login=False,
+                               self_login=False, stream_label=True))
+        printed = [str(c.args[0]) for c in p.call_args_list if c.args]
+        self.assertIn("stream:montalu1", printed, printed)
+        self.assertIn("stream:montalu", printed, printed)
+
     def test_cli_stream_label_empty_under_full_authority(self):
         # #533: on a full-authority box the flag prints NOTHING (the hook's
         # fail-safe then refuses the acceptance exemption).

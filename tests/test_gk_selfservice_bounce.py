@@ -86,6 +86,27 @@ class OriginResolution(unittest.TestCase):
         # origin marker; it must not be read as an origin here.
         self.assertIsNone(cs._origin_reduced_stream(["stream:montalu"]))
 
+    def test_handed_by_legacy_prerename_name_attributes_to_canonical(self):
+        # #564: a gk request FILED before the base-stream rename carries the OLD
+        # `handed-by:montalu` label. It must still attribute to the reduced
+        # stream (its CANONICAL name montalu1), routed through the single
+        # _stream_rename_equivalents primitive. RED before the fix (montalu is
+        # not in _REDUCED_STREAM_USERS -> None).
+        self.assertEqual(
+            cs._origin_reduced_stream(["needs-gatekeeper", "handed-by:montalu"]),
+            "montalu1")
+
+    def test_handed_by_current_name_still_attributes(self):
+        # #564 regression: the current numbered name attributes to itself.
+        self.assertEqual(
+            cs._origin_reduced_stream(["handed-by:montalu1"]), "montalu1")
+
+    def test_handed_by_non_renamed_stream_is_unchanged(self):
+        # #564: a stream not involved in any rename attributes to itself exactly
+        # as before (equivalents expand to just the name).
+        self.assertEqual(
+            cs._origin_reduced_stream(["handed-by:montalu2"]), "montalu2")
+
 
 # --------------------------------------------------------------------------- #
 # The JOB, driven with an injected fetch + a recording bounce_apply.

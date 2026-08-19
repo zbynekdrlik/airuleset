@@ -260,7 +260,26 @@ if [ -n "$ISSUE_NUM" ]; then
             # called inside `if`/`&&`/`!` conditions, so `set -e` never aborts on
             # a grep no-match.
             _has_label() { printf '%s\n' "$LABEL_NAMES" | grep -qxF "$1"; }
-            if _has_label "$STREAM_LABEL" && _has_label "needs-acceptance" \
+            # #564: STREAM_LABEL may be MULTIPLE newline-separated equivalents.
+            # A base-stream rename (montalu -> montalu1) means this box's own
+            # tickets can still carry the OLD `stream:montalu` label during the
+            # transition, so `authority --stream-label` emits every equivalent.
+            # The acceptance carve-out matches if the ticket carries ANY of them.
+            # Read line-by-line (a here-string runs in THIS shell, so `return`
+            # works; `IFS= read -r` avoids any word-split / glob expansion — a
+            # defensive choice, since `stream:<unix-user>` values never contain
+            # whitespace or glob chars anyway). Only ever called inside `if`/`&&`
+            # conditions, so `set -e` never aborts on a grep no-match (same reason
+            # `_has_label` is safe).
+            _has_own_stream_label() {
+                local _lbl
+                while IFS= read -r _lbl; do
+                    [ -n "$_lbl" ] || continue
+                    if _has_label "$_lbl"; then return 0; fi
+                done <<< "$STREAM_LABEL"
+                return 1
+            }
+            if _has_own_stream_label && _has_label "needs-acceptance" \
                && ! _has_label "ready-for-review" \
                && ! _has_label "needs-gatekeeper" \
                && ! _has_label "prio:bounce"; then
