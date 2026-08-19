@@ -472,8 +472,10 @@ class TestSonioxFlaggedNonSubdevHost(TestCase):
         joined = "\n".join(contacted)
         # dev2's real user@host -- the account this ticket exists to fix
         self.assertIn("newlevel@100.82.64.27", joined)
-        # a couple of subdev stream accounts still contacted (no regression)
-        self.assertIn("montalu@100.118.174.27", joined)
+        # a couple of subdev stream accounts still contacted (no regression).
+        # #537: montalu was renamed to montalu1 (live 2026-08-19) — the
+        # numbered account is the real deployable target now.
+        self.assertIn("montalu1@100.118.174.27", joined)
         self.assertIn("marek@100.118.174.27", joined)
 
 

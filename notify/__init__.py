@@ -75,8 +75,7 @@ STREAM_NOTIFY_OWNER = {
     # linux user without touching Discord routing. marek deliberately stays
     # unnumbered (and out of this map, per the header comment above).
     "david1": "david",
-    "montalu": "zbynek",
-    "montalu1": "zbynek",
+    "montalu1": "zbynek",   # #537 rename of montalu (live 2026-08-19) — see the david1 comment above
     "montalu2": "zbynek",
     "montalu3": "zbynek",
     "montalu4": "marek",

@@ -171,12 +171,14 @@ class JobBehaviour(unittest.TestCase):
                             for ln in logs), logs)
 
     def test_reduced_stream_box_never_bounces(self):
-        # a requester (reduced-stream) home is skipped entirely.
+        # a requester (reduced-stream) home is skipped entirely. #537: the
+        # montalu box now runs as montalu1 (/home/montalu1), which _bounce_quals
+        # / _gkreq_supervisor_root recognise as a reduced stream via its home.
         rec = _Recorder()
         logs, _ = _run(
-            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:montalu"],
-              "has_line": False, "origin_stream": "montalu"}], rec,
-            roots={"/home/montalu/devel/odoo-erp": "odoo-erp"})
+            [{"number": 3316, "labels": ["needs-gatekeeper", "handed-by:montalu1"],
+              "has_line": False, "origin_stream": "montalu1"}], rec,
+            roots={"/home/montalu1/devel/odoo-erp": "odoo-erp"})
         self.assertEqual(rec.calls, [])
 
     def test_non_cross_stream_repo_never_bounces(self):
@@ -328,9 +330,11 @@ class RealFetch(unittest.TestCase):
     def test_parses_labels_body_and_line_in_a_COMMENT(self):
         # has_line must be True when the Self-service-checked line is in a
         # COMMENT (not the body) — the --issue-mode gk-request shape.
+        # #537: montalu renamed to montalu1, so a current handed-by carries the
+        # numbered name (_origin_reduced_stream reads it from _REDUCED_STREAM_USERS).
         view = {"3316": {"number": 3316,
                          "labels": [{"name": "needs-gatekeeper"},
-                                    {"name": "handed-by:montalu"}],
+                                    {"name": "handed-by:montalu1"}],
                          "body": "Zaseknutá fronta.",
                          "comments": [{"body": "GATEKEEPER-ACTION: reštart. "
                                        "Self-service-checked: čítal som z PROD "
@@ -341,7 +345,7 @@ class RealFetch(unittest.TestCase):
             out = cs._fetch_gk_action_requests("/repo")
         self.assertEqual(len(out), 1)
         self.assertTrue(out[0]["has_line"])
-        self.assertEqual(out[0]["origin_stream"], "montalu")
+        self.assertEqual(out[0]["origin_stream"], "montalu1")
 
     def test_no_line_anywhere_is_has_line_false(self):
         view = {"5": {"number": 5,

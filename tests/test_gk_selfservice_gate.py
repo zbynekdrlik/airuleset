@@ -146,8 +146,10 @@ class AuthorityScope(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_branch_merge_stream_also_gated(self):
+        # montalu1 (renamed from montalu, #537) is a branch-merge reduced
+        # stream — its gk-request without a self-service line is still gated.
         r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
-                '--comment "prod read"', user="montalu")
+                '--comment "prod read"', user="montalu1")
         self.assertEqual(r.returncode, 2, r.stderr)
 
 

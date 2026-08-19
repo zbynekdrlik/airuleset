@@ -50,31 +50,6 @@ REMOTE_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
     {
-        # Isolated montalu odoo dev stream — MIGRATED 2026-07-24 from dev1 to
-        # the subdev VPS (airuleset#33 + odoo-erp#1895; same box as marek and
-        # david: tailscale 100.118.174.27 / MagicDNS "subdev", public
-        # subdev.newlevel.media = fallback only — address by tailscale per
-        # machine-identities). The old dev1 account (uid 1001) is LOCKED with
-        # a ForceCommand redirect notice; /home/montalu on dev1 stays
-        # untouched as the rollback backup per the #1895 contract. Unlike
-        # marek/david, montalu authorizes the DEFAULT newlevel key (no
-        # gatekeeper_access identity — live-verified at the swap).
-        #
-        # #258 (2026-08-05): this exact key (dev1's own default
-        # ~/.ssh/id_ed25519, comment "david grena mac" for unrelated
-        # historical reasons — NOT david@subdev's key) got stripped from
-        # montalu's authorized_keys by a gatekeeper access review that
-        # mistook the misleading comment for the real cross-company
-        # david@subdev identity. Restored via root@subdev under a
-        # corrected comment. If push to montalu@subdev ever silently
-        # starts failing with "Permission denied" again, check
-        # authorized_keys FIRST before assuming a code regression.
-        "name": "montalu@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu",
-        "repo_path": "~/devel/airuleset",
-    },
-    {
         # montalu2/montalu3/montalu4 — three MORE full parallel montalu
         # streams (airuleset#251, odoo-erp#2961: "zhodné s dnešným
         # montalu" — same subdev box, same default-key shape, same
@@ -222,7 +197,7 @@ REMOTE_HOSTS = [
         # `identity` pinned: that same deploy.md file shows the ssh command
         # already working with NO -i flag from dev1 -- i.e. dev1's own
         # default key (~/.ssh/id_ed25519) is already authorized there, the
-        # same "default newlevel key, no identity" shape montalu@subdev
+        # same "default newlevel key, no identity" shape montalu1@subdev
         # already uses. Deliberately NOT the ~/.ssh/forestshop_dev_backup_pull
         # key found on dev1's disk -- its own comment
         # (forestshop-dev-backup-pull@dev1) marks it single-purpose for a
@@ -274,33 +249,41 @@ REMOTE_HOSTS = [
         "identity": "~/.ssh/spinbike_vps",
     },
     {
-        # montalu1/david1/simap1 (#537, 2026-08-18): the NUMBERED push targets
-        # for the base-stream rename, registered ALONGSIDE the base entries
-        # above so the fleet table already knows the coming names. They carry
-        # `"pending": True` because the LIVE unix rename has NOT happened yet —
-        # the accounts do NOT exist on subdev, so `_deployable_hosts()`
-        # (cli_remote.py) filters them out of EVERY ssh path (the deploy loop
-        # AND provision_subdev_soniox_key). This is fail2ban-critical:
-        # montalu1 authenticates via the shared default key/sshpass path, and a
-        # password attempt against a non-existent account is a fail2ban strike
-        # (#341/#300/#326). The live-op rename ticket removes the `"pending"`
-        # flag (and the old entry) once each account is created + verified.
-        # Identity mirrors the base: montalu1 = default newlevel key (no
-        # `identity`, like montalu); david1/simap1 = the operator
-        # gatekeeper_access identity (like david/simap).
-        "name": "montalu1@subdev",
-        "host": "100.118.174.27",
-        "user": "montalu1",
-        "repo_path": "~/devel/airuleset",
-        "pending": True,
-    },
-    {
+        # david1 (#537): the NUMBERED push target for the david->david1
+        # base-stream rename, registered ALONGSIDE the base david entry above
+        # so the fleet table already knows the coming name. It carries
+        # `"pending": True` because david's LIVE unix rename has NOT happened
+        # yet — the account does NOT exist on subdev, so `_deployable_hosts()`
+        # (cli_remote.py) filters it out of EVERY ssh path (the deploy loop,
+        # provision_subdev_soniox_key, AND the hourly fleet-burn job). This is
+        # fail2ban-critical: a key/password attempt against a non-existent
+        # account is a fail2ban strike (#341/#300/#326). The live-op rename
+        # ticket removes the `"pending"` flag (and the old entry) once the
+        # account is created + verified. Identity mirrors the base: david1 =
+        # the operator gatekeeper_access identity (like david). (montalu1 and
+        # simap1 are already renamed live — their entries are below.)
         "name": "david1@subdev",
         "host": "100.118.174.27",
         "user": "david1",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
         "pending": True,
+    },
+    {
+        # montalu1 — the renamed base montalu stream (was `montalu`; #537 live
+        # rename 2026-08-19: in-place usermod on subdev, uid 1002 kept, home
+        # moved to /home/montalu1, primary group renamed, linger re-enabled,
+        # ssh from dev1 with the montalu-family DEFAULT key verified; the old
+        # `montalu@subdev` entry + its AUTHORITY_BY_USER row are GONE — the OS
+        # account no longer exists). Unlike david1/simap1 it authenticates
+        # with the DEFAULT newlevel key (no `identity`, like montalu2..8) — the
+        # montalu family's shared default-key/sshpass path, never
+        # gatekeeper_access. Original history: airuleset#33 + odoo-erp#1895
+        # (migrated 2026-07-24 from dev1 to the subdev VPS).
+        "name": "montalu1@subdev",
+        "host": "100.118.174.27",
+        "user": "montalu1",
+        "repo_path": "~/devel/airuleset",
     },
     {
         # simap1 — the renamed 4th sub-dev stream (was `simap`; #537 live
@@ -339,7 +322,8 @@ AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 AUTHORITY_BY_USER = {
     "david": "fork-no-merge",
     "marek": "branch-merge",
-    "montalu": "branch-merge",
+    # montalu (airuleset#33) was renamed to montalu1 (#537, 2026-08-19) — its
+    # row moved to the numbered block below; the OS account `montalu` is gone.
     # simap (airuleset#143) was renamed to simap1 (#537, 2026-08-18) — its
     # row moved to the numbered block below; the OS account `simap` is gone.
     # montalu2/montalu3/montalu4 (airuleset#251, odoo-erp#2961): three MORE
@@ -363,15 +347,17 @@ AUTHORITY_BY_USER = {
     "montalu6": "branch-merge",
     "montalu7": "branch-merge",
     "montalu8": "branch-merge",
-    # montalu1/david1/simap1 (#537, 2026-08-18): the NUMBERED names for the
-    # base-stream rename (owner directive on #532 — montalu->montalu1,
-    # david->david1, simap->simap1; marek STAYS marek, deliberately NOT
-    # renamed). Added ALONGSIDE the base entries above (which stay until each
-    # live unix rename lands — removing them is the live-op ticket's job);
-    # each inherits its base's authority profile so the moment a box actually
-    # runs as the new name it resolves correctly. STREAM_RENAME_ALIASES
-    # (below) drives the transition alias so old `stream:<base>` tickets keep
-    # working during the switch, in BOTH directions.
+    # montalu1/david1/simap1 (#537): the NUMBERED names for the base-stream
+    # rename (owner directive on #532 — montalu->montalu1, david->david1,
+    # simap->simap1; marek STAYS marek, deliberately NOT renamed). montalu1
+    # (rename live 2026-08-19) and simap1 (rename live 2026-08-18) now run as
+    # the new OS account — their base row is gone; david1 stays a pre-rename
+    # ALIAS added ALONGSIDE its base david (which stays until david's live
+    # rename lands — removing it is the live-op ticket's job). Each inherits
+    # its base's authority profile so the moment a box runs as the new name it
+    # resolves correctly. STREAM_RENAME_ALIASES (below) drives the transition
+    # alias so old `stream:<base>` tickets keep working during the switch, in
+    # BOTH directions.
     "montalu1": "branch-merge",
     "david1": "fork-no-merge",
     "simap1": "fork-no-merge",

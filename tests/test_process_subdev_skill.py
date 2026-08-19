@@ -36,7 +36,7 @@ class TestSkillExistsAndScoped(TestCase):
                       airuleset.skill_names_for_user("gatekeeper"))
         self.assertIn("process-subdev",
                       airuleset.skill_names_for_user("newlevel"))
-        for u in ("david", "marek", "montalu"):
+        for u in ("david", "marek", "montalu1"):
             self.assertNotIn("process-subdev",
                              airuleset.skill_names_for_user(u), u)
 

@@ -335,15 +335,19 @@ class TestBounceBackstopSweepBudget(unittest.TestCase):
 
 class TestBounceQuals(unittest.TestCase):
     """Scoping is derived from the PANE's home dir, not the watchdog user:
-    montalu's claude runs inside NEWLEVEL's tmux (a `sudo su - montalu`
-    window), so newlevel's watchdog serves that pane — its cwd
-    /home/montalu/... names the stream, and the stream LABEL (the #1599
+    a stream's claude session's cwd (e.g. /home/montalu1/... after the #537
+    rename) names the stream, and the stream LABEL (the #1599
     convention) scopes the query; @me is useless (gh identity is the same
     zbynekdrlik account across boxes)."""
 
     def test_stream_home_scopes_by_label(self):
-        self.assertEqual(wd._bounce_quals("/home/montalu/devel/odoo-erp"),
-                         ["label:stream:montalu"])
+        # #537: montalu renamed to montalu1 (the box's home is /home/montalu1);
+        # _bounce_quals scopes by the /home/<name>/ path, so it follows the
+        # account. david is unchanged (its rename has not landed yet).
+        self.assertIn("montalu1", wd._REDUCED_STREAM_USERS)
+        self.assertNotIn("montalu", wd._REDUCED_STREAM_USERS)
+        self.assertEqual(wd._bounce_quals("/home/montalu1/devel/odoo-erp"),
+                         ["label:stream:montalu1"])
         self.assertEqual(wd._bounce_quals("/home/david/devel/x"),
                          ["label:stream:david"])
 
@@ -377,7 +381,7 @@ class TestBounceQuals(unittest.TestCase):
         # Full authority = the core slice (same exclusions as tickets-status).
         quals = wd._bounce_quals("/home/newlevel/devel/demo")
         self.assertEqual(len(quals), 1)
-        for u in ("david", "marek", "montalu", "montalu2", "montalu3",
+        for u in ("david", "marek", "montalu1", "montalu2", "montalu3",
                   "montalu4", "david2", "david3", "david4"):
             self.assertIn("-label:stream:%s" % u, quals[0])
 
@@ -673,7 +677,7 @@ class TestForeignTmuxUserNeverPings(unittest.TestCase):
             logs = wd.bounce_backstop(
                 time.time(), FakeTmux([]), {},
                 lambda b, **k: pings.append(b), home=home,
-                gh_fetch=lambda r: [1727], user="montalu",
+                gh_fetch=lambda r: [1727], user="montalu1",
                 cross_stream_repos={"demo"})
             self.assertTrue(pings, "montalu is no longer foreign-tmux — "
                             "job 8 must run normally, not no-op")

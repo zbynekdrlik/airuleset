@@ -136,8 +136,9 @@ def _soniox_key_line(source: Path = None):
 def _deployable_hosts(hosts=None):
     """`REMOTE_HOSTS` entries that are LIVE ssh/deploy targets — i.e. NOT
     flagged `"pending": True` (#537). A pending entry names a base-stream
-    rename target (`montalu1`/`david1`/`simap1`) whose LIVE unix rename has
-    not landed yet, so the account does NOT exist on the box. BOTH ssh paths —
+    rename target whose LIVE unix rename has not landed yet (montalu1 and
+    simap1 already landed — only `david1` is still pending), so the account
+    does NOT exist on the box. BOTH ssh paths —
     `cmd_push()`'s deploy loop AND `provision_subdev_soniox_key()` — filter
     through here so a pending target is NEVER contacted: a password/pubkey
     attempt against a non-existent account is a fail2ban strike
@@ -200,9 +201,9 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     control_opts = list(control_opts or [])
     import airuleset  # #433 L-E: REMOTE_HOSTS/AUTHORITY_BY_USER promoted to cli_fleet, read via facade
     # #537: filter pending (not-yet-live rename) targets out FIRST — a pending
-    # montalu1 IS in AUTHORITY_BY_USER, so it would otherwise pass the
+    # david1 IS in AUTHORITY_BY_USER, so it would otherwise pass the
     # stream-account filter and get an ssh (fail2ban strike against a
-    # non-existent account).
+    # non-existent account). (montalu1/simap1 renames already landed.)
     targets = [h for h in _deployable_hosts(hosts)
                if h.get("user") in airuleset.AUTHORITY_BY_USER or h.get("soniox")]
     if not targets:
@@ -394,9 +395,9 @@ SSH_RETRY_MAX_ATTEMPTS = 3
 # #358 adversarial-review F1 (MAJOR, measured against the real
 # REMOTE_HOSTS list): 60s was sized as "a few seconds to low tens of
 # seconds" between an account's deploy call and its LATER soniox-key call
-# -- but those two calls are NOT adjacent. montalu@subdev sits at deploy-
-# loop index 2 and is also soniox-phase's FIRST target, so its own real
-# gap is TEN complete `git pull --ff-only && python3 airuleset.py install`
+# -- but those two calls are NOT adjacent. A montalu-family account near
+# the top of the deploy loop that is also an early soniox-phase target has
+# a real gap of TEN complete `git pull --ff-only && python3 airuleset.py install`
 # runs for every OTHER account still queued in the deploy loop -- a
 # budget this file's own REMOTE_DEPLOY_TIMEOUT_S sizes at up to 1560s
 # EACH for a slow first-time install (apt-get + claude-CLI curl +
