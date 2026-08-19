@@ -894,8 +894,9 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
     # can never outlive its request, which itself has the 30-min age cap, so this
     # is bounded with no separate age reaper needed.
     aborts = state.setdefault("goal_stash_abort", {}) if state is not None else {}
-    for _dead in [k for k in aborts if k not in reqs]:
-        aborts.pop(_dead, None)
+    if not dry_run:      # #516 -- a dry-run must not mutate persisted state
+        for _dead in [k for k in aborts if k not in reqs]:
+            aborts.pop(_dead, None)
     for sid, entry in list(reqs.items()):
         if not isinstance(entry, dict):
             continue
