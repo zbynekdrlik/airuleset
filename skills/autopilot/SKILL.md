@@ -184,6 +184,17 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   `ops-wait`=W, or carrying a delivered owner-question → U) instead of letting it rot in `I` until the
   owner asks (montalu3); the JUDGMENT stays in the session, only the scheduler is mechanical — the
   supervisor still sets/clears every label with evidence.
+  **stale! freshness tag is MECHANICAL (#570) — W = tlač dopredu KAŽDÝ deň:** `W` is NEVER passive
+  waiting — if `W N`, that is N things you must PUSH FORWARD every day so they move: at least a 1×/day
+  reminder to the third party AND a re-verification that the blocker STILL holds by RE-READING the
+  referenced (cross-repo) ticket, never from memory — each recorded as a COMMENT on the ticket (that
+  comment IS the freshness evidence). Owner (2026-08-19, verbatim): "Ak je W 15 tak je 15 veci ktore
+  mas pushovat dopredu aby sa to pohlo. Nie ze ... cakas x dni na nejake info v discussion odoo a vobec
+  si tych ludi aspon raz denne nepovzbudil." Mechanized: `core-quals`/`slice-quals --ops-wait` tags
+  `stale!` any W member with NO fresh (≤24h) stream-authored push comment (never a false accusation — a
+  gh error / zero comments / unresolvable identity leaves it UNTAGGED), and the ~daily nudge NAMES the
+  stale members with the required action (re-verify the blocker + remind the third party TODAY, with a
+  ticket comment).
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do

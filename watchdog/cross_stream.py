@@ -1271,9 +1271,16 @@ def gk_selfservice_bounce(now, run, state, home=None, dry_run=False,
 #       manually-labeled-then-cleared ticket is not an orphan),
 #   (f) the title does not carry the `GATEKEEPER-ACTION` prefix (job 11's
 #       in:title query already surfaces those).
-# A "proper marker present but never labeled" case (gk may have worked it
-# directly from the comment) is deliberately LEFT to manual triage — that is
-# the exact "line-present-but-pure-read" judgement #516 forbids mechanizing.
+# A "proper marker present but never labeled" case was ORIGINALLY (#551) left to
+# manual triage. #570 now MECHANIZES exactly that case — but SAFELY, in a
+# SEPARATE parallel pass (`_gk_comment_handoff_pass`, below), NOT by relaxing
+# THIS mutated decider: a proper `GATEKEEPER-ACTION:`/`READY-FOR-REVIEW:` marker
+# is reconciled ONLY when its COMMENT was created within a bounded ~48h window
+# AND the target label was NEVER applied (paginated timeline) — the two defenses
+# that keep the pervasive-token minefield (~44 processed tickets) from being
+# re-labelled. It is NOT the #516-forbidden "line-present-but-pure-read"
+# judgement (that stays manual): the window + never-labeled gate is a
+# FALSIFIABLE mechanical signal, not a read-vs-action prose classification.
 # --------------------------------------------------------------------------- #
 
 # Marker classifiers, applied PER LINE (re.match anchors each line's start).
@@ -1293,6 +1300,60 @@ _GK_PROPER_MARKER_RE = re.compile(r'[ \t]{0,3}GATEKEEPER-ACTION[ \t]*:')
 _GK_MUTATED_MARKER_RE = re.compile(
     r'[ \t]{0,3}GATEKEEPER-ACTION[ \t]*[(\[][^\n:]{0,80}:')
 _GK_FENCE_RE = re.compile(r'[ \t]{0,3}(```|~~~)')
+
+# #570 — the PROPER `READY-FOR-REVIEW:` hand-off marker (the reduced-authority
+# fork-no-merge / branch-merge hand-off convention). Same GENEROUS proper shape
+# as `_GK_PROPER_MARKER_RE` (line-start token, optional horizontal ws, colon —
+# `[ \t]` never `\s`, biasing toward SILENCE). Its matching label is
+# `ready-for-review`.
+_GK_READY_MARKER_RE = re.compile(r'[ \t]{0,3}READY-FOR-REVIEW[ \t]*:')
+
+# #570 — the comment-handoff backstop's marker→label mapping + the downstream
+# gatekeeper-FLOW labels that mean "gk already engaged" (so a marker on such a
+# ticket is NOT an un-delivered hand-off — the #551 #4128 false-positive class,
+# generalised): `needs-gatekeeper` is superseded by review OR acceptance;
+# `ready-for-review` is superseded by acceptance (already reviewed).
+_GK_COMMENT_HANDOFF_MARKERS = (
+    (_GK_PROPER_MARKER_RE, "GATEKEEPER-ACTION", "needs-gatekeeper",
+     frozenset({"ready-for-review", "needs-acceptance"})),
+    (_GK_READY_MARKER_RE, "READY-FOR-REVIEW", "ready-for-review",
+     frozenset({"needs-acceptance"})),
+)
+
+# The bounded window (env AIRULESET_GK_COMMENT_HANDOFF_WINDOW_S): only a PROPER
+# marker comment CREATED within this many seconds counts as a live hand-off.
+# This is the PRIMARY false-positive defense — the token is on ~44 already-
+# processed tickets forever, whose markers are OLD (outside the window); a
+# genuine bot-comment-automation-miss is RECENT. 48h (> the job's own 6h
+# GKORPHAN cadence, so no hand-off is ever missed between sweeps), floored so a
+# units error can't collapse it. Also the COST bound: the searches use
+# `updated:>=<window>` so only recently-updated tickets are ever fetched.
+GK_COMMENT_HANDOFF_WINDOW_S = 48 * 3600
+GK_COMMENT_HANDOFF_WINDOW_MIN_S = 6 * 3600
+# Cap on candidate detail fetches per marker-type per sweep (the #172/#504
+# per-sweep-budget class): a window-bounded search returns few (only tickets
+# updated in the window), but a units error / a burst is bounded here too.
+# Overflow is UNSEEN (the safe direction — job 11's own stale-handoff alarm is a
+# separate backstop for a parked one). 20 (not larger) keeps the COMBINED worst
+# case (2 marker types × this + #551's own ~60 views, all in the same 6h-
+# cadenced 120s sweep) well inside budget (#570 review 🔵).
+GK_COMMENT_HANDOFF_MAX_CANDIDATES = 20
+
+
+def _comment_handoff_window_s():
+    """The effective comment-handoff window: the env override
+    (AIRULESET_GK_COMMENT_HANDOFF_WINDOW_S), FLOORED at
+    GK_COMMENT_HANDOFF_WINDOW_MIN_S so a units error (a sub-6h value) can never
+    collapse the primary false-positive defense to a tiny window (which would
+    still be safe — narrower = fewer candidates — but the floor keeps the
+    documented behavior honest and matches the sibling `_cadence` pattern in
+    ops_wait_recheck)."""
+    try:
+        v = int(os.environ.get("AIRULESET_GK_COMMENT_HANDOFF_WINDOW_S",
+                               GK_COMMENT_HANDOFF_WINDOW_S))
+    except (ValueError, TypeError):
+        v = GK_COMMENT_HANDOFF_WINDOW_S
+    return max(v, GK_COMMENT_HANDOFF_WINDOW_MIN_S)
 
 _GKORPHAN_EVIDENCE_TEMPLATE = (
     "gk hand-off backstop (airuleset#551): tento tiket nesie MUTOVANÝ "
@@ -1445,24 +1506,205 @@ def _fetch_gk_orphan_candidates(root, home=None):
     return out
 
 
-def _gk_ever_labeled(root, num, env):
-    """Was `needs-gatekeeper` EVER applied to issue `num` (PAGINATED timeline —
-    a labeled event can sit past the first page, #551 live finding)? True /
-    False / None (unreadable → fail-safe not-orphan). `gh api` substitutes
-    {owner}/{repo} from the checkout at `root`."""
+def _gk_ever_labeled(root, num, env, label="needs-gatekeeper"):
+    """Was `label` (default `needs-gatekeeper`) EVER applied to issue `num`
+    (PAGINATED timeline — a labeled event can sit past the first page, #551 live
+    finding)? True / False / None (unreadable → fail-safe not-orphan). `gh api`
+    substitutes {owner}/{repo} from the checkout at `root`. The `label` param
+    (#570) lets the comment-handoff backstop ask the SAME question for a
+    `ready-for-review` hand-off, sharing this one paginated-timeline reader."""
     import subprocess
     try:
         r = subprocess.run(
             ["gh", "api", "--paginate",
              "repos/{owner}/{repo}/issues/%d/timeline" % int(num),
              "--jq", '.[]|select(.event=="labeled" and '
-                     '.label.name=="needs-gatekeeper")|.label.name'],
+                     '.label.name=="%s")|.label.name' % label],
             cwd=root, env=env, capture_output=True, text=True, timeout=20)
         if r.returncode != 0:
             return None
-        return "needs-gatekeeper" in (r.stdout or "")
+        return label in (r.stdout or "")
     except Exception:
         return None
+
+
+# --------------------------------------------------------------------------- #
+# #570 — comment-handoff backstop for a PROPER `GATEKEEPER-ACTION:` /
+# `READY-FOR-REVIEW:` marker COMMENT that never got its matching label (the repo
+# auto-label workflow does not fire on a stream-BOT comment; a reduced stream
+# cannot add labels — 403). This is the COMPLEMENT of the MUTATED-marker case
+# above (which #551 explicitly leaves the proper case to manual triage). Runs as
+# a PARALLEL pass in `gk_orphan_marker_sweep`; the mutated decider/fetch are
+# untouched (minimal blast radius on just-merged safety-critical code).
+#
+# False-positive minefield (SAME as #551): the proper token is on ~44 processed
+# tickets forever. Defended by the SAME six-condition ANDed gate biased to
+# SILENCE — but the two load-bearing defenses here are the BOUNDED WINDOW (a
+# processed ticket's marker is OLD → out of window) + the NEVER-LABELED
+# paginated timeline (`_gk_ever_labeled` for the TARGET label — catches a
+# "processed <48h ago, label removed" edge). Bias: never a false label add.
+# --------------------------------------------------------------------------- #
+
+
+def _gk_proper_marker_in_window(comments, marker_re, now, window_s):
+    """True iff ANY comment carries a PROPER `marker_re` marker (line-start,
+    OUTSIDE a fenced code block — the same `_gk_non_fenced_lines` discipline the
+    mutated classifier uses) AND that comment was CREATED within `window_s` of
+    `now`. `comments` is the `gh issue view --json comments` list (each a dict
+    with `body` + `createdAt`). An unparsable/absent `createdAt` reads as
+    OUT-of-window (fail-safe — a marker we cannot date never counts as a live
+    hand-off). Pure; no gh."""
+    for c in comments or []:
+        if not isinstance(c, dict):
+            continue
+        ts = watchdog._parse_gh_ts(c.get("createdAt"))
+        if ts is None or (now - ts) > window_s or ts > now + window_s:
+            continue
+        for line in _gk_non_fenced_lines(c.get("body")):
+            if marker_re.match(line):
+                return True
+    return False
+
+
+def _gk_comment_handoff_decide(marker_in_window, currently_labeled,
+                               handoff_flow, ever_labeled):
+    """PURE facts-in / verdict-out (#486 — the caller LOGS every verdict).
+    Returns (is_handoff, reason). A candidate is an UN-DELIVERED comment
+    hand-off iff ALL hold; every exclusion returns an explicit reason. Biased
+    HARD to SILENCE — `ever_labeled is None` (timeline unreadable) is NOT a
+    hand-off (fail-safe, never a false label add on an unmeasurable fact)."""
+    if not marker_in_window:
+        return False, "no-proper-marker-in-window"
+    if currently_labeled:
+        return False, "already-labeled"
+    if handoff_flow:
+        return False, "in-gatekeeper-flow"      # review/acceptance engaged
+    if ever_labeled is None:
+        return False, "timeline-undeterminable"  # fail-safe: never label
+    if ever_labeled:
+        return False, "was-labeled-then-cleared"
+    return True, "orphaned-comment-handoff"
+
+
+def _fetch_gk_comment_handoffs(root, home, now, window_s):
+    """Live candidate facts for the comment-handoff backstop at `root`, or None
+    on ANY error (fail-safe — an auth/network hiccup must never look like a real
+    hand-off). Returns a list of dicts, each with what `_gk_comment_handoff_decide`
+    needs PLUS `target_label`: `{number, target_label, marker_in_window,
+    currently_labeled, handoff_flow, ever_labeled}`.
+
+    Per marker type (`GATEKEEPER-ACTION`→`needs-gatekeeper`,
+    `READY-FOR-REVIEW`→`ready-for-review`) ONE cheap search narrows the field —
+    the token in a comment, NOT currently carrying the target label, and
+    `updated:>=<window date>` so only RECENTLY-updated tickets are fetched (the
+    cost + primary false-positive bound). The search's own filters LAG/TOKENIZE,
+    so nothing it says is trusted — a per-candidate `gh issue view` supplies the
+    authoritative labels/comments, and the PROPER marker + its comment's
+    createdAt are checked client-side (`_gk_proper_marker_in_window`). The
+    PAGINATED timeline read (`ever_labeled` for the TARGET label) fires ONLY for
+    a candidate already past the cheap gate (marker-in-window ∧ ¬labeled ∧
+    ¬flow) — ≈0 per sweep on real data. `GK_COMMENT_HANDOFF_MAX_CANDIDATES`
+    caps the detail fetches per marker type."""
+    import subprocess
+    env = _gh_env(home)
+    from datetime import datetime, timezone
+    since = datetime.fromtimestamp(
+        max(0.0, now - window_s), tz=timezone.utc).strftime("%Y-%m-%d")
+    out = []
+    for marker_re, token, target_label, flow_labels in _GK_COMMENT_HANDOFF_MARKERS:
+        try:
+            r = subprocess.run(
+                ["gh", "issue", "list", "--state", "open", "--search",
+                 '"%s" in:comments -label:%s updated:>=%s %s'
+                 % (token, target_label, since, watchdog.AUTOPILOT_SKIP_EXCL),
+                 "-L", str(GK_COMMENT_HANDOFF_MAX_CANDIDATES),
+                 "--json", "number,title,updatedAt"],
+                cwd=root, env=env, capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                return None
+            rows = json.loads(r.stdout or "[]")
+        except Exception:
+            return None
+        # freshest first — a live hand-off is a recently-touched ticket.
+        rows.sort(key=lambda x: str(x.get("updatedAt") or ""), reverse=True)
+        for x in rows[:GK_COMMENT_HANDOFF_MAX_CANDIDATES]:
+            num = x.get("number")
+            try:
+                v = subprocess.run(
+                    ["gh", "issue", "view", str(num), "--json",
+                     "number,title,labels,comments"],
+                    cwd=root, env=env, capture_output=True, text=True, timeout=15)
+                if v.returncode != 0:
+                    return None
+                d = json.loads(v.stdout or "{}")
+            except Exception:
+                return None
+            labels = {str((lb or {}).get("name", ""))
+                      for lb in (d.get("labels") or []) if isinstance(lb, dict)}
+            comments = [c for c in (d.get("comments") or []) if isinstance(c, dict)]
+            marker_in_window = _gk_proper_marker_in_window(
+                comments, marker_re, now, window_s)
+            currently_labeled = target_label in labels
+            handoff_flow = bool(labels & flow_labels)
+            ever_labeled = None
+            if marker_in_window and not currently_labeled and not handoff_flow:
+                ever_labeled = _gk_ever_labeled(root, num, env, label=target_label)
+            out.append({"number": num, "target_label": target_label,
+                        "marker_in_window": marker_in_window,
+                        "currently_labeled": currently_labeled,
+                        "handoff_flow": handoff_flow,
+                        "ever_labeled": ever_labeled})
+    return out
+
+
+_GK_HANDOFF_EVIDENCE_TEMPLATE = (
+    "gk hand-off backstop (airuleset#570): tento tiket nesie PROPER "
+    "`%(marker)s` hand-off marker v KOMENTÁRI (za posledné ~2 dni), ale "
+    "`%(label)s` label nikdy nedopadol — repo auto-label workflow nefiruje na "
+    "komenty stream-bot účtu a reduced stream nemá práva pridať label. Doplnil "
+    "som `%(label)s` zo supervisor strany, aby gk fronta hand-off zdvihla. Ak "
+    "je to omyl (hand-off je už vybavený), label odober.")
+
+_GK_HANDOFF_PING_TEMPLATE = (
+    "⚠️ **%(name)s: orphaned comment hand-off #%(num)d**\n> Tiket nesie PROPER "
+    "hand-off marker v komente bez `%(label)s` labelu (workflow ho na stream-bot "
+    "komente minul), ale label sa nepodarilo doplniť automaticky. Skontroluj "
+    "#%(num)d v `%(root)s` — hand-off pravdepodobne nebol doručený gk fronte.")
+
+
+def _apply_gk_comment_handoff_reconcile(root, num, target_label, home=None,
+                                        dry_run=False):
+    """Reconcile ONE orphaned comment hand-off: post the evidence comment
+    (durable record FIRST), then add `target_label` (queue re-insertion — the
+    existing quals/job-11 flow then surfaces it). Returns a TRI-STATE (never
+    raises), the SAME shape + rationale as `_apply_gk_orphan_reconcile`:
+      "comment-failed" — nothing posted; caller undoes the dedup + retries,
+      "labeled"        — comment + label both landed,
+      "label-failed"   — the comment posted but the label did NOT; caller KEEPS
+                         the dedup (never re-posting the comment) and pings once.
+    The evidence text is marker-specific (GATEKEEPER-ACTION vs READY-FOR-REVIEW)."""
+    if dry_run:
+        return "labeled"
+    import subprocess
+    env = _gh_env(home)
+
+    def _gh(*args):
+        try:
+            return subprocess.run(["gh"] + list(args), cwd=root, env=env,
+                                  capture_output=True, text=True, timeout=15)
+        except Exception:
+            return None
+
+    marker = ("GATEKEEPER-ACTION" if target_label == "needs-gatekeeper"
+              else "READY-FOR-REVIEW")
+    body = _GK_HANDOFF_EVIDENCE_TEMPLATE % {"marker": marker, "label": target_label}
+    c = _gh("issue", "comment", str(num), "--body", body)
+    if c is None or c.returncode != 0:
+        return "comment-failed"
+    lab = _gh("issue", "edit", str(num), "--add-label", target_label)
+    if lab is not None and lab.returncode == 0:
+        return "labeled"
+    return "label-failed"
 
 
 def _apply_gk_orphan_reconcile(root, num, home=None, dry_run=False):
@@ -1499,10 +1741,65 @@ def _apply_gk_orphan_reconcile(root, num, home=None, dry_run=False):
     return "label-failed"
 
 
+def _gk_comment_handoff_pass(root, name, now, dry_run, handoff_fetch,
+                             handoff_apply, send_fn, seen, persist):
+    """#570 — the PARALLEL comment-handoff pass for ONE root, run inside
+    `gk_orphan_marker_sweep`'s per-root loop AFTER the mutated pass. Extracted
+    module-level so the sweep function stays small (the #509/#511 capped-function
+    lesson). Fetches proper-marker-in-window candidates (`handoff_fetch(root)`),
+    decides (`_gk_comment_handoff_decide`), and reconciles (add the TARGET label
+    + evidence comment) via `handoff_apply(root, num, label)`. Own `handoff:`
+    dedup sub-namespace in the SHARED `seen`, same kill-safe persist-before-
+    mutate + tri-state + #516 dry-run-no-latch discipline as the mutated pass.
+    Returns log lines. Never raises (the caller's per-job try/except is the
+    final net; this stays defensive so one bad root never kills the pass)."""
+    logs = []
+    candidates = handoff_fetch(root)
+    if candidates is None:
+        return logs                            # gh error → keep prior state
+    for c in candidates:
+        num = c.get("number")
+        target_label = c.get("target_label")
+        is_handoff, reason = _gk_comment_handoff_decide(
+            c.get("marker_in_window"), c.get("currently_labeled"),
+            c.get("handoff_flow"), c.get("ever_labeled"))
+        key = "handoff:%s#%s" % (name, num)
+        if not is_handoff:
+            logs.append("gk-handoff-skip %s (%s)" % (key, reason))
+            continue
+        if key in seen:
+            logs.append("gk-handoff-already %s" % key)
+            continue
+        if dry_run:
+            logs.append("gk-handoff-reconcile %s (dry-run)" % key)
+            continue
+        seen[key] = int(now)                   # dedup BEFORE the mutation (#193)
+        persist()
+        result = handoff_apply(root, num, target_label)
+        if result == "labeled":
+            logs.append("gk-handoff-reconcile %s (labeled %s + evidence)"
+                        % (key, target_label))
+        elif result == "label-failed":
+            send_fn(_GK_HANDOFF_PING_TEMPLATE
+                    % {"name": name, "num": num, "root": root,
+                       "label": target_label},
+                    dedup_key="gkhandoff:%s:%d" % (key, int(now)),
+                    dry_run=dry_run, project=name)
+            logs.append("gk-handoff-reconcile %s (evidence posted; label add "
+                        "failed — pinged, not re-posted)" % key)
+        else:  # "comment-failed" — nothing posted, so retry is safe.
+            seen.pop(key, None)
+            persist()
+            logs.append("gk-handoff-reconcile-failed %s (comment did not post; "
+                        "retry next sweep)" % key)
+    return logs
+
+
 def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
                            gh_fetch=None, apply_fn=None, interval=None,
-                           persist=None, user=None):
-    """Job 36 (#551) — see the section comment. Runs ONLY on a supervisor
+                           persist=None, user=None, handoff_fetch=None,
+                           handoff_apply=None):
+    """Job 36 (#551 + #570) — see the section comment. Runs ONLY on a supervisor
     (full-authority) box (`_gkreq_supervisor_root`), for cross-stream repos
     (`_repo_in_cross_stream_flow`); a reduced-stream box never reconciles (it
     is the REQUESTER). Mutates state['gkorphan']; `persist` is invoked BEFORE
@@ -1510,7 +1807,16 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
     dedup is a ONE-SHOT latch (a reconciled ticket gets the label → the next
     sweep's decider returns `already-labeled`), so `dry_run` must NOT persist
     it (#516 F1). Every candidate's verdict is logged (#486). Best-effort
-    (never raises). Returns log lines."""
+    (never raises). Returns log lines.
+
+    #570 — a SECOND, PARALLEL pass (`_gk_comment_handoff_pass`) runs per root
+    when `handoff_fetch` is wired (the "wired = on" convention: an existing
+    #551-only caller that passes no `handoff_fetch` runs ONLY the mutated pass,
+    byte-identical + network-free). It reconciles a PROPER
+    `GATEKEEPER-ACTION:`/`READY-FOR-REVIEW:` marker COMMENT (created in the last
+    ~48h) that never got its matching label — adding the label so the gk queue
+    sees the hand-off. Its `handoff:` dedup sub-namespace lives in the SAME
+    `seen` dict."""
     interval = watchdog.GKORPHAN_INTERVAL if interval is None else interval
     if user is None:
         import getpass
@@ -1530,6 +1836,11 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
     fetch = gh_fetch or (lambda root: _fetch_gk_orphan_candidates(root, home))
     apply_reconcile = apply_fn or (
         lambda root, num: _apply_gk_orphan_reconcile(root, num, home, dry_run))
+    # #570 — the comment-handoff pass is wired = on. When `handoff_fetch` is not
+    # given (an existing #551-only caller), the pass is skipped entirely.
+    happly = handoff_apply or (
+        lambda root, num, label: _apply_gk_comment_handoff_reconcile(
+            root, num, label, home, dry_run))
     persist = persist or (lambda: None)
     persist()                                  # cadence stamp survives a kill
     logs = []
@@ -1544,6 +1855,13 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
         if not _repo_in_cross_stream_flow(root):
             continue                           # not a gatekeeper<->sub-dev repo
         name = os.path.basename(root.rstrip("/"))
+        # #570 — the PARALLEL comment-handoff pass (proper marker in window). A
+        # gh error inside it keeps prior state for THAT root; it never blocks the
+        # mutated pass below. Skipped entirely when `handoff_fetch` is unwired.
+        if handoff_fetch is not None:
+            logs += _gk_comment_handoff_pass(
+                root, name, now, dry_run, handoff_fetch, happly, send_fn,
+                seen, persist)
         candidates = fetch(root)
         if candidates is None:
             continue                           # gh error → keep prior state

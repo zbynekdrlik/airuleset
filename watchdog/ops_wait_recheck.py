@@ -211,16 +211,43 @@ def _fmt_age(seconds):
     return "~%dd" % int(seconds // 86400)
 
 
+def _member_numbers(members):
+    """The issue NUMBERS of a parked-W member list, tolerant of BOTH the #570
+    structured shape (`[{"number": int, "stale": bool}, ...]`, from
+    `_watchdog_ops_wait_fetch`) AND a legacy bare `int` (an older fetch, or an
+    existing int-based test) — so the decider/sig/nudge machinery is unchanged
+    for the int case and enriched for the dict case. A malformed element is
+    dropped (never raises)."""
+    out = []
+    for m in members or []:
+        if isinstance(m, bool):
+            continue
+        if isinstance(m, int):
+            out.append(m)
+        elif isinstance(m, dict) and isinstance(m.get("number"), int):
+            out.append(m["number"])
+    return out
+
+
+def _stale_numbers(members):
+    """The subset of `_member_numbers` flagged `stale!` — only the #570
+    structured shape carries staleness, so a legacy int list yields an EMPTY
+    set (no stale sub-clause, the safe/unchanged direction)."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and m.get("stale")
+            and isinstance(m.get("number"), int)]
+
+
 def _sig(members):
     """A stable signature of the parked W set (sorted numbers, comma-joined) —
     stored so a reader can see WHICH tickets a rec is tracking, and so a future
     set-change refinement has a hook. Numeric sort so the sig is order-stable."""
-    return ",".join(str(n) for n in sorted(members))
+    return ",".join(str(n) for n in sorted(_member_numbers(members)))
 
 
 def _members_line(members):
     """`#A #B #C` for the nudge text, oldest-number-first for stable reading."""
-    return " ".join("#%d" % n for n in sorted(members))
+    return " ".join("#%d" % n for n in sorted(_member_numbers(members)))
 
 
 def _partition_sig(i_count, w_members):
@@ -328,6 +355,17 @@ _W_CLAUSE = (
     "dorazil, zlož `ops-wait` s dôkazom a vráť tiket do práce; ak sa stále čaká, "
     "potvrď to.")
 
+# The #570 stale sub-clause — appended to the W clause when any parked W member
+# has gone COLD (no fresh ≤24h stream-push evidence: `stale!` in `--ops-wait`,
+# parsed by `_watchdog_ops_wait_fetch` into `member["stale"]`). NAMES the stale
+# members and states the doctrine action: re-verify the blocker by RE-READING
+# the referenced ticket + remind the third party TODAY with a ticket comment
+# (that comment IS the freshness evidence — #570 bod 3 "tlač dopredu každý deň").
+_W_STALE_CLAUSE = (
+    "STALE (žiadna evidencia >24h) %s: over blocker RE-ČÍTANÍM referencovaného "
+    "tiketu a pripomeň sa tretej strane DNES komentárom na tikete (ten komentár "
+    "JE evidencia).")
+
 
 def _nudge_text(i_count, w_members, now, w_first_seen):
     """The partition-audit keystroke injected into the armed loop. Carries the
@@ -347,6 +385,10 @@ def _nudge_text(i_count, w_members, now, w_first_seen):
         age = (_fmt_age(now - w_first_seen)
                if isinstance(w_first_seen, (int, float)) else "?")
         clauses.append(_W_CLAUSE % (_members_line(w_members), age))
+        stale = _stale_numbers(w_members)
+        if stale:
+            clauses.append(_W_STALE_CLAUSE
+                           % " ".join("#%d" % n for n in sorted(stale)))
     return (
         "stuck-check: partition-audit — over či `I`/`W` labely tvojho `/goal` "
         "partition sedia s doktrínou #526/#539. %s Label mení supervisor s "

@@ -52,7 +52,8 @@ def _row_action(row, own_stream=None):
     return airuleset.ROW_IMPLEMENT
 
 
-def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None):
+def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
+                      stale_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -71,8 +72,15 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None):
     carry NO delivered question — ` no-question!` is APPENDED to their reason
     column (a space-separated warning WITHIN field 3, so the tab-field layout
     is unchanged), mechanizing the #527 invariant. Only meaningful alongside
-    `reason_fn`."""
+    `reason_fn`.
+
+    `stale_numbers` (#570, `--ops-wait` only): a set of W-member numbers with
+    NO fresh (≤24h) evidence of a stream push — ` stale!` is APPENDED to their
+    reason column, the SAME space-separated-within-field-3 mechanism as
+    `flag_numbers`. Only meaningful alongside `reason_fn`; a member can carry
+    both warnings (order: no-question! then stale!)."""
     flag_numbers = flag_numbers or set()
+    stale_numbers = stale_numbers or set()
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
         action = _row_action(row, own_stream)
@@ -83,6 +91,8 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None):
             reason = reason_fn(row.get("labels"))
             if n in flag_numbers:
                 reason = (reason + " no-question!").strip()
+            if n in stale_numbers:
+                reason = (reason + " stale!").strip()
             print("%s\t%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
                                           action, reason,
                                           row.get("title") or ""))
@@ -450,8 +460,13 @@ def cmd_slice_quals(args):
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
         # (external event/evidence) so they are distinguishable in the listing.
+        # #570: also tag `stale!` a member with no fresh (≤24h) stream-push
+        # evidence — one per-member `gh issue view` on this on-demand path (the
+        # #539 `no-question!` shape), never on the hot footer refresh.
         _print_issue_rows(ops_wait, own_stream=user,
-                          reason_fn=airuleset._ops_wait_reason)
+                          reason_fn=airuleset._ops_wait_reason,
+                          stale_numbers=airuleset._stale_ops_wait_flagged(
+                              ops_wait, cwd=root))
         return
     if want_waiting:
         # #512: each labeled member gets a reason tag (answer/decision/
@@ -632,8 +647,12 @@ def cmd_core_quals(args):
         # own_stream=None: a full-authority box owns no stream, so EVERY
         # stream-labelled row is action-only. #526: tag each W member
         # `acceptance` (client thread sent) vs `ops-wait` (external event).
+        # #570: also tag `stale!` a member with no fresh (≤24h) stream-push
+        # evidence (one per-member `gh issue view`, on-demand path only).
         _print_issue_rows(ops_wait, own_stream=None,
-                          reason_fn=airuleset._ops_wait_reason)
+                          reason_fn=airuleset._ops_wait_reason,
+                          stale_numbers=airuleset._stale_ops_wait_flagged(
+                              ops_wait, cwd=root))
         return
     if want_waiting:
         # own_stream=None: a full-authority box owns no stream, so EVERY

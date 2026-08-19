@@ -3410,6 +3410,20 @@ def _watchdog_gkorphan_fetch(root):
     return _fetch_gk_orphan_candidates(root)
 
 
+def _watchdog_gkorphan_handoff_fetch(root):
+    """Job 36's #570 comment-handoff real gh fetch — the PROPER
+    `GATEKEEPER-ACTION:`/`READY-FOR-REVIEW:` marker-comment-in-window candidate
+    facts (window-bounded `in:comments` searches narrowed by per-candidate
+    comment/label/timeline reads). Computes its own `now` (a ms skew across a
+    48h window is irrelevant) and uses the default gh env (home=None), exactly
+    like `_watchdog_gkorphan_fetch`. Same network-free-tests wiring as jobs
+    8/11/31: run_once gates the whole handoff pass on THIS being wired."""
+    import time as _t
+    from watchdog import _comment_handoff_window_s, _fetch_gk_comment_handoffs
+    return _fetch_gk_comment_handoffs(root, None, _t.time(),
+                                      _comment_handoff_window_s())
+
+
 def _watchdog_owner_decision_fetch(home=None):
     """#461 daily owner-decision digest fetch — the box-wide aggregate of open
     `needs-answer`/`needs-decision` tickets. Wired here (not inside run_once) so
@@ -3733,12 +3747,26 @@ def _watchdog_ops_wait_fetch(cwd):
     long-parked W ticket into an armed loop's attention.
 
     `--ops-wait` prints `number<TAB>createdAt<TAB>action<TAB>reason<TAB>title`
-    per member (oldest-first); field 0 is the issue number. A None return
-    (non-zero exit — the #181 untrustworthy-empty refusal — or an unparsable
-    line) is UNDETERMINED and the nudge job fails safe to no-nudge. An empty but
-    SUCCESSFUL result (exit 0, no lines) returns `[]` (genuinely no W parked),
-    which the job treats as "clear the tracking state". Wired HERE, like every
-    other network call in this file, so run_once's unit tests stay network-free."""
+    per member (oldest-first); field 0 is the issue number, field 3 the reason
+    (which carries a ` stale!` warning for a member with no fresh (≤24h) stream
+    push — #570). Returns a list of `{"number": int, "stale": bool}` so the job
+    20 nudge can NAME the stale members; the sibling `ops_wait_recheck` helpers
+    accept BOTH this dict shape AND a legacy bare `int` (back-compat). A None
+    return (non-zero exit — the #181 untrustworthy-empty refusal — or an
+    unparsable line) is UNDETERMINED and the nudge job fails safe to no-nudge.
+    An empty but SUCCESSFUL result (exit 0, no lines) returns `[]` (genuinely no
+    W parked), which the job treats as "clear the tracking state".
+
+    Timeout (#570): 35s, not the sibling `--count`'s 15s — `--ops-wait` now does
+    up to OPS_WAIT_STALE_MAX_FETCHES (25) per-member `gh issue view` comment
+    reads to compute `stale!`. This is RARE on the sweep: it runs at most once
+    per repo per `_cached_ops_wait` TTL (30 min), so on a 60s sweep a given
+    repo's cache is expired only ~3% of the time — the 120s sweep budget absorbs
+    an occasional cached fetch (~25 × <1s), and a genuine timeout returns None
+    (the W-clause of that day's nudge is dropped, re-checked next TTL via the
+    60s fail_ttl — a bounded, self-healing degradation, #570 review 🔵). Wired
+    HERE, like every other network call in this file, so run_once's unit tests
+    stay network-free."""
     import subprocess
     try:
         root = _repo_root(cwd=cwd) or cwd
@@ -3749,7 +3777,7 @@ def _watchdog_ops_wait_fetch(cwd):
     try:
         r = subprocess.run(
             [sys.executable, os.path.abspath(__file__), cmd_name, "--ops-wait"],
-            cwd=cwd, capture_output=True, text=True, timeout=15)
+            cwd=cwd, capture_output=True, text=True, timeout=35)
     except Exception:
         return None
     if r.returncode != 0:
@@ -3759,11 +3787,18 @@ def _watchdog_ops_wait_fetch(cwd):
         line = line.strip()
         if not line:
             continue
-        head = line.split("\t", 1)[0]
+        parts = line.split("\t")
         try:
-            members.append(int(head))
-        except ValueError:
+            num = int(parts[0])
+        except (ValueError, IndexError):
             return None   # a malformed line -> undetermined, never a partial set
+        # `--ops-wait` always prints the FULL 5-field form (reason_fn is always
+        # given), so field 3 IS the reason column (`ops-wait`/`acceptance` +
+        # optional ` stale!`). Require >=5 fields so a hypothetical degraded
+        # 4-field line (title at index 3) can never be misread as `stale!`
+        # (#570 review nit); anything shorter -> not stale.
+        reason = parts[3] if len(parts) >= 5 else ""
+        members.append({"number": num, "stale": "stale!" in reason})
     return members
 
 
@@ -4051,6 +4086,11 @@ def cmd_watchdog(args):
                     # (network-free tests for every other job, like jobs
                     # 8/11/31). Internally 6h-cadenced.
                     gkorphan_fetch=_watchdog_gkorphan_fetch,
+                    # #570: the parallel comment-handoff pass (proper
+                    # GATEKEEPER-ACTION/READY-FOR-REVIEW marker comment in a ~48h
+                    # window that never got its label) — wired = on, same
+                    # network-free-tests convention.
+                    gkorphan_handoff_fetch=_watchdog_gkorphan_handoff_fetch,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to
@@ -4571,6 +4611,11 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _comment_carries_question as _comment_carries_question,
     _issue_question_comment_state as _issue_question_comment_state,
     _no_question_flagged as _no_question_flagged,
+    OPS_WAIT_EVIDENCE_MAX_S as OPS_WAIT_EVIDENCE_MAX_S,
+    OPS_WAIT_STALE_MAX_FETCHES as OPS_WAIT_STALE_MAX_FETCHES,
+    _stream_self_login as _stream_self_login,
+    _issue_comment_ages as _issue_comment_ages,
+    _stale_ops_wait_flagged as _stale_ops_wait_flagged,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,

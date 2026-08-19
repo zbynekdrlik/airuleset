@@ -20,6 +20,7 @@ re-exports every name here via its facade.
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 
@@ -813,6 +814,145 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
         if state is False:
             flagged.add(number)                  # ok fetch, no question -> flag
         # True (has a question) or None (fetch failed) -> never flag
+    return flagged
+
+
+# #570 — W (`ops-wait`) freshness: a parked W ticket the stream has not PUSHED
+# on within OPS_WAIT_EVIDENCE_MAX_S is `stale!`-tagged in `--ops-wait`, so the
+# footer/stop-proof reader and job 20's re-check nudge both see WHICH parked
+# tickets have gone cold (the "tlač dopredu každý deň" doctrine, #570 bod 3).
+OPS_WAIT_EVIDENCE_MAX_S = 24 * 3600
+# Bound on the per-member `gh issue view` comment fetches per `--ops-wait`
+# invocation (a real W set is a handful — montalu's worst incident was 13; a
+# >25-member W is pathological). Overflow members are left UNTAGGED (the safe
+# direction — never a false accusation). This keeps the watchdog's
+# `_watchdog_ops_wait_fetch` subprocess (which runs `--ops-wait`) bounded so its
+# 35s timeout has margin (~25 × <1s), alongside its own 30-min `_cached_ops_wait`
+# cache; the session's own on-demand `--ops-wait` is uncapped in wall-clock time
+# so it always gets full stale info. TRADE-OFF (#570 review 🔵): the stale
+# computation is COUPLED into the SAME `--ops-wait` invocation the #547 W-nudge
+# reads, so a pathological large-W + slow-gh cold-cache sweep can time the
+# subprocess out → None → the W-clause of that day's partition nudge is dropped;
+# it SELF-HEALS (the 60s `_cached_ops_wait` fail_ttl re-checks, and the I-clause
+# still fires while I>0), so this is a bounded, fail-safe degradation, not a
+# correctness bug. The cap + a modest 35s timeout keep it rare.
+OPS_WAIT_STALE_MAX_FETCHES = 25
+
+
+def _parse_iso_ts(s):
+    """Epoch seconds for an ISO-8601 `createdAt` (gh renders `...Z`), or None on
+    any unparsable/absent value (fail-safe — an unmeasurable timestamp is simply
+    ignored, never guessed)."""
+    if not isinstance(s, str) or not s.strip():
+        return None
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _stream_self_login():
+    """THIS box's own gh identity in the FORM a `gh issue view --json comments`
+    comment `author.login` renders it (#463): the fixed App-bot login on an
+    App-token box (NO network call — `gh api user` 403s there structurally), the
+    real gh login on a PAT box, or None when unresolvable. None is not fatal:
+    `_stale_ops_wait_flagged` degrades to the any-comment definition (the SAFE
+    direction — it under-flags rather than false-accuse)."""
+    import airuleset
+    if _is_gh_app_token_box():
+        return airuleset.STREAM_APP_BOT_LOGIN
+    return airuleset._gh_login()
+
+
+def _issue_comment_ages(number, self_login, now, cwd=None):
+    """Evidence ages for issue `number`, the #570 freshness fallback: returns
+    `(own_ts, any_ts)` — the createdAt epoch of the most recent comment AUTHORED
+    by `self_login`, and of the most recent comment of ANY author. Either is
+    None when absent. Returns None (the WHOLE tuple) when the gh fetch FAILED or
+    was unusable → the caller does NOT flag (fail-safe, "nikdy falošný", #539).
+
+    `airuleset._gh_out` returns "" on ANY failure OR empty result, but a
+    successful `gh issue view <n> --json comments` always prints a JSON object
+    (`{"comments": [...]}`, non-empty even with zero comments), so "" is
+    unambiguously a FAILURE here → None. `now` is unused for the read itself; it
+    is passed for signature symmetry with the injectable seam the caller uses."""
+    import airuleset
+    raw = airuleset._gh_out("issue", "view", str(number), "--json", "comments",
+                            cwd=cwd, timeout=15)
+    if not raw:
+        return None                              # gh failed -> fail-safe
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    comments = obj.get("comments") if isinstance(obj, dict) else None
+    if not isinstance(comments, list):
+        return None
+    own_ts = any_ts = None
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        ts = _parse_iso_ts(c.get("createdAt"))
+        if ts is None:
+            continue
+        if any_ts is None or ts > any_ts:
+            any_ts = ts
+        author = c.get("author")
+        login = author.get("login") if isinstance(author, dict) else None
+        if self_login and login == self_login and (own_ts is None or ts > own_ts):
+            own_ts = ts
+    return (own_ts, any_ts)
+
+
+def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
+    """The set of ops-wait (W) member numbers to tag `stale!` (#570) — a parked
+    W ticket the stream has NOT pushed on within OPS_WAIT_EVIDENCE_MAX_S (24h).
+
+    Evidence = the last comment AUTHORED BY THE STREAM'S OWN gh account — the
+    daily push / third-party reminder / blocker re-verification the W doctrine
+    mandates IS a ticket comment (#570 bod 3), so an OWN comment is the direct
+    mechanization of "push forward every day". A member is flagged iff the gh
+    fetch SUCCEEDS AND either:
+      - the newest OWN comment is older than 24h, OR
+      - there is NO own comment but the newest comment of ANY author is also
+        older than 24h (a ticket parked/left untouched >24h).
+
+    Never a false accusation ("nikdy falošný", the #539 no-question! pattern):
+    a gh failure / unusable read (ages_fn → None), zero comments at all
+    (own_ts AND any_ts both None), or a member beyond OPS_WAIT_STALE_MAX_FETCHES
+    is NOT flagged. When `self_login` is unresolvable (None — e.g. a PAT-box gh
+    hiccup), the check DEGRADES to the any-comment definition, which UNDER-flags
+    (misses "third party replied but the stream never pushed") — the safe
+    direction, a false negative, never a false positive.
+
+    Deliberately keyed on OWN comment, NOT "last comment at all": a third
+    party's reply would otherwise reset the clock and HIDE the very staleness
+    this exists to surface (montalu3: a blocker cited a day after it was
+    resolved — a reply had landed, but the session never looked)."""
+    now = time.time() if now is None else now
+    if self_login is None and ages_fn is None:
+        self_login = _stream_self_login()
+    ages = ages_fn or (lambda n: _issue_comment_ages(n, self_login, now, cwd))
+    flagged = set()
+    for number in sorted(rows)[:OPS_WAIT_STALE_MAX_FETCHES]:
+        try:
+            res = ages(number)
+        except Exception:
+            res = None
+        if res is None:
+            continue                             # gh failed / unusable -> no flag
+        own_ts, any_ts = res
+        if own_ts is not None:
+            if (now - own_ts) > OPS_WAIT_EVIDENCE_MAX_S:
+                flagged.add(number)
+        elif any_ts is not None:
+            if (now - any_ts) > OPS_WAIT_EVIDENCE_MAX_S:
+                flagged.add(number)
+        # zero comments (own_ts AND any_ts None) -> ambiguous -> never flag (safe)
     return flagged
 
 
