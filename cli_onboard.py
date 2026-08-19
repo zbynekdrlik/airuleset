@@ -26,9 +26,7 @@ import datetime
 import json
 import os
 import re
-import shlex
 import socket
-import subprocess
 import sys
 from pathlib import Path
 
@@ -63,113 +61,25 @@ STEP_ORDER = [
 ]
 
 
-# --------------------------------------------------------------------------- #
-# Injectable executor — local argv, or ssh-wrapped for a REMOTE_HOSTS target.
-# --------------------------------------------------------------------------- #
-def _run(run):
-    return run or subprocess.run
-
-
-def resolve_remote(host):
-    """The REMOTE_HOSTS entry for `host` (name or ip), or None for local.
-    dev1 / local / None run locally (this maintainer box)."""
-    if host in (None, "", "local", "dev1"):
-        return None
-    try:
-        import cli_fleet
-        for h in cli_fleet.REMOTE_HOSTS:
-            if h.get("name") == host or h.get("host") == host:
-                return h
-    except Exception:
-        return None
-    return None
-
-
-def _ssh_prefix(remote):
-    """The `ssh …user@host` argv prefix for a REMOTE_HOSTS entry (StrictHost
-    off + optional identity file), reused by `_exec` and `_remote_home`."""
-    ssh = ["ssh", "-o", "StrictHostKeyChecking=no"]
-    ident = remote.get("identity")
-    if ident:
-        ssh += ["-i", os.path.expanduser(ident)]
-    ssh += ["%s@%s" % (remote["user"], remote["host"])]
-    return ssh
-
-
-def _exec(argv, host=None, run=None, input=None):
-    """Run `argv` locally, or ssh-wrapped when `host` names a remote box. gh
-    API calls (list/create with -R) pass host=None — they talk to GitHub from
-    any box; only working-tree git / repo-create needs the host. Every argv
-    element is `shlex.quote`-d for the ssh command string, so a project path
-    with shell metacharacters can never break out (#583)."""
-    remote = resolve_remote(host)
-    if remote is None:
-        return _run(run)(argv, capture_output=True, text=True, input=input)
-    ssh = _ssh_prefix(remote) + [" ".join(shlex.quote(a) for a in argv)]
-    return _run(run)(ssh, capture_output=True, text=True, input=input)
-
-
-def _git(path, args, host=None, run=None):
-    return _exec(["git", "-C", str(path), *args], host=host, run=run)
-
-
-def _gh(args, run=None):
-    """gh API call (repo-scoped via -R) — always local, never ssh."""
-    return _run(run)(["gh", *args], capture_output=True, text=True)
-
-
-# --------------------------------------------------------------------------- #
-# Remote path + filesystem, ALL routed through the injected runner (#583) —
-# local and remote share ONE code path (`subprocess.run` or ssh-wrapped
-# `_exec`), so a `--host <remote>` onboard NEVER touches the local filesystem
-# and is offline-testable with an injected ssh runner.
-# --------------------------------------------------------------------------- #
-def _remote_home(host, run=None):
-    """The remote `$HOME` (local `~` for a local host). `$HOME` stays UNquoted
-    so the remote shell expands it — a fixed literal with ZERO user data, no
-    injection surface. None if the remote could not be reached/read."""
-    remote = resolve_remote(host)
-    if remote is None:
-        return os.path.expanduser("~")
-    r = _run(run)(_ssh_prefix(remote) + ['printf %s "$HOME"'],
-                  capture_output=True, text=True)
-    return (r.stdout or "").strip() or None
-
-
-def _resolve_remote_path(orig_path, host, run=None):
-    """Expand a leading `~` against the REMOTE home (never the local one — the
-    #583 tilde bug). An absolute path is used verbatim; an unresolvable `~/…`
-    (unreachable remote) returns None so the caller refuses."""
-    s = str(orig_path)
-    if s == "~":
-        return _remote_home(host, run=run)
-    if s.startswith("~/"):
-        home = _remote_home(host, run=run)
-        return (home.rstrip("/") + s[1:]) if home else None
-    return s
-
-
-def _fs_exists(path, host=None, run=None, kind="e"):
-    """True iff `path` exists on the target (local or remote), via `test`.
-    kind: 'e' any / 'f' regular file / 'd' directory."""
-    flag = {"e": "-e", "f": "-f", "d": "-d"}.get(kind, "-e")
-    return _exec(["test", flag, str(path)], host=host, run=run).returncode == 0
-
-
-def _read_file(path, host=None, run=None):
-    """Text content of `path` on the target (via `cat`), or None if absent —
-    never raises for a missing file."""
-    r = _exec(["cat", str(path)], host=host, run=run)
-    return r.stdout if r.returncode == 0 else None
-
-
-def _write_file(path, content, host=None, run=None):
-    """Write `content` to `path` on the target over the runner (local or ssh),
-    via `sh -c 'cat > <quoted path>'` with `content` on stdin. The path is
-    `shlex.quote`-d inside the `-c` string AND the whole `-c` argument is quoted
-    again for ssh transport, so a hostile project path cannot inject (#583)."""
-    cmd = ["sh", "-c", "cat > %s" % shlex.quote(str(path))]
-    return _exec(cmd, host=host, run=run, input=content).returncode == 0
+# The local/ssh EXECUTION + remote-filesystem transport layer lives in
+# cli_onboard_exec.py (#583 split) — re-exported here so cli_onboard.<name>
+# keeps resolving for every caller and test. resolve_remote/_exec/_git/_gh/
+# _fs_exists/_read_file/_write_file/_resolve_remote_path route EVERY detection,
+# read and write through the injected runner, so a `--host <remote>` onboard
+# runs entirely over ssh and never touches the local filesystem.
+from cli_onboard_exec import (  # noqa: E402
+    _run as _run,
+    resolve_remote as resolve_remote,
+    _ssh_prefix as _ssh_prefix,
+    _exec as _exec,
+    _git as _git,
+    _gh as _gh,
+    _remote_home as _remote_home,
+    _resolve_remote_path as _resolve_remote_path,
+    _fs_exists as _fs_exists,
+    _read_file as _read_file,
+    _write_file as _write_file,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -592,7 +502,9 @@ def step_gitignore(path, stack, host=None, run=None, dry_run=False):
     existing = _read_file(gi, host=host, run=run) or ""
     if existing and not existing.endswith("\n"):
         existing += "\n"
-    _write_file(gi, existing + "\n".join(missing) + "\n", host=host, run=run)
+    if not _write_file(gi, existing + "\n".join(missing) + "\n",
+                       host=host, run=run):
+        return _step("gitignore", "skipped", "failed to write .gitignore")
     # Untracking already-tracked artifacts (`git rm --cached`) only STICKS in a
     # NON-pathspec commit — a pathspec commit re-reads the worktree and re-adds
     # the still-present artifact, so the old pathspec form was a silent no-op
@@ -632,7 +544,8 @@ def step_claude_md(path, name, host=None, run=None, dry_run=False):
     if dry_run:
         return _step("claude_md", "would-apply",
                      "would create CLAUDE.md skeleton + Playbook router")
-    _write_file(cm, _claude_md_skeleton(name), host=host, run=run)
+    if not _write_file(cm, _claude_md_skeleton(name), host=host, run=run):
+        return _step("claude_md", "skipped", "failed to write CLAUDE.md")
     _git(path, ["add", "CLAUDE.md"], host=host, run=run)
     cr = _commit_paths(
         path, "chore: onboard — CLAUDE.md skeleton + Playbook router (#569)",
@@ -755,20 +668,31 @@ def step_registry(path, entry, registry_path, host=None, run=None, dry_run=False
 # --------------------------------------------------------------------------- #
 def _remote_preflight(orig_path, host, run=None):
     """Resolve the path to operate on + a FAIL-SAFE reachability gate (#583).
-    Returns `(target_path, error)`; `error` is None on success. For a LOCAL
-    host: `(abspath+expanduser, None)`, unchanged. For a REMOTE host: verify
-    ssh reachability, expand the remote `~`, verify the target DIR exists
-    remotely — on ANY failure return `(None, <reason>)` so the caller REFUSES
-    rather than falling back to a (nonexistent, false-negative) LOCAL path."""
+    Returns `(target_path, error)`; `error` is None on success. The project
+    directory must EXIST (local or remote) — onboard operates on an existing
+    dir, never creates one. LOCAL host: expand+abspath, verify the dir exists.
+    An UNKNOWN host (truthy, not a local alias, not a REMOTE_HOSTS entry — a
+    typo like `dve2`/`gk`) REFUSES rather than silently localizing (#583 review
+    — the same discrimination `_audit_host_target` already applies). REMOTE
+    host: verify ssh reachability, expand the remote `~`, verify the target dir
+    — on ANY failure return `(None, <reason>)`, never a local false-negative."""
+    if host in (None, "", "local", "dev1"):
+        target = _norm_path(orig_path)
+        if not _fs_exists(target, run=run, kind="d"):
+            return None, ("path %s does not exist — onboard operates on an "
+                          "EXISTING project directory" % target)
+        return target, None
     if resolve_remote(host) is None:
-        return _norm_path(orig_path), None
+        return None, ("unknown host %r — not this box and not a known "
+                      "REMOTE_HOSTS target; refusing (won't onboard locally)"
+                      % host)
     if _exec(["true"], host=host, run=run).returncode != 0:
         return None, ("host %r unreachable over ssh — refusing to onboard "
                       "(never proceeding on local false-negatives)" % host)
     target = _resolve_remote_path(orig_path, host, run=run)
     if not target:
-        return None, ("could not resolve the remote home for %r on host %r"
-                      % (orig_path, host))
+        return None, ("could not resolve the remote path for %r on host %r "
+                      "(use an absolute or ~/ path)" % (orig_path, host))
     if not _fs_exists(target, host=host, run=run, kind="d"):
         return None, ("remote path %s does not exist on host %r — onboard "
                       "operates on an EXISTING project directory" % (target, host))
@@ -836,14 +760,21 @@ def audit_project(entry, host=None, run=None):
         path = os.path.expanduser(orig)
     else:
         # remote: ssh reachability + remote tilde expansion + dir existence.
+        # `unreachable` (host down / home unresolvable) is a "could not check"
+        # soft note; but a REACHABLE host whose project dir is simply GONE is
+        # real drift (`missing-repo`) — the same signal the local branch gives
+        # for an absent dir, never hidden as a clean `unreachable` (#583 review).
         if _exec(["true"], host=host, run=run).returncode != 0:
             return [{"kind": "unreachable",
                      "detail": "host %r unreachable over ssh" % host}]
         path = _resolve_remote_path(orig, host, run=run)
-        if not path or not _fs_exists(path, host=host, run=run, kind="d"):
+        if not path:
             return [{"kind": "unreachable",
-                     "detail": "remote path %s absent/unreadable on host %r"
-                     % (path or orig, host)}]
+                     "detail": "remote home unresolvable for %r on host %r"
+                     % (orig, host)}]
+        if not _fs_exists(path, host=host, run=run, kind="d"):
+            return [{"kind": "missing-repo",
+                     "detail": "%s absent on host %r" % (path, host)}]
     drift = []
     if not has_git_repo(path, host=host, run=run):
         drift.append({"kind": "missing-repo", "detail": path or "(no path)"})
