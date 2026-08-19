@@ -745,6 +745,14 @@ class TestHiddenTabDisconnect(unittest.TestCase):
         # the invariant is wired INSIDE activate: connect the visible, suspend others
         self.assertIn("connect(made[k]", html)
         self.assertIn("suspend(made[k]", html)
+        # DIRECTION matters (both #585 reviewers 🔵): a swapped branch — connect the
+        # HIDDEN tabs, suspend the VISIBLE one — would still contain both tokens.
+        # Assert the ACTIVE branch (`+k === idx`) connects+shows and the `else`
+        # branch suspends+hides, so a direction swap regresses this test.
+        self.assertRegex(
+            html,
+            r"if\s*\(\s*\+k === idx\s*\)\s*\{\s*connect\(made\[k\][^}]*?'block'[^}]*?\}"
+            r"\s*else\s*\{\s*suspend\(made\[k\][^}]*?'none'")
 
     def test_reconnect_ux_and_scrollback_documented(self):
         # The reconnect UX + "nothing lost" claim must be surfaced to the owner
@@ -792,14 +800,26 @@ class TestCtrlWProtection(unittest.TestCase):
         self.assertIn(".lock(", html)
         self.assertIn("KeyW", html)                   # Ctrl+W is the locked key
         self.assertIn("function keyboardLockSupported(", html)  # feature-detect
-        # honest fallback: when unsupported the button is disabled (not silently dead)
-        self.assertIn("disabled", html)
+        # honest fallback: the disabled assignment is inside the ELSE of the
+        # feature-detect (a swap that disables when SUPPORTED would fail this).
+        self.assertRegex(html, r"if\s*\(\s*keyboardLockSupported\(\)\s*\)")
+        self.assertRegex(html, r"\}\s*else\s*\{[^}]*?fsBtn\.disabled = true")
+        # secure-context honesty (#585 reviewer 🔵): Keyboard Lock needs HTTPS/
+        # localhost, so the gate consults isSecureContext AND the disabled title
+        # names HTTPS as the real reason on the plain-HTTP tailnet (not a false
+        # "browser unsupported").
+        self.assertIn("isSecureContext", html)
+        self.assertIn("HTTPS", html)
 
     def test_pwa_alternative_documented_in_hint(self):
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
         self.assertIn("PWA", hint)
         self.assertIn("Ctrl+W", hint)                 # the shortcut it protects
+        # HONEST framing (#585 both reviewers): the hint must NOT promise PWA
+        # delivers Ctrl+W to the terminal (it does not for an iframe). Fullscreen
+        # is the mechanism that does; PWA only reduces accidental-close risk.
+        self.assertIn("Fullscreen", hint)
 
     def test_ctrlw_additions_preserve_escaping_and_single_pass(self):
         # The #579 injection invariants must survive the Ctrl+W / disconnect JS.

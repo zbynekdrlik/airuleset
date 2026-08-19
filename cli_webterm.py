@@ -256,7 +256,8 @@ def connect_main(argv, inventory_path=None):
 # Dashboard — a single-page Windows-Terminal-style tabbed UI generated from the
 # inventory (#579). A top tab bar (one short-alias tab per session) + one lazily
 # created iframe per session pointing at the SAME-ORIGIN ttyd URL (`/t/?arg=<id>`
-# under the #584 gateway). Tabs switch instantly, and ONE gateway form login
+# under the #584 gateway). Tab switching hides/reconnects (a remote target's
+# switch-back incurs an SSH-reconnect flash, not instant), and ONE gateway form login
 # (session cookie) covers every tab — no per-tab auth. #585: the iframe ELEMENT
 # is kept once opened, but only the VISIBLE tab holds a LIVE terminal client —
 # every hidden tab is disconnected (its throwaway tmux clone dies), so a hidden
@@ -420,7 +421,7 @@ body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
-<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku (funguje aj počas písania v termináli) · skrytý tab sa odpojí a pri návrate obnoví (história ostáva v tmuxe) · Ctrl+W: v bežnom okne vyskočí potvrdenie, &#9974; Fullscreen zapne Keyboard Lock a Ctrl+W pôjde do terminálu, alebo nainštaluj ako PWA (Chrome → Inštalovať) · prihlásenie raz (tailnet-only)</div>
+<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku (funguje aj počas písania v termináli) · skrytý tab sa odpojí a pri návrate znovu pripojí (scrollback ostáva v tmuxe; scroll-pozícia sa resetne) · Ctrl+W: potvrdenie pri zatváraní chráni vždy; &#9974; Fullscreen (Keyboard Lock) pošle Ctrl+W priamo do terminálu — vyžaduje HTTPS/localhost; PWA/app-okno zmenší riziko náhodného zatvorenia · prihlásenie raz (tailnet-only)</div>
 <script>
 const CFG = @@CFG_JSON@@;
 const frames = document.getElementById('frames');
@@ -430,7 +431,7 @@ function ttydSrc(s) { return CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id)
 function connect(f, s) {                   // (re)attach a suspended/new iframe to its terminal
   if (f.dataset.live === '1') return;      // already live -> never a needless reload
   f.src = ttydSrc(s);                      // a fresh ttyd client re-attaches to the SAME base
-  f.dataset.live = '1';                    // session; scrollback lives in tmux, not the browser
+  f.dataset.live = '1';                    // session (the scrollback BUFFER lives in tmux)
 }
 function suspend(f) {                       // #585(a): disconnect a HIDDEN tab so its throwaway
   if (f.dataset.live !== '1') return;      // tmux clone dies (WS close) and can NEVER drive the
@@ -455,8 +456,13 @@ function activate(idx) {
   // #585(a): EXACTLY the visible tab holds a live terminal client — every hidden
   // tab is disconnected (its clone session dies), so a hidden tab can never
   // shrink the base session's shared tmux window (window-size latest sizes to the
-  // most-recently-active client). Reconnect on return; scrollback lives in tmux,
-  // so nothing is lost (a brief reconnect flash is the only UX cost).
+  // most-recently-active client). Reconnect on return re-attaches to the SAME
+  // base: the scrollback BUFFER is preserved (verified live — a real shell base
+  // survives the clone churn with its history + env intact), but copy-mode scroll
+  // POSITION and current-window selection reset, and there is a brief reconnect
+  // flash. (Residual, inherited from #584: a base viewed ONLY through webterm and
+  // reduced to just this clone under `destroy-unattached keep-last` is the #584
+  // accepted-loss case — a normal shell session is not affected.)
   for (const k in made) {
     if (+k === idx) { connect(made[k], s); made[k].style.display = 'block'; }
     else { suspend(made[k]); made[k].style.display = 'none'; }
@@ -500,6 +506,7 @@ function attachForwarder(f) {
   // hotkey in the CAPTURE phase, before xterm. A cross-origin frame would throw
   // here — impossible under the gateway, but caught so one frame can never break
   // the page or the rest of switching.
+  if (f.dataset.live !== '1') return;      // #585: skip the about:blank (suspend) load
   try {
     const w = f.contentWindow;
     if (w) w.addEventListener('keydown', onHotkey, true);
@@ -522,11 +529,15 @@ window.addEventListener('beforeunload', (e) => {
 });
 // Layer 2 — a Fullscreen button that requests fullscreen + Keyboard Lock, so
 // Chrome delivers Ctrl+W (and Ctrl+T/N) to the PAGE => the terminal as
-// delete-word, not the browser. Feature-detected: an unsupported browser gets a
-// disabled button with an honest title (Layer 1 confirm + the PWA hint remain).
+// delete-word, not the browser. Feature-detected + gated on a SECURE CONTEXT:
+// the Keyboard Lock API is only exposed on HTTPS/localhost, so over the plain-HTTP
+// tailnet `navigator.keyboard` is undefined and the button is disabled — with a
+// title that names the REAL reason (needs HTTPS) rather than a false "browser
+// unsupported". Layer 1 (the close-confirm) still protects Ctrl+W there.
 const KB_LOCK_KEYS = ['KeyW', 'KeyT', 'KeyN'];
 function keyboardLockSupported() {
   return !!(document.documentElement.requestFullscreen
+            && window.isSecureContext
             && navigator.keyboard && navigator.keyboard.lock);
 }
 async function goFullscreen() {
@@ -543,7 +554,9 @@ if (fsBtn) {
     fsBtn.addEventListener('click', goFullscreen);
   } else {
     fsBtn.disabled = true;
-    fsBtn.title = 'Fullscreen + Keyboard Lock nie je v tomto prehliadači podporený';
+    fsBtn.title = !window.isSecureContext
+      ? 'Keyboard Lock vyžaduje HTTPS/localhost — cez HTTP tailnet Ctrl+W chráni potvrdenie pri zatváraní'
+      : 'Fullscreen + Keyboard Lock nie je v tomto prehliadači podporený';
   }
 }
 window.addEventListener('keydown', onHotkey);   // Ctrl+Alt+1..9 when the bar is focused
