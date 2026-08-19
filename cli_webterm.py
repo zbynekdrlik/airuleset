@@ -297,11 +297,18 @@ def render_dashboard_html(inventory, ttyd_base=None):
     each tab's iframe src as `<ttyd_base>/?arg=<id>` on first activation."""
     ttyd_base = (ttyd_base or "").rstrip("/")
     tabs = _tab_sessions(inventory)
-    buttons = "\n".join(
-        '<button class="tab" data-idx="%d" title="%s">'
-        '<span class="ico">&#9656;</span><span class="al">%s</span></button>'
-        % (i, _html_escape(t["title"]), _html_escape(t["alias"]))
-        for i, t in enumerate(tabs))
+
+    def _tab_button(i, t):
+        # #582: an ordinal badge (1-9) on the first nine tabs = the VISIBLE
+        # Ctrl+Alt+1..9 map, so the shortcut is discoverable and a specific tab
+        # is faster to pick out by eye. It is a fixed POSITION digit, never
+        # user data, so it adds no injection surface (unlike the escaped label).
+        ordinal = ('<span class="ord">%d</span>' % (i + 1)) if i < 9 else ""
+        return ('<button class="tab" data-idx="%d" title="%s">'
+                '<span class="ico">&#9656;</span>%s<span class="al">%s</span></button>'
+                % (i, _html_escape(t["title"]), ordinal, _html_escape(t["alias"])))
+
+    buttons = "\n".join(_tab_button(i, t) for i, t in enumerate(tabs))
     cfg = {"ttyd_base": ttyd_base, "sessions": tabs}
     subst = {"@@COUNT@@": str(len(tabs)), "@@BUTTONS@@": buttons,
              "@@CFG_JSON@@": _json_for_script(cfg)}
@@ -338,6 +345,16 @@ body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf
 .tab.active { background: #0d1117; color: #fff; border-color: #30363d; }
 .tab .ico { color: #2f81f7; font-size: 11px; }
 .tab .al { overflow: hidden; text-overflow: ellipsis; }
+.tab .ord { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 3px; border-radius: 3px;
+  background: #30363d; color: #8b949e; font-size: 10px; line-height: 1; }
+.tab.active .ord { background: #2f81f7; color: #fff; }
+#nav { position: sticky; left: 0; z-index: 1; display: inline-flex; gap: 2px;
+  padding-right: 4px; margin-right: 2px; background: #161b22; flex: 0 0 auto; }
+.cyc { cursor: pointer; border: 1px solid #30363d; border-radius: 6px;
+  background: #21262d; color: #adbac7; font: inherit; line-height: 1;
+  padding: 6px 9px; }
+.cyc:hover { background: #2a3038; color: #e6edf3; }
 #frames { position: relative; flex: 1 1 auto; }
 #frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
   border: 0; background: #0d1117; }
@@ -347,14 +364,16 @@ body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf
 </head>
 <body>
 <div id="tabbar">
+<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session (Ctrl+Alt+←)">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session (Ctrl+Alt+→)">&#9654;</button></span>
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
-<div id="hint">@@COUNT@@ tmux sessions · klik na záložku prepne · Ctrl+Alt+1..9 (keď je fokus na lište) · prihlásenie raz (tailnet-only)</div>
+<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 a Ctrl+Alt+←/→ len keď má fokus lišta (počas písania v termináli je to iný origin — použi klik / ◀ ▶) · prihlásenie raz (tailnet-only)</div>
 <script>
 const CFG = @@CFG_JSON@@;
 const frames = document.getElementById('frames');
 const made = {};
+let current = 0;                          // the active tab index (drives cycle())
 function activate(idx) {
   const s = CFG.sessions[idx];
   if (!s) return;
@@ -368,18 +387,36 @@ function activate(idx) {
   for (const k in made) made[k].style.display = (+k === idx) ? 'block' : 'none';
   document.querySelectorAll('.tab').forEach((t) =>
     t.classList.toggle('active', +t.dataset.idx === idx));
+  current = idx;
+}
+function cycle(delta) {                    // step to prev/next session, wrapping both ways
+  const n = CFG.sessions.length;
+  if (!n) return;
+  activate(((current + delta) % n + n) % n);
 }
 document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
-// Ctrl+Alt+1..9 switches tabs — but ONLY while the parent page (tab bar) has
-// focus: once you click INTO a terminal, the ttyd iframe is a DIFFERENT origin
-// (:7682 vs the dashboard's :8080), so the parent window stops receiving its
-// keydowns. Clicking a tab always switches; full keyboard-switch-while-typing
-// would need a same-origin proxy or a ttyd-side bridge (tracked as a follow-up).
+document.querySelectorAll('.cyc').forEach((b) =>
+  b.addEventListener('click', () => cycle(+b.dataset.cyc)));
+// Ctrl+Alt+1..9 (direct jump) and Ctrl+Alt+Left/Right (cycle) switch tabs — but
+// ONLY while the parent page (tab bar) has focus: once you click INTO a terminal,
+// the ttyd iframe is a DIFFERENT origin (:7682 vs the dashboard's :8080), so the
+// parent window stops receiving its keydowns (a web-platform limit — the parent
+// cannot read keys inside a cross-origin iframe). Clicking a tab or the ◀ ▶
+// buttons always switches, so keyboard-while-typing is a convenience, not the
+// only path. Full keyboard-switch-while-typing would need a same-origin reverse
+// proxy or a ttyd-side postMessage bridge — both disproportionate for a shortcut
+// where click works reliably (see the #582 design comment for the rejected
+// alternatives).
 window.addEventListener('keydown', (e) => {
-  if (e.ctrlKey && e.altKey && e.key >= '1' && e.key <= '9') {
+  if (!(e.ctrlKey && e.altKey)) return;
+  if (e.key >= '1' && e.key <= '9') {
     const idx = parseInt(e.key, 10) - 1;
     if (idx < CFG.sessions.length) { e.preventDefault(); activate(idx); }
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault(); cycle(1);
+  } else if (e.key === 'ArrowLeft') {
+    e.preventDefault(); cycle(-1);
   }
 });
 if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page
