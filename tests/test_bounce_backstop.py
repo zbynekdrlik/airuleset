@@ -20,6 +20,7 @@ from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import airuleset
 import statusbar
 import watchdog as wd
 
@@ -365,17 +366,46 @@ class TestBounceQuals(unittest.TestCase):
     def test_david_family_home_scopes_by_own_label(self):
         # airuleset#326 (adversarial-review MAJOR finding, live-triggered):
         # david2/david3/david4 ALSO work on odoo-erp (a _CROSS_STREAM_REPOS
-        # member) from day one -- unlike simap/miva1 (which merge nowhere and
-        # were correctly left out of _REDUCED_STREAM_USERS), the matching
-        # precedent here is montalu2/3/4 above, whose entries were added AT
-        # onboarding for exactly this reason. Without its own entry, a
-        # david2/3/4 pane fell through to the full-authority exclude-all
-        # branch instead of its own label -- confirmed live before this fix:
-        # `_bounce_quals("/home/david2/devel/odoo-erp")` returned the
-        # exclude-all fragment, not `["label:stream:david2"]`.
+        # member) from day one; the matching precedent here is montalu2/3/4
+        # above, whose entries were added AT onboarding for exactly this reason.
+        # Without its own entry, a david2/3/4 pane fell through to the
+        # full-authority exclude-all branch instead of its own label -- confirmed
+        # live before this fix: `_bounce_quals("/home/david2/devel/odoo-erp")`
+        # returned the exclude-all fragment, not `["label:stream:david2"]`.
+        # (#564: _REDUCED_STREAM_USERS is now DERIVED from AUTHORITY_BY_USER, so
+        # every reduced stream -- incl. the once-omitted simap1/miva1 -- is
+        # registered automatically, tested below.)
         for u in ("david2", "david3", "david4"):
             self.assertEqual(wd._bounce_quals("/home/%s/devel/odoo-erp" % u),
                              ["label:stream:%s" % u], u)
+
+    def test_reduced_users_is_derived_from_the_authority_map(self):
+        # #564: _REDUCED_STREAM_USERS must equal EVERY non-full AUTHORITY_BY_USER
+        # key (a reduced-authority stream == a bounce/gkreq participant), so
+        # onboarding a new stream into the authority map auto-registers it and
+        # the staleness class cannot recur. RED before the fix (the hand-listed
+        # tuple was a strict subset).
+        expected = {u for u, p in airuleset.AUTHORITY_BY_USER.items()
+                    if p != "full"}
+        self.assertEqual(set(wd._REDUCED_STREAM_USERS), expected)
+
+    def test_live_reduced_streams_are_registered(self):
+        # #564: the exact live streams the issue-561 audit found missing.
+        for u in ("simap1", "montalu5", "montalu6", "montalu7", "montalu8",
+                  "miva1", "david1"):
+            self.assertIn(u, wd._REDUCED_STREAM_USERS, u)
+
+    def test_new_reduced_stream_home_scopes_by_own_label(self):
+        # #564: a formerly-omitted reduced stream now scopes to its OWN label
+        # instead of falling through to the full-authority exclude-all branch.
+        # simap1 is a rename target, so its slice covers the legacy simap too
+        # (item-2 alias expansion); miva1 is not renamed, so just itself.
+        self.assertEqual(wd._bounce_quals("/home/simap1/devel/odoo-erp"),
+                         ["label:stream:simap1", "label:stream:simap"])
+        self.assertEqual(wd._bounce_quals("/home/miva1/devel/odoo-erp"),
+                         ["label:stream:miva1"])
+        self.assertEqual(wd._bounce_quals("/home/montalu5/devel/odoo-erp"),
+                         ["label:stream:montalu5"])
 
     def test_full_authority_home_excludes_subdev_streams(self):
         # Live dry-run finding (2026-07-19): an unscoped full-box query picked
@@ -398,6 +428,26 @@ class TestBounceQuals(unittest.TestCase):
         for u in ("david2", "david3", "david4"):
             self.assertFalse(wd._gkreq_supervisor_root("/home/%s/devel/odoo-erp" % u), u)
         self.assertTrue(wd._gkreq_supervisor_root("/home/newlevel/devel/odoo-erp"))
+
+    def test_new_reduced_stream_pane_is_not_a_gkreq_supervisor_root(self):
+        # #564: a formerly-omitted reduced stream (simap1/miva1/montalu5-8/david1)
+        # must NOT be mis-classified as the gatekeeper/supervisor (the #326
+        # class). RED before the fix (missing from _REDUCED_STREAM_USERS ->
+        # _gkreq_supervisor_root returned True for its own HOME).
+        for u in ("simap1", "miva1", "montalu5", "montalu8", "david1"):
+            self.assertFalse(
+                wd._gkreq_supervisor_root("/home/%s/devel/odoo-erp" % u), u)
+
+    def test_full_authority_exclusion_covers_new_streams(self):
+        # #564: the full-authority (dev1) exclude-all set must now also exclude
+        # the newly-registered reduced streams (and their rename equivalents),
+        # or a dev1 job-8 query would pick up their bounce tickets and nudge the
+        # wrong person. RED before the fix.
+        quals = wd._bounce_quals("/home/newlevel/devel/demo")
+        self.assertEqual(len(quals), 1)
+        for u in ("simap1", "simap", "miva1", "montalu5", "montalu8",
+                  "david1"):
+            self.assertIn("-label:stream:%s" % u, quals[0], u)
 
 
 class TestCrossStreamRepoScope(unittest.TestCase):
