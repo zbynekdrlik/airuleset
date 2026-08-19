@@ -100,7 +100,7 @@ class TestLowMemSurfaceDecision(unittest.TestCase):
     consecutive low-mem skips with a genuine backlog, deduped once per episode."""
 
     def _d(self, **over):
-        base = dict(low_mem=True, backlog=12, min_backlog=3, streak=0,
+        base = dict(backlog=12, min_backlog=3, streak=0,
                     max_streak=5, already_surfaced=False)
         base.update(over)
         return og.lane_low_mem_surface_decision(**base)
@@ -125,12 +125,13 @@ class TestLowMemSurfaceDecision(unittest.TestCase):
         d = self._d(streak=9, backlog=2, min_backlog=3)   # backlog < min
         self.assertFalse(d.surface)
 
-    def test_mem_recovered_resets_episode(self):
-        # low_mem False -> the OOM skip did not fire this sweep -> episode over.
-        d = self._d(low_mem=False, streak=4, already_surfaced=True)
-        self.assertFalse(d.surface)
-        self.assertEqual(d.streak, 0)
-        self.assertFalse(d.surfaced)
+    def test_backlog_exactly_min_backlog_surfaces(self):
+        # BOUNDARY: the gate is `backlog >= min_backlog`, so backlog == min
+        # (a genuine, if minimal, backlog) DOES surface -- locks the >= against a
+        # `>` off-by-one that would silence a box capped at exactly min tickets.
+        d = self._d(streak=4, max_streak=5, backlog=3, min_backlog=3)
+        self.assertTrue(d.surface)
+        self.assertTrue(d.surfaced)
 
 
 # --- the #565 shared evidence predicate ---------------------------------------

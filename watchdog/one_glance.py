@@ -314,12 +314,13 @@ def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
 LaneLowMemSurface = namedtuple("LaneLowMemSurface", "surface streak surfaced")
 
 
-def lane_low_mem_surface_decision(*, low_mem, backlog, min_backlog,
+def lane_low_mem_surface_decision(*, backlog, min_backlog,
                                   streak, max_streak, already_surfaced):
     """#571 — the persistent-low-mem CAPACITY-CEILING surface decider.
 
-    ``low_mem`` is the caller's measured "under-saturated fill blocked by
-    MemAvailable < GOAL_LANE_MIN_MEM_AVAIL_MB" boolean. The OOM protection (the
+    Called ONLY inside the low-mem skip branch (a low-mem skip is firing THIS
+    sweep — so there is no not-low-mem case here; the mem-recovered / box-filled
+    episode RESET is a SEPARATE ``_lane_lowmem_reset``). The OOM protection (the
     ``skip:low-mem`` itself and the 1536MB threshold) is UNCHANGED — this decider
     only decides whether to ALSO emit the ONE owner-facing CAPACITY-CAPPED signal
     (a persistent RAM ceiling is an OWNER DECISION: upgrade the box vs accept a
@@ -328,17 +329,13 @@ def lane_low_mem_surface_decision(*, low_mem, backlog, min_backlog,
     Verdict (`LaneLowMemSurface(surface, streak, surfaced)` — ``streak`` and
     ``surfaced`` are the caller's NEW persisted episode state):
 
-      * not ``low_mem``: the OOM skip did not fire this sweep → episode OVER →
-        streak RESET (0), surfaced RESET (False), ``surface=False``.
-      * ``low_mem`` and ``already_surfaced``: keep counting, ``surface=False``
-        (deduped — the signal fires EXACTLY once per episode).
-      * ``low_mem``, ``streak+1 >= max_streak`` AND ``backlog >= min_backlog``
-        AND not yet surfaced → ``surface=True`` (a PERSISTENT ceiling, not a
-        transient dip / thin backlog), ``surfaced=True``.
+      * ``already_surfaced``: keep counting, ``surface=False`` (deduped — the
+        signal fires EXACTLY once per episode).
+      * ``streak+1 >= max_streak`` AND ``backlog >= min_backlog`` AND not yet
+        surfaced → ``surface=True`` (a PERSISTENT ceiling, not a transient dip /
+        thin backlog), ``surfaced=True``.
       * otherwise (accumulating, or a thin backlog): ``surface=False``.
     """
-    if not low_mem:
-        return LaneLowMemSurface(False, 0, False)
     streak = streak + 1
     if already_surfaced:
         return LaneLowMemSurface(False, streak, True)
