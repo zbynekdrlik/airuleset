@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd                                    # noqa: E402
+import notify                                             # noqa: E402
 
 DAY = 86400
 NOW = 1785200000.0          # fixed; never time.time() (hour-bucket jitter rule)
@@ -843,6 +844,94 @@ class TestIncrementalLogFlush172(unittest.TestCase):
             "job 27's decision line must be visible via log_fn even though "
             "run_once() itself never returned (job 28 killed the sweep) -- "
             "the OLD 'print only the returned list' path would show nothing")
+
+
+# --------------------------------------------------------------------------- #
+# #560 — jobs 27/28 wired through notify.episode_gate() (#558): a persistent
+# chronic condition alerts ONCE at onset + ONE recovery, never a re-page per
+# reping window (the #546 `burn-alert:<hour>` anti-pattern) and never a
+# silent clear. The behavioral tests below drive the CURRENT public signature
+# and isolate the episode store off the real ~/.claude by patching
+# notify._claude_dir — they FAIL on the pre-#560 per-reping-bucket code (5
+# pings / no recovery). The onset/recovery-ROUTING unit tests inject a fake
+# episode_gate to walk each decision (open/hold/clearing/recover/quiet).
+# --------------------------------------------------------------------------- #
+class _EpisodeStoreIsolated(unittest.TestCase):
+    def setUp(self):
+        self.ep_home = Path(tempfile.mkdtemp(prefix="airuleset-560-ep-"))
+        self.addCleanup(shutil.rmtree, self.ep_home, ignore_errors=True)
+        self.sent = []
+        self.state = {}
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        self.sent.append({"msg": msg, "dedup": dedup_key})
+        return "sent"
+
+    def _isolated(self):
+        # Redirect the episode store off the real ~/.claude. send_fn is a fake
+        # in these tests, so notify.send() (which also reads _claude_dir) is
+        # never called — only episode_gate's own store is affected.
+        return unittest.mock.patch.object(
+            notify, "_claude_dir", lambda: str(self.ep_home))
+
+
+class TestNetDriftEpisodeHysteresis(_EpisodeStoreIsolated):
+    """#560 behavioral RED: a persistent backlog alerts ONCE, and its
+    recovery sends exactly ONE message — never a per-reping-window re-page
+    and never a silent clear."""
+
+    @staticmethod
+    def _fetch(opened, closed):
+        return lambda label, window_s: (opened, closed)
+
+    def test_persistent_condition_alerts_once_not_per_reping_window(self):
+        fetch = self._fetch(40, 5)                       # net +35, persistent
+        with self._isolated():
+            for i in range(5):                            # five daily sweeps
+                wd.net_drift_alarm(NOW + i * DAY, self.state, send_fn=self.send,
+                                   repo_roots=["/repos/x"],
+                                   issue_counts_fetch=fetch,
+                                   interval=1, reping=DAY)
+        self.assertEqual(
+            len(self.sent), 1,
+            "a persistent chronic condition must alert ONCE at onset, not "
+            "re-page every reping window (the #546 burn-alert:<hour> disease)")
+
+    def test_recovery_sends_exactly_one_message_after_clearing(self):
+        with self._isolated():
+            wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
+                               repo_roots=["/repos/x"],
+                               issue_counts_fetch=self._fetch(40, 5),
+                               interval=1, reping=DAY)                   # onset
+            for i in range(1, 4):                         # three healthy passes
+                wd.net_drift_alarm(NOW + i * DAY, self.state, send_fn=self.send,
+                                   repo_roots=["/repos/x"],
+                                   issue_counts_fetch=self._fetch(5, 5),
+                                   interval=1, reping=DAY)
+        self.assertEqual(
+            len(self.sent), 2,
+            "onset + exactly ONE recovery after the hysteresis window; the "
+            "pre-#560 code drops the dedup silently with no recovery ping")
+        self.assertIn("backlog", self.sent[1]["msg"].lower())
+
+
+class TestStuckMainEpisodeHysteresis(_EpisodeStoreIsolated):
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-560-sm-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_persistent_stuck_main_alerts_once_not_per_reping_window(self):
+        r = _make_repo(self.tmp, "camera-box", base_ts=NOW - 6 * DAY,
+                       work_ts=NOW - 3600, undelivered=25)
+        with self._isolated():
+            for i in range(5):
+                wd.stuck_main_sweep(NOW + i * DAY, self.state, send_fn=self.send,
+                                    repo_roots=[str(r)], interval=1, reping=DAY)
+        self.assertEqual(
+            len(self.sent), 1,
+            "a persistently stuck main must alert ONCE at onset, not re-page "
+            "every reping window")
 
 
 if __name__ == "__main__":
