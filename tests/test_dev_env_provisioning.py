@@ -789,14 +789,20 @@ class TestApplyStreamSshAttach(TestCase):
                              p.read_text(), f"{user} must not get the block")
 
     def test_ssh_attach_block_cwd_uses_the_fallback_chain(self):
-        # #563: the block's cwd must try devel/odoo/odoo-erp THEN devel/odoo
-        # before $HOME -- the old binary "odoo-erp or $HOME" fallback dropped
-        # montalu1 (whose project dir is ~/devel/odoo, no odoo-erp subdir)
-        # into $HOME, so a claude launched there wrote under the wrong project
-        # key (no history/memory).
+        # #563: the block's cwd must iterate STREAM_DEV_CWD_CHAIN (odoo-erp,
+        # then devel/odoo) before $HOME -- the old binary "odoo-erp or $HOME"
+        # fallback dropped montalu1 (project dir ~/devel/odoo, no odoo-erp
+        # subdir) into $HOME, so a claude launched there wrote under the wrong
+        # project key (no history/memory). Derive the expected loop FROM the
+        # shared constant so the bash block and the Python _stream_session_cwd()
+        # chain can never drift apart (the divergence guard both fresh-context
+        # reviews asked for), and so the test is not a duplicated source of
+        # truth for the chain order.
         block = airuleset.STREAM_SSH_ATTACH_BLOCK
-        self.assertIn("for __airuleset_rel in devel/odoo/odoo-erp devel/odoo",
-                      block)
+        expected_loop = "for __airuleset_rel in " + " ".join(
+            airuleset.STREAM_DEV_CWD_CHAIN)
+        self.assertIn(expected_loop, block)
+        # the old binary fallback (odoo-erp OR $HOME, no intermediate) is gone
         self.assertNotIn('[ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"',
                          block)
 

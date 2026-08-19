@@ -1010,9 +1010,12 @@ def cmd_install(args):
         print(f"  ffmpeg static install error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3g. subdev stream dev-env bootstrap: tmux session + claude launched
-    # (#263), ssh auto-attach (#264), human-gap report (#263). True no-ops on
-    # every non-stream box (dev1/dev2/gatekeeper) via AUTHORITY_BY_USER's own
-    # scope.
+    # (#263), ssh auto-attach (#264), human-gap report (#263). The tmux
+    # session/window-name/gap-report legs are true no-ops on every non-stream
+    # box (dev1/dev2/gatekeeper) via AUTHORITY_BY_USER's own scope. The ssh
+    # auto-attach leg is the ONE exception: it ALSO installs on the gk box
+    # `gatekeeper` account (#562, via SSH_ATTACH_EXTRA_USERS), and stays a
+    # no-op only on dev1/dev2 (`newlevel`).
     try:
         result = ensure_stream_tmux_session()
         if result:
@@ -4174,14 +4177,18 @@ from cli_fleet import (  # noqa: E402, F401
 
 # --- #263: subdev stream dev-env bootstrap (claude tmux session + gap report) --
 def _stream_session_cwd() -> Path:
-    """The convention working directory for a subdev/gatekeeper account's tmux
-    session (see STREAM_DEV_CWD_CHAIN's own comment, above apply_ultracode_
-    launcher). #563: a FALLBACK CHAIN -- the first EXISTING dir of
+    """The convention working directory for the #263 tmux bootstrap of a
+    subdev STREAM account (see STREAM_DEV_CWD_CHAIN's own comment, above
+    apply_ultracode_launcher). Its only caller, ensure_stream_tmux_session(),
+    early-returns for any account NOT in AUTHORITY_BY_USER, so this function is
+    never reached for gatekeeper -- gatekeeper's own ssh-attach cwd is computed
+    by the bash block's inline chain loop over the SAME STREAM_DEV_CWD_CHAIN,
+    not here. #563: a FALLBACK CHAIN -- the first EXISTING dir of
     STREAM_DEV_CWD_CHAIN wins (odoo-erp, then devel/odoo), else $HOME. The old
     binary "odoo-erp or $HOME" fallback dropped montalu1 (project dir
     ~/devel/odoo, no odoo-erp subdir) into $HOME. Falling back to $HOME keeps
-    bootstrap from hard-failing on an account gatekeeper hasn't finished
-    Phase 1 for (and is correct for gatekeeper, which has no odoo checkout)."""
+    bootstrap from hard-failing on a stream account gatekeeper hasn't finished
+    Phase 1 for."""
     home = Path.home()
     for rel in STREAM_DEV_CWD_CHAIN:
         p = home / rel

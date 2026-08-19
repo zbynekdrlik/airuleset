@@ -301,12 +301,15 @@ def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
 
 def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     """Idempotently add/remove the #264 ssh-auto-attach marker block in
-    ~/.bashrc, scoped STRICTLY to subdev stream accounts (AUTHORITY_BY_USER's
-    keys -- the exact registry #263's tmux bootstrap also keys off, single
-    source of truth for "which accounts are subdev streams"). Absent from
-    every other box (dev1/dev2/gatekeeper): the marker is actively REMOVED
-    there if ever present, so a future AUTHORITY_BY_USER edit can never leave
-    a stale attach block on the wrong account.
+    ~/.bashrc, scoped to the ssh-attach eligibility set: subdev stream
+    accounts (AUTHORITY_BY_USER's keys -- the registry #263's tmux bootstrap
+    also keys off) UNION SSH_ATTACH_EXTRA_USERS (the gk box `gatekeeper`
+    account, #562 -- eligible for the block but deliberately NOT in
+    AUTHORITY_BY_USER, since that map is the stream registry and gatekeeper is
+    not a stream). Every account OUTSIDE that union (dev1/dev2 = `newlevel`,
+    any other): the marker is actively REMOVED there if ever present, so a
+    future eligibility edit can never leave a stale attach block on the wrong
+    account.
 
     Same overall idempotent-marker-block shape as apply_ultracode_launcher
     (#77) -- create/update if this account should have it, strip if not --
