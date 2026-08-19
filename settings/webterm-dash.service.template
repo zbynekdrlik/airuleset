@@ -1,0 +1,39 @@
+# airuleset web terminal — static dashboard (systemd --user unit, managed by airuleset).
+#
+# Installed ONLY on dev1 (the single gateway) by `airuleset.py install` via
+# setup_webterm_service(). Serves the generated single-page tabbed dashboard
+# ({{DASH_DIR}}/index.html) over plain HTTP, bound to dev1's tailscale IP
+# ({{BIND_IP}}) so it is reachable tailnet-wide by RAW IP — a MagicDNS-
+# independent, cross-node-working URL (#579: `tailscale serve` matched only the
+# node's MagicDNS name, so a raw-IP request 404'd from other tailnet nodes). The
+# IP is resolved dynamically at install time (`tailscale ip -4`, validated to the
+# 100.64.0.0/10 CGNAT range); if none is available, install REFUSES to provision
+# rather than bind a public interface. Do not edit the installed copy in
+# ~/.config/systemd/user/ by hand — edit this template and re-run
+# `python3 airuleset.py install`.
+#
+# Security boundary: tailnet-only exposure (bound to the tailscale IP, NEVER
+# 0.0.0.0/public). This page is UNAUTHENTICATED (it only discloses fleet session
+# labels, already `tailscale status`-visible); the shell port (ttyd :7682) stays
+# basic-auth-gated. `http.server` is a read-only static file server (no upload,
+# no exec), so a caps-light unit is sufficient.
+
+[Unit]
+Description=airuleset web terminal — static dashboard (dev1-only)
+Documentation=https://github.com/zbynekdrlik/airuleset
+After=network-online.target
+Wants=network-online.target
+# Restart loop guard: more than StartLimitBurst restarts in the interval = stop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env python3 -m http.server {{DASH_PORT}} --bind {{BIND_IP}} --directory {{DASH_DIR}}
+Restart=on-failure
+RestartSec=5
+MemoryMax=128M
+TasksMax=32
+
+[Install]
+WantedBy=default.target
