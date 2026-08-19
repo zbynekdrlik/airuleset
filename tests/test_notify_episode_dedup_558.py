@@ -15,7 +15,6 @@ So a chronic condition alerts ONCE per onset + ONE recovery, never per time buck
 (hysteresis), not one flicker.
 """
 
-import os
 import shutil
 import sys
 import tempfile

@@ -2089,6 +2089,135 @@ def drop_grace_question(message_id, path=None):
     return False
 
 
+# --------------------------------------------------------------------------- #
+# #558 -- episode dedup with hysteresis for chronic-condition alerts (546
+# lane 2). An OPT-IN primitive a chronic-condition caller consults BEFORE
+# send(): it decides open/hold/clearing/recover/quiet and NEVER posts, so a
+# chronic condition alerts ONCE per onset + ONE recovery (never the 546
+# `burn-alert:<hour>` per-bucket re-page) and clearing needs N consecutive
+# healthy passes (hysteresis), not one flicker. Deliberately SEPARATE from
+# send() -- send() stays byte-identical, so this can never suppress a
+# legitimate ❓/✅ (the exact concern that deferred lane 2 out of 546 lane 1).
+# 546 lane 1 already suppressed the CURRENT chronic classes at the send()
+# chokepoint; this is the mechanism 546 lane 2 asked for ("the shared throttle
+# gains hysteresis") for any FUTURE or remaining chronic alert.
+# --------------------------------------------------------------------------- #
+_EPISODES_REL = "notify-episodes.json"
+EPISODE_CLEAR_AFTER = 3               # default consecutive healthy passes to clear
+EPISODE_MAX_AGE_S = 30 * 24 * 3600    # age-reap a stuck-open episode whose caller
+                                       # stopped observing it (so the per-key store
+                                       # never grows unbounded — #519/#531 discipline)
+
+
+def _episodes_path():
+    return os.path.join(_claude_dir(), _EPISODES_REL)
+
+
+def load_episodes(path=None):
+    """The condition_key -> {active, healthy_streak, opened_at, last_seen} map.
+    {} on any error (fail toward alerting, never raise)."""
+    path = path or _episodes_path()
+    try:
+        with open(path, encoding="utf-8") as h:
+            d = json.load(h)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_episodes(d, path=None):
+    path = path or _episodes_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as h:
+            json.dump(d, h)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
+def _prune_episodes(store, now):
+    """Drop malformed entries and any episode not observed in
+    `EPISODE_MAX_AGE_S` — a caller that stopped calling the gate (its job was
+    removed) must not leak a record forever. A FUTURE `last_seen` (clock skew)
+    is KEPT (the #519 safe direction — `now - last` goes negative, never
+    exceeds the max age). Never raises."""
+    for k in list(store.keys()):
+        v = store.get(k)
+        if not isinstance(v, dict):
+            store.pop(k, None)
+            continue
+        try:
+            last = float(v.get("last_seen", 0) or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if now - last > EPISODE_MAX_AGE_S:
+            store.pop(k, None)
+
+
+def episode_gate(condition_key, healthy, clear_after=None, now=None, path=None):
+    """Decide what a chronic-condition caller should do THIS pass (#558).
+
+    Call it on EVERY pass (healthy or not) with a stable `condition_key` and a
+    boolean `healthy` (True = the condition is absent this pass). Returns:
+      * "open"     — first unhealthy pass of a new episode -> SEND the onset alert
+      * "hold"     — the condition persists -> send NOTHING (no per-pass re-page)
+      * "clearing" — a healthy pass, fewer than `clear_after` in a row -> hysteresis, send NOTHING
+      * "recover"  — `clear_after` consecutive healthy passes -> SEND ONE recovery message
+      * "quiet"    — no active episode and healthy -> nothing to do
+
+    OPT-IN and side-effect-free w.r.t. Discord: it only DECIDES + updates its
+    own JSON store; the caller does the sending, so `send()` is untouched.
+    Best-effort/fail-safe: an unreadable/unwritable store degrades toward
+    ALERTING (a fresh unhealthy pass reads "open"), never raises, never
+    silently swallows an alert. A falsy `condition_key` can't be tracked, so it
+    fails the same way (unhealthy -> "open", healthy -> "quiet")."""
+    now = time.time() if now is None else now
+    clear_after = EPISODE_CLEAR_AFTER if clear_after is None else clear_after
+    if clear_after < 1:
+        clear_after = 1
+    if not condition_key:
+        return "open" if not healthy else "quiet"
+    store = load_episodes(path)
+    _prune_episodes(store, now)
+    rec = store.get(condition_key)
+    active = bool(rec.get("active")) if isinstance(rec, dict) else False
+
+    if not healthy:
+        if not active:
+            store[condition_key] = {"active": True, "healthy_streak": 0,
+                                    "opened_at": now, "last_seen": now}
+            _save_episodes(store, path)
+            return "open"
+        rec["healthy_streak"] = 0
+        rec["last_seen"] = now
+        store[condition_key] = rec
+        _save_episodes(store, path)
+        return "hold"
+
+    # healthy this pass
+    if not active:
+        if isinstance(rec, dict):        # stale/cleared leftover -> tidy it
+            store.pop(condition_key, None)
+            _save_episodes(store, path)
+        return "quiet"
+    try:
+        streak = int(rec.get("healthy_streak", 0) or 0) + 1
+    except (TypeError, ValueError):
+        streak = 1
+    rec["last_seen"] = now
+    if streak >= clear_after:
+        store.pop(condition_key, None)   # episode closed
+        _save_episodes(store, path)
+        return "recover"
+    rec["healthy_streak"] = streak
+    store[condition_key] = rec
+    _save_episodes(store, path)
+    return "clearing"
+
+
 # --- sent-card map (message id -> repo/issue) — airuleset#297/#298 -------
 # The per-ticket completion CARD's own message id, mapped to which repo/issue
 # it is for. Recorded at SEND time (never parsed back out of the card's
