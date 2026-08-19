@@ -91,10 +91,20 @@ def _fake_gh_dir():
 
 
 def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
-        app_token_dir=None, api_user_403=False, labels="", labels_fail=False):
+        app_token_dir=None, api_user_403=False, labels="", labels_fail=False,
+        user=None):
     payload = json.dumps({"tool_input": {"command": cmd}})
     env = dict(os.environ)
     env["PATH"] = _fake_gh_dir() + os.pathsep + env.get("PATH", "")
+    if user is not None:
+        # #564: force the subprocess's own unix identity (getpass.getuser()
+        # reads LOGNAME/USER) so `authority --stream-label` resolves a specific
+        # stream — e.g. a rename target (montalu1) whose equivalents include the
+        # legacy `montalu`. The authority PROFILE still comes from the cwd
+        # marker (resolve_authority is marker-first), so this does not change
+        # branch-merge/fork-no-merge selection.
+        env["LOGNAME"] = user
+        env["USER"] = user
     env["FAKE_GH_ME"] = me
     env["FAKE_GH_AUTHOR"] = author
     env["FAKE_GH_FAIL"] = "1" if gh_fail else "0"
@@ -338,6 +348,46 @@ class TestStreamLabelAcceptanceClose(TestCase):
                 self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
                 author=airuleset.MAINTAINER_GH_LOGIN, labels=labels)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_acceptance_close_of_ticket_with_legacy_prerename_stream_label(self):
+        # #564 (the live residual): a montalu1 box (post base-stream rename)
+        # closing its OWN needs-acceptance ticket that still carries the OLD
+        # `stream:montalu` label during the transition. `authority --stream-label`
+        # must emit BOTH equivalents and the hook must match ANY of them. RED
+        # before the fix (only `stream:montalu1` emitted → old label never
+        # matches → BLOCK). The subprocess runs as unix user montalu1 (a real
+        # STREAM_RENAME_ALIASES target), so this uses the real rename table.
+        labels = "stream:montalu needs-acceptance"
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp "
+                "--comment 'client confirmed on PROD'",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels,
+                user="montalu1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_acceptance_close_with_current_name_label_after_rename(self):
+        # #564 regression lock: emitting MULTIPLE equivalents must not break the
+        # exact CURRENT-name match — a montalu1 box closing a ticket carrying the
+        # current `stream:montalu1` label still ALLOWS.
+        labels = "stream:montalu1 needs-acceptance"
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp "
+                "--comment 'client confirmed'",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels,
+                user="montalu1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_blocks_acceptance_close_with_foreign_stream_label_even_with_alias(self):
+        # #564 fail-safe: a montalu1 box must NOT get the carve-out for a
+        # DIFFERENT stream's ticket. `stream:david` is neither montalu1 nor its
+        # legacy montalu equivalent → BLOCK, exactly like the pre-alias
+        # foreign-label case.
+        labels = "stream:david needs-acceptance"
+        r = run("gh issue close 3313 -R zbynekdrlik/odoo-erp --comment done",
+                self.branch, me=airuleset.MAINTAINER_GH_LOGIN,
+                author=airuleset.MAINTAINER_GH_LOGIN, labels=labels,
+                user="montalu1")
+        self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_allows_acceptance_close_with_short_c_comment_flag(self):
         # The `-c` short form of --comment must be honored identically.
