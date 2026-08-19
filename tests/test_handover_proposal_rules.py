@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -402,6 +403,13 @@ class TestHandoverBareFollowUpRecall(TestHandoverTriggerInjection):
     verb). Accepted residuals (a generic non-odoo „vlákno"/„discuss" reply, a
     reply-to-client out of a thread) are documented per the #319 convention in
     the ticket design comment.
+
+    #577 review hardening (adversarial review, this ticket): English reply verbs
+    (reply/respond) were DROPPED — the streams work in Slovak and reply/respond
+    over-fired on daily English dev prose + substrings (correspond/respondent/
+    no-reply); and every verb stem lost its trailing backtrackable \\w* (next to
+    the bounded gap it is catastrophic-backtracking ReDoS on a repeated verb-token
+    input, a vuln PRE-EXISTING in arms 1-3 too). Both are locked below.
     """
 
     # --- the gap cases: RED under the pre-#577 pattern ---
@@ -432,10 +440,6 @@ class TestHandoverBareFollowUpRecall(TestHandoverTriggerInjection):
         # „klientovi odpíš" — client -> reply ordering
         self.assertTrue(self._prompt("klientovi odpíš do vlákna", "r577f"))
 
-    def test_en_reply_to_client_in_discuss_injects(self):
-        self.assertTrue(self._prompt(
-            "reply to the client in the Discuss thread", "r577g"))
-
     def test_ask_surface_bare_followup_injects(self):
         # the AskUserQuestion (owner-approval) surface, primed first so
         # user-questions-slovak's once-per-session marker is set (#521 residual)
@@ -463,6 +467,45 @@ class TestHandoverBareFollowUpRecall(TestHandoverTriggerInjection):
 
     def test_unrelated_reply_stays_silent(self):
         self.assertFalse(self._prompt("odpovedz mi kedy máš čas", "n577e"))
+
+    def test_english_reply_respond_verbs_no_longer_fire(self):
+        # review A M1 / B m2: English reply/respond were dropped — they over-fired
+        # on daily English dev prose and on substrings (correspond / respondent /
+        # no-reply). Slovak recall (odpoved/odpíš/reaguj) is unaffected.
+        self.assertFalse(self._prompt(
+            "reply to the client in the Discuss thread", "n577f"))
+        self.assertFalse(self._prompt(
+            "respond to the reviewer in the discussion", "n577g"))
+        self.assertFalse(self._prompt(
+            "correspondence with the client about the reagent order", "n577h"))
+
+    def test_reaguj_stem_avoids_reagent_substring(self):
+        # `reaguj` (not bare `reag`) keeps the Slovak imperative but no longer
+        # matches the accounting/lab noun "reagent" next to a client signal.
+        self.assertTrue(self._prompt("reaguj klientovi vo vlákne", "n577i"))
+        self.assertFalse(self._prompt("objednaj reagent pre klienta", "n577j"))
+
+    def test_pattern_is_redos_safe_on_repeated_verb_tokens(self):
+        # review B M1: a \w* verb prefix next to the [^\n]{0,N} gap is
+        # catastrophic-backtracking ReDoS on a repeated verb-token input
+        # (measured ~9 s for "odpoved"*1000, ~14 s for "odovzdav"*1000 pre-fix).
+        # Bare stems fix it (<10 ms). Load the REAL conf pattern and assert it
+        # completes far under a generous bound even under heavy box load — the
+        # fixed timing (~8 ms) vs the vulnerable (~13 s) leaves a ~1600x margin.
+        pattern = next(
+            (pat for topic, _t, pat, _b in load_conf_rows() if topic == HANDOVER_TOPIC),
+            None)
+        self.assertIsNotNone(pattern, "handover row not found in the conf")
+        rx = re.compile(pattern)
+        for tok in ("odpoved", "odovzdav", "napis", "informuj"):
+            payload = tok * 1200
+            start = time.perf_counter()
+            rx.search(payload)
+            elapsed = time.perf_counter() - start
+            self.assertLess(
+                elapsed, 2.0,
+                "ReDoS regression: %r*1200 took %.3fs — a backtrackable \\w* verb "
+                "prefix was reintroduced next to the [^\\n]{0,N} gap" % (tok, elapsed))
 
 
 if __name__ == "__main__":
