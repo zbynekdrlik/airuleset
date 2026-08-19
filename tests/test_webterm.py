@@ -717,5 +717,118 @@ class TestSameOriginKeyboard(unittest.TestCase):
         self.assertIn("klik", hint.lower())
 
 
+class TestHiddenTabDisconnect(unittest.TestCase):
+    """#585 (a): a hidden webterm tab must NOT influence the base tmux session's
+    shared window size. Root cause (reproduced live): grouped sessions share a
+    window whose size follows `window-size latest` = the most-recently-active
+    client; a hidden iframe stays an ATTACHED client and, when its xterm reports
+    a shrunken viewport, shrinks the window the owner's WT client is viewing
+    (Ctrl+B W = a tiny/blank choose-tree). Fix: only the VISIBLE tab keeps a live
+    terminal client — every hidden tab is disconnected (its throwaway clone dies
+    on WS close), reconnecting on return (scrollback lives in tmux, not the
+    browser)."""
+
+    def _inv(self, n=3):
+        return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
+                 "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
+                for i in range(1, n + 1)]
+
+    def test_activate_disconnects_hidden_and_reconnects_visible(self):
+        # The invariant loop: for each made iframe, connect+show the active idx,
+        # suspend+hide every other. A hidden tab is suspended to about:blank so
+        # it is no longer an attached tmux client (cannot drive window sizing).
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("function suspend(", html)
+        self.assertIn("function connect(", html)
+        self.assertIn("about:blank", html)            # disconnect target
+        self.assertIn("dataset.live", html)           # live/suspended state marker
+        # the invariant is wired INSIDE activate: connect the visible, suspend others
+        self.assertIn("connect(made[k]", html)
+        self.assertIn("suspend(made[k]", html)
+        # DIRECTION matters (both #585 reviewers 🔵): a swapped branch — connect the
+        # HIDDEN tabs, suspend the VISIBLE one — would still contain both tokens.
+        # Assert the ACTIVE branch (`+k === idx`) connects+shows and the `else`
+        # branch suspends+hides, so a direction swap regresses this test.
+        self.assertRegex(
+            html,
+            r"if\s*\(\s*\+k === idx\s*\)\s*\{\s*connect\(made\[k\][^}]*?'block'[^}]*?\}"
+            r"\s*else\s*\{\s*suspend\(made\[k\][^}]*?'none'")
+
+    def test_reconnect_ux_and_scrollback_documented(self):
+        # The reconnect UX + "nothing lost" claim must be surfaced to the owner
+        # (scrollback lives in tmux, so a disconnect/reconnect loses nothing).
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
+        self.assertIn("tmux", hint.lower())           # scrollback lives in tmux
+        self.assertTrue("odpojí" in hint or "obnov" in hint,  # reconnect UX advertised
+                        "hint must document the disconnect/reconnect behavior")
+
+    def test_visible_tab_is_never_needlessly_reloaded(self):
+        # connect() must early-return when already live, so re-activating the
+        # SAME tab does not reload it (a reload would flash + churn the clone).
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertRegex(html, r"dataset\.live\s*===\s*'1'")   # the already-live guard
+
+
+class TestCtrlWProtection(unittest.TestCase):
+    """#585 (b): Ctrl+W is readline delete-word in the terminal but the browser
+    consumes it as close-tab (a reserved shortcut the page cannot preventDefault
+    in a normal window). Three layers: (1) a beforeunload confirm armed WHILE a
+    terminal is connected (no silent tab loss); (2) a Fullscreen button that
+    requests fullscreen + navigator.keyboard.lock so Chrome delivers Ctrl+W to
+    the terminal (feature-detected, honest hint when unsupported); (3) a
+    documented PWA alternative in the hint."""
+
+    def _inv(self, n=3):
+        return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
+                 "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
+                for i in range(1, n + 1)]
+
+    def test_beforeunload_confirm_registered_and_gated(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("'beforeunload'", html)         # the handler is registered
+        self.assertIn("function hasLiveTerminal(", html)  # the gate
+        self.assertIn("hasLiveTerminal()", html)      # gate CONSULTED in beforeunload
+        self.assertIn("preventDefault()", html)       # standard confirm shape
+        self.assertIn("returnValue", html)
+
+    def test_fullscreen_button_requests_lock_with_feature_detect(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn('id="fs"', html)                # a Fullscreen control exists
+        self.assertIn("requestFullscreen", html)
+        self.assertIn("navigator.keyboard", html)     # Keyboard Lock API
+        self.assertIn(".lock(", html)
+        self.assertIn("KeyW", html)                   # Ctrl+W is the locked key
+        self.assertIn("function keyboardLockSupported(", html)  # feature-detect
+        # honest fallback: the disabled assignment is inside the ELSE of the
+        # feature-detect (a swap that disables when SUPPORTED would fail this).
+        self.assertRegex(html, r"if\s*\(\s*keyboardLockSupported\(\)\s*\)")
+        self.assertRegex(html, r"\}\s*else\s*\{[^}]*?fsBtn\.disabled = true")
+        # secure-context honesty (#585 reviewer 🔵): Keyboard Lock needs HTTPS/
+        # localhost, so the gate consults isSecureContext AND the disabled title
+        # names HTTPS as the real reason on the plain-HTTP tailnet (not a false
+        # "browser unsupported").
+        self.assertIn("isSecureContext", html)
+        self.assertIn("HTTPS", html)
+
+    def test_pwa_alternative_documented_in_hint(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
+        self.assertIn("PWA", hint)
+        self.assertIn("Ctrl+W", hint)                 # the shortcut it protects
+        # HONEST framing (#585 both reviewers): the hint must NOT promise PWA
+        # delivers Ctrl+W to the terminal (it does not for an iframe). Fullscreen
+        # is the mechanism that does; PWA only reduces accidental-close risk.
+        self.assertIn("Fullscreen", hint)
+
+    def test_ctrlw_additions_preserve_escaping_and_single_pass(self):
+        # The #579 injection invariants must survive the Ctrl+W / disconnect JS.
+        inv = [{"id": "x", "label": "</script><script>alert(1)</script>",
+                "kind": "owner", "local": True, "host": None, "user": None}]
+        html = w.render_dashboard_html(inv, ttyd_base="/t")
+        self.assertNotIn("</script><script>", html)
+        self.assertEqual(html.count('"ttyd_base"'), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
