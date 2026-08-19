@@ -372,5 +372,42 @@ class TestShowCliWiring(_StoreCase):
         self.assertEqual(locator, str(p.resolve()))
 
 
+# --------------------------------------------------------------------------- #
+# Doctrine — the OUTPUT direction in the credential modules (#580)
+# --------------------------------------------------------------------------- #
+class TestShowDoctrine(TestCase):
+    RECV = ROOT / "modules" / "core" / "receive-files-via-upload-url.md"
+    DELIVER = ROOT / "modules" / "core" / "deliver-files-as-urls.md"
+
+    def _line_with(self, text, finder, *cotokens):
+        """Per-line teeth (#500): the ONE operative line containing `finder`
+        must carry every co-token — a partial revert drops them together."""
+        hits = [ln for ln in text.splitlines() if finder in ln]
+        self.assertTrue(hits, "no line contains %r" % finder)
+        self.assertTrue(
+            any(all(c in ln for c in cotokens) for ln in hits),
+            "no %r line carries all of %r" % (finder, cotokens))
+
+    def test_receive_module_documents_the_output_direction(self):
+        t = self.RECV.read_text(encoding="utf-8")
+        self.assertIn("Delivering a CREDENTIAL TO the Owner", t)
+        # The command line names both sources.
+        self._line_with(t, "secret show <NAME>", "secret show <NAME>",
+                        "secret show --file")
+        # A BANNED line forbids chat + "run cat yourself", routing to `secret show`.
+        self._line_with(t, "run `cat` yourself", "run `cat` yourself",
+                        "chat")
+        self.assertIn("SESSION never sees the value", t)
+
+    def test_deliver_stub_points_at_the_credential_out_channel(self):
+        t = self.DELIVER.read_text(encoding="utf-8")
+        self._line_with(t, "A credential is NOT a file", "secret show",
+                        "one-shot")
+        # Must stay a short stub AND keep its cross-reference (other tests
+        # assert these too — do not regress them here).
+        self.assertLess(len(t.splitlines()), 12)
+        self.assertIn("receive-files-via-upload-url", t)
+
+
 if __name__ == "__main__":
     main()
