@@ -267,121 +267,56 @@ class TestSendHookProjectRouting(_HomeIsolated):
 
 
 # --------------------------------------------------------------------------- #
-# 4. hooks/notify-api-error.sh: project computed via python (canonical),
-#    falling back to basename — never a checkout-dir-name mismatch with the
-#    run-card / idle-ping label for the SAME repo.
+# 4. hooks/notify-api-error.sh: RETIRED to a documented NO-OP (#546, owner
+#    directive 5333914691 — the api-error Discord ping class is banned; the
+#    watchdog's silent `continue` auto-resume is the only api-error reaction).
+#    These locks INVERT the old project-label contract: the hook must drain
+#    stdin, exit 0, and never invoke the notify api-error path at all.
 # --------------------------------------------------------------------------- #
 
-class TestApiErrorHookProjectLabel(unittest.TestCase):
+class TestApiErrorHookRetiredNoOp(unittest.TestCase):
 
-    def test_hook_calls_the_project_label_cli_mode(self):
+    def test_hook_source_is_a_documented_noop(self):
         src = API_ERROR_HOOK.read_text()
-        self.assertIn("--project-label", src)
+        self.assertIn("#546", src)          # cites the retiring directive
+        self.assertIn("exit 0", src)
+        # No LIVE (non-comment) line may still invoke the retired flow —
+        # comments documenting the retirement legitimately mention the flags.
+        live = [ln for ln in src.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")]
+        for token in ("--api-error", "--project-label", "python3"):
+            self.assertFalse([ln for ln in live if token in ln],
+                             "live line still carries %s: %r"
+                             % (token, [ln for ln in live if token in ln]))
 
-    def test_hook_still_falls_back_when_python_yields_nothing(self):
-        # A basename-shaped fallback must survive even if the python call
-        # fails/returns empty -- PROJECT must never end up unset.
-        src = API_ERROR_HOOK.read_text()
-        self.assertIn("basename", src)
-
-    def _run_with_fake_python(self, cwd, log_path, project_label_ok=True):
-        """A fake `python3` earlier on PATH: a `notify --project-label`
-        invocation is faithfully DELEGATED to the REAL python3 (so the
-        canonical value is genuine) unless `project_label_ok` is False (in
-        which case it fails, forcing the hook's own basename fallback); a
-        `notify --api-error` invocation is never actually run (no network,
-        no real send) -- its full argv is logged instead, so the test can
-        assert on the EXACT --project value the hook passed. Anything else
-        delegates to the real python3 untouched (#369 review m6 -- the
-        pre-existing tests only asserted the hook's SOURCE mentions
-        `--project-label`/`basename`, which a mutant deleting the whole
-        PROJECT-computation block still satisfied via the surrounding
-        comments)."""
-        real_python3 = shutil.which("python3")
-
-        def q(s):
-            # single-quote a value for literal bash embedding
-            return "'" + str(s).replace("'", "'\\''") + "'"
-
-        project_label_branch = (
-            "exec %s \"$@\"" % q(real_python3) if project_label_ok
-            else "exit 1")
+    def test_hook_exits_zero_and_never_fires_api_error(self):
+        # Behavioural teeth: a fake python3 earlier on PATH logs any
+        # `notify --api-error` argv. On an api-error payload the retired
+        # hook must exit 0 and the log must stay EMPTY (no background job
+        # racing either — poll briefly before declaring silence).
+        log = Path(tempfile.mkdtemp(prefix="airuleset-apierr-noop-")) / "argv.log"
+        self.addCleanup(shutil.rmtree, log.parent, True)
         d = Path(tempfile.mkdtemp(prefix="airuleset-fakepy3-"))
         self.addCleanup(shutil.rmtree, d, True)
         fake = d / "python3"
         fake.write_text(
             "#!/usr/bin/env bash\n"
-            "set -euo pipefail\n"
-            "if printf '%s\\n' \"$*\" | grep -q -- '--api-error'; then\n"
-            "    printf '%s\\n' \"$*\" >> " + q(log_path) + "\n"
-            "    exit 0\n"
-            "fi\n"
-            "if printf '%s\\n' \"$*\" | grep -q -- '--project-label'; then\n"
-            "    " + project_label_branch + "\n"
-            "fi\n"
-            "exec " + q(real_python3) + " \"$@\"\n")
+            "printf '%s\\n' \"$*\" >> " + "'" + str(log) + "'" + "\n"
+            "exit 0\n")
         fake.chmod(0o755)
-        env = {**os.environ, "PATH": str(d) + os.pathsep + os.environ.get("PATH", "")}
+        env = {**os.environ,
+               "PATH": str(d) + os.pathsep + os.environ.get("PATH", "")}
         payload = json.dumps({
             "last_assistant_message": "API Error: Server is temporarily "
-                                       "limiting requests · Rate limited",
-            "session_id": "s1", "cwd": str(cwd)})
-        return subprocess.run(["bash", str(API_ERROR_HOOK)], input=payload,
-                              capture_output=True, text=True, env=env)
-
-    def test_hook_passes_the_canonical_project_label_to_api_error(self):
-        log = Path(tempfile.mkdtemp(prefix="airuleset-apierr-log-")) / "argv.log"
-        self.addCleanup(shutil.rmtree, log.parent, True)
-        expected = subprocess.run(
-            [sys.executable, str(AIRULESET), "notify", "--project-label",
-             "--cwd", str(ROOT)], capture_output=True, text=True).stdout.strip()
-        self.assertTrue(expected)
-        r = self._run_with_fake_python(ROOT, log)
+                                      "limiting requests · Rate limited",
+            "session_id": "s1", "cwd": str(ROOT)})
+        r = subprocess.run(["bash", str(API_ERROR_HOOK)], input=payload,
+                           capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        # the background `( ... ) &` job may still be finishing when the
-        # hook itself has already exited -- poll briefly for its log line.
-        deadline = time.time() + 5
-        logged = ""
-        while time.time() < deadline:
-            if log.exists():
-                logged = log.read_text()
-                if logged.strip():
-                    break
-            time.sleep(0.1)
-        self.assertIn("--project %s" % expected, logged, logged)
-
-    def test_hook_falls_back_to_basename_when_project_label_fails(self):
-        log = Path(tempfile.mkdtemp(prefix="airuleset-apierr-log2-")) / "argv.log"
-        self.addCleanup(shutil.rmtree, log.parent, True)
-        r = self._run_with_fake_python(ROOT, log, project_label_ok=False)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        deadline = time.time() + 5
-        logged = ""
-        while time.time() < deadline:
-            if log.exists():
-                logged = log.read_text()
-                if logged.strip():
-                    break
-            time.sleep(0.1)
-        # the fallback recipe (git-toplevel-basename) — computed the SAME
-        # way the hook itself computes it, never hardcoded: in a plain
-        # checkout that is "airuleset", but from inside a WORKTREE checkout
-        # (as THIS test suite may itself be running) `git rev-parse
-        # --show-toplevel` resolves to the WORKTREE's own root, so the
-        # fallback's basename is the worktree dir name, not "airuleset" —
-        # a genuine, real divergence from the canonical --project-label
-        # value that PRE-DATES #369 (the fallback recipe was the OLD code's
-        # ONLY mechanism, so it was always "wrong" in a worktree; #369
-        # merely demoted it to a rarely-hit fallback, per review m4). What
-        # this test asserts is narrower and still meaningful: the fallback
-        # actually RAN and produced ITS OWN real value — never the literal
-        # "unknown" the pre-fallback code used to collapse to.
-        expected_fallback = subprocess.run(
-            ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True).stdout.strip()
-        expected_fallback = os.path.basename(expected_fallback.rstrip("/"))
-        self.assertIn("--project %s" % expected_fallback, logged, logged)
-        self.assertNotIn("--project unknown", logged, logged)
+        self.assertEqual(r.stdout.strip(), "", r.stdout)
+        time.sleep(1.0)   # a leaked `( ... ) &` job would land within this
+        logged = log.read_text() if log.exists() else ""
+        self.assertEqual(logged.strip(), "", logged)
 
 
 # --------------------------------------------------------------------------- #
