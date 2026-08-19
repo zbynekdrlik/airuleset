@@ -26,8 +26,8 @@ user-invocable: true
    doc, spec, quote, invoice, or any text document is shown on screen, transcribe its exact
    text into a `*_verbatim.md`. In the original failure the shown requirements doc WAS the
    meeting's substance; never reduce a shown spec to a one-line summary. Same weight as rule 1.
-   **VERBATIM covers codes/numbers/dimensions/labels — NEVER names** (personal or
-   customer/company names → `[redigované]` at write time, Rule 7).
+   **VERBATIM covers codes/numbers/dimensions/labels — NEVER the customer's names** (person or
+   company → `[redigované]` at write time, Rule 7).
 4. **Completeness is priority #1.** End with an adversarial completeness critic (Phase 5).
    When unsure whether something is a requirement, capture it — over-capture, never drop.
 5. **Transcription = Soniox stt-async-v5 (PRIMARY); YOU pick, never ask which.** Whisper twice
@@ -46,16 +46,17 @@ user-invocable: true
    (`speaker_turns.json` comes straight out of `transcribe_soniox.py`) — no caption/subtitle
    track required. The caption track is only a fallback speaker source for the local-whisper
    path; when you fall back to whisper, its caption speaker labels + timings are still gold.
-7. **REDACT personal + customer/company names AT WRITE TIME — this OVERRIDES "verbatim".**
+7. **REDACT the customer's personal + company names AT WRITE TIME — this OVERRIDES "verbatim".**
    ERP grids (Odberateľ column) and doc title blocks (NÁZOV) show names prominently, and the
    "every field verbatim" instinct (Rule 3) copies them — the #1 privacy leak (montalu, #576).
    When you record ANY ERP/app/document
    screen, write `[redigované]` for every personal name and every customer/company name
    as you write the line — never capture-now-redact-later.
    KEEP every order/reference code (ZAK/OP/PV/doc numbers), dimension, quantity, status,
-   label — those ARE the verbatim data. When you fan out screen-reader
-   sub-agents (Phase 5), put this rule in EACH sub-reader's prompt: a skill body does
-   not reach a dispatched agent, so the name-safe format lives in the prompt.
+   label — AND your OWN side's names (team/dev, product/module, vendor): context, not the leak
+   (redaction targets the CUSTOMER only — the Odberateľ / client). When you fan out screen-reader
+   sub-agents (Phase 5), put this rule in EACH sub-reader's prompt: a skill body does not reach a
+   dispatched agent, so the name-safe format lives in the prompt.
 
 ## Setup & variables
 
@@ -250,7 +251,8 @@ For EACH file in `frames_kept/`, use the Read tool to look at it and record what
   value / status / menu / button visible, and the capability it implies. **Redact AT WRITE TIME
   (Hard Rule 7):** `[redigované]` for every personal/customer/company name; keep the codes,
   numbers, dimensions, labels.
-- A shown document/spec/quote → transcribe its **exact text** into `*_verbatim.md` (Hard Rule 3).
+- A shown document/spec/quote → transcribe its **exact text** into `*_verbatim.md` (Hard Rule 3),
+  customer names → `[redigované]` (Hard Rule 7).
 - Correlate with `transcript.txt` + `speaker_turns.json`: when a screen is on (~its t_sec ±8 s),
   what is the speaker saying about it? That pairing is where requirements crystallize.
 
@@ -260,13 +262,14 @@ Combine all artifacts — `transcript.txt`, `speaker_turns.json`, `screen_invent
 `*_verbatim.md` — into the deliverable the user asked for (tickets, spec, decision log, summary).
 Then run a **completeness critic** before declaring done:
 
-- **Redaction check — MANDATORY before accepting ANY inventory or verbatim file:** scan every
-  produced file for a leaked personal/customer/company name; a leak is a GAP — redact it to
-  `[redigované]` (Hard Rule 7).
+- **Redaction check — MANDATORY before accepting ANY produced file (inventory, verbatim, or the
+  final deliverable):** scan each for a leaked customer name (person or company); a leak is a GAP
+  — redact it to `[redigované]` (Hard Rule 7).
 - Large/important synthesis (e.g. "turn this into tickets") + ultracode on / user asks → use the
-  **Workflow** tool: fan out parallel readers over transcript segments + screen groups, then a
-  critic agent whose only job is "what requirement, screen, number, or shown document is NOT
-  represented in the output?". Loop until the critic comes back dry.
+  **Workflow** tool: fan out parallel readers over transcript segments + screen groups (put Hard
+  Rule 7's redaction into EACH reader's prompt — a skill body never reaches a dispatched agent),
+  then a critic agent whose only job is "what requirement, screen, number, or shown document is
+  NOT represented in the output?". Loop until the critic comes back dry.
 - Smaller synthesis → inline critic pass: re-read each screen + speaker turn and tick off where
   it landed in the output. Anything unticked is a gap — fix it.
 - Capture EVERYTHING identified-but-not-done as tracked items (e.g. GitHub issues) — never drop a
@@ -308,13 +311,11 @@ on the METHOD (not the content), then bank the improvement so the next run inher
 1. Ask: what did THIS run reveal was weak, slow, brittle, or missing in the *method*? (ASR quality
    on this audio, diarization accuracy, screen-dedup threshold, a channel that got under-read, a
    step that hung, a manual fix-up you had to improvise, a better tool that would have helped.)
-2. Turn each concrete lesson into an **edit of this SKILL.md and/or its scripts** — tighten a
-   threshold, add a preflight, fix a fragile command, adjust the ASR/context choice, add an
-   anti-pattern. Then **commit** it (airuleset is a git repo):
-   `cd ~/devel/airuleset && git add skills/meeting-analysis && git commit -m "meeting-analysis: <lesson> (self-improve after <topic> run)"`.
-   On a box whose airuleset checkout can't push (isolated sub-dev users like montalu), do NOT
-   commit — put the concrete lesson into the completion report's `🔧 Self-improve:` line so the
-   maintainer session applies it to the repo.
+2. Turn each concrete lesson into an **edit of this SKILL.md and/or its scripts** (tighten a
+   threshold, add a preflight, fix a fragile command, add an anti-pattern), then **commit** it
+   (`cd ~/devel/airuleset && git add skills/meeting-analysis && git commit -m "..."`). On an
+   isolated sub-dev box whose airuleset checkout can't push (e.g. montalu), do NOT commit — put
+   the lesson into the completion report's `🔧 Self-improve:` line for the maintainer to apply.
 3. If the lesson is project-state (not method) — e.g. a montalu-specific gotcha — write it to
    session memory instead, and cross-link.
 4. The completion report MUST end with a one-line `🔧 Self-improve:` note stating what changed in

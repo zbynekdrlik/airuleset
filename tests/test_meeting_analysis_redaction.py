@@ -58,10 +58,18 @@ class RedactionRuleIsBakedIn(_Teeth, unittest.TestCase):
         self.assert_teeth("OVERRIDES", "REDACT", "verbatim", "WRITE TIME")
 
     def test_redacted_token_replaces_personal_and_company_names(self):
-        self.assert_teeth("[redigované]", "personal name", "customer")
+        # finder is a phrase UNIQUE to the operative write-time line (#498) —
+        # `[redigované]` alone appears on 5 lines, so it is a co-token here,
+        # not the finder (hardened per the #576 review, finding R2-1).
+        self.assert_teeth("for every personal name and every", "[redigované]", "customer")
 
     def test_keep_codes_and_data_not_names(self):
         self.assert_teeth("ZAK/OP/PV", "dimension")
+
+    def test_redaction_is_scoped_to_the_customer_not_your_own_side(self):
+        # #576 review R2-2: the rule must NOT over-redact the user's own
+        # team/product/vendor names (they are analysis context, not the leak)
+        self.assert_teeth("OWN side's names", "context", "leak")
 
     def test_hard_rule_3_is_qualified(self):
         self.assert_teeth("VERBATIM covers", "NEVER", "names")
