@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd
 from watchdog import goal
+from watchdog.transcripts import WorkerLane   # #571 -- structured evidence lanes
 
 from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
@@ -1156,6 +1157,83 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(owns)
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("skip:working-no-tasks" in ln for ln in logs), logs)
+
+    def test_571_working_marker_with_structured_live_lane_does_not_defer(self):
+        # #571 LOCK (a) at the goal.py level: a ⏳ marker with 0 RENDER task
+        # badges but a STRUCTURED live lane (count_live_workers -- e.g. a worker
+        # mid-long-tool-call, render-invisible but disk-live) must NOT
+        # skip:working-no-tasks -- it PROCEEDS to the fill/saturation check. RED
+        # against the pre-#571 render-badge read, which deferred on waiters<=0
+        # regardless of the disk-live lane (the count call sat BELOW the branch,
+        # so the patched evidence was never consulted) -- gk 16 issues / 2 lanes.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        live_ev = [WorkerLane("w1", "live", 100.0, None, "")]
+        with m.patch.object(wd, "transcript_last_marker", return_value="⏳"), \
+             m.patch.object(wd, "_pane_live_task_count", return_value=0), \
+             m.patch.object(wd, "count_live_workers", return_value=(1, live_ev)), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
+        self.assertFalse(any("skip:working-no-tasks" in ln for ln in logs), logs)
+        # positive proof it proceeded past working-no-tasks into the fill logic
+        # (1 live lane, backlog 5 -> under-saturated surplus-floor is the next
+        # decision the fill path reaches).
+        self.assertTrue(any("surplus-floor" in ln or "saturated" in ln
+                            or "lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_571_genuinely_zero_structured_lanes_still_defers(self):
+        # #571 LOCK (b) at the goal.py level: a ⏳ marker, 0 render badges, AND 0
+        # non-stale structured lanes -> the defer is preserved (first sweep of
+        # the episode), so a genuinely-idle ⏳ pane is not nudged prematurely.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        with m.patch.object(wd, "transcript_last_marker", return_value="⏳"), \
+             m.patch.object(wd, "_pane_live_task_count", return_value=0), \
+             m.patch.object(wd, "count_live_workers", return_value=(0, [])):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
+        self.assertFalse(owns)
+        self.assertEqual(tmux.sent, [])
+        self.assertTrue(any("skip:working-no-tasks" in ln for ln in logs), logs)
+
+    def test_571_low_mem_capacity_capped_surfaces_once(self):
+        # #571 LOCK (d) at the goal.py level: after M consecutive low-mem skips
+        # with a genuine backlog, the ONE deduped CAPACITY-CAPPED owner-decision
+        # line fires; the OOM skip:low-mem line is preserved every sweep and NO
+        # nudge is typed (OOM protection unchanged).
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        live_ev = [WorkerLane("w1", "live", 100.0, None, ""),
+                   WorkerLane("w2", "live", 100.0, None, "")]
+        rec = {"lms": goal.GOAL_LANE_LOWMEM_SURFACE_STREAK - 1}
+        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)), \
+             m.patch.object(goal, "_mem_available_mb", return_value=812):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 12, now,
+                                          tmtime, rec=rec)
+        self.assertTrue(any("skip:low-mem" in ln for ln in logs), logs)
+        self.assertTrue(any("CAPACITY-CAPPED" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])       # OOM protection preserved
+        # dedup -- a later sweep in the SAME episode does NOT re-surface (rec
+        # carries lms/lmsurf); the skip:low-mem line still fires every sweep.
+        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)), \
+             m.patch.object(goal, "_mem_available_mb", return_value=812):
+            logs2, _o2, _t2 = self._call(GOAL_ARMED_CAP, lambda cwd: 12, now,
+                                         tmtime, rec=rec)
+        self.assertTrue(any("skip:low-mem" in ln for ln in logs2), logs2)
+        self.assertFalse(any("CAPACITY-CAPPED" in ln for ln in logs2), logs2)
+
+    def test_571_low_mem_recovered_resets_the_capacity_episode(self):
+        # #571: mem OK -> the OOM skip did not fire -> the surface episode resets
+        # (lms/lmsurf cleared), so a FUTURE persistent low-mem run re-surfaces.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        live_ev = [WorkerLane("w1", "live", 100.0, None, ""),
+                   WorkerLane("w2", "live", 100.0, None, "")]
+        rec = {"lms": 3, "lmsurf": True}
+        with m.patch.object(wd, "count_live_workers", return_value=(2, live_ev)), \
+             m.patch.object(goal, "_mem_available_mb", return_value=8192):
+            self._call(GOAL_ARMED_CAP, lambda cwd: 12, now, tmtime, rec=rec)
+        self.assertEqual(rec.get("lms", 0), 0)
+        self.assertFalse(rec.get("lmsurf", False))
 
     def test_input_box_not_idle_logs_skip_not_silent(self):
         # kind=="input", no draft, but not at an idle prompt -> the ONE
