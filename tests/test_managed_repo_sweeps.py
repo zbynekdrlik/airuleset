@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd                                    # noqa: E402
+import notify                                             # noqa: E402
 
 DAY = 86400
 NOW = 1785200000.0          # fixed; never time.time() (hour-bucket jitter rule)
@@ -187,8 +188,34 @@ class TestSweepDue(unittest.TestCase):
         self.assertTrue(wd._sweep_due(state, "k", NOW, 3600))
 
 
-class TestNetDriftAlarm(unittest.TestCase):
+class _RepoHealthStoreIsolated(unittest.TestCase):
+    """#560: net_drift_alarm/stuck_main_sweep now consult
+    notify.episode_gate(), whose DEFAULT store is
+    ~/.claude/notify-episodes.json. Every test that FIRES these jobs (i.e.
+    reaches a real measurement + a real send_fn, so the gate is consulted)
+    MUST isolate that store off the real home, or it pollutes ~/.claude AND
+    collides with the many concurrent worker suites this box runs (the #559
+    keyless-send-pollution class). setUp patches notify._claude_dir to a
+    throwaway per-test dir; `self.episodes()` reads the isolated store back.
+    A test that kills BEFORE any measurement (the cadence/marker crash-safety
+    classes) never reaches the gate and needs no isolation."""
+
     def setUp(self):
+        super().setUp()
+        self._ep_home = tempfile.mkdtemp(prefix="airuleset-560-store-")
+        self.addCleanup(shutil.rmtree, self._ep_home, ignore_errors=True)
+        _p = unittest.mock.patch.object(notify, "_claude_dir",
+                                        lambda: self._ep_home)
+        _p.start()
+        self.addCleanup(_p.stop)
+
+    def episodes(self):
+        return notify.load_episodes()   # patched _claude_dir -> isolated store
+
+
+class TestNetDriftAlarm(_RepoHealthStoreIsolated):
+    def setUp(self):
+        super().setUp()
         self.sent = []
         self.state = {}
 
@@ -242,7 +269,11 @@ class TestNetDriftAlarm(unittest.TestCase):
                            repo_roots=["/repos/x"], issue_counts_fetch=fetch)
         self.assertEqual(len(calls), 1)   # second sweep skipped -- not due yet
 
-    def test_reping_dedup_within_window(self):
+    def test_second_consecutive_unhealthy_sweep_holds_no_resend(self):
+        # #560 (was test_reping_dedup_within_window): a second DUE sweep while
+        # the condition persists must NOT re-send -- the gate returns "hold"
+        # after the onset. Same observable (1 send), the mechanism is now
+        # episode_gate hysteresis, not a per-reping-window dedup.
         def fetch(label, window_s):
             return (40, 5)
         wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
@@ -251,11 +282,12 @@ class TestNetDriftAlarm(unittest.TestCase):
         wd.net_drift_alarm(NOW + 2, self.state, send_fn=self.send,
                            repo_roots=["/repos/x"], issue_counts_fetch=fetch,
                            interval=1)
-        self.assertEqual(len(self.sent), 1)   # second sweep due, but re-ping deduped
+        self.assertEqual(len(self.sent), 1)   # onset only; 2nd sweep -> hold
 
 
-class TestStuckMainSweep(unittest.TestCase):
+class TestStuckMainSweep(_RepoHealthStoreIsolated):
     def setUp(self):
+        super().setUp()
         self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-stuckmain-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.sent = []
@@ -372,14 +404,19 @@ class TestStuckMainSweep(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(fetched, [])
 
-    def test_fork_skip_drops_stale_dedup_memory(self):
-        """A fork that once (wrongly) pinged must have that dedup entry cleared
-        so it can never re-ping either."""
+    def test_fork_skip_never_consults_the_gate_or_sends(self):
+        """#560 (was test_fork_skip_drops_stale_dedup_memory): a fork is
+        skipped BEFORE any measurement, so it never sends AND never opens an
+        episode -- the gate is not consulted for a skipped repo. (The old
+        assertion that a stale `state['stuck_main']` dedup entry gets cleared
+        is retired -- that per-repo memory no longer exists; #560 moved dedup
+        to episode_gate's store, and this proves the fork never enters it.)"""
         r = self._fork()
-        self.state["stuck_main"] = {"kvaskodev/odoo-erp": {"pinged_ts": NOW - DAY}}
         wd.stuck_main_sweep(NOW, self.state, send_fn=self.send, repo_roots=[str(r)])
         self.assertEqual(self.sent, [])
-        self.assertNotIn("kvaskodev/odoo-erp", self.state.get("stuck_main", {}))
+        self.assertNotIn(
+            "stuck-main:kvaskodev/odoo-erp", self.episodes(),
+            "a fork-skipped repo must never open an episode (gate not consulted)")
 
     def test_env_skip_list_silences_a_named_repo(self):
         """#441: an operator opt-out via AIRULESET_STUCK_MAIN_SKIP silences a
@@ -396,11 +433,12 @@ class TestStuckMainSweep(unittest.TestCase):
         self.assertTrue(any("stuck-main skip" in line for line in logs))
 
 
-class TestRunOnceWiring(unittest.TestCase):
+class TestRunOnceWiring(_RepoHealthStoreIsolated):
     """Both jobs are reachable through run_once's real dispatch, gated on
     their injected params exactly like jobs 8/11/16/24/25."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-runonce-repos-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.state_path = self.tmp / "state.json"
@@ -565,18 +603,18 @@ class TestMarkerPersistedBeforeRepoRoots_172(unittest.TestCase):
             "kill inside the os.walk itself must not lose it either")
 
 
-class TestDedupPersistedBeforeThePing_172(unittest.TestCase):
-    """#172 (reopened) finding 3: dedup memory (duplicate-ping suppression)
-    must reach DISK the MOMENT a ping fires, not only at the very end of
-    the per-repo loop -- mirroring jobs 8/11's own "dedup memory BEFORE
-    the ping" shape, which the original #172 fix had copied only half of
-    (the cadence stamp, not the per-repo dedup write). Before this fix, a
-    kill between two pings in the same sweep lost the FIRST repo's dedup
-    entry entirely, so it re-pinged on its next rotation -- crossing
-    `notify.send`'s own daily dedup bucket, i.e. a duplicate Discord
-    alert."""
+class TestDedupPersistedBeforeThePing_172(_RepoHealthStoreIsolated):
+    """#172 (reopened) finding 3 -- CONVERTED for #560: the finding's
+    guarantee (a kill between two pings must not lose the FIRST repo's dedup,
+    or it re-pings on the next rotation) still holds, but the mechanism moved
+    from the hand-rolled `state['net_drift']`/`state['stuck_main']` per-repo
+    memory to notify.episode_gate()'s own atomic store (an `os.replace`
+    per gate call, so the first repo's OPENED episode is on disk the instant
+    its onset fires -- BEFORE the second repo's fetch even starts). We now
+    assert the episode STORE, not the removed state key."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-f3-172-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.state_path = self.tmp / "state.json"
@@ -586,11 +624,11 @@ class TestDedupPersistedBeforeThePing_172(unittest.TestCase):
         self.sent.append(msg)
         return "sent"
 
-    def test_net_drift_first_repos_dedup_survives_a_kill_on_the_second(self):
+    def test_net_drift_first_repos_episode_survives_a_kill_on_the_second(self):
         def fetch(label, window_s):
             if label == "b":
                 raise SystemExit("simulated kill mid-fetch on repo b")
-            return (40, 5)   # repo "a" -- above threshold, pings first
+            return (40, 5)   # repo "a" -- above threshold, opens first
 
         with self.assertRaises(SystemExit):
             wd.run_once(now=NOW, run=lambda *a, **k: "", send_fn=self.send,
@@ -598,15 +636,15 @@ class TestDedupPersistedBeforeThePing_172(unittest.TestCase):
                        repo_roots=["/repos/a", "/repos/b"],
                        issue_counts_fetch=fetch)
         self.assertEqual(len(self.sent), 1,
-                         "repo a must have pinged before repo b's kill")
-        on_disk = wd.load_state(self.state_path)
-        self.assertIn(
-            "a", on_disk.get("net_drift", {}),
-            "repo a's dedup entry (already pinged) must have reached disk "
-            "BEFORE repo b's fetch even started -- a kill there must not "
-            "lose it, or repo a re-pings on its next rotation")
+                         "repo a must have alerted (open) before repo b's kill")
+        ep = self.episodes()
+        self.assertTrue(
+            ep.get("net-drift:a", {}).get("active"),
+            "repo a's OPENED episode must have reached the episode store "
+            "(atomic os.replace) BEFORE repo b's fetch even started -- a kill "
+            "there must not lose it, or repo a re-opens on its next rotation")
 
-    def test_stuck_main_first_repos_dedup_survives_a_kill_on_the_second(self):
+    def test_stuck_main_first_repos_episode_survives_a_kill_on_the_second(self):
         r = _make_repo(self.tmp, "aa", base_ts=NOW - 6 * DAY, undelivered=25)
 
         def killed_fetch(root):
@@ -619,60 +657,24 @@ class TestDedupPersistedBeforeThePing_172(unittest.TestCase):
                        repo_roots=[str(r), str(self.tmp / "bb")],
                        git_fetch=killed_fetch)
         self.assertEqual(len(self.sent), 1,
-                         "repo aa must have pinged before repo bb's kill")
-        on_disk = wd.load_state(self.state_path)
-        self.assertIn(
-            "aa", on_disk.get("stuck_main", {}),
-            "repo aa's dedup entry (already pinged) must have reached disk "
+                         "repo aa must have alerted (open) before repo bb's kill")
+        ep = self.episodes()
+        self.assertTrue(
+            ep.get("stuck-main:aa", {}).get("active"),
+            "repo aa's OPENED episode must have reached the episode store "
             "BEFORE repo bb's fetch even started")
 
 
-class TestDedupMemoryAges_172(unittest.TestCase):
-    """#172 (reopened) smaller item: a dedup entry used to be kept FOREVER
-    once its repo stopped appearing in `repo_roots()` at all (deleted,
-    renamed, or moved past `discover_managed_repos`' max_depth) -- "not
-    touched this sweep" was true both for a repo merely sitting out the
-    round-robin batch (must survive, see TestBatchingPreservesUntouchedDedup)
-    and for a repo that is simply gone (should eventually be forgotten),
-    and the old pruning filter could not tell them apart. Age entries out
-    past DEDUP_MEMORY_MAX_AGE_S instead."""
-
-    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
-        return "sent"
-
-    def test_net_drift_stale_entry_for_a_vanished_repo_is_pruned(self):
-        state = {"net_drift": {"gone": {
-            "pinged_ts": NOW - wd.DEDUP_MEMORY_MAX_AGE_S - DAY}}}
-
-        def fetch(label, window_s):
-            return (5, 5)   # below threshold -- never re-adds "gone" itself
-
-        wd.net_drift_alarm(NOW, state, send_fn=self.send,
-                           repo_roots=["/repos/other"], issue_counts_fetch=fetch)
-        self.assertNotIn("gone", state.get("net_drift", {}))
-
-    def test_net_drift_recent_untouched_entry_survives(self):
-        state = {"net_drift": {"sits-out": {"pinged_ts": NOW - DAY}}}
-
-        def fetch(label, window_s):
-            return (5, 5)
-
-        wd.net_drift_alarm(NOW, state, send_fn=self.send,
-                           repo_roots=["/repos/other"], issue_counts_fetch=fetch)
-        self.assertIn("sits-out", state.get("net_drift", {}))
-
-    def test_stuck_main_stale_entry_for_a_vanished_repo_is_pruned(self):
-        state = {"stuck_main": {"gone": {
-            "pinged_ts": NOW - wd.DEDUP_MEMORY_MAX_AGE_S - DAY}}}
-        wd.stuck_main_sweep(NOW, state, send_fn=self.send,
-                           repo_roots=["/repos/other"], git_fetch=None)
-        self.assertNotIn("gone", state.get("stuck_main", {}))
-
-    def test_stuck_main_recent_untouched_entry_survives(self):
-        state = {"stuck_main": {"sits-out": {"pinged_ts": NOW - DAY}}}
-        wd.stuck_main_sweep(NOW, state, send_fn=self.send,
-                           repo_roots=["/repos/other"], git_fetch=None)
-        self.assertIn("sits-out", state.get("stuck_main", {}))
+# #172 (reopened) smaller item -- `TestDedupMemoryAges_172` REMOVED for #560.
+# It tested the hand-rolled `state['net_drift']`/`state['stuck_main']`
+# dedup-memory AGING (`DEDUP_MEMORY_MAX_AGE_S` prune of a vanished repo's
+# entry, and survival of a recently-touched one). #560 retires that whole
+# per-repo memory in favour of notify.episode_gate()'s own atomic store, and
+# the "age out an episode whose caller stopped observing it" guarantee moved
+# WITH it -- `notify._prune_episodes` / `EPISODE_MAX_AGE_S` (30d), tested by
+# `tests/test_notify_episode_dedup_558.py` (the primitive's own contract).
+# Re-testing it here would just re-test episode_gate through repo_health, so
+# the class is dropped rather than converted (its guarantee is not lost).
 
 
 class TestRepoSweepBatch172(unittest.TestCase):
@@ -761,53 +763,62 @@ class TestRepoSweepBatch172(unittest.TestCase):
         self.assertEqual(state.get("k"), 3)
 
 
-class TestBatchingPreservesUntouchedDedup_172(unittest.TestCase):
-    """#172: when a sweep only touches a ROUND-ROBIN BATCH of the full repo
-    list, a repo sitting OUT this sweep must keep its existing dedup memory
-    -- the original pruning rule (`seen if k in live`) silently assumed
-    every repo was re-measured every sweep, which stopped being true once
-    batching was added.
+class TestBatchingPreservesUntouchedDedup_172(_RepoHealthStoreIsolated):
+    """#172 -- CONVERTED for #560: when a sweep only touches a ROUND-ROBIN
+    BATCH of the full repo list, a repo sitting OUT this sweep must keep its
+    existing dedup -- BUT under #560 this is inherent to episode_gate rather
+    than a hand-rolled prune: the gate only ever modifies keys it is CALLED
+    with, and a sit-out repo is never measured, so its episode is untouched
+    by construction. We now assert the episode STORE.
 
-    #172 (reopened): the original version of this test passed
-    `repo_roots=["/repos/x"]` -- ONE repo -- with `max_repos=1`, so
-    `_repo_sweep_batch` takes its `max_repos >= n` FULL-LIST fast path
-    (n=1) and the round-robin sit-out this test's own docstring claims to
-    exercise never actually happens; "o/untouched" (a label that never even
-    appears in `repo_roots`) survives for the trivial reason that it was
-    never a candidate at all, not because batching preserved it. Two repo
-    roots with `max_repos=1` is what actually forces one of them to sit out
-    a real round-robin batch."""
+    Two repo roots with `max_repos=1` genuinely forces one to sit out a real
+    round-robin batch (`_repo_label` with no remote falls back to the
+    basename; sorted() puts 'touched' < 'untouched', so cursor=0 touches only
+    the first)."""
+
+    def setUp(self):
+        super().setUp()
+        self.state = {}
 
     def send(self, msg, owner=None, dedup_key=None, dry_run=False):
         return "sent"
 
-    def test_net_drift_repo_that_sits_out_the_batch_keeps_its_pinged_state(self):
-        state = {"net_drift": {"untouched": {"pinged_ts": NOW - 10}}}
+    def test_net_drift_repo_that_sits_out_the_batch_keeps_its_episode(self):
+        # Pre-open an episode for the repo that will sit out this sweep.
+        notify.episode_gate("net-drift:untouched", False, now=NOW - 100)
+        fetched = []
 
         def fetch(label, window_s):
-            return (40, 5)   # net well above threshold -> would re-ping
+            fetched.append(label)     # records who was actually MEASURED
+            return (40, 5)            # "touched" is above threshold -> opens
 
-        # TWO repo roots, batch of exactly 1 -- one of them genuinely sits
-        # out this sweep's round-robin batch. `_repo_label` with no remote
-        # falls back to the basename; sorted() puts "/repos/touched" first
-        # ('t' < 'u'), so the default cursor=0 batch touches ONLY it and
-        # "/repos/untouched" (label "untouched") genuinely sits out.
-        wd.net_drift_alarm(NOW, state, send_fn=self.send,
+        wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
                            repo_roots=["/repos/touched", "/repos/untouched"],
                            issue_counts_fetch=fetch, max_repos=1)
-        # A repo genuinely sitting out this sweep's batch (not touched, but
-        # still a candidate in repo_roots) must keep its prior dedup entry.
-        self.assertIn("untouched", state.get("net_drift", {}))
+        # Independent proof of the sit-out (not inferred from episode state):
+        # only "touched" was fetched, "untouched" genuinely sat out.
+        self.assertEqual(fetched, ["touched"],
+                         "only the batched repo is measured; 'untouched' sits out")
+        ep = self.episodes()
+        self.assertTrue(ep.get("net-drift:touched", {}).get("active"),
+                        "the measured repo opened its episode")
+        self.assertTrue(
+            ep.get("net-drift:untouched", {}).get("active"),
+            "a repo genuinely sitting out this sweep's round-robin batch keeps "
+            "its existing episode -- the sweep never consults the gate for it")
 
-    def test_stuck_main_repo_that_sits_out_the_batch_keeps_its_pinged_state(self):
-        state = {"stuck_main": {"y": {"pinged_ts": NOW - 10}}}
-        wd.stuck_main_sweep(NOW, state, send_fn=self.send,
+    def test_stuck_main_repo_that_sits_out_the_batch_keeps_its_episode(self):
+        notify.episode_gate("stuck-main:y", False, now=NOW - 100)
+        wd.stuck_main_sweep(NOW, self.state, send_fn=self.send,
                            repo_roots=["/repos/y", "/repos/x"],
                            git_fetch=None, max_repos=1)
-        self.assertIn("y", state.get("stuck_main", {}))
+        ep = self.episodes()
+        self.assertTrue(
+            ep.get("stuck-main:y", {}).get("active"),
+            "a repo sitting out this sweep's batch keeps its episode")
 
 
-class TestIncrementalLogFlush172(unittest.TestCase):
+class TestIncrementalLogFlush172(_RepoHealthStoreIsolated):
     """#172 fix (3): job decision lines must reach `log_fn` AS THEY HAPPEN,
     not only via the list run_once() RETURNS -- a sweep killed mid-way
     (systemd TimeoutStartSec) never returns at all, so the old "print the
@@ -816,6 +827,7 @@ class TestIncrementalLogFlush172(unittest.TestCase):
     job 28's hung `git fetch` could have eaten the rest of the budget."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-flush172-"))
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.state_path = self.tmp / "state.json"
@@ -843,6 +855,192 @@ class TestIncrementalLogFlush172(unittest.TestCase):
             "job 27's decision line must be visible via log_fn even though "
             "run_once() itself never returned (job 28 killed the sweep) -- "
             "the OLD 'print only the returned list' path would show nothing")
+
+
+# --------------------------------------------------------------------------- #
+# #560 — jobs 27/28 wired through notify.episode_gate() (#558): a persistent
+# chronic condition alerts ONCE at onset + ONE recovery, never a re-page per
+# reping window (the #546 `burn-alert:<hour>` anti-pattern) and never a
+# silent clear. The behavioral tests below drive the CURRENT public signature
+# and isolate the episode store off the real ~/.claude by patching
+# notify._claude_dir — they FAIL on the pre-#560 per-reping-bucket code (5
+# pings / no recovery). The onset/recovery-ROUTING unit tests inject a fake
+# episode_gate to walk each decision (open/hold/clearing/recover/quiet).
+# --------------------------------------------------------------------------- #
+class _EpisodeStoreIsolated(_RepoHealthStoreIsolated):
+    """#560 hysteresis tests: the episode store is auto-isolated off the real
+    ~/.claude by the base's setUp; add the per-test send collector + state."""
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+        self.state = {}
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        self.sent.append({"msg": msg, "dedup": dedup_key})
+        return "sent"
+
+
+class TestNetDriftEpisodeHysteresis(_EpisodeStoreIsolated):
+    """#560 behavioral RED: a persistent backlog alerts ONCE, and its
+    recovery sends exactly ONE message — never a per-reping-window re-page
+    and never a silent clear."""
+
+    @staticmethod
+    def _fetch(opened, closed):
+        return lambda label, window_s: (opened, closed)
+
+    def test_persistent_condition_alerts_once_not_per_reping_window(self):
+        fetch = self._fetch(40, 5)                       # net +35, persistent
+        for i in range(5):                                # five daily sweeps
+            wd.net_drift_alarm(NOW + i * DAY, self.state, send_fn=self.send,
+                               repo_roots=["/repos/x"],
+                               issue_counts_fetch=fetch,
+                               interval=1)
+        self.assertEqual(
+            len(self.sent), 1,
+            "a persistent chronic condition must alert ONCE at onset, not "
+            "re-page every reping window (the #546 burn-alert:<hour> disease)")
+
+    def test_recovery_sends_exactly_one_message_after_clearing(self):
+        wd.net_drift_alarm(NOW, self.state, send_fn=self.send,
+                           repo_roots=["/repos/x"],
+                           issue_counts_fetch=self._fetch(40, 5),
+                           interval=1)                       # onset
+        for i in range(1, 4):                             # three healthy passes
+            wd.net_drift_alarm(NOW + i * DAY, self.state, send_fn=self.send,
+                               repo_roots=["/repos/x"],
+                               issue_counts_fetch=self._fetch(5, 5),
+                               interval=1)
+        self.assertEqual(
+            len(self.sent), 2,
+            "onset + exactly ONE recovery after the hysteresis window; the "
+            "pre-#560 code drops the dedup silently with no recovery ping")
+        self.assertIn("backlog", self.sent[1]["msg"].lower())
+
+
+class TestStuckMainEpisodeHysteresis(_EpisodeStoreIsolated):
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-560-sm-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def test_persistent_stuck_main_alerts_once_not_per_reping_window(self):
+        r = _make_repo(self.tmp, "camera-box", base_ts=NOW - 6 * DAY,
+                       work_ts=NOW - 3600, undelivered=25)
+        for i in range(5):
+            wd.stuck_main_sweep(NOW + i * DAY, self.state, send_fn=self.send,
+                                repo_roots=[str(r)], interval=1)
+        self.assertEqual(
+            len(self.sent), 1,
+            "a persistently stuck main must alert ONCE at onset, not re-page "
+            "every reping window")
+
+
+class _RecordingGate:
+    """A fake episode_gate that records every consult and returns a scripted
+    decision -- lets a test walk the routing (open/recover/hold/...) without
+    driving the real hysteresis state machine, and locks the wiring SEAM (a
+    refactor that drops the consult, mis-keys the condition or mis-routes a
+    decision fails loudly -- the #534 injected-callable-seam lesson)."""
+
+    def __init__(self, decision):
+        self.decision = decision
+        self.calls = []
+
+    def __call__(self, condition_key, healthy, now=None, **kw):
+        self.calls.append((condition_key, healthy, now))
+        return self.decision
+
+
+class TestEpisodeGateRouting(_RepoHealthStoreIsolated):
+    """#560: net_drift/stuck_main consult the INJECTED episode_gate with a
+    stable condition_key + `healthy`, and route open -> onset / recover ->
+    recovery / everything-else -> nothing. Fresh send-layer keys per instant."""
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+        self.state = {}
+        self.tmp = Path(tempfile.mkdtemp(prefix="airuleset-560-route-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def send(self, msg, owner=None, dedup_key=None, dry_run=False):
+        self.sent.append({"msg": msg, "dedup": dedup_key})
+        return "sent"
+
+    def _net(self, gate, opened=40, closed=5, **kw):
+        self.state = {}
+        return wd.net_drift_alarm(
+            NOW, self.state, send_fn=self.send, repo_roots=["/repos/proj"],
+            issue_counts_fetch=lambda lbl, w: (opened, closed),
+            episode_gate=gate, **kw)
+
+    def test_net_drift_open_sends_onset_with_fresh_key(self):
+        g = _RecordingGate("open")
+        self._net(g)
+        self.assertEqual(g.calls, [("net-drift:proj", False, NOW)],
+                         "gate consulted with a stable key + healthy=False")
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(self.sent[0]["dedup"].startswith("net-drift-open:proj:"),
+                        "onset key is fresh-per-instant, not a reping bucket")
+
+    def test_net_drift_recover_sends_recovery(self):
+        g = _RecordingGate("recover")
+        self._net(g, opened=5, closed=5)          # net 0 -> healthy=True
+        self.assertEqual(g.calls, [("net-drift:proj", True, NOW)])
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("backlog", self.sent[0]["msg"].lower())
+        self.assertTrue(
+            self.sent[0]["dedup"].startswith("net-drift-recover:proj:"))
+
+    def test_net_drift_hold_clearing_quiet_send_nothing(self):
+        for d in ("hold", "clearing", "quiet"):
+            self.sent = []
+            self._net(_RecordingGate(d))
+            self.assertEqual(self.sent, [], "decision %r must not send" % d)
+
+    def test_net_drift_dry_run_never_consults_the_gate(self):
+        g = _RecordingGate("open")
+        self._net(g, dry_run=True)
+        self.assertEqual(g.calls, [], "dry-run must not touch the episode store")
+        self.assertEqual(self.sent, [])
+
+    def test_net_drift_send_fn_none_never_consults_the_gate(self):
+        g = _RecordingGate("open")
+        wd.net_drift_alarm(NOW, {}, send_fn=None, repo_roots=["/repos/proj"],
+                           issue_counts_fetch=lambda lbl, w: (40, 5),
+                           episode_gate=g)
+        self.assertEqual(g.calls, [], "no delivery path -> episode untouched")
+
+    def _sm(self, gate, name, stalled=True, **kw):
+        base_ts = NOW - 6 * DAY if stalled else NOW - 3600
+        r = _make_repo(self.tmp, name, base_ts=base_ts, work_ts=NOW - 3600,
+                       undelivered=25)
+        self.state = {}
+        return wd.stuck_main_sweep(NOW, self.state, send_fn=self.send,
+                                   repo_roots=[str(r)], episode_gate=gate, **kw)
+
+    def test_stuck_main_open_sends_onset_healthy_false(self):
+        g = _RecordingGate("open")
+        self._sm(g, "smopen", stalled=True)
+        self.assertEqual(g.calls, [("stuck-main:smopen", False, NOW)])
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(
+            self.sent[0]["dedup"].startswith("stuck-main-open:smopen:"))
+
+    def test_stuck_main_recover_sends_recovery_healthy_true(self):
+        g = _RecordingGate("recover")
+        self._sm(g, "smrec", stalled=False)       # fresh base -> not stalled
+        self.assertEqual(g.calls, [("stuck-main:smrec", True, NOW)])
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(
+            self.sent[0]["dedup"].startswith("stuck-main-recover:smrec:"))
+
+    def test_stuck_main_hold_sends_nothing(self):
+        g = _RecordingGate("hold")
+        self._sm(g, "smhold", stalled=True)
+        self.assertEqual(self.sent, [])
 
 
 if __name__ == "__main__":

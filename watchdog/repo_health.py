@@ -47,6 +47,8 @@ module docstring, zero behavior change.
 import os
 import re
 
+import notify                    # #560: episode_gate() default; no cycle
+                                 # (notify imports no watchdog module).
 from watchdog.cards import _git_first_line, _git_base_ref
 
 # --------------------------------------------------------------------------- #
@@ -405,17 +407,11 @@ def _sweep_due(state, key, now, interval):
 # probes ahead of them in the same sweep are accounted for.
 REPO_SWEEP_BATCH_MAX = 3          # env AIRULESET_REPO_SWEEP_BATCH
 
-# #172 (reopened) smaller item: a dedup-memory entry (job 27's `net_drift` /
-# job 28's `stuck_main`) used to be kept FOREVER once a repo stopped
-# appearing in `repo_roots()` at all (deleted, renamed, or moved past
-# `discover_managed_repos`' max_depth) -- "not touched this sweep" is true
-# both for a repo merely sitting out the round-robin batch (must survive)
-# and for a repo that is simply gone (should eventually be forgotten), and
-# the old pruning filter could not tell them apart. Age entries out instead
-# of a touched/live check alone -- comfortably longer than one full
-# rotation (~14h at the current default) so an ordinary sit-out is never
-# mistaken for abandonment.
-DEDUP_MEMORY_MAX_AGE_S = 30 * 86400   # 30 days
+# #560: `DEDUP_MEMORY_MAX_AGE_S` (the 30d age-out of a per-repo `net_drift`/
+# `stuck_main` dedup entry whose repo stopped appearing in `repo_roots()`)
+# is REMOVED -- jobs 27/28 no longer keep a per-repo dedup memory at all;
+# episode_gate() owns the store and its own age-reaping (`EPISODE_MAX_AGE_S`,
+# `_prune_episodes` in notify).
 
 
 def _repo_sweep_batch(repos, state, cursor_key, max_repos=None):
@@ -477,14 +473,16 @@ def _repo_sweep_batch(repos, state, cursor_key, max_repos=None):
 
 NET_DRIFT_WINDOW_S = 7 * 86400
 NET_DRIFT_THRESHOLD = 10          # net > this pings; env AIRULESET_NET_DRIFT_THRESHOLD
-NET_DRIFT_REPING_S = 86400        # once a day while it persists
+# #560: the old per-`reping`-window re-ping cadence is retired -- episode_gate
+# alerts ONCE at onset + ONE recovery (hysteresis via `notify.EPISODE_CLEAR_AFTER`),
+# so this job no longer has (or needs) a `reping` knob.
 
 
 def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
                     issue_counts_fetch=None, git_run=None, threshold=None,
-                    window=NET_DRIFT_WINDOW_S, reping=NET_DRIFT_REPING_S,
+                    window=NET_DRIFT_WINDOW_S,
                     interval=MANAGED_SWEEP_INTERVAL_S, persist=None,
-                    max_repos=None):
+                    max_repos=None, episode_gate=None):
     """Job 27 -- see the section comment. `issue_counts_fetch(repo_label,
     window_s) -> (opened, closed) | None` -- None means unmeasurable (no gh
     auth, rate-limited, repo not on GitHub) and is never treated as a stall.
@@ -506,16 +504,25 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
     inside the per-repo loop did. The cursor advance is persisted again
     once the batch is drawn, still before the first `gh` call.
 
-    #172 (reopened) finding 3: dedup memory (`state['net_drift']`) is now
-    the SAME dict object as the caller's `state`, updated AND persisted the
-    moment a ping fires -- mirroring jobs 8/11's own '# dedup memory BEFORE
-    the ping' shape, which the original #172 fix copied only half of (the
-    cadence stamp, not the per-repo dedup write). Before this, a kill
-    between two pings in the same sweep lost the FIRST repo's dedup entry
-    entirely, so it re-pinged on its next rotation -- a duplicate alert
-    across `notify.send`'s own daily dedup bucket."""
+    #560: dedup is now the OPT-IN `notify.episode_gate()` primitive (#558),
+    not a per-repo `state['net_drift']` `pinged_ts` memory re-paged per
+    time-bucket. For each MEASURED repo the gate is consulted with a
+    stable `condition_key` ("net-drift:<label>") + a boolean `healthy`
+    (net <= threshold), and it decides open/hold/clearing/recover/quiet --
+    so a persistent backlog alerts ONCE at onset + ONE recovery message,
+    never a daily re-page and never a silent clear. The gate is consulted
+    ONLY when there is a real measurement AND `not dry_run and send_fn is
+    not None`: a dry-run must not mutate the real episode store (#516), and
+    `send_fn is None` (nothing was delivered) must not advance the episode,
+    or a later sweep with a real notify path would owe no onset (job 24's
+    own contract). `episode_gate` is injectable (default `notify.
+    episode_gate`) for tests, same "wired = injected" convention as
+    `issue_counts_fetch`/`send_fn`. The `persist`/cadence/cursor
+    crash-safety (#172 F4 above) is UNCHANGED; only the per-repo dedup
+    memory moved to the gate's own atomic store."""
     if issue_counts_fetch is None:
         return []
+    gate = episode_gate if episode_gate is not None else notify.episode_gate
     if threshold is None:
         try:
             threshold = int(os.environ.get("AIRULESET_NET_DRIFT_THRESHOLD",
@@ -530,6 +537,10 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
         # #172 F4: stamp + persist BEFORE repo_roots() (the os.walk) runs --
         # not just before the per-repo network loop.
         state["net_drift_last_sweep"] = now
+        # #560: the pre-episode_gate per-repo dedup memory is retired; pop the
+        # legacy key once so it can't sit as dead state on already-deployed
+        # boxes (the gate has its own atomic store, notify-episodes.json).
+        state.pop("net_drift", None)
         persist()
     repos = sorted(set(repo_roots() if callable(repo_roots) else (repo_roots or [])))
     if dry_run:
@@ -540,60 +551,52 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
         batch = _repo_sweep_batch(repos, state, "net_drift_cursor", max_repos)
         persist()      # cursor advance also survives a kill BEFORE a
                         # single per-repo `gh` call leaves this process
-    touched = set()
-    seen = dict(state.get("net_drift") or {})
-    if not dry_run:
-        state["net_drift"] = seen     # #172 F3: same dict from here on, so
-                                       # a per-repo write below is already
-                                       # visible in `state` for persist()
-    live = set()
     for root in batch:
         label = _repo_label(root, git_run)
-        touched.add(label)
         try:
             counts = issue_counts_fetch(label, window)
         except Exception as exc:
             counts = None
             logs.append("net-drift fetch-error %s: %r" % (label, exc))
         if not counts:
-            continue
+            continue          # unmeasurable -- don't observe the episode
         opened, closed = counts
         net = opened - closed
         logs.append("net-drift %s opened=%d closed=%d net=%+d"
                     % (label, opened, closed, net))
-        if net <= threshold:
-            seen.pop(label, None)
+        if dry_run or send_fn is None:
+            # No real delivery path -> do NOT consult the gate (a dry-run must
+            # not mutate the store #516; `send_fn is None` delivered nothing,
+            # so a later real sweep still owes the onset). Measurement is
+            # already logged above for diagnostics.
             continue
-        live.add(label)
-        prev = seen.get(label) or {}
-        pinged = prev.get("pinged_ts")
-        if dry_run or send_fn is None or (
-                pinged is not None and now - float(pinged) < reping):
-            continue
-        seen[label] = {"pinged_ts": now}
-        if not dry_run:
-            persist()      # #172 F3: dedup memory BEFORE the ping
-        status = send_fn(
-            "\U0001f4c8 **%s** -- backlog rastie: +%d ticketov za posledny "
-            "tyzden\n"
-            "> Za poslednych 7 dni pribudlo %d novych a zavrelo sa len %d -- "
-            "backlog rastie rychlejsie, ako sa stiha spracovavat."
-            % (label, net, opened, closed),
-            dedup_key="net-drift:%s:%d" % (label, int(now // reping)),
-            dry_run=dry_run)
-        logs.append("net-drift PING %s -> %s" % (label, status))
-    if not dry_run:
-        # keep dedup memory for every repo NOT touched THIS sweep (the
-        # round-robin batch means most repos sit out most sweeps) -- only
-        # drop/refresh entries for repos actually re-measured just now --
-        # AND age out anything that hasn't been refreshed in
-        # DEDUP_MEMORY_MAX_AGE_S regardless of touched/live, so a repo that
-        # simply stops existing (deleted, renamed, moved past max_depth)
-        # doesn't keep its dedup entry forever (#172 reopened smaller item).
-        state["net_drift"] = {
-            k: v for k, v in seen.items()
-            if (k in live or k not in touched)
-            and (now - float(v.get("pinged_ts", now)) < DEDUP_MEMORY_MAX_AGE_S)}
+        healthy = net <= threshold
+        decision = gate("net-drift:%s" % label, healthy, now=now)
+        logs.append("net-drift GATE %s -> %s" % (label, decision))
+        if decision == "open":
+            status = send_fn(
+                "\U0001f4c8 **%s** -- backlog rastie: +%d ticketov za posledny "
+                "tyzden\n"
+                "> Za poslednych 7 dni pribudlo %d novych a zavrelo sa len %d -- "
+                "backlog rastie rychlejsie, ako sa stiha spracovavat."
+                % (label, net, opened, closed),
+                # send-layer key is FRESH per instant (int(now), the gk_request
+                # / #535 / #543 pattern), never a coarser bucket than the gate's
+                # own primary dedup -- else notify's TTL would swallow a genuine
+                # re-open of a NEW episode.
+                dedup_key="net-drift-open:%s:%d" % (label, int(now)),
+                dry_run=dry_run)
+            logs.append("net-drift PING %s -> %s" % (label, status))
+        elif decision == "recover":
+            status = send_fn(
+                "✅ **%s** -- backlog uz nerastie\n"
+                "> Za posledny tyzden pribudlo %d novych a zavrelo sa %d "
+                "ticketov -- backlog sa vratil pod kontrolu (predtym nahlaseny "
+                "rast je vyrieseny)."
+                % (label, opened, closed),
+                dedup_key="net-drift-recover:%s:%d" % (label, int(now)),
+                dry_run=dry_run)
+            logs.append("net-drift RECOVER %s -> %s" % (label, status))
     return logs
 
 
@@ -613,7 +616,8 @@ def net_drift_alarm(now, state, send_fn=None, dry_run=False, repo_roots=None,
 
 STUCK_MAIN_AGE_S = 5 * 86400          # env AIRULESET_STUCK_MAIN_AGE_S
 STUCK_MAIN_AHEAD_MIN = 20             # env AIRULESET_STUCK_MAIN_AHEAD
-STUCK_MAIN_REPING_S = 86400
+# #560: no `reping` re-page cadence any more -- episode_gate (onset + one
+# recovery via hysteresis) replaced the per-window re-ping.
 
 
 def _stuck_main_skip_set():
@@ -628,9 +632,9 @@ def _stuck_main_skip_set():
 
 def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                      git_run=None, git_fetch=None, age_threshold=None,
-                     ahead_threshold=None, reping=STUCK_MAIN_REPING_S,
+                     ahead_threshold=None,
                      interval=MANAGED_SWEEP_INTERVAL_S, persist=None,
-                     max_repos=None):
+                     max_repos=None, episode_gate=None):
     """Job 28 -- see the section comment. `git_fetch(root)` is called (best-
     effort before this pass -- see the #172 reopened note below) before
     reading refs, since no live session may have fetched this repo recently
@@ -658,11 +662,18 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
     `repo_roots()` runs (see net_drift_alarm's matching note); the cursor
     advance is persisted again once the batch is drawn.
 
-    #172 (reopened) finding 3: dedup memory (`state['stuck_main']`) is the
-    SAME dict object as the caller's `state` from here on, written and
-    persisted the moment a ping fires -- mirroring jobs 8/11's own shape,
-    which the original #172 fix only half-copied (see net_drift_alarm's
-    matching note for the full consequence of the gap)."""
+    #560: dedup is the OPT-IN `notify.episode_gate()` primitive (#558), not a
+    per-repo `state['stuck_main']` `pinged_ts` memory re-paged per time-bucket
+    -- see net_drift_alarm's matching #560 note. For each MEASURED repo
+    (not fork-skipped, fetch OK, `delivery_state` succeeded) the gate is
+    consulted with "stuck-main:<label>" + `healthy = not stalled` and decides
+    open/hold/clearing/recover/quiet: a persistently stuck main alerts ONCE at
+    onset + ONE recovery when it moves again, never a daily re-page. A
+    fork-skip / fetch-error / unmeasurable repo does NOT consult the gate (we
+    did not observe the condition, so the episode is left untouched -- an
+    age-reap in the store handles a repo that stops being measured). Same
+    dry-run / `send_fn is None` gate-suppression as net_drift_alarm. The
+    `persist`/cadence/cursor crash-safety (#172 F4/F5 above) is UNCHANGED."""
     if age_threshold is None:
         try:
             age_threshold = int(os.environ.get("AIRULESET_STUCK_MAIN_AGE_S",
@@ -676,12 +687,16 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
         except ValueError:
             ahead_threshold = STUCK_MAIN_AHEAD_MIN
     persist = persist or (lambda: None)
+    gate = episode_gate if episode_gate is not None else notify.episode_gate
     logs = []
     if not _sweep_due(state, "stuck_main_last_sweep", now, interval):
         return logs
     if not dry_run:
         # #172 F4: stamp + persist BEFORE repo_roots() (the os.walk) runs.
         state["stuck_main_last_sweep"] = now
+        # #560: retire the pre-episode_gate per-repo dedup memory (moved to
+        # the gate's own atomic store); pop the legacy key once.
+        state.pop("stuck_main", None)
         persist()
     repos = sorted(set(repo_roots() if callable(repo_roots) else (repo_roots or [])))
     if dry_run:
@@ -692,22 +707,17 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
         batch = _repo_sweep_batch(repos, state, "stuck_main_cursor", max_repos)
         persist()      # cursor advance also survives a kill BEFORE a
                         # single `git fetch` leaves this process
-    touched = set()
-    seen = dict(state.get("stuck_main") or {})
-    if not dry_run:
-        state["stuck_main"] = seen    # #172 F3: same dict from here on
-    live = set()
     skip_set = _stuck_main_skip_set()
     for root in batch:
         label = _repo_label(root, git_run)
-        touched.add(label)
         # #441: a fork's origin/main is deliberately frozen (delivery goes
         # upstream, not to its own main), so this base ref is never a stalled
-        # merge -- skip it BEFORE the fetch, and drop any stale dedup memory so
-        # it can never re-ping either. Auto-detected via a distinct `upstream`
-        # remote (purely local, no network) or via the explicit opt-out list.
+        # merge -- skip it BEFORE the fetch. #560: a skip does NOT consult the
+        # gate (we did not measure the condition -- the episode is left as-is,
+        # age-reaped by the store if the repo stops being measured). Auto-
+        # detected via a distinct `upstream` remote (purely local, no network)
+        # or via the explicit opt-out list.
         if label in skip_set or _repo_is_fork(root, git_run):
-            seen.pop(label, None)
             logs.append("stuck-main skip %s (fork/opt-out)" % label)
             continue
         if git_fetch is not None:
@@ -719,40 +729,42 @@ def stuck_main_sweep(now, state, send_fn=None, dry_run=False, repo_roots=None,
                                  # measure on them, skip this repo entirely
         st = delivery_state(root, now, git_run=git_run)
         if st is None:
-            continue
+            continue            # unmeasurable -- don't observe the episode
         stalled = (st["undelivered"] >= ahead_threshold
                    and age_threshold <= st["delivery_age"] <= DELIVERY_STALL_MAX_S)
         logs.append("stuck-main %s undelivered=%d delivery_age=%ds base=%s"
                     % (label, st["undelivered"], int(st["delivery_age"]),
                        st["base"]))
-        if not stalled:
-            seen.pop(label, None)
-            continue
-        live.add(label)
-        prev = seen.get(label) or {}
-        pinged = prev.get("pinged_ts")
-        if dry_run or send_fn is None or (
-                pinged is not None and now - float(pinged) < reping):
-            continue
-        seen[label] = {"pinged_ts": now}
-        if not dry_run:
-            persist()      # #172 F3: dedup memory BEFORE the ping
-        days = int(st["delivery_age"] // 86400)
-        status = send_fn(
-            "\U0001f512 **%s** -- vetva %s stoji %d dni, %d commitov caka na zluenie\n"
-            "> Praca sa hromadi na pracovnej vetve, ale do %s sa uz %d dni nic "
-            "nezluilo -- skontroluj, ci nie je zablokovany merge/PR."
-            % (label, st["base"].split("/")[-1], days, st["undelivered"],
-               st["base"].split("/")[-1], days),
-            dedup_key="stuck-main:%s:%d" % (label, int(now // reping)),
-            dry_run=dry_run)
-        logs.append("stuck-main PING %s -> %s" % (label, status))
-    if not dry_run:
-        # See net_drift_alarm's matching comment: prune untouched-but-live
-        # entries normally, and age out anything unrefreshed past
-        # DEDUP_MEMORY_MAX_AGE_S regardless (#172 reopened smaller item).
-        state["stuck_main"] = {
-            k: v for k, v in seen.items()
-            if (k in live or k not in touched)
-            and (now - float(v.get("pinged_ts", now)) < DEDUP_MEMORY_MAX_AGE_S)}
+        if dry_run or send_fn is None:
+            continue            # no real delivery path -> don't consult the
+                                 # gate (#516 dry-run store guard; a `send_fn
+                                 # is None` sweep delivered nothing, so a later
+                                 # real sweep still owes the onset)
+        healthy = not stalled
+        decision = gate("stuck-main:%s" % label, healthy, now=now)
+        logs.append("stuck-main GATE %s -> %s" % (label, decision))
+        base = st["base"].split("/")[-1]
+        if decision == "open":
+            days = int(st["delivery_age"] // 86400)
+            status = send_fn(
+                "\U0001f512 **%s** -- vetva %s stoji %d dni, %d commitov caka na zluenie\n"
+                "> Praca sa hromadi na pracovnej vetve, ale do %s sa uz %d dni nic "
+                "nezluilo -- skontroluj, ci nie je zablokovany merge/PR."
+                % (label, base, days, st["undelivered"], base, days),
+                # FRESH per-instant key (#535/#543) -- never a bucket that
+                # notify's TTL could use to swallow a new episode's re-open.
+                dedup_key="stuck-main-open:%s:%d" % (label, int(now)),
+                dry_run=dry_run)
+            logs.append("stuck-main PING %s -> %s" % (label, status))
+        elif decision == "recover":
+            status = send_fn(
+                "✅ **%s** -- vetva %s sa zase hybe\n"
+                "> Do %s sa uz zlucuje -- predtym nahlaseny zablokovany merge "
+                "je vyrieseny."
+                % (label, base, base),
+                dedup_key="stuck-main-recover:%s:%d" % (label, int(now)),
+                dry_run=dry_run)
+            logs.append("stuck-main RECOVER %s -> %s" % (label, status))
+    # #560: no per-repo dedup-memory prune here any more -- episode_gate owns
+    # its own store + `_prune_episodes` age-reaping.
     return logs
