@@ -146,15 +146,21 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     return False
 
 
-# --- #263/#264: subdev stream account dev-env convention -------------------
-# The convention working directory for a subdev stream account's tmux
-# session: every currently-provisioned account (montalu/marek/david/simap,
-# live-verified; montalu2/montalu3/montalu4 per their own TODO-PROVISIONING.md
-# gatekeeper Phase-1 contract) checks out the odoo-erp repo at exactly this
-# path. Used by both #263's tmux bootstrap (_stream_session_cwd, below
-# AUTHORITY_BY_USER) and #264's ssh auto-attach block (right below) -- ONE
-# literal, not two independently-maintained copies.
+# --- #263/#264/#563: subdev stream account dev-env convention --------------
+# The convention working directory for a subdev/gatekeeper account's tmux
+# session. NOT every account checks out at the same path (#563): montalu1
+# (renamed from montalu, #537) has its project at ~/devel/odoo, other
+# accounts check out ~/devel/odoo/odoo-erp, and gatekeeper has no odoo
+# checkout at all. So the cwd is a FALLBACK CHAIN: the first EXISTING dir of
+# STREAM_DEV_CWD_CHAIN wins, else $HOME. A binary "odoo-erp or $HOME"
+# fallback dropped montalu1 into $HOME, where a claude wrote under the wrong
+# project key (no history/memory -- the owner's complaint). STREAM_DEV_CWD_REL
+# stays the primary (chain[0]). Used by BOTH #263's tmux bootstrap
+# (_stream_session_cwd, below AUTHORITY_BY_USER) and #264's ssh auto-attach
+# block (right below) -- ONE shared chain, not two independently-maintained
+# copies.
 STREAM_DEV_CWD_REL = "devel/odoo/odoo-erp"
+STREAM_DEV_CWD_CHAIN = (STREAM_DEV_CWD_REL, "devel/odoo")
 
 # --- #264: subdev stream ssh auto-attach ------------------------------------
 # One subdev stream account = one tmux session; an interactive ssh login
@@ -178,8 +184,16 @@ STREAM_SSH_ATTACH_BLOCK = (
     # guard keeps that failure mode from ever being reachable).
     'if [[ $- == *i* ]] && [ -n "${SSH_TTY:-}" ] && [ -z "${TMUX:-}" ] '
     '&& command -v tmux >/dev/null 2>&1; then\n'
-    f'  __airuleset_cwd="$HOME/{STREAM_DEV_CWD_REL}"\n'
-    '  [ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"\n'
+    # #563: cwd FALLBACK CHAIN -- first EXISTING dir of STREAM_DEV_CWD_CHAIN
+    # wins, else $HOME. A binary "odoo-erp or $HOME" fallback dropped montalu1
+    # (project dir ~/devel/odoo, no odoo-erp subdir) into $HOME, so a claude
+    # launched there wrote under the wrong project key (no history/memory).
+    '  __airuleset_cwd="$HOME"\n'
+    f'  for __airuleset_rel in {" ".join(STREAM_DEV_CWD_CHAIN)}; do\n'
+    '    if [ -d "$HOME/$__airuleset_rel" ]; then\n'
+    '      __airuleset_cwd="$HOME/$__airuleset_rel"; break\n'
+    '    fi\n'
+    '  done\n'
     '  __airuleset_me="$(whoami)"\n'
     "  # #284: a tmux destroy-unattached sweep (#254) can reduce a\n"
     "  # multi-member session GROUP down to exactly one survivor whose\n"
@@ -229,6 +243,19 @@ STREAM_SSH_ATTACH_BLOCK = (
     f"{STREAM_SSH_ATTACH_MARK_END}"
 )
 
+# --- #562: gk box ssh auto-attach -------------------------------------------
+# The gk box `gatekeeper` account is NOT a subdev stream account (not in
+# AUTHORITY_BY_USER -- that map is about MERGE authority + stream scoping,
+# neither of which gatekeeper is part of), but the owner wants the SAME #264
+# ssh auto-attach behaviour there: an interactive `ssh gatekeeper@gk` should
+# land straight in tmux instead of a bare shell. So the eligibility gate is
+# widened by this explicit extra-user set, keeping the change strictly in the
+# ssh-attach lane -- adding "gatekeeper" to AUTHORITY_BY_USER would misclassify
+# it as a subdev stream everywhere downstream (statusline slice, skill scoping,
+# notify routing). Owner ask (2026-08-19): "uz ma skor vsade po ssh pekne joine
+# do tmux okrem ked sa ssh do gk, tam musim vsetko sam".
+SSH_ATTACH_EXTRA_USERS = frozenset({"gatekeeper"})
+
 
 def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
                                 end=STREAM_SSH_ATTACH_MARK_END):
@@ -274,12 +301,15 @@ def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
 
 def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     """Idempotently add/remove the #264 ssh-auto-attach marker block in
-    ~/.bashrc, scoped STRICTLY to subdev stream accounts (AUTHORITY_BY_USER's
-    keys -- the exact registry #263's tmux bootstrap also keys off, single
-    source of truth for "which accounts are subdev streams"). Absent from
-    every other box (dev1/dev2/gatekeeper): the marker is actively REMOVED
-    there if ever present, so a future AUTHORITY_BY_USER edit can never leave
-    a stale attach block on the wrong account.
+    ~/.bashrc, scoped to the ssh-attach eligibility set: subdev stream
+    accounts (AUTHORITY_BY_USER's keys -- the registry #263's tmux bootstrap
+    also keys off) UNION SSH_ATTACH_EXTRA_USERS (the gk box `gatekeeper`
+    account, #562 -- eligible for the block but deliberately NOT in
+    AUTHORITY_BY_USER, since that map is the stream registry and gatekeeper is
+    not a stream). Every account OUTSIDE that union (dev1/dev2 = `newlevel`,
+    any other): the marker is actively REMOVED there if ever present, so a
+    future eligibility edit can never leave a stale attach block on the wrong
+    account.
 
     Same overall idempotent-marker-block shape as apply_ultracode_launcher
     (#77) -- create/update if this account should have it, strip if not --
@@ -293,7 +323,8 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     import airuleset
     bpath = bashrc_path or airuleset.BASHRC
     u = user or airuleset._current_user()
-    should_have = u in airuleset.AUTHORITY_BY_USER
+    should_have = (u in airuleset.AUTHORITY_BY_USER
+                   or u in SSH_ATTACH_EXTRA_USERS)
     existing = bpath.read_text() if bpath.exists() else ""
     spans = _stream_marker_block_spans(existing)
     if should_have:
