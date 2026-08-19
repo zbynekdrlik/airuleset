@@ -501,9 +501,13 @@ def state(name):
 def read_value(name):
     """The raw value bytes.
 
-    The ONE function in this package that returns a value. Its only caller is
-    `airuleset.cmd_secret`'s `exec` action, which passes it to a child process
-    through the environment or stdin and never prints it.
+    One of only TWO value-returning functions in this package (the other is
+    `read_show_file`, the `--file` source). Its callers are
+    `airuleset.cmd_secret`'s `exec` action (passes it to a child process through
+    the environment or stdin) and `filedrop/show_server.py`'s GET handler
+    (writes it into the one-shot render response, at GET time only) — neither
+    prints it to the session, and there is deliberately no formatting/rendering
+    helper that could put a value on stdout by accident.
     """
     check_name(name)
     try:
@@ -902,6 +906,14 @@ def validate_show_file(path):
             "refusing to show %s — it is not owner-only (mode 0%o has group/"
             "other permission bits); a credential file must be 0600"
             % (real, _stat.S_IMODE(stt.st_mode)))
+    # Belt-and-suspenders on the shared subdev VPS (foreign uids by design): a
+    # cross-user 0600 file would pass the mode check but is not OURS to show.
+    # DAC would already refuse the read (read_show_file's os.open -> EACCES),
+    # but refusing HERE fails fast with an honest message instead of a late 410.
+    if stt.st_uid != os.getuid():
+        raise SecretError(
+            "refusing to show %s — it is owned by uid %d, not you (uid %d); a "
+            "credential file must be your own" % (real, stt.st_uid, os.getuid()))
     return real
 
 

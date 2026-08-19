@@ -138,13 +138,17 @@ _ttl_timer.start()
 
 
 def _js(text):
-    """`text` as a JS string literal safe to inline inside a <script> — JSON
-    plus the extra escapes that stop a `</script>` (or any HTML-context
-    confusion) breaking out of the script element. The value is only ever
-    ASSIGNED to a variable, never eval'd."""
+    """`text` as a JS string literal safe to inline inside a <script>.
+
+    `json.dumps` (default `ensure_ascii=True`) already neutralises `"`, `\\`,
+    control characters, AND every non-ASCII codepoint — including the U+2028 /
+    U+2029 line/paragraph separators that would otherwise terminate a JS string
+    — by emitting them as `\\uXXXX`. The only breakout it does NOT cover is
+    the HTML parser seeing a literal `</script>`, so `<`, `>` and `&` are escaped
+    to `\\u003c` / `\\u003e` / `\\u0026` on top. The value is only ever ASSIGNED
+    to a variable (and set as a textarea `.value`), never eval'd or in innerHTML."""
     s = json.dumps(text)
-    for a, b in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"),
-                 (" ", "\\u2028"), (" ", "\\u2029")):
+    for a, b in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026")):
         s = s.replace(a, b)
     return s
 
@@ -235,6 +239,14 @@ def _read_value():
     return read_show_file(LOCATOR)
 
 
+# ONE-SHOT consume-latch, PROCESS-GLOBAL (see do_GET). `_servers` below holds one
+# BoundedServer per bind IP, all in this one process and each ThreadingHTTPServer,
+# so the latch that makes "shown ONCE" true under concurrency must be a module
+# global — a per-instance latch would miss a race across two bind interfaces.
+_serve_lock = threading.Lock()
+_served = False
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 60
@@ -257,8 +269,14 @@ class H(BaseHTTPRequestHandler):
 
     @staticmethod
     def _is_token(segment):
-        """Constant-time compare — the endpoint's only authentication."""
-        return hmac.compare_digest(segment, TOKEN)
+        """Constant-time compare — the endpoint's only authentication. A
+        non-ASCII path segment makes hmac.compare_digest raise TypeError; such
+        a segment simply is not the token, so it is REFUSED (404), never raised
+        into a traceback in the endpoint log."""
+        try:
+            return hmac.compare_digest(segment, TOKEN)
+        except TypeError:
+            return False
 
     def _teardown(self):
         # One value, one endpoint. Flush first: bytes already handed to the
@@ -283,24 +301,45 @@ class H(BaseHTTPRequestHandler):
         # The token segment is compared RAW, never percent-decoded (#116).
         if not (len(p) == 1 and self._is_token(p[0])):
             return self._txt(404, "not found")
+        # ONE-SHOT consume-latch: claim the single view ATOMICALLY, BEFORE
+        # reading the value, so concurrent token GETs cannot each read+serve it
+        # before the first thread tears down. Only the claimant reads / serves /
+        # tears down; every other request (racing or later) gets 410 and does
+        # NOT tear down (the claimant owns the teardown).
+        global _served
+        with _serve_lock:
+            if _served:
+                return self._txt(410, "value already shown — generate it again")
+            _served = True
         try:
             data = _read_value()
             text = data.decode("utf-8")
         except SecretError as e:
-            # `e` names the NAME/PATH + the cap only — no value in it.
+            # The value is gone (forgotten / purged / TTL) or a --file source no
+            # longer validates. `e` may name the --file PATH (never the value),
+            # so it goes only to stderr (the endpoint log), never the HTTP body.
             log_event("show-error", LABEL)
-            self._txt(410, "value no longer available: %s" % e)
+            sys.stderr.write("show: %s\n" % e)
+            self._txt(410, "value no longer available — generate it again")
             return self._teardown()
         except UnicodeDecodeError:
             log_event("show-error", LABEL)
             self._txt(415, "value is not UTF-8 text — copy it another way")
             return self._teardown()
         if len(data) > MAX_SECRET_BYTES:
+            # Defense-in-depth, unreachable today: a NAME value is capped at
+            # store_value time and a --file value inside read_show_file (which
+            # raises -> the 410 branch above). Kept so a future cap change can
+            # never silently serve an oversize value.
             log_event("show-error", LABEL)
             self._txt(413, "value over the %d-byte cap" % MAX_SECRET_BYTES)
             return self._teardown()
-        body = PAGE.replace("VALUE_PLACEHOLDER", _js(text))
-        body = body.replace("NAME_PLACEHOLDER", repr(LABEL)).encode()
+        # NAME first, VALUE last: the value insertion must be the FINAL pass so
+        # nothing rescans it — otherwise a value literally containing
+        # "NAME_PLACEHOLDER" would be corrupted by the second replace (LABEL is
+        # NAME_RE, so it can never contain "VALUE_PLACEHOLDER").
+        body = PAGE.replace("NAME_PLACEHOLDER", repr(LABEL))
+        body = body.replace("VALUE_PLACEHOLDER", _js(text)).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

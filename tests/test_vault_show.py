@@ -9,10 +9,12 @@ Offline: the server-handler tests spawn filedrop/show_server.py bound to
 127.0.0.1 ONLY (never a public interface, even in a fixture); the vault-helper
 and CLI-wiring tests run in-process against tmp dirs.
 """
+import json
 import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -115,6 +117,14 @@ class TestValidateShowFile(_StoreCase):
         d.mkdir(mode=0o700)
         with self.assertRaises(st.SecretError):
             st.validate_show_file(str(d))
+
+    def test_a_foreign_owned_file_is_refused(self):
+        # Review finding (t4): a cross-user 0600 file on the shared subdev VPS
+        # passes the mode check but is not ours to show.
+        p = self._secret_file(mode=0o600)
+        with m.patch("os.getuid", return_value=os.getuid() + 424242):
+            with self.assertRaises(st.SecretError):
+                st.validate_show_file(str(p))
 
 
 class TestReadShowFile(_StoreCase):
@@ -320,6 +330,84 @@ class TestShowServerFileSource(_ShowServerCase):
         src = SHOW_SERVER.read_text(encoding="utf-8")
         self.assertNotIn("from filedrop import bind_ips", src)
         self.assertIn("def is_private", src)
+
+
+class TestShowServerHardening(_ShowServerCase):
+    """Review-fix coverage (#580): the one-shot consume-latch (MAJOR), the
+    placeholder-order integrity fix, and the non-ASCII token guard."""
+
+    def _store(self, name="DB_PASS", val=VAL):
+        st.store_value(name, val.encode(), keep_s=600)
+
+    def test_concurrent_views_serve_the_value_at_most_once(self):
+        # M1: without the process-global consume-latch, up to MAX_CONNECTIONS
+        # threads each read + serve the value before the first tears down. With
+        # it, the value is served EXACTLY once; every racer gets 410 (or a
+        # connection error once the winner has exited).
+        self._store()
+        proc, port = self._serve(kind="name", locator="DB_PASS")
+        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
+        results = []
+        barrier = threading.Barrier(8)
+
+        def hit():
+            barrier.wait()
+            try:
+                code, body, _ = self._get(url, timeout=10)
+                results.append((code, VAL.encode() in body))
+            except OSError:
+                results.append((None, False))
+
+        threads = [threading.Thread(target=hit) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=25)
+        served = [r for r in results if r[0] == 200 and r[1]]
+        self.assertEqual(len(served), 1, results)   # value served EXACTLY once
+        proc.wait(timeout=15)
+
+    def test_the_one_shot_latch_precedes_the_value_read(self):
+        # Deterministic teeth for M1: the consume-latch (claim _served under
+        # _serve_lock) MUST run BEFORE _read_value() in do_GET, or a racing
+        # thread reads + serves the value before the winner tears down. (The
+        # behavioural test above is a safe regression guard, but os._exit races
+        # the losers, so this source-order lock is what actually has teeth.)
+        src = SHOW_SERVER.read_text(encoding="utf-8")
+        do_get = src.split("def do_GET", 1)[1].split("\n\n\n", 1)[0]
+        self.assertIn("with _serve_lock:", do_get)
+        latch = do_get.find("_served = True")
+        read = do_get.find("_read_value(")
+        self.assertNotEqual(latch, -1, "consume-latch missing from do_GET")
+        self.assertNotEqual(read, -1, "_read_value call missing from do_GET")
+        self.assertLess(latch, read,
+                        "the consume-latch must be claimed BEFORE _read_value()")
+
+    def test_a_value_containing_the_placeholder_token_is_not_corrupted(self):
+        # m2: NAME is substituted first, VALUE last, so a value literally
+        # containing "NAME_PLACEHOLDER" survives intact.
+        tricky = "PART1-NAME_PLACEHOLDER-PART2-580"
+        self._store(val=tricky)
+        proc, port = self._serve(kind="name", locator="DB_PASS")
+        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
+        code, body, _ = self._get(url)
+        self.assertEqual(code, 200)
+        # The exact JSON-embedded value (placeholder substring and all) is present.
+        self.assertIn(json.dumps(tricky).encode(), body)
+
+    def test_a_raw_non_ascii_token_segment_is_404_not_a_crash(self):
+        # t3: a raw high byte in the request target -> Latin-1-decoded non-ASCII
+        # self.path -> hmac.compare_digest would raise TypeError; the guard
+        # turns it into a plain 404 with no teardown and no traceback.
+        self._store()
+        proc, port = self._serve(kind="name", locator="DB_PASS")
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        s.sendall(b"GET /\xc3\xa9nope/ HTTP/1.1\r\n"
+                  b"Host: x\r\nConnection: close\r\n\r\n")
+        resp = s.recv(4096)
+        s.close()
+        self.assertIn(b"404", resp.split(b"\r\n", 1)[0])
+        self.assertIsNone(proc.poll())              # did not crash / tear down
 
 
 # --------------------------------------------------------------------------- #
