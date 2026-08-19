@@ -1157,6 +1157,43 @@ LANE_TARGET_MIN_INTERVAL_S = 6 * 3600            # env AIRULESET_LANE_TARGET_INT
 # active build. Env-tunable (`AIRULESET_LANE_TARGET_MERGED_MIN_IDLE_S`).
 LANE_TARGET_MERGED_MIN_IDLE_S = 2 * 3600
 
+# --- #545 owner addendum (2026-08-19): tier-0 bypass classification ---------
+# camera-box is Tier 0 (#557: ZERO local cargo compilation), so a lane target/
+# is either LEGACY (built before the #557 flip) or evidence of a live tier-0
+# gate BYPASS (a `cargo` compile that ran locally AFTER the ban -- the known
+# class is a build INSIDE an E2E .sh script the Bash-level hook cannot see,
+# camera-box #185). The #557 `block-tier0-local-build.sh` allowlist inversion
+# MERGED at 598e3826 (closed 2026-08-19T00:38:59Z); a Tier-0 lane target/ file
+# NEWER than this instant is a bypass finding to RECORD + FILE before the purge
+# (never silently delete it). Env-overridable (a box whose deploy lagged the
+# merge, or a future re-flip).
+TIER0_FLIP_ISO = "2026-08-19T00:38:59+00:00"
+
+
+def _tier0_flip_epoch():
+    """The #557 tier-0 flip instant as an epoch, `AIRULESET_TIER0_FLIP_EPOCH`
+    env-override winning, else the #557 merge instant (`TIER0_FLIP_ISO`)."""
+    env = os.environ.get("AIRULESET_TIER0_FLIP_EPOCH")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            print("  lane-target-reclaim: bad AIRULESET_TIER0_FLIP_EPOCH %r, "
+                  "falling back to the #557 default" % env, file=sys.stderr)
+    import datetime as _dt
+    return _dt.datetime.fromisoformat(TIER0_FLIP_ISO).timestamp()
+
+
+TIER0_FLIP_EPOCH = _tier0_flip_epoch()      # import-time default (ISO or env)
+LANE_TARGET_TIER0_BYPASS_STATE_PATH = CLAUDE_DIR / "lane-target-tier0-bypass-state.json"
+# Per-repo dedup cooldown: at most ONE bypass ticket per offending repo per
+# window. The natural cardinality is already ~1 (a reclaimed target is gone, so
+# re-detection needs a NEW post-flip lane) -- this only bounds a dedup-state
+# loss to one duplicate per window. Env-tunable.
+LANE_TARGET_TIER0_BYPASS_REFILE_S = 14 * 24 * 3600
+LANE_TARGET_TIER0_BYPASS_TITLE = (
+    "Tier-0 gate bypass: lokalny cargo build po #557 (airuleset #545 auto-detekcia)")
+
 
 def _lane_human_size(n):
     """`cli_target_purge._human_size(n)`, with a plain fallback if that
@@ -1247,9 +1284,15 @@ def _log_lane_target_results(results, log_path, now, dry_run: bool):
             action = "SKIP"
         size = r.get("size")
         size_txt = " size=%s" % _lane_human_size(size) if size is not None else ""
-        lines.append("%s %s %s branch=%s repo=%s%s reason=%s" % (
+        tier0_txt = ""
+        if "tier0_bypass" in r:              # only set on a purge candidate (#545)
+            if r.get("tier0_bypass"):
+                tier0_txt = " tier0=BYPASS(%s)" % (r.get("tier0_bypass_filed") or "?")
+            else:
+                tier0_txt = " tier0=legacy"
+        lines.append("%s %s %s branch=%s repo=%s%s%s reason=%s" % (
             ts, action, r["target"], r.get("branch"), r.get("repo"),
-            size_txt, r.get("reason", "")))
+            size_txt, tier0_txt, r.get("reason", "")))
     if not lines:
         return
     try:
@@ -1261,10 +1304,164 @@ def _log_lane_target_results(results, log_path, now, dry_run: bool):
               file=sys.stderr)
 
 
+def _lane_repo_slug(root, git_run):
+    """`owner/name` for a lane's primary checkout, parsed from its `origin`
+    remote (`git remote get-url origin`) -- https OR ssh form. Returns None
+    when there is no origin or the URL is unparseable, so a bypass finding is
+    then RECORDED but never FILED on a guessed repo (fail-SAFE: never file the
+    wrong repo)."""
+    url = git_run(["remote", "get-url", "origin"], root)
+    if not url:
+        return None
+    m = re.search(r"[:/]([^/:]+)/([^/:]+?)(?:\.git)?/?$", url.strip())
+    if not m:
+        return None
+    return "%s/%s" % (m.group(1), m.group(2))
+
+
+def _sample_fresh_target_files(target_dir, flip_epoch, limit=6):
+    """Up to `limit` (relpath, mtime) pairs for FILES under `target/` whose
+    mtime is strictly AFTER `flip_epoch` -- the concrete evidence a post-#557
+    cargo compile ran. Bounded (returns as soon as `limit` is reached); a
+    per-file stat error is skipped (fail-safe)."""
+    out = []
+    base = str(target_dir)
+    for dirpath, _dirs, files in os.walk(base, onerror=lambda e: None):
+        for f in files:
+            fp = os.path.join(dirpath, f)
+            try:
+                mt = os.lstat(fp).st_mtime
+            except OSError:
+                continue
+            if mt > flip_epoch:
+                out.append((os.path.relpath(fp, base), mt))
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def _tier0_bypass_issue_body(branch, lane, target_dir, newest_mtime, fresh_sample):
+    """The body of the auto-filed tier-0 bypass ticket (#545): plain evidence
+    (newest mtime + a fresh-file sample) + the known hook-gap class + a
+    mandatory `Scope-gate:` line."""
+    import datetime as _dt
+
+    def _iso(ts):
+        try:
+            return _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return str(ts)
+
+    lines = [
+        "Automaticka detekcia (airuleset #545): worktree-lane `target/` na "
+        "**Tier-0** projekte obsahuje build artefakty NOVSIE ako #557 tier-0 "
+        "flip (%s) -- dokaz, ze lokalna `cargo` kompilacia prebehla PO zakaze "
+        "(#557: ziadne lokalne cargo buildy), teda obisla tier-0 gate." % TIER0_FLIP_ISO,
+        "",
+        "- Lane branch: `%s`" % branch,
+        "- Lane: `%s`" % lane,
+        "- target/: `%s`" % target_dir,
+        "- Najnovsi target/ mtime: %s  (flip baseline: %s)" % (
+            _iso(newest_mtime), TIER0_FLIP_ISO),
+        "",
+        "Vzorka cerstvych (post-flip) suborov:",
+    ]
+    if fresh_sample:
+        for rel, mt in fresh_sample:
+            lines.append("  - `%s`  (%s)" % (rel, _iso(mt)))
+    else:
+        lines.append("  - (ziadna vzorka -- mtime evidencia vyssie)")
+    lines += [
+        "",
+        "Znama trieda hook-gapu: `cargo build` VNUTRI E2E `.sh` skriptu, ktory "
+        "`block-tier0-local-build.sh` (Bash-level hook) nevidi -- camera-box "
+        "#185. Najdi a oprav miesto, ktore kompiluje lokalne, aby tier-0 gate "
+        "platil aj tam.",
+        "",
+        "(Pozn.: `target/` tejto zmergovanej lane airuleset automaticky "
+        "reklamoval -- je 100% regenerovatelny; toto je LEN nahlasenie "
+        "hook-gapu, nie strata dat.)",
+        "",
+        "Scope-gate: cross-cutting",
+    ]
+    return "\n".join(lines)
+
+
+def _default_tier0_bypass_filer(repo_slug, title, body):
+    """Real `gh issue create -R <owner/name>` filer for a tier-0 bypass finding
+    (#545). Returns the created issue URL, or None on ANY failure (fail-SAFE:
+    the caller reports the failure, never records it as 'filed')."""
+    import subprocess as _sp
+    try:
+        r = _sp.run(["gh", "issue", "create", "-R", repo_slug,
+                     "--title", title, "--body", body],
+                    capture_output=True, text=True, timeout=60)
+    except Exception as e:      # noqa: BLE001 -- a filing crash never blocks reclaim
+        print("  lane-target-reclaim: tier-0 bypass filing errored: %s" % e,
+              file=sys.stderr)
+        return None
+    if r.returncode != 0:
+        print("  lane-target-reclaim: tier-0 bypass filing failed (rc=%d): %s" % (
+            r.returncode, (r.stderr or "").strip()), file=sys.stderr)
+        return None
+    return (r.stdout or "").strip() or "filed"
+
+
+def _record_tier0_bypass(root, branch, lane, target_dir, newest_mtime,
+                         fresh_sample, now, git_run, issue_filer,
+                         bypass_state_path, dry_run):
+    """Resolve the offending repo, dedup per-repo against a local state file
+    (`LANE_TARGET_TIER0_BYPASS_REFILE_S` cooldown), and file ONE ticket via
+    `issue_filer`. Records BEFORE the caller's delete. Returns a human status
+    string; NEVER raises -- a bypass finding must not block the reclaim."""
+    slug = _lane_repo_slug(root, git_run)
+    if not slug:
+        return "repo slug unresolved -- recorded, not filed"
+    if dry_run:
+        return "dry-run -- would file on %s (not filed)" % slug
+
+    refile_s = _worktree_env_age_s("AIRULESET_LANE_TARGET_TIER0_BYPASS_REFILE_S",
+                                   LANE_TARGET_TIER0_BYPASS_REFILE_S)
+    try:
+        st = json.loads(Path(bypass_state_path).read_text())
+        filed = st.get("filed", {}) if isinstance(st, dict) else {}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        filed = {}
+    prev = filed.get(slug)
+    if isinstance(prev, dict):
+        try:
+            ts = float(prev.get("ts", 0))
+        except (TypeError, ValueError):
+            ts = 0
+        if 0 <= now - ts < refile_s:        # a future-dated stamp re-files (fail-safe)
+            return "already tracked on %s (dedup)" % slug
+
+    title = LANE_TARGET_TIER0_BYPASS_TITLE
+    body = _tier0_bypass_issue_body(branch, lane, target_dir, newest_mtime, fresh_sample)
+    try:
+        url = issue_filer(slug, title, body)
+    except Exception as e:      # noqa: BLE001 -- a filer crash never blocks reclaim
+        print("  lane-target-reclaim: tier-0 bypass filer raised: %s" % e,
+              file=sys.stderr)
+        url = None
+    if not url:
+        return "filing FAILED on %s -- recorded, not filed" % slug
+
+    filed[slug] = {"ts": now, "issue": url}
+    try:
+        Path(bypass_state_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(bypass_state_path).write_text(json.dumps({"filed": filed}))
+    except OSError as e:
+        print("  lane-target-reclaim: could not write bypass state %s: %s" % (
+            bypass_state_path, e), file=sys.stderr)
+    return "filed on %s: %s" % (slug, url)
+
+
 def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
                               log_path=None, state_path=None, force: bool = False,
                               git_run=None, tier0_fn=None, proc_dir=None,
-                              hook_path=None):
+                              hook_path=None, flip_epoch=None, issue_filer=None,
+                              bypass_state_path=None):
     """Reclaim the `target/` of a worktree LANE whose branch is MERGED into
     its base (#545). A candidate is purged only when ALL of these hold, in
     order (each refusing -- never guessing -- on its own failure):
@@ -1294,9 +1491,20 @@ def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
     never the worktree, never the branch (the #345 sweep owns whole-lane
     removal at the 24h floor).
 
+    #545 owner addendum (tier-0 bypass classification): each purge candidate is
+    classified against `flip_epoch` (the #557 tier-0 flip, `_tier0_flip_epoch`)
+    BEFORE the delete. A `target/` whose newest artifact is NEWER than the flip
+    is a tier-0 gate BYPASS (a local cargo compile that ran after the ban -- a
+    hook gap the Bash-level guard cannot see, camera-box #185): it is RECORDED
+    and FILED (via `issue_filer`, deduped per-repo against `bypass_state_path`)
+    on the lane's own `origin` repo, then STILL purged (the deletion scope is
+    unchanged -- Approach 1 only). A pre-flip (legacy) target purges silently.
+
     Returns a list of per-lane dicts (`target`, `lane`, `branch`, `repo`,
-    `purged`, `reason`, `size`, `age_s`). Cadence-gated by its own state file;
-    `force=True` (a manual CLI call) or `dry_run=True` bypasses the gate."""
+    `purged`, `reason`, `size`, `age_s`; plus `newest_mtime`/`tier0_bypass` and,
+    on a bypass, `fresh_sample`/`tier0_bypass_filed`). Cadence-gated by its own
+    state file; `force=True` (a manual CLI call) or `dry_run=True` bypasses the
+    gate (a dry-run classifies but never files and never deletes)."""
     import time as _time
     now = _time.time() if now is None else now
     home = Path(home or os.environ.get("HOME") or os.path.expanduser("~"))
@@ -1305,6 +1513,10 @@ def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
     git_run = git_run or _worktree_git
     grace = _worktree_env_age_s("AIRULESET_LANE_TARGET_MERGED_MIN_IDLE_S",
                                 LANE_TARGET_MERGED_MIN_IDLE_S)
+    flip_epoch = _tier0_flip_epoch() if flip_epoch is None else flip_epoch
+    issue_filer = issue_filer or _default_tier0_bypass_filer
+    bypass_state_path = (Path(bypass_state_path) if bypass_state_path
+                         else LANE_TARGET_TIER0_BYPASS_STATE_PATH)
 
     if not force and not dry_run:
         try:
@@ -1408,8 +1620,9 @@ def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
                 results.append(entry)
                 continue
 
-            size_bytes, _ = _dir_stats(target_dir)
+            size_bytes, newest_mtime = _dir_stats(target_dir)
             entry["size"] = size_bytes
+            entry["newest_mtime"] = newest_mtime
 
             # Re-check symlink + live use immediately before the delete (a
             # TOCTOU re-check -- something could have started a build, or
@@ -1423,6 +1636,22 @@ def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
                 entry["reason"] = "in live use (re-checked before delete) -- kept"
                 results.append(entry)
                 continue
+
+            # --- Tier-0 bypass classification (#545 owner addendum) ---------
+            # A merged Tier-0 lane target/ with build artifacts NEWER than the
+            # #557 flip is evidence a cargo compile ran locally after the ban
+            # (a hook gap the Bash-level guard cannot see -- camera-box #185).
+            # RECORD + FILE the finding BEFORE the delete; never silently purge
+            # a bypass. Deletion scope itself is UNCHANGED (owner: Approach 1
+            # only). A pre-flip (legacy) target purges silently.
+            bypass = newest_mtime is not None and newest_mtime > flip_epoch
+            entry["tier0_bypass"] = bypass
+            if bypass:
+                fresh_sample = _sample_fresh_target_files(target_dir, flip_epoch)
+                entry["fresh_sample"] = fresh_sample
+                entry["tier0_bypass_filed"] = _record_tier0_bypass(
+                    root, branch, lane, target_dir, newest_mtime, fresh_sample,
+                    now, git_run, issue_filer, bypass_state_path, dry_run)
 
             entry["reason"] = "merged-lane target/ reclaimed (%s idle, %s)" % (
                 "%.1fh" % (rec / 3600.0), _lane_human_size(size_bytes))
@@ -1472,4 +1701,18 @@ def cmd_purge_lane_targets(args):
     verb = "would be " if dry_run else ""
     print("%d merged-lane target/ dir(s) %sreclaimed, %s %sfreed." % (
         len(purged), verb, _lane_human_size(total), verb))
+    # Tier-0 classification report (#545): surface every bypass finding (a
+    # merged lane whose target/ held post-#557 build artifacts).
+    bypasses = [r for r in results if r.get("tier0_bypass")]
+    legacy = [r for r in purged if r.get("tier0_bypass") is False]
+    if bypasses:
+        print()
+        print("  TIER-0 BYPASS: %d lane(s) with fresh (post-#557) target/ "
+              "artifacts -- a local cargo build escaped the tier-0 gate:" % len(bypasses))
+        for r in bypasses:
+            print("    %s (branch %s) -- %s" % (
+                r["target"], r.get("branch"), r.get("tier0_bypass_filed") or "?"))
+    if legacy:
+        print("  Tier-0: %d reclaimed lane(s) were legacy (pre-#557), not a bypass."
+              % len(legacy))
     print("Log: %s" % LANE_TARGET_LOG_PATH)

@@ -159,6 +159,12 @@ class _Base(unittest.TestCase):
         kw.setdefault("tier0_fn", lambda cwd: True)
         kw.setdefault("log_path", self.log)
         kw.setdefault("state_path", self.state)
+        # #545: a recorder filer (never real `gh`) + a far-FUTURE flip epoch so
+        # an existing test's wall-clock-fresh target classifies LEGACY and never
+        # files; a bypass test overrides `flip_epoch` explicitly.
+        kw.setdefault("issue_filer", self._filer)
+        kw.setdefault("bypass_state_path", self.bypass_state)
+        kw.setdefault("flip_epoch", NOW + 3650 * 24 * 3600)
         return cli_worktree_sweep.purge_merged_lane_targets(**kw)
 
     def _by_branch(self, results, branch):
@@ -546,12 +552,12 @@ class TestTier0BypassClassification(_Base):
 
 class TestTier0BypassHelpers(_Base):
     def test_lane_repo_slug_parses_https_and_ssh(self):
-        for url, want in (
+        for i, (url, want) in enumerate((
             ("https://github.com/zbynekdrlik/camera-box.git", "zbynekdrlik/camera-box"),
             ("https://github.com/zbynekdrlik/camera-box", "zbynekdrlik/camera-box"),
             ("git@github.com:zbynekdrlik/camera-box.git", "zbynekdrlik/camera-box"),
-        ):
-            repo = _mkrepo(self.root, name="p-" + url.rsplit("/", 1)[-1].replace(".git", ""))
+        )):
+            repo = _mkrepo(self.root, name="p-slug-%d" % i)
             _git(["remote", "add", "origin", url], repo)
             self.assertEqual(
                 cli_worktree_sweep._lane_repo_slug(repo, cli_worktree_sweep._worktree_git),
