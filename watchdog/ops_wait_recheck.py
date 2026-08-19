@@ -614,8 +614,12 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
 
     # #578: fetch the WORKABLE I members (cached, once per repo per TTL) ONLY here
     # in the nudge branch, so the `--audit` subprocess never fires on a wait/skip
-    # sweep. None (not wired / fetch failed) degrades to the generic clause.
-    i_members = _cached_i_members(cwd, i_members_fetch, state, now)
+    # sweep. AND only when the I direction is actually active (`i_count > 0`) — a
+    # W-only nudge (i_count 0/None) would not render the I clause, so the fetch
+    # would be wasted (#578 review 🔵). None (not wired / fetch failed / W-only)
+    # degrades to the generic clause.
+    i_members = (_cached_i_members(cwd, i_members_fetch, state, now)
+                 if isinstance(i_count, int) and i_count > 0 else None)
     text = _nudge_text(i_count, members, now, new_rec["w_first_seen"],
                        i_members=i_members)
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual

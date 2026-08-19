@@ -29,7 +29,12 @@ TOKENS = (
     "umbrella/tracking ticket gated na INÝ ticket",
     "blocker ticket",
     "acceptance DRAFT",
-    "sibling",
+    # #578 review 🔵 (both reviewers): "sibling" pre-exists in the #539 chained-I
+    # clause on the SAME physical STATUS W-bullet line, so it carried no
+    # partial-revert teeth there. "sekvenčná práca" (Slovak) is unique to the
+    # #578 clause on BOTH surfaces (the base #539 clause uses English "sequenced
+    # work"), so a partial revert of the distinction sentence turns this RED.
+    "sekvenčná práca",
 )
 
 

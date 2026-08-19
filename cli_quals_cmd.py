@@ -108,7 +108,14 @@ def _print_audit_rows(rows, own_stream=None):
     checklist/umbrella-gated). Comma, not space, so a label with an internal
     space is never split. Field 0 stays the issue number, and the `action`
     column (field 2) is the SAME action-only/implement discriminator `--list`
-    carries, so existing number-parsing / column layout is unaffected."""
+    carries, so existing number-parsing / column layout is unaffected.
+
+    KNOWN limitation (#578 review 🔵, display-only): a label NAME containing a
+    literal COMMA would mis-split on the round-trip. Harmless in practice — the
+    nudge's SHAPE detection keys on exact membership in `_REVIEW_LANE_LABELS`
+    (`ready-for-review`/`needs-gatekeeper`, no commas) and the real vocabulary
+    (`stream:*`, `ops-wait`, `bug`, …) carries none, so a mis-split only garbles
+    the cosmetic label display, never a routing/labelling decision."""
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
         action = _row_action(row, own_stream)

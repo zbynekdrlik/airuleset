@@ -3819,8 +3819,11 @@ def _parse_i_audit_lines(text):
     `--audit` prints `number<TAB>createdAt<TAB>action<TAB>labels` per member;
     field 3 is a COMMA-joined label-name list (empty for a label-less core
     ticket) — comma, not space, so a label with an internal space ("help
-    wanted") is not split. Deliberately tolerant: a row with fewer than 3 fields
-    is malformed (-> None); a missing/empty label field reads as `[]`."""
+    wanted") is not split. (Known display-only limitation, #578 review 🔵: a
+    label NAME with a literal comma would mis-split; harmless — the nudge's shape
+    detection keys on exact `ready-for-review`/`needs-gatekeeper` membership,
+    never on the split list.) Deliberately tolerant: a row with fewer than 3
+    fields is malformed (-> None); a missing/empty label field reads as `[]`."""
     recs = []
     for line in (text or "").splitlines():
         line = line.rstrip("\n")
