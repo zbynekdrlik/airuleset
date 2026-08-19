@@ -1710,6 +1710,7 @@ from watchdog.cross_stream import (  # noqa: E402
     _apply_gk_orphan_reconcile as _apply_gk_orphan_reconcile,
     gk_orphan_marker_sweep as gk_orphan_marker_sweep,
     GK_COMMENT_HANDOFF_WINDOW_S as GK_COMMENT_HANDOFF_WINDOW_S,
+    _comment_handoff_window_s as _comment_handoff_window_s,
     _gk_proper_marker_in_window as _gk_proper_marker_in_window,
     _gk_comment_handoff_decide as _gk_comment_handoff_decide,
     _fetch_gk_comment_handoffs as _fetch_gk_comment_handoffs,

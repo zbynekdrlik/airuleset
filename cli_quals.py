@@ -823,13 +823,20 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
 # tickets have gone cold (the "tlač dopredu každý deň" doctrine, #570 bod 3).
 OPS_WAIT_EVIDENCE_MAX_S = 24 * 3600
 # Bound on the per-member `gh issue view` comment fetches per `--ops-wait`
-# invocation (generous — a real W set is a handful; a >40-member W is
-# pathological). Overflow members are left UNTAGGED (the safe direction — never
-# a false accusation). This is what keeps the watchdog's `_watchdog_ops_wait_fetch`
-# subprocess (which runs `--ops-wait`) bounded, alongside its own 30-min
-# `_cached_ops_wait` cache; the session's own on-demand `--ops-wait` is uncapped
-# in wall-clock time so it always gets full stale info.
-OPS_WAIT_STALE_MAX_FETCHES = 40
+# invocation (a real W set is a handful — montalu's worst incident was 13; a
+# >25-member W is pathological). Overflow members are left UNTAGGED (the safe
+# direction — never a false accusation). This keeps the watchdog's
+# `_watchdog_ops_wait_fetch` subprocess (which runs `--ops-wait`) bounded so its
+# 35s timeout has margin (~25 × <1s), alongside its own 30-min `_cached_ops_wait`
+# cache; the session's own on-demand `--ops-wait` is uncapped in wall-clock time
+# so it always gets full stale info. TRADE-OFF (#570 review 🔵): the stale
+# computation is COUPLED into the SAME `--ops-wait` invocation the #547 W-nudge
+# reads, so a pathological large-W + slow-gh cold-cache sweep can time the
+# subprocess out → None → the W-clause of that day's partition nudge is dropped;
+# it SELF-HEALS (the 60s `_cached_ops_wait` fail_ttl re-checks, and the I-clause
+# still fires while I>0), so this is a bounded, fail-safe degradation, not a
+# correctness bug. The cap + a modest 35s timeout keep it rare.
+OPS_WAIT_STALE_MAX_FETCHES = 25
 
 
 def _parse_iso_ts(s):

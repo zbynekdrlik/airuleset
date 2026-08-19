@@ -227,7 +227,11 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                "             u_reconcile_clear=None, conformance_root=None,\n"
                "             conformance_is_target=None, "
                "conformance_hb_enabled=False,\n"
-               "             gkorphan_fetch=None):")
+               # #570 re-pin: run_once gained gkorphan_handoff_fetch (the
+               # comment-handoff pass's own wired=on fetch seam), so the
+               # signature-lock anchor's LAST line moved (the #504/#547/#551
+               # re-pin-on-every-signature-change discipline).
+               "             gkorphan_fetch=None, gkorphan_handoff_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

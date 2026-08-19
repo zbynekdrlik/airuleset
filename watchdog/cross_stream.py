@@ -1271,9 +1271,16 @@ def gk_selfservice_bounce(now, run, state, home=None, dry_run=False,
 #       manually-labeled-then-cleared ticket is not an orphan),
 #   (f) the title does not carry the `GATEKEEPER-ACTION` prefix (job 11's
 #       in:title query already surfaces those).
-# A "proper marker present but never labeled" case (gk may have worked it
-# directly from the comment) is deliberately LEFT to manual triage — that is
-# the exact "line-present-but-pure-read" judgement #516 forbids mechanizing.
+# A "proper marker present but never labeled" case was ORIGINALLY (#551) left to
+# manual triage. #570 now MECHANIZES exactly that case — but SAFELY, in a
+# SEPARATE parallel pass (`_gk_comment_handoff_pass`, below), NOT by relaxing
+# THIS mutated decider: a proper `GATEKEEPER-ACTION:`/`READY-FOR-REVIEW:` marker
+# is reconciled ONLY when its COMMENT was created within a bounded ~48h window
+# AND the target label was NEVER applied (paginated timeline) — the two defenses
+# that keep the pervasive-token minefield (~44 processed tickets) from being
+# re-labelled. It is NOT the #516-forbidden "line-present-but-pure-read"
+# judgement (that stays manual): the window + never-labeled gate is a
+# FALSIFIABLE mechanical signal, not a read-vs-action prose classification.
 # --------------------------------------------------------------------------- #
 
 # Marker classifiers, applied PER LINE (re.match anchors each line's start).
@@ -1324,10 +1331,29 @@ _GK_COMMENT_HANDOFF_MARKERS = (
 GK_COMMENT_HANDOFF_WINDOW_S = 48 * 3600
 GK_COMMENT_HANDOFF_WINDOW_MIN_S = 6 * 3600
 # Cap on candidate detail fetches per marker-type per sweep (the #172/#504
-# per-sweep-budget class): a window-bounded search returns few, but a units
-# error / a burst is bounded here too. Overflow is UNSEEN (the safe direction —
-# job 11's own stale-handoff alarm is a separate backstop for a parked one).
-GK_COMMENT_HANDOFF_MAX_CANDIDATES = 40
+# per-sweep-budget class): a window-bounded search returns few (only tickets
+# updated in the window), but a units error / a burst is bounded here too.
+# Overflow is UNSEEN (the safe direction — job 11's own stale-handoff alarm is a
+# separate backstop for a parked one). 20 (not larger) keeps the COMBINED worst
+# case (2 marker types × this + #551's own ~60 views, all in the same 6h-
+# cadenced 120s sweep) well inside budget (#570 review 🔵).
+GK_COMMENT_HANDOFF_MAX_CANDIDATES = 20
+
+
+def _comment_handoff_window_s():
+    """The effective comment-handoff window: the env override
+    (AIRULESET_GK_COMMENT_HANDOFF_WINDOW_S), FLOORED at
+    GK_COMMENT_HANDOFF_WINDOW_MIN_S so a units error (a sub-6h value) can never
+    collapse the primary false-positive defense to a tiny window (which would
+    still be safe — narrower = fewer candidates — but the floor keeps the
+    documented behavior honest and matches the sibling `_cadence` pattern in
+    ops_wait_recheck)."""
+    try:
+        v = int(os.environ.get("AIRULESET_GK_COMMENT_HANDOFF_WINDOW_S",
+                               GK_COMMENT_HANDOFF_WINDOW_S))
+    except (ValueError, TypeError):
+        v = GK_COMMENT_HANDOFF_WINDOW_S
+    return max(v, GK_COMMENT_HANDOFF_WINDOW_MIN_S)
 
 _GKORPHAN_EVIDENCE_TEMPLATE = (
     "gk hand-off backstop (airuleset#551): tento tiket nesie MUTOVANÝ "

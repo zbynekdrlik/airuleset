@@ -60,6 +60,22 @@ class ProperMarkerInWindow(unittest.TestCase):
         self.assertFalse(cs._gk_proper_marker_in_window(
             cmts, cs._GK_PROPER_MARKER_RE, NOW, WINDOW))
 
+    def test_midline_token_with_colon_after_prose_is_not_a_marker(self):
+        # ANCHORING TEETH (#570 review 🟡): the token WITH a colon but MID-LINE
+        # (after prose) must NOT count — `_GK_*_MARKER_RE` uses `.match` (anchored
+        # at line start), so a `.match`->`.search` mutation would open a
+        # false-label-add class on any "see the GATEKEEPER-ACTION: convention"
+        # prose. This line makes `.match`=False but `.search`=True, so the
+        # mutation is caught (unlike the backtick-no-colon case above where both
+        # are False).
+        cmts = [_c("Please follow the GATEKEEPER-ACTION: convention here", 3600)]
+        self.assertFalse(cs._gk_proper_marker_in_window(
+            cmts, cs._GK_PROPER_MARKER_RE, NOW, WINDOW))
+        # same for READY-FOR-REVIEW
+        cmts2 = [_c("As noted the READY-FOR-REVIEW: step comes later", 3600)]
+        self.assertFalse(cs._gk_proper_marker_in_window(
+            cmts2, cs._GK_READY_MARKER_RE, NOW, WINDOW))
+
     def test_fenced_marker_paste_is_not_a_marker(self):
         cmts = [_c("```\nGATEKEEPER-ACTION: example\n```", 3600)]
         self.assertFalse(cs._gk_proper_marker_in_window(
