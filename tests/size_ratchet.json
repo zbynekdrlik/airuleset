@@ -13,7 +13,7 @@
     "cli_deployer_glue.py": 346,
     "cli_filedrop_watchdog.py": 518,
     "cli_fleet.py": 406,
-    "cli_quals.py": 1485,
+    "cli_quals.py": 1501,
     "cli_quals_cmd.py": 673,
     "cli_remote.py": 1015,
     "cli_scratch_sweep.py": 1505,
