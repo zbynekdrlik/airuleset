@@ -1,16 +1,5 @@
 [
   {
-    "name": "automatizacie-montalu",
-    "host": "dev2",
-    "path": "~/devel/montalu/automatizacie-montalu",
-    "branch_model": "2-branch",
-    "default_branch": "main",
-    "work_branch": "dev",
-    "overrides": [],
-    "onboarded": "2026-07-02",
-    "relocated": "2026-08-19 (moved from dev1:~/devel/automatizacie-montalu — that dir is now a STALE July scaffold leftover; live repo/work is the dev2 copy, origin unchanged)"
-  },
-  {
     "name": "camera-box",
     "host": "dev1",
     "path": "~/devel/camera-box",
@@ -131,6 +120,16 @@
     "work_branch": "dev",
     "overrides": [],
     "onboarded": "2026-06-03"
+  },
+  {
+    "name": "automatizacie-montalu",
+    "host": "dev2",
+    "path": "~/devel/montalu/automatizacie-montalu",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-07-02"
   },
   {
     "name": "bakerion-ai",
