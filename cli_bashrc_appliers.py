@@ -229,6 +229,19 @@ STREAM_SSH_ATTACH_BLOCK = (
     f"{STREAM_SSH_ATTACH_MARK_END}"
 )
 
+# --- #562: gk box ssh auto-attach -------------------------------------------
+# The gk box `gatekeeper` account is NOT a subdev stream account (not in
+# AUTHORITY_BY_USER -- that map is about MERGE authority + stream scoping,
+# neither of which gatekeeper is part of), but the owner wants the SAME #264
+# ssh auto-attach behaviour there: an interactive `ssh gatekeeper@gk` should
+# land straight in tmux instead of a bare shell. So the eligibility gate is
+# widened by this explicit extra-user set, keeping the change strictly in the
+# ssh-attach lane -- adding "gatekeeper" to AUTHORITY_BY_USER would misclassify
+# it as a subdev stream everywhere downstream (statusline slice, skill scoping,
+# notify routing). Owner ask (2026-08-19): "uz ma skor vsade po ssh pekne joine
+# do tmux okrem ked sa ssh do gk, tam musim vsetko sam".
+SSH_ATTACH_EXTRA_USERS = frozenset({"gatekeeper"})
+
 
 def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
                                 end=STREAM_SSH_ATTACH_MARK_END):
@@ -293,7 +306,8 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     import airuleset
     bpath = bashrc_path or airuleset.BASHRC
     u = user or airuleset._current_user()
-    should_have = u in airuleset.AUTHORITY_BY_USER
+    should_have = (u in airuleset.AUTHORITY_BY_USER
+                   or u in SSH_ATTACH_EXTRA_USERS)
     existing = bpath.read_text() if bpath.exists() else ""
     spans = _stream_marker_block_spans(existing)
     if should_have:
