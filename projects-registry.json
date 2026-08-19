@@ -1,0 +1,206 @@
+[
+  {
+    "name": "automatizacie-montalu",
+    "host": "dev1",
+    "path": "~/devel/automatizacie-montalu",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-07-02"
+  },
+  {
+    "name": "camera-box",
+    "host": "dev1",
+    "path": "~/devel/camera-box",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-06-08"
+  },
+  {
+    "name": "dantetimesync",
+    "host": "dev1",
+    "path": "~/devel/dantetimesync",
+    "branch_model": "2-branch",
+    "default_branch": "master",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "devbridge",
+    "host": "dev1",
+    "path": "~/devel/devbridge",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "obsytplayer",
+    "host": "dev1",
+    "path": "~/devel/obsytplayer",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "odoo-slovnormal",
+    "host": "dev1",
+    "path": "~/devel/odoo/odoo-slovnormal",
+    "branch_model": "3-branch",
+    "default_branch": "main",
+    "work_branch": "develop",
+    "overrides": [
+      "3-branch"
+    ],
+    "onboarded": null
+  },
+  {
+    "name": "parovanie-produktov",
+    "host": "dev1",
+    "path": "~/devel/forestshop/parovanie_produktov",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-06-25"
+  },
+  {
+    "name": "reaperiem",
+    "host": "dev1",
+    "path": "~/devel/reaperiem",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "remoteos-mcp",
+    "host": "dev1",
+    "path": "~/devel/remoteos-mcp",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "restreamer",
+    "host": "dev1",
+    "path": "~/devel/restreamer",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "songplayer",
+    "host": "dev1",
+    "path": "~/devel/songplayer",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "spinbike",
+    "host": "dev1",
+    "path": "~/devel/spinbike",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "voiceagent",
+    "host": "dev1",
+    "path": "~/devel/voiceagent",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-06-03"
+  },
+  {
+    "name": "bakerion-ai",
+    "host": "dev2",
+    "path": "~/devel/bakerion-ai/repo",
+    "branch_model": "2-branch",
+    "default_branch": "master",
+    "work_branch": "dev",
+    "overrides": [
+      "local-builds=allowed"
+    ],
+    "onboarded": null
+  },
+  {
+    "name": "codex-bridge",
+    "host": "dev2",
+    "path": "~/devel/codex-bridge",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "email-extractor",
+    "host": "dev2",
+    "path": "~/devel/n8n/email_extract",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-06-25"
+  },
+  {
+    "name": "forecasting-storage",
+    "host": "dev2",
+    "path": "~/devel/slovnormal/forecasting_storage",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-07-14"
+  },
+  {
+    "name": "montalu-n8n",
+    "host": "dev2",
+    "path": "~/devel/montalu/n8n",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-07-14"
+  },
+  {
+    "name": "montalu-vyuctovanie",
+    "host": "dev2",
+    "path": "~/devel/montalu/vyuctovanie",
+    "branch_model": "2-branch",
+    "default_branch": "master",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-08-19"
+  },
+  {
+    "name": "presenter",
+    "host": "dev2",
+    "path": "~/devel/presenter/presenter-dev2",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  }
+]
