@@ -1,10 +1,10 @@
 {
   "files": {
-    "airuleset.py": 5383,
+    "airuleset.py": 5391,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 793,
-    "cli_bashrc_appliers.py": 330,
+    "cli_bashrc_appliers.py": 358,
     "cli_binary_installers.py": 241,
     "cli_burn.py": 553,
     "cli_caveman_plugins.py": 589,
@@ -67,7 +67,7 @@
     "tests/test_delivery_stall.py": 362,
     "tests/test_design_before_code.py": 137,
     "tests/test_design_gate.py": 1599,
-    "tests/test_dev_env_provisioning.py": 1543,
+    "tests/test_dev_env_provisioning.py": 1618,
     "tests/test_discord_notify_check.py": 107,
     "tests/test_discord_reply.py": 1997,
     "tests/test_dispatch_floor.py": 601,
