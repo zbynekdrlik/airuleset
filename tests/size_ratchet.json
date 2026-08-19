@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 5381,
+    "airuleset.py": 5383,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_autopilot_lock.py": 793,
@@ -35,7 +35,7 @@
     "tests/_hook_state_cleanup.py": 164,
     "tests/conftest.py": 187,
     "tests/test_account_limit_backoff.py": 283,
-    "tests/test_airuleset.py": 14494,
+    "tests/test_airuleset.py": 14514,
     "tests/test_architecture_first_414.py": 120,
     "tests/test_ask_before_assuming.py": 46,
     "tests/test_ask_before_assuming_dropped_rows.py": 576,
