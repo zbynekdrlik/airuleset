@@ -4012,10 +4012,12 @@ class TestStreamNotifyOwnerRouting(TestCase):
         # to zbynek was the #295 bug — this assertion was INVERTED from
         # "zbynek" as the RED half of that fix's regression test.
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu4"], "marek")
-        # montalu5/6/7/8 (airuleset#378): owner routing decision 2026-08-11 —
-        # montalu5 is Marek's stream (like montalu4) -> claude-marek; the
-        # other three are zbynek's -> claude-zbynek.
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu5"], "marek")
+        # montalu5/6/7/8: owner routing decision 2026-08-19 (airuleset#572)
+        # REVERSED the 2026-08-11 #378 decision that montalu5 was Marek's --
+        # montalu5 now routes to zbynek (-> claude-zbynek), same as 6/7/8.
+        # The invariant is inverted here (not deleted) because the ROUTING
+        # OWNER genuinely changed by owner directive, per regression-test-first.
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu5"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu6"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu7"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu8"], "zbynek")
@@ -4034,6 +4036,13 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david2"], "david")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david3"], "david")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david4"], "david")
+        # admin/stepan (airuleset#572, 2026-08-19): the forestshop-dev box's
+        # two linux accounts route to claude-marek. They have no Discord
+        # identity of their own and are absent from AUTHORITY_BY_USER (full
+        # authority) -- without this redirect resolve_owner() returned "" and
+        # the ping fell to the shared DISCORD_NOTIFICATION_CHANNEL_ID thread.
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["admin"], "marek")
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["stepan"], "marek")
         # marek is deliberately absent: its own tmux session name already
         # resolves correctly via DISCORD_NOTIFICATION_CHANNEL_MAREK.
         self.assertNotIn("marek", self.notify.STREAM_NOTIFY_OWNER)
@@ -4064,15 +4073,26 @@ class TestStreamNotifyOwnerRouting(TestCase):
                 self.assertEqual(self.notify.resolve_owner(), "david", who)
 
     def test_montalu5_8_resolve_per_the_owner_routing_decision(self):
-        # airuleset#378: montalu5 -> marek (Marek's stream, like montalu4),
-        # montalu6/7/8 -> zbynek. Resolved directly inside resolve_owner()
-        # with no TMUX and no env override, exactly like the other stream
-        # personas above.
-        for who, owner in (("montalu5", "marek"), ("montalu6", "zbynek"),
+        # airuleset#572 (2026-08-19) REVERSED #378: montalu5 -> zbynek (no
+        # longer Marek's stream), montalu6/7/8 -> zbynek. Resolved directly
+        # inside resolve_owner() with no TMUX and no env override, exactly
+        # like the other stream personas above.
+        for who, owner in (("montalu5", "zbynek"), ("montalu6", "zbynek"),
                            ("montalu7", "zbynek"), ("montalu8", "zbynek")):
             with m.patch.dict(os.environ, {}, clear=True), \
                     m.patch.object(self.notify, "_current_user", return_value=who):
                 self.assertEqual(self.notify.resolve_owner(), owner, who)
+
+    def test_forestshop_dev_accounts_resolve_to_marek(self):
+        # airuleset#572: the forestshop-dev box's two linux accounts (admin,
+        # stepan) redirect to claude-marek, resolved directly inside
+        # resolve_owner() with no TMUX and no env override -- without the
+        # STREAM_NOTIFY_OWNER entries they returned "" and the ping fell to
+        # the shared channel.
+        for who in ("admin", "stepan"):
+            with m.patch.dict(os.environ, {}, clear=True), \
+                    m.patch.object(self.notify, "_current_user", return_value=who):
+                self.assertEqual(self.notify.resolve_owner(), "marek", who)
 
     def test_env_override_still_wins_over_the_stream_map(self):
         # montalu/david keep a redundant hand-added bashrc export from
