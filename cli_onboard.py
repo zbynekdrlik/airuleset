@@ -197,13 +197,29 @@ def remote_url(path, run=None):
     return None
 
 
+def _branch_exists(path, branch, run=None):
+    return _git(path, ["rev-parse", "--verify", "--quiet",
+                       "refs/heads/" + branch], run=run).returncode == 0
+
+
 def detect_default_branch(path, run=None):
-    """The repo's default branch — origin/HEAD if known, else the checked-out
-    branch. NEVER changed by this module (respect existing convention)."""
+    """The repo's default branch. NEVER changed by this module (respect the
+    existing convention).
+
+    1. `origin/HEAD` — the authoritative remote default (set at clone).
+    2. origin/HEAD absent (a local init, or a clone that never ran
+       `remote set-head`): a working repo is normally CHECKED OUT on its dev
+       branch, so the current branch is NOT the default — prefer an existing
+       `main`/`master` branch, else fall back to the checked-out branch. This
+       avoids a false `branch-model-mismatch` for every 2-branch project
+       sitting on its dev branch (#569 live-verify)."""
     r = _git(path, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
              run=run)
     if r.returncode == 0 and (r.stdout or "").strip():
         return r.stdout.strip().split("/")[-1]
+    for cand in ("main", "master"):
+        if _branch_exists(path, cand, run=run):
+            return cand
     r = _git(path, ["symbolic-ref", "--short", "HEAD"], run=run)
     if r.returncode == 0 and (r.stdout or "").strip():
         return r.stdout.strip()

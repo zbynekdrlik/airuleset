@@ -169,5 +169,37 @@ class TestDeriveRejectsEmpty(unittest.TestCase):
             ob.derive_repo_name("")
 
 
+class TestAuditNoFalseBranchMismatchOnDevCheckout(unittest.TestCase):
+    # Live-verify follow-up: a real 2-branch project is normally CHECKED OUT on
+    # its dev branch, and detect_default_branch fell back to the current branch
+    # when origin/HEAD wasn't locally set → every such project got a spurious
+    # `branch-model-mismatch registry=main repo=dev` in the audit sweep.
+    def test_repo_on_dev_branch_is_not_flagged(self):
+        with TemporaryDirectory() as d:
+            repo = Path(d)
+            init_repo(repo, default_branch="main", remote=REMOTE)
+            subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b",
+                            "dev"], check=True)  # the normal working state
+            self.assertEqual(ob.detect_default_branch(str(repo)), "main",
+                             "default should be main, not the dev checkout")
+            entry = {"name": "foo", "host": "dev1", "path": str(repo),
+                     "branch_model": "2-branch", "default_branch": "main",
+                     "work_branch": "dev"}
+            kinds = {x["kind"] for x in ob.audit_project(entry)}
+            self.assertNotIn("branch-model-mismatch", kinds,
+                             "false mismatch for a repo on its dev branch")
+
+    def test_genuine_master_vs_main_mismatch_still_flagged(self):
+        # the real drift the check exists for must still fire
+        with TemporaryDirectory() as d:
+            repo = Path(d)
+            init_repo(repo, default_branch="master", remote=REMOTE)
+            entry = {"name": "foo", "host": "dev1", "path": str(repo),
+                     "branch_model": "2-branch", "default_branch": "main",
+                     "work_branch": "dev"}
+            kinds = {x["kind"] for x in ob.audit_project(entry)}
+            self.assertIn("branch-model-mismatch", kinds)
+
+
 if __name__ == "__main__":
     unittest.main()
