@@ -198,57 +198,114 @@ class RecentHumanVetoesRecovery(unittest.TestCase):
 
 
 class SubmitOwnGoalPrimitive(unittest.TestCase):
-    """Direct lock on the new `submit_own_goal_verified` primitive: a COMPLETE
-    own /goal is submitted (transcript-confirmed); a TRUNCATED one is NEVER
-    submitted (#36); a foreign draft is refused with zero keystrokes."""
+    """Direct lock on the `submit_own_goal_verified` primitive: a COMPLETE own
+    /goal is submitted (PANE-verified — the box goes bare); a TRUNCATED one is
+    NEVER submitted (#36); a foreign draft is refused with zero keystrokes; a
+    swallowed Enter earns ONE corrective Escape+Enter.
 
-    def _fake(self, box, transcript_path=None, enters_swallowed=0):
+    #566-review F1: confirmation is PANE-based (box no longer holds our /goal),
+    NEVER transcript-based — a slash-command submit is written to the transcript
+    as a `<command-name>/goal</command-name>...` COMPOSITE, so the raw `/goal ...`
+    text is never a substring of the accepted turn. These tests pass NO
+    transcript path (the primitive no longer takes one), proving the pane proof
+    is self-sufficient."""
+
+    def _fake(self, box, enters_swallowed=0):
         return DeliverGoalFakeTmux(
             [("%9", "claude", CWD, "111")], GOAL_IDLE_CAP, model_type=True,
-            initial_box=box, transcript_path=transcript_path,
-            enters_swallowed=enters_swallowed)
+            initial_box=box, enters_swallowed=enters_swallowed)
 
     def test_complete_own_goal_submitted(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        tpath = Path(d.name) / "t.jsonl"
-        tpath.write_text("")
-        tmux = self._fake(GOAL_TEXT, transcript_path=str(tpath))
+        tmux = self._fake(GOAL_TEXT)
         ok = wd.submit_own_goal_verified("%9", GOAL_TEXT, run=tmux,
-                                         tpath=str(tpath),
                                          sleep_fn=lambda *a, **k: None)
-        self.assertTrue(ok)
+        self.assertTrue(ok, "a complete own /goal must submit (pane went bare)")
         self.assertIn("Enter", tmux.keys())
         self.assertNotIn("C-s", tmux.keys())
 
     def test_truncated_goal_never_submitted(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        tpath = Path(d.name) / "t.jsonl"
-        tpath.write_text("")
         # the box holds only a PREFIX of the expected payload (a truncated type)
-        tmux = self._fake(GOAL_TEXT[:30], transcript_path=str(tpath))
+        tmux = self._fake(GOAL_TEXT[:30])
         ok = wd.submit_own_goal_verified("%9", GOAL_TEXT, run=tmux,
-                                         tpath=str(tpath),
                                          sleep_fn=lambda *a, **k: None)
         self.assertFalse(ok)
         self.assertNotIn("Enter", tmux.keys(),
                          "a truncated /goal must NEVER be submitted (#36)")
 
     def test_foreign_draft_refused_zero_keystrokes(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        tpath = Path(d.name) / "t.jsonl"
-        tpath.write_text("")
-        tmux = self._fake("nechat ako je moj vlastny draft",
-                          transcript_path=str(tpath))
+        tmux = self._fake("nechat ako je moj vlastny draft")
         ok = wd.submit_own_goal_verified("%9", GOAL_TEXT, run=tmux,
-                                         tpath=str(tpath),
                                          sleep_fn=lambda *a, **k: None)
         self.assertFalse(ok)
         self.assertEqual([a for a in tmux.sent
                           if len(a) > 1 and a[1] == "send-keys"], [],
                          "a foreign draft must receive ZERO keystrokes")
+
+    def test_swallowed_enter_earns_one_corrective_escape_enter(self):
+        # first Enter is swallowed (box keeps text); the corrective Escape+Enter
+        # then lands (box goes bare) -> confirmed via the pane, no transcript.
+        tmux = self._fake(GOAL_TEXT, enters_swallowed=1)
+        ok = wd.submit_own_goal_verified("%9", GOAL_TEXT, run=tmux,
+                                         sleep_fn=lambda *a, **k: None)
+        self.assertTrue(ok)
+        self.assertEqual(tmux.keys().count("Escape"), 1,
+                         "exactly ONE corrective Escape (never two, #35)")
+        self.assertEqual(tmux.keys().count("Enter"), 2)
+
+
+class RecentHumanGateFailsSafeOnUnreadableTranscript(unittest.TestCase):
+    """#566-review A1: `_recovery_recent_human` must VETO (return True) when the
+    transcript FILE is missing/unreadable — not fall through to
+    `_goal_autoarm_recent_human_activity`, whose `(False, "")` on a read failure
+    would let a recovery keystroke PROCEED on unprovable state."""
+
+    def test_missing_transcript_file_vetoes(self):
+        # a real path string, but the file does not exist -> unprovable -> VETO
+        self.assertTrue(
+            goal._recovery_recent_human("sid", CWD, "/no/such/transcript.jsonl",
+                                        1_000.0),
+            "an unreadable transcript must fail SAFE toward VETO")
+
+    def test_none_path_vetoes(self):
+        self.assertTrue(goal._recovery_recent_human("sid", CWD, None, 1_000.0))
+
+    def test_readable_quiet_transcript_does_not_veto(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        tpath = Path(d.name) / "quiet.jsonl"
+        tpath.write_text('{"type":"assistant","message":{"content":""}}\n')
+        self.assertFalse(
+            goal._recovery_recent_human("sid", CWD, str(tpath), 1_000_000.0),
+            "a readable transcript with no recent human is NOT a veto")
+
+
+class LivelockRecoveryStopsAfterEscalation(unittest.TestCase):
+    """#566-review F2: once the janitor has ESCALATED (pinged) for a pane, the
+    job-9 livelock recovery stops re-ordering the janitor every sweep (clause 2:
+    one loud escalation, never infinite retries); job 20 keeps its own retry."""
+
+    def setUp(self):
+        _isolate_goal_state(self)
+
+    def test_already_escalated_pane_orders_no_further_recovery(self):
+        proj, _ = _proj_with_transcript(self)
+        # seed the shared janitor rec as already-pinged for the pane the fake
+        # resolves (%9).
+        state = {"janitor_pinged_rec": {"%9": {"janitor_pinged": True}}}
+        calls = []
+
+        def _spy_recover(*a, **kw):
+            calls.append(1)
+            return []
+
+        tmux = DeliverGoalFakeTmux([("%9", "claude", CWD, "111")], GOAL_IDLE_CAP)
+        with m.patch.object(wd, "_janitor_recover", side_effect=_spy_recover):
+            logs = goal._resolve_stash_abort_livelock(
+                SID, CWD, tmux, proj, state, 5_000_000.0, None, False,
+                lambda *a, **k: None)
+        self.assertEqual(calls, [],
+                         "an already-escalated pane must not re-order recovery")
+        self.assertTrue(any("ALREADY-escalated" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
