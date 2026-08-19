@@ -725,6 +725,48 @@ class TestApplyStreamSshAttach(TestCase):
         self.assertIn("alias ll='ls -alF'", text)
         self.assertIn("export FOO=bar", text)
 
+    # --- #562: the gk box `gatekeeper` account also gets the ssh auto-attach
+    # block. It is NOT a subdev stream account (not in AUTHORITY_BY_USER), so
+    # the eligibility gate is widened by an explicit extra-user set, NOT by
+    # adding it to the merge-authority map (which would misclassify it as a
+    # stream everywhere downstream). Owner ask (2026-08-19): "uz ma skor vsade
+    # po ssh pekne joine do tmux okrem ked sa ssh do gk, tam musim vsetko sam".
+
+    def test_adds_block_for_the_gatekeeper_account(self):
+        p = self._tmp("# existing content\n")
+        changed = airuleset.apply_stream_ssh_attach(p, user="gatekeeper")
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertIn(airuleset.STREAM_SSH_ATTACH_MARK_START, text)
+        self.assertIn(airuleset.STREAM_SSH_ATTACH_MARK_END, text)
+        self.assertIn("exec tmux new-session -A -s", text)
+
+    def test_gatekeeper_block_is_the_byte_identical_stream_block(self):
+        # #562 is an ELIGIBILITY-only widening -- the block content added for
+        # the gatekeeper account must be byte-identical to the reviewed
+        # #264/#284 stream block, never a gk-specific variant.
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_ssh_attach(p, user="gatekeeper")
+        self.assertIn(airuleset.STREAM_SSH_ATTACH_BLOCK, p.read_text())
+
+    def test_idempotent_second_call_for_gatekeeper_is_a_no_op(self):
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_ssh_attach(p, user="gatekeeper")
+        changed = airuleset.apply_stream_ssh_attach(p, user="gatekeeper")
+        self.assertFalse(changed)
+
+    def test_widening_is_scoped_to_gatekeeper_not_arbitrary_non_stream_users(self):
+        # The widening must stay minimal: newlevel (dev1/dev2) AND any other
+        # non-stream, non-gatekeeper account still get NO block. Catches an
+        # over-broad gate (e.g. `or True`) that the gatekeeper test alone
+        # would not.
+        for user in ("newlevel", "root", "somerandomuser"):
+            p = self._tmp("# existing content\n")
+            changed = airuleset.apply_stream_ssh_attach(p, user=user)
+            self.assertFalse(changed, f"{user} must not get the block")
+            self.assertNotIn(airuleset.STREAM_SSH_ATTACH_MARK_START,
+                             p.read_text(), f"{user} must not get the block")
+
 
 class TestStreamMarkerBlockSpansSafety(TestCase):
     """#235's own documented corruption class: a lazy regex `.*?` block scan
