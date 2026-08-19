@@ -385,6 +385,16 @@ GOAL_REQUEST_MAX_AGE_S = 30 * 60   # a request older than this is DISCARDED
                                    # an undeliverable arm request is a
                                    # silent-dead-autopilot failure class.
 
+# #566 -- N consecutive IDENTICAL `stash-abort: slot occupied` aborts from the
+# goal path is a LIVELOCK (our own park stale-occupies the single stash slot),
+# not N independent transients: goal_sweep orders OWNED janitor recovery once
+# the count reaches this, so the request never lapses in silence (montalu3
+# 2026-08-19: 28 identical aborts over ~30 min, then LAPSE). Deliberately small
+# -- a debounce against a passing state (a live turn, a momentary draft), not a
+# long wait; the janitor's own provenance + own-content + recent-human gates
+# make each ordered recovery safe.
+GOAL_STASH_ABORT_LIVELOCK = 3
+
 # REMOVED (#403-review CRITICAL C1): `_GOAL_NON_BOUNDARY_MARKERS` used to
 # refuse to arm while the session's last transcript marker was a question
 # or working marker. But the /autopilot bootstrap turn that RECORDS the
@@ -508,6 +518,143 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
 
 
 # --------------------------------------------------------------------------- #
+# #566 -- OWNED recovery of a stranded goal delivery. Coupled to the janitor's
+# EXISTING ownership proof (`_janitor_watch_seen` / `_janitor_park_seen`
+# provenance + own-content shape), never a parallel detector; every keystroke
+# sits behind that PROVEN-own-state gate AND the recent-human gate.
+# --------------------------------------------------------------------------- #
+
+def _recovery_recent_human(sid, cwd, tpath, now):
+    """The recent-human gate for a recovery keystroke: True (VETO) when a human
+    just touched this pane, so we never keystroke into a human-active pane. An
+    UNREADABLE / missing transcript fails SAFE toward VETO (unprovable-quiet is
+    treated as "may be active") -- the recovery is an OPPORTUNISTIC self-heal, so
+    refusing on an unreadable pane only defers it a sweep, never a data loss.
+
+    #566-review A1: `_goal_autoarm_recent_human_activity` returns `(False, "")`
+    for BOTH "read succeeded, no recent human" AND "read FAILED" (its underlying
+    `_last_human_prompt_ts` swallows a read error to None) -- so a missing/
+    unreadable transcript FILE would read not-recent and let the recovery
+    PROCEED, contradicting the fail-safe intent. Probe the file itself first and
+    VETO on any read failure (a genuinely-empty/new transcript still reads
+    readable-and-quiet, which is correctly not-recent)."""
+    if not tpath:
+        return True
+    try:
+        os.path.getsize(tpath)          # exists + readable stat
+    except OSError:
+        return True                     # unprovable -> VETO (fail-safe)
+    recent, _reason = watchdog._goal_autoarm_recent_human_activity(sid, tpath, now)
+    return bool(recent)
+
+
+def _janitor_provenance(state, pid, now):
+    """True when the janitor's OWN proof shows a watchdog delivery job touched
+    this pane -- the 6h generic mark OR the durable, age-unbounded park record.
+    Reused verbatim, never re-derived (#486)."""
+    return bool(watchdog._janitor_watch_seen(state, pid, now)
+                or watchdog._janitor_park_seen(state, pid))
+
+
+def _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath, run, state,
+                              now, sleep_fn, logs):
+    """#566 case (a) -- when the input box ALREADY holds our OWN swallowed
+    COMPLETE `/goal <text>` (a prior attempt typed it but the Enter was
+    swallowed/raced), COMPLETE the submit in place rather than routing it into
+    `deliver_with_stash`, which would park our own /goal into the single slot and
+    abort forever. Returns True on a transcript-confirmed submit, False/None
+    otherwise (the caller then falls through to the ordinary stash path).
+
+    Three gates, ALL required before the one Enter keystroke: (1) janitor
+    PROVENANCE (a watchdog job touched this pane -- the mark `deliver_goal` just
+    set, or a durable park); (2) the recent-human gate (never keystroke a
+    human-active pane); (3) EXACT-payload completeness -- the box head is a
+    leading substring of `text` AND the box tail is a trailing substring, proving
+    the box holds the WHOLE literal `/goal <text>` (a truncated type fails the
+    tail check and is refused). A foreign draft matches neither end and is left
+    untouched. `submit_own_goal_verified` re-verifies completeness against a
+    FRESH capture right before the keystroke."""
+    if not _janitor_provenance(state, pid, now):
+        return False
+    # cheap content pre-check on the capture we already hold, before the
+    # transcript read the recent-human gate does -- a foreign draft bails here.
+    head = watchdog._input_box_head_text(captured)
+    tail = watchdog._input_line_text(captured)
+    if not (head and head.startswith("/goal ") and text.startswith(head)
+            and tail and text.endswith(tail)):
+        return False
+    if _recovery_recent_human(sid, cwd, tpath, now):
+        _log_goal_sync("SKIP recover-swallowed recent-human sid=%s cwd=%s"
+                       % (sid, cwd))
+        return False
+    return watchdog.submit_own_goal_verified(pid, text, run=run,
+                                             sleep_fn=sleep_fn, logs=logs)
+
+
+def _resolve_stash_abort_livelock(sid, cwd, run, projects_dir, state, now,
+                                  send_fn, dry_run, sleep_fn):
+    """#566 case (b) -- a PENDING goal request has hit
+    `GOAL_STASH_ABORT_LIVELOCK` consecutive identical `stash-abort: slot
+    occupied` aborts: order the shared janitor recovery NOW (from job 9, which
+    is NOT budget-deferred like job 20's dark-watch), so the stale own stash slot
+    is resolved BEFORE the request's age cap can lapse it in silence.
+
+    Re-resolves the pane and takes a FRESH capture right before the keystroke,
+    then delegates to `watchdog._janitor_recover` -- the SAME provenance +
+    own-content-shape gated driver job 20 uses (pop / clear-and-pop for our own
+    stranded content; a genuine foreign occupant is left COMPLETELY untouched;
+    one loud owner ping on a recovery failure). Adds the recent-human gate AND
+    the copy-mode / open-dialog pre-guards on top (never keystroke a human-active
+    or non-boundary pane). Returns log lines for goal_sweep.
+
+    #566-review F2: once the janitor has ESCALATED (pinged the owner) for this
+    pane, the recovery FAILED and the owner was told ONCE -- STOP re-ordering the
+    recovery keystrokes every sweep (clause 2: one loud escalation, never
+    infinite retries; job 20's dark-watch retains its own per-sweep retry). A
+    later verified success clears `janitor_pinged`, so a genuinely-fresh livelock
+    re-attempts. This also bounds the rare same-sweep overlap with job 20's own
+    `_janitor_recover` to the pre-escalation sweeps only."""
+    logs = []
+    pid = _compact._find_pane_for_session(sid, cwd, run=run,
+                                          projects_dir=projects_dir)
+    if not pid:
+        return logs
+    jrec = state.setdefault("janitor_pinged_rec", {}).setdefault(pid, {}) \
+        if state is not None else {}
+    if jrec.get("janitor_pinged"):
+        logs.append("stash-abort-livelock ALREADY-escalated sid=%s (%s) -> job 20 "
+                    "retains its own retry" % (sid, cwd))
+        return logs
+    # #566-review F4: mirror deliver_goal / goal_dark_watch's own pre-keystroke
+    # pane guards (copy-mode, an open dialog) rather than relying solely on
+    # `_janitor_recover`'s box-unreadability no-op.
+    if watchdog.pane_in_mode(pid, run):
+        logs.append("stash-abort-livelock SKIP in-mode sid=%s (%s)" % (sid, cwd))
+        return logs
+    tinfo = watchdog.find_active_transcript(projects_dir, cwd)
+    tpath = tinfo[0] if tinfo else None
+    if _recovery_recent_human(sid, cwd, tpath, now):
+        logs.append("stash-abort-livelock SKIP recent-human sid=%s (%s)"
+                    % (sid, cwd))
+        return logs
+    captured = watchdog.capture_pane(pid, run, lines=40)
+    if watchdog.pane_waiting_on_user(captured):
+        logs.append("stash-abort-livelock SKIP dialog-open sid=%s (%s)"
+                    % (sid, cwd))
+        return logs
+    loc = watchdog._pane_location(pid, run) or pid
+    logs.append("stash-abort-livelock ORDER janitor recovery sid=%s (%s) loc=%s"
+                % (sid, cwd, loc))
+    jlogs = watchdog._janitor_recover(run, jrec, pid, cwd, captured, loc,
+                                      send_fn, dry_run, sleep_fn,
+                                      state=state, now=now)
+    logs += jlogs
+    if not dry_run and any(ln.startswith("RECOVERED (janitor)") for ln in jlogs):
+        state.get("janitor_watch", {}).pop(pid, None)
+    return logs
+
+
+# --------------------------------------------------------------------------- #
 # The ONE delivery function.
 # --------------------------------------------------------------------------- #
 
@@ -611,6 +758,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("SKIP dialog-open sid=%s cwd=%s" % (sid, cwd))
         return "skip:dialog-open"
 
+    tpath = None            # #566: defined for the case-(a) recovery below even
+                            # when there is no active transcript (normal origin)
     tinfo = watchdog.find_active_transcript(projects_dir, cwd)
     if tinfo:
         tpath, _tmtime = tinfo
@@ -671,6 +820,19 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # (#403-review MAJOR M1: this branch used to mark only on success
         # and never clear, exactly backwards).
         watchdog._janitor_mark_watch(state, pid, now)
+        # #566 -- if the box ALREADY holds our OWN swallowed COMPLETE /goal (a
+        # prior attempt typed it but the Enter was swallowed / raced), SUBMIT it
+        # in place rather than re-stashing our own /goal into the single slot and
+        # aborting forever (the #501 lane-nudge lesson, one payload class over).
+        # OWNED recovery, coupled to the janitor's own proof: provenance (the
+        # mark just set / a durable park) + an EXACT head+tail completeness match
+        # against `text` + the recent-human gate -- so a foreign draft or a
+        # truncated own type is NEVER submitted, and a human-active pane vetoes.
+        if _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath,
+                                     run, state, now, sleep_fn, logs):
+            watchdog._janitor_clear_watch(state, pid)
+            _log_goal_sync("SEND recover-swallowed sid=%s cwd=%s" % (sid, cwd))
+            return "sent"
         # #488: thread `state` so deliver_with_stash can DURABLY record a park
         # it definitively creates (STASH_PARKED) -> the shared janitor reclaims
         # it after ANY delay, not just the 6h generic-mark window (the gk
@@ -685,6 +847,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             _log_goal_sync("SEND stash sid=%s cwd=%s" % (sid, cwd))
             return "sent"
         _log_goal_sync("SKIP stash-abort sid=%s cwd=%s" % (sid, cwd))
+        # #566 -- distinguish the PERSISTENT slot-occupied livelock (our own park
+        # stale-occupies the single slot) from a TRANSIENT abort, so goal_sweep
+        # orders owned recovery only for the livelock, never for a passing state.
+        if isinstance(logs, list) and any(
+                ln == "stash-abort: slot occupied" for ln in logs):
+            return "skip:stash-abort-slot-occupied"
         return "skip:stash-abort"
 
     # Bare box -- verified typed send. Mark provenance BEFORE typing so the
@@ -756,6 +924,17 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
                     "~/.claude/watchdog-disable-goal (rm to re-enable)")
         return logs
     reqs = load_goal_requests(requests_path)
+    # #566 -- the per-sid consecutive `slot occupied` livelock counter. Reap any
+    # sid no longer pending (an episode-end pop, not a rolling window): the store
+    # can never outlive its request, which itself has the 30-min age cap, so this
+    # is bounded with no separate age reaper needed.
+    # #516 (#566-review A2) -- a dry-run must not mutate persisted state, not
+    # even the benign `setdefault` of an empty dict: use a throwaway local on a
+    # dry-run (the counter is never read or written on a dry-run sweep anyway).
+    aborts = (state.setdefault("goal_stash_abort", {})
+              if (state is not None and not dry_run) else {})
+    for _dead in [k for k in aborts if k not in reqs]:
+        aborts.pop(_dead, None)
     for sid, entry in list(reqs.items()):
         if not isinstance(entry, dict):
             continue
@@ -765,6 +944,7 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
         if not text:
             # malformed/legacy entry -- nothing to type; drop rather than
             # retry forever on an empty payload.
+            aborts.pop(sid, None)
             clear_goal_request(sid, path=requests_path)
             continue
         if handled is not None and sid in handled:
@@ -774,20 +954,49 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
         if dry_run:
             logs.append("DRY-RUN goal-sweep would evaluate sid=%s" % sid)
             continue
+        # a fresh per-request log list so the stash-abort REASON is derivable
+        # (deliver_goal returns `skip:stash-abort-slot-occupied` only for the
+        # slot-occupied livelock, never a transient abort).
+        call_logs = []
         word = deliver_goal(sid, cwd, text, authority, run=run,
                             projects_dir=projects_dir, now=now, state=state,
                             request_ts=entry.get("ts"), send_fn=send_fn,
                             dry_run=dry_run, sleep_fn=sleep_fn,
-                            origin=entry.get("origin"))
+                            origin=entry.get("origin"), logs=call_logs)
+        prior_aborts = aborts.get(sid, 0)
         if word in _GOAL_TERMINAL_WORDS:
+            aborts.pop(sid, None)
             clear_goal_request(sid, path=requests_path)
         if word == "sent":
             logs.append("OK (goal-sweep) sid=%s -> sent" % sid)
             if handled is not None:
                 handled.add(sid)
         elif word == "expired":
-            logs.append("LAPSE (goal-sweep) sid=%s (age > cap, discarded)" % sid)
+            # #566 -- a request must not lapse in SILENCE while its delivery was
+            # provably stuck by our own state: name the blocking state.
+            if prior_aborts >= GOAL_STASH_ABORT_LIVELOCK:
+                logs.append("LAPSE (goal-sweep) sid=%s (age > cap, discarded; "
+                            "blocked %d sweeps on stash-abort: slot occupied)"
+                            % (sid, prior_aborts))
+            else:
+                logs.append("LAPSE (goal-sweep) sid=%s (age > cap, discarded)"
+                            % sid)
+        elif word == "skip:stash-abort-slot-occupied":
+            # #566 -- count the identical livelock and, at the threshold, ORDER
+            # owned janitor recovery (job 9 is not budget-deferred like job 20),
+            # so the stale own stash slot is resolved BEFORE the age cap lapses.
+            n = prior_aborts + 1
+            aborts[sid] = n
+            logs.append("SKIP (goal-sweep) sid=%s -> %s (%d/%d)"
+                        % (sid, word, n, GOAL_STASH_ABORT_LIVELOCK))
+            if n >= GOAL_STASH_ABORT_LIVELOCK:
+                logs += _resolve_stash_abort_livelock(
+                    sid, cwd, run, projects_dir, state, now, send_fn,
+                    dry_run, sleep_fn)
+                if handled is not None:
+                    handled.add(sid)
         else:
+            aborts.pop(sid, None)
             logs.append("SKIP (goal-sweep) sid=%s -> %s" % (sid, word))
     return logs
 

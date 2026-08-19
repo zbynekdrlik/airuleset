@@ -458,6 +458,7 @@ from watchdog.tmux_io import (  # noqa: E402
     send_continue as send_continue,
     send_verified as send_verified,
     submit_own_draft_verified as submit_own_draft_verified,
+    submit_own_goal_verified as submit_own_goal_verified,
     _await_submit_confirmed as _await_submit_confirmed,
     _await_typed_landed as _await_typed_landed,
     _subagent_nudge_signature as _subagent_nudge_signature,
