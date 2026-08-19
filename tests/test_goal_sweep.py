@@ -2296,7 +2296,10 @@ class TestGoalLaneNudgeDoctrine(unittest.TestCase):
         self.assertIn("ci", low)
 
     def test_min_mem_threshold_is_a_named_constant_documented(self):
-        # #442 re-fix 2: the memory floor is a named, sane default (~1.5 GB).
+        # #442 re-fix 2 / #574: the memory floor is a named, sane default
+        # (~1 GB after the #574 evidence-based recalibration from the
+        # uncalibrated 1536; effective floor is env-overridable via
+        # _lane_min_mem_avail_mb).
         self.assertGreaterEqual(goal.GOAL_LANE_MIN_MEM_AVAIL_MB, 1024)
         self.assertLessEqual(goal.GOAL_LANE_MIN_MEM_AVAIL_MB, 4096)
         self.assertEqual(goal.GOAL_LANE_SATURATION_WORKERS, 5)

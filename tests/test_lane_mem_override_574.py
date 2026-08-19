@@ -1,6 +1,6 @@
 """#574 — evidence-based recalibration of the lane-fill memory gate.
 
-Locks the three deliverables of #574:
+Locks the four deliverables of #574:
   1. a CALL-TIME env override `AIRULESET_LANE_MIN_MEM_MB` on the lane-fill
      memory floor (never frozen at import — #545), malformed/non-positive
      falling back to the default;
@@ -127,16 +127,23 @@ class LaneGateHonorsEnvOverride(unittest.TestCase):
                 sleep_fn=lambda s: None)
         return logs
 
-    def test_lower_override_admits_a_state_the_fixed_1536_blocked(self):
-        # env floor 1000, MemAvailable 1100 -> 1100 >= 1000 -> mem OK, the
-        # fill gate does NOT block. RED against the current fixed 1536
-        # (which ignores the env: 1100 < 1536 -> skip:low-mem).
+    def test_override_below_default_admits_a_state_the_default_blocks(self):
+        # env floor 900 (BELOW the 1024 default), MemAvailable 1000: the
+        # DEFAULT floor (1024) WOULD block (1000 < 1024 -> skip:low-mem), but
+        # the override lowers the effective floor to 900, so 1000 >= 900 ->
+        # mem OK, NO skip. Teeth: a gate that IGNORES the env falls back to
+        # the 1024 default and skips -> this assertion fails. So the override
+        # genuinely LOWERS the effective floor below the default, not merely
+        # reads a value that happens to match. (#574 review 🔵-2: the prior
+        # env=1000/mem=1100 form was vacuous once the default dropped to 1024,
+        # since 1100 >= 1024 already admitted it regardless of the env.)
+        self.assertEqual(goal.GOAL_LANE_MIN_MEM_AVAIL_MB, 1024)  # premise guard
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         live_ev = [WorkerLane("w1", "live", 100.0, None, ""),
                    WorkerLane("w2", "live", 100.0, None, "")]
-        with m.patch.dict(os.environ, {self.ENV: "1000"}):
-            logs = self._call(12, now, tmtime, 1100, live_ev)
+        with m.patch.dict(os.environ, {self.ENV: "900"}):
+            logs = self._call(12, now, tmtime, 1000, live_ev)
         self.assertFalse(any("skip:low-mem" in ln for ln in logs), logs)
 
     def test_higher_override_blocks_and_skip_message_shows_effective(self):
@@ -190,6 +197,14 @@ class WatchdogUnitCarriesEnvironmentFile(unittest.TestCase):
         # sets no override is byte-identical in behavior); a bare
         # `EnvironmentFile=` would FAIL the unit start when absent.
         t = self._template()
+        # #574 review 🔵-1: assert the line is PRESENT before the per-line
+        # loop, so a full template revert (zero EnvironmentFile lines) fails
+        # HERE too instead of passing vacuously (the loop asserts nothing when
+        # there is nothing to iterate).
+        self.assertTrue(
+            any(ln.strip().startswith("EnvironmentFile")
+                for ln in t.splitlines()),
+            "no EnvironmentFile line present in the template at all")
         for ln in t.splitlines():
             if ln.strip().startswith("EnvironmentFile"):
                 self.assertTrue(ln.strip().startswith("EnvironmentFile=-"),
