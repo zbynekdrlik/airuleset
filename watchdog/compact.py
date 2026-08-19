@@ -55,16 +55,20 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             them has a TIME-BOXED override any more (the #400 fix this
             collapse builds on removed the two that used to: the
             live-tasks defer's "deliver anyway past grace" escape, and the
-            `⏳`/`❓` marker's "hold-grace" escape). Conditions (b) and (c)
-            DO carry one narrow, EVIDENCE-based (never time-boxed)
+            `⏳`/`❓` marker's "hold-grace" escape). Condition (c)'s `⏳`
+            veto carries ONE narrow, EVIDENCE-based (never time-boxed)
             exemption (#425): when `origin` is `self-callback` AND the
             SAME last-real-turn text that carries the `⏳` marker ALSO
-            contains the canonical `## ✅ Work Complete` heading, both
-            checks stand down for THAT evaluation — see
+            contains the canonical `## ✅ Work Complete` heading, the `⏳`
+            check stands down for THAT evaluation — see
             `_compact_self_reported_complete`'s own docstring for the full
-            reasoning (a fable-advisor-reviewed decision) and its
-            deliberately-accepted residual. `❓` is NEVER exempted, under
-            any origin or any content, ever (#333). All pass → type
+            reasoning (a fable-advisor-reviewed decision). Condition (b)'s
+            live-tasks veto NO LONGER carries this exemption (#565): a
+            per-ticket Work Complete boundary is for THAT lane only, so it
+            must never override a DETECTED live sibling lane (the incident:
+            one self-callback compact orphaned ~10 live worker lanes). `❓`
+            is NEVER exempted, under any origin or any content, ever (#333).
+            All pass → type
             `/compact`, log `SEND`, clear the request. Any check fails →
             log `SKIP reason=<x>`, and the request is LEFT PENDING for the
             next periodic sweep (`compact_sweep`, below) to re-evaluate —
@@ -441,10 +445,13 @@ def _compact_transcript_completion_heading(tpath):
 
 
 def _compact_self_reported_complete(origin, tpath):
-    """The #425 exemption gate, shared by BOTH condition (c)'s `⏳` veto
-    and condition (b)'s live-tasks veto (never condition (c)'s `❓` veto,
-    which this function is never even consulted for — see
-    `_compact_not_at_boundary` below).
+    """The #425 exemption gate for condition (c)'s `⏳` veto ONLY (never
+    condition (c)'s `❓` veto, which this function is never even consulted
+    for; and — since #565 — never condition (b)'s live-tasks veto either,
+    which no longer reads this exemption at all: a per-ticket Work
+    Complete boundary must not override a DETECTED live sibling lane, see
+    `_session_has_live_bg_tasks`). Consulted only from
+    `_compact_not_at_boundary` below.
 
     ROOT CAUSE. A supervisor session legitimately, per
     `message-status-marker.md`'s own contract, ends a turn with BOTH the
@@ -461,11 +468,13 @@ def _compact_self_reported_complete(origin, tpath):
     every ~60s sweep until the 30-min request-age cap silently discarded
     it) — reproduced live on two boxes, 8x each.
 
-    CHOSEN APPROACH (fable-advisor-reviewed, gate OPEN, #425): exempt
-    BOTH condition (b) and condition (c) together, under the SAME single,
-    narrow, EVIDENCE-based boolean — `origin == self-callback` AND the
-    transcript's own LAST REAL turn (the exact turn carrying the `⏳`
-    being evaluated) ALSO contains the completion heading. This is
+    CHOSEN APPROACH (fable-advisor-reviewed, gate OPEN, #425; NARROWED to
+    condition (c) only by #565): exempt condition (c)'s `⏳` veto under a
+    single, narrow, EVIDENCE-based boolean — `origin == self-callback` AND
+    the transcript's own LAST REAL turn (the exact turn carrying the `⏳`
+    being evaluated) ALSO contains the completion heading. (#425 originally
+    exempted condition (b)'s live-tasks veto under the SAME boolean; #565
+    removed that — see `_session_has_live_bg_tasks`.) This is
     deliberately NOT the #394-style time-boxed "hold-grace, then deliver
     anyway" escape #402 removed — every operand is a byte-level fact of
     the transcript AS IT EXISTS at evaluation time, so the exemption is
@@ -478,14 +487,15 @@ def _compact_self_reported_complete(origin, tpath):
     `subagent-stop` boundary is proven a completely different, unrelated
     way and never reads this narrow trust.
 
-    Condition (b)'s two live-task signals (CC's own "Waiting for N
-    background agents" pane text; a dispatched sibling's own
-    `subagents/*.jsonl` freshness) are agent-dispatch SPECIFIC — they
-    structurally cannot see, and never could, a generic background Bash
-    job (e.g. a `run_in_background` CI-wait). So relaxing (b) here does
-    not weaken any protection against that shape; it was never provided.
-    The always-unconditional ~2s `COMPACT_MIN_REQUEST_AGE_S` floor against
-    the #238 same-turn-dispatch race is UNTOUCHED by this exemption.
+    Condition (b)'s live-task signals (CC's "Waiting for N background
+    agents" pane text; `count_live_workers`' `subagents/*.jsonl` structured
+    count, #565) are agent-dispatch SPECIFIC — they cannot see a generic
+    background Bash job (a `run_in_background` CI-wait). So the montalu3-class
+    `⏳` case below (a same-ticket background Bash wait, invisible to (b)) is
+    decided ENTIRELY by this condition-(c) exemption, unaffected by #565's
+    removal of the (b) exemption. The always-unconditional ~2s
+    `COMPACT_MIN_REQUEST_AGE_S` floor against the #238 same-turn-dispatch
+    race is UNTOUCHED by this exemption.
 
     REJECTED ALTERNATIVE: a content classifier trying to additionally
     distinguish "the ⏳ narrates an INDEPENDENT worker" from "the ⏳
@@ -604,54 +614,49 @@ def _compact_recent_human_activity(cwd, sid, now, projects_dir=None, window_s=No
 # Condition (b) — no live background tasks of this session's own.
 # --------------------------------------------------------------------------- #
 
-_LIVE_BG_TASK_WINDOW_S = 120
+# The freshness window for the STRUCTURED live-worker count (signal (b)).
+# Mirrors the lane consumer's `GOAL_LANE_LIVE_WINDOW_S` (15 min) VALUE and its
+# documented reasoning verbatim (#518): a live worker sitting in ONE long
+# foreground tool call (a ~9-min CI-wait; a long test run) writes nothing to
+# its subagent transcript for the duration, so the window must comfortably
+# exceed the longest single tool call (the 10-min Bash timeout cap) or a busy
+# worker is misread as dead. The pre-#565 value HERE was 120s — shorter than a
+# single CI poll, which is how a saturated supervisor's ~10 live lanes read as
+# zero and got auto-compacted (#565). Independently tunable, never the NAME.
+COMPACT_LIVE_WORKER_FRESHNESS_S = 15 * 60
 
 
 def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
-                               captured=None, origin=None):
-    """True when EITHER of two independent signals says this session
-    still has background work in flight: (a) the pane's own capture shows
-    CC's ambient "Waiting for N background agents" row, or (b) a sibling
-    worker's own subagent transcript was written within the last
-    `_LIVE_BG_TASK_WINDOW_S` seconds. Neither signal readable → False
-    (deferral is an optimization of an already-real safety property,
-    never itself a new way to block on "we don't know"). `captured`
-    (optional): reuse an already-known capture rather than issuing a
-    fresh tmux round-trip.
+                               captured=None):
+    """True when EITHER of two independent STRUCTURED signals says this session
+    still has background work in flight, so a `/compact` would orphan a live
+    worker lane (#565):
 
-    #425: a genuine positive from EITHER signal is still subject to the
-    SAME narrow, evidence-based exemption `_compact_not_at_boundary`
-    applies to the `⏳` marker — see `_compact_self_reported_complete`'s
-    own docstring for the full reasoning. The exemption check is
-    deliberately consulted ONLY once a live task is already found (never
-    up front) so the common no-live-tasks case pays nothing extra.
+      (a) the pane shows CC's "Waiting for N background agents" row — a genuine
+          CC-rendered positive WHEN present, but NOT rendered by an idle
+          supervisor showing only agent-strip rows, so an ADDITIONAL positive
+          only, never relied on alone;
+      (b) `count_live_workers` reports >=1 LIVE lane from on-disk task state —
+          a subagent transcript written within `COMPACT_LIVE_WORKER_FRESHNESS_S`
+          (15 min) whose last real turn is not a wedged/dead mode (#486 G2 /
+          #518). REPLACES the pre-#565 raw 120s `subagent_active` window, which
+          was shorter than a single 9-min CI poll, so a worker mid-long-tool-
+          call read as dead and the box auto-compacted its own live lanes.
 
-    COST FOR A NON-SELF-CALLBACK ORIGIN (#402-review MINOR-3, corrected).
-    `_compact_self_reported_complete` itself never reads the transcript
-    TEXT for a non-self-callback origin (its own `origin` check short-
-    circuits first) — but a docstring HERE used to overstate that as "the
-    caller never even pays" for anything, which was false: when signal
-    (a) (the pane-text row) already made `live` True, `tpath` was still
-    resolved via `_transcript_for_session` (a filesystem walk to LOCATE
-    the file, cheaper than reading its text but not free) purely so the
-    exemption check COULD run, even though that check was always going
-    to return False immediately for a non-self-callback origin. The
-    resolve below is now origin-gated too, so a subagent-stop/blank-
-    origin caller genuinely skips it in the pane-positive path — the
-    ONE case signal (b)'s own resolve (line ~631, needed unconditionally
-    to compute `live` itself, never origin-gated) does not already
-    cover."""
-    pdir = projects_dir or watchdog.PROJECTS_DIR
+    Neither signal readable → False (a deferral optimization, never a new way to
+    block on "we don't know"). `captured` (optional): reuse a known capture.
 
-    def _resolve_tpath():
-        try:
-            return watchdog._transcript_for_session(pdir, sid, cwd)
-        except Exception:
-            _log.debug("compact: _transcript_for_session failed for sid %s", sid,
-                      exc_info=True)
-            return None
-
-    live = False
+    NO #425 exemption here (the #565 fix): a `## ✅ Work Complete` heading is a
+    boundary for the ONE ticket that just finished, so on a multi-lane
+    supervisor it must NEVER be read as "no live tasks" (the incident: a
+    per-ticket self-callback compact killed ~10 sibling lanes). The heading
+    still excuses condition (c)'s `⏳`-marker veto (its original #425 purpose),
+    but no longer overrides a DETECTED live lane here. Accepted consequence
+    (design comment on #565): on a saturated box a self-callback request usually
+    expires (30-min age cap) undelivered — correct, CC native auto-compact still
+    covers genuine context pressure. `count_live_workers` is disk-only and, like
+    the pre-#565 probe, blind to a generic background Bash CI-wait, so the
+    montalu3-class ⏳ case (condition (c)) is unaffected."""
     if pid:
         cap = captured
         if cap is None:
@@ -662,24 +667,17 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
                           exc_info=True)
                 cap = None
         if cap and watchdog._BG_AGENTS_WAIT_RX.search(cap):
-            live = True
+            return True
 
-    tpath = None
-    if not live:
-        tpath = _resolve_tpath()
-        if tpath is not None:
-            now_ts = now if now is not None else time.time()
-            live = bool(watchdog.subagent_active(str(tpath), now_ts,
-                                                 _LIVE_BG_TASK_WINDOW_S))
-
-    if not live:
-        return False
-
-    if tpath is None and origin == _COMPACT_SELF_CALLBACK_ORIGIN:
-        tpath = _resolve_tpath()
-    if tpath is not None and _compact_self_reported_complete(origin, tpath):
-        return False
-    return True
+    now_ts = now if now is not None else time.time()
+    pdir = projects_dir or watchdog.PROJECTS_DIR
+    # `count_live_workers` never raises (fail-safe to a 0 count); its `on_warn`
+    # is routed to debug log (not the default stderr). A 0 count ALLOWS
+    # compaction — the direction the pre-#565 probe took on an unreadable read.
+    count, _ev = watchdog.count_live_workers(
+        pdir, cwd, sid, now_ts, COMPACT_LIVE_WORKER_FRESHNESS_S,
+        on_warn=lambda msg: _log.debug("compact: count_live_workers: %s", msg))
+    return count > 0
 
 
 # --------------------------------------------------------------------------- #
@@ -984,9 +982,11 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("SKIP already-queued sid=%s cwd=%s" % (sid, cwd))
         return "already-queued"
 
-    # Condition (b) — no live background tasks of this session's own.
+    # Condition (b) — no live background tasks of this session's own. NOT
+    # exempted by a Work Complete heading (#565): a per-ticket boundary does not
+    # imply the sibling lanes finished.
     if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
-                                  captured=captured, origin=origin):
+                                  captured=captured):
         _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
         return "skip:live-tasks"
     if _compact_request_too_young(request_ts, now):
@@ -1009,7 +1009,7 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
         _log_compact_sync("SKIP raced sid=%s cwd=%s" % (sid, cwd))
         return "skip:raced"
     if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
-                                  captured=fresh, origin=origin):
+                                  captured=fresh):
         _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s" % (sid, cwd))
         return "skip:live-tasks-raced"
 

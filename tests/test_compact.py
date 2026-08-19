@@ -566,8 +566,9 @@ class TestDeliverCompact(unittest.TestCase):
         proj = self._dir()
         now = time.time()
         _write_marker_transcript(proj, self.CWD, self.SID)
-        _write_subagent_transcript(proj, self.CWD, self.SID,
-                                   mtime=now - compact._LIVE_BG_TASK_WINDOW_S - 60)
+        _write_subagent_transcript(
+            proj, self.CWD, self.SID,
+            mtime=now - compact.COMPACT_LIVE_WORKER_FRESHNESS_S - 60)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
                                        projects_dir=proj, delivered_path=self.delp,
@@ -640,6 +641,27 @@ class TestDeliverCompact(unittest.TestCase):
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
         self.assertEqual(word, "skip:live-tasks-raced")
+
+    def test_565_genuinely_all_done_still_delivers_even_with_a_stale_lane_file(self):
+        # #565 no-false-veto regression: removing the (b) exemption must NOT
+        # over-block a session that genuinely HAS no live lanes. A Work
+        # Complete heading + self-callback + idle strip-row pane (no "Waiting"
+        # row) + a lingering STALE subagent file (>15 min) still delivers --
+        # the ⏳ tail is excused by condition (c)'s #425 exemption, and
+        # condition (b) reads the stale lane as not-live.
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        _write_subagent_transcript(
+            proj, self.CWD, self.SID,
+            mtime=now - compact.COMPACT_LIVE_WORKER_FRESHNESS_S - 60)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")],
+                                      CB_IDLE_STRIP_ROWS_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp, now=now)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
 
     # -- condition (c): not on a ⏳/❓ marker; not an unresumed API error - #
 
@@ -1139,67 +1161,73 @@ class TestCompactSelfReportedCompleteExemption(unittest.TestCase):
         p.write_text("\n".join(lines) + "\n")
         self.assertFalse(compact._compact_self_reported_complete("self-callback", p))
 
-    # -- _session_has_live_bg_tasks origin scoping ------------------------ #
+    # -- _session_has_live_bg_tasks: structured live-worker count, NO #425
+    #    exemption (#565) --------------------------------------------------- #
 
-    def test_live_bg_tasks_exempted_when_predicate_true(self):
-        proj = self._dir()
-        now = time.time()
-        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
-        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now)
-        self.assertFalse(compact._session_has_live_bg_tasks(
-            None, self.SID, self.CWD, None, projects_dir=proj, now=now,
-            origin="self-callback"))
-
-    def test_live_bg_tasks_not_exempted_for_subagent_stop(self):
+    def test_live_bg_tasks_true_for_a_fresh_live_lane_even_with_work_complete(self):
+        # #565: a fresh subagent lane counts live REGARDLESS of a
+        # `## ✅ Work Complete` heading -- the exemption is gone from (b),
+        # so "one ticket done" never masks a live sibling lane.
         proj = self._dir()
         now = time.time()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now)
         self.assertTrue(compact._session_has_live_bg_tasks(
-            None, self.SID, self.CWD, None, projects_dir=proj, now=now,
-            origin="subagent-stop"))
+            None, self.SID, self.CWD, None, projects_dir=proj, now=now))
 
-    def test_live_bg_tasks_pane_signal_skips_the_tpath_resolve_for_non_self_callback(self):
-        # #402-review MINOR-3: once `live=True` via the PANE-TEXT signal
-        # alone (no subagent transcript needed to establish it), a
-        # non-self-callback origin must not pay for LOCATING the
-        # transcript either -- `_compact_self_reported_complete` was
-        # always going to refuse it on origin alone, and the docstring
-        # here used to (wrongly) claim the caller "never even pays" for
-        # anything in that case.
+    def test_live_bg_tasks_pane_waiting_row_alone_is_live(self):
+        # signal (a): the "Waiting for N background agents" row, with no
+        # subagent transcript at all, is a genuine live positive.
         proj = self._dir()
         run = DeliverCompactFakeTmux([("%1", "claude", self.CWD, "111")],
                                      CB_BG_AGENT_CAP)
-        with m.patch.object(wd, "_transcript_for_session") as spy:
-            result = compact._session_has_live_bg_tasks(
-                "%1", self.SID, self.CWD, run, projects_dir=proj,
-                origin="subagent-stop")
-        self.assertTrue(result)
-        spy.assert_not_called()
+        self.assertTrue(compact._session_has_live_bg_tasks(
+            "%1", self.SID, self.CWD, run, projects_dir=proj))
 
-    def test_live_bg_tasks_pane_signal_still_resolves_and_exempts_self_callback(self):
-        # The positive control for the test above: a self-callback origin
-        # DOES still need (and get) the resolve, and is correctly
-        # exempted once the transcript backs the claim.
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID,
-                                 _WORK_COMPLETE_PLUS_TAIL)
-        run = DeliverCompactFakeTmux([("%1", "claude", self.CWD, "111")],
-                                     CB_BG_AGENT_CAP)
-        result = compact._session_has_live_bg_tasks(
-            "%1", self.SID, self.CWD, run, projects_dir=proj,
-            origin="self-callback")
-        self.assertFalse(result)
-
-    def test_live_bg_tasks_not_exempted_when_no_live_task_present_anyway(self):
-        # the exemption is only ever CONSULTED once a live task is already
-        # detected -- with none present at all, the answer is False
-        # regardless of origin, and no transcript-text read is spent.
+    def test_live_bg_tasks_false_with_no_live_lane_and_no_pane_signal(self):
+        # no subagent transcript + an idle strip-row pane (no "Waiting" row)
+        # -> not live, even with a Work Complete heading present. Locks that
+        # #565's removal of the exemption did NOT introduce a false veto.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        run = DeliverCompactFakeTmux([("%1", "claude", self.CWD, "111")],
+                                     CB_IDLE_STRIP_ROWS_CAP)
         self.assertFalse(compact._session_has_live_bg_tasks(
-            None, self.SID, self.CWD, None, projects_dir=proj,
-            origin="self-callback"))
+            "%1", self.SID, self.CWD, run, projects_dir=proj))
+
+    def test_live_bg_tasks_false_for_a_stale_lane_past_the_freshness_window(self):
+        # a subagent transcript older than COMPACT_LIVE_WORKER_FRESHNESS_S is
+        # stale -> not counted live (self-heals; a box that just finished a
+        # ticket is active, not stuck).
+        proj = self._dir()
+        now = time.time()
+        _write_subagent_transcript(
+            proj, self.CWD, self.SID,
+            mtime=now - compact.COMPACT_LIVE_WORKER_FRESHNESS_S - 60)
+        self.assertFalse(compact._session_has_live_bg_tasks(
+            None, self.SID, self.CWD, None, projects_dir=proj, now=now))
+
+    def test_live_bg_tasks_reads_count_live_workers_at_the_15min_window(self):
+        # #565 wiring lock: (b) reads the STRUCTURED count_live_workers at
+        # COMPACT_LIVE_WORKER_FRESHNESS_S, not the pre-#565 raw 120s
+        # subagent_active window. A 300s-old lane (dead under 120s, live under
+        # 15 min) proves BOTH which primitive is consulted AND the window.
+        proj = self._dir()
+        now = time.time()
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now - 300)
+        seen = {}
+        real = wd.count_live_workers
+
+        def spy(pdir, cwd, sid, n, fresh, **kw):
+            seen["freshness"] = fresh
+            return real(pdir, cwd, sid, n, fresh, **kw)
+
+        with m.patch.object(wd, "count_live_workers", spy):
+            result = compact._session_has_live_bg_tasks(
+                None, self.SID, self.CWD, None, projects_dir=proj, now=now)
+        self.assertTrue(result)
+        self.assertEqual(seen["freshness"],
+                         compact.COMPACT_LIVE_WORKER_FRESHNESS_S)
 
     # -- _compact_not_at_boundary origin scoping -------------------------- #
 
