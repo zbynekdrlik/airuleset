@@ -329,5 +329,60 @@ class TestThreadNameEndsWithStreamNumber(TestCase):
         self.assertIn("#537", w)
 
 
+class TestGreetingOnlyInFirstMessage(TestCase):
+    """#573 — the greeting (oslovenie „Dobrý deň…" / „Ahoj…") belongs ONLY in
+    the FIRST (opening) message of a thread; a follow-up reply in the same
+    thread carries NO greeting and continues straight at the content. Live
+    trigger: the miva PROD thread „Augustová dochádzka" (discuss.channel 19)
+    had three same-day follow-ups all reopening with „Dobrý deň…".
+
+    Teeth per #498/#500: the operative rule wraps across several physical
+    lines, so a per-line _teeth mixin cannot hold every token — bound a
+    norm()-collapsed WINDOW to the new bullet (its unique start anchor → the
+    next `- **` marker) and assert the operative tokens inside it, so a
+    PARTIAL revert of the bullet (not just a full deletion) fails. The coarse
+    whole-file assertIn catches a full deletion; the reassurance-note tokens
+    lock the second half of the ticket (the template is the OPENING message)."""
+
+    START = "The greeting (oslovenie"
+
+    def setUp(self):
+        self.raw = read(COMPOSE)
+        self.t = norm(self.raw)
+
+    def _bullet_window(self):
+        # The start anchor sits on ONE physical line (the bullet's first line);
+        # index on it, take the raw slice up to the NEXT `- **` bullet marker
+        # and normalize so the markdown line-wrap collapses away.
+        i = self.raw.index(self.START)
+        j = self.raw.find("\n- **", i + len(self.START))
+        self.assertNotEqual(j, -1, "greeting bullet must be followed by another `- **` bullet")
+        return norm(self.raw[i:j])
+
+    def test_operative_rule_present_whole_file(self):
+        # coarse full-deletion guard (clean assertIn message)
+        self.assertIn(self.START, self.t)
+
+    def test_greeting_first_message_rule_has_teeth(self):
+        w = self._bullet_window()
+        self.assertIn("ONLY in the FIRST (opening) message of a thread", w)
+        self.assertIn("follow-up reply in an existing thread carries NO greeting", w)
+
+    def test_follow_up_keeps_delivery_and_names_the_incident(self):
+        w = self._bullet_window()
+        # delivery is unconditional even without a greeting; the mention anchor is not
+        self.assertIn("partner_ids", w)
+        self.assertIn("for delivery ALWAYS, on every message", w)
+        # the live miva PROD incident is named so the rule carries its own why
+        self.assertIn("#573", w)
+        self.assertIn("Greet once, at the top of the thread", w)
+
+    def test_reassurance_template_marked_as_opening_message(self):
+        # the second half of the ticket: the „Ahoj <mená>…" template is the
+        # OPENING message, and a follow-up drops the oslovenie
+        self.assertIn("OPENING message of the thread", self.t)
+        self.assertIn("a follow-up reply drops the oslovenie", self.t)
+
+
 if __name__ == "__main__":
     main()
