@@ -17,7 +17,6 @@ Two layers:
     (#12)`) AND the same trigger text OUTSIDE a worker context (MAIN session).
 """
 import json
-import os
 import subprocess
 import sys
 import tempfile
