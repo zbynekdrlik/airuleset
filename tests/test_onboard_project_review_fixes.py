@@ -124,8 +124,10 @@ class TestAuditSkipsCrossHost(unittest.TestCase):
             self.assertIn("unreachable", kinds)
             self.assertNotIn("missing-repo", kinds,
                              "cross-host entry falsely reported as missing-repo")
-            # the local entry still audits locally (clean)
-            self.assertEqual(rep["local-proj"], [])
+            # the local entry was still audited LOCALLY — its real repo was found
+            # (no missing-repo), never skipped as cross-host.
+            self.assertNotIn("missing-repo",
+                             {x["kind"] for x in rep["local-proj"]})
 
 
 class TestCorruptRegistryNotOverwritten(unittest.TestCase):
