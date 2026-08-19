@@ -107,16 +107,29 @@ def _bounce_quals(cwd):
     after the montalu->montalu1 rename `_REDUCED_STREAM_USERS` carries
     `montalu1` but not `montalu`, so without this a full-authority box's bounce
     nudge would pick up an old `stream:montalu` bounce and ping the wrong
-    person. The reduced-box's OWN slice (the `/home/<user>/` branch above) is
-    left scoped to its own canonical label — that own-slice narrowing is a
-    separate concern, not a gk leak, and its shape is #537-locked."""
+    person. #564: the reduced-box's OWN slice (the `/home/<user>/` branch
+    above) is now EXPANDED through the SAME primitive too, so a renamed box
+    (montalu1) also picks up its own OLD `stream:montalu`-labeled bounce
+    tickets during the transition instead of under-nudging itself — the
+    own-slice narrowing #537 deliberately left is exactly what #564 item 2
+    overturns (the quals are unioned per-qual by `_fetch_bounce_tickets`, so an
+    extra alias label never narrows the result; a non-renamed stream expands to
+    itself)."""
     c = str(cwd or "")
     if c.startswith("/home/gatekeeper/"):
         return []
+    import airuleset
     for u in watchdog._REDUCED_STREAM_USERS:
         if c.startswith("/home/%s/" % u):
-            return ["label:stream:%s" % u]
-    import airuleset
+            # #564: expand the reduced box's OWN slice via the SAME single alias
+            # primitive the full-authority branch below uses, so a renamed box
+            # (montalu1) also picks up its own OLD stream:montalu-labeled bounce
+            # tickets during the transition instead of under-nudging itself. The
+            # quals are UNIONED per-qual by _fetch_bounce_tickets, so an extra
+            # alias label never narrows the result; a non-renamed stream expands
+            # to just itself (byte-identical to before).
+            return ["label:stream:%s" % n
+                    for n in airuleset._stream_rename_equivalents(u)]
     names = set()
     for u in watchdog._REDUCED_STREAM_USERS:
         names.update(airuleset._stream_rename_equivalents(u))
@@ -977,11 +990,31 @@ def _origin_reduced_stream(labels):
     REVIEW-queue ownership primitive, rule 8). None when no such label is
     present (e.g. a read-only fork that could apply no label — that case is a
     documented residual the gatekeeper's manual triage handles, never
-    auto-bounced, since its stream is not attributable from labels)."""
+    auto-bounced, since its stream is not attributable from labels).
+
+    #564: the match is EXPANDED via `airuleset._stream_rename_equivalents()`
+    (the SAME single alias primitive `_bounce_quals`/`_slice_quals`/
+    `_ticket_is_stream_labeled` use), so a request FILED before a base-stream
+    rename (a legacy `handed-by:montalu` label) still attributes to its stream.
+    Returns the matched REGISTRY name `u` — for a rename whose old account is
+    already gone (montalu->montalu1) that is the numbered name (montalu is no
+    longer a key); for a still-in-progress transition where BOTH keys are
+    present (david + david1) it is the base name `david`, since it is iterated
+    first and `david` ∈ equivalents(`david`). Either way the bounce routes
+    correctly: `_apply_selfservice_bounce` stamps `stream:<returned>`, and every
+    box in that rename family reads BOTH labels in its own (now alias-expanded,
+    #564 item 2) bounce slice, so the ticket surfaces on the right lane
+    regardless of which family member the returned name is. A stream not
+    involved in any rename attributes to itself exactly as before."""
+    import airuleset
     for lb in (labels or []):
         m = _HANDED_BY_RE.match(str(lb))
-        if m and m.group(1) in watchdog._REDUCED_STREAM_USERS:
-            return m.group(1)
+        if not m:
+            continue
+        handed = m.group(1)
+        for u in watchdog._REDUCED_STREAM_USERS:
+            if handed in airuleset._stream_rename_equivalents(u):
+                return u
     return None
 
 

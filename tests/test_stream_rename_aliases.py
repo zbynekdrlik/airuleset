@@ -562,13 +562,26 @@ class TestBounceQualsFullAuthorityAlias(TestCase):
         self.assertIn("-label:stream:montalu1", toks)
         self.assertIn("-label:stream:montalu", toks)       # FAILS before the fix
 
-    def test_a_reduced_box_own_slice_is_unchanged(self):
-        # #537-locked: a montalu1 box's OWN bounce slice stays scoped to its own
-        # canonical label (own-slice narrowing is a separate concern, not a gk
-        # leak) — this fix touches only the full-authority exclusion branch.
+    def test_a_reduced_box_own_slice_expands_to_equivalents(self):
+        # #564 (INVERTS the #537-locked own-slice narrowing): a montalu1 box's
+        # OWN bounce slice must ALSO cover the legacy `stream:montalu` label so
+        # it does not under-nudge itself about its own old-labeled bounce
+        # tickets during the transition. #537 deliberately left this narrowed
+        # ("own-slice narrowing is a separate concern, not a gk leak"); issue 564
+        # item 2 is precisely that separate concern, routed through the SAME
+        # _stream_rename_equivalents primitive as the full-authority branch. The
+        # quals are UNIONED per-qual by _fetch_bounce_tickets, so an extra
+        # alias label never narrows the result. RED before the fix.
         import watchdog as wd
         self.assertEqual(wd._bounce_quals("/home/montalu1/devel/odoo-erp"),
-                         ["label:stream:montalu1"])
+                         ["label:stream:montalu1", "label:stream:montalu"])
+
+    def test_a_non_renamed_reduced_box_own_slice_is_unchanged(self):
+        # #564: a stream NOT involved in any rename (montalu2) expands to just
+        # itself, so its own slice is byte-identical to before.
+        import watchdog as wd
+        self.assertEqual(wd._bounce_quals("/home/montalu2/devel/odoo-erp"),
+                         ["label:stream:montalu2"])
 
 
 if __name__ == "__main__":

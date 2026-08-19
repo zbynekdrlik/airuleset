@@ -165,6 +165,12 @@ import re
 import time
 from pathlib import Path
 
+# #564: the source-of-truth authority map, for deriving _REDUCED_STREAM_USERS
+# below. cli_fleet is a zero-import constants leaf, so a top-level import here
+# cannot create a circular import (unlike the watchdog.* facade re-exports
+# further down, which are deliberately mid-file).
+import cli_fleet
+
 # Tunables (the CLI may override; defaults match the user's spec: 5-min grace,
 # `continue`, 3 retries at the base cadence, then widen — see BACKOFF_CAP_SECONDS).
 GRACE_SECONDS = 5 * 60
@@ -810,42 +816,37 @@ from watchdog.u_labels import (  # noqa: E402
 
 BOUNCE_INTERVAL = 30 * 60            # min seconds between bounce sweeps
 BOUNCE_RENUDGE_SECONDS = 6 * 3600    # same ticket set re-nudged at most this often
-# montalu2/montalu3/montalu4 (airuleset#251, odoo-erp#2961): three MORE full
-# parallel montalu streams working on odoo-erp (a _CROSS_STREAM_REPOS
-# member) — need their own bounce-quals scoping like montalu itself, or a
-# pane in one of their homes falls through to the full-authority
-# exclude-all-reduced-streams branch instead of its own stream:<user> label.
+# The reduced-authority sub-dev streams that participate in the gatekeeper<->
+# sub-dev bounce/gkreq flow -- consumed by `_bounce_quals` (scope a pane's own
+# home to its stream label vs the full-authority exclude-all branch),
+# `_gkreq_supervisor_root` (skip a reduced box's own HOME) and
+# `_origin_reduced_stream` (attribute a `handed-by:<x>` gk request).
 #
-# simap and miva1 (airuleset#143 / #300) are NOT in this tuple -- an
-# omission carried over unrevisited from #143, never a documented decision.
-# Their odoo-erp involvement was never confirmed at onboarding time, so
-# widening the tuple for them would be exactly the speculative pre-emptive
-# fix this repo's own FREEZE forbids ("the same defect exists in N more
-# places" is not fixed pre-emptively). Consequence, scoped to
-# _CROSS_STREAM_REPOS (odoo-erp): _gkreq_supervisor_root would (wrongly)
-# treat a pane under /home/simap/ or /home/miva1/ as a FULL-authority
-# supervisor root, so job 11 could nudge that stream's OWN pane to work a
-# needs-gatekeeper ticket it filed itself -- backwards, the same failure
-# _gkreq_supervisor_root's own docstring says to avoid. Neither stream has
-# ever produced that failure in production -- if it ever does, start here.
+# #564: DERIVED from AUTHORITY_BY_USER (every non-"full" key) rather than
+# hand-listed. Semantics: reduced authority <=> sub-dev stream <=> bounce/gkreq
+# participant, so the AUTHORITY_BY_USER key set IS exactly this registry -- and
+# onboarding a new stream into that one map now auto-registers it here too, so
+# the recurring staleness class (a live stream missing from a hand-typed tuple:
+# `_gkreq_supervisor_root` mis-classifies its pane as a FULL-authority
+# supervisor, or `_bounce_quals` scopes it to the exclude-all branch instead of
+# its own label -- the montalu2/3/4 #251 and david2/3/4 #326 regressions, then
+# simap1/miva1/montalu5-8/david1 found still missing by the issue-561 audit)
+# cannot recur. The `!= "full"` filter is defensive (no "full" key exists in
+# the map today, but a future one must never leak into this reduced registry).
 #
-# david2/david3/david4 (airuleset#326, 2026-08-08) ARE in this tuple --
-# corrected by adversarial review after the first onboarding pass initially
-# left them out, misapplying the simap/miva1 precedent above. The two cases
-# are NOT the same: simap/miva1's odoo-erp involvement is unconfirmed
-# (speculative), while #326's own ticket text states david2/3/4 are
-# provisioned specifically "for the odoo-erp repo" as clones of `david`
-# itself (which IS in this tuple) -- a KNOWN, ticket-scoped fact, not a
-# pre-emptive guess. Confirmed live before the fix: `_bounce_quals(
-# "/home/david2/devel/odoo-erp")` returned the full-authority exclude-all
-# fragment instead of `["label:stream:david2"]`, and `_gkreq_supervisor_root(
-# "/home/david2/devel/odoo-erp")` returned True (would nudge david2's own
-# pane about its own gk-request) -- the same montalu2/3/4-style regression
-# item 3 of #326 exists to prevent, just in the watchdog's separate
-# bounce/gkreq registry rather than AUTHORITY_BY_USER's generic one.
-_REDUCED_STREAM_USERS = ("david", "marek", "montalu1",
-                         "montalu2", "montalu3", "montalu4",
-                         "david2", "david3", "david4")
+# Read from `cli_fleet` (the zero-import constants leaf = the source of truth)
+# at MODULE LOAD, NOT the `airuleset` facade re-export (not guaranteed resolved
+# at watchdog import time) -- safe because cli_fleet imports nothing, so this
+# cannot create a circular import. This is a STATIC registry consumed as a
+# tuple attribute by its call sites and tests (`x in wd._REDUCED_STREAM_USERS`),
+# not a per-call value; the rename TRANSITION layer that IS test-patchable
+# lives in `_stream_rename_equivalents()` (call-time facade read of
+# STREAM_RENAME_ALIASES), so the static registry and the dynamic alias compose
+# cleanly. AUTHORITY_BY_USER carries both a rename base and its numbered alias
+# during a transition (e.g. david + david1); the duplicates are equivalents and
+# every consumer unions/dedupes, so a slice is never narrowed by carrying both.
+_REDUCED_STREAM_USERS = tuple(
+    u for u, _prof in cli_fleet.AUTHORITY_BY_USER.items() if _prof != "full")
 
 BOUNCE_NUDGE = ("bounce-backstop: open prio:bounce tickets %s in %s — "
                 "gatekeeper-returned work is waiting. Per the autopilot "

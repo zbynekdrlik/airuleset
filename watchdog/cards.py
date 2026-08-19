@@ -126,7 +126,9 @@ def make_owned_closed_filter(current_user_fn=None, authority_fn=None,
         did close.
       * REDUCED-authority stream box -> only candidates whose TEMPORALLY-LAST
         origin-shaped label (`stream:<user>` / `handed-by:<user>`) names THIS
-        box's own stream, via `_last_origin_owner` — the SAME ownership oracle
+        box's own stream (alias-expanded via `_stream_rename_equivalents` so a
+        renamed box still matches its own legacy `stream:<old>` label during the
+        transition, #564), via `_last_origin_owner` — the SAME ownership oracle
         `_slice_mine_and_handed` / `cmd_gk_request` use (never a parallel
         derivation, #181). ONE batched GraphQL timeline read for the whole
         candidate set, so it survives a relabel and works on a shared-gh-account
@@ -181,6 +183,16 @@ def make_owned_closed_filter(current_user_fn=None, authority_fn=None,
         me = current_user_fn()
         if not me:
             return None                    # can't identify box -> skip, keep dedup
+        # #564: match this box's OWN stream under the in-progress base-stream
+        # rename too — a renamed box (montalu1) still owns merged tickets whose
+        # temporally-last origin label is the LEGACY stream:montalu, and
+        # `_last_origin_owner` returns that bare label username ("montalu"). Route
+        # the comparison through the SAME single `_stream_rename_equivalents`
+        # primitive item 2 uses (never a parallel rename table); a non-renamed
+        # stream expands to just itself, so the match is byte-identical to the
+        # prior `== me`.
+        import airuleset
+        own_names = set(airuleset._stream_rename_equivalents(me))
         if root not in memo:
             try:
                 memo[root] = owner_fn(root, sorted(closed))
@@ -189,7 +201,7 @@ def make_owned_closed_filter(current_user_fn=None, authority_fn=None,
         owners = memo[root]
         if owners is None:
             return None                    # skip, keep dedup
-        scoped = {n: ts for n, ts in closed.items() if owners.get(n) == me}
+        scoped = {n: ts for n, ts in closed.items() if owners.get(n) in own_names}
         return scoped or None              # own-nothing/flake -> skip, keep dedup
 
     return owned
