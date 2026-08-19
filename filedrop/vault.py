@@ -848,3 +848,108 @@ def list_entries(now=None):
             _iso(meta["expires_at"]) if isinstance(meta.get("expires_at"), (int, float)) else "-",
         ))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# SHOW CHANNEL (#580) — the OUTPUT direction. `secret show` stands up a one-shot
+# endpoint (filedrop/show_server.py) that RENDERS a value to the OWNER's browser
+# ONCE, then tears down — the reverse of `secret request`, which RECEIVES one.
+# The source is a vault NAME (read_value) or a `--file` durable path
+# (read_show_file). The SESSION never sees the value: the server child reads it
+# only at GET time; the CLI parent only ever passes the NAME or the validated
+# PATH (neither is the value) to the child, and the token through the env.
+# --------------------------------------------------------------------------- #
+
+SHOW_SOURCE_KINDS = ("name", "file")
+
+
+def validate_show_file(path):
+    """The resolved absolute Path a `secret show --file` source may read, or raise.
+
+    The same two refusals `validate_durable_path` applies to a durable WRITE
+    target (no symlink at the final component, no git-repo ancestor), PLUS two
+    the write-validator does not need because it validates a path that need not
+    exist yet: the file must EXIST as a regular file, and it must be OWNER-ONLY
+    (no group/other permission bits — a `~/.secrets/<name>` durable file is
+    0600). A world- or group-readable "secret" file is REFUSED rather than
+    served: showing an already-leaky file over a one-shot URL does not make it
+    safe, and the `--file` source is meant for exactly the 0600 files the
+    durable-persist convention writes.
+    """
+    import stat as _stat
+    p = Path(path).expanduser()
+    if p.is_symlink():
+        raise SecretError(
+            "refusing to show %s — it is a symlink, and a source that can be "
+            "redirected is not a source" % p)
+    try:
+        real = p.resolve()
+    except (OSError, RuntimeError) as e:
+        raise SecretError("cannot resolve --file %s: %s" % (p, e)) from e
+    for parent in real.parents:
+        if (parent / ".git").exists():
+            raise SecretError(
+                "refusing to show a file inside a git repository (%s) — a "
+                "credential there is one `git add` from being committed" % parent)
+    try:
+        stt = os.stat(str(real))
+    except OSError as e:
+        raise SecretError("--file %s is not readable: %s" % (real, e)) from e
+    if not _stat.S_ISREG(stt.st_mode):
+        raise SecretError("--file %s is not a regular file" % real)
+    if stt.st_mode & 0o077:
+        raise SecretError(
+            "refusing to show %s — it is not owner-only (mode 0%o has group/"
+            "other permission bits); a credential file must be 0600"
+            % (real, _stat.S_IMODE(stt.st_mode)))
+    return real
+
+
+def read_show_file(path):
+    """The raw bytes of a `--file` source, or raise.
+
+    Re-validates with `validate_show_file` and opens O_NOFOLLOW, so a symlink
+    swapped in at the path AFTER the CLI's validate check (TOCTOU) is refused
+    rather than followed — the same discipline `store_value` applies to a
+    write. Called ONLY by filedrop/show_server.py at GET time (never by the
+    session/CLI parent), so the value is read only when it is actually being
+    shown.
+    """
+    real = validate_show_file(path)
+    try:
+        fd = os.open(str(real), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as e:
+        raise SecretError(
+            "refusing to read %s: %s (a symlink at a --file path is never "
+            "followed)" % (real, e)) from e
+    try:
+        with os.fdopen(fd, "rb") as f:
+            data = f.read(MAX_SECRET_BYTES + 1)
+    except OSError as e:
+        raise SecretError("could not read --file %s: %s" % (real, e)) from e
+    if not data:
+        raise SecretError("--file %s is empty" % real)
+    if len(data) > MAX_SECRET_BYTES:
+        raise SecretError("--file %s is over the %d-byte cap" % (real, MAX_SECRET_BYTES))
+    return data
+
+
+def show_log_label(kind, locator):
+    """A value-free, path-free label identifying a `secret show` in the delivery
+    log — the NAME for a vault source, or a `--file` basename sanitised to the
+    NAME grammar for a file source.
+
+    The basename names the credential's PURPOSE (like a vault NAME already
+    does), never its value and never the directory path. It is held to
+    `NAME_RE` so `log_event()` records it as-is rather than as `<invalid>`; a
+    digit-leading or otherwise-odd basename is repaired to a valid label rather
+    than passed through. This is a readability convenience, never a correctness
+    dependency — `log_event()` degrades any bad label to `<invalid>` anyway.
+    """
+    if kind == "name":
+        return locator
+    base = os.path.basename(str(locator))
+    lab = re.sub(r"[^A-Za-z0-9_]", "_", base)
+    if not lab or lab[0].isdigit():
+        lab = "f_" + lab
+    return lab[:64]
