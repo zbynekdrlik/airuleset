@@ -42,9 +42,21 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   feature that is merged-but-not-yet-deployed or scheduled — the client must be
   able to act on it the moment they read the thread. Confirm it is live on their
   PROD first.
+- **The greeting (oslovenie — „Dobrý deň…" / „Ahoj…") belongs ONLY in the FIRST
+  (opening) message of a thread.** A follow-up reply in an existing thread carries
+  NO greeting — it continues directly with the content (an `@`-mention anchor only
+  where it genuinely belongs; `partner_ids` for delivery ALWAYS, on every message).
+  Repeating „Dobrý deň, pani …" on every follow-up in the same thread reads as
+  machine-sent — the live miva PROD thread „Augustová dochádzka" (discuss.channel
+  19) had three same-day follow-ups all reopening with „Dobrý deň…" (airuleset
+  #573, 2026-08-19). Greet once, at the top of the thread; after that, just the
+  message.
 - **Close the client message with named recipients + the self-blame reassurance**,
   so a client who cannot see the feature reports it back to YOU instead of
-  assuming they did something wrong. Slovak template (adapt names / feature / URL):
+  assuming they did something wrong. The `Ahoj <mená>…` opening below is the
+  OPENING message of the thread; a follow-up reply drops the oslovenie and starts
+  straight at the content (greeting rule above). Slovak template (adapt names /
+  feature / URL):
 
   > Ahoj `<mená>`, funkcia `<čo>` je už nasadená na vašom systéme —
   > `<deep-link URL>`. Ak ju u seba nevidíte, napíšte prosím sem do vlákna —
