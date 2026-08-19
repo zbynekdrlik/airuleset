@@ -17,6 +17,16 @@ Documentation=https://github.com/zbynekdrlik/airuleset
 
 [Service]
 Type=oneshot
+# Optional per-box env overrides, owner-managed (NOT written by install, like
+# the ~/.claude/api-watchdog.disabled marker). The `-` prefix makes systemd
+# ignore the file when it is absent, so a box that sets nothing is byte-identical
+# in behavior; `%h` is systemd's user-home specifier (no CLI substitution needed).
+# systemd re-reads it on each oneshot start, so editing a value needs no
+# daemon-reload (adding this line the first time does). This is how any
+# AIRULESET_* watchdog knob is set per-box — e.g. AIRULESET_LANE_MIN_MEM_MB=1024
+# to raise/lower the lane-fill memory floor (watchdog/goal.py
+# _lane_min_mem_avail_mb, #574).
+EnvironmentFile=-%h/.claude/watchdog.env
 # Reads ~/.claude transcripts, talks to the user's tmux server (default socket
 # /tmp/tmux-<uid>/), and POSTs to Discord — so NO network/socket sandbox here.
 ExecStart=/usr/bin/env python3 {{REPO_DIR}}/airuleset.py watchdog --once

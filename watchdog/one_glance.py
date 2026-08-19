@@ -321,8 +321,9 @@ def lane_low_mem_surface_decision(*, backlog, min_backlog,
     Called ONLY inside the low-mem skip branch (a low-mem skip is firing THIS
     sweep — so there is no not-low-mem case here; the mem-recovered / box-filled
     episode RESET is a SEPARATE ``_lane_lowmem_reset``). The OOM protection (the
-    ``skip:low-mem`` itself and the 1536MB threshold) is UNCHANGED — this decider
-    only decides whether to ALSO emit the ONE owner-facing CAPACITY-CAPPED signal
+    ``skip:low-mem`` itself and its memory threshold) is UNCHANGED — this decider
+    takes no threshold value and only decides whether to ALSO emit the ONE
+    owner-facing CAPACITY-CAPPED signal
     (a persistent RAM ceiling is an OWNER DECISION: upgrade the box vs accept a
     lower saturation).
 

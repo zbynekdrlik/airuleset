@@ -17,7 +17,6 @@ harness shape (shared `_goal_arm_helpers`), driving the REAL
 `goal_lane_occupancy_nudge`.
 """
 
-import json
 import os
 import unittest
 import unittest.mock as m
