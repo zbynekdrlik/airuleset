@@ -107,6 +107,7 @@
     "tests/test_item95_item9_question_skill.py": 218,
     "tests/test_janitor_park_reclaim.py": 363,
     "tests/test_labelled_box_border.py": 276,
+    "tests/test_lane_mem_override_574.py": 207,
     "tests/test_lane_occupancy_571.py": 206,
     "tests/test_local_poll_repeat_block.py": 605,
     "tests/test_long_turn.py": 408,
