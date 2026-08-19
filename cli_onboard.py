@@ -26,9 +26,7 @@ import datetime
 import json
 import os
 import re
-import shlex
 import socket
-import subprocess
 import sys
 from pathlib import Path
 
@@ -63,51 +61,25 @@ STEP_ORDER = [
 ]
 
 
-# --------------------------------------------------------------------------- #
-# Injectable executor — local argv, or ssh-wrapped for a REMOTE_HOSTS target.
-# --------------------------------------------------------------------------- #
-def _run(run):
-    return run or subprocess.run
-
-
-def resolve_remote(host):
-    """The REMOTE_HOSTS entry for `host` (name or ip), or None for local.
-    dev1 / local / None run locally (this maintainer box)."""
-    if host in (None, "", "local", "dev1"):
-        return None
-    try:
-        import cli_fleet
-        for h in cli_fleet.REMOTE_HOSTS:
-            if h.get("name") == host or h.get("host") == host:
-                return h
-    except Exception:
-        return None
-    return None
-
-
-def _exec(argv, host=None, run=None):
-    """Run `argv` locally, or ssh-wrapped when `host` names a remote box.
-    gh API calls (issue list/create with -R) pass host=None — they talk to
-    GitHub from any box; only working-tree git / repo-create needs the host."""
-    remote = resolve_remote(host)
-    if remote is None:
-        return _run(run)(argv, capture_output=True, text=True)
-    ssh = ["ssh", "-o", "StrictHostKeyChecking=no"]
-    ident = remote.get("identity")
-    if ident:
-        ssh += ["-i", os.path.expanduser(ident)]
-    ssh += ["%s@%s" % (remote["user"], remote["host"]),
-            " ".join(shlex.quote(a) for a in argv)]
-    return _run(run)(ssh, capture_output=True, text=True)
-
-
-def _git(path, args, host=None, run=None):
-    return _exec(["git", "-C", str(path), *args], host=host, run=run)
-
-
-def _gh(args, run=None):
-    """gh API call (repo-scoped via -R) — always local, never ssh."""
-    return _run(run)(["gh", *args], capture_output=True, text=True)
+# The local/ssh EXECUTION + remote-filesystem transport layer lives in
+# cli_onboard_exec.py (#583 split) — re-exported here so cli_onboard.<name>
+# keeps resolving for every caller and test. resolve_remote/_exec/_git/_gh/
+# _fs_exists/_read_file/_write_file/_resolve_remote_path route EVERY detection,
+# read and write through the injected runner, so a `--host <remote>` onboard
+# runs entirely over ssh and never touches the local filesystem.
+from cli_onboard_exec import (  # noqa: E402
+    _run as _run,
+    resolve_remote as resolve_remote,
+    _ssh_prefix as _ssh_prefix,
+    _exec as _exec,
+    _git as _git,
+    _gh as _gh,
+    _remote_home as _remote_home,
+    _resolve_remote_path as _resolve_remote_path,
+    _fs_exists as _fs_exists,
+    _read_file as _read_file,
+    _write_file as _write_file,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -135,6 +107,13 @@ def derive_repo_name(path, name=None):
         raise ValueError("cannot derive a repo name from path %r" % path)
     parent = p.parent.name
     if parent in CLUSTER_PREFIXES:
+        # Don't DOUBLE the cluster prefix when the leaf already carries the
+        # cluster name (case-insensitive token) — montalu/automatizacie-montalu
+        # → automatizacie-montalu, NOT montalu-automatizacie-montalu (#583).
+        # base is already lowercased by _sanitize_name, so a token match is
+        # case-insensitive; parent is the lowercase CLUSTER_PREFIXES key.
+        if parent.lower() in base.split("-"):
+            return base
         return "%s-%s" % (parent, base)
     return base
 
@@ -142,14 +121,15 @@ def derive_repo_name(path, name=None):
 # --------------------------------------------------------------------------- #
 # Stack + .gitignore (append-only).
 # --------------------------------------------------------------------------- #
-def detect_stack(path):
+def detect_stack(path, host=None, run=None):
     p = Path(path)
-    if (p / "Cargo.toml").exists():
+    if _fs_exists(p / "Cargo.toml", host=host, run=run):
         return "rust"
-    if (p / "package.json").exists():
+    if _fs_exists(p / "package.json", host=host, run=run):
         return "node"
-    if ((p / "pyproject.toml").exists() or (p / "setup.py").exists()
-            or (p / "requirements.txt").exists()):
+    if (_fs_exists(p / "pyproject.toml", host=host, run=run)
+            or _fs_exists(p / "setup.py", host=host, run=run)
+            or _fs_exists(p / "requirements.txt", host=host, run=run)):
         return "python"
     return "unknown"
 
@@ -158,13 +138,16 @@ def _default_gitignore_patterns(stack):
     return list(GITIGNORE_COMMON) + GITIGNORE_BY_STACK.get(stack, [])
 
 
-def gitignore_missing_patterns(path, stack):
+def gitignore_missing_patterns(path, stack, host=None, run=None):
     """Default patterns for `stack` that are ABSENT from the existing
-    .gitignore — append-only, never proposes removing a user's own lines."""
+    .gitignore — append-only, never proposes removing a user's own lines.
+    Reads the .gitignore over the runner (local or ssh), so a remote host's
+    file is read remotely, never a nonexistent local one (#583)."""
     existing = set()
     gi = Path(path) / ".gitignore"
-    if gi.exists():
-        for line in gi.read_text(encoding="utf-8").splitlines():
+    content = _read_file(gi, host=host, run=run)
+    if content is not None:
+        for line in content.splitlines():
             existing.add(line.strip())
     return [p for p in _default_gitignore_patterns(stack) if p not in existing]
 
@@ -186,23 +169,23 @@ def _tracked_ignored_artifacts(path, host=None, run=None):
 # --------------------------------------------------------------------------- #
 # Repo / branch detection.
 # --------------------------------------------------------------------------- #
-def has_git_repo(path, run=None):
-    return _git(path, ["rev-parse", "--git-dir"], run=run).returncode == 0
+def has_git_repo(path, host=None, run=None):
+    return _git(path, ["rev-parse", "--git-dir"], host=host, run=run).returncode == 0
 
 
-def remote_url(path, run=None):
-    r = _git(path, ["remote", "get-url", "origin"], run=run)
+def remote_url(path, host=None, run=None):
+    r = _git(path, ["remote", "get-url", "origin"], host=host, run=run)
     if r.returncode == 0 and (r.stdout or "").strip():
         return r.stdout.strip()
     return None
 
 
-def _branch_exists(path, branch, run=None):
+def _branch_exists(path, branch, host=None, run=None):
     return _git(path, ["rev-parse", "--verify", "--quiet",
-                       "refs/heads/" + branch], run=run).returncode == 0
+                       "refs/heads/" + branch], host=host, run=run).returncode == 0
 
 
-def detect_default_branch(path, run=None):
+def detect_default_branch(path, host=None, run=None):
     """The repo's default branch. NEVER changed by this module (respect the
     existing convention).
 
@@ -214,21 +197,21 @@ def detect_default_branch(path, run=None):
        avoids a false `branch-model-mismatch` for every 2-branch project
        sitting on its dev branch (#569 live-verify)."""
     r = _git(path, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-             run=run)
+             host=host, run=run)
     if r.returncode == 0 and (r.stdout or "").strip():
         return r.stdout.strip().split("/")[-1]
     for cand in ("main", "master"):
-        if _branch_exists(path, cand, run=run):
+        if _branch_exists(path, cand, host=host, run=run):
             return cand
-    r = _git(path, ["symbolic-ref", "--short", "HEAD"], run=run)
+    r = _git(path, ["symbolic-ref", "--short", "HEAD"], host=host, run=run)
     if r.returncode == 0 and (r.stdout or "").strip():
         return r.stdout.strip()
     return None
 
 
-def detect_branch_model(path, run=None, overrides=None):
+def detect_branch_model(path, host=None, run=None, overrides=None):
     overrides = overrides or []
-    default = detect_default_branch(path, run=run) or "main"
+    default = detect_default_branch(path, host=host, run=run) or "main"
     if "3-branch" in overrides:
         return {"branch_model": "3-branch", "default_branch": default,
                 "work_branch": "develop"}
@@ -236,12 +219,13 @@ def detect_branch_model(path, run=None, overrides=None):
             "work_branch": "dev"}
 
 
-def worktree_is_dirty(path, run=None):
-    return bool((_git(path, ["status", "--porcelain"], run=run).stdout or "").strip())
+def worktree_is_dirty(path, host=None, run=None):
+    return bool((_git(path, ["status", "--porcelain"], host=host,
+                      run=run).stdout or "").strip())
 
 
-def file_is_dirty(path, relpath, run=None):
-    r = _git(path, ["status", "--porcelain", "--", relpath], run=run)
+def file_is_dirty(path, relpath, host=None, run=None):
+    r = _git(path, ["status", "--porcelain", "--", relpath], host=host, run=run)
     return bool((r.stdout or "").strip())
 
 
@@ -355,19 +339,35 @@ def _tilde(path):
     return ap
 
 
-def build_registry_entry(path, host, name, overrides, existing,
-                         onboarded_date=None, run=None):
+def _registry_display_path(orig_path, target_path, host):
+    """The tilde-form path recorded in the registry. LOCAL host: `_tilde` of the
+    resolved absolute path (unchanged). REMOTE host: the resolved path was
+    expanded against the REMOTE home, which local-home `_tilde` cannot
+    re-collapse — so preserve the ORIGINAL typed `~/…`/absolute form (#583)."""
+    if resolve_remote(host) is None:
+        return _tilde(target_path)
+    s = str(orig_path)
+    if s == "~" or s.startswith("~/") or s.startswith("/"):
+        return s
+    return str(target_path)
+
+
+def build_registry_entry(orig_path, target_path, host, name, overrides,
+                         existing, onboarded_date=None, run=None):
     """Build the registry entry. `overrides` is the EFFECTIVE set (the caller
     has already merged in the existing entry's overrides), and `host`/
     `onboarded` fall back to the existing entry so a BARE re-onboard is a
     genuine no-op instead of regressing the recorded state (#569 review
-    MAJOR-1/M1: the registry is the reconstructable source of truth)."""
-    model = detect_branch_model(path, run=run, overrides=overrides)
+    MAJOR-1/M1: the registry is the reconstructable source of truth).
+    `target_path` is the host-resolved path used for detection over ssh;
+    `orig_path` is the typed path used for the tilde-form display (#583)."""
+    model = detect_branch_model(target_path, host=host, run=run,
+                                overrides=overrides)
     onboarded = (existing or {}).get("onboarded") or onboarded_date or _today()
     return {
         "name": name,
         "host": host or (existing or {}).get("host") or "dev1",
-        "path": _tilde(path),
+        "path": _registry_display_path(orig_path, target_path, host),
         "branch_model": model["branch_model"],
         "default_branch": model["default_branch"],
         "work_branch": model["work_branch"],
@@ -463,7 +463,7 @@ def _step(name, status, detail):
 
 
 def step_git_init(path, host=None, run=None, dry_run=False):
-    if has_git_repo(path, run=run):
+    if has_git_repo(path, host=host, run=run):
         return _step("git_init", "satisfied", "git repo present")
     if dry_run:
         return _step("git_init", "would-apply", "would git init")
@@ -481,17 +481,17 @@ def _commit_paths(path, message, paths, host=None, run=None):
                 host=host, run=run)
 
 
-def _staged_paths(path, run=None):
+def _staged_paths(path, host=None, run=None):
     """Paths already staged in the index (the project session's own work)."""
-    r = _git(path, ["diff", "--cached", "--name-only"], run=run)
+    r = _git(path, ["diff", "--cached", "--name-only"], host=host, run=run)
     return [f for f in (r.stdout or "").splitlines() if f.strip()]
 
 
 def step_gitignore(path, stack, host=None, run=None, dry_run=False):
-    missing = gitignore_missing_patterns(path, stack)
+    missing = gitignore_missing_patterns(path, stack, host=host, run=run)
     if not missing:
         return _step("gitignore", "satisfied", "all default patterns present")
-    if file_is_dirty(path, ".gitignore", run=run):
+    if file_is_dirty(path, ".gitignore", host=host, run=run):
         return _step("gitignore", "skipped",
                      ".gitignore has uncommitted changes — not touching a "
                      "dirty worktree")
@@ -499,10 +499,12 @@ def step_gitignore(path, stack, host=None, run=None, dry_run=False):
         return _step("gitignore", "would-apply",
                      "would append %d pattern(s)" % len(missing))
     gi = Path(path) / ".gitignore"
-    existing = gi.read_text(encoding="utf-8") if gi.exists() else ""
+    existing = _read_file(gi, host=host, run=run) or ""
     if existing and not existing.endswith("\n"):
         existing += "\n"
-    gi.write_text(existing + "\n".join(missing) + "\n", encoding="utf-8")
+    if not _write_file(gi, existing + "\n".join(missing) + "\n",
+                       host=host, run=run):
+        return _step("gitignore", "skipped", "failed to write .gitignore")
     # Untracking already-tracked artifacts (`git rm --cached`) only STICKS in a
     # NON-pathspec commit — a pathspec commit re-reads the worktree and re-adds
     # the still-present artifact, so the old pathspec form was a silent no-op
@@ -510,7 +512,7 @@ def step_gitignore(path, stack, host=None, run=None, dry_run=False):
     # safe ONLY when the project session has no OTHER staged work; otherwise we
     # commit .gitignore alone (scoped) and leave the artifacts for a manual
     # untrack rather than risk sweeping the session's staged files.
-    pre_staged = _staged_paths(path, run=run)
+    pre_staged = _staged_paths(path, host=host, run=run)
     arts = ([] if pre_staged
             else _tracked_ignored_artifacts(path, host=host, run=run))
     _git(path, ["add", ".gitignore"], host=host, run=run)
@@ -537,12 +539,13 @@ def step_gitignore(path, stack, host=None, run=None, dry_run=False):
 
 def step_claude_md(path, name, host=None, run=None, dry_run=False):
     cm = Path(path) / "CLAUDE.md"
-    if cm.exists():
+    if _fs_exists(cm, host=host, run=run):
         return _step("claude_md", "satisfied", "CLAUDE.md present (never overwritten)")
     if dry_run:
         return _step("claude_md", "would-apply",
                      "would create CLAUDE.md skeleton + Playbook router")
-    cm.write_text(_claude_md_skeleton(name), encoding="utf-8")
+    if not _write_file(cm, _claude_md_skeleton(name), host=host, run=run):
+        return _step("claude_md", "skipped", "failed to write CLAUDE.md")
     _git(path, ["add", "CLAUDE.md"], host=host, run=run)
     cr = _commit_paths(
         path, "chore: onboard — CLAUDE.md skeleton + Playbook router (#569)",
@@ -554,7 +557,7 @@ def step_claude_md(path, name, host=None, run=None, dry_run=False):
 
 
 def step_remote(path, name, host=None, run=None, dry_run=False):
-    url = remote_url(path, run=run)
+    url = remote_url(path, host=host, run=run)
     if url:
         return _step("remote", "satisfied", "origin: " + url)
     target = "%s/%s" % (GITHUB_OWNER, name)
@@ -569,12 +572,12 @@ def step_remote(path, name, host=None, run=None, dry_run=False):
 
 
 def step_branches(path, overrides=None, host=None, run=None, dry_run=False):
-    model = detect_branch_model(path, run=run, overrides=overrides)
+    model = detect_branch_model(path, host=host, run=run, overrides=overrides)
     work = model["work_branch"]
     detail = "%s (default %s, work %s)" % (
         model["branch_model"], model["default_branch"], work)
     exists = _git(path, ["rev-parse", "--verify", "--quiet",
-                         "refs/heads/" + work], run=run).returncode == 0
+                         "refs/heads/" + work], host=host, run=run).returncode == 0
     if exists:
         return _step("branches", "satisfied", detail + " — work branch present")
     if dry_run:
@@ -584,11 +587,13 @@ def step_branches(path, overrides=None, host=None, run=None, dry_run=False):
     return _step("branches", "applied" if ok else "skipped", detail)
 
 
-def step_foundation_tickets(path, name, host=None, run=None, dry_run=False):
+def step_foundation_tickets(path, name, host=None, run=None, dry_run=False,
+                            stack=None):
     gaps = []
-    if not _has_ci(path):
+    if not _has_ci(path, host=host, run=run):
         gaps.append(("ci", FOUNDATION_CI_TITLE, _foundation_ci_body(name)))
-    if detect_stack(path) == "node":
+    if (stack if stack is not None else detect_stack(path, host=host, run=run)) \
+            == "node":
         gaps.append(("version-label", FOUNDATION_VERSION_TITLE,
                      _foundation_version_body(name)))
     if not gaps:
@@ -613,11 +618,16 @@ def step_foundation_tickets(path, name, host=None, run=None, dry_run=False):
     return _step("foundation_tickets", status, detail)
 
 
-def _has_ci(path):
-    wf = Path(path) / ".github" / "workflows"
-    if not wf.is_dir():
-        return False
-    return any(wf.glob("*.yml")) or any(wf.glob("*.yaml"))
+def _has_ci(path, host=None, run=None):
+    """True iff the target has a `.github/workflows/*.yml|*.yaml` file. Routed
+    through the runner (a grouped `find`) so a remote host is checked over ssh,
+    never a nonexistent local `.github` (#583). `find` on an absent dir prints
+    nothing (rc!=0) → False."""
+    wf = str(Path(path) / ".github" / "workflows")
+    r = _exec(["find", wf, "-maxdepth", "1", "-type", "f",
+               "(", "-name", "*.yml", "-o", "-name", "*.yaml", ")"],
+              host=host, run=run)
+    return bool((r.stdout or "").strip())
 
 
 def step_notification_ticket(path, name, host=None, run=None, dry_run=False):
@@ -656,76 +666,161 @@ def step_registry(path, entry, registry_path, host=None, run=None, dry_run=False
 # --------------------------------------------------------------------------- #
 # Orchestration.
 # --------------------------------------------------------------------------- #
+def _remote_preflight(orig_path, host, run=None):
+    """Resolve the path to operate on + a FAIL-SAFE reachability gate (#583).
+    Returns `(target_path, error)`; `error` is None on success. The project
+    directory must EXIST (local or remote) — onboard operates on an existing
+    dir, never creates one. LOCAL host: expand+abspath, verify the dir exists.
+    An UNKNOWN host (truthy, not a local alias, not a REMOTE_HOSTS entry — a
+    typo like `dve2`/`gk`) REFUSES rather than silently localizing (#583 review
+    — the same discrimination `_audit_host_target` already applies). REMOTE
+    host: verify ssh reachability, expand the remote `~`, verify the target dir
+    — on ANY failure return `(None, <reason>)`, never a local false-negative."""
+    if host in (None, "", "local", "dev1"):
+        target = _norm_path(orig_path)
+        if not _fs_exists(target, run=run, kind="d"):
+            return None, ("path %s does not exist — onboard operates on an "
+                          "EXISTING project directory" % target)
+        return target, None
+    if resolve_remote(host) is None:
+        return None, ("unknown host %r — not this box and not a known "
+                      "REMOTE_HOSTS target; refusing (won't onboard locally)"
+                      % host)
+    if _exec(["true"], host=host, run=run).returncode != 0:
+        return None, ("host %r unreachable over ssh — refusing to onboard "
+                      "(never proceeding on local false-negatives)" % host)
+    target = _resolve_remote_path(orig_path, host, run=run)
+    if not target:
+        return None, ("could not resolve the remote path for %r on host %r "
+                      "(use an absolute or ~/ path)" % (orig_path, host))
+    if not _fs_exists(target, host=host, run=run, kind="d"):
+        return None, ("remote path %s does not exist on host %r — onboard "
+                      "operates on an EXISTING project directory" % (target, host))
+    return target, None
+
+
 def onboard_project(path, host=None, name=None, overrides=None,
                     registry_path=None, run=None, dry_run=False,
                     onboarded_date=None):
-    path = _norm_path(path)
+    orig_path = str(path)
     registry_path = registry_path or default_registry_path()
     entries = load_registry(registry_path)
-    existing = _find_existing(entries, path, name)
+    existing = _find_existing(entries, orig_path, name)
     # Authoritative name: explicit --name wins; else the recorded registry name
     # (the stable key — may NOT be path-derivable, e.g. email-extractor from
-    # ~/devel/n8n/email_extract); else derive it (#569 review MAJOR-1/M3).
+    # ~/devel/n8n/email_extract); else derive it (#569 review MAJOR-1/M3). Name
+    # derivation reads only the leaf/parent NAMES, so the typed path is correct.
     if name:
-        name = derive_repo_name(path, name=name)
+        name = derive_repo_name(orig_path, name=name)
     elif existing is not None:
         name = existing["name"]
     else:
-        name = derive_repo_name(path)
+        name = derive_repo_name(orig_path)
+    # FAIL-SAFE (#583): for a remote host resolve the path over ssh + verify
+    # reachability BEFORE any detection. A failure REFUSES (never a local
+    # false-negative); the error is surfaced in dry-run too.
+    target_path, err = _remote_preflight(orig_path, host, run=run)
+    if err:
+        return {"name": name, "stack": None, "steps": [], "entry": None,
+                "error": err}
     # Effective overrides inherit from the existing entry when the caller passed
     # none, so a BARE re-onboard preserves the branch model / overrides instead
     # of regressing them (and step_branches never creates a spurious dev branch
     # on a 3-branch project) — #569 review MAJOR-2/M1.
     eff_overrides = (list(overrides) if overrides
                      else list((existing or {}).get("overrides", [])))
-    stack = detect_stack(path)
+    stack = detect_stack(target_path, host=host, run=run)
     steps = [
-        step_git_init(path, host, run, dry_run),
-        step_gitignore(path, stack, host, run, dry_run),
-        step_claude_md(path, name, host, run, dry_run),
-        step_remote(path, name, host, run, dry_run),
-        step_branches(path, eff_overrides, host, run, dry_run),
-        step_foundation_tickets(path, name, host, run, dry_run),
-        step_notification_ticket(path, name, host, run, dry_run),
+        step_git_init(target_path, host, run, dry_run),
+        step_gitignore(target_path, stack, host, run, dry_run),
+        step_claude_md(target_path, name, host, run, dry_run),
+        step_remote(target_path, name, host, run, dry_run),
+        step_branches(target_path, eff_overrides, host, run, dry_run),
+        step_foundation_tickets(target_path, name, host, run, dry_run,
+                                stack=stack),
+        step_notification_ticket(target_path, name, host, run, dry_run),
     ]
-    entry = build_registry_entry(path, host, name, eff_overrides, existing,
+    entry = build_registry_entry(orig_path, target_path, host, name,
+                                 eff_overrides, existing,
                                  onboarded_date=onboarded_date, run=run)
-    steps.append(step_registry(path, entry, registry_path, host, run, dry_run))
-    return {"name": name, "stack": stack, "steps": steps, "entry": entry}
+    steps.append(step_registry(target_path, entry, registry_path, host, run,
+                               dry_run))
+    return {"name": name, "stack": stack, "steps": steps, "entry": entry,
+            "error": None}
 
 
-def audit_project(entry, run=None):
-    """READ-ONLY drift report for one registry entry — never mutates."""
-    path = os.path.expanduser(entry.get("path", ""))
+def audit_project(entry, host=None, run=None):
+    """READ-ONLY drift report for one registry entry — never mutates. For a
+    REMOTE host every check runs over ssh; an unreachable host / missing remote
+    dir reports `unreachable` (NEVER a false `missing-repo` drift), and the
+    remote `~` is expanded remotely (#583)."""
+    orig = entry.get("path", "")
+    remote = resolve_remote(host)
+    if remote is None:
+        path = os.path.expanduser(orig)
+    else:
+        # remote: ssh reachability + remote tilde expansion + dir existence.
+        # `unreachable` (host down / home unresolvable) is a "could not check"
+        # soft note; but a REACHABLE host whose project dir is simply GONE is
+        # real drift (`missing-repo`) — the same signal the local branch gives
+        # for an absent dir, never hidden as a clean `unreachable` (#583 review).
+        if _exec(["true"], host=host, run=run).returncode != 0:
+            return [{"kind": "unreachable",
+                     "detail": "host %r unreachable over ssh" % host}]
+        path = _resolve_remote_path(orig, host, run=run)
+        if not path:
+            return [{"kind": "unreachable",
+                     "detail": "remote home unresolvable for %r on host %r"
+                     % (orig, host)}]
+        if not _fs_exists(path, host=host, run=run, kind="d"):
+            return [{"kind": "missing-repo",
+                     "detail": "%s absent on host %r" % (path, host)}]
     drift = []
-    if not has_git_repo(path, run=run):
+    if not has_git_repo(path, host=host, run=run):
         drift.append({"kind": "missing-repo", "detail": path or "(no path)"})
         return drift
-    if remote_url(path, run=run) is None:
+    if remote_url(path, host=host, run=run) is None:
         drift.append({"kind": "missing-remote", "detail": "no origin remote"})
-    arts = _tracked_ignored_artifacts(path, run=run)
+    arts = _tracked_ignored_artifacts(path, host=host, run=run)
     if arts:
         drift.append({"kind": "tracked-artifact",
                       "detail": ", ".join(arts[:5])})
-    actual = detect_default_branch(path, run=run)
+    actual = detect_default_branch(path, host=host, run=run)
     want = entry.get("default_branch")
     if want and actual and actual != want:
         drift.append({"kind": "branch-model-mismatch",
                       "detail": "registry=%s repo=%s" % (want, actual)})
     cm = Path(path) / "CLAUDE.md"
-    if not cm.exists():
+    cm_content = _read_file(cm, host=host, run=run)
+    if cm_content is None:
         drift.append({"kind": "missing-claude-md", "detail": "CLAUDE.md absent"})
-    elif "## Playbook router" not in cm.read_text(encoding="utf-8", errors="replace"):
+    elif "## Playbook router" not in cm_content:
         drift.append({"kind": "missing-router",
                       "detail": "CLAUDE.md has no Playbook router"})
     return drift
 
 
+def _audit_host_target(host, local_host):
+    """How to reach `host` for an audit: `(exec_host, error)`. This box (or a
+    local alias / empty host) audits LOCALLY (`(None, None)`); a known
+    REMOTE_HOSTS box audits over ssh (`(host, None)`); any other named host is
+    genuinely unreachable from here (`(None, <reason>)`) — never audited against
+    the local filesystem (which is the #569 MAJOR-3 false-missing-repo bug)."""
+    if not host or (local_host and host == local_host):
+        return None, None
+    if resolve_remote(host) is not None:
+        return host, None
+    return None, ("host=%s is not this box (%s) and not a known REMOTE_HOSTS "
+                  "target — run --audit on that box"
+                  % (host, local_host or "?"))
+
+
 def audit_registry(registry_path=None, run=None, local_host=None):
-    """Read-only drift sweep across the registry. A cross-host entry (its `host`
-    is not THIS box) is SKIPPED with a `remote-host` note instead of audited
-    against the local filesystem — otherwise every dev2 entry reads as a false
-    `missing-repo` when the sweep runs on dev1 (#569 review MAJOR-3)."""
+    """Read-only drift sweep across the registry. A cross-host entry on a known
+    REMOTE_HOSTS box is audited OVER SSH (#583, requirement 4); an entry whose
+    host is neither this box nor a known remote target is reported `unreachable`
+    (NEVER a false `missing-repo` drift — the #569 MAJOR-3 intent, kind
+    evolved)."""
     registry_path = registry_path or default_registry_path()
     local_host = local_host or _current_host()
     out = {}
@@ -733,12 +828,11 @@ def audit_registry(registry_path=None, run=None, local_host=None):
         name = e.get("name")
         if not name:
             continue
-        host = e.get("host")
-        if host and local_host and host != local_host:
-            out[name] = [{"kind": "remote-host",
-                          "detail": "host=%s — run --audit on that box" % host}]
+        exec_host, err = _audit_host_target(e.get("host"), local_host)
+        if err:
+            out[name] = [{"kind": "unreachable", "detail": err}]
         else:
-            out[name] = audit_project(e, run=run)
+            out[name] = audit_project(e, host=exec_host, run=run)
     return out
 
 
@@ -757,8 +851,12 @@ def _print_audit(report):
     clean = True
     for name in sorted(report):
         drift = report[name]
-        if drift and all(d.get("kind") == "remote-host" for d in drift):
-            print("  ⇄ %-28s %s" % (name, drift[0]["detail"]))
+        # `unreachable` is "could not check", NOT drift — surfaced distinctly and
+        # never flips the clean tally (#583, requirement 4; kind evolved from the
+        # #569 `remote-host` skip).
+        if drift and all(d.get("kind") in ("unreachable", "remote-host")
+                         for d in drift):
+            print("  ⚠ %-28s %s" % (name, drift[0]["detail"]))
             continue
         if not drift:
             print("  ✓ %-28s no drift" % name)
@@ -781,10 +879,10 @@ def cmd_onboard_project(args):
               % registry_path, file=sys.stderr)
         return 2
     path = getattr(args, "path", None)
+    host = getattr(args, "host", None)
     # --audit/--check share dest="audit" (no separate args.check).
     if getattr(args, "audit", False):
         if path:
-            path = _norm_path(path)
             entry = _find_existing(load_registry(registry_path), path,
                                    getattr(args, "name", None))
             if entry is None:
@@ -793,10 +891,20 @@ def cmd_onboard_project(args):
                 except ValueError as e:
                     print("onboard-project: %s" % e, file=sys.stderr)
                     return 2
-                entry = {"name": name, "path": path,
-                         "host": getattr(args, "host", None) or "dev1",
-                         "default_branch": None}
-            _print_audit({entry["name"]: audit_project(entry)})
+                # keep the typed path for a remote host (so audit_project can
+                # expand the remote ~); abspath it for a local host (#583).
+                entry_path = (path if resolve_remote(host) is not None
+                              else _norm_path(path))
+                entry = {"name": name, "path": entry_path,
+                         "host": host or "dev1", "default_branch": None}
+            exec_host, err = _audit_host_target(host or entry.get("host"),
+                                                _current_host())
+            if err:
+                _print_audit({entry["name"]:
+                              [{"kind": "unreachable", "detail": err}]})
+            else:
+                _print_audit({entry["name"]:
+                              audit_project(entry, host=exec_host)})
         else:
             _print_audit(audit_registry(registry_path))
         return 0
@@ -806,13 +914,18 @@ def cmd_onboard_project(args):
         return 2
     try:
         result = onboard_project(
-            path, host=getattr(args, "host", None),
+            path, host=host,
             name=getattr(args, "name", None),
             overrides=getattr(args, "override", None) or [],
             registry_path=registry_path,
             dry_run=getattr(args, "dry_run", False))
     except ValueError as e:
         print("onboard-project: %s" % e, file=sys.stderr)
+        return 2
+    # FAIL-SAFE (#583): a remote preflight failure REFUSES the whole run (real
+    # AND dry-run) instead of proceeding on local false-negatives.
+    if result.get("error"):
+        print("onboard-project: %s" % result["error"], file=sys.stderr)
         return 2
     _print_result(result)
     return 0
