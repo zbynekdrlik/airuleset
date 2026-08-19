@@ -542,5 +542,77 @@ class TestSetupWiring(unittest.TestCase):
             self.assertEqual(first_unit, pt["WEBTERM_DASH_SERVICE_DEST"].read_text())
 
 
+class TestTabSwitchingUX(unittest.TestCase):
+    """#582: Ctrl+Alt+N can't switch tabs while focus is inside a cross-origin
+    ttyd iframe (a web-platform limitation — the parent :8080 page never
+    receives keydowns dispatched inside the :7682 iframe). The proportionate
+    fix keeps reliable CLICK switching and adds discoverable UX: ordinal
+    badges (the visible Ctrl+Alt+N map), Prev/Next cycle controls that step
+    through ALL sessions, Ctrl+Alt+arrow cycling, and an honest hint."""
+
+    def _inv(self, n):
+        return [{"id": "s%02d" % i, "label": "sess %02d" % i, "kind": "owner",
+                 "local": False, "host": "10.0.0.%d" % i, "user": "usr%02d" % i}
+                for i in range(1, n + 1)]
+
+    def test_ordinal_badges_on_first_nine_tabs_only(self):
+        # 11 sessions -> exactly 9 ordinal badges (the Ctrl+Alt+1..9 range),
+        # numbered 1..9; the 10th/11th tabs carry no badge.
+        html = w.render_dashboard_html(self._inv(11), ttyd_base="http://b:7682")
+        self.assertEqual(html.count('class="ord"'), 9)
+        self.assertIn('<span class="ord">1</span>', html)
+        self.assertIn('<span class="ord">9</span>', html)
+        self.assertNotIn('<span class="ord">10</span>', html)
+        self.assertNotIn('<span class="ord">11</span>', html)
+
+    def test_ordinal_badge_count_matches_small_inventory(self):
+        html = w.render_dashboard_html(self._inv(3), ttyd_base="http://b:7682")
+        self.assertEqual(html.count('class="ord"'), 3)
+        self.assertIn('<span class="ord">1</span>', html)
+        self.assertIn('<span class="ord">3</span>', html)
+
+    def test_ordinal_badges_are_only_digits_never_a_label(self):
+        # Even a hostile label must never leak into the ordinal badge — the
+        # badge is a fixed position digit, not user data.
+        inv = [{"id": "x", "label": "<b>PWN</b>", "kind": "owner",
+                "local": True, "host": None, "user": None}]
+        html = w.render_dashboard_html(inv, ttyd_base="http://b:7682")
+        import re as _re
+        for content in _re.findall(r'<span class="ord">([^<]*)</span>', html):
+            self.assertRegex(content, r"^[0-9]+$")
+
+    def test_prev_next_cycle_buttons_present(self):
+        html = w.render_dashboard_html(self._inv(4), ttyd_base="http://b:7682")
+        self.assertIn('class="cyc"', html)
+        self.assertIn('data-cyc="-1"', html)   # prev
+        self.assertIn('data-cyc="1"', html)    # next
+        self.assertIn("function cycle(", html)  # the JS helper the buttons call
+
+    def test_keydown_listener_handles_arrow_cycling(self):
+        # Ctrl+Alt+Left/Right cycle prev/next when the tab bar has focus.
+        html = w.render_dashboard_html(self._inv(4), ttyd_base="http://b:7682")
+        self.assertIn("ArrowLeft", html)
+        self.assertIn("ArrowRight", html)
+        # The direct 1..9 jump must still be there (real value when bar focused).
+        self.assertIn("Ctrl+Alt", html)
+
+    def test_hint_is_honest_about_keyboard_limitation(self):
+        # The hint must say click always works AND that the shortcut only works
+        # while the bar has focus (never over-promise keyboard-switch-typing).
+        html = w.render_dashboard_html(self._inv(4), ttyd_base="http://b:7682")
+        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
+        self.assertIn("klik", hint.lower())          # click always works
+        self.assertIn("fokus", hint.lower())          # shortcut only when the bar is focused
+        self.assertTrue("◀" in hint or "▶" in hint)   # surfaces the new cycle affordance
+
+    def test_ux_additions_do_not_break_escaping_or_single_pass(self):
+        # The security invariants from #579 must survive the UX additions.
+        inv = [{"id": "x", "label": "</script><script>alert(1)</script>",
+                "kind": "owner", "local": True, "host": None, "user": None}]
+        html = w.render_dashboard_html(inv, ttyd_base="http://b:7682")
+        self.assertNotIn("</script><script>", html)
+        self.assertEqual(html.count('"ttyd_base"'), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
