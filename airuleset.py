@@ -3728,12 +3728,25 @@ def _watchdog_ops_wait_fetch(cwd):
     long-parked W ticket into an armed loop's attention.
 
     `--ops-wait` prints `number<TAB>createdAt<TAB>action<TAB>reason<TAB>title`
-    per member (oldest-first); field 0 is the issue number. A None return
-    (non-zero exit — the #181 untrustworthy-empty refusal — or an unparsable
-    line) is UNDETERMINED and the nudge job fails safe to no-nudge. An empty but
-    SUCCESSFUL result (exit 0, no lines) returns `[]` (genuinely no W parked),
-    which the job treats as "clear the tracking state". Wired HERE, like every
-    other network call in this file, so run_once's unit tests stay network-free."""
+    per member (oldest-first); field 0 is the issue number, field 3 the reason
+    (which carries a ` stale!` warning for a member with no fresh (≤24h) stream
+    push — #570). Returns a list of `{"number": int, "stale": bool}` so the job
+    20 nudge can NAME the stale members; the sibling `ops_wait_recheck` helpers
+    accept BOTH this dict shape AND a legacy bare `int` (back-compat). A None
+    return (non-zero exit — the #181 untrustworthy-empty refusal — or an
+    unparsable line) is UNDETERMINED and the nudge job fails safe to no-nudge.
+    An empty but SUCCESSFUL result (exit 0, no lines) returns `[]` (genuinely no
+    W parked), which the job treats as "clear the tracking state".
+
+    Timeout (#570): 45s, not the sibling `--count`'s 15s — `--ops-wait` now does
+    up to OPS_WAIT_STALE_MAX_FETCHES per-member `gh issue view` comment reads to
+    compute `stale!`. This is RARE on the sweep: it runs at most once per repo
+    per `_cached_ops_wait` TTL (30 min), so on a 60s sweep a given repo's cache
+    is expired only ~3% of the time — the 120s sweep budget absorbs an
+    occasional 45s cached fetch, and a genuine timeout returns None (no nudge
+    that cycle, re-checked next TTL — a ~daily nudge missing one cycle is
+    negligible). Wired HERE, like every other network call in this file, so
+    run_once's unit tests stay network-free."""
     import subprocess
     try:
         root = _repo_root(cwd=cwd) or cwd
@@ -3744,7 +3757,7 @@ def _watchdog_ops_wait_fetch(cwd):
     try:
         r = subprocess.run(
             [sys.executable, os.path.abspath(__file__), cmd_name, "--ops-wait"],
-            cwd=cwd, capture_output=True, text=True, timeout=15)
+            cwd=cwd, capture_output=True, text=True, timeout=45)
     except Exception:
         return None
     if r.returncode != 0:
@@ -3754,11 +3767,15 @@ def _watchdog_ops_wait_fetch(cwd):
         line = line.strip()
         if not line:
             continue
-        head = line.split("\t", 1)[0]
+        parts = line.split("\t")
         try:
-            members.append(int(head))
-        except ValueError:
+            num = int(parts[0])
+        except (ValueError, IndexError):
             return None   # a malformed line -> undetermined, never a partial set
+        # field 3 is the reason column (`ops-wait`/`acceptance` + optional
+        # ` stale!`); absent on a legacy/degraded line -> not stale.
+        reason = parts[3] if len(parts) > 3 else ""
+        members.append({"number": num, "stale": "stale!" in reason})
     return members
 
 
@@ -4566,6 +4583,11 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _comment_carries_question as _comment_carries_question,
     _issue_question_comment_state as _issue_question_comment_state,
     _no_question_flagged as _no_question_flagged,
+    OPS_WAIT_EVIDENCE_MAX_S as OPS_WAIT_EVIDENCE_MAX_S,
+    OPS_WAIT_STALE_MAX_FETCHES as OPS_WAIT_STALE_MAX_FETCHES,
+    _stream_self_login as _stream_self_login,
+    _issue_comment_ages as _issue_comment_ages,
+    _stale_ops_wait_flagged as _stale_ops_wait_flagged,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,
