@@ -783,6 +783,28 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
     return count, evidence
 
 
+def lane_has_live_evidence(evidence):
+    """#571 — the #565 EVIDENCE-based liveness predicate as a SHARED helper:
+    True iff ANY lane in a ``count_live_workers`` evidence list is NON-STALE
+    (``live`` / ``wedged`` / ``unreadable``), the direction a consumer whose
+    DANGEROUS bias is UNDER-counting live lanes must read — never the
+    wedged-EXCLUDING headline ``count``.
+
+    Two consumers now have that inverted danger and so must NOT reuse ``count``
+    (`internals-watchdog.md`, #565 shared-primitive bias): compact's
+    ``_session_has_live_bg_tasks`` (already inlines this exact `any(non-stale)`
+    predicate) and the lane-occupancy ``working-no-tasks`` defer (#571) —
+    UNDER-counting a live lane there suppresses the recovery/fill nudge (the gk
+    16-issues / 2-lanes regression), so a fresh WEDGED lane (recoverable work
+    the supervisor still owns) reads as "there IS a live lane → do not defer".
+
+    Fail-safe: an empty / falsy evidence list (or ``None``) → False (no live
+    lane); a malformed item with no ``state`` is treated as non-live. Never
+    raises."""
+    return any(getattr(lane, "state", "stale") != "stale"
+               for lane in (evidence or []))
+
+
 # A tool-call opening the model emitted as TEXT — `<invoke name="...">` / `<invoke
 # name="...">` — instead of a structured tool_use. Used by job 4a.
 _TEXTCALL_RX = re.compile(r"<\s*(?:antml:)?invoke\b[^>]*\bname\s*=", re.I)

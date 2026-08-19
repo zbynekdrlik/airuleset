@@ -27,7 +27,6 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from watchdog import one_glance as og            # noqa: E402
-from watchdog import transcripts as tr           # noqa: E402
 from watchdog.transcripts import (               # noqa: E402
     WorkerLane, count_live_workers, encode_project_dir, lane_has_live_evidence)
 
@@ -181,8 +180,8 @@ class TestCountLiveWorkersDeterminism(unittest.TestCase):
         r1 = count_live_workers(self.root, CWD, SID, NOW, FRESH)
         r2 = count_live_workers(self.root, CWD, SID, NOW, FRESH)
         self.assertEqual(r1[0], r2[0])
-        self.assertEqual([(l.agent_id, l.state) for l in r1[1]],
-                         [(l.agent_id, l.state) for l in r2[1]])
+        self.assertEqual([(la.agent_id, la.state) for la in r1[1]],
+                         [(la.agent_id, la.state) for la in r2[1]])
         self.assertEqual(r1[0], 1)
 
     def test_worker_mid_12min_tool_call_counts_live(self):

@@ -251,3 +251,97 @@ def evaluate(now, sid, cwd, projects_dir, state, backlog_fetch, goal_mark_entry,
                   armed, hb.age_s, src, "")
     g = g._replace(line=format_line(loc, g))
     return g, g.line
+
+
+# --- #571: the lane-occupancy working-no-tasks + low-mem-surface deciders ------
+#
+# Both are PURE (facts in / verdict out), so the capped orchestrator
+# `goal.goal_lane_occupancy_nudge` consumes them through thin module-level
+# helpers and never grows, and every branch is mutation-lockable in isolation.
+
+LaneWorkingNoTasks = namedtuple("LaneWorkingNoTasks", "defer streak log")
+
+
+def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
+                                   backlog, defer_streak, max_defers):
+    """#571 — the lane-occupancy ``working-no-tasks`` branch decider.
+
+    The branch fires only on a ``⏳`` marker with 0 RENDER task badges
+    (``render_waiters <= 0``). Pre-#571 it then DEFERRED unconditionally, reading
+    the FLAPPING render badge as truth — so a worker mid-long-tool-call (whose
+    strip badge is render-invisible but whose subagent transcript is disk-live)
+    read as "0 live tasks" and SUPPRESSED the fill nudge (the gk 16-issues /
+    2-lanes regression). ``structured_live`` is the STRUCTURED read
+    (``transcripts.lane_has_live_evidence`` over ``count_live_workers`` evidence —
+    any non-stale lane, the #565 evidence predicate, NEVER the wedged-excluding
+    count).
+
+    Verdict (`LaneWorkingNoTasks(defer, streak, log)`):
+
+      * NOT applicable (``marker != "⏳"`` or ``render_waiters > 0``): the branch
+        does not fire → ``defer=False``, streak RESET (0), ``log=None`` (silent —
+        the saturation logic below logs its own decision).
+      * ``structured_live`` True: lanes ARE live (render-invisible) → NOT a
+        working-no-tasks state → PROCEED (``defer=False``), streak RESET,
+        ``log=None`` (the fill/saturation logic logs).
+      * ``structured_live`` False (genuinely 0 non-stale lanes): a ``⏳`` claiming
+        work with nothing running → BOUNDED defer. ``defer=True`` while
+        ``streak < max_defers`` OR ``backlog <= 0`` (nothing to nudge for). At
+        ``streak >= max_defers`` WITH ``backlog > 0`` → ESCALATE: stop deferring
+        (``defer=False``) so the pane reaches the gated empty-lane nudge path
+        (its own idle / cooldown / GOAL_LANE_MAX_NUDGES give-up bound the
+        keystrokes) — never an unbounded identical skip loop (the #566 livelock
+        class). Both defer and escalate journal a greppable ``log``.
+
+    ``streak`` is the caller's NEW persisted defer streak.
+    """
+    if marker != "⏳" or render_waiters > 0:
+        return LaneWorkingNoTasks(False, 0, None)      # branch does not fire
+    if structured_live:
+        return LaneWorkingNoTasks(False, 0, None)      # lanes live -> proceed
+    streak = defer_streak + 1
+    if backlog > 0 and streak >= max_defers:
+        return LaneWorkingNoTasks(
+            False, streak,
+            "working-no-tasks ESCALATE (%d defers, backlog>0, 0 structured live "
+            "lanes -- proceeding to the gated nudge path)" % streak)
+    return LaneWorkingNoTasks(
+        True, streak,
+        "skip:working-no-tasks (⏳ marker, 0 structured live lanes, defer %d/%d)"
+        % (streak, max_defers))
+
+
+LaneLowMemSurface = namedtuple("LaneLowMemSurface", "surface streak surfaced")
+
+
+def lane_low_mem_surface_decision(*, low_mem, backlog, min_backlog,
+                                  streak, max_streak, already_surfaced):
+    """#571 — the persistent-low-mem CAPACITY-CEILING surface decider.
+
+    ``low_mem`` is the caller's measured "under-saturated fill blocked by
+    MemAvailable < GOAL_LANE_MIN_MEM_AVAIL_MB" boolean. The OOM protection (the
+    ``skip:low-mem`` itself and the 1536MB threshold) is UNCHANGED — this decider
+    only decides whether to ALSO emit the ONE owner-facing CAPACITY-CAPPED signal
+    (a persistent RAM ceiling is an OWNER DECISION: upgrade the box vs accept a
+    lower saturation).
+
+    Verdict (`LaneLowMemSurface(surface, streak, surfaced)` — ``streak`` and
+    ``surfaced`` are the caller's NEW persisted episode state):
+
+      * not ``low_mem``: the OOM skip did not fire this sweep → episode OVER →
+        streak RESET (0), surfaced RESET (False), ``surface=False``.
+      * ``low_mem`` and ``already_surfaced``: keep counting, ``surface=False``
+        (deduped — the signal fires EXACTLY once per episode).
+      * ``low_mem``, ``streak+1 >= max_streak`` AND ``backlog >= min_backlog``
+        AND not yet surfaced → ``surface=True`` (a PERSISTENT ceiling, not a
+        transient dip / thin backlog), ``surfaced=True``.
+      * otherwise (accumulating, or a thin backlog): ``surface=False``.
+    """
+    if not low_mem:
+        return LaneLowMemSurface(False, 0, False)
+    streak = streak + 1
+    if already_surfaced:
+        return LaneLowMemSurface(False, streak, True)
+    if streak >= max_streak and backlog >= min_backlog:
+        return LaneLowMemSurface(True, streak, True)
+    return LaneLowMemSurface(False, streak, False)

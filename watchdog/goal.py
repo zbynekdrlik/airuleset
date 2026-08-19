@@ -1868,6 +1868,19 @@ GOAL_LANE_SATURATION_WORKERS = 5      # fill floor caps here: >= min(5, backlog)
 # nudged regardless of memory.
 GOAL_LANE_MIN_MEM_AVAIL_MB = 1536
 
+# #571 -- max CONSECUTIVE working-no-tasks defers (a ⏳ marker with 0 render task
+# badges AND 0 structured live lanes) before the branch STOPS deferring and
+# proceeds to the gated empty-lane nudge path. Bounds the pre-#571 unbounded
+# identical skip loop (the #566 livelock class) without nudging a genuinely-idle
+# ⏳ box before a few sweeps confirm it. Each sweep is ~60-70s, so 3 ~= 3-4 min.
+GOAL_LANE_WNT_MAX_DEFERS = 3
+# #571 -- consecutive low-mem skips (under-saturated fill blocked by MemAvailable
+# < GOAL_LANE_MIN_MEM_AVAIL_MB) with a genuine backlog before the ONE owner-facing
+# CAPACITY-CAPPED decision line fires (deduped once per episode). ~5 sweeps
+# (~5-6 min) confirms a PERSISTENT ceiling, not a transient dip; the OOM skip
+# itself and the 1536MB threshold are UNCHANGED.
+GOAL_LANE_LOWMEM_SURFACE_STREAK = 5
+
 # #442 re-fix 2 -- the UNDER-SATURATED (non-zero worker) nudge text. Distinct
 # from GOAL_LANE_NUDGE_TEXT (which says "0 dispatched workerov"): here 1-4 workers
 # ARE running, so the text names the real count and frames saturation as
@@ -2220,6 +2233,74 @@ def _lane_pre_send_race(ok, fresh_armed, loc):
     return False, []
 
 
+def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
+                   backlog_fetch, state, loc):
+    """#571 -- the STRUCTURED live-lane gate + working-no-tasks decision,
+    extracted so the capped ``goal_lane_occupancy_nudge`` does not grow (the
+    #509/#530/#511 "never grow the capped function, extract the new branch"
+    mechanic).
+
+    Resolves the live-lane count + evidence and the backlog ONCE (both RETURNED
+    for the saturation gate to REUSE -- one ``count_live_workers`` pass per
+    sweep), then runs the working-no-tasks decision on the #565 EVIDENCE
+    predicate (``lane_has_live_evidence`` -- any non-stale lane), NEVER the
+    flapping render ``waiters`` badge. Persists the defer streak in
+    ``rec['wntd']`` (rides in the existing goal_lane rec, so the #531 orphan
+    reaper already covers it -- no new state namespace). Returns
+    ``(defer:bool, log:str|None, live_workers:int, backlog_n)``."""
+    live_workers, ev = watchdog.count_live_workers(
+        projects_dir, cwd, sid, now, GOAL_LANE_LIVE_WINDOW_S)
+    backlog_n = watchdog._cached_backlog_count(cwd, backlog_fetch, state, now)
+    wnt = _one_glance.lane_working_no_tasks_decision(
+        marker=marker, render_waiters=waiters,
+        structured_live=watchdog.lane_has_live_evidence(ev),
+        backlog=(backlog_n if isinstance(backlog_n, int) else 0),
+        defer_streak=rec.get("wntd", 0), max_defers=GOAL_LANE_WNT_MAX_DEFERS)
+    rec["wntd"] = wnt.streak
+    log = None
+    if wnt.log:
+        log = ("lane-occupancy %s waiters=%d workers=%d -> %s"
+               % (loc, waiters, live_workers, wnt.log))
+    return wnt.defer, log, live_workers, backlog_n
+
+
+def _lane_lowmem_reset(rec):
+    """#571 -- clear the low-mem CAPACITY-CAPPED surface episode when the OOM skip
+    did NOT fire this sweep (mem recovered / box saturated / not-under-saturated)
+    so a FUTURE persistent low-mem run re-surfaces once."""
+    rec.pop("lms", None)
+    rec.pop("lmsurf", None)
+
+
+def _lane_lowmem_skip(rec, live_workers, waiters, backlog_n, mem_mb, loc):
+    """#571 -- the low-mem skip handling, extracted. The OOM-protection
+    ``skip:low-mem`` line and the 1536MB threshold are UNCHANGED; after
+    ``GOAL_LANE_LOWMEM_SURFACE_STREAK`` consecutive skips with a genuine backlog
+    this ALSO emits ONE deduped CAPACITY-CAPPED owner-decision line (the
+    persistent-RAM-ceiling surface: upgrade the box vs accept a lower
+    saturation). Returns the list of log lines. Episode state (``lms`` streak +
+    ``lmsurf`` fired-flag) rides in the existing goal_lane rec (#531-reaped)."""
+    dec = _one_glance.lane_low_mem_surface_decision(
+        low_mem=True, backlog=backlog_n, min_backlog=GOAL_LANE_MIN_BACKLOG,
+        streak=rec.get("lms", 0), max_streak=GOAL_LANE_LOWMEM_SURFACE_STREAK,
+        already_surfaced=bool(rec.get("lmsurf")))
+    rec["lms"] = dec.streak
+    rec["lmsurf"] = dec.surfaced
+    out = ["lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+           "skip:low-mem MemAvailable=%dMB (< %dMB)"
+           % (loc, live_workers, waiters, backlog_n, mem_mb,
+              GOAL_LANE_MIN_MEM_AVAIL_MB)]
+    if dec.surface:
+        out.append(
+            "lane-occupancy %s -> CAPACITY-CAPPED: %d consecutive low-mem skips, "
+            "MemAvailable=%dMB < %dMB with backlog=%d and only %d live lane(s) -- "
+            "PERSISTENT RAM ceiling, OWNER DECISION needed (upgrade box vs accept "
+            "lower saturation). 1536MB threshold NOT auto-changed."
+            % (loc, dec.streak, mem_mb, GOAL_LANE_MIN_MEM_AVAIL_MB, backlog_n,
+               live_workers))
+    return out
+
+
 def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               tmtime, loc, send_fn, dry_run, handled,
                               projects_dir, backlog_fetch=None, state=None,
@@ -2294,10 +2375,12 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               "delivered to this session this cycle)")
         return logs, False
     waiters = watchdog._pane_live_task_count(captured)
-    if marker == "⏳" and waiters <= 0:
-        logs.append("lane-occupancy %s waiters=%d -> skip:working-no-tasks "
-                    "(⏳ marker but 0 live tasks -- session claims working, "
-                    "defer)" % (loc, waiters))
+    # #571 -- structured live-lane gate; live_workers/backlog_n reused below.
+    _wnt_defer, _wnt_log, live_workers, backlog_n = _lane_wnt_gate(
+        rec, marker, waiters, projects_dir, cwd, sid, now, backlog_fetch, state, loc)
+    if _wnt_log:
+        logs.append(_wnt_log)
+    if _wnt_defer:
         return logs, False
     # #502 -- ACCOUNT-LIMIT BACK-OFF (extracted helper, keeps this function small).
     # When the supervisor's OWN transcript shows a recent account-level dispatch
@@ -2338,9 +2421,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # the render floor's stale-strip over-count used to SUPPRESS exactly that
     # (#486-G2 dangerous direction). It is the SAME structured count the #509
     # effectiveness signal already uses below, so the two now agree by construction.
-    live_workers, _ev = watchdog.count_live_workers(
-        projects_dir, cwd, sid, now, GOAL_LANE_LIVE_WINDOW_S)
-    backlog_n = watchdog._cached_backlog_count(cwd, backlog_fetch, state, now)
+    # #571 -- live_workers/backlog_n resolved ABOVE (reused, one pass per sweep).
     if not isinstance(backlog_n, int) or backlog_n <= 0:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%r -> "
                     "no measurable open backlog, skip"
@@ -2375,6 +2456,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     floor = min(GOAL_LANE_SATURATION_WORKERS, backlog_n)
     if live_workers >= floor:
         _lane_clear_effectiveness(rec)   # #509: filled -> re-probe fresh on next dip
+        _lane_lowmem_reset(rec)          # #571: box filled -> low-mem episode over
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
                     "saturated (>= %d workers), skip"
                     % (loc, live_workers, waiters, backlog_n, floor))
@@ -2401,11 +2483,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # (a fully stalled box must always be nudged).
         mem_mb = _mem_available_mb()
         if mem_mb is not None and mem_mb < GOAL_LANE_MIN_MEM_AVAIL_MB:
-            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                        "skip:low-mem MemAvailable=%dMB (< %dMB)"
-                        % (loc, live_workers, waiters, backlog_n, mem_mb,
-                           GOAL_LANE_MIN_MEM_AVAIL_MB))
+            logs += _lane_lowmem_skip(rec, live_workers, waiters, backlog_n,
+                                      mem_mb, loc)   # #571: OOM skip + surface
             return logs, True
+        _lane_lowmem_reset(rec)          # #571: mem OK -> low-mem episode over
     # #442 THIRD GAP -- the idle gate, now applied PER BRANCH (was a silent
     # top-of-function early-return that structurally excluded every busy
     # under-saturated session). The 0-worker EMPTY-lane branch keeps the
