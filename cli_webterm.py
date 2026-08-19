@@ -281,11 +281,14 @@ def _tab_sessions(inventory):
 
 
 def _json_for_script(obj):
-    """`json.dumps` with the three chars that could break out of a <script>
-    element neutralized, so an inventory label can never inject markup/JS."""
+    """`json.dumps` with the chars that could break out of a <script> element
+    neutralized, so an inventory label can never inject markup/JS: `<`/`>`/`&`
+    (a literal `</script>` / entity) plus U+2028/U+2029 (JS line terminators
+    that are legal in JSON but would break the `const CFG = {…}` literal)."""
     return (json.dumps(obj, ensure_ascii=False)
             .replace("<", "\\u003c").replace(">", "\\u003e")
-            .replace("&", "\\u0026"))
+            .replace("&", "\\u0026")
+            .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
 
 
 def render_dashboard_html(inventory, ttyd_base=None):
@@ -300,10 +303,13 @@ def render_dashboard_html(inventory, ttyd_base=None):
         % (i, _html_escape(t["title"]), _html_escape(t["alias"]))
         for i, t in enumerate(tabs))
     cfg = {"ttyd_base": ttyd_base, "sessions": tabs}
-    return (_DASHBOARD_TEMPLATE
-            .replace("@@COUNT@@", str(len(tabs)))
-            .replace("@@BUTTONS@@", buttons)
-            .replace("@@CFG_JSON@@", _json_for_script(cfg)))
+    subst = {"@@COUNT@@": str(len(tabs)), "@@BUTTONS@@": buttons,
+             "@@CFG_JSON@@": _json_for_script(cfg)}
+    # SINGLE PASS over the TEMPLATE — inserted content (an inventory label in a
+    # button, the config JSON) is never re-scanned, so a label that happens to
+    # equal a `@@…@@` sentinel can't splice a later substitution into itself.
+    return re.sub(r"@@(?:COUNT|BUTTONS|CFG_JSON)@@",
+                  lambda mo: subst[mo.group(0)], _DASHBOARD_TEMPLATE)
 
 
 # NOTE: `.replace()` substitution (not `%`-formatting) — the CSS/JS body is full
@@ -344,7 +350,7 @@ body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
-<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo Ctrl+Alt+1..9 · prihlásenie raz (tailnet-only)</div>
+<div id="hint">@@COUNT@@ tmux sessions · klik na záložku prepne · Ctrl+Alt+1..9 (keď je fokus na lište) · prihlásenie raz (tailnet-only)</div>
 <script>
 const CFG = @@CFG_JSON@@;
 const frames = document.getElementById('frames');
@@ -352,19 +358,24 @@ const made = {};
 function activate(idx) {
   const s = CFG.sessions[idx];
   if (!s) return;
-  if (!made[idx]) {
+  if (!made[idx]) {                       // lazy: one iframe per activated tab, never N eager
     const f = document.createElement('iframe');
     f.className = 'term';
     f.src = CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id);
     frames.appendChild(f);
-    made[idx] = f;
+    made[idx] = f;                        // kept alive; switching only hides/shows
   }
   for (const k in made) made[k].style.display = (+k === idx) ? 'block' : 'none';
-  document.querySelectorAll('.tab').forEach((t, i) =>
-    t.classList.toggle('active', i === idx));
+  document.querySelectorAll('.tab').forEach((t) =>
+    t.classList.toggle('active', +t.dataset.idx === idx));
 }
-document.querySelectorAll('.tab').forEach((t, i) =>
-  t.addEventListener('click', () => activate(i)));
+document.querySelectorAll('.tab').forEach((t) =>
+  t.addEventListener('click', () => activate(+t.dataset.idx)));
+// Ctrl+Alt+1..9 switches tabs — but ONLY while the parent page (tab bar) has
+// focus: once you click INTO a terminal, the ttyd iframe is a DIFFERENT origin
+// (:7682 vs the dashboard's :8080), so the parent window stops receiving its
+// keydowns. Clicking a tab always switches; full keyboard-switch-while-typing
+// would need a same-origin proxy or a ttyd-side bridge (tracked as a follow-up).
 window.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.altKey && e.key >= '1' && e.key <= '9') {
     const idx = parseInt(e.key, 10) - 1;
@@ -379,8 +390,9 @@ if (CFG.sessions.length) activate(0);   // land in the first terminal, not a lan
 
 
 # --------------------------------------------------------------------------- #
-# Provisioning — dev1-only. Renders the systemd --user ttyd unit + launcher +
-# inventory + dashboard, enables the unit, configures tailscale serve. Mirrors
+# Provisioning — dev1-only. Renders the systemd --user ttyd + dashboard units +
+# launcher + inventory + dashboard (both bound to the tailscale IP), enables the
+# units, and RESETS any stale tailscale serve config (#579). Mirrors
 # `setup_filedrop_service()`.
 # --------------------------------------------------------------------------- #
 
@@ -409,15 +421,21 @@ def _ensure_credential():
     return cred
 
 
-# `-O`/--check-origin: reject a cross-origin websocket upgrade (CSWSH). VERIFIED
-# live through tailscale serve — a raw ws upgrade with a foreign Origin gets no
-# 101 (serve surfaces a 502), a same-origin one gets 101, and the legit browser
-# terminal keeps working. This is defence-in-depth on top of the PRIMARY CSWSH
-# defence, which holds even without `-O`: ttyd requires a fixed AuthToken in the
-# ws init message (an empty/wrong token spawns no shell), and its `/token`
-# endpoint sends NO CORS headers, so a browser attacker's cross-origin
-# `fetch("/token")` is blocked from READING the token — it can never construct a
-# valid ws init. `-c` basic-auth gates both /token and the ws.
+# `-O`/--check-origin: reject a cross-origin websocket upgrade (CSWSH). KEPT
+# under the #579 iframe topology and it does NOT block the terminal: the ttyd
+# page loads INSIDE the dashboard iframe from `http://<ip>:7682/`, so the iframe
+# document's own origin is `<ip>:7682` and the ws it opens carries `Origin:
+# http://<ip>:7682` — same-origin with the ws Host, so `-O` returns 101. The
+# parent dashboard origin (`<ip>:8080`) never enters the ws Origin header (the ws
+# is initiated by the :7682 document, not the parent). This is defence-in-depth
+# on top of the PRIMARY CSWSH defence, which holds even without `-O`: ttyd
+# requires a fixed AuthToken in the ws init message (an empty/wrong token spawns
+# no shell), and its `/token` endpoint sends NO CORS headers, so a browser
+# attacker's cross-origin `fetch("/token")` is blocked from READING the token —
+# it can never construct a valid ws init. `-c` basic-auth gates both /token and
+# the ws. (ttyd's default responses carry no X-Frame-Options/CSP frame-ancestors
+# — verified live: a 401 from :7682 sends only WWW-Authenticate — so the iframe
+# embeds cleanly; a future ttyd that adds a framing header would need revisiting.)
 _LAUNCH_TEMPLATE = """#!/usr/bin/env bash
 # airuleset-managed (#555/#579) — do NOT edit; regenerate via `python3 airuleset.py install`.
 # Reads the basic-auth credential from a mode-600 file (keeps it out of the unit
@@ -458,9 +476,12 @@ def _render_webterm_dash_unit(bind_ip):
 
 # dev1's tailscale IP must be inside the CGNAT block tailscale uses
 # (100.64.0.0/10 — second octet 64..127); anything else is NOT a tailnet address
-# and must never become a bind target (that could expose a shell publicly).
+# and must never become a bind target (that could expose a shell publicly). Every
+# octet is range-checked (0..255) so a malformed value like 100.64.999.1 is
+# rejected too, not merely "second octet in range".
+_OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
 _TS_CGNAT_RE = re.compile(
-    r"^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$")
+    r"^100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\." + _OCTET + r"\." + _OCTET + r"$")
 
 
 def _tailscale_ip(run=None):
@@ -487,8 +508,11 @@ def _reset_tailscale_serve(run=None):
     """Idempotently clear any leftover `tailscale serve` config from the old
     (#555) serve-fronted design — the services now bind the tailscale IP
     directly, so no serve mapping should remain (a stale one would keep matching
-    only the MagicDNS name — the exact #579 cross-node 404). Best-effort: an
-    already-empty serve config makes this a no-op."""
+    only the MagicDNS name — the exact #579 cross-node 404). `serve reset` is a
+    NODE-WIDE reset: on dev1 the webterm gateway is the ONLY `tailscale serve`
+    user (filedrop binds directly), so there is no collateral today; a future
+    dev1 service that uses `tailscale serve` would need this narrowed to the
+    specific ports. Best-effort: an already-empty serve config makes it a no-op."""
     run = run or subprocess.run
     try:
         run(["tailscale", "serve", "reset"], capture_output=True, text=True)
@@ -544,6 +568,9 @@ def setup_webterm_service(run=None):
     ttyd_base = "http://%s:%d" % (bind_ip, WEBTERM_TTYD_PORT)
     WEBTERM_DASH_INDEX.write_text(
         render_dashboard_html(inv, ttyd_base=ttyd_base), encoding="utf-8")
+    # Remove the old serve-fronted single-file dashboard (superseded by the
+    # served webterm-dash/ directory) so no stale copy lingers (#579).
+    (CLAUDE_DIR / "webterm-dashboard.html").unlink(missing_ok=True)
     _ensure_credential()
     WEBTERM_LAUNCH_PATH.write_text(render_webterm_launch_script(bind_ip),
                                    encoding="utf-8")

@@ -4,8 +4,10 @@
 # by `airuleset.py install` via setup_webterm_service() — unlike the File-Drop
 # unit, which runs on every box. ExecStart runs the generated launcher script
 # ({{LAUNCH_SCRIPT}} is substituted with the absolute path at install time); the
-# launcher reads the basic-auth credential from a mode-600 file and execs ttyd on
-# 127.0.0.1:7681. tailscale serve fronts it tailnet-only.
+# launcher reads the basic-auth credential from a mode-600 file and execs ttyd
+# bound DIRECTLY to dev1's tailscale IP on :7682 (#579 — no reverse proxy; the
+# old `tailscale serve` layer matched only the MagicDNS name, so a raw-IP request
+# 404'd cross-node). The bind IP is resolved dynamically at install time.
 #
 # Deliberately LIGHT hardening: this service spawns interactive ssh + tmux child
 # processes (it needs ~/.ssh, ~/.secrets, AF_UNIX for ssh-agent/control sockets),

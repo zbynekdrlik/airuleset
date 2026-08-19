@@ -205,6 +205,26 @@ class TestRendering(unittest.TestCase):
         self.assertNotIn("<b>PWN</b>", html)      # never unescaped
         self.assertIn("PWN", html)                # but the text survives escaped
 
+    def test_dashboard_label_cannot_close_the_script_element(self):
+        # A `</script>` in a label must not break out of the embedded config JS.
+        inv = [{"id": "x", "label": "</script><script>alert(1)</script>",
+                "kind": "owner", "local": True, "host": None, "user": None}]
+        html = w.render_dashboard_html(inv, ttyd_base="http://b:7682")
+        self.assertNotIn("</script><script>", html)   # neutralized in the JSON
+        self.assertIn("\\u003c/script\\u003e", html)   # rendered as escaped codepoints
+
+    def test_dashboard_sentinel_label_does_not_splice_config(self):
+        # A label equal to a template sentinel must NOT splice the config JSON
+        # into the tab markup (single-pass substitution guards this).
+        inv = [{"id": "x", "label": "@@CFG_JSON@@", "kind": "owner",
+                "local": True, "host": None, "user": None}]
+        html = w.render_dashboard_html(inv, ttyd_base="http://100.64.0.9:7682")
+        # The sentinel-shaped label survives as literal text in the tab title,
+        # and the config JSON appears exactly ONCE (in the <script>, not spliced
+        # into a title attribute).
+        self.assertIn("@@CFG_JSON@@", html)
+        self.assertEqual(html.count('"ttyd_base"'), 1)
+
     def test_launch_script_binds_tailscale_ip_not_loopback(self):
         # #579: ttyd binds the tailscale IP directly on 7682 (serve is gone);
         # NEVER loopback, NEVER the old 7681.
@@ -349,6 +369,19 @@ class TestTailscaleIP(unittest.TestCase):
         # 100.200.x is NOT in 100.64.0.0/10 (second octet must be 64..127).
         self.assertIsNone(w._tailscale_ip(run=_run_returning("100.200.0.1\n")))
 
+    def test_rejects_malformed_octets(self):
+        # A malformed value in the CGNAT band (octet > 255) is still rejected.
+        self.assertIsNone(w._tailscale_ip(run=_run_returning("100.64.999.1\n")))
+        self.assertIsNone(w._tailscale_ip(run=_run_returning("100.64.1\n")))
+
+    def test_boundary_ips(self):
+        self.assertEqual(w._tailscale_ip(run=_run_returning("100.64.0.0\n")),
+                         "100.64.0.0")
+        self.assertEqual(w._tailscale_ip(run=_run_returning("100.127.255.255\n")),
+                         "100.127.255.255")
+        self.assertIsNone(w._tailscale_ip(run=_run_returning("100.63.0.1\n")))
+        self.assertIsNone(w._tailscale_ip(run=_run_returning("100.128.0.1\n")))
+
 
 class TestDashUnit(unittest.TestCase):
     def test_dash_unit_binds_tailscale_ip_and_directory(self):
@@ -396,6 +429,23 @@ class TestShortAlias(unittest.TestCase):
         ordered = sorted(aliases, key=w._tab_order_key)
         self.assertEqual(
             ordered, ["dev1", "dev2", "gk", "m1", "m3", "miva", "d1", "d2", "aaa", "zzz"])
+
+    def test_tab_sessions_end_to_end_order(self):
+        # The FULL pipeline (alias derivation -> sort) over a realistic
+        # inventory produces the owner's stable Windows-Terminal tab order.
+        inv = [
+            {"id": "montalu3-subdev", "label": "montalu3@subdev", "user": "montalu3"},
+            {"id": "dev2", "label": "dev2", "user": "newlevel"},
+            {"id": "david-subdev", "label": "david@subdev", "user": "david"},
+            {"id": "dev1", "label": "dev1 (localhost)", "user": None, "local": True},
+            {"id": "gatekeeper", "label": "gatekeeper", "user": "gatekeeper"},
+            {"id": "montalu1-subdev", "label": "montalu1@subdev", "user": "montalu1"},
+            {"id": "miva1-subdev", "label": "miva1@subdev", "user": "miva1"},
+            {"id": "admin-forestshop-dev", "label": "admin@forestshop-dev", "user": "admin"},
+        ]
+        aliases = [t["alias"] for t in w._tab_sessions(inv)]
+        self.assertEqual(
+            aliases, ["dev1", "dev2", "gk", "m1", "m3", "miva", "d1", "admin"])
 
 
 class TestSetupWiring(unittest.TestCase):
