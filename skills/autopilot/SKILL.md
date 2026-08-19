@@ -194,7 +194,13 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   `stale!` any W member with NO fresh (≤24h) stream-authored push comment (never a false accusation — a
   gh error / zero comments / unresolvable identity leaves it UNTAGGED), and the ~daily nudge NAMES the
   stale members with the required action (re-verify the blocker + remind the third party TODAY, with a
-  ticket comment).
+  ticket comment). **A daily reminder must be a SUBSTANTIVE, CONCRETE ask that MOVES the ticket,
+  never a content-free ack (#568):** the mandated 1×/day third-party reminder is a real push — a
+  specific question, a named blocker, the exact thing you need from them — NEVER a hollow "still
+  working on it" acknowledgement; the `stale!` tag resets its 24h freshness clock on ANY
+  stream-authored comment, so a content-free ack would silence the tag while the third party stays
+  genuinely un-nudged (the exact "never actually nudged them" failure in tag-compliant disguise). A
+  concrete ask is a real povzbudenie, not status noise.
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do
