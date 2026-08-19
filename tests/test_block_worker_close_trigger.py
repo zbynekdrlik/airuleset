@@ -41,7 +41,11 @@ class TestGrammar(TestCase):
     def _hit(self, text):
         return ct.find_close_trigger(text)
 
-    def test_positives_all_match_github_grammar(self):
+    def test_positives_all_match_the_close_grammar(self):
+        # The #564 incident proves KEYWORD + ':' + space + '#N' auto-closes. The
+        # no-separator / colon-no-space forms (`fix#12`, `fix:#12`, `Fixes:#12`)
+        # are matched fail-SAFE (block-more) rather than as verified GitHub
+        # behaviour — review A-F5; the cost of over-blocking them is a reword.
         for t in ("fix: #12", "Fixes:#12", "fix #12", "fix:#12", "FIXES #12",
                   "close #4", "closes #4", "closed #4", "Closed:#4",
                   "resolve: octocat/Hello-World#3", "resolves #9", "Resolved #1",
@@ -219,6 +223,85 @@ class TestHookPassesSafeAndNonWorker(_HookBase):
     def test_bypass_marker_inside_message_still_blocks(self):
         r = self.run_hook('git commit -m "fix: #12 airuleset:close-trigger-ok"')
         self.assertEqual(r.returncode, 2, r.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# Layer 3 -- adversarial-review hardening (2x fresh-context reviewers, #567)
+# --------------------------------------------------------------------------- #
+
+class TestReviewHardeningGrammar(TestCase):
+    def _hit(self, t):
+        return ct.find_close_trigger(t)
+
+    def test_af1_number_glued_to_word_char_is_not_a_ref(self):
+        # A-F1: GitHub does NOT autolink `#N` when digits are glued to a word
+        # char, so these are NOT close-triggers and must PASS.
+        for t in ("fix #3d overlay", "fix #2fa prompt", "resolve #4k video",
+                  "fix #1password sync", "fix #12foo", "fix #12_bar",
+                  "closes #404page"):
+            self.assertIsNone(self._hit(t), "should NOT match: %r" % t)
+
+    def test_af1_number_before_punctuation_still_blocks(self):
+        # GitHub DOES autolink `#12` before `-`/`.`/`,`/space -- still block.
+        for t in ("fix #12-foo", "fix #12.bar", "fix #12,", "fix #12 end"):
+            self.assertIsNotNone(self._hit(t), "should match: %r" % t)
+
+    def test_af3_gh_dash_n_and_issue_url_are_failsafe_blocked(self):
+        # A-F3: GH-N and a full issue URL, added fail-safe (block-more).
+        self.assertIsNotNone(self._hit("fixes GH-3"))
+        self.assertIsNone(self._hit("fixes GH-3x"))           # glued word char
+        self.assertIsNotNone(self._hit(
+            "fixes https://github.com/octocat/Hello-World/issues/3"))
+        self.assertIsNotNone(self._hit("fixes github.com/o/r/issues/3"))
+        # keyword NOT adjacent to the URL -> not a trigger.
+        self.assertIsNone(self._hit("fix explained in github.com/o/r/issues/3"))
+
+
+class TestReviewHardeningExtraction(TestCase):
+    def _scan(self, cmd, cwd=WORKTREE_CWD):
+        return ct.scan_commit_command(cmd, cwd)
+
+    def test_af2_dashed_git_commit_form_is_scanned(self):
+        # A-F2: `git-commit` (the dashed executable form) must not evade.
+        self.assertTrue(self._scan('git-commit -m "fixes #12"'))
+
+    def test_bf4_backslash_escaped_quote_does_not_split_the_message(self):
+        # B-F4: `\"` inside `-m "..."` must not toggle quote state, else a
+        # following `&&` splits the trigger into a non-commit segment.
+        self.assertTrue(self._scan('git commit -m "note \\" && fixes #12 rest"'))
+
+    def test_bf3_printf_redirect_written_in_same_command(self):
+        # B-F3: a message file created by a printf/echo redirect in the SAME
+        # command does not exist on disk yet -- capture it from the command.
+        self.assertTrue(self._scan(
+            "printf 'fix #99\\n' > m.txt && git commit -F m.txt"))
+        self.assertTrue(self._scan(
+            "echo 'closes #77' > n.txt && git commit -F n.txt"))
+        self.assertIsNone(self._scan(
+            "echo 'review (#77)' > ok.txt && git commit -F ok.txt"))
+
+
+class TestReviewHardeningBypass(TestCase):
+    def test_bf1_marker_inside_heredoc_body_does_not_bypass(self):
+        # B-F1: the bypass marker only counts as REAL shell text; a marker in a
+        # heredoc message body must NOT disable the guard.
+        cmd = ("git commit -F - <<'EOF'\nfix #12 real\n"
+               "the airuleset:close-trigger-ok note\nEOF")
+        self.assertFalse(ct.has_bypass_marker(cmd))
+        self.assertTrue(ct.scan_commit_command(cmd, WORKTREE_CWD))
+
+    def test_bf2_marker_behind_escaped_quote_does_not_bypass(self):
+        # B-F2: same root cause via an escaped `\"` in a -m value.
+        cmd = 'git commit -m "fix #12 \\" airuleset:close-trigger-ok \\""'
+        self.assertFalse(ct.has_bypass_marker(cmd))
+        self.assertTrue(ct.scan_commit_command(cmd, WORKTREE_CWD))
+
+    def test_legit_bypass_comment_is_honoured(self):
+        self.assertTrue(ct.has_bypass_marker(
+            'git commit -m "fix: #12"  # airuleset:close-trigger-ok reason'))
+
+    def test_no_bypass_when_marker_absent(self):
+        self.assertFalse(ct.has_bypass_marker('git commit -m "fix: #12"'))
 
 
 def _rmtree(p):
