@@ -159,26 +159,28 @@ def _fetch_ttl():
                OPS_WAIT_FETCH_TTL_MIN_S)
 
 
-def _cached_ops_wait(cwd, ops_wait_fetch, state, now, ttl=None, fail_ttl=None):
-    """The parked W member NUMBERS for the repo at `cwd`, CACHED per-cwd in
-    `state["ops_wait_cache"]` for `ttl` (a real list) / `fail_ttl` (a None
-    failure) — the faithful sibling of `_cached_backlog_count` (#365). This is
-    the load-bearing fix (#547 review): without it the fetch would spawn a
-    `--ops-wait` gh union subprocess EVERY 60s sweep for EVERY armed pane, on the
-    120s-budgeted sweep's critical path — the exact per-sweep-gh class the backlog
-    cache exists to prevent. Bounds it to at most one subprocess per repo per TTL,
-    shared across every armed pane on that repo.
+def _cached_member_fetch(cwd, fetch, state, now, cache_key, ttl=None,
+                         fail_ttl=None):
+    """A per-cwd TTL cache over a member-list `fetch` — the faithful sibling of
+    `_cached_backlog_count` (#365), keyed by `cache_key` so ONE implementation
+    serves BOTH the parked-W fetch (`ops_wait_cache`, #547) and the I-member
+    fetch (`i_members_cache`, #578). This is the load-bearing #547-review fix:
+    without it the fetch would spawn a gh union subprocess EVERY 60s sweep for
+    EVERY armed pane on the 120s-budgeted sweep's critical path. Bounds it to at
+    most one subprocess per repo per TTL, shared across every armed pane there.
 
-    `ops_wait_fetch is None` (not wired) -> None, no cache write (the "wired = on"
+    `fetch is None` (not wired) -> None, no cache write (the "wired = on"
     convention). A fetch exception -> None. A `ts` crossing the JSON persistence
     boundary is type-checked (a malformed/legacy entry reads as EXPIRED, never
     raises). None (unmeasurable) is cached only for `fail_ttl` so a transient gh
-    hiccup re-checks soon. Returns a `list[int]` or None — never a guessed []."""
-    if ops_wait_fetch is None:
+    hiccup re-checks soon. Returns a `list` or None — never a guessed []. The
+    list element TYPE is the fetch's own (ints for ops-wait numbers, dicts for
+    I-member records); this cache is element-type-agnostic."""
+    if fetch is None:
         return None
     ttl = _fetch_ttl() if ttl is None else ttl
     fail_ttl = OPS_WAIT_FETCH_FAIL_TTL_S if fail_ttl is None else fail_ttl
-    cache = state.setdefault("ops_wait_cache", {})
+    cache = state.setdefault(cache_key, {})
     entry = cache.get(cwd)
     if isinstance(entry, dict):
         try:
@@ -191,13 +193,30 @@ def _cached_ops_wait(cwd, ops_wait_fetch, state, now, ttl=None, fail_ttl=None):
             if age < entry_ttl:
                 return members if isinstance(members, list) else None
     try:
-        members = ops_wait_fetch(cwd)
+        members = fetch(cwd)
     except Exception:
         members = None
     if not (members is None or isinstance(members, list)):
         members = None
     cache[cwd] = {"ts": now, "members": members}
     return members
+
+
+def _cached_ops_wait(cwd, ops_wait_fetch, state, now, ttl=None, fail_ttl=None):
+    """The parked W member NUMBERS for the repo at `cwd`, CACHED per-cwd in
+    `state["ops_wait_cache"]` (#547). Thin wrapper over `_cached_member_fetch`."""
+    return _cached_member_fetch(cwd, ops_wait_fetch, state, now,
+                                "ops_wait_cache", ttl, fail_ttl)
+
+
+def _cached_i_members(cwd, i_members_fetch, state, now, ttl=None, fail_ttl=None):
+    """The WORKABLE (I) member RECORDS (`{number, createdAt, labels}`) for the
+    repo at `cwd`, CACHED per-cwd in `state["i_members_cache"]` (#578). Thin
+    wrapper over `_cached_member_fetch` — read only inside the ~daily nudge
+    branch so the `--audit` subprocess fires at most once per repo per TTL AND
+    only when actually nudging, never every sweep (#547 "cache the FETCH")."""
+    return _cached_member_fetch(cwd, i_members_fetch, state, now,
+                                "i_members_cache", ttl, fail_ttl)
 
 
 def _fmt_age(seconds):
@@ -335,16 +354,89 @@ def _recheck_decision(rec, i_count, w_members, now, cadence):
     return ("wait", new_rec, "grace")
 
 
-# The I→W/U re-audit clause (#552): instructs the loop to re-audit its `I` list
-# against the #526/#539 parking shapes. Fixed text (the I count itself is not
-# named — the watchdog cannot judge WHICH `I` member qualifies; that is session
-# judgment) — the word "re-audituj" is the stable token the wiring test keys on.
+# The GENERIC I→W/U re-audit clause (#552): the FALLBACK when the per-member
+# audit list cannot be fetched (fetch failed / not wired). Instructs the loop to
+# re-audit its `I` list against the #526/#539 parking shapes. The word
+# "re-audituj" is the stable token the wiring test keys on.
 _I_CLAUSE = (
     "I→W/U: re-audituj každý `I` tiket proti #526/#539 tvarom — fix-class čakajúci "
     "na externú udalosť → `ops-wait` s dôkazom (W); odoslaný acceptance thread → "
     "`ops-wait` (W); deferred-thread na pomenovanú udalosť → `ops-wait` (W); "
     "doručená živá owner-otázka → needs-answer/needs-decision (U); chained-I a "
     "reálne dispatchovateľné ostávajú `I`.")
+
+# #578 — the NAMED per-I-member audit. The gk `I 16` incident showed the generic
+# clause above is too weak: the session COULD enumerate its I members and STILL
+# left them mislabelled (a 7-ticket release-tail bare, a `ready-for-review` review
+# lane mis-called "stream-owned"). So when the member list IS available
+# (`_watchdog_i_members_fetch` via `--audit`), the nudge NAMES each member with
+# age + labels + a SHAPE-specific instruction, making "I know but I don't label"
+# impossible to sustain silently. Judgment stays in the session (no
+# auto-labelling); the supervisor still sets/clears every label with evidence.
+_I_MEMBER_MAX = 12   # bound the keystroke — name the oldest N, summarise the rest
+# labels that make a member DEFINITIVELY a gk review lane (the #4497 shape): only
+# this box can review/merge/close it, so it is DISPATCHED, never parked.
+_REVIEW_LANE_LABELS = ("ready-for-review", "needs-gatekeeper")
+
+
+def _member_age_s(created_at, now):
+    """Age in seconds of an ISO-8601 `createdAt` (`2026-08-03T00:00:00Z`), or
+    None when unparsable/blank. Tolerant of the trailing `Z` (older Pythons'
+    `fromisoformat` needs `+00:00`); a clock-skew future createdAt returns a
+    negative age which `_fmt_age` clamps to 0."""
+    if not isinstance(created_at, str) or not created_at.strip():
+        return None
+    import datetime
+    s = created_at.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    try:
+        return now - dt.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _i_member_line(rec, now):
+    """One named audit line: `#N (~age) [labels] → <short shape tag>`. The FULL
+    shape instructions live once in the clause HEADER (`_i_clause_named`); the
+    per-member tag is a short pointer so the keystroke stays bounded even at 12
+    members. A `ready-for-review`/`needs-gatekeeper` member is a review lane
+    (dispatch); any other is a bare/other member (ops-wait if gated)."""
+    labels = [lb for lb in (rec.get("labels") or []) if isinstance(lb, str)]
+    age_s = _member_age_s(rec.get("createdAt"), now)
+    age = _fmt_age(age_s) if age_s is not None else "?"
+    lbl = ",".join(labels) if labels else "bez labelov"
+    tag = ("review lane → DISPATCHNI"
+           if any(lb in _REVIEW_LANE_LABELS for lb in labels)
+           else "bare/other → ops-wait ak gated")
+    return "#%s (%s) [%s] %s" % (rec.get("number"), age, lbl, tag)
+
+
+def _i_clause_named(i_members, now):
+    """The named I→W/U audit clause — the two shape instructions once in the
+    header, then each valid member spelled out (oldest first) with a short tag,
+    capped at `_I_MEMBER_MAX` with a `(+K ďalších)` tail so the keystroke stays
+    bounded. `; `-joined (never a raw newline — a newline in a typed keystroke can
+    submit prematurely)."""
+    valid = [r for r in (i_members or [])
+             if isinstance(r, dict) and isinstance(r.get("number"), int)]
+    ordered = sorted(valid, key=lambda r: r.get("createdAt") or "")
+    shown = ordered[:_I_MEMBER_MAX]
+    body = "; ".join(_i_member_line(r, now) for r in shown)
+    tail = len(ordered) - len(shown)
+    tail_str = ("; (+%d ďalších `I` tiketov — re-audituj aj tie)" % tail
+                if tail > 0 else "")
+    return ("I→W/U (menovite): re-audituj tieto `I` tikety proti #526/#539 — "
+            "`ready-for-review`/`needs-gatekeeper` člen JE tvoja review lane, "
+            "DISPATCHNI ju (neparkuj); bare/umbrella člen gated na release/"
+            "checklist/iný ticket → olabeluj `ops-wait` s pomenovaným eventom "
+            "(supervisor, s dôkazom); label mení supervisor s dôkazom, nikdy "
+            "automaticky. Členovia: %s%s; chained-I a reálne dispatchovateľné "
+            "ostávajú `I`." % (body, tail_str))
 
 # The W→I re-check clause (#547, preserved as a subset of the combined nudge):
 # names the parked W numbers + their truthful park age, instructs re-checking the
@@ -367,7 +459,7 @@ _W_STALE_CLAUSE = (
     "JE evidencia).")
 
 
-def _nudge_text(i_count, w_members, now, w_first_seen):
+def _nudge_text(i_count, w_members, now, w_first_seen, i_members=None):
     """The partition-audit keystroke injected into the armed loop. Carries the
     shared `stuck-check: ` prefix (own-payload recognition + machine-prompt
     exclusion — see the module docstring) and composes ONE ping from whichever
@@ -375,12 +467,20 @@ def _nudge_text(i_count, w_members, now, w_first_seen):
     (naming the parked W numbers + their truthful `w_first_seen` age) when W is
     non-empty. When ONLY W applies (I==0), the text degrades to #547's W-only
     nudge; when both apply, both clauses ride one keystroke. The label change is
-    always the SUPERVISOR's with evidence, never an auto-unlabel by the watchdog."""
+    always the SUPERVISOR's with evidence, never an auto-unlabel by the watchdog.
+
+    `i_members` (#578): the fetched WORKABLE (I) member records (`{number,
+    createdAt, labels}`, via `_cached_i_members`). When present + non-empty, the
+    I clause NAMES each member with age + labels + a shape-specific instruction
+    (`_i_clause_named`); when None (fetch failed / not wired) or empty it degrades
+    to the generic `_I_CLAUSE` — never a crash, never a bare count."""
     i_pos = isinstance(i_count, int) and i_count > 0
     w_pos = isinstance(w_members, list) and bool(w_members)
     clauses = []
     if i_pos:
-        clauses.append(_I_CLAUSE)
+        valid = [r for r in (i_members or [])
+                 if isinstance(r, dict) and isinstance(r.get("number"), int)]
+        clauses.append(_i_clause_named(valid, now) if valid else _I_CLAUSE)
     if w_pos:
         age = (_fmt_age(now - w_first_seen)
                if isinstance(w_first_seen, (int, float)) else "?")
@@ -423,7 +523,8 @@ def _prune_ops_wait_orphans(wrecs, visited_sids, now,
 
 def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                           dry_run, handled, ops_wait_fetch, state,
-                          sleep_fn=None, cadence=None, i_count=None):
+                          sleep_fn=None, cadence=None, i_count=None,
+                          i_members_fetch=None):
     """Audit ONE armed candidate pane's partition (I→W/U + W→I) and, on cadence,
     deliver ONE verified re-audit nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -451,7 +552,14 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     `handled` set (at most ONE keystroke per pane per sweep across the keystroke
     jobs — this job runs AFTER the lane nudge in the loop, so a pane the lane
     nudge already typed is deferred to next sweep, and a nudge WE send claims the
-    sid so any keystroke job later in the SAME sweep skips it)."""
+    sid so any keystroke job later in the SAME sweep skips it).
+
+    `i_members_fetch(cwd)` (#578): the injected I-member seam — the WORKABLE
+    member records (`{number, createdAt, labels}`) for the NAMED audit clause,
+    read through `_cached_i_members` (per-repo TTL cache) and ONLY inside the
+    nudge branch, so the `--audit` subprocess fires at most once per repo per TTL
+    AND only when actually nudging (~daily), never every sweep. None (not wired /
+    fetch failed) degrades the nudge to the generic `_I_CLAUSE` — never a crash."""
     logs = []
     cadence = cadence or _cadence()
     # CACHED per-repo (#547 review): the fetch fires at most once per repo per
@@ -504,7 +612,12 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
         logs.append("ops-wait-recheck %s -> WOULD-NUDGE partition %s" % (loc, sig))
         return logs
 
-    text = _nudge_text(i_count, members, now, new_rec["w_first_seen"])
+    # #578: fetch the WORKABLE I members (cached, once per repo per TTL) ONLY here
+    # in the nudge branch, so the `--audit` subprocess never fires on a wait/skip
+    # sweep. None (not wired / fetch failed) degrades to the generic clause.
+    i_members = _cached_i_members(cwd, i_members_fetch, state, now)
+    text = _nudge_text(i_count, members, now, new_rec["w_first_seen"],
+                       i_members=i_members)
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual
     # stuck send stays reclaimable, cleared only on a confirmed submit.
     watchdog._janitor_mark_watch(state, pid, now)

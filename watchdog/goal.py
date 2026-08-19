@@ -3005,7 +3005,8 @@ def _prune_goal_lane_orphans(recs, visited_sids, now,
 def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
-                    sweep_deadline=None, ops_wait_fetch=None):
+                    sweep_deadline=None, ops_wait_fetch=None,
+                    i_members_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -3112,7 +3113,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += _ops_wait_recheck.goal_ops_wait_recheck(
                 now, run, wrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 ops_wait_fetch=ops_wait_fetch, state=state, sleep_fn=sleep_fn,
-                i_count=glance.backlog)
+                i_count=glance.backlog, i_members_fetch=i_members_fetch)  # #578
     if not dry_run:   # #531 -- prune goal_lane for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_lane_orphans(recs, visited_sids, now)
         # #547 -- the same orphan prune for the ops-wait re-check namespace.

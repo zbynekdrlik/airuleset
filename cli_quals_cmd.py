@@ -98,6 +98,26 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                                           row.get("title") or ""))
 
 
+def _print_audit_rows(rows, own_stream=None):
+    """`number<TAB>createdAt<TAB>action<TAB>labels` per WORKABLE (I) member,
+    OLDEST first — the `--audit` output the job-20 named partition-audit nudge
+    reads (#578). `labels` is the COMMA-joined label-name list (empty for a
+    label-less core ticket), so the watchdog can NAME each I member with its
+    labels + derive its shape (a `ready-for-review`/`needs-gatekeeper` member is
+    a review lane; a bare member is a candidate for `ops-wait` if release/
+    checklist/umbrella-gated). Comma, not space, so a label with an internal
+    space is never split. Field 0 stays the issue number, and the `action`
+    column (field 2) is the SAME action-only/implement discriminator `--list`
+    carries, so existing number-parsing / column layout is unaffected."""
+    for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
+        row = rows[n]
+        action = _row_action(row, own_stream)
+        names = ",".join(
+            (lb or {}).get("name") or "" for lb in (row.get("labels") or [])
+            if isinstance(lb, dict) and (lb or {}).get("name"))
+        print("%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "", action, names))
+
+
 def _print_ping_rows(ping_entries):
     """Print the ticketless ❓ pings that fold into `U N` (#512), one per member,
     each tagged `ping` in the reason column — so `--waiting`'s member list
@@ -397,7 +417,8 @@ def cmd_slice_quals(args):
     want_list = getattr(args, "list", False)
     want_waiting = getattr(args, "waiting", False)
     want_ops_wait = getattr(args, "ops_wait", False)
-    if not (want_count or want_list or want_waiting or want_ops_wait):
+    want_audit = getattr(args, "audit", False)   # #578
+    if not (want_count or want_list or want_waiting or want_ops_wait or want_audit):
         for q in quals:
             print(q)
         return
@@ -481,6 +502,11 @@ def cmd_slice_quals(args):
     if want_count:
         print(len(unhandled))
         return
+    if want_audit:
+        # #578: the WORKABLE set with a labels column, for the job-20 named
+        # partition-audit nudge (same set as --list, plus labels).
+        _print_audit_rows(unhandled, own_stream=user)
+        return
     _print_issue_rows(unhandled, own_stream=user)
 
 
@@ -560,7 +586,8 @@ def cmd_core_quals(args):
     want_list = getattr(args, "list", False)
     want_waiting = getattr(args, "waiting", False)
     want_ops_wait = getattr(args, "ops_wait", False)
-    if not (want_count or want_list or want_waiting or want_ops_wait):
+    want_audit = getattr(args, "audit", False)   # #578
+    if not (want_count or want_list or want_waiting or want_ops_wait or want_audit):
         for q in quals:
             print(q)
         return
@@ -667,6 +694,12 @@ def cmd_core_quals(args):
         return
     if want_count:
         print(len(workable))
+        return
+    if want_audit:
+        # #578: the WORKABLE obligation set with a labels column, for the job-20
+        # named partition-audit nudge. own_stream=None: a full-authority box owns
+        # no stream, so every stream-labelled row is action-only.
+        _print_audit_rows(workable, own_stream=None)
         return
     # own_stream=None: a full-authority box owns no stream, so EVERY
     # stream-labelled row in its obligation set is action-only.

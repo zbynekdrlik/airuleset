@@ -20,7 +20,9 @@ The member list is fetched via the new `core-quals`/`slice-quals --audit`
 and ONLY inside the ~daily nudge branch — never every sweep.
 """
 
+import json
 import os
+import subprocess
 import sys
 import unittest
 import unittest.mock as m
@@ -115,8 +117,9 @@ class TestWatchdogIMembersFetch(unittest.TestCase):
     """`_watchdog_i_members_fetch` parses `--audit` into member records."""
 
     def test_parses_audit_lines(self):
+        # labels are COMMA-joined (a label with an internal space is not split).
         recs = airuleset._parse_i_audit_lines(
-            "4497\t2026-08-04T00:00:00Z\taction-only\tready-for-review stream:montalu5\n"
+            "4497\t2026-08-04T00:00:00Z\taction-only\tready-for-review,stream:montalu5\n"
             "4459\t2026-08-03T00:00:00Z\timplement\t\n")
         self.assertEqual([r["number"] for r in recs], [4497, 4459])
         self.assertEqual(recs[0]["labels"], ["ready-for-review", "stream:montalu5"])
@@ -199,6 +202,55 @@ class TestNudgeBranchFetchesMembers(unittest.TestCase):
                                 "a nudge must fetch the I members to name them")
         typed = "".join(tmux.typed_texts())
         self.assertIn("#4459", typed, "the delivered nudge names the member")
+
+
+class TestAuditCliEndToEnd(unittest.TestCase):
+    """`core-quals --audit` emits `number<TAB>createdAt<TAB>action<TAB>labels`
+    (the format `_watchdog_i_members_fetch` parses) — a regression in
+    `_print_audit_rows` (column order, missing/space-joined labels) is caught
+    here, not just in the pure parse test."""
+
+    _ROWS = json.dumps([
+        {"number": 10, "title": "plain", "createdAt": "2026-08-01T00:00:00Z",
+         "labels": [{"name": "bug"}]},
+        {"number": 11, "title": "review lane", "createdAt": "2026-08-02T00:00:00Z",
+         "labels": [{"name": "ready-for-review"}, {"name": "stream:montalu5"}]},
+    ])
+
+    def _prep(self, repo, bindir):
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        gh = Path(bindir) / "gh"
+        gh.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  *"repo view"*|repo*) echo "zbynekdrlik/demo";;\n'
+            '  *"--search label:autopilot-skip"*) echo 0;;\n'
+            "  *) echo '%s';;\n" % self._ROWS +
+            'esac\n')
+        gh.chmod(0o755)
+
+    def test_audit_column_and_comma_labels_round_trip(self):
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            self._prep(repo, bindir)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "core-quals", "--audit"],
+                capture_output=True, text=True, cwd=repo,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            # the exact format the watchdog fetch parses -> round-trip it.
+            recs = airuleset._parse_i_audit_lines(r.stdout)
+            by_num = {rec["number"]: rec for rec in recs}
+            self.assertIn(11, by_num)
+            self.assertEqual(by_num[11]["labels"],
+                             ["ready-for-review", "stream:montalu5"])
+            self.assertEqual(by_num[10]["labels"], ["bug"])
+            # the review-lane member reads action-only on a full box (stream-owned)
+            line11 = [ln for ln in r.stdout.splitlines() if ln.startswith("11\t")][0]
+            self.assertIn("action-only", line11)
+            self.assertIn("ready-for-review,stream:montalu5", line11)
 
 
 if __name__ == "__main__":

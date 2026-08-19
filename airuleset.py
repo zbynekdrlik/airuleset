@@ -3809,6 +3809,68 @@ def _watchdog_ops_wait_fetch(cwd):
     return members
 
 
+def _parse_i_audit_lines(text):
+    """Parse `core-quals`/`slice-quals --audit` output into WORKABLE (I) member
+    records `[{"number": int, "createdAt": str, "labels": [str]}]`, oldest-first,
+    or None on ANY malformed line (undetermined — never a partial set). Split out
+    from `_watchdog_i_members_fetch` so the parse is unit-testable without a
+    subprocess (#578).
+
+    `--audit` prints `number<TAB>createdAt<TAB>action<TAB>labels` per member;
+    field 3 is a COMMA-joined label-name list (empty for a label-less core
+    ticket) — comma, not space, so a label with an internal space ("help
+    wanted") is not split. Deliberately tolerant: a row with fewer than 3 fields
+    is malformed (-> None); a missing/empty label field reads as `[]`."""
+    recs = []
+    for line in (text or "").splitlines():
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            return None
+        try:
+            num = int(parts[0])
+        except (ValueError, IndexError):
+            return None
+        labels = ([s for s in parts[3].split(",") if s]
+                  if len(parts) >= 4 and parts[3].strip() else [])
+        recs.append({"number": num, "createdAt": parts[1], "labels": labels})
+    return recs
+
+
+def _watchdog_i_members_fetch(cwd):
+    """#578 — the WORKABLE (I) member records for THIS box's slice of the repo at
+    `cwd`, or None on any failure/refusal. The 1:1 sibling of
+    `_watchdog_ops_wait_fetch`: same authority-aware command choice
+    (`core-quals`/`slice-quals`), same `_repo_root(cwd=cwd)` resolution, same
+    refuse->None contract — only the flag differs (`--audit`) and the parse
+    (member records WITH labels, via `_parse_i_audit_lines`). This RAW fetch is
+    uncached; the job-20 nudge reads it through `ops_wait_recheck._cached_i_members`
+    (a per-repo TTL cache, the sibling of `_cached_ops_wait`) so it fires at most
+    once per repo per TTL AND only inside the ~daily nudge branch — never every
+    sweep (#547 "cache the FETCH"). The 15s timeout matches the CHEAP `--count`
+    sibling, NOT the 35s `--ops-wait` (labels are already in the union rows — no
+    per-member `gh view`). Wired HERE like every network call so run_once's unit
+    tests stay network-free."""
+    import subprocess
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
+    except Exception:
+        return None
+    cmd_name = "core-quals" if authority == "full" else "slice-quals"
+    try:
+        r = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), cmd_name, "--audit"],
+            cwd=cwd, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return _parse_i_audit_lines(r.stdout or "")
+
+
 def _watchdog_vault_purge():
     """Job 29's credential-store sweep (#144) — the injection point so run_once
     never imports the store (or touches a real `~/.claude/secrets/`) in a test.
@@ -4072,6 +4134,12 @@ def cmd_watchdog(args):
                     # `_cached_backlog_count`), so it fires at most once per repo
                     # per OPS_WAIT_FETCH_TTL_S — never every sweep per pane.
                     ops_wait_fetch=_watchdog_ops_wait_fetch,
+                    # #578 — the WORKABLE I-member fetch for the job-20 NAMED
+                    # partition-audit nudge. Read only inside the ~daily nudge
+                    # branch, through `_cached_i_members` (the sibling of
+                    # `_cached_ops_wait`), so the `--audit` subprocess fires at
+                    # most once per repo per TTL and only when actually nudging.
+                    i_members_fetch=_watchdog_i_members_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
                     # each box holds the airuleset checkout it can measure.
@@ -5366,6 +5434,11 @@ def main():
         "--ops-wait", action="store_true",
         help="List the ops-wait remainder (ops-wait label) parked on an "
              "external event/evidence — excluded from --count/--list (#510)")
+    p_slice.add_argument(
+        "--audit", action="store_true",
+        help="Print number<TAB>createdAt<TAB>action<TAB>labels for each WORKABLE "
+             "member (the --list set + a labels column) — the job-20 named "
+             "partition-audit nudge reads this to name each I member (#578)")
     p_slice.add_argument("--extra", default=None,
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")
@@ -5391,6 +5464,11 @@ def main():
         "--ops-wait", action="store_true",
         help="List the ops-wait remainder (ops-wait label) parked on an "
              "external event/evidence — excluded from --count/--list (#510)")
+    p_core.add_argument(
+        "--audit", action="store_true",
+        help="Print number<TAB>createdAt<TAB>action<TAB>labels for each WORKABLE "
+             "obligation member (the --list set + a labels column) — the job-20 "
+             "named partition-audit nudge reads this to name each I member (#578)")
     p_core.add_argument("--extra", default=None,
                         help="Extra search qualifier ANDed onto every query "
                              "(e.g. label:prio:bounce for the bounce seed)")

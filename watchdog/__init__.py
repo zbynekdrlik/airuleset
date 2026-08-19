@@ -1762,7 +1762,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              repo_roots=None, issue_counts_fetch=None, git_fetch=None,
              vault_purge=None, vault_backstop=None, log_fn=None, reopen_fetch=None,
              time_fn=None, sweep_budget_s=None, backlog_fetch=None,
-             ops_wait_fetch=None,
+             ops_wait_fetch=None, i_members_fetch=None,
              progress_dir=None, questions_path=None,
              owner_decision_fetch=None, gk_selfservice_fetch=None,
              u_reconcile_clear=None, conformance_root=None,
@@ -3834,7 +3834,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             state=state, handled=compact_handled_this_sweep,
             backlog_fetch=backlog_fetch, send_fn=send_fn,
             sleep_fn=sleep_fn, time_fn=time_fn,
-            sweep_deadline=tail_deadline, ops_wait_fetch=ops_wait_fetch)
+            sweep_deadline=tail_deadline, ops_wait_fetch=ops_wait_fetch,
+            i_members_fetch=i_members_fetch)   # #578
     _add("goal_lane_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_lane_sweep, "goal-lane-sweep error")
 
