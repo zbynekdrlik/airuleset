@@ -89,6 +89,16 @@ def _make_target(lane, size_files=3):
     return tgt
 
 
+def _set_target_file_mtimes(tgt, mtime):
+    """Recursively set every FILE mtime under target/ to `mtime` -- controls
+    the freshness `_dir_stats` reports vs the tier-0 flip epoch. Call AFTER
+    `_backdate_recency` (which only touches the lane's top-level entries, never
+    target/'s inner files, so the two do not interfere)."""
+    for dirpath, _dirs, files in os.walk(tgt):
+        for f in files:
+            os.utime(os.path.join(dirpath, f), (mtime, mtime))
+
+
 def _backdate_recency(repo, lane, name, age_s, now=NOW):
     """Set every mtime `_worktree_recency_age_s` reads (git-admin HEAD/index/
     logs/HEAD/ORIG_HEAD + the lane's top-level entries + the lane dir itself)
@@ -130,6 +140,16 @@ class _Base(unittest.TestCase):
         self.empty_proc.mkdir()
         self.log = self.root / "lane.log"
         self.state = self.root / "lane-state.json"
+        # #545 owner addendum -- a recorder filer (NEVER a real `gh` call in a
+        # test) + a per-repo dedup state file. Every _run below defaults to
+        # these + a far-future flip epoch, so an existing test classifies its
+        # (wall-clock-fresh) target as LEGACY and never files; the bypass tests
+        # override `flip_epoch` explicitly.
+        self.bypass_state = self.root / "bypass-state.json"
+        self._filer_calls = []
+        self._filer = lambda slug, title, body: (
+            self._filer_calls.append((slug, title, body))
+            or ("https://github.com/%s/issues/999" % slug))
 
     def _run(self, **kw):
         kw.setdefault("home", self.root)
@@ -139,6 +159,12 @@ class _Base(unittest.TestCase):
         kw.setdefault("tier0_fn", lambda cwd: True)
         kw.setdefault("log_path", self.log)
         kw.setdefault("state_path", self.state)
+        # #545: a recorder filer (never real `gh`) + a far-FUTURE flip epoch so
+        # an existing test's wall-clock-fresh target classifies LEGACY and never
+        # files; a bypass test overrides `flip_epoch` explicitly.
+        kw.setdefault("issue_filer", self._filer)
+        kw.setdefault("bypass_state_path", self.bypass_state)
+        kw.setdefault("flip_epoch", NOW + 3650 * 24 * 3600)
         return cli_worktree_sweep.purge_merged_lane_targets(**kw)
 
     def _by_branch(self, results, branch):
@@ -400,6 +426,211 @@ class TestLogging(_Base):
         self._run(dry_run=False)
         text = self.log.read_text()
         self.assertIn("SKIP", text)
+
+
+class TestTier0BypassClassification(_Base):
+    """#545 owner addendum (2026-08-19): a merged Tier-0 lane target/ whose
+    build artifacts are NEWER than the #557 flip is a tier-0 gate BYPASS -- it
+    is RECORDED + FILED on the offending repo BEFORE the (unchanged-scope)
+    purge, never silently deleted. A pre-flip (legacy) target purges silently."""
+
+    CAMBOX = "https://github.com/zbynekdrlik/camera-box.git"
+
+    def _bypass_lane(self, repo, file_mtime, branch="worktree-merged",
+                     name=None, age_s=5 * 3600, origin=None):
+        name = name or branch
+        lane = _add_lane(repo, branch, name=name, commits=2)
+        _merge_into_base(repo, branch)
+        tgt = _make_target(lane)
+        _backdate_recency(repo, lane, name, age_s)
+        _set_target_file_mtimes(tgt, file_mtime)   # AFTER backdate (independent)
+        if origin:
+            _git(["remote", "add", "origin", origin], repo)
+        return lane, tgt
+
+    def _run_flip(self, flip_epoch, **kw):
+        kw.setdefault("flip_epoch", flip_epoch)
+        kw.setdefault("issue_filer", self._filer)
+        kw.setdefault("bypass_state_path", self.bypass_state)
+        return self._run(**kw)
+
+    def test_post_flip_target_is_flagged_filed_and_still_purged(self):
+        repo = _mkrepo(self.root)
+        lane, tgt = self._bypass_lane(repo, NOW - 1000, origin=self.CAMBOX)
+        results = self._run_flip(NOW - 100000, dry_run=False)
+        row = self._by_branch(results, "worktree-merged")
+        self.assertTrue(row["purged"], "a bypass lane is STILL purged: %s" % row.get("reason"))
+        self.assertFalse(tgt.exists(), "target/ must be gone after purge")
+        self.assertTrue(row["tier0_bypass"], "a post-flip target must be flagged a bypass")
+        self.assertEqual(len(self._filer_calls), 1, "exactly one ticket filed")
+        slug, title, body = self._filer_calls[0]
+        self.assertEqual(slug, "zbynekdrlik/camera-box",
+                         "filed on the repo derived from origin, not a hardcoded one")
+        self.assertIn("filed", (row.get("tier0_bypass_filed") or "").lower())
+
+    def test_pre_flip_target_is_legacy_not_filed(self):
+        repo = _mkrepo(self.root)
+        lane, tgt = self._bypass_lane(repo, NOW - 200000, origin=self.CAMBOX)
+        results = self._run_flip(NOW - 100000, dry_run=False)
+        row = self._by_branch(results, "worktree-merged")
+        self.assertTrue(row["purged"], "a legacy merged lane still purges")
+        self.assertFalse(tgt.exists())
+        self.assertFalse(row["tier0_bypass"], "a pre-flip target is legacy, not a bypass")
+        self.assertEqual(self._filer_calls, [], "a legacy target must never file a ticket")
+
+    def test_dry_run_never_files_or_deletes_a_bypass(self):
+        repo = _mkrepo(self.root)
+        lane, tgt = self._bypass_lane(repo, NOW - 1000, origin=self.CAMBOX)
+        results = self._run_flip(NOW - 100000, dry_run=True)
+        row = self._by_branch(results, "worktree-merged")
+        self.assertTrue(row["purged"], "dry-run marks a would-be-reclaim")
+        self.assertTrue(tgt.exists(), "dry-run must never delete target/")
+        self.assertEqual(self._filer_calls, [], "dry-run must never file a ticket")
+        self.assertTrue(row["tier0_bypass"], "dry-run still CLASSIFIES the bypass")
+
+    def test_bypass_deduped_per_repo_in_one_run(self):
+        repo = _mkrepo(self.root)
+        self._bypass_lane(repo, NOW - 1000, branch="worktree-a", origin=self.CAMBOX)
+        self._bypass_lane(repo, NOW - 1000, branch="worktree-b")   # same origin repo
+        results = self._run_flip(NOW - 100000, dry_run=False)
+        self.assertTrue(all(r["purged"] for r in results
+                            if r.get("branch", "").startswith("worktree-")))
+        self.assertEqual(len(self._filer_calls), 1,
+                         "two bypass lanes in ONE repo file exactly one ticket")
+
+    def test_bypass_not_refiled_within_cooldown_across_runs(self):
+        repo = _mkrepo(self.root)
+        self._bypass_lane(repo, NOW - 1000, branch="worktree-a", origin=self.CAMBOX)
+        self._run_flip(NOW - 100000, dry_run=False)
+        self.assertEqual(len(self._filer_calls), 1)
+        # a NEW bypass lane on the SAME repo, a second run within cooldown
+        self._bypass_lane(repo, NOW - 1000, branch="worktree-b")
+        self._run_flip(NOW - 100000, dry_run=False)
+        self.assertEqual(len(self._filer_calls), 1,
+                         "a second bypass on the same repo within cooldown is not re-filed")
+
+    def test_unresolvable_repo_slug_records_but_does_not_file(self):
+        repo = _mkrepo(self.root)                       # NO origin remote
+        lane, tgt = self._bypass_lane(repo, NOW - 1000)
+        results = self._run_flip(NOW - 100000, dry_run=False)
+        row = self._by_branch(results, "worktree-merged")
+        self.assertTrue(row["purged"], "an unresolvable-slug bypass is STILL purged")
+        self.assertFalse(tgt.exists())
+        self.assertTrue(row["tier0_bypass"])
+        self.assertEqual(self._filer_calls, [], "never file on a guessed/unknown repo")
+        self.assertIn("not filed", (row.get("tier0_bypass_filed") or "").lower())
+
+    def test_bypass_still_purged_when_filing_fails(self):
+        repo = _mkrepo(self.root)
+        lane, tgt = self._bypass_lane(repo, NOW - 1000, origin=self.CAMBOX)
+        results = self._run_flip(NOW - 100000, dry_run=False,
+                                 issue_filer=lambda slug, title, body: None)
+        row = self._by_branch(results, "worktree-merged")
+        self.assertTrue(row["purged"], "a filing failure must NOT block the purge")
+        self.assertFalse(tgt.exists())
+        self.assertIn("fail", (row.get("tier0_bypass_filed") or "").lower())
+
+    def test_bypass_body_carries_scope_gate_and_evidence(self):
+        repo = _mkrepo(self.root)
+        lane, tgt = self._bypass_lane(repo, NOW - 1000, origin=self.CAMBOX)
+        self._run_flip(NOW - 100000, dry_run=False)
+        self.assertEqual(len(self._filer_calls), 1)
+        _slug, _title, body = self._filer_calls[0]
+        self.assertIn("Scope-gate:", body, "the filed body must carry a Scope-gate line")
+        self.assertIn("worktree-merged", body, "the body names the offending lane")
+        self.assertIn("557", body, "the body cites the #557 flip as the evidence baseline")
+
+    def test_bypass_and_legacy_both_logged(self):
+        repo = _mkrepo(self.root)
+        self._bypass_lane(repo, NOW - 1000, branch="worktree-fresh", origin=self.CAMBOX)
+        self._bypass_lane(repo, NOW - 200000, branch="worktree-old")
+        self._run_flip(NOW - 100000, dry_run=False)
+        text = self.log.read_text()
+        self.assertIn("tier0=BYPASS", text, "a purged bypass lane logs its tier-0 verdict")
+        self.assertIn("tier0=legacy", text, "a purged legacy lane logs its tier-0 verdict")
+
+    def test_bypass_log_carries_mtime_evidence_even_if_filing_fails(self):
+        # #545 review C5: the bypass evidence (mtime + fresh count) must be
+        # durable in the reclaim log even when the ticket-file failed.
+        repo = _mkrepo(self.root)
+        self._bypass_lane(repo, NOW - 1000, origin=self.CAMBOX)
+        self._run_flip(NOW - 100000, dry_run=False,
+                       issue_filer=lambda slug, title, body: None)   # filing fails
+        text = self.log.read_text()
+        self.assertIn("tier0=BYPASS", text)
+        self.assertIn("mtime=", text, "the newest mtime is logged as durable evidence")
+        self.assertIn("fresh>=", text, "the fresh-file count is logged as durable evidence")
+
+    def test_target_at_exact_flip_is_legacy(self):
+        # #545 review C3: a file mtime EXACTLY at the flip is legacy (strict >).
+        repo = _mkrepo(self.root)
+        lane, tgt = self._bypass_lane(repo, NOW - 100000, origin=self.CAMBOX)
+        results = self._run_flip(NOW - 100000, dry_run=False)     # flip == file mtime
+        row = self._by_branch(results, "worktree-merged")
+        self.assertTrue(row["purged"])
+        self.assertFalse(row["tier0_bypass"],
+                         "a file mtime exactly at the flip instant is legacy, not a bypass")
+        self.assertEqual(self._filer_calls, [])
+
+    def test_future_dated_bypass_state_refiles(self):
+        # #545 review C4: a future-dated 'filed' stamp must NOT wedge dedup.
+        import json as _json
+        repo = _mkrepo(self.root)
+        self._bypass_lane(repo, NOW - 1000, origin=self.CAMBOX)
+        self.bypass_state.write_text(_json.dumps(
+            {"filed": {"zbynekdrlik/camera-box":
+                       {"ts": NOW + 10 * 24 * 3600, "issue": "old"}}}))
+        self._run_flip(NOW - 100000, dry_run=False)
+        self.assertEqual(len(self._filer_calls), 1,
+                         "a future-dated dedup stamp is ignored (re-file), never wedges dedup")
+
+    def test_within_run_dedup_survives_state_write_failure(self):
+        # #545 review C6: within-run per-repo dedup must hold even when the
+        # bypass-state DISK write fails (the disk-pressure scenario this whole
+        # feature runs in) -- the in-memory guard, not just the disk state.
+        repo = _mkrepo(self.root)
+        self._bypass_lane(repo, NOW - 1000, branch="worktree-a", origin=self.CAMBOX)
+        self._bypass_lane(repo, NOW - 1000, branch="worktree-b")   # same origin repo
+        afile = self.root / "afile"
+        afile.write_text("x")                                       # parent is a FILE
+        unwritable = afile / "state.json"                           # -> mkdir/write fails
+        self._run_flip(NOW - 100000, dry_run=False, bypass_state_path=unwritable)
+        self.assertEqual(len(self._filer_calls), 1,
+                         "in-memory dedup holds even when the state write fails")
+
+
+class TestTier0BypassHelpers(_Base):
+    def test_lane_repo_slug_parses_https_and_ssh(self):
+        for i, (url, want) in enumerate((
+            ("https://github.com/zbynekdrlik/camera-box.git", "zbynekdrlik/camera-box"),
+            ("https://github.com/zbynekdrlik/camera-box", "zbynekdrlik/camera-box"),
+            ("git@github.com:zbynekdrlik/camera-box.git", "zbynekdrlik/camera-box"),
+        )):
+            repo = _mkrepo(self.root, name="p-slug-%d" % i)
+            _git(["remote", "add", "origin", url], repo)
+            self.assertEqual(
+                cli_worktree_sweep._lane_repo_slug(repo, cli_worktree_sweep._worktree_git),
+                want, "slug from %s" % url)
+
+    def test_lane_repo_slug_none_when_no_origin(self):
+        repo = _mkrepo(self.root)
+        self.assertIsNone(cli_worktree_sweep._lane_repo_slug(
+            repo, cli_worktree_sweep._worktree_git))
+
+    def test_sample_fresh_only_returns_post_flip_files(self):
+        repo = _mkrepo(self.root)
+        lane = _add_lane(repo, "worktree-s", commits=1)
+        tgt = _make_target(lane)
+        _set_target_file_mtimes(tgt, NOW - 200000)         # all legacy first
+        fresh = tgt / "debug" / "fresh.bin"
+        fresh.write_text("x")
+        os.utime(fresh, (NOW - 500, NOW - 500))            # one post-flip file
+        sample = cli_worktree_sweep._sample_fresh_target_files(tgt, NOW - 100000, limit=6)
+        paths = [p for p, _m in sample]
+        self.assertTrue(any("fresh.bin" in p for p in paths),
+                        "the post-flip file is sampled")
+        self.assertFalse(any("art0.bin" in p for p in paths),
+                         "a pre-flip file is never sampled")
 
 
 if __name__ == "__main__":

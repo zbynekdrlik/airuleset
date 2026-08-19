@@ -1162,6 +1162,13 @@ def cmd_install(args):
             total = sum(r.get("size", 0) or 0 for r in lane_purged)
             print(f"  Reclaimed {len(lane_purged)} merged-lane target/ dir(s), "
                   f"{_human_size(total)} freed (log: {LANE_TARGET_LOG_PATH})")
+        # #545 tier-0 classification: surface any bypass finding (a merged lane
+        # whose target/ held post-#557 build artifacts -- a local cargo build
+        # that escaped the tier-0 gate, auto-filed on the offending repo).
+        lane_bypass = [r for r in lane_results if r.get("tier0_bypass")]
+        for r in lane_bypass:
+            print(f"  ⚠ TIER-0 BYPASS: {r.get('branch')} -- "
+                  f"{r.get('tier0_bypass_filed') or '?'}")
     except Exception as e:
         print(f"  merged-lane target reclaim error (non-fatal): {e}", file=sys.stderr)
 
