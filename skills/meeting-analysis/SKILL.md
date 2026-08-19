@@ -26,6 +26,8 @@ user-invocable: true
    doc, spec, quote, invoice, or any text document is shown on screen, transcribe its exact
    text into a `*_verbatim.md`. In the original failure the shown requirements doc WAS the
    meeting's substance; never reduce a shown spec to a one-line summary. Same weight as rule 1.
+   **VERBATIM covers codes/numbers/dimensions/labels — NEVER names** (personal or
+   customer/company names → `[redigované]` at write time, Rule 7).
 4. **Completeness is priority #1.** End with an adversarial completeness critic (Phase 5).
    When unsure whether something is a requirement, capture it — over-capture, never drop.
 5. **Transcription = Soniox stt-async-v5 (PRIMARY); YOU pick, never ask which.** Whisper twice
@@ -44,6 +46,16 @@ user-invocable: true
    (`speaker_turns.json` comes straight out of `transcribe_soniox.py`) — no caption/subtitle
    track required. The caption track is only a fallback speaker source for the local-whisper
    path; when you fall back to whisper, its caption speaker labels + timings are still gold.
+7. **REDACT personal + customer/company names AT WRITE TIME — this OVERRIDES "verbatim".**
+   ERP grids (Odberateľ column) and doc title blocks (NÁZOV) show names prominently, and the
+   "every field verbatim" instinct (Rule 3) copies them — the #1 privacy leak (montalu, #576).
+   When you record ANY ERP/app/document
+   screen, write `[redigované]` for every personal name and every customer/company name
+   as you write the line — never capture-now-redact-later.
+   KEEP every order/reference code (ZAK/OP/PV/doc numbers), dimension, quantity, status,
+   label — those ARE the verbatim data. When you fan out screen-reader
+   sub-agents (Phase 5), put this rule in EACH sub-reader's prompt: a skill body does
+   not reach a dispatched agent, so the name-safe format lives in the prompt.
 
 ## Setup & variables
 
@@ -229,13 +241,15 @@ it for loose screen↔speech correlation, not exact alignment (prep.py warns on 
 ## Phase 4 — READ every distinct screen yourself (the channel audio misses)
 
 For EACH file in `frames_kept/`, use the Read tool to look at it and record what's on it —
-**field by field** for ERP/app screens, **verbatim** (Hard Rule 3) for shown documents:
+**field by field** for ERP/app screens, **verbatim** (names redacted — Hard Rule 7) for shown docs:
 
 - Read every `frames_kept/scr_*.jpg` (Read renders the image). Don't sample — dedup already cut
   it to a readable set (dozens). If it's hundreds, the dedup threshold needs raising (Phase 3),
   not sampling.
 - Write a `screen_inventory.md`: per screen — what system/screen it is, every field / column /
-  value / status / menu / button visible, and the capability it implies.
+  value / status / menu / button visible, and the capability it implies. **Redact AT WRITE TIME
+  (Hard Rule 7):** `[redigované]` for every personal/customer/company name; keep the codes,
+  numbers, dimensions, labels.
 - A shown document/spec/quote → transcribe its **exact text** into `*_verbatim.md` (Hard Rule 3).
 - Correlate with `transcript.txt` + `speaker_turns.json`: when a screen is on (~its t_sec ±8 s),
   what is the speaker saying about it? That pairing is where requirements crystallize.
@@ -246,6 +260,9 @@ Combine all artifacts — `transcript.txt`, `speaker_turns.json`, `screen_invent
 `*_verbatim.md` — into the deliverable the user asked for (tickets, spec, decision log, summary).
 Then run a **completeness critic** before declaring done:
 
+- **Redaction check — MANDATORY before accepting ANY inventory or verbatim file:** scan every
+  produced file for a leaked personal/customer/company name; a leak is a GAP — redact it to
+  `[redigované]` (Hard Rule 7).
 - Large/important synthesis (e.g. "turn this into tickets") + ultracode on / user asks → use the
   **Workflow** tool: fan out parallel readers over transcript segments + screen groups, then a
   critic agent whose only job is "what requirement, screen, number, or shown document is NOT
@@ -261,29 +278,26 @@ with no citation is an unverifiable hallucinated requirement; the user must be a
 one back to the moment in the call it came from.
 
 **Delivered-vs-broken cross-check (mandatory when the meeting is a complaint call).** When the
-meeting exists because the user/stakeholder says previously-"delivered" things are non-functional,
-unclear, or wrong (the recurring montalu/Peto pattern), the synthesis MUST explicitly reconcile
-the call against what was already claimed done:
+meeting exists because previously-"delivered" things are called non-functional / unclear / wrong
+(the recurring montalu/Peto pattern), reconcile the call against what was already claimed done:
 
-- For each complaint in the call, find the ticket/PR that claimed to deliver it
-  (`gh issue list --state closed`, `gh pr list --state merged`, the project memory). File a
-  **regression/bug ticket** that names the original claim, quotes the call's evidence that it is
-  broken, and states the expected behavior. Do NOT re-file it as a fresh feature — link the origin.
-- **VERIFY THE DEPLOYED VERSION the complainer actually ran — before calling anything a regression.**
-  A merged PR is NOT the same as a deployed feature. Establish the git SHA / release the tested
-  environment was running (e.g. `ssh <host> 'git -C <addon> rev-parse HEAD'` / a version label /
-  container uptime) and compare it against each candidate PR's **merge date**. A "delivered but
-  broken" complaint is very often just a **stale test/deploy environment** — the fix is a deploy /
-  env refresh, NOT a new dev bug. Filing already-done work as a fresh regression is the exact
-  wasted-cycle trap the user is burned by. Split the output into *already-fixed-pending-deploy*
-  (file/flag a deploy-and-reverify item) vs *genuinely-not-done*. (Live example: half a cutover
-  call's "regressions" were a 4-day-stale test env; the type-to-filter fix was merged to `develop`
-  but not deployed — filing it as a new bug would have been dead work.)
-- An item the stakeholder found **"unintelligible / unclear / can't tell what it does"** is a real
-  finding, not noise → file a **clarity/UX ticket** (labelling, wording, findability — the montalu
-  "Peter must FIND it and know the flow" acceptance bar), never silently drop it.
-- Separate **NEW requirements** (never promised) from **REGRESSIONS** (promised, now broken) in the
-  output — they are different work and the user reads them differently.
+- For each complaint, find the ticket/PR that claimed to deliver it (`gh issue list --state closed`,
+  `gh pr list --state merged`, project memory) and file a **regression/bug ticket** that names the
+  original claim, quotes the call's evidence it is broken, and states the expected behavior — link
+  the origin, never re-file as a fresh feature.
+- **VERIFY THE DEPLOYED VERSION the complainer actually ran BEFORE calling anything a regression** —
+  a merged PR ≠ a deployed feature. Get the git SHA / version / container uptime of the tested env
+  (`ssh <host> 'git -C <addon> rev-parse HEAD'`) and compare it to each candidate PR's **merge
+  date**. A "delivered but broken" complaint is very often just a **stale test/deploy env** (the fix
+  is a deploy/refresh, not a new dev bug — the exact wasted-cycle trap). Split the output into
+  *already-fixed-pending-deploy* (file a deploy-and-reverify item) vs *genuinely-not-done*. (Live:
+  half a cutover call's "regressions" were a 4-day-stale env — the type-to-filter fix was merged to
+  `develop`, just not deployed.)
+- An item found **"unintelligible / unclear / can't tell what it does"** is a real finding → file a
+  **clarity/UX ticket** (labelling, wording, findability — the "Peter must FIND it and know the
+  flow" bar), never drop it.
+- Separate **NEW requirements** (never promised) from **REGRESSIONS** (promised, now broken) — the
+  user reads them differently.
 
 ## Phase 6 — Self-improve the method (run EVERY time, before declaring done)
 
@@ -336,8 +350,8 @@ Any artifact the user should open goes back as a clickable link, never a `/tmp` 
   "looked done but dropped half" failure.
 - Declaring done without the Phase 6 self-improvement pass → **WRONG.** The method must improve
   every run; skipping it repeats the same flaws.
+- Transcribing a customer/company name verbatim because "transcribe every field" → **WRONG.**
+  Verbatim is for codes/numbers/dimensions/labels; names → `[redigované]` at write (Rules 3 + 7).
 
-The intent: every meeting is analyzed across all three channels (words + speakers + screen) with
-the BEST transcription available (Soniox stt-async-v5, native diarization), ending with a
-completeness pass AND a self-improvement pass — so the user never re-explains the method, never
-loses requirements that were shown but not said, and every run is better than the last.
+The intent: three channels analyzed (words + speakers + screen), best transcription,
+names redacted at write time, and completeness + self-improvement passes every run.

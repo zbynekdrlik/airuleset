@@ -94,17 +94,41 @@ class CoarseWholeFilePresence(unittest.TestCase):
             self.assertIn(tok, b, "#576 redaction token %r missing from the skill" % tok)
 
 
+def _hook_strip_frontmatter():
+    """Extract and exec the REAL `strip_frontmatter` from the hook, so the
+    guard below measures EXACTLY what the injector measures — never a
+    hand-typed re-implementation of the stripping (the #498 discipline:
+    drive the real hook, not a guess at its rules). The injector truncates
+    `strip_frontmatter(fh.read()).strip()`, i.e. the body WITHOUT the YAML
+    frontmatter — so counting the whole file (frontmatter included) would
+    over-count by ~500 chars and demand a cut the injector never needs."""
+    src = INJECT_HOOK.read_text(encoding="utf-8")
+    m = re.search(
+        r"^def strip_frontmatter\(text\):\n(?:[ \t].*\n|\n)+", src, re.M
+    )
+    if not m:
+        raise AssertionError(
+            "strip_frontmatter no longer found in inject-situational-rule.sh"
+        )
+    ns = {}
+    exec(m.group(0), ns)  # noqa: S102 — the hook's own function, not user input
+    return ns["strip_frontmatter"]
+
+
 class InjectionDeliversTheWholeSkill(unittest.TestCase):
     """`skills/meeting-analysis/SKILL.md` is injected by a
     `hooks/situational-triggers.conf` UserPromptSubmit row, and
-    `inject-situational-rule.sh` TRUNCATES any body over `MAX_BODY` chars —
-    which would silently drop the tail (Phase 5 critic / anti-patterns /
-    Phase 6) from the nudge. The #576 additions grow the file, so lock that
-    the whole skill still fits under the REAL hook's cap (read from the hook,
-    never a hand-typed copy). If this fails, CONDENSE the skill's prose to
-    fit — do NOT raise MAX_BODY here."""
+    `inject-situational-rule.sh` TRUNCATES any injected body over `MAX_BODY`
+    chars — which would silently drop the tail (Phase 5 critic /
+    anti-patterns / Phase 6) from the nudge. The #576 additions grow the
+    skill, so lock that the injected body still fits under the REAL cap.
 
-    def test_skill_body_fits_under_inject_max_body(self):
+    Both `MAX_BODY` and the frontmatter-stripping are read from the actual
+    hook (never hand-typed), so this measures precisely what the injector
+    delivers. If it fails, CONDENSE the skill's prose to fit — do NOT raise
+    MAX_BODY here."""
+
+    def test_injected_body_fits_under_inject_max_body(self):
         m = re.search(
             r"^MAX_BODY\s*=\s*(\d+)", INJECT_HOOK.read_text(encoding="utf-8"), re.M
         )
@@ -112,11 +136,13 @@ class InjectionDeliversTheWholeSkill(unittest.TestCase):
             m, "MAX_BODY no longer defined in inject-situational-rule.sh"
         )
         max_body = int(m.group(1))
-        n = len(_body())
+        # exactly the injector's own measurement: strip_frontmatter(...).strip()
+        injected_body = _hook_strip_frontmatter()(_body()).strip()
+        n = len(injected_body)
         self.assertLessEqual(
             n,
             max_body,
-            "meeting-analysis SKILL.md is %d chars > MAX_BODY %d — the "
+            "meeting-analysis injected body is %d chars > MAX_BODY %d — the "
             "situational-injection nudge will TRUNCATE its tail (Phase 5 "
             "critic / anti-patterns / Phase 6). Condense prose to fit (#576)."
             % (n, max_body),
