@@ -364,11 +364,11 @@ body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf
 </head>
 <body>
 <div id="tabbar">
-<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session (Ctrl+Alt+←)">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session (Ctrl+Alt+→)">&#9654;</button></span>
+<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session">&#9654;</button></span>
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
-<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 a Ctrl+Alt+←/→ len keď má fokus lišta (počas písania v termináli je to iný origin — použi klik / ◀ ▶) · prihlásenie raz (tailnet-only)</div>
+<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku keď má fokus lišta (počas písania v termináli je to iný origin — použi klik / ◀ ▶) · prihlásenie raz (tailnet-only)</div>
 <script>
 const CFG = @@CFG_JSON@@;
 const frames = document.getElementById('frames');
@@ -385,8 +385,14 @@ function activate(idx) {
     made[idx] = f;                        // kept alive; switching only hides/shows
   }
   for (const k in made) made[k].style.display = (+k === idx) ? 'block' : 'none';
-  document.querySelectorAll('.tab').forEach((t) =>
-    t.classList.toggle('active', +t.dataset.idx === idx));
+  document.querySelectorAll('.tab').forEach((t) => {
+    const on = +t.dataset.idx === idx;
+    t.classList.toggle('active', on);
+    // #582: keep the active tab visible even when the bar has scrolled past it
+    // (the exact case the ◀ ▶ cycle buttons exist for — stepping past tab 9).
+    // Optional call: a browser without scrollIntoView must never break switching.
+    if (on) t.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
+  });
   current = idx;
 }
 function cycle(delta) {                    // step to prev/next session, wrapping both ways
@@ -398,25 +404,23 @@ document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
 document.querySelectorAll('.cyc').forEach((b) =>
   b.addEventListener('click', () => cycle(+b.dataset.cyc)));
-// Ctrl+Alt+1..9 (direct jump) and Ctrl+Alt+Left/Right (cycle) switch tabs — but
-// ONLY while the parent page (tab bar) has focus: once you click INTO a terminal,
-// the ttyd iframe is a DIFFERENT origin (:7682 vs the dashboard's :8080), so the
-// parent window stops receiving its keydowns (a web-platform limit — the parent
-// cannot read keys inside a cross-origin iframe). Clicking a tab or the ◀ ▶
-// buttons always switches, so keyboard-while-typing is a convenience, not the
-// only path. Full keyboard-switch-while-typing would need a same-origin reverse
-// proxy or a ttyd-side postMessage bridge — both disproportionate for a shortcut
-// where click works reliably (see the #582 design comment for the rejected
-// alternatives).
+// Ctrl+Alt+1..9 jumps to a tab — but ONLY while the parent page (tab bar) has
+// focus: once you click INTO a terminal, the ttyd iframe is a DIFFERENT origin
+// (:7682 vs the dashboard's :8080), so the parent window stops receiving its
+// keydowns (a web-platform limit — the parent cannot read keys inside a
+// cross-origin iframe). Clicking a tab or the ◀ ▶ cycle buttons always switches,
+// so those are the reliable path; the number shortcut is a bonus for when the
+// bar is focused. (No Ctrl+Alt+arrow binding: Ctrl+Alt+Left/Right is the Linux
+// desktop workspace-switch shortcut and is grabbed by the compositor before the
+// page sees it — advertising it would over-promise; the ◀ ▶ buttons cover
+// cycling reliably.) Full keyboard-switch-while-typing would need a same-origin
+// reverse proxy or a ttyd-side postMessage bridge — both disproportionate for a
+// shortcut where click works (see the #582 design comment for the alternatives).
 window.addEventListener('keydown', (e) => {
   if (!(e.ctrlKey && e.altKey)) return;
   if (e.key >= '1' && e.key <= '9') {
     const idx = parseInt(e.key, 10) - 1;
     if (idx < CFG.sessions.length) { e.preventDefault(); activate(idx); }
-  } else if (e.key === 'ArrowRight') {
-    e.preventDefault(); cycle(1);
-  } else if (e.key === 'ArrowLeft') {
-    e.preventDefault(); cycle(-1);
   }
 });
 if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page

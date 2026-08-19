@@ -576,9 +576,13 @@ class TestTabSwitchingUX(unittest.TestCase):
         # badge is a fixed position digit, not user data.
         inv = [{"id": "x", "label": "<b>PWN</b>", "kind": "owner",
                 "local": True, "host": None, "user": None}]
+        # A single-tab inventory still gets one badge — assert it EXISTS so the
+        # digits-only guarantee can never be met vacuously (0 badges).
         html = w.render_dashboard_html(inv, ttyd_base="http://b:7682")
         import re as _re
-        for content in _re.findall(r'<span class="ord">([^<]*)</span>', html):
+        matches = _re.findall(r'<span class="ord">([^<]*)</span>', html)
+        self.assertTrue(matches)                      # a badge is actually present
+        for content in matches:
             self.assertRegex(content, r"^[0-9]+$")
 
     def test_prev_next_cycle_buttons_present(self):
@@ -588,13 +592,17 @@ class TestTabSwitchingUX(unittest.TestCase):
         self.assertIn('data-cyc="1"', html)    # next
         self.assertIn("function cycle(", html)  # the JS helper the buttons call
 
-    def test_keydown_listener_handles_arrow_cycling(self):
-        # Ctrl+Alt+Left/Right cycle prev/next when the tab bar has focus.
+    def test_keydown_is_direct_jump_only_no_arrow_binding(self):
+        # Ctrl+Alt+1..9 direct-jumps when the tab bar has focus — gate the ACTUAL
+        # handler code, not the decorative "Ctrl+Alt" hint text.
         html = w.render_dashboard_html(self._inv(4), ttyd_base="http://b:7682")
-        self.assertIn("ArrowLeft", html)
-        self.assertIn("ArrowRight", html)
-        # The direct 1..9 jump must still be there (real value when bar focused).
-        self.assertIn("Ctrl+Alt", html)
+        self.assertIn("e.key >= '1'", html)          # the digit-jump handler
+        self.assertIn("function cycle(", html)        # cycling stays (via ◀ ▶ buttons)
+        # No Ctrl+Alt+arrow binding: Ctrl+Alt+Left/Right is the Linux desktop
+        # workspace-switch shortcut, grabbed by the compositor before the page
+        # sees it — advertising it would over-promise (both #582 reviewers).
+        self.assertNotIn("ArrowLeft", html)
+        self.assertNotIn("ArrowRight", html)
 
     def test_hint_is_honest_about_keyboard_limitation(self):
         # The hint must say click always works AND that the shortcut only works
