@@ -3405,6 +3405,21 @@ def _watchdog_gkorphan_fetch(root):
     return _fetch_gk_orphan_candidates(root)
 
 
+def _watchdog_gkorphan_handoff_fetch(root):
+    """Job 36's #570 comment-handoff real gh fetch — the PROPER
+    `GATEKEEPER-ACTION:`/`READY-FOR-REVIEW:` marker-comment-in-window candidate
+    facts (window-bounded `in:comments` searches narrowed by per-candidate
+    comment/label/timeline reads). Computes its own `now` (a ms skew across a
+    48h window is irrelevant) and uses the default gh env (home=None), exactly
+    like `_watchdog_gkorphan_fetch`. Same network-free-tests wiring as jobs
+    8/11/31: run_once gates the whole handoff pass on THIS being wired."""
+    import time as _t
+    from watchdog import (GK_COMMENT_HANDOFF_WINDOW_S,
+                          _fetch_gk_comment_handoffs)
+    return _fetch_gk_comment_handoffs(root, None, _t.time(),
+                                      GK_COMMENT_HANDOFF_WINDOW_S)
+
+
 def _watchdog_owner_decision_fetch(home=None):
     """#461 daily owner-decision digest fetch — the box-wide aggregate of open
     `needs-answer`/`needs-decision` tickets. Wired here (not inside run_once) so
@@ -4063,6 +4078,11 @@ def cmd_watchdog(args):
                     # (network-free tests for every other job, like jobs
                     # 8/11/31). Internally 6h-cadenced.
                     gkorphan_fetch=_watchdog_gkorphan_fetch,
+                    # #570: the parallel comment-handoff pass (proper
+                    # GATEKEEPER-ACTION/READY-FOR-REVIEW marker comment in a ~48h
+                    # window that never got its label) — wired = on, same
+                    # network-free-tests convention.
+                    gkorphan_handoff_fetch=_watchdog_gkorphan_handoff_fetch,
                     # #172: print each job's decision line AS IT HAPPENS,
                     # not only from the list run_once() returns — a sweep
                     # killed mid-way (systemd TimeoutStartSec=120) used to

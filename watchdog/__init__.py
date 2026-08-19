@@ -1709,6 +1709,11 @@ from watchdog.cross_stream import (  # noqa: E402
     _fetch_gk_orphan_candidates as _fetch_gk_orphan_candidates,
     _apply_gk_orphan_reconcile as _apply_gk_orphan_reconcile,
     gk_orphan_marker_sweep as gk_orphan_marker_sweep,
+    GK_COMMENT_HANDOFF_WINDOW_S as GK_COMMENT_HANDOFF_WINDOW_S,
+    _gk_proper_marker_in_window as _gk_proper_marker_in_window,
+    _gk_comment_handoff_decide as _gk_comment_handoff_decide,
+    _fetch_gk_comment_handoffs as _fetch_gk_comment_handoffs,
+    _apply_gk_comment_handoff_reconcile as _apply_gk_comment_handoff_reconcile,
     _cached_backlog_open as _cached_backlog_open,
     _cached_backlog_count as _cached_backlog_count,
 )
@@ -1759,7 +1764,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              owner_decision_fetch=None, gk_selfservice_fetch=None,
              u_reconcile_clear=None, conformance_root=None,
              conformance_is_target=None, conformance_hb_enabled=False,
-             gkorphan_fetch=None):
+             gkorphan_fetch=None, gkorphan_handoff_fetch=None):
     """Scan every `claude` pane once. 36 numbered jobs per poll — 30 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -4026,6 +4031,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
          lambda: gk_orphan_marker_sweep(
              now, run, state, send_fn=send_fn, dry_run=dry_run,
              gh_fetch=gkorphan_fetch,
+             # #570: the PARALLEL comment-handoff pass, gated on its OWN fetch
+             # being wired (the "wired = on" convention). None → the sweep runs
+             # ONLY the mutated pass (byte-identical to #551).
+             handoff_fetch=gkorphan_handoff_fetch,
              persist=lambda: save_state(state_path, state)),
          "gk-orphan-marker-sweep error")
 

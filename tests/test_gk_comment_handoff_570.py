@@ -166,7 +166,7 @@ class SweepBehaviour(unittest.TestCase):
         self.assertEqual(rec.calls,
                          [("/home/gatekeeper/devel/odoo-erp", 4336,
                            "needs-gatekeeper")])
-        self.assertTrue(any("gk-handoff-reconcile odoo-erp#4336" in ln
+        self.assertTrue(any("gk-handoff-reconcile handoff:odoo-erp#4336" in ln
                             for ln in logs), logs)
 
     def test_ready_for_review_handoff_uses_ready_for_review_label(self):
