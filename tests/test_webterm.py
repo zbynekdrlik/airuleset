@@ -359,8 +359,12 @@ class TestDashUnit(unittest.TestCase):
         self.assertIn("%d" % w.WEBTERM_DASH_PORT, unit)    # 8080
         self.assertIn("http.server", unit)
         self.assertIn("WantedBy=default.target", unit)
-        # NEVER binds a public / wildcard interface.
-        self.assertNotIn("0.0.0.0", unit)
+        # NEVER binds a public / wildcard interface (the actual bind directive;
+        # a doc comment may still spell out "never 0.0.0.0").
+        self.assertNotIn("--bind 0.0.0.0", unit)
+        # The ExecStart bind arg is exactly the tailscale IP passed in.
+        exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+        self.assertIn("--bind 100.104.8.125", exec_line)
 
 
 class TestShortAlias(unittest.TestCase):

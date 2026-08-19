@@ -6,14 +6,17 @@ sessions flotily (dev1, dev2, gk, subdev streamy) — klik = pripojený do žij�
 tmux session daného targetu. Sessions žijú v tmuxoch na targetoch (už dnes), táto
 web vrstva je len perzistentné, PC-nezávislé okno do nich.
 
-Architektúra (viď design komentár na #555):
-  browser --tailscale(WireGuard)--> dev1 `tailscale serve`
-      :80   /  -> statický dashboard (webterm-dashboard.html, generovaný z inventára)
-      :7682 /  -> ttyd(127.0.0.1:7681, basic-auth) -> connect -> ssh -t -> tmux targetu
-Tailnet-only (serve = "tailnet only", off-tailnet nedosiahnuteľné), basic-auth
+Architektúra (viď design komentáre na #555 + #579):
+  cross-node browser --tailscale(WireGuard)--> dev1 tailscale IP <ip>
+      :8080 /  -> statický tabbed dashboard (webterm-dash/index.html, http.server)
+      :7682 /  -> ttyd(<ip>:7682, basic-auth) -> connect -> ssh -t -> tmux targetu
+#579: obe služby bindnú PRIAMO na dev1 tailscale IP (dynamicky `tailscale ip -4`,
+nikdy hardcode/0.0.0.0) — `tailscale serve` matchoval len MagicDNS meno uzla,
+takže raw-IP request cross-node 404'oval. Dashboard je single-page Windows-
+Terminal tabbed UI (iframe/session, krátke aliasy). Tailnet-only, basic-auth
 login na shell porte. Inventár generovaný z `_deployable_hosts()` + dev1, NIKDY
 ručný zoznam. Provisioning dev1-only (`os.uname().nodename == "dev1"`), systemd
---user unit podľa vzoru `setup_filedrop_service()`, `ttyd` v RUNTIME_DEPS.
+--user unity podľa vzoru `setup_filedrop_service()`, `ttyd` inštalovaný dev1-lokálne.
 
 Dve úlohy modulu, oddelené aby CONNECT cesta (beží per-terminal-open, ttyd child)
 mala minimálne importy: (1) INVENTORY/PROVISIONING (install-time, dev1) generuje
@@ -38,24 +41,31 @@ SECRETS_DIR = Path.home() / ".secrets"
 # filedrop/watchdog. Gated exactly like the coordinator-only watchdog jobs
 # (16/19/35) — `os.uname().nodename == "dev1"`.
 WEBTERM_GATEWAY_HOST = "dev1"
-# ttyd binds loopback only; tailscale serve fronts it (tailnet-only).
-WEBTERM_TTYD_PORT = 7681
-# Two tailnet-only serve ports (root-mounted each, so no reverse-proxy base-path
-# strip issue — tailscale serve `--set-path /x` STRIPS the prefix, which breaks
-# ttyd's `window.location`-derived ws URL; a root mount forwards unstripped):
-WEBTERM_DASH_SERVE_PORT = 80      # http://dev1.<tailnet>.ts.net/       -> dashboard
-WEBTERM_TTYD_SERVE_PORT = 7682    # http://dev1.<tailnet>.ts.net:7682/  -> ttyd
+# #579: ttyd binds dev1's tailscale IP DIRECTLY on this port (no reverse proxy,
+# no serve) — the browser reaches it at http://<tailscale-ip>:7682/ from any
+# tailnet node by raw IP. (Was 7681 loopback fronted by `tailscale serve`, whose
+# handler matched only the MagicDNS name → raw-IP request 404'd cross-node.)
+WEBTERM_TTYD_PORT = 7682
+# The static tabbed dashboard is served by `python3 -m http.server` bound to the
+# same tailscale IP on this port (a systemd --user unit). Non-privileged, so no
+# CAP_NET_BIND_SERVICE is needed (a privileged :80 would).
+WEBTERM_DASH_PORT = 8080
 # The owner tmux session group on his own boxes (dev1/dev2). A stream account's
 # own session is named after its unix user (#264 whoami auto-attach convention).
 OWNER_GROUP = "zbynek"
 WEBTERM_LOGIN_USER = "zbynek"
 
 WEBTERM_INVENTORY_PATH = CLAUDE_DIR / "webterm-inventory.json"
-WEBTERM_DASHBOARD_PATH = CLAUDE_DIR / "webterm-dashboard.html"
+# #579: the dashboard is a directory served by http.server (`/` -> index.html),
+# not a single loose HTML file fronted by serve.
+WEBTERM_DASH_DIR = CLAUDE_DIR / "webterm-dash"
+WEBTERM_DASH_INDEX = WEBTERM_DASH_DIR / "index.html"
 WEBTERM_LAUNCH_PATH = CLAUDE_DIR / "airuleset-webterm-ttyd.sh"
 WEBTERM_CRED_PATH = SECRETS_DIR / "webterm_credential"
 WEBTERM_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-ttyd.service"
 WEBTERM_SERVICE_TEMPLATE = REPO_DIR / "settings" / "webterm-ttyd.service.template"
+WEBTERM_DASH_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-dash.service"
+WEBTERM_DASH_SERVICE_TEMPLATE = REPO_DIR / "settings" / "webterm-dash.service.template"
 
 
 # --------------------------------------------------------------------------- #
@@ -196,10 +206,11 @@ def connect_main(argv, inventory_path=None):
 
 
 # --------------------------------------------------------------------------- #
-# Dashboard — a static HTML page generated from the inventory. Owner boxes
-# grouped first, then subdev streams. Each card opens the terminal in a NEW tab
-# (one browser tab per session — the direct analogue of one Windows Terminal
-# tab per SSH session).
+# Dashboard — a single-page Windows-Terminal-style tabbed UI generated from the
+# inventory (#579). A top tab bar (one short-alias tab per session) + one lazily
+# created iframe per session pointing at the IP-first ttyd URL. Tabs switch
+# instantly (hide/show; the iframe is kept alive once opened so terminal state
+# persists), and ONE basic-auth login (cached per host:port) covers every tab.
 # --------------------------------------------------------------------------- #
 
 def _html_escape(s):
@@ -207,39 +218,96 @@ def _html_escape(s):
             .replace(">", "&gt;").replace('"', "&quot;"))
 
 
-def _dashboard_card(entry, ttyd_base):
-    href = "%s/?arg=%s" % (ttyd_base, _html_escape(entry["id"]))
-    label = _html_escape(entry["label"])
-    sub = "localhost" if entry.get("local") else _html_escape(
-        "%s@%s" % (entry["user"], entry["host"]))
-    return ('<a class="card" href="%s" target="_blank" rel="noopener">'
-            '<span class="lbl">%s</span><span class="sub">%s</span></a>'
-            % (href, label, sub))
+def _short_alias(entry):
+    """A Windows-Terminal-style SHORT tab alias mirroring the owner's own tab
+    names (dev1, dev2, gk, m1..m8 for montalu, miva, d1..d4 for david); an
+    unrecognized session gets a sensible short form. The FULL id/label stays as
+    the tab's `title` tooltip, so a short alias is never ambiguous (#579)."""
+    if entry.get("local") or entry.get("id") == "dev1":
+        return "dev1"
+    user = (entry.get("user") or "").strip()
+    name = entry.get("id") or entry.get("label") or ""
+    if user == "gatekeeper":
+        return "gk"
+    mo = re.match(r"^montalu(\d+)$", user)
+    if mo:
+        return "m" + mo.group(1)
+    mo = re.match(r"^david(\d*)$", user)
+    if mo:
+        return "d" + (mo.group(1) or "1")   # base `david` == d1
+    mo = re.match(r"^miva(\d+)$", user)
+    if mo:
+        return "miva" if mo.group(1) == "1" else "mv" + mo.group(1)
+    mo = re.match(r"^simap(\d+)$", user)
+    if mo:
+        return "si" + mo.group(1)
+    if user == "newlevel":
+        # an owner box (dev2 / spinbike-vps) shares the `newlevel` unix user —
+        # key on the box NAME, not the user.
+        return (name.split("-")[0] or name)[:8]
+    if user:
+        return user[:8]
+    return (name.split("-")[0] or name)[:8]
+
+
+def _tab_order_key(alias):
+    """Stable tab order (#579 owner spec): dev1, dev2, gk, m1.., miva, d1..,
+    then everything else alphabetically. Uniform 3-tuples so no cross-group
+    comparison ever puts a str next to an int."""
+    if alias == "dev1":
+        return (0, 0, "")
+    if alias == "dev2":
+        return (1, 0, "")
+    if alias == "gk":
+        return (2, 0, "")
+    mo = re.match(r"^m(\d+)$", alias)
+    if mo:
+        return (3, int(mo.group(1)), "")
+    if alias == "miva":
+        return (4, 0, "")
+    mo = re.match(r"^d(\d+)$", alias)
+    if mo:
+        return (5, int(mo.group(1)), "")
+    return (6, 0, alias)
+
+
+def _tab_sessions(inventory):
+    """Inventory entries as tab descriptors (short alias + full-id title),
+    sorted in the owner's stable Windows-Terminal order."""
+    tabs = [{"id": e["id"], "alias": _short_alias(e),
+             "title": e.get("label") or e["id"]} for e in inventory]
+    tabs.sort(key=lambda t: _tab_order_key(t["alias"]))
+    return tabs
+
+
+def _json_for_script(obj):
+    """`json.dumps` with the three chars that could break out of a <script>
+    element neutralized, so an inventory label can never inject markup/JS."""
+    return (json.dumps(obj, ensure_ascii=False)
+            .replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("&", "\\u0026"))
 
 
 def render_dashboard_html(inventory, ttyd_base=None):
-    """The dashboard HTML. `ttyd_base` is the tailnet origin of the ttyd serve
-    port (e.g. `http://dev1.tail547bba.ts.net:7682`); each card links there with
-    `?arg=<id>`."""
+    """The single-page tabbed terminal UI. `ttyd_base` is the tailnet IP origin
+    of the ttyd port (e.g. `http://100.104.8.125:7682`); the page's JS builds
+    each tab's iframe src as `<ttyd_base>/?arg=<id>` on first activation."""
     ttyd_base = (ttyd_base or "").rstrip("/")
-    owners = [e for e in inventory if e.get("kind") == "owner"]
-    streams = [e for e in inventory if e.get("kind") == "stream"]
-
-    def section(title, items):
-        if not items:
-            return ""
-        cards = "\n".join(_dashboard_card(e, ttyd_base) for e in items)
-        return ('<h2>%s</h2>\n<div class="grid">\n%s\n</div>\n'
-                % (_html_escape(title), cards))
-
-    body = (section("Moje boxy", owners)
-            + section("Subdev streamy", streams))
-    return _DASHBOARD_TEMPLATE % {
-        "count": len(inventory),
-        "body": body,
-    }
+    tabs = _tab_sessions(inventory)
+    buttons = "\n".join(
+        '<button class="tab" data-idx="%d" title="%s">'
+        '<span class="ico">&#9656;</span><span class="al">%s</span></button>'
+        % (i, _html_escape(t["title"]), _html_escape(t["alias"]))
+        for i, t in enumerate(tabs))
+    cfg = {"ttyd_base": ttyd_base, "sessions": tabs}
+    return (_DASHBOARD_TEMPLATE
+            .replace("@@COUNT@@", str(len(tabs)))
+            .replace("@@BUTTONS@@", buttons)
+            .replace("@@CFG_JSON@@", _json_for_script(cfg)))
 
 
+# NOTE: `.replace()` substitution (not `%`-formatting) — the CSS/JS body is full
+# of `{}`, `%`, and `:` that would otherwise need escaping.
 _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <html lang="sk">
 <head>
@@ -249,34 +317,62 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <style>
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
-body { margin: 0; background: #0d1117; color: #e6edf3;
-  font: 15px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-header { padding: 22px 26px 6px; }
-header h1 { margin: 0; font-size: 20px; font-weight: 600; }
-header p { margin: 6px 0 0; color: #8b949e; font-size: 13px; }
-main { padding: 8px 26px 40px; }
-h2 { margin: 26px 0 10px; font-size: 13px; text-transform: uppercase;
-  letter-spacing: .08em; color: #8b949e; font-weight: 600; }
-.grid { display: grid; gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
-.card { display: flex; flex-direction: column; gap: 3px;
-  padding: 13px 15px; border: 1px solid #30363d; border-radius: 9px;
-  background: #161b22; text-decoration: none; color: inherit;
-  transition: border-color .12s, background .12s; }
-.card:hover { border-color: #2f81f7; background: #1c2330; }
-.card .lbl { font-weight: 600; font-size: 15px; }
-.card .sub { color: #8b949e; font-size: 12px; }
-footer { padding: 0 26px 30px; color: #6e7681; font-size: 12px; }
+html, body { height: 100%; margin: 0; }
+body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf3;
+  font: 13px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow: hidden; }
+#tabbar { display: flex; align-items: stretch; gap: 2px; padding: 4px 6px 0;
+  background: #161b22; border-bottom: 1px solid #30363d; overflow-x: auto;
+  flex: 0 0 auto; white-space: nowrap; }
+.tab { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  padding: 6px 12px; border: 1px solid transparent; border-bottom: none;
+  border-radius: 7px 7px 0 0; background: #21262d; color: #adbac7;
+  font: inherit; line-height: 1; max-width: 170px; flex: 0 0 auto; }
+.tab:hover { background: #2a3038; color: #e6edf3; }
+.tab.active { background: #0d1117; color: #fff; border-color: #30363d; }
+.tab .ico { color: #2f81f7; font-size: 11px; }
+.tab .al { overflow: hidden; text-overflow: ellipsis; }
+#frames { position: relative; flex: 1 1 auto; }
+#frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
+  border: 0; background: #0d1117; }
+#hint { flex: 0 0 auto; padding: 3px 10px; color: #6e7681; font-size: 11px;
+  background: #161b22; border-top: 1px solid #21262d; }
 </style>
 </head>
 <body>
-<header>
-<h1>work.newlevel.media</h1>
-<p>%(count)d tmux sessions flotily · klik = nový tab pripojený do tmuxu · tailnet-only</p>
-</header>
-<main>
-%(body)s</main>
-<footer>Prihlásenie sa vyžiada pri prvom termináli. Sessions žijú na targetoch — prežijú reboot aj iné PC.</footer>
+<div id="tabbar">
+@@BUTTONS@@
+</div>
+<div id="frames"></div>
+<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo Ctrl+Alt+1..9 · prihlásenie raz (tailnet-only)</div>
+<script>
+const CFG = @@CFG_JSON@@;
+const frames = document.getElementById('frames');
+const made = {};
+function activate(idx) {
+  const s = CFG.sessions[idx];
+  if (!s) return;
+  if (!made[idx]) {
+    const f = document.createElement('iframe');
+    f.className = 'term';
+    f.src = CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id);
+    frames.appendChild(f);
+    made[idx] = f;
+  }
+  for (const k in made) made[k].style.display = (+k === idx) ? 'block' : 'none';
+  document.querySelectorAll('.tab').forEach((t, i) =>
+    t.classList.toggle('active', i === idx));
+}
+document.querySelectorAll('.tab').forEach((t, i) =>
+  t.addEventListener('click', () => activate(i)));
+window.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.altKey && e.key >= '1' && e.key <= '9') {
+    const idx = parseInt(e.key, 10) - 1;
+    if (idx < CFG.sessions.length) { e.preventDefault(); activate(idx); }
+  }
+});
+if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page
+</script>
 </body>
 </html>
 """
@@ -323,20 +419,23 @@ def _ensure_credential():
 # `fetch("/token")` is blocked from READING the token — it can never construct a
 # valid ws init. `-c` basic-auth gates both /token and the ws.
 _LAUNCH_TEMPLATE = """#!/usr/bin/env bash
-# airuleset-managed (#555) — do NOT edit; regenerate via `python3 airuleset.py install`.
+# airuleset-managed (#555/#579) — do NOT edit; regenerate via `python3 airuleset.py install`.
 # Reads the basic-auth credential from a mode-600 file (keeps it out of the unit
-# file) and execs ttyd on loopback; tailscale serve fronts it tailnet-only.
+# file) and execs ttyd bound DIRECTLY to dev1's tailscale IP (tailnet-only, no
+# reverse proxy — #579: `tailscale serve` matched only the MagicDNS name, so a
+# raw-IP request 404'd cross-node).
 set -euo pipefail
 cred="$(cat %(cred_path)s)"
-exec ttyd -p %(ttyd_port)d -i 127.0.0.1 -a -W -O -c "$cred" \\
+exec ttyd -p %(ttyd_port)d -i %(bind_ip)s -a -W -O -c "$cred" \\
   python3 %(repo_dir)s/cli_webterm.py webterm-connect
 """
 
 
-def render_webterm_launch_script():
+def render_webterm_launch_script(bind_ip):
     return _LAUNCH_TEMPLATE % {
         "cred_path": shlex.quote(str(WEBTERM_CRED_PATH)),
         "ttyd_port": WEBTERM_TTYD_PORT,
+        "bind_ip": shlex.quote(bind_ip),
         "repo_dir": shlex.quote(str(REPO_DIR)),
     }
 
@@ -346,52 +445,65 @@ def _render_webterm_unit():
     return tmpl.replace("{{LAUNCH_SCRIPT}}", str(WEBTERM_LAUNCH_PATH))
 
 
-def _ts_dns_name(run=None):
-    """dev1's tailscale MagicDNS name (e.g. dev1.tail547bba.ts.net), for the
-    printed URL. Falls back to the bare hostname."""
+def _render_webterm_dash_unit(bind_ip):
+    """The static-dashboard systemd --user unit: `python3 -m http.server` bound
+    to `bind_ip` (dev1's tailscale IP) on WEBTERM_DASH_PORT, serving the
+    generated `webterm-dash/` directory. `bind_ip` MUST be a validated tailscale
+    IP (see `_tailscale_ip`) — never 0.0.0.0/public."""
+    tmpl = WEBTERM_DASH_SERVICE_TEMPLATE.read_text(encoding="utf-8")
+    return (tmpl.replace("{{BIND_IP}}", bind_ip)
+            .replace("{{DASH_DIR}}", str(WEBTERM_DASH_DIR))
+            .replace("{{DASH_PORT}}", str(WEBTERM_DASH_PORT)))
+
+
+# dev1's tailscale IP must be inside the CGNAT block tailscale uses
+# (100.64.0.0/10 — second octet 64..127); anything else is NOT a tailnet address
+# and must never become a bind target (that could expose a shell publicly).
+_TS_CGNAT_RE = re.compile(
+    r"^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}$")
+
+
+def _tailscale_ip(run=None):
+    """dev1's tailscale IPv4 (validated to 100.64.0.0/10), for binding the
+    gateway services tailnet-only. Returns the IP string, or None if tailscale
+    has no usable tailnet IP — the caller MUST then REFUSE to provision (never
+    fall back to 0.0.0.0 or a public interface)."""
     run = run or subprocess.run
     try:
-        out = run(["tailscale", "status", "--json"],
-                  capture_output=True, text=True, timeout=5)
-        name = json.loads(out.stdout).get("Self", {}).get("DNSName", "").rstrip(".")
-        return name or WEBTERM_GATEWAY_HOST
+        out = run(["tailscale", "ip", "-4"], capture_output=True, text=True,
+                  timeout=5)
     except Exception:
-        return WEBTERM_GATEWAY_HOST
+        return None
+    if getattr(out, "returncode", 1) != 0:
+        return None
+    for line in (getattr(out, "stdout", "") or "").splitlines():
+        ip = line.strip()
+        if _TS_CGNAT_RE.match(ip):
+            return ip
+    return None
 
 
-def _ttyd_serve_base(run=None):
-    return "http://%s:%d" % (_ts_dns_name(run=run), WEBTERM_TTYD_SERVE_PORT)
-
-
-def _configure_tailscale_serve(run=None):
-    """Idempotent tailnet-only serve: dashboard at `/` on :80, ttyd at `/` on
-    :7682. Two ROOT mounts (no `--set-path`) so nothing strips ttyd's path.
-    Needs the tailscale operator grant (`tailscale set --operator=$USER`, done
-    once); prints the manual command on failure rather than claiming success."""
+def _reset_tailscale_serve(run=None):
+    """Idempotently clear any leftover `tailscale serve` config from the old
+    (#555) serve-fronted design — the services now bind the tailscale IP
+    directly, so no serve mapping should remain (a stale one would keep matching
+    only the MagicDNS name — the exact #579 cross-node 404). Best-effort: an
+    already-empty serve config makes this a no-op."""
     run = run or subprocess.run
-    steps = [
-        ["tailscale", "serve", "--bg", "--http=%d" % WEBTERM_DASH_SERVE_PORT,
-         str(WEBTERM_DASHBOARD_PATH)],
-        ["tailscale", "serve", "--bg", "--http=%d" % WEBTERM_TTYD_SERVE_PORT,
-         "http://127.0.0.1:%d" % WEBTERM_TTYD_PORT],
-    ]
-    ok = True
-    for cmd in steps:
-        r = run(cmd, capture_output=True, text=True)
-        if getattr(r, "returncode", 1) != 0:
-            ok = False
-            print("  webterm: tailscale serve step failed — run manually:\n"
-                  "    %s\n    %s" % (" ".join(cmd), (getattr(r, "stderr", "") or "").strip()),
-                  file=sys.stderr)
-    return ok
+    try:
+        run(["tailscale", "serve", "reset"], capture_output=True, text=True)
+    except Exception as e:
+        print("  webterm: `tailscale serve reset` skipped (%s)" % e,
+              file=sys.stderr)
 
 
 def is_webterm_gateway():
     return os.uname().nodename == WEBTERM_GATEWAY_HOST
 
 
-def setup_webterm_service(run=None, configure_serve=True):
-    """dev1-only: provision + enable the ttyd web-terminal gateway. Idempotent.
+def setup_webterm_service(run=None):
+    """dev1-only: provision + enable the ttyd web-terminal gateway + static
+    dashboard, both bound DIRECTLY to dev1's tailscale IP (#579). Idempotent.
     Returns True on success, False on any skip/failure (never raises for a
     non-fatal step — mirrors setup_filedrop_service)."""
     if not is_webterm_gateway():
@@ -407,21 +519,40 @@ def setup_webterm_service(run=None, configure_serve=True):
             print("  webterm: ttyd not installed and `sudo -n apt-get install "
                   "ttyd` failed — skipping the gateway", file=sys.stderr)
             return False
+
+    # #579: resolve dev1's tailscale IP ONCE (single source of truth for the
+    # dashboard links, the ttyd `-i` bind, and the dashboard `--bind`). REFUSE
+    # LOUDLY if there is none — NEVER write a unit that could bind 0.0.0.0.
+    bind_ip = _tailscale_ip(run=run)
+    if not bind_ip:
+        print("  webterm: no tailscale IP (`tailscale ip -4` gave nothing in "
+              "100.64.0.0/10) — REFUSING to provision (never binds 0.0.0.0/"
+              "public). Bring tailscale up and re-run install.", file=sys.stderr)
+        return False
+
     from cli_filedrop_watchdog import _run_systemctl, _whoami
 
+    # The old serve-fronted design (#555) is gone — clear any leftover serve
+    # config so a stale MagicDNS-only mapping can't linger and re-cause #579.
+    _reset_tailscale_serve(run=run)
+
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
+    WEBTERM_DASH_DIR.mkdir(parents=True, exist_ok=True)
     inv = webterm_inventory()
     WEBTERM_INVENTORY_PATH.write_text(
         json.dumps(inv, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    WEBTERM_DASHBOARD_PATH.write_text(
-        render_dashboard_html(inv, ttyd_base=_ttyd_serve_base(run=run)),
-        encoding="utf-8")
+    ttyd_base = "http://%s:%d" % (bind_ip, WEBTERM_TTYD_PORT)
+    WEBTERM_DASH_INDEX.write_text(
+        render_dashboard_html(inv, ttyd_base=ttyd_base), encoding="utf-8")
     _ensure_credential()
-    WEBTERM_LAUNCH_PATH.write_text(render_webterm_launch_script(), encoding="utf-8")
+    WEBTERM_LAUNCH_PATH.write_text(render_webterm_launch_script(bind_ip),
+                                   encoding="utf-8")
     os.chmod(WEBTERM_LAUNCH_PATH, 0o755)
 
     WEBTERM_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
     WEBTERM_SERVICE_DEST.write_text(_render_webterm_unit(), encoding="utf-8")
+    WEBTERM_DASH_SERVICE_DEST.write_text(_render_webterm_dash_unit(bind_ip),
+                                         encoding="utf-8")
 
     try:
         run(["loginctl", "enable-linger", _whoami()], capture_output=True, text=True)
@@ -432,35 +563,35 @@ def setup_webterm_service(run=None, configure_serve=True):
     if rc != 0:
         print("  webterm: systemctl daemon-reload FAILED: %s" % (err or "").strip(),
               file=sys.stderr)
-    rc, _o, err = _run_systemctl(["enable", "--now", "webterm-ttyd.service"])
-    if rc != 0:
-        print("  webterm: systemctl enable --now FAILED: %s\n"
-              "    Manual: XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user "
-              "enable --now webterm-ttyd.service" % (err or "").strip(),
-              file=sys.stderr)
-        return False
-    # `enable --now` is a no-op for an already-running service, so a re-install
-    # that changed the launcher/unit (e.g. new ttyd flags) needs an explicit
-    # restart to take effect — mirrors setup_filedrop_service (#555 review).
-    rc, _o, err = _run_systemctl(["restart", "webterm-ttyd.service"])
-    if rc != 0:
-        print("  webterm: systemctl restart FAILED (new ttyd flags may not be "
-              "live): %s" % (err or "").strip(), file=sys.stderr)
 
-    serve_ok = _configure_tailscale_serve(run=run) if configure_serve else True
-    if serve_ok:
-        # NOTE (#555 review): the dashboard port (:80) is served UNAUTHENTICATED
-        # over the tailnet — it discloses fleet session labels + user@host to any
-        # tailnet peer (largely `tailscale status`-discoverable already; the shell
-        # port :7682 stays basic-auth-gated). Accepted residual; tighten with a
-        # tailscale ACL restricting dev1:80 to owner devices if desired.
-        print("  webterm: gateway live — http://%s/ (tailnet-only, login user %r)"
-              % (_ts_dns_name(run=run), WEBTERM_LOGIN_USER))
-    else:
-        print("  webterm: ttyd service is up but tailscale serve is NOT "
-              "configured — the gateway is not reachable until serve is set "
-              "(see the manual command above)", file=sys.stderr)
-    return True
+    ok_all = True
+    for svc in ("webterm-ttyd.service", "webterm-dash.service"):
+        rc, _o, err = _run_systemctl(["enable", "--now", svc])
+        if rc != 0:
+            print("  webterm: systemctl enable --now %s FAILED: %s\n"
+                  "    Manual: XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user "
+                  "enable --now %s" % (svc, (err or "").strip(), svc),
+                  file=sys.stderr)
+            ok_all = False
+            continue
+        # `enable --now` is a no-op for an already-running service, so a
+        # re-install that changed the launcher/unit (new ttyd flags, new bind IP,
+        # new dashboard) needs an explicit restart to take effect.
+        rc, _o, err = _run_systemctl(["restart", svc])
+        if rc != 0:
+            print("  webterm: systemctl restart %s FAILED (new config may not be "
+                  "live): %s" % (svc, (err or "").strip()), file=sys.stderr)
+
+    if ok_all:
+        # NOTE: the dashboard port is served UNAUTHENTICATED over the tailnet — it
+        # discloses fleet session labels to any tailnet peer (largely `tailscale
+        # status`-discoverable already; the shell port :7682 stays basic-auth-
+        # gated). Accepted residual; tighten with a tailscale ACL if desired.
+        print("  webterm: gateway live — dashboard http://%s:%d/ , shell "
+              "http://%s:%d/ (tailnet-only, login user %r)"
+              % (bind_ip, WEBTERM_DASH_PORT, bind_ip, WEBTERM_TTYD_PORT,
+                 WEBTERM_LOGIN_USER))
+    return ok_all
 
 
 def maybe_setup_webterm():
