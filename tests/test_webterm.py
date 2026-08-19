@@ -248,8 +248,11 @@ class TestRendering(unittest.TestCase):
 
 
 _FAKE_TMUX = r"""#!/usr/bin/env bash
-# Fake tmux: records which session the REAL _ATTACH_BODY snippet selects, driven
-# by FAKETMUX_SESSIONS (newline-separated `group::name`, group may be empty).
+# Fake tmux: LOGS every invocation's argv to $FAKETMUX_LOG (one line each) and
+# answers has-session/list-sessions from FAKETMUX_SESSIONS (newline-separated
+# `group::name`, group may be empty). Proves the REAL _ATTACH_BODY builds the
+# right grouped-clone multi-attach commands and NEVER detaches another client.
+echo "$*" >> "$FAKETMUX_LOG"
 cmd="$1"; shift
 case "$cmd" in
   has-session)
@@ -267,20 +270,18 @@ case "$cmd" in
       done <<< "$FAKETMUX_SESSIONS"
     fi
     exit 0 ;;
-  new-session)
-    if [ "$1" = "-t" ]; then echo "NEWSESSION_T:$2"; else echo "NEWSESSION_AS:$3"; fi
-    exit 0 ;;
-  attach)
-    echo "ATTACH_T:$2"; exit 0 ;;
 esac
 exit 0
 """
 
 
 class TestAttachSnippetBehavior(unittest.TestCase):
-    """Run the REAL _ATTACH_BODY snippet against a fake tmux to prove which
-    session it selects across every fleet case (the trickiest correctness
-    surface — the group-survivor awk + the 0/1/2 single-session count)."""
+    """#584: standard tmux multi-attach that NEVER disturbs an existing client.
+    Run the REAL _ATTACH_BODY against a logging fake tmux and prove: an existing
+    session is JOINED via a throwaway GROUPED clone (independent view, cleaned
+    up on disconnect, base never touched), the window sizes to the ACTIVE client
+    (window-size latest + aggressive-resize on), and `attach -d` (the only verb
+    that detaches other clients) is NEVER used."""
 
     def setUp(self):
         import subprocess
@@ -289,37 +290,68 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         faketmux = Path(self.d) / "tmux"
         faketmux.write_text(_FAKE_TMUX, encoding="utf-8")
         os.chmod(faketmux, 0o755)
+        self.log = Path(self.d) / "log"
 
-    def _select(self, preferred, sessions):
+    def _run(self, preferred, sessions):
         env = dict(os.environ, PATH=self.d + ":" + os.environ["PATH"],
-                   FAKETMUX_SESSIONS=sessions)
+                   FAKETMUX_SESSIONS=sessions, FAKETMUX_LOG=str(self.log))
         cmd = w._remote_command(preferred)
-        r = self.subprocess.run(["sh", "-c", cmd], capture_output=True,
-                                text=True, env=env, timeout=10)
-        return r.stdout.strip()
+        self.subprocess.run(["sh", "-c", cmd], capture_output=True,
+                            text=True, env=env, timeout=10)
+        return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
 
-    def test_grouped_owner_picks_group_survivor_not_cotenant(self):
-        # dev1: zbynek + marek co-tenant. P=zbynek must pick zbynek-4, NOT marek.
-        out = self._select("zbynek", "zbynek::zbynek-4\nmarek::marek-12")
-        self.assertEqual(out, "NEWSESSION_T:zbynek-4")
+    def test_grouped_owner_joins_survivor_via_grouped_clone(self):
+        # dev1: zbynek + marek co-tenant. P=zbynek joins zbynek-4 (group
+        # survivor) via a NEW grouped clone, never marek, never a bare attach.
+        log = self._run("zbynek", "zbynek::zbynek-4\nmarek::marek-12")
+        self.assertRegex(log, r"new-session -t zbynek-4 -s zbynek-4-web-\d+")
+        self.assertNotIn("attach -d", log)
+        self.assertNotRegex(log, r"\battach -t\b")     # never a shared mirror attach
 
-    def test_standalone_stream_picks_exact_name(self):
-        out = self._select("david", "::david\n::montalu")
-        self.assertEqual(out, "NEWSESSION_T:david")
+    def test_standalone_stream_joins_exact_via_grouped_clone(self):
+        log = self._run("david", "::david\n::montalu")
+        self.assertRegex(log, r"new-session -t david -s david-web-\d+")
 
-    def test_gk_single_unnamed_session_attaches_it(self):
-        # gk: one session "0", empty group, P=zbynek -> single-session fallback.
-        out = self._select("zbynek", "::0")
-        self.assertEqual(out, "ATTACH_T:0")
+    def test_single_session_joins_via_grouped_clone_not_shared_attach(self):
+        # gk: one session "0". Previously a bare `attach -t 0` (shared/mirrored
+        # view); now an independent grouped clone.
+        log = self._run("zbynek", "::0")
+        self.assertRegex(log, r"new-session -t 0 -s 0-web-\d+")
+        self.assertNotRegex(log, r"\battach -t 0\b")
 
-    def test_no_sessions_creates_preferred(self):
-        out = self._select("zbynek", "")
-        self.assertEqual(out, "NEWSESSION_AS:zbynek")
+    def test_cleanup_kills_only_the_clone_never_the_base(self):
+        # The disconnect trap fires on EXIT (the fake new-session returns at
+        # once) -> the throwaway clone is killed, the BASE session never is.
+        log = self._run("zbynek", "zbynek::zbynek-4")
+        self.assertRegex(log, r"kill-session -t zbynek-4-web-\d+")
+        # never a kill of the bare base session
+        self.assertNotRegex(log, r"kill-session -t zbynek-4(?!-web)")
+
+    def test_sizes_window_to_active_client(self):
+        # window-size latest + aggressive-resize on -> the shared window sizes to
+        # whoever is actively viewing, never the smallest client (the owner's WT
+        # view can't be shrunk by a small web client).
+        log = self._run("zbynek", "zbynek::zbynek-4")
+        self.assertIn("window-size latest", log)
+        self.assertIn("aggressive-resize on", log)
+
+    def test_no_sessions_creates_preferred_and_does_not_kill_it(self):
+        # No existing session -> create the owner's own base, which must PERSIST
+        # (never trap-killed — it is not a throwaway clone).
+        log = self._run("zbynek", "")
+        self.assertRegex(log, r"new-session -A -s zbynek")
+        self.assertNotIn("kill-session", log)
 
     def test_two_sessions_no_match_creates_preferred(self):
-        # Two sessions, neither matches P -> must NOT attach a wrong one; create.
-        out = self._select("gatekeeper", "zbynek::zbynek-4\nmarek::marek-12")
-        self.assertEqual(out, "NEWSESSION_AS:gatekeeper")
+        log = self._run("gatekeeper", "zbynek::zbynek-4\nmarek::marek-12")
+        self.assertRegex(log, r"new-session -A -s gatekeeper")
+
+    def test_never_uses_detach_flag_anywhere(self):
+        # `attach -d` is the ONLY tmux verb that detaches OTHER clients; it must
+        # never appear in any resolution path (the owner's WT stays attached).
+        for sess in ("zbynek::zbynek-4\nmarek::marek-12", "::0", ""):
+            log = self._run("zbynek", sess)
+            self.assertNotIn("attach -d", log)
 
 
 class TestProvisioningGate(unittest.TestCase):
@@ -620,6 +652,52 @@ class TestTabSwitchingUX(unittest.TestCase):
         html = w.render_dashboard_html(inv, ttyd_base="http://b:7682")
         self.assertNotIn("</script><script>", html)
         self.assertEqual(html.count('"ttyd_base"'), 1)
+
+
+class TestSameOriginKeyboard(unittest.TestCase):
+    """#584 supersedes #582's residual: the gateway makes the terminal iframes
+    SAME-ORIGIN, so Ctrl+Alt+1..9 now works even while focus is IN a terminal —
+    a per-iframe capture-phase keydown forwarder (only possible same-origin)
+    reaches the parent's switch logic before xterm consumes the keystroke."""
+
+    def _inv(self, n=3):
+        return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
+                 "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
+                for i in range(1, n + 1)]
+
+    def test_dashboard_uses_same_origin_ttyd_base(self):
+        # The caller now passes a RELATIVE base (`/t`) so each iframe is
+        # same-origin with the dashboard — never an absolute `<ip>:7682` origin.
+        html = w.render_dashboard_html(self._inv(2), ttyd_base="/t")
+        self.assertIn('"ttyd_base": "/t"', html)
+        self.assertIn("?arg=", html)              # iframe src still built from it
+        self.assertNotIn(":7682", html)           # no cross-origin ttyd port
+
+    def test_per_iframe_keydown_forwarder_is_wired_on_load(self):
+        # The fix: attach a keydown listener to each terminal iframe's OWN window
+        # when it loads (same-origin makes `contentWindow` reachable), in the
+        # CAPTURE phase so it fires before xterm swallows the key.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("contentWindow", html)
+        self.assertIn("addEventListener('load'", html)
+        # capture-phase keydown forwarder (the `true` 3rd arg is load-bearing)
+        self.assertRegex(html, r"addEventListener\('keydown',\s*\w+,\s*true\)")
+
+    def test_hotkey_handler_shared_and_stops_propagation(self):
+        # ONE shared handler used by BOTH the parent bar AND the per-iframe
+        # forwarder; it stops propagation so xterm never also processes the key.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("e.key >= '1'", html)        # the digit-jump logic
+        self.assertIn("stopPropagation", html)     # xterm must not also get it
+
+    def test_hint_no_longer_says_shortcut_fails_while_typing(self):
+        # The honest #582 residual ("during typing it's a different origin — use
+        # click") is GONE now that the shortcut works while typing.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
+        self.assertNotIn("iný origin", hint)
+        # click / cycle buttons still advertised as the always-works path
+        self.assertIn("klik", hint.lower())
 
 
 if __name__ == "__main__":
