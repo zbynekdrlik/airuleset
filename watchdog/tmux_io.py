@@ -850,3 +850,94 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     else:
         _log("submit-own unconfirmed: box changed, left in place (retryable)")
     return False
+
+
+def submit_own_goal_verified(pane_id, text, run=None, sleep_fn=None, logs=None):
+    """#566 -- SUBMIT an EXISTING, COMPLETE, own `/goal <...>` payload already
+    sitting swallowed-unsubmitted in the input box, PANE-verified, WITHOUT
+    re-typing or backspacing it. The `/goal`-specific sibling of
+    `submit_own_draft_verified` (#501): that primitive REFUSES the human-typeable
+    `/goal ` prefix because CONTENT is not proof of ownership for it -- here the
+    CALLER (the #566 goal recovery in `deliver_goal`) has ALREADY proven
+    ownership (the #372 janitor watch/park provenance + the recent-human gate)
+    AND passes the EXACT expected payload, so ownership is proven by an EXACT
+    head+tail match against `text` rather than an unambiguous-nudge prefix.
+
+    COMPLETENESS is mandatory before ANY keystroke (HARD CONSTRAINT: a truncated
+    slash command is NEVER submitted -- the #36 disaster): the box HEAD row must
+    be a leading substring of `text` AND the box TAIL row must be a trailing
+    substring of `text` AND `text` must start with `/goal `. Both ends matching
+    the literal expected payload prove the box holds the WHOLE rendered
+    `/goal <...>`; a partial/truncated type (tail does not match `text`'s tail)
+    is refused. Recognition reads the HEAD row (`_input_box_head_text`) + the
+    TAIL row (`_input_line_text`), never guessing. A collapsed-paste placeholder
+    (`[Pasted text #N]`) never `startswith("/goal ")`, so it is refused too.
+
+    Confirmation is PANE-based, NOT transcript-based (#566-review F1 -- the
+    #501 sibling's transcript token works for a PLAIN-TEXT nudge, but a SLASH
+    COMMAND like `/goal` is written to the transcript as a `<command-name>
+    /goal</command-name> ... <command-args>...` COMPOSITE, so the raw `/goal
+    <...>` text is NEVER a contiguous substring of the accepted `user` turn and a
+    transcript match can never succeed -- `watchdog/decide.py`'s own #336-F1
+    finding). So this mirrors the PROVEN production `/goal` typing path
+    `goal._send_goal_verified` exactly: press Enter, and the submit is confirmed
+    the instant the box no longer holds our `/goal` (`_await_typed_landed(...,
+    want=False)`); a swallowed Enter (#36 agent-strip) earns ONE corrective
+    Escape+Enter (never a second Escape #35), re-verified. On a genuinely
+    unconfirmed submit the box is left EXACTLY as-is (never backspace our own
+    complete payload; it is a legit pending arm), logged honestly, return False;
+    the caller's escalation fires."""
+    run = run or watchdog._default_run
+    sleep_fn = sleep_fn or time.sleep
+
+    def _log(reason):
+        if isinstance(logs, list):
+            logs.append(reason)
+
+    if not text or not text.startswith("/goal "):
+        _log("submit-own-goal abort: payload is not a /goal command")
+        return False
+
+    def _complete_own_goal(cap):
+        # The box holds the COMPLETE literal `/goal <text>`: head row is its
+        # leading substring AND tail row is its trailing substring. A truncated
+        # type matches the head but NOT the tail -> refused.
+        head = watchdog._input_box_head_text(cap)
+        tail = watchdog._input_line_text(cap)
+        return (bool(head) and head.startswith("/goal ")
+                and text.startswith(head)
+                and bool(tail) and text.endswith(tail))
+
+    cap = watchdog.capture_pane(pane_id, run, lines=40)
+    if not _complete_own_goal(cap):
+        _log("submit-own-goal abort: box no longer holds the complete own /goal")
+        return False
+    if "esc to interrupt" in (cap or ""):
+        _log("submit-own-goal abort: live turn")
+        return False
+    # A SELECTED agent-strip row (#36) steals the Enter -- ONE Escape returns
+    # focus (the draft survives ONE Escape; two would delete it, #35), then
+    # re-confirm the complete own /goal is still there before submitting.
+    if watchdog._strip_selected(cap):
+        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+        cap = watchdog.capture_pane(pane_id, run, lines=40)
+        if not _complete_own_goal(cap):
+            _log("submit-own-goal abort: own /goal gone after strip Escape")
+            return False
+    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    # PANE proof: the box no longer holds our `/goal` (`want=False`) => submitted.
+    if not _await_typed_landed(pane_id, text, run, sleep_fn, want=False):
+        _log("submit-own-goal delivered")
+        return True
+    # STILL in the box -- a swallowed Enter (#36). ONE corrective Escape+Enter.
+    run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    if not _await_typed_landed(pane_id, text, run, sleep_fn, want=False):
+        _log("submit-own-goal delivered (after corrective Escape+Enter)")
+        return True
+    # Genuinely unconfirmed -- our own complete /goal is still in the box. Leave
+    # it EXACTLY as-is (never backspace our own payload; it is a legit pending
+    # arm), logged honestly (#134/#360); the caller's escalation fires.
+    _log("submit-own-goal unconfirmed: own /goal still in box, left in place "
+         "(retryable)")
+    return False
