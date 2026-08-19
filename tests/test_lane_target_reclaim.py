@@ -549,6 +549,55 @@ class TestTier0BypassClassification(_Base):
         self.assertIn("tier0=BYPASS", text, "a purged bypass lane logs its tier-0 verdict")
         self.assertIn("tier0=legacy", text, "a purged legacy lane logs its tier-0 verdict")
 
+    def test_bypass_log_carries_mtime_evidence_even_if_filing_fails(self):
+        # #545 review C5: the bypass evidence (mtime + fresh count) must be
+        # durable in the reclaim log even when the ticket-file failed.
+        repo = _mkrepo(self.root)
+        self._bypass_lane(repo, NOW - 1000, origin=self.CAMBOX)
+        self._run_flip(NOW - 100000, dry_run=False,
+                       issue_filer=lambda slug, title, body: None)   # filing fails
+        text = self.log.read_text()
+        self.assertIn("tier0=BYPASS", text)
+        self.assertIn("mtime=", text, "the newest mtime is logged as durable evidence")
+        self.assertIn("fresh>=", text, "the fresh-file count is logged as durable evidence")
+
+    def test_target_at_exact_flip_is_legacy(self):
+        # #545 review C3: a file mtime EXACTLY at the flip is legacy (strict >).
+        repo = _mkrepo(self.root)
+        lane, tgt = self._bypass_lane(repo, NOW - 100000, origin=self.CAMBOX)
+        results = self._run_flip(NOW - 100000, dry_run=False)     # flip == file mtime
+        row = self._by_branch(results, "worktree-merged")
+        self.assertTrue(row["purged"])
+        self.assertFalse(row["tier0_bypass"],
+                         "a file mtime exactly at the flip instant is legacy, not a bypass")
+        self.assertEqual(self._filer_calls, [])
+
+    def test_future_dated_bypass_state_refiles(self):
+        # #545 review C4: a future-dated 'filed' stamp must NOT wedge dedup.
+        import json as _json
+        repo = _mkrepo(self.root)
+        self._bypass_lane(repo, NOW - 1000, origin=self.CAMBOX)
+        self.bypass_state.write_text(_json.dumps(
+            {"filed": {"zbynekdrlik/camera-box":
+                       {"ts": NOW + 10 * 24 * 3600, "issue": "old"}}}))
+        self._run_flip(NOW - 100000, dry_run=False)
+        self.assertEqual(len(self._filer_calls), 1,
+                         "a future-dated dedup stamp is ignored (re-file), never wedges dedup")
+
+    def test_within_run_dedup_survives_state_write_failure(self):
+        # #545 review C6: within-run per-repo dedup must hold even when the
+        # bypass-state DISK write fails (the disk-pressure scenario this whole
+        # feature runs in) -- the in-memory guard, not just the disk state.
+        repo = _mkrepo(self.root)
+        self._bypass_lane(repo, NOW - 1000, branch="worktree-a", origin=self.CAMBOX)
+        self._bypass_lane(repo, NOW - 1000, branch="worktree-b")   # same origin repo
+        afile = self.root / "afile"
+        afile.write_text("x")                                       # parent is a FILE
+        unwritable = afile / "state.json"                           # -> mkdir/write fails
+        self._run_flip(NOW - 100000, dry_run=False, bypass_state_path=unwritable)
+        self.assertEqual(len(self._filer_calls), 1,
+                         "in-memory dedup holds even when the state write fails")
+
 
 class TestTier0BypassHelpers(_Base):
     def test_lane_repo_slug_parses_https_and_ssh(self):

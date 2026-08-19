@@ -1165,14 +1165,23 @@ LANE_TARGET_MERGED_MIN_IDLE_S = 2 * 3600
 # camera-box #185). The #557 `block-tier0-local-build.sh` allowlist inversion
 # MERGED at 598e3826 (closed 2026-08-19T00:38:59Z); a Tier-0 lane target/ file
 # NEWER than this instant is a bypass finding to RECORD + FILE before the purge
-# (never silently delete it). Env-overridable (a box whose deploy lagged the
-# merge, or a future re-flip).
+# (never silently delete it).
+#
+# NOTE (#545 review 🟡): `TIER0_FLIP_ISO` is the #557 MERGE instant, but the
+# hook only starts BLOCKING once #557 DEPLOYS to a box (the push after merge).
+# A legit build in the (one-time, now-passed) merge->deploy window has an mtime
+# > this and would classify as a bypass. So the flip epoch is ENV-OVERRIDABLE
+# (`AIRULESET_TIER0_FLIP_EPOCH`, resolved at CALL time): set it to the box's
+# actual #557 deploy instant when they differ meaningfully, and always DRY-RUN
+# first (the CLI previews WOULD-file findings) before trusting an auto-file.
 TIER0_FLIP_ISO = "2026-08-19T00:38:59+00:00"
 
 
 def _tier0_flip_epoch():
     """The #557 tier-0 flip instant as an epoch, `AIRULESET_TIER0_FLIP_EPOCH`
-    env-override winning, else the #557 merge instant (`TIER0_FLIP_ISO`)."""
+    env-override winning (resolved at CALL time, so a box whose #557 deploy
+    lagged the merge can tune it), else the #557 merge instant
+    (`TIER0_FLIP_ISO`)."""
     env = os.environ.get("AIRULESET_TIER0_FLIP_EPOCH")
     if env:
         try:
@@ -1184,7 +1193,6 @@ def _tier0_flip_epoch():
     return _dt.datetime.fromisoformat(TIER0_FLIP_ISO).timestamp()
 
 
-TIER0_FLIP_EPOCH = _tier0_flip_epoch()      # import-time default (ISO or env)
 LANE_TARGET_TIER0_BYPASS_STATE_PATH = CLAUDE_DIR / "lane-target-tier0-bypass-state.json"
 # Per-repo dedup cooldown: at most ONE bypass ticket per offending repo per
 # window. The natural cardinality is already ~1 (a reclaimed target is gone, so
@@ -1287,7 +1295,20 @@ def _log_lane_target_results(results, log_path, now, dry_run: bool):
         tier0_txt = ""
         if "tier0_bypass" in r:              # only set on a purge candidate (#545)
             if r.get("tier0_bypass"):
-                tier0_txt = " tier0=BYPASS(%s)" % (r.get("tier0_bypass_filed") or "?")
+                # Log the mtime + fresh-file count too, so the bypass evidence
+                # is DURABLE even when the ticket-file failed (the ticket body
+                # is then lost with the deleted target/ -- #545 review C5).
+                nm = r.get("newest_mtime")
+                nm_txt = ""
+                if nm is not None:
+                    try:
+                        nm_txt = " mtime=%s" % _dt.datetime.fromtimestamp(
+                            nm, tz=_dt.timezone.utc).isoformat()
+                    except (OverflowError, OSError, ValueError):
+                        nm_txt = " mtime=%s" % nm
+                fresh_n = len(r.get("fresh_sample") or [])
+                tier0_txt = " tier0=BYPASS(%s)%s fresh>=%d" % (
+                    r.get("tier0_bypass_filed") or "?", nm_txt, fresh_n)
             else:
                 tier0_txt = " tier0=legacy"
         lines.append("%s %s %s branch=%s repo=%s%s%s reason=%s" % (
@@ -1409,16 +1430,21 @@ def _default_tier0_bypass_filer(repo_slug, title, body):
 
 def _record_tier0_bypass(root, branch, lane, target_dir, newest_mtime,
                          fresh_sample, now, git_run, issue_filer,
-                         bypass_state_path, dry_run):
-    """Resolve the offending repo, dedup per-repo against a local state file
-    (`LANE_TARGET_TIER0_BYPASS_REFILE_S` cooldown), and file ONE ticket via
-    `issue_filer`. Records BEFORE the caller's delete. Returns a human status
-    string; NEVER raises -- a bypass finding must not block the reclaim."""
+                         bypass_state_path, dry_run, filed_this_run=None):
+    """Resolve the offending repo, dedup per-repo (ACROSS runs via the local
+    state file's `LANE_TARGET_TIER0_BYPASS_REFILE_S` cooldown; WITHIN a run via
+    the in-memory `filed_this_run` set, which stays correct even if the state
+    write below fails -- the disk-pressure scenario this whole feature runs in,
+    #545 review C6), and file ONE ticket via `issue_filer`. Records BEFORE the
+    caller's delete. Returns a human status string; NEVER raises -- a bypass
+    finding must not block the reclaim."""
     slug = _lane_repo_slug(root, git_run)
     if not slug:
         return "repo slug unresolved -- recorded, not filed"
     if dry_run:
         return "dry-run -- would file on %s (not filed)" % slug
+    if filed_this_run is not None and slug in filed_this_run:
+        return "already tracked on %s (this run)" % slug
 
     refile_s = _worktree_env_age_s("AIRULESET_LANE_TARGET_TIER0_BYPASS_REFILE_S",
                                    LANE_TARGET_TIER0_BYPASS_REFILE_S)
@@ -1434,6 +1460,8 @@ def _record_tier0_bypass(root, branch, lane, target_dir, newest_mtime,
         except (TypeError, ValueError):
             ts = 0
         if 0 <= now - ts < refile_s:        # a future-dated stamp re-files (fail-safe)
+            if filed_this_run is not None:
+                filed_this_run.add(slug)
             return "already tracked on %s (dedup)" % slug
 
     title = LANE_TARGET_TIER0_BYPASS_TITLE
@@ -1447,6 +1475,8 @@ def _record_tier0_bypass(root, branch, lane, target_dir, newest_mtime,
     if not url:
         return "filing FAILED on %s -- recorded, not filed" % slug
 
+    if filed_this_run is not None:          # dedup the rest of THIS run even if
+        filed_this_run.add(slug)            # the disk write below fails (C6)
     filed[slug] = {"ts": now, "issue": url}
     try:
         Path(bypass_state_path).parent.mkdir(parents=True, exist_ok=True)
@@ -1549,6 +1579,7 @@ def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
             return _tier0_via_hook(cwd, hook_path=hook_path)
 
     results = []
+    filed_this_run = set()          # #545 C6: within-run per-repo dedup, disk-safe
     discovery_failed = False
     try:
         lane_targets = list(_iter_lane_target_dirs(home, git_run))
@@ -1651,7 +1682,8 @@ def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
                 entry["fresh_sample"] = fresh_sample
                 entry["tier0_bypass_filed"] = _record_tier0_bypass(
                     root, branch, lane, target_dir, newest_mtime, fresh_sample,
-                    now, git_run, issue_filer, bypass_state_path, dry_run)
+                    now, git_run, issue_filer, bypass_state_path, dry_run,
+                    filed_this_run=filed_this_run)
 
             entry["reason"] = "merged-lane target/ reclaimed (%s idle, %s)" % (
                 "%.1fh" % (rec / 3600.0), _lane_human_size(size_bytes))
