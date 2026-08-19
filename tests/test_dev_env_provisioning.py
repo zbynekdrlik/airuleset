@@ -160,6 +160,27 @@ class TestStreamSessionCwd(TestCase):
         with m.patch.object(Path, "home", return_value=d):
             self.assertEqual(airuleset._stream_session_cwd(), d)
 
+    # --- #563: cwd fallback CHAIN. montalu1's real project dir is
+    # ~/devel/odoo (no odoo-erp subdir), so the old binary "odoo-erp or
+    # $HOME" fallback dropped it into $HOME (wrong project key = no
+    # history/memory). The chain tries odoo-erp, THEN devel/odoo, THEN $HOME.
+
+    def test_returns_devel_odoo_when_only_that_exists(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "devel" / "odoo").mkdir(parents=True)
+        with m.patch.object(Path, "home", return_value=d):
+            self.assertEqual(airuleset._stream_session_cwd(),
+                             d / "devel" / "odoo")
+
+    def test_odoo_erp_wins_when_both_dirs_exist(self):
+        # priority preserved: odoo-erp is first in the chain, so an account
+        # WITH the odoo-erp checkout still lands there, not one level up.
+        d = Path(tempfile.mkdtemp())
+        (d / "devel" / "odoo" / "odoo-erp").mkdir(parents=True)
+        with m.patch.object(Path, "home", return_value=d):
+            self.assertEqual(airuleset._stream_session_cwd(),
+                             d / "devel" / "odoo" / "odoo-erp")
+
 
 class TestTmuxSessionExists(TestCase):
     def test_true_on_rc_zero(self):
@@ -766,6 +787,18 @@ class TestApplyStreamSshAttach(TestCase):
             self.assertFalse(changed, f"{user} must not get the block")
             self.assertNotIn(airuleset.STREAM_SSH_ATTACH_MARK_START,
                              p.read_text(), f"{user} must not get the block")
+
+    def test_ssh_attach_block_cwd_uses_the_fallback_chain(self):
+        # #563: the block's cwd must try devel/odoo/odoo-erp THEN devel/odoo
+        # before $HOME -- the old binary "odoo-erp or $HOME" fallback dropped
+        # montalu1 (whose project dir is ~/devel/odoo, no odoo-erp subdir)
+        # into $HOME, so a claude launched there wrote under the wrong project
+        # key (no history/memory).
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn("for __airuleset_rel in devel/odoo/odoo-erp devel/odoo",
+                      block)
+        self.assertNotIn('[ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"',
+                         block)
 
 
 class TestStreamMarkerBlockSpansSafety(TestCase):
