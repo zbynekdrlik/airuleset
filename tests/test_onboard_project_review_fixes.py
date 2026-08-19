@@ -99,7 +99,12 @@ class TestNameResolvedByPath(unittest.TestCase):
 
 
 class TestAuditSkipsCrossHost(unittest.TestCase):
-    def test_audit_registry_skips_other_host(self):
+    # #583 supersedes the #569 MAJOR-3 `remote-host` SKIP: a cross-host entry is
+    # now audited over ssh (requirement 4). A host that is neither this box nor a
+    # known REMOTE_HOSTS target is genuinely unreachable → `unreachable` (never
+    # the false `missing-repo` drift the #569 skip existed to prevent). The
+    # never-false-missing-repo intent is preserved; only the kind name evolves.
+    def test_audit_registry_unknown_host_is_unreachable_not_drift(self):
         here = socket.gethostname()
         with TemporaryDirectory() as d, TemporaryDirectory() as rd:
             local_repo = Path(d)
@@ -116,9 +121,11 @@ class TestAuditSkipsCrossHost(unittest.TestCase):
             ])
             rep = ob.audit_registry(reg)
             kinds = {x["kind"] for x in rep["remote-proj"]}
-            self.assertIn("remote-host", kinds)
+            self.assertIn("unreachable", kinds)
             self.assertNotIn("missing-repo", kinds,
                              "cross-host entry falsely reported as missing-repo")
+            # the local entry still audits locally (clean)
+            self.assertEqual(rep["local-proj"], [])
 
 
 class TestCorruptRegistryNotOverwritten(unittest.TestCase):
