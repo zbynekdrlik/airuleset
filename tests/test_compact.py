@@ -142,13 +142,21 @@ def _write_human_transcript(base, cwd, sid, ts_epoch,
     return p
 
 
-def _write_subagent_transcript(base, cwd, sid, mtime=None):
+def _write_subagent_transcript(base, cwd, sid, mtime=None, error=False):
     """A sibling subagent transcript proving `_session_has_live_bg_tasks`'s
-    file-mtime signal — <base>/<encoded-cwd>/<sid>/subagents/agent-x.jsonl."""
+    file-mtime signal — <base>/<encoded-cwd>/<sid>/subagents/agent-x.jsonl.
+    `error=True` makes its last turn an unrecovered api-error (a `wedged`
+    lane: count_live_workers drops it from its live COUNT, but compact still
+    vetoes on it — #565-review)."""
     d = Path(base) / _encode(cwd) / sid / "subagents"
     d.mkdir(parents=True, exist_ok=True)
     p = d / "agent-x.jsonl"
-    p.write_text(json.dumps({"type": "assistant"}) + "\n")
+    if error:
+        entry = {"type": "assistant", "isApiErrorMessage": True,
+                 "message": {"id": "msg_1", "content": "API Error: 529"}}
+    else:
+        entry = {"type": "assistant"}
+    p.write_text(json.dumps(entry) + "\n")
     if mtime is not None:
         os.utime(p, (mtime, mtime))
     return p
@@ -1205,6 +1213,32 @@ class TestCompactSelfReportedCompleteExemption(unittest.TestCase):
             proj, self.CWD, self.SID,
             mtime=now - compact.COMPACT_LIVE_WORKER_FRESHNESS_S - 60)
         self.assertFalse(compact._session_has_live_bg_tasks(
+            None, self.SID, self.CWD, None, projects_dir=proj, now=now))
+
+    def test_live_bg_tasks_true_for_a_fresh_wedged_lane_pending_auto_resume(self):
+        # #565-review 🟡: count_live_workers EXCLUDES a fresh api-errored
+        # ("wedged") lane from its live COUNT (correct for its lane-nudge
+        # consumer) — but for compact that lane is recoverable in-flight work
+        # (pending job-1 auto-resume) the supervisor still owns, and compaction
+        # would orphan it. Condition (b) must veto on any NON-STALE lane, not
+        # the wedged-excluding count.
+        proj = self._dir()
+        now = time.time()
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now, error=True)
+        self.assertTrue(compact._session_has_live_bg_tasks(
+            None, self.SID, self.CWD, None, projects_dir=proj, now=now))
+
+    def test_live_bg_tasks_window_floor_strictly_exceeds_the_10min_bash_cap(self):
+        # #565-review 🔵: the load-bearing correctness property is "the window
+        # strictly exceeds the 10-min (600s) Bash timeout cap, so a worker
+        # silent for one max-length tool call still counts live." A lane silent
+        # 605s (just past the cap) MUST veto — an ABSOLUTE age, not relative to
+        # the constant, so a mutant shrinking COMPACT_LIVE_WORKER_FRESHNESS_S
+        # below ~600 fails HERE (the 300s fixtures would survive such a shrink).
+        proj = self._dir()
+        now = time.time()
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now - 605)
+        self.assertTrue(compact._session_has_live_bg_tasks(
             None, self.SID, self.CWD, None, projects_dir=proj, now=now))
 
     def test_live_bg_tasks_reads_count_live_workers_at_the_15min_window(self):

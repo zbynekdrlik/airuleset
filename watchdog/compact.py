@@ -636,12 +636,15 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
           CC-rendered positive WHEN present, but NOT rendered by an idle
           supervisor showing only agent-strip rows, so an ADDITIONAL positive
           only, never relied on alone;
-      (b) `count_live_workers` reports >=1 LIVE lane from on-disk task state —
+      (b) `count_live_workers` reports a FRESH lane in its on-disk task state —
           a subagent transcript written within `COMPACT_LIVE_WORKER_FRESHNESS_S`
-          (15 min) whose last real turn is not a wedged/dead mode (#486 G2 /
-          #518). REPLACES the pre-#565 raw 120s `subagent_active` window, which
-          was shorter than a single 9-min CI poll, so a worker mid-long-tool-
-          call read as dead and the box auto-compacted its own live lanes.
+          (15 min), #486 G2 / #518. Vetoes on ANY non-stale lane (live OR
+          wedged), NOT the wedged-EXCLUDING `count`: a wedged (unrecovered-api-
+          error) lane pending job-1 auto-resume is recoverable work the
+          supervisor still owns, so compaction must not orphan it (#565-review).
+          REPLACES the pre-#565 raw 120s `subagent_active` window, which was
+          shorter than a single 9-min CI poll — so a worker mid-long-tool-call
+          read as dead and the box auto-compacted its own live lanes.
 
     Neither signal readable → False (a deferral optimization, never a new way to
     block on "we don't know"). `captured` (optional): reuse a known capture.
@@ -671,13 +674,20 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
 
     now_ts = now if now is not None else time.time()
     pdir = projects_dir or watchdog.PROJECTS_DIR
-    # `count_live_workers` never raises (fail-safe to a 0 count); its `on_warn`
-    # is routed to debug log (not the default stderr). A 0 count ALLOWS
-    # compaction — the direction the pre-#565 probe took on an unreadable read.
-    count, _ev = watchdog.count_live_workers(
+    # `count_live_workers` never raises (fail-safe to no lanes); its `on_warn`
+    # is routed to debug log (not the default stderr).
+    _count, evidence = watchdog.count_live_workers(
         pdir, cwd, sid, now_ts, COMPACT_LIVE_WORKER_FRESHNESS_S,
         on_warn=lambda msg: _log.debug("compact: count_live_workers: %s", msg))
-    return count > 0
+    # Veto on ANY FRESH lane the supervisor still owns — NOT the wedged-EXCLUDING
+    # `count` (#565-review). count_live_workers drops a fresh lane whose last turn
+    # is an unrecovered api-error ("wedged") because its lane-nudge consumer WANTS
+    # to nudge such a worker; but for compact the danger is inverted — a wedged
+    # lane pending job-1 auto-resume is recoverable in-flight work the supervisor
+    # still owns, and compaction would orphan it exactly like a live one. So count
+    # every NON-STALE lane (live / wedged / unreadable). No fresh lane (empty
+    # evidence, or all aged past the window) → False → compaction allowed.
+    return any(lane.state != "stale" for lane in evidence)
 
 
 # --------------------------------------------------------------------------- #
