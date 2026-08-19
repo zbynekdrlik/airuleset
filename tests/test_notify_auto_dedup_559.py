@@ -64,9 +64,16 @@ class TestAutoDedupKeyHelper(_HomeIsolated):
                                   "so two legitimately-distinct pings both send")
 
     def test_identical_body_same_window_same_key(self):
-        a = notify._auto_dedup_key("same", "o", now=1000.0)
-        b = notify._auto_dedup_key("same", "o", now=1000.0 + notify.AUTO_DEDUP_WINDOW_S - 1)
-        self.assertEqual(a, b, "identical content within one window must share a "
+        # Fixed time-bucket (int(now // window)), so "same window" means the
+        # SAME bucket — align to a bucket start and stay just inside it. (Two
+        # instants merely `window-1` apart can straddle a bucket boundary; that
+        # boundary under-throttle is the accepted, safe direction for a
+        # throttle, never a false dedup.)
+        w = notify.AUTO_DEDUP_WINDOW_S
+        base = 10 * w                      # bucket-aligned
+        a = notify._auto_dedup_key("same", "o", now=float(base))
+        b = notify._auto_dedup_key("same", "o", now=float(base + w - 1))
+        self.assertEqual(a, b, "identical content within one bucket must share a "
                               "key so a runaway repeat is throttled")
 
     def test_identical_body_next_window_different_key(self):

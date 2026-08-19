@@ -44,6 +44,17 @@ _DEDUP_TTL_S = 14 * 24 * 3600
 # future caller might append to the sanitised key (#359).
 _DEDUP_NAME_MAX = 180
 
+# #559: throttle window (seconds) for an AUTO-derived key given to a send that
+# arrived without a dedup_key. A keyless send used to bypass dedup AND trace
+# entirely (logged key=-, 1871 lines / the single largest bucket on dev1); it
+# now gets `auto:<owner>:<sha16(body)>:<bucket>` so identical spam WITHIN the
+# window is throttled while distinct pings (distinct body -> distinct hash) and
+# a legitimate re-send AFTER the window both still deliver. The window (default
+# 300 s, env-overridable) bounds the dedup horizon to minutes rather than the
+# 14-day marker TTL a bare content hash would inherit (cross_stream.py:304's
+# documented "content-stable key swallowed by the 14-day TTL" trap).
+AUTO_DEDUP_WINDOW_S = 300
+
 # Stream personas whose tmux session name has NO Discord identity of its own
 # (airuleset#259, 2026-08-06): montalu/montalu2/montalu3/simap/miva1 (#300)
 # route to zbynek's own thread; montalu4 routes to MAREK's own thread (his dev stream
@@ -2308,6 +2319,40 @@ def _post_discord(token, channel, content):
 # comment); ❓ (`waiting:`/`❓:`), ✅ (`done:`), run-cards (`<repo>#<n>`),
 # bounce/gkreq, job-4 `busypane:`, and the genuine one-shot `acctblock:` alarm
 # (no auto-reset, needs a human) all use OTHER key namespaces and keep sending.
+
+
+def _auto_dedup_window_s():
+    """The #559 throttle window (seconds), env-overridable via
+    `AIRULESET_AUTO_DEDUP_WINDOW_S`. A missing / garbage / non-positive value
+    falls back to `AUTO_DEDUP_WINDOW_S`, never raises."""
+    try:
+        v = int(os.environ.get("AIRULESET_AUTO_DEDUP_WINDOW_S") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    return v if v > 0 else AUTO_DEDUP_WINDOW_S
+
+
+def _auto_dedup_key(body, owner, now=None, window_s=None):
+    """#559: a stable, TRACEABLE dedup key for a send that arrived without one.
+
+    `auto:<owner>:<sha16(body)>:<time-bucket>`, so:
+      * identical content sent repeatedly WITHIN the window dedups (a runaway
+        keyless caller is throttled instead of flooding Discord);
+      * legitimately-DISTINCT pings (different body) hash differently and ALL
+        send — never a false dedup of two distinct messages;
+      * the same content re-sent AFTER the window sends again (the time bucket
+        bounds the dedup window to minutes, not the 14-day marker TTL a bare
+        content hash would inherit);
+      * the delivery log carries `key=auto:…` instead of an untraceable `key=-`.
+    `owner` is folded in so two DIFFERENT owners' identical bodies never
+    collide. The result is `auto:`-namespaced, so it never matches a #546
+    `SUPPRESSED_ALERT_PREFIXES` entry."""
+    now = time.time() if now is None else now
+    window = window_s if window_s else _auto_dedup_window_s()
+    digest = hashlib.sha256(str(body or "").encode("utf-8", "replace")).hexdigest()[:16]
+    return "auto:%s:%s:%d" % (owner or "-", digest, int(now // window))
+
+
 SUPPRESSED_ALERT_PREFIXES = (
     ("apierr", "api-error"),             # watchdog job 1 (stall / busy / giveup / stashabort)
     ("sesslimit", "session-limit"),      # watchdog job 6 (5h limit / giveup / resume)
@@ -2383,6 +2428,16 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     # (a tmux re-query between them could otherwise disagree).
     if owner is None:
         owner = resolve_owner()
+
+    # #559: a keyless send used to bypass dedup AND trace entirely (logged
+    # key=-). Auto-derive a bounded-window content-hash key so it becomes
+    # dedupable + traceable, WITHOUT dropping legitimately-distinct pings. Runs
+    # AFTER the #546 suppression gate (a keyless send is never a suppressed
+    # alert class — every suppressed class carries one of those keys) and AFTER
+    # owner resolution (owner is folded into the key so two owners' identical
+    # bodies never collide).
+    if not dedup_key:
+        dedup_key = _auto_dedup_key(body, owner)
 
     # Build the delivery list ONCE: primary owner first, then the parallel mirror
     # recipients (each gets the SAME body in THEIR OWN thread with THEIR OWN @mention).
