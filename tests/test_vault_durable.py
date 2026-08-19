@@ -187,8 +187,10 @@ class TestDurableBackstop(_StoreCase):
         self.assertEqual(st.durable_backstop(), [])
 
     def test_never_reads_the_value(self):
-        # The backstop must not open the value file (read_value's single-caller
-        # invariant). It works purely on file existence + metadata.
+        # The backstop must NOT read the value — read_value has exactly two
+        # legitimate callers (secret exec + the show endpoint, #580), and the
+        # backstop is not one of them. It works purely on file existence +
+        # metadata.
         nonce = st.register_request("K", durable_path=self._dpath("k"))
         st.store_value("K", VAL, keep_s=600, nonce=nonce)
         Path(self._dpath("k")).unlink()

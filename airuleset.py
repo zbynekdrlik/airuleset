@@ -5356,7 +5356,9 @@ def main():
                             "exec NAME -- CMD (hand the value to a child; a "
                             "name LOCKED to a template ignores CMD and runs "
                             "its own command instead, #154) | "
-                            "forget NAME | purge (drop everything past its TTL)")
+                            "forget NAME | purge (drop everything past its TTL) | "
+                            "show NAME|--file PATH (render a value the box holds "
+                            "to YOUR browser ONCE, then tear down — #580)")
     p_sec.add_argument("name", nargs="?", default=None,
                        help="Secret name: letters/digits/underscore, also used "
                             "as the env var name for `exec`")
@@ -5384,6 +5386,10 @@ def main():
                             "(e.g. ~/.secrets/<name>) written at paste (request) "
                             "or self-healed on use (exec), so the credential "
                             "survives the vault's <=24h TTL (#529)")
+    p_sec.add_argument("--file", default=None,
+                       help="show: render a mode-600 file (e.g. ~/.secrets/"
+                            "<name>) instead of a vault NAME — the file must be "
+                            "owner-only and outside any git repo (#580)")
     p_sec.add_argument("cmd", nargs=argparse.REMAINDER,
                        help="exec: the command to run, after `--`")
 

@@ -63,7 +63,7 @@ def _pick_free_port(ips, ports):
     return None
 
 
-SECRET_ACTIONS = ("request", "status", "list", "exec", "forget", "purge")
+SECRET_ACTIONS = ("request", "status", "list", "exec", "forget", "purge", "show")
 # Both lifetimes are CLAMPED, not merely defaulted. `int(args.ttl or DEFAULT)`
 # let a negative value through (0 is falsy and fell back; -1 is truthy), and the
 # server armed its shutdown timer only for a positive TTL — so `--ttl -1` gave a
@@ -82,6 +82,9 @@ def _secret_clamp_keep(value):
 # A distinct range from `upload`'s 8799-8819, so the two endpoint kinds can
 # never be confused for one another by a port alone.
 SECRET_PORTS = range(8830, 8850)
+# A THIRD distinct range for the `secret show` render endpoint (#580), so the
+# receive (request), send (show) and file (upload) endpoints never share a port.
+SHOW_PORTS = range(8850, 8870)
 
 
 def _secret_bindable(ip):
@@ -329,7 +332,7 @@ def _secret_apply_remainder(args):
     field argparse left unset.
     """
     ints = {"--ttl": "ttl", "--keep": "keep", "--port": "port"}
-    strs = {"--env": "env", "--persist": "persist"}
+    strs = {"--env": "env", "--persist": "persist", "--file": "file"}
     rest = list(getattr(args, "cmd", None) or [])
     while rest:
         tok = rest[0]
@@ -395,6 +398,136 @@ def _secret_exec_self_heal(nm, value, persist):
     except st.SecretError as e:
         print("secret exec: durable persist to %s failed: %s" % (persist, e),
               file=sys.stderr)
+
+
+def _secret_show_source(args, st):
+    """Resolve `secret show`'s value source WITHOUT reading the value (#580).
+
+    Returns (kind, locator, label): a vault NAME that is `ready`, or a validated
+    `--file` path. The CLI parent must never read the value — it only checks
+    metadata (`state`) for a name, or the file's LOCATION + mode
+    (`validate_show_file`) for a file, and hands the name/path to the server
+    child, which reads the value at GET. Fail-fast: exit 2 on a missing source
+    or a bad --file (an operator error), exit 1 on a name that is not stored.
+    """
+    file_arg = getattr(args, "file", None)
+    name = getattr(args, "name", None)
+    if file_arg:
+        if name:
+            print("secret show: give a NAME or --file, not both", file=sys.stderr)
+            sys.exit(2)
+        try:
+            real = st.validate_show_file(file_arg)
+        except st.SecretError as e:
+            print("secret show: --file %s" % e, file=sys.stderr)
+            sys.exit(2)
+        return "file", str(real), st.show_log_label("file", str(real))
+    if not name:
+        print("secret show: needs a NAME or --file <path>", file=sys.stderr)
+        sys.exit(2)
+    try:
+        st.check_name(name)
+    except st.SecretError as e:
+        print("secret: %s" % e, file=sys.stderr)
+        sys.exit(2)
+    state = st.state(name)
+    if state != "ready":
+        print("%s is not stored (state=%s) — nothing to show" % (name, state),
+              file=sys.stderr)
+        sys.exit(1)
+    return "name", name, st.show_log_label("name", name)
+
+
+def _secret_show(args):
+    """Stand up a one-shot RENDER endpoint (filedrop/show_server.py) that shows
+    a credential the box holds to the OWNER's browser ONCE, then tears down —
+    the OUTPUT direction of the vault (#580).
+
+    Reuses `secret request`'s bind policy (`_secret_bindable`/`_secret_select_ips`,
+    encrypted-default + `--allow-plain`), port pick, health probe and URL
+    labelling. The value never reaches THIS process: the server child reads it
+    only at GET (`read_value`/`read_show_file`), and the token goes through the
+    env (0400), never argv. The NAME/PATH passed in argv is not the value. No
+    vault entry is created or consumed — `show` neither stores nor forgets; the
+    endpoint self-terminates on first view or TTL.
+    """
+    import secrets as _secrets
+    import subprocess
+    import time
+
+    from filedrop import bind_ips
+    from filedrop import vault as st
+
+    kind, locator, label = _secret_show_source(args, st)
+    ttl = _secret_clamp_ttl(getattr(args, "ttl", None) or st.DEFAULT_ENDPOINT_TTL_S)
+
+    private = [ip for ip in bind_ips() if _secret_bindable(ip)]
+    if not private:
+        print("secret show: no private interface to bind (refusing a public bind)",
+              file=sys.stderr)
+        sys.exit(1)
+    ips, dropped = _secret_select_ips(private,
+                                      allow_plain=getattr(args, "allow_plain", False))
+    if not ips:
+        print("secret show: only unencrypted interfaces are available (%s). A "
+              "credential would cross the LAN in cleartext — re-run with "
+              "--allow-plain if that is acceptable here."
+              % ", ".join(dropped), file=sys.stderr)
+        sys.exit(1)
+
+    port = int(getattr(args, "port", None) or 0) or _pick_free_port(ips, SHOW_PORTS)
+    if port is None:
+        print("secret show: no free port in %d-%d" % (SHOW_PORTS[0], SHOW_PORTS[-1]),
+              file=sys.stderr)
+        sys.exit(1)
+
+    token = _secrets.token_urlsafe(24)      # 24 bytes = 192 bits (>= 128)
+    st.log_event("show", label, ttl=ttl)
+    endpoint_log = st.log_path().parent / ("show-endpoint-%d.log" % port)
+    endpoint_log.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(endpoint_log), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    # The token goes through the ENVIRONMENT, never argv: /proc/<pid>/cmdline is
+    # world-readable (0444), /proc/<pid>/environ is owner-only (0400).
+    child_env = dict(os.environ)
+    child_env["AIRULESET_VAULT_TOKEN"] = token
+    with os.fdopen(fd, "ab") as lf:
+        child = subprocess.Popen(
+            [sys.executable, str(REPO_DIR / "filedrop" / "show_server.py"),
+             str(port), ",".join(ips), kind, locator, str(ttl)],
+            stdout=subprocess.DEVNULL, stderr=lf, stdin=subprocess.DEVNULL,
+            env=child_env, start_new_session=True)
+
+    probes = _secret_probe_urls(ips, port)
+    opener = _secret_opener()
+
+    def _live(u):
+        try:
+            return opener.open(u, timeout=2).status in (200, 204)
+        except OSError:
+            return False
+
+    for _ in range(20):
+        if child.poll() is not None:
+            print("secret show: endpoint exited early — see %s" % endpoint_log,
+                  file=sys.stderr)
+            sys.exit(1)
+        if any(_live(u) for u in probes):
+            break
+        time.sleep(0.25)
+    else:
+        print("secret show: endpoint failed to come up — see %s" % endpoint_log,
+              file=sys.stderr)
+        sys.exit(1)
+
+    for ip in ips:
+        if _live(_secret_health_url(ip, port)):
+            print(_secret_url_line(ip, port, token))
+    if dropped:
+        print("(skipped %s — cleartext; --allow-plain offers them too)"
+              % ", ".join(dropped))
+    print("name=%s  endpoint-ttl=%ds  (jednorazové zobrazenie)" % (label, ttl))
+    print("Otvor URL v prehliadači — hodnota sa zobrazí RAZ a potom sa adresa "
+          "zavrie. Do chatu ju NEPÍŠ.")
 
 
 def cmd_secret(args):
@@ -479,6 +612,9 @@ def cmd_secret(args):
             print("secret: %s" % e, file=sys.stderr)
             sys.exit(2)
         return name
+
+    if action == "show":
+        return _secret_show(args)
 
     if action == "purge":
         print("purged: %s" % (", ".join(expired) if expired else "nothing"))
