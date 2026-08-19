@@ -145,10 +145,10 @@ STREAM_NOTIFY_OWNER = {
     # stepan@forestshop-dev). Owner directive: forestshop-dev notifications
     # go to claude-marek. Neither account has a Discord identity of its own
     # and neither is in AUTHORITY_BY_USER (both are full-authority), so
-    # without this redirect resolve_owner() returns "" and
-    # notification_channel() falls back to the shared
-    # DISCORD_NOTIFICATION_CHANNEL_ID thread -- exactly the "chodí do claude"
-    # the owner reported.
+    # without this redirect resolve_owner() finds no per-owner mapping for
+    # them (it returns "" with no tmux, else the box's own unmapped session
+    # group), so notification_channel() falls back to the shared
+    # DISCORD_NOTIFICATION_CHANNEL_ID thread -- the "chodí do claude" reported.
     #
     # GENERIC-USERNAME CAVEAT: "admin"/"stepan" are generic names that TODAY
     # exist in the managed fleet ONLY on the forestshop-dev box.
