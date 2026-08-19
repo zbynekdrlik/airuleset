@@ -242,7 +242,12 @@ SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner"
                # banned); hidden on-demand, deploys everywhere at zero
                # slash-noise cost, description-triggered when a session
                # posts to an Odoo Discuss channel over XML-RPC.
-               "odoo-discuss-xmlrpc"]
+               "odoo-discuss-xmlrpc",
+               # #569 (2026-08-19) — thin wrapper over `airuleset.py
+               # onboard-project`; all onboarding logic lives in the CLI
+               # (cli_onboard.py), the skill just invokes + reports. Deploys
+               # everywhere so any box can onboard a project the SAME way.
+               "onboard-project"]
 
 # --- Per-box skill scoping (user complaint 2026-07-11: "slash cmd by nemali byt
 # vsetky vsade ale len relevantne k danemu projektu") ---
@@ -4783,6 +4788,11 @@ from cli_autopilot_lock import (  # noqa: E402
 #  WATCHDOG_* -> cli_filedrop_watchdog.py, #433 L-B)
 
 
+from cli_onboard import (  # noqa: E402
+    cmd_onboard_project as cmd_onboard_project,
+)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -5348,6 +5358,33 @@ def main():
                         help="Override the recorded/compared holder pid "
                              "(default: auto-detect the long-lived campaign process)")
 
+    p_onboard = sub.add_parser(
+        "onboard-project",
+        help="Idempotent onboarding of a project under airuleset management "
+             "(git/remote/branches/.gitignore/CLAUDE.md/foundation+notification "
+             "tickets/registry) + --audit drift mode (#569)")
+    p_onboard.add_argument("path", nargs="?",
+                           help="Path to the project to onboard (or audit); "
+                                "omit with --audit to sweep the whole registry")
+    p_onboard.add_argument("--host", default=None,
+                           help="Machine the project lives on (dev1 default; "
+                                "a REMOTE_HOSTS name runs the steps over ssh)")
+    p_onboard.add_argument("--name", default=None,
+                           help="Explicit repo name (overrides deterministic "
+                                "path derivation — e.g. a client-cluster prefix)")
+    p_onboard.add_argument("--override", action="append", default=[],
+                           help="Convention override tag, repeatable "
+                                "(3-branch, merge=manual, local-builds=...)")
+    p_onboard.add_argument("--audit", "--check", dest="audit",
+                           action="store_true",
+                           help="READ-ONLY: report drift from the canonical "
+                                "checklist; no mutations, no auto-fixes")
+    p_onboard.add_argument("--dry-run", dest="dry_run", action="store_true",
+                           help="Report would-apply for every step; change nothing")
+    p_onboard.add_argument("--registry", default=None,
+                           help="Registry file path (default: the repo's "
+                                "projects-registry.json)")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -5389,6 +5426,7 @@ SUBCOMMANDS = {
     "tickets-status": cmd_tickets_status,
     "gk-request": cmd_gk_request,
     "autopilot-lock": cmd_autopilot_lock,
+    "onboard-project": cmd_onboard_project,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
