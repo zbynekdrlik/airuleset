@@ -2070,12 +2070,24 @@ GOAL_LANE_SATURATION_WORKERS = 5      # fill floor caps here: >= min(5, backlog)
 # memory headroom. Below this many MB of MemAvailable, another worktree worker
 # risks tipping a memory-tight box into the #448 pressure-reap zone (a reaped bg
 # shell / OOM-killed worker is worse than a briefly under-filled lane), so the
-# guard stays silent and journals the measured value. ~1.5 GB: comfortably above
-# a single worker's steady-state footprint plus headroom for its subprocesses,
-# and well clear of the pressure zone where #448's reaper starts culling. The
-# 0-worker EMPTY-lane nudge is UNAFFECTED -- a fully stalled box must always be
-# nudged regardless of memory.
-GOAL_LANE_MIN_MEM_AVAIL_MB = 1536
+# guard stays silent and journals the measured value. The 0-worker EMPTY-lane
+# nudge is UNAFFECTED -- a fully stalled box must always be nudged.
+#
+# #574 -- EVIDENCE-BASED DEFAULT + per-box override. The original 1536 was an
+# uncalibrated #442 implementation constant (born c703967d, ZERO cited OOM
+# evidence) that blocked gk's HISTORICALLY-WORKING saturation: gk (3.8 GB, main
+# claude ~1.4 GB RSS) ran 5+ lanes at ~1.2-1.4 GB MemAvailable with no reported
+# OOM before this gate existed, yet the 1536 floor fires skip:low-mem at
+# 1405-1480 MB -- exactly that state. Recalibrated to 1024: it admits gk's
+# evidenced 5-lane state (1.2 GB+, comfortably above 1024) and no more, while
+# keeping ~1 GB reserve still well clear of the swap-thrash zone where #448's
+# reaper culls. NOT removed -- the memoryPressure-reap class is real; a box that
+# needs a different floor sets AIRULESET_LANE_MIN_MEM_MB via the watchdog unit's
+# EnvironmentFile (read at CALL time by _lane_min_mem_avail_mb, #545). The
+# CAPACITY-CAPPED surface (#571) still escalates to the owner when even the
+# recalibrated floor blocks saturation with a real backlog. This constant is the
+# DEFAULT only -- read the effective floor via _lane_min_mem_avail_mb().
+GOAL_LANE_MIN_MEM_AVAIL_MB = 1024
 
 # #571 -- max CONSECUTIVE working-no-tasks defers (a ⏳ marker with 0 render task
 # badges AND 0 structured live lanes) before the branch STOPS deferring and
@@ -2084,10 +2096,11 @@ GOAL_LANE_MIN_MEM_AVAIL_MB = 1536
 # ⏳ box before a few sweeps confirm it. Each sweep is ~60-70s, so 3 ~= 3-4 min.
 GOAL_LANE_WNT_MAX_DEFERS = 3
 # #571 -- consecutive low-mem skips (under-saturated fill blocked by MemAvailable
-# < GOAL_LANE_MIN_MEM_AVAIL_MB) with a genuine backlog before the ONE owner-facing
-# CAPACITY-CAPPED decision line fires (deduped once per episode). ~5 sweeps
-# (~5-6 min) confirms a PERSISTENT ceiling, not a transient dip; the OOM skip
-# itself and the 1536MB threshold are UNCHANGED.
+# < the effective floor _lane_min_mem_avail_mb()) with a genuine backlog before
+# the ONE owner-facing CAPACITY-CAPPED decision line fires (deduped once per
+# episode). ~5 sweeps (~5-6 min) confirms a PERSISTENT ceiling, not a transient
+# dip; the OOM skip itself is UNCHANGED (its threshold is the #574 effective,
+# env-overridable floor, no longer a hardcoded 1536).
 GOAL_LANE_LOWMEM_SURFACE_STREAK = 5
 
 # #442 re-fix 2 -- the UNDER-SATURATED (non-zero worker) nudge text. Distinct
@@ -2128,6 +2141,26 @@ def _mem_available_mb():
     except Exception:
         return None
     return None
+
+
+def _lane_min_mem_avail_mb():
+    """The EFFECTIVE lane-fill memory floor in MB (#574): env
+    AIRULESET_LANE_MIN_MEM_MB overrides GOAL_LANE_MIN_MEM_AVAIL_MB, read at
+    CALL time. Never frozen at import (#545: an import-time env constant fires
+    on every airuleset invocation incl. the 60s watchdog, double-warns
+    fleet-wide, and cannot be per-box overridden via the watchdog unit's
+    EnvironmentFile). A malformed / non-positive value falls back to the
+    default -- the OOM guard is recalibrated, never silently disabled. The
+    per-box knob is set in ~/.claude/watchdog.env (see the
+    settings/api-watchdog.service.template EnvironmentFile)."""
+    raw = os.environ.get("AIRULESET_LANE_MIN_MEM_MB")
+    if raw is None:
+        return GOAL_LANE_MIN_MEM_AVAIL_MB
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return GOAL_LANE_MIN_MEM_AVAIL_MB
+    return v if v > 0 else GOAL_LANE_MIN_MEM_AVAIL_MB
 
 
 # #509 -- SURPLUS FLOOR for the UNDER-SATURATED (fill-more-lanes) nudge. The
@@ -2488,18 +2521,20 @@ def _lane_lowmem_reset(rec, dry_run):
 
 def _lane_lowmem_skip(rec, live_workers, waiters, backlog_n, mem_mb, loc, dry_run):
     """#571 -- the low-mem skip handling, extracted. The OOM-protection
-    ``skip:low-mem`` line and the 1536MB threshold are UNCHANGED; after
-    ``GOAL_LANE_LOWMEM_SURFACE_STREAK`` consecutive skips with a genuine backlog
-    this ALSO emits ONE deduped CAPACITY-CAPPED owner-decision line (the
-    persistent-RAM-ceiling surface: upgrade the box vs accept a lower
+    ``skip:low-mem`` line is UNCHANGED except that its threshold is now the
+    EFFECTIVE floor ``_lane_min_mem_avail_mb()`` (#574: env-overridable per box,
+    default recalibrated 1024), printed in the message instead of a hardcoded
+    literal. After ``GOAL_LANE_LOWMEM_SURFACE_STREAK`` consecutive skips with a
+    genuine backlog this ALSO emits ONE deduped CAPACITY-CAPPED owner-decision
+    line (the persistent-RAM-ceiling surface: upgrade the box vs accept a lower
     saturation). Returns the list of log lines. Episode state (``lms`` streak +
     ``lmsurf`` fired-flag) rides in the existing goal_lane rec (#531-reaped) and
     is advanced ONLY on a REAL sweep -- ``dry_run`` logs the OOM skip but mutates
     nothing and never latches the one-shot surface (#516)."""
+    min_mem = _lane_min_mem_avail_mb()   # #574: effective (env-overridable) floor
     out = ["lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
            "skip:low-mem MemAvailable=%dMB (< %dMB)"
-           % (loc, live_workers, waiters, backlog_n, mem_mb,
-              GOAL_LANE_MIN_MEM_AVAIL_MB)]
+           % (loc, live_workers, waiters, backlog_n, mem_mb, min_mem)]
     if dry_run:
         return out
     dec = _one_glance.lane_low_mem_surface_decision(
@@ -2513,9 +2548,9 @@ def _lane_lowmem_skip(rec, live_workers, waiters, backlog_n, mem_mb, loc, dry_ru
             "lane-occupancy %s -> CAPACITY-CAPPED: %d consecutive low-mem skips, "
             "MemAvailable=%dMB < %dMB with backlog=%d and only %d live lane(s) -- "
             "PERSISTENT RAM ceiling, OWNER DECISION needed (upgrade box vs accept "
-            "lower saturation). 1536MB threshold NOT auto-changed."
-            % (loc, dec.streak, mem_mb, GOAL_LANE_MIN_MEM_AVAIL_MB, backlog_n,
-               live_workers))
+            "lower saturation). %dMB threshold NOT auto-changed."
+            % (loc, dec.streak, mem_mb, min_mem, backlog_n,
+               live_workers, min_mem))
     return out
 
 
@@ -2700,7 +2735,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # guard runs on (owner directive). The 0-worker empty-lane nudge is exempt
         # (a fully stalled box must always be nudged).
         mem_mb = _mem_available_mb()
-        if mem_mb is not None and mem_mb < GOAL_LANE_MIN_MEM_AVAIL_MB:
+        if mem_mb is not None and mem_mb < _lane_min_mem_avail_mb():  # #574: effective floor
             logs += _lane_lowmem_skip(rec, live_workers, waiters, backlog_n,
                                       mem_mb, loc, dry_run)   # #571: OOM + surface
             return logs, True
