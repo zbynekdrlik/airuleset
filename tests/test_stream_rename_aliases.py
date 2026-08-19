@@ -343,5 +343,233 @@ class TestC2GuardWithAliasedSlice(TestCase):
                 airuleset._refuse_unless_empty_is_trustworthy("slice-quals", quals)
 
 
+class TestCoreSearchExclAliasExpansion(TestCase):
+    """#561: `_core_search_excl()` is the THIRD `_stream_rename_equivalents()`
+    consumer the #537 staging missed. It builds the full-authority CORE
+    gh-search exclusion straight from AUTHORITY_BY_USER keys, so after the live
+    rename removed the OLD `montalu`/`simap` keys (their OS accounts are gone)
+    it stopped excluding the OLD `stream:montalu`/`stream:simap` labels the
+    odoo-erp tickets still carry (live gk audit 2026-08-19: 69 open
+    `stream:montalu`, 0 `stream:montalu1`), leaking ~50 tickets into gk
+    core-quals / footer `I` / the /goal stop-proof / the Discord card.
+
+    Patched to the post-rename END state (only-new keys) so the test is
+    hermetic and survives the live registry evolving, mirroring
+    `TestTicketIsStreamLabeledAlias.test_old_label_survives_removal_of_old_key
+    _from_authority` above."""
+
+    ONLY_NEW = {"montalu1": "branch-merge", "simap1": "fork-no-merge",
+                "david1": "fork-no-merge", "marek": "branch-merge",
+                "montalu2": "branch-merge"}
+
+    def test_new_names_are_still_excluded(self):
+        # Exact-token membership (`excl.split()`), never substring `in excl`:
+        # `-label:stream:montalu` is a SUBSTRING of `-label:stream:montalu1`,
+        # so a substring assertion would pass for the wrong reason.
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
+            toks = airuleset._core_search_excl().split()
+        for name in ("montalu1", "simap1", "david1", "marek", "montalu2"):
+            self.assertIn("-label:stream:%s" % name, toks, name)
+
+    def test_legacy_alias_labels_are_also_excluded(self):
+        # THE #561 regression: the OLD labels the repo still carries must be
+        # excluded too, via the SAME `_stream_rename_equivalents()` primitive
+        # `_slice_quals`/`_ticket_is_stream_labeled` already use — never a
+        # second parallel alias table. Exact-token membership: `montalu` is a
+        # prefix of `montalu1`, so a substring `in` would falsely pass.
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
+            toks = airuleset._core_search_excl().split()
+        self.assertIn("-label:stream:montalu", toks)   # FAILS before the fix
+        self.assertIn("-label:stream:simap", toks)     # FAILS before the fix
+
+    def test_a_full_profile_entry_is_still_never_excluded(self):
+        # M-5 invariant preserved: a `full` entry is not a sub-dev stream, and
+        # excluding its label would remove a whole population from every count.
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                            {"david": "fork-no-merge", "boss": "full"}):
+            toks = airuleset._core_search_excl().split()
+        self.assertIn("-label:stream:david", toks)
+        self.assertNotIn("-label:stream:boss", toks)
+
+    def test_output_is_deduped_and_sorted_deterministic(self):
+        # `david` AND `david1` are BOTH keys pre-rename and each expands to the
+        # SAME pair, so a naive nested comprehension would emit duplicate
+        # `-label:stream:david`/`-label:stream:david1` fragments. Collect into a
+        # set, sorted-join — no duplicate tokens, deterministic order.
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                            {"david": "fork-no-merge", "david1": "fork-no-merge"}):
+            excl = airuleset._core_search_excl()
+        toks = excl.split()
+        self.assertEqual(len(toks), len(set(toks)), "duplicate exclusion terms: %r" % excl)
+        self.assertEqual(toks, sorted(toks), "non-deterministic order: %r" % excl)
+
+
+def _gh_filtered(items):
+    """A `_gh_out` stand-in with REAL `-label:` exclusion semantics (a mirror
+    of `test_authority_profiles._fake_gh_search_filtered`, inlined so this file
+    stays self-contained): `-label:X` genuinely REMOVES an item carrying X, so
+    it can prove that an exclusion term added to the built query actually drops
+    a ticket — a pure substring-inclusion fake cannot."""
+    import json as _json
+
+    def gh(*a, **k):
+        args = [str(x) for x in a]
+        if "--search" not in args:
+            return "[]"
+        search = args[args.index("--search") + 1]
+        matched = []
+        for it in items:
+            labels = it.get("labels") or set()
+            ok = True
+            for tok in search.split():
+                if tok.startswith("-label:"):
+                    names = tok[len("-label:"):].split(",")
+                    if any(n in labels for n in names):
+                        ok = False
+                        break
+                elif tok.startswith("label:"):
+                    names = tok[len("label:"):].split(",")
+                    if not any(n in labels for n in names):
+                        ok = False
+                        break
+            if ok:
+                matched.append(it)
+        if "-q" in args:
+            return str(len(matched))
+        return _json.dumps([
+            {"number": it["number"], "title": "t%d" % it["number"],
+             "createdAt": "2026-01-01T00:00:00Z",
+             "labels": [{"name": n} for n in sorted(it.get("labels") or [])]}
+            for it in matched])
+
+    return gh
+
+
+class TestCoreQualsCountExcludesLegacyStreamTicket(TestCase):
+    """#561 end-to-end reproduction of the live 5->61 regression, driven
+    through the actual `cmd_core_quals` count path (not just the derivation),
+    so it fails when the COUNT leaks — the number the /goal stop-proof reads."""
+
+    ONLY_NEW = {"montalu1": "branch-merge", "simap1": "fork-no-merge",
+                "david1": "fork-no-merge", "marek": "branch-merge"}
+
+    def _count(self):
+        import contextlib
+        import io
+        items = [
+            {"number": 11, "labels": set()},                  # genuine gk core work
+            {"number": 3062, "labels": {"stream:montalu"}},   # renamed-away label
+        ]
+        gh = _gh_filtered(items)
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
+            with m.patch.object(airuleset, "resolve_authority", return_value="full"):
+                with m.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_core_quals(m.Mock(
+                            count=True, list=False, waiting=False,
+                            ops_wait=False, extra=None))
+        return buf.getvalue().strip()
+
+    def test_a_stream_montalu_ticket_is_not_counted_into_gk_core(self):
+        self.assertEqual(
+            self._count(), "1",
+            "a renamed-away stream:montalu ticket leaked into the gk core "
+            "count — the exact 5->61 regression #561 fixes")
+
+
+class TestStreamOwnerOfAlias(TestCase):
+    """#561: `_stream_owner_of()` — the `implement`/`action-only` row
+    discriminator (`_row_action`, the issue's exact 'appear as implement rows'
+    evidence) and the re-adoption filter — must recognise a legacy
+    `stream:<old>` label, or a `stream:montalu`+`needs-gatekeeper` hand-off
+    (odoo-erp #2396/#2377, legitimately in the obligation UNION) would render
+    as `implement` and invite the gatekeeper to write montalu's code."""
+
+    ONLY_NEW = {"montalu1": "branch-merge", "david1": "fork-no-merge"}
+
+    def test_legacy_label_resolves_to_the_canonical_renamed_stream(self):
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
+            # returns the AUTHORITY_BY_USER KEY (current canonical name), so a
+            # montalu1 box's own old-labeled ticket matches its own_stream and
+            # still reads `implement`, while gk (own_stream="") reads action-only.
+            self.assertEqual(
+                airuleset._stream_owner_of([{"name": "stream:montalu"}]),
+                "montalu1")                                    # "" before the fix
+            self.assertEqual(
+                airuleset._stream_owner_of([{"name": "stream:montalu1"}]),
+                "montalu1")
+
+    def test_a_non_stream_label_is_not_owned(self):
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
+            self.assertEqual(
+                airuleset._stream_owner_of([{"name": "bug"}]), "")
+
+    def test_a_full_profile_entry_is_never_owned(self):
+        # M-5 for the OWNERSHIP path (review A 🔵): a `profile == "full"` entry
+        # is not a sub-dev stream — its label must NEVER read as ownership, or
+        # its tickets would wrongly become untouchable. Mirrors the same guard
+        # `test_a_full_profile_entry_is_still_never_excluded` locks for
+        # `_core_search_excl`.
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                            {"montalu1": "branch-merge", "boss": "full"}):
+            self.assertEqual(
+                airuleset._stream_owner_of([{"name": "stream:boss"}]), "")
+            self.assertEqual(
+                airuleset._stream_owner_of([{"name": "stream:montalu"}]),
+                "montalu1")
+
+    def test_a_row_with_a_legacy_stream_handoff_is_marked_action_only(self):
+        # End-to-end through `cmd_core_quals --list`: a stream:montalu +
+        # needs-gatekeeper ticket surfaces via the obligation union and MUST be
+        # `action-only` (gk reviews it, never implements). `implement` before fix.
+        import contextlib
+        import io
+        items = [
+            {"number": 11, "labels": set()},                            # core -> implement
+            {"number": 2396, "labels": {"stream:montalu", "needs-gatekeeper"}},
+        ]
+        gh = _gh_filtered(items)
+        buf = io.StringIO()
+        with m.patch.object(airuleset, "AUTHORITY_BY_USER", self.ONLY_NEW):
+            with m.patch.object(airuleset, "resolve_authority", return_value="full"):
+                with m.patch.object(airuleset, "_gh_out", side_effect=gh):
+                    with contextlib.redirect_stdout(buf):
+                        airuleset.cmd_core_quals(m.Mock(
+                            count=False, list=True, waiting=False,
+                            ops_wait=False, extra=None))
+        out = buf.getvalue()
+        row = [ln for ln in out.splitlines() if ln.startswith("2396\t")]
+        self.assertTrue(row, out)
+        self.assertIn("action-only", row[0])
+        core = [ln for ln in out.splitlines() if ln.startswith("11\t")]
+        self.assertTrue(core, out)
+        self.assertIn("implement", core[0])
+
+
+class TestBounceQualsFullAuthorityAlias(TestCase):
+    """#561: the watchdog full-authority (dev1) bounce-nudge exclusion
+    (`_bounce_quals`, cross_stream.py:108) is the SAME `stream:%s`-from-a-stream-
+    registry leak class — after the rename `_REDUCED_STREAM_USERS` carries
+    `montalu1` but not `montalu`, so dev1's job-8 query would NOT exclude an
+    old `stream:montalu` bounce ticket and nudge the wrong person about it."""
+
+    def test_full_authority_exclusion_covers_the_legacy_alias(self):
+        import watchdog as wd
+        quals = wd._bounce_quals("/home/newlevel/devel/odoo-erp")
+        self.assertEqual(len(quals), 1)
+        toks = quals[0].split()  # exact-token: `montalu` is a prefix of `montalu1`
+        self.assertIn("-label:stream:montalu1", toks)
+        self.assertIn("-label:stream:montalu", toks)       # FAILS before the fix
+
+    def test_a_reduced_box_own_slice_is_unchanged(self):
+        # #537-locked: a montalu1 box's OWN bounce slice stays scoped to its own
+        # canonical label (own-slice narrowing is a separate concern, not a gk
+        # leak) — this fix touches only the full-authority exclusion branch.
+        import watchdog as wd
+        self.assertEqual(wd._bounce_quals("/home/montalu1/devel/odoo-erp"),
+                         ["label:stream:montalu1"])
+
+
 if __name__ == "__main__":
     main()
