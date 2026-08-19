@@ -187,9 +187,9 @@ class RecentHumanVetoesRecovery(unittest.TestCase):
             [("%9", "claude", CWD, "111")], GOAL_IDLE_CAP, model_type=True,
             initial_box=GOAL_TEXT, transcript_path=str(tpath))
         now = time.time()      # the human prompt above is stamped ~now
-        word = goal.deliver_goal(SID, CWD, GOAL_TEXT, "full", run=tmux,
-                                 projects_dir=proj, now=now, state={},
-                                 request_ts=now, sleep_fn=lambda *a, **k: None)
+        goal.deliver_goal(SID, CWD, GOAL_TEXT, "full", run=tmux,
+                          projects_dir=proj, now=now, state={},
+                          request_ts=now, sleep_fn=lambda *a, **k: None)
         # the recovery must have been vetoed -> the ordinary stash path ran
         # instead (it stashes, i.e. sends C-s), never a bare submit-in-place.
         self.assertIn("C-s", tmux.keys(),
@@ -209,8 +209,10 @@ class SubmitOwnGoalPrimitive(unittest.TestCase):
             enters_swallowed=enters_swallowed)
 
     def test_complete_own_goal_submitted(self):
-        d = TemporaryDirectory(); self.addCleanup(d.cleanup)
-        tpath = Path(d.name) / "t.jsonl"; tpath.write_text("")
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        tpath = Path(d.name) / "t.jsonl"
+        tpath.write_text("")
         tmux = self._fake(GOAL_TEXT, transcript_path=str(tpath))
         ok = wd.submit_own_goal_verified("%9", GOAL_TEXT, run=tmux,
                                          tpath=str(tpath),
@@ -220,8 +222,10 @@ class SubmitOwnGoalPrimitive(unittest.TestCase):
         self.assertNotIn("C-s", tmux.keys())
 
     def test_truncated_goal_never_submitted(self):
-        d = TemporaryDirectory(); self.addCleanup(d.cleanup)
-        tpath = Path(d.name) / "t.jsonl"; tpath.write_text("")
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        tpath = Path(d.name) / "t.jsonl"
+        tpath.write_text("")
         # the box holds only a PREFIX of the expected payload (a truncated type)
         tmux = self._fake(GOAL_TEXT[:30], transcript_path=str(tpath))
         ok = wd.submit_own_goal_verified("%9", GOAL_TEXT, run=tmux,
@@ -232,8 +236,10 @@ class SubmitOwnGoalPrimitive(unittest.TestCase):
                          "a truncated /goal must NEVER be submitted (#36)")
 
     def test_foreign_draft_refused_zero_keystrokes(self):
-        d = TemporaryDirectory(); self.addCleanup(d.cleanup)
-        tpath = Path(d.name) / "t.jsonl"; tpath.write_text("")
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        tpath = Path(d.name) / "t.jsonl"
+        tpath.write_text("")
         tmux = self._fake("nechat ako je moj vlastny draft",
                           transcript_path=str(tpath))
         ok = wd.submit_own_goal_verified("%9", GOAL_TEXT, run=tmux,

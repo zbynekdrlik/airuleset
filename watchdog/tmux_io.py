@@ -850,3 +850,111 @@ def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,
     else:
         _log("submit-own unconfirmed: box changed, left in place (retryable)")
     return False
+
+
+def submit_own_goal_verified(pane_id, text, run=None, tpath=None,
+                             sleep_fn=None, logs=None):
+    """#566 -- SUBMIT an EXISTING, COMPLETE, own `/goal <...>` payload already
+    sitting swallowed-unsubmitted in the input box, transcript-verified, WITHOUT
+    re-typing or backspacing it. The `/goal`-specific sibling of
+    `submit_own_draft_verified` (#501): that primitive REFUSES the human-typeable
+    `/goal ` prefix because CONTENT is not proof of ownership for it -- here the
+    CALLER (the #566 goal recovery in `deliver_goal`) has ALREADY proven
+    ownership (the #372 janitor watch/park provenance + the recent-human gate)
+    AND passes the EXACT expected payload, so ownership is proven by an EXACT
+    head+tail match against `text` rather than an unambiguous-nudge prefix.
+
+    COMPLETENESS is mandatory before ANY keystroke (HARD CONSTRAINT: a truncated
+    slash command is NEVER submitted -- the #36 disaster): the box HEAD row must
+    be a leading substring of `text` AND the box TAIL row must be a trailing
+    substring of `text` AND `text` must start with `/goal `. Both ends matching
+    the literal expected payload prove the box holds the WHOLE rendered
+    `/goal <...>`; a partial/truncated type (tail does not match `text`'s tail)
+    is refused. Recognition reads the HEAD row (`_input_box_head_text`) + the
+    TAIL row (`_input_line_text`), never guessing.
+
+    Submit mechanics mirror `submit_own_draft_verified` exactly: a fresh capture
+    race-guard, a strip-selector Escape (#36, never a second #35), Enter,
+    transcript proof via `_await_submit_confirmed` (the HEAD row is the
+    verification token -- wrap-safe and far more specific than the bare prefix),
+    ONE corrective Escape+Enter on a swallowed submit, and -- on a genuinely
+    unconfirmed submit -- the box is left EXACTLY as-is (never backspace our own
+    complete payload; it is a legit pending arm), logged honestly, return False;
+    the caller's escalation fires. A falsy/unreadable `tpath` refuses (the
+    transcript is the whole proof)."""
+    run = run or watchdog._default_run
+    sleep_fn = sleep_fn or time.sleep
+
+    def _log(reason):
+        if isinstance(logs, list):
+            logs.append(reason)
+
+    if not text or not text.startswith("/goal "):
+        _log("submit-own-goal abort: payload is not a /goal command")
+        return False
+    if not tpath:
+        _log("submit-own-goal abort: no transcript path")
+        return False
+
+    def _complete_own_goal(cap):
+        # The box holds the COMPLETE literal `/goal <text>`: head row is its
+        # leading substring AND tail row is its trailing substring. A truncated
+        # type matches the head but NOT the tail -> refused.
+        head = watchdog._input_box_head_text(cap)
+        tail = watchdog._input_line_text(cap)
+        return (bool(head) and head.startswith("/goal ")
+                and text.startswith(head)
+                and bool(tail) and text.endswith(tail))
+
+    cap = watchdog.capture_pane(pane_id, run, lines=40)
+    if not _complete_own_goal(cap):
+        _log("submit-own-goal abort: box no longer holds the complete own /goal")
+        return False
+    if "esc to interrupt" in (cap or ""):
+        _log("submit-own-goal abort: live turn")
+        return False
+    # A SELECTED agent-strip row (#36) steals the Enter -- ONE Escape returns
+    # focus (the draft survives ONE Escape; two would delete it, #35), then
+    # re-confirm the complete own /goal is still there before submitting.
+    if watchdog._strip_selected(cap):
+        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+        cap = watchdog.capture_pane(pane_id, run, lines=40)
+        if not _complete_own_goal(cap):
+            _log("submit-own-goal abort: own /goal gone after strip Escape")
+            return False
+    try:
+        baseline = os.path.getsize(tpath)
+    except OSError:
+        _log("submit-own-goal abort: transcript unreadable pre-send")
+        return False
+    # The HEAD row is the payload's leading substring, so it appears verbatim in
+    # the accepted `user` turn AND is far more specific than the bare `/goal `
+    # prefix -- a wrap-safe, low-false-confirm verification token.
+    token = watchdog._input_box_head_text(cap)
+    run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+    if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
+        _log("submit-own-goal delivered")
+        return True
+    # Unconfirmed. ONE corrective Escape+Enter only while the complete own /goal
+    # is PROVABLY still in the box (a swallowed Enter, #36) -- never a second
+    # Escape (#35), never an Escape into a box that already went bare (#233).
+    if _complete_own_goal(watchdog.capture_pane(pane_id, run, lines=40)):
+        run(["tmux", "send-keys", "-t", pane_id, "Escape"])
+        run(["tmux", "send-keys", "-t", pane_id, "Enter"])
+        if _await_submit_confirmed(tpath, baseline, token, sleep_fn):
+            _log("submit-own-goal delivered (after corrective Escape+Enter)")
+            return True
+    # Genuinely unconfirmed. Leave the box EXACTLY as-is -- never backspace our
+    # own complete payload (a legit pending arm). Read once, log honestly
+    # (#134/#360); the caller's escalation fires.
+    final = watchdog._input_box_head_text(watchdog.capture_pane(pane_id, run, lines=40))
+    if final is None:
+        _log("submit-own-goal unconfirmed: box unreadable, submit not proven")
+    elif final.startswith("/goal "):
+        _log("submit-own-goal unconfirmed: own /goal still in box, left in place "
+             "(retryable)")
+    elif final == "":
+        _log("submit-own-goal unconfirmed: box bare, submit not proven")
+    else:
+        _log("submit-own-goal unconfirmed: box changed, left in place (retryable)")
+    return False
