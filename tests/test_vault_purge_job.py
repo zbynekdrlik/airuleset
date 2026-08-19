@@ -212,6 +212,10 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
         # (#547 re-pin: `ops_wait_fetch=None` was inserted on its own NEW line
         # right after the `backlog_fetch=None,` line — the anchor grew a middle
         # line; the mutation target `vault_purge=None` is untouched.)
+        # (#551 re-pin: `gkorphan_fetch=None` (job 36's fetch) was appended on
+        # its own NEW trailing line, so the closing `):` moved off the
+        # `conformance_hb_enabled=False` line — the anchor grew a last line;
+        # the mutation target `vault_purge=None` is untouched.)
         old = ("             vault_purge=None, vault_backstop=None, "
                "log_fn=None, reopen_fetch=None,\n"
                "             time_fn=None, sweep_budget_s=None, "
@@ -222,7 +226,8 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                "gk_selfservice_fetch=None,\n"
                "             u_reconcile_clear=None, conformance_root=None,\n"
                "             conformance_is_target=None, "
-               "conformance_hb_enabled=False):")
+               "conformance_hb_enabled=False,\n"
+               "             gkorphan_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a
