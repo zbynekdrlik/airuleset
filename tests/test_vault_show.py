@@ -11,7 +11,6 @@ and CLI-wiring tests run in-process against tmp dirs.
 """
 import os
 import socket
-import stat
 import subprocess
 import sys
 import time

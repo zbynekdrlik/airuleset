@@ -646,11 +646,30 @@ class TestCliSurface(TestCase):
         self.assertIs(airuleset.SUBCOMMANDS["secret"], airuleset.cmd_secret)
 
     def test_there_is_no_action_that_prints_a_value(self):
-        for banned in ("show", "cat", "print", "get", "read", "reveal"):
+        # No action prints a stored value to the SESSION's stdout. `show`
+        # (#580) is a value-DELIVERY action, NOT a value-PRINT one: it renders
+        # the value to the OWNER's browser through a one-shot URL and the
+        # session never reads it (the server child reads it at GET), so it is
+        # allowed here — but the word-ban still forbids any action whose name
+        # implies printing the value to stdout.
+        for banned in ("cat", "print", "get", "read", "reveal"):
             self.assertNotIn(banned, airuleset.SECRET_ACTIONS)
         self.assertEqual(
             sorted(airuleset.SECRET_ACTIONS),
-            ["exec", "forget", "list", "purge", "request", "status"])
+            ["exec", "forget", "list", "purge", "request", "show", "status"])
+        # Teeth for `show`: the CLI PARENT never CALLS a value-reader — the
+        # value-returning paths (read_value / read_show_file) are called only
+        # by filedrop/show_server.py at GET time — so `secret show` cannot
+        # print the value into the transcript. Matched as the CALL shape
+        # (`read_value(`), never the bare word, so a docstring/comment that
+        # merely NAMES the reader (as this function's own does) is not a false
+        # positive — the #113 "assert the statement, never the substring" rule.
+        import inspect
+        import cli_vault
+        show_src = (inspect.getsource(cli_vault._secret_show)
+                    + inspect.getsource(cli_vault._secret_show_source))
+        self.assertNotIn("read_value(", show_src)
+        self.assertNotIn("read_show_file(", show_src)
 
     def test_help_names_the_channel_as_the_way_to_ask_for_a_credential(self):
         out = subprocess.run(
