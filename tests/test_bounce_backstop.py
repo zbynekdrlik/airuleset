@@ -343,13 +343,16 @@ class TestBounceQuals(unittest.TestCase):
     def test_stream_home_scopes_by_label(self):
         # #537: montalu renamed to montalu1 (the box's home is /home/montalu1);
         # _bounce_quals scopes by the /home/<name>/ path, so it follows the
-        # account. david is unchanged (its rename has not landed yet).
+        # account. #564: the own-slice now ALSO covers the legacy stream label
+        # (via _stream_rename_equivalents) so the box does not under-nudge itself
+        # about its own old-labeled bounce tickets. david (a rename base whose
+        # live rename has not landed) expands to david + david1.
         self.assertIn("montalu1", wd._REDUCED_STREAM_USERS)
         self.assertNotIn("montalu", wd._REDUCED_STREAM_USERS)
         self.assertEqual(wd._bounce_quals("/home/montalu1/devel/odoo-erp"),
-                         ["label:stream:montalu1"])
+                         ["label:stream:montalu1", "label:stream:montalu"])
         self.assertEqual(wd._bounce_quals("/home/david/devel/x"),
-                         ["label:stream:david"])
+                         ["label:stream:david", "label:stream:david1"])
 
     def test_montalu_family_home_scopes_by_own_label(self):
         # airuleset#251: montalu2/3/4 work on odoo-erp (a _CROSS_STREAM_REPOS
