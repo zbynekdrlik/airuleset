@@ -887,7 +887,16 @@ def cmd_authority(args):
         # (`_slice_quals`) — the ownership signal that survives a shared gh
         # identity, unlike authorship (#463). No network call.
         if resolve_authority() != "full":
-            print("stream:%s" % airuleset._current_user())
+            # #564: emit ALL rename equivalents (newline-separated), routed
+            # through the single `_stream_rename_equivalents()` alias primitive
+            # (never a parallel table). A box whose base stream was renamed
+            # (montalu -> montalu1) still owns tickets carrying the OLD
+            # `stream:montalu` label during the transition, so the close-guard
+            # hook must recognize ANY of them (`_has_own_stream_label` loops).
+            # A non-renamed stream expands to just itself, so its output is
+            # byte-identical to before.
+            for n in _stream_rename_equivalents(airuleset._current_user()):
+                print("stream:%s" % n)
         return
     profile = resolve_authority()
     print(profile)
