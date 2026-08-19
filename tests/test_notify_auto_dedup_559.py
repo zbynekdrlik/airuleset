@@ -93,8 +93,11 @@ class TestAutoDedupKeyHelper(_HomeIsolated):
 class TestSendDedupsKeylessCalls(_HomeIsolated):
 
     def test_second_identical_keyless_send_is_deduped(self):
-        st1 = notify.send("identical body", env=self.ENV, owner="zbynek")
-        st2 = notify.send("identical body", env=self.ENV, owner="zbynek")
+        # Pin time so the two sends can never straddle a bucket boundary (which
+        # would flip st2 back to "sent") — determinism on a contended box.
+        with mock.patch("notify.time.time", return_value=1000.0):
+            st1 = notify.send("identical body", env=self.ENV, owner="zbynek")
+            st2 = notify.send("identical body", env=self.ENV, owner="zbynek")
         self.assertEqual(st1, "sent")
         self.assertEqual(
             st2, "dedup",

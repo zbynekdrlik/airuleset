@@ -2100,7 +2100,9 @@ def drop_grace_question(message_id, path=None):
 # legitimate ❓/✅ (the exact concern that deferred lane 2 out of 546 lane 1).
 # 546 lane 1 already suppressed the CURRENT chronic classes at the send()
 # chokepoint; this is the mechanism 546 lane 2 asked for ("the shared throttle
-# gains hysteresis") for any FUTURE or remaining chronic alert.
+# gains hysteresis") for any FUTURE or remaining chronic alert. The consuming
+# wiring (repo_health net-drift/stuck-main) is tracked in issue #560 so this
+# opt-in primitive is never orphaned as unconsumed dead code.
 # --------------------------------------------------------------------------- #
 _EPISODES_REL = "notify-episodes.json"
 EPISODE_CLEAR_AFTER = 3               # default consecutive healthy passes to clear
@@ -2175,7 +2177,11 @@ def episode_gate(condition_key, healthy, clear_after=None, now=None, path=None):
     silently swallows an alert. A falsy `condition_key` can't be tracked, so it
     fails the same way (unhealthy -> "open", healthy -> "quiet")."""
     now = time.time() if now is None else now
-    clear_after = EPISODE_CLEAR_AFTER if clear_after is None else clear_after
+    try:
+        clear_after = (EPISODE_CLEAR_AFTER if clear_after is None
+                       else int(clear_after))
+    except (TypeError, ValueError):
+        clear_after = EPISODE_CLEAR_AFTER   # non-numeric -> default (never raise)
     if clear_after < 1:
         clear_after = 1
     if not condition_key:
@@ -2545,7 +2551,15 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     silent drop), never dry-run-mutating. The gate runs FIRST so a suppressed
     class never claims a dedup marker, resolves a channel, or reaches the
     network — and it covers every caller of this one chokepoint (watchdog jobs
-    1/6/16/19 + usage.py + the CLI `--api-error`) at once."""
+    1/6/16/19 + usage.py + the CLI `--api-error`) at once.
+
+    #559: a KEYLESS send (`dedup_key` falsy) auto-derives a bounded-window
+    content-hash key (`_auto_dedup_key`, AFTER the #546 gate + owner
+    resolution), so identical content within the window dedups (traceable
+    `key=auto:…` instead of `key=-`) while distinct content always sends. Like
+    the keyed path, a keyless send whose POST fails keeps its claim, so a
+    byte-identical retry is deduped until the window rolls — a caller needing
+    guaranteed retry delivery passes an explicit `dedup_key`."""
     suppressed = _suppressed_alert_class(dedup_key)
     if suppressed is not None:
         if not dry_run:

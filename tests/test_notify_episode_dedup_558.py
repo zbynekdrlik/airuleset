@@ -135,6 +135,16 @@ class TestEpisodeFailSafe(_StoreIsolated):
         self.assertEqual(notify.episode_gate("", False), "open")
         self.assertEqual(notify.episode_gate("", True), "quiet")
 
+    def test_non_numeric_clear_after_falls_back_to_default_never_raises(self):
+        # The "never raises" guarantee must hold even for a bad clear_after —
+        # a non-numeric value falls back to EPISODE_CLEAR_AFTER, never a
+        # TypeError from the `< 1` clamp.
+        self.assertEqual(self.gate(False, clear_after="bad"), "open")
+        self.assertEqual(
+            self.gate(True, clear_after="bad"), "clearing",
+            "a bad clear_after must clamp to the default (3), so one healthy "
+            "pass is still 'clearing', never an early recover")
+
 
 class TestSendIsUntouchedBy558(_StoreIsolated):
     """The load-bearing safety property of 546 lane 2: the episode gate is a
