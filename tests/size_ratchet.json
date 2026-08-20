@@ -266,7 +266,7 @@
     "watchdog/repo_health.py": 770,
     "watchdog/stash.py": 1048,
     "watchdog/sweep_jobs.py": 263,
-    "watchdog/tmux_io.py": 964,
+    "watchdog/tmux_io.py": 972,
     "watchdog/transcripts.py": 1120,
     "watchdog/u_labels.py": 369,
     "watchdog/usage.py": 387,
