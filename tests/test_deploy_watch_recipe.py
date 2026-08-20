@@ -207,7 +207,7 @@ class TestWDoctrineNamesVersionLive(unittest.TestCase):
     def test_ops_wait_nudge_names_version_live_not_run_terminal(self):
         """The job-20 W->I re-check nudge tells a parked-W session the release
         re-entry signal is the LIVE version on the target, not run-terminal."""
-        t = owr._nudge_text(None, [41], now=1000.0, w_first_seen=1000.0)
+        t = owr._nudge_text(None, [41], now=1000.0, w_seen={"41": 1000.0})
         self.assertIn("verzia ŽIVÁ na cieli", t)
         self.assertIn("run-terminal", t)
         # the member is still named (the existing #547/#570 behaviour is intact)

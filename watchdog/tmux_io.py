@@ -599,7 +599,8 @@ def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
     return not want
 
 
-def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None):
+def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
+                  out=None):
     """Type `text` + Enter into a BARE input box and VERIFY the submit landed
     via the TRANSCRIPT (the #486 delivery bullet's structured proof), not the
     pane render: after the send, the session jsonl at `tpath` must gain a new
@@ -632,6 +633,28 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None)
         let the caller's #372 janitor mark backstop it.
     False means "not delivered, retryable next sweep" — the caller leaves its
     own budget unconsumed.
+
+    `out` (#594, optional): when a dict is passed, `send_verified` records the
+    ONE outcome a flat bool cannot express — a submit that was DELIVERED but the
+    transcript confirmation RACED. It sets `out["delivered_unconfirmed"] = True`
+    in the "box bare after our Enter, submit not proven" branch: the Enter
+    CLEARED the box (CC accepted/queued the submit), only the `user` turn was
+    not written inside the window (the normal case when injecting into an
+    actively-cycling armed `/goal` loop). The genuine-swallow path (text left
+    STUCK) returns ABOVE via `_undo_and_release_slot` — text backed out, never
+    accepted — so it never reaches this branch. TWO live paths DO reach it, both
+    delivery: the first-Enter path (box cleared straight away) and the corrective
+    Escape+Enter path (lines below) that ends bare; the latter's delivery-ness
+    rests on this module's #36 premise (the corrective Escape only DESELECTS the
+    agent strip, it never clears the composer), so a bare box after it means the
+    Enter, not the Escape, emptied it. A caller that must not re-deliver (job
+    20's re-check nudge, #594) reads `ok OR out.get("delivered_unconfirmed")` as
+    "delivered", while still retrying a genuine swallow (neither True nor the flag
+    set). Even in the theoretical over-claim (an Escape that DID clear a real
+    composer), the only cost is the caller advancing its cadence by one period
+    (job 20: ≥6h, ~daily) while the ticket stays OPEN + surfaced and job 20 is
+    itself the re-check backstop — bounded and self-healing, never a permanent
+    silence. Default None -> byte-identical for every existing caller.
 
     `tpath` is REQUIRED (the transcript is the whole proof); a falsy or
     unreadable `tpath` refuses to send rather than typing blind or reading from
@@ -716,6 +739,12 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None)
         _log("send-verified unconfirmed: box unreadable, submit not proven")
     elif itext == "":
         _log("send-verified unconfirmed: box bare, submit not proven")
+        # #594: the Enter CLEARED the box (CC accepted/queued the submit) — this
+        # is a DELIVERY the transcript confirmation merely raced (a cycling armed
+        # loop). NOT a swallow (that path returned above with the text UNDONE).
+        # Surface it so a caller that must not re-deliver treats it as delivered.
+        if isinstance(out, dict):
+            out["delivered_unconfirmed"] = True
     else:
         _log("send-verified unconfirmed: box holds unrecognized content, "
              "left in place (retryable)")
