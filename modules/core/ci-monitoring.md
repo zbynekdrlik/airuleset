@@ -53,6 +53,21 @@
 
   **Fail-fast on job-level failure, inside the SAME poll.** Both shapes above wake the moment ANY job in a still-running multi-job run reports `conclusion=="failure"` or `conclusion=="timed_out"` (a job hitting its own `timeout-minutes` is arguably the likeliest way this scenario happens; a `cancelled` job is deliberately excluded — either a cascade from a sibling failure, already reported via that sibling, or a genuine `gh run cancel` where waking would be misleading) — not just when the whole run reaches `completed` — via the SAME single `gh run view` call (`,jobs` added to `--json`, no second call), branching in `--jq` before bash ever sees the JSON. A run-level-only wait misses this: a 50+-job shadow-gate run whose critical E2E job already failed can stay `in_progress` for hours before anyone notices (#365, 2026-08-12). `gh run view --json jobs` returns only the LATEST attempt, so a superseded pre-rerun failure never re-fires the wake. (The measured `GH_DEBUG=api` cost of adding `,jobs` is in the playbook.)
 
+**DEPLOY / VERSION-LIVE watch — unblock on DEPLOYED-STATE, not run-terminal (#588).** For a release/deploy wait, the run-level `completed` OVERSHOOTS the deployed state by the whole post-deploy E2E tail (tens of minutes) — a worker "watching the deploy" long after the version is live on PROD is the trust-damaging failure (owner report, montalu5). Drop this DEPLOY-DONE classifier into EITHER loop above (SAME single `gh run view` call — one API call, the `| jq` is local), with `DEPLOY_JOB_RE` = the deploy-completing job set (NEVER the E2E tail): it unblocks the moment that set is all-green even while the tail keeps the run `in_progress`; a deploy-set failure fails fast; a scoped-out E2E failure never masks DEPLOYED.
+
+```bash
+DEPLOY_JOB_RE='Deploy to PROD|Disable Maintenance|Smoke'   # the deploy-completing set — NEVER the E2E tail
+s=$(gh run view <id> --json status,conclusion,jobs | jq -r --arg re "$DEPLOY_JOB_RE" '
+  ([.jobs[]?|select(.name|test($re))]) as $dep
+  | if   ($dep|length)>0 and any($dep[]; .conclusion=="failure" or .conclusion=="timed_out") then "DEPLOYFAIL "+([$dep[]|select(.conclusion=="failure" or .conclusion=="timed_out")|.name]|join(", "))
+    elif ($dep|length)>0 and all($dep[]; .conclusion=="success")                              then "DEPLOYED "+([$dep[]|.name]|join(", "))
+    elif .status=="completed"                                                                 then "TERMINAL "+.status+" "+(.conclusion//"")
+    else "PENDING "+.status end')
+# DEPLOYED -> break (version is live). DEPLOYFAIL -> break (deploy broke). TERMINAL -> break (run ended before a deploy-set match; check DEPLOY_JOB_RE).
+```
+
+Prefer/COMBINE the ground truth the owner looks at — a DIRECT version read from the live target (DOM version label / health endpoint / XML-RPC module version): the deploy-set green is the CI signal, the live version read the confirmation. The run's final conclusion (E2E tail) is an OPTIONAL confirmation, **never the re-entry gate** for a parked ticket.
+
 - **`Monitor` / `/loop` / Cloud Routines** where they fit — `Monitor` streams output live (still session-scoped); Cloud Routines run on Anthropic infra (survive everything) when configured.
 
 **CRITICAL — a `run_in_background` CI poll is outright BROKEN in a subagent.** A subagent with no pending FOREGROUND tool call is returned as "completed" and TERMINATES; the detached task's completion then fires to the PARENT, so the worker silently dies after every push (~40% of autopilot-worker failures). Wait FOREGROUND with the loop above, or — for a long / multi-stage wait — hand the run-id back to the supervisor and RETURN, TaskStopping anything you launched. Hook-enforced (#28): `block-subagent-bg-ci-poll.sh` denies the launch, `subagent-stop-check-bg-work.sh` blocks the stop while your own background work is live.
