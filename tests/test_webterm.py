@@ -375,11 +375,19 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # session (default `off`) is never touched, so the owner detaching from
         # the base while the clone lives can NEVER kill the base (the gk 09:58
         # total-death). Armed on the clone (`-t "$C"`), NEVER `-g` (global).
+        # The fake tmux logs `echo "$*"`, so the shell already stripped the
+        # quotes around the one-argument hook command -- match the unquoted form.
         log = self._run("zbynek", "zbynek::zbynek-4")
         self.assertRegex(
             log,
             r'set-hook -t zbynek-4-web-\d+ client-attached '
-            r'"set-option destroy-unattached on"')
+            r'set-option destroy-unattached on')
+        # And prove (fake-independent) that the hook command is a SINGLE quoted
+        # argument to set-hook in the real command string, targeting the clone.
+        cmd = w._remote_command("zbynek")
+        self.assertIn(
+            'tmux set-hook -t "$C" client-attached '
+            '"set-option destroy-unattached on"', cmd)
 
     def test_connect_never_sets_a_global_destroy_unattached(self):
         # #591: the per-session scoping must NEVER become a global -- a global
