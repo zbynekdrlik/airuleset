@@ -141,17 +141,30 @@ def webterm_inventory():
 # disturbs an existing Windows-Terminal/ssh client on the same session (owner
 # report: "rozpadne mi view ked ... sa prepnem do webtermu ... standartny tmux
 # multispoj"):
-#   1. size every window to the ACTIVE viewing client (window-size latest +
-#      aggressive-resize on), so a small web client can never shrink the owner's
-#      WT view (idempotent, benign — `latest` is already the tmux default);
+#   1. #586: the webterm client NEVER influences window sizing. #584 tried the
+#      OPPOSITE — `-gw window-size latest` sizes the shared window to whoever is
+#      ACTIVE, so a small webterm client shrinks (blackens) the owner's WT view
+#      the moment the webterm tab is looked at (the Ctrl+B W blackening). Those
+#      overrides are REMOVED. The PRIMARY fix is the fleet-wide managed conf
+#      (`window-size manual` + `default-size 176x50`, version-gated in
+#      cli_tmux_provisioning) which pins a FIXED window no client can resize.
+#      Here, as client-level BELT-AND-SUSPENDERS, the throwaway clone attaches
+#      with the `ignore-size` CLIENT flag (`new-session ... -f ignore-size`, man
+#      tmux: "the client does not affect the size of other clients") — verified
+#      live: under `window-size latest` a clone WITH ignore-size held the WT
+#      window at its size, WITHOUT it the window shrank to the small client.
+#      This protects even a target still on tmux 3.4 (pre-#242-cutover), where
+#      the managed conf cannot ship `window-size manual` (it would crash #241).
 #   2. resolve the base session to JOIN: exact `=$P` -> group survivor -> the
 #      single existing session -> else create `$P` fresh;
 #   3. an existing base is joined via a THROWAWAY GROUPED clone
-#      (`new-session -t <base> -s <base>-web-$$`) — an independent VIEW onto the
-#      same windows, never a mirror, NEVER `attach -d` (the only verb that
-#      detaches other clients). The clone is killed on disconnect (trap, EXIT +
-#      signals); the base — which holds the group's windows, so the shell
-#      survives — is NEVER killed (the trap targets only the named clone).
+#      (`new-session -t <base> -s <base>-web-$$ -f ignore-size`) — an independent
+#      VIEW onto the same windows, never a mirror, NEVER `attach -d` (the only
+#      verb that detaches other clients). The clone is killed on disconnect
+#      (trap, EXIT + signals); the base — which holds the group's windows, so
+#      the shell survives — is NEVER killed (the trap targets only the named
+#      clone). The `-A` fresh-base fallback is the owner's OWN real view, so it
+#      is deliberately NOT ignore-size.
 # Mirrors the fleet ssh auto-attach convention
 # (cli_bashrc_appliers.STREAM_SSH_ATTACH_BLOCK). Reused for local (dev1) and
 # remote (ssh) alike. Residual (documented, not chased): if a concurrent
@@ -159,8 +172,6 @@ def webterm_inventory():
 # (owner's WT gone), disconnecting the web client ends that ownerless shell —
 # same class the fleet's existing keep-last sweep already produces.
 _ATTACH_BODY = (
-    'tmux set-option -gw window-size latest >/dev/null 2>&1 || true; '
-    'tmux set-option -gw aggressive-resize on >/dev/null 2>&1 || true; '
     'T=""; '
     'if tmux has-session -t "=$P" 2>/dev/null; then T="$P"; else '
     'T=$(tmux list-sessions -F "#{session_group}::#{session_name}" 2>/dev/null '
@@ -175,7 +186,8 @@ _ATTACH_BODY = (
     # "$C"` could match a live sibling clone whose pid is a numeric extension of
     # this one (…-web-123 vs …-web-1234) and kill the wrong web view (#584 review).
     "trap 'tmux kill-session -t \"=$C\" 2>/dev/null || true' EXIT HUP INT TERM; "
-    'tmux new-session -t "$T" -s "$C"; '
+    # #586: `-f ignore-size` — the webterm clone never resizes the shared window.
+    'tmux new-session -t "$T" -s "$C" -f ignore-size; '
     'exit; '
     'fi; '
     'exec tmux new-session -A -s "$P"'
