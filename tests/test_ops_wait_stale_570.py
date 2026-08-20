@@ -149,7 +149,8 @@ class NudgeNamesStaleMembers(unittest.TestCase):
 
     def test_stale_members_named_with_action(self):
         members = [{"number": 41, "stale": True}, {"number": 43, "stale": False}]
-        t = owr._nudge_text(None, members, now=1000.0, w_first_seen=1000.0 - 3 * DAY)
+        t = owr._nudge_text(None, members, now=1000.0,
+                            w_seen={"41": 1000.0 - 3 * DAY, "43": 1000.0 - 3 * DAY})
         self.assertIn("#41", t)
         self.assertIn("STALE", t)          # the stale sub-clause fires
         self.assertIn("DNES", t)           # the required action (remind today)
@@ -157,7 +158,8 @@ class NudgeNamesStaleMembers(unittest.TestCase):
     def test_legacy_int_members_still_work(self):
         # back-compat: an int list (a legacy fetch / an existing test) yields no
         # stale sub-clause and still names the parked members
-        t = owr._nudge_text(None, [41, 43], now=1000.0, w_first_seen=1000.0)
+        t = owr._nudge_text(None, [41, 43], now=1000.0,
+                            w_seen={"41": 1000.0, "43": 1000.0})
         self.assertIn("#41", t)
         self.assertIn("#43", t)
         self.assertNotIn("STALE", t)

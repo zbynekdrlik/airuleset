@@ -73,7 +73,8 @@ class TestRecheckDecision(unittest.TestCase):
         self.assertEqual(reason, "grace")
         self.assertEqual(out["first_seen"], NOW)
         self.assertIsNone(out["last_nudge"])
-        self.assertEqual(out["w_first_seen"], NOW)   # W-specific park anchor seeded
+        # #594: per-ticket W first-seen map — each new member seeded to now
+        self.assertEqual(out["w_seen"], {"41": NOW, "43": NOW})
         self.assertEqual(out["sig"], "i:0|w:41,43")   # partition sig, numeric sort
 
     def test_past_cadence_from_first_seen_nudges(self):
@@ -116,8 +117,8 @@ class TestRecheckDecisionIDirection(unittest.TestCase):
         action, out, reason = owr._recheck_decision(rec, 5, [], NOW, CAD)
         self.assertEqual(action, "nudge")
         self.assertEqual(reason, "due")
-        # W empty -> no W-park anchor; sig names the I half.
-        self.assertIsNone(out["w_first_seen"])
+        # W empty -> no per-ticket W map; sig names the I half.
+        self.assertIsNone(out["w_seen"])
         self.assertEqual(out["sig"], "i:5|w:")
 
     def test_i_positive_w_empty_first_sight_waits(self):
@@ -129,24 +130,37 @@ class TestRecheckDecisionIDirection(unittest.TestCase):
         rec = {"first_seen": NOW - 2 * CAD}
         action, out, _ = owr._recheck_decision(rec, 3, [41, 43], NOW, CAD)
         self.assertEqual(action, "nudge")
-        self.assertEqual(out["w_first_seen"], NOW)   # W first seen this sweep
+        # #594: both members first-seen this sweep -> seeded to now
+        self.assertEqual(out["w_seen"], {"41": NOW, "43": NOW})
         self.assertEqual(out["sig"], "i:3|w:41,43")
 
-    def test_w_park_anchor_preserved_across_sweeps(self):
-        # A continuously-parked W keeps its ORIGINAL w_first_seen (truthful age),
-        # not the partition's own (older) first_seen.
-        rec = {"first_seen": NOW - 5 * DAY, "w_first_seen": NOW - 3 * CAD,
+    def test_w_park_anchor_preserved_per_ticket_and_new_member_fresh(self):
+        # #594: a continuously-parked member keeps its ORIGINAL per-ticket
+        # anchor (truthful age), while a member NEWLY appearing in W is seeded
+        # fresh to `now` — so the new one reads ~0h even alongside an old one,
+        # the exact bug the single partition-level anchor caused.
+        rec = {"first_seen": NOW - 5 * DAY, "w_seen": {"41": NOW - 3 * CAD},
+               "last_nudge": None}
+        action, out, _ = owr._recheck_decision(rec, 2, [41, 43], NOW, CAD)
+        self.assertEqual(action, "nudge")
+        self.assertEqual(out["w_seen"]["41"], NOW - 3 * CAD)   # preserved
+        self.assertEqual(out["w_seen"]["43"], NOW)             # fresh member
+
+    def test_w_seen_drops_a_member_that_left_w(self):
+        # A member no longer in the W set is dropped from `w_seen` (so a
+        # re-added ticket later gets a FRESH anchor from its re-entry).
+        rec = {"first_seen": NOW - 5 * DAY,
+               "w_seen": {"41": NOW - 3 * CAD, "43": NOW - 2 * CAD},
                "last_nudge": None}
         action, out, _ = owr._recheck_decision(rec, 2, [41], NOW, CAD)
-        self.assertEqual(action, "nudge")
-        self.assertEqual(out["w_first_seen"], NOW - 3 * CAD)
+        self.assertEqual(out["w_seen"], {"41": NOW - 3 * CAD})
 
     def test_w_park_anchor_dropped_when_w_empties(self):
-        # W drains to [] but I still >0 -> keep auditing (I), drop the W anchor.
-        rec = {"first_seen": NOW - 5 * DAY, "w_first_seen": NOW - 3 * CAD}
+        # W drains to [] but I still >0 -> keep auditing (I), drop the W map.
+        rec = {"first_seen": NOW - 5 * DAY, "w_seen": {"41": NOW - 3 * CAD}}
         action, out, _ = owr._recheck_decision(rec, 2, [], NOW, CAD)
         self.assertIn(action, ("nudge", "wait"))
-        self.assertIsNone(out["w_first_seen"])
+        self.assertIsNone(out["w_seen"])
 
     def test_i_zero_w_empty_clears(self):
         action, out, _ = owr._recheck_decision(
@@ -509,23 +523,33 @@ class TestNudgeText(unittest.TestCase):
         self.assertNotIn("parknuté `ops-wait`", t)   # no W clause when W empty
 
     def test_w_only_degrades_to_547_shape(self):
-        t = owr._nudge_text(0, [41, 43], NOW, NOW - 3 * 3600)
+        # #594: per-ticket w_seen map — both members aged from their own entry.
+        t = owr._nudge_text(0, [41, 43], NOW,
+                            {"41": NOW - 3 * 3600, "43": NOW - 3 * 3600})
         self.assertIn("stuck-check:", t)
         self.assertNotIn("re-audituj", t)         # no I clause when I==0
         self.assertIn("#41", t)
         self.assertIn("#43", t)
-        self.assertIn("~3h", t)                   # truthful W-park age
+        self.assertIn("~3h", t)                   # truthful per-ticket W-park age
 
     def test_both_directions_ride_one_ping(self):
-        t = owr._nudge_text(2, [41], NOW, NOW - 3600)
+        t = owr._nudge_text(2, [41], NOW, {"41": NOW - 3600})
         self.assertIn("re-audituj", t)
         self.assertIn("#41", t)
         self.assertIn("supervisor", t)            # label-change ownership note
 
-    def test_w_age_uses_w_first_seen_not_partition_age(self):
-        # w_first_seen just now -> ~0h even if the partition is days old.
-        t = owr._nudge_text(0, [7], NOW, NOW)
-        self.assertIn("~0h", t)
+    def test_w_age_is_per_ticket_from_w_seen(self):
+        # #594: two members with DIFFERENT per-ticket entries render DIFFERENT
+        # ages in the SAME nudge — a fresh member ~0h beside an old one ~24h.
+        t = owr._nudge_text(0, [7, 9], NOW, {"7": NOW, "9": NOW - 24 * 3600})
+        self.assertIn("#7 (~0h)", t)
+        self.assertIn("#9 (~24h)", t)
+
+    def test_w_member_missing_from_w_seen_ages_unknown(self):
+        # A member absent from the map (a state/fetch edge) ages `?`, never a
+        # fabricated age (#539 fail-safe bias).
+        t = owr._nudge_text(0, [7], NOW, {})
+        self.assertIn("#7 (?)", t)
 
 
 class TestOrchestratorIDirection(_OrchBase):

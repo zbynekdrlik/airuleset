@@ -269,6 +269,22 @@ def _members_line(members):
     return " ".join("#%d" % n for n in sorted(_member_numbers(members)))
 
 
+def _members_line_aged(members, w_seen, now):
+    """`#A (~ageA) #B (~ageB)` for the W clause (#594) — each member aged from
+    ITS OWN `w_seen` entry (when the watchdog first observed it in W, ≈ the
+    `ops-wait` label-add within one fetch TTL), never a single stale partition-
+    level anchor. Oldest-number-first for stable reading. A member absent from
+    `w_seen`, or an unusable map (a state/fetch edge), ages `?` — never a
+    fabricated age (#539 fail-safe bias)."""
+    seen = w_seen if isinstance(w_seen, dict) else {}
+    parts = []
+    for n in sorted(_member_numbers(members)):
+        ts = seen.get(str(n))
+        age = _fmt_age(now - ts) if isinstance(ts, (int, float)) else "?"
+        parts.append("#%d (%s)" % (n, age))
+    return " ".join(parts)
+
+
 def _partition_sig(i_count, w_members):
     """A stable signature of the whole partition-audit set — the I count and the
     sorted W numbers — stored for observability (a reader sees what a rec is
@@ -290,7 +306,7 @@ def _partition_sig(i_count, w_members):
 #   "clear" -- BOTH halves determined-empty (I==0 AND W==[]) -> partition drained,
 #              pop the sid's rec (episode end);
 #   "wait"  -- something to audit but still inside the grace / reping window ->
-#              persist (seed first_seen/w_first_seen, refresh sig), no nudge;
+#              persist (seed first_seen/w_seen, refresh sig), no nudge;
 #   "nudge" -- something to audit past the cadence -> the caller ATTEMPTS a
 #              verified send and advances last_nudge only on a CONFIRMED submit.
 
@@ -321,10 +337,22 @@ def _recheck_decision(rec, i_count, w_members, now, cadence):
     `now` on first sight — so a long-pre-existing partition (present before this
     job existed) is first nudged one cadence after deploy, the safe cold-start.
 
-    `w_first_seen` is a SECOND, W-specific anchor for the nudge text's truthful
-    W-park age: seeded to `now` when W first becomes non-empty and DROPPED when W
-    empties, so a long-running I>0 loop that parks a W ticket TODAY reads "~0h",
-    never the partition's own (possibly days-old) `first_seen`."""
+    `w_seen` is a PER-TICKET first-seen map ({str(number): ts}) for the nudge
+    text's truthful, per-member W-park age (#594): each current W member keeps
+    its EXISTING anchor and a member NEWLY appearing in W is seeded to `now`
+    (≈ its `ops-wait` label-add within one fetch TTL); a member that leaves W is
+    DROPPED (only the current set survives). This replaces the single
+    partition-level `w_first_seen` anchor whose bug it fixes — that one W-wide
+    anchor was seeded when W FIRST became non-empty and preserved across sweeps
+    regardless of WHICH tickets were in W, so a ticket added to an already-
+    non-empty W set inherited a stale (up to days-old) age. Per-ticket, a ticket
+    parked TODAY reads "~0h" even alongside a member parked days ago. `w_seen` is
+    None (dropped) when W is empty. Cold-start caveat (unchanged from `first_seen`):
+    a member present before this job first saw the session is seeded on first
+    SIGHT, so its age is under-reported until it re-enters W — the SAFE direction
+    (never the over-report the incident was about), and the exact GitHub
+    label-add EVENT timestamp is deliberately NOT fetched (a per-ticket timeline
+    query the repo twice rejected on this path, #507/#550)."""
     i_pos = isinstance(i_count, int) and i_count > 0
     w_pos = isinstance(w_members, list) and bool(w_members)
     if not (i_pos or w_pos):
@@ -340,13 +368,17 @@ def _recheck_decision(rec, i_count, w_members, now, cadence):
     if not isinstance(last_nudge, (int, float)):
         last_nudge = None
     if w_pos:
-        w_first_seen = rec.get("w_first_seen") if isinstance(rec, dict) else None
-        if not isinstance(w_first_seen, (int, float)):
-            w_first_seen = now
+        prior_seen = rec.get("w_seen") if isinstance(rec, dict) else None
+        prior_seen = prior_seen if isinstance(prior_seen, dict) else {}
+        w_seen = {}
+        for n in _member_numbers(w_members):
+            key = str(n)
+            ts = prior_seen.get(key)
+            w_seen[key] = ts if isinstance(ts, (int, float)) else now
     else:
-        w_first_seen = None
+        w_seen = None
     new_rec = {"first_seen": first_seen, "last_nudge": last_nudge,
-               "w_first_seen": w_first_seen,
+               "w_seen": w_seen,
                "sig": _partition_sig(i_count, w_members)}
     anchor = last_nudge if last_nudge is not None else first_seen
     if now - anchor >= cadence:
@@ -439,10 +471,11 @@ def _i_clause_named(i_members, now):
             "ostávajú `I`." % (body, tail_str))
 
 # The W→I re-check clause (#547, preserved as a subset of the combined nudge):
-# names the parked W numbers + their truthful park age, instructs re-checking the
-# external event the park comment records.
+# names the parked W numbers each with ITS OWN park age (#594 — per-ticket, not a
+# single stale partition anchor), instructs re-checking the external event the
+# park comment records.
 _W_CLAUSE = (
-    "W→I: parknuté `ops-wait` tikety %s (parknuté %s) — over externý stav ktorý si "
+    "W→I: parknuté `ops-wait` tikety %s — over externý stav ktorý si "
     "pri parkovaní zapísal do komentára (odpoveď vo vlákne / vyšlý release = verzia "
     "ŽIVÁ na cieli: deploy-set zelený + priame čítanie verzie, NIE run-terminal — "
     "#588): ak už dorazil, zlož `ops-wait` s dôkazom a vráť tiket do práce; ak sa "
@@ -460,15 +493,21 @@ _W_STALE_CLAUSE = (
     "JE evidencia).")
 
 
-def _nudge_text(i_count, w_members, now, w_first_seen, i_members=None):
+def _nudge_text(i_count, w_members, now, w_seen, i_members=None):
     """The partition-audit keystroke injected into the armed loop. Carries the
     shared `stuck-check: ` prefix (own-payload recognition + machine-prompt
     exclusion — see the module docstring) and composes ONE ping from whichever
     direction(s) apply: the I→W/U re-audit clause when I>0, the W→I re-check clause
-    (naming the parked W numbers + their truthful `w_first_seen` age) when W is
-    non-empty. When ONLY W applies (I==0), the text degrades to #547's W-only
-    nudge; when both apply, both clauses ride one keystroke. The label change is
-    always the SUPERVISOR's with evidence, never an auto-unlabel by the watchdog.
+    (naming the parked W numbers each with ITS OWN per-ticket park age from
+    `w_seen`, #594) when W is non-empty. When ONLY W applies (I==0), the text
+    degrades to #547's W-only nudge; when both apply, both clauses ride one
+    keystroke. The label change is always the SUPERVISOR's with evidence, never
+    an auto-unlabel by the watchdog.
+
+    `w_seen` (#594): the PER-TICKET first-seen map ({str(number): ts}) that ages
+    each W member from its OWN W entry, never a single stale partition-level
+    anchor. A member missing from the map, or an unusable map, ages `?` (never a
+    fabricated age).
 
     `i_members` (#578): the fetched WORKABLE (I) member records (`{number,
     createdAt, labels}`, via `_cached_i_members`). When present + non-empty, the
@@ -483,9 +522,7 @@ def _nudge_text(i_count, w_members, now, w_first_seen, i_members=None):
                  if isinstance(r, dict) and isinstance(r.get("number"), int)]
         clauses.append(_i_clause_named(valid, now) if valid else _I_CLAUSE)
     if w_pos:
-        age = (_fmt_age(now - w_first_seen)
-               if isinstance(w_first_seen, (int, float)) else "?")
-        clauses.append(_W_CLAUSE % (_members_line(w_members), age))
+        clauses.append(_W_CLAUSE % _members_line_aged(w_members, w_seen, now))
         stale = _stale_numbers(w_members)
         if stale:
             clauses.append(_W_STALE_CLAUSE
@@ -591,7 +628,7 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
         return logs
 
     # action in ("wait", "nudge"): persist the seeded/refreshed rec (first_seen,
-    # w_first_seen, sig, lts age-anchor for the reaper). last_nudge is only
+    # w_seen, sig, lts age-anchor for the reaper). last_nudge is only
     # advanced on a CONFIRMED send below.
     if not dry_run:
         new_rec["lts"] = now
@@ -621,7 +658,7 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # degrades to the generic clause.
     i_members = (_cached_i_members(cwd, i_members_fetch, state, now)
                  if isinstance(i_count, int) and i_count > 0 else None)
-    text = _nudge_text(i_count, members, now, new_rec["w_first_seen"],
+    text = _nudge_text(i_count, members, now, new_rec["w_seen"],
                        i_members=i_members)
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual
     # stuck send stays reclaimable, cleared only on a delivered submit.
