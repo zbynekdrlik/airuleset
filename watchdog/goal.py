@@ -2695,16 +2695,16 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # workable) with idle lanes is now filled up to the backlog, not just once it
     # passes 10. backlog_n is already >= 1 (the `<= 0` guard above returned), so
     # floor >= 1 and workers==0 is always < floor (the empty-lane branch stays
-    # reachable). live_workers (dispatched SUBAGENT transcripts) already EXCLUDES
-    # `waiters` (CC's bg-shell/monitor badge, a separate population) from the
-    # count; a CI-waiting or finished-but-recent subagent still writes its
-    # transcript, so live_workers is an honest OVER-estimate of genuinely-working
-    # lanes -- which makes the guard CONSERVATIVE (nudges less, never over), the
-    # safe direction. Anti-flap (#481 design): the 15-min per-fire cooldown + the
-    # 3-min recent-human gate + the 15-min live-window's own completion-recency
-    # (a just-merged worker stays counted through its integration window) + the
-    # empty-lane idle gate -- no new debounce, reusing only state the guard reads.
-    # At or above the floor = saturated = silent.
+    # reachable). live_workers (dispatched SUBAGENT transcripts) EXCLUDES `waiters`
+    # (CC's bg-shell/monitor badge). #587 changed the finished direction: a
+    # CI-waiting subagent is still counted (tool_use tail = mid-work), but a
+    # cleanly-FINISHED one now DROPS from live_workers immediately (terminal
+    # stop_reason) / after FINISH_SETTLE_S -- a TIGHTER estimate, no longer masking
+    # a just-finished-but-free lane (the intended #587 fill direction: a freed lane
+    # with backlog SHOULD be filled on the real gap). The old completion-recency
+    # anti-flap (a just-merged worker counted through its integration window) is
+    # gone (it WAS the #587 ghost); now = 15-min cooldown + 3-min recent-human +
+    # empty-lane idle gate + ~30s FINISH_SETTLE_S debounce. At/above floor = silent.
     mem_mb = None
     floor = min(GOAL_LANE_SATURATION_WORKERS, backlog_n)
     if live_workers >= floor:

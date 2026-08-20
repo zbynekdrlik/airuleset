@@ -638,13 +638,21 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
           only, never relied on alone;
       (b) `count_live_workers` reports a FRESH lane in its on-disk task state —
           a subagent transcript written within `COMPACT_LIVE_WORKER_FRESHNESS_S`
-          (15 min), #486 G2 / #518. Vetoes on ANY non-stale lane (live OR
-          wedged), NOT the wedged-EXCLUDING `count`: a wedged (unrecovered-api-
+          (15 min), #486 G2 / #518. Vetoes via the SHARED
+          `lane_has_live_evidence` predicate (a `live`/`wedged`/`unreadable`
+          lane), NOT the wedged-EXCLUDING `count`: a wedged (unrecovered-api-
           error) lane pending job-1 auto-resume is recoverable work the
           supervisor still owns, so compaction must not orphan it (#565-review).
-          REPLACES the pre-#565 raw 120s `subagent_active` window, which was
-          shorter than a single 9-min CI poll — so a worker mid-long-tool-call
-          read as dead and the box auto-compacted its own live lanes.
+          #587: a `finished` lane (a worker whose last real turn is a completed
+          text reply — it produced its final answer and returned) is EXCLUDED
+          from that predicate, so a just-finished worker no longer vetoes: a
+          per-ticket boundary ALWAYS follows a worker return, so the finished
+          lane's mtime is still fresh at that moment, and the pre-#587 code read
+          it live for the whole 15-min window (the ghost that starved every
+          boundary — supervisor sessions ran ~1M ctx). REPLACES the pre-#565 raw
+          120s `subagent_active` window, which was shorter than a single 9-min CI
+          poll — so a worker mid-long-tool-call read as dead and the box
+          auto-compacted its own live lanes.
 
     Neither signal readable → False (a deferral optimization, never a new way to
     block on "we don't know"). `captured` (optional): reuse a known capture.
@@ -679,15 +687,17 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
     _count, evidence = watchdog.count_live_workers(
         pdir, cwd, sid, now_ts, COMPACT_LIVE_WORKER_FRESHNESS_S,
         on_warn=lambda msg: _log.debug("compact: count_live_workers: %s", msg))
-    # Veto on ANY FRESH lane the supervisor still owns — NOT the wedged-EXCLUDING
-    # `count` (#565-review). count_live_workers drops a fresh lane whose last turn
-    # is an unrecovered api-error ("wedged") because its lane-nudge consumer WANTS
-    # to nudge such a worker; but for compact the danger is inverted — a wedged
-    # lane pending job-1 auto-resume is recoverable in-flight work the supervisor
-    # still owns, and compaction would orphan it exactly like a live one. So count
-    # every NON-STALE lane (live / wedged / unreadable). No fresh lane (empty
-    # evidence, or all aged past the window) → False → compaction allowed.
-    return any(lane.state != "stale" for lane in evidence)
+    # Veto on ANY FRESH lane the supervisor still owns — the SHARED
+    # `lane_has_live_evidence` predicate (#565 evidence read, #587 single source
+    # of truth: compact and the #571 lane-fill gate now read the SAME helper, so
+    # the predicate can never drift between them). It counts a `live`/`wedged`/
+    # `unreadable` lane as live (NOT the wedged-EXCLUDING `count`): a wedged lane
+    # pending job-1 auto-resume is recoverable in-flight work compaction would
+    # orphan (#565-review). It EXCLUDES a `finished` lane (#587) — a worker that
+    # produced its final reply and returned is a FREE lane, not the 15-min mtime
+    # ghost that used to veto every per-ticket boundary. No live lane (empty
+    # evidence, or all stale/finished) → False → compaction allowed.
+    return watchdog.lane_has_live_evidence(evidence)
 
 
 # --------------------------------------------------------------------------- #
@@ -696,7 +706,20 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
 # --------------------------------------------------------------------------- #
 
 COMPACT_TEXT = "/compact"
-COMPACT_REQUEST_MAX_AGE_S = 30 * 60   # a request older than this is DISCARDED
+# A request older than this is DISCARDED. KEPT at 30 min, deliberately, after
+# #587 (evaluated, not silently changed). #587's finish-immediate fix removes the
+# PRIMARY veto (the 15-min mtime ghost of a just-finished worker), so a request
+# now delivers PROMPTLY in the window "worker returned, new lanes not yet
+# dispatched" (the synchronous attempt / the next ~60s sweep) — the cap is no
+# longer the bottleneck it was in the incident (dev1 supervisor: 1 SEND/day,
+# requests cycling SKIP live-tasks -> SKIP expired). RAISING it would let a stale
+# request deliver `/compact` at a much later, possibly-inappropriate moment (the
+# #400 stale-anchor class); and since the boundary RE-ANCHORS on every report
+# (each next ticket creates a fresh request with a fresh `ts` once the prior one
+# clears/expires), an expired request is always replaced by the next boundary
+# event — so the cap stays a safe upper bound on how long ONE request lingers,
+# not the fix. The fix is condition (b), not this cap.
+COMPACT_REQUEST_MAX_AGE_S = 30 * 60
 
 COMPACT_MIN_REQUEST_AGE_S = 2.0   # env AIRULESET_COMPACT_MIN_REQUEST_AGE_S
 

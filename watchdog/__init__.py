@@ -410,6 +410,7 @@ from watchdog.transcripts import (  # noqa: E402
     _entry_has_tool_use as _entry_has_tool_use,
     _ends_with_toolcall as _ends_with_toolcall,
     transcript_text_toolcall_stall as transcript_text_toolcall_stall,
+    transcript_worker_finished as transcript_worker_finished,   # #587 finish-immediate
     _hash as _hash,
     _stream_user as _stream_user,
     project_label as project_label,

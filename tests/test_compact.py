@@ -142,18 +142,32 @@ def _write_human_transcript(base, cwd, sid, ts_epoch,
     return p
 
 
-def _write_subagent_transcript(base, cwd, sid, mtime=None, error=False):
+def _write_subagent_transcript(base, cwd, sid, mtime=None, error=False,
+                               finished=False, settling=False, agent_id="x"):
     """A sibling subagent transcript proving `_session_has_live_bg_tasks`'s
-    file-mtime signal — <base>/<encoded-cwd>/<sid>/subagents/agent-x.jsonl.
+    file-mtime signal — <base>/<encoded-cwd>/<sid>/subagents/agent-<id>.jsonl.
     `error=True` makes its last turn an unrecovered api-error (a `wedged`
     lane: count_live_workers drops it from its live COUNT, but compact still
-    vetoes on it — #565-review)."""
+    vetoes on it — #565-review). `finished=True` (#587) makes its last real
+    turn a COMPLETED text reply with a TERMINAL stop_reason (end_turn — the
+    ~78% common case incl. autopilot-worker final reports), a `finished` lane
+    that compact must NOT veto on: a per-ticket boundary always follows a
+    worker return, so the finished lane's mtime is still fresh at that moment.
+    `settling=True` gives the same final text but a NON-terminal (absent)
+    stop_reason — the #587 `settling` state, finished only once aged past
+    FINISH_SETTLE_S."""
     d = Path(base) / _encode(cwd) / sid / "subagents"
     d.mkdir(parents=True, exist_ok=True)
-    p = d / "agent-x.jsonl"
+    p = d / ("agent-" + agent_id + ".jsonl")
     if error:
         entry = {"type": "assistant", "isApiErrorMessage": True,
                  "message": {"id": "msg_1", "content": "API Error: 529"}}
+    elif finished or settling:
+        msg = {"role": "assistant",
+               "content": [{"type": "text", "text": "issues: #587 done; merged."}]}
+        if finished:
+            msg["stop_reason"] = "end_turn"   # terminal → finished immediately
+        entry = {"type": "assistant", "message": msg}
     else:
         entry = {"type": "assistant"}
     p.write_text(json.dumps(entry) + "\n")
@@ -577,6 +591,98 @@ class TestDeliverCompact(unittest.TestCase):
         _write_subagent_transcript(
             proj, self.CWD, self.SID,
             mtime=now - compact.COMPACT_LIVE_WORKER_FRESHNESS_S - 60)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
+                                       projects_dir=proj, delivered_path=self.delp,
+                                       now=now)
+        self.assertEqual(word, "sent")
+
+    def test_587_finished_worker_ghost_no_longer_blocks_compact(self):
+        # #587 RED -- the headline fix. A per-ticket boundary ALWAYS follows a
+        # worker return (SubagentStop / self-callback report after integration),
+        # so at that moment the just-finished worker's transcript is still fresh
+        # (mtime well inside the 15-min window). Pre-#587 it reads `live` ->
+        # skip:live-tasks forever (the 15-min ghost); before it expires the
+        # supervisor dispatches new lanes and the request lapses at the 30-min
+        # cap, so the compactable window never exists. Post-#587 a finished lane
+        # (last turn a completed text reply) is NOT live -> the compact SENDs.
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   finished=True)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
+                                       projects_dir=proj, delivered_path=self.delp,
+                                       now=now)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", "".join("".join(s) for s in tmux.sent))
+
+    def test_587_finished_lane_beside_a_running_lane_still_vetoes(self):
+        # #587 no-false-send regression: a FINISHED lane must not mask a genuine
+        # RUNNING sibling. With one finished + one still-mid-work lane (the bare
+        # `{"type":"assistant"}` synthetic that reads `live`), compact still
+        # vetoes -- the running lane is real in-flight work compaction would
+        # orphan. The finish-immediate reclassification never over-reaches.
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   finished=True, agent_id="fin")
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   agent_id="run")   # bare -> reads live
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
+                                       projects_dir=proj, delivered_path=self.delp,
+                                       now=now)
+        self.assertEqual(word, "skip:live-tasks")
+        self.assertEqual(tmux.sent, [])
+
+    def test_587_finished_lane_beside_a_wedged_lane_still_vetoes(self):
+        # #587 x #565: a wedged (unrecovered-api-error) lane pending job-1
+        # auto-resume is recoverable in-flight work the supervisor still owns, so
+        # it must keep vetoing compact even when a sibling lane is finished. The
+        # #565 direction (wedged stays live for compact) is preserved.
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   finished=True, agent_id="fin")
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   error=True, agent_id="wedged")
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
+                                       projects_dir=proj, delivered_path=self.delp,
+                                       now=now)
+        self.assertEqual(word, "skip:live-tasks")
+        self.assertEqual(tmux.sent, [])
+
+    def test_587_fresh_settling_worker_still_vetoes_until_it_settles(self):
+        # #587-review: a fresh worker whose last turn is a text reply with a
+        # NON-terminal (None) stop_reason could be a text block streamed just
+        # before a large tool_use (~14s gap) — it must keep vetoing compact until
+        # it has settled, so a running worker mid-large-edit is never orphaned.
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   settling=True)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
+                                       projects_dir=proj, delivered_path=self.delp,
+                                       now=now)
+        self.assertEqual(word, "skip:live-tasks")
+        self.assertEqual(tmux.sent, [])
+
+    def test_587_settled_worker_no_longer_blocks_compact(self):
+        # the same settling worker, aged past FINISH_SETTLE_S (any pending tool_use
+        # would have been flushed by now) → a genuine finish → compact SENDs.
+        from watchdog.transcripts import FINISH_SETTLE_S
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=now - (FINISH_SETTLE_S + 5), settling=True)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
                                        projects_dir=proj, delivered_path=self.delp,
