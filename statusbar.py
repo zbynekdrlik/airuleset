@@ -152,8 +152,10 @@ def _user_waiting_sfx(cache, ping_count=0):
     """The '· U N' suffix — everything WAITING ON THE OWNER, split OUT of the
     workable `I N` so `I` = only what THIS box must action and `U` = what is on
     the owner (#468 for answer/decision; #512 consolidates in needs-acceptance
-    AND the standalone `Q` badge). `N` = the label-based `user_waiting`
-    (needs-answer/needs-decision/needs-acceptance, from the cache) PLUS
+    AND the standalone `Q` badge; #601 adds needs-owner-action — an owner
+    physical/manual step). `N` = the label-based `user_waiting`
+    (needs-answer/needs-decision/needs-acceptance/needs-owner-action, from the
+    cache) PLUS
     `ping_count` — the live count of ticketless ❓ pings the caller computed via
     `question_ping_count` (the merged-in `Q`, deduped so a ping tied to a labeled
     ticket is not counted twice). Orange-adjacent (208), distinct from the grey

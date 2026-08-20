@@ -78,9 +78,13 @@ class OwnerActionRoutesToU(unittest.TestCase):
                          "#601: an owner-action ticket must NEVER enter the W "
                          "bucket (owner is not a third party)")
 
-    def test_owner_action_never_enters_W_bucket_across_combos(self):
-        # It must never reach the ops_wait bucket under ANY combination — that
-        # is what keeps the #570 stale! W-freshness path from ever touching it.
+    def test_owner_action_stays_out_of_W_when_it_is_the_dominant_label(self):
+        # When needs-owner-action is the HIGHEST-precedence user-waiting label
+        # (no co-present needs-acceptance, which would outrank it), it never
+        # reaches the ops_wait bucket — that is what keeps the #570 stale!
+        # W-freshness path from ever touching it. needs-answer + ops-wait STAYS
+        # in U too (#526: a pending owner answer beats a sent thread), so those
+        # combos are also out of W.
         for combo in (("needs-owner-action",),
                       ("needs-owner-action", "ops-wait"),
                       ("needs-owner-action", "needs-answer"),
@@ -89,6 +93,25 @@ class OwnerActionRoutesToU(unittest.TestCase):
             _, _, ops_wait = airuleset._partition_workable(rows)
             self.assertEqual(set(ops_wait), set(),
                              "#601: %r must not land in W" % (combo,))
+
+    def test_acceptance_precedence_dominates_a_co_present_owner_action(self):
+        # The lowest-precedence design honestly documented (review A 🟡): a
+        # PATHOLOGICAL row carrying BOTH needs-acceptance AND needs-owner-action
+        # follows the higher-precedence acceptance routing, NOT action's — so
+        # needs-acceptance + needs-owner-action + ops-wait reads reason
+        # `acceptance` and routes to W by the acceptance-scoped override. This is
+        # the byte-exact preservation of #526 (action is additive, never a
+        # regression of an existing label's routing). The combo is contradictory
+        # and never occurs in practice; the test pins the documented behavior.
+        rows = {5: _row(5, "needs-acceptance", "needs-owner-action", "ops-wait")}
+        workable, user_waiting, ops_wait = airuleset._partition_workable(rows)
+        self.assertEqual(set(ops_wait), {5},
+                         "acceptance (higher precedence) dominates a co-present "
+                         "owner-action → W, not U (#601 lowest-precedence design)")
+        self.assertEqual(
+            airuleset._user_waiting_reason(
+                _labels("needs-acceptance", "needs-owner-action")), "acceptance",
+            "acceptance outranks action in the reason precedence")
 
     def test_answer_precedence_over_action_in_tag(self):
         # A live owner QUESTION (needs-answer) is the more time-sensitive of the

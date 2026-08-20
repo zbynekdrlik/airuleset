@@ -669,18 +669,29 @@ def _partition_workable(rows, acceptance_present=None):
     only reaches U once a draft was actually presented (a ❓ ping fired).
 
     `needs-owner-action` (#601, the owner's own physical/manual step) routes to U
-    UNCONDITIONALLY via the `else` branch below — its reason is `action`, never
-    `acceptance`, so the acceptance-scoped W override and the #539 chained-I gate
-    both skip it. Two consequences the code makes structural: (1) an
-    owner-action + `ops-wait` row still lands in U (owner beats third-party
-    framing — the owner is not a third party); (2) an owner-action row NEVER
-    enters the `ops_wait` bucket, so the #570 stale! W-freshness path can never
-    touch it. There is NO chained-I analog for `action`: a physical owner step
-    is always the owner's court (→ U), never the stream's own deferrable work,
-    so it stays U even with an empty `acceptance_present` set. The
-    labelled-but-not-yet-announced defect is surfaced by the `no-action!`
-    display flag (`_no_question_flagged` + `_print_issue_rows`), not by a
-    routing-to-I gate."""
+    via the `else` branch below WHEN it is the HIGHEST-precedence user-waiting
+    label on the row — i.e. `_user_waiting_reason` reads `action` (no co-present
+    needs-answer/needs-decision/needs-acceptance, all of which outrank it). In
+    that normal case: (1) an owner-action + `ops-wait` row still lands in U
+    (owner beats third-party framing — the owner is not a third party); (2) it
+    never enters the `ops_wait` bucket, so the #570 stale! W-freshness path can
+    never touch it; and (3) it has NO #539 chained-I analog — a physical owner
+    step is always the owner's court (→ U), never the stream's own deferrable
+    work, so it stays U even with an empty `acceptance_present` set.
+
+    Because `action` is the LOWEST precedence (deliberately, so needs-answer/
+    needs-decision/needs-acceptance stay byte-exact per #507/#526/#539), a
+    PATHOLOGICAL row that ALSO carries a higher-precedence user-waiting label
+    follows THAT label's routing, not action's: e.g. `needs-acceptance` +
+    `needs-owner-action` + `ops-wait` reads reason `acceptance` and routes to W
+    by the acceptance-scoped override (and the #507 gk-override / #539
+    chained-I paths a co-present `needs-acceptance` triggers apply too). Such a
+    contradictory combo does not occur in practice — the byte-exact preservation
+    of the co-present label's established semantics is the intended design, and a
+    genuine owner-only-blocked ticket never carries a competing acceptance/answer
+    label. The labelled-but-not-yet-announced defect is surfaced by the
+    `no-action!` display flag (`_no_question_flagged` + `_print_issue_rows`), not
+    by a routing-to-I gate."""
     workable, user_waiting, ops_wait = {}, {}, {}
     for number, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None

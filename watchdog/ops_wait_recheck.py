@@ -394,8 +394,9 @@ _I_CLAUSE = (
     "I→W/U: re-audituj každý `I` tiket proti #526/#539 tvarom — fix-class čakajúci "
     "na externú udalosť → `ops-wait` s dôkazom (W); odoslaný acceptance thread → "
     "`ops-wait` (W); deferred-thread na pomenovanú udalosť → `ops-wait` (W); "
-    "doručená živá owner-otázka → needs-answer/needs-decision (U); chained-I a "
-    "reálne dispatchovateľné ostávajú `I`.")
+    "doručená živá owner-otázka → needs-answer/needs-decision (U); owner fyzický/"
+    "manuálny krok pri rigu → `needs-owner-action` (U, #601 — owner nie je tretia "
+    "strana); chained-I a reálne dispatchovateľné ostávajú `I`.")
 
 # #578 — the NAMED per-I-member audit. The gk `I 16` incident showed the generic
 # clause above is too weak: the session COULD enumerate its I members and STILL
