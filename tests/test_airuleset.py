@@ -4921,11 +4921,13 @@ class TestTmuxHistoryLimit(TestCase):
         # removed at the source (see TestTmuxWindowSizeRemoved).
         self.assertIn("set-option -g history-limit 50000", text)
         self.assertIn("set-option -g default-size 176x50", text)
-        # #254: detached grouped-session duplicates (zbynek-1..4 piling up
-        # per attach) self-clean via tmux's own destroy-unattached, down to
-        # exactly one survivor per group -- see TestTmuxDestroyUnattached
-        # below for the dedicated keep-last-not-keep-group lock.
-        self.assertIn("set-option -g destroy-unattached keep-last", text)
+        # #591: the global destroy-unattached line is REMOVED entirely --
+        # `keep-last` killed the BASE session (with Claude inside) the moment
+        # the owner detached while a webterm clone kept the group alive
+        # (gk 2026-08-20 total-server death). Fresh servers now inherit tmux's
+        # factory default `off`; the webterm clone self-cleans PER-SESSION
+        # instead (cli_webterm). See TestTmuxDestroyUnattached below.
+        self.assertNotIn("destroy-unattached", text)
         self.assertNotIn("window-size", text)
         # never the resize-window/list-windows shape this ticket's incident
         # history explicitly rejected -- see TestTmuxWindowSizeNoResize.
@@ -5021,7 +5023,7 @@ class TestTmuxHistoryLimit(TestCase):
             "set -g mouse on\n\n"
             f"{airuleset.TMUX_MARK_START}\n"
             "set-option -g history-limit 50000\n"
-            "set-option -g destroy-unattached keep-last\n"
+            # #591: no `destroy-unattached` line at all -- removed globally.
             "set-option -g default-size 176x50\n"
             'bind-key -n S-PageUp if -F '
             '"#{==:#{pane_current_command},claude}" '
@@ -5087,20 +5089,21 @@ class TestTmuxHistoryLimit(TestCase):
         # calls remove S-F1/S-DC from an ALREADY-RUNNING server that was
         # live-bound before this fix deployed -- rewriting the conf file
         # alone does not retroactively unbind a live key-table entry.
-        # #586: the FIRST call is now the CONF-CONTENT version probe
-        # (`tmux -V`, deciding whether `window-size manual` may be emitted) --
-        # NOT a live-apply. It is followed by the SAME 8 live-apply calls as
-        # before (history-limit + destroy-unattached + 3 scrollback binds
-        # + 1 popup bind + 2 unbinds), so 1 probe + 8 live = 9. `window-size`
-        # is STILL never live-applied (it is conf-only); the probe just reads
-        # the version through the same injectable runner.
+        # #586: the FIRST call is the CONF-CONTENT version probe (`tmux -V`,
+        # deciding whether `window-size manual` may be emitted) -- NOT a
+        # live-apply. #591: the 2nd live-apply is now an UNSET of the global
+        # destroy-unattached (`set-option -gu`) -- a self-heal that reverts any
+        # running server still carrying the old, base-session-killing `keep-last`
+        # back to tmux's default `off` on the next install; verified live that
+        # `-gu` on a keep-last server -> off, idempotent. Still 1 probe + 8 live
+        # = 9. `window-size` is STILL never live-applied (conf-only).
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
         self.assertEqual(len(calls), 9)
         self.assertEqual(calls[0], ["tmux", "-V"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "history-limit", "50000"])
-        self.assertEqual(calls[2], ["tmux", "set-option", "-g", "destroy-unattached", "keep-last"])
+        self.assertEqual(calls[2], ["tmux", "set-option", "-gu", "destroy-unattached"])
         self.assertEqual(calls[3], [
             "tmux", "bind-key", "-n", "S-PageUp", "if", "-F",
             "#{==:#{pane_current_command},claude}",
@@ -5247,46 +5250,32 @@ class TestTmuxHistoryLimit(TestCase):
 
 
 class TestTmuxDestroyUnattached(TestCase):
-    """#254: each attach to a grouped tmux session (zbynek-1..4, all
-    sharing the same windows) spawned another grouped sibling that lingers
-    detached forever under tmux's factory default `destroy-unattached off`
-    -- reproduced live on dev1 against the real default socket with a
-    genuine pty-attached-then-detached grouped sibling (see the STILL-VALID
-    comment on #254). Fix: `destroy-unattached keep-last`.
+    """#591: the GLOBAL `destroy-unattached keep-last` #254 introduced is
+    REMOVED entirely -- it killed the BASE session (with a live Claude process
+    inside) and then the whole tmux server. `keep-last` destroys an unattached
+    session that is IN A GROUP and NOT the group's last member; a standalone
+    base is safe until a webterm clone (`new-session -t`) forms a group, after
+    which the owner detaching from the BASE destroys it (base is unattached,
+    grouped, not-last), and the clone's later teardown empties the server (the
+    gk 2026-08-20 09:58 total-death). Reproduced live on an isolated `-L`
+    scratch tmux 3.7b server with real pty clients: global keep-last + base +
+    grouped clone, detach base -> base DESTROYED.
 
-    CORRECTION TO THE TICKET'S OWN SUGGESTED VALUE -- verified empirically,
-    not assumed: the ticket's own title/body names `keep-group`, but a real
-    pty-attached client on an isolated `-L` scratch tmux 3.7b server proved
-    `keep-group` DESTROYS EVERY ORDINARY STANDALONE (non-grouped) session
-    the moment its one client detaches -- identical to boolean `on`. Since
-    almost every real project session on the fleet is a plain standalone
-    session (never linked into a tmux session-group at all), shipping
-    `keep-group` would nuke essentially every ordinary session on every
-    detach -- a regression far worse than the bug being fixed. `keep-last`
-    is the value that actually matches what the ticket's own prose
-    describes ("destroy an unattached session ONLY when it is in a group
-    and other sessions of the group remain"): it destroys a detached
-    grouped sibling while >=1 other group member remains, and leaves BOTH
-    the group's last survivor AND every standalone session completely
-    untouched -- verified with a real 3-member group reduced cleanly to
-    exactly 1 survivor, and a standalone session surviving an attach/
-    detach cycle unharmed, both against a real running tmux 3.7b server.
+    Fix: the conf carries NO `destroy-unattached` line (fresh servers inherit
+    tmux's default `off`, never destroyed); the webterm throwaway clone gets
+    its OWN session-scoped `destroy-unattached on` via a `client-attached` hook
+    instead (cli_webterm), so ONLY the clone self-cleans on its client's detach
+    and the base is never touched -- verified live that a session-scoped set
+    does NOT leak to other group members (base stays `off`).
 
-    Live-apply is safe here for a DIFFERENT reason than history-limit's
-    (#235) -- destroy-unattached, by definition, only ever evaluates
-    sessions with ZERO attached clients, so it structurally cannot disturb
-    anything currently on screen (unlike #236/#241's window-size, which
-    recomputes the LIVE geometry of an ATTACHED client's window). Verified
-    live: applying it against a running server holding a pre-existing
-    pile-up (one attached session, two already-detached grouped
-    duplicates -- the exact zbynek-1/2/3/4 shape before manual cleanup)
-    immediately swept the two duplicates away with NO new attach/detach
-    cycle needed, while leaving the attached grouped session AND a
-    separate attached standalone session completely untouched. This is
-    also the answer to "how do already-piled-up siblings get cleaned" --
-    the live-apply itself performs a one-time sweep on the very next
-    push/install; no new hook, no new watchdog job (respecting the
-    FREEZE)."""
+    Live-apply now UNSETS the global (`set-option -gu destroy-unattached`)
+    rather than setting a value -- a #254-style self-heal that reverts any
+    running server still carrying the base-killing `keep-last` back to `off` on
+    the next push/install (verified live: `-gu` on a keep-last server -> off,
+    idempotent), auto-closing the transition window. destroy-unattached remains
+    safe to touch on a running server for the same #235-vs-#254 reason (it only
+    ever evaluates ZERO-client sessions), and unsetting to `off` can never
+    destroy anything."""
 
     def _tmp(self, content=None):
         d = tempfile.mkdtemp()
@@ -5295,58 +5284,50 @@ class TestTmuxDestroyUnattached(TestCase):
             p.write_text(content)
         return p
 
-    def test_conf_carries_destroy_unattached_keep_last(self):
+    def test_conf_carries_no_global_destroy_unattached(self):
+        # #591: the global line is gone entirely -- a fresh server inherits
+        # tmux's default `off`, so the base session is never destroyed.
         p = self._tmp()
         airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         text = p.read_text()
-        self.assertIn("set-option -g destroy-unattached keep-last", text)
+        self.assertNotIn("destroy-unattached", text)
+
+    def test_never_emits_keep_last_the_base_session_killer(self):
+        # #591 regression lock: `keep-last` is EXACTLY what killed the base
+        # session (grouped-but-not-last on owner-detach) -- a future edit must
+        # never silently re-introduce it into the global conf.
+        p = self._tmp()
+        airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        text = p.read_text()
+        self.assertNotIn("keep-last", text)
 
     def test_never_emits_keep_group_the_tickets_own_wrong_suggestion(self):
-        # keep-group destroys every standalone session on detach (verified
-        # live against a real tmux 3.7b server, see the class docstring) --
-        # a regression lock so a future edit can never silently revert to
-        # the ticket's own literally-named-but-wrong value.
+        # #254 lock preserved: keep-group destroys every standalone session on
+        # detach (verified live) -- must never appear, same as keep-last/on.
         p = self._tmp()
         airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         text = p.read_text()
         self.assertNotIn("keep-group", text)
 
     def test_never_emits_bare_destroy_unattached_on(self):
-        # boolean `on` has the SAME standalone-destruction problem as
-        # keep-group, AND has no group-size awareness at all -- it would
-        # destroy the group's own last surviving member too, defeating the
-        # "zbynek-4 survives" acceptance criterion entirely.
+        # boolean `on` destroys every unattached session including the base --
+        # the conf must never carry any global destroy-unattached value at all.
         p = self._tmp()
         airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         text = p.read_text()
         self.assertNotIn("destroy-unattached on", text)
 
-    def test_is_live_applied_alongside_history_limit(self):
-        # Live-applying destroy-unattached is what self-heals an ALREADY-
-        # existing pile-up on the very next push -- see the class
-        # docstring for the live proof that this never touches an attached
-        # session, grouped or standalone.
+    def test_live_apply_UNSETS_the_stale_global_destroy_unattached(self):
+        # #591: the live-apply self-heals a running server still carrying the
+        # base-killing `keep-last` by UNSETTING the global (`-gu`), reverting it
+        # to tmux's default `off` -- verified live: `-gu` on a keep-last server
+        # -> off, idempotent. It never SETS keep-last (the pre-#591 value).
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertIn(["tmux", "set-option", "-g", "destroy-unattached", "keep-last"], calls)
-
-    def test_custom_destroy_unattached_value_is_injectable(self):
-        # ADVERSARIAL-REVIEW FINDING (#254, MINOR): the first draft injected
-        # "keep-last" -- the DEFAULT -- which cannot distinguish real
-        # parameter threading from a hardcoded constant (a mutant reverting
-        # BOTH consumption sites, the render call and the live argv, to the
-        # module constant survived this test and 5 others). Inject a value
-        # that DIFFERS from the default (mirroring the sibling
-        # test_custom_history_limit_value's own limit=99999 != 50000
-        # convention) and assert it reached BOTH the conf text and the
-        # live-apply argv.
-        p = self._tmp()
-        calls = []
-        airuleset.apply_tmux_history_limit(
-            p, destroy_unattached="off", run=calls.append)
-        self.assertIn("destroy-unattached off", p.read_text())
-        self.assertIn(["tmux", "set-option", "-g", "destroy-unattached", "off"], calls)
+        self.assertIn(["tmux", "set-option", "-gu", "destroy-unattached"], calls)
+        self.assertNotIn(
+            ["tmux", "set-option", "-g", "destroy-unattached", "keep-last"], calls)
 
     def test_idempotent_second_run_with_destroy_unattached_is_a_no_op(self):
         p = self._tmp("# my tmux conf\n")

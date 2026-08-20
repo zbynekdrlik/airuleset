@@ -41,6 +41,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import cli_aliases  # #592: the shared fleet target-alias derivation (stdlib-only)
+
 REPO_DIR = Path(__file__).resolve().parent
 CLAUDE_DIR = Path.home() / ".claude"
 SECRETS_DIR = Path.home() / ".secrets"
@@ -157,20 +159,25 @@ def webterm_inventory():
 #      the managed conf cannot ship `window-size manual` (it would crash #241).
 #   2. resolve the base session to JOIN: exact `=$P` -> group survivor -> the
 #      single existing session -> else create `$P` fresh;
-#   3. an existing base is joined via a THROWAWAY GROUPED clone
-#      (`new-session -t <base> -s <base>-web-$$ -f ignore-size`) — an independent
-#      VIEW onto the same windows, never a mirror, NEVER `attach -d` (the only
-#      verb that detaches other clients). The clone is killed on disconnect
-#      (trap, EXIT + signals); the base — which holds the group's windows, so
-#      the shell survives — is NEVER killed (the trap targets only the named
-#      clone). The `-A` fresh-base fallback is the owner's OWN real view, so it
-#      is deliberately NOT ignore-size.
+#   3. an existing base is joined via a THROWAWAY GROUPED clone: created
+#      DETACHED (`new-session -d -t <base> -s <base>-web-$$`), armed with a
+#      per-session `client-attached` destroy-unattached hook, then attached
+#      (`attach-session -t <clone> -f ignore-size`) — an independent VIEW onto
+#      the same windows, never a mirror, NEVER `attach -d` (the only verb that
+#      detaches other clients). The clone is killed on disconnect (trap, EXIT +
+#      signals) AND self-destructs on its own client-detach via the per-session
+#      `destroy-unattached on` (#591 belt-and-suspenders for a trap that never
+#      fires). The base — which holds the group's windows, so the shell
+#      survives — is NEVER killed (the trap targets only the named clone, and
+#      the base keeps tmux's default `off`). The `-A` fresh-base fallback is the
+#      owner's OWN real view, so it is deliberately NOT ignore-size.
 # Mirrors the fleet ssh auto-attach convention
 # (cli_bashrc_appliers.STREAM_SSH_ATTACH_BLOCK). Reused for local (dev1) and
-# remote (ssh) alike. Residual (documented, not chased): if a concurrent
-# destroy-unattached sweep has already reduced the group to just this clone
-# (owner's WT gone), disconnecting the web client ends that ownerless shell —
-# same class the fleet's existing keep-last sweep already produces.
+# remote (ssh) alike. Residual (documented, not chased): if the owner's WT is
+# already gone so this clone is the group's only remaining session,
+# disconnecting the web client ends that ownerless shell — an expected, benign
+# outcome (nothing left to protect), NOT the #591 base-kill the per-session
+# scoping fixes (that was a GLOBAL keep-last destroying a LIVE base).
 _ATTACH_BODY = (
     'T=""; '
     'if tmux has-session -t "=$P" 2>/dev/null; then T="$P"; else '
@@ -186,8 +193,37 @@ _ATTACH_BODY = (
     # "$C"` could match a live sibling clone whose pid is a numeric extension of
     # this one (…-web-123 vs …-web-1234) and kill the wrong web view (#584 review).
     "trap 'tmux kill-session -t \"=$C\" 2>/dev/null || true' EXIT HUP INT TERM; "
-    # #586: `-f ignore-size` — the webterm clone never resizes the shared window.
-    'tmux new-session -t "$T" -s "$C" -f ignore-size; '
+    # #591: the clone is created DETACHED, then a PER-SESSION `client-attached`
+    # hook arms its OWN `destroy-unattached on`, then it is attached. This scopes
+    # the sweep to the clone ALONE — the base session keeps tmux's default `off`
+    # and is NEVER destroyed, so the owner detaching from the base while the clone
+    # lives can no longer kill the base (the gk 2026-08-20 total-death; the old
+    # GLOBAL `destroy-unattached keep-last` in cli_tmux_provisioning did that and
+    # is removed). Two live-verified tmux constraints shape this: (1) setting
+    # `destroy-unattached on` on a DETACHED (zero-client) session destroys it
+    # IMMEDIATELY, so the hook defers the set to attach time, when `on` is safe;
+    # (2) `set-option`/`set-hook` `-t` do NOT accept the `=` exact-match anchor
+    # (only has-session/kill-session do), so `$C` is targeted bare — safe because
+    # the exact-named session was just created, so prefix resolution matches it
+    # exactly. `-f ignore-size` (#586, the clone never resizes the shared window)
+    # moves to the attach: a detached new-session has no client for the flag.
+    # NOT `exec`ed, so the EXIT/HUP trap still fires to kill the clone (the
+    # per-session `on` is the belt-and-suspenders for a trap that never fires).
+    # TRANSITION RESIDUAL (#591-review B1, documented not guarded): on a target
+    # NOT yet re-installed after #591 whose RUNNING server still carries the old
+    # live GLOBAL `keep-last`, `new-session -d` creates the clone DETACHED and
+    # keep-last destroys it AT CREATION (before set-hook/attach), so this connect
+    # FAILS (the base is still safe — the #591 goal holds; only the webterm view
+    # to that one target breaks). Closed by CO-DEPLOYMENT: the same install/push
+    # that ships this code runs apply_tmux_history_limit's `set-option -gu
+    # destroy-unattached` on that box's running server, reverting keep-last to
+    # `off`. So the window is a transient failed-connect (never a death) that
+    # self-heals on that target's install; global tmux policy is deliberately
+    # kept OUT of this connect script (cli_tmux_provisioning owns it). Distinct
+    # from the ownerless-clone residual noted in the header comment above.
+    'tmux new-session -d -t "$T" -s "$C"; '
+    'tmux set-hook -t "$C" client-attached "set-option destroy-unattached on"; '
+    'tmux attach-session -t "$C" -f ignore-size; '
     'exit; '
     'fi; '
     'exec tmux new-session -A -s "$P"'
@@ -286,32 +322,17 @@ def _short_alias(entry):
     """A Windows-Terminal-style SHORT tab alias mirroring the owner's own tab
     names (dev1, dev2, gk, m1..m8 for montalu, miva, d1..d4 for david); an
     unrecognized session gets a sensible short form. The FULL id/label stays as
-    the tab's `title` tooltip, so a short alias is never ambiguous (#579)."""
-    if entry.get("local") or entry.get("id") == "dev1":
-        return "dev1"
-    user = (entry.get("user") or "").strip()
-    name = entry.get("id") or entry.get("label") or ""
-    if user == "gatekeeper":
-        return "gk"
-    mo = re.match(r"^montalu(\d+)$", user)
-    if mo:
-        return "m" + mo.group(1)
-    mo = re.match(r"^david(\d*)$", user)
-    if mo:
-        return "d" + (mo.group(1) or "1")   # base `david` == d1
-    mo = re.match(r"^miva(\d+)$", user)
-    if mo:
-        return "miva" if mo.group(1) == "1" else "mv" + mo.group(1)
-    mo = re.match(r"^simap(\d+)$", user)
-    if mo:
-        return "si" + mo.group(1)
-    if user == "newlevel":
-        # an owner box (dev2 / spinbike-vps) shares the `newlevel` unix user —
-        # key on the box NAME, not the user.
-        return (name.split("-")[0] or name)[:8]
-    if user:
-        return user[:8]
-    return (name.split("-")[0] or name)[:8]
+    the tab's `title` tooltip, so a short alias is never ambiguous (#579).
+
+    #592: the alias derivation itself lives in the shared `cli_aliases` leaf so
+    the tmux WINDOW names (cli_tmux_provisioning) draw from the SAME source —
+    never a parallel map. This wrapper only unwraps the webterm inventory entry
+    into (user, box_name): a `local` entry (dev1) forces the box name to `dev1`
+    (the old `local or id=="dev1"` short-circuit), otherwise the box name is the
+    inventory id/label."""
+    box_name = "dev1" if entry.get("local") else (
+        entry.get("id") or entry.get("label") or "")
+    return cli_aliases.short_target_alias(entry.get("user"), box_name)
 
 
 def _tab_order_key(alias):

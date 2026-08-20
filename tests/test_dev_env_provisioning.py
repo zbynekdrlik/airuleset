@@ -1449,15 +1449,15 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
 
 
 class TestApplyStreamTmuxWindowName(TestCase):
-    """#554: the tmux WINDOW name carries the stream account's name so the
-    owner, attached to one of many subdev sessions, can tell at a glance
-    which stream they are in. Root cause (verified live on montalu@subdev):
-    the default status-left already shows the SESSION name and the owner
-    still could not tell -- the identity has to go where the owner looks
-    (the window-status list), which `automatic-rename on` fills with the
-    running command (`bash`/`node`). Same idempotent per-account marker-block
-    shape as apply_stream_ssh_attach (#264): present ONLY for
-    AUTHORITY_BY_USER stream accounts, actively stripped everywhere else."""
+    """#554/#592: the tmux WINDOW name carries the box's short TARGET ALIAS so
+    the owner, attached to one of many fleet sessions, can tell at a glance
+    where they are. #554 gated this to subdev stream accounts only, so gk/dev1/
+    dev2 windows showed `bash` (owner report 2026-08-20); #592 renders it on
+    EVERY managed box, with the name = the box's `cli_aliases.short_target_alias`
+    (gatekeeper->gk, dev1->dev1, dev2->dev2, montaluN->mN, davidN->dN, ...) --
+    ONE shared alias source, never a second parallel map. Idempotent per-box
+    marker-block (shape of apply_stream_ssh_attach, #264); the block is stripped
+    only when a box has no safe alias (never in practice)."""
 
     def _tmp(self, content=None):
         d = tempfile.mkdtemp()
@@ -1486,27 +1486,48 @@ class TestApplyStreamTmuxWindowName(TestCase):
         block = airuleset.render_stream_tmux_window_block("david1")
         self.assertNotIn("after-new-window", block)
 
-    def test_adds_block_for_a_stream_account(self):
+    def test_adds_block_for_a_stream_account_with_its_alias(self):
+        # #592: a stream box is named by its ALIAS (montalu2 -> m2), matching
+        # the owner's own webterm tab + live mitigation, not the full username.
+        # `host="subdev"` = the stream account's real box; without it the test
+        # would inherit the test box's own hostname (dev1) and the `dev1`
+        # short-circuit would fire (montalu2 never actually runs on dev1).
         p = self._tmp("# existing content\n")
         changed = airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", run=lambda argv: None)
+            p, user="montalu2", host="subdev", run=lambda argv: None)
         self.assertTrue(changed)
         text = p.read_text()
         self.assertIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, text)
-        self.assertIn('set-hook -g session-created "rename-window montalu2"', text)
+        self.assertIn('set-hook -g session-created "rename-window m2"', text)
 
-    def test_never_added_for_dev1_style_user(self):
+    def test_gk_gets_the_gk_alias(self):
+        # #592: gk (gatekeeper account) was the owner's report -- window showed
+        # `bash`. Now it carries the `gk` alias block.
         p = self._tmp("# existing content\n")
         changed = airuleset.apply_stream_tmux_window_name(
-            p, user="newlevel", run=lambda argv: None)
-        self.assertFalse(changed)
-        self.assertNotIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, p.read_text())
+            p, user="gatekeeper", host="gatekeeper-cx23", run=lambda argv: None)
+        self.assertTrue(changed)
+        self.assertIn('set-hook -g session-created "rename-window gk"', p.read_text())
 
-    def test_removes_block_from_a_non_stream_account_if_ever_present(self):
-        block = airuleset.render_stream_tmux_window_block("montalu2")
+    def test_dev1_and_dev2_get_their_box_alias(self):
+        # #592: dev1/dev2 share the `newlevel` unix user -> the BOX name (host)
+        # disambiguates the alias. Both previously got NO block (showed `bash`).
+        for box in ("dev1", "dev2"):
+            p = self._tmp("# existing content\n")
+            changed = airuleset.apply_stream_tmux_window_name(
+                p, user="newlevel", host=box, run=lambda argv: None)
+            self.assertTrue(changed, box)
+            self.assertIn(
+                'set-hook -g session-created "rename-window %s"' % box, p.read_text())
+
+    def test_strips_block_when_the_derived_alias_is_unsafe(self):
+        # An alias that does not match the safe unix-name shape (injection guard)
+        # is never rendered -- and an existing block is stripped. `9bad` fails
+        # `_SAFE_STREAM_NAME_RE` (must start with a letter).
+        block = airuleset.render_stream_tmux_window_block("m2")
         p = self._tmp(f"# before\n{block}\n# after\n")
         changed = airuleset.apply_stream_tmux_window_name(
-            p, user="newlevel", run=lambda argv: None)
+            p, user="9bad", host="9bad", run=lambda argv: None)
         self.assertTrue(changed)
         text = p.read_text()
         self.assertNotIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, text)
@@ -1551,36 +1572,67 @@ class TestApplyStreamTmuxWindowName(TestCase):
     def test_live_applies_the_server_options_for_a_stream_account(self):
         calls = []
         p = self._tmp("# existing content\n")
-        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=calls.append)
+        airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", host="subdev", run=calls.append)
         # server-option sets (no keystrokes) -- automatic-rename off + the
         # session-created rename hook, exactly what the conf block carries.
+        # #592: the hook renames to the ALIAS (m2), not the full username.
         self.assertIn(["tmux", "set-option", "-gw", "automatic-rename", "off"], calls)
         self.assertIn(
-            ["tmux", "set-hook", "-g", "session-created", "rename-window montalu2"],
+            ["tmux", "set-hook", "-g", "session-created", "rename-window m2"],
             calls)
 
-    def test_live_apply_renames_existing_windows_of_the_primary_session(self):
-        # A run that returns two window ids for the primary session `=montalu2`,
-        # then records the rename calls. Proves an ALREADY-running session
-        # updates immediately (config-path rename-window, never send-keys).
+    def test_live_apply_renames_every_window_on_the_server_to_the_alias(self):
+        # #592-review (B3): the live-apply lists ALL windows on this user's
+        # server (`list-windows -a`), NOT the `=<unix-user>` session -- on
+        # dev1/dev2 the owner's real session is zbynek-N/marek-N while the unix
+        # user is `newlevel`, so a `=<unix-user>` target would rename NOTHING.
+        # A run that returns two window ids for `list-windows -a`, then records
+        # the rename calls; each is renamed to the alias (config-path, never
+        # send-keys).
         seen = []
 
         def run(argv):
             seen.append(argv)
-            if argv[:3] == ["tmux", "list-windows", "-t"] and argv[3] == "=montalu2":
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
                 return _FakeCP(returncode=0, stdout="@0\n@3\n")
             return _FakeCP(returncode=0, stdout="")
 
         p = self._tmp("# existing content\n")
-        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=run)
-        self.assertIn(["tmux", "rename-window", "-t", "@0", "montalu2"], seen)
-        self.assertIn(["tmux", "rename-window", "-t", "@3", "montalu2"], seen)
+        airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", host="subdev", run=run)
+        self.assertIn(["tmux", "rename-window", "-t", "@0", "m2"], seen)
+        self.assertIn(["tmux", "rename-window", "-t", "@3", "m2"], seen)
 
-    def test_no_live_apply_calls_for_a_non_stream_account(self):
+    def test_live_apply_covers_owner_session_named_differently_from_unix_user(self):
+        # #592-review (B3): the EXACT dev1/dev2 case the owner reported. The
+        # owner's session is `zbynek-N` while the unix user is `newlevel`, so the
+        # old `=<unix-user>` target renamed NOTHING and the current window stayed
+        # `bash`. `list-windows -a` covers zbynek-N's window -> renamed to `dev1`.
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout="@7\n")  # a zbynek-4 window
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="newlevel", host="dev1", run=run)
+        # never targets the non-existent `=newlevel` session
+        self.assertNotIn(
+            ["tmux", "list-windows", "-t", "=newlevel", "-F", "#{window_id}"], seen)
+        self.assertIn(["tmux", "rename-window", "-t", "@7", "dev1"], seen)
+
+    def test_no_live_apply_calls_when_alias_is_unsafe(self):
+        # #592: a box with no SAFE alias (injection guard) gets no block AND no
+        # tmux mutation -- the strip path. `9bad` fails `_SAFE_STREAM_NAME_RE`.
         calls = []
         p = self._tmp("# existing content\n")
-        airuleset.apply_stream_tmux_window_name(p, user="newlevel", run=calls.append)
-        self.assertEqual(calls, [], "a human box must get NO tmux mutation")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="9bad", host="9bad", run=calls.append)
+        self.assertEqual(calls, [], "an unsafe-alias box must get NO tmux mutation")
 
     def test_marker_sets_are_mutually_non_substring(self):
         # #554 review F2: apply_tmux_history_limit and this feature share the
@@ -1602,12 +1654,13 @@ class TestApplyStreamTmuxWindowName(TestCase):
         # user's own content preserved -- neither scanner eats the other.
         p = self._tmp("set -g mouse on\n")
         airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
-        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
+        airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", host="subdev", run=lambda argv: None)
         # a second install of BOTH must be a byte-for-byte no-op
         before = p.read_text()
         c1 = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         c2 = airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", run=lambda argv: None)
+            p, user="montalu2", host="subdev", run=lambda argv: None)
         after = p.read_text()
         self.assertFalse(c1)
         self.assertFalse(c2)
@@ -1617,7 +1670,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertEqual(after.count(airuleset.STREAM_TMUX_WINDOW_MARK_START), 1)
         self.assertIn("set -g mouse on", after)
         self.assertIn("set-option -g history-limit", after)
-        self.assertIn('rename-window montalu2', after)
+        self.assertIn('rename-window m2', after)  # #592: alias, not full username
 
 
 if __name__ == "__main__":

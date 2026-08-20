@@ -31,6 +31,7 @@ repo idiom, cf. cli_scratch_sweep.py's own CLAUDE_DIR):
     derivation, identical value.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -67,22 +68,23 @@ TMUX_WINDOW_SIZE = "manual"
 # #242 cutover comment) that this >= boundary passes -- the same forward
 # assumption the cutover itself makes.
 _MIN_WINDOW_SIZE_MANUAL_VERSION = (3, 5)
-# #254: "keep-last", NOT "keep-group" -- despite the ticket's own title
-# naming keep-group, that value DESTROYS EVERY ORDINARY STANDALONE
-# (non-grouped) session the moment its one client detaches, identical to
-# boolean `on` -- confirmed live against a real tmux 3.7b server via a
-# genuine pty-attached client on an isolated `-L` scratch socket (never
-# the box's real default server). Since almost every real project session
-# on the fleet is a plain standalone session, keep-group would nuke
-# essentially all of them on every detach -- far worse than the pile-up
-# bug it exists to fix. keep-last is the value that matches what the
-# ticket's OWN prose actually describes: destroy a detached GROUPED
-# sibling only while another session remains in its group, and leave both
-# a group's last surviving member and every standalone session untouched.
-# See render_tmux_history_block/apply_tmux_history_limit below, and
-# TestTmuxDestroyUnattached in tests/test_airuleset.py for the full
-# regression lock against reverting to keep-group or bare `on`.
-TMUX_DESTROY_UNATTACHED = "keep-last"
+# #591: there is NO managed `destroy-unattached` value any more -- the global
+# option is REMOVED from the conf entirely (fresh servers inherit tmux's factory
+# default `off`, which never destroys a session). #254 shipped a GLOBAL
+# `destroy-unattached keep-last` to sweep detached grouped-session duplicates;
+# that value protects the group's LAST member, NOT the BASE session, so once a
+# webterm clone (`new-session -t`, cli_webterm) forms a group, the owner
+# detaching from the BASE destroys the base (unattached, grouped, not-last) --
+# killing the live Claude process inside -- and the clone's later teardown
+# empties the whole tmux server (the gk 2026-08-20 09:58 total-death). Verified
+# live on an isolated `-L` scratch tmux 3.7b server with real pty clients.
+# The webterm throwaway clone now self-cleans PER-SESSION instead (a
+# `client-attached` hook arming its OWN session-scoped `destroy-unattached on`
+# in cli_webterm), so ONLY the clone is ever swept and the base is untouched --
+# verified live that a session-scoped set does NOT leak to other group members.
+# See render_tmux_history_block/apply_tmux_history_limit below (the live-apply
+# now UNSETS any stale global -- a #254-style self-heal), and
+# TestTmuxDestroyUnattached in tests/test_airuleset.py for the regression locks.
 TMUX_MARK_START = "# >>> airuleset tmux >>>"
 TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # #235: tmux's own built-in default (2000-line scrollback) plus the current
@@ -176,38 +178,26 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # scrolled back down and auto-exited to the live view, with the pane's
 # own content completely undisturbed throughout.
 #
-# #254: each attach to a tmux session-GROUP (e.g. zbynek-1..4, all sharing
-# the same underlying windows -- the shape a grouped `new-session -t`
-# attach produces) left the detached duplicate orphaned forever under
-# tmux's factory-default `destroy-unattached off` -- reproduced live on
-# dev1 against the real default socket with a genuine pty-attached-then-
-# detached grouped sibling (STILL-VALID evidence on #254). Fix:
-# `destroy-unattached keep-last` (see TMUX_DESTROY_UNATTACHED above for
-# why NOT the ticket's own literally-named keep-group). UNLIKE window-size
-# above, this is safe to LIVE-APPLY for a different reason: by
-# definition it only ever evaluates sessions with ZERO attached clients,
-# so it structurally cannot disturb anything currently on screen. Verified
-# live: applying it against a running server holding a pre-existing
-# pile-up (one attached session, two already-detached grouped duplicates
-# -- the exact zbynek-1/2/3/4 shape before manual cleanup) immediately
-# swept the two duplicates away with no new attach/detach cycle needed,
-# while leaving the attached grouped session AND a separate attached
-# standalone session completely untouched. This also answers "how do
-# already-piled-up siblings get cleaned": the live-apply itself performs
-# a one-time sweep on the very next push/install -- no new hook, no new
-# watchdog job needed.
-#
-# ADVERSARIAL-REVIEW FINDING (#254, MINOR): live-apply-safe and conf-
-# read-safe are INDEPENDENT claims (#236 vs #241's own lesson for
-# window-size -- one option was unsafe live-applied, the OTHER unsafe
-# merely READ from a conf file at server startup). This block's own live-
-# apply proof above was run against tmux 3.7b; the cold conf-PARSE half
-# was separately verified clean on BOTH the fleet's stock tmux 3.4 (the
-# only version Ubuntu 24.04 noble ships, and the live server on any box
-# not yet rebooted through #242's cutover) and 3.7b -- `set-option -g
-# destroy-unattached keep-last` in a conf file starts cleanly on both, and
-# a live `set-option` against a running 3.4 server also succeeds. No
-# #241-shaped crash-at-parse-time hazard on either binary.
+# #591: the global destroy-unattached is REMOVED (see the TMUX_DESTROY_UNATTACHED
+# removal comment above for the full mechanism). #254 shipped `destroy-unattached
+# keep-last` to sweep detached grouped duplicates, but that value protects the
+# group's LAST member, NOT the BASE session -- so once a webterm clone
+# (`new-session -t`, cli_webterm) forms a group, the owner detaching from the
+# BASE destroyed it (unattached, grouped, not-last) with the live Claude process
+# inside, and the clone's later teardown emptied the whole tmux server (gk
+# 2026-08-20 09:58 total-death). Reproduced live on an isolated `-L` scratch
+# tmux 3.7b server with real pty clients. The conf now carries NO line at all
+# (fresh servers inherit tmux's default `off`, which never destroys a session),
+# and the live-apply below UNSETS (`-gu`) the global -- a #254-style self-heal
+# that reverts any RUNNING server still carrying the base-killing `keep-last`
+# back to `off` on the next push/install (verified live: `-gu` on a keep-last
+# server -> off, idempotent). The webterm throwaway clone self-cleans PER-SESSION
+# instead (a `client-attached` hook arming its OWN session-scoped
+# `destroy-unattached on`, cli_webterm), so ONLY the clone is ever swept -- a
+# session-scoped set does NOT leak to other group members (base stays `off`,
+# verified live). destroy-unattached is safe to touch on a running server for
+# the #235-vs-#254 reason (it only ever evaluates ZERO-client sessions), and
+# unsetting to `off` can never destroy anything.
 #
 # Pane addressing (verified, not assumed): every keystroke-sending job in
 # watchdog/__init__.py (list_claude_panes/_reconcile_candidate_panes)
@@ -453,7 +443,6 @@ def _tmux_conf_quote(word):
 
 def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
                                default_size=TMUX_DEFAULT_SIZE,
-                               destroy_unattached=TMUX_DESTROY_UNATTACHED,
                                window_size_manual=False):
     # #338: per-token _tmux_conf_quote (not a bare " ".join) -- required
     # the moment the S-PageUp entry's `"send-keys C-o"`/`"copy-mode -eu"`
@@ -472,10 +461,12 @@ def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
     # before `default-size` so the two size options sit together.
     window_size_line = (
         f"set-option -g window-size {TMUX_WINDOW_SIZE}\n" if window_size_manual else "")
+    # #591: NO `destroy-unattached` line -- the global option is removed; the
+    # base session must inherit tmux's default `off` (see the module comment
+    # above), and the webterm clone self-cleans per-session instead.
     return (
         f"{TMUX_MARK_START}\n"
         f"set-option -g history-limit {limit}\n"
-        f"set-option -g destroy-unattached {destroy_unattached}\n"
         f"{window_size_line}"
         f"set-option -g default-size {default_size}\n"
         f"{keybind_lines}\n"
@@ -568,10 +559,11 @@ def _tmux_supports_window_size_manual(run):
 
 def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HISTORY_LIMIT,
                               default_size: str = TMUX_DEFAULT_SIZE,
-                              destroy_unattached: str = TMUX_DESTROY_UNATTACHED,
                               run=None) -> bool:
     """Ensure `~/.tmux.conf` carries the managed tmux block: history-limit
-    (#235), destroy-unattached (#254), and default-size (#236).
+    (#235) and default-size (#236) -- and UNSETS any stale global
+    destroy-unattached on a running server (#591 self-heal; the conf no longer
+    carries a destroy-unattached line at all).
     `window-size manual` (#586) is emitted too, but ONLY VERSION-GATED and
     CONF-ONLY: this probes the PATH `tmux -V` once via `run`
     (`_tmux_supports_window_size_manual`) and includes the line ONLY when the
@@ -595,16 +587,19 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     limit (tmux has no way to grow an existing pane's history buffer in
     place). This is a server OPTION set, never a keystroke into any pane.
 
-    #254: destroy-unattached is ALSO live-applied, right after
-    history-limit -- unlike window-size/default-size it only ever
-    evaluates sessions with ZERO attached clients, so it structurally
-    cannot disturb anything currently on screen (verified live: see the
-    module comment above `render_tmux_history_block`). Live-applying it
-    is what immediately self-heals any ALREADY-existing detached grouped
-    pile-up (e.g. zbynek-1/2/3 while zbynek-4 stays attached) on the very
-    next push, with no new hook and no new watchdog job needed -- tmux's
-    own destroy-unattached evaluation re-fires on every future detach
-    from then on.
+    #591: the global destroy-unattached is UNSET (`set-option -gu`) right
+    after history-limit -- not SET to any value. #254 introduced a global
+    `keep-last`; that protects the group's LAST member, not the BASE, so
+    once a webterm clone forms a group the owner detaching from the base
+    destroyed it (with the Claude process inside) and the server later died
+    (the gk 2026-08-20 total-death). The conf now carries no line at all
+    (fresh servers -> tmux default `off`), and this live-apply self-heals
+    any RUNNING server still carrying the stale base-killing `keep-last` by
+    reverting it to `off` on the next push -- verified live: `-gu` on a
+    keep-last server -> off, idempotent. It only ever evaluates ZERO-client
+    sessions (the #235-vs-#254 safety) and unsetting to `off` can never
+    destroy anything. The webterm clone self-cleans PER-SESSION instead
+    (cli_webterm's `client-attached` hook), so the base is never swept.
 
     default-size is DELIBERATELY CONF-ONLY -- never live-applied via a
     real tmux subprocess call, in any code path. It lands in the conf
@@ -648,7 +643,7 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     # closed: an unprobeable / <3.5 box gets no window-size line (never the #241
     # 3.4 crash).
     window_size_manual = _tmux_supports_window_size_manual(runner)
-    block = render_tmux_history_block(limit, default_size, destroy_unattached,
+    block = render_tmux_history_block(limit, default_size,
                                        window_size_manual=window_size_manual)
 
     existing = path.read_text() if path.exists() else ""
@@ -672,7 +667,14 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     # `runner` was already resolved above (for the #586 version probe).
     live_argvs = [
         ["tmux", "set-option", "-g", "history-limit", str(limit)],
-        ["tmux", "set-option", "-g", "destroy-unattached", str(destroy_unattached)],
+        # #591: UNSET (not set) the global destroy-unattached on any running
+        # server -- a #254-style self-heal that reverts a box still carrying the
+        # base-killing `keep-last` (live-applied before this fix, or read from a
+        # not-yet-rewritten conf) back to tmux's default `off`. Verified live on
+        # tmux 3.7b: `-gu` on a keep-last server -> off, idempotent (a no-op when
+        # already unset). Setting `off` never destroys anything, so this is safe
+        # to apply against a running server, same #235-vs-#254 reason as before.
+        ["tmux", "set-option", "-gu", "destroy-unattached"],
     ]
     live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
     live_argvs += [["tmux"] + argv for argv in TMUX_POPUP_BIND_ARGVS]
@@ -706,42 +708,49 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
 
 
 # ---------------------------------------------------------------------------
-# #554: the tmux WINDOW name carries the subdev stream account's name, so the
-# owner -- attached to one of many subdev sessions -- can tell at a glance
-# WHICH stream they are in. Root cause (verified live on montalu@subdev,
-# tmux 3.7b): the default status-left already shows the SESSION name
-# (`[#{session_name}]`) and the owner STILL could not tell -- the identity
-# has to go where the owner actually looks, the window-status list in the
-# middle of the status bar, which `automatic-rename on` keeps filling with
-# the running command (`bash`/`node`). So: name the window after the stream
-# and turn `automatic-rename` off so it STICKS.
+# #554/#592: the tmux WINDOW name carries the box's short TARGET ALIAS, so the
+# owner -- attached to one of many fleet sessions -- can tell at a glance WHERE
+# they are. Root cause (verified live on montalu@subdev, tmux 3.7b): the default
+# status-left already shows the SESSION name (`[#{session_name}]`) and the owner
+# STILL could not tell -- the identity has to go where the owner actually looks,
+# the window-status list in the middle of the status bar, which
+# `automatic-rename on` keeps filling with the running command (`bash`/`node`).
+# So: name the window after the box alias and turn `automatic-rename` off so it
+# STICKS.
 #
-# Same idempotent per-account marker-block shape as apply_stream_ssh_attach
-# (#264): present ONLY for AUTHORITY_BY_USER stream accounts, actively
-# STRIPPED on dev1/dev2/gatekeeper -- a human box does varied work and the
-# command-tracking window name is USEFUL there (and the box's HOST, not the
-# user which is always `newlevel`, is what distinguishes dev1 from dev2).
-# The stream name is BAKED at install time from `_current_user()` -- 100%
-# predictable, testable, and (unlike `#{session_name}`) constant across the
-# ssh grouped-attach survivor path (`new-session -t`), so the session-created
-# hook always renames the shared window to the SAME literal instead of a
-# grouped session's auto-generated name.
+# #592 generalizes #554 from subdev stream accounts to EVERY managed box: #554
+# gated this to AUTHORITY_BY_USER keys, so gk/dev1/dev2 got NO block and their
+# windows showed `bash` (owner report 2026-08-20). Now it renders on every box,
+# with the name = the box's `cli_aliases.short_target_alias` (gatekeeper->gk,
+# dev1->dev1, dev2->dev2, montaluN->mN, davidN->dN, ...) -- the SAME single
+# source the webterm dashboard tabs draw on (cli_webterm._short_alias), never a
+# parallel map. The "stream" in the marker/function names below is historical
+# (#554); the feature now covers all boxes. The block is stripped
+# only when a box yields no SAFE alias (never in practice). Same idempotent
+# per-box marker-block shape as apply_stream_ssh_attach (#264).
+#
+# The alias is BAKED at install time from `_current_user()` + hostname -- 100%
+# predictable, testable, and (unlike `#{session_name}`) constant across the ssh
+# grouped-attach survivor path (`new-session -t`), so the session-created hook
+# always renames the shared window to the SAME literal.
 # ---------------------------------------------------------------------------
 
 STREAM_TMUX_WINDOW_MARK_START = "# >>> airuleset tmux stream-window >>>"
 STREAM_TMUX_WINDOW_MARK_END = "# <<< airuleset tmux stream-window <<<"
 
-# The stream name is interpolated as a LITERAL into a tmux `rename-window`
-# argument -- constrain it to a shell/tmux-safe unix-username shape so a
-# hypothetical exotic account name can never inject tmux command syntax.
-# Every real AUTHORITY_BY_USER key already matches this.
+# The alias is interpolated as a LITERAL into a tmux `rename-window` argument --
+# constrain it to a shell/tmux-safe unix-name shape so an exotic hostname/user
+# can never inject tmux command syntax. Every real alias (dev1/dev2/gk/mN/dN/
+# miva/siN + the marek owner account) already matches this.
 _SAFE_STREAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
-def render_stream_tmux_window_block(stream):
-    """The managed ~/.tmux.conf block that names this stream account's tmux
-    windows after the stream. `stream` is the baked linux username (already
-    validated against `_SAFE_STREAM_NAME_RE` by the caller).
+def render_stream_tmux_window_block(name):
+    """The managed ~/.tmux.conf block that names this box's tmux windows after
+    `name` -- the box's short TARGET ALIAS (#592; already validated against
+    `_SAFE_STREAM_NAME_RE` by the caller). #554 baked the subdev username here;
+    #592 bakes the alias (e.g. `m2`/`gk`/`dev1`), but the render itself is
+    name-agnostic -- it bakes whatever literal it is handed.
 
     `after-new-window` is DELIBERATELY not emitted: it fires ONLY on windows
     opened AFTER the initial one, so it never names the session's FIRST
@@ -752,36 +761,48 @@ def render_stream_tmux_window_block(stream):
     on both 3.4 and 3.7b -- it is simply the WRONG hook for the first
     window.) The `session-created` hook + `automatic-rename off` pair is
     proven clean on BOTH the fleet's tmux 3.4 and 3.7b (a scratch conf
-    starts rc=0 with `#{window_name}` = the stream on both).
+    starts rc=0 with `#{window_name}` = the name on both).
 
     KNOWN LIMITATION (review F3): `session-created` names only the FIRST
-    window of a NEW session. A second window opened later inside a stream
-    session keeps its own name (with `automatic-rename off` it does not
-    track the command either). Acceptable -- a stream account runs a single
-    claude window -- and the live-apply below is more thorough, renaming
-    EVERY existing window of the primary session on each install."""
+    window of a NEW session. A second window opened later keeps its own name
+    (with `automatic-rename off` it does not track the command either).
+    Acceptable, and the live-apply below is more thorough, renaming EVERY
+    existing window of the primary session on each install."""
     return (
         f"{STREAM_TMUX_WINDOW_MARK_START}\n"
-        "# #554: window name = stream account name so the owner sees WHICH\n"
-        "# subdev stream they are attached to. automatic-rename off makes it\n"
-        "# STICK (a stream account only runs claude; a command-tracking name\n"
-        "# -- 'node'/'bash' -- has no value and hides the identity). Present\n"
-        "# only for subdev stream accounts; stripped on dev1/dev2/gatekeeper.\n"
+        "# #554/#592: window name = this box's short target alias so the owner\n"
+        "# sees WHERE they are (dev1/dev2/gk/mN/dN/...). automatic-rename off\n"
+        "# makes it STICK (a command-tracking 'node'/'bash' name hides the\n"
+        "# identity). Rendered on EVERY managed box; the alias is the SAME\n"
+        "# source the webterm tabs use (cli_aliases.short_target_alias).\n"
         "set-option -gw automatic-rename off\n"
-        f'set-hook -g session-created "rename-window {stream}"\n'
+        f'set-hook -g session-created "rename-window {name}"\n'
         f"{STREAM_TMUX_WINDOW_MARK_END}"
     )
 
 
-def _live_apply_stream_window_name(stream, run=None):
-    """Best-effort live-apply on any RUNNING tmux server for this stream
-    account, so an ALREADY-running/attached session updates on the next
-    push WITHOUT waiting for a session re-create. Purely configuration-path
-    (`set-option` / `set-hook` / `rename-window` -- NEVER a `send-keys`
-    keystroke into any pane), failure-tolerant (no server / no matching
-    session -> no-op), and it NEVER creates or resurrects a session (the
-    standing 'never touch a session the user deliberately stopped' rule):
-    `rename-window` only relabels a window that already exists.
+def _live_apply_stream_window_name(new_name, run=None):
+    """Best-effort live-apply on any RUNNING tmux server for this box, so an
+    ALREADY-running/attached session updates on the next push WITHOUT waiting
+    for a session re-create. `new_name` is the box alias to rename every window
+    to (#592, e.g. `m2`/`dev1`/`gk`). Purely configuration-path (`set-option` /
+    `set-hook` / `rename-window` -- NEVER a `send-keys` keystroke into any
+    pane), failure-tolerant (no server -> no-op), and it NEVER creates or
+    resurrects a session (the standing 'never touch a session the user
+    deliberately stopped' rule): `rename-window` only relabels a window that
+    already exists.
+
+    #592-review (B3): renames EVERY window on this user's server (`list-windows
+    -a`), NOT just the `=<unix-user>` session -- on dev1/dev2 the owner's real
+    session is `zbynek-N`/`marek-N` while `_current_user()` is `newlevel`, so a
+    `=<unix-user>` target matched nothing and the currently-attached window
+    stayed FROZEN at its command name (`bash`, under the global
+    `automatic-rename off` set just above) until the next `session-created`.
+    Every session on this server IS on this box, so the box alias is the right
+    name for all of them; `automatic-rename off` then keeps it stuck. Consistent
+    with #554's own "rename EVERY existing window" intent, generalized across
+    sessions. Owner-UX trade-off (accepted, the #554 identity-over-command
+    decision): all windows show the same alias -- the owner navigates by index.
 
     A `rename-window` is safe to live-apply for the same reason
     `destroy-unattached` is (apply_tmux_history_limit): it changes a server
@@ -790,18 +811,17 @@ def _live_apply_stream_window_name(stream, run=None):
     runner = run or _default_tmux_run
     for argv in (["tmux", "set-option", "-gw", "automatic-rename", "off"],
                  ["tmux", "set-hook", "-g", "session-created",
-                  "rename-window %s" % stream]):
+                  "rename-window %s" % new_name]):
         try:
             runner(argv)
         except Exception as e:
             print("  tmux stream-window live-apply skipped (non-fatal): %s" % e,
                   file=sys.stderr)
-    # Rename every window of the PRIMARY session (=<stream>) so an attached
-    # session updates immediately. A missing session makes list-windows exit
-    # non-zero (or the injected test `run` returns None) -> no rename at all.
+    # Rename EVERY window on this user's server to the alias so an attached
+    # session updates immediately, whatever its name. No server (or the injected
+    # test `run` returning None) makes list-windows exit non-zero -> no rename.
     try:
-        result = runner(["tmux", "list-windows", "-t", "=%s" % stream,
-                         "-F", "#{window_id}"])
+        result = runner(["tmux", "list-windows", "-a", "-F", "#{window_id}"])
     except Exception as e:
         print("  tmux stream-window live-apply (list) skipped (non-fatal): %s" % e,
               file=sys.stderr)
@@ -813,37 +833,44 @@ def _live_apply_stream_window_name(stream, run=None):
         if not wid:
             continue
         try:
-            runner(["tmux", "rename-window", "-t", wid, stream])
+            runner(["tmux", "rename-window", "-t", wid, new_name])
         except Exception:
             # one window's failure never skips the rest
             pass
 
 
-def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, run=None):
-    """Idempotently add/remove the #554 stream-window naming marker block in
-    ~/.tmux.conf, scoped STRICTLY to subdev stream accounts
-    (AUTHORITY_BY_USER's keys -- the exact registry #263/#264 key off). The
-    block is PRESENT for a stream account and actively STRIPPED on every
-    other box, so a future AUTHORITY_BY_USER edit can never leave a stale
-    block on a human account (dev1/dev2/gatekeeper).
+def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
+                                   run=None):
+    """Idempotently add/remove the #554/#592 window-naming marker block in
+    ~/.tmux.conf. #592: rendered on EVERY managed box, with the window name =
+    the box's short TARGET ALIAS (`cli_aliases.short_target_alias(user, host)`
+    -- gatekeeper->gk, dev1->dev1, dev2->dev2, montaluN->mN, davidN->dN, ...),
+    the SAME single source the webterm dashboard tabs draw on, never a parallel
+    map. `host` defaults to the box's hostname (`os.uname().nodename`); it is
+    load-bearing only for the owner boxes that share the `newlevel` unix user
+    (dev1 vs dev2). The block is stripped only when a box yields no SAFE alias
+    (an alias failing `_SAFE_STREAM_NAME_RE`, the injection guard -- never in
+    practice), so a future exotic hostname can never leave a broken
+    rename-window directive behind.
 
     Same overall shape as apply_stream_ssh_attach (#264): positional-span
     rewrite (the shared `_clean_tmux_block_spans`, parameterized with this
     block's own markers), create-file-if-absent, no-op on a second run.
-    Additionally live-applies the same directives on any
-    running server for a stream account (`_live_apply_stream_window_name`)
-    so an attached session updates immediately. Returns True iff
-    ~/.tmux.conf changed."""
+    Additionally live-applies the same directives on any running server for
+    this box (`_live_apply_stream_window_name`) so an attached session updates
+    immediately. Returns True iff ~/.tmux.conf changed."""
     import airuleset
+    from cli_aliases import short_target_alias
     path = tmux_conf_path or TMUX_CONF
     u = user or airuleset._current_user()
-    should_have = bool(u) and u in airuleset.AUTHORITY_BY_USER \
-        and bool(_SAFE_STREAM_NAME_RE.match(u))
+    box = host or os.uname().nodename
+    alias = short_target_alias(u, box)
+    should_have = bool(alias) and bool(_SAFE_STREAM_NAME_RE.match(alias))
     existing = path.read_text() if path.exists() else ""
     spans = _clean_tmux_block_spans(
         existing, STREAM_TMUX_WINDOW_MARK_START, STREAM_TMUX_WINDOW_MARK_END)
     if should_have:
-        block = render_stream_tmux_window_block(u)
+        block = render_stream_tmux_window_block(alias)
         if spans:
             out, cursor = [], 0
             for s, e in spans:
@@ -870,7 +897,9 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, run=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new)
     if should_have:
-        _live_apply_stream_window_name(u, run)
+        # rename EVERY window on this box's server to the alias (the owner's
+        # session name may differ from the unix user -- zbynek-N on dev1, #592-B3).
+        _live_apply_stream_window_name(alias, run)
     return changed
 
 
