@@ -397,17 +397,22 @@ class TestOwnerDecisionLabelsInSync(unittest.TestCase):
         # belong in that backstop. The invariant is now a SUBSET one: every
         # owner-decision re-ping label is a user-waiting label (so the re-ping
         # never nags about something the footer wouldn't call owner-parked), and
-        # the ONLY user-waiting label NOT re-pinged is `needs-acceptance`.
+        # the user-waiting labels NOT re-pinged are `needs-acceptance` (#512, an
+        # acceptance not a decision) and `needs-owner-action` (#601, a physical
+        # owner step, not a decision to re-ask as a daily "Odpovedz prosím"
+        # question).
         import cli_quals
         self.assertTrue(set(wd.OWNER_DECISION_LABELS)
                         <= set(cli_quals.USER_WAITING_LABELS),
                         "every re-ping label must be a user-waiting label")
         self.assertEqual(
             set(cli_quals.USER_WAITING_LABELS) - set(wd.OWNER_DECISION_LABELS),
-            {"needs-acceptance"},
-            "needs-acceptance is the one user-waiting label deliberately NOT in "
-            "the owner-decision re-ping (#512: an acceptance, not a decision; "
-            "watchdog re-ask jobs are scoped unchanged)")
+            {"needs-acceptance", "needs-owner-action"},
+            "needs-acceptance (#512: an acceptance, not a decision) AND "
+            "needs-owner-action (#601: a physical owner step, not a daily "
+            "'Odpovedz prosím' question) are the user-waiting labels "
+            "deliberately NOT in the owner-decision re-ping; watchdog re-ask "
+            "jobs stay scoped to genuine decisions")
 
 
 class TestRunOnceWiring(unittest.TestCase):

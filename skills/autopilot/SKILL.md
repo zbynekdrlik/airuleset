@@ -210,6 +210,17 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   `needs-acceptance` ktorého acceptance DRAFT sa NEDÁ zložiť, lebo čaká na stream-ovho SIBLING workera
   (sibling ticket) — žiadny externý release event, žiadny blocker ticket → OSTÁVA `I` (Claudova
   vlastná sekvenčná práca); pipeline-gated/umbrella čaká na RELEASE stage ALEBO na BLOCKER ticket → W.
+  **Owner fyzická akcia = U, nikdy W (#601, owner ruling 2026-08-20).** Ticket, ktorý čaká na OWNEROV
+  vlastný fyzický/manuálny krok (príď k rigu, sprav hardvérovú akciu, buď pri tom), NIE JE tretia
+  strana — patrí do `U`, nie `W`: olabeluj `needs-owner-action` (v `--waiting` tagovaný `action`;
+  doručené OZNÁMENIE = ❓ ping/komentár menujúci konkrétny krok, chýbajúce = `no-action!`).
+  `needs-owner-action` + `ops-wait` → `U` (owner beats third-party framing); owner-action NIKDY nevojde
+  do `W` bucketu, takže #570 `stale!` sa naň nevzťahuje, a NEMÁ #539 `I`-fallback (na rozdiel od bare
+  `needs-acceptance` bez draftu je fyzický owner-krok vždy owner-ova zodpovednosť, nie odložiteľná
+  vlastná práca streamu → vždy `U`). Owner nie je
+  tretia strana — owner-blocked `ops-wait` je mis-shape, ktorý job-20 partition-audit nudge fleet-wide
+  pomenúva, aby si bežiace slučky opravili svoje W tikety samy. Čistí ho SUPERVISOR s dôkazom, že owner
+  krok spravil (paralela k `ops-wait`, nie auto Discord-answer).
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do

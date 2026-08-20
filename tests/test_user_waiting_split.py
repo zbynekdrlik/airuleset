@@ -101,12 +101,16 @@ class PartitionHelpers(unittest.TestCase):
         self.assertEqual(set(workable), {9})
         self.assertEqual(waiting, {})
 
-    def test_labels_constant_is_the_three_owner_waiting_labels(self):
+    def test_labels_constant_is_the_four_owner_waiting_labels(self):
         # #512 (owner decision 2026-08-16): the "waiting on the OWNER" family is
         # consolidated to answer + decision + acceptance (was the two #468
         # labels; needs-acceptance folded in, its A-bucket never shipped).
+        # #601 (owner ruling 2026-08-20): needs-owner-action joins — an owner's
+        # own physical/manual step ("čo čaká na TEBA") is U, never a W third
+        # party.
         self.assertEqual(set(airuleset.USER_WAITING_LABELS),
-                         {"needs-answer", "needs-decision", "needs-acceptance"})
+                         {"needs-answer", "needs-decision", "needs-acceptance",
+                          "needs-owner-action"})
 
     def test_bare_needs_acceptance_partitions_into_user_waiting(self):
         # #512: the ONE derivation routes a bare needs-acceptance row to the

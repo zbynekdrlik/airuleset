@@ -677,8 +677,10 @@ QUESTION_REPING_S = 24 * 3600
 # a flat literal here (never a module-level `from cli_quals import`) because the
 # import direction is airuleset -> watchdog and watchdog is a 60s systemd timer;
 # a reverse import would add import-time cost to every sweep. The SUBSET
-# invariant (every re-ping label ∈ USER_WAITING_LABELS; the only excluded one is
-# needs-acceptance) is pinned by TestOwnerDecisionLabelsInSync.
+# invariant (every re-ping label ∈ USER_WAITING_LABELS; the DELIBERATELY-excluded
+# ones are needs-acceptance — an acceptance, not a decision — AND, since #601,
+# needs-owner-action — a physical owner step, not a daily "Odpovedz prosím"
+# question) is pinned by TestOwnerDecisionLabelsInSync.
 OWNER_DECISION_LABELS = ("needs-answer", "needs-decision")
 
 
