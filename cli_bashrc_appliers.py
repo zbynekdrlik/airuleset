@@ -284,6 +284,24 @@ STREAM_SSH_ATTACH_BLOCK = (
 SSH_ATTACH_EXTRA_USERS = frozenset({"gatekeeper"})
 
 
+def is_single_session_box_user(user: str = None) -> bool:
+    """True iff `user` runs the fleet's ONE-tmux-session-per-account model
+    (#264): a subdev stream account (AUTHORITY_BY_USER) or the gk box
+    `gatekeeper` account (SSH_ATTACH_EXTRA_USERS, #562). The owner's `newlevel`
+    boxes (dev1/dev2) run MANY project sessions and are NOT in this set.
+
+    This is the ONE source of truth for that distinction. The #264 ssh
+    auto-attach (`apply_stream_ssh_attach`) creates exactly one `-A -s "$me"`
+    session per such account, and the #554/#592 per-target WINDOW-name block
+    (`apply_stream_tmux_window_name`) names that single window -- so BOTH gate
+    on this predicate. A multi-project box must NEVER get either: naming every
+    window the same literal + `automatic-rename off` destroys the owner's
+    per-project navigation (#593, the #592 regression on dev1/dev2)."""
+    import airuleset
+    u = user or airuleset._current_user()
+    return u in airuleset.AUTHORITY_BY_USER or u in SSH_ATTACH_EXTRA_USERS
+
+
 def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
                                 end=STREAM_SSH_ATTACH_MARK_END):
     """Left-to-right positional scan for CLEAN (start, end) marker pairs --
@@ -350,8 +368,11 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     import airuleset
     bpath = bashrc_path or airuleset.BASHRC
     u = user or airuleset._current_user()
-    should_have = (u in airuleset.AUTHORITY_BY_USER
-                   or u in SSH_ATTACH_EXTRA_USERS)
+    # The ssh-auto-attach eligibility set IS the single-session-per-account set
+    # (#593): subdev streams (AUTHORITY_BY_USER) + the gk `gatekeeper` account
+    # (SSH_ATTACH_EXTRA_USERS, #562). Shared with the #592 window-name block via
+    # ONE predicate so the two can never drift on "which boxes are single-session".
+    should_have = is_single_session_box_user(u)
     existing = bpath.read_text() if bpath.exists() else ""
     spans = _stream_marker_block_spans(existing)
     if should_have:

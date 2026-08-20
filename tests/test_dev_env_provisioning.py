@@ -1510,15 +1510,18 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
 
 
 class TestApplyStreamTmuxWindowName(TestCase):
-    """#554/#592: the tmux WINDOW name carries the box's short TARGET ALIAS so
-    the owner, attached to one of many fleet sessions, can tell at a glance
-    where they are. #554 gated this to subdev stream accounts only, so gk/dev1/
-    dev2 windows showed `bash` (owner report 2026-08-20); #592 renders it on
-    EVERY managed box, with the name = the box's `cli_aliases.short_target_alias`
-    (gatekeeper->gk, dev1->dev1, dev2->dev2, montaluN->mN, davidN->dN, ...) --
-    ONE shared alias source, never a second parallel map. Idempotent per-box
+    """#554/#592/#593: the tmux WINDOW name carries the box's short TARGET ALIAS
+    so the owner, attached to one of many fleet sessions, can tell at a glance
+    where they are. #554 gated this to subdev streams; #592 also covered gk (its
+    window showed `bash`); #593 SCOPES it to SINGLE-SESSION-per-account boxes
+    only (gk + subdev streams -- `is_single_session_box_user`, the SAME set the
+    #264 ssh-auto-attach uses), NEVER an owner/newlevel MULTI-PROJECT box (dev1/
+    dev2), where one fixed name + automatic-rename off froze every project window
+    and destroyed navigation (the #592 regression). The name = the box's
+    `cli_aliases.short_target_alias` (gatekeeper->gk, montaluN->mN, davidN->dN)
+    -- ONE shared alias source, never a second parallel map. Idempotent per-box
     marker-block (shape of apply_stream_ssh_attach, #264); the block is stripped
-    only when a box has no safe alias (never in practice)."""
+    when a box is not single-session or has no safe alias."""
 
     def _tmp(self, content=None):
         d = tempfile.mkdtemp()
