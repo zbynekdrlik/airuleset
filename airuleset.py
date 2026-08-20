@@ -3052,12 +3052,18 @@ def _run_card_require_repo_and_issue(args, repo, issue):
     require it to EXIT NON-ZERO and write a durable delivery-log line with the
     reason — never a silent `return` (exit 0, no log, silent even under
     --dry-run). That silent `return` (here since 9bee24a1, 2026-06-20) is the
-    branch the airuleset supervisor hit by firing run-cards without --repo
-    (~20 cards dropped, zero trace, zero log after 2026-08-17T17:09). Routes
-    through the SAME `_run_card_refuse` shape every other refusal uses
-    (log + stderr + exit 1; --dry-run prints + exits but skips only the
-    durable log), with a `?` sentinel for whichever field is missing so the
-    log key stays greppable (`?#586` / `x#?` / `?#?`). Never returns."""
+    branch the airuleset supervisor hit by firing run-cards without --repo,
+    silently dropping the completion cards for a run of closed tickets. The
+    diagnostic evidence of the drop is the MARKER GAP — the newest delivered
+    airuleset card marker is #529 (2026-08-17), none after — NOT the delivery
+    log: a SUCCESSFUL card writes only its inner `_send` line
+    (`kind=python key=<repo>#<issue>`), never a `kind=run-card` line (that
+    outer line fires ONLY on refuse/failure), so "zero kind=run-card lines"
+    alone is a null signal (#523). Routes through the SAME `_run_card_refuse`
+    shape every other refusal uses (log + stderr + exit 1; --dry-run prints +
+    exits but skips only the durable log), with a `?` sentinel for whichever
+    field is missing so the log key stays greppable
+    (`?#586` / `x#?` / `?#?`). Never returns."""
     missing = ([] if repo else ["--repo"]) + \
               ([] if issue is not None else ["--issue"])
     joined = " and ".join(missing)

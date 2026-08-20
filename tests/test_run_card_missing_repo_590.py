@@ -183,27 +183,46 @@ class TestHappyPathStillPrintsDecision(_Harness):
 
 
 class TestNoSilentBranchRegressionLock(_Harness):
-    """The structural invariant: `_notify_run_card` has NO bare `return`
-    (a silent exit-0) and NO `sys.exit(0)` -- every non-delivery path is loud
-    (non-zero exit + logged reason) or a logged `sent`. Locks #590 so no
-    future edit re-opens a silent branch."""
+    """The structural invariant: the run-card path has NO silent exit-0 branch
+    -- no bare `return`, and no exit-0-equivalent call (`sys.exit()` /
+    `sys.exit(0)` / `sys.exit(None)` / `os._exit(0)`) -- every non-delivery
+    path is loud (non-zero exit + logged reason) or a logged `sent`. Both
+    `_notify_run_card` AND its `_run_card_require_repo_and_issue` helper are
+    scanned (review 🔵: the helper is the branch #590 restored, so a future
+    bare `return` slipped in there would re-open the exact hole). Locks #590
+    so no future edit re-opens a silent branch."""
 
-    def test_notify_run_card_has_no_silent_exit_path(self):
-        tree = ast.parse(inspect.getsource(airuleset._notify_run_card))
-        fn = tree.body[0]
-        bare_returns = [n.lineno for n in ast.walk(fn)
-                        if isinstance(n, ast.Return) and n.value is None]
-        exit0 = [n.lineno for n in ast.walk(fn)
-                 if isinstance(n, ast.Call)
-                 and isinstance(n.func, ast.Attribute) and n.func.attr == "exit"
-                 and n.args and isinstance(n.args[0], ast.Constant)
-                 and n.args[0].value == 0]
-        self.assertEqual(bare_returns, [],
-                         "_notify_run_card has a bare `return` (silent exit-0) "
-                         "at line(s) %s -- every non-delivery must exit "
-                         "non-zero + log (#134/#135)" % bare_returns)
-        self.assertEqual(exit0, [],
-                         "_notify_run_card has a silent sys.exit(0) at %s" % exit0)
+    @staticmethod
+    def _silent_exit_lines(fn):
+        """Line numbers of any silent exit-0 shape in an AST FunctionDef:
+        a bare `return` (value None -> exit 0), or an `.exit(...)` call
+        (sys.exit / os._exit) with NO arg, a `0` arg, or a `None` arg."""
+        bare = [n.lineno for n in ast.walk(fn)
+                if isinstance(n, ast.Return) and n.value is None]
+        exit0 = []
+        for n in ast.walk(fn):
+            if not (isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in ("exit", "_exit")):
+                continue
+            if not n.args:                       # sys.exit() -> exit 0
+                exit0.append(n.lineno)
+            elif (isinstance(n.args[0], ast.Constant)
+                  and n.args[0].value in (0, None)):   # exit(0) / exit(None)
+                exit0.append(n.lineno)
+        return bare, exit0
+
+    def test_run_card_paths_have_no_silent_exit(self):
+        for name in ("_notify_run_card", "_run_card_require_repo_and_issue"):
+            fn = ast.parse(inspect.getsource(getattr(airuleset, name))).body[0]
+            bare, exit0 = self._silent_exit_lines(fn)
+            self.assertEqual(bare, [],
+                             "%s has a bare `return` (silent exit-0) at "
+                             "line(s) %s -- every non-delivery must exit "
+                             "non-zero + log (#134/#135)" % (name, bare))
+            self.assertEqual(exit0, [],
+                             "%s has a silent exit-0 call (sys.exit()/"
+                             "sys.exit(0)/os._exit(0)) at %s" % (name, exit0))
 
 
 if __name__ == "__main__":
