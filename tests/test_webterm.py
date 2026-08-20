@@ -284,9 +284,16 @@ class TestAttachSnippetBehavior(unittest.TestCase):
     """#584: standard tmux multi-attach that NEVER disturbs an existing client.
     Run the REAL _ATTACH_BODY against a logging fake tmux and prove: an existing
     session is JOINED via a throwaway GROUPED clone (independent view, cleaned
-    up on disconnect, base never touched), the window sizes to the ACTIVE client
-    (window-size latest + aggressive-resize on), and `attach -d` (the only verb
-    that detaches other clients) is NEVER used."""
+    up on disconnect, base never touched), and `attach -d` (the only verb that
+    detaches other clients) is NEVER used. #586: the webterm client no longer
+    forces ANY window-size policy on the target -- it drops the #584 `-gw
+    window-size latest` + `aggressive-resize on` overrides (that was the ROOT
+    regression: `latest` shrinks the shared window to whoever is active, so a
+    small webterm client blackens the owner's WT view) and instead attaches the
+    clone with the `ignore-size` CLIENT flag, so the webterm client can NEVER
+    influence window sizing regardless of the target's own window-size policy
+    (belt-and-suspenders on top of the fleet-wide `window-size manual`, which is
+    the primary fix in cli_tmux_provisioning)."""
 
     def setUp(self):
         import subprocess
@@ -333,13 +340,33 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # never a kill of the bare base session (either `=zbynek-4` or `zbynek-4`)
         self.assertNotRegex(log, r"kill-session -t =?zbynek-4(?!-web)")
 
-    def test_sizes_window_to_active_client(self):
-        # window-size latest + aggressive-resize on -> the shared window sizes to
-        # whoever is actively viewing, never the smallest client (the owner's WT
-        # view can't be shrunk by a small web client).
+    def test_does_not_force_any_window_size_policy_on_the_target(self):
+        # #586: the ROOT regression was `-gw window-size latest` (+ aggressive-
+        # resize) — that shrinks the shared window to the active client, so a
+        # small webterm client blackens the owner's WT choose-tree. The webterm
+        # client must set NEITHER: the target's own managed conf (window-size
+        # manual on a supported box) governs, and ignore-size on the clone is
+        # the client-level belt-and-suspenders.
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertIn("window-size latest", log)
-        self.assertIn("aggressive-resize on", log)
+        self.assertNotIn("window-size latest", log)
+        self.assertNotIn("aggressive-resize", log)
+
+    def test_clone_attaches_with_ignore_size_client_flag(self):
+        # #586: the grouped clone carries `-f ignore-size` so it can NEVER
+        # resize the shared window (verified live: under `window-size latest` a
+        # clone with ignore-size held the WT window at its size, without it the
+        # window shrank to the small client). The base's own `new-session -A`
+        # fallback (no existing session) must NOT carry it — that client IS the
+        # owner's real view.
+        log = self._run("zbynek", "zbynek::zbynek-4")
+        self.assertRegex(log, r"new-session -t zbynek-4 -s zbynek-4-web-\d+ -f ignore-size")
+
+    def test_fresh_base_session_is_not_ignore_size(self):
+        # No existing session -> the owner's own base is created; it is the real
+        # viewing client, so it must NOT be ignore-size (only the throwaway
+        # webterm clone is).
+        log = self._run("zbynek", "")
+        self.assertNotIn("ignore-size", log)
 
     def test_no_sessions_creates_preferred_and_does_not_kill_it(self):
         # No existing session -> create the owner's own base, which must PERSIST
