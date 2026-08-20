@@ -326,16 +326,24 @@ def transcript_last_marker_line(path):
     return _last_marker_line_from_entries(_iter_jsonl_tail(path))
 
 
-def transcript_last_marker_bounded(path, tail_bytes=1_000_000, max_entries=200):
+def transcript_last_marker_bounded(path, tail_bytes=2_000_000, max_entries=200):
     """The last-marker glyph (⏳/✅/❓ or '') via a BOUNDED SEEK instead of
     `transcript_last_marker`'s whole-file `f.read()` — identical walk
-    (`_last_marker_line_from_entries`, no drift), but reads only the last
-    `tail_bytes`. Added for the compact `❓`-veto path (#599): that read fires
-    on every one of a busy loop's Work-Complete hooks, and on cambox's 670 MB
-    transcript the whole-file read measured 1.17 s vs 0.005 s here. Reads more
-    entries than the 60-line default `transcript_last_marker` walks, which is
-    strictly MORE robust (it can walk further back past a burst of synthetic
-    entries) — the walk still returns on the first real assistant turn."""
+    (`_last_marker_line_from_entries`), but reads only the last `tail_bytes`.
+    Added for the compact `❓`-veto path (#599): that read fires on every one of
+    a busy loop's Work-Complete hooks, and on cambox's 670 MB transcript the
+    whole-file read measured 1.17 s vs ~0.01 s here.
+
+    DRIFT RESIDUAL vs `transcript_last_marker` (#599 review 🔵): the two disagree
+    only when a SINGLE entry larger than `tail_bytes` sits between EOF and the
+    last real assistant turn — the corpus has 53 such entries (max ~7 MB). The
+    default is raised to 2 MB (covers 52 of the 53). For the `❓` veto the
+    dangerous drift is a FALSE-NEGATIVE (bounded='' while full='❓' → a
+    mid-decision session compacted), but it is heavily backstopped: a `❓`-blocked
+    turn is IDLE (nothing writes a >2 MB entry AFTER it), and a giant user
+    paste that could is caught by the recent-human / busy vetoes. Widening
+    further trades the (already ~0.01 s) read cost for a vanishing residual, so
+    2 MB is the stopping point."""
     return _last_marker_line_from_entries(
         _read_jsonl_byte_tail(path, tail_bytes, max_entries))[0]
 
@@ -440,24 +448,12 @@ def question_repoke_streak(tpath, is_human_fn, tail_bytes=1_000_000, max_entries
     `tail_bytes` of the transcript at `tpath` via a BOUNDED SEEK (never a
     whole-file read -- montalu's transcript is 240 MB), parse up to the newest
     `max_entries` JSONL entries, and return the pure detector's verdict. `(0, "")`
-    on any read failure. The partial first line after a mid-file seek fails
-    json.loads and is dropped."""
-    try:
-        with open(tpath, "rb") as f:
-            try:
-                f.seek(-tail_bytes, 2)
-            except OSError:
-                f.seek(0)
-            raw = f.read()
-    except OSError:
-        return 0, ""
-    entries = []
-    for ln in raw.splitlines()[-max_entries:]:
-        try:
-            entries.append(json.loads(ln))
-        except Exception:
-            continue
-    return question_repoke_run(entries, is_human_fn)
+    on any read failure (an empty entry list → `question_repoke_run([])` →
+    `(0, "")`, so the error semantics are preserved). Reuses the shared
+    `_read_jsonl_byte_tail` (#599 dedup) — this bounded-seek read used to be
+    inlined here byte-for-byte."""
+    return question_repoke_run(
+        _read_jsonl_byte_tail(tpath, tail_bytes, max_entries), is_human_fn)
 
 
 def supervisor_responded_to_nudge(path, nudge_signature, max_lines=200):
@@ -1174,6 +1170,38 @@ def _entry_bg_bash_tool_use_ids(entry):
     return ids
 
 
+def _task_notification_ids(entry):
+    """tool_use ids named in a `<task-notification>` COMPLETION block, read from
+    EVERY location CC writes one (measured live on cambox, #599 review 🟡):
+      - the `user` form — `message.content` (str, or a list joined by
+        `_entry_text`);
+      - the `queue-operation` form — a TOP-LEVEL `content` string (the DOMINANT
+        shape: 8860 of ~12.5k notification entries; a `queue-operation` entry
+        has NO `message` key, so `_entry_text` alone MISSES it);
+      - the `attachment` form — a string inside the `attachment` payload
+        (`attachment.prompt`).
+    Reading ONLY `message.content` left 264/1411 completions invisible, so those
+    jobs read live until they scrolled out — a SAFE (over-veto) direction, but
+    needless delivery latency AND the source of the ticket's under-stated bg-free
+    rate (measured 71% with the old reader vs ~85% ground truth). Never raises."""
+    texts = []
+    try:
+        texts.append(_entry_text(entry) or "")
+    except Exception:
+        texts.append("")
+    c = entry.get("content") if isinstance(entry, dict) else None
+    if isinstance(c, str):
+        texts.append(c)
+    att = entry.get("attachment") if isinstance(entry, dict) else None
+    if isinstance(att, dict):
+        texts.extend(v for v in att.values() if isinstance(v, str))
+    ids = []
+    for t in texts:
+        if "<task-notification>" in t:
+            ids.extend(_TASK_NOTIFICATION_TOOL_USE_ID_RX.findall(t))
+    return ids
+
+
 def session_live_bg_bash(entries):
     """PURE (entries in / verdict out, #504) — True iff any `run_in_background`
     Bash START in `entries` has NO later `<task-notification>` COMPLETION for
@@ -1184,22 +1212,24 @@ def session_live_bg_bash(entries):
     conservative direction for a VETO whose danger is orphaning a running job.
 
     `notified` is collected across the WHOLE window first (a START and its
-    completion may be any distance apart), then a START is live iff its id is
-    absent from `notified`. An entry whose `_entry_text` raises on a
-    wrong-typed (`"text": null`) block degrades to '' (no notification), never
-    crashing the reader. Never raises."""
+    completion may be any distance apart, and CC writes a completion in three
+    entry shapes — `_task_notification_ids` reads all of them), then a START is
+    live iff its id is absent from `notified`. The START side is STRUCTURAL
+    (`_entry_bg_bash_tool_use_ids` reads only a parsed `tool_use` block), immune
+    to a `<task-notification>` merely QUOTED in assistant prose; a prose-quoted
+    completion whose text carries the exact unique `toolu_…` id of a still-live
+    START in the same window would false-CLEAR it, but that collision is
+    practically unreachable (an exact unique id, in prose, same 200-entry
+    window) — an accepted residual, the safe-side twin of #486's own
+    quoted-markup care. `_entry_text` raising on a wrong-typed (`"text": null`)
+    block is caught inside `_task_notification_ids`. Never raises."""
     started = []
     notified = set()
     for e in entries:
         if not isinstance(e, dict):
             continue
         started.extend(_entry_bg_bash_tool_use_ids(e))
-        try:
-            text = _entry_text(e) or ""
-        except Exception:
-            text = ""
-        if "<task-notification>" in text:
-            notified.update(_TASK_NOTIFICATION_TOOL_USE_ID_RX.findall(text))
+        notified.update(_task_notification_ids(e))
     return any(tid not in notified for tid in started)
 
 
@@ -1209,10 +1239,24 @@ def session_has_live_bg_bash(path, tail_bytes=1_000_000, max_entries=200):
     hundreds of MB) → the pure verdict. `max_entries` (200, the death-detector
     sibling window) is deliberately TIGHT so an ABANDONED older bg job scrolls
     out of the window and stops vetoing (self-healing) while a genuinely-recent
-    live job is still caught — measured on cambox: a trailing 200-entry window
-    is empty of open bg jobs ~71% of the time, so this veto never permanently
-    blocks compaction. Fail-safe: an unreadable transcript → [] → False (never
-    a guessed veto). Never raises."""
+    live job is still caught — measured on cambox, a trailing 200-entry window
+    is empty of open bg jobs ~85% of the time (ground truth; ~82% with this
+    reader), so this veto does NOT permanently block compaction: a safe moment
+    aligns within minutes.
+
+    ACCEPTED RESIDUAL, honestly stated (the window is NOT purely beneficial in
+    both directions): a genuinely-LIVE long-running bg job whose START scrolled
+    PAST the window (measured 1.2% of jobs on cambox have a start->completion
+    gap >200 entries, max ~1152) reads NOT-live, so a `/compact` could orphan
+    its completion (the #29193 class this veto exists to prevent). That case is
+    rare, RECOVERABLE (`ci-monitoring.md`'s established re-derive-from-the-
+    durable-resource path), and still a net improvement over no veto (this
+    covers ~98.8% of bg-job lifetimes). Widening the window trades this against
+    MORE over-veto on abandoned jobs (the 0-SEND direction), so it stays TIGHT;
+    both bounds are env-tunable (`_compact_bg_bash_window`) if a stream needs it.
+
+    Fail-safe: an unreadable transcript → [] → False (never a guessed veto).
+    Never raises."""
     return session_live_bg_bash(_read_jsonl_byte_tail(path, tail_bytes, max_entries))
 
 

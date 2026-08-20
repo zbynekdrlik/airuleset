@@ -1050,9 +1050,12 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
     signal a genuine chance to catch up, exactly like the old retry loop
     did, without resurrecting the loop itself: the wait is computed from
     the REQUEST's own recorded `ts` (via a fresh `load_compact_requests`
-    read, since a re-record may have preserved an already-old-enough
-    anchor), so a re-record whose anchor already clears the floor sleeps
-    zero.
+    read). Under the #599 supersede rule `record_compact_request` sets `ts`
+    to `now` on EVERY record, so on this synchronous path `req_ts` is always
+    ~now and the fresh boundary sleeps the ~2s `COMPACT_MIN_REQUEST_AGE_S`
+    floor once — exactly the #238 same-turn-dispatch race protection the old
+    retry loop gave (the pre-#599 "a re-record whose anchor was already old
+    enough sleeps zero" branch is unreachable now that ts never carries over).
 
     Returns the disposition word `deliver_compact` returns (or
     `"skip:no-session"` if recording itself failed — a disk-write

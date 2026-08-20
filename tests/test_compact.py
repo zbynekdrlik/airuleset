@@ -1857,6 +1857,44 @@ class TestBgBashDetector599(unittest.TestCase):
                    self._completion("t1"), self._completion("t2")]
         self.assertFalse(wd.session_live_bg_bash(entries))
 
+    def test_completion_in_queue_operation_form_is_not_live(self):
+        # #599 review 🟡: CC writes a bg completion as a `queue-operation` entry
+        # with the `<task-notification>` in a TOP-LEVEL `content` string (NO
+        # `message` key) — the DOMINANT form (8860 of ~12.5k on cambox). The
+        # message-only reader MISSED it (over-veto); `_task_notification_ids`
+        # now reads the top-level content. This test is RED against the old
+        # message-only reader.
+        qop = {"type": "queue-operation", "content": (
+            "<task-notification>\n<task-id>bq</task-id>\n"
+            "<tool-use-id>toolu_qop</tool-use-id>\n</task-notification>")}
+        self.assertFalse(wd.session_live_bg_bash([self._bg_start("toolu_qop"), qop]))
+
+    def test_completion_in_attachment_form_is_not_live(self):
+        # the `attachment` form carries the notification in `attachment.prompt`
+        # (measured live) — also read by `_task_notification_ids`.
+        att = {"type": "attachment", "attachment": {"type": "queued_command",
+               "prompt": ("<task-notification>\n<task-id>ba</task-id>\n"
+                          "<tool-use-id>toolu_att</tool-use-id>\n"
+                          "</task-notification>")}}
+        self.assertFalse(wd.session_live_bg_bash([self._bg_start("toolu_att"), att]))
+
+    def test_bounded_marker_finds_marker_behind_a_large_trailing_entry(self):
+        # #599 review 🔵: the bounded marker read (2MB default) must still find a
+        # `❓` marker turn even when a large (~1.5MB) trailing entry sits between
+        # it and EOF — the drift the tiny synthetic fixtures did not cover.
+        proj = self._dir()
+        d = Path(proj) / _encode("/home/x/big")
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "sidBig.jsonl"
+        marker = json.dumps({"type": "assistant",
+                             "message": {"id": "m1", "content": "❓ NEEDS YOU: rozhodni"}})
+        big = json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": "x" * 1_500_000}]}})
+        p.write_text(marker + "\n" + big + "\n")
+        self.assertEqual(wd.transcript_last_marker_bounded(str(p)), "❓")
+        self.assertEqual(wd.transcript_last_marker_bounded(str(p)),
+                         wd.transcript_last_marker(str(p)))
+
     def test_a_non_bg_bash_tool_use_is_not_a_bg_job(self):
         entries = [{"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "t1", "name": "Bash",
