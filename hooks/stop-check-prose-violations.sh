@@ -1619,9 +1619,11 @@ fi
 # session_id/cwd fields directly, exactly like the SubagentStop sibling
 # channel (notify-compact-subagent-boundary.sh) already does for a worker's
 # ticket boundary. `--origin self-callback` is the SAME proven-boundary
-# origin `--self` uses, so the exact same, already-adversarially-reviewed
-# exemption machinery (_compact_self_reported_complete, #425) applies
-# unchanged. Best-effort, silent, non-blocking: a redundant call alongside a
+# origin `--self` uses, so it flows through the exact same delivery path
+# (post-#599: the `⏳`-marker veto and its self-callback-only #425 exemption
+# were removed — a recorded boundary now delivers at the next safe moment, so
+# the origin only affects the #188 unresumed-api-error gate). Best-effort,
+# silent, non-blocking: a redundant call alongside a
 # compliant model's own `--self` invocation is a harmless no-op
 # (record_compact_request's own re-record/cooldown semantics already
 # collapse it), and any failure here (no python3, no jq-independent

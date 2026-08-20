@@ -19,8 +19,9 @@ well-formed), a completion-heading turn is by construction a real boundary,
 so the hook fires ONE best-effort `airuleset.py compact-request --record
 --session <sid> --cwd <cwd> --origin self-callback` call -- the SAME CLI
 entry point + the SAME `self-callback` proven-boundary origin `--self`
-already uses, so the exact same, already-adversarially-reviewed exemption
-machinery (`_compact_self_reported_complete`, #425) applies unchanged. Never
+already uses, so it flows through the exact same delivery path (post-#599:
+the `⏳`-marker veto and its self-callback-only #425 exemption were removed,
+so the origin now only affects the #188 unresumed-api-error gate). Never
 `--self` itself: that resolves the pane via `$TMUX_PANE`, which is correct
 for a session calling it as ITS OWN mid-turn tool call, but a HOOK process
 has no reliable `$TMUX_PANE` of its own -- `--record` takes the payload's own

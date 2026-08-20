@@ -69,6 +69,33 @@ def _iter_jsonl_tail(path, max_lines=60):
     return out
 
 
+def _read_jsonl_byte_tail(path, tail_bytes, max_entries):
+    """Parsed JSONL entries from the last `tail_bytes` of a transcript via a
+    BOUNDED SEEK (never a whole-file `f.read()`) — take up to the newest
+    `max_entries`. The partial first line after a mid-file seek fails
+    `json.loads` and is dropped. `[]` on any read failure. Mirrors
+    `question_repoke_streak`'s own bounded read: the compact / bg-bash readers
+    run against real supervisor transcripts that reach hundreds of MB (cambox's
+    is 670 MB — a full `_iter_jsonl_tail` read of it measured 1.17 s vs 0.005 s
+    for this seek), so the tail MUST be bounded by bytes, not read whole."""
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(-int(tail_bytes), 2)
+            except OSError:
+                f.seek(0)
+            raw = f.read()
+    except (OSError, ValueError, TypeError):
+        return []
+    out = []
+    for ln in raw.splitlines()[-max_entries:]:
+        try:
+            out.append(json.loads(ln))
+        except Exception:
+            continue
+    return out
+
+
 def _entry_text(entry):
     msg = entry.get("message") if isinstance(entry, dict) else None
     if not isinstance(msg, dict):
@@ -268,12 +295,13 @@ def transcript_last_marker(path):
     return transcript_last_marker_line(path)[0]
 
 
-def transcript_last_marker_line(path):
-    """(marker, full marker LINE) of the session's last real assistant message,
-    or ('', ''). Same walk/semantics as transcript_last_marker — the LINE feeds
-    declared_wait_until (a ⏳ that names a future clock time is a healthy wait,
-    not a stall; the 2026-07-20 drilling incident)."""
-    for entry in reversed(_iter_jsonl_tail(path)):
+def _last_marker_line_from_entries(entries):
+    """PURE (entries in / verdict out) — the (marker, full marker LINE) walk
+    factored out of `transcript_last_marker_line` so a BOUNDED-tail caller
+    (`transcript_last_marker_bounded`, the compact path) shares the IDENTICAL
+    semantics with zero drift (#486 no-duplicate direction). Walks newest ->
+    oldest, returns on the first real assistant turn."""
+    for entry in reversed(entries):
         if not isinstance(entry, dict) or entry.get("type") != "assistant":
             continue
         if entry.get("isApiErrorMessage") is True:
@@ -288,6 +316,28 @@ def transcript_last_marker_line(path):
                 return m.group(1), ln
         return "", ""               # a real reply, but with no status marker
     return "", ""
+
+
+def transcript_last_marker_line(path):
+    """(marker, full marker LINE) of the session's last real assistant message,
+    or ('', ''). Same walk/semantics as transcript_last_marker — the LINE feeds
+    declared_wait_until (a ⏳ that names a future clock time is a healthy wait,
+    not a stall; the 2026-07-20 drilling incident)."""
+    return _last_marker_line_from_entries(_iter_jsonl_tail(path))
+
+
+def transcript_last_marker_bounded(path, tail_bytes=1_000_000, max_entries=200):
+    """The last-marker glyph (⏳/✅/❓ or '') via a BOUNDED SEEK instead of
+    `transcript_last_marker`'s whole-file `f.read()` — identical walk
+    (`_last_marker_line_from_entries`, no drift), but reads only the last
+    `tail_bytes`. Added for the compact `❓`-veto path (#599): that read fires
+    on every one of a busy loop's Work-Complete hooks, and on cambox's 670 MB
+    transcript the whole-file read measured 1.17 s vs 0.005 s here. Reads more
+    entries than the 60-line default `transcript_last_marker` walks, which is
+    strictly MORE robust (it can walk further back past a burst of synthetic
+    entries) — the walk still returns on the first real assistant turn."""
+    return _last_marker_line_from_entries(
+        _read_jsonl_byte_tail(path, tail_bytes, max_entries))[0]
 
 
 def transcript_last_assistant_text(path):
@@ -1083,6 +1133,87 @@ def transcript_worker_finished(path):
         return ("terminal" if msg.get("stop_reason") in _TERMINAL_STOP_REASONS
                 else "settling")
     return ""
+
+
+# --- #599: live run_in_background Bash job detection (STRUCTURED transcript
+# signal, #486 direction — no pane heuristics). Measured live against the real
+# `~/.claude/projects` corpus (read-only) so the shape is not guessed:
+#   START      — an assistant `tool_use` block, name=="Bash", whose
+#                `input.run_in_background is True`; carries a `tool_use` `id`.
+#   COMPLETION — a LATER `user`/`queue-operation` entry whose string content
+#                holds a `<task-notification>` block naming that same id inside
+#                `<tool-use-id>…</tool-use-id>` (CC injects it when the bg job
+#                finishes — verified on cambox's transcript, 1402 bg jobs).
+# A live bg-bash job == a START with no matching COMPLETION in the bounded tail.
+# Consumed ONLY by compact's veto (`_session_has_live_bg_tasks`), never folded
+# into `count_live_workers`/`lane_has_live_evidence` — a bg-bash job is NOT a
+# worker lane, so the lane-occupancy (#571) / gk-fill consumers whose danger is
+# UNDER-counting a live lane must not see it (they'd suppress their fill nudge).
+_TASK_NOTIFICATION_TOOL_USE_ID_RX = re.compile(
+    r"<\s*tool-use-id\s*>\s*([^<\s]+)\s*<\s*/\s*tool-use-id\s*>", re.I)
+
+
+def _entry_bg_bash_tool_use_ids(entry):
+    """tool_use ids of every `run_in_background:true` Bash tool_use in an
+    assistant entry (a START). [] for anything else. Never raises."""
+    ids = []
+    msg = entry.get("message") if isinstance(entry, dict) else None
+    if not isinstance(msg, dict):
+        return ids
+    c = msg.get("content")
+    if not isinstance(c, list):
+        return ids
+    for x in c:
+        if (isinstance(x, dict) and x.get("type") == "tool_use"
+                and x.get("name") == "Bash"):
+            inp = x.get("input")
+            if isinstance(inp, dict) and inp.get("run_in_background") is True:
+                tid = x.get("id")
+                if isinstance(tid, str) and tid:
+                    ids.append(tid)
+    return ids
+
+
+def session_live_bg_bash(entries):
+    """PURE (entries in / verdict out, #504) — True iff any `run_in_background`
+    Bash START in `entries` has NO later `<task-notification>` COMPLETION for
+    its tool_use id. `entries` are already-parsed transcript jsonl dicts (the
+    caller bounds how many). A completion whose START is outside the window is
+    IGNORED (an unmatched completion is not a live job); a START whose
+    completion is outside the window (below the tail) reads live — the
+    conservative direction for a VETO whose danger is orphaning a running job.
+
+    `notified` is collected across the WHOLE window first (a START and its
+    completion may be any distance apart), then a START is live iff its id is
+    absent from `notified`. An entry whose `_entry_text` raises on a
+    wrong-typed (`"text": null`) block degrades to '' (no notification), never
+    crashing the reader. Never raises."""
+    started = []
+    notified = set()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        started.extend(_entry_bg_bash_tool_use_ids(e))
+        try:
+            text = _entry_text(e) or ""
+        except Exception:
+            text = ""
+        if "<task-notification>" in text:
+            notified.update(_TASK_NOTIFICATION_TOOL_USE_ID_RX.findall(text))
+    return any(tid not in notified for tid in started)
+
+
+def session_has_live_bg_bash(path, tail_bytes=1_000_000, max_entries=200):
+    """I/O wrapper for `session_live_bg_bash` — bounded-seek read of the last
+    `tail_bytes` (never a whole-file read; the supervisor transcript is
+    hundreds of MB) → the pure verdict. `max_entries` (200, the death-detector
+    sibling window) is deliberately TIGHT so an ABANDONED older bg job scrolls
+    out of the window and stops vetoing (self-healing) while a genuinely-recent
+    live job is still caught — measured on cambox: a trailing 200-entry window
+    is empty of open bg jobs ~71% of the time, so this veto never permanently
+    blocks compaction. Fail-safe: an unreadable transcript → [] → False (never
+    a guessed veto). Never raises."""
+    return session_live_bg_bash(_read_jsonl_byte_tail(path, tail_bytes, max_entries))
 
 
 def _hash(text):
