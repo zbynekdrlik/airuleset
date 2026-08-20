@@ -806,6 +806,54 @@ class TestApplyStreamSshAttach(TestCase):
         self.assertNotIn('[ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"',
                          block)
 
+    # --- #593: the ssh survivor-join clone is a grouped-session creator, so it
+    # must carry the SAME per-session `client-attached destroy-unattached on`
+    # hook cli_webterm's #591 clone got -- otherwise, once #591 removed the
+    # GLOBAL keep-last sweep, its detached duplicates orphan forever (the #254
+    # pile-up, returning for the ssh path).
+
+    def test_survivor_join_clone_carries_the_per_session_destroy_unattached_hook(self):
+        # The #591 mechanism reused verbatim: a per-session `client-attached`
+        # hook arming `destroy-unattached on`, targeting the join clone by its
+        # own name. Same three tokens the webterm clone's hook carries.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn("set-hook", block)
+        self.assertIn("client-attached", block)
+        self.assertIn("set-option destroy-unattached on", block)
+
+    def test_survivor_join_clone_is_created_detached_named_then_attached(self):
+        # `destroy-unattached on` on a zero-client session destroys it
+        # IMMEDIATELY, so (like #591's webterm clone) the join clone is created
+        # DETACHED (`-d`) with an explicit NAME (`-s`, so the hook can target
+        # it -- set-hook -t does not take tmux's `=` anchor), the hook armed,
+        # then attached. The old single `exec new-session -t "$survivor"` (no
+        # detach, no name, no hook) is gone.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn('new-session -d -t "$__airuleset_survivor" '
+                      '-s "$__airuleset_join"', block)
+        self.assertIn('exec tmux attach-session -t "$__airuleset_join"', block)
+        # the pre-#593 shape (attach-in-one-exec, no hook) must be gone
+        self.assertNotIn('exec tmux new-session -t "$__airuleset_survivor"',
+                         block)
+
+    def test_survivor_join_clone_name_is_pid_scoped_off_the_base_name(self):
+        # A unique per-login name so two concurrent survivor-joins never clash;
+        # derived from the base session name (== whoami) + the login shell pid.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn('__airuleset_join="${__airuleset_me}-join-$$"', block)
+
+    def test_stale_284_global_sweep_comment_is_fixed(self):
+        # #593 point 2: the #284 comment used to defend against a tmux
+        # destroy-unattached sweep as if it still ran; after #591 removed the
+        # GLOBAL sweep it no longer does (the survivor-search stays only as
+        # harmless defense-in-depth). The comment must say so.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn("no longer happens globally after #591", block)
+        # the survivor-search itself is KEPT (defense-in-depth), so its own
+        # marker stays present -- this lock is about the comment's framing, not
+        # deleting the search.
+        self.assertIn("__airuleset_survivor", block)
+
 
 class TestStreamMarkerBlockSpansSafety(TestCase):
     """#235's own documented corruption class: a lazy regex `.*?` block scan
@@ -960,7 +1008,14 @@ class TestGroupSurvivorReattach(TestCase):
             list_sessions_out="zbynek zbynek-4\nmarek marek-0\n",
             whoami="zbynek",
         )
-        self.assertIn("new-session -t zbynek-4", log)
+        # #593: the join is now a DETACHED, NAMED grouped clone (so its own
+        # per-session destroy-unattached hook can target it), attached
+        # afterwards -- never the old single `new-session -t zbynek-4`.
+        self.assertIn("new-session -d -t zbynek-4 -s zbynek-join-", log)
+        self.assertIn("set-hook -t zbynek-join-", log)
+        self.assertIn("client-attached", log)
+        self.assertIn("destroy-unattached on", log)
+        self.assertIn("attach-session -t zbynek-join-", log)
         self.assertNotIn("new-session -A -s zbynek", log)
         # MINOR-1 (adversarial review, #284): the exact-name check MUST use
         # tmux's `=`-anchored exact match, never a bare (prefix-matching,
@@ -1023,16 +1078,18 @@ class TestGroupSurvivorReattach(TestCase):
     def test_a_grouped_session_whose_name_contains_a_space_is_still_joined_intact(self):
         # the positive counterpart of the above: a REAL survivor whose own
         # name has an embedded space must still be captured WHOLE (never
-        # truncated at the space) and exec'd as ONE argument -- the [%d]
+        # truncated at the space) and passed as ONE argument -- the [%d]
         # argv-count prefix is what proves "my session two" landed as a
-        # SINGLE argument (count 3: new-session, -t, "my session two"),
-        # not three separate ones a naive split would have produced.
+        # SINGLE argument. #593: the detached-create argv is
+        # `new-session -d -t "my session two" -s "$join"` == 6 args; a naive
+        # split of the spacy name would push the count past 6.
         log, r = self._run_block(
             has_session_rc=1,
             list_sessions_out="zbynek my session two\n",
             whoami="zbynek",
         )
-        self.assertIn("[3] new-session -t my session two", log)
+        self.assertIn("[6] new-session -d -t my session two -s zbynek-join-",
+                      log)
 
     def test_the_survivor_exec_runs_outside_the_process_substitution_loop(self):
         # CRITICAL-1 (adversarial review, #284, live-verified against a
@@ -1048,8 +1105,12 @@ class TestGroupSurvivorReattach(TestCase):
         # `done < <(...)` line that closes the loop's own redirect.
         block = airuleset.STREAM_SSH_ATTACH_BLOCK
         done_idx = block.index("done < <(tmux list-sessions")
+        # #593: the survivor branch now exec's the ATTACH of the named
+        # detached clone (after create + set-hook), not a single
+        # `new-session -t`; the CRITICAL-1 invariant is unchanged -- this
+        # exec must still run AFTER the process-substitution loop closes.
         survivor_exec_idx = block.index(
-            'exec tmux new-session -t "$__airuleset_survivor"'
+            'exec tmux attach-session -t "$__airuleset_join"'
         )
         self.assertGreater(
             survivor_exec_idx, done_idx,
@@ -1449,15 +1510,18 @@ class TestCmdPushNeverReattemptsAuthFailedHostForSoniox(TestCase):
 
 
 class TestApplyStreamTmuxWindowName(TestCase):
-    """#554/#592: the tmux WINDOW name carries the box's short TARGET ALIAS so
-    the owner, attached to one of many fleet sessions, can tell at a glance
-    where they are. #554 gated this to subdev stream accounts only, so gk/dev1/
-    dev2 windows showed `bash` (owner report 2026-08-20); #592 renders it on
-    EVERY managed box, with the name = the box's `cli_aliases.short_target_alias`
-    (gatekeeper->gk, dev1->dev1, dev2->dev2, montaluN->mN, davidN->dN, ...) --
-    ONE shared alias source, never a second parallel map. Idempotent per-box
+    """#554/#592/#593: the tmux WINDOW name carries the box's short TARGET ALIAS
+    so the owner, attached to one of many fleet sessions, can tell at a glance
+    where they are. #554 gated this to subdev streams; #592 also covered gk (its
+    window showed `bash`); #593 SCOPES it to SINGLE-SESSION-per-account boxes
+    only (gk + subdev streams -- `is_single_session_box_user`, the SAME set the
+    #264 ssh-auto-attach uses), NEVER an owner/newlevel MULTI-PROJECT box (dev1/
+    dev2), where one fixed name + automatic-rename off froze every project window
+    and destroyed navigation (the #592 regression). The name = the box's
+    `cli_aliases.short_target_alias` (gatekeeper->gk, montaluN->mN, davidN->dN)
+    -- ONE shared alias source, never a second parallel map. Idempotent per-box
     marker-block (shape of apply_stream_ssh_attach, #264); the block is stripped
-    only when a box has no safe alias (never in practice)."""
+    when a box is not single-session or has no safe alias."""
 
     def _tmp(self, content=None):
         d = tempfile.mkdtemp()
@@ -1509,16 +1573,43 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertTrue(changed)
         self.assertIn('set-hook -g session-created "rename-window gk"', p.read_text())
 
-    def test_dev1_and_dev2_get_their_box_alias(self):
-        # #592: dev1/dev2 share the `newlevel` unix user -> the BOX name (host)
-        # disambiguates the alias. Both previously got NO block (showed `bash`).
+    def test_dev1_and_dev2_owner_boxes_get_NO_window_naming_block(self):
+        # #593 REGRESSION FIX: dev1/dev2 (unix user `newlevel`) are MULTI-PROJECT
+        # owner boxes -- many project sessions, windows named per-command by
+        # automatic-rename. #592 wrongly rendered the single-fixed-name block
+        # there (automatic-rename off + session-created rename-window dev1),
+        # destroying per-project navigation. They must get NO block at all.
         for box in ("dev1", "dev2"):
             p = self._tmp("# existing content\n")
             changed = airuleset.apply_stream_tmux_window_name(
                 p, user="newlevel", host=box, run=lambda argv: None)
-            self.assertTrue(changed, box)
-            self.assertIn(
-                'set-hook -g session-created "rename-window %s"' % box, p.read_text())
+            self.assertFalse(changed, box)
+            text = p.read_text()
+            self.assertNotIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, text, box)
+            self.assertNotIn("automatic-rename off", text, box)
+            self.assertNotIn("session-created", text, box)
+
+    def test_is_single_session_box_user_gates_window_naming(self):
+        # #593: the eligibility property is "one unix account = one tmux
+        # session" -- the SAME set the #264 ssh-auto-attach uses. gk + subdev
+        # streams YES, the owner's newlevel multi-project boxes NO.
+        self.assertFalse(airuleset.is_single_session_box_user("newlevel"))
+        self.assertTrue(airuleset.is_single_session_box_user("gatekeeper"))
+        self.assertTrue(airuleset.is_single_session_box_user("montalu2"))
+
+    def test_window_naming_gates_on_the_same_set_as_ssh_attach(self):
+        # #593: the extracted `is_single_session_box_user` predicate IS the
+        # ssh-auto-attach eligibility gate -- one source of truth, so the two
+        # features can never drift on "which boxes are single-session". Note
+        # newlevel@subdev yields a SAFE alias ("subdev"), so the predicate --
+        # not alias safety -- is what must exclude it.
+        for u in ("newlevel", "gatekeeper", "montalu2", "david", "root"):
+            ps = self._tmp("# c\n")
+            airuleset.apply_stream_ssh_attach(ps, user=u)
+            ssh_has = airuleset.STREAM_SSH_ATTACH_MARK_START in ps.read_text()
+            self.assertEqual(
+                airuleset.is_single_session_box_user(u), ssh_has,
+                "%s: is_single_session_box_user must match ssh-attach" % u)
 
     def test_strips_block_when_the_derived_alias_is_unsafe(self):
         # An alias that does not match the safe unix-name shape (injection guard)
@@ -1583,13 +1674,14 @@ class TestApplyStreamTmuxWindowName(TestCase):
             calls)
 
     def test_live_apply_renames_every_window_on_the_server_to_the_alias(self):
-        # #592-review (B3): the live-apply lists ALL windows on this user's
-        # server (`list-windows -a`), NOT the `=<unix-user>` session -- on
-        # dev1/dev2 the owner's real session is zbynek-N/marek-N while the unix
-        # user is `newlevel`, so a `=<unix-user>` target would rename NOTHING.
-        # A run that returns two window ids for `list-windows -a`, then records
-        # the rename calls; each is renamed to the alias (config-path, never
-        # send-keys).
+        # #592-review (B3): the live-apply lists ALL windows on this
+        # single-session box's server (`list-windows -a`), NOT the
+        # `=<unix-user>` session -- on gk the owner's real session is `zbynek-N`
+        # (#562) while the unix user is `gatekeeper`, so a `=<unix-user>` target
+        # would rename NOTHING. (#593: an owner/newlevel multi-project box never
+        # reaches this path at all.) A run returns two window ids for
+        # `list-windows -a`, then records the rename calls; each is renamed to
+        # the alias (config-path, never send-keys).
         seen = []
 
         def run(argv):
@@ -1604,26 +1696,81 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertIn(["tmux", "rename-window", "-t", "@0", "m2"], seen)
         self.assertIn(["tmux", "rename-window", "-t", "@3", "m2"], seen)
 
-    def test_live_apply_covers_owner_session_named_differently_from_unix_user(self):
-        # #592-review (B3): the EXACT dev1/dev2 case the owner reported. The
-        # owner's session is `zbynek-N` while the unix user is `newlevel`, so the
-        # old `=<unix-user>` target renamed NOTHING and the current window stayed
-        # `bash`. `list-windows -a` covers zbynek-N's window -> renamed to `dev1`.
+    def test_newlevel_owner_box_does_NO_window_naming_live_apply(self):
+        # #593 REGRESSION FIX: a newlevel multi-project owner box must NOT
+        # live-apply the window naming -- no automatic-rename off, no
+        # session-created rename hook, no rename-window of any window. The old
+        # #592 code renamed EVERY window on the server to `dev1`, destroying
+        # per-project navigation.
         seen = []
 
         def run(argv):
             seen.append(argv)
             if argv[:3] == ["tmux", "list-windows", "-a"]:
-                return _FakeCP(returncode=0, stdout="@7\n")  # a zbynek-4 window
+                return _FakeCP(returncode=0, stdout="@7\n")
             return _FakeCP(returncode=0, stdout="")
 
         p = self._tmp("# existing content\n")
         airuleset.apply_stream_tmux_window_name(
             p, user="newlevel", host="dev1", run=run)
-        # never targets the non-existent `=newlevel` session
         self.assertNotIn(
-            ["tmux", "list-windows", "-t", "=newlevel", "-F", "#{window_id}"], seen)
-        self.assertIn(["tmux", "rename-window", "-t", "@7", "dev1"], seen)
+            ["tmux", "set-option", "-gw", "automatic-rename", "off"], seen)
+        self.assertNotIn(
+            ["tmux", "set-hook", "-g", "session-created", "rename-window dev1"],
+            seen)
+        self.assertNotIn(["tmux", "rename-window", "-t", "@7", "dev1"], seen)
+
+    def test_newlevel_owner_box_live_reverts_the_bad_592_server_options(self):
+        # #593: symmetric self-heal -- a newlevel box whose running server still
+        # carries the bad #592 options gets them UNSET on the next install
+        # (automatic-rename back to default `on`, session-created hook removed),
+        # not just stripped from the conf. Config-path only, never send-keys.
+        seen = []
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="newlevel", host="dev1", run=seen.append)
+        self.assertIn(["tmux", "set-option", "-gwu", "automatic-rename"], seen)
+        self.assertIn(["tmux", "set-hook", "-gu", "session-created"], seen)
+
+    def test_owner_box_live_revert_unfreezes_windows_named_the_alias(self):
+        # #593 (review 🟡): a manual `rename-window` (what the bad #592 live-apply
+        # did) sets a PER-WINDOW automatic-rename OFF override that the GLOBAL
+        # reset does NOT clear -- so already-open owner windows stay frozen at
+        # `dev1` until each window's own override is cleared. Only windows still
+        # NAMED the alias are un-frozen; a window the owner deliberately named is
+        # left untouched.
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout="@0 dev1\n@3 dev1\n@7 vim\n")
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="newlevel", host="dev1", run=run)
+        self.assertIn(
+            ["tmux", "set-option", "-wu", "-t", "@0", "automatic-rename"], seen)
+        self.assertIn(
+            ["tmux", "set-option", "-wu", "-t", "@3", "automatic-rename"], seen)
+        # the owner's own `vim` window is NOT touched
+        self.assertNotIn(
+            ["tmux", "set-option", "-wu", "-t", "@7", "automatic-rename"], seen)
+
+    def test_owner_box_with_existing_bad_block_gets_it_stripped(self):
+        # #593: a newlevel box whose ~/.tmux.conf already carries the (wrongly
+        # provisioned) #592 block gets it STRIPPED on the next apply -- so a
+        # server restart never re-arms the bad options.
+        block = airuleset.render_stream_tmux_window_block("dev1")
+        p = self._tmp(f"# before\n{block}\n# after\n")
+        changed = airuleset.apply_stream_tmux_window_name(
+            p, user="newlevel", host="dev1", run=lambda argv: None)
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertNotIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, text)
+        self.assertIn("# before", text)
+        self.assertIn("# after", text)
 
     def test_no_live_apply_calls_when_alias_is_unsafe(self):
         # #592: a box with no SAFE alias (injection guard) gets no block AND no

@@ -410,6 +410,7 @@ from cli_bashrc_appliers import (  # noqa: E402, F401
     STREAM_SSH_ATTACH_BLOCK as STREAM_SSH_ATTACH_BLOCK,
     _stream_marker_block_spans as _stream_marker_block_spans,
     apply_stream_ssh_attach as apply_stream_ssh_attach,
+    is_single_session_box_user as is_single_session_box_user,
 )
 
 
@@ -446,6 +447,7 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
     STREAM_TMUX_WINDOW_MARK_START,
     STREAM_TMUX_WINDOW_MARK_END,
     render_stream_tmux_window_block,
+    _live_revert_stream_window_name,
     apply_stream_tmux_window_name,
     _sudo_write_root_file,
     setup_tmux_cutover_provisioning,
@@ -1040,13 +1042,18 @@ def cmd_install(args):
         print(f"  ssh auto-attach setup error (non-fatal): {e}", file=sys.stderr)
     try:
         # #554/#592: name the tmux WINDOW after the box's short TARGET ALIAS
-        # (dev1/dev2/gk/mN/dN/...) so the owner sees WHERE they are. #592
-        # renders this on EVERY managed box (it was subdev-stream-only under
-        # #554, so gk/dev1/dev2 windows showed `bash`); the alias comes from the
-        # SAME source the webterm tabs use (cli_aliases.short_target_alias).
+        # (gk/mN/dN/...) so the owner sees WHERE they are. #593: renders ONLY on
+        # SINGLE-SESSION-per-account boxes (gk + subdev streams), NEVER an owner/
+        # newlevel MULTI-PROJECT box (dev1/dev2) -- one fixed name there froze
+        # every project window and destroyed navigation (the #592 regression).
+        # The alias comes from the SAME source the webterm tabs use
+        # (cli_aliases.short_target_alias).
         window_name_changed = apply_stream_tmux_window_name()
         if window_name_changed:
-            print(f"  Updated:   {TMUX_CONF} (tmux window name = target alias, #592)")
+            # neutral wording: on a single-session box this ADDS the alias block,
+            # on an owner multi-project box it STRIPS a stale one (#593) -- the
+            # message must not claim a direction it may not have done.
+            print(f"  Updated:   {TMUX_CONF} (tmux window-name block, #592/#593)")
     except Exception as e:
         print(f"  stream tmux window-name setup error (non-fatal): {e}", file=sys.stderr)
     try:
