@@ -1050,7 +1050,10 @@ def cmd_install(args):
         # (cli_aliases.short_target_alias).
         window_name_changed = apply_stream_tmux_window_name()
         if window_name_changed:
-            print(f"  Updated:   {TMUX_CONF} (tmux window name = target alias, #592)")
+            # neutral wording: on a single-session box this ADDS the alias block,
+            # on an owner multi-project box it STRIPS a stale one (#593) -- the
+            # message must not claim a direction it may not have done.
+            print(f"  Updated:   {TMUX_CONF} (tmux window-name block, #592/#593)")
     except Exception as e:
         print(f"  stream tmux window-name setup error (non-fatal): {e}", file=sys.stderr)
     try:

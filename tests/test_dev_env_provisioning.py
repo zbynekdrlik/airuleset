@@ -1674,13 +1674,14 @@ class TestApplyStreamTmuxWindowName(TestCase):
             calls)
 
     def test_live_apply_renames_every_window_on_the_server_to_the_alias(self):
-        # #592-review (B3): the live-apply lists ALL windows on this user's
-        # server (`list-windows -a`), NOT the `=<unix-user>` session -- on
-        # dev1/dev2 the owner's real session is zbynek-N/marek-N while the unix
-        # user is `newlevel`, so a `=<unix-user>` target would rename NOTHING.
-        # A run that returns two window ids for `list-windows -a`, then records
-        # the rename calls; each is renamed to the alias (config-path, never
-        # send-keys).
+        # #592-review (B3): the live-apply lists ALL windows on this
+        # single-session box's server (`list-windows -a`), NOT the
+        # `=<unix-user>` session -- on gk the owner's real session is `zbynek-N`
+        # (#562) while the unix user is `gatekeeper`, so a `=<unix-user>` target
+        # would rename NOTHING. (#593: an owner/newlevel multi-project box never
+        # reaches this path at all.) A run returns two window ids for
+        # `list-windows -a`, then records the rename calls; each is renamed to
+        # the alias (config-path, never send-keys).
         seen = []
 
         def run(argv):
@@ -1730,6 +1731,32 @@ class TestApplyStreamTmuxWindowName(TestCase):
             p, user="newlevel", host="dev1", run=seen.append)
         self.assertIn(["tmux", "set-option", "-gwu", "automatic-rename"], seen)
         self.assertIn(["tmux", "set-hook", "-gu", "session-created"], seen)
+
+    def test_owner_box_live_revert_unfreezes_windows_named_the_alias(self):
+        # #593 (review 🟡): a manual `rename-window` (what the bad #592 live-apply
+        # did) sets a PER-WINDOW automatic-rename OFF override that the GLOBAL
+        # reset does NOT clear -- so already-open owner windows stay frozen at
+        # `dev1` until each window's own override is cleared. Only windows still
+        # NAMED the alias are un-frozen; a window the owner deliberately named is
+        # left untouched.
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout="@0 dev1\n@3 dev1\n@7 vim\n")
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="newlevel", host="dev1", run=run)
+        self.assertIn(
+            ["tmux", "set-option", "-wu", "-t", "@0", "automatic-rename"], seen)
+        self.assertIn(
+            ["tmux", "set-option", "-wu", "-t", "@3", "automatic-rename"], seen)
+        # the owner's own `vim` window is NOT touched
+        self.assertNotIn(
+            ["tmux", "set-option", "-wu", "-t", "@7", "automatic-rename"], seen)
 
     def test_owner_box_with_existing_bad_block_gets_it_stripped(self):
         # #593: a newlevel box whose ~/.tmux.conf already carries the (wrongly

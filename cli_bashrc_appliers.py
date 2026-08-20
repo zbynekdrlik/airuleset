@@ -245,13 +245,18 @@ STREAM_SSH_ATTACH_BLOCK = (
     # (both live-verified tmux constraints carried verbatim from #591).
     # `set-hook -t` does NOT take tmux's `=` exact-match anchor (only
     # has-session/kill-session do), so the just-created clone is targeted by
-    # its bare, unambiguous name. The survivor is always a real `-A -s` base
-    # holding the group's windows, so the join safely self-destructs on the
-    # user's detach while the base survives -- no trap needed (unlike
-    # webterm's throwaway view): the per-session `on` IS the cleanup. The
-    # detached-create is success-guarded so a failed create (name clash,
-    # tmux briefly unreachable) FALLS THROUGH to the plain `-A -s` base path
-    # below, never a dead ssh session. TRANSITION RESIDUAL (same class as
+    # its bare, unambiguous name. The survivor is a DURABLE group member
+    # holding the group's windows (normally the `-A -s` base -- a standalone
+    # base is ungrouped, so the scan is only reached once a `-t` clone has
+    # grouped it), so the join safely self-destructs on the user's detach while
+    # that member keeps the windows alive -- no trap needed (unlike webterm's
+    # throwaway view): the per-session `on` IS the cleanup. If the only survivor
+    # is itself a transient view, the group's windows live only while some
+    # member remains -- the benign ownerless-clone residual cli_webterm
+    # documents. The detached-create is success-guarded so a failed create
+    # (name clash, tmux briefly unreachable) FALLS THROUGH to the plain `-A -s`
+    # base path below, never a dead ssh session OUTSIDE the documented
+    # transition residual. TRANSITION RESIDUAL (same class as
     # #591-review B1): on a box NOT yet re-installed after #591 whose running
     # server still carries the old GLOBAL keep-last, the detached clone is
     # swept at creation and this connect fails -- self-heals on that box's

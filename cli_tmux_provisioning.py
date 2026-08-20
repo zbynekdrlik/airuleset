@@ -849,24 +849,35 @@ def _live_apply_stream_window_name(new_name, run=None):
             pass
 
 
-def _live_revert_stream_window_name(run=None):
+def _live_revert_stream_window_name(alias, run=None):
     """#593: UNDO the #592 window-naming options on any RUNNING server for a
     box that must NOT carry them -- an owner/newlevel MULTI-PROJECT box (dev1/
-    dev2) the pre-#593 code wrongly provisioned. Unsets the global
-    `automatic-rename` override (`set-option -gwu` -> back to tmux's default
-    `on`, so per-command per-project window names resume) and removes the
-    `session-created` rename hook (`set-hook -gu`). Both live-verified on an
-    isolated `-L` scratch tmux 3.7b (rc=0; automatic-rename returns to `on`,
-    the session-created rename command is dropped).
+    dev2) the pre-#593 code wrongly provisioned. Three config-path steps:
+
+      1. `set-option -gwu automatic-rename` -- reset the GLOBAL window option
+         to tmux's default `on` (new windows resume per-command tracking).
+      2. `set-hook -gu session-created` -- remove the rename hook (new sessions
+         no longer get the fixed name).
+      3. For every EXISTING window still frozen at the `<alias>` literal,
+         `set-option -wu -t <wid> automatic-rename` -- clear its PER-WINDOW
+         override so the owner's already-open project windows resume tracking.
+
+    Step 3 is load-bearing (adversarial review, live-verified on an isolated
+    `-L` scratch tmux 3.7b): the bad #592 live-apply renamed every window with
+    `rename-window`, which sets a PER-WINDOW `automatic-rename off` override that
+    the GLOBAL reset in step 1 does NOT clear -- so WITHOUT step 3 the owner's
+    open windows stay frozen at `<alias>` until they are recreated or the server
+    restarts (the exact regression symptom). Scoped to windows NAMED the alias
+    (the ones #592 clobbered) so a window the owner DELIBERATELY named is left
+    untouched.
 
     Config-path ONLY (`set-option`/`set-hook`, NEVER a `send-keys` keystroke
     into any pane), failure-tolerant (no server -> no-op), and it NEVER creates
     or resurrects a session (the standing 'never touch a session the user
     deliberately stopped' rule). Mirrors `apply_tmux_history_limit`'s #591
-    `set-option -gu destroy-unattached` self-heal shape -- an idempotent
-    live-revert that reverts a running box still carrying a stale managed option
-    to its factory default, safe on a live server (default `on`/unset never
-    breaks navigation the way the frozen `off` + fixed name did)."""
+    `set-option -gu destroy-unattached` self-heal shape -- idempotent, safe on
+    a live server (the reverted defaults never break navigation the way the
+    frozen `off` + fixed name did)."""
     runner = run or _default_tmux_run
     for argv in (["tmux", "set-option", "-gwu", "automatic-rename"],
                  ["tmux", "set-hook", "-gu", "session-created"]):
@@ -875,6 +886,28 @@ def _live_revert_stream_window_name(run=None):
         except Exception as e:
             print("  tmux stream-window live-revert skipped (non-fatal): %s" % e,
                   file=sys.stderr)
+    # un-freeze the owner's already-open windows still stuck at the alias literal
+    try:
+        result = runner(["tmux", "list-windows", "-a", "-F",
+                         "#{window_id} #{window_name}"])
+    except Exception as e:
+        print("  tmux stream-window live-revert (list) skipped (non-fatal): %s"
+              % e, file=sys.stderr)
+        return
+    if getattr(result, "returncode", 1) != 0:
+        return
+    for line in (getattr(result, "stdout", "") or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        wid, _, wname = line.partition(" ")
+        if not wid or wname != alias:
+            continue
+        try:
+            runner(["tmux", "set-option", "-wu", "-t", wid, "automatic-rename"])
+        except Exception as e:
+            print("  tmux window un-freeze skipped for %s (non-fatal): %s"
+                  % (wid, e), file=sys.stderr)
 
 
 def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
@@ -955,9 +988,10 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
     elif safe_alias and not single_session:
         # #593: a multi-project owner box (dev1/dev2) the pre-#593 code wrongly
         # provisioned -- self-heal any running server that still carries the bad
-        # #592 options, so a restart never re-arms them (the conf strip above
-        # only fixes the NEXT start).
-        _live_revert_stream_window_name(run)
+        # #592 options AND un-freeze its already-open windows stuck at `<alias>`
+        # (so the owner's navigation is restored without a restart; the conf
+        # strip above only fixes the NEXT server start).
+        _live_revert_stream_window_name(alias, run)
     return changed
 
 
