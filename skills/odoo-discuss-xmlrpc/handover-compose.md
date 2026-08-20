@@ -29,11 +29,39 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   montalu→montalu1, david→david1, simap→simap1; marek stays unnumbered, unused,
   and does no client handovers), so every active handover stream ends with its
   number and the rule is uniform.
+- **Every message ENDS with a stream-identity signature line.** The LAST line of
+  EVERY message body is `ZbynekAI <N>`, so the owner sees at a glance WHICH stream
+  sent it and where to go resolve what the thread discusses (owner request,
+  airuleset #598: the shared sender display name "zbynekai odovzdavac" told the
+  owner nothing about which subdev owns it). `<N>` is the SAME stream number as the
+  thread-name suffix above — the trailing digits of the unix user, or "1" for an
+  UNNUMBERED base stream (montalu, david, simap) — marek does no client handovers, so
+  never signs: montaluN → N, davidN → N (base david → 1), simapN → N (base → 1),
+  miva1 → 1 / mivaN → N. It REUSES the project's existing stream number, NEVER a
+  second derivation — for a NUMBERED stream it matches `cli_aliases.short_target_alias`'s
+  family regexes (montalu/david/simap/miva, each capturing that numeric suffix) and the
+  #532 thread-name suffix; the base → 1 case is the #532/#537 convention's own mapping
+  (base streams renamed to <name>1), NOT derived from those `\d+` regexes. On any
+  single client Odoo instance only ONE stream family posts (montalu
+  → erp.montalu.cloud, david → its own, …), so the bare number is unambiguous there.
+  The signature stays on EVERY message — the OPENING thread message AND every
+  follow-up — never dropped the way the greeting is. It is a POISTKA that works even
+  while streams SHARE one Odoo account; if the accounts are ever renamed per stream
+  ("ZbynekAI N" display name, airuleset #598 → odoo-erp #4624) the signature stays as
+  the short number line and the two layers do not conflict.
 - **The message body MUST carry a direct deep-link URL to the LIVE feature** on
   the client's PROD — the actual route / record / page URL the client clicks to
   SEE it, never a menu path ("Predaj → Objednávky → …") and never the bare
   instance homepage. Open the URL and confirm it loads the feature before putting
-  it in the proposal.
+  it in the proposal. **This applies to EVERY openable reference in the message,
+  not only the handed-over feature:** anything the reader can open — a specific
+  record, a screen, an action, a report, a dashboard — is named with its OWN direct
+  functional URL, verified live before sending, never only a prose menu path (owner
+  directive, airuleset #595: a handover message — montalu PROD msg 1723308 —
+  described two live features only by the menu path "Výroba a montáž ▸ Operácie ▸
+  Výrobná tabuľa" with no clickable URL and was rejected; nobody can click through
+  and see it). This generalizes completion-report.md's 🌐-line rule to client-facing
+  Discuss messages and notifications.
 - **State the owner's thread membership EXPLICITLY in the proposal.** The posting
   recipe already puts the owner on `partner_ids` (control ping) — but the PROPOSAL
   text you show the owner must SAY so ("teba pridám do vlákna ako člena"), so the
@@ -61,6 +89,11 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   > Ahoj `<mená>`, funkcia `<čo>` je už nasadená na vašom systéme —
   > `<deep-link URL>`. Ak ju u seba nevidíte, napíšte prosím sem do vlákna —
   > chyba je na našej strane a hneď to opravíme.
+  >
+  > ZbynekAI `<N>`
+
+  The `ZbynekAI <N>` line is MANDATORY on this and every message (signature rule
+  above) — it is the LAST line even here in the template a stream copies verbatim.
 
 One thread = one topic, a sub-thread under the channel the owner named (montalu:
 IT-support) — never a new top-level channel or group chat (see `## Channel +

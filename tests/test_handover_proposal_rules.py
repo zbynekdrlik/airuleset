@@ -196,6 +196,28 @@ class TestCoFitSizeGuard(TestCase):
             % (recipe, comp, recipe + comp, budget),
         )
 
+    def test_both_bodies_actually_inject_on_a_message_post_write(self):
+        """The REAL, wrapper-inclusive budget check (found live this ticket): the
+        arithmetic guard above sums RAW bodies, but inject-situational-rule.sh
+        (line 170) sums the ALREADY-WRAPPED chunks (`<project-rule>…</project-rule>`,
+        ~250 B overhead each) + the raw next body against MAX_TOTAL — so raw-body
+        arithmetic UNDER-counts, and a compact pointer that "fit" the raw budget
+        still DEFERRED the odoo recipe. Drive the real hook: a .py write with
+        message_post MUST inject BOTH the odoo recipe AND comprehensive-logging."""
+        with tempfile.TemporaryDirectory() as td:
+            payload = {"session_id": "cofit-real", "tool_name": "Write",
+                       "tool_input": {"file_path": "/repo/importer.py",
+                                      "content": "channel.message_post(body=h, body_is_html=True)"}}
+            r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                               capture_output=True, text=True,
+                               env=dict(os.environ, TMPDIR=td))
+        self.assertEqual(r.returncode, 0, "injector hook must never block: %r" % r.stderr)
+        # both co-firing bodies must be present — neither deferred over the real budget
+        self.assertIn("Odoo Discuss over XML-RPC", r.stdout,
+                      "the odoo message_post recipe DEFERRED — a co-firing body over-grew MAX_TOTAL")
+        self.assertIn("Comprehensive Logging", r.stdout,
+                      "comprehensive-logging did not inject on a .py message_post write")
+
 
 class TestHandoverTriggerInjection(TestCase):
     """Functional: the trigger loads the composition rules at proposal time, and
@@ -506,6 +528,169 @@ class TestHandoverBareFollowUpRecall(TestHandoverTriggerInjection):
                 elapsed, 2.0,
                 "ReDoS regression: %r*1200 took %.3fs — a backtrackable \\w* verb "
                 "prefix was reintroduced next to the [^\\n]{0,N} gap" % (tok, elapsed))
+
+
+DELIVER = ROOT / "modules" / "core" / "deliver-files-as-urls.md"
+
+
+class TestMessageSignatureRule(TestCase):
+    """#598 — every message posted to a client Odoo Discuss thread ENDS with a
+    stream-identity signature line `ZbynekAI <N>`, so the owner sees which
+    stream sent it and where to go resolve what the thread discusses. The
+    number derivation REUSES the #532 thread-suffix / the
+    cli_aliases.short_target_alias family regexes, never a second one.
+
+    Teeth per #498/#500/#532: the rule wraps across several physical lines, so
+    bound a norm()-collapsed WINDOW to the new bullet (unique start anchor →
+    next `- **`) and assert the operative tokens inside it; the coarse
+    whole-file assertIn catches a full deletion, the window a PARTIAL revert."""
+
+    START = "Every message ENDS with a stream-identity signature line"
+
+    def setUp(self):
+        self.raw = read(COMPOSE)
+        self.t = norm(self.raw)
+
+    def _bullet_window(self):
+        i = self.raw.index(self.START)
+        j = self.raw.find("\n- **", i + len(self.START))
+        self.assertNotEqual(j, -1, "signature bullet must be followed by another `- **` bullet")
+        return norm(self.raw[i:j])
+
+    def test_operative_rule_present_whole_file(self):
+        self.assertIn(self.START, self.t)
+
+    def test_signature_form_and_owner_request(self):
+        w = self._bullet_window()
+        self.assertIn("ZbynekAI <N>", w)
+        self.assertIn("airuleset #598", w)
+        self.assertIn("LAST line of", w)
+
+    def test_number_derivation_reuses_not_reinvents(self):
+        w = self._bullet_window()
+        self.assertIn("montaluN → N", w)
+        self.assertIn("UNNUMBERED base stream (montalu, david, simap)", w)
+        # REUSE, never a second derivation — the canonical sources
+        self.assertIn("cli_aliases.short_target_alias", w)
+        self.assertIn("#532 thread-name suffix", w)
+        self.assertIn("NEVER a second derivation", w)
+        # provenance ACCURACY (both #598 reviews): base → 1 is the #532/#537
+        # convention's own mapping, NOT derived from the \\d+ family regexes
+        # (those never match a base montalu/simap) — the reuse claim must not
+        # over-credit short_target_alias for the base case
+        self.assertIn("#532/#537 convention's own mapping", w)
+        self.assertIn("NOT derived from those", w)
+
+    def test_signature_stays_in_the_copy_paste_template(self):
+        # #598 review MINOR: a stream copies the reassurance template verbatim,
+        # so the mandated `ZbynekAI <N>` signature line must appear IN it or the
+        # template itself would violate the rule at the point of use.
+        i = self.raw.index("Ak ju u seba nevidíte")
+        j = self.raw.index("One thread = one topic", i)
+        template = self.raw[i:j]
+        self.assertIn("ZbynekAI `<N>`", template)
+
+    def test_signature_on_every_message_and_is_poistka(self):
+        w = self._bullet_window()
+        # unlike the greeting, the signature is on EVERY message
+        self.assertIn("never dropped the way the greeting is", w)
+        # unambiguous per client Odoo instance
+        self.assertIn("only ONE stream family posts", w)
+        # a poistka even under a shared account, coexists with a per-stream rename
+        self.assertIn("POISTKA", w)
+        self.assertIn("odoo-erp #4624", w)
+
+
+class TestEveryOpenableReferenceCarriesUrl(TestCase):
+    """#595 — the message body's URL rule GENERALIZED: every openable reference
+    (not only the handed-over feature) carries its direct functional URL,
+    verified live, never only a menu path. Owner incident: montalu PROD msg
+    1723308 described features by menu path with no URL and was rejected.
+
+    Teeth: bound the window to the (extended) deep-link bullet; the pre-#595
+    R2 tokens stay in the same bullet so a full revert also fails test_r2."""
+
+    START = "The message body MUST carry a direct deep-link URL to the LIVE feature"
+
+    def setUp(self):
+        self.raw = read(COMPOSE)
+        self.t = norm(self.raw)
+
+    def _bullet_window(self):
+        i = self.raw.index(self.START)
+        j = self.raw.find("\n- **", i + len(self.START))
+        self.assertNotEqual(j, -1, "deep-link bullet must be followed by another `- **` bullet")
+        return norm(self.raw[i:j])
+
+    def test_r2_core_still_present(self):
+        # the pre-existing R2 tokens are preserved (keeps test_r2 green)
+        w = self._bullet_window()
+        self.assertIn("direct deep-link URL to the LIVE feature", w)
+        self.assertIn("never a menu path", w)
+
+    def test_generalized_to_every_openable_reference(self):
+        w = self._bullet_window()
+        self.assertIn("EVERY openable reference in the message", w)
+        self.assertIn("verified live before sending", w)
+
+    def test_names_the_incident_and_generalizes_report_rule(self):
+        w = self._bullet_window()
+        self.assertIn("airuleset #595", w)
+        self.assertIn("msg 1723308", w)
+        self.assertIn("generalizes completion-report.md's 🌐-line rule", w)
+
+
+class TestModulesCoreUrlReferenceRule(TestCase):
+    """#595 — the always-on modules/core rule (extends deliver-files-as-urls.md,
+    the nearest 'always a URL' owner) so it reaches EVERY session incl. a
+    dispatched worker (a skill body does NOT, #104). Single-physical-line
+    paragraph → per-line teeth: the finder line carries every co-token, so a
+    partial revert drops them together."""
+
+    FINDER = "A message that REFERENCES an openable thing carries its functional URL"
+    COTOKENS = ("#595", "menu path", "1723308", "generalizes",
+                "completion-report.md", "Discord ping")
+
+    def setUp(self):
+        self.raw = read(DELIVER)
+
+    def test_rule_present(self):
+        self.assertIn(self.FINDER, norm(self.raw))
+
+    def test_operative_line_has_teeth(self):
+        lines = [ln for ln in self.raw.splitlines() if self.FINDER in ln]
+        self.assertTrue(lines, "the #595 operative line is missing from deliver-files-as-urls.md")
+        # one physical line carries the finder AND every co-token — a partial
+        # revert of that line drops them together
+        self.assertTrue(
+            any(all(tok in ln for tok in self.COTOKENS) for ln in lines),
+            "the #595 operative line must carry all co-tokens: %r" % (self.COTOKENS,))
+
+
+class TestSkillPointsAtIdentityAndUrlRule(TestCase):
+    """#598/#595 — the message-body identity signature + reference-URL rule live
+    in the COMPANION, never the recipe. The recipe's #521 co-fit budget is REAL
+    and wrapper-inclusive (TestCoFitSizeGuard's functional method) — growing
+    SKILL.md even by a compact pointer DEFERRED the odoo recipe on a .py
+    message_post write (the exact #521 failure, found live this ticket), so the
+    recipe is NOT grown. It ALREADY points at handover-compose.md for the
+    message body rules; `ZbynekAI` lives ONLY in the companion so it stays lean."""
+
+    def setUp(self):
+        self.raw = read(SKILL)
+        self.t = norm(self.raw)
+
+    def test_recipe_points_at_companion_for_body_rules(self):
+        # the recipe already routes message-body composition to the companion —
+        # no new (budget-consuming) pointer is added
+        self.assertIn("handover-compose.md", self.t)
+        self.assertIn("its message body must follow the canonical cross-stream rules", self.t)
+
+    def test_recipe_does_not_restate_the_signature_form(self):
+        # the operative `ZbynekAI <N>` form + its derivation live ONLY in the
+        # companion — a recipe restatement would blow the #521 co-fit budget
+        self.assertNotIn("ZbynekAI", self.raw)
+        self.assertNotIn("montaluN", self.raw)
 
 
 if __name__ == "__main__":
