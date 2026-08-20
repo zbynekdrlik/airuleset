@@ -151,6 +151,23 @@ class TestLaneHasLiveEvidence(unittest.TestCase):
         self.assertFalse(lane_has_live_evidence([]))
         self.assertFalse(lane_has_live_evidence(None))
 
+    def test_a_finished_lane_is_not_live_evidence(self):
+        # #587: a cleanly-finished lane is DEAD for the #571 consumer too — a
+        # FREE lane the supervisor can fill, so it must NOT read as a live lane
+        # (that would suppress the fill nudge). Same danger direction as compact:
+        # a genuinely finished lane is dead for both.
+        self.assertFalse(lane_has_live_evidence([self._lane("finished")]))
+        self.assertFalse(
+            lane_has_live_evidence([self._lane("stale"), self._lane("finished")]))
+
+    def test_a_finished_plus_a_live_lane_is_still_live(self):
+        # a finished lane alongside a genuinely running one → still live (the
+        # running one is what matters), so the fill/defer proceeds correctly.
+        self.assertTrue(
+            lane_has_live_evidence([self._lane("finished"), self._lane("live")]))
+        self.assertTrue(
+            lane_has_live_evidence([self._lane("finished"), self._lane("wedged")]))
+
 
 # --- LOCK (e): count_live_workers determinism + the 12-min-tool-call window ----
 
@@ -165,12 +182,23 @@ class TestCountLiveWorkersDeterminism(unittest.TestCase):
         d = self.root / encode_project_dir(CWD) / SID / "subagents"
         d.mkdir(parents=True, exist_ok=True)
         p = d / ("agent-" + agent_id + ".jsonl")
+        # a genuinely RUNNING worker: last real turn is a `tool_use` (mid-tool-
+        # call). Post-#587 a bare assistant TEXT turn reads as a FINISHED lane, so
+        # a "live worker" fixture must end in a tool_use — never a lone text turn.
         line = last_line or json.dumps(
             {"type": "assistant", "message": {"role": "assistant",
-             "content": [{"type": "text", "text": "working"}]}})
+             "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                          "input": {}}]}})
         p.write_text(line + "\n")
         os.utime(p, (NOW - age_s, NOW - age_s))
         return p
+
+    def _finished_line(self):
+        # a cleanly-finished worker: last real turn is a completed text reply
+        # (#587) — reads as a `finished` lane, excluded from live evidence.
+        return json.dumps(
+            {"type": "assistant", "message": {"role": "assistant",
+             "content": [{"type": "text", "text": "issues: #1 done"}]}})
 
     def test_repeated_reads_over_same_fixture_are_identical(self):
         # LOCK (e): the flap the regression showed (0->4->0->5) was a RENDER
@@ -200,6 +228,26 @@ class TestCountLiveWorkersDeterminism(unittest.TestCase):
         count, ev = count_live_workers(self.root, CWD, SID, NOW, FRESH)
         self.assertEqual(count, 0)
         self.assertFalse(lane_has_live_evidence(ev))
+
+    def test_a_fresh_finished_worker_is_not_live_for_the_fill_gate(self):
+        # #587 through the REAL reader for the #571 consumer: a freshly-written
+        # FINISHED worker (last turn a completed text reply) is a FREE lane, so
+        # `lane_has_live_evidence` must read False → the working-no-tasks gate is
+        # free to fill it. The gk-regression's inverse: a finished ghost must not
+        # mask an empty lane.
+        self._write_worker("fin", age_s=120, last_line=self._finished_line())
+        count, ev = count_live_workers(self.root, CWD, SID, NOW, FRESH)
+        self.assertEqual(count, 0)
+        self.assertFalse(lane_has_live_evidence(ev))
+
+    def test_a_running_worker_beside_a_finished_one_still_reads_live(self):
+        # a genuinely running worker must NOT be suppressed by a sibling finished
+        # lane — the fill gate proceeds normally (no false fill nudge).
+        self._write_worker("run", age_s=120)                       # tool_use tail
+        self._write_worker("fin", age_s=120, last_line=self._finished_line())
+        count, ev = count_live_workers(self.root, CWD, SID, NOW, FRESH)
+        self.assertEqual(count, 1)
+        self.assertTrue(lane_has_live_evidence(ev))
 
 
 if __name__ == "__main__":
