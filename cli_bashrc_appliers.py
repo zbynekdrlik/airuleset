@@ -195,35 +195,33 @@ STREAM_SSH_ATTACH_BLOCK = (
     '    fi\n'
     '  done\n'
     '  __airuleset_me="$(whoami)"\n'
-    "  # #284: a tmux destroy-unattached sweep (#254) can reduce a\n"
-    "  # multi-member session GROUP down to exactly one survivor whose\n"
-    "  # NAME is iteration-order-arbitrary -- not necessarily this exact\n"
-    "  # username the -A reattach below depends on. If a differently-named\n"
-    "  # survivor is invisible to the exact check, the plain -A path would\n"
-    "  # silently create a fresh EMPTY session while the real, populated\n"
-    "  # one sits orphaned in its own group. Search for a live group\n"
-    "  # survivor FIRST -- `=`-anchored EXACT match (#263's own\n"
+    "  # #284/#593: search for a live group survivor whose NAME may differ\n"
+    "  # from this exact username before the plain -A reattach. This once\n"
+    "  # guarded against a tmux destroy-unattached sweep (#254) reducing a\n"
+    "  # multi-member session GROUP down to one iteration-order-arbitrary\n"
+    "  # survivor -- but that sweep no longer happens globally after #591\n"
+    "  # (which REMOVED the global `destroy-unattached keep-last`; #591\n"
+    "  # scopes cleanup to a per-session `client-attached` hook per clone\n"
+    "  # instead -- cli_webterm's webterm clone and the survivor-join\n"
+    "  # below). The survivor search is KEPT as harmless defense-in-depth:\n"
+    "  # if a differently-named survivor ever exists (an older server's\n"
+    "  # leftover, a manual sweep), the plain -A path would silently\n"
+    "  # create a fresh EMPTY session while the real, populated one sits\n"
+    "  # orphaned in its own group. `=`-anchored EXACT match (#263's own\n"
     "  # established fix: a bare target does PREFIX matching and would\n"
-    "  # wrongly match e.g. zbynek-4 for zbynek) -- and, if found, join it\n"
-    "  # as a new independent VIEW onto the SAME windows (grouped session,\n"
-    "  # `new-session -t`) -- the user's own decided reattach behaviour.\n"
-    "  # The survivor's own name is captured into a variable and the\n"
-    "  # actual `exec` happens AFTER the `while ... done < <(...)` loop\n"
-    "  # closes, never inside it -- an adversarial review proved live\n"
-    "  # that an `exec` sitting INSIDE the process-substitution loop\n"
-    "  # inherits that pipe as its own stdin, so a real tmux client\n"
-    "  # refuses to attach (`open terminal failed: not a terminal`) and\n"
-    "  # the ssh login dies right there, since `exec` already replaced\n"
-    "  # the shell -- worse than the pre-#284 behaviour it was meant to\n"
-    "  # fix. Falls through to the plain exact-name path below when no\n"
-    "  # survivor is found, or tmux itself is unreachable. Residual\n"
-    "  # (documented, not chased): if the survivor is destroyed by a\n"
-    "  # concurrent sweep in the narrow window between `list-sessions`\n"
-    "  # returning its name and the `exec` below running, real tmux does\n"
-    "  # NOT error -- it silently creates a brand-new session in a\n"
-    "  # freshly-derived group name instead of falling through to -A -s;\n"
-    "  # still a live, working session either way, just not the exact\n"
-    "  # -A -s fallback this comment used to (wrongly) promise.\n"
+    "  # wrongly match e.g. zbynek-4 for zbynek); if found, join it as a\n"
+    "  # new independent VIEW onto the SAME windows (grouped session),\n"
+    "  # which the survivor-join below now arms with its OWN per-session\n"
+    "  # destroy-unattached hook (#593) so its detached duplicates\n"
+    "  # self-clean. The survivor's own name is captured into a variable\n"
+    "  # and the `exec` happens AFTER the `while ... done < <(...)` loop\n"
+    "  # closes, never inside it -- an adversarial review proved live that\n"
+    "  # an `exec` sitting INSIDE the process-substitution loop inherits\n"
+    "  # that pipe as its own stdin, so a real tmux client refuses to\n"
+    "  # attach (`open terminal failed: not a terminal`) and the ssh login\n"
+    "  # dies right there, since `exec` already replaced the shell. Falls\n"
+    "  # through to the plain exact-name path below when no survivor is\n"
+    "  # found, or tmux itself is unreachable.\n"
     '  if ! tmux has-session -t "=$__airuleset_me" 2>/dev/null; then\n'
     '    __airuleset_survivor=""\n'
     '    while read -r __airuleset_g __airuleset_n; do\n'
@@ -235,7 +233,36 @@ STREAM_SSH_ATTACH_BLOCK = (
     "    done < <(tmux list-sessions "
     "-F '#{session_group} #{session_name}' 2>/dev/null)\n"
     '    if [ -n "$__airuleset_survivor" ]; then\n'
-    '      exec tmux new-session -t "$__airuleset_survivor"\n'
+    # #593: the survivor-join clone is ALSO a grouped-session creator
+    # (`new-session -t`), so give it the SAME per-session `client-attached
+    # destroy-unattached on` hook cli_webterm's #591 clone got -- otherwise,
+    # now that #591 removed the GLOBAL keep-last sweep, its detached
+    # duplicates orphan forever (the #254 pile-up, returning for the ssh
+    # path). Named explicitly (`-s`) so the hook can target it; created
+    # DETACHED (`-d`) then the hook armed then attached, because setting
+    # `destroy-unattached on` on a zero-client session destroys it
+    # IMMEDIATELY -- so the hook DEFERS the `on` to client-attached time
+    # (both live-verified tmux constraints carried verbatim from #591).
+    # `set-hook -t` does NOT take tmux's `=` exact-match anchor (only
+    # has-session/kill-session do), so the just-created clone is targeted by
+    # its bare, unambiguous name. The survivor is always a real `-A -s` base
+    # holding the group's windows, so the join safely self-destructs on the
+    # user's detach while the base survives -- no trap needed (unlike
+    # webterm's throwaway view): the per-session `on` IS the cleanup. The
+    # detached-create is success-guarded so a failed create (name clash,
+    # tmux briefly unreachable) FALLS THROUGH to the plain `-A -s` base path
+    # below, never a dead ssh session. TRANSITION RESIDUAL (same class as
+    # #591-review B1): on a box NOT yet re-installed after #591 whose running
+    # server still carries the old GLOBAL keep-last, the detached clone is
+    # swept at creation and this connect fails -- self-heals on that box's
+    # next install, which unsets the global (cli_tmux_provisioning).
+    '      __airuleset_join="${__airuleset_me}-join-$$"\n'
+    '      if tmux new-session -d -t "$__airuleset_survivor" '
+    '-s "$__airuleset_join" 2>/dev/null; then\n'
+    '        tmux set-hook -t "$__airuleset_join" client-attached '
+    '"set-option destroy-unattached on" 2>/dev/null\n'
+    '        exec tmux attach-session -t "$__airuleset_join"\n'
+    "      fi\n"
     "    fi\n"
     "  fi\n"
     '  exec tmux new-session -A -s "$__airuleset_me" -c "$__airuleset_cwd"\n'
