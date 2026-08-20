@@ -8,6 +8,7 @@ unit rendering, and the dev1-only provisioning gate.
 """
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -744,57 +745,63 @@ class TestSameOriginKeyboard(unittest.TestCase):
         self.assertIn("klik", hint.lower())
 
 
-class TestHiddenTabDisconnect(unittest.TestCase):
-    """#585 (a): a hidden webterm tab must NOT influence the base tmux session's
-    shared window size. Root cause (reproduced live): grouped sessions share a
-    window whose size follows `window-size latest` = the most-recently-active
-    client; a hidden iframe stays an ATTACHED client and, when its xterm reports
-    a shrunken viewport, shrinks the window the owner's WT client is viewing
-    (Ctrl+B W = a tiny/blank choose-tree). Fix: only the VISIBLE tab keeps a live
-    terminal client — every hidden tab is disconnected (its throwaway clone dies
-    on WS close), reconnecting on return (scrollback lives in tmux, not the
-    browser)."""
+class TestAllTabsPreloaded(unittest.TestCase):
+    """#586: SUPERSEDES #585's disconnect-on-hide. #585 disconnected every hidden
+    tab (about:blank) so it could not shrink the shared window under `window-size
+    latest` — but that made switching slow (reconnect on every switch, a refresh
+    feel) AND caused a "Leave site?" dialog on every tab click (navigating the
+    iframe to about:blank unloads ttyd's page, firing ttyd's OWN beforeunload).
+    #586 fixes the SIZING at the source instead (fleet-wide `window-size manual`
+    + the clone's `ignore-size` flag — cli_tmux_provisioning + _ATTACH_BODY), so
+    a hidden tab no longer NEEDS disconnecting. All tabs PRELOAD at login and
+    stay connected; switching is pure show/hide (instant, no reconnect, no iframe
+    navigation, so no beforeunload dialog on a tab click)."""
 
     def _inv(self, n=3):
         return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
                  "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
                 for i in range(1, n + 1)]
 
-    def test_activate_disconnects_hidden_and_reconnects_visible(self):
-        # The invariant loop: for each made iframe, connect+show the active idx,
-        # suspend+hide every other. A hidden tab is suspended to about:blank so
-        # it is no longer an attached tmux client (cannot drive window sizing).
+    def test_no_disconnect_on_hide_suspend_or_about_blank(self):
+        # The #585 disconnect mechanism is GONE — no suspend(), no about:blank
+        # navigation (that navigation was the ROOT of both the slow-switch feel
+        # and the Leave-site dialog on tab click).
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertIn("function suspend(", html)
-        self.assertIn("function connect(", html)
-        self.assertIn("about:blank", html)            # disconnect target
-        self.assertIn("dataset.live", html)           # live/suspended state marker
-        # the invariant is wired INSIDE activate: connect the visible, suspend others
-        self.assertIn("connect(made[k]", html)
-        self.assertIn("suspend(made[k]", html)
-        # DIRECTION matters (both #585 reviewers 🔵): a swapped branch — connect the
-        # HIDDEN tabs, suspend the VISIBLE one — would still contain both tokens.
-        # Assert the ACTIVE branch (`+k === idx`) connects+shows and the `else`
-        # branch suspends+hides, so a direction swap regresses this test.
+        self.assertNotIn("function suspend(", html)
+        self.assertNotIn("about:blank", html)
+
+    def test_all_tabs_preloaded_and_connected_at_login(self):
+        # Every tab's iframe is created AND connected up front (keepalive), not
+        # lazily on first activation — so a switch never has to (re)connect.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("function preloadAll(", html)   # the preload helper
+        self.assertIn("preloadAll()", html)           # it is actually CALLED
+        self.assertIn("ttydSrc(", html)               # each frame gets a real src
+
+    def test_switch_is_pure_show_hide_no_src_change_inside_activate(self):
+        # activate() must ONLY toggle display (block/none) — never reassign an
+        # iframe's src (that would be a reconnect/navigation). The active branch
+        # shows, the else branch hides; NO `connect(`/`.src` inside the loop.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        # the show/hide loop is wired inside activate on the same +k===idx test
         self.assertRegex(
             html,
-            r"if\s*\(\s*\+k === idx\s*\)\s*\{\s*connect\(made\[k\][^}]*?'block'[^}]*?\}"
-            r"\s*else\s*\{\s*suspend\(made\[k\][^}]*?'none'")
+            r"function activate\(idx\)\s*\{.*?\+k === idx.*?'block'.*?'none'",
+        )
+        # isolate the activate() body and assert it never reassigns .src there
+        m = re.search(r"function activate\(idx\)\s*\{(.*?)\n\}", html, re.S)
+        self.assertIsNotNone(m, "activate() body not found")
+        self.assertNotIn(".src", m.group(1),
+                         "activate() must not navigate any iframe (pure show/hide)")
 
-    def test_reconnect_ux_and_scrollback_documented(self):
-        # The reconnect UX + "nothing lost" claim must be surfaced to the owner
-        # (scrollback lives in tmux, so a disconnect/reconnect loses nothing).
+    def test_hint_documents_preloaded_instant_switching(self):
+        # The owner-facing hint must state tabs are preloaded + switching is
+        # instant with no reconnect (the #585 "odpojí/obnoví" line is gone).
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
-        self.assertIn("tmux", hint.lower())           # scrollback lives in tmux
-        self.assertTrue("odpojí" in hint or "obnov" in hint,  # reconnect UX advertised
-                        "hint must document the disconnect/reconnect behavior")
-
-    def test_visible_tab_is_never_needlessly_reloaded(self):
-        # connect() must early-return when already live, so re-activating the
-        # SAME tab does not reload it (a reload would flash + churn the clone).
-        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertRegex(html, r"dataset\.live\s*===\s*'1'")   # the already-live guard
+        self.assertNotIn("odpojí", hint)              # no disconnect language
+        self.assertTrue("prednač" in hint.lower() or "instant" in hint.lower(),
+                        "hint must advertise preloaded/instant switching")
 
 
 class TestCtrlWProtection(unittest.TestCase):
@@ -855,6 +862,21 @@ class TestCtrlWProtection(unittest.TestCase):
         html = w.render_dashboard_html(inv, ttyd_base="/t")
         self.assertNotIn("</script><script>", html)
         self.assertEqual(html.count('"ttyd_base"'), 1)
+
+    def test_beforeunload_fires_only_on_real_close_never_on_tab_switch(self):
+        # #586: with the #585 iframe-navigation (about:blank suspend) gone, a tab
+        # switch never unloads any ttyd frame, so ttyd's own beforeunload never
+        # fires on a tab click (the "Leave site?" dialog the owner reported). The
+        # PAGE's OWN beforeunload is still armed — gated on a live terminal — so a
+        # real window/tab close with a live session still confirms. Structural
+        # proof here (behavioural proof is the live jsdom run): exactly ONE
+        # beforeunload handler, gated on hasLiveTerminal, and activate() performs
+        # no navigation (locked by TestAllTabsPreloaded).
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertEqual(html.count("'beforeunload'"), 1)  # exactly one, the page's
+        # the single beforeunload consults the live-terminal gate
+        self.assertRegex(html, r"addEventListener\('beforeunload',[^)]*\)")
+        self.assertIn("if (!hasLiveTerminal()) return;", html)
 
 
 if __name__ == "__main__":
