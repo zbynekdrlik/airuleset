@@ -5395,6 +5395,102 @@ class TestTmuxWindowSizeRemoved(TestCase):
         self.assertNotIn("list-windows", joined)
 
 
+class _FakeTmuxVersion:
+    """A `run(argv)` double that answers ONLY `tmux -V` (with a fixed version
+    line), and returns None for every other tmux call — so a version-gated
+    caller detects the version while the live-apply calls stay no-ops, exactly
+    like the production `run=None` default against a dead socket. #586."""
+
+    def __init__(self, version_line):
+        self.version_line = version_line
+        self.calls = []
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        if argv[:2] == ["tmux", "-V"]:
+            class _R:
+                pass
+            r = _R()
+            r.stdout = self.version_line
+            r.returncode = 0
+            return r
+        return None
+
+
+class TestTmuxWindowSizeVersionGated(TestCase):
+    """#586: `window-size manual` is RESTORED to the managed block — the owner's
+    governing agreement is a FIXED tmux size fleet-wide (`sme sa dohodli ze tmux
+    bude mat fixnu velkost aby sa toto nedialo`), which #584's `-gw window-size
+    latest` per-connect override directly violated. It is VERSION-GATED, not
+    unconditional: #241 proved (reproduced live again on dev1's real
+    /usr/bin/tmux 3.4 for #586) that the line CRASHES tmux 3.4 at conf-parse
+    startup (`server exited unexpectedly`) — a fleet-wide catastrophe — while
+    tmux 3.7b starts cleanly (also reproduced live). So the option is emitted
+    ONLY when the PATH `tmux -V` reads >= (3,5); a box we cannot probe, or one
+    still on 3.4 (pre-#242-cutover), never gets the crashing line. Still
+    CONF-ONLY (never live-applied), so no #236 live-apply resize hazard on any
+    box."""
+
+    def _tmp(self):
+        return Path(tempfile.mkdtemp()) / ".tmux.conf"
+
+    def test_window_size_manual_emitted_when_tmux_is_3_7b(self):
+        p = self._tmp()
+        airuleset.apply_tmux_history_limit(p, run=_FakeTmuxVersion("tmux 3.7b\n"))
+        self.assertIn("set-option -g window-size manual", p.read_text())
+
+    def test_window_size_manual_not_emitted_on_tmux_3_4_the_crashing_version(self):
+        p = self._tmp()
+        airuleset.apply_tmux_history_limit(p, run=_FakeTmuxVersion("tmux 3.4\n"))
+        self.assertNotIn("window-size", p.read_text())
+
+    def test_window_size_manual_not_emitted_when_version_undetectable(self):
+        # run() that never answers `tmux -V` (returns None) -> fail CLOSED,
+        # never ship the crashing line to a box whose version we cannot read.
+        p = self._tmp()
+        airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertNotIn("window-size", p.read_text())
+
+    def test_window_size_manual_is_conf_only_never_live_applied(self):
+        # Even on a supported version, window-size is written to the CONF
+        # (takes effect at next server start) and NEVER passed to a live
+        # `run` call — the #236 live-apply resize hazard must not return.
+        p = self._tmp()
+        fake = _FakeTmuxVersion("tmux 3.7b\n")
+        airuleset.apply_tmux_history_limit(p, run=fake)
+        self.assertIn("set-option -g window-size manual", p.read_text())
+        live_joined = " ".join(" ".join(c) for c in fake.calls)
+        self.assertNotIn("window-size", live_joined)
+
+    def test_version_probe_is_a_single_tmux_dash_V_call_first(self):
+        p = self._tmp()
+        fake = _FakeTmuxVersion("tmux 3.7b\n")
+        airuleset.apply_tmux_history_limit(p, run=fake)
+        self.assertEqual(fake.calls[0], ["tmux", "-V"])
+        self.assertEqual(sum(1 for c in fake.calls if c == ["tmux", "-V"]), 1)
+
+    def test_parse_tmux_version_handles_letter_suffix_and_plain(self):
+        self.assertEqual(airuleset._parse_tmux_version("tmux 3.7b\n"), (3, 7))
+        self.assertEqual(airuleset._parse_tmux_version("tmux 3.4"), (3, 4))
+        self.assertEqual(airuleset._parse_tmux_version("tmux next-3.8"), (3, 8))
+        self.assertIsNone(airuleset._parse_tmux_version(""))
+        self.assertIsNone(airuleset._parse_tmux_version(None))
+        self.assertIsNone(airuleset._parse_tmux_version("garbage"))
+
+    def test_supports_gate_boundary_3_4_false_3_5_and_up_true(self):
+        self.assertFalse(airuleset._tmux_supports_window_size_manual(
+            _FakeTmuxVersion("tmux 3.4\n")))
+        self.assertTrue(airuleset._tmux_supports_window_size_manual(
+            _FakeTmuxVersion("tmux 3.5\n")))
+        self.assertTrue(airuleset._tmux_supports_window_size_manual(
+            _FakeTmuxVersion("tmux 3.7b\n")))
+
+        # a runner that raises (tmux missing) -> False, never propagates.
+        def _boom(argv):
+            raise OSError("tmux not found")
+        self.assertFalse(airuleset._tmux_supports_window_size_manual(_boom))
+
+
 class TestTmuxWindowSizeNoResize(TestCase):
     """#236's own incident history (two live-tmux destructions on dev1,
     the second a kernel segfault in tmux 3.4's format-expansion code)
