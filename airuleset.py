@@ -425,7 +425,6 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
     _MIN_WINDOW_SIZE_MANUAL_VERSION,
     _parse_tmux_version,
     _tmux_supports_window_size_manual,
-    TMUX_DESTROY_UNATTACHED,
     TMUX_MARK_START,
     TMUX_MARK_END,
     TMUX_SCROLLBACK_KEYBINDS,

@@ -67,22 +67,23 @@ TMUX_WINDOW_SIZE = "manual"
 # #242 cutover comment) that this >= boundary passes -- the same forward
 # assumption the cutover itself makes.
 _MIN_WINDOW_SIZE_MANUAL_VERSION = (3, 5)
-# #254: "keep-last", NOT "keep-group" -- despite the ticket's own title
-# naming keep-group, that value DESTROYS EVERY ORDINARY STANDALONE
-# (non-grouped) session the moment its one client detaches, identical to
-# boolean `on` -- confirmed live against a real tmux 3.7b server via a
-# genuine pty-attached client on an isolated `-L` scratch socket (never
-# the box's real default server). Since almost every real project session
-# on the fleet is a plain standalone session, keep-group would nuke
-# essentially all of them on every detach -- far worse than the pile-up
-# bug it exists to fix. keep-last is the value that matches what the
-# ticket's OWN prose actually describes: destroy a detached GROUPED
-# sibling only while another session remains in its group, and leave both
-# a group's last surviving member and every standalone session untouched.
-# See render_tmux_history_block/apply_tmux_history_limit below, and
-# TestTmuxDestroyUnattached in tests/test_airuleset.py for the full
-# regression lock against reverting to keep-group or bare `on`.
-TMUX_DESTROY_UNATTACHED = "keep-last"
+# #591: there is NO managed `destroy-unattached` value any more -- the global
+# option is REMOVED from the conf entirely (fresh servers inherit tmux's factory
+# default `off`, which never destroys a session). #254 shipped a GLOBAL
+# `destroy-unattached keep-last` to sweep detached grouped-session duplicates;
+# that value protects the group's LAST member, NOT the BASE session, so once a
+# webterm clone (`new-session -t`, cli_webterm) forms a group, the owner
+# detaching from the BASE destroys the base (unattached, grouped, not-last) --
+# killing the live Claude process inside -- and the clone's later teardown
+# empties the whole tmux server (the gk 2026-08-20 09:58 total-death). Verified
+# live on an isolated `-L` scratch tmux 3.7b server with real pty clients.
+# The webterm throwaway clone now self-cleans PER-SESSION instead (a
+# `client-attached` hook arming its OWN session-scoped `destroy-unattached on`
+# in cli_webterm), so ONLY the clone is ever swept and the base is untouched --
+# verified live that a session-scoped set does NOT leak to other group members.
+# See render_tmux_history_block/apply_tmux_history_limit below (the live-apply
+# now UNSETS any stale global -- a #254-style self-heal), and
+# TestTmuxDestroyUnattached in tests/test_airuleset.py for the regression locks.
 TMUX_MARK_START = "# >>> airuleset tmux >>>"
 TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # #235: tmux's own built-in default (2000-line scrollback) plus the current
@@ -176,38 +177,26 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # scrolled back down and auto-exited to the live view, with the pane's
 # own content completely undisturbed throughout.
 #
-# #254: each attach to a tmux session-GROUP (e.g. zbynek-1..4, all sharing
-# the same underlying windows -- the shape a grouped `new-session -t`
-# attach produces) left the detached duplicate orphaned forever under
-# tmux's factory-default `destroy-unattached off` -- reproduced live on
-# dev1 against the real default socket with a genuine pty-attached-then-
-# detached grouped sibling (STILL-VALID evidence on #254). Fix:
-# `destroy-unattached keep-last` (see TMUX_DESTROY_UNATTACHED above for
-# why NOT the ticket's own literally-named keep-group). UNLIKE window-size
-# above, this is safe to LIVE-APPLY for a different reason: by
-# definition it only ever evaluates sessions with ZERO attached clients,
-# so it structurally cannot disturb anything currently on screen. Verified
-# live: applying it against a running server holding a pre-existing
-# pile-up (one attached session, two already-detached grouped duplicates
-# -- the exact zbynek-1/2/3/4 shape before manual cleanup) immediately
-# swept the two duplicates away with no new attach/detach cycle needed,
-# while leaving the attached grouped session AND a separate attached
-# standalone session completely untouched. This also answers "how do
-# already-piled-up siblings get cleaned": the live-apply itself performs
-# a one-time sweep on the very next push/install -- no new hook, no new
-# watchdog job needed.
-#
-# ADVERSARIAL-REVIEW FINDING (#254, MINOR): live-apply-safe and conf-
-# read-safe are INDEPENDENT claims (#236 vs #241's own lesson for
-# window-size -- one option was unsafe live-applied, the OTHER unsafe
-# merely READ from a conf file at server startup). This block's own live-
-# apply proof above was run against tmux 3.7b; the cold conf-PARSE half
-# was separately verified clean on BOTH the fleet's stock tmux 3.4 (the
-# only version Ubuntu 24.04 noble ships, and the live server on any box
-# not yet rebooted through #242's cutover) and 3.7b -- `set-option -g
-# destroy-unattached keep-last` in a conf file starts cleanly on both, and
-# a live `set-option` against a running 3.4 server also succeeds. No
-# #241-shaped crash-at-parse-time hazard on either binary.
+# #591: the global destroy-unattached is REMOVED (see the TMUX_DESTROY_UNATTACHED
+# removal comment above for the full mechanism). #254 shipped `destroy-unattached
+# keep-last` to sweep detached grouped duplicates, but that value protects the
+# group's LAST member, NOT the BASE session -- so once a webterm clone
+# (`new-session -t`, cli_webterm) forms a group, the owner detaching from the
+# BASE destroyed it (unattached, grouped, not-last) with the live Claude process
+# inside, and the clone's later teardown emptied the whole tmux server (gk
+# 2026-08-20 09:58 total-death). Reproduced live on an isolated `-L` scratch
+# tmux 3.7b server with real pty clients. The conf now carries NO line at all
+# (fresh servers inherit tmux's default `off`, which never destroys a session),
+# and the live-apply below UNSETS (`-gu`) the global -- a #254-style self-heal
+# that reverts any RUNNING server still carrying the base-killing `keep-last`
+# back to `off` on the next push/install (verified live: `-gu` on a keep-last
+# server -> off, idempotent). The webterm throwaway clone self-cleans PER-SESSION
+# instead (a `client-attached` hook arming its OWN session-scoped
+# `destroy-unattached on`, cli_webterm), so ONLY the clone is ever swept -- a
+# session-scoped set does NOT leak to other group members (base stays `off`,
+# verified live). destroy-unattached is safe to touch on a running server for
+# the #235-vs-#254 reason (it only ever evaluates ZERO-client sessions), and
+# unsetting to `off` can never destroy anything.
 #
 # Pane addressing (verified, not assumed): every keystroke-sending job in
 # watchdog/__init__.py (list_claude_panes/_reconcile_candidate_panes)
@@ -453,7 +442,6 @@ def _tmux_conf_quote(word):
 
 def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
                                default_size=TMUX_DEFAULT_SIZE,
-                               destroy_unattached=TMUX_DESTROY_UNATTACHED,
                                window_size_manual=False):
     # #338: per-token _tmux_conf_quote (not a bare " ".join) -- required
     # the moment the S-PageUp entry's `"send-keys C-o"`/`"copy-mode -eu"`
@@ -472,10 +460,12 @@ def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
     # before `default-size` so the two size options sit together.
     window_size_line = (
         f"set-option -g window-size {TMUX_WINDOW_SIZE}\n" if window_size_manual else "")
+    # #591: NO `destroy-unattached` line -- the global option is removed; the
+    # base session must inherit tmux's default `off` (see the module comment
+    # above), and the webterm clone self-cleans per-session instead.
     return (
         f"{TMUX_MARK_START}\n"
         f"set-option -g history-limit {limit}\n"
-        f"set-option -g destroy-unattached {destroy_unattached}\n"
         f"{window_size_line}"
         f"set-option -g default-size {default_size}\n"
         f"{keybind_lines}\n"
@@ -568,7 +558,6 @@ def _tmux_supports_window_size_manual(run):
 
 def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HISTORY_LIMIT,
                               default_size: str = TMUX_DEFAULT_SIZE,
-                              destroy_unattached: str = TMUX_DESTROY_UNATTACHED,
                               run=None) -> bool:
     """Ensure `~/.tmux.conf` carries the managed tmux block: history-limit
     (#235), destroy-unattached (#254), and default-size (#236).
@@ -595,16 +584,19 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     limit (tmux has no way to grow an existing pane's history buffer in
     place). This is a server OPTION set, never a keystroke into any pane.
 
-    #254: destroy-unattached is ALSO live-applied, right after
-    history-limit -- unlike window-size/default-size it only ever
-    evaluates sessions with ZERO attached clients, so it structurally
-    cannot disturb anything currently on screen (verified live: see the
-    module comment above `render_tmux_history_block`). Live-applying it
-    is what immediately self-heals any ALREADY-existing detached grouped
-    pile-up (e.g. zbynek-1/2/3 while zbynek-4 stays attached) on the very
-    next push, with no new hook and no new watchdog job needed -- tmux's
-    own destroy-unattached evaluation re-fires on every future detach
-    from then on.
+    #591: the global destroy-unattached is UNSET (`set-option -gu`) right
+    after history-limit -- not SET to any value. #254 introduced a global
+    `keep-last`; that protects the group's LAST member, not the BASE, so
+    once a webterm clone forms a group the owner detaching from the base
+    destroyed it (with the Claude process inside) and the server later died
+    (the gk 2026-08-20 total-death). The conf now carries no line at all
+    (fresh servers -> tmux default `off`), and this live-apply self-heals
+    any RUNNING server still carrying the stale base-killing `keep-last` by
+    reverting it to `off` on the next push -- verified live: `-gu` on a
+    keep-last server -> off, idempotent. It only ever evaluates ZERO-client
+    sessions (the #235-vs-#254 safety) and unsetting to `off` can never
+    destroy anything. The webterm clone self-cleans PER-SESSION instead
+    (cli_webterm's `client-attached` hook), so the base is never swept.
 
     default-size is DELIBERATELY CONF-ONLY -- never live-applied via a
     real tmux subprocess call, in any code path. It lands in the conf
@@ -648,7 +640,7 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     # closed: an unprobeable / <3.5 box gets no window-size line (never the #241
     # 3.4 crash).
     window_size_manual = _tmux_supports_window_size_manual(runner)
-    block = render_tmux_history_block(limit, default_size, destroy_unattached,
+    block = render_tmux_history_block(limit, default_size,
                                        window_size_manual=window_size_manual)
 
     existing = path.read_text() if path.exists() else ""
@@ -672,7 +664,14 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     # `runner` was already resolved above (for the #586 version probe).
     live_argvs = [
         ["tmux", "set-option", "-g", "history-limit", str(limit)],
-        ["tmux", "set-option", "-g", "destroy-unattached", str(destroy_unattached)],
+        # #591: UNSET (not set) the global destroy-unattached on any running
+        # server -- a #254-style self-heal that reverts a box still carrying the
+        # base-killing `keep-last` (live-applied before this fix, or read from a
+        # not-yet-rewritten conf) back to tmux's default `off`. Verified live on
+        # tmux 3.7b: `-gu` on a keep-last server -> off, idempotent (a no-op when
+        # already unset). Setting `off` never destroys anything, so this is safe
+        # to apply against a running server, same #235-vs-#254 reason as before.
+        ["tmux", "set-option", "-gu", "destroy-unattached"],
     ]
     live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
     live_argvs += [["tmux"] + argv for argv in TMUX_POPUP_BIND_ARGVS]
