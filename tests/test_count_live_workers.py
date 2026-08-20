@@ -35,10 +35,25 @@ FRESH = 15 * 60  # 15 min window, matching today's GOAL_LANE_LIVE_WINDOW_S
 
 # --- transcript-entry builders (only the shapes the reader inspects) ----------
 
-def _assistant(text):
-    return json.dumps({"type": "assistant",
-                       "message": {"role": "assistant",
-                                   "content": [{"type": "text", "text": text}]}})
+def _assistant(text, stop_reason=None):
+    msg = {"role": "assistant", "content": [{"type": "text", "text": text}]}
+    if stop_reason is not None:
+        msg["stop_reason"] = stop_reason
+    return json.dumps({"type": "assistant", "message": msg})
+
+
+def _finished_terminal(text="issues: #1 done"):
+    """A DEFINITELY-finished worker: a final text reply carrying a TERMINAL
+    stop_reason (end_turn) — #587 classifies this `finished` at ANY fresh age
+    (the ~78% common case, incl. autopilot-worker final reports)."""
+    return _assistant(text, stop_reason="end_turn")
+
+
+def _finished_settling(text="issues: #1 done"):
+    """A structurally-finished worker with a NON-terminal (absent) stop_reason —
+    #587's `settling` state (~18% of real finishes). Classified `finished` ONLY
+    once its mtime is older than FINISH_SETTLE_S, so a fresh one stays live."""
+    return _assistant(text)   # no stop_reason
 
 
 def _running():
@@ -232,14 +247,14 @@ class TestApiErrorGuard(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             _write_worker(root, CWD, SID, "done",
-                          [_tool_result_user(), _assistant("issues: #1 done")],
+                          [_tool_result_user(), _finished_terminal("issues: #1 done")],
                           age_s=8)
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
             self.assertEqual(n, 0)
             self.assertEqual(_states(ev), ["finished"])
             self.assertEqual(_by_id(ev, "done").state, "finished")
             # still FRESH (its age is inside the window) — the reclassification is
-            # by CONTENT (a finished final turn), NOT by ageing out.
+            # by CONTENT (a terminal final turn), NOT by ageing out.
             self.assertLess(_by_id(ev, "done").age_s, FRESH)
 
 
@@ -256,33 +271,62 @@ def _plain_user(text="follow up"):
 
 
 class TestFinishImmediate587(unittest.TestCase):
-    """#587 — a cleanly-FINISHED worker drops out of the live liveness the moment
-    it finishes (its last real turn is a completed final TEXT response, no pending
-    tool call), so a per-ticket compact boundary no longer sees a 15-min mtime
-    ghost. Detection is CONSERVATIVE: only a clear text-ending final turn reads
-    finished; a mid-tool-call / tool_result-tail / api-error / plain-user tail
-    stays live. Behavioural, through the real classifier."""
+    """#587 — a cleanly-FINISHED worker drops out of the live liveness (its last
+    real turn is a completed final TEXT response, no pending tool call), so a
+    per-ticket compact boundary no longer sees a 15-min mtime ghost. Detection is
+    CONSERVATIVE: a `terminal` (end_turn) final turn is finished at any fresh age;
+    a `settling` (None-stop_reason) text-tail only once aged past FINISH_SETTLE_S
+    (so a mid-stream running worker is never misread finished); a mid-tool-call /
+    tool_result-tail / api-error / plain-user tail stays live. Behavioural,
+    through the real classifier."""
 
-    def test_finished_text_ending_worker_is_finished_not_live(self):
+    def test_terminal_finished_worker_is_finished_at_any_fresh_age(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             _write_worker(root, CWD, SID, "fin",
-                          [_tool_result_user(), _assistant("issues: #587 done")],
-                          age_s=300)
+                          [_tool_result_user(), _finished_terminal("issues: #587 done")],
+                          age_s=3)   # freshly finished — terminal stop_reason → immediate
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
             self.assertEqual(n, 0)
             self.assertEqual(_states(ev), ["finished"])
 
-    def test_finished_with_a_trailing_thinking_then_text_is_finished(self):
+    def test_terminal_finished_with_a_trailing_thinking_then_text_is_finished(self):
         # one API response splits into [thinking, text] JSONL lines; the final
         # produced content is the TEXT (a trailing thinking-only line is a sentinel
-        # that is skipped back to the real text). Still finished.
+        # that is skipped back to the real text). Terminal stop_reason → finished.
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             _write_worker(root, CWD, SID, "fin2",
                           [_tool_result_user(), _thinking(),
-                           _assistant("All done: clean tree, PR merged.")],
-                          age_s=120)
+                           _finished_terminal("All done: clean tree, PR merged.")],
+                          age_s=5)
+            n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
+            self.assertEqual(n, 0)
+            self.assertEqual(_states(ev), ["finished"])
+
+    def test_settling_finished_worker_stays_live_until_it_settles(self):
+        # #587-review: a text-tail with a NON-terminal (None) stop_reason could be
+        # a text block the model streamed just before a large tool_use in the SAME
+        # message (a ~14s gap). A FRESH settling worker must stay LIVE (not yet
+        # provably finished), so a running worker mid-large-edit is never orphaned.
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            _write_worker(root, CWD, SID, "settling",
+                          [_tool_result_user(), _finished_settling("issues: #587 done")],
+                          age_s=5)   # < FINISH_SETTLE_S
+            n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
+            self.assertEqual(n, 1)
+            self.assertEqual(_states(ev), ["live"])
+
+    def test_settling_finished_worker_is_finished_once_aged_past_settle(self):
+        # the same settling worker, now aged past FINISH_SETTLE_S (any pending
+        # tool_use would have been flushed by now) → a genuine finish → not live.
+        import tempfile
+        from watchdog.transcripts import FINISH_SETTLE_S
+        with tempfile.TemporaryDirectory() as root:
+            _write_worker(root, CWD, SID, "settled",
+                          [_tool_result_user(), _finished_settling("issues: #587 done")],
+                          age_s=FINISH_SETTLE_S + 5)
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
             self.assertEqual(n, 0)
             self.assertEqual(_states(ev), ["finished"])
@@ -361,7 +405,7 @@ class TestFinishImmediate587(unittest.TestCase):
     def test_finished_and_running_mix_counts_only_running(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
-            _write_worker(root, CWD, SID, "fin", [_assistant("done")], age_s=5)
+            _write_worker(root, CWD, SID, "fin", [_finished_terminal("done")], age_s=5)
             _write_worker(root, CWD, SID, "run", [_running()], age_s=5)
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
             self.assertEqual(n, 1)
@@ -369,12 +413,13 @@ class TestFinishImmediate587(unittest.TestCase):
             self.assertEqual(_by_id(ev, "fin").state, "finished")
             self.assertEqual(_by_id(ev, "run").state, "live")
 
-    def test_finished_lane_at_the_freshness_boundary_is_finished_not_live(self):
-        # the reclassification is by CONTENT, not age — a finished worker at
-        # exactly the freshness boundary (still "fresh") is "finished", not "live".
+    def test_terminal_finished_lane_at_the_freshness_boundary_is_finished_not_live(self):
+        # a TERMINAL finish is by CONTENT, not age — a finished worker at exactly
+        # the freshness boundary (still "fresh") is "finished", not "live".
         import tempfile
         with tempfile.TemporaryDirectory() as root:
-            _write_worker(root, CWD, SID, "edge", [_assistant("done")], age_s=FRESH)
+            _write_worker(root, CWD, SID, "edge", [_finished_terminal("done")],
+                          age_s=FRESH)
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
             self.assertEqual(n, 0)
             self.assertEqual(_states(ev), ["finished"])
@@ -384,7 +429,7 @@ class TestFinishImmediate587(unittest.TestCase):
         # "stale" (never reaches the content classifier), same as any other lane.
         import tempfile
         with tempfile.TemporaryDirectory() as root:
-            _write_worker(root, CWD, SID, "old", [_assistant("done")],
+            _write_worker(root, CWD, SID, "old", [_finished_terminal("done")],
                           age_s=FRESH + 60)
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
             self.assertEqual(n, 0)
@@ -395,7 +440,7 @@ class TestFinishImmediate587(unittest.TestCase):
         # journal must be able to name it, it just is not counted live.
         import tempfile
         with tempfile.TemporaryDirectory() as root:
-            _write_worker(root, CWD, SID, "typedfin", [_assistant("done")],
+            _write_worker(root, CWD, SID, "typedfin", [_finished_terminal("done")],
                           age_s=10, meta={"agentType": "autopilot-worker"})
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
             self.assertEqual(n, 0)
@@ -651,7 +696,10 @@ class TestNeverRaises(unittest.TestCase):
 class TestTranscriptWorkerFinishedUnit(unittest.TestCase):
     """#587 — direct unit coverage of the pure `transcript_worker_finished`
     reader (the classifier `count_live_workers` delegates the finish decision to).
-    Written transcript files, no mtime dependence (finish is a CONTENT verdict)."""
+    Returns a 3-state string: "terminal" (final text + end_turn/stop_sequence),
+    "settling" (final text, non-terminal stop_reason — trusted only once settled),
+    "" (running / unmeasurable). Written transcript files, no mtime dependence
+    (the age gate lives in count_live_workers, not this reader)."""
 
     def _write(self, root, *lines):
         d = _subagents_dir(root, CWD, SID)
@@ -660,67 +708,86 @@ class TestTranscriptWorkerFinishedUnit(unittest.TestCase):
         p.write_text("\n".join(lines) + "\n")
         return p
 
-    def test_text_ending_turn_is_finished(self):
+    def test_terminal_stop_reason_text_is_terminal(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            p = self._write(root, _tool_result_user(), _finished_terminal("all done"))
+            self.assertEqual(transcripts.transcript_worker_finished(p), "terminal")
+
+    def test_stop_sequence_is_also_terminal(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            p = self._write(root, _assistant("done", stop_reason="stop_sequence"))
+            self.assertEqual(transcripts.transcript_worker_finished(p), "terminal")
+
+    def test_non_terminal_stop_reason_text_is_settling(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             p = self._write(root, _tool_result_user(), _assistant("all done"))
-            self.assertTrue(transcripts.transcript_worker_finished(p))
+            self.assertEqual(transcripts.transcript_worker_finished(p), "settling")
 
-    def test_thinking_then_text_is_finished(self):
+    def test_thinking_then_terminal_text_is_terminal(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             p = self._write(root, _tool_result_user(), _thinking(),
-                            _assistant("final report body"))
-            self.assertTrue(transcripts.transcript_worker_finished(p))
+                            _finished_terminal("final report body"))
+            self.assertEqual(transcripts.transcript_worker_finished(p), "terminal")
 
-    def test_tool_use_ending_turn_is_not_finished(self):
+    def test_tool_use_ending_turn_is_running(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             p = self._write(root, _assistant("let me check"), _running())
-            self.assertFalse(transcripts.transcript_worker_finished(p))
+            self.assertEqual(transcripts.transcript_worker_finished(p), "")
 
-    def test_tool_result_tail_is_not_finished(self):
+    def test_tool_result_tail_is_running(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             p = self._write(root, _running(), _tool_result_user())
-            self.assertFalse(transcripts.transcript_worker_finished(p))
+            self.assertEqual(transcripts.transcript_worker_finished(p), "")
 
-    def test_plain_user_followup_tail_is_not_finished(self):
+    def test_plain_user_followup_tail_is_running(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             p = self._write(root, _assistant("first"), _plain_user("more"))
-            self.assertFalse(transcripts.transcript_worker_finished(p))
+            self.assertEqual(transcripts.transcript_worker_finished(p), "")
 
-    def test_api_error_last_turn_is_not_finished(self):
+    def test_api_error_last_turn_is_running(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             p = self._write(root, _assistant("hi"), _api_error())
-            self.assertFalse(transcripts.transcript_worker_finished(p))
+            self.assertEqual(transcripts.transcript_worker_finished(p), "")
 
-    def test_text_toolcall_stall_is_not_finished(self):
-        # a tool-call emitted as TEXT is NOT a clean finish — worker_finished
-        # itself returns True on the raw text (it looks like a text reply), but
-        # count_live_workers checks `wedged` (which owns this shape) FIRST, so the
-        # lane never reaches the finished branch. This asserts the pure function's
-        # own honest limit + documents why ORDER matters in the caller.
+    def test_text_toolcall_stall_is_wedged_in_the_caller_not_finished(self):
+        # a tool-call emitted as TEXT (no stop_reason) reads "settling" from the
+        # PURE function (it is a text-ending turn), but count_live_workers checks
+        # `wedged` (which owns this shape) FIRST, so the lane is `wedged`, never
+        # `finished`. Locks the caller's ordering, not a mislabelled outcome.
         import tempfile
         with tempfile.TemporaryDirectory() as root:
             p = self._write(root, _textcall_stall())
-            # the raw text ends in tool-call markup, which is a text block →
-            # transcript_worker_finished sees a "text reply" and returns True…
-            self.assertTrue(transcripts.transcript_worker_finished(p))
-            # …but count_live_workers classifies it `wedged`, never `finished`,
-            # because the wedged (text-toolcall-stall) check runs first.
+            self.assertEqual(transcripts.transcript_worker_finished(p), "settling")
             n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
             self.assertEqual(_states(ev), ["wedged"])
 
-    def test_empty_or_missing_transcript_is_not_finished(self):
+    def test_wrong_typed_text_block_is_running_never_raises(self):
+        # #587-review 🔵: a `"text": null` block makes _entry_text raise TypeError;
+        # the reader must guard it (the facade re-exports this for direct callers),
+        # degrading to "" (not finished), never propagating the exception.
         import tempfile
         with tempfile.TemporaryDirectory() as root:
-            self.assertFalse(
-                transcripts.transcript_worker_finished(Path(root) / "nope.jsonl"))
+            bad = json.dumps({"type": "assistant", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": None}]}})
+            p = self._write(root, bad)
+            self.assertEqual(transcripts.transcript_worker_finished(p), "")
+
+    def test_empty_or_missing_transcript_is_running(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(
+                transcripts.transcript_worker_finished(Path(root) / "nope.jsonl"), "")
             p = self._write(root)  # empty (just a newline)
-            self.assertFalse(transcripts.transcript_worker_finished(p))
+            self.assertEqual(transcripts.transcript_worker_finished(p), "")
 
     def test_exported_on_the_watchdog_facade(self):
         import watchdog as wd

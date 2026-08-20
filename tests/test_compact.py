@@ -143,27 +143,31 @@ def _write_human_transcript(base, cwd, sid, ts_epoch,
 
 
 def _write_subagent_transcript(base, cwd, sid, mtime=None, error=False,
-                               finished=False, agent_id="x"):
+                               finished=False, settling=False, agent_id="x"):
     """A sibling subagent transcript proving `_session_has_live_bg_tasks`'s
     file-mtime signal — <base>/<encoded-cwd>/<sid>/subagents/agent-<id>.jsonl.
     `error=True` makes its last turn an unrecovered api-error (a `wedged`
     lane: count_live_workers drops it from its live COUNT, but compact still
     vetoes on it — #565-review). `finished=True` (#587) makes its last real
-    turn a COMPLETED text reply (a `finished` lane — the worker produced its
-    final answer and returned to the parent), which compact must NOT veto on:
-    a per-ticket boundary always follows a worker return, so the finished
-    lane's mtime is still fresh at that moment."""
+    turn a COMPLETED text reply with a TERMINAL stop_reason (end_turn — the
+    ~78% common case incl. autopilot-worker final reports), a `finished` lane
+    that compact must NOT veto on: a per-ticket boundary always follows a
+    worker return, so the finished lane's mtime is still fresh at that moment.
+    `settling=True` gives the same final text but a NON-terminal (absent)
+    stop_reason — the #587 `settling` state, finished only once aged past
+    FINISH_SETTLE_S."""
     d = Path(base) / _encode(cwd) / sid / "subagents"
     d.mkdir(parents=True, exist_ok=True)
     p = d / ("agent-" + agent_id + ".jsonl")
     if error:
         entry = {"type": "assistant", "isApiErrorMessage": True,
                  "message": {"id": "msg_1", "content": "API Error: 529"}}
-    elif finished:
-        entry = {"type": "assistant",
-                 "message": {"role": "assistant",
-                             "content": [{"type": "text",
-                                          "text": "issues: #587 done; merged."}]}}
+    elif finished or settling:
+        msg = {"role": "assistant",
+               "content": [{"type": "text", "text": "issues: #587 done; merged."}]}
+        if finished:
+            msg["stop_reason"] = "end_turn"   # terminal → finished immediately
+        entry = {"type": "assistant", "message": msg}
     else:
         entry = {"type": "assistant"}
     p.write_text(json.dumps(entry) + "\n")
@@ -652,6 +656,38 @@ class TestDeliverCompact(unittest.TestCase):
                                        now=now)
         self.assertEqual(word, "skip:live-tasks")
         self.assertEqual(tmux.sent, [])
+
+    def test_587_fresh_settling_worker_still_vetoes_until_it_settles(self):
+        # #587-review: a fresh worker whose last turn is a text reply with a
+        # NON-terminal (None) stop_reason could be a text block streamed just
+        # before a large tool_use (~14s gap) — it must keep vetoing compact until
+        # it has settled, so a running worker mid-large-edit is never orphaned.
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   settling=True)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
+                                       projects_dir=proj, delivered_path=self.delp,
+                                       now=now)
+        self.assertEqual(word, "skip:live-tasks")
+        self.assertEqual(tmux.sent, [])
+
+    def test_587_settled_worker_no_longer_blocks_compact(self):
+        # the same settling worker, aged past FINISH_SETTLE_S (any pending tool_use
+        # would have been flushed by now) → a genuine finish → compact SENDs.
+        from watchdog.transcripts import FINISH_SETTLE_S
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        _write_subagent_transcript(proj, self.CWD, self.SID,
+                                   mtime=now - (FINISH_SETTLE_S + 5), settling=True)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
+                                       projects_dir=proj, delivered_path=self.delp,
+                                       now=now)
+        self.assertEqual(word, "sent")
 
     def test_565_saturated_supervisor_live_lanes_not_compacted_on_self_callback(self):
         # #565 RED -- the reported live incident: a per-ticket
