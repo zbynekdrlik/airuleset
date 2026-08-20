@@ -56,12 +56,12 @@
 **DEPLOY / VERSION-LIVE watch — unblock on DEPLOYED-STATE, not run-terminal (#588).** For a release/deploy wait, the run-level `completed` OVERSHOOTS the deployed state by the whole post-deploy E2E tail (tens of minutes) — a worker "watching the deploy" long after the version is live on PROD is the trust-damaging failure (owner report, montalu5). Drop this DEPLOY-DONE classifier into EITHER loop above (SAME single `gh run view` call — one API call, the `| jq` is local), with `DEPLOY_JOB_RE` = the deploy-completing job set (NEVER the E2E tail): it unblocks the moment that set is all-green even while the tail keeps the run `in_progress`; a deploy-set failure fails fast; a scoped-out E2E failure never masks DEPLOYED.
 
 ```bash
-DEPLOY_JOB_RE='Deploy to PROD|Disable Maintenance|Smoke'   # the deploy-completing set — NEVER the E2E tail
+DEPLOY_JOB_RE='Deploy to PROD|Disable Maintenance|Smoke'   # deploy-completing set — NEVER the E2E tail; tokens are UNANCHORED regex, so anchor ('^Deploy to PROD$') or pick tail-disjoint tokens
 s=$(gh run view <id> --json status,conclusion,jobs | jq -r --arg re "$DEPLOY_JOB_RE" '
-  ([.jobs[]?|select(.name|test($re))]) as $dep
-  | if   ($dep|length)>0 and any($dep[]; .conclusion=="failure" or .conclusion=="timed_out") then "DEPLOYFAIL "+([$dep[]|select(.conclusion=="failure" or .conclusion=="timed_out")|.name]|join(", "))
-    elif ($dep|length)>0 and all($dep[]; .conclusion=="success")                              then "DEPLOYED "+([$dep[]|.name]|join(", "))
-    elif .status=="completed"                                                                 then "TERMINAL "+.status+" "+(.conclusion//"")
+  ([.jobs[]?|select((.name // "")|test($re))]) as $dep
+  | if   ($dep|length)>0 and any($dep[]; .conclusion=="failure" or .conclusion=="timed_out")                         then "DEPLOYFAIL "+([$dep[]|select(.conclusion=="failure" or .conclusion=="timed_out")|.name]|join(", "))
+    elif ($dep|length)>0 and any($dep[]; .conclusion=="success") and all($dep[]; .conclusion=="success" or .conclusion=="skipped") then "DEPLOYED "+([$dep[]|.name]|join(", "))
+    elif .status=="completed"                                                                                        then "TERMINAL "+.status+" "+(.conclusion//"")
     else "PENDING "+.status end')
 # DEPLOYED -> break (version is live). DEPLOYFAIL -> break (deploy broke). TERMINAL -> break (run ended before a deploy-set match; check DEPLOY_JOB_RE).
 ```

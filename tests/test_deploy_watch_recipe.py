@@ -137,6 +137,28 @@ class TestDeployDoneClassifier(unittest.TestCase):
             _job("build", "success"), _job("test", "success")]}
         self.assertTrue(_classify(run).startswith("TERMINAL"))
 
+    def test_conditionally_skipped_deploy_job_still_deployed(self):
+        """A deploy-completing job that conditionally SKIPS (the owner's own
+        'Disable Maintenance Mode' skips when maintenance was never on) must
+        still count as done — else the watch silently degrades to run-terminal,
+        the exact overshoot #588 fixes. Requires >=1 real success in the set."""
+        run = {"status": "in_progress", "conclusion": None, "jobs": [
+            _job("Deploy to PROD", "success"),
+            _job("Disable Maintenance Mode", "skipped"),
+            _job("Smoke tests", "success"),
+            _job("PROD E2E Tests", None)]}
+        self.assertTrue(_classify(run).startswith("DEPLOYED"))
+
+    def test_all_skipped_deploy_set_is_not_deployed(self):
+        """If the WHOLE deploy set skipped, no deploy actually ran — the
+        any(success) guard must keep it out of DEPLOYED (never a false unblock
+        when nothing was deployed)."""
+        run = {"status": "completed", "conclusion": "success", "jobs": [
+            _job("Deploy to PROD", "skipped"),
+            _job("Disable Maintenance Mode", "skipped"),
+            _job("Smoke tests", "skipped")]}
+        self.assertFalse(_classify(run).startswith("DEPLOYED"))
+
 
 class TestRecipeDocumentsDeployedStateSemantics(unittest.TestCase):
     """Content-lock (#500 single-line teeth) on the non-executed prose that
