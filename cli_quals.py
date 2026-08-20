@@ -416,7 +416,22 @@ def _ticket_is_stream_labeled(labels):
 # raised (or, for needs-acceptance, after the work is DONE), so partitioning them
 # never risks a question going unasked (skills/autopilot/SKILL.md's Step-1
 # backlog-scope bullet, #468 reconciliation).
-USER_WAITING_LABELS = ("needs-answer", "needs-decision", "needs-acceptance")
+# #601: `needs-owner-action` — the OWNER must perform a physical/manual step
+# (come to the rig, do a hardware action, be present). The owner is NEVER a
+# third party, so an owner-blocked ticket belongs in `U` ("čo čaká na TEBA" —
+# a question, an approval, OR a physical/manual step), NEVER in `W` (which is
+# STRICTLY a third party / an external event MIMO ownera). Before #601 streams
+# parked such a ticket as `ops-wait` → W (the only park label they knew), the
+# doctrinal bug the owner ruled against (camera-box 2026-08-20). It is the
+# LOWEST-precedence user-waiting label (see `_user_waiting_reason`): answer/
+# decision/acceptance keep their #507/#526/#539 routing byte-exact, and `action`
+# only decides routing/tag when it is the SOLE user-waiting label. It is cleared
+# by the SUPERVISOR with evidence that the physical step was done (parallel to
+# `ops-wait`), NOT by the Discord-answer auto-clear (watchdog job 32 keys on
+# OWNER_DECISION_LABELS, which deliberately EXCLUDES it — an action is not a
+# decision to re-ask as a daily "please answer").
+USER_WAITING_LABELS = ("needs-answer", "needs-decision", "needs-acceptance",
+                       "needs-owner-action")
 
 # #512: the gk-processed / bounce labels that OVERRIDE a `needs-acceptance`
 # ticket's routing to the `U N` user-waiting bucket. A `needs-acceptance` ticket
@@ -485,9 +500,12 @@ def _row_is_user_waiting(labels):
     NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS label (a re-hand-off `ready-for-review`/
     `needs-gatekeeper`, or a returned `prio:bounce`) is NOT user-waiting — it
     stays `workable` so `_slice_mine_and_handed`'s `handed`/gk logic picks it up
-    (#507's precedence: "label wins", preserved). `needs-answer`/`needs-decision`
-    carry no such override (they are not hand-off states), so their #468 routing
-    is unchanged.
+    (#507's precedence: "label wins", preserved). `needs-answer`/`needs-decision`/
+    `needs-owner-action` carry no such override (they are not hand-off states),
+    so their routing is unchanged — `needs-owner-action` (#601) is
+    user-waiting=True unconditionally (an owner-blocked physical step is always
+    the owner's court; the acceptance-override applies to `needs-acceptance`
+    only).
 
     A missing/unreadable `labels` value reads as NOT user-waiting (→ workable) —
     the SAFE side: never hide a ticket from THIS box's own responsibility because
@@ -510,16 +528,25 @@ def _row_is_user_waiting(labels):
 
 def _user_waiting_reason(labels):
     """The plain-word REASON a row is user-waiting — `answer` (needs-answer),
-    `decision` (needs-decision), or `acceptance` (needs-acceptance) — for the
-    `--waiting` per-member reason tag (#512). Returns "" for a row that is not
-    user-waiting (defensive; callers only pass the `user_waiting` bucket). A row
-    carrying several user-waiting labels reports the FIRST by the fixed
-    precedence answer > decision > acceptance, so the tag is deterministic."""
+    `decision` (needs-decision), `acceptance` (needs-acceptance), or `action`
+    (needs-owner-action, #601) — for the `--waiting` per-member reason tag
+    (#512). Returns "" for a row that is not user-waiting (defensive; callers
+    only pass the `user_waiting` bucket). A row carrying several user-waiting
+    labels reports the FIRST by the fixed precedence answer > decision >
+    acceptance > action, so the tag is deterministic.
+
+    `action` is LAST on purpose (#601): answer/decision/acceptance have
+    established routing semantics (#507/#526/#539) that MUST stay byte-exact, so
+    `action` only decides the tag (and, via `_partition_workable`'s `else`
+    branch, the routing) when needs-owner-action is the SOLE user-waiting label.
+    A live owner QUESTION is the more time-sensitive of the two, so it is
+    surfaced first when a ticket carries both."""
     names = {(lb or {}).get("name") for lb in (labels or [])
              if isinstance(lb, dict)}
     for label, reason in (("needs-answer", "answer"),
                           ("needs-decision", "decision"),
-                          ("needs-acceptance", "acceptance")):
+                          ("needs-acceptance", "acceptance"),
+                          ("needs-owner-action", "action")):
         if label in names:
             return reason
     return ""
@@ -639,7 +666,21 @@ def _partition_workable(rows, acceptance_present=None):
     neither a live owner question (not U) nor a third-party wait (not W); it is
     Claude's own chained work → I. This enforces the owner-UX invariant "otázky
     na mňa?" never truthfully answers NIE while U > 0: a bare needs-acceptance
-    only reaches U once a draft was actually presented (a ❓ ping fired)."""
+    only reaches U once a draft was actually presented (a ❓ ping fired).
+
+    `needs-owner-action` (#601, the owner's own physical/manual step) routes to U
+    UNCONDITIONALLY via the `else` branch below — its reason is `action`, never
+    `acceptance`, so the acceptance-scoped W override and the #539 chained-I gate
+    both skip it. Two consequences the code makes structural: (1) an
+    owner-action + `ops-wait` row still lands in U (owner beats third-party
+    framing — the owner is not a third party); (2) an owner-action row NEVER
+    enters the `ops_wait` bucket, so the #570 stale! W-freshness path can never
+    touch it. There is NO chained-I analog for `action`: a physical owner step
+    is always the owner's court (→ U), never the stream's own deferrable work,
+    so it stays U even with an empty `acceptance_present` set. The
+    labelled-but-not-yet-announced defect is surfaced by the `no-action!`
+    display flag (`_no_question_flagged` + `_print_issue_rows`), not by a
+    routing-to-I gate."""
     workable, user_waiting, ops_wait = {}, {}, {}
     for number, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None
@@ -790,9 +831,14 @@ def _issue_question_comment_state(number, cwd=None):
 
 
 def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
-    """The set of `U`-member issue numbers to tag `no-question!` (#539,
-    mechanizing the #527 invariant "U > 0 ⟹ every U member carries a DELIVERED
-    question"). For each member of `rows` (the `user_waiting` bucket):
+    """The set of `U`-member issue numbers to tag `no-question!`/`no-action!`
+    (#539, mechanizing the #527 invariant "U > 0 ⟹ every U member carries a
+    DELIVERED question/notice"). For a `needs-owner-action` member (#601) the
+    "delivered question" IS a delivered ACTION notice — the SAME shape (a ❓ ping
+    in the map referencing `#N`, or a ❓-marked comment naming the step), so this
+    function needs NO action-specific branch; the display side (`_print_issue_
+    rows`) renders the flag as `no-action!` for an `action`-reason member. For
+    each member of `rows` (the `user_waiting` bucket):
 
       - covered if the question map references `#N`
         (`statusbar.question_map_ticket_refs`, the AUTHORITATIVE delivered-ping

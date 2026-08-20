@@ -479,7 +479,9 @@ _W_CLAUSE = (
     "pri parkovaní zapísal do komentára (odpoveď vo vlákne / vyšlý release = verzia "
     "ŽIVÁ na cieli: deploy-set zelený + priame čítanie verzie, NIE run-terminal — "
     "#588): ak už dorazil, zlož `ops-wait` s dôkazom a vráť tiket do práce; ak sa "
-    "stále čaká, potvrď to.")
+    "stále čaká, potvrď to. MIS-SHAPE (#601): ak je blocker OWNER (fyzický krok "
+    "pri rigu / jeho prítomnosť / manuálna akcia), NIE JE to W — prelabeluj "
+    "`needs-owner-action` a tiket sa presunie do U (owner nie je tretia strana).")
 
 # The #570 stale sub-clause — appended to the W clause when any parked W member
 # has gone COLD (no fresh ≤24h stream-push evidence: `stale!` in `--ops-wait`,

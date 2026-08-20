@@ -69,10 +69,12 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     `split("\\t", 1)[0]` number-parsing is unaffected.
 
     `flag_numbers` (#539, `--waiting` only): a set of `U`-member numbers that
-    carry NO delivered question — ` no-question!` is APPENDED to their reason
-    column (a space-separated warning WITHIN field 3, so the tab-field layout
-    is unchanged), mechanizing the #527 invariant. Only meaningful alongside
-    `reason_fn`.
+    carry NO delivered question/notice — ` no-question!` is APPENDED to their
+    reason column (a space-separated warning WITHIN field 3, so the tab-field
+    layout is unchanged), mechanizing the #527 invariant. For an `action`-reason
+    member (needs-owner-action, #601) the appended warning is ` no-action!`
+    instead — the missing signal is a delivered ACTION notice, not a question.
+    Only meaningful alongside `reason_fn`.
 
     `stale_numbers` (#570, `--ops-wait` only): a set of W-member numbers with
     NO fresh (≤24h) evidence of a stream push — ` stale!` is APPENDED to their
@@ -90,7 +92,11 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
         else:
             reason = reason_fn(row.get("labels"))
             if n in flag_numbers:
-                reason = (reason + " no-question!").strip()
+                # #601: an owner-action member's missing DELIVERED signal is a
+                # missing ACTION notice, not a missing question — render
+                # `no-action!` so the tag reads correctly for a physical step.
+                warn = " no-action!" if reason == "action" else " no-question!"
+                reason = (reason + warn).strip()
             if n in stale_numbers:
                 reason = (reason + " stale!").strip()
             print("%s\t%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
