@@ -28,7 +28,18 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   are themselves a mistake and will be renamed to <name>1 (airuleset #537:
   montalu→montalu1, david→david1, simap→simap1; marek stays unnumbered, unused,
   and does no client handovers), so every active handover stream ends with its
-  number and the rule is uniform.
+  number and the rule is uniform. **The name is at most ~30 CHARACTERS including
+  that trailing number** (airuleset #597, owner directive): a longer name is
+  truncated behind the Odoo Discuss sidebar's first page and the number — the
+  whole point — disappears from view (the owner kept hand-shortening them). Good:
+  „Oprava filtra rozmerov 2" (24). Too long: „Viditeľnosť leadov pre obchodníkov 2"
+  (36) — shorten to e.g. „Viditeľnosť leadov 2" (20). **The proposal you present
+  to the owner must ALREADY carry a name that satisfies BOTH conditions** (ends
+  with the stream number AND ≤ 30 chars) — never a long or un-numbered draft the
+  owner then has to fix. Both conditions are now HOOK-ENFORCED at create time
+  (`hooks/block-discuss-thread-name.sh`, airuleset #596/#597): a `discuss.channel`
+  create whose name breaks either condition is BLOCKED before it reaches PROD (a
+  `message_post` to an existing channel and a `write`/rename are never blocked).
 - **Every message ENDS with a stream-identity signature line.** The LAST line of
   EVERY message body is `ZbynekAI <N>`, so the owner sees at a glance WHICH stream
   sent it and where to go resolve what the thread discusses (owner request,
