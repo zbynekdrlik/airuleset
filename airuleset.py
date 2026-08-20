@@ -954,17 +954,19 @@ def cmd_install(args):
     # identical frame-stacking mechanism also fires on every per-attach
     # resize from a different-sized terminal, not just scrollback rotation.
     # #236 originally also shipped `window-size manual`; #241 removed it
-    # again -- it crashes tmux 3.4's server outright at startup (every
-    # managed box's version) -- so only history-limit + default-size ship
-    # now. history-limit alone is live-applied to any RUNNING tmux server
-    # (#235's original, proven-safe scope); default-size is conf-only and
-    # takes effect for the next server/session (see apply_tmux_history_
+    # (it crashes tmux 3.4 at conf-parse startup); #586 RESTORED it
+    # VERSION-GATED + conf-only -- emitted only on a box whose PATH tmux is
+    # >= 3.5 (dev1 is 3.7b via the #242 cutover; a 3.4 box never gets it).
+    # history-limit alone is live-applied to any RUNNING tmux server (#235's
+    # original, proven-safe scope); default-size AND window-size are conf-only
+    # and take effect for the next server/session (see apply_tmux_history_
     # limit's own docstring, and the module-level comment above
     # render_tmux_history_block, for the full history).
     try:
         tmux_changed = apply_tmux_history_limit()
         tmux_desc = (f"history-limit {TMUX_HISTORY_LIMIT}, "
-                     f"default-size {TMUX_DEFAULT_SIZE}")
+                     f"default-size {TMUX_DEFAULT_SIZE}, "
+                     f"window-size manual (tmux>=3.5 only)")
         if tmux_changed:
             print(f"  Updated:   {TMUX_CONF} ({tmux_desc})")
         else:

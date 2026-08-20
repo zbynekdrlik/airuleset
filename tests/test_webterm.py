@@ -799,6 +799,16 @@ class TestAllTabsPreloaded(unittest.TestCase):
         self.assertNotIn(".src", body,
                          "activate() must not navigate any iframe (pure show/hide)")
 
+    def test_exactly_one_iframe_src_assignment_in_the_whole_script(self):
+        # #586 review 🔵: the activate-body check catches a regression that
+        # navigates INSIDE activate, but a differently-named nav helper (e.g.
+        # reconnect(f,s){ f.src=... } called from activate) would evade it.
+        # Close it whole-script: the ONLY place an iframe src is (re)assigned is
+        # makeFrame's initial connect — exactly ONE `.src =` in the script.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        script = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+        self.assertEqual(script.count(".src ="), 1)
+
     def test_hint_documents_preloaded_instant_switching(self):
         # The owner-facing hint must state tabs are preloaded + switching is
         # instant with no reconnect (the #585 "odpojí/obnoví" line is gone).

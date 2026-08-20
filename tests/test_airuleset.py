@@ -4885,11 +4885,13 @@ class TestTmuxHistoryLimit(TestCase):
     made real scrollback holey within minutes under agentic load -- measured
     live: active panes saturated at ~1940/2000), PLUS default-size 176x50
     (#236: the fixed size new windows get). #236 originally also shipped
-    `window-size manual`, but #241 found it CRASHES tmux 3.4's server at
-    startup outright (`server exited unexpectedly`) -- confirmed live
-    against the real 3.4 binary every managed box runs, the only version
-    Ubuntu 24.04 noble ships -- so it was removed at the source; see
-    TestTmuxWindowSizeRemoved below for the dedicated lock. Same idempotent-
+    `window-size manual`; #241 removed it (it CRASHES tmux 3.4's server at
+    conf-parse startup, `server exited unexpectedly`); #586 RESTORED it
+    VERSION-GATED + conf-only -- emitted ONLY when the PATH `tmux -V` reads
+    >= 3.5 (so a 3.4 box never gets the crashing line). See
+    TestTmuxWindowSizeVersionGated (the version-gate) and
+    TestTmuxWindowSizeRemoved (the fail-closed / never-live-applied lock)
+    below. Same idempotent-
     marker-block shape as apply_ultracode_launcher (#77) -- create if
     missing, rewrite CONTENT in place if present, never touch anything
     outside the markers -- plus a live-apply on any running tmux server via

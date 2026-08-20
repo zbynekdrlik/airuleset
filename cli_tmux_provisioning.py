@@ -572,11 +572,14 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
                               run=None) -> bool:
     """Ensure `~/.tmux.conf` carries the managed tmux block: history-limit
     (#235), destroy-unattached (#254), and default-size (#236).
-    `window-size manual` was REMOVED again by #241 -- it crashes tmux
-    3.4's server outright at startup, so it is never emitted here at all,
-    conf-only or otherwise (see the module-level comment above
-    `render_tmux_history_block` for the full incident history and the
-    `default-size`-alone trade-off this leaves).
+    `window-size manual` (#586) is emitted too, but ONLY VERSION-GATED and
+    CONF-ONLY: this probes the PATH `tmux -V` once via `run`
+    (`_tmux_supports_window_size_manual`) and includes the line ONLY when the
+    reading tmux is >= _MIN_WINDOW_SIZE_MANUAL_VERSION -- a box on tmux 3.4, or
+    one whose version cannot be read, NEVER receives it (it crashes 3.4 at
+    conf-parse startup, #241). It is never live-applied, so no #236 live-apply
+    resize hazard on any box (see the module-level comment above
+    `render_tmux_history_block` for the full incident history).
 
     Idempotent marker block: create the file if absent, rewrite ONLY the
     block's CONTENT in place if a clean pair of markers already exists
