@@ -431,6 +431,50 @@ class TestOrchestrator(_OrchBase):
         self.assertNotIn(self.sid, handled)
 
 
+class TestBusyPaneRefire594(_OrchBase):
+    """#594 root cause A — a nudge DELIVERED once (box cleared, message
+    submitted/queued into an actively-cycling armed `/goal` loop) whose
+    transcript confirmation RACED must NOT re-deliver on every later sweep."""
+
+    def _tmux_unconfirmed(self):
+        # transcript_path=None models the busy-pane / cycling-armed-loop case:
+        # the Enter SUBMITS (clears the box — delivered/queued) but writes NO
+        # `user` turn to the transcript in the window, so `_await_submit_confirmed`
+        # fails and `send_verified` returns False despite the delivery.
+        return DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=None)
+
+    def test_delivered_unconfirmed_holds_dedup_across_sweeps(self):
+        # RED before the fix: 3 sweeps -> 3 deliveries (last_nudge never advances
+        # because it was recorded ONLY on a transcript-CONFIRMED submit). GREEN:
+        # ONE delivery, last_nudge advanced, the busy-pane retry spam stopped.
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        state = {}
+        tmux = self._tmux_unconfirmed()
+        for _ in range(3):
+            owr.goal_ops_wait_recheck(
+                NOW, tmux, wrecs, self.sid, self.CWD, "%9", self.tpath, "sess:0",
+                False, set(), ops_wait_fetch=lambda cwd: [41], state=state,
+                sleep_fn=lambda *a, **k: None, cadence=CAD, i_count=0)
+        deliveries = [t for t in tmux.typed_texts() if "stuck-check" in t]
+        self.assertEqual(len(deliveries), 1,
+                         "a delivered-but-unconfirmed nudge must NOT re-deliver "
+                         "across sweeps (busy-pane retry spam, #594): got %d"
+                         % len(deliveries))
+        self.assertEqual(wrecs[self.sid]["last_nudge"], NOW)
+
+    def test_genuine_swallow_still_retries(self):
+        # The #594 fix must NOT regress the genuine-swallow retry: a swallowed
+        # Enter (text stuck -> corrective -> undone, NEVER delivered) leaves
+        # last_nudge unadvanced so the nudge retries next sweep.
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        tmux = self._tmux(enters_swallowed=99)
+        logs = self._run(wrecs, lambda cwd: [41], tmux, handled=set(), state={})
+        self.assertTrue(any("submit-unverified" in ln for ln in logs))
+        self.assertIsNone(wrecs[self.sid]["last_nudge"])
+
+
 class TestNudgeText(unittest.TestCase):
     """#552 — the composed partition-audit text: the I clause when I>0, the W
     clause (names + truthful park age) when W non-empty, both when both, and a
