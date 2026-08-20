@@ -188,6 +188,47 @@ class RuntimeDepsCheck(unittest.TestCase):
             airuleset.check_runtime_deps()
         self.assertEqual(run.call_count, 1, run.call_args_list)
 
+    def test_pdftoppm_is_a_tracked_dependency(self):
+        # #600: Claude's Read tool shells out to `pdftoppm` (from the
+        # poppler-utils apt package) to render PDF pages. A no-sudo subdev
+        # box (montalu1) lacked it, so RUNTIME_DEPS never provisioned or
+        # verified it and PDF reads silently failed (odoo-erp#4634).
+        self.assertIn("pdftoppm", airuleset.RUNTIME_DEPS)
+
+    def test_pdftoppm_install_uses_the_poppler_utils_apt_package(self):
+        # #600: the `pdftoppm` binary ships inside the "poppler-utils" apt
+        # package — there is no package literally named "pdftoppm" — so the
+        # install must name poppler-utils, exactly like node/npx -> nodejs.
+        seen_argv = []
+
+        def run(argv, **kw):
+            seen_argv.append(argv)
+            return m.Mock(returncode=0)
+
+        with m.patch("shutil.which",
+                     side_effect=lambda d: None if d == "pdftoppm" else "/usr/bin/" + d), \
+                m.patch("subprocess.run", side_effect=run):
+            airuleset.check_runtime_deps()
+        poppler_calls = [a for a in seen_argv if "poppler-utils" in a]
+        self.assertTrue(poppler_calls, seen_argv)
+        for argv in poppler_calls:
+            self.assertNotIn("pdftoppm", argv, argv)
+
+    def test_pdftoppm_missing_warning_names_the_poppler_utils_apt_package(self):
+        # #600 (mutation guard, mirroring the npx warning test): when the
+        # install fails on a no-sudo box, the LOUD remediation text must name
+        # the apt PACKAGE (poppler-utils), never the raw binary (pdftoppm —
+        # not a real apt package at all, a dead-end instruction).
+        with m.patch("shutil.which",
+                     side_effect=lambda d: None if d == "pdftoppm" else "/usr/bin/" + d), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=1)):
+            out = StringIO()
+            with m.patch("sys.stdout", out):
+                missing = airuleset.check_runtime_deps()
+        self.assertIn("pdftoppm", missing)
+        self.assertIn("apt-get install poppler-utils", out.getvalue())
+        self.assertNotIn("apt-get install pdftoppm", out.getvalue())
+
 
 class SudoLessToolRequestPath(unittest.TestCase):
     """#98: a sub-dev box (david/marek/montalu) has NO sudo, so
