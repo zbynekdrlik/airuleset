@@ -8,6 +8,7 @@ unit rendering, and the dev1-only provisioning gate.
 """
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -284,9 +285,16 @@ class TestAttachSnippetBehavior(unittest.TestCase):
     """#584: standard tmux multi-attach that NEVER disturbs an existing client.
     Run the REAL _ATTACH_BODY against a logging fake tmux and prove: an existing
     session is JOINED via a throwaway GROUPED clone (independent view, cleaned
-    up on disconnect, base never touched), the window sizes to the ACTIVE client
-    (window-size latest + aggressive-resize on), and `attach -d` (the only verb
-    that detaches other clients) is NEVER used."""
+    up on disconnect, base never touched), and `attach -d` (the only verb that
+    detaches other clients) is NEVER used. #586: the webterm client no longer
+    forces ANY window-size policy on the target -- it drops the #584 `-gw
+    window-size latest` + `aggressive-resize on` overrides (that was the ROOT
+    regression: `latest` shrinks the shared window to whoever is active, so a
+    small webterm client blackens the owner's WT view) and instead attaches the
+    clone with the `ignore-size` CLIENT flag, so the webterm client can NEVER
+    influence window sizing regardless of the target's own window-size policy
+    (belt-and-suspenders on top of the fleet-wide `window-size manual`, which is
+    the primary fix in cli_tmux_provisioning)."""
 
     def setUp(self):
         import subprocess
@@ -333,13 +341,33 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # never a kill of the bare base session (either `=zbynek-4` or `zbynek-4`)
         self.assertNotRegex(log, r"kill-session -t =?zbynek-4(?!-web)")
 
-    def test_sizes_window_to_active_client(self):
-        # window-size latest + aggressive-resize on -> the shared window sizes to
-        # whoever is actively viewing, never the smallest client (the owner's WT
-        # view can't be shrunk by a small web client).
+    def test_does_not_force_any_window_size_policy_on_the_target(self):
+        # #586: the ROOT regression was `-gw window-size latest` (+ aggressive-
+        # resize) — that shrinks the shared window to the active client, so a
+        # small webterm client blackens the owner's WT choose-tree. The webterm
+        # client must set NEITHER: the target's own managed conf (window-size
+        # manual on a supported box) governs, and ignore-size on the clone is
+        # the client-level belt-and-suspenders.
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertIn("window-size latest", log)
-        self.assertIn("aggressive-resize on", log)
+        self.assertNotIn("window-size latest", log)
+        self.assertNotIn("aggressive-resize", log)
+
+    def test_clone_attaches_with_ignore_size_client_flag(self):
+        # #586: the grouped clone carries `-f ignore-size` so it can NEVER
+        # resize the shared window (verified live: under `window-size latest` a
+        # clone with ignore-size held the WT window at its size, without it the
+        # window shrank to the small client). The base's own `new-session -A`
+        # fallback (no existing session) must NOT carry it — that client IS the
+        # owner's real view.
+        log = self._run("zbynek", "zbynek::zbynek-4")
+        self.assertRegex(log, r"new-session -t zbynek-4 -s zbynek-4-web-\d+ -f ignore-size")
+
+    def test_fresh_base_session_is_not_ignore_size(self):
+        # No existing session -> the owner's own base is created; it is the real
+        # viewing client, so it must NOT be ignore-size (only the throwaway
+        # webterm clone is).
+        log = self._run("zbynek", "")
+        self.assertNotIn("ignore-size", log)
 
     def test_no_sessions_creates_preferred_and_does_not_kill_it(self):
         # No existing session -> create the owner's own base, which must PERSIST
@@ -717,57 +745,78 @@ class TestSameOriginKeyboard(unittest.TestCase):
         self.assertIn("klik", hint.lower())
 
 
-class TestHiddenTabDisconnect(unittest.TestCase):
-    """#585 (a): a hidden webterm tab must NOT influence the base tmux session's
-    shared window size. Root cause (reproduced live): grouped sessions share a
-    window whose size follows `window-size latest` = the most-recently-active
-    client; a hidden iframe stays an ATTACHED client and, when its xterm reports
-    a shrunken viewport, shrinks the window the owner's WT client is viewing
-    (Ctrl+B W = a tiny/blank choose-tree). Fix: only the VISIBLE tab keeps a live
-    terminal client — every hidden tab is disconnected (its throwaway clone dies
-    on WS close), reconnecting on return (scrollback lives in tmux, not the
-    browser)."""
+class TestAllTabsPreloaded(unittest.TestCase):
+    """#586: SUPERSEDES #585's disconnect-on-hide. #585 disconnected every hidden
+    tab (about:blank) so it could not shrink the shared window under `window-size
+    latest` — but that made switching slow (reconnect on every switch, a refresh
+    feel) AND caused a "Leave site?" dialog on every tab click (navigating the
+    iframe to about:blank unloads ttyd's page, firing ttyd's OWN beforeunload).
+    #586 fixes the SIZING at the source instead (fleet-wide `window-size manual`
+    + the clone's `ignore-size` flag — cli_tmux_provisioning + _ATTACH_BODY), so
+    a hidden tab no longer NEEDS disconnecting. All tabs PRELOAD at login and
+    stay connected; switching is pure show/hide (instant, no reconnect, no iframe
+    navigation, so no beforeunload dialog on a tab click)."""
 
     def _inv(self, n=3):
         return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
                  "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
                 for i in range(1, n + 1)]
 
-    def test_activate_disconnects_hidden_and_reconnects_visible(self):
-        # The invariant loop: for each made iframe, connect+show the active idx,
-        # suspend+hide every other. A hidden tab is suspended to about:blank so
-        # it is no longer an attached tmux client (cannot drive window sizing).
+    def test_no_disconnect_on_hide_suspend_or_about_blank(self):
+        # The #585 disconnect mechanism is GONE — no suspend(), no about:blank
+        # navigation (that navigation was the ROOT of both the slow-switch feel
+        # and the Leave-site dialog on tab click).
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertIn("function suspend(", html)
-        self.assertIn("function connect(", html)
-        self.assertIn("about:blank", html)            # disconnect target
-        self.assertIn("dataset.live", html)           # live/suspended state marker
-        # the invariant is wired INSIDE activate: connect the visible, suspend others
-        self.assertIn("connect(made[k]", html)
-        self.assertIn("suspend(made[k]", html)
-        # DIRECTION matters (both #585 reviewers 🔵): a swapped branch — connect the
-        # HIDDEN tabs, suspend the VISIBLE one — would still contain both tokens.
-        # Assert the ACTIVE branch (`+k === idx`) connects+shows and the `else`
-        # branch suspends+hides, so a direction swap regresses this test.
-        self.assertRegex(
-            html,
-            r"if\s*\(\s*\+k === idx\s*\)\s*\{\s*connect\(made\[k\][^}]*?'block'[^}]*?\}"
-            r"\s*else\s*\{\s*suspend\(made\[k\][^}]*?'none'")
+        self.assertNotIn("function suspend(", html)
+        self.assertNotIn("about:blank", html)
 
-    def test_reconnect_ux_and_scrollback_documented(self):
-        # The reconnect UX + "nothing lost" claim must be surfaced to the owner
-        # (scrollback lives in tmux, so a disconnect/reconnect loses nothing).
+    def test_all_tabs_preloaded_and_connected_at_login(self):
+        # Every tab's iframe is created AND connected up front (keepalive), not
+        # lazily on first activation — so a switch never has to (re)connect.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("function preloadAll(", html)   # the preload helper
+        self.assertIn("preloadAll()", html)           # it is actually CALLED
+        self.assertIn("ttydSrc(", html)               # each frame gets a real src
+
+    def test_switch_is_pure_show_hide_no_src_change_inside_activate(self):
+        # activate() must ONLY toggle display (block/none) — never reassign an
+        # iframe's src (that would be a reconnect/navigation, and a navigation is
+        # exactly what fired the Leave-site dialog in #585). Isolate the
+        # activate() body and prove: it toggles display on the +k===idx test and
+        # never touches `.src`.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        m = re.search(r"function activate\(idx\)\s*\{(.*?)\n\}", html, re.S)
+        self.assertIsNotNone(m, "activate() body not found")
+        body = m.group(1)
+        self.assertIn("+k === idx", body)     # the show/hide branch key
+        self.assertIn("'block'", body)        # active tab shown
+        self.assertIn("'none'", body)         # others hidden
+        # #586: switching must NOT (re)connect or suspend any iframe — those were
+        # the #585 navigations that made switching slow AND fired the Leave-site
+        # dialog. Pure display toggle only.
+        self.assertNotIn("suspend(", body)
+        self.assertNotIn("connect(", body)
+        self.assertNotIn(".src", body,
+                         "activate() must not navigate any iframe (pure show/hide)")
+
+    def test_exactly_one_iframe_src_assignment_in_the_whole_script(self):
+        # #586 review 🔵: the activate-body check catches a regression that
+        # navigates INSIDE activate, but a differently-named nav helper (e.g.
+        # reconnect(f,s){ f.src=... } called from activate) would evade it.
+        # Close it whole-script: the ONLY place an iframe src is (re)assigned is
+        # makeFrame's initial connect — exactly ONE `.src =` in the script.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        script = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+        self.assertEqual(script.count(".src ="), 1)
+
+    def test_hint_documents_preloaded_instant_switching(self):
+        # The owner-facing hint must state tabs are preloaded + switching is
+        # instant with no reconnect (the #585 "odpojí/obnoví" line is gone).
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
-        self.assertIn("tmux", hint.lower())           # scrollback lives in tmux
-        self.assertTrue("odpojí" in hint or "obnov" in hint,  # reconnect UX advertised
-                        "hint must document the disconnect/reconnect behavior")
-
-    def test_visible_tab_is_never_needlessly_reloaded(self):
-        # connect() must early-return when already live, so re-activating the
-        # SAME tab does not reload it (a reload would flash + churn the clone).
-        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertRegex(html, r"dataset\.live\s*===\s*'1'")   # the already-live guard
+        self.assertNotIn("odpojí", hint)              # no disconnect language
+        self.assertTrue("prednač" in hint.lower() or "instant" in hint.lower(),
+                        "hint must advertise preloaded/instant switching")
 
 
 class TestCtrlWProtection(unittest.TestCase):
@@ -828,6 +877,21 @@ class TestCtrlWProtection(unittest.TestCase):
         html = w.render_dashboard_html(inv, ttyd_base="/t")
         self.assertNotIn("</script><script>", html)
         self.assertEqual(html.count('"ttyd_base"'), 1)
+
+    def test_beforeunload_fires_only_on_real_close_never_on_tab_switch(self):
+        # #586: with the #585 iframe-navigation (about:blank suspend) gone, a tab
+        # switch never unloads any ttyd frame, so ttyd's own beforeunload never
+        # fires on a tab click (the "Leave site?" dialog the owner reported). The
+        # PAGE's OWN beforeunload is still armed — gated on a live terminal — so a
+        # real window/tab close with a live session still confirms. Structural
+        # proof here (behavioural proof is the live jsdom run): exactly ONE
+        # beforeunload handler, gated on hasLiveTerminal, and activate() performs
+        # no navigation (locked by TestAllTabsPreloaded).
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertEqual(html.count("'beforeunload'"), 1)  # exactly one, the page's
+        # the single beforeunload consults the live-terminal gate
+        self.assertRegex(html, r"addEventListener\('beforeunload',[^)]*\)")
+        self.assertIn("if (!hasLiveTerminal()) return;", html)
 
 
 if __name__ == "__main__":

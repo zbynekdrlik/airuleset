@@ -480,6 +480,48 @@ class TestGatewayIntegration(unittest.TestCase):
                 await self._teardown(h)
         _run(go())
 
+    def test_gateway_handles_21_concurrent_ws_relays(self):
+        # #586: preloading ALL tabs at login opens ~21 simultaneous WS relays
+        # (one per fleet session, vs #585's one-at-a-time visible tab). Prove the
+        # stdlib-asyncio transparent proxy sustains 21 concurrent UPGRADED relays,
+        # each held open at once and independently echoing its own payload.
+        async def go():
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions)
+            try:
+                tok = sessions.create()
+                N = 21
+                conns = []
+                for _i in range(N):
+                    reader, writer = await asyncio.open_connection("127.0.0.1", h.port)
+                    req = (b"GET /t/ws HTTP/1.1\r\nHost: x\r\n"
+                           b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                           b"Sec-WebSocket-Version: 13\r\n"
+                           b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                           b"Origin: " + h.origin.encode() + b"\r\n"
+                           b"Cookie: webterm_session=" + tok.encode() + b"\r\n\r\n")
+                    writer.write(req)
+                    await writer.drain()
+                    conns.append((reader, writer))
+                # ALL upgraded — held open concurrently (none closed to make room)
+                for reader, writer in conns:
+                    head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"),
+                                                  timeout=5)
+                    self.assertIn(b"101", head)
+                # each relay independently echoes its own distinct payload
+                for i, (reader, writer) in enumerate(conns):
+                    writer.write(b"m%02d" % i)
+                    await writer.drain()
+                for i, (reader, writer) in enumerate(conns):
+                    echoed = await asyncio.wait_for(
+                        reader.readexactly(len(b"ECHO:m00")), timeout=5)
+                    self.assertEqual(echoed, b"ECHO:m%02d" % i)
+                for reader, writer in conns:
+                    writer.close()
+            finally:
+                await self._teardown(h)
+        _run(go())
+
     def test_ws_cross_origin_refused_cswsh(self):
         async def go():
             sessions = g.SessionStore()
