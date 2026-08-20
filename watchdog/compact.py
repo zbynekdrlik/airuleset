@@ -29,19 +29,27 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
 
   DELIVERY — ONE function, `deliver_compact()`. It checks, in order:
             (a) the pane is idle, with no unsent draft and no open dialog;
-            (b) the session has no live background tasks of its own;
-            (c) the session's last real turn is not a `⏳`/`❓` marker, AND
-                is not stuck on an unread API error (#188 — a proven
+            (b) the session has no live background tasks of its own — neither a
+                dispatched worker lane (`count_live_workers`) NOR a live
+                `run_in_background` Bash job (#599: a START with no completion
+                notification in the transcript tail; a `/compact` would orphan
+                its completion notification, the #29193 class);
+            (c) the session's last real turn is not a `❓` marker (blocked on
+                the user — #333/#228; the `⏳` marker NO LONGER blocks, #599),
+                AND is not stuck on an unread API error (#188 — a proven
                 boundary whose worker result the supervisor has
                 demonstrably not consumed yet);
             (d) at least `COMPACT_MIN_DELIVERY_INTERVAL_S` (30 min) has
                 passed since the last REAL `/compact` delivered to this
                 session;
             (e) the request itself is not older than
-                `COMPACT_REQUEST_MAX_AGE_S`, anchored at FIRST-seen —
-                never refreshed by a later re-record (the exact #400 fix:
-                a refreshable anchor is how an 11-hour-stale request once
-                survived).
+                `COMPACT_REQUEST_MAX_AGE_S`, anchored at the LAST boundary
+                record — REFRESHED by every re-record (#599 supersede,
+                REVERSING #400's non-refreshable anchor: the strong direct
+                delivery conditions now replace the marker proxy the age cap
+                used to backstop, so the cap measures "time since the LAST
+                boundary" — a busy loop's request holds until delivered while a
+                gone-quiet session's ages out after 30 min of no new boundary).
             Two more checks ride along, both closing real previously-live
             production incidents scoped to the two proven origins, not
             merely the 5 named above: the user must not be actively
@@ -51,24 +59,19 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
             a loop) against the same-turn-dispatch race (#238): a sibling
             worker dispatched in the very same turn can be briefly
             invisible to the live-tasks signals.
-            Every condition above is an UNCONDITIONAL hard skip — none of
-            them has a TIME-BOXED override any more (the #400 fix this
-            collapse builds on removed the two that used to: the
-            live-tasks defer's "deliver anyway past grace" escape, and the
-            `⏳`/`❓` marker's "hold-grace" escape). Condition (c)'s `⏳`
-            veto carries ONE narrow, EVIDENCE-based (never time-boxed)
-            exemption (#425): when `origin` is `self-callback` AND the
-            SAME last-real-turn text that carries the `⏳` marker ALSO
-            contains the canonical `## ✅ Work Complete` heading, the `⏳`
-            check stands down for THAT evaluation — see
-            `_compact_self_reported_complete`'s own docstring for the full
-            reasoning (a fable-advisor-reviewed decision). Condition (b)'s
-            live-tasks veto NO LONGER carries this exemption (#565): a
-            per-ticket Work Complete boundary is for THAT lane only, so it
-            must never override a DETECTED live sibling lane (the incident:
-            one self-callback compact orphaned ~10 live worker lanes). `❓`
-            is NEVER exempted, under any origin or any content, ever (#333).
-            All pass → type
+            Every condition above is an UNCONDITIONAL hard skip — none has a
+            TIME-BOXED override. #599 removed condition (c)'s `⏳` veto
+            ENTIRELY (and with it the self-callback-only #425 exemption and its
+            `_compact_self_reported_*` machinery): a recorded boundary request
+            already PROVES a boundary occurred, and a 24/7 loop moves on to `⏳`
+            within seconds, so the marker is no longer a delivery proxy — the
+            DIRECT live-work conditions ((a)/(b)) are. (#565 had already removed
+            the same exemption from condition (b)'s live-tasks veto — a
+            per-ticket boundary must never override a DETECTED live sibling
+            lane; #599 finishes the job on (c).) `❓` is NEVER exempted, under
+            any origin or content, ever (#333/#228 — the session is
+            mid-decision; the pending question + the in-flight ticket the
+            user's answer needs would be lost). All pass → type
             `/compact`, log `SEND`, clear the request. Any check fails →
             log `SKIP reason=<x>`, and the request is LEFT PENDING for the
             next periodic sweep (`compact_sweep`, below) to re-evaluate —
@@ -173,70 +176,53 @@ def _save_compact_requests(d, path=None):
 
 
 def record_compact_request(session, cwd, now=None, path=None, origin=None):
-    """Record a pending `/compact` request for `session` — called ONLY by
-    the two proven origins (`compact-request --self` /
-    `compact-request --record --origin subagent-stop`). Overwrites any
-    earlier pending request for the SAME session, except its `ts`: `ts` is
-    set ONCE, on the call that CREATES the entry, and preserved
-    UNCONDITIONALLY on every later re-record for the same still-pending
-    session (`cwd` always takes the newest call's value). This is
-    the #400 non-refreshable age-cap invariant — a request whose anchor
-    can be refreshed by an ordinary re-record never actually ages out, no
-    matter how stale it genuinely is. Fail-safe (never raises). Returns
-    True on success.
+    """Record / SUPERSEDE the pending `/compact` request for `session` — called
+    ONLY by the two proven origins (`compact-request --self` /
+    `--record --origin subagent-stop`). Overwrites any earlier pending request
+    for the SAME session, INCLUDING its `ts`: `ts` is set to `now` on EVERY
+    record (the #599 SUPERSEDE rule, REVERSING #400's non-refreshable anchor).
+    Dedup is 1-pending-per-session (the dict is keyed by session). `cwd` and
+    `origin` both take the newest call's value. Fail-safe (never raises).
+    Returns True on success.
 
-    ORIGIN NEVER DOWNGRADES FROM `self-callback` (#402-review MAJOR-1).
-    The SubagentStop hook fires under the SUPERVISOR's own sid on every
-    worker return — routine in #317's parallel-round shape — and can
-    re-record a STILL-PENDING self-callback request with
-    origin="subagent-stop" (or a blank/None origin) before it is ever
-    delivered. `origin` otherwise "always takes the newest call's value"
-    (per the paragraph above, unchanged for every OTHER pairing), which
-    would silently strip the #425 exemption from a turn that genuinely
-    earned it (own "## Work Complete" heading + trailing "more workers
-    still dispatched" tail) — live-confirmed on this box's own real
-    `~/.claude/compact-requests.json`. A later self-callback re-record
-    still correctly UPGRADES a pending subagent-stop/blank origin (this
-    is unaffected — the newest-value rule still applies in that
-    direction); only a self-callback -> anything-else transition on an
-    ALREADY-pending entry is refused.
+    WHY #400 IS REVERSED (design comment on #599). #400 made the anchor
+    non-refreshable because a request kept alive forever could deliver
+    `/compact` at a much-later INAPPROPRIATE moment — but that hazard existed
+    only because the delivery logic then relied on the boundary MARKER still
+    being present (a proxy for "still an appropriate moment"). #599 replaces
+    that proxy with the DIRECT delivery conditions (pane idle, no live worker,
+    no live bg-bash, no draft, no recent-human, not `❓`), so an appropriate
+    moment is checked directly AT DELIVERY — the age cap no longer has to be the
+    safety mechanism. A recorded boundary request is now a STANDING claim: it
+    HOLDS until delivered or SUPERSEDED by a newer boundary of the same session,
+    not discarded by an arbitrary timeout that a 24/7 loop's boundaries never
+    align with (cambox: 244 SKIP / 0 SEND). The 30-min `COMPACT_REQUEST_MAX_AGE_S`
+    cap stays, but with `ts` refreshing on every genuine boundary it now measures
+    "time since the LAST boundary" — on a busy loop (a boundary every few
+    minutes) it never bites (holds until delivered); on a GONE-QUIET session
+    (loop stopped) it discards a stale request after 30 min of no new boundary.
+    THAT is how a SEND happens on a saturated loop: the anchor keeps refreshing,
+    the request never expires while the loop is alive, and it delivers at the
+    first safe moment (measured frequent: ~71% of trailing windows are free of
+    live bg-bash, plus idle-between-turns is constant). The #400 text-sniffing
+    trigger that could refresh a request forever is separately, structurally
+    gone (retired to a permanent no-op); the only re-records now are genuine
+    boundaries, which SHOULD supersede.
 
-    #402-review MINOR-2 was CONSIDERED and REJECTED here, deliberately: a
-    re-record landing on an already-EXPIRED prior entry (>
-    `COMPACT_REQUEST_MAX_AGE_S` old) does briefly inherit that dead
-    anchor and get discarded on its OWN synchronous evaluation without
-    ever really being evaluated — but only within the narrow window
-    before `deliver_compact`'s condition (e) is next checked (a hard,
-    unconditional, no-pane-resolution-needed FIRST check, in both the
-    synchronous attempt and `compact_sweep`'s own ~60s cadence), which
-    clears the stale entry outright. The NEXT genuine boundary event
-    after that lands on a cleared entry and gets a genuinely fresh `ts`.
-    A gated "reset ts when the prior entry is already expired" fix was
-    drafted and then reverted: it directly reproduces a WEAKER form of
-    the #400 bug it was meant to avoid (a session producing boundary
-    events more often than `COMPACT_REQUEST_MAX_AGE_S` apart, forever,
-    can keep resetting the anchor just past each expiry and never let
-    condition (e) actually fire) and collides with this function's own
-    pre-existing, deliberately-locked #400 regression test
-    (`test_ts_is_never_refreshed_across_a_re_record`, which the fix
-    cannot pass without weakening). The residual (a single record call's
-    own synchronous attempt occasionally reporting a spurious "expired"
-    inside that <=60s window) is self-healing and narrower than the
-    reset would have been unsafe."""
+    ORIGIN takes the newest value (#599): the #402-era "origin never downgrades
+    from self-callback" protection is REMOVED with the #425 `⏳` exemption it
+    existed to guard — #599 drops that exemption entirely, so no origin is
+    second-class any more (point 4). Both record sites always pass a proven
+    origin, so the stored origin stays proven in practice, and
+    `_compact_session_unresumed`'s proven-origin gate keeps working across a
+    self-callback <-> subagent-stop supersede (both are proven)."""
     session = str(session or "").strip()
     if not session:
         return False
     now = time.time() if now is None else now
     d = load_compact_requests(path)
-    prior = d.get(session)
-    ts = prior.get("ts") if isinstance(prior, dict) and prior.get("ts") is not None \
-        else int(now)
-    new_origin = str(origin or "").strip()
-    prior_origin = prior.get("origin") if isinstance(prior, dict) else None
-    if prior_origin == _COMPACT_SELF_CALLBACK_ORIGIN \
-            and new_origin != _COMPACT_SELF_CALLBACK_ORIGIN:
-        new_origin = prior_origin
-    d[session] = {"cwd": str(cwd or ""), "ts": ts, "origin": new_origin}
+    d[session] = {"cwd": str(cwd or ""), "ts": int(now),
+                  "origin": str(origin or "").strip()}
     return _save_compact_requests(d, path)
 
 
@@ -393,161 +379,56 @@ _COMPACT_SELF_CALLBACK_ORIGIN = "self-callback"
 _COMPACT_PROVEN_BOUNDARY_ORIGINS = frozenset(
     (_COMPACT_PROVEN_BOUNDARY_ORIGIN, _COMPACT_SELF_CALLBACK_ORIGIN))
 
-# `⏳` (still working) and `❓` (blocked on the user) both positively say
-# "this is not a completed-ticket boundary" — `❓` is NEVER relaxed for
-# either origin, at any content, ever (genuinely undurable state either
-# way; see #333's own live forensic evidence for why an earlier per-origin
-# relaxation was reversed). `⏳` gets exactly ONE narrow, evidence-based
-# exemption — see `_compact_self_reported_complete` below (#425).
-_COMPACT_NON_BOUNDARY_MARKERS = ("❓", "⏳")
+# The ONLY marker that still vetoes condition (c) after #599: `❓` (blocked on
+# the user) is genuinely undurable state — the session is mid-decision, and the
+# pending question + the in-flight ticket the user's answer needs would be lost
+# by a compaction (the #228 hazard) — so it is NEVER relaxed, under any origin
+# or content, ever (#333's own live forensic evidence for why an earlier
+# per-origin relaxation was reversed). The `⏳` marker NO LONGER vetoes (#599):
+# a recorded boundary request already PROVES a boundary occurred (durable state
+# in git/GitHub), and a 24/7 loop moves on to `⏳` within seconds; safety at the
+# delivery instant is held by the DIRECT live-work conditions (pane idle/busy,
+# no live worker, no live bg-bash, no draft, recent-human), not by this marker
+# proxy — which only ever additionally blocked the idle-after-`⏳` case, exactly
+# the case the owner wants compacted. Dropping the `⏳` veto for ALL origins
+# unifies the former self-callback-only #425 exemption (point 4); its
+# `_compact_self_reported_*` machinery is deleted with it.
+_COMPACT_BLOCKING_MARKER = "❓"
 
 # The SAME canonical heading `hooks/stop-check-prose-violations.sh`'s own
 # `IS_COMPLETION_HEADING` classifier anchors on (`^## ✅ Work Complete|^✅
-# Work Complete`) — reused here so a session's own report is read by the
-# identical rule that enforces it must be genuine, never a parallel,
-# independently-drifting spelling.
+# Work Complete`). KEPT after #599 (compact itself no longer reads it — the
+# `⏳` exemption that used it is gone), because `watchdog/cards.py::
+# report_boundary_after` (job 25) still imports it FROM HERE so a genuine
+# report is read by the identical rule that enforces it must be genuine, never
+# a parallel, independently-drifting spelling.
 _COMPACT_COMPLETION_HEADING_RX = re.compile(
     r"(?m)^(?:## )?✅ Work Complete\b")
 
 
-def _compact_transcript_completion_heading(tpath):
-    """True when `tpath`'s own LAST REAL assistant turn (the same walk
-    `transcript_last_marker` uses) carries the canonical `## ✅ Work
-    Complete` heading anywhere in its full text — not just the tail 1-3
-    lines `transcript_last_marker_line` trims to, since the heading sits
-    at the TOP of a real completion report while the `⏳` tail this
-    function is paired against sits at the BOTTOM of the SAME turn.
-    Unreadable/missing transcript -> False, never guessed positive.
-
-    KNOWN, ACCEPTED RESIDUAL (#402-review MINOR-2, probe-confirmed, never
-    observed in production). `_COMPACT_COMPLETION_HEADING_RX`'s `^`
-    anchor (per #402-review MINOR-1, locked by
-    `test_heading_mentioned_mid_line_is_not_a_genuine_heading`) refuses a
-    MID-LINE mention, but not a genuine LINE-START quote inside a fenced
-    code block (e.g. the same turn's OWN prose citing a worked example
-    that happens to open a fenced line with the literal heading text).
-    Closing this needs a fence-aware scan (track ``` open/close state
-    across the whole text before matching), which was DELIBERATELY not
-    added: `_compact_self_reported_complete`'s own docstring already
-    rejects free-prose content-sniffing on the grounds that it is BOTH
-    unnecessary (the montalu3-class gap it would also need to solve has
-    an already-accepted recovery path) and unreliable — the SAME
-    reasoning applies one level up here. The exposure is narrow by
-    construction: it needs `origin == self-callback` AND the session's
-    OWN current last real turn to independently end on a genuine
-    unresolved `⏳`/live-task signal AND ALSO quote the heading at a true
-    line start earlier in that SAME turn — matching this repo's own
-    established "document as an accepted residual, don't chase it
-    pre-emptively" precedent (see #331's F3/F4) rather than expanding
-    scope on a shape the corpus has never actually produced."""
-    text = watchdog.transcript_last_assistant_text(str(tpath))
-    return bool(_COMPACT_COMPLETION_HEADING_RX.search(text))
-
-
-def _compact_self_reported_complete(origin, tpath):
-    """The #425 exemption gate for condition (c)'s `⏳` veto ONLY (never
-    condition (c)'s `❓` veto, which this function is never even consulted
-    for; and — since #565 — never condition (b)'s live-tasks veto either,
-    which no longer reads this exemption at all: a per-ticket Work
-    Complete boundary must not override a DETECTED live sibling lane, see
-    `_session_has_live_bg_tasks`). Consulted only from
-    `_compact_not_at_boundary` below.
-
-    ROOT CAUSE. A supervisor session legitimately, per
-    `message-status-marker.md`'s own contract, ends a turn with BOTH the
-    canonical `## ✅ Work Complete` heading for a ticket that just
-    genuinely finished (its own state already durable — a merged PR, a
-    closed issue, nothing living only in this session's context) AND a
-    trailing `⏳ WORKING: <N more workers still dispatched>` tail, because
-    OTHER, INDEPENDENT parallel `autopilot-worker` subagents — each its
-    own worktree, its own transcript, its own context that survives this
-    session's own compaction untouched — are still running (#317's
-    worktree-isolation model). The pre-#425 unconditional `⏳` veto
-    (#333) could not tell that turn apart from a genuinely-unfinished
-    mid-work `⏳` and deferred it FOREVER (repeated `SKIP not-a-boundary`
-    every ~60s sweep until the 30-min request-age cap silently discarded
-    it) — reproduced live on two boxes, 8x each.
-
-    CHOSEN APPROACH (fable-advisor-reviewed, gate OPEN, #425; NARROWED to
-    condition (c) only by #565): exempt condition (c)'s `⏳` veto under a
-    single, narrow, EVIDENCE-based boolean — `origin == self-callback` AND
-    the transcript's own LAST REAL turn (the exact turn carrying the `⏳`
-    being evaluated) ALSO contains the completion heading. (#425 originally
-    exempted condition (b)'s live-tasks veto under the SAME boolean; #565
-    removed that — see `_session_has_live_bg_tasks`.) This is
-    deliberately NOT the #394-style time-boxed "hold-grace, then deliver
-    anyway" escape #402 removed — every operand is a byte-level fact of
-    the transcript AS IT EXISTS at evaluation time, so the exemption is
-    self-deactivating the moment the session's last real turn moves on to
-    something without the heading. `origin` is checked FIRST (a cheap
-    comparison) so a non-self-callback caller (`subagent-stop`, or the
-    periodic sweep's own blank/`None` origin) never even pays for the
-    transcript-text read — the exemption is trusted ONLY for the one
-    caller whose own durability claim it is built to honour; a
-    `subagent-stop` boundary is proven a completely different, unrelated
-    way and never reads this narrow trust.
-
-    Condition (b)'s live-task signals (CC's "Waiting for N background
-    agents" pane text; `count_live_workers`' `subagents/*.jsonl` structured
-    count, #565) are agent-dispatch SPECIFIC — they cannot see a generic
-    background Bash job (a `run_in_background` CI-wait). So the montalu3-class
-    `⏳` case below (a same-ticket background Bash wait, invisible to (b)) is
-    decided ENTIRELY by this condition-(c) exemption, unaffected by #565's
-    removal of the (b) exemption. The always-unconditional ~2s
-    `COMPACT_MIN_REQUEST_AGE_S` floor against the #238 same-turn-dispatch
-    race is UNTOUCHED by this exemption.
-
-    REJECTED ALTERNATIVE: a content classifier trying to additionally
-    distinguish "the ⏳ narrates an INDEPENDENT worker" from "the ⏳
-    narrates THIS SAME reported ticket's own still-running work" (the
-    "montalu3-class" case named in #425's own mandate) — e.g. sniffing
-    the `⏳` text for a matching ticket number or words like "CI"/
-    "verify". Rejected because it is BOTH unnecessary and unreliable: (a)
-    that bad shape can only ever arise from a genuinely-BACKGROUNDED wait
-    (a foreground poll could not have finished generating the report text
-    at all, since the turn would not yet have ended), and for exactly
-    that shape `ci-monitoring.md`'s own already-accepted doctrine already
-    states the notification linkage MAY be lost across a compaction
-    boundary and the established recovery is a routine re-derivation from
-    the durable resource (e.g. `gh run view`) on the next turn — a known,
-    bounded, ALREADY-accepted risk this repo treats as normal elsewhere,
-    never as something needing new prevention machinery; (b) condition
-    (b) never protected this specific sub-shape ANYWAY (agent-dispatch
-    specific, as above), so the blanket pre-#425 `⏳` veto that DID defend
-    it was a side effect of the very bug being fixed here, not a
-    deliberate policy; and (c) free-prose keyword-sniffing (Slovak or
-    English, arbitrary phrasing) is exactly the guessing-era scaffolding
-    #402 deliberately removed — a sniff's false negatives would silently
-    reopen #425 for real completed-ticket-with-parallel-workers turns,
-    while its true positives buy nothing the existing recovery path
-    doesn't already provide. So this fix DELIBERATELY delivers on the
-    montalu3-class shape too — an explicit, test-locked, ACCEPTED
-    trade-off, not an oversight (see
-    `test_montalu3_class_same_ticket_background_wait_still_delivers_by_
-    design` in `tests/test_compact.py`)."""
-    if origin != _COMPACT_SELF_CALLBACK_ORIGIN:
-        return False
-    if tpath is None:
-        return False
-    return _compact_transcript_completion_heading(tpath)
-
-
 def _compact_not_at_boundary(cwd, sid, projects_dir=None, origin=None):
-    """Condition (c), first half — True when the session's CURRENT last
-    real turn carries a `⏳`/`❓` marker. Unmeasurable (no transcript)
-    never blocks. `❓` is UNCONDITIONAL — the #425 exemption below is
-    never even consulted for it. `⏳` gets the narrow #425 exemption via
-    `_compact_self_reported_complete` (see its own docstring)."""
+    """Condition (c), first half — True ONLY when the session's CURRENT last
+    real turn carries a `❓` marker (blocked on the user). #599: the `⏳` marker
+    NO LONGER vetoes — a recorded boundary request PROVES a boundary occurred
+    (durable state in git/GitHub), so delivery must not require the last turn to
+    STILL be that boundary; a 24/7 loop moves on to `⏳` within seconds, and the
+    idle-after-`⏳` case is exactly what the owner wants compacted. Safety at the
+    delivery instant is held by the DIRECT live-work conditions (pane busy/idle,
+    no live worker, no live bg-bash, no draft, recent-human), not by this marker
+    proxy. `❓` STAYS an UNCONDITIONAL veto for every origin (#333/#228 — the
+    session is mid-decision and the pending question + the in-flight ticket the
+    user's answer needs would be lost by a compaction). Dropping the `⏳` veto
+    for ALL origins unifies the former self-callback-only #425 exemption (point
+    4); `origin` is kept for signature parity but no longer consulted here.
+    Bounded read (`transcript_last_marker_bounded`, #599 perf — the whole-file
+    marker read measured 1.17s on cambox's 670 MB transcript, fired every
+    Work-Complete hook). Unmeasurable (no transcript) never blocks."""
     pdir = projects_dir or watchdog.PROJECTS_DIR
     tpath = watchdog._transcript_for_session(pdir, sid, cwd)
     if tpath is None:
         return False
-    marker = watchdog.transcript_last_marker(tpath)
-    if marker not in _COMPACT_NON_BOUNDARY_MARKERS:
-        return False
-    if marker == "⏳" and _compact_self_reported_complete(origin, tpath):
-        return False
-    return True
+    return (watchdog.transcript_last_marker_bounded(str(tpath))
+            == _COMPACT_BLOCKING_MARKER)
 
 
 def _compact_session_unresumed(cwd, sid, projects_dir=None, origin=None):
@@ -701,24 +582,75 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
 
 
 # --------------------------------------------------------------------------- #
+# Condition (b), SECOND signal (#599) — no live `run_in_background` Bash job.
+# --------------------------------------------------------------------------- #
+
+# The bounded transcript-tail window for the bg-bash liveness read. TIGHT on
+# purpose (200 entries ≈ the death-detector sibling window): an ABANDONED older
+# bg job scrolls out of the window and stops vetoing (self-healing), while a
+# genuinely-recent live job is still caught — measured on cambox, a trailing
+# 200-entry window is free of open bg jobs ~71% of the time, so this veto never
+# permanently blocks compaction. Byte-bounded (1MB seek) so the read stays
+# ~0.005s even on a 670MB transcript. Both env-tunable (via
+# ~/.claude/watchdog.env, #574), each floored so a misconfigured value can
+# never silently disable the veto.
+COMPACT_BG_BASH_TAIL_BYTES = 1_000_000   # env AIRULESET_COMPACT_BG_BASH_TAIL_BYTES
+COMPACT_BG_BASH_MAX_ENTRIES = 200        # env AIRULESET_COMPACT_BG_BASH_MAX_ENTRIES
+
+
+def _compact_bg_bash_window():
+    """(tail_bytes, max_entries) for the bg-bash read — the constants or their
+    env overrides, each floored to a positive minimum so a malformed / disabling
+    value (0 / negative / unparseable) falls back to the constant, never off."""
+    def _pos(env, const):
+        try:
+            v = int(os.environ.get(env, const))
+        except ValueError:
+            return const
+        return v if v > 0 else const
+    return (_pos("AIRULESET_COMPACT_BG_BASH_TAIL_BYTES", COMPACT_BG_BASH_TAIL_BYTES),
+            _pos("AIRULESET_COMPACT_BG_BASH_MAX_ENTRIES", COMPACT_BG_BASH_MAX_ENTRIES))
+
+
+def _compact_live_bg_bash(cwd, sid, projects_dir=None):
+    """True when the session's OWN transcript shows a live `run_in_background`
+    Bash job (a START with no later completion notification in the bounded
+    tail), so a `/compact` would orphan its completion (#29193). DELIBERATELY
+    SEPARATE from the worker-lane `count_live_workers` signal
+    (`_session_has_live_bg_tasks`): a bg-bash job is NOT a worker lane, so the
+    lane-occupancy (#571) / gk-fill consumers whose danger is UNDER-counting a
+    live lane must never see it — keeping this in its own compact-only
+    `session_has_live_bg_bash` is what leaves them structurally unaffected.
+    Unmeasurable (no transcript) never blocks."""
+    pdir = projects_dir or watchdog.PROJECTS_DIR
+    tpath = watchdog._transcript_for_session(pdir, sid, cwd)
+    if tpath is None:
+        return False
+    tail_bytes, max_entries = _compact_bg_bash_window()
+    return watchdog.session_has_live_bg_bash(str(tpath), tail_bytes=tail_bytes,
+                                             max_entries=max_entries)
+
+
+# --------------------------------------------------------------------------- #
 # Condition (e), the hard age cap — and the small (2s) same-turn-dispatch
 # race floor for the synchronous record-time attempt only (#238).
 # --------------------------------------------------------------------------- #
 
 COMPACT_TEXT = "/compact"
-# A request older than this is DISCARDED. KEPT at 30 min, deliberately, after
-# #587 (evaluated, not silently changed). #587's finish-immediate fix removes the
-# PRIMARY veto (the 15-min mtime ghost of a just-finished worker), so a request
-# now delivers PROMPTLY in the window "worker returned, new lanes not yet
-# dispatched" (the synchronous attempt / the next ~60s sweep) — the cap is no
-# longer the bottleneck it was in the incident (dev1 supervisor: 1 SEND/day,
-# requests cycling SKIP live-tasks -> SKIP expired). RAISING it would let a stale
-# request deliver `/compact` at a much later, possibly-inappropriate moment (the
-# #400 stale-anchor class); and since the boundary RE-ANCHORS on every report
-# (each next ticket creates a fresh request with a fresh `ts` once the prior one
-# clears/expires), an expired request is always replaced by the next boundary
-# event — so the cap stays a safe upper bound on how long ONE request lingers,
-# not the fix. The fix is condition (b), not this cap.
+# A request whose `ts` is older than this is DISCARDED. KEPT at 30 min but its
+# SEMANTICS changed under #599: `ts` now REFRESHES on every genuine boundary
+# (supersede — `record_compact_request`), so this measures "time since the LAST
+# boundary", not "time since first-seen" (#400's non-refreshable anchor is
+# reversed). On a busy loop (a boundary every few minutes) it never bites — the
+# request HOLDS until it delivers at the first safe moment, which is what fixes
+# cambox's 244 SKIP / 0 SEND (together with #599 dropping the `⏳` veto that
+# starved every delivery). On a GONE-QUIET session (the loop stopped / finished)
+# `ts` stops refreshing and the request ages out after 30 min of no new
+# boundary — correct: a pending request from a session that has not hit a
+# boundary in half an hour is stale. The "possibly-inappropriate late moment"
+# hazard the #400 non-refreshable anchor guarded is now handled by the DIRECT
+# delivery conditions (pane idle, no live worker, no live bg-bash, no draft, no
+# recent-human, not `❓`), never by this cap.
 COMPACT_REQUEST_MAX_AGE_S = 30 * 60
 
 COMPACT_MIN_REQUEST_AGE_S = 2.0   # env AIRULESET_COMPACT_MIN_REQUEST_AGE_S
@@ -1022,6 +954,12 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                                   captured=captured):
         _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
         return "skip:live-tasks"
+    # Condition (b), SECOND signal (#599) — a live `run_in_background` Bash job
+    # (invisible to `count_live_workers`) whose completion `/compact` would
+    # orphan (#29193). Distinct reason so the forensic log keeps the two apart.
+    if _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir):
+        _log_compact_sync("SKIP live-bg-bash sid=%s cwd=%s" % (sid, cwd))
+        return "skip:live-bg-bash"
     if _compact_request_too_young(request_ts, now):
         _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
         return "skip:too-young"
@@ -1045,6 +983,9 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
                                   captured=fresh):
         _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s" % (sid, cwd))
         return "skip:live-tasks-raced"
+    if _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir):
+        _log_compact_sync("SKIP live-bg-bash-raced sid=%s cwd=%s" % (sid, cwd))
+        return "skip:live-bg-bash-raced"
 
     # Mark provenance BEFORE typing so the shared janitor (#372) can
     # recover a stuck send for THIS pane — a delivering job's own
@@ -1109,9 +1050,12 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
     signal a genuine chance to catch up, exactly like the old retry loop
     did, without resurrecting the loop itself: the wait is computed from
     the REQUEST's own recorded `ts` (via a fresh `load_compact_requests`
-    read, since a re-record may have preserved an already-old-enough
-    anchor), so a re-record whose anchor already clears the floor sleeps
-    zero.
+    read). Under the #599 supersede rule `record_compact_request` sets `ts`
+    to `now` on EVERY record, so on this synchronous path `req_ts` is always
+    ~now and the fresh boundary sleeps the ~2s `COMPACT_MIN_REQUEST_AGE_S`
+    floor once — exactly the #238 same-turn-dispatch race protection the old
+    retry loop gave (the pre-#599 "a re-record whose anchor was already old
+    enough sleeps zero" branch is unreachable now that ts never carries over).
 
     Returns the disposition word `deliver_compact` returns (or
     `"skip:no-session"` if recording itself failed — a disk-write

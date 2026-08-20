@@ -399,7 +399,11 @@ from watchdog.transcripts import (  # noqa: E402
     transcript_current_context as transcript_current_context,
     transcript_last_marker as transcript_last_marker,
     transcript_last_marker_line as transcript_last_marker_line,
+    transcript_last_marker_bounded as transcript_last_marker_bounded,   # #599 bounded ❓-veto read
     transcript_last_assistant_text as transcript_last_assistant_text,
+    session_live_bg_bash as session_live_bg_bash,             # #599 pure bg-bash pairing
+    session_has_live_bg_bash as session_has_live_bg_bash,     # #599 bg-bash veto (compact-only)
+    _read_jsonl_byte_tail as _read_jsonl_byte_tail,           # #599 bounded-seek reader
     question_repoke_run as question_repoke_run,           # #522
     question_repoke_streak as question_repoke_streak,     # #522
     supervisor_responded_to_nudge as supervisor_responded_to_nudge,

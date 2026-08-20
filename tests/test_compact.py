@@ -176,6 +176,34 @@ def _write_subagent_transcript(base, cwd, sid, mtime=None, error=False,
     return p
 
 
+def _write_bg_bash_transcript(base, cwd, sid, marker_text=None, live=True,
+                              tool_use_id="toolu_bg1"):
+    """A MAIN transcript at <base>/<encoded-cwd>/<sid>.jsonl whose tail carries
+    a `run_in_background:true` Bash tool_use (a START — the shape measured live
+    on cambox's transcript). `live=True` → NO completion follows, so
+    `session_has_live_bg_bash` reads a LIVE bg job (a `/compact` would orphan
+    it). `live=False` → a later `<task-notification>` names that tool_use id
+    (COMPLETION), so the job reads NOT live. An optional trailing `marker_text`
+    assistant turn lets a test combine the marker check with the bg-bash check;
+    with `marker_text=None` the last real turn is the bg START itself (marker
+    '' — not a `❓`, so condition (c) passes and the bg-bash veto is what fires)."""
+    d = Path(base) / _encode(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / (sid + ".jsonl")
+    lines = [{"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": tool_use_id, "name": "Bash",
+         "input": {"command": "bash fleet-upgrade.sh", "run_in_background": True}}]}}]
+    if not live:
+        lines.append({"type": "user", "message": {"content": (
+            "<task-notification>\n<task-id>bq1</task-id>\n"
+            "<tool-use-id>%s</tool-use-id>\n</task-notification>" % tool_use_id)}})
+    if marker_text is not None:
+        lines.append({"type": "assistant",
+                      "message": {"id": "m2", "content": marker_text}})
+    p.write_text("\n".join(json.dumps(e) for e in lines) + "\n")
+    return p
+
+
 CB_IDLE_CAP = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
 CB_BUSY_CAP = ("● Baking…\n✳ Baking… (2m 30s · ↓ 4.1k tokens · esc to interrupt)\n"
               "  ctx ███░  caveman:lite\n")
@@ -342,52 +370,57 @@ class CompactRequestState(unittest.TestCase):
         self.assertFalse(compact.record_compact_request("", "/x", path=p))
         self.assertEqual(compact.load_compact_requests(p), {})
 
-    def test_ts_is_never_refreshed_across_a_re_record(self):
-        # #400's own fix: the age-cap anchor must be set ONCE, never
-        # refreshed by a later re-record for the same still-pending
-        # session — a refreshable anchor is how an 11h-stale request once
-        # survived.
+    def test_ts_is_refreshed_across_a_re_record(self):
+        # #599 SUPERSEDE (reverses #400's non-refreshable anchor): a re-record
+        # from a genuine boundary REFRESHES `ts` — a recorded boundary request
+        # is a STANDING claim that holds until delivered, and each new boundary
+        # is a genuinely-newer claim. Now that `ts` measures "time since the
+        # LAST boundary", a busy loop's request never expires (holds until it
+        # delivers at a safe moment), while a gone-quiet session's ages out
+        # after 30 min of no new boundary. The old #400 "possibly-inappropriate
+        # late delivery" hazard is now handled by the direct delivery conditions.
         p = self._p()
         compact.record_compact_request("sess-1", "/x", now=1000, path=p,
                                        origin="subagent-stop")
         compact.record_compact_request("sess-1", "/y", now=5000, path=p,
                                        origin="self-callback")
         d = compact.load_compact_requests(p)
-        self.assertEqual(d["sess-1"]["ts"], 1000)      # frozen at first-seen
+        self.assertEqual(d["sess-1"]["ts"], 5000)      # REFRESHED (supersede)
         self.assertEqual(d["sess-1"]["cwd"], "/y")      # latest cwd wins
         self.assertEqual(d["sess-1"]["origin"], "self-callback")  # latest origin
 
-    def test_a_pending_self_callback_origin_is_never_downgraded(self):
-        # #402-review MAJOR-1: the SubagentStop hook fires under the
-        # SUPERVISOR's own sid on every worker return (#317's parallel-
-        # round shape), which can re-record a still-pending self-callback
-        # request with origin="subagent-stop" before it is ever
-        # delivered -- silently losing the #425 exemption for a turn that
-        # genuinely earned it (its own "## Work Complete" heading +
-        # trailing "more workers still dispatched" tail). A re-record
-        # from the WEAKER (subagent-stop) or UNKNOWN (blank/None) origin
-        # must never overwrite an already-recorded self-callback claim.
+    def test_supersede_dedup_is_one_pending_per_session(self):
+        # #599 point 5c: a newer boundary record REPLACES the older (no queue
+        # of duplicates) — the dict is keyed by session, so there is always
+        # exactly ONE pending request per session, carrying the NEWEST anchor.
+        p = self._p()
+        for t in (1000, 1200, 1500, 1800):
+            compact.record_compact_request("sess-1", "/x", now=t, path=p,
+                                           origin="self-callback")
+        d = compact.load_compact_requests(p)
+        self.assertEqual(list(d.keys()), ["sess-1"])   # one pending, not four
+        self.assertEqual(d["sess-1"]["ts"], 1800)      # newest anchor
+
+    def test_origin_takes_newest_value_no_downgrade_protection(self):
+        # #599 point 4: the #402-era "origin never downgrades from
+        # self-callback" protection is REMOVED with the #425 `⏳` exemption it
+        # guarded (that exemption is gone — no origin is second-class). origin
+        # now simply takes the newest call's value, in EITHER direction. Both
+        # record sites always pass a proven origin, so it stays proven; the
+        # #188 unresumed-api-error gate accepts either proven origin.
         p = self._p()
         compact.record_compact_request("sess-1", "/x", now=1000, path=p,
                                        origin="self-callback")
         compact.record_compact_request("sess-1", "/x", now=1001, path=p,
                                        origin="subagent-stop")
         d = compact.load_compact_requests(p)
-        self.assertEqual(d["sess-1"]["origin"], "self-callback")
+        self.assertEqual(d["sess-1"]["origin"], "subagent-stop")  # newest wins
+        # blank likewise takes the newest value (no downgrade refusal)
+        compact.record_compact_request("sess-1", "/x", now=1002, path=p, origin=None)
+        self.assertEqual(compact.load_compact_requests(p)["sess-1"]["origin"], "")
 
-    def test_a_pending_self_callback_origin_is_never_downgraded_to_blank(self):
-        p = self._p()
-        compact.record_compact_request("sess-1", "/x", now=1000, path=p,
-                                       origin="self-callback")
-        compact.record_compact_request("sess-1", "/x", now=1001, path=p,
-                                       origin=None)
-        d = compact.load_compact_requests(p)
-        self.assertEqual(d["sess-1"]["origin"], "self-callback")
-
-    def test_a_pending_subagent_stop_origin_is_still_upgraded_by_self_callback(self):
-        # The OPPOSITE direction stays exactly as before (and is already
-        # locked by test_ts_is_never_refreshed_across_a_re_record above,
-        # restated here so the two directions are visible side by side).
+    def test_subagent_stop_origin_is_upgraded_by_self_callback(self):
+        # The self-callback direction also just takes the newest value.
         p = self._p()
         compact.record_compact_request("sess-1", "/x", now=1000, path=p,
                                        origin="subagent-stop")
@@ -396,18 +429,13 @@ class CompactRequestState(unittest.TestCase):
         d = compact.load_compact_requests(p)
         self.assertEqual(d["sess-1"]["origin"], "self-callback")
 
-    def test_ts_is_preserved_even_when_the_prior_anchor_is_already_expired(self):
-        # #402-review MINOR-2 was CONSIDERED (reset ts when the prior
-        # entry is already past the age cap, so a genuinely fresh
-        # boundary doesn't inherit a corpse) and REJECTED: it directly
-        # reproduces a weaker form of the #400 bug this test locks (a
-        # session producing boundary events more often than
-        # COMPACT_REQUEST_MAX_AGE_S apart, forever, could keep resetting
-        # the anchor just past each expiry and never let condition (e)
-        # fire). The narrower residual (deliver_compact's OWN condition
-        # (e), checked unconditionally FIRST, clears an expired entry
-        # within one sweep cadence regardless) is documented on
-        # `record_compact_request`'s own docstring.
+    def test_ts_is_refreshed_even_when_the_prior_anchor_is_already_expired(self):
+        # #599: the supersede applies unconditionally — a re-record ALWAYS
+        # refreshes `ts` to `now`, even when the prior entry was already past
+        # the age cap. This is exactly the desired behavior: a fresh boundary
+        # is a fresh standing claim, never inheriting a dead anchor (the old
+        # #400 concern about resetting-past-expiry is moot because expiry is no
+        # longer the safety mechanism — the direct delivery conditions are).
         p = self._p()
         compact.record_compact_request("sess-1", "/x", now=1000, path=p,
                                        origin="self-callback")
@@ -415,7 +443,7 @@ class CompactRequestState(unittest.TestCase):
         compact.record_compact_request("sess-1", "/y", now=way_past_the_cap, path=p,
                                        origin="self-callback")
         d = compact.load_compact_requests(p)
-        self.assertEqual(d["sess-1"]["ts"], 1000)
+        self.assertEqual(d["sess-1"]["ts"], way_past_the_cap)   # REFRESHED
 
     def test_clear_removes_one_request_only(self):
         p = self._p()
@@ -789,16 +817,22 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(word, "skip:not-a-boundary")
         self.assertEqual(tmux.sent, [])
 
-    def test_still_working_marker_skips_for_every_origin(self):
-        # #333 REVERSED the old per-origin relaxation -- ⏳ blocks proven
-        # origins too, not just the plain channel.
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID, "⏳ WORKING: next batch")
-        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
-        word = compact.deliver_compact(self.SID, self.CWD, origin="subagent-stop",
-                                       run=tmux, projects_dir=proj,
-                                       delivered_path=self.delp)
-        self.assertEqual(word, "skip:not-a-boundary")
+    def test_still_working_marker_now_delivers_for_every_origin(self):
+        # #599 FLIP (reverses #333's `⏳` veto): the `⏳` marker NO LONGER
+        # vetoes — a recorded boundary PROVES a boundary occurred, and a 24/7
+        # loop moves on to `⏳` within seconds. The idle-after-`⏳` case (pane at
+        # rest, no live work) is exactly what the owner wants compacted.
+        for origin in ("subagent-stop", "self-callback", None):
+            proj = self._dir()
+            _write_marker_transcript(proj, self.CWD, self.SID, "⏳ WORKING: next batch")
+            # a FRESH delivered-path per iteration so the 30-min cooldown of an
+            # earlier iteration's send does not mask a later one.
+            delp = str(Path(self._dir()) / "delivered.json")
+            tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+            word = compact.deliver_compact(self.SID, self.CWD, origin=origin,
+                                           run=tmux, projects_dir=proj,
+                                           delivered_path=delp)
+            self.assertEqual(word, "sent", "origin=%r should deliver on ⏳" % origin)
 
     def test_done_marker_still_delivers(self):
         proj = self._dir()
@@ -808,10 +842,13 @@ class TestDeliverCompact(unittest.TestCase):
                                        projects_dir=proj, delivered_path=self.delp)
         self.assertEqual(word, "sent")
 
-    # -- #425: the ⏳ marker exemption (mandate items (a)/(b)/(c)) -------- #
+    # -- #599: the ⏳ marker no longer vetoes (dropped for ALL origins) ---- #
 
     def test_work_complete_heading_with_parallel_tail_delivers(self):
-        # (a) of the #425 mandate -- the reported live-incident shape.
+        # The #425 live-incident shape (a `## ✅ Work Complete` heading + a
+        # trailing `⏳` for still-running parallel workers) STILL delivers —
+        # now simply because the `⏳` marker no longer vetoes at all (#599), not
+        # via a narrow self-callback-only heading exemption.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
@@ -821,10 +858,12 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(word, "sent")
         self.assertIn("/compact", tmux.typed_texts())
 
-    def test_plain_working_marker_with_no_heading_still_skips_even_self_callback(self):
-        # (b) of the #425 mandate -- a genuinely mid-work ⏳ with NO
-        # completion heading defers regardless of origin: the exemption
-        # requires BOTH self-callback AND the heading, never origin alone.
+    def test_plain_working_marker_with_no_heading_now_delivers(self):
+        # #599 FLIP: a genuinely mid-work `⏳` with NO completion heading used
+        # to defer FOREVER (the old exemption required BOTH self-callback AND a
+        # heading). It now delivers — the record proved the boundary, and were
+        # there genuinely live work the (b)/bg-bash conditions would catch it
+        # (here the pane is idle with none).
         proj = self._dir()
         _write_marker_transcript(
             proj, self.CWD, self.SID,
@@ -833,11 +872,13 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "skip:not-a-boundary")
+        self.assertEqual(word, "sent")
 
     def test_question_marker_never_exempted_even_with_heading(self):
-        # (c) of the #425 mandate -- ❓ is NEVER exempted (#333), even
-        # with a completion heading earlier in the same turn.
+        # `❓` is NEVER relaxed (#333/#228), even with a completion heading
+        # earlier in the same turn — the session is mid-decision waiting for
+        # the user, and the pending question / in-flight ticket the user's
+        # answer needs would be lost by a compaction.
         proj = self._dir()
         text = "## ✅ Work Complete\n\n...\n\n❓ NEEDS YOU: schváliš merge PR #41?"
         _write_marker_transcript(proj, self.CWD, self.SID, text)
@@ -848,53 +889,34 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(word, "skip:not-a-boundary")
         self.assertEqual(tmux.sent, [])
 
-    def test_heading_plus_tail_not_exempted_for_subagent_stop_origin(self):
-        # the exemption is scoped ONLY to self-callback -- a subagent-stop
-        # boundary is proven a completely different way and never reads
-        # this narrow trust.
+    def test_heading_plus_tail_delivers_for_subagent_stop_origin(self):
+        # #599 point 4: a `subagent-stop` boundary is no longer second-class —
+        # the `⏳` veto is gone for it too (this is the exact 7-requests-died
+        # case the ticket named), so a `⏳` + heading turn delivers.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         word = compact.deliver_compact(self.SID, self.CWD, origin="subagent-stop",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "skip:not-a-boundary")
+        self.assertEqual(word, "sent")
 
-    def test_heading_plus_tail_not_exempted_for_blank_origin(self):
+    def test_working_marker_delivers_for_blank_origin(self):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
         word = compact.deliver_compact(self.SID, self.CWD, origin=None,
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "skip:not-a-boundary")
+        self.assertEqual(word, "sent")
 
-    def test_montalu3_class_same_ticket_background_wait_still_delivers_by_design(self):
-        """(d) of the #425 mandate, decided + locked with justification
-        (see `_compact_self_reported_complete`'s own docstring for the
-        full reasoning): a message that -- against
-        `message-status-marker.md`'s OWN contract, which forbids it --
-        claims `## ✅ Work Complete` while its trailing ⏳ actually
-        narrates a background wait for THE SAME just-reported ticket
-        (e.g. a still-running CI/verify for the very PR just claimed
-        complete) is structurally INDISTINGUISHABLE, from transcript text
-        alone, from the safe "independent parallel worker" shape this
-        exemption exists to unblock. This fix deliberately does NOT
-        attempt a content classifier to tell them apart (a keyword-sniff
-        for "CI"/"verify"/a matching ticket number is exactly the
-        guessing-era scaffolding #402 removed, and any such sniff has
-        real false negatives that would silently reopen #425). This case
-        therefore ALSO delivers -- an accepted, explicitly documented
-        trade-off, not an oversight: the worst case (a background Bash
-        CI-wait job's own notification linkage lost across the
-        compaction boundary) is already a known, bounded, ACCEPTED risk
-        per `ci-monitoring.md`'s own established doctrine (re-derive from
-        the durable resource on the next turn), and condition (b)'s own
-        two signals are agent-dispatch SPECIFIC -- they structurally
-        cannot see a generic background Bash CI-wait job at all, so the
-        pre-#425 blanket ⏳ veto never actually protected this specific
-        sub-shape either; it was a side effect of the bug being fixed
-        here, not a deliberate policy."""
+    def test_montalu3_class_same_ticket_background_wait_with_no_live_bg_delivers(self):
+        # #599: a `## ✅ Work Complete` whose trailing `⏳` narrates a
+        # same-ticket background wait STILL delivers WHEN there is no actual
+        # live bg-bash job in the transcript (the record proved the boundary).
+        # The dangerous sub-case — a genuinely-LIVE background wait — is now
+        # caught by the point-3 bg-bash veto (see test_live_bg_bash_skips), so
+        # this is no longer the "accepted trade-off" the owner rejected.
         proj = self._dir()
         text = ("## ✅ Work Complete\n\n...PR #41 merged...\n\n"
                "⏳ WORKING: waiting for CI on PR #41 to go green before "
@@ -1189,7 +1211,11 @@ class TestCompactSubmitVerify(unittest.TestCase):
 #     regression on a non-⏳-marker path would be invisible there.
 # --------------------------------------------------------------------------- #
 
-class TestCompactSelfReportedCompleteExemption(unittest.TestCase):
+class TestCompactConditionBAndMarker(unittest.TestCase):
+    """Condition (b) live-worker signal, and condition (c)'s `❓`-only marker
+    veto (#599: the `⏳` veto and its `_compact_self_reported_*` /
+    `_compact_transcript_completion_heading` machinery were removed — those
+    unit tests were deleted with the functions)."""
     SID = "sess-exempt-1"
     CWD = "/home/newlevel/devel/exempttest"
 
@@ -1197,83 +1223,6 @@ class TestCompactSelfReportedCompleteExemption(unittest.TestCase):
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
         return Path(d.name)
-
-    # -- _compact_transcript_completion_heading / _compact_self_reported_complete
-
-    def test_true_only_with_both_self_callback_and_heading(self):
-        proj = self._dir()
-        p = _write_marker_transcript(proj, self.CWD, self.SID,
-                                     _WORK_COMPLETE_PLUS_TAIL)
-        self.assertTrue(compact._compact_transcript_completion_heading(p))
-        self.assertTrue(compact._compact_self_reported_complete("self-callback", p))
-
-    def test_false_without_heading(self):
-        proj = self._dir()
-        p = _write_marker_transcript(proj, self.CWD, self.SID,
-                                     "⏳ WORKING: still busy")
-        self.assertFalse(compact._compact_transcript_completion_heading(p))
-        self.assertFalse(compact._compact_self_reported_complete("self-callback", p))
-
-    def test_heading_mentioned_mid_line_is_not_a_genuine_heading(self):
-        # #402-review MINOR-1: a surviving mutant (dropping the `^`
-        # anchor from _COMPACT_COMPLETION_HEADING_RX) passed all 101
-        # pre-existing tests -- none of them locked the anchor's real
-        # job, which is refusing a MID-LINE mention of the heading text
-        # (a session merely quoting/discussing "✅ Work Complete" inline,
-        # not genuinely opening a turn with it). Mirrors the same
-        # mention-vs-use discriminator this repo's own command-matching
-        # hooks already rely on (never a bare substring scan).
-        proj = self._dir()
-        mid_line = ("Poznamka: predchadzajuce sedenie skoncilo textom "
-                    "'✅ Work Complete' vnutri vety, nie ako vlastny "
-                    "nadpis riadku.\n⏳ WORKING: stale prebieha")
-        p = _write_marker_transcript(proj, self.CWD, self.SID, mid_line)
-        self.assertFalse(compact._compact_transcript_completion_heading(p))
-        self.assertFalse(compact._compact_self_reported_complete("self-callback", p))
-
-    def test_false_for_subagent_stop_origin_even_with_heading(self):
-        proj = self._dir()
-        p = _write_marker_transcript(proj, self.CWD, self.SID,
-                                     _WORK_COMPLETE_PLUS_TAIL)
-        self.assertFalse(compact._compact_self_reported_complete("subagent-stop", p))
-
-    def test_false_for_blank_origin_even_with_heading(self):
-        proj = self._dir()
-        p = _write_marker_transcript(proj, self.CWD, self.SID,
-                                     _WORK_COMPLETE_PLUS_TAIL)
-        self.assertFalse(compact._compact_self_reported_complete(None, p))
-
-    def test_false_for_none_tpath(self):
-        self.assertFalse(compact._compact_self_reported_complete("self-callback", None))
-
-    def test_bare_heading_without_hash_prefix_also_matches(self):
-        # the SAME two shapes stop-check-prose-violations.sh's own
-        # IS_COMPLETION_HEADING classifier accepts:
-        # "^## ✅ Work Complete" OR "^✅ Work Complete".
-        proj = self._dir()
-        p = _write_marker_transcript(
-            proj, self.CWD, self.SID,
-            "✅ Work Complete\n\n...\n\n⏳ WORKING: more")
-        self.assertTrue(compact._compact_self_reported_complete("self-callback", p))
-
-    def test_heading_must_be_in_the_last_real_turn_not_an_earlier_one(self):
-        # a Work Complete heading from an EARLIER turn does not leak
-        # forward into a LATER, genuinely-still-working turn that has no
-        # heading of its own -- transcript_last_assistant_text only ever
-        # reads the LAST real turn.
-        proj = self._dir()
-        d = Path(proj) / _encode(self.CWD)
-        d.mkdir(parents=True, exist_ok=True)
-        p = d / (self.SID + ".jsonl")
-        lines = [
-            json.dumps({"type": "assistant",
-                       "message": {"id": "m1", "content": _WORK_COMPLETE_PLUS_TAIL}}),
-            json.dumps({"type": "assistant",
-                       "message": {"id": "m2",
-                                  "content": "⏳ WORKING: a fresh, unrelated turn"}}),
-        ]
-        p.write_text("\n".join(lines) + "\n")
-        self.assertFalse(compact._compact_self_reported_complete("self-callback", p))
 
     # -- _session_has_live_bg_tasks: structured live-worker count, NO #425
     #    exemption (#565) --------------------------------------------------- #
@@ -1369,22 +1318,34 @@ class TestCompactSelfReportedCompleteExemption(unittest.TestCase):
         self.assertEqual(seen["freshness"],
                          compact.COMPACT_LIVE_WORKER_FRESHNESS_S)
 
-    # -- _compact_not_at_boundary origin scoping -------------------------- #
+    # -- _compact_not_at_boundary: #599 `❓`-only veto --------------------- #
 
-    def test_not_at_boundary_exempted_when_predicate_true(self):
+    def test_not_at_boundary_false_for_working_marker_with_heading(self):
+        # #599: `⏳` never vetoes now (regardless of heading/origin).
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         self.assertFalse(compact._compact_not_at_boundary(
             self.CWD, self.SID, projects_dir=proj, origin="self-callback"))
 
-    def test_not_at_boundary_still_blocks_plain_working(self):
+    def test_not_at_boundary_false_for_plain_working_marker(self):
+        # #599 FLIP: a plain `⏳ WORKING` no longer vetoes (used to return True).
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID,
                                  "⏳ WORKING: no heading here")
-        self.assertTrue(compact._compact_not_at_boundary(
+        self.assertFalse(compact._compact_not_at_boundary(
             self.CWD, self.SID, projects_dir=proj, origin="self-callback"))
 
-    def test_not_at_boundary_never_exempts_question_marker(self):
+    def test_not_at_boundary_false_for_working_marker_subagent_stop_origin(self):
+        # #599 point 4: subagent-stop is no longer second-class — `⏳` doesn't
+        # veto for it either (the 7-requests-died case).
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID,
+                                 "⏳ WORKING: next ticket")
+        self.assertFalse(compact._compact_not_at_boundary(
+            self.CWD, self.SID, projects_dir=proj, origin="subagent-stop"))
+
+    def test_not_at_boundary_true_for_question_marker(self):
+        # `❓` STILL vetoes (#333/#228), even with a completion heading.
         proj = self._dir()
         _write_marker_transcript(
             proj, self.CWD, self.SID,
@@ -1392,7 +1353,7 @@ class TestCompactSelfReportedCompleteExemption(unittest.TestCase):
         self.assertTrue(compact._compact_not_at_boundary(
             self.CWD, self.SID, projects_dir=proj, origin="self-callback"))
 
-    def test_not_at_boundary_unaffected_when_marker_is_not_non_boundary_at_all(self):
+    def test_not_at_boundary_false_for_done_marker(self):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, "✅ DONE: hotovo")
         self.assertFalse(compact._compact_not_at_boundary(
@@ -1748,10 +1709,11 @@ class TestCompactSyncAttempt(unittest.TestCase):
             compact.COMPACT_MIN_REQUEST_AGE_S + compact.COMPACT_SYNC_ATTEMPT_MARGIN_S,
             places=6)
 
-    def test_a_re_record_whose_anchor_is_already_old_enough_sleeps_zero(self):
-        # A re-record within the SAME still-pending window preserves the
-        # ORIGINAL ts (#400) -- if that original ts is already >= the
-        # floor, the wait must be a genuine no-op, not a second sleep.
+    def test_sync_attempt_records_fresh_anchor_then_sleeps_the_floor_and_sends(self):
+        # #599 supersede (reverses #400's non-refreshable anchor): the sync
+        # attempt's OWN record always sets a FRESH `ts` (never inherits an older
+        # anchor), so a fresh boundary sleeps the #238 floor once and delivers
+        # when the clock has advanced past it.
         compact.record_compact_request(self.SID, self.CWD, now=3_000_000.0,
                                        path=self.reqp, origin="self-callback")
         clock = [3_000_000.0 + compact.COMPACT_MIN_REQUEST_AGE_S + 10]
@@ -1762,6 +1724,7 @@ class TestCompactSyncAttempt(unittest.TestCase):
 
         def sleep_fn(s):
             calls.append(s)
+            clock[0] += s          # advance the clock by the slept duration
 
         tmux = self._tmux(CB_IDLE_CAP)
         word = compact._compact_sync_attempt(
@@ -1769,7 +1732,7 @@ class TestCompactSyncAttempt(unittest.TestCase):
             projects_dir=self.proj.name, delivered_path=self.delp,
             requests_path=self.reqp, now_fn=now_fn, sleep_fn=sleep_fn)
         self.assertEqual(word, "sent")
-        self.assertEqual(calls, [])
+        self.assertEqual(len(calls), 1)       # slept the #238 floor exactly once
 
     def test_record_failure_reports_skip_no_session_and_never_sleeps(self):
         calls = []
@@ -1848,6 +1811,219 @@ class TestRunOnceCompactWiring(unittest.TestCase):
 
     def test_compact_stall_watch_function_no_longer_exists(self):
         self.assertFalse(hasattr(wd, "compact_stall_watch"))
+
+
+# --------------------------------------------------------------------------- #
+# #599 — the run_in_background Bash liveness detector (transcripts.py), its
+# isolation from the worker-lane primitive, and the compact bg-bash veto +
+# boundary standing-claim delivery.
+# --------------------------------------------------------------------------- #
+
+class TestBgBashDetector599(unittest.TestCase):
+    """#599 point 3 — the STRUCTURED run_in_background Bash liveness detector,
+    and its DELIBERATE isolation from the worker-lane primitive so the #571
+    lane-occupancy / gk-fill consumers are structurally unaffected."""
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _bg_start(self, tid):
+        return {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": tid, "name": "Bash",
+             "input": {"command": "x", "run_in_background": True}}]}}
+
+    def _completion(self, tid):
+        return {"type": "user", "message": {"content": (
+            "<task-notification>\n<task-id>b</task-id>\n"
+            "<tool-use-id>%s</tool-use-id>\n</task-notification>" % tid)}}
+
+    def test_start_without_completion_is_live(self):
+        self.assertTrue(wd.session_live_bg_bash([self._bg_start("toolu_a")]))
+
+    def test_start_with_completion_is_not_live(self):
+        self.assertFalse(wd.session_live_bg_bash(
+            [self._bg_start("toolu_a"), self._completion("toolu_a")]))
+
+    def test_one_open_among_several_completed_is_live(self):
+        entries = [self._bg_start("t1"), self._completion("t1"),
+                   self._bg_start("t2"), self._completion("t2"),
+                   self._bg_start("t3")]   # t3 never completes → live
+        self.assertTrue(wd.session_live_bg_bash(entries))
+
+    def test_all_completed_is_not_live(self):
+        entries = [self._bg_start("t1"), self._bg_start("t2"),
+                   self._completion("t1"), self._completion("t2")]
+        self.assertFalse(wd.session_live_bg_bash(entries))
+
+    def test_completion_in_queue_operation_form_is_not_live(self):
+        # #599 review 🟡: CC writes a bg completion as a `queue-operation` entry
+        # with the `<task-notification>` in a TOP-LEVEL `content` string (NO
+        # `message` key) — the DOMINANT form (8860 of ~12.5k on cambox). The
+        # message-only reader MISSED it (over-veto); `_task_notification_ids`
+        # now reads the top-level content. This test is RED against the old
+        # message-only reader.
+        qop = {"type": "queue-operation", "content": (
+            "<task-notification>\n<task-id>bq</task-id>\n"
+            "<tool-use-id>toolu_qop</tool-use-id>\n</task-notification>")}
+        self.assertFalse(wd.session_live_bg_bash([self._bg_start("toolu_qop"), qop]))
+
+    def test_completion_in_attachment_form_is_not_live(self):
+        # the `attachment` form carries the notification in `attachment.prompt`
+        # (measured live) — also read by `_task_notification_ids`.
+        att = {"type": "attachment", "attachment": {"type": "queued_command",
+               "prompt": ("<task-notification>\n<task-id>ba</task-id>\n"
+                          "<tool-use-id>toolu_att</tool-use-id>\n"
+                          "</task-notification>")}}
+        self.assertFalse(wd.session_live_bg_bash([self._bg_start("toolu_att"), att]))
+
+    def test_bounded_marker_finds_marker_behind_a_large_trailing_entry(self):
+        # #599 review 🔵: the bounded marker read (2MB default) must still find a
+        # `❓` marker turn even when a large (~1.5MB) trailing entry sits between
+        # it and EOF — the drift the tiny synthetic fixtures did not cover.
+        proj = self._dir()
+        d = Path(proj) / _encode("/home/x/big")
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "sidBig.jsonl"
+        marker = json.dumps({"type": "assistant",
+                             "message": {"id": "m1", "content": "❓ NEEDS YOU: rozhodni"}})
+        big = json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": "x" * 1_500_000}]}})
+        p.write_text(marker + "\n" + big + "\n")
+        self.assertEqual(wd.transcript_last_marker_bounded(str(p)), "❓")
+        self.assertEqual(wd.transcript_last_marker_bounded(str(p)),
+                         wd.transcript_last_marker(str(p)))
+
+    def test_a_non_bg_bash_tool_use_is_not_a_bg_job(self):
+        entries = [{"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash",
+             "input": {"command": "ls"}}]}}]   # no run_in_background
+        self.assertFalse(wd.session_live_bg_bash(entries))
+
+    def test_unmatched_completion_alone_is_not_live(self):
+        # a completion whose START is outside the window must not read live.
+        self.assertFalse(wd.session_live_bg_bash([self._completion("t9")]))
+
+    def test_empty_and_garbage_never_raise(self):
+        self.assertFalse(wd.session_live_bg_bash([]))
+        self.assertFalse(wd.session_live_bg_bash([None, 3, "x", {}]))
+        self.assertFalse(wd.session_live_bg_bash(   # wrong-typed text block
+            [{"type": "assistant", "message": {"content": [
+                {"type": "text", "text": None}]}}]))
+
+    def test_io_wrapper_live_and_not_live(self):
+        proj = self._dir()
+        p = _write_bg_bash_transcript(proj, "/home/x/p", "sidL", live=True)
+        self.assertTrue(wd.session_has_live_bg_bash(str(p)))
+        p2 = _write_bg_bash_transcript(proj, "/home/x/q", "sidD", live=False)
+        self.assertFalse(wd.session_has_live_bg_bash(str(p2)))
+
+    def test_io_wrapper_unreadable_is_false(self):
+        self.assertFalse(wd.session_has_live_bg_bash("/no/such/transcript.jsonl"))
+
+    def test_bg_bash_is_invisible_to_count_live_workers(self):
+        # CONSUMER ISOLATION (#565/#587 shared-primitive lesson): a bg-bash job
+        # is NOT a worker lane. The lane-occupancy (#571) / gk-fill consumers
+        # read count_live_workers / lane_has_live_evidence, whose danger is
+        # UNDER-counting a live lane (a false live lane there would SUPPRESS a
+        # fill nudge). A session with a LIVE bg-bash job but NO dispatched
+        # subagents must read 0 live workers / no live evidence — proving the
+        # bg-bash signal is held entirely separate and never leaks into them.
+        proj = self._dir()
+        cwd, sid = "/home/x/iso", "sidIso"
+        _write_bg_bash_transcript(proj, cwd, sid, live=True)
+        main = str(Path(proj) / _encode(cwd) / (sid + ".jsonl"))
+        self.assertTrue(wd.session_has_live_bg_bash(main))    # bg detected...
+        count, evidence = wd.count_live_workers(
+            str(proj), cwd, sid, time.time(), 15 * 60)
+        self.assertEqual(count, 0)                             # ...but invisible here
+        self.assertEqual(evidence, [])
+        self.assertFalse(wd.lane_has_live_evidence(evidence))
+
+    def test_bounded_marker_agrees_with_the_full_reader(self):
+        proj = self._dir()
+        for marker in ("⏳ WORKING: x", "❓ NEEDS YOU: y", "✅ DONE: z", ""):
+            p = _write_marker_transcript(proj, "/home/x/m", "sidM", marker)
+            self.assertEqual(wd.transcript_last_marker_bounded(str(p)),
+                             wd.transcript_last_marker(str(p)),
+                             "bounded vs full disagree for %r" % marker)
+
+
+class TestCompactBgBashVeto599(unittest.TestCase):
+    """#599 — deliver_compact's bg-bash veto (point 5b) and the boundary
+    STANDING-CLAIM delivery (point 5a)."""
+    SID = "sess-bgveto-1"
+    CWD = "/home/newlevel/devel/bgvetotest"
+
+    def setUp(self):
+        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def test_live_bg_bash_skips(self):
+        # point 5b: a live run_in_background Bash job (no completion) vetoes,
+        # with its OWN distinct reason, so a `/compact` never orphans it.
+        proj = self._dir()
+        _write_bg_bash_transcript(proj, self.CWD, self.SID, live=True)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "skip:live-bg-bash")
+        self.assertEqual(tmux.sent, [])
+
+    def test_completed_bg_bash_delivers(self):
+        # a bg job whose completion notification arrived is NOT live → the
+        # boundary request delivers.
+        proj = self._dir()
+        _write_bg_bash_transcript(proj, self.CWD, self.SID, live=False)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "sent")
+
+    def test_live_bg_bash_beats_the_dropped_working_marker(self):
+        # combined: the last turn is `⏳` (no longer vetoes) BUT a live bg-bash
+        # job is present → skip:live-bg-bash (NOT skip:not-a-boundary). Proves
+        # the `⏳` veto is gone AND the bg-bash veto is what protects the job.
+        proj = self._dir()
+        _write_bg_bash_transcript(proj, self.CWD, self.SID,
+                                  marker_text="⏳ WORKING: fleet upgrade", live=True)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "skip:live-bg-bash")
+
+    def test_boundary_recorded_then_working_delivers_as_standing_claim(self):
+        # point 5a: a boundary request recorded a while ago (ts within the cap)
+        # STILL delivers once the session sits at an idle `⏳` turn with no live
+        # work — the record is a STANDING claim, never gated on the last turn
+        # still being a boundary.
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, self.SID, "⏳ WORKING: next ticket")
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        now = 100000.0
+        recorded_ts = now - 300   # 5 min ago, well within the 30-min cap
+        word = compact.deliver_compact(
+            self.SID, self.CWD, origin="self-callback", run=tmux,
+            projects_dir=proj, delivered_path=self.delp, now=now,
+            request_ts=recorded_ts)
+        self.assertEqual(word, "sent")
+
+    def test_env_tunable_window_never_disables_the_veto(self):
+        # a malformed/disabling env value falls back to the constant, never off.
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_BG_BASH_TAIL_BYTES": "0",
+                           "AIRULESET_COMPACT_BG_BASH_MAX_ENTRIES": "-5"}):
+            tb, me2 = compact._compact_bg_bash_window()
+        self.assertEqual(tb, compact.COMPACT_BG_BASH_TAIL_BYTES)
+        self.assertEqual(me2, compact.COMPACT_BG_BASH_MAX_ENTRIES)
 
 
 if __name__ == "__main__":

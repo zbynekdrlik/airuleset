@@ -672,11 +672,12 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
 #
 # A saturated `/process-subdev` (or `/autopilot`) SUPERVISOR consumes a worker
 # return (task-notification) and continues `⏳ WORKING` WITHOUT writing the
-# per-ticket `## ✅ Work Complete` report. The only compact request that fires
-# for that boundary is `origin=subagent-stop`, which legitimately LAPSES on the
-# `⏳` veto (`_compact_self_reported_complete` is `self-callback`-ONLY, #425
-# by-design — #523 root cause). So the ticket gets neither a report NOR its
-# per-ticket compact (the #411 `--self` path is a CONSEQUENCE of the report).
+# per-ticket `## ✅ Work Complete` report. #599 fixed the COMPACT half of this
+# (a `subagent-stop` request no longer LAPSES on a `⏳` veto — that veto is
+# gone, so the per-ticket compact now delivers at the next safe moment); but
+# the missing REPORT itself is a separate, still-live concern — the ticket gets
+# no `## ✅ Work Complete` report at all, which is what job 25 nudges (the #411
+# `--self` compact is a CONSEQUENCE of the report, not job 25's target).
 #
 # Job 25 already computes "closed/merged tickets of this box" for missing CARDS
 # (`card_reconcile` above). This is the SECOND check over the SAME closed set:
@@ -686,9 +687,9 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
 # consecutive-swallow give-up that escalates to the owner so a permanently
 # swallowed delivery is never silent (#442-F2 / #502 / #509 / #511).
 #
-# It changes NOTHING about the compact veto (#425/#523 stay): the supervisor
-# writing the report re-arms the per-ticket compact through the existing #411
-# `--self` path all on its own.
+# It changes NOTHING about the compact veto: the supervisor writing the report
+# re-arms the per-ticket compact through the existing #411 `--self` path all on
+# its own (and post-#599 the subagent-stop request delivers on its own too).
 # --------------------------------------------------------------------------- #
 
 # The SAME canonical heading `hooks/stop-check-prose-violations.sh` and
