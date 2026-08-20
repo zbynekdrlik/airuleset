@@ -219,6 +219,40 @@ class SendVerified(_Base):
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("no transcript path" in ln for ln in logs), logs)
 
+    def test_delivered_unconfirmed_sets_out_flag(self):
+        # #594: the Enter clears the box (delivered/queued) but no `user` turn
+        # is written -> False, and `out["delivered_unconfirmed"]` records that
+        # it was DELIVERED (the box-bare branch), so a caller can dedup on it.
+        p = self._tpath()
+        tmux = self._fake(transcript_path=None)   # Enter clears box, writes no turn
+        out = {}
+        ok = wd.send_verified(PID, TEXT, tmux, p, sleep_fn=lambda s: None,
+                              logs=[], out=out)
+        self.assertFalse(ok)
+        self.assertTrue(out.get("delivered_unconfirmed"))
+
+    def test_swallowed_does_not_set_delivered_flag(self):
+        # #594: a GENUINE swallow (text stuck -> undone, never accepted) returns
+        # False WITHOUT the delivered flag -> the caller keeps retrying it.
+        p = self._tpath()
+        tmux = self._fake(enters_swallowed=99, transcript_path=p)
+        out = {}
+        ok = wd.send_verified(PID, TEXT, tmux, p, sleep_fn=lambda s: None,
+                              logs=[], out=out)
+        self.assertFalse(ok)
+        self.assertFalse(out.get("delivered_unconfirmed"))
+
+    def test_confirmed_submit_leaves_out_flag_unset(self):
+        # A confirmed submit returns True; the delivered-unconfirmed flag is a
+        # False-return-only signal, so it stays unset on the True path.
+        p = self._tpath()
+        tmux = self._fake(transcript_path=p)
+        out = {}
+        ok = wd.send_verified(PID, TEXT, tmux, p, sleep_fn=lambda s: None,
+                              logs=[], out=out)
+        self.assertTrue(ok)
+        self.assertFalse(out.get("delivered_unconfirmed"))
+
 
 if __name__ == "__main__":
     unittest.main()

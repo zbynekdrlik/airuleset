@@ -624,13 +624,25 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     text = _nudge_text(i_count, members, now, new_rec["w_first_seen"],
                        i_members=i_members)
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual
-    # stuck send stays reclaimable, cleared only on a confirmed submit.
+    # stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)
-    if not watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                  logs=logs):
-        # Unverified submit — transient, retried next sweep. Do NOT advance
-        # last_nudge (else a swallowed send silently skips a whole cadence), do
-        # NOT claim the pane in `handled`.
+    # #594: read BOTH the confirmed-submit bool AND the delivered-unconfirmed
+    # signal. Injecting into an actively-cycling armed loop, the Enter submits
+    # (box clears — delivered/queued) but the transcript confirmation races, so a
+    # bool-only read leaves `last_nudge` unadvanced and the nudge re-fires +
+    # re-delivers EVERY sweep (the reported 6×/35min). A DELIVERED submit
+    # (confirmed OR box-bare-unconfirmed) advances the dedup; only a GENUINE
+    # swallow / abort (neither) retries — send_verified distinguishes them
+    # (`delivered_unconfirmed` is set only in the box-cleared branch, never on
+    # the undone-swallow path).
+    send_out = {}
+    ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
+                                logs=logs, out=send_out)
+    delivered = ok or bool(send_out.get("delivered_unconfirmed"))
+    if not delivered:
+        # Genuinely unverified (swallowed / aborted / unreadable) — transient,
+        # retried next sweep. Do NOT advance last_nudge (else a swallowed send
+        # silently skips a whole cadence), do NOT claim the pane in `handled`.
         logs.append("ops-wait-recheck %s -> submit-unverified (partition %s, "
                     "retry next sweep)" % (loc, sig))
         return logs
@@ -639,6 +651,7 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     wrecs[sid] = new_rec
     if handled is not None:
         handled.add(sid)
-    logs.append("ops-wait-recheck nudge %s -> partition %s (tracked %s)"
-                % (loc, sig, _fmt_age(now - new_rec["first_seen"])))
+    note = "" if ok else " (delivered-unconfirmed — submit raced confirmation)"
+    logs.append("ops-wait-recheck nudge %s -> partition %s (tracked %s)%s"
+                % (loc, sig, _fmt_age(now - new_rec["first_seen"]), note))
     return logs
