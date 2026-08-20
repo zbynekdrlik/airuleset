@@ -105,6 +105,11 @@ REMOTE_HOSTS = [
         "user": "david",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
+        # STOPGAP (#537, 2026-08-21): account renamed david->david1 live tonight;
+        # pending=True keeps the deploy loop off the now-nonexistent user
+        # (fail2ban) until the runbook step 7/8 repo flip lands and removes
+        # this entry entirely.
+        "pending": True,
     },
     {
         # miva1 -- 5th sub-dev stream, phase-1 isolated, on the same subdev
