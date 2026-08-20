@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -91,8 +92,19 @@ class OAuthRevokedClassifier(unittest.TestCase):
     def test_recognises_the_agent_death_variant_without_login_prefix(self):
         self.assertTrue(wd.is_oauth_revoked(AGENT_DEATH))
 
-    def test_bare_please_run_login(self):
-        self.assertTrue(wd.is_oauth_revoked("Please run /login"))
+    def test_bare_please_run_login_is_NOT_a_rotation_revoke(self):
+        # #602 adversarial-review corpus finding: a bare "Please run /login"
+        # (with no "access token has been revoked") is login-expired /
+        # not-logged-in — 193/270 (71%) of real /login-bearing api-errors, NOT
+        # a token rotation. The enriched rotation prompt ("old token revoked,
+        # fresh token on disk") would be FACTUALLY WRONG for it, so it is
+        # DELIBERATELY excluded and keeps job 1's bare-`continue` recovery.
+        self.assertFalse(wd.is_oauth_revoked("Please run /login"))
+
+    def test_login_expired_and_not_logged_in_are_not_rotation_revokes(self):
+        # the two dominant non-rotation /login banners from the corpus scan.
+        self.assertFalse(wd.is_oauth_revoked("Login expired · Please run /login"))
+        self.assertFalse(wd.is_oauth_revoked("Not logged in · Please run /login"))
 
     def test_normal_reply_is_not_oauth_revoked(self):
         self.assertFalse(wd.is_oauth_revoked("pracujem na tickete…"))

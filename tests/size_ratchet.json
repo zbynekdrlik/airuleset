@@ -251,7 +251,7 @@
     "watchdog/conformance.py": 430,
     "watchdog/conformance_heartbeat.py": 409,
     "watchdog/cross_stream.py": 1969,
-    "watchdog/decide.py": 778,
+    "watchdog/decide.py": 791,
     "watchdog/discord_api.py": 187,
     "watchdog/discord_replies.py": 780,
     "watchdog/goal.py": 3121,
