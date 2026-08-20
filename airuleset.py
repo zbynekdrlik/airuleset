@@ -3058,7 +3058,32 @@ def _notify_run_card(args, compose_autopilot_card, send):
         repo = getattr(args, "repo", None)
         issue = getattr(args, "issue", None)
         if not repo or issue is None:
-            return  # need --repo + --issue to build a card
+            # #590: a missing --repo/--issue is a NON-DELIVERY, and #134/#135
+            # require a non-delivered run-card to EXIT NON-ZERO and write a
+            # durable delivery-log line with the reason — never a silent
+            # `return` (exit 0, no log, no output, silent even under
+            # --dry-run). That silent `return` (here since 9bee24a1,
+            # 2026-06-20) is the branch the airuleset supervisor hit by
+            # firing run-cards without --repo, dropping ~20 cards with zero
+            # trace. Same log+stderr+exit shape as `_run_card_refuse`,
+            # inlined because `name` is not yet computable when `repo` is the
+            # missing field. --dry-run keeps that helper's own contract:
+            # PRINT the refuse-would decision + reason, exit non-zero, skip
+            # only the DURABLE log write.
+            dry_run = getattr(args, "dry_run", False)
+            missing = ([] if repo else ["--repo"]) + \
+                      ([] if issue is not None else ["--issue"])
+            name = str(repo).rstrip("/").split("/")[-1] if repo else "?"
+            key = "%s#%s" % (name, issue if issue is not None else "?")
+            reason = "missing required %s" % " and ".join(missing)
+            if not dry_run:
+                from notify import log_delivery
+                log_delivery("refused", kind="run-card", key=key,
+                             reason=reason)
+            print("notify --run-card: REFUSED (%s) — %s; a completion card "
+                  "needs both --repo <owner/name> and --issue <N> to build. "
+                  "No card sent." % (key, reason), file=sys.stderr)
+            sys.exit(1)
 
         # #474 terminal-skip: an external caller re-firing an IDENTICAL
         # contentless card (empty/generic --goal or --achieved) would
