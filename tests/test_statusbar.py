@@ -1901,7 +1901,7 @@ class UserWaitingSegment(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
-                '  */comments*) echo "[]";;\n'
+                '  */timeline*) echo "[]";;\n'
                 '  *"--search label:autopilot-skip"*) echo "[]";;\n'
                 '  *assignee:@me*) echo \'%s\';;\n' % A +
                 '  *author:@me*)   echo \'%s\';;\n' % B +

@@ -28,6 +28,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import airuleset  # noqa: E402
+import cli_quals  # noqa: E402
 
 SLUG = "zbynekdrlik/odoo-erp"
 ROOT = "/tmp/does-not-matter-589"
@@ -139,9 +140,10 @@ class ResolvedHandoffEndCondition(unittest.TestCase):
         i_bucket = sum(1 for n in workable if not handed.get(n))
         self.assertEqual(gk, 0)
         self.assertEqual(i_bucket, 1)
-        # disjoint: no workable ticket is counted in both
-        both = [n for n in workable if handed.get(n) and not handed.get(n)]
-        self.assertEqual(both, [])
+        # gk (handed subset) and I (not-handed subset) PARTITION workable
+        # exactly — no ticket is dropped or double-counted (the #391 invariant
+        # the derivation `gk = sum(handed); I = len - gk` enforces).
+        self.assertEqual(gk + i_bucket, len(workable))
 
 
 class LegitimateFreshHandoffStillCounts(unittest.TestCase):
@@ -256,6 +258,20 @@ class TimelineEndpointIsTheFallbackDataSource(unittest.TestCase):
                          "fallback must not read /comments (no label events)")
         # exactly ONE gh api call per candidate — no per-ticket explosion
         self.assertEqual(len(api_paths), 1)
+
+
+class QueueLabelSetParity(unittest.TestCase):
+    """#589 both-reviews 🔵: `airuleset._HANDOFF_QUEUE_LABELS` (the resolution
+    signal's queue-label set) duplicates `cli_quals.MAINTAINER_ACTION_LABELS`
+    with no import between them; a future THIRD queue label added to one but not
+    the other would silently desync the end condition. Lock them equal."""
+
+    def test_handoff_queue_labels_match_maintainer_action_labels(self):
+        self.assertEqual(
+            set(airuleset._HANDOFF_QUEUE_LABELS),
+            set(cli_quals.MAINTAINER_ACTION_LABELS),
+            "the timeline resolution queue-label set must stay in sync with "
+            "cli_quals.MAINTAINER_ACTION_LABELS (#589)")
 
 
 if __name__ == "__main__":

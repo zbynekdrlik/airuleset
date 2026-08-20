@@ -1460,10 +1460,19 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     # instead of `/comments`, and treat a gk-RESOLUTION event (queue-label
     # removal / close) AFTER the last hand-off comment as a NEGATIVE signal
     # via the shared last-signal-wins walk. Zero added gh calls — the
-    # timeline REPLACES the comments call (one `gh api` per candidate,
-    # `per_page=100` covers more history than the previous default-30
-    # comments window). `_timeline_handoff_signal` is the pure per-event
-    # classifier.
+    # timeline REPLACES the comments call (one `gh api` per candidate).
+    # `_timeline_handoff_signal` is the pure per-event classifier.
+    #
+    # ACCEPTED RESIDUAL (both #589 reviews): the timeline is fetched
+    # oldest-first, ONE page of `per_page=100` events (the API ignores
+    # `direction=desc` — verified live), so a resolution beyond event 100 on a
+    # hyper-active ticket is missed and its stale hand-off keeps counting as
+    # gk. This is never WORSE than the pre-#589 `/comments` behaviour (which
+    # read only the oldest default page too) and fails toward the stream's own
+    # court (a safe over-count of `I`, never a false gk stop); fetching the
+    # LAST page needs the total count = an extra per-ticket call, the query
+    # explosion #589's cost constraint forbids. See `_timeline_handoff_signal`
+    # for the full residual list.
     #
     # #391 CRITICAL-1: for a row in `bounce_numbers`, an upgrade to handed
     # additionally requires `saw_gatekeeper_comment` -- a recognised
