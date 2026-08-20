@@ -27,7 +27,7 @@
   "filedrop/server.py": 193,
   "filedrop/share.py": 103,
   "filedrop/upload_server.py": 309,
-  "filedrop/vault.py": 967,
+  "filedrop/vault.py": 1027,
   "filedrop/vault_server.py": 385,
   "notify/__init__.py": 2684,
   "statusbar.py": 745,

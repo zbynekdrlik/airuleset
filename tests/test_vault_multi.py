@@ -15,28 +15,19 @@ Named `vault_multi` (never `*secret*`/`*credential*`): hooks/
 block-sensitive-staging.sh refuses to `git add` any basename with those words.
 """
 
-import json
 import os
 import stat
-import subprocess
 import sys
 import tempfile
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from unittest import TestCase, main
 from unittest import mock as m
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import airuleset                                        # noqa: E402
-import cli_vault                                        # noqa: E402
 from filedrop import vault as st                        # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "filedrop" / "vault_server.py"
-
-TOK = "toktoktoktoktok603"
 
 
 class _StoreCase(TestCase):
@@ -130,8 +121,12 @@ class TestStoreValuesAtomicity(_StoreCase):
                 st.store_values(
                     [("WS_IDENT", b"ident-603"), ("WS_SECRET", b"s3cr3t-603")],
                     nonces={"WS_IDENT": n1, "WS_SECRET": n2})
+        # All-or-nothing: NEITHER name is `ready` — the first (committed then
+        # rolled back) is `absent`, the second (failed mid-write, never
+        # committed) stays `pending`.
+        self.assertNotEqual(st.state("WS_IDENT"), "ready")
+        self.assertNotEqual(st.state("WS_SECRET"), "ready")
         self.assertEqual(st.state("WS_IDENT"), "absent")     # rolled back
-        self.assertEqual(st.state("WS_SECRET"), "absent")
 
     def test_empty_items_is_refused(self):
         with self.assertRaises(st.SecretError):

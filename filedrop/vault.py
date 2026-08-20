@@ -487,6 +487,66 @@ def store_value(name, data, keep_s=DEFAULT_KEEP_S, now=None, nonce=None):
         _persist_at_receipt(name, dpath, bytes(data))
 
 
+def store_values(items, keep_s=DEFAULT_KEEP_S, now=None, nonces=None):
+    """Store several named values ALL-OR-NOTHING (#603, multi-field intake).
+
+    `items`: an iterable of (name, bytes). `nonces`: {name: nonce} — each
+    endpoint's proof it belongs to the CURRENT request (a mismatch/revoked name
+    aborts the WHOLE set). PRE-FLIGHTS every name (valid name, still `pending`,
+    endpoint nonce matches, non-empty, within the byte cap) BEFORE writing ANY
+    value, so a bad name / stale nonce / empty / oversize member aborts the set
+    with NOTHING on disk. Then writes them all with `store_value`'s own
+    O_EXCL / nonce / paste-time-durable-persist discipline; if a write still
+    fails after a clean pre-flight (a residual disk error), the values already
+    written IN THIS CALL are removed (reverting those names to `absent`), so a
+    partial set is never left behind — the reverse of a half-populated
+    credential pair the whole feature exists to avoid.
+
+    Raises `SecretError` naming only the offending NAME and the reason — never a
+    value, a prefix of it, or its length (the same no-leak guarantee every
+    function in this module keeps). On success every name is `ready`; returns
+    the list of stored names, in the order given.
+    """
+    items = list(items)
+    nonces = nonces or {}
+    if not items:
+        raise SecretError("no values to store")
+    # PRE-FLIGHT — every member, before a single write, so the set aborts
+    # cleanly on a bad member instead of leaving the earlier ones stored.
+    for name, data in items:
+        check_name(name)
+        if not isinstance(data, (bytes, bytearray)):
+            raise SecretError("%s: value must be bytes" % name)
+        if not data:
+            raise SecretError("%s: empty value" % name)
+        if len(data) > MAX_SECRET_BYTES:
+            raise SecretError(
+                "%s: value over the %d-byte cap" % (name, MAX_SECRET_BYTES))
+        current = state(name)
+        if current != "pending":
+            raise SecretError(
+                "%s: not awaiting a value (state=%s) — a multi-field member "
+                "must have a live request" % (name, current))
+        want = nonces.get(name)
+        if want is not None and read_meta(name).get("nonce") != want:
+            raise SecretError(
+                "%s: this endpoint no longer matches the current request "
+                "(it was revoked or replaced) — refusing to store" % name)
+    # COMMIT — pre-flight passed, so these should all succeed; roll back on a
+    # residual failure to keep the whole set all-or-nothing.
+    written = []
+    try:
+        for name, data in items:
+            store_value(name, bytes(data), keep_s=keep_s, now=now,
+                        nonce=nonces.get(name))
+            written.append(name)
+    except SecretError:
+        for nm in written:
+            _unlink_entry(nm)               # revert to `absent`, re-requestable
+        raise
+    return [nm for nm, _ in items]
+
+
 def state(name):
     """`ready` (a value is stored), `pending` (requested, not yet posted) or
     `absent`. Deliberately the ONLY read a session ever needs."""
