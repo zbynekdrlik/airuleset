@@ -561,7 +561,9 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
                               default_size: str = TMUX_DEFAULT_SIZE,
                               run=None) -> bool:
     """Ensure `~/.tmux.conf` carries the managed tmux block: history-limit
-    (#235), destroy-unattached (#254), and default-size (#236).
+    (#235) and default-size (#236) -- and UNSETS any stale global
+    destroy-unattached on a running server (#591 self-heal; the conf no longer
+    carries a destroy-unattached line at all).
     `window-size manual` (#586) is emitted too, but ONLY VERSION-GATED and
     CONF-ONLY: this probes the PATH `tmux -V` once via `run`
     (`_tmux_supports_window_size_manual`) and includes the line ONLY when the

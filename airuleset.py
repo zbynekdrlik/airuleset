@@ -1039,12 +1039,14 @@ def cmd_install(args):
     except Exception as e:
         print(f"  ssh auto-attach setup error (non-fatal): {e}", file=sys.stderr)
     try:
-        # #554: name the tmux WINDOW after the stream so the owner sees which
-        # subdev session they are attached to. Stream accounts only; a true
-        # no-op (and actively strips any stale block) on dev1/dev2/gatekeeper.
+        # #554/#592: name the tmux WINDOW after the box's short TARGET ALIAS
+        # (dev1/dev2/gk/mN/dN/...) so the owner sees WHERE they are. #592
+        # renders this on EVERY managed box (it was subdev-stream-only under
+        # #554, so gk/dev1/dev2 windows showed `bash`); the alias comes from the
+        # SAME source the webterm tabs use (cli_aliases.short_target_alias).
         window_name_changed = apply_stream_tmux_window_name()
         if window_name_changed:
-            print(f"  Updated:   {TMUX_CONF} (subdev tmux window name, #554)")
+            print(f"  Updated:   {TMUX_CONF} (tmux window name = target alias, #592)")
     except Exception as e:
         print(f"  stream tmux window-name setup error (non-fatal): {e}", file=sys.stderr)
     try:

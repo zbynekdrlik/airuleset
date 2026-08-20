@@ -25,7 +25,12 @@ def short_target_alias(user, box_name):
     stream family (montalu/david/miva/simap) and the gk account key off the
     USER. An unrecognized box gets a sensible short form (never empty for a
     non-empty input). Behaviour is byte-identical to the pre-#592
-    cli_webterm._short_alias for every input that function accepted."""
+    cli_webterm._short_alias for every input the webterm inventory produces
+    (every entry carries an `id`). The one divergence is unreachable: the old
+    code short-circuited on `id == "dev1"` alone, this on `box_name == "dev1"`
+    where the caller passes `id or label`, so an entry with a falsy id AND
+    `label == "dev1"` would differ -- `_tab_sessions` always sets `id`, so no
+    real entry hits it."""
     box_name = box_name or ""
     # dev1 short-circuits first (mirrors the old `local or id=="dev1"` check),
     # regardless of user.
