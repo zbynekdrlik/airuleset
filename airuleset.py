@@ -2148,6 +2148,64 @@ def _comment_readiness_signal(body):
     return None
 
 
+# #589: the queue labels whose REMOVAL is a gk-resolution signal. A gatekeeper
+# who reviews + merges + releases a hand-off REMOVES these when done (the live
+# odoo-erp #4502 shape) -- the `unlabeled` timeline event for one of these,
+# occurring AFTER the last READY-FOR-REVIEW comment, is the fallback's END
+# CONDITION (see `_timeline_handoff_signal`). Same set as cli_quals'
+# MAINTAINER_ACTION_LABELS, kept local to this module so the pure signal
+# helper has no cli_quals import; `prio:bounce` is deliberately NOT here (a
+# bounce is handled separately via `bounce_numbers`, not as a resolution).
+_HANDOFF_QUEUE_LABELS = ("ready-for-review", "needs-gatekeeper")
+
+
+def _timeline_handoff_signal(ev):
+    """#589 END CONDITION: per-TIMELINE-EVENT signal for the fallback's
+    LAST-VERDICT-WINS walk over a ticket's issue TIMELINE (which, unlike
+    `/comments`, carries label + close events alongside the comment bodies).
+    Returns `(verdict_signal, is_gatekeeper_comment)`:
+
+      verdict_signal -- True = a genuine READY-FOR-REVIEW hand-off comment;
+        False = a NEGATIVE (unhandled) signal, either an EXPLICIT
+        gatekeeper FINDING comment (the pre-existing #313 signal) OR a
+        gk-RESOLUTION EVENT (a `ready-for-review`/`needs-gatekeeper` queue
+        label REMOVED, or the issue CLOSED -- the #4502 shape where the gk
+        finished the hand-off and left NO finding comment); None = neutral.
+
+      is_gatekeeper_comment -- True ONLY for a genuine gatekeeper FINDING
+        COMMENT, never for a resolution event. This preserves the #391
+        CRITICAL-1 bounce-visibility gate byte-for-byte: a `prio:bounce`
+        row may only be re-upgraded to handed when a VISIBLE gatekeeper
+        COMMENT was seen, and a label-removal / close event must never
+        satisfy that gate.
+
+    Walking the timeline in chronological order and keeping the LAST non-None
+    verdict is what makes the END CONDITION work with zero extra ordering
+    logic: a resolution event AFTER the hand-off comment overwrites True with
+    False (the hand-off is done), while a later comment-only RE-hand-off
+    (fork-no-merge 403 / broken auto-labeller -- the legitimate case the
+    fallback exists for) overwrites it back to True. A `labeled
+    ready-for-review` event is NOT a positive signal here: a ticket that
+    reaches the fallback has no CURRENT queue label (else `label_handed` is
+    already True and it never enters the candidate walk), so a historical
+    add is irrelevant -- only the comment and the resolution events matter.
+    """
+    if not isinstance(ev, dict):
+        return None, False
+    etype = ev.get("event")
+    if etype == "commented":
+        sig = _comment_readiness_signal(ev.get("body"))
+        return sig, (sig is False)
+    if etype == "unlabeled":
+        name = (ev.get("label") or {}).get("name")
+        if name in _HANDOFF_QUEUE_LABELS:
+            return False, False   # gk cleared the queue label -- resolution
+        return None, False
+    if etype == "closed":
+        return False, False       # gk closed/resolved -- resolution
+    return None, False
+
+
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the

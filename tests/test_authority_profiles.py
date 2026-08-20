@@ -1311,8 +1311,8 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
                         '"createdAt": "2026-07-01T00:00:00Z", '
                         '"labels": [{"name": "ready-for-review"}, '
                         '{"name": "prio:bounce"}]}]')
-            if "issues/5/comments" in j:
-                return '[{"body": "READY-FOR-REVIEW: fork pushed, tests green"}]'
+            if "issues/5/timeline" in j:
+                return '[{"event": "commented", "body": "READY-FOR-REVIEW: fork pushed, tests green"}]'
             return "[]"
 
         buf = io.StringIO()
@@ -1345,11 +1345,11 @@ class TestSliceQualsExcludesHandedOffLikeTheFooter(TestCase):
                 return ('[{"number": 5, "title": "re-handed", '
                         '"createdAt": "2026-07-01T00:00:00Z", '
                         '"labels": [{"name": "prio:bounce"}]}]')
-            if "issues/5/comments" in j:
-                return ('[{"body": "READY-FOR-REVIEW: fork pushed, tests green"},'
-                        '{"body": "**GATEKEEPER FINDING:** needs another fix, '
+            if "issues/5/timeline" in j:
+                return ('[{"event": "commented", "body": "READY-FOR-REVIEW: fork pushed, tests green"},'
+                        '{"event": "commented", "body": "**GATEKEEPER FINDING:** needs another fix, '
                         'bouncing back."},'
-                        '{"body": "READY-FOR-REVIEW: addressed the finding, '
+                        '{"event": "commented", "body": "READY-FOR-REVIEW: addressed the finding, '
                         're-pushed."}]')
             return "[]"
 

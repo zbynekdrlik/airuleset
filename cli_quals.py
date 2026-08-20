@@ -1444,27 +1444,43 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     # #313 pt 2: the label alone is not a reliable hand-off signal — the
     # PRIMARY signal is the READY-FOR-REVIEW comment (agents/autopilot-
     # worker.md), always postable regardless of write access. A candidate
-    # the label missed is checked directly against its own comments via
-    # `_comment_readiness_signal`, in creation order, keeping the LAST
-    # signal (a stale pre-bounce comment is correctly invalidated by a
-    # later gatekeeper finding/bounce, and a genuine post-bounce
-    # re-submission overrides that again).
+    # the label missed is checked directly against its own comments, in
+    # creation order, keeping the LAST signal (a stale pre-bounce comment is
+    # correctly invalidated by a later gatekeeper finding/bounce, and a
+    # genuine post-bounce re-submission overrides that again).
+    #
+    # #589 END CONDITION: the comment signal alone had NO way to expire a
+    # DONE hand-off (gk reviewed + merged + released and removed the queue
+    # labels but left no `**GATEKEEPER` finding comment — the live odoo-erp
+    # #4502 shape → the stale READY-FOR-REVIEW comment read True forever, so
+    # the ticket counted in gk permanently AND, since the label query said
+    # it was NOT handed, in `I` too — the #391 `I = mine - gk` violation the
+    # owner ruled unacceptable). Fix: read the issue TIMELINE (which carries
+    # the label-removal / close EVENTS the `/comments` endpoint cannot see)
+    # instead of `/comments`, and treat a gk-RESOLUTION event (queue-label
+    # removal / close) AFTER the last hand-off comment as a NEGATIVE signal
+    # via the shared last-signal-wins walk. Zero added gh calls — the
+    # timeline REPLACES the comments call (one `gh api` per candidate,
+    # `per_page=100` covers more history than the previous default-30
+    # comments window). `_timeline_handoff_signal` is the pure per-event
+    # classifier.
     #
     # #391 CRITICAL-1: for a row in `bounce_numbers`, an upgrade to handed
     # additionally requires `saw_gatekeeper_comment` -- a recognised
-    # gatekeeper-authored comment (`_comment_readiness_signal` returning
-    # False) seen SOMEWHERE in the walk, proving the bounce is genuinely
-    # VISIBLE in the thread (a real post-bounce re-hand-off) rather than a
-    # bare-label bounce with no comment at all (which must never re-flip a
-    # stale pre-bounce hand-off comment back to handed).
+    # gatekeeper-authored COMMENT (not a resolution EVENT) seen SOMEWHERE in
+    # the walk, proving the bounce is genuinely VISIBLE in the thread (a real
+    # post-bounce re-hand-off) rather than a bare-label bounce with no comment
+    # at all (which must never re-flip a stale pre-bounce hand-off comment
+    # back to handed). `_timeline_handoff_signal`'s second return value is
+    # True ONLY for a gatekeeper COMMENT, so this gate is byte-preserved.
     if slug and not failed:
         # #507: a `processed_numbers` ticket (needs-acceptance — a hand-off the
         # gatekeeper already processed) is EXCLUDED from the candidate walk
         # entirely: it must stay handed=False (own workable, back in the
         # stream's court), and its stale, permanent READY-FOR-REVIEW comment
         # must never re-flip it to parked-with-gk. Excluding it here (rather
-        # than fetching its comments and refusing the upgrade) also skips a
-        # pointless `gh api .../comments` call per such ticket. The COMMON
+        # than fetching its timeline and refusing the upgrade) also skips a
+        # pointless `gh api .../timeline` call per such ticket. The COMMON
         # re-hand-off carries a fresh ready-for-review/needs-gatekeeper LABEL,
         # so it is already handed via the label-check and never reaches here;
         # the comment-only-re-hand-off edge is the accepted SAFE-direction
@@ -1475,20 +1491,19 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
             reverse=True)
         for n_num in unhandled_candidates[:airuleset._HANDOFF_COMMENT_CHECK_LIMIT]:
             raw = airuleset._gh_out("api",
-                          "repos/%s/issues/%d/comments" % (slug, n_num),
+                          "repos/%s/issues/%d/timeline?per_page=100" % (slug, n_num),
                           cwd=root, timeout=20)
             try:
-                comments = json.loads(raw)
+                events = json.loads(raw)
             except (ValueError, TypeError):
-                comments = []
-            if not isinstance(comments, list):
+                events = []
+            if not isinstance(events, list):
                 continue   # e.g. a bare int -- never a real answer
             verdict = False
             saw_gatekeeper_comment = False
-            for c in comments:
-                body = c.get("body") if isinstance(c, dict) else None
-                sig = airuleset._comment_readiness_signal(body)
-                if sig is False:
+            for ev in events:
+                sig, is_gk_comment = airuleset._timeline_handoff_signal(ev)
+                if is_gk_comment:
                     saw_gatekeeper_comment = True
                 if sig is not None:
                     verdict = sig
