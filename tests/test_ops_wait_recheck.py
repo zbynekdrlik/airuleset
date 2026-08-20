@@ -475,6 +475,27 @@ class TestBusyPaneRefire594(_OrchBase):
         self.assertIsNone(wrecs[self.sid]["last_nudge"])
 
 
+class TestParkedAge594(_OrchBase):
+    """#594 root cause B — a W member the watchdog first sees THIS sweep must be
+    aged from ITS OWN W entry, never from a stale partition-level anchor."""
+
+    def test_fresh_w_member_not_aged_by_stale_partition_anchor(self):
+        # The incident shape: the partition/session has been tracked ~24h, and a
+        # W member #3076 that entered W ~1h ago is nudged. Pre-fix the nudge ages
+        # #3076 by the single partition-level `w_first_seen` (~24h) -> RED. GREEN:
+        # a per-ticket first-seen map ages #3076 from its own entry (~0h).
+        wrecs = {self.sid: {"first_seen": NOW - DAY, "w_first_seen": NOW - DAY,
+                            "last_nudge": None}}
+        tmux = self._tmux()
+        self._run(wrecs, lambda cwd: [3076], tmux, handled=set(), state={})
+        typed = "".join(tmux.typed_texts())
+        self.assertIn("#3076", typed)
+        self.assertIn("~0h", typed,
+                      "a freshly-parked W member must be aged from its own W "
+                      "entry (~0h), not the stale ~24h partition anchor (#594)")
+        self.assertNotIn("~24h", typed)
+
+
 class TestNudgeText(unittest.TestCase):
     """#552 — the composed partition-audit text: the I clause when I>0, the W
     clause (names + truthful park age) when W non-empty, both when both, and a
