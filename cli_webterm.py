@@ -433,51 +433,46 @@ body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
-<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku (funguje aj počas písania v termináli) · skrytý tab sa odpojí a pri návrate znovu pripojí (scrollback ostáva v tmuxe; scroll-pozícia sa resetne) · Ctrl+W: potvrdenie pri zatváraní chráni vždy; &#9974; Fullscreen (Keyboard Lock) pošle Ctrl+W priamo do terminálu — vyžaduje HTTPS/localhost; PWA/app-okno zmenší riziko náhodného zatvorenia · prihlásenie raz (tailnet-only)</div>
+<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku (funguje aj počas písania v termináli) · všetky záložky sú prednačítané a stále pripojené — prepínanie je instantné, bez reconnectu (scrollback ostáva v tmuxe) · Ctrl+W: potvrdenie pri zatváraní chráni vždy; &#9974; Fullscreen (Keyboard Lock) pošle Ctrl+W priamo do terminálu — vyžaduje HTTPS/localhost; PWA/app-okno zmenší riziko náhodného zatvorenia · prihlásenie raz (tailnet-only)</div>
 <script>
 const CFG = @@CFG_JSON@@;
 const frames = document.getElementById('frames');
 const made = {};
 let current = 0;                          // the active tab index (drives cycle())
 function ttydSrc(s) { return CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id); }
-function connect(f, s) {                   // (re)attach a suspended/new iframe to its terminal
-  if (f.dataset.live === '1') return;      // already live -> never a needless reload
-  f.src = ttydSrc(s);                      // a fresh ttyd client re-attaches to the SAME base
-  f.dataset.live = '1';                    // session (the scrollback BUFFER lives in tmux)
+function makeFrame(idx, s) {                // #586: create + CONNECT one iframe ONCE, hidden.
+  if (made[idx]) return made[idx];         // idempotent — an iframe is never re-created/reloaded,
+  const f = document.createElement('iframe');   // so it is never navigated after its first load
+  f.className = 'term';
+  f.addEventListener('load', () => attachForwarder(f));  // #584 same-origin keydown
+  f.style.display = 'none';
+  f.src = ttydSrc(s);                      // connected at creation (preloaded, keepalive)
+  f.dataset.live = '1';
+  frames.appendChild(f);
+  made[idx] = f;
+  return f;
 }
-function suspend(f) {                       // #585(a): disconnect a HIDDEN tab so its throwaway
-  if (f.dataset.live !== '1') return;      // tmux clone dies (WS close) and can NEVER drive the
-  f.src = 'about:blank';                    // base session's shared window size (window-size latest)
-  f.dataset.live = '0';
-}
-function hasLiveTerminal() {                // gate for the #585(b) beforeunload confirm
+function preloadAll() {                     // #586: connect EVERY tab at login. Supersedes #585's
+  CFG.sessions.forEach((s, i) => makeFrame(i, s));   // disconnect-on-hide, which made switching
+}                                           // slow (a reconnect each time) AND fired ttyd's own
+                                            // beforeunload ("Leave site?") on every tab click.
+                                            // Sizing is now fixed SERVER-side (window-size manual +
+                                            // the clone's ignore-size flag), so a hidden-but-still-
+                                            // connected tab can never shrink the shared window —
+                                            // disconnecting it is no longer needed.
+function hasLiveTerminal() {                // gate for the beforeunload close-confirm
   for (const k in made) if (made[k].dataset.live === '1') return true;
   return false;
 }
 function activate(idx) {
   const s = CFG.sessions[idx];
   if (!s) return;
-  if (!made[idx]) {                       // lazy: one iframe per activated tab, never N eager
-    const f = document.createElement('iframe');
-    f.className = 'term';
-    f.dataset.live = '0';
-    f.addEventListener('load', () => attachForwarder(f));  // #584 same-origin keydown
-    frames.appendChild(f);
-    made[idx] = f;
-  }
-  // #585(a): EXACTLY the visible tab holds a live terminal client — every hidden
-  // tab is disconnected (its clone session dies), so a hidden tab can never
-  // shrink the base session's shared tmux window (window-size latest sizes to the
-  // most-recently-active client). Reconnect on return re-attaches to the SAME
-  // base: the scrollback BUFFER is preserved (verified live — a real shell base
-  // survives the clone churn with its history + env intact), but copy-mode scroll
-  // POSITION and current-window selection reset, and there is a brief reconnect
-  // flash. (Residual, inherited from #584: a base viewed ONLY through webterm and
-  // reduced to just this clone under `destroy-unattached keep-last` is the #584
-  // accepted-loss case — a normal shell session is not affected.)
+  makeFrame(idx, s);                        // already preloaded — idempotent no-op
+  // #586: PURE show/hide. Every tab stays CONNECTED (preloaded), so switching is
+  // instant with no reconnect AND no iframe navigation — which is exactly why a
+  // tab click never fires ttyd's own beforeunload. Only `display` toggles here.
   for (const k in made) {
-    if (+k === idx) { connect(made[k], s); made[k].style.display = 'block'; }
-    else { suspend(made[k]); made[k].style.display = 'none'; }
+    made[k].style.display = (+k === idx) ? 'block' : 'none';
   }
   document.querySelectorAll('.tab').forEach((t) => {
     const on = +t.dataset.idx === idx;
@@ -518,7 +513,7 @@ function attachForwarder(f) {
   // hotkey in the CAPTURE phase, before xterm. A cross-origin frame would throw
   // here — impossible under the gateway, but caught so one frame can never break
   // the page or the rest of switching.
-  if (f.dataset.live !== '1') return;      // #585: skip the about:blank (suspend) load
+  if (f.dataset.live !== '1') return;      // defensive: only forward for a live frame
   try {
     const w = f.contentWindow;
     if (w) w.addEventListener('keydown', onHotkey, true);
@@ -572,6 +567,7 @@ if (fsBtn) {
   }
 }
 window.addEventListener('keydown', onHotkey);   // Ctrl+Alt+1..9 when the bar is focused
+preloadAll();                           // #586: connect every tab up front (instant switching)
 if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page
 </script>
 </body>

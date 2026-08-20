@@ -780,18 +780,23 @@ class TestAllTabsPreloaded(unittest.TestCase):
 
     def test_switch_is_pure_show_hide_no_src_change_inside_activate(self):
         # activate() must ONLY toggle display (block/none) — never reassign an
-        # iframe's src (that would be a reconnect/navigation). The active branch
-        # shows, the else branch hides; NO `connect(`/`.src` inside the loop.
+        # iframe's src (that would be a reconnect/navigation, and a navigation is
+        # exactly what fired the Leave-site dialog in #585). Isolate the
+        # activate() body and prove: it toggles display on the +k===idx test and
+        # never touches `.src`.
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        # the show/hide loop is wired inside activate on the same +k===idx test
-        self.assertRegex(
-            html,
-            r"function activate\(idx\)\s*\{.*?\+k === idx.*?'block'.*?'none'",
-        )
-        # isolate the activate() body and assert it never reassigns .src there
         m = re.search(r"function activate\(idx\)\s*\{(.*?)\n\}", html, re.S)
         self.assertIsNotNone(m, "activate() body not found")
-        self.assertNotIn(".src", m.group(1),
+        body = m.group(1)
+        self.assertIn("+k === idx", body)     # the show/hide branch key
+        self.assertIn("'block'", body)        # active tab shown
+        self.assertIn("'none'", body)         # others hidden
+        # #586: switching must NOT (re)connect or suspend any iframe — those were
+        # the #585 navigations that made switching slow AND fired the Leave-site
+        # dialog. Pure display toggle only.
+        self.assertNotIn("suspend(", body)
+        self.assertNotIn("connect(", body)
+        self.assertNotIn(".src", body,
                          "activate() must not navigate any iframe (pure show/hide)")
 
     def test_hint_documents_preloaded_instant_switching(self):
