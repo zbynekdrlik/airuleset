@@ -196,6 +196,28 @@ class TestCoFitSizeGuard(TestCase):
             % (recipe, comp, recipe + comp, budget),
         )
 
+    def test_both_bodies_actually_inject_on_a_message_post_write(self):
+        """The REAL, wrapper-inclusive budget check (found live this ticket): the
+        arithmetic guard above sums RAW bodies, but inject-situational-rule.sh
+        (line 170) sums the ALREADY-WRAPPED chunks (`<project-rule>…</project-rule>`,
+        ~250 B overhead each) + the raw next body against MAX_TOTAL — so raw-body
+        arithmetic UNDER-counts, and a compact pointer that "fit" the raw budget
+        still DEFERRED the odoo recipe. Drive the real hook: a .py write with
+        message_post MUST inject BOTH the odoo recipe AND comprehensive-logging."""
+        with tempfile.TemporaryDirectory() as td:
+            payload = {"session_id": "cofit-real", "tool_name": "Write",
+                       "tool_input": {"file_path": "/repo/importer.py",
+                                      "content": "channel.message_post(body=h, body_is_html=True)"}}
+            r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
+                               capture_output=True, text=True,
+                               env=dict(os.environ, TMPDIR=td))
+        self.assertEqual(r.returncode, 0, "injector hook must never block: %r" % r.stderr)
+        # both co-firing bodies must be present — neither deferred over the real budget
+        self.assertIn("Odoo Discuss over XML-RPC", r.stdout,
+                      "the odoo message_post recipe DEFERRED — a co-firing body over-grew MAX_TOTAL")
+        self.assertIn("Comprehensive Logging", r.stdout,
+                      "comprehensive-logging did not inject on a .py message_post write")
+
 
 class TestHandoverTriggerInjection(TestCase):
     """Functional: the trigger loads the composition rules at proposal time, and
@@ -631,24 +653,27 @@ class TestModulesCoreUrlReferenceRule(TestCase):
 
 
 class TestSkillPointsAtIdentityAndUrlRule(TestCase):
-    """#598/#595 — the lean recipe (SKILL.md) POINTS at the companion for the
-    body identity signature + reference-URL rule, and does NOT restate the
-    operative form (which would blow the #521 co-fit budget). `ZbynekAI` lives
-    ONLY in the companion."""
+    """#598/#595 — the message-body identity signature + reference-URL rule live
+    in the COMPANION, never the recipe. The recipe's #521 co-fit budget is REAL
+    and wrapper-inclusive (TestCoFitSizeGuard's functional method) — growing
+    SKILL.md even by a compact pointer DEFERRED the odoo recipe on a .py
+    message_post write (the exact #521 failure, found live this ticket), so the
+    recipe is NOT grown. It ALREADY points at handover-compose.md for the
+    message body rules; `ZbynekAI` lives ONLY in the companion so it stays lean."""
 
     def setUp(self):
         self.raw = read(SKILL)
         self.t = norm(self.raw)
 
-    def test_recipe_points_at_body_identity_and_links(self):
-        self.assertIn("Body identity + links", self.t)
-        self.assertIn("signature", self.t)
-        self.assertIn("functional URL", self.t)
+    def test_recipe_points_at_companion_for_body_rules(self):
+        # the recipe already routes message-body composition to the companion —
+        # no new (budget-consuming) pointer is added
         self.assertIn("handover-compose.md", self.t)
+        self.assertIn("its message body must follow the canonical cross-stream rules", self.t)
 
     def test_recipe_does_not_restate_the_signature_form(self):
         # the operative `ZbynekAI <N>` form + its derivation live ONLY in the
-        # companion — the recipe stays a pointer (co-fit budget, #521/#573)
+        # companion — a recipe restatement would blow the #521 co-fit budget
         self.assertNotIn("ZbynekAI", self.raw)
         self.assertNotIn("montaluN", self.raw)
 
