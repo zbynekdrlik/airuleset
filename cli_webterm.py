@@ -209,6 +209,18 @@ _ATTACH_BODY = (
     # moves to the attach: a detached new-session has no client for the flag.
     # NOT `exec`ed, so the EXIT/HUP trap still fires to kill the clone (the
     # per-session `on` is the belt-and-suspenders for a trap that never fires).
+    # TRANSITION RESIDUAL (#591-review B1, documented not guarded): on a target
+    # NOT yet re-installed after #591 whose RUNNING server still carries the old
+    # live GLOBAL `keep-last`, `new-session -d` creates the clone DETACHED and
+    # keep-last destroys it AT CREATION (before set-hook/attach), so this connect
+    # FAILS (the base is still safe — the #591 goal holds; only the webterm view
+    # to that one target breaks). Closed by CO-DEPLOYMENT: the same install/push
+    # that ships this code runs apply_tmux_history_limit's `set-option -gu
+    # destroy-unattached` on that box's running server, reverting keep-last to
+    # `off`. So the window is a transient failed-connect (never a death) that
+    # self-heals on that target's install; global tmux policy is deliberately
+    # kept OUT of this connect script (cli_tmux_provisioning owns it). Distinct
+    # from the ownerless-clone residual noted in the header comment above.
     'tmux new-session -d -t "$T" -s "$C"; '
     'tmux set-hook -t "$C" client-attached "set-option destroy-unattached on"; '
     'tmux attach-session -t "$C" -f ignore-size; '

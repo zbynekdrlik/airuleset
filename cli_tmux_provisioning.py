@@ -781,17 +781,28 @@ def render_stream_tmux_window_block(name):
     )
 
 
-def _live_apply_stream_window_name(session_name, new_name, run=None):
+def _live_apply_stream_window_name(new_name, run=None):
     """Best-effort live-apply on any RUNNING tmux server for this box, so an
     ALREADY-running/attached session updates on the next push WITHOUT waiting
-    for a session re-create. `session_name` is the primary session (the unix
-    user, e.g. `montalu2`/`newlevel`); `new_name` is the box alias to rename
-    every window of that session to (#592, e.g. `m2`/`dev1`). Purely
-    configuration-path (`set-option` / `set-hook` / `rename-window` -- NEVER a
-    `send-keys` keystroke into any pane), failure-tolerant (no server / no
-    matching session -> no-op), and it NEVER creates or resurrects a session
-    (the standing 'never touch a session the user deliberately stopped' rule):
-    `rename-window` only relabels a window that already exists.
+    for a session re-create. `new_name` is the box alias to rename every window
+    to (#592, e.g. `m2`/`dev1`/`gk`). Purely configuration-path (`set-option` /
+    `set-hook` / `rename-window` -- NEVER a `send-keys` keystroke into any
+    pane), failure-tolerant (no server -> no-op), and it NEVER creates or
+    resurrects a session (the standing 'never touch a session the user
+    deliberately stopped' rule): `rename-window` only relabels a window that
+    already exists.
+
+    #592-review (B3): renames EVERY window on this user's server (`list-windows
+    -a`), NOT just the `=<unix-user>` session -- on dev1/dev2 the owner's real
+    session is `zbynek-N`/`marek-N` while `_current_user()` is `newlevel`, so a
+    `=<unix-user>` target matched nothing and the currently-attached window
+    stayed FROZEN at its command name (`bash`, under the global
+    `automatic-rename off` set just above) until the next `session-created`.
+    Every session on this server IS on this box, so the box alias is the right
+    name for all of them; `automatic-rename off` then keeps it stuck. Consistent
+    with #554's own "rename EVERY existing window" intent, generalized across
+    sessions. Owner-UX trade-off (accepted, the #554 identity-over-command
+    decision): all windows show the same alias -- the owner navigates by index.
 
     A `rename-window` is safe to live-apply for the same reason
     `destroy-unattached` is (apply_tmux_history_limit): it changes a server
@@ -806,13 +817,11 @@ def _live_apply_stream_window_name(session_name, new_name, run=None):
         except Exception as e:
             print("  tmux stream-window live-apply skipped (non-fatal): %s" % e,
                   file=sys.stderr)
-    # Rename every window of the PRIMARY session (=<session_name>) to the alias
-    # so an attached session updates immediately. A missing session makes
-    # list-windows exit non-zero (or the injected test `run` returns None) ->
-    # no rename at all.
+    # Rename EVERY window on this user's server to the alias so an attached
+    # session updates immediately, whatever its name. No server (or the injected
+    # test `run` returning None) makes list-windows exit non-zero -> no rename.
     try:
-        result = runner(["tmux", "list-windows", "-t", "=%s" % session_name,
-                         "-F", "#{window_id}"])
+        result = runner(["tmux", "list-windows", "-a", "-F", "#{window_id}"])
     except Exception as e:
         print("  tmux stream-window live-apply (list) skipped (non-fatal): %s" % e,
               file=sys.stderr)
@@ -888,8 +897,9 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new)
     if should_have:
-        # primary session = the unix user (=<u>); new window name = the alias.
-        _live_apply_stream_window_name(u, alias, run)
+        # rename EVERY window on this box's server to the alias (the owner's
+        # session name may differ from the unix user -- zbynek-N on dev1, #592-B3).
+        _live_apply_stream_window_name(alias, run)
     return changed
 
 

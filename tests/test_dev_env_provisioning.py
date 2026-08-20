@@ -1582,17 +1582,19 @@ class TestApplyStreamTmuxWindowName(TestCase):
             ["tmux", "set-hook", "-g", "session-created", "rename-window m2"],
             calls)
 
-    def test_live_apply_renames_existing_windows_of_the_primary_session(self):
-        # A run that returns two window ids for the PRIMARY session (=montalu2,
-        # the unix-user-named session), then records the rename calls. #592: the
-        # session TARGET is still the username (=montalu2), but the new NAME is
-        # the alias (m2). Proves an ALREADY-running session updates immediately
-        # (config-path rename-window, never send-keys).
+    def test_live_apply_renames_every_window_on_the_server_to_the_alias(self):
+        # #592-review (B3): the live-apply lists ALL windows on this user's
+        # server (`list-windows -a`), NOT the `=<unix-user>` session -- on
+        # dev1/dev2 the owner's real session is zbynek-N/marek-N while the unix
+        # user is `newlevel`, so a `=<unix-user>` target would rename NOTHING.
+        # A run that returns two window ids for `list-windows -a`, then records
+        # the rename calls; each is renamed to the alias (config-path, never
+        # send-keys).
         seen = []
 
         def run(argv):
             seen.append(argv)
-            if argv[:3] == ["tmux", "list-windows", "-t"] and argv[3] == "=montalu2":
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
                 return _FakeCP(returncode=0, stdout="@0\n@3\n")
             return _FakeCP(returncode=0, stdout="")
 
@@ -1601,6 +1603,27 @@ class TestApplyStreamTmuxWindowName(TestCase):
             p, user="montalu2", host="subdev", run=run)
         self.assertIn(["tmux", "rename-window", "-t", "@0", "m2"], seen)
         self.assertIn(["tmux", "rename-window", "-t", "@3", "m2"], seen)
+
+    def test_live_apply_covers_owner_session_named_differently_from_unix_user(self):
+        # #592-review (B3): the EXACT dev1/dev2 case the owner reported. The
+        # owner's session is `zbynek-N` while the unix user is `newlevel`, so the
+        # old `=<unix-user>` target renamed NOTHING and the current window stayed
+        # `bash`. `list-windows -a` covers zbynek-N's window -> renamed to `dev1`.
+        seen = []
+
+        def run(argv):
+            seen.append(argv)
+            if argv[:3] == ["tmux", "list-windows", "-a"]:
+                return _FakeCP(returncode=0, stdout="@7\n")  # a zbynek-4 window
+            return _FakeCP(returncode=0, stdout="")
+
+        p = self._tmp("# existing content\n")
+        airuleset.apply_stream_tmux_window_name(
+            p, user="newlevel", host="dev1", run=run)
+        # never targets the non-existent `=newlevel` session
+        self.assertNotIn(
+            ["tmux", "list-windows", "-t", "=newlevel", "-F", "#{window_id}"], seen)
+        self.assertIn(["tmux", "rename-window", "-t", "@7", "dev1"], seen)
 
     def test_no_live_apply_calls_when_alias_is_unsafe(self):
         # #592: a box with no SAFE alias (injection guard) gets no block AND no

@@ -33,7 +33,13 @@ def short_target_alias(user, box_name):
     real entry hits it."""
     box_name = box_name or ""
     # dev1 short-circuits first (mirrors the old `local or id=="dev1"` check),
-    # regardless of user.
+    # regardless of user. #592-review (B5): this is keyed on the BARE hostname
+    # `dev1`/`dev2` the fleet actually uses (machine-identities); a stream account
+    # would only collapse to `dev1` if literally provisioned on a host named
+    # `dev1` (streams live on `subdev`). If a box's `os.uname().nodename` were ever
+    # an FQDN/uppercase (`dev2.example.com`), the `newlevel` branch's `[:8]` could
+    # yield an alias failing `_SAFE_STREAM_NAME_RE` -> the caller STRIPS the block
+    # (fail-safe, non-corrupting) rather than shipping broken tmux syntax.
     if box_name == "dev1":
         return "dev1"
     user = (user or "").strip()
