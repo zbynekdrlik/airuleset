@@ -443,9 +443,10 @@ def _i_clause_named(i_members, now):
 # external event the park comment records.
 _W_CLAUSE = (
     "W→I: parknuté `ops-wait` tikety %s (parknuté %s) — over externý stav ktorý si "
-    "pri parkovaní zapísal do komentára (odpoveď vo vlákne / vyšlý release): ak už "
-    "dorazil, zlož `ops-wait` s dôkazom a vráť tiket do práce; ak sa stále čaká, "
-    "potvrď to.")
+    "pri parkovaní zapísal do komentára (odpoveď vo vlákne / vyšlý release = verzia "
+    "ŽIVÁ na cieli: deploy-set zelený + priame čítanie verzie, NIE run-terminal — "
+    "#588): ak už dorazil, zlož `ops-wait` s dôkazom a vráť tiket do práce; ak sa "
+    "stále čaká, potvrď to.")
 
 # The #570 stale sub-clause — appended to the W clause when any parked W member
 # has gone COLD (no fresh ≤24h stream-push evidence: `stale!` in `--ops-wait`,

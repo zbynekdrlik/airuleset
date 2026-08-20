@@ -14380,15 +14380,15 @@ class TestCiMonitoringJqFilterHasRealTeeth(TestCase):
     """
 
     def _extract_block(self, index):
-        # ci-monitoring.md has exactly two fenced blocks: the first tagged
-        # ```bash (the foreground loop), the second bare ``` (the
-        # background waiter). Splitting on the literal fence marker avoids
-        # the "bare fence" ambiguity a single non-greedy regex would hit
-        # (the FIRST block's own CLOSING fence is bare too).
+        # ci-monitoring.md has THREE fenced blocks: [0] ```bash foreground
+        # loop, [1] bare ``` background waiter, [2] ```bash #588 deploy-watch
+        # (its own coverage is test_deploy_watch_recipe.py). This class locks
+        # [0]/[1] (the `--jq` shapes); splitting on the literal fence marker
+        # avoids the bare-fence ambiguity a non-greedy regex would hit.
         text = (airuleset.REPO_DIR / "modules" / "core" / "ci-monitoring.md").read_text()
         parts = text.split("```")
-        self.assertEqual(len(parts), 5,
-                          "expected exactly two fenced blocks in ci-monitoring.md")
+        self.assertEqual(len(parts), 7,
+                          "expected exactly three fenced blocks in ci-monitoring.md")
         code = parts[1 + index * 2]
         if code.startswith("bash\n"):
             code = code[len("bash\n"):]

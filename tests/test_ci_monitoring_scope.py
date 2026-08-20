@@ -196,9 +196,16 @@ class TestAccretionCap(unittest.TestCase):
     """
 
     def test_module_stays_under_its_word_cap(self):
+        # Cap raised 1400 -> 1700 for the #588 DEPLOY / VERSION-LIVE watch
+        # recipe (unblock on deployed-state, not run-terminal — a user-
+        # requested standardization). The cap governs incident NARRATIVE
+        # accretion; an operative poll recipe (the always-on content a
+        # working session actually copies) is the sanctioned kind of growth,
+        # not narrative. Keep it tight: any further raise needs the same
+        # operative-vs-narrative justification, not just "one more paragraph".
         words = len(_text(CI_MONITORING).split())
         self.assertLessEqual(
-            words, 1400,
+            words, 1700,
             f"ci-monitoring.md is {words} words; incident narrative belongs "
             "in .claude/rules/airuleset-internals.md (auto-loads on "
             "modules/** and tests/**), not in the always-on prefix",
