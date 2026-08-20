@@ -73,7 +73,8 @@ class TestRecheckDecision(unittest.TestCase):
         self.assertEqual(reason, "grace")
         self.assertEqual(out["first_seen"], NOW)
         self.assertIsNone(out["last_nudge"])
-        self.assertEqual(out["w_first_seen"], NOW)   # W-specific park anchor seeded
+        # #594: per-ticket W first-seen map — each new member seeded to now
+        self.assertEqual(out["w_seen"], {"41": NOW, "43": NOW})
         self.assertEqual(out["sig"], "i:0|w:41,43")   # partition sig, numeric sort
 
     def test_past_cadence_from_first_seen_nudges(self):
@@ -116,8 +117,8 @@ class TestRecheckDecisionIDirection(unittest.TestCase):
         action, out, reason = owr._recheck_decision(rec, 5, [], NOW, CAD)
         self.assertEqual(action, "nudge")
         self.assertEqual(reason, "due")
-        # W empty -> no W-park anchor; sig names the I half.
-        self.assertIsNone(out["w_first_seen"])
+        # W empty -> no per-ticket W map; sig names the I half.
+        self.assertIsNone(out["w_seen"])
         self.assertEqual(out["sig"], "i:5|w:")
 
     def test_i_positive_w_empty_first_sight_waits(self):
@@ -129,24 +130,37 @@ class TestRecheckDecisionIDirection(unittest.TestCase):
         rec = {"first_seen": NOW - 2 * CAD}
         action, out, _ = owr._recheck_decision(rec, 3, [41, 43], NOW, CAD)
         self.assertEqual(action, "nudge")
-        self.assertEqual(out["w_first_seen"], NOW)   # W first seen this sweep
+        # #594: both members first-seen this sweep -> seeded to now
+        self.assertEqual(out["w_seen"], {"41": NOW, "43": NOW})
         self.assertEqual(out["sig"], "i:3|w:41,43")
 
-    def test_w_park_anchor_preserved_across_sweeps(self):
-        # A continuously-parked W keeps its ORIGINAL w_first_seen (truthful age),
-        # not the partition's own (older) first_seen.
-        rec = {"first_seen": NOW - 5 * DAY, "w_first_seen": NOW - 3 * CAD,
+    def test_w_park_anchor_preserved_per_ticket_and_new_member_fresh(self):
+        # #594: a continuously-parked member keeps its ORIGINAL per-ticket
+        # anchor (truthful age), while a member NEWLY appearing in W is seeded
+        # fresh to `now` — so the new one reads ~0h even alongside an old one,
+        # the exact bug the single partition-level anchor caused.
+        rec = {"first_seen": NOW - 5 * DAY, "w_seen": {"41": NOW - 3 * CAD},
+               "last_nudge": None}
+        action, out, _ = owr._recheck_decision(rec, 2, [41, 43], NOW, CAD)
+        self.assertEqual(action, "nudge")
+        self.assertEqual(out["w_seen"]["41"], NOW - 3 * CAD)   # preserved
+        self.assertEqual(out["w_seen"]["43"], NOW)             # fresh member
+
+    def test_w_seen_drops_a_member_that_left_w(self):
+        # A member no longer in the W set is dropped from `w_seen` (so a
+        # re-added ticket later gets a FRESH anchor from its re-entry).
+        rec = {"first_seen": NOW - 5 * DAY,
+               "w_seen": {"41": NOW - 3 * CAD, "43": NOW - 2 * CAD},
                "last_nudge": None}
         action, out, _ = owr._recheck_decision(rec, 2, [41], NOW, CAD)
-        self.assertEqual(action, "nudge")
-        self.assertEqual(out["w_first_seen"], NOW - 3 * CAD)
+        self.assertEqual(out["w_seen"], {"41": NOW - 3 * CAD})
 
     def test_w_park_anchor_dropped_when_w_empties(self):
-        # W drains to [] but I still >0 -> keep auditing (I), drop the W anchor.
-        rec = {"first_seen": NOW - 5 * DAY, "w_first_seen": NOW - 3 * CAD}
+        # W drains to [] but I still >0 -> keep auditing (I), drop the W map.
+        rec = {"first_seen": NOW - 5 * DAY, "w_seen": {"41": NOW - 3 * CAD}}
         action, out, _ = owr._recheck_decision(rec, 2, [], NOW, CAD)
         self.assertIn(action, ("nudge", "wait"))
-        self.assertIsNone(out["w_first_seen"])
+        self.assertIsNone(out["w_seen"])
 
     def test_i_zero_w_empty_clears(self):
         action, out, _ = owr._recheck_decision(
@@ -431,6 +445,71 @@ class TestOrchestrator(_OrchBase):
         self.assertNotIn(self.sid, handled)
 
 
+class TestBusyPaneRefire594(_OrchBase):
+    """#594 root cause A — a nudge DELIVERED once (box cleared, message
+    submitted/queued into an actively-cycling armed `/goal` loop) whose
+    transcript confirmation RACED must NOT re-deliver on every later sweep."""
+
+    def _tmux_unconfirmed(self):
+        # transcript_path=None models the busy-pane / cycling-armed-loop case:
+        # the Enter SUBMITS (clears the box — delivered/queued) but writes NO
+        # `user` turn to the transcript in the window, so `_await_submit_confirmed`
+        # fails and `send_verified` returns False despite the delivery.
+        return DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=None)
+
+    def test_delivered_unconfirmed_holds_dedup_across_sweeps(self):
+        # RED before the fix: 3 sweeps -> 3 deliveries (last_nudge never advances
+        # because it was recorded ONLY on a transcript-CONFIRMED submit). GREEN:
+        # ONE delivery, last_nudge advanced, the busy-pane retry spam stopped.
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        state = {}
+        tmux = self._tmux_unconfirmed()
+        for _ in range(3):
+            owr.goal_ops_wait_recheck(
+                NOW, tmux, wrecs, self.sid, self.CWD, "%9", self.tpath, "sess:0",
+                False, set(), ops_wait_fetch=lambda cwd: [41], state=state,
+                sleep_fn=lambda *a, **k: None, cadence=CAD, i_count=0)
+        deliveries = [t for t in tmux.typed_texts() if "stuck-check" in t]
+        self.assertEqual(len(deliveries), 1,
+                         "a delivered-but-unconfirmed nudge must NOT re-deliver "
+                         "across sweeps (busy-pane retry spam, #594): got %d"
+                         % len(deliveries))
+        self.assertEqual(wrecs[self.sid]["last_nudge"], NOW)
+
+    def test_genuine_swallow_still_retries(self):
+        # The #594 fix must NOT regress the genuine-swallow retry: a swallowed
+        # Enter (text stuck -> corrective -> undone, NEVER delivered) leaves
+        # last_nudge unadvanced so the nudge retries next sweep.
+        wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        tmux = self._tmux(enters_swallowed=99)
+        logs = self._run(wrecs, lambda cwd: [41], tmux, handled=set(), state={})
+        self.assertTrue(any("submit-unverified" in ln for ln in logs))
+        self.assertIsNone(wrecs[self.sid]["last_nudge"])
+
+
+class TestParkedAge594(_OrchBase):
+    """#594 root cause B — a W member the watchdog first sees THIS sweep must be
+    aged from ITS OWN W entry, never from a stale partition-level anchor."""
+
+    def test_fresh_w_member_not_aged_by_stale_partition_anchor(self):
+        # The incident shape: the partition/session has been tracked ~24h, and a
+        # W member #3076 that entered W ~1h ago is nudged. Pre-fix the nudge ages
+        # #3076 by the single partition-level `w_first_seen` (~24h) -> RED. GREEN:
+        # a per-ticket first-seen map ages #3076 from its own entry (~0h).
+        wrecs = {self.sid: {"first_seen": NOW - DAY, "w_first_seen": NOW - DAY,
+                            "last_nudge": None}}
+        tmux = self._tmux()
+        self._run(wrecs, lambda cwd: [3076], tmux, handled=set(), state={})
+        typed = "".join(tmux.typed_texts())
+        self.assertIn("#3076", typed)
+        self.assertIn("~0h", typed,
+                      "a freshly-parked W member must be aged from its own W "
+                      "entry (~0h), not the stale ~24h partition anchor (#594)")
+        self.assertNotIn("~24h", typed)
+
+
 class TestNudgeText(unittest.TestCase):
     """#552 — the composed partition-audit text: the I clause when I>0, the W
     clause (names + truthful park age) when W non-empty, both when both, and a
@@ -444,23 +523,33 @@ class TestNudgeText(unittest.TestCase):
         self.assertNotIn("parknuté `ops-wait`", t)   # no W clause when W empty
 
     def test_w_only_degrades_to_547_shape(self):
-        t = owr._nudge_text(0, [41, 43], NOW, NOW - 3 * 3600)
+        # #594: per-ticket w_seen map — both members aged from their own entry.
+        t = owr._nudge_text(0, [41, 43], NOW,
+                            {"41": NOW - 3 * 3600, "43": NOW - 3 * 3600})
         self.assertIn("stuck-check:", t)
         self.assertNotIn("re-audituj", t)         # no I clause when I==0
         self.assertIn("#41", t)
         self.assertIn("#43", t)
-        self.assertIn("~3h", t)                   # truthful W-park age
+        self.assertIn("~3h", t)                   # truthful per-ticket W-park age
 
     def test_both_directions_ride_one_ping(self):
-        t = owr._nudge_text(2, [41], NOW, NOW - 3600)
+        t = owr._nudge_text(2, [41], NOW, {"41": NOW - 3600})
         self.assertIn("re-audituj", t)
         self.assertIn("#41", t)
         self.assertIn("supervisor", t)            # label-change ownership note
 
-    def test_w_age_uses_w_first_seen_not_partition_age(self):
-        # w_first_seen just now -> ~0h even if the partition is days old.
-        t = owr._nudge_text(0, [7], NOW, NOW)
-        self.assertIn("~0h", t)
+    def test_w_age_is_per_ticket_from_w_seen(self):
+        # #594: two members with DIFFERENT per-ticket entries render DIFFERENT
+        # ages in the SAME nudge — a fresh member ~0h beside an old one ~24h.
+        t = owr._nudge_text(0, [7, 9], NOW, {"7": NOW, "9": NOW - 24 * 3600})
+        self.assertIn("#7 (~0h)", t)
+        self.assertIn("#9 (~24h)", t)
+
+    def test_w_member_missing_from_w_seen_ages_unknown(self):
+        # A member absent from the map (a state/fetch edge) ages `?`, never a
+        # fabricated age (#539 fail-safe bias).
+        t = owr._nudge_text(0, [7], NOW, {})
+        self.assertIn("#7 (?)", t)
 
 
 class TestOrchestratorIDirection(_OrchBase):
