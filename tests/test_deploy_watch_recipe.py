@@ -19,11 +19,23 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CI_MONITORING = REPO / "modules" / "core" / "ci-monitoring.md"
+STATUSLINE = REPO / "modules" / "core" / "statusline-vocabulary.md"
+
+sys.path.insert(0, str(REPO))
+from watchdog import ops_wait_recheck as owr  # noqa: E402
+
+
+def _line_with(text, finder):
+    for line in text.split("\n"):
+        if finder in line:
+            return line
+    return ""
 
 # The deploy-completing job set for the owner's odoo-erp case — the SAME
 # DEPLOY_JOB_RE the recipe documents. The "PROD E2E Tests" tail is
@@ -146,6 +158,38 @@ class TestRecipeDocumentsDeployedStateSemantics(unittest.TestCase):
         """Owner point 3 must survive verbatim as the doc's own rule."""
         text = self._text().lower()
         self.assertIn("never the re-entry gate", text)
+
+
+class TestWDoctrineNamesVersionLive(unittest.TestCase):
+    """#588 part (c): the W/ops-wait re-entry guidance names 'version live on
+    PROD' (deployed-state) as the event for a release/deploy-parked W ticket,
+    NOT run-terminal — on BOTH the statusline W doctrine and the job-20
+    ops_wait_recheck nudge text."""
+
+    # Content-lock teeth (#578): each token must be UNIQUE on the one huge
+    # physical W-bullet line, or a partial revert leaves the token elsewhere
+    # and the lock has no teeth.
+    W_FINDER = "Deploy/release re-entry event = verzia ŽIVÁ na PROD (#588)"
+    W_TOKENS = ("DEPLOYED-STATE", "run-terminal", "deploy-watch recept")
+
+    def test_statusline_W_bullet_names_deployed_state_re_entry(self):
+        text = STATUSLINE.read_text(encoding="utf-8")
+        line = _line_with(text, self.W_FINDER)
+        self.assertTrue(line, "the W bullet must carry the #588 deploy/release "
+                              "re-entry clause")
+        for tok in self.W_TOKENS:
+            self.assertEqual(
+                line.count(tok), 1,
+                "W bullet token %r must be whole-line-unique for #578 teeth" % tok)
+
+    def test_ops_wait_nudge_names_version_live_not_run_terminal(self):
+        """The job-20 W->I re-check nudge tells a parked-W session the release
+        re-entry signal is the LIVE version on the target, not run-terminal."""
+        t = owr._nudge_text(None, [41], now=1000.0, w_first_seen=1000.0)
+        self.assertIn("verzia ŽIVÁ na cieli", t)
+        self.assertIn("run-terminal", t)
+        # the member is still named (the existing #547/#570 behaviour is intact)
+        self.assertIn("#41", t)
 
 
 if __name__ == "__main__":
