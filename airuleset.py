@@ -3047,6 +3047,36 @@ def _run_card_refuse(name, issue, dry_run, log_reason, stderr_detail,
     sys.exit(1)
 
 
+def _run_card_require_repo_and_issue(args, repo, issue):
+    """#590: a run-card missing --repo/--issue is a NON-DELIVERY, and #134/#135
+    require it to EXIT NON-ZERO and write a durable delivery-log line with the
+    reason — never a silent `return` (exit 0, no log, silent even under
+    --dry-run). That silent `return` (here since 9bee24a1, 2026-06-20) is the
+    branch the airuleset supervisor hit by firing run-cards without --repo,
+    silently dropping the completion cards for a run of closed tickets. The
+    diagnostic evidence of the drop is the MARKER GAP — the newest delivered
+    airuleset card marker is #529 (2026-08-17), none after — NOT the delivery
+    log: a SUCCESSFUL card writes only its inner `_send` line
+    (`kind=python key=<repo>#<issue>`), never a `kind=run-card` line (that
+    outer line fires ONLY on refuse/failure), so "zero kind=run-card lines"
+    alone is a null signal (#523). Routes through the SAME `_run_card_refuse`
+    shape every other refusal uses (log + stderr + exit 1; --dry-run prints +
+    exits but skips only the durable log), with a `?` sentinel for whichever
+    field is missing so the log key stays greppable
+    (`?#586` / `x#?` / `?#?`). Never returns."""
+    missing = ([] if repo else ["--repo"]) + \
+              ([] if issue is not None else ["--issue"])
+    joined = " and ".join(missing)
+    _run_card_refuse(
+        str(repo).rstrip("/").split("/")[-1] if repo else "?",
+        issue if issue is not None else "?",
+        getattr(args, "dry_run", False),
+        log_reason="missing required %s" % joined,
+        stderr_detail="missing required %s; a completion card needs both "
+                      "--repo <owner/name> and --issue <N> to build. No card "
+                      "sent." % joined)
+
+
 def _notify_run_card(args, compose_autopilot_card, send):
     """Send the per-ticket completion card, gathering the issue title (the Cieľ)
     and the remaining backlog count from gh. The autopilot worker fires this
@@ -3058,7 +3088,7 @@ def _notify_run_card(args, compose_autopilot_card, send):
         repo = getattr(args, "repo", None)
         issue = getattr(args, "issue", None)
         if not repo or issue is None:
-            return  # need --repo + --issue to build a card
+            _run_card_require_repo_and_issue(args, repo, issue)
 
         # #474 terminal-skip: an external caller re-firing an IDENTICAL
         # contentless card (empty/generic --goal or --achieved) would
