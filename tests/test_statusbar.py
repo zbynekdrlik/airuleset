@@ -357,7 +357,7 @@ class RefreshCLI(unittest.TestCase):
                 '  *assignee:@me*) echo \'not-json{{{\';;\n'
                 '  *author:@me*)   echo \'[{"number":1,"labels":[]}]\';;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                '  *"issues/1/comments"*) echo \'[{"body":'
+                '  *"issues/1/timeline"*) echo \'[{"event": "commented", "body":'
                 '"READY-FOR-REVIEW: fork pushed, tests green"}]\';;\n'
                 '  *) echo 16;;\n'
                 'esac\n')
@@ -374,7 +374,7 @@ class RefreshCLI(unittest.TestCase):
             self.assertIsNone(cache["open"])       # gh error, never a wrong number
             self.assertIsNone(cache["gk"])
             calls = log.read_text() if log.exists() else ""
-            self.assertNotIn("comments", calls, calls)
+            self.assertNotIn("timeline", calls, calls)
 
     def test_refresh_recovers_a_comment_only_handoff_when_the_label_never_landed(self):
         # #313 pt 2, live-verified against zbynekdrlik/odoo-erp#3239: a
@@ -396,8 +396,8 @@ class RefreshCLI(unittest.TestCase):
                 '  *assignee:@me*) echo \'[{"number":1,"labels":[]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                '  *"issues/1/comments"*) echo \'[{"body":"looks good"},'
-                '{"body":"READY-FOR-REVIEW: fork pushed, tests green"}]\';;\n'
+                '  *"issues/1/timeline"*) echo \'[{"event": "commented", "body":"looks good"},'
+                '{"event": "commented", "body":"READY-FOR-REVIEW: fork pushed, tests green"}]\';;\n'
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -432,7 +432,7 @@ class RefreshCLI(unittest.TestCase):
                 '  *assignee:@me*) echo \'[{"number":1,"labels":[]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                '  *"issues/1/comments"*) echo \'[{"body":"still working on it"}]\';;\n'
+                '  *"issues/1/timeline"*) echo \'[{"event": "commented", "body":"still working on it"}]\';;\n'
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -453,7 +453,7 @@ class RefreshCLI(unittest.TestCase):
 
     def test_refresh_never_calls_the_comment_fallback_for_an_already_labeled_ticket(self):
         # Cost discipline: a ticket ALREADY handed off via the label needs no
-        # extra `gh api .../comments` call at all.
+        # extra `gh api .../timeline` call at all.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -481,7 +481,7 @@ class RefreshCLI(unittest.TestCase):
                      "PATH": f"{bindir}:{os.environ['PATH']}"})
             self.assertEqual(r.returncode, 0, r.stderr)
             calls = log.read_text() if log.exists() else ""
-            self.assertNotIn("comments", calls, calls)
+            self.assertNotIn("timeline", calls, calls)
 
     def test_refresh_a_bounce_label_overrides_a_stale_ready_for_review_label(self):
         # #313 pt 2 adversarial review round 2, F3: `prio:bounce` is the
@@ -504,7 +504,7 @@ class RefreshCLI(unittest.TestCase):
                 '{"name":"ready-for-review"},{"name":"prio:bounce"}]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                '  *"issues/1/comments"*) echo \'[]\';;\n'
+                '  *"issues/1/timeline"*) echo \'[]\';;\n'
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -547,9 +547,9 @@ class RefreshCLI(unittest.TestCase):
                 '{"name":"ready-for-review"},{"name":"prio:bounce"}]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                '  *"issues/1/comments"*) echo \'[]\';;\n'
-                '  *"issues/2/comments"*) echo \'[]\';;\n'
-                '  *"issues/3/comments"*) echo \'[]\';;\n'
+                '  *"issues/1/timeline"*) echo \'[]\';;\n'
+                '  *"issues/2/timeline"*) echo \'[]\';;\n'
+                '  *"issues/3/timeline"*) echo \'[]\';;\n'
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -579,8 +579,8 @@ class RefreshCLI(unittest.TestCase):
             Path(repo, "CLAUDE.md").write_text(
                 "<!-- airuleset:authority=fork-no-merge -->\n")
             comments = json.dumps([
-                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
-                {"body": "**GATEKEEPER FINDING:** needs another fix, "
+                {"event": "commented", "body": "READY-FOR-REVIEW: fork pushed, tests green"},
+                {"event": "commented", "body": "**GATEKEEPER FINDING:** needs another fix, "
                          "bouncing back."},
             ])
             fake_gh = Path(bindir) / "gh"
@@ -592,7 +592,7 @@ class RefreshCLI(unittest.TestCase):
                 '"labels":[{"name":"prio:bounce"}]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                "  *\"issues/1/timeline\"*) echo '%s';;\n" % comments +
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -621,10 +621,10 @@ class RefreshCLI(unittest.TestCase):
             Path(repo, "CLAUDE.md").write_text(
                 "<!-- airuleset:authority=fork-no-merge -->\n")
             comments = json.dumps([
-                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
-                {"body": "**GATEKEEPER FINDING:** needs another fix, "
+                {"event": "commented", "body": "READY-FOR-REVIEW: fork pushed, tests green"},
+                {"event": "commented", "body": "**GATEKEEPER FINDING:** needs another fix, "
                          "bouncing back."},
-                {"body": "READY-FOR-REVIEW: addressed the finding, fixed "
+                {"event": "commented", "body": "READY-FOR-REVIEW: addressed the finding, fixed "
                          "and re-pushed."},
             ])
             fake_gh = Path(bindir) / "gh"
@@ -636,7 +636,7 @@ class RefreshCLI(unittest.TestCase):
                 '"labels":[{"name":"prio:bounce"}]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                "  *\"issues/1/timeline\"*) echo '%s';;\n" % comments +
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -673,7 +673,7 @@ class RefreshCLI(unittest.TestCase):
             Path(repo, "CLAUDE.md").write_text(
                 "<!-- airuleset:authority=fork-no-merge -->\n")
             comments = json.dumps([
-                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
+                {"event": "commented", "body": "READY-FOR-REVIEW: fork pushed, tests green"},
             ])
             fake_gh = Path(bindir) / "gh"
             fake_gh.write_text(
@@ -685,7 +685,7 @@ class RefreshCLI(unittest.TestCase):
                 '{"name":"prio:bounce"}]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                "  *\"issues/1/timeline\"*) echo '%s';;\n" % comments +
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -729,7 +729,7 @@ class RefreshCLI(unittest.TestCase):
             Path(repo, "CLAUDE.md").write_text(
                 "<!-- airuleset:authority=fork-no-merge -->\n")
             comments = json.dumps([
-                {"body": "READY-FOR-REVIEW: fork pushed, tests green"},
+                {"event": "commented", "body": "READY-FOR-REVIEW: fork pushed, tests green"},
             ])
             fake_gh = Path(bindir) / "gh"
             fake_gh.write_text(
@@ -741,7 +741,7 @@ class RefreshCLI(unittest.TestCase):
                 '{"number":2,"labels":[{"name":"ready-for-review"}]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                "  *\"issues/1/timeline\"*) echo '%s';;\n" % comments +
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -843,7 +843,7 @@ class RefreshCLI(unittest.TestCase):
             Path(repo, "CLAUDE.md").write_text(
                 "<!-- airuleset:authority=branch-merge -->\n")
             comments = json.dumps([
-                {"body": "READY-FOR-REVIEW: merged into develop, tests green"},
+                {"event": "commented", "body": "READY-FOR-REVIEW: merged into develop, tests green"},
             ])
             fake_gh = Path(bindir) / "gh"
             fake_gh.write_text(
@@ -856,7 +856,7 @@ class RefreshCLI(unittest.TestCase):
                 '  *label:stream:*) echo \'[{"number":1,'
                 '"labels":[{"name":"needs-acceptance"}]},'
                 '{"number":2,"labels":[{"name":"ready-for-review"}]}]\';;\n'
-                '  *"issues/1/comments"*) echo \'' + comments + '\';;\n'
+                '  *"issues/1/timeline"*) echo \'' + comments + '\';;\n'
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -907,7 +907,7 @@ class RefreshCLI(unittest.TestCase):
             # A genuine FRESH re-hand-off comment (client feedback addressed,
             # re-submitted) -- but no fresh ready-for-review label was added.
             comments = json.dumps([
-                {"body": "READY-FOR-REVIEW: addressed client feedback, "
+                {"event": "commented", "body": "READY-FOR-REVIEW: addressed client feedback, "
                          "re-submitted after the needs-acceptance bounce"},
             ])
             fake_gh = Path(bindir) / "gh"
@@ -919,7 +919,7 @@ class RefreshCLI(unittest.TestCase):
                 '"labels":[{"name":"needs-acceptance"}]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                "  *\"issues/1/timeline\"*) echo '%s';;\n" % comments +
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -1024,9 +1024,9 @@ class RefreshCLI(unittest.TestCase):
             Path(repo, "CLAUDE.md").write_text(
                 "<!-- airuleset:authority=fork-no-merge -->\n")
             comments = json.dumps([
-                {"body": "Note: earlier I said READY-FOR-REVIEW but that "
+                {"event": "commented", "body": "Note: earlier I said READY-FOR-REVIEW but that "
                          "was premature, still fixing a bug."},
-                {"body": "**GATEKEEPER FINDING:** not ready.\n"
+                {"event": "commented", "body": "**GATEKEEPER FINDING:** not ready.\n"
                          "READY-FOR-REVIEW is NOT accurate here."},
             ])
             fake_gh = Path(bindir) / "gh"
@@ -1037,7 +1037,7 @@ class RefreshCLI(unittest.TestCase):
                 '  *assignee:@me*) echo \'[{"number":1,"labels":[]}]\';;\n'
                 '  *author:@me*)   echo "[]";;\n'
                 '  *label:stream:*) echo "[]";;\n'
-                "  *\"issues/1/comments\"*) echo '%s';;\n" % comments +
+                "  *\"issues/1/timeline\"*) echo '%s';;\n" % comments +
                 '  *) echo 16;;\n'
                 'esac\n')
             fake_gh.chmod(0o755)
@@ -1901,7 +1901,7 @@ class UserWaitingSegment(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "kvaskodev/odoo-erp";;\n'
-                '  */comments*) echo "[]";;\n'
+                '  */timeline*) echo "[]";;\n'
                 '  *"--search label:autopilot-skip"*) echo "[]";;\n'
                 '  *assignee:@me*) echo \'%s\';;\n' % A +
                 '  *author:@me*)   echo \'%s\';;\n' % B +
