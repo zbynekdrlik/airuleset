@@ -95,23 +95,6 @@ REMOTE_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
     {
-        # David's isolated external-dev user (slovnormal odoo dev stream: no
-        # sudo, no prod keys, can't read other homes) — MIGRATED 2026-07-22
-        # from the gatekeeper VPS to the same subdev VPS as marek (see the
-        # marek@subdev entry above for the box facts). Old david@gk account is
-        # BLOCKED (ForceCommand notice). Same gatekeeper_access key.
-        "name": "david@subdev",
-        "host": "100.118.174.27",
-        "user": "david",
-        "repo_path": "~/devel/airuleset",
-        "identity": "~/.secrets/gatekeeper_access_ed25519",
-        # STOPGAP (#537, 2026-08-21): account renamed david->david1 live tonight;
-        # pending=True keeps the deploy loop off the now-nonexistent user
-        # (fail2ban) until the runbook step 7/8 repo flip lands and removes
-        # this entry entirely.
-        "pending": True,
-    },
-    {
         # miva1 -- 5th sub-dev stream, phase-1 isolated, on the same subdev
         # VPS as marek/david/simap (airuleset#300; tracking ticket for the
         # account itself is odoo-erp#3223). Built by gatekeeper: bare linux
@@ -254,25 +237,19 @@ REMOTE_HOSTS = [
         "identity": "~/.ssh/spinbike_vps",
     },
     {
-        # david1 (#537): the NUMBERED push target for the david->david1
-        # base-stream rename, registered ALONGSIDE the base david entry above
-        # so the fleet table already knows the coming name. It carries
-        # `"pending": True` because david's LIVE unix rename has NOT happened
-        # yet — the account does NOT exist on subdev, so `_deployable_hosts()`
-        # (cli_remote.py) filters it out of EVERY ssh path (the deploy loop,
-        # provision_subdev_soniox_key, AND the hourly fleet-burn job). This is
-        # fail2ban-critical: a key/password attempt against a non-existent
-        # account is a fail2ban strike (#341/#300/#326). The live-op rename
-        # ticket removes the `"pending"` flag (and the old entry) once the
-        # account is created + verified. Identity mirrors the base: david1 =
-        # the operator gatekeeper_access identity (like david). (montalu1 and
-        # simap1 are already renamed live — their entries are below.)
+        # david1 (#537): the renamed base david stream (was `david`; #537 live
+        # rename 2026-08-21: in-place usermod on subdev, uid 1000 kept, home
+        # moved to /home/david1, primary group renamed, linger re-enabled,
+        # CC per-project state migrated, stale /home/david symlinks repointed,
+        # session relaunched, token delivery `delivered: stream=david1`
+        # verified). Identity mirrors the base: the operator gatekeeper_access
+        # identity. David's isolated external-dev user (slovnormal odoo dev
+        # stream: no sudo, no prod keys, can't read other homes).
         "name": "david1@subdev",
         "host": "100.118.174.27",
         "user": "david1",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
-        "pending": True,
     },
     {
         # montalu1 — the renamed base montalu stream (was `montalu`; #537 live
@@ -325,7 +302,6 @@ REMOTE_HOSTS = [
 # default (checked by the /autopilot skill, not here). Only the user adds markers.
 AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 AUTHORITY_BY_USER = {
-    "david": "fork-no-merge",
     "marek": "branch-merge",
     # montalu (airuleset#33) was renamed to montalu1 (#537, 2026-08-19) — its
     # row moved to the numbered block below; the OS account `montalu` is gone.
