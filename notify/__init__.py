@@ -79,11 +79,16 @@ AUTO_DEDUP_WINDOW_S = 300
 # existed — harmless, since the env override is checked FIRST in
 # resolve_owner() and carries the identical value either way.
 STREAM_NOTIFY_OWNER = {
-    "david": "david",
-    # david1/montalu1/simap1 (#537): the numbered ALIASES of the unnumbered
-    # base streams (rename prep). Each mirrors its base's routing decision
-    # EXACTLY — same human owner, same thread — so the live rename flips the
-    # linux user without touching Discord routing. marek deliberately stays
+    # david1/montalu1/simap1 (#537): the NUMBERED names for the base-stream
+    # rename — all three now LIVE (montalu1 2026-08-19, simap1 2026-08-18,
+    # david1 2026-08-21). Each mirrors its base's routing decision EXACTLY —
+    # same human owner, same thread — so the live rename flipped the linux user
+    # without touching Discord routing. The bare `david` self-map is GONE (the
+    # OS account no longer exists); `david1 -> david` carries the routing. Note
+    # `david` STAYS a valid map VALUE (the owner of david1/david2/3/4, a real
+    # Discord thread) — exactly like marek is a value but not a key; dropping
+    # the self-map is behaviour-neutral (resolve_owner falls back to the tmux
+    # session group for a self-mapped stream). marek deliberately stays
     # unnumbered (and out of this map, per the header comment above).
     "david1": "david",
     "montalu1": "zbynek",   # #537 rename of montalu (live 2026-08-19) — see the david1 comment above

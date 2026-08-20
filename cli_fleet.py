@@ -95,18 +95,6 @@ REMOTE_HOSTS = [
         "identity": "~/.secrets/gatekeeper_access_ed25519",
     },
     {
-        # David's isolated external-dev user (slovnormal odoo dev stream: no
-        # sudo, no prod keys, can't read other homes) — MIGRATED 2026-07-22
-        # from the gatekeeper VPS to the same subdev VPS as marek (see the
-        # marek@subdev entry above for the box facts). Old david@gk account is
-        # BLOCKED (ForceCommand notice). Same gatekeeper_access key.
-        "name": "david@subdev",
-        "host": "100.118.174.27",
-        "user": "david",
-        "repo_path": "~/devel/airuleset",
-        "identity": "~/.secrets/gatekeeper_access_ed25519",
-    },
-    {
         # miva1 -- 5th sub-dev stream, phase-1 isolated, on the same subdev
         # VPS as marek/david/simap (airuleset#300; tracking ticket for the
         # account itself is odoo-erp#3223). Built by gatekeeper: bare linux
@@ -249,25 +237,21 @@ REMOTE_HOSTS = [
         "identity": "~/.ssh/spinbike_vps",
     },
     {
-        # david1 (#537): the NUMBERED push target for the david->david1
-        # base-stream rename, registered ALONGSIDE the base david entry above
-        # so the fleet table already knows the coming name. It carries
-        # `"pending": True` because david's LIVE unix rename has NOT happened
-        # yet — the account does NOT exist on subdev, so `_deployable_hosts()`
-        # (cli_remote.py) filters it out of EVERY ssh path (the deploy loop,
-        # provision_subdev_soniox_key, AND the hourly fleet-burn job). This is
-        # fail2ban-critical: a key/password attempt against a non-existent
-        # account is a fail2ban strike (#341/#300/#326). The live-op rename
-        # ticket removes the `"pending"` flag (and the old entry) once the
-        # account is created + verified. Identity mirrors the base: david1 =
-        # the operator gatekeeper_access identity (like david). (montalu1 and
-        # simap1 are already renamed live — their entries are below.)
+        # david1 — the renamed external-dev stream (was `david`; #537 live
+        # rename 2026-08-21: in-place usermod on subdev, home moved to
+        # /home/david1, CC per-project state migrated (#561 step 5b), ssh
+        # verified with the gatekeeper_access identity, session relaunched;
+        # the old `david@subdev` entry + its AUTHORITY_BY_USER row are GONE —
+        # the OS account no longer exists). Original build history: airuleset#23
+        # + odoo-erp#1895 (slovnormal external-dev fork stream: no sudo, no prod
+        # keys; MIGRATED 2026-07-22 from the gk VPS to subdev). Identity = the
+        # operator gatekeeper_access key (like marek/simap1), never the montalu
+        # default-key path. montalu1/simap1 are already renamed live too.
         "name": "david1@subdev",
         "host": "100.118.174.27",
         "user": "david1",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
-        "pending": True,
     },
     {
         # montalu1 — the renamed base montalu stream (was `montalu`; #537 live
@@ -320,8 +304,9 @@ REMOTE_HOSTS = [
 # default (checked by the /autopilot skill, not here). Only the user adds markers.
 AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 AUTHORITY_BY_USER = {
-    "david": "fork-no-merge",
     "marek": "branch-merge",
+    # david (airuleset#23) was renamed to david1 (#537, 2026-08-21) — its row
+    # moved to the numbered block below; the OS account `david` is gone.
     # montalu (airuleset#33) was renamed to montalu1 (#537, 2026-08-19) — its
     # row moved to the numbered block below; the OS account `montalu` is gone.
     # simap (airuleset#143) was renamed to simap1 (#537, 2026-08-18) — its
@@ -349,15 +334,13 @@ AUTHORITY_BY_USER = {
     "montalu8": "branch-merge",
     # montalu1/david1/simap1 (#537): the NUMBERED names for the base-stream
     # rename (owner directive on #532 — montalu->montalu1, david->david1,
-    # simap->simap1; marek STAYS marek, deliberately NOT renamed). montalu1
-    # (rename live 2026-08-19) and simap1 (rename live 2026-08-18) now run as
-    # the new OS account — their base row is gone; david1 stays a pre-rename
-    # ALIAS added ALONGSIDE its base david (which stays until david's live
-    # rename lands — removing it is the live-op ticket's job). Each inherits
-    # its base's authority profile so the moment a box runs as the new name it
-    # resolves correctly. STREAM_RENAME_ALIASES (below) drives the transition
-    # alias so old `stream:<base>` tickets keep working during the switch, in
-    # BOTH directions.
+    # simap->simap1; marek STAYS marek, deliberately NOT renamed). All three
+    # renames are now LIVE (montalu1 2026-08-19, simap1 2026-08-18, david1
+    # 2026-08-21) — each runs as the new OS account, so every base row above is
+    # gone. Each keeps its base's authority profile. STREAM_RENAME_ALIASES
+    # (below) is KEPT so old `stream:<base>` tickets still resolve via
+    # `_stream_rename_equivalents`, in BOTH directions, until no open
+    # `stream:<base>` ticket remains.
     "montalu1": "branch-merge",
     "david1": "fork-no-merge",
     "simap1": "fork-no-merge",

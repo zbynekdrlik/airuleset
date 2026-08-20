@@ -77,13 +77,14 @@ class TestDiscordNotifyCheckSshHint(TestCase):
         self.assertIn("simap1@100.118.174.27", out)
         self.assertNotIn("ssh <this-host>", out)
 
-    def test_hint_includes_pinned_identity_for_david(self):
-        # david@subdev pins the SAME identity — must not be dropped or swapped.
+    def test_hint_includes_pinned_identity_for_david1(self):
+        # david1@subdev (renamed from david, #537 live rename 2026-08-21) pins
+        # the SAME identity — must not be dropped or swapped.
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(airuleset, "_whoami", return_value="david"):
+            with mock.patch.object(airuleset, "_whoami", return_value="david1"):
                 out = self._run(tmp)
         self.assertIn("-i ~/.secrets/gatekeeper_access_ed25519", out)
-        self.assertIn("david@100.118.174.27", out)
+        self.assertIn("david1@100.118.174.27", out)
 
     def test_hint_has_no_identity_flag_for_host_with_none(self):
         # montalu1@subdev (renamed from montalu, #537) authorizes the DEFAULT

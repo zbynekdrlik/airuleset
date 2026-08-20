@@ -309,7 +309,7 @@ class TestReducedAuthorityBoxSkipsDigest(unittest.TestCase):
             fetch_calls.append(1)
             return repo_wide
 
-        with mock.patch.object(airuleset, "_current_user", lambda: "david"):
+        with mock.patch.object(airuleset, "_current_user", lambda: "david1"):
             wd.reping_owner_decision_tickets(
                 _daytime_now(), send, state, fetch=fetch, account_owner="david")
         self.assertEqual(calls, [],
@@ -319,11 +319,12 @@ class TestReducedAuthorityBoxSkipsDigest(unittest.TestCase):
 
     def test_default_box_authority_resolver_skips_reduced_box(self):
         # No explicit authority=: the default _box_authority() reads the box OS
-        # user's AUTHORITY_BY_USER entry. A real reduced user (david) -> skip.
+        # user's AUTHORITY_BY_USER entry. A real reduced user (david1, renamed
+        # from david #537) -> skip.
         import airuleset
         send, calls = self._spy_send()
         state = {}
-        with mock.patch.object(airuleset, "_current_user", lambda: "david"):
+        with mock.patch.object(airuleset, "_current_user", lambda: "david1"):
             out = wd.reping_owner_decision_tickets(
                 _daytime_now(), send, state,
                 fetch=lambda home=None: [("odoo-erp", 1, "t")],

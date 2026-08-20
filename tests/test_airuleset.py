@@ -4021,7 +4021,13 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu6"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu7"], "zbynek")
         self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["montalu8"], "zbynek")
-        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david"], "david")
+        # david1 (renamed from david, #537 live rename 2026-08-21) — same
+        # routing to the `david` owner/thread as the base; the bare `david`
+        # unix-account KEY is GONE (the OS account no longer exists). `david`
+        # stays a valid map VALUE (david1/david2/3/4's owner), so assertNotIn
+        # checks the KEY only.
+        self.assertEqual(self.notify.STREAM_NOTIFY_OWNER["david1"], "david")
+        self.assertNotIn("david", self.notify.STREAM_NOTIFY_OWNER)
         # miva1 (airuleset#300): phase-1 isolated stream, same shape as
         # simap -- its own tmux session name carries no Discord identity of
         # its own, so it redirects straight to zbynek's own thread.
@@ -4056,8 +4062,10 @@ class TestStreamNotifyOwnerRouting(TestCase):
             self.assertEqual(self.notify.resolve_owner(), "zbynek")
 
     def test_david_routes_to_its_own_owner_not_zbyneks(self):
+        # #537 live rename 2026-08-21: the box now runs as unix-user david1,
+        # which maps to the `david` owner/thread (never zbynek's).
         with m.patch.dict(os.environ, {}, clear=True), \
-                m.patch.object(self.notify, "_current_user", return_value="david"):
+                m.patch.object(self.notify, "_current_user", return_value="david1"):
             self.assertEqual(self.notify.resolve_owner(), "david")
 
     def test_miva1_resolves_to_zbynek_with_no_tmux_and_no_env_override(self):
@@ -4153,7 +4161,10 @@ class TestStreamNotifyOwnerRouting(TestCase):
         self.assertEqual(self.notify.stream_redirect("montalu4"), "marek")
         self.assertEqual(self.notify.stream_redirect("simap1"), "zbynek")
         self.assertEqual(self.notify.stream_redirect("miva1"), "zbynek")
-        # david is self-mapped — the redirect is a documented no-op for it.
+        # david1 (renamed from david, #537) redirects to the `david` owner
+        # like the base did; a bare `david` is no longer a map KEY, so
+        # stream_redirect returns it unchanged (correct — `david` IS the owner).
+        self.assertEqual(self.notify.stream_redirect("david1"), "david")
         self.assertEqual(self.notify.stream_redirect("david"), "david")
         # david2/david3/david4 (airuleset#326) redirect to david's own thread.
         self.assertEqual(self.notify.stream_redirect("david2"), "david")
@@ -10964,14 +10975,15 @@ class TestRemoteHosts(TestCase):
     box, and every managed user is present exactly once."""
 
     GK_HOST = "100.90.94.41"
-    # simap1/miva1 share marek/david's identity requirement (airuleset#143/
+    # simap1/miva1 share marek/david1's identity requirement (airuleset#143/
     # #300 — same operator keys as marek, registered on the same subdev box).
-    # simap was RENAMED to simap1 (#537 live rename, 2026-08-18) — the old
-    # OS account is gone, so the old entry must NOT be here.
+    # simap was RENAMED to simap1 (#537 live rename, 2026-08-18) and david to
+    # david1 (#537 live rename, 2026-08-21) — the old OS accounts are gone, so
+    # the old entries must NOT be here.
     # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE parallel
     # david streams — additional capacity for the same external developer,
-    # same subdev box, same gatekeeper_access identity requirement as david.
-    SUBDEV_USERS = {"marek", "david", "simap1", "miva1",
+    # same subdev box, same gatekeeper_access identity requirement as david1.
+    SUBDEV_USERS = {"marek", "david1", "simap1", "miva1",
                     "david2", "david3", "david4"}
 
     def _subdev_entries(self):
@@ -10982,7 +10994,7 @@ class TestRemoteHosts(TestCase):
         names = [r["name"] for r in airuleset.REMOTE_HOSTS]
         self.assertEqual(len(names), len(set(names)), "duplicate target name")
         for expected in ("dev2", "gatekeeper", "montalu1@subdev",
-                         "marek@subdev", "david@subdev", "simap1@subdev",
+                         "marek@subdev", "david1@subdev", "simap1@subdev",
                          "montalu2@subdev", "montalu3@subdev",
                          "montalu4@subdev", "miva1@subdev",
                          "david2@subdev", "david3@subdev", "david4@subdev",
@@ -10991,6 +11003,11 @@ class TestRemoteHosts(TestCase):
                          "admin@forestshop-dev", "stepan@forestshop-dev",
                          "spinbike-vps"):
             self.assertIn(expected, names)
+        self.assertNotIn("david@subdev", names,
+                         "david was RENAMED to david1 (#537 live rename, "
+                         "2026-08-21) — the old OS account is gone, so its "
+                         "target must NOT be here (a push would fail + risk "
+                         "fail2ban)")
         self.assertNotIn("montalu@subdev", names,
                          "montalu was RENAMED to montalu1 (#537 live rename, "
                          "2026-08-19) — the old OS account is gone, so its "
@@ -13390,10 +13407,26 @@ class TestBlockSubdevSshMisuseHook(TestCase):
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn("marek", r.stderr)
 
-    def test_blocks_david_without_identity(self):
+    def test_blocks_david1_without_identity(self):
+        # david1 (renamed from david, #537) IS in the gatekeeper-key allow
+        # tuple, so a bare ssh with no -i is blocked with the needs-identity
+        # reason (like marek/simap1/miva1), not the unauthorized-user reason.
+        r = self._run('ssh david1@116.203.108.177 "ls"')
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("without -i", r.stderr)
+        self.assertIn("david1", r.stderr)
+
+    def test_blocks_renamed_away_david(self):
+        # #537: the bare `david` account no longer exists (renamed to david1)
+        # — the hook must now BLOCK it, so a stray push/probe to the dead
+        # account never lands a fail2ban strike (the exact reason the old
+        # entry is removed).
         r = self._run('ssh david@116.203.108.177 "ls"')
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("david", r.stderr)
+        # pin the OFFENDING user to bare david (the block hint separately
+        # prints the allowed david[1234] family, so a bare assertIn("david")
+        # would pass for any blocked user).
+        self.assertIn("unauthorized user 'david'@subdev", r.stderr)
 
     def test_blocks_marek_with_wrong_identity(self):
         r = self._run('ssh -i ~/.ssh/id_rsa marek@subdev "ls"')
@@ -13511,9 +13544,11 @@ class TestBlockSubdevSshMisuseHook(TestCase):
             'ssh -i ~/.secrets/gatekeeper_access_ed25519 marek@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    def test_allows_david_with_gatekeeper_identity(self):
+    def test_allows_david1_with_gatekeeper_identity(self):
+        # david renamed to david1 (#537 live rename 2026-08-21) — the hook
+        # allow-list follows the OS account, so david1 is the allowed user.
         r = self._run(
-            'ssh -i ~/.secrets/gatekeeper_access_ed25519 david@subdev.newlevel.media "ls"')
+            'ssh -i ~/.secrets/gatekeeper_access_ed25519 david1@subdev.newlevel.media "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_simap_with_gatekeeper_identity(self):
@@ -13535,7 +13570,8 @@ class TestBlockSubdevSshMisuseHook(TestCase):
             self.assertEqual(r.returncode, 0, user + " " + r.stdout + r.stderr)
 
     def test_allows_fused_identity_flag(self):
-        r = self._run('ssh -i~/.secrets/gatekeeper_access_ed25519 david@subdev "ls"')
+        # david1 (renamed from david, #537) with the fused `-i~/...` flag form.
+        r = self._run('ssh -i~/.secrets/gatekeeper_access_ed25519 david1@subdev "ls"')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_allows_scp_montalu1(self):

@@ -32,7 +32,11 @@ def read(rel):
 
 class TestAuthorityResolution(TestCase):
     def test_known_stream_users_map_to_their_profiles(self):
-        self.assertEqual(airuleset.AUTHORITY_BY_USER["david"], "fork-no-merge")
+        # david1 (was david, airuleset#23; #537 live rename 2026-08-21): same
+        # fork-no-merge profile as the base. The OLD unix name's row left the
+        # map with the OS account (runbook-537 step 8, live in-place usermod).
+        self.assertEqual(airuleset.AUTHORITY_BY_USER["david1"], "fork-no-merge")
+        self.assertNotIn("david", airuleset.AUTHORITY_BY_USER)
         self.assertEqual(airuleset.AUTHORITY_BY_USER["marek"], "branch-merge")
         # montalu1 (was montalu; #537 live rename 2026-08-19): same
         # branch-merge profile as the base. The OLD unix name's row left the
@@ -93,7 +97,7 @@ class TestAuthorityResolution(TestCase):
             self.assertEqual(airuleset.resolve_authority(), "full")
 
     def test_resolve_uses_the_map_for_stream_users(self):
-        with m.patch.object(airuleset, "_current_user", return_value="david"):
+        with m.patch.object(airuleset, "_current_user", return_value="david1"):
             self.assertEqual(airuleset.resolve_authority(), "fork-no-merge")
 
     def test_cli_prints_the_profile(self):
@@ -179,7 +183,7 @@ class TestAuthorityResolution(TestCase):
         from pathlib import Path
         d = tempfile.mkdtemp()
         (Path(d) / "CLAUDE.md").write_text("<!-- airuleset:authority=full -->\n")
-        with m.patch.object(airuleset, "_current_user", return_value="david"):
+        with m.patch.object(airuleset, "_current_user", return_value="david1"):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "full")
 
     def test_project_marker_can_lower_authority(self):
@@ -193,7 +197,7 @@ class TestAuthorityResolution(TestCase):
     def test_no_marker_falls_back_to_user_map(self):
         import tempfile
         d = tempfile.mkdtemp()  # no CLAUDE.md
-        with m.patch.object(airuleset, "_current_user", return_value="david"):
+        with m.patch.object(airuleset, "_current_user", return_value="david1"):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
 
     def test_bogus_marker_value_ignored(self):
@@ -201,7 +205,7 @@ class TestAuthorityResolution(TestCase):
         from pathlib import Path
         d = tempfile.mkdtemp()
         (Path(d) / "CLAUDE.md").write_text("<!-- airuleset:authority=superuser -->\n")
-        with m.patch.object(airuleset, "_current_user", return_value="david"):
+        with m.patch.object(airuleset, "_current_user", return_value="david1"):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
 
     def test_bare_prose_mention_does_NOT_change_authority(self):
@@ -213,7 +217,7 @@ class TestAuthorityResolution(TestCase):
         d = tempfile.mkdtemp()
         (Path(d) / "CLAUDE.md").write_text(
             "Streams: set airuleset:authority=full to grant full rights.\n")
-        with m.patch.object(airuleset, "_current_user", return_value="david"):
+        with m.patch.object(airuleset, "_current_user", return_value="david1"):
             self.assertEqual(airuleset.resolve_authority(cwd=d), "fork-no-merge")
 
     def test_last_comment_marker_wins_over_an_example(self):
@@ -525,7 +529,7 @@ class TestPerBoxSkillScoping(TestCase):
         self.assertIn("playbook-review", names)
 
     def test_subdev_also_loses_deploy_ssh(self):
-        for user in ("david", "marek", "montalu1", "montalu2", "montalu3",
+        for user in ("david1", "marek", "montalu1", "montalu2", "montalu3",
                      "montalu4", "montalu5", "montalu6", "montalu7",
                      "montalu8"):
             names = airuleset.skill_names_for_user(user)
@@ -930,7 +934,7 @@ class TestSliceQualsIsTheOneSliceDefinition(TestCase):
 
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
-            with mk.patch.object(airuleset, "_current_user", return_value="david"):
+            with mk.patch.object(airuleset, "_current_user", return_value="david1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -988,7 +992,7 @@ class TestSliceQualsIncludesOwnBounceTickets(TestCase):
 
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
-            with mk.patch.object(airuleset, "_current_user", return_value="david"):
+            with mk.patch.object(airuleset, "_current_user", return_value="david1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -1165,7 +1169,7 @@ class TestSliceQualsRefusesRatherThanGuessing(TestCase):
 
         buf = io.StringIO()
         with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
-            with mk.patch.object(airuleset, "_current_user", return_value="david"):
+            with mk.patch.object(airuleset, "_current_user", return_value="david1"):
                 with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                     with contextlib.redirect_stdout(buf):
                         airuleset.cmd_slice_quals(
@@ -2428,7 +2432,7 @@ class TestSliceQualsDoesNotSilentlyCapItsOwnCount(TestCase):
                              return_value="fork-no-merge"):
             with mk.patch.object(airuleset, "_gh_login", return_value="kvaskodev"):
                 with mk.patch.object(airuleset, "_current_user",
-                                     return_value="david"):
+                                     return_value="david1"):
                     with mk.patch.object(airuleset, "_gh_out", side_effect=gh):
                         with contextlib.redirect_stdout(io.StringIO()):
                             airuleset.cmd_slice_quals(
@@ -2626,7 +2630,7 @@ class TestEveryStopProofRefusesAnUnansweringSearchIndex(TestCase):
         stream has THREE quals, so `len(quals) == 1` is False and the guard is
         skipped entirely."""
         out, err, exc = _drive(airuleset.cmd_slice_quals, _renamed_repo_gh(),
-                               authority="fork-no-merge", user="david",
+                               authority="fork-no-merge", user="david1",
                                login="kvaskodev")
         self._assert_refused(
             out, err, exc,
@@ -2635,7 +2639,7 @@ class TestEveryStopProofRefusesAnUnansweringSearchIndex(TestCase):
 
     def test_own_account_slice_quals_list_refuses_too(self):
         out, err, exc = _drive(airuleset.cmd_slice_quals, _renamed_repo_gh(),
-                               authority="fork-no-merge", user="david",
+                               authority="fork-no-merge", user="david1",
                                login="kvaskodev", count=False, list=True)
         self._assert_refused(out, err, exc, "slice-quals --list went empty")
 
@@ -2644,7 +2648,7 @@ class TestEveryStopProofRefusesAnUnansweringSearchIndex(TestCase):
         shape that let it drift for three rounds."""
         core = _drive(airuleset.cmd_core_quals, _renamed_repo_gh())
         slic = _drive(airuleset.cmd_slice_quals, _renamed_repo_gh(),
-                      authority="fork-no-merge", user="david", login="kvaskodev")
+                      authority="fork-no-merge", user="david1", login="kvaskodev")
         for out, err, exc in (core, slic):
             self.assertIsNotNone(exc)
             self.assertNotEqual(exc.code, 0)
@@ -2667,7 +2671,7 @@ class TestEveryStopProofRefusesAnUnansweringSearchIndex(TestCase):
                              side_effect=recorder):
             _drive(airuleset.cmd_core_quals, _renamed_repo_gh(healthy=True))
             _drive(airuleset.cmd_slice_quals, _renamed_repo_gh(healthy=True),
-                   authority="fork-no-merge", user="david", login="kvaskodev")
+                   authority="fork-no-merge", user="david1", login="kvaskodev")
         self.assertEqual(
             sorted(callers), ["core-quals", "slice-quals"],
             "one of the two stop-proofs does not go through the shared "
