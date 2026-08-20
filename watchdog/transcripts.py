@@ -618,7 +618,10 @@ SUBAGENT_NUDGE_STATE_TTL_SECONDS = SUBAGENT_MAX_AGE_SECONDS
 
 WorkerLane = namedtuple("WorkerLane", ["agent_id", "state", "age_s",
                                        "agent_type", "detail"])
-# state ∈ {"live", "stale", "wedged", "unreadable"}; count == #(state=="live").
+# state ∈ {"live", "stale", "wedged", "unreadable", "finished"};
+# count == #(state=="live"). `finished` (#587) is a FRESH lane whose worker has
+# produced its final reply and returned — excluded from `count` AND from
+# `lane_has_live_evidence` (a free lane), like `stale`.
 
 
 def _warn_stderr(msg):
@@ -674,12 +677,19 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
     (`transcript_text_toolcall_stall`, job 4a's own high-precision detector — it
     only fires when the last real turn ENDS with tool-call markup, never on a mere
     mention). Both are the SAME dangerous direction, so a liveness count excludes
-    both. RESIDUAL, honestly stated: a cleanly-FINISHED worker (its last turn a
-    normal `assistant end_turn` report with no error and no text-stall) is left to
-    age out of the window naturally — its mtime freezes at the final report — so it
-    briefly counts live for up to `freshness_s` after finishing. That is CORRECT,
-    not a bug: a box that just finished a ticket is active, not stuck, and it
-    self-heals once the mtime ages past the window.
+    both.
+
+    #587 — a cleanly-FINISHED worker (its last real turn a completed `assistant`
+    TEXT reply, no error, no text-stall) is classified `finished` and NOT counted
+    live, EVEN while its mtime is still fresh. The pre-#587 code left it to age out
+    of the window naturally (it "briefly counted live for up to freshness_s after
+    finishing") — which is exactly the 15-min mtime ghost that vetoed every
+    per-ticket compact boundary, because a boundary ALWAYS follows a worker return.
+    A subagent that produces a final text reply has RETURNED to its parent (or is
+    idle awaiting a follow-up); either way it is not executing in-flight work, so
+    `finished` is the honest classification (`transcript_worker_finished`). Wedged
+    is checked BEFORE finished, so an api-error / text-toolcall-stall lane stays
+    `wedged` (still live for compact), never `finished`.
 
     Fail toward a SAFE count, loudly, never crashing a sweep (mirrors G1's reader
     direction). Never raises:
@@ -770,6 +780,12 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
             wedged = transcript_last_error(p)
             if not wedged and transcript_text_toolcall_stall(p):
                 wedged = "text-toolcall stall"
+            # #587: a cleanly-FINISHED worker (last real turn a completed text
+            # reply, no pending tool call) is not executing in-flight work. The
+            # wedged check runs FIRST, so an api-error / text-toolcall-stall lane
+            # is never reclassified as finished — a wedged lane stays recoverable
+            # in-flight work the supervisor still owns (the #565 direction).
+            finished = not wedged and transcript_worker_finished(p)
         except Exception as e:
             warn("content scan failed (%s): %s" % (p, e))
             evidence.append(WorkerLane(agent_id, "unreadable", age, None,
@@ -778,30 +794,52 @@ def count_live_workers(projects_dir, cwd, session_id, now, freshness_s,
         if wedged:
             evidence.append(WorkerLane(agent_id, "wedged", age, atype, wedged[:80]))
             continue
+        if finished:
+            # a `finished` lane is FRESH (its mtime is inside the window) but not
+            # live — excluded from the count AND (via `lane_has_live_evidence`)
+            # from the evidence-based live predicate, so the compact / lane-fill /
+            # one-glance consumers all read it as a FREE lane immediately (#587),
+            # instead of a 15-min mtime ghost. Still full evidence (agent_type
+            # enriched) so the decision journal can name it.
+            evidence.append(WorkerLane(agent_id, "finished", age, atype, ""))
+            continue
         count += 1
         evidence.append(WorkerLane(agent_id, "live", age, atype, ""))
     return count, evidence
 
 
+_LANE_NOT_LIVE_STATES = frozenset(("stale", "finished"))
+
+
 def lane_has_live_evidence(evidence):
     """#571 — the #565 EVIDENCE-based liveness predicate as a SHARED helper:
-    True iff ANY lane in a ``count_live_workers`` evidence list is NON-STALE
-    (``live`` / ``wedged`` / ``unreadable``), the direction a consumer whose
-    DANGEROUS bias is UNDER-counting live lanes must read — never the
-    wedged-EXCLUDING headline ``count``.
+    True iff ANY lane in a ``count_live_workers`` evidence list is a genuinely
+    live lane (``live`` / ``wedged`` / ``unreadable`` — NOT ``stale`` and NOT
+    ``finished``), the direction a consumer whose DANGEROUS bias is UNDER-
+    counting live lanes must read — never the wedged-EXCLUDING headline
+    ``count``.
 
-    Two consumers now have that inverted danger and so must NOT reuse ``count``
-    (`internals-watchdog.md`, #565 shared-primitive bias): compact's
-    ``_session_has_live_bg_tasks`` (already inlines this exact `any(non-stale)`
-    predicate) and the lane-occupancy ``working-no-tasks`` defer (#571) —
-    UNDER-counting a live lane there suppresses the recovery/fill nudge (the gk
-    16-issues / 2-lanes regression), so a fresh WEDGED lane (recoverable work
-    the supervisor still owns) reads as "there IS a live lane → do not defer".
+    Two consumers have that inverted danger and BOTH read this SINGLE predicate
+    (`internals-watchdog.md`, #565 shared-primitive bias — no inline copy to
+    drift): compact's ``_session_has_live_bg_tasks`` (a live/wedged lane must
+    veto a compact that would orphan it) and the lane-occupancy
+    ``working-no-tasks`` defer (#571) — UNDER-counting a live lane there
+    suppresses the recovery/fill nudge (the gk 16-issues / 2-lanes regression),
+    so a fresh WEDGED lane (recoverable work the supervisor still owns) reads as
+    "there IS a live lane".
+
+    #587: a ``finished`` lane (a worker that produced its final reply and
+    returned) is DEAD for BOTH consumers — a FREE lane compact may compact past
+    and the fill gate may fill — so it is excluded here exactly like ``stale``.
+    Finish-detection is conservative (only a clear text-ending final turn), so a
+    genuinely running/wedged lane is never misread as finished; the danger
+    direction (under-counting a RUNNING lane) is the SAME for both consumers and
+    is not made worse by this exclusion.
 
     Fail-safe: an empty / falsy evidence list (or ``None``) → False (no live
     lane); a malformed item with no ``state`` is treated as non-live. Never
     raises."""
-    return any(getattr(lane, "state", "stale") != "stale"
+    return any(getattr(lane, "state", "stale") not in _LANE_NOT_LIVE_STATES
                for lane in (evidence or []))
 
 
@@ -931,6 +969,71 @@ def transcript_text_toolcall_stall(path):
         if text in _SENTINELS:
             continue                        # synthetic / tool-only text — keep scanning back
         return _ends_with_toolcall(text)
+    return False
+
+
+def transcript_worker_finished(path):
+    """#587 — True iff a SUBAGENT transcript's LAST REAL turn is a COMPLETED
+    final response: an assistant TEXT turn that did NOT end in a tool call. A
+    subagent runs an internal agentic loop and TERMINATES the instant it
+    produces a final text answer with no further tool_use — that text is what it
+    RETURNS to the parent — so a text-ending tail means the worker has finished
+    (or is idle awaiting a parent follow-up), NOT executing in-flight work right
+    now. This is the AUTHORITATIVE finish record the compact / lane-fill / one-
+    glance consumers need so a cleanly-finished lane drops out of the live
+    liveness IMMEDIATELY, instead of aging out of the 15-min mtime window (the
+    ghost that vetoed every per-ticket compact boundary).
+
+    Uses the SAME walk sematics as its siblings `transcript_last_error` /
+    `transcript_text_toolcall_stall` (no new parser — reuses `_iter_jsonl_tail`,
+    `_entry_has_tool_use`, `_entry_text`, `_SENTINELS`), so it cannot drift from
+    them. `stop_reason` is deliberately NOT consulted: it is `None` on the
+    majority of real finished transcripts (one API response splits into several
+    JSONL lines sharing a `message.id`, and CC populates `stop_reason`
+    inconsistently across versions), so the CONTENT-block type of the last real
+    turn is the robust cross-version signal.
+
+    Walking newest -> oldest:
+      - a `user` entry (a tool_result feed — a tool just completed, the model is
+        generating its next turn — OR a plain-text parent follow-up not yet acted
+        on) → False: the agent is RUNNING / about to run, not finished;
+      - an assistant `isApiErrorMessage` → False: a wedged/errored lane is not a
+        clean finish (and the caller checks `wedged` BEFORE `finished` anyway);
+      - an assistant with a parsed `tool_use` block → False: the last response
+        ended in a tool call, so the tool is executing → RUNNING (checked before
+        the sentinel skip, since a pure tool_use entry has empty text ∈
+        _SENTINELS and would otherwise be skipped);
+      - an assistant whose text ∈ _SENTINELS (synthetic / tool-only / a trailing
+        thinking-only line) → skip, keep scanning back;
+      - a real assistant TEXT reply → True: a produced final answer, no pending
+        tool → FINISHED.
+    Unmeasurable / empty / nothing decidable → False (never guessed finished —
+    the conservative direction: an unprovable-finished lane stays live, which is
+    exactly the pre-#587 status quo and self-heals when its mtime ages out).
+
+    ACCEPTED RESIDUAL (probe-confirmed narrow, never observed): the sub-
+    millisecond flush race where a NON-final response's `text` line is on disk
+    but its following `tool_use` line is not yet flushed reads as a false
+    `finished`. It is astronomically unlikely to be caught by a 60 s sweep, and
+    for both consumer directions the harm is bounded (compact: a single
+    orphaned-lane risk that CC-native auto-compact / the next boundary re-covers;
+    #571: one bounded, self-healing defer/fill). Documented, not chased — this
+    repo's established accepted-residual precedent."""
+    for entry in reversed(_iter_jsonl_tail(path, max_lines=200)):
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("type")
+        if t == "user":
+            return False            # tool_result feed / parent follow-up → running, about to run
+        if t != "assistant":
+            continue                # system / attachment / bookkeeping — skip, keep scanning back
+        if entry.get("isApiErrorMessage") is True:
+            return False            # a wedged/errored lane is not a clean finish
+        if _entry_has_tool_use(entry):
+            return False            # last response ended in a tool call → still running
+        if (_entry_text(entry) or "").strip() in _SENTINELS:
+            continue                # synthetic / tool-only / trailing thinking — keep scanning back
+        return True                 # a real produced text reply, no pending tool → finished
     return False
 
 

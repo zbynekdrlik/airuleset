@@ -648,5 +648,86 @@ class TestNeverRaises(unittest.TestCase):
         self.assertEqual(wl.state, "live")
 
 
+class TestTranscriptWorkerFinishedUnit(unittest.TestCase):
+    """#587 — direct unit coverage of the pure `transcript_worker_finished`
+    reader (the classifier `count_live_workers` delegates the finish decision to).
+    Written transcript files, no mtime dependence (finish is a CONTENT verdict)."""
+
+    def _write(self, root, *lines):
+        d = _subagents_dir(root, CWD, SID)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "agent-u.jsonl"
+        p.write_text("\n".join(lines) + "\n")
+        return p
+
+    def test_text_ending_turn_is_finished(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            p = self._write(root, _tool_result_user(), _assistant("all done"))
+            self.assertTrue(transcripts.transcript_worker_finished(p))
+
+    def test_thinking_then_text_is_finished(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            p = self._write(root, _tool_result_user(), _thinking(),
+                            _assistant("final report body"))
+            self.assertTrue(transcripts.transcript_worker_finished(p))
+
+    def test_tool_use_ending_turn_is_not_finished(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            p = self._write(root, _assistant("let me check"), _running())
+            self.assertFalse(transcripts.transcript_worker_finished(p))
+
+    def test_tool_result_tail_is_not_finished(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            p = self._write(root, _running(), _tool_result_user())
+            self.assertFalse(transcripts.transcript_worker_finished(p))
+
+    def test_plain_user_followup_tail_is_not_finished(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            p = self._write(root, _assistant("first"), _plain_user("more"))
+            self.assertFalse(transcripts.transcript_worker_finished(p))
+
+    def test_api_error_last_turn_is_not_finished(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            p = self._write(root, _assistant("hi"), _api_error())
+            self.assertFalse(transcripts.transcript_worker_finished(p))
+
+    def test_text_toolcall_stall_is_not_finished(self):
+        # a tool-call emitted as TEXT is NOT a clean finish — worker_finished
+        # itself returns True on the raw text (it looks like a text reply), but
+        # count_live_workers checks `wedged` (which owns this shape) FIRST, so the
+        # lane never reaches the finished branch. This asserts the pure function's
+        # own honest limit + documents why ORDER matters in the caller.
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            p = self._write(root, _textcall_stall())
+            # the raw text ends in tool-call markup, which is a text block →
+            # transcript_worker_finished sees a "text reply" and returns True…
+            self.assertTrue(transcripts.transcript_worker_finished(p))
+            # …but count_live_workers classifies it `wedged`, never `finished`,
+            # because the wedged (text-toolcall-stall) check runs first.
+            n, ev = count_live_workers(root, CWD, SID, NOW, FRESH)
+            self.assertEqual(_states(ev), ["wedged"])
+
+    def test_empty_or_missing_transcript_is_not_finished(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            self.assertFalse(
+                transcripts.transcript_worker_finished(Path(root) / "nope.jsonl"))
+            p = self._write(root)  # empty (just a newline)
+            self.assertFalse(transcripts.transcript_worker_finished(p))
+
+    def test_exported_on_the_watchdog_facade(self):
+        import watchdog as wd
+        self.assertTrue(hasattr(wd, "transcript_worker_finished"))
+        self.assertIs(wd.transcript_worker_finished,
+                      transcripts.transcript_worker_finished)
+
+
 if __name__ == "__main__":
     unittest.main()
