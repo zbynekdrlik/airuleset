@@ -353,5 +353,112 @@ class TestHookPasses(_HookBase):
         self.assertEqual(self.run_hook(content=script).returncode, 0)
 
 
+# --------------------------------------------------------------------------- #
+# Layer 4 -- adversarial-review fixes (2x fresh-context reviewers)
+# --------------------------------------------------------------------------- #
+
+class TestReviewFixMajorA_OrmChain(TestCase):
+    """MAJOR-A: an ORM create via the near-universal `.sudo()`/`.with_context()`
+    method chain before `.create(` must be detected."""
+    def test_sudo_create_detected(self):
+        self.assertTrue(g.is_channel_create("env['discuss.channel'].sudo().create({'name':'Bad'})"))
+
+    def test_with_context_create_detected(self):
+        self.assertTrue(g.is_channel_create(
+            "self.env['discuss.channel'].with_context(x=1).create({'name':'Bad'})"))
+
+    def test_newline_chain_create_detected(self):
+        self.assertTrue(g.is_channel_create(
+            "env['discuss.channel']\n  .sudo()\n  .create({'name':'Bad'})"))
+
+    def test_chain_ending_in_non_create_is_not_a_create(self):
+        for s in ("env['discuss.channel'].sudo().write({'name':'X'})",
+                  "env['discuss.channel'].sudo().search([])",
+                  "env['discuss.channel'].browse(1).message_post(body='x')"):
+            self.assertFalse(g.is_channel_create(s), s)
+
+    def test_sudo_chain_bad_name_evaluates_to_violation(self):
+        v = g.evaluate("env['discuss.channel'].sudo().create({'name':'Zle bez cisla'})",
+                       "montalu2")
+        self.assertIsNotNone(v)
+
+
+class TestReviewFixMajorB_WriteWithParentNotCreate(TestCase):
+    """MAJOR-B: a `write` that sets `parent_channel_id` (a re-parent + rename)
+    is NOT a create and must NEVER be blocked -- the name-correction path stays
+    open. Keying on the field alone (the pre-fix bug) false-blocked it."""
+    def test_write_with_parent_channel_id_is_not_a_create(self):
+        content = ('execute_kw(d,u,k,"discuss.channel","write",[[cid]],'
+                   '{"name":"Zle dlhe meno bez cisla","parent_channel_id":5})')
+        self.assertFalse(g.is_channel_create(content))
+        self.assertIsNone(g.evaluate(content, "montalu2"))
+
+    def test_genuine_create_with_parent_is_still_caught(self):
+        content = ('execute_kw(d,u,k,"discuss.channel","create",'
+                   '[{"name":"Zle bez cisla","parent_channel_id":5}])')
+        self.assertIsNotNone(g.evaluate(content, "montalu2"))
+
+
+class TestReviewFixMajorC_JsonRpc(TestCase):
+    """MAJOR-C: a JSON-RPC / call_kw create ("model"+"method":"create") must be
+    detected (the header claims JSON-RPC coverage); a JSON-RPC write must not."""
+    def test_jsonrpc_create_detected(self):
+        self.assertTrue(g.is_channel_create(
+            '{"model":"discuss.channel","method":"create","args":[[{"name":"Bad"}]]}'))
+
+    def test_jsonrpc_create_bad_name_is_a_violation(self):
+        v = g.evaluate(
+            '{"model":"discuss.channel","method":"create","args":[[{"name":"Zle bez cisla"}]]}',
+            "montalu2")
+        self.assertIsNotNone(v)
+
+    def test_jsonrpc_write_is_not_a_create(self):
+        self.assertFalse(g.is_channel_create(
+            '{"model":"discuss.channel","method":"write","args":[[cid,{"name":"X"}]]}'))
+
+    def test_jsonrpc_message_post_is_not_a_create(self):
+        self.assertFalse(g.is_channel_create(
+            '{"model":"discuss.channel","method":"message_post"}'))
+
+
+class TestReviewFixMultiNameAnySemantics(TestCase):
+    """R2 test-gap: the "block iff NO name compliant" decision (`any`, not `all`)
+    was unpinned, so a refactor to `all` survived every test. This PINS `any`:
+    a create where an UNRELATED name literal is compliant does NOT block, even
+    though the channel name is non-compliant. This is the DELIBERATE choice
+    (documented residual): `all` would false-block a legit channel create merely
+    because an unrelated name (a foreign-model create in the same script) is
+    non-compliant -- exactly the "must not false-block unrelated Odoo work" the
+    ticket forbids. The realistic single-name thread-create script is unaffected
+    (both `any` and `all` block a lone non-compliant channel name)."""
+    def test_unrelated_compliant_name_masks_per_any_semantics(self):
+        content = ('execute_kw(d,u,k,"res.partner","create",[{"name":"Firma 2"}]); '
+                   'execute_kw(d,u,k,"discuss.channel","create",[{"name":"Zle bez cisla"}])')
+        # `any(compliant)` -> "Firma 2" is compliant -> allow. `all` would block.
+        self.assertIsNone(g.evaluate(content, "montalu2"))
+
+    def test_all_names_non_compliant_still_blocks(self):
+        content = ('execute_kw(d,u,k,"res.partner","create",[{"name":"Firma bez"}]); '
+                   'execute_kw(d,u,k,"discuss.channel","create",[{"name":"Zle bez cisla"}])')
+        self.assertIsNotNone(g.evaluate(content, "montalu2"))
+
+
+class TestReviewFixHookEndToEnd(_HookBase):
+    def test_sudo_chain_create_bad_name_blocked(self):
+        cmd = "python3 -c \"env['discuss.channel'].sudo().create({'name':'Zle bez cisla'})\""
+        self.assertEqual(self.run_hook(command=cmd).returncode, 2)
+
+    def test_write_with_parent_channel_id_not_blocked(self):
+        cmd = ('python3 -c \'execute_kw(d,u,k,"discuss.channel","write",[[cid]],'
+               '{"name":"Zle dlhe meno bez cisla","parent_channel_id":5})\'')
+        self.assertEqual(self.run_hook(command=cmd).returncode, 0)
+
+    def test_jsonrpc_create_bad_name_blocked(self):
+        script = ('import requests\n'
+                  'body = {"model":"discuss.channel","method":"create",'
+                  '"args":[[{"name":"Zle bez cisla"}]]}\n')
+        self.assertEqual(self.run_hook(content=script).returncode, 2)
+
+
 if __name__ == "__main__":
     main()
