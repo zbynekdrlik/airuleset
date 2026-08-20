@@ -806,6 +806,54 @@ class TestApplyStreamSshAttach(TestCase):
         self.assertNotIn('[ -d "$__airuleset_cwd" ] || __airuleset_cwd="$HOME"',
                          block)
 
+    # --- #593: the ssh survivor-join clone is a grouped-session creator, so it
+    # must carry the SAME per-session `client-attached destroy-unattached on`
+    # hook cli_webterm's #591 clone got -- otherwise, once #591 removed the
+    # GLOBAL keep-last sweep, its detached duplicates orphan forever (the #254
+    # pile-up, returning for the ssh path).
+
+    def test_survivor_join_clone_carries_the_per_session_destroy_unattached_hook(self):
+        # The #591 mechanism reused verbatim: a per-session `client-attached`
+        # hook arming `destroy-unattached on`, targeting the join clone by its
+        # own name. Same three tokens the webterm clone's hook carries.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn("set-hook", block)
+        self.assertIn("client-attached", block)
+        self.assertIn("set-option destroy-unattached on", block)
+
+    def test_survivor_join_clone_is_created_detached_named_then_attached(self):
+        # `destroy-unattached on` on a zero-client session destroys it
+        # IMMEDIATELY, so (like #591's webterm clone) the join clone is created
+        # DETACHED (`-d`) with an explicit NAME (`-s`, so the hook can target
+        # it -- set-hook -t does not take tmux's `=` anchor), the hook armed,
+        # then attached. The old single `exec new-session -t "$survivor"` (no
+        # detach, no name, no hook) is gone.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn('new-session -d -t "$__airuleset_survivor" '
+                      '-s "$__airuleset_join"', block)
+        self.assertIn('exec tmux attach-session -t "$__airuleset_join"', block)
+        # the pre-#593 shape (attach-in-one-exec, no hook) must be gone
+        self.assertNotIn('exec tmux new-session -t "$__airuleset_survivor"',
+                         block)
+
+    def test_survivor_join_clone_name_is_pid_scoped_off_the_base_name(self):
+        # A unique per-login name so two concurrent survivor-joins never clash;
+        # derived from the base session name (== whoami) + the login shell pid.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn('__airuleset_join="${__airuleset_me}-join-$$"', block)
+
+    def test_stale_284_global_sweep_comment_is_fixed(self):
+        # #593 point 2: the #284 comment used to defend against a tmux
+        # destroy-unattached sweep as if it still ran; after #591 removed the
+        # GLOBAL sweep it no longer does (the survivor-search stays only as
+        # harmless defense-in-depth). The comment must say so.
+        block = airuleset.STREAM_SSH_ATTACH_BLOCK
+        self.assertIn("no longer happens globally after #591", block)
+        # the survivor-search itself is KEPT (defense-in-depth), so its own
+        # marker stays present -- this lock is about the comment's framing, not
+        # deleting the search.
+        self.assertIn("__airuleset_survivor", block)
+
 
 class TestStreamMarkerBlockSpansSafety(TestCase):
     """#235's own documented corruption class: a lazy regex `.*?` block scan
@@ -960,7 +1008,14 @@ class TestGroupSurvivorReattach(TestCase):
             list_sessions_out="zbynek zbynek-4\nmarek marek-0\n",
             whoami="zbynek",
         )
-        self.assertIn("new-session -t zbynek-4", log)
+        # #593: the join is now a DETACHED, NAMED grouped clone (so its own
+        # per-session destroy-unattached hook can target it), attached
+        # afterwards -- never the old single `new-session -t zbynek-4`.
+        self.assertIn("new-session -d -t zbynek-4 -s zbynek-join-", log)
+        self.assertIn("set-hook -t zbynek-join-", log)
+        self.assertIn("client-attached", log)
+        self.assertIn("destroy-unattached on", log)
+        self.assertIn("attach-session -t zbynek-join-", log)
         self.assertNotIn("new-session -A -s zbynek", log)
         # MINOR-1 (adversarial review, #284): the exact-name check MUST use
         # tmux's `=`-anchored exact match, never a bare (prefix-matching,
@@ -1023,16 +1078,18 @@ class TestGroupSurvivorReattach(TestCase):
     def test_a_grouped_session_whose_name_contains_a_space_is_still_joined_intact(self):
         # the positive counterpart of the above: a REAL survivor whose own
         # name has an embedded space must still be captured WHOLE (never
-        # truncated at the space) and exec'd as ONE argument -- the [%d]
+        # truncated at the space) and passed as ONE argument -- the [%d]
         # argv-count prefix is what proves "my session two" landed as a
-        # SINGLE argument (count 3: new-session, -t, "my session two"),
-        # not three separate ones a naive split would have produced.
+        # SINGLE argument. #593: the detached-create argv is
+        # `new-session -d -t "my session two" -s "$join"` == 6 args; a naive
+        # split of the spacy name would push the count past 6.
         log, r = self._run_block(
             has_session_rc=1,
             list_sessions_out="zbynek my session two\n",
             whoami="zbynek",
         )
-        self.assertIn("[3] new-session -t my session two", log)
+        self.assertIn("[6] new-session -d -t my session two -s zbynek-join-",
+                      log)
 
     def test_the_survivor_exec_runs_outside_the_process_substitution_loop(self):
         # CRITICAL-1 (adversarial review, #284, live-verified against a
@@ -1048,8 +1105,12 @@ class TestGroupSurvivorReattach(TestCase):
         # `done < <(...)` line that closes the loop's own redirect.
         block = airuleset.STREAM_SSH_ATTACH_BLOCK
         done_idx = block.index("done < <(tmux list-sessions")
+        # #593: the survivor branch now exec's the ATTACH of the named
+        # detached clone (after create + set-hook), not a single
+        # `new-session -t`; the CRITICAL-1 invariant is unchanged -- this
+        # exec must still run AFTER the process-substitution loop closes.
         survivor_exec_idx = block.index(
-            'exec tmux new-session -t "$__airuleset_survivor"'
+            'exec tmux attach-session -t "$__airuleset_join"'
         )
         self.assertGreater(
             survivor_exec_idx, done_idx,
