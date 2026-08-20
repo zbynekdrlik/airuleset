@@ -1,6 +1,6 @@
 {
  "files": {
-  "airuleset.py": 5706,
+  "airuleset.py": 5718,
   "backlog_marker_gate.py": 90,
   "burn/__init__.py": 2339,
   "cli_aliases.py": 99,
@@ -178,7 +178,7 @@
   "tests/test_run_card_enforcement.py": 2265,
   "tests/test_run_once_characterization.py": 446,
   "tests/test_run_once_registry_labels.py": 173,
-  "tests/test_runtime_deps.py": 210,
+  "tests/test_runtime_deps.py": 251,
   "tests/test_schedule_wakeup_loop_only.py": 66,
   "tests/test_scope_gate.py": 1503,
   "tests/test_send_verified.py": 258,

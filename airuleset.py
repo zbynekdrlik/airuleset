@@ -498,21 +498,33 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
 # lacks it would silently break the popup with zero warning. This is the
 # sanctioned mechanism (autonomous-verification.md) for closing that gap.
 RUNTIME_DEPS = ("jq", "curl", "git", "gh", "tmux", "sshpass", "btop",
-                 "node", "npx", "less")
+                 "node", "npx", "less", "pdftoppm")
+# NOTE (#600): `pdftoppm` (from the `poppler-utils` apt package, see
+# RUNTIME_DEP_PACKAGE below) IS fleet-wide — Claude's Read tool shells out to
+# it to render PDF pages, a universally useful capability on EVERY box, and a
+# no-sudo subdev box (montalu1) lacking it is exactly the gap that filed this
+# ticket (odoo-erp#4634). Unlike `ttyd` (below), a warning on a box that lacks
+# it is a TRUE signal — the dep is genuinely wanted everywhere — so it belongs
+# in the flat fleet-wide list alongside jq/btop/less/node, not dev1-local.
 # NOTE (#555): `ttyd` is NOT in the fleet-wide RUNTIME_DEPS — the web terminal
 # gateway is dev1-ONLY, and `check_runtime_deps()` runs on EVERY box (incl. the
 # ~19 no-sudo subdev accounts, where a `sudo -n apt-get install ttyd` would fail
 # every install and cry wolf on the "MISSING RUNTIME DEP" channel). It is
 # installed dev1-locally inside setup_webterm_service() instead.
 
-# The apt PACKAGE name differs from the BINARY name for node/npx (#158):
+# The apt PACKAGE name differs from the BINARY name for node/npx (#158) and
+# pdftoppm (#600):
 # Debian/Ubuntu's real "node" package is an unrelated amateur packet-radio
 # program (installing it would never provide the `node` binary at all), and
 # `npx` has no package of its own — both ship bundled inside "nodejs" (this
 # fleet's own NodeSource package, confirmed live to explicitly `Replaces:
-# npm`, i.e. npm+npx included). Every other tracked dep's binary name IS its
-# apt package name, so this override only needs the two exceptions.
-RUNTIME_DEP_PACKAGE = {"node": "nodejs", "npx": "nodejs"}
+# npm`, i.e. npm+npx included). The `pdftoppm` binary (Claude's Read tool
+# shells out to it to render PDF pages) ships inside "poppler-utils",
+# alongside its pdftotext/pdfinfo siblings — there is no apt package named
+# "pdftoppm". Every other tracked dep's binary name IS its apt package name,
+# so this override only needs these three exceptions.
+RUNTIME_DEP_PACKAGE = {"node": "nodejs", "npx": "nodejs",
+                       "pdftoppm": "poppler-utils"}
 
 
 def check_runtime_deps(deps=RUNTIME_DEPS):
