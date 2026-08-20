@@ -131,9 +131,13 @@ class TestStoreValuesAtomicity(_StoreCase):
         self.assertEqual(st.state("WS_SECRET"), "pending")
 
     def test_a_write_failure_mid_loop_rolls_back_earlier_writes(self):
-        # Pre-flight passes for both, but the SECOND store_value raises (a
-        # residual disk error). The first, already committed, must be rolled
-        # back so no partial set survives.
+        # Pre-flight passes for both, but the SECOND store_value raises a BARE
+        # OSError — the exact "residual disk error" (ENOSPC/EIO) store_value's
+        # own f.write raises, which is NOT a SecretError. The first, already
+        # committed, must be rolled back so no partial set survives, and the
+        # rollback must REVERT to `pending` (retry-able), never leave a `ready`
+        # value. (#603 review: the original test faked this as a SecretError,
+        # missing the real OSError failure class entirely.)
         n1 = self._pending("WS_IDENT")
         n2 = self._pending("WS_SECRET")
         real = st.store_value
@@ -142,24 +146,42 @@ class TestStoreValuesAtomicity(_StoreCase):
         def flaky(name, data, **kw):
             calls["n"] += 1
             if calls["n"] == 2:
-                raise st.SecretError("%s: simulated disk error" % name)
+                raise OSError(28, "No space left on device")
             return real(name, data, **kw)
 
         with m.patch.object(st, "store_value", side_effect=flaky):
+            # An OSError is wrapped as SecretError (the typed no-leak contract).
             with self.assertRaises(st.SecretError):
                 st.store_values(
                     [("WS_IDENT", b"ident-603"), ("WS_SECRET", b"s3cr3t-603")],
                     nonces={"WS_IDENT": n1, "WS_SECRET": n2})
-        # All-or-nothing: NEITHER name is `ready` — the first (committed then
-        # rolled back) is `absent`, the second (failed mid-write, never
-        # committed) stays `pending`.
+        # All-or-nothing: NEITHER name is `ready`, and both revert to `pending`
+        # (the first committed-then-rolled-back, the second never committed) so
+        # a corrected retry submit still matches the live endpoint's nonce.
         self.assertNotEqual(st.state("WS_IDENT"), "ready")
         self.assertNotEqual(st.state("WS_SECRET"), "ready")
-        self.assertEqual(st.state("WS_IDENT"), "absent")     # rolled back
+        self.assertEqual(st.state("WS_IDENT"), "pending")    # retry-able
+        self.assertEqual(st.state("WS_SECRET"), "pending")
+        self.assertEqual(st.read_meta("WS_IDENT").get("nonce"), n1)  # nonce kept
 
     def test_empty_items_is_refused(self):
         with self.assertRaises(st.SecretError):
             st.store_values([], nonces={})
+
+    def test_store_value_cleans_up_its_own_truncated_write(self):
+        # #603 review: a write failure AFTER O_EXCL created the value file must
+        # not leave a truncated value marked `ready`. Force the meta write to
+        # fail (OSError) AFTER the value was written, and assert store_value
+        # removed the value and reverted the name to `pending` (its meta is the
+        # untouched pending record, so it stays re-submittable).
+        n1 = self._pending("DB_PASS")
+        with m.patch.object(st, "_write_json_0600",
+                            side_effect=OSError(28, "No space left on device")):
+            with self.assertRaises(st.SecretError):
+                st.store_value("DB_PASS", b"val-603", nonce=n1)
+        self.assertEqual(st.state("DB_PASS"), "pending")     # NOT `ready`
+        self.assertFalse(st.value_path("DB_PASS").exists())  # value cleaned up
+        self.assertEqual(st.read_meta("DB_PASS").get("nonce"), n1)  # meta intact
 
     def test_the_error_never_contains_a_value(self):
         n1 = self._pending("WS_IDENT")
@@ -282,6 +304,60 @@ class TestPersistMap(_StoreCase):
         with self.assertRaises(SystemExit):
             cli_vault._secret_parse_persist_map(
                 _Args(persist_map="A=%s" % (repo / "leak")), ["A"])
+
+
+class _FakeLiveOpener:
+    """A urllib-opener stand-in whose every probe reads live (200), so
+    _secret_request's readiness loop returns without a real server."""
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def open(self, url, timeout=None):
+        return self._Resp()
+
+
+class TestSelectionSeam(_StoreCase):
+    """The single-vs-multi CHOICE in _secret_request (env var + argv names_csv +
+    per-name record_endpoint) — the 'safe path / new path one branch apart' seam
+    the review flagged as untested (#603 MINOR-3). Popen + the readiness probe
+    are mocked so no real endpoint is spawned."""
+
+    def _drive(self, name, cmd):
+        args = _Args(name=name, cmd=cmd, port=_free_port())
+        fake_proc = m.Mock(pid=13579)
+        with m.patch("filedrop.bind_ips", return_value=["127.0.0.1"]), \
+                m.patch("subprocess.Popen", return_value=fake_proc) as popen, \
+                m.patch.object(cli_vault, "_secret_opener",
+                               return_value=_FakeLiveOpener()):
+            cli_vault._secret_request(args)
+        argv = popen.call_args.args[0]
+        env = popen.call_args.kwargs["env"]
+        return argv, env
+
+    def test_multi_uses_names_csv_and_the_nonces_map_env(self):
+        argv, env = self._drive("WS_IDENT", ["WS_SECRET"])
+        self.assertEqual(argv[4], "WS_IDENT,WS_SECRET")     # the names CSV
+        self.assertIn("AIRULESET_VAULT_NONCES", env)        # map, not single
+        self.assertNotIn("AIRULESET_VAULT_NONCE", env)
+        parsed = json.loads(env["AIRULESET_VAULT_NONCES"])
+        self.assertEqual(set(parsed), {"WS_IDENT", "WS_SECRET"})
+        # The shared endpoint pid is recorded under EVERY name.
+        self.assertEqual(st.read_meta("WS_IDENT").get("endpoint_pid"), 13579)
+        self.assertEqual(st.read_meta("WS_SECRET").get("endpoint_pid"), 13579)
+
+    def test_single_uses_the_single_nonce_env_byte_identical(self):
+        argv, env = self._drive("DB_PASS", [])
+        self.assertEqual(argv[4], "DB_PASS")                # a bare name, no CSV
+        self.assertIn("AIRULESET_VAULT_NONCE", env)         # the OLD env var
+        self.assertNotIn("AIRULESET_VAULT_NONCES", env)
+        self.assertEqual(st.read_meta("DB_PASS").get("endpoint_pid"), 13579)
 
 
 class _MultiServerCase(_StoreCase):

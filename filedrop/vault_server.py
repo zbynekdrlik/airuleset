@@ -139,6 +139,15 @@ for _n in NAMES:
         check_name(_n)
     except SecretError as e:
         sys.exit("vault: %s" % e)
+# A MULTI endpoint MUST carry a nonce for every name (revocation protection) —
+# refuse to serve if AIRULESET_VAULT_NONCES was absent/unparseable/incomplete,
+# rather than silently storing a member with no nonce check (#603 review). The
+# single path's `AIRULESET_VAULT_NONCE` can't degrade this way; this keeps multi
+# from being weaker than single.
+if IS_MULTI and not all(_n in NONCES for _n in NAMES):
+    sys.exit("vault: a multi-field endpoint needs a nonce per name via "
+             "AIRULESET_VAULT_NONCES — refusing to serve without revocation "
+             "protection for every field")
 if not BIND_IPS:
     sys.exit("vault: no bind address given")
 for _ip in BIND_IPS:
@@ -473,9 +482,13 @@ class H(BaseHTTPRequestHandler):
         """
         try:
             payload = json.loads(data.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             # NEVER interpolate the body / the parse exception (it can quote a
-            # snippet of the value) — a fixed literal only.
+            # snippet of the value) — a fixed literal only. RecursionError is
+            # explicit: a deeply-nested JSON body (well under the size cap)
+            # makes json.loads recurse past the limit, and it is NOT a
+            # ValueError, so without it the request reset the connection and
+            # dumped a traceback into the endpoint log (#603 review).
             return self._txt(400, "malformed JSON body")
         if not isinstance(payload, dict):
             return self._txt(400, "expected a JSON object of {name: value}")
@@ -502,11 +515,15 @@ class H(BaseHTTPRequestHandler):
             _stored = True
         try:
             store_values(items, keep_s=KEEP, nonces=NONCES)
-        except SecretError as e:
+        except (SecretError, OSError) as e:
             # A genuine store failure after a clean validation (a revoked nonce,
-            # a disk error). store_values already rolled back its own writes, so
-            # nothing partial is on disk. Release the latch so a legit retry can
-            # happen and stay up. `e` names NAME + reason only, never a value.
+            # a real disk error). store_values already rolled back its own
+            # writes (reverting each committed member to `pending`), so nothing
+            # partial is on disk and a corrected retry can still match. Release
+            # the latch so that retry can happen and stay up. `e` names NAME +
+            # reason only, never a value. OSError is caught belt-and-suspenders
+            # (store_values wraps it as SecretError) so a future regression can
+            # never dead-lock the latch at 410 (#603 review).
             with _store_lock:
                 _stored = False
             return self._txt(409, "not stored: %s" % e)
