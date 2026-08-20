@@ -1489,9 +1489,12 @@ class TestApplyStreamTmuxWindowName(TestCase):
     def test_adds_block_for_a_stream_account_with_its_alias(self):
         # #592: a stream box is named by its ALIAS (montalu2 -> m2), matching
         # the owner's own webterm tab + live mitigation, not the full username.
+        # `host="subdev"` = the stream account's real box; without it the test
+        # would inherit the test box's own hostname (dev1) and the `dev1`
+        # short-circuit would fire (montalu2 never actually runs on dev1).
         p = self._tmp("# existing content\n")
         changed = airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", run=lambda argv: None)
+            p, user="montalu2", host="subdev", run=lambda argv: None)
         self.assertTrue(changed)
         text = p.read_text()
         self.assertIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, text)
@@ -1569,7 +1572,8 @@ class TestApplyStreamTmuxWindowName(TestCase):
     def test_live_applies_the_server_options_for_a_stream_account(self):
         calls = []
         p = self._tmp("# existing content\n")
-        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=calls.append)
+        airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", host="subdev", run=calls.append)
         # server-option sets (no keystrokes) -- automatic-rename off + the
         # session-created rename hook, exactly what the conf block carries.
         # #592: the hook renames to the ALIAS (m2), not the full username.
@@ -1593,7 +1597,8 @@ class TestApplyStreamTmuxWindowName(TestCase):
             return _FakeCP(returncode=0, stdout="")
 
         p = self._tmp("# existing content\n")
-        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=run)
+        airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", host="subdev", run=run)
         self.assertIn(["tmux", "rename-window", "-t", "@0", "m2"], seen)
         self.assertIn(["tmux", "rename-window", "-t", "@3", "m2"], seen)
 
@@ -1626,12 +1631,13 @@ class TestApplyStreamTmuxWindowName(TestCase):
         # user's own content preserved -- neither scanner eats the other.
         p = self._tmp("set -g mouse on\n")
         airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
-        airuleset.apply_stream_tmux_window_name(p, user="montalu2", run=lambda argv: None)
+        airuleset.apply_stream_tmux_window_name(
+            p, user="montalu2", host="subdev", run=lambda argv: None)
         # a second install of BOTH must be a byte-for-byte no-op
         before = p.read_text()
         c1 = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         c2 = airuleset.apply_stream_tmux_window_name(
-            p, user="montalu2", run=lambda argv: None)
+            p, user="montalu2", host="subdev", run=lambda argv: None)
         after = p.read_text()
         self.assertFalse(c1)
         self.assertFalse(c2)

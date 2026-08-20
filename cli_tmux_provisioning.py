@@ -31,6 +31,7 @@ repo idiom, cf. cli_scratch_sweep.py's own CLAUDE_DIR):
     derivation, identical value.
 """
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -705,42 +706,49 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
 
 
 # ---------------------------------------------------------------------------
-# #554: the tmux WINDOW name carries the subdev stream account's name, so the
-# owner -- attached to one of many subdev sessions -- can tell at a glance
-# WHICH stream they are in. Root cause (verified live on montalu@subdev,
-# tmux 3.7b): the default status-left already shows the SESSION name
-# (`[#{session_name}]`) and the owner STILL could not tell -- the identity
-# has to go where the owner actually looks, the window-status list in the
-# middle of the status bar, which `automatic-rename on` keeps filling with
-# the running command (`bash`/`node`). So: name the window after the stream
-# and turn `automatic-rename` off so it STICKS.
+# #554/#592: the tmux WINDOW name carries the box's short TARGET ALIAS, so the
+# owner -- attached to one of many fleet sessions -- can tell at a glance WHERE
+# they are. Root cause (verified live on montalu@subdev, tmux 3.7b): the default
+# status-left already shows the SESSION name (`[#{session_name}]`) and the owner
+# STILL could not tell -- the identity has to go where the owner actually looks,
+# the window-status list in the middle of the status bar, which
+# `automatic-rename on` keeps filling with the running command (`bash`/`node`).
+# So: name the window after the box alias and turn `automatic-rename` off so it
+# STICKS.
 #
-# Same idempotent per-account marker-block shape as apply_stream_ssh_attach
-# (#264): present ONLY for AUTHORITY_BY_USER stream accounts, actively
-# STRIPPED on dev1/dev2/gatekeeper -- a human box does varied work and the
-# command-tracking window name is USEFUL there (and the box's HOST, not the
-# user which is always `newlevel`, is what distinguishes dev1 from dev2).
-# The stream name is BAKED at install time from `_current_user()` -- 100%
-# predictable, testable, and (unlike `#{session_name}`) constant across the
-# ssh grouped-attach survivor path (`new-session -t`), so the session-created
-# hook always renames the shared window to the SAME literal instead of a
-# grouped session's auto-generated name.
+# #592 generalizes #554 from subdev stream accounts to EVERY managed box: #554
+# gated this to AUTHORITY_BY_USER keys, so gk/dev1/dev2 got NO block and their
+# windows showed `bash` (owner report 2026-08-20). Now it renders on every box,
+# with the name = the box's `cli_aliases.short_target_alias` (gatekeeper->gk,
+# dev1->dev1, dev2->dev2, montaluN->mN, davidN->dN, ...) -- the SAME single
+# source the webterm dashboard tabs draw on (cli_webterm._short_alias), never a
+# parallel map. The "stream" in the marker/function names below is historical
+# (#554); the feature now covers all boxes. The block is stripped
+# only when a box yields no SAFE alias (never in practice). Same idempotent
+# per-box marker-block shape as apply_stream_ssh_attach (#264).
+#
+# The alias is BAKED at install time from `_current_user()` + hostname -- 100%
+# predictable, testable, and (unlike `#{session_name}`) constant across the ssh
+# grouped-attach survivor path (`new-session -t`), so the session-created hook
+# always renames the shared window to the SAME literal.
 # ---------------------------------------------------------------------------
 
 STREAM_TMUX_WINDOW_MARK_START = "# >>> airuleset tmux stream-window >>>"
 STREAM_TMUX_WINDOW_MARK_END = "# <<< airuleset tmux stream-window <<<"
 
-# The stream name is interpolated as a LITERAL into a tmux `rename-window`
-# argument -- constrain it to a shell/tmux-safe unix-username shape so a
-# hypothetical exotic account name can never inject tmux command syntax.
-# Every real AUTHORITY_BY_USER key already matches this.
+# The alias is interpolated as a LITERAL into a tmux `rename-window` argument --
+# constrain it to a shell/tmux-safe unix-name shape so an exotic hostname/user
+# can never inject tmux command syntax. Every real alias (dev1/dev2/gk/mN/dN/
+# miva/siN + the marek owner account) already matches this.
 _SAFE_STREAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
-def render_stream_tmux_window_block(stream):
-    """The managed ~/.tmux.conf block that names this stream account's tmux
-    windows after the stream. `stream` is the baked linux username (already
-    validated against `_SAFE_STREAM_NAME_RE` by the caller).
+def render_stream_tmux_window_block(name):
+    """The managed ~/.tmux.conf block that names this box's tmux windows after
+    `name` -- the box's short TARGET ALIAS (#592; already validated against
+    `_SAFE_STREAM_NAME_RE` by the caller). #554 baked the subdev username here;
+    #592 bakes the alias (e.g. `m2`/`gk`/`dev1`), but the render itself is
+    name-agnostic -- it bakes whatever literal it is handed.
 
     `after-new-window` is DELIBERATELY not emitted: it fires ONLY on windows
     opened AFTER the initial one, so it never names the session's FIRST
@@ -751,35 +759,36 @@ def render_stream_tmux_window_block(stream):
     on both 3.4 and 3.7b -- it is simply the WRONG hook for the first
     window.) The `session-created` hook + `automatic-rename off` pair is
     proven clean on BOTH the fleet's tmux 3.4 and 3.7b (a scratch conf
-    starts rc=0 with `#{window_name}` = the stream on both).
+    starts rc=0 with `#{window_name}` = the name on both).
 
     KNOWN LIMITATION (review F3): `session-created` names only the FIRST
-    window of a NEW session. A second window opened later inside a stream
-    session keeps its own name (with `automatic-rename off` it does not
-    track the command either). Acceptable -- a stream account runs a single
-    claude window -- and the live-apply below is more thorough, renaming
-    EVERY existing window of the primary session on each install."""
+    window of a NEW session. A second window opened later keeps its own name
+    (with `automatic-rename off` it does not track the command either).
+    Acceptable, and the live-apply below is more thorough, renaming EVERY
+    existing window of the primary session on each install."""
     return (
         f"{STREAM_TMUX_WINDOW_MARK_START}\n"
-        "# #554: window name = stream account name so the owner sees WHICH\n"
-        "# subdev stream they are attached to. automatic-rename off makes it\n"
-        "# STICK (a stream account only runs claude; a command-tracking name\n"
-        "# -- 'node'/'bash' -- has no value and hides the identity). Present\n"
-        "# only for subdev stream accounts; stripped on dev1/dev2/gatekeeper.\n"
+        "# #554/#592: window name = this box's short target alias so the owner\n"
+        "# sees WHERE they are (dev1/dev2/gk/mN/dN/...). automatic-rename off\n"
+        "# makes it STICK (a command-tracking 'node'/'bash' name hides the\n"
+        "# identity). Rendered on EVERY managed box; the alias is the SAME\n"
+        "# source the webterm tabs use (cli_aliases.short_target_alias).\n"
         "set-option -gw automatic-rename off\n"
-        f'set-hook -g session-created "rename-window {stream}"\n'
+        f'set-hook -g session-created "rename-window {name}"\n'
         f"{STREAM_TMUX_WINDOW_MARK_END}"
     )
 
 
-def _live_apply_stream_window_name(stream, run=None):
-    """Best-effort live-apply on any RUNNING tmux server for this stream
-    account, so an ALREADY-running/attached session updates on the next
-    push WITHOUT waiting for a session re-create. Purely configuration-path
-    (`set-option` / `set-hook` / `rename-window` -- NEVER a `send-keys`
-    keystroke into any pane), failure-tolerant (no server / no matching
-    session -> no-op), and it NEVER creates or resurrects a session (the
-    standing 'never touch a session the user deliberately stopped' rule):
+def _live_apply_stream_window_name(session_name, new_name, run=None):
+    """Best-effort live-apply on any RUNNING tmux server for this box, so an
+    ALREADY-running/attached session updates on the next push WITHOUT waiting
+    for a session re-create. `session_name` is the primary session (the unix
+    user, e.g. `montalu2`/`newlevel`); `new_name` is the box alias to rename
+    every window of that session to (#592, e.g. `m2`/`dev1`). Purely
+    configuration-path (`set-option` / `set-hook` / `rename-window` -- NEVER a
+    `send-keys` keystroke into any pane), failure-tolerant (no server / no
+    matching session -> no-op), and it NEVER creates or resurrects a session
+    (the standing 'never touch a session the user deliberately stopped' rule):
     `rename-window` only relabels a window that already exists.
 
     A `rename-window` is safe to live-apply for the same reason
@@ -789,17 +798,18 @@ def _live_apply_stream_window_name(stream, run=None):
     runner = run or _default_tmux_run
     for argv in (["tmux", "set-option", "-gw", "automatic-rename", "off"],
                  ["tmux", "set-hook", "-g", "session-created",
-                  "rename-window %s" % stream]):
+                  "rename-window %s" % new_name]):
         try:
             runner(argv)
         except Exception as e:
             print("  tmux stream-window live-apply skipped (non-fatal): %s" % e,
                   file=sys.stderr)
-    # Rename every window of the PRIMARY session (=<stream>) so an attached
-    # session updates immediately. A missing session makes list-windows exit
-    # non-zero (or the injected test `run` returns None) -> no rename at all.
+    # Rename every window of the PRIMARY session (=<session_name>) to the alias
+    # so an attached session updates immediately. A missing session makes
+    # list-windows exit non-zero (or the injected test `run` returns None) ->
+    # no rename at all.
     try:
-        result = runner(["tmux", "list-windows", "-t", "=%s" % stream,
+        result = runner(["tmux", "list-windows", "-t", "=%s" % session_name,
                          "-F", "#{window_id}"])
     except Exception as e:
         print("  tmux stream-window live-apply (list) skipped (non-fatal): %s" % e,
@@ -812,37 +822,44 @@ def _live_apply_stream_window_name(stream, run=None):
         if not wid:
             continue
         try:
-            runner(["tmux", "rename-window", "-t", wid, stream])
+            runner(["tmux", "rename-window", "-t", wid, new_name])
         except Exception:
             # one window's failure never skips the rest
             pass
 
 
-def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, run=None):
-    """Idempotently add/remove the #554 stream-window naming marker block in
-    ~/.tmux.conf, scoped STRICTLY to subdev stream accounts
-    (AUTHORITY_BY_USER's keys -- the exact registry #263/#264 key off). The
-    block is PRESENT for a stream account and actively STRIPPED on every
-    other box, so a future AUTHORITY_BY_USER edit can never leave a stale
-    block on a human account (dev1/dev2/gatekeeper).
+def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
+                                   run=None):
+    """Idempotently add/remove the #554/#592 window-naming marker block in
+    ~/.tmux.conf. #592: rendered on EVERY managed box, with the window name =
+    the box's short TARGET ALIAS (`cli_aliases.short_target_alias(user, host)`
+    -- gatekeeper->gk, dev1->dev1, dev2->dev2, montaluN->mN, davidN->dN, ...),
+    the SAME single source the webterm dashboard tabs draw on, never a parallel
+    map. `host` defaults to the box's hostname (`os.uname().nodename`); it is
+    load-bearing only for the owner boxes that share the `newlevel` unix user
+    (dev1 vs dev2). The block is stripped only when a box yields no SAFE alias
+    (an alias failing `_SAFE_STREAM_NAME_RE`, the injection guard -- never in
+    practice), so a future exotic hostname can never leave a broken
+    rename-window directive behind.
 
     Same overall shape as apply_stream_ssh_attach (#264): positional-span
     rewrite (the shared `_clean_tmux_block_spans`, parameterized with this
     block's own markers), create-file-if-absent, no-op on a second run.
-    Additionally live-applies the same directives on any
-    running server for a stream account (`_live_apply_stream_window_name`)
-    so an attached session updates immediately. Returns True iff
-    ~/.tmux.conf changed."""
+    Additionally live-applies the same directives on any running server for
+    this box (`_live_apply_stream_window_name`) so an attached session updates
+    immediately. Returns True iff ~/.tmux.conf changed."""
     import airuleset
+    from cli_aliases import short_target_alias
     path = tmux_conf_path or TMUX_CONF
     u = user or airuleset._current_user()
-    should_have = bool(u) and u in airuleset.AUTHORITY_BY_USER \
-        and bool(_SAFE_STREAM_NAME_RE.match(u))
+    box = host or os.uname().nodename
+    alias = short_target_alias(u, box)
+    should_have = bool(alias) and bool(_SAFE_STREAM_NAME_RE.match(alias))
     existing = path.read_text() if path.exists() else ""
     spans = _clean_tmux_block_spans(
         existing, STREAM_TMUX_WINDOW_MARK_START, STREAM_TMUX_WINDOW_MARK_END)
     if should_have:
-        block = render_stream_tmux_window_block(u)
+        block = render_stream_tmux_window_block(alias)
         if spans:
             out, cursor = [], 0
             for s, e in spans:
@@ -869,7 +886,8 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, run=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new)
     if should_have:
-        _live_apply_stream_window_name(u, run)
+        # primary session = the unix user (=<u>); new window name = the alias.
+        _live_apply_stream_window_name(u, alias, run)
     return changed
 
 

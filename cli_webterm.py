@@ -41,6 +41,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import cli_aliases  # #592: the shared fleet target-alias derivation (stdlib-only)
+
 REPO_DIR = Path(__file__).resolve().parent
 CLAUDE_DIR = Path.home() / ".claude"
 SECRETS_DIR = Path.home() / ".secrets"
@@ -308,32 +310,17 @@ def _short_alias(entry):
     """A Windows-Terminal-style SHORT tab alias mirroring the owner's own tab
     names (dev1, dev2, gk, m1..m8 for montalu, miva, d1..d4 for david); an
     unrecognized session gets a sensible short form. The FULL id/label stays as
-    the tab's `title` tooltip, so a short alias is never ambiguous (#579)."""
-    if entry.get("local") or entry.get("id") == "dev1":
-        return "dev1"
-    user = (entry.get("user") or "").strip()
-    name = entry.get("id") or entry.get("label") or ""
-    if user == "gatekeeper":
-        return "gk"
-    mo = re.match(r"^montalu(\d+)$", user)
-    if mo:
-        return "m" + mo.group(1)
-    mo = re.match(r"^david(\d*)$", user)
-    if mo:
-        return "d" + (mo.group(1) or "1")   # base `david` == d1
-    mo = re.match(r"^miva(\d+)$", user)
-    if mo:
-        return "miva" if mo.group(1) == "1" else "mv" + mo.group(1)
-    mo = re.match(r"^simap(\d+)$", user)
-    if mo:
-        return "si" + mo.group(1)
-    if user == "newlevel":
-        # an owner box (dev2 / spinbike-vps) shares the `newlevel` unix user —
-        # key on the box NAME, not the user.
-        return (name.split("-")[0] or name)[:8]
-    if user:
-        return user[:8]
-    return (name.split("-")[0] or name)[:8]
+    the tab's `title` tooltip, so a short alias is never ambiguous (#579).
+
+    #592: the alias derivation itself lives in the shared `cli_aliases` leaf so
+    the tmux WINDOW names (cli_tmux_provisioning) draw from the SAME source —
+    never a parallel map. This wrapper only unwraps the webterm inventory entry
+    into (user, box_name): a `local` entry (dev1) forces the box name to `dev1`
+    (the old `local or id=="dev1"` short-circuit), otherwise the box name is the
+    inventory id/label."""
+    box_name = "dev1" if entry.get("local") else (
+        entry.get("id") or entry.get("label") or "")
+    return cli_aliases.short_target_alias(entry.get("user"), box_name)
 
 
 def _tab_order_key(alias):
