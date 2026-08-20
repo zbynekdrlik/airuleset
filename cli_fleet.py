@@ -237,16 +237,14 @@ REMOTE_HOSTS = [
         "identity": "~/.ssh/spinbike_vps",
     },
     {
-        # david1 — the renamed external-dev stream (was `david`; #537 live
-        # rename 2026-08-21: in-place usermod on subdev, home moved to
-        # /home/david1, CC per-project state migrated (#561 step 5b), ssh
-        # verified with the gatekeeper_access identity, session relaunched;
-        # the old `david@subdev` entry + its AUTHORITY_BY_USER row are GONE —
-        # the OS account no longer exists). Original build history: airuleset#23
-        # + odoo-erp#1895 (slovnormal external-dev fork stream: no sudo, no prod
-        # keys; MIGRATED 2026-07-22 from the gk VPS to subdev). Identity = the
-        # operator gatekeeper_access key (like marek/simap1), never the montalu
-        # default-key path. montalu1/simap1 are already renamed live too.
+        # david1 (#537): the renamed base david stream (was `david`; #537 live
+        # rename 2026-08-21: in-place usermod on subdev, uid 1000 kept, home
+        # moved to /home/david1, primary group renamed, linger re-enabled,
+        # CC per-project state migrated, stale /home/david symlinks repointed,
+        # session relaunched, token delivery `delivered: stream=david1`
+        # verified). Identity mirrors the base: the operator gatekeeper_access
+        # identity. David's isolated external-dev user (slovnormal odoo dev
+        # stream: no sudo, no prod keys, can't read other homes).
         "name": "david1@subdev",
         "host": "100.118.174.27",
         "user": "david1",
