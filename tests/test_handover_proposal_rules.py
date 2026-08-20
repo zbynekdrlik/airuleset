@@ -570,10 +570,25 @@ class TestMessageSignatureRule(TestCase):
         w = self._bullet_window()
         self.assertIn("montaluN → N", w)
         self.assertIn("UNNUMBERED base stream (montalu, david, simap)", w)
-        # REUSE, never a second derivation — the two canonical sources
+        # REUSE, never a second derivation — the canonical sources
         self.assertIn("cli_aliases.short_target_alias", w)
         self.assertIn("#532 thread-name suffix", w)
-        self.assertIn("SAME derivation, NEVER a second one", w)
+        self.assertIn("NEVER a second derivation", w)
+        # provenance ACCURACY (both #598 reviews): base → 1 is the #532/#537
+        # convention's own mapping, NOT derived from the \\d+ family regexes
+        # (those never match a base montalu/simap) — the reuse claim must not
+        # over-credit short_target_alias for the base case
+        self.assertIn("#532/#537 convention's own mapping", w)
+        self.assertIn("NOT derived from those", w)
+
+    def test_signature_stays_in_the_copy_paste_template(self):
+        # #598 review MINOR: a stream copies the reassurance template verbatim,
+        # so the mandated `ZbynekAI <N>` signature line must appear IN it or the
+        # template itself would violate the rule at the point of use.
+        i = self.raw.index("Ak ju u seba nevidíte")
+        j = self.raw.index("One thread = one topic", i)
+        template = self.raw[i:j]
+        self.assertIn("ZbynekAI `<N>`", template)
 
     def test_signature_on_every_message_and_is_poistka(self):
         w = self._bullet_window()

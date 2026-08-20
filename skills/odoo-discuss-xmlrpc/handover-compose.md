@@ -35,11 +35,14 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   airuleset #598: the shared sender display name "zbynekai odovzdavac" told the
   owner nothing about which subdev owns it). `<N>` is the SAME stream number as the
   thread-name suffix above — the trailing digits of the unix user, or "1" for an
-  UNNUMBERED base stream (montalu, david, simap): montaluN → N, davidN → N (base
-  david → 1), simapN → N (base → 1), miva1 → 1 / mivaN → N. It is the SAME
-  derivation, NEVER a second one — it matches both the #532 thread-name suffix and
-  `cli_aliases.short_target_alias`'s family regexes (each captures that same numeric
-  suffix). On any single client Odoo instance only ONE stream family posts (montalu
+  UNNUMBERED base stream (montalu, david, simap) — marek does no client handovers, so
+  never signs: montaluN → N, davidN → N (base david → 1), simapN → N (base → 1),
+  miva1 → 1 / mivaN → N. It REUSES the project's existing stream number, NEVER a
+  second derivation — for a NUMBERED stream it matches `cli_aliases.short_target_alias`'s
+  family regexes (montalu/david/simap/miva, each capturing that numeric suffix) and the
+  #532 thread-name suffix; the base → 1 case is the #532/#537 convention's own mapping
+  (base streams renamed to <name>1), NOT derived from those `\d+` regexes. On any
+  single client Odoo instance only ONE stream family posts (montalu
   → erp.montalu.cloud, david → its own, …), so the bare number is unambiguous there.
   The signature stays on EVERY message — the OPENING thread message AND every
   follow-up — never dropped the way the greeting is. It is a POISTKA that works even
@@ -86,6 +89,11 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   > Ahoj `<mená>`, funkcia `<čo>` je už nasadená na vašom systéme —
   > `<deep-link URL>`. Ak ju u seba nevidíte, napíšte prosím sem do vlákna —
   > chyba je na našej strane a hneď to opravíme.
+  >
+  > ZbynekAI `<N>`
+
+  The `ZbynekAI <N>` line is MANDATORY on this and every message (signature rule
+  above) — it is the LAST line even here in the template a stream copies verbatim.
 
 One thread = one topic, a sub-thread under the channel the owner named (montalu:
 IT-support) — never a new top-level channel or group chat (see `## Channel +
