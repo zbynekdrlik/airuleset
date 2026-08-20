@@ -316,20 +316,22 @@ class TestAttachSnippetBehavior(unittest.TestCase):
     def test_grouped_owner_joins_survivor_via_grouped_clone(self):
         # dev1: zbynek + marek co-tenant. P=zbynek joins zbynek-4 (group
         # survivor) via a NEW grouped clone, never marek, never a bare attach.
+        # #591: the clone is created DETACHED (`-d`) so a per-session sweep
+        # hook can be armed before attaching (see below).
         log = self._run("zbynek", "zbynek::zbynek-4\nmarek::marek-12")
-        self.assertRegex(log, r"new-session -t zbynek-4 -s zbynek-4-web-\d+")
+        self.assertRegex(log, r"new-session -d -t zbynek-4 -s zbynek-4-web-\d+")
         self.assertNotIn("attach -d", log)
         self.assertNotRegex(log, r"\battach -t\b")     # never a shared mirror attach
 
     def test_standalone_stream_joins_exact_via_grouped_clone(self):
         log = self._run("david", "::david\n::montalu")
-        self.assertRegex(log, r"new-session -t david -s david-web-\d+")
+        self.assertRegex(log, r"new-session -d -t david -s david-web-\d+")
 
     def test_single_session_joins_via_grouped_clone_not_shared_attach(self):
         # gk: one session "0". Previously a bare `attach -t 0` (shared/mirrored
         # view); now an independent grouped clone.
         log = self._run("zbynek", "::0")
-        self.assertRegex(log, r"new-session -t 0 -s 0-web-\d+")
+        self.assertRegex(log, r"new-session -d -t 0 -s 0-web-\d+")
         self.assertNotRegex(log, r"\battach -t 0\b")
 
     def test_cleanup_kills_only_the_clone_never_the_base(self):
@@ -358,9 +360,36 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # clone with ignore-size held the WT window at its size, without it the
         # window shrank to the small client). The base's own `new-session -A`
         # fallback (no existing session) must NOT carry it — that client IS the
-        # owner's real view.
+        # owner's real view. #591: the clone is now created DETACHED, so the
+        # `-f ignore-size` CLIENT flag moves to the `attach-session` that
+        # actually attaches the webterm client (a detached new-session has no
+        # client, so the flag would be moot there).
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertRegex(log, r"new-session -t zbynek-4 -s zbynek-4-web-\d+ -f ignore-size")
+        self.assertRegex(log, r"attach-session -t zbynek-4-web-\d+ -f ignore-size")
+
+    def test_clone_arms_per_session_destroy_unattached_hook(self):
+        # #591 THE FIX: the throwaway clone gets its OWN `destroy-unattached on`
+        # via a `client-attached` hook (fires only once a client is attached,
+        # when `on` is safe -- setting it on a DETACHED session self-destructs
+        # it, verified live). This scopes the sweep to the clone ALONE; the base
+        # session (default `off`) is never touched, so the owner detaching from
+        # the base while the clone lives can NEVER kill the base (the gk 09:58
+        # total-death). Armed on the clone (`-t "$C"`), NEVER `-g` (global).
+        log = self._run("zbynek", "zbynek::zbynek-4")
+        self.assertRegex(
+            log,
+            r'set-hook -t zbynek-4-web-\d+ client-attached '
+            r'"set-option destroy-unattached on"')
+
+    def test_connect_never_sets_a_global_destroy_unattached(self):
+        # #591: the per-session scoping must NEVER become a global -- a global
+        # `destroy-unattached` (any value/unset) is exactly the base-killer this
+        # fix removes, and global tmux policy is cli_tmux_provisioning's concern,
+        # never the connect script's.
+        for sess in ("zbynek::zbynek-4", "::0", ""):
+            log = self._run("zbynek", sess)
+            self.assertNotIn("set-option -g destroy-unattached", log)
+            self.assertNotIn("destroy-unattached keep-last", log)
 
     def test_fresh_base_session_is_not_ignore_size(self):
         # No existing session -> the owner's own base is created; it is the real
