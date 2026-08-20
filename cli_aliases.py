@@ -64,3 +64,36 @@ def short_target_alias(user, box_name):
     if user:
         return user[:8]
     return (box_name.split("-")[0] or box_name)[:8]
+
+
+# The subdev STREAM FAMILIES that own client Odoo work and therefore number
+# (#532/#537 thread-name suffix, #598 signature) and suffix (#596/#597 Discuss
+# thread name) their client threads. `marek` (no client handovers), `gatekeeper`
+# and the owner account (`newlevel`) are deliberately ABSENT -- they are not
+# numbered client-handover streams. Same family stems as `short_target_alias`
+# above (montalu/david/simap/miva); a `\d*` (not `\d+`) so a base stream matches.
+_STREAM_FAMILY_RE = re.compile(r"^(?:montalu|david|simap|miva)(\d*)$")
+
+
+def stream_number(user):
+    """The canonical subdev STREAM NUMBER for a unix `user`, as a string, or
+    None. THE single source (never a second map) for the #532 thread-name
+    suffix, the #598 message signature, and the #596/#597 Discuss-thread-name
+    guard -- materializing into one testable function the derivation that until
+    now lived only as prose in `handover-compose.md`.
+
+    A NUMBERED stream user carries its number as trailing digits: montalu2 ->
+    "2", david4 -> "4", miva2 -> "2". By construction this equals the trailing
+    digits of `short_target_alias(user, "")` for every numbered stream (the two
+    reuse the same family stems and cannot drift). An UNNUMBERED base stream
+    (montalu / david / simap / miva) maps to "1" -- the #532/#537 convention's
+    own mapping (base streams are a mistake being renamed to <name>1), which is
+    NOT derivable from the `\\d+` family regex (short_target_alias drops the
+    digit for miva -> "miva"), so it is supplied here explicitly. Any non-stream
+    user (owner / gatekeeper / marek / unknown / empty) returns None, so a caller
+    (the #596 guard) stays SILENT for them -- user-only (never the box short-
+    circuit `short_target_alias` carries, which is wrong for a stream number)."""
+    m = _STREAM_FAMILY_RE.match((user or "").strip())
+    if not m:
+        return None
+    return m.group(1) or "1"

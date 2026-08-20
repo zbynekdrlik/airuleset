@@ -21,7 +21,6 @@ Three layers, mirroring test_block_worker_close_trigger.py:
 import json
 import subprocess
 import sys
-import tempfile
 import time
 import unicodedata
 from pathlib import Path
