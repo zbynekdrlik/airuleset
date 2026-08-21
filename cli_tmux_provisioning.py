@@ -10,9 +10,12 @@ cutover, report_stream_dev_env / ensure_stream_tmux_session, and every test's
 keep working unchanged.
 
 This region provisions the managed `~/.tmux.conf` marker block (history
-limit, default window size, destroy-unattached policy, scrollback keybinds,
-history-popup keybind) plus the systemd tmux-server CUTOVER that swaps a box
-onto the newest tmux build.
+limit, default window size, scrollback keybinds, history-popup keybind) plus
+the live self-heals that UNSET stale globals on a running server
+(destroy-unattached #591, aggressive-resize + window-size #613) and the systemd
+tmux-server CUTOVER that swaps a box onto the newest tmux build. The conf block
+carries no destroy-unattached / window-size line (those are live `-gu` unsets,
+not conf policy).
 
 Deliberately SELF-CONTAINED: stdlib only at module level (`subprocess` is
 imported locally inside the three functions that use it, verbatim), NO
@@ -641,17 +644,15 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         # #613: UNSET the stale global aggressive-resize on any running server --
         # the SIBLING self-heal to destroy-unattached above. #584's connect
         # live-set `-gw aggressive-resize on` GLOBALLY (persists for the server's
-        # life); #586 removed those connect lines + added conf `window-size
-        # manual` (CONF-ONLY, restart-only) but added NO live-revert, so a
-        # long-running owner server still carries it. `aggressive-resize on`
-        # OVERRIDES the `ignore-size` clone protection #586 relies on: a small
-        # ignore-size webterm clone then shrinks whatever window it is current on,
-        # so windows in one session drift to DIFFERENT sizes and `Ctrl+B W`
-        # (switching to a smaller-drifted window) leaves a dead dark border in
-        # the larger client (the "stmavol celý terminál" report; reproduced live).
-        # `-gwu` (window-option unset) reverts it to tmux's default `off`. Verified
-        # live on tmux 3.7b: `-gwu`/`-gu` both revert on->off, idempotent, server
-        # unharmed.
+        # life) and #586 added no live-revert, so a long-running owner server
+        # still carries it -- a stale non-default global worth cleaning up
+        # regardless. (The prior #613 fix thought this WAS the dead-border cause
+        # via the `ignore-size` clone premise #586 relied on; #613 REOPEN proved
+        # otherwise -- the border was the `window-size manual` pin + ignore-size
+        # themselves, both now removed -- so this unset is retained as harmless
+        # cleanup, not as the border fix.) `-gwu` (window-option unset) reverts it
+        # to tmux's default `off`. Verified live on tmux 3.7b: `-gwu`/`-gu` both
+        # revert on->off, idempotent, server unharmed.
         ["tmux", "set-option", "-gwu", "aggressive-resize"],
         # #613 REOPEN: UNSET the stale global window-size on any running server --
         # the THIRD sibling self-heal. #586 pinned `window-size manual` fleet-wide
@@ -996,9 +997,11 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
 # tmux SERVER is live breaks every attach ("server exited unexpectedly"),
 # and at boot no server exists yet -- the only moment a flip is provably
 # safe for a box whose server is already live today (dev2/gatekeeper/
-# subdev). This is what actually unlocks #236's fixed-geometry goal:
-# `window-size manual` crashes tmux 3.4's server outright at startup
-# (#241), starts cleanly on 3.7b.
+# subdev). The cutover's standing rationale is the matching client/server
+# binary. (It was ALSO what unlocked #586's fixed-geometry `window-size manual`
+# attempt -- that option crashes tmux 3.4's server at startup, #241, but starts
+# cleanly on 3.7b -- since REVERSED by #613 REOPEN: the manual pin was itself
+# the dead border, so no window-size line ships at all now.)
 #
 # System-level (root-owned /etc/systemd/system + /usr/local/bin), unlike
 # every OTHER airuleset-managed unit (file-drop/api-watchdog are --user).

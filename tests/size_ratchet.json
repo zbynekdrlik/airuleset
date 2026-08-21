@@ -280,7 +280,7 @@
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
-    "airuleset.py::cmd_install": 516,
+    "airuleset.py::cmd_install": 519,
     "airuleset.py::cmd_notify": 320,
     "airuleset.py::main": 620,
     "cli_remote.py::cmd_push": 389,

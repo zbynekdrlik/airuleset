@@ -367,11 +367,14 @@ def connect_main(argv, inventory_path=None):
 # created iframe per session pointing at the SAME-ORIGIN ttyd URL (`/t/?arg=<id>`
 # under the #584 gateway). Tab switching hides/reconnects (a remote target's
 # switch-back incurs an SSH-reconnect flash, not instant), and ONE gateway form login
-# (session cookie) covers every tab — no per-tab auth. #585: the iframe ELEMENT
-# is kept once opened, but only the VISIBLE tab holds a LIVE terminal client —
-# every hidden tab is disconnected (its throwaway tmux clone dies), so a hidden
-# tab can never shrink the base session's shared window (`window-size latest`);
-# it reconnects on return and loses nothing (scrollback lives in tmux).
+# (session cookie) covers every tab — no per-tab auth. #585 originally
+# disconnected every hidden tab so it could not shrink the shared window;
+# #586's preload-all (every tab kept connected, see `preloadAll()`) SUPERSEDED
+# that, and #613 REOPEN removed the window-size pin entirely. Under tmux's
+# default `latest` the shared window sizes to the most-recent-KEYSTROKE client
+# (streaming output / a fresh attach does NOT re-pin it, proven live), and a
+# hidden preloaded clone sends no keystrokes — so keeping hidden tabs connected
+# is safe without any server-side size pin.
 # --------------------------------------------------------------------------- #
 
 def _html_escape(s):
@@ -538,10 +541,12 @@ function preloadAll() {                     // #586: connect EVERY tab at login.
   CFG.sessions.forEach((s, i) => makeFrame(i, s));   // disconnect-on-hide, which made switching
 }                                           // slow (a reconnect each time) AND fired ttyd's own
                                             // beforeunload ("Leave site?") on every tab click.
-                                            // Sizing is now fixed SERVER-side (window-size manual +
-                                            // the clone's ignore-size flag), so a hidden-but-still-
-                                            // connected tab can never shrink the shared window —
-                                            // disconnecting it is no longer needed.
+                                            // #613 REOPEN: no server-side size pin any more (tmux
+                                            // default `latest`). A hidden-but-still-connected tab is
+                                            // safe because it sends no KEYSTROKES, and only a
+                                            // keystroke re-pins the shared window under `latest`
+                                            // (streaming output / a fresh attach does not) — proven
+                                            // live — so a hidden clone can never shrink the view.
 function hasLiveTerminal() {                // gate for the beforeunload close-confirm
   for (const k in made) if (made[k].dataset.live === '1') return true;
   return false;

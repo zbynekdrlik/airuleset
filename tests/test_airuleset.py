@@ -5363,25 +5363,21 @@ class TestTmuxAggressiveResizeSelfHeal(TestCase):
     """#613: #584's webterm connect ran `tmux set-option -gw aggressive-resize
     on` (AND `-gw window-size latest`) GLOBALLY on the running server; a global
     set-option PERSISTS for the server's life. #586 removed those lines from the
-    connect code and added conf `window-size manual` (version-gated, CONF-ONLY --
-    applies only on the NEXT server restart), but added NO live-revert of the
-    stale globals. The owner's long-running server therefore still carries
-    `aggressive-resize on`, which OVERRIDES the `ignore-size` clone protection
-    #586 relies on: a small ignore-size webterm clone shrinks whatever window it
-    is current on, so windows in one session drift to different sizes and
-    `Ctrl+B W` (switching to a smaller-drifted window) leaves a dead dark border
-    -- the reported "stmavol celý terminál". Reproduced live (isolated `-L`
-    server + ttyd + headless Chrome).
+    connect code but added NO live-revert of the stale globals, so the owner's
+    long-running server still carried `aggressive-resize on`. The prior #613 fix
+    thought that WAS the dead-border cause (via the `ignore-size` clone premise
+    #586 relied on) and shipped this `-gwu aggressive-resize` self-heal.
 
-    Fix: extend the existing live-apply self-heal in apply_tmux_history_limit to
-    UNSET the global (`set-option -gwu aggressive-resize`) on any running server,
-    reverting it to tmux's default `off` -- the SAME self-heal shape and safety
-    class as #591's `-gu destroy-unattached` (`-gwu` is the window-option unset;
-    aggressive-resize is a window option). Verified live on tmux 3.7b: `-gwu`
-    on an `aggressive-resize on` server -> off, idempotent, server unharmed (it
-    is a plain window option, not window-size, so it carries none of window-
-    size's #236 snap-resize / #241 3.4-crash hazard). window-size stays
-    conf-only (never live-applied), so this fix touches ONLY aggressive-resize."""
+    #613 REOPEN proved that theory WRONG (the symptom persisted): the real dead
+    border was the `window-size manual` conf pin + the clone's `-f ignore-size`
+    flag, BOTH now removed (see TestTmuxWindowSizeSelfHeal + the webterm tests).
+    This aggressive-resize `-gwu` self-heal is RETAINED as harmless cleanup of a
+    stale non-default global -- NOT as the border fix. Verified live on tmux
+    3.7b: `-gwu` on an `aggressive-resize on` server -> off, idempotent, server
+    unharmed. window-size is now ALSO live-UNSET (`set-option -gu window-size`,
+    the sibling self-heal -- see TestTmuxWindowSizeSelfHeal and this class's own
+    `test_aggressive_resize_selfheal_sits_beside_destroy_unattached`, which
+    asserts it at calls[3]); only a live SET of window-size stays banned."""
 
     def _tmp(self, content=None):
         d = tempfile.mkdtemp()
@@ -5502,9 +5498,14 @@ class TestTmuxWindowSizeSelfHeal(TestCase):
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
         self.assertIn(["tmux", "set-option", "-gu", "window-size"], calls)
-        # never a live SET of window-size (the banned #236 hazard).
-        self.assertNotIn(["tmux", "set-option", "-g", "window-size", "manual"], calls)
-        self.assertNotIn(["tmux", "set-option", "-g", "window-size", "latest"], calls)
+        # never a live SET of window-size (the banned #236 hazard). Hardened
+        # (review 🔵): EVERY live call touching window-size must be EXACTLY the
+        # `-gu` unset -- so a future live SET to ANY value (manual/latest/largest/
+        # smallest, all considered + rejected in the design) is caught, not just
+        # the two the design rejected first.
+        window_size_calls = [c for c in calls if "window-size" in c]
+        self.assertEqual(
+            window_size_calls, [["tmux", "set-option", "-gu", "window-size"]])
 
     def test_window_size_selfheal_sits_beside_the_other_selfheals(self):
         # the window-size `-gu` self-heal follows the destroy-unattached and

@@ -819,11 +819,13 @@ class TestAllTabsPreloaded(unittest.TestCase):
     latest` — but that made switching slow (reconnect on every switch, a refresh
     feel) AND caused a "Leave site?" dialog on every tab click (navigating the
     iframe to about:blank unloads ttyd's page, firing ttyd's OWN beforeunload).
-    #586 fixes the SIZING at the source instead (fleet-wide `window-size manual`
-    + the clone's `ignore-size` flag — cli_tmux_provisioning + _ATTACH_BODY), so
-    a hidden tab no longer NEEDS disconnecting. All tabs PRELOAD at login and
-    stay connected; switching is pure show/hide (instant, no reconnect, no iframe
-    navigation, so no beforeunload dialog on a tab click)."""
+    #586 made every tab PRELOAD + stay connected instead of disconnecting hidden
+    ones. #613 REOPEN removed the server-side size pin entirely: keeping hidden
+    tabs connected is safe because a hidden preloaded clone sends no KEYSTROKES,
+    and only a keystroke re-pins the shared window under tmux's default `latest`
+    (streaming output / a fresh attach does NOT, proven live). All tabs PRELOAD
+    at login and stay connected; switching is pure show/hide (instant, no
+    reconnect, no iframe navigation, so no beforeunload dialog on a tab click)."""
 
     def _inv(self, n=3):
         return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
