@@ -332,7 +332,8 @@ def _secret_apply_remainder(args):
     field argparse left unset.
     """
     ints = {"--ttl": "ttl", "--keep": "keep", "--port": "port"}
-    strs = {"--env": "env", "--persist": "persist", "--file": "file"}
+    strs = {"--env": "env", "--persist": "persist", "--file": "file",
+            "--persist-map": "persist_map"}
     rest = list(getattr(args, "cmd", None) or [])
     while rest:
         tok = rest[0]
@@ -530,6 +531,257 @@ def _secret_show(args):
           "zavrie. Do chatu ju NEPÍŠ.")
 
 
+def _secret_request_names(args):
+    """Every NAME to request in ONE endpoint (#603): `args.name` plus the extra
+    positional names argparse's REMAINDER swallowed (`name` is `nargs="?"`, so
+    `secret request A B C` parses as name="A", cmd=["B","C"]), with our own
+    flags — which may appear ANYWHERE among the names — pulled back onto `args`.
+
+    A SINGLE-name request yields a one-element list, and the downstream path
+    treats that byte-identically to today (same argv, same single-field page,
+    same raw-body POST). `_secret_apply_remainder` has already extracted the
+    LEADING flags before this runs; this walk re-derives the names AND catches
+    any flag that trails a name (`request A B --ttl 900`), which the head-only
+    remainder pass stops before. Idempotent: a flag already set on `args` is
+    never overwritten.
+    """
+    ints = {"--ttl": "ttl", "--keep": "keep", "--port": "port"}
+    strs = {"--persist": "persist", "--persist-map": "persist_map"}
+    bools = {"--allow-plain": "allow_plain", "--replace": "replace"}
+    toks = ([args.name] if getattr(args, "name", None) else []) \
+        + list(getattr(args, "cmd", None) or [])
+    names, i = [], 0
+    while i < len(toks):
+        tok = toks[i]
+        if tok == "--":
+            i += 1                              # tolerate a stray -- (no child)
+            continue
+        key, eq, inline = tok.partition("=")
+        if key in bools:
+            setattr(args, bools[key], True)
+            i += 1
+            continue
+        if key in ints or key in strs:
+            dest = ints.get(key) or strs[key]
+            if eq:
+                val, step = inline, 1
+            elif i + 1 < len(toks):
+                val, step = toks[i + 1], 2
+            else:
+                i += 1                          # dangling flag: drop it
+                continue
+            if key in ints:
+                try:
+                    val = int(val)
+                except ValueError:
+                    print("secret request: %s expects a number, got %r"
+                          % (key, val), file=sys.stderr)
+                    sys.exit(2)
+            if getattr(args, dest, None) is None:
+                setattr(args, dest, val)        # an explicit value always wins
+            i += step
+            continue
+        names.append(tok)
+        i += 1
+    args.cmd = []
+    return names
+
+
+def _secret_parse_persist_map(args, names):
+    """{name: resolved durable path} for this request (#603).
+
+    A single name may still use `--persist PATH` (unchanged, #529). ANY request
+    may use `--persist-map NAME=path,NAME2=path2`. The two are mutually
+    exclusive, and `--persist` with more than one name is refused (one path
+    cannot serve several names — use --persist-map). Every path is validated
+    (`validate_durable_path`: no symlink, no git-repo ancestor — the on-disk
+    filename keeps its natural hyphens, so the operator gives an EXPLICIT path,
+    never one derived from the underscore-only vault NAME). A map key naming a
+    credential NOT in this request is a typo and is refused before an endpoint
+    stands up. Fail-fast: exits 2 on any operator error.
+    """
+    from filedrop import vault as st
+    persist = getattr(args, "persist", None)
+    raw_map = getattr(args, "persist_map", None)
+    if persist and raw_map:
+        print("secret request: use EITHER --persist (a single name) OR "
+              "--persist-map, not both", file=sys.stderr)
+        sys.exit(2)
+    if persist:
+        if len(names) != 1:
+            print("secret request: --persist takes ONE path — for several names "
+                  "use --persist-map NAME=path,NAME2=path2", file=sys.stderr)
+            sys.exit(2)
+        return {names[0]: _secret_resolve_persist(args)}
+    if not raw_map:
+        return {}
+    nameset = set(names)
+    out = {}
+    for pair in raw_map.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        key, sep, path = pair.partition("=")
+        key, path = key.strip(), path.strip()
+        if not sep or not key or not path:
+            print("secret request: --persist-map entry %r must be NAME=path"
+                  % pair, file=sys.stderr)
+            sys.exit(2)
+        if key not in nameset:
+            print("secret request: --persist-map names %r, which is not being "
+                  "requested" % key, file=sys.stderr)
+            sys.exit(2)
+        try:
+            out[key] = str(st.validate_durable_path(path))
+        except st.SecretError as e:
+            print("secret request: --persist-map %s: %s" % (key, e),
+                  file=sys.stderr)
+            sys.exit(2)
+    return out
+
+
+def _secret_request(args):
+    """Stand up ONE intake endpoint for one OR several named credentials (#603).
+
+    Extracted from `cmd_secret`'s request fall-through so the multi-field path
+    has room without growing `cmd_secret`. A single name reproduces today's flow
+    exactly (argv carries one NAME, the nonce goes through `AIRULESET_VAULT_NONCE`,
+    the server serves the single-field page and stores the raw body); several
+    names share ONE URL, ONE token and ONE atomic submit (nonces map through
+    `AIRULESET_VAULT_NONCES`, the server serves a field-per-name page and stores
+    the JSON body all-or-nothing via `vault.store_values`).
+    """
+    import json
+    import secrets as _secrets
+    import subprocess
+    import time
+
+    from filedrop import bind_ips
+    from filedrop import vault as st
+
+    names = _secret_request_names(args)
+    seen = []
+    for n in names:
+        try:
+            st.check_name(n)
+        except st.SecretError as e:
+            print("secret: %s" % e, file=sys.stderr)
+            sys.exit(2)
+        if n not in seen:
+            seen.append(n)                      # dedup, order-preserving
+    names = seen
+    if not names:
+        print("secret request: needs at least one NAME", file=sys.stderr)
+        sys.exit(2)
+
+    # Validate durable targets NOW (fail fast, before any endpoint).
+    persist_map = _secret_parse_persist_map(args, names)
+
+    ready = [n for n in names if st.state(n) == "ready"]
+    if ready:
+        print("already stored — `secret forget` first: %s" % ", ".join(ready),
+              file=sys.stderr)
+        sys.exit(1)
+    pending = [n for n in names if st.state(n) == "pending"]
+    if pending and not getattr(args, "replace", False):
+        print("already has a pending request — finish it, or re-run with "
+              "--replace: %s" % ", ".join(pending), file=sys.stderr)
+        sys.exit(1)
+    for n in pending:
+        print("cancelling the previous request for %s: %s"
+              % (n, st.stop_endpoint(n)))
+        st.forget(n)
+
+    ttl = _secret_clamp_ttl(getattr(args, "ttl", None) or st.DEFAULT_ENDPOINT_TTL_S)
+    keep = _secret_clamp_keep(getattr(args, "keep", None) or st.DEFAULT_KEEP_S)
+
+    private = [ip for ip in bind_ips() if _secret_bindable(ip)]
+    if not private:
+        print("secret: no private interface to bind (refusing a public bind)",
+              file=sys.stderr)
+        sys.exit(1)
+    ips, dropped = _secret_select_ips(private,
+                                      allow_plain=getattr(args, "allow_plain", False))
+    if not ips:
+        print("secret: only unencrypted interfaces are available (%s). A "
+              "credential would cross the LAN in cleartext — re-run with "
+              "--allow-plain if that is acceptable here."
+              % ", ".join(dropped), file=sys.stderr)
+        sys.exit(1)
+
+    port = int(getattr(args, "port", None) or 0) or _pick_free_port(ips, SECRET_PORTS)
+    if port is None:
+        print("secret: no free port in %d-%d" % (SECRET_PORTS[0], SECRET_PORTS[-1]),
+              file=sys.stderr)
+        sys.exit(1)
+
+    token = _secrets.token_urlsafe(24)          # 24 bytes = 192 bits (>= 128)
+    nonces = {n: st.register_request(n, endpoint_ttl_s=ttl, keep_s=keep,
+                                     durable_path=persist_map.get(n))
+              for n in names}
+    endpoint_log = st.log_path().parent / ("endpoint-%d.log" % port)
+    endpoint_log.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(endpoint_log), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    # The token goes through the ENVIRONMENT, never argv (/proc/<pid>/cmdline is
+    # 0444; /proc/<pid>/environ is 0400). A single name keeps the exact env var
+    # it always used; several names carry a {name: nonce} JSON map instead.
+    child_env = dict(os.environ)
+    child_env["AIRULESET_VAULT_TOKEN"] = token
+    if len(names) == 1:
+        child_env["AIRULESET_VAULT_NONCE"] = nonces[names[0]]
+    else:
+        child_env["AIRULESET_VAULT_NONCES"] = json.dumps(nonces)
+    with os.fdopen(fd, "ab") as lf:
+        child = subprocess.Popen(
+            [sys.executable, str(REPO_DIR / "filedrop" / "vault_server.py"),
+             str(port), ",".join(ips), ",".join(names), str(ttl), str(keep)],
+            stdout=subprocess.DEVNULL, stderr=lf, stdin=subprocess.DEVNULL,
+            env=child_env, start_new_session=True)
+    # One shared endpoint serves the whole page: record its pid under EVERY name
+    # so `forget`/the TTL sweep can stop it (cancelling any one name tears down
+    # the shared page, which is the safe direction for a credential request).
+    for n in names:
+        st.record_endpoint(n, child.pid)
+
+    probes = _secret_probe_urls(ips, port)
+    opener = _secret_opener()
+
+    def _live(u):
+        try:
+            return opener.open(u, timeout=2).status in (200, 204)
+        except OSError:
+            return False
+
+    for _ in range(20):
+        if any(_live(u) for u in probes):
+            break
+        time.sleep(0.25)
+    else:
+        print("secret: endpoint failed to come up — see %s" % endpoint_log,
+              file=sys.stderr)
+        sys.exit(1)
+
+    for ip in ips:
+        if _live(_secret_health_url(ip, port)):
+            print(_secret_url_line(ip, port, token))
+    if dropped:
+        print("(skipped %s — cleartext; --allow-plain offers them too)"
+              % ", ".join(dropped))
+    print("name=%s  endpoint-ttl=%ds  keep=%ds"
+          % (",".join(names), ttl, keep))
+    for n in names:
+        if n in persist_map:
+            print("durable[%s]=%s  (persisted 0600 at paste — survives the "
+                  "vault TTL)" % (n, persist_map[n]))
+    if len(names) == 1:
+        print("Otvor URL v prehliadači a vlož hodnotu — do chatu ju NEPÍŠ. "
+              "Stav: `airuleset.py secret status %s`." % names[0])
+    else:
+        print("Otvor URL v prehliadači, vlož VŠETKY hodnoty a odošli RAZ — do "
+              "chatu ich NEPÍŠ. Stav: `airuleset.py secret status <NAME>` "
+              "(mená: %s)." % ", ".join(names))
+
+
 def cmd_secret(args):
     """Receive a CREDENTIAL from the user through a URL — never through chat.
 
@@ -585,12 +837,9 @@ def cmd_secret(args):
       * TTL is swept HOURLY (watchdog job 29), so a value stored with the 60s
         minimum `keep` can survive up to ~1h past its expiry.
     """
-    import secrets as _secrets
     import shlex
     import subprocess
-    import time
 
-    from filedrop import bind_ips
     from filedrop import vault as st
 
     _secret_apply_remainder(args)
@@ -756,107 +1005,8 @@ def cmd_secret(args):
         sys.exit(res.returncode)
 
     # --- request -----------------------------------------------------------
-    nm = _need_name()
-    # #529: --persist PATH marks this credential DURABLE — the value is written
-    # to that mode-600 file at the moment it is pasted (store_value's
-    # paste-time persist), so it survives the vault's <=24h retention. Validate
-    # the path NOW (fail fast, before standing up the endpoint).
-    persist = _secret_resolve_persist(args)
-    state = st.state(nm)
-    if state == "ready":
-        print("%s is already stored — `secret forget %s` first" % (nm, nm),
-              file=sys.stderr)
-        sys.exit(1)
-    if state == "pending":
-        # A second endpoint for the same name means two live tokens, neither
-        # invalidating the other. Replacing is fine, but it must be asked for.
-        if not getattr(args, "replace", False):
-            print("%s already has a pending request — finish it, or re-run "
-                  "with --replace to cancel it and issue a new URL" % nm,
-                  file=sys.stderr)
-            sys.exit(1)
-        print("cancelling the previous request: %s" % st.stop_endpoint(nm))
-        st.forget(nm)
-    ttl = _secret_clamp_ttl(getattr(args, "ttl", None) or st.DEFAULT_ENDPOINT_TTL_S)
-    keep = _secret_clamp_keep(getattr(args, "keep", None) or st.DEFAULT_KEEP_S)
-
-    private = [ip for ip in bind_ips() if _secret_bindable(ip)]
-    if not private:
-        print("secret: no private interface to bind (refusing a public bind)",
-              file=sys.stderr)
-        sys.exit(1)
-    # Bind only what we advertise: an address the user is not being offered is
-    # pure attack surface.
-    ips, dropped = _secret_select_ips(private,
-                                      allow_plain=getattr(args, "allow_plain", False))
-    if not ips:
-        print("secret: only unencrypted interfaces are available (%s). A "
-              "credential would cross the LAN in cleartext — re-run with "
-              "--allow-plain if that is acceptable here."
-              % ", ".join(dropped), file=sys.stderr)
-        sys.exit(1)
-
-    port = int(getattr(args, "port", None) or 0) or _pick_free_port(ips, SECRET_PORTS)
-    if port is None:
-        print("secret: no free port in %d-%d" % (SECRET_PORTS[0], SECRET_PORTS[-1]),
-              file=sys.stderr)
-        sys.exit(1)
-
-    token = _secrets.token_urlsafe(24)
-    nonce = st.register_request(nm, endpoint_ttl_s=ttl, keep_s=keep,
-                                durable_path=persist)
-    # The endpoint's own diagnostics (bind failures) — NOT the value log, and
-    # the server deliberately never writes the token or the body here.
-    endpoint_log = st.log_path().parent / ("endpoint-%d.log" % port)
-    endpoint_log.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(endpoint_log), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    # The token goes through the ENVIRONMENT, never argv: /proc/<pid>/cmdline is
-    # world-readable (0444) and these boxes host foreign uids, while
-    # /proc/<pid>/environ is owner-only (0400). In argv, the endpoint's only
-    # auth would be readable by every local account for the whole TTL.
-    child_env = dict(os.environ)
-    child_env["AIRULESET_VAULT_TOKEN"] = token
-    child_env["AIRULESET_VAULT_NONCE"] = nonce
-    with os.fdopen(fd, "ab") as lf:
-        child = subprocess.Popen(
-            [sys.executable, str(REPO_DIR / "filedrop" / "vault_server.py"),
-             str(port), ",".join(ips), nm, str(ttl), str(keep)],
-            stdout=subprocess.DEVNULL, stderr=lf, stdin=subprocess.DEVNULL,
-            env=child_env, start_new_session=True)
-    # Recorded so `forget` and the TTL sweep can actually STOP the endpoint,
-    # rather than deleting the value while its URL stays open.
-    st.record_endpoint(nm, child.pid)
-
-    probes = _secret_probe_urls(ips, port)
-
-    opener = _secret_opener()
-
-    def _live(u):
-        try:
-            # /healthz answers 204. Accepting only 200 made every probe read
-            # "dead" and `request` printed no URL at all — see the tests.
-            return opener.open(u, timeout=2).status in (200, 204)
-        except OSError:
-            return False
-
-    for _ in range(20):
-        if any(_live(u) for u in probes):
-            break
-        time.sleep(0.25)
-    else:
-        print("secret: endpoint failed to come up — see %s" % endpoint_log,
-              file=sys.stderr)
-        sys.exit(1)
-
-    for ip in ips:
-        if _live(_secret_health_url(ip, port)):
-            print(_secret_url_line(ip, port, token))
-    if dropped:
-        print("(skipped %s — cleartext; --allow-plain offers them too)"
-              % ", ".join(dropped))
-    print("name=%s  endpoint-ttl=%ds  keep=%ds" % (nm, ttl, keep))
-    if persist:
-        print("durable=%s  (persisted 0600 at paste — survives the vault TTL)"
-              % persist)
-    print("Otvor URL v prehliadači a vlož hodnotu — do chatu ju NEPÍŠ. "
-          "Stav: `airuleset.py secret status %s`." % nm)
+    # ONE endpoint for one OR several named credentials (#603). The whole flow
+    # lives in `_secret_request` so the multi-field path has room without
+    # growing this dispatcher; a single-name request there is byte-identical to
+    # the pre-#603 inline flow.
+    return _secret_request(args)

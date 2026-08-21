@@ -470,13 +470,34 @@ def store_value(name, data, keep_s=DEFAULT_KEEP_S, now=None, nonce=None):
         # O_EXCL also refuses a PLANTED SYMLINK at this path (EEXIST), which is
         # why the value write was never redirectable the way the meta one was.
         raise SecretError("%s is already present — forget it first" % name) from e
-    with os.fdopen(fd, "wb") as f:
-        f.write(bytes(data))
-    ts = _now(now)
-    meta = read_meta(name)
-    meta.update({"received": ts, "keep_s": int(keep_s),
-                 "expires_at": ts + int(keep_s)})
-    _write_json_0600(meta_path(name), meta)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(bytes(data))
+        ts = _now(now)
+        meta = read_meta(name)
+        meta.update({"received": ts, "keep_s": int(keep_s),
+                     "expires_at": ts + int(keep_s)})
+        _write_json_0600(meta_path(name), meta)
+    except (OSError, SecretError) as e:
+        # A write failure (ENOSPC / EIO on the value, a symlink at the meta
+        # path) AFTER O_EXCL created the value file would otherwise leave a
+        # TRUNCATED value marked `ready` while the meta is still `pending` — a
+        # corrupt half-write (#603 review). Remove the value so the name
+        # reverts cleanly to `pending` (its meta is untouched until the value
+        # write succeeds, so it stays re-requestable / re-submittable), then
+        # re-raise. An OSError becomes a SecretError so callers keep the typed,
+        # no-value contract (its str carries only errno + a store PATH, never a
+        # value); a SecretError (the symlink case) propagates as-is.
+        try:
+            p.unlink()
+        except OSError:
+            # airuleset:script-ok best-effort cleanup of a failed O_EXCL write;
+            # the SecretError below still reports the write failure loudly, so
+            # nothing is silently swallowed.
+            pass
+        if isinstance(e, SecretError):
+            raise
+        raise SecretError("%s: could not be written (rolled back)" % name) from e
     log_event("received", name)
     # #529 — persist AT RECEIPT to the durable ~/.secrets/<name> target the
     # request registered (`secret request --persist`), so the credential
@@ -485,6 +506,89 @@ def store_value(name, data, keep_s=DEFAULT_KEEP_S, now=None, nonce=None):
     dpath = meta.get("durable_path")
     if isinstance(dpath, str) and dpath:
         _persist_at_receipt(name, dpath, bytes(data))
+
+
+def store_values(items, keep_s=DEFAULT_KEEP_S, now=None, nonces=None):
+    """Store several named values ALL-OR-NOTHING (#603, multi-field intake).
+
+    `items`: an iterable of (name, bytes). `nonces`: {name: nonce} — each
+    endpoint's proof it belongs to the CURRENT request (a mismatch/revoked name
+    aborts the WHOLE set). PRE-FLIGHTS every name (valid name, still `pending`,
+    endpoint nonce matches, non-empty, within the byte cap) BEFORE writing ANY
+    value, so a bad name / stale nonce / empty / oversize member aborts the set
+    with NOTHING on disk. Then writes them all with `store_value`'s own
+    O_EXCL / nonce / paste-time-durable-persist discipline; if a write still
+    fails after a clean pre-flight — a residual disk error raises `OSError`, and
+    `store_value` itself cleans up its own truncated write — the values already
+    written IN THIS CALL are reverted to `pending` (value removed, the endpoint's
+    pending/nonce meta restored), so a partial set is never left behind AND a
+    corrected/retry submit still matches the live endpoint. All-or-nothing is
+    guaranteed for the VAULT store; a durable `--persist-map` file already
+    written for a committed member is left in place per durable-copy semantics
+    (it is overwrite-authoritative — a successful retry replaces it).
+
+    Raises `SecretError` naming only the offending NAME and the reason — never a
+    value, a prefix of it, or its length (the same no-leak guarantee every
+    function in this module keeps; an `OSError` from a real disk failure is
+    wrapped as `SecretError` so this contract holds on that path too). On
+    success every name is `ready`; returns the list of stored names, in order.
+    """
+    items = list(items)
+    nonces = nonces or {}
+    if not items:
+        raise SecretError("no values to store")
+    # PRE-FLIGHT — every member, before a single write, so the set aborts
+    # cleanly on a bad member instead of leaving the earlier ones stored.
+    for name, data in items:
+        check_name(name)
+        if not isinstance(data, (bytes, bytearray)):
+            raise SecretError("%s: value must be bytes" % name)
+        if not data:
+            raise SecretError("%s: empty value" % name)
+        if len(data) > MAX_SECRET_BYTES:
+            raise SecretError(
+                "%s: value over the %d-byte cap" % (name, MAX_SECRET_BYTES))
+        current = state(name)
+        if current != "pending":
+            raise SecretError(
+                "%s: not awaiting a value (state=%s) — a multi-field member "
+                "must have a live request" % (name, current))
+        want = nonces.get(name)
+        if want is not None and read_meta(name).get("nonce") != want:
+            raise SecretError(
+                "%s: this endpoint no longer matches the current request "
+                "(it was revoked or replaced) — refusing to store" % name)
+    # Snapshot each member's pending meta BEFORE any write, so a rollback can
+    # revert a committed member to `pending` (retry-able) rather than dropping
+    # it to `absent` (which would kill a corrected resubmit's pre-flight).
+    pre_meta = {name: read_meta(name) for name, _ in items}
+    # COMMIT — pre-flight passed, so these should all succeed; roll back on a
+    # residual failure (SecretError, or a bare OSError from a real disk error)
+    # to keep the whole set all-or-nothing.
+    written = []
+    try:
+        for name, data in items:
+            store_value(name, bytes(data), keep_s=keep_s, now=now,
+                        nonce=nonces.get(name))
+            written.append(name)
+    except (SecretError, OSError) as e:
+        for nm in written:
+            try:
+                value_path(nm).unlink()
+            except OSError:
+                # airuleset:script-ok best-effort; the meta restore below (or
+                # the last-resort _unlink_entry) is what actually reverts state,
+                # and the raise at the end reports the failure loudly.
+                pass
+            try:
+                _write_json_0600(meta_path(nm), pre_meta[nm])   # restore pending
+            except (OSError, SecretError):
+                _unlink_entry(nm)           # last resort: at least no `ready` value
+        if isinstance(e, SecretError):
+            raise
+        raise SecretError(
+            "the value set could not be stored and was rolled back") from e
+    return [nm for nm, _ in items]
 
 
 def state(name):

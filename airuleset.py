@@ -4988,6 +4988,9 @@ from cli_vault import (  # noqa: E402
     _secret_url_line as _secret_url_line,
     _secret_redact as _secret_redact,
     _secret_apply_remainder as _secret_apply_remainder,
+    _secret_request_names as _secret_request_names,
+    _secret_parse_persist_map as _secret_parse_persist_map,
+    _secret_request as _secret_request,
     cmd_secret as cmd_secret,
 )
 
@@ -5495,7 +5498,9 @@ def main():
         help="Ask the user for a CREDENTIAL through a one-shot URL — never in "
              "chat (a value typed into chat is in the transcript forever)")
     p_sec.add_argument("action", choices=list(SECRET_ACTIONS),
-                       help="request (stand up the URL) | status | list | "
+                       help="request NAME [NAME2 ...] (stand up the URL — several "
+                            "names share ONE page with a field each, #603) | "
+                            "status | list | "
                             "exec NAME -- CMD (hand the value to a child; a "
                             "name LOCKED to a template ignores CMD and runs "
                             "its own command instead, #154) | "
@@ -5504,7 +5509,9 @@ def main():
                             "to YOUR browser ONCE, then tear down — #580)")
     p_sec.add_argument("name", nargs="?", default=None,
                        help="Secret name: letters/digits/underscore, also used "
-                            "as the env var name for `exec`")
+                            "as the env var name for `exec`. `request` also "
+                            "takes MORE names after the first (one URL, a field "
+                            "per name, one atomic submit — #603)")
     p_sec.add_argument("--ttl", type=int, default=None,
                        help="Endpoint self-shutdown after N seconds "
                             "(default 600 — minutes, not hours)")
@@ -5528,7 +5535,13 @@ def main():
                        help="request/exec: DURABLE opt-in — a mode-600 file "
                             "(e.g. ~/.secrets/<name>) written at paste (request) "
                             "or self-healed on use (exec), so the credential "
-                            "survives the vault's <=24h TTL (#529)")
+                            "survives the vault's <=24h TTL (#529). For a "
+                            "MULTI-name request use --persist-map instead")
+    p_sec.add_argument("--persist-map", default=None,
+                       help="request: durable targets for a MULTI-name request — "
+                            "NAME1=path1,NAME2=path2 (each a mode-600 file like "
+                            "~/.secrets/<name>). Names not listed stay one-shot; "
+                            "mutually exclusive with --persist (#603)")
     p_sec.add_argument("--file", default=None,
                        help="show: render a mode-600 file (e.g. ~/.secrets/"
                             "<name>) instead of a vault NAME — the file must be "

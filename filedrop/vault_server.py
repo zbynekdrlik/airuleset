@@ -53,6 +53,7 @@ someone else.
 """
 import hmac
 import ipaddress
+import json
 import os
 import sys
 import threading
@@ -64,11 +65,11 @@ from pathlib import Path
 # exactly ONE piece of code writes a credential to disk.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from filedrop.vault import (MAX_SECRET_BYTES, SecretError,  # noqa: E402
-                            check_name, store_value)
+                            check_name, store_value, store_values)
 
 if len(sys.argv) < 6:
     sys.exit("usage: AIRULESET_VAULT_TOKEN=<token> vault_server.py <port> "
-             "<bind_ips_csv> <name> <ttl_s> <keep_s>")
+             "<bind_ips_csv> <names_csv> <ttl_s> <keep_s>")
 TOKEN = os.environ.get("AIRULESET_VAULT_TOKEN") or ""
 # Ties this process to ONE request. If the name is forgotten (or the request
 # replaced) while this endpoint is still alive, the nonce no longer matches and
@@ -79,9 +80,27 @@ if not TOKEN:
              "through the environment (0400) and never in argv (0444)")
 PORT = int(sys.argv[1])
 BIND_IPS = [x for x in sys.argv[2].split(",") if x]
-NAME = sys.argv[3]
+# The name POSITION widened to a comma-separated LIST (#603). One name is
+# byte-identical to before (single-field page, raw-body POST); several names
+# share this ONE endpoint (a field per name, a JSON body, an atomic submit). A
+# vault NAME is NAME_RE (letters/digits/underscore), so the comma is a safe
+# delimiter that can never appear inside a name.
+NAMES = [x for x in sys.argv[3].split(",") if x]
+NAME = NAMES[0] if NAMES else ""            # the single-field path's one name
+IS_MULTI = len(NAMES) > 1
 TTL = int(sys.argv[4])
 KEEP = int(sys.argv[5])
+# Several names each carry their own nonce, through a {name: nonce} JSON map in
+# the environment (never argv). A single name keeps the exact env var it always
+# used, so its whole flow is unchanged.
+NONCES = {}
+if IS_MULTI:
+    try:
+        _parsed = json.loads(os.environ.get("AIRULESET_VAULT_NONCES") or "{}")
+        if isinstance(_parsed, dict):
+            NONCES = {k: v for k, v in _parsed.items() if isinstance(v, str)}
+    except ValueError:
+        NONCES = {}
 
 
 def is_private(ip):
@@ -113,10 +132,22 @@ def is_private(ip):
     return False                        # public / 172.16-31 docker / link-local
 
 
-try:
-    check_name(NAME)
-except SecretError as e:
-    sys.exit("vault: %s" % e)
+if not NAMES:
+    sys.exit("vault: no name given")
+for _n in NAMES:
+    try:
+        check_name(_n)
+    except SecretError as e:
+        sys.exit("vault: %s" % e)
+# A MULTI endpoint MUST carry a nonce for every name (revocation protection) —
+# refuse to serve if AIRULESET_VAULT_NONCES was absent/unparseable/incomplete,
+# rather than silently storing a member with no nonce check (#603 review). The
+# single path's `AIRULESET_VAULT_NONCE` can't degrade this way; this keeps multi
+# from being weaker than single.
+if IS_MULTI and not all(_n in NONCES for _n in NAMES):
+    sys.exit("vault: a multi-field endpoint needs a nonce per name via "
+             "AIRULESET_VAULT_NONCES — refusing to serve without revocation "
+             "protection for every field")
 if not BIND_IPS:
     sys.exit("vault: no bind address given")
 for _ip in BIND_IPS:
@@ -200,10 +231,89 @@ v.focus();
 </script></html>"""
 
 
+# The MULTI-field page (#603): one endpoint, a field per name, ONE atomic submit.
+# Served RAW (single braces, #18). The field labels come from NAMES, which are
+# NAME_RE-validated (letters/digits/underscore only) at startup, so
+# `json.dumps(NAMES)` produces an array with NO HTML/JS metacharacters — there is
+# nothing to break out of the <script> with, and the labels are set via
+# textContent regardless. The values are collected client-side into a JSON body;
+# the client refuses an empty field (inline) so a normal submit is always
+# complete. The whole set is stored all-or-nothing by the server.
+MULTI_PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=referrer content=no-referrer>
+<title>Bezpecne odoslanie hesiel / klucov</title>
+<link rel=icon href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2016%2016'%3E%3Crect%20width='16'%20height='16'%20rx='3'%20fill='%230f172a'/%3E%3Cpath%20d='M5%207V5.5a3%203%200%20016%200V7h1v6H4V7zm1.5%200h3V5.5a1.5%201.5%200%2000-3%200z'%20fill='%2338bdf8'/%3E%3C/svg%3E">
+<style>
+ body{font:16px system-ui;margin:0;background:#0f172a;color:#e2e8f0;display:grid;place-items:center;min-height:100vh}
+ .card{background:#1e293b;padding:32px;border-radius:14px;width:min(560px,92vw);box-shadow:0 10px 40px #0006}
+ h1{font-size:18px;margin:0 0 4px} p{color:#94a3b8;margin:.2em 0 1em;font-size:14px}
+ code{color:#38bdf8}
+ label.fld{display:block;margin:12px 0}
+ label.fld .nm{display:block;color:#94a3b8;font-size:13px;margin-bottom:4px;font-family:ui-monospace,monospace}
+ input[type=password]{width:100%;box-sizing:border-box;padding:12px;border-radius:8px;
+   border:1px solid #475569;background:#0f172a;color:#e2e8f0;font:15px ui-monospace,monospace}
+ button{margin-top:16px;padding:12px 18px;border:0;border-radius:8px;background:#38bdf8;
+   color:#0f172a;font-weight:600;font-size:15px;cursor:pointer}
+ button[disabled]{opacity:.5;cursor:default}
+ #status{margin-top:14px;font-size:14px;white-space:pre-line}
+ .ok{color:#4ade80} .err{color:#f87171}
+</style>
+<div class=card>
+ <h1>Odoslanie <span id=cnt></span> hodnot naraz</h1>
+ <p>Vyplň VŠETKY políčka a odošli RAZ. Hodnoty sa ulozia len na server (prava
+    0600) — <b>nikdy sa nezobrazia v chate</b> a Claude ich nevidi. Odoslat sa da
+    raz; potom sa tato adresa zavrie.</p>
+ <div id=fields></div>
+ <button id=b>Odoslat vsetky</button>
+ <div id=status></div>
+</div>
+<script>
+const NAMES=NAMES_PLACEHOLDER,fields=document.getElementById('fields'),
+ b=document.getElementById('b'),st=document.getElementById('status'),inputs={};
+document.getElementById('cnt').textContent=NAMES.length;
+NAMES.forEach((nm,i)=>{
+ const wrap=document.createElement('label');wrap.className='fld';
+ const lab=document.createElement('span');lab.className='nm';lab.textContent=nm;
+ const inp=document.createElement('input');inp.type='password';
+ inp.autocomplete='off';inp.spellcheck=false;inp.placeholder='hodnota pre '+nm;
+ wrap.appendChild(lab);wrap.appendChild(inp);fields.appendChild(wrap);
+ inputs[nm]=inp;if(i===0)setTimeout(()=>inp.focus(),0);
+});
+b.onclick=()=>{
+ const payload={};
+ for(const nm of NAMES){
+  const val=inputs[nm].value;
+  if(!val){st.className='err';st.textContent='Vypln policko: '+nm;
+    inputs[nm].focus();return}
+  payload[nm]=val;
+ }
+ b.disabled=true;st.className='';st.textContent='Odosielam...';
+ fetch(location.pathname,{method:'POST',cache:'no-store',
+   headers:{'Content-Type':'application/json; charset=utf-8'},
+   body:JSON.stringify(payload)})
+  .then(r=>{if(r.status===200){
+     for(const nm of NAMES)inputs[nm].value='';
+     st.className='ok';st.textContent='Prijate. Okno mozes zavriet.';
+     b.style.display='none';fields.style.display='none'}
+    else{b.disabled=false;st.className='err';
+      r.text().then(t=>{st.textContent='Chyba '+r.status+(t?': '+t:'')})
+       .catch(()=>{st.textContent='Chyba '+r.status})}})
+  .catch(()=>{b.disabled=false;st.className='err';
+     st.textContent='Sietova chyba - skus znova.'});
+};
+</script></html>"""
+
+
 # A credential endpoint serves exactly one browser for a few minutes. Unbounded
 # threads are pure abuse surface, so refuse past a small cap rather than let a
 # single host spawn one thread per connection for the whole TTL.
 MAX_CONNECTIONS = 16
+
+# The MULTI path's whole JSON body cap: one per-value cap per name plus one more
+# value's worth of JSON structure overhead. Each individual value is still
+# re-capped at MAX_SECRET_BYTES on its own (in _store_multi and in the store).
+MULTI_BODY_CAP = (len(NAMES) + 1) * MAX_SECRET_BYTES
 
 
 class BoundedServer(ThreadingHTTPServer):
@@ -229,6 +339,19 @@ class BoundedServer(ThreadingHTTPServer):
         super().close_request(request)
         with self._lock:
             self._live = max(0, self._live - 1)
+
+
+# ONE-SHOT consume-latch for the MULTI path (#603), PROCESS-GLOBAL — the SAME
+# reason show_server.py (#580) needs one: `_servers` below holds one
+# BoundedServer per bind IP, all in THIS one process, so the latch that makes
+# "submitted ONCE" true under concurrency must be a module global (a per-instance
+# one would miss a race across two bind interfaces). Claimed AFTER validation but
+# BEFORE the store, so a validation error (an empty field) never consumes it and
+# the endpoint stays up. The SINGLE-name path needs NO latch — store_value's
+# O_EXCL already makes each name single-shot and it exits on the first success —
+# so its flow is left byte-identical.
+_store_lock = threading.Lock()
+_stored = False
 
 
 class H(BaseHTTPRequestHandler):
@@ -272,7 +395,14 @@ class H(BaseHTTPRequestHandler):
         # the endpoint's only auth, and decoding it would let `%74ok...`
         # authenticate as `tok...` (the #116 lesson, kept on purpose).
         if len(p) == 1 and self._is_token(p[0]):
-            body = PAGE.replace("NAME_PLACEHOLDER", repr(NAME)).encode()
+            if IS_MULTI:
+                # NAMES are NAME_RE-validated (no HTML/JS metacharacters), so
+                # json.dumps produces a safe JS array literal to build the
+                # field-per-name form from.
+                body = MULTI_PAGE.replace(
+                    "NAMES_PLACEHOLDER", json.dumps(NAMES)).encode()
+            else:
+                body = PAGE.replace("NAME_PLACEHOLDER", repr(NAME)).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -307,9 +437,13 @@ class H(BaseHTTPRequestHandler):
             return self._txt(400, "malformed Content-Length")
         if length <= 0:
             return self._txt(411, "Content-Length required (got none/zero)")
-        if length > MAX_SECRET_BYTES:
+        # The single path caps the whole body at one value; the multi path
+        # carries N values in a JSON object, so its cap scales with the count
+        # (per-value caps are re-checked below and inside the store).
+        cap = MULTI_BODY_CAP if IS_MULTI else MAX_SECRET_BYTES
+        if length > cap:
             self._drain(length)          # read it so the reply reaches the client
-            return self._txt(413, "value over the %d-byte cap" % MAX_SECRET_BYTES)
+            return self._txt(413, "body over the %d-byte cap" % cap)
         data = b""
         while len(data) < length:
             chunk = self.rfile.read(min(1 << 16, length - len(data)))
@@ -320,6 +454,8 @@ class H(BaseHTTPRequestHandler):
             # NEVER report the bytes themselves, only the counts.
             return self._txt(400, "incomplete body: got %d of %d bytes"
                                   % (len(data), length))
+        if IS_MULTI:
+            return self._store_multi(data)
         try:
             store_value(NAME, data, keep_s=KEEP, nonce=NONCE)
         except SecretError as e:
@@ -337,6 +473,65 @@ class H(BaseHTTPRequestHandler):
             # that hung up before the ack is not a reason to stay alive and
             # accept a second submission.
             pass
+        os._exit(0)
+
+    def _store_multi(self, data):
+        """The MULTI path (#603): a JSON object {name: value}, stored
+        ALL-OR-NOTHING with a single-consume latch. Never echoes a value —
+        every error names only the NAME (NAME_RE) and a reason.
+        """
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # NEVER interpolate the body / the parse exception (it can quote a
+            # snippet of the value) — a fixed literal only. RecursionError is
+            # explicit: a deeply-nested JSON body (well under the size cap)
+            # makes json.loads recurse past the limit, and it is NOT a
+            # ValueError, so without it the request reset the connection and
+            # dumped a traceback into the endpoint log (#603 review).
+            return self._txt(400, "malformed JSON body")
+        if not isinstance(payload, dict):
+            return self._txt(400, "expected a JSON object of {name: value}")
+        # VALIDATION — before the latch, so an empty/missing field never
+        # consumes the one-shot and the endpoint stays up for a fix + resubmit
+        # (the client blocks an empty field, so this is only a bypass/edge).
+        items = []
+        for nm in NAMES:
+            raw = payload.get(nm)
+            if not isinstance(raw, str) or not raw:
+                return self._txt(422, "missing or empty value for %s" % nm)
+            enc = raw.encode("utf-8")
+            if len(enc) > MAX_SECRET_BYTES:
+                return self._txt(
+                    413, "value for %s over the %d-byte cap"
+                    % (nm, MAX_SECRET_BYTES))
+            items.append((nm, enc))
+        # CONSUME-LATCH — claim the single submission atomically, AFTER
+        # validation, so two racing tabs cannot both store. A racer gets 410.
+        global _stored
+        with _store_lock:
+            if _stored:
+                return self._txt(410, "already submitted — this page is one-shot")
+            _stored = True
+        try:
+            store_values(items, keep_s=KEEP, nonces=NONCES)
+        except (SecretError, OSError) as e:
+            # A genuine store failure after a clean validation (a revoked nonce,
+            # a real disk error). store_values already rolled back its own
+            # writes (reverting each committed member to `pending`), so nothing
+            # partial is on disk and a corrected retry can still match. Release
+            # the latch so that retry can happen and stay up. `e` names NAME +
+            # reason only, never a value. OSError is caught belt-and-suspenders
+            # (store_values wraps it as SecretError) so a future regression can
+            # never dead-lock the latch at 410 (#603 review).
+            with _store_lock:
+                _stored = False
+            return self._txt(409, "not stored: %s" % e)
+        self._txt(200, "ok")
+        try:
+            self.wfile.flush()
+        except OSError:
+            pass                # airuleset:script-ok values already safely stored
         os._exit(0)
 
     # Draining an oversize body is a courtesy — it lets the client actually
