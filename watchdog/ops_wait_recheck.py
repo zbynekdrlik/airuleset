@@ -101,6 +101,21 @@ REOPEN only when ALL hold: (T1) a machine-readable park convention exists (a
 reliably emit); (T2) a measured need for sub-6h re-check latency; (T3) a safe,
 budgeted RO-poll / push-signal seam OFF the sweep critical path. None hold today.
 Full evidence: issue #550.
+
+HODINOVÝ THREAD-CHECK (#607, owner 2026-08-21) — the owner's contract is that an
+armed loop reads its client Discuss threads AT LEAST 1×/hour so a reply never
+sits unnoticed. The DUTY is a fleet rule (statusline-vocabulary.md W bullet) and
+is NAMED in the `_W_CLAUSE` nudge; the watchdog-side ENFORCEMENT is the SAME as
+#570's — the weekend-aware `stale!` freshness result (`cli_quals.
+_stale_ops_wait_flagged`, now `working_time`-based), which surfaces WHICH W
+tickets have gone >24h WORKING with no stream push (i.e. the hourly-check +
+reminder discipline demonstrably failed). Verifying the hourly READ itself at
+hourly GRANULARITY is DEFERRED for exactly the PHASE-2 reasons above (the
+watchdog cannot read Odoo Discuss — no credential, no machine-readable thread
+source, and a per-sweep NL comment-poll is the #172/#365/#550 class it rejects) —
+so the daily nudge cadence is unchanged (a 12×/day hourly keystroke would be the
+spam #552 already fought). REOPEN the hourly-granularity check only under the
+SAME T1/T2/T3 above. Full evidence: issue #607.
 """
 import os
 
@@ -476,13 +491,17 @@ def _i_clause_named(i_members, now):
 # single stale partition anchor), instructs re-checking the external event the
 # park comment records.
 _W_CLAUSE = (
-    "W→I: parknuté `ops-wait` tikety %s — over externý stav ktorý si "
+    "W→I: parknuté `ops-wait` tikety %s — klientske Discuss vlákna čítaj ASPOŇ "
+    "1×/hodinu (či neprišla odpoveď, #607) a over externý stav ktorý si "
     "pri parkovaní zapísal do komentára (odpoveď vo vlákne / vyšlý release = verzia "
     "ŽIVÁ na cieli: deploy-set zelený + priame čítanie verzie, NIE run-terminal — "
     "#588): ak už dorazil, zlož `ops-wait` s dôkazom a vráť tiket do práce; ak sa "
     "stále čaká, potvrď to. MIS-SHAPE (#601): ak je blocker OWNER (fyzický krok "
     "pri rigu / jeho prítomnosť / manuálna akcia), NIE JE to W — prelabeluj "
-    "`needs-owner-action` a tiket sa presunie do U (owner nie je tretia strana).")
+    "`needs-owner-action` a tiket sa presunie do U (owner nie je tretia strana). "
+    "MIS-SHAPE (#607): ak re-entry event je ROZHODNUTIE/ODPOVEĎ OWNERA (nie tretej "
+    "strany, nie fyzický krok), tiež NIE JE to W — „na U sa vždy pýtam“: prelabeluj "
+    "`needs-answer`/`needs-decision` a DORUČ otázku (❓ ping), tiket sa presunie do U.")
 
 # The #570 stale sub-clause — appended to the W clause when any parked W member
 # has gone COLD (no fresh ≤24h stream-push evidence: `stale!` in `--ops-wait`,
@@ -491,9 +510,11 @@ _W_CLAUSE = (
 # the referenced ticket + remind the third party TODAY with a ticket comment
 # (that comment IS the freshness evidence — #570 bod 3 "tlač dopredu každý deň").
 _W_STALE_CLAUSE = (
-    "STALE (žiadna evidencia >24h) %s: over blocker RE-ČÍTANÍM referencovaného "
-    "tiketu a pripomeň sa tretej strane DNES komentárom na tikete (ten komentár "
-    "JE evidencia).")
+    "STALE (>24h pracovných dní bez odpovede, víkend sa nepočíta — #607) %s: "
+    "kontrakt už nie je len tag — MUSÍ ísť DNES do klientskeho Discuss vlákna "
+    "VECNÁ pripomienka (mention + partner_ids + konkrétna vec čo čakáš, nie "
+    "prázdny ack), over blocker RE-ČÍTANÍM referencovaného tiketu a na tikete "
+    "komentárom zaznač že pripomienka odišla (ten komentár JE evidencia).")
 
 
 def _nudge_text(i_count, w_members, now, w_seen, i_members=None):
