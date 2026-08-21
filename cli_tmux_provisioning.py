@@ -562,8 +562,10 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
                               run=None) -> bool:
     """Ensure `~/.tmux.conf` carries the managed tmux block: history-limit
     (#235) and default-size (#236) -- and UNSETS any stale global
-    destroy-unattached on a running server (#591 self-heal; the conf no longer
-    carries a destroy-unattached line at all).
+    destroy-unattached (#591 self-heal; the conf no longer carries a
+    destroy-unattached line at all) AND aggressive-resize (#613 self-heal --
+    #584's connect live-set `aggressive-resize on` globally, the Ctrl+B W
+    blackening; the conf never carried it) on a running server.
     `window-size manual` (#586) is emitted too, but ONLY VERSION-GATED and
     CONF-ONLY: this probes the PATH `tmux -V` once via `run`
     (`_tmux_supports_window_size_manual`) and includes the line ONLY when the
@@ -675,6 +677,29 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         # already unset). Setting `off` never destroys anything, so this is safe
         # to apply against a running server, same #235-vs-#254 reason as before.
         ["tmux", "set-option", "-gu", "destroy-unattached"],
+        # #613: UNSET the global aggressive-resize on any running server -- the
+        # SIBLING self-heal to destroy-unattached above, for the SAME kind of
+        # stale webterm-era global. #584's connect live-set `-gw aggressive-resize
+        # on` (and `-gw window-size latest`) GLOBALLY; a global set-option
+        # PERSISTS for the server's whole life. #586 removed those connect lines
+        # and added conf `window-size manual` (version-gated, CONF-ONLY -- applies
+        # only on the NEXT server restart), but added NO live-revert, so a
+        # long-running owner server still carries `aggressive-resize on`. That
+        # value OVERRIDES the `ignore-size` clone protection #586 relies on -- a
+        # small ignore-size webterm clone then shrinks whatever window it is
+        # current on, so windows in one session drift to DIFFERENT sizes and
+        # `Ctrl+B W` (switching to a smaller-drifted window) leaves a dead dark
+        # border in the larger client (the "stmavol celý terminál" report, #613;
+        # reproduced live: isolated `-L` server + ttyd + headless Chrome).
+        # `-gu` reverts it to tmux's default `off`, restoring the ignore-size
+        # protection -> uniform window sizes -> no per-window drift -> no
+        # blackening. Verified live on tmux 3.7b: `-gu` on an `aggressive-resize
+        # on` server -> off, idempotent, server unharmed. Unlike window-size,
+        # aggressive-resize is a plain window OPTION affecting only FUTURE resize
+        # computation, so it carries NONE of window-size's live-apply hazard
+        # (#236 snap-resize / #241 3.4 crash) -- which is exactly why window-size
+        # stays conf-only and is NEVER live-applied here, while this one is safe.
+        ["tmux", "set-option", "-gu", "aggressive-resize"],
     ]
     live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
     live_argvs += [["tmux"] + argv for argv in TMUX_POPUP_BIND_ARGVS]
