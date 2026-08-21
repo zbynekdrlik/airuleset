@@ -507,60 +507,40 @@ def _compact_recent_human_activity(cwd, sid, now, projects_dir=None, window_s=No
 COMPACT_LIVE_WORKER_FRESHNESS_S = 15 * 60
 
 
-def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
-                               captured=None):
-    """True when EITHER of two independent STRUCTURED signals says this session
-    still has background work in flight, so a `/compact` would orphan a live
-    worker lane (#565):
+def _live_bg_tasks_detail(sid, cwd, projects_dir=None, now=None):
+    """The compact ``agent-id(state)`` label(s) of this session's LIVE worker
+    lane(s), joined by ",", or "" when none — condition (b) of `deliver_compact`:
+    a fresh subagent lane the supervisor still owns means a `/compact` would
+    orphan it (#565), and the DETAIL names it for the decision log (#605 thread
+    3 — the incident was blind-diagnosed twice from a bare `SKIP live-tasks`).
 
-      (a) the pane shows CC's "Waiting for N background agents" row — a genuine
-          CC-rendered positive WHEN present, but NOT rendered by an idle
-          supervisor showing only agent-strip rows, so an ADDITIONAL positive
-          only, never relied on alone;
-      (b) `count_live_workers` reports a FRESH lane in its on-disk task state —
-          a subagent transcript written within `COMPACT_LIVE_WORKER_FRESHNESS_S`
-          (15 min), #486 G2 / #518. Vetoes via the SHARED
-          `lane_has_live_evidence` predicate (a `live`/`wedged`/`unreadable`
-          lane), NOT the wedged-EXCLUDING `count`: a wedged (unrecovered-api-
-          error) lane pending job-1 auto-resume is recoverable work the
-          supervisor still owns, so compaction must not orphan it (#565-review).
-          #587: a `finished` lane (a worker whose last real turn is a completed
-          text reply — it produced its final answer and returned) is EXCLUDED
-          from that predicate, so a just-finished worker no longer vetoes: a
-          per-ticket boundary ALWAYS follows a worker return, so the finished
-          lane's mtime is still fresh at that moment, and the pre-#587 code read
-          it live for the whole 15-min window (the ghost that starved every
-          boundary — supervisor sessions ran ~1M ctx). REPLACES the pre-#565 raw
-          120s `subagent_active` window, which was shorter than a single 9-min CI
-          poll — so a worker mid-long-tool-call read as dead and the box
-          auto-compacted its own live lanes.
+    #605: the STRUCTURED `count_live_workers` signal is now the ONLY signal — the
+    pane `_BG_AGENTS_WAIT_RX` scrape (former signal (a)) was REMOVED. That scrape
+    carried NO timestamp, so it could not tell a genuinely-live "Waiting for N
+    background agents" render from a STALE one left in an idle session's
+    scrollback; and it was only ever reached at an idle `❯` boundary (PAST the
+    `busy` check in `deliver_compact`), where a genuinely-live "Waiting" state
+    does not occur — so it only ever produced FALSE positives (the 02:50 incident
+    on sid 2d02a127: 30 min of false SKIP live-tasks at an idle prompt with ZERO
+    fresh lanes). It also lost no real coverage: a genuinely-live background AGENT
+    always has a fresh subagent transcript inside the 15-min window (which
+    exceeds the 10-min Bash tool cap, #518), so signal (b) catches every real
+    live worker, and the sub-second dispatch race is covered by the #238
+    too-young floor. This is the #486 direction — replace a pane-render heuristic
+    with structured transcript state.
 
-    Neither signal readable → False (a deferral optimization, never a new way to
-    block on "we don't know"). `captured` (optional): reuse a known capture.
+    Vetoes on ANY FRESH lane via the SAME `_LANE_NOT_LIVE_STATES` partition
+    `lane_has_live_evidence` uses (`live_lane_labels`, single source of truth —
+    the detail can never disagree with the veto): a `live`/`wedged`/`unreadable`
+    lane counts live (#565-review: a wedged lane pending job-1 auto-resume is
+    recoverable in-flight work the supervisor still owns); a `finished` lane is
+    EXCLUDED (#587 — a worker that produced its final reply and returned is a
+    FREE lane, not the 15-min mtime ghost). Unreadable → [] → "" (a deferral
+    optimization, never a new way to block on "we don't know").
 
-    NO #425 exemption here (the #565 fix): a `## ✅ Work Complete` heading is a
-    boundary for the ONE ticket that just finished, so on a multi-lane
-    supervisor it must NEVER be read as "no live tasks" (the incident: a
-    per-ticket self-callback compact killed ~10 sibling lanes). The heading
-    still excuses condition (c)'s `⏳`-marker veto (its original #425 purpose),
-    but no longer overrides a DETECTED live lane here. Accepted consequence
-    (design comment on #565): on a saturated box a self-callback request usually
-    expires (30-min age cap) undelivered — correct, CC native auto-compact still
-    covers genuine context pressure. `count_live_workers` is disk-only and, like
-    the pre-#565 probe, blind to a generic background Bash CI-wait, so the
-    montalu3-class ⏳ case (condition (c)) is unaffected."""
-    if pid:
-        cap = captured
-        if cap is None:
-            try:
-                cap = watchdog.capture_pane(pid, run, lines=40)
-            except Exception:
-                _log.debug("compact: capture_pane failed for pane %s", pid,
-                          exc_info=True)
-                cap = None
-        if cap and watchdog._BG_AGENTS_WAIT_RX.search(cap):
-            return True
-
+    `count_live_workers` is disk-only and blind to a generic background Bash
+    CI-wait — that is a SEPARATE compact-only signal (`_compact_live_bg_bash`,
+    #599/#604), never folded in here (#565/#571 shared-primitive isolation)."""
     now_ts = now if now is not None else time.time()
     pdir = projects_dir or watchdog.PROJECTS_DIR
     # `count_live_workers` never raises (fail-safe to no lanes); its `on_warn`
@@ -568,17 +548,14 @@ def _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=None, now=None,
     _count, evidence = watchdog.count_live_workers(
         pdir, cwd, sid, now_ts, COMPACT_LIVE_WORKER_FRESHNESS_S,
         on_warn=lambda msg: _log.debug("compact: count_live_workers: %s", msg))
-    # Veto on ANY FRESH lane the supervisor still owns — the SHARED
-    # `lane_has_live_evidence` predicate (#565 evidence read, #587 single source
-    # of truth: compact and the #571 lane-fill gate now read the SAME helper, so
-    # the predicate can never drift between them). It counts a `live`/`wedged`/
-    # `unreadable` lane as live (NOT the wedged-EXCLUDING `count`): a wedged lane
-    # pending job-1 auto-resume is recoverable in-flight work compaction would
-    # orphan (#565-review). It EXCLUDES a `finished` lane (#587) — a worker that
-    # produced its final reply and returned is a FREE lane, not the 15-min mtime
-    # ghost that used to veto every per-ticket boundary. No live lane (empty
-    # evidence, or all stale/finished) → False → compaction allowed.
-    return watchdog.lane_has_live_evidence(evidence)
+    return ",".join(watchdog.live_lane_labels(evidence))
+
+
+def _session_has_live_bg_tasks(sid, cwd, projects_dir=None, now=None):
+    """True iff `_live_bg_tasks_detail` names any live worker lane — the bool
+    form of condition (b). #605: STRUCTURED-only (the pane signal (a) was
+    removed); see `_live_bg_tasks_detail` for the full reasoning."""
+    return bool(_live_bg_tasks_detail(sid, cwd, projects_dir=projects_dir, now=now))
 
 
 # --------------------------------------------------------------------------- #
@@ -613,22 +590,24 @@ def _compact_bg_bash_window():
 
 
 def _compact_live_bg_bash(cwd, sid, projects_dir=None):
-    """True when the session's OWN transcript shows a live `run_in_background`
-    Bash job (a START with no later completion notification in the bounded
-    tail), so a `/compact` would orphan its completion (#29193). DELIBERATELY
+    """The live `run_in_background` Bash bgid(s) of the session's OWN transcript
+    (a START with no later completion/kill in the bounded tail), joined by ",",
+    or "" when none — so a `/compact` never orphans a live bg job's completion
+    (#29193). #605: returns the DETAIL (not a bare bool) so the SKIP live-bg-bash
+    decision log NAMES the job (thread 3), via `session_live_bg_bash_ids` (the
+    id-returning sibling of the `session_has_live_bg_bash` bool). DELIBERATELY
     SEPARATE from the worker-lane `count_live_workers` signal
-    (`_session_has_live_bg_tasks`): a bg-bash job is NOT a worker lane, so the
+    (`_live_bg_tasks_detail`): a bg-bash job is NOT a worker lane, so the
     lane-occupancy (#571) / gk-fill consumers whose danger is UNDER-counting a
-    live lane must never see it — keeping this in its own compact-only
-    `session_has_live_bg_bash` is what leaves them structurally unaffected.
-    Unmeasurable (no transcript) never blocks."""
+    live lane must never see it — keeping this in its own compact-only reader is
+    what leaves them structurally unaffected. Unmeasurable (no transcript) → ""."""
     pdir = projects_dir or watchdog.PROJECTS_DIR
     tpath = watchdog._transcript_for_session(pdir, sid, cwd)
     if tpath is None:
-        return False
+        return ""
     tail_bytes, max_entries = _compact_bg_bash_window()
-    return watchdog.session_has_live_bg_bash(str(tpath), tail_bytes=tail_bytes,
-                                             max_entries=max_entries)
+    return ",".join(watchdog.session_live_bg_bash_ids(
+        str(tpath), tail_bytes=tail_bytes, max_entries=max_entries))
 
 
 # --------------------------------------------------------------------------- #
@@ -686,7 +665,7 @@ def _compact_request_too_young(request_ts, now, min_age=None):
     to be trusted yet — closes the #238 same-turn-dispatch race (a
     sibling worker's own liveness signals can lag ~100ms behind its
     dispatch). Applied ONLY on the branch where
-    `_session_has_live_bg_tasks` already read False. A missing
+    `_live_bg_tasks_detail` already read no live lane. A missing
     `request_ts` (the periodic sweep, well past this floor by
     construction) is "not too young" — a complete no-op there."""
     if request_ts is None:
@@ -949,16 +928,23 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
 
     # Condition (b) — no live background tasks of this session's own. NOT
     # exempted by a Work Complete heading (#565): a per-ticket boundary does not
-    # imply the sibling lanes finished.
-    if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
-                                  captured=captured):
-        _log_compact_sync("SKIP live-tasks sid=%s cwd=%s" % (sid, cwd))
+    # imply the sibling lanes finished. #605: STRUCTURED-only (the pane
+    # `_BG_AGENTS_WAIT_RX` scrape was removed — it false-positived on stale
+    # scrollback at an idle prompt), and the log NAMES the live lane(s) so the
+    # veto is never blind-diagnosed again (thread 3).
+    lanes = _live_bg_tasks_detail(sid, cwd, projects_dir=projects_dir)
+    if lanes:
+        _log_compact_sync("SKIP live-tasks sid=%s cwd=%s lanes=%s"
+                          % (sid, cwd, lanes))
         return "skip:live-tasks"
     # Condition (b), SECOND signal (#599) — a live `run_in_background` Bash job
     # (invisible to `count_live_workers`) whose completion `/compact` would
-    # orphan (#29193). Distinct reason so the forensic log keeps the two apart.
-    if _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir):
-        _log_compact_sync("SKIP live-bg-bash sid=%s cwd=%s" % (sid, cwd))
+    # orphan (#29193). Distinct reason + bgid so the forensic log keeps the two
+    # apart AND names the job (#605 thread 3).
+    bgjobs = _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir)
+    if bgjobs:
+        _log_compact_sync("SKIP live-bg-bash sid=%s cwd=%s jobs=%s"
+                          % (sid, cwd, bgjobs))
         return "skip:live-bg-bash"
     if _compact_request_too_young(request_ts, now):
         _log_compact_sync("SKIP too-young sid=%s cwd=%s" % (sid, cwd))
@@ -979,12 +965,15 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     if fresh_kind != "input" or fresh_draft:
         _log_compact_sync("SKIP raced sid=%s cwd=%s" % (sid, cwd))
         return "skip:raced"
-    if _session_has_live_bg_tasks(pid, sid, cwd, run, projects_dir=projects_dir,
-                                  captured=fresh):
-        _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s" % (sid, cwd))
+    lanes = _live_bg_tasks_detail(sid, cwd, projects_dir=projects_dir)
+    if lanes:
+        _log_compact_sync("SKIP live-tasks-raced sid=%s cwd=%s lanes=%s"
+                          % (sid, cwd, lanes))
         return "skip:live-tasks-raced"
-    if _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir):
-        _log_compact_sync("SKIP live-bg-bash-raced sid=%s cwd=%s" % (sid, cwd))
+    bgjobs = _compact_live_bg_bash(cwd, sid, projects_dir=projects_dir)
+    if bgjobs:
+        _log_compact_sync("SKIP live-bg-bash-raced sid=%s cwd=%s jobs=%s"
+                          % (sid, cwd, bgjobs))
         return "skip:live-bg-bash-raced"
 
     # Mark provenance BEFORE typing so the shared janitor (#372) can
@@ -1046,7 +1035,7 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
     this box alone" took that slow path for want of exactly this (#238's
     own adversarial review, finding 🔴1). The floor's OWN purpose is real
     — a same-turn-dispatched sibling worker can be briefly invisible to
-    `_session_has_live_bg_tasks` — and this wait is what gives that
+    `_live_bg_tasks_detail` — and this wait is what gives that
     signal a genuine chance to catch up, exactly like the old retry loop
     did, without resurrecting the loop itself: the wait is computed from
     the REQUEST's own recorded `ts` (via a fresh `load_compact_requests`

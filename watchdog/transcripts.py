@@ -902,6 +902,27 @@ def lane_has_live_evidence(evidence):
                for lane in (evidence or []))
 
 
+def live_lane_labels(evidence):
+    """The compact ``agent_id(state[/agent_type])`` labels of every LIVE lane in a
+    ``count_live_workers`` evidence list — the SAME live/not-live partition
+    ``lane_has_live_evidence`` uses (``_LANE_NOT_LIVE_STATES`` exclusion, #565/#587
+    single source of truth), so the compact decision-log detail can never disagree
+    with the veto that produced it. For the ``SKIP live-tasks`` decision log
+    (#605): when condition (b) vetoes, NAME the exact lane(s) so it is never
+    blind-diagnosed again (the #605 incident was diagnosed twice from a bare
+    ``SKIP live-tasks sid=... cwd=...``). Never raises; a malformed lane is
+    labelled defensively."""
+    labels = []
+    for lane in (evidence or []):
+        state = getattr(lane, "state", "stale")
+        if state in _LANE_NOT_LIVE_STATES:
+            continue
+        aid = getattr(lane, "agent_id", None) or "?"
+        atype = getattr(lane, "agent_type", None)
+        labels.append("%s(%s%s)" % (aid, state, ("/" + atype) if atype else ""))
+    return labels
+
+
 # A tool-call opening the model emitted as TEXT — `<invoke name="...">` / `<invoke
 # name="...">` — instead of a structured tool_use. Used by job 4a.
 _TEXTCALL_RX = re.compile(r"<\s*(?:antml:)?invoke\b[^>]*\bname\s*=", re.I)
@@ -1267,6 +1288,31 @@ def _task_notification_ids(entry):
     return ids
 
 
+def live_bg_bash_ids(entries):
+    """PURE — the LIST of bgids in `entries` that actually LAUNCHED and have
+    NEITHER a `<task-notification>` COMPLETION (via their toolu id) NOR a
+    confirmed TaskStop KILL (via their bgid). The id-returning sibling of
+    `session_live_bg_bash` (which is `bool(...)` of this), so the compact
+    ``SKIP live-bg-bash`` decision log (#605) can NAME the exact live job(s)
+    instead of a blind veto. Same collection/pairing semantics as
+    `session_live_bg_bash` (single source of truth — no drift). Never raises."""
+    launched = {}          # bgid -> toolu (a bg job that ACTUALLY started)
+    notified = set()       # toolu ids that got a completion notification
+    killed = set()         # bgids terminated by a confirmed TaskStop
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        pair = _entry_bg_bash_launch(e)
+        if pair is not None:
+            launched[pair[0]] = pair[1]
+        notified.update(_task_notification_ids(e))
+        kb = _entry_taskstop_bgid(e)
+        if kb is not None:
+            killed.add(kb)
+    return [bgid for bgid, toolu in launched.items()
+            if toolu not in notified and bgid not in killed]
+
+
 def session_live_bg_bash(entries):
     """PURE (entries in / verdict out, #504) — True iff some bg-bash job in
     `entries` actually LAUNCHED and has NEITHER a `<task-notification>`
@@ -1290,21 +1336,7 @@ def session_live_bg_bash(entries):
     same 200-entry window) — an accepted residual, the safe-side twin of #486's
     own quoted-markup care. `_entry_text` raising on a wrong-typed block is
     caught inside `_task_notification_ids`. Never raises."""
-    launched = {}          # bgid -> toolu (a bg job that ACTUALLY started)
-    notified = set()       # toolu ids that got a completion notification
-    killed = set()         # bgids terminated by a confirmed TaskStop
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        pair = _entry_bg_bash_launch(e)
-        if pair is not None:
-            launched[pair[0]] = pair[1]
-        notified.update(_task_notification_ids(e))
-        kb = _entry_taskstop_bgid(e)
-        if kb is not None:
-            killed.add(kb)
-    return any(toolu not in notified and bgid not in killed
-               for bgid, toolu in launched.items())
+    return bool(live_bg_bash_ids(entries))
 
 
 def session_has_live_bg_bash(path, tail_bytes=1_000_000, max_entries=200):
@@ -1331,7 +1363,17 @@ def session_has_live_bg_bash(path, tail_bytes=1_000_000, max_entries=200):
 
     Fail-safe: an unreadable transcript → [] → False (never a guessed veto).
     Never raises."""
-    return session_live_bg_bash(_read_jsonl_byte_tail(path, tail_bytes, max_entries))
+    return bool(session_live_bg_bash_ids(path, tail_bytes=tail_bytes,
+                                         max_entries=max_entries))
+
+
+def session_live_bg_bash_ids(path, tail_bytes=1_000_000, max_entries=200):
+    """The bgids of LIVE bg-bash jobs in the transcript tail — the id-returning
+    I/O wrapper sibling of `session_has_live_bg_bash` (which is `bool(...)` of
+    this). Same bounded-seek read + window semantics; for the compact decision
+    log (#605). Fail-safe: an unreadable transcript → [] (never a guessed veto).
+    Never raises."""
+    return live_bg_bash_ids(_read_jsonl_byte_tail(path, tail_bytes, max_entries))
 
 
 def _hash(text):
