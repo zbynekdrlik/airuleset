@@ -1900,11 +1900,20 @@ class TestBgBashDetector599(unittest.TestCase):
         self.assertEqual(wd.transcript_last_marker_bounded(str(p)),
                          wd.transcript_last_marker(str(p)))
 
-    def test_a_non_bg_bash_tool_use_is_not_a_bg_job(self):
-        entries = [{"type": "assistant", "message": {"content": [
+    def test_a_foreground_bash_result_is_not_a_bg_job(self):
+        # #604: the detector keys a LAUNCH on a tool_result carrying a
+        # `toolUseResult.backgroundTaskId`. A normal FOREGROUND Bash tool_result
+        # (no backgroundTaskId) — and, separately, the assistant Bash tool_use
+        # itself — must NOT register as a live bg job. (The error-result launch
+        # is covered by TestBgBashKillDetector604.test_hook_blocked_start.)
+        fg_result = {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": False,
+             "content": "file1\nfile2\n"}]},
+            "toolUseResult": {"stdout": "file1\nfile2\n", "stderr": ""}}
+        assistant_tool_use = {"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "t1", "name": "Bash",
-             "input": {"command": "ls"}}]}}]   # no run_in_background
-        self.assertFalse(wd.session_live_bg_bash(entries))
+             "input": {"command": "ls", "run_in_background": True}}]}}
+        self.assertFalse(wd.session_live_bg_bash([assistant_tool_use, fg_result]))
 
     def test_unmatched_completion_alone_is_not_live(self):
         # a completion whose START is outside the window must not read live.
