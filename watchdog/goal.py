@@ -2497,7 +2497,7 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
     wnt = _one_glance.lane_working_no_tasks_decision(
         marker=marker, render_waiters=waiters,
         structured_live=watchdog.lane_has_live_evidence(ev),
-        backlog=(backlog_n if isinstance(backlog_n, int) else 0),
+        backlog=(backlog_n if isinstance(backlog_n, int) and backlog_n >= GOAL_LANE_MIN_BACKLOG else 0),  # #611: sub-min never escalates (would only skip:min-backlog)
         defer_streak=rec.get("wntd", 0), max_defers=GOAL_LANE_WNT_MAX_DEFERS)
     if not dry_run:
         rec["wntd"] = wnt.streak
@@ -2761,14 +2761,14 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     n = rec.get("ln", 0)
     aborts = rec.get("lna", 0)
     # #442 THIRD GAP -- the nudge-count give-up (GOAL_LANE_MAX_NUDGES) applies
-    # ONLY to the 0-worker empty-lane branch: a truly stalled box gets a
-    # bounded number of pokes then one give-up ping. The UNDER-SATURATED
-    # fill-the-cap branch has NO permanent give-up -- a session that stays
-    # under-saturated for hours must keep being pushed every
-    # GOAL_LANE_INTERVAL_S (constant #365 anti-annoyance give-up structurally
-    # disabled saturation enforcement). The stash-abort give-up (a delivery
-    # that permanently FAILS) stays for BOTH branches -- it is a
-    # delivery-mechanics bound, not a "stop nudging" decision.
+    # ONLY to the 0-worker empty-lane branch: a truly stalled box gets a bounded
+    # number of pokes then one give-up OWNER ping. #611 EXPLICIT DECISION: a
+    # WNT-ESCALATED empty-lane box is bounded by this SAME give-up (2 pokes ->
+    # ping "look at the session", never a forever-nudge of a perpetually-⏳-0-lane
+    # session that ignored them); the #530 backlog-change re-arm still fires on
+    # its NON-escalated fresh sweeps. The UNDER-SATURATED branch has NO permanent
+    # give-up (pushed every GOAL_LANE_INTERVAL_S). The stash-abort give-up stays
+    # for BOTH branches -- a delivery-mechanics bound, not a "stop nudging" one.
     count_gaveup = (not under_saturated) and n >= GOAL_LANE_MAX_NUDGES
     stash_gaveup = aborts >= GOAL_LANE_MAX_STASH_ABORTS
     if count_gaveup or stash_gaveup:
