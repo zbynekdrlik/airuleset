@@ -62,9 +62,11 @@ _DAVID_GO_LIVE = (
 _DAVID_UNIT_NOTE = (
     "# NOTE (#612): this is the DAVID developer gateway on SUBDEV — it binds\n"
     "# LOOPBACK (127.0.0.1) and is fronted by a cloudflared public HTTPS tunnel\n"
-    "# for david.newlevel.media. The 'dev1 / tailscale IP' wording inherited from\n"
-    "# the shared template below does NOT apply here. Scoped inventory: david1-4\n"
-    "# + codex-bridge only (never the owner fleet). Regenerate via install.\n#\n")
+    "# for david.newlevel.media. The 'dev1 / tailscale IP' wording, the ttyd port\n"
+    "# 7682 and the 'webterm-gateway.service' name inherited from the shared\n"
+    "# template below refer to the OWNER deployment — the DAVID ports are ttyd\n"
+    "# 7683 / gateway 8081 and the units are webterm-david-*.service. Scoped\n"
+    "# inventory: david1-4 + codex-bridge only (never the owner fleet).\n#\n")
 
 
 def render_david_ttyd_unit():
@@ -141,7 +143,12 @@ def setup_webterm_david_service(run=None):
     no systemd. Idempotent. Returns True on success, False on any skip/failure
     (never raises)."""
     run = run or subprocess.run
-    ok, reason = prerequisites_ready()
+    try:
+        ok, reason = prerequisites_ready()
+    except Exception as e:  # a gate that itself errors is a SAFE no-op, never a raise
+        print("  webterm(david): prerequisite check errored (%r) — no-op."
+              % e, file=sys.stderr)
+        return False
     if not ok:
         print("  webterm(david): %s — no-op until go-live setup.\n%s"
               % (reason, _DAVID_GO_LIVE), file=sys.stderr)

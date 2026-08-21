@@ -115,8 +115,11 @@ class TestDavidArtifactsWrite(unittest.TestCase):
             self.assertNotIn("dev1", ids)
             launcher = (claude / "airuleset-webterm-david-ttyd.sh").read_text(
                 encoding="utf-8")
-            self.assertIn("--inventory", launcher)
+            # Scoped inventory handed via the env var, never a client-injectable
+            # argv flag (#612 review).
+            self.assertIn("export WEBTERM_INVENTORY=", launcher)
             self.assertIn("webterm-david-inventory.json", launcher)
+            self.assertNotIn("--inventory", launcher)
             self.assertIn("-p %d" % d.WEBTERM_DAVID_TTYD_PORT, launcher)
             # The david credential realm was created with the david login.
             cred = (secrets / "webterm_david_credential").read_text(

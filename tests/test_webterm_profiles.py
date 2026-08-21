@@ -122,30 +122,34 @@ class TestWebtermInventoryProfileArg(unittest.TestCase):
                          ["david1", "david2", "david3", "david4", "codex-bridge"])
 
 
-class TestConnectAllowlistIsProfileScoped(unittest.TestCase):
-    """The heart of the security boundary: david's ttyd is launched with david's
-    inventory, so connect_main can only ever resolve david's ids."""
+def _david_inv_file():
+    d = tempfile.mkdtemp()
+    f = Path(d) / "david-inv.json"
+    f.write_text(json.dumps(p.david_inventory()), encoding="utf-8")
+    return f
 
-    def _david_inv_file(self):
-        d = tempfile.mkdtemp()
-        f = Path(d) / "david-inv.json"
-        f.write_text(json.dumps(p.david_inventory()), encoding="utf-8")
-        return f
+
+class TestConnectAllowlistIsProfileScoped(unittest.TestCase):
+    """The heart of the security boundary: david's ttyd child reads david's
+    inventory (via the WEBTERM_INVENTORY env var the launcher exports), so
+    connect_main can only ever resolve david's ids."""
 
     def test_owner_ids_are_refused_against_david_inventory(self):
-        f = self._david_inv_file()
+        f = _david_inv_file()
         for owner_id in ("dev1", "gatekeeper", "gk", "montalu-subdev", "marek",
                          "dev2"):
-            with m.patch.object(w.os, "execvp",
-                                side_effect=AssertionError("must not exec")) as ex:
-                rc = w.connect_main(["--inventory", str(f), owner_id])
+            with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
+                    m.patch.object(w.os, "execvp",
+                                   side_effect=AssertionError("must not exec")) as ex:
+                rc = w.connect_main([owner_id])
             self.assertEqual(rc, 2, "owner id %r must be refused" % owner_id)
             ex.assert_not_called()
 
     def test_david_id_execs_ssh_with_dedicated_identity(self):
-        f = self._david_inv_file()
-        with m.patch.object(w.os, "execvp") as ex:
-            w.connect_main(["--inventory", str(f), "david2"])
+        f = _david_inv_file()
+        with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
+                m.patch.object(w.os, "execvp") as ex:
+            w.connect_main(["david2"])
         ex.assert_called_once()
         argv = ex.call_args[0][1]
         self.assertEqual(argv[0], "ssh")
@@ -154,38 +158,47 @@ class TestConnectAllowlistIsProfileScoped(unittest.TestCase):
         self.assertIn("david2@127.0.0.1", argv)
 
     def test_codex_bridge_id_execs_mirror_of_existing_dev2_access(self):
-        f = self._david_inv_file()
-        with m.patch.object(w.os, "execvp") as ex:
-            w.connect_main(["--inventory", str(f), "codex-bridge"])
+        f = _david_inv_file()
+        with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
+                m.patch.object(w.os, "execvp") as ex:
+            w.connect_main(["codex-bridge"])
         argv = ex.call_args[0][1]
         self.assertEqual(argv[0], "ssh")
         self.assertIn(os.path.expanduser("~/.ssh/id_ed25519"), argv)
         self.assertIn("newlevel@100.82.64.27", argv)
 
 
-class TestConnectInventoryFlagParsing(unittest.TestCase):
-    def test_inventory_flag_overrides_default_path(self):
-        d = tempfile.mkdtemp()
-        f = Path(d) / "inv.json"
-        f.write_text(json.dumps([{"id": "dev1", "local": True,
-                                  "preferred": "zbynek"}]), encoding="utf-8")
-        with m.patch.object(w.os, "execvp") as ex:
-            rc = w.connect_main(["--inventory", str(f), "dev1"])
-        self.assertIn(rc, (0, None))
-        ex.assert_called_once()
+class TestInventorySelectionIsEnvNotClientArgv(unittest.TestCase):
+    """#612 adversarial review: the scoped inventory is chosen by the launcher's
+    WEBTERM_INVENTORY env var, NEVER by a client argv flag — ttyd's `-a` appends
+    client `?arg=` values, so honoring an argv `--inventory` would be
+    client-injectable (point the allowlist at an arbitrary JSON)."""
 
-    def test_inventory_flag_without_value_is_refused(self):
-        with m.patch.object(w.os, "execvp",
-                            side_effect=AssertionError("must not exec")):
-            rc = w.connect_main(["--inventory"])
+    def test_client_argv_inventory_flag_is_treated_as_sid_and_refused(self):
+        # A client smuggling `?arg=--inventory&arg=/evil.json&arg=dev1` must NOT
+        # be honored: `--inventory` becomes the session id and is refused.
+        with m.patch.dict(os.environ, {}, clear=False), \
+                m.patch.object(w.os, "execvp",
+                               side_effect=AssertionError("must not exec")):
+            os.environ.pop("WEBTERM_INVENTORY", None)
+            rc = w.connect_main(["--inventory", "/evil.json", "dev1"])
         self.assertEqual(rc, 2)
 
-    def test_explicit_kwarg_still_works_without_flag(self):
+    def test_env_var_selects_scoped_inventory(self):
+        f = _david_inv_file()
+        with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
+                m.patch.object(w.os, "execvp") as ex:
+            w.connect_main(["david1"])
+        ex.assert_called_once()
+
+    def test_explicit_kwarg_overrides_env(self):
         d = tempfile.mkdtemp()
         f = Path(d) / "inv.json"
         f.write_text(json.dumps([{"id": "dev1", "local": True,
                                   "preferred": "zbynek"}]), encoding="utf-8")
-        with m.patch.object(w.os, "execvp") as ex:
+        # kwarg wins even if a (different) env var is present.
+        with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": "/nonexistent.json"}), \
+                m.patch.object(w.os, "execvp") as ex:
             w.connect_main(["dev1"], inventory_path=f)
         ex.assert_called_once()
 
@@ -194,13 +207,19 @@ class TestLauncherPassesInventory(unittest.TestCase):
     def test_launcher_without_inventory_is_unchanged(self):
         s = w.render_webterm_launch_script()
         self.assertIn("webterm-connect", s)
+        self.assertNotIn("WEBTERM_INVENTORY", s)
+        # No client-injectable argv flag on the connect command, ever.
         self.assertNotIn("--inventory", s)
 
-    def test_launcher_with_inventory_passes_scoped_path(self):
+    def test_launcher_with_inventory_exports_env_not_argv(self):
         s = w.render_webterm_launch_script(inventory_path="/x/david-inv.json")
-        self.assertIn("webterm-connect --inventory /x/david-inv.json", s)
-        # The url-arg id is still appended by ttyd AFTER the fixed command.
-        self.assertIn("-a", s)
+        self.assertIn("export WEBTERM_INVENTORY=/x/david-inv.json", s)
+        # The scoped path is NEVER passed as a connect argv flag (injectable).
+        self.assertNotIn("webterm-connect --inventory", s)
+        self.assertNotIn("--inventory", s)
+        self.assertIn("-a", s)  # ttyd still appends the url-arg id
+        # The export precedes the exec so the ttyd child inherits it.
+        self.assertLess(s.index("export WEBTERM_INVENTORY"), s.index("exec ttyd"))
 
 
 class TestAuthRealmSeparation(unittest.TestCase):

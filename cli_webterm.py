@@ -308,18 +308,18 @@ def connect_main(argv, inventory_path=None):
     shell), then exec. Returns a non-zero rc only on a refusal/error; on success
     it execs and never returns.
 
-    #612: an optional leading `--inventory <path>` (which the profile launcher
-    prepends before ttyd appends the url-arg id) selects the PROFILE's scoped
-    inventory. This is the security boundary made physical: david's ttyd is
-    launched with david's inventory, so an owner-fleet id is simply not present
-    in the allowlist and is refused below — never a client choice."""
-    argv = list(argv)
-    if argv and argv[0] == "--inventory":
-        if len(argv) < 2 or not argv[1]:
-            sys.stderr.write("webterm: --inventory needs a path\r\n")
-            return 2
-        inventory_path = argv[1]
-        argv = argv[2:]
+    #612: the PROFILE's scoped inventory is selected via the `WEBTERM_INVENTORY`
+    ENV VAR that the profile launcher exports (david -> david's inventory). This
+    is the security boundary made physical: david's ttyd child reads david's
+    inventory, so an owner-fleet id is simply not present in the allowlist and is
+    refused below. It is an ENV var, NOT a client argv flag, PRECISELY because
+    ttyd's `-a` appends client-controlled `?arg=` values as argv — an argv
+    `--inventory` flag would be client-injectable (a client could point the
+    allowlist at an arbitrary JSON), whereas an env var cannot be injected
+    through ttyd url args (#612 adversarial review). `inventory_path` kwarg (tests)
+    wins; else the env var; else the default WEBTERM_INVENTORY_PATH."""
+    if inventory_path is None:
+        inventory_path = os.environ.get("WEBTERM_INVENTORY") or None
     if not argv:
         sys.stderr.write("webterm: no session id given\r\n")
         return 2
@@ -688,29 +688,32 @@ _LAUNCH_TEMPLATE = """#!/usr/bin/env bash
 # Execs ttyd bound LOOPBACK-only (127.0.0.1) behind a `-b /t` base path; the
 # same-origin gateway (cli_webterm_gateway.py) is the tailnet entry + login.
 set -euo pipefail
-exec ttyd -p %(ttyd_port)d -i %(ttyd_bind)s -b %(base_path)s -a -W \\
-  python3 %(repo_dir)s/cli_webterm.py webterm-connect%(connect_args)s
+%(inventory_export)sexec ttyd -p %(ttyd_port)d -i %(ttyd_bind)s -b %(base_path)s -a -W \\
+  python3 %(repo_dir)s/cli_webterm.py webterm-connect
 """
 
 
 def render_webterm_launch_script(inventory_path=None, ttyd_port=None):
     """The ttyd launcher: loopback bind + `-b /t` base path, no basic-auth, no
     `-O` (#584 — the gateway is the sole entry + authenticator). #612: when
-    `inventory_path` is given (the david profile), it is passed as
-    `webterm-connect --inventory <path>` BEFORE ttyd appends the url-arg id, so
-    that ttyd child's allowlist is physically the profile's scoped inventory;
-    `ttyd_port` overrides the owner default (the david gateway box uses its own
-    loopback port). Both default to the owner values so the owner launcher is
-    byte-identical to pre-#612."""
-    connect_args = ""
+    `inventory_path` is given (the david profile), it is EXPORTED as the
+    `WEBTERM_INVENTORY` env var that the ttyd child (`webterm-connect`) reads —
+    NOT a client-injectable argv flag (ttyd's `-a` appends client `?arg=` values
+    as argv, so an argv `--inventory` would be injectable — #612 review). That
+    makes the ttyd child's allowlist physically the profile's scoped inventory.
+    `ttyd_port` overrides the owner default (the david box uses its own loopback
+    port). With no `inventory_path`/`ttyd_port` (owner), the emitted script is
+    BYTE-IDENTICAL to pre-#612 — no env line, owner port."""
+    inventory_export = ""
     if inventory_path:
-        connect_args = " --inventory " + shlex.quote(str(inventory_path))
+        inventory_export = ("export WEBTERM_INVENTORY=%s\n"
+                            % shlex.quote(str(inventory_path)))
     return _LAUNCH_TEMPLATE % {
         "ttyd_port": ttyd_port if ttyd_port is not None else WEBTERM_TTYD_PORT,
         "ttyd_bind": shlex.quote(WEBTERM_TTYD_BIND),
         "base_path": shlex.quote(WEBTERM_TTYD_BASE),
         "repo_dir": shlex.quote(str(REPO_DIR)),
-        "connect_args": connect_args,
+        "inventory_export": inventory_export,
     }
 
 
