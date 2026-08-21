@@ -26,9 +26,9 @@ from zoneinfo import ZoneInfo
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import watchdog as wd
-import watchdog.handoff_alarm as ha
-import watchdog.cross_stream as cs
+import watchdog as wd  # noqa: E402
+import watchdog.handoff_alarm as ha  # noqa: E402
+import watchdog.cross_stream as cs  # noqa: E402
 
 TZ = ZoneInfo("Europe/Bratislava")
 H = 3600

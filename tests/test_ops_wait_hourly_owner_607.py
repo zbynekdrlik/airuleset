@@ -26,7 +26,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import watchdog.ops_wait_recheck as owr
+import watchdog.ops_wait_recheck as owr  # noqa: E402
 
 STATUS = REPO / "modules" / "core" / "statusline-vocabulary.md"
 
