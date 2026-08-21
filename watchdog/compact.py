@@ -889,11 +889,11 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     if request_ts is not None:
         age = _safe_age(now, request_ts)
         if age is not None and age > COMPACT_REQUEST_MAX_AGE_S:
-            # #523: name the ORIGIN on the discard record. A lapsed
-            # `subagent-stop` request is the BY-DESIGN #425 outcome — a
-            # `⏳` supervisor that never self-declared its own
-            # `## ✅ Work Complete` boundary, so veto (c) correctly refused
-            # it every sweep until this cap. Surfacing the origin here (the
+            # #523: name the ORIGIN on the discard record. Post-#610 the sole
+            # producer is `self-callback`, so a lapse now means a gone-quiet
+            # session (no new boundary in 30 min, #599 supersede); the retired
+            # `subagent-stop` producer is what used to lapse under the old
+            # #425 `⏳` veto. Surfacing the origin here (the
             # #486 "silent suppression -> explicit decision log" guardrail,
             # logging-only) turns "half my per-ticket compacts lapse" triage
             # into a read instead of a re-investigation, without touching any
@@ -1141,10 +1141,10 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
                 handled.add(sid)
         elif word == "expired":
             # #523: name the ORIGIN on the LAPSE journal line too (the
-            # `deliver_compact` sync-log record above already does). A
-            # `subagent-stop` LAPSE is the expected #425 by-design outcome on
-            # a saturated `⏳` supervisor, not a failure — the origin is what
-            # lets triage tell the two apart at a glance.
+            # `deliver_compact` sync-log record above already does). Post-#610
+            # the sole producer is `self-callback`; a lapse now means a
+            # gone-quiet session (no new boundary in 30 min, #599), not a
+            # failure — the origin is what lets triage tell the two apart.
             logs.append("LAPSE (compact-sweep) sid=%s origin=%s "
                         "(age > cap, discarded)" % (sid, origin or "-"))
         else:

@@ -6,8 +6,8 @@ implementing a text-sniffing/heuristic-boundary era of this machinery) and
 wholesale along with the claim system it watched). See `watchdog/compact.py`'s
 own module docstring for the full design; this file locks its CONTRACT:
 
-  - Exactly two origins ever create a request (`self-callback`,
-    `subagent-stop`) — nothing text-sniffed, nothing context-size-derived.
+  - The delivery machinery accepts two origins (`self-callback`, and
+    `subagent-stop` whose producer was retired #610) — nothing text-sniffed.
   - `deliver_compact()`'s five named conditions (pane idle/no-draft, no live
     background tasks, not on a ⏳/❓ marker or unresumed API error, a 30-min
     per-session cooldown, a hard non-refreshable age cap) are ALL
