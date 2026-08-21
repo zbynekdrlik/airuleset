@@ -14,7 +14,7 @@
     "cli_deployer_glue.py": 346,
     "cli_filedrop_watchdog.py": 518,
     "cli_fleet.py": 406,
-    "cli_quals.py": 1582,
+    "cli_quals.py": 1595,
     "cli_quals_cmd.py": 720,
     "cli_remote.py": 1018,
     "cli_scratch_sweep.py": 1505,
@@ -140,7 +140,7 @@
     "tests/test_notify_repo_resolution.py": 108,
     "tests/test_ops_wait_recheck.py": 848,
     "tests/test_ops_wait_split.py": 433,
-    "tests/test_ops_wait_stale_570.py": 169,
+    "tests/test_ops_wait_stale_570.py": 179,
     "tests/test_ops_wait_stale_doctrine_570.py": 66,
     "tests/test_owner_action_601.py": 322,
     "tests/test_owner_decision_digest.py": 464,
@@ -242,6 +242,7 @@
     "tests/test_worker_review_dispatch_shape.py": 235,
     "tests/test_workflow_cost_discipline.py": 68,
     "tests/test_working_liveness.py": 332,
+    "tests/test_working_time_607.py": 137,
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_wrapped_draft.py": 619,
     "watchdog/__init__.py": 4105,
@@ -272,7 +273,8 @@
     "watchdog/transcripts.py": 1411,
     "watchdog/u_labels.py": 369,
     "watchdog/usage.py": 387,
-    "watchdog/wedge.py": 297
+    "watchdog/wedge.py": 297,
+    "working_time.py": 78
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,

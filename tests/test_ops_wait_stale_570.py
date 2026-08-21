@@ -37,7 +37,17 @@ class StaleDecider(unittest.TestCase):
     """`_stale_ops_wait_flagged(rows, now, self_login, ages_fn)` — pure, no gh."""
 
     def setUp(self):
-        self.now = 1_000_000.0
+        # #607: the 24h window is now WORKING time (weekend-excluded). The old
+        # `now=1_000_000.0` anchor is 1970-01-12 (a Monday) whose `now - 3*DAY`
+        # lands on Friday 1970-01-09 — a span that straddles a whole weekend, so
+        # its WORKING elapsed time is only ~24h (borderline, no longer strictly
+        # `> 24h`). Anchor to a mid-week Wednesday noon so `now - 3*DAY` (Sunday)
+        # yields ~60 WORKING hours — unambiguously stale under both the old flat
+        # and the new weekend-aware contract, keeping the decider's intent intact.
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        self.now = datetime(2026, 8, 19, 12,
+                            tzinfo=ZoneInfo("Europe/Bratislava")).timestamp()
 
     def _run(self, rows, ages):
         return cli_quals._stale_ops_wait_flagged(

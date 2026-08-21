@@ -23,6 +23,8 @@ import re
 import time
 from pathlib import Path
 
+import working_time
+
 
 class SliceUnresolved(Exception):
     """This box's own gh identity could not be resolved, so "my slice" is
@@ -894,6 +896,9 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
 # on within OPS_WAIT_EVIDENCE_MAX_S is `stale!`-tagged in `--ops-wait`, so the
 # footer/stop-proof reader and job 20's re-check nudge both see WHICH parked
 # tickets have gone cold (the "tlač dopredu každý deň" doctrine, #570 bod 3).
+# #607: the window is 24h of WORKING time — Saturday/Sunday (Europe/Bratislava)
+# do NOT count toward it (`working_time.working_deadline_passed`), so a Friday
+# reminder's deadline lands Monday afternoon, not Saturday.
 OPS_WAIT_EVIDENCE_MAX_S = 24 * 3600
 # Bound on the per-member `gh issue view` comment fetches per `--ops-wait`
 # invocation (a real W set is a handful — montalu's worst incident was 13; a
@@ -983,7 +988,9 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
 
 def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
     """The set of ops-wait (W) member numbers to tag `stale!` (#570) — a parked
-    W ticket the stream has NOT pushed on within OPS_WAIT_EVIDENCE_MAX_S (24h).
+    W ticket the stream has NOT pushed on within OPS_WAIT_EVIDENCE_MAX_S (24h of
+    WORKING time; Sat/Sun in Europe/Bratislava excluded, #607 —
+    `working_time.working_deadline_passed`).
 
     Evidence = the last comment AUTHORED BY THE STREAM'S OWN gh account — the
     daily push / third-party reminder / blocker re-verification the W doctrine
@@ -1019,11 +1026,17 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
         if res is None:
             continue                             # gh failed / unusable -> no flag
         own_ts, any_ts = res
+        # #607: the 24h window is WORKING days — Saturday/Sunday (Europe/
+        # Bratislava) do not count, so a Friday-parked ticket is not falsely
+        # flagged over the weekend (the shared `working_time` helper, used by
+        # the gk-lane freshness push too). tz-error fails safe to the flat span.
         if own_ts is not None:
-            if (now - own_ts) > OPS_WAIT_EVIDENCE_MAX_S:
+            if working_time.working_deadline_passed(own_ts, now,
+                                                    OPS_WAIT_EVIDENCE_MAX_S):
                 flagged.add(number)
         elif any_ts is not None:
-            if (now - any_ts) > OPS_WAIT_EVIDENCE_MAX_S:
+            if working_time.working_deadline_passed(any_ts, now,
+                                                    OPS_WAIT_EVIDENCE_MAX_S):
                 flagged.add(number)
         # zero comments (own_ts AND any_ts None) -> ambiguous -> never flag (safe)
     return flagged
