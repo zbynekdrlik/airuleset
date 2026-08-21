@@ -240,6 +240,29 @@ class GoalTemplateResolution(unittest.TestCase):
         p = self._p(_skill_md(("full", long_line)))
         self.assertIsNone(goal.goal_template_for_authority("full", path=p))
 
+    def test_over_cap_line_refusal_is_LOGGED_not_silent(self):
+        # #617 -- the refuse ALREADY happens (returns None). The #169
+        # regression was SILENT, so a re-grown template disabled the whole
+        # autopilot loop with no signal. An optional `logs` list surfaces the
+        # over-cap refusal LOUDLY (the dark-rearm path passes one), so a
+        # recurrence is visible in the watchdog log, not a silent no-arm.
+        long_line = "/goal " + ("x" * (goal.GOAL_ARM_CHAR_CAP + 50))
+        p = self._p(_skill_md(("full", long_line)))
+        logs = []
+        self.assertIsNone(
+            goal.goal_template_for_authority("full", path=p, logs=logs))
+        self.assertTrue(
+            any("cap" in ln.lower() or "oversize" in ln.lower() for ln in logs),
+            "over-cap refusal must be logged, got %r" % logs)
+
+    def test_pure_resolver_call_without_logs_stays_side_effect_free(self):
+        # #617 -- `logs` is OPTIONAL; a pure resolution call (tests, the
+        # footer, every non-arm caller) passes nothing and gets the exact
+        # prior behaviour with no log write.
+        p = self._p(_skill_md(("full", "/goal STOP CONDITIONS ok")))
+        self.assertEqual(goal.goal_template_for_authority("full", path=p),
+                         "/goal STOP CONDITIONS ok")
+
     def test_the_real_shipped_skill_md_resolves_all_three_authorities(self):
         # Live-shipped-artifact proof, not just a synthetic fixture: the
         # ACTUAL installed skills/autopilot/SKILL.md this repo ships must

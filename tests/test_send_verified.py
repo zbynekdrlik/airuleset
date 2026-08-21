@@ -23,12 +23,40 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import watchdog as wd  # noqa: E402
+import watchdog.goal as goal  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux, GOAL_IDLE_CAP, GOAL_DRAFT_CAP,
 )
 
 PID = "%9"
 TEXT = "štuchnutie: zaplň lány, backlog=5"
+
+
+class _TruncTypeFake:
+    """#617 -- models a TRUNCATED own /goal type into a box verified bare:
+    the entry + fresh captures read BARE, then after the first `-l` type the
+    box renders only a truncated PREFIX (so `_await_typed(want=True)` rejects
+    it), and a BSpace run clears it back to bare (so the undo can converge)."""
+
+    def __init__(self, bare_cap, trunc_cap):
+        self.bare = bare_cap
+        self.trunc = trunc_cap
+        self.sent = []
+        self.typed = False
+        self.cleared = False
+
+    def __call__(self, argv, timeout=8):
+        j = " ".join(argv)
+        if "send-keys" in j:
+            self.sent.append(argv)
+            if "-l" in argv:
+                self.typed = True
+            elif argv[4:] and all(k == "BSpace" for k in argv[4:]):
+                self.cleared = True
+            return ""
+        if "capture-pane" in j:
+            return self.bare if (self.cleared or not self.typed) else self.trunc
+        return ""
 
 
 def _tails(sent):
@@ -252,6 +280,43 @@ class SendVerified(_Base):
                               logs=[], out=out)
         self.assertTrue(ok)
         self.assertFalse(out.get("delivered_unconfirmed"))
+
+
+class TruncatedTypeUndone617(unittest.TestCase):
+    def test_truncated_own_type_is_undone_never_left_in_box(self):
+        # #617 -- montalu1@subdev: a partial /goal type (a send-keys chunk
+        # interrupted) rendered a TRUNCATED prefix that _await_typed rejects.
+        # BEFORE this fix `_send_goal_verified` returned False and LEFT the
+        # truncated /goal fragment in the box -> the poisoned draft the next
+        # sweep can neither submit nor clear (the live 674-char stuck draft).
+        # The verify-fail branch MUST undo its own partial type; the box was
+        # verified bare before typing, so backspacing len(text) is safe.
+        text = "/goal STOP CONDITIONS " + ("x " * 400)   # long, wraps
+        trunc = ("● wip\n❯ /goal STOP CONDITIONS x x python3 ~\n"
+                 "  ctx ███░  caveman:lite\n")
+        fake = _TruncTypeFake(GOAL_IDLE_CAP, trunc)
+        logs = []
+        ok = goal._send_goal_verified(PID, text, fake, captured=GOAL_IDLE_CAP,
+                                      sleep_fn=lambda *_a: None, logs=logs)
+        self.assertFalse(ok)
+        self.assertIn("BSpace", _tails(fake.sent))          # the undo happened
+        self.assertTrue(any("undone" in ln for ln in logs), logs)
+
+    def test_confirmed_type_is_never_undone(self):
+        # Control: a type that DOES land + submits must NOT trigger the undo.
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        tp = Path(d.name) / "s.jsonl"
+        tp.write_text(json.dumps(
+            {"type": "assistant", "message": {"content": "x"}}) + "\n")
+        tmux = DeliverGoalFakeTmux([(PID, "claude", "/x", "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   transcript_path=tp)
+        ok = goal._send_goal_verified(PID, "/goal STOP CONDITIONS ok", tmux,
+                                      captured=GOAL_IDLE_CAP,
+                                      sleep_fn=lambda *_a: None, logs=[])
+        self.assertTrue(ok)
+        self.assertNotIn("BSpace", _tails(tmux.sent))
 
 
 if __name__ == "__main__":
