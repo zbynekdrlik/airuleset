@@ -259,7 +259,7 @@ def evaluate(now, sid, cwd, projects_dir, state, backlog_fetch, goal_mark_entry,
 # `goal.goal_lane_occupancy_nudge` consumes them through thin module-level
 # helpers and never grows, and every branch is mutation-lockable in isolation.
 
-LaneWorkingNoTasks = namedtuple("LaneWorkingNoTasks", "defer streak log")
+LaneWorkingNoTasks = namedtuple("LaneWorkingNoTasks", "defer streak log escalated")
 
 
 def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
@@ -276,7 +276,7 @@ def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
     any non-stale lane, the #565 evidence predicate, NEVER the wedged-excluding
     count).
 
-    Verdict (`LaneWorkingNoTasks(defer, streak, log)`):
+    Verdict (`LaneWorkingNoTasks(defer, streak, log, escalated)`):
 
       * NOT applicable (``marker != "⏳"`` or ``render_waiters > 0``): the branch
         does not fire → ``defer=False``, streak RESET (0), ``log=None`` (silent —
@@ -293,22 +293,24 @@ def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
         keystrokes) — never an unbounded identical skip loop (the #566 livelock
         class). Both defer and escalate journal a greppable ``log``.
 
+    ``escalated`` is True ONLY in the escalate branch -- #611: the empty-lane
+    caller uses it to BYPASS its 15-min idle floor, never on any other verdict.
     ``streak`` is the caller's NEW persisted defer streak.
     """
     if marker != "⏳" or render_waiters > 0:
-        return LaneWorkingNoTasks(False, 0, None)      # branch does not fire
+        return LaneWorkingNoTasks(False, 0, None, False)  # branch does not fire
     if structured_live:
-        return LaneWorkingNoTasks(False, 0, None)      # lanes live -> proceed
+        return LaneWorkingNoTasks(False, 0, None, False)  # lanes live -> proceed
     streak = defer_streak + 1
     if backlog > 0 and streak >= max_defers:
         return LaneWorkingNoTasks(
             False, streak,
             "working-no-tasks ESCALATE (%d defers, backlog>0, 0 structured live "
-            "lanes -- proceeding to the gated nudge path)" % streak)
+            "lanes -- proceeding to the gated nudge path)" % streak, True)
     return LaneWorkingNoTasks(
         True, streak,
         "skip:working-no-tasks (⏳ marker, 0 structured live lanes, defer %d/%d)"
-        % (streak, max_defers))
+        % (streak, max_defers), False)
 
 
 LaneLowMemSurface = namedtuple("LaneLowMemSurface", "surface streak surfaced")
