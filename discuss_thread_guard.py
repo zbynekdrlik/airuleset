@@ -224,6 +224,17 @@ def evaluate(content, user):
 #     carries the signature example, so it passes; a stream rarely edits such a
 #     doc, and the fleet's unmeasurable->over-block direction is the safe one for
 #     a quality gate.
+#   * a RUNTIME-built signature (`f"ZbynekAI {n}"`, `"ZbynekAI "+str(n)`, a `%d`)
+#     is OVER-blocked -- the signature literal is not visible in the tool-call
+#     content. This is the fail-safe (over-block) direction, off the recipe (which
+#     mandates a literal `ZbynekAI <N>` last line), and carries the
+#     `airuleset:discuss-sig-ok` bypass.
+#   * because the check is "a compliant `ZbynekAI <N>` appears ANYWHERE in the
+#     content", a MULTI-OP single tool-call can mask an unsigned post: two
+#     message_posts where only the first is signed, or a signed create/other op
+#     bundled with an unsigned post, both slip. The realistic single-post shape
+#     the recipe + incident produce is unaffected; this is the same
+#     unmeasurable->allow bias the create gate's `any`-semantics residual takes.
 # --------------------------------------------------------------------------- #
 
 SIGNATURE_WORD = "ZbynekAI"

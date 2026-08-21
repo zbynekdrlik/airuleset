@@ -504,6 +504,16 @@ class TestIsChannelMessagePost(TestCase):
         self.assertFalse(g.is_channel_message_post(
             'execute_kw(d,u,k,"sale.order","message_post",[oid],{"body":"log"})'))
 
+    def test_jsonrpc_message_post_on_other_model_not_detected(self):
+        # review B: the JSON-RPC branch requires BOTH the discuss.channel model
+        # AND the message_post method -- a message_post on a NON-discuss model
+        # (discuss.channel appearing only in a body string, never as "model")
+        # must NOT fire. Pins the `_JSONRPC_MODEL_RE and` requirement (a mutant
+        # dropping it survived every other test).
+        self.assertFalse(g.is_channel_message_post(
+            '{"model":"sale.order","method":"message_post",'
+            '"args":[[oid],{"body":"posted about the discuss.channel feature"}]}'))
+
 
 class TestSignaturePresent(TestCase):
     def test_exact_signature_present(self):
