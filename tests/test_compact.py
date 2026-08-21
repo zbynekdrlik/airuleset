@@ -1950,6 +1950,97 @@ class TestBgBashDetector599(unittest.TestCase):
                              "bounded vs full disagree for %r" % marker)
 
 
+class TestBgBashKillDetector604(unittest.TestCase):
+    """#604 — a bg-bash job that was TaskStop-KILLED (or whose launch was
+    hook-BLOCKED and never started) is TERMINAL, not live. The #599 detector
+    keyed liveness on the assistant `run_in_background` tool_use (the REQUEST
+    to launch) and read either case live forever (until it scrolled out of the
+    tight window). The fix re-keys on the launch-CONFIRMING tool_result
+    (`toolUseResult.backgroundTaskId`) + a confirmed TaskStop kill. Fixtures
+    are the REAL shapes measured live on sid 2d02a127 (push43 / b0tkvepdj)."""
+
+    def _assistant_bg_toolu(self, toolu):
+        # the assistant `run_in_background:true` Bash tool_use — the REQUEST to
+        # launch (what the OLD #599 signal keyed on). Present in EVERY real
+        # transcript, so a #604 RED fixture keeps it (the old code reads it
+        # live) while the new code ignores it in favour of the tool_result.
+        return {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": toolu, "name": "Bash",
+             "input": {"command": "x", "run_in_background": True}}]}}
+
+    def _bg_launch_result(self, toolu, bgid):
+        # the tool_result CC writes when a bg job ACTUALLY launches — a
+        # structured `toolUseResult.backgroundTaskId` (proof of launch) +
+        # the tool_result block's tool_use_id (for completion matching).
+        return {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": toolu, "is_error": False,
+             "content": "Command running in background with ID: %s. Output "
+                        "is being written to: /tmp/x/%s.output." % (bgid, bgid)}]},
+            "toolUseResult": {"stdout": "", "stderr": "", "interrupted": False,
+                              "isImage": False, "noOutputExpected": False,
+                              "backgroundTaskId": bgid}}
+
+    def _taskstop(self, toolu, bgid):
+        # the assistant TaskStop tool_use + its CONFIRMED tool_result
+        # (`toolUseResult.task_type=="local_bash"` + `task_id`), the real
+        # b0tkvepdj kill shape — carries NO `<task-notification>`.
+        stop = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": toolu, "name": "TaskStop",
+             "input": {"task_id": bgid}}]}}
+        res = {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": toolu,
+             "content": '{"message":"Successfully stopped task: %s","task_id":'
+                        '"%s","task_type":"local_bash"}' % (bgid, bgid)}]},
+            "toolUseResult": {"message": "Successfully stopped task: %s" % bgid,
+                              "task_id": bgid, "task_type": "local_bash",
+                              "command": "python3 airuleset.py push"}}
+        return [stop, res]
+
+    def _hook_blocked_result(self, toolu):
+        # a run_in_background Bash tool_use BLOCKED by a PreToolUse hook — an
+        # error tool_result with NO backgroundTaskId, so nothing launched.
+        return {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": toolu, "is_error": True,
+             "content": "Error: PreToolUse:Bash hook error: BLOCKED"}]},
+            "toolUseResult": "Error: PreToolUse:Bash hook error: BLOCKED"}
+
+    def test_taskstop_killed_bg_bash_is_not_live(self):
+        # the REAL b0tkvepdj shape: launched, then a confirmed TaskStop kill,
+        # no task-notification. RED against the old assistant-tool_use signal.
+        entries = ([self._assistant_bg_toolu("toolu_k"),
+                    self._bg_launch_result("toolu_k", "bgk")]
+                   + self._taskstop("toolu_ts", "bgk"))
+        self.assertFalse(wd.session_live_bg_bash(entries))
+
+    def test_hook_blocked_start_is_not_live(self):
+        # a hook-BLOCKED launch (error result, no backgroundTaskId) never ran.
+        # RED against the old signal (which read the assistant tool_use live).
+        entries = [self._assistant_bg_toolu("toolu_b"),
+                   self._hook_blocked_result("toolu_b")]
+        self.assertFalse(wd.session_live_bg_bash(entries))
+
+    def test_launched_bg_bash_without_terminal_is_live(self):
+        # CONTROL: a genuinely-launched bg job (structured backgroundTaskId)
+        # with NO completion and NO kill still vetoes — the fix must not
+        # over-fix and orphan a real running job (the #29193 danger direction).
+        entries = [self._assistant_bg_toolu("toolu_l"),
+                   self._bg_launch_result("toolu_l", "bgl")]
+        self.assertTrue(wd.session_live_bg_bash(entries))
+
+    def test_killed_one_among_a_live_one_is_still_live(self):
+        # a killed job does not clear a DIFFERENT still-live launched job.
+        entries = ([self._assistant_bg_toolu("toolu_k"),
+                    self._bg_launch_result("toolu_k", "bgk")]
+                   + self._taskstop("toolu_ts", "bgk")
+                   + [self._assistant_bg_toolu("toolu_l"),
+                      self._bg_launch_result("toolu_l", "bgl")])
+        self.assertTrue(wd.session_live_bg_bash(entries))
+
+    def test_taskstop_for_an_unknown_task_never_raises(self):
+        # a TaskStop whose bgid has no launch in the window is a harmless no-op.
+        self.assertFalse(wd.session_live_bg_bash(self._taskstop("toolu_ts", "bgX")))
+
+
 class TestCompactBgBashVeto599(unittest.TestCase):
     """#599 — deliver_compact's bg-bash veto (point 5b) and the boundary
     STANDING-CLAIM delivery (point 5a)."""
@@ -2014,6 +2105,42 @@ class TestCompactBgBashVeto599(unittest.TestCase):
             self.SID, self.CWD, origin="self-callback", run=tmux,
             projects_dir=proj, delivered_path=self.delp, now=now,
             request_ts=recorded_ts)
+        self.assertEqual(word, "sent")
+
+    def test_taskstop_killed_bg_bash_delivers(self):
+        # #604: a session whose bg job was TaskStop-KILLED is NOT live, so the
+        # recorded boundary request delivers (no false skip:live-bg-bash veto
+        # blocking compaction with zero running processes). RED against the old
+        # assistant-tool_use signal, which read the killed job live forever.
+        proj = self._dir()
+        d = Path(proj) / _encode(self.CWD)
+        d.mkdir(parents=True, exist_ok=True)
+        entries = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_k", "name": "Bash",
+                 "input": {"command": "airuleset.py push",
+                           "run_in_background": True}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_k",
+                 "is_error": False,
+                 "content": "Command running in background with ID: bgk."}]},
+             "toolUseResult": {"backgroundTaskId": "bgk"}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_ts", "name": "TaskStop",
+                 "input": {"task_id": "bgk"}}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_ts",
+                 "content": '{"message":"Successfully stopped task: bgk"}'}]},
+             "toolUseResult": {"message": "Successfully stopped task: bgk",
+                               "task_id": "bgk", "task_type": "local_bash"}},
+        ]
+        (d / (self.SID + ".jsonl")).write_text(
+            "\n".join(json.dumps(e) for e in entries) + "\n")
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")],
+                                      CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
         self.assertEqual(word, "sent")
 
     def test_env_tunable_window_never_disables_the_veto(self):
