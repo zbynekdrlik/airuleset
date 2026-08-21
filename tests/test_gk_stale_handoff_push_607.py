@@ -105,10 +105,14 @@ class StaleHandoffPushDecider(unittest.TestCase):
         self.assertNotIn("7", g.get("stale_push_seen", {}).get("demo", {}))
 
     def test_dry_run_posts_nothing_and_mutates_no_state(self):
-        logs, pushed, calls, g = self._push({7: SUN_UPD}, dry_run=True)
+        # #516: a dry_run sweep must touch NO persistent state — run_once's
+        # save_state persists `g` unconditionally, so `g` must be untouched
+        # (not even an empty `stale_push_seen` container). Review-lock (#607 R2).
+        g = {}
+        logs, pushed, calls, _g = self._push({7: SUN_UPD}, g=g, dry_run=True)
         self.assertEqual(calls, [])
         self.assertEqual(pushed, [])
-        self.assertNotIn("demo", g.get("stale_push_seen", {}))
+        self.assertEqual(g, {}, "dry_run mutated g (persisted by save_state)")
 
 
 class Constants(unittest.TestCase):

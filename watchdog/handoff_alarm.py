@@ -176,10 +176,12 @@ def _stale_handoff_push(name, root, handoffs, g, now, comment_fn,
     seen_all = g.get("stale_push_seen")
     if not isinstance(seen_all, dict):
         seen_all = {}
-    g["stale_push_seen"] = seen_all
-    seen = seen_all.get(name)
-    if not isinstance(seen, dict):
-        seen = {}
+    existing = seen_all.get(name)
+    # Work on a COPY so a `dry_run` sweep mutates NO persistent state (#516):
+    # `run_once`'s save_state persists `g` unconditionally, so the container +
+    # this per-name map are written back into `g` ONLY in the non-dry_run branch
+    # below — a dry-run never touches `g` (nor the resolved-ticket prune).
+    seen = dict(existing) if isinstance(existing, dict) else {}
 
     live_nums, candidates = set(), []
     for n, upd in handoffs.items():
@@ -223,6 +225,7 @@ def _stale_handoff_push(name, root, handoffs, g, now, comment_fn,
         logs.append("gkstale-push %s #%d (durable comment posted)" % (name, num))
 
     if not dry_run:
+        g["stale_push_seen"] = seen_all
         if seen:
             seen_all[name] = seen
         else:

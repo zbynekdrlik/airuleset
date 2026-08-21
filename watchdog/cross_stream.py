@@ -744,8 +744,11 @@ def _stale_handoff_session_nudge(state, pid, root, pushed, run, now,
                                  run, now, projects_dir, sleep_fn, logs):
         logs.append("gkstale-nudge %s %s" % (root, tick_str))
     else:
-        logs.append("gkstale-nudge-unverified %s %s (durable comment already "
-                    "posted; retry next sweep)" % (root, tick_str))
+        # No keystroke retry: the per-ticket 24h dedup holds next sweep so
+        # `pushed` will be empty and this nudge won't re-fire — the durable
+        # comment already posted IS the record (never a lost hand-off).
+        logs.append("gkstale-nudge-unverified %s %s (durable comment is the "
+                    "record; no keystroke retry)" % (root, tick_str))
     return logs
 
 
