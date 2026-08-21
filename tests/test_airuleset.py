@@ -5107,7 +5107,7 @@ class TestTmuxHistoryLimit(TestCase):
         # running server still carrying the old, base-session-killing `keep-last`
         # back to tmux's default `off` on the next install; verified live that
         # `-gu` on a keep-last server -> off, idempotent. #613: the 3rd live-apply
-        # is now the SIBLING self-heal `set-option -gu aggressive-resize` --
+        # is now the SIBLING self-heal `set-option -gwu aggressive-resize` --
         # reverting the stale `aggressive-resize on` #584 live-set globally (the
         # Ctrl+B W blackening) back to tmux's default `off`, verified live on
         # 3.7b. Now 1 probe + 9 live = 10. `window-size` is STILL never
@@ -5119,7 +5119,7 @@ class TestTmuxHistoryLimit(TestCase):
         self.assertEqual(calls[0], ["tmux", "-V"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "history-limit", "50000"])
         self.assertEqual(calls[2], ["tmux", "set-option", "-gu", "destroy-unattached"])
-        self.assertEqual(calls[3], ["tmux", "set-option", "-gu", "aggressive-resize"])
+        self.assertEqual(calls[3], ["tmux", "set-option", "-gwu", "aggressive-resize"])
         self.assertEqual(calls[4], [
             "tmux", "bind-key", "-n", "S-PageUp", "if", "-F",
             "#{==:#{pane_current_command},claude}",
@@ -5138,7 +5138,7 @@ class TestTmuxHistoryLimit(TestCase):
         # ones from being attempted. #586: call 1 is now the version probe
         # (`tmux -V`); call 3 (destroy-unattached, the 2nd live-apply) raises,
         # and the remaining live-apply calls must still run -> 10 total
-        # (#613 added the aggressive-resize `-gu` self-heal as the 4th call).
+        # (#613 added the aggressive-resize `-gwu` self-heal as the 4th call).
         p = self._tmp()
         calls = []
 
@@ -5370,9 +5370,10 @@ class TestTmuxAggressiveResizeSelfHeal(TestCase):
     server + ttyd + headless Chrome).
 
     Fix: extend the existing live-apply self-heal in apply_tmux_history_limit to
-    UNSET the global (`set-option -gu aggressive-resize`) on any running server,
+    UNSET the global (`set-option -gwu aggressive-resize`) on any running server,
     reverting it to tmux's default `off` -- the SAME self-heal shape and safety
-    class as #591's `-gu destroy-unattached`. Verified live on tmux 3.7b: `-gu`
+    class as #591's `-gu destroy-unattached` (`-gwu` is the window-option unset;
+    aggressive-resize is a window option). Verified live on tmux 3.7b: `-gwu`
     on an `aggressive-resize on` server -> off, idempotent, server unharmed (it
     is a plain window option, not window-size, so it carries none of window-
     size's #236 snap-resize / #241 3.4-crash hazard). window-size stays
@@ -5395,13 +5396,14 @@ class TestTmuxAggressiveResizeSelfHeal(TestCase):
 
     def test_live_apply_UNSETS_the_stale_global_aggressive_resize(self):
         # #613: the live-apply self-heals a running server still carrying
-        # #584's `aggressive-resize on` by UNSETTING the global (`-gu`),
-        # reverting it to tmux's default `off` -- verified live: `-gu` on an
-        # `aggressive-resize on` server -> off, idempotent. It never SETS `on`.
+        # #584's `aggressive-resize on` by UNSETTING the global (`-gwu`, the
+        # window-option unset), reverting it to tmux's default `off` -- verified
+        # live: `-gwu` on an `aggressive-resize on` server -> off, idempotent.
+        # It never SETS `on`.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertIn(["tmux", "set-option", "-gu", "aggressive-resize"], calls)
+        self.assertIn(["tmux", "set-option", "-gwu", "aggressive-resize"], calls)
         self.assertNotIn(
             ["tmux", "set-option", "-gw", "aggressive-resize", "on"], calls)
         self.assertNotIn(
@@ -5415,7 +5417,7 @@ class TestTmuxAggressiveResizeSelfHeal(TestCase):
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
         self.assertEqual(calls[2], ["tmux", "set-option", "-gu", "destroy-unattached"])
-        self.assertEqual(calls[3], ["tmux", "set-option", "-gu", "aggressive-resize"])
+        self.assertEqual(calls[3], ["tmux", "set-option", "-gwu", "aggressive-resize"])
 
 
 class TestTmuxWindowSizeRemoved(TestCase):
