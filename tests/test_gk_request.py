@@ -845,6 +845,62 @@ class TestStaleHandoffAlarm(unittest.TestCase):
                          "backoff clock")
 
 
+class TestStaleHandoffPush607Wiring(unittest.TestCase):
+    """#607 — the 24h-push kontrakt wired into job 11: a >24h-working stale
+    hand-off gets a durable comment (via the injected `push_apply` seam) + a
+    gk-session nudge on an idle supervisor pane. Uses a FIXED mid-week `now` so
+    the weekend-aware window is deterministic (the shared `working_time` helper)."""
+
+    @staticmethod
+    def _ts(y, mo, d, h=0):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime(y, mo, d, h,
+                        tzinfo=ZoneInfo("Europe/Bratislava")).timestamp()
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.root = str(Path(tmp.name) / "devel" / "demo")
+        Path(self.root).mkdir(parents=True)
+        seed_repo_cache(self.home, self.root, "demo")
+        self.now = self._ts(2026, 8, 19, 12)          # Wednesday noon
+        self.stale_upd = int(self._ts(2026, 8, 16, 12))   # prior Sunday (~60 wh)
+        self.comments = []
+
+    def _sweep(self, fetched, state, panes=None, captured=IDLE):
+        tmux = FakeTmux(panes if panes is not None else [], captured)
+
+        def push_apply(root, num, name, home, dry_run):
+            self.comments.append((root, num, name))
+            return True
+        return wd.gk_request_backstop(
+            self.now, tmux, state, lambda *a, **k: "sent", home=self.home,
+            gh_fetch=lambda root: fetched, user="gatekeeper",
+            push_apply=push_apply, persist=lambda: None), tmux
+
+    def test_stale_handoff_posts_durable_comment(self):
+        logs, _t = self._sweep(
+            {"tickets": [], "handoffs": {7: self.stale_upd}}, {})
+        self.assertIn((self.root, 7, "demo"), self.comments)
+        self.assertTrue(any("gkstale-push" in ln and "#7" in ln for ln in logs),
+                        logs)
+
+    def test_fresh_handoff_gets_no_push_comment(self):
+        fresh = int(self.now - 12 * 3600)
+        logs, _t = self._sweep({"tickets": [], "handoffs": {7: fresh}}, {})
+        self.assertEqual(self.comments, [])
+
+    def test_idle_supervisor_pane_gets_a_session_nudge(self):
+        logs, tmux = self._sweep(
+            {"tickets": [], "handoffs": {7: self.stale_upd}}, {},
+            panes=[(1, self.root)], captured=IDLE)
+        self.assertIn((self.root, 7, "demo"), self.comments)
+        # the durable comment posted AND a session nudge fired into the idle pane
+        self.assertTrue(any("gkstale-nudge" in ln for ln in logs), logs)
+
+
 class TestMachinePrefixes(unittest.TestCase):
     def test_gkreq_nudge_is_a_machine_prompt(self):
         self.assertTrue(any(

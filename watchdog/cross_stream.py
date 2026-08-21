@@ -691,10 +691,89 @@ def _fetch_gkreq_tickets(root, home=None):
     return {"tickets": sorted(nums), "handoffs": handoffs}
 
 
+def _apply_stale_handoff_comment(root, num, name, home=None, dry_run=False):
+    """#607 — post the durable "gk, vieš o tom?" freshness comment on ONE stale
+    hand-off (mirrors `_apply_selfservice_bounce`'s applier shape). Returns True
+    iff the comment posted (rc 0); a network/gh failure returns False so the
+    caller's `_stale_handoff_push` leaves the dedup untouched and retries. Never
+    raises. `dry_run` posts nothing and returns True (the caller under dry_run
+    never calls this at all — the flag is belt-and-suspenders)."""
+    if dry_run:
+        return True
+    import subprocess
+    env = _gh_env(home)
+    body = watchdog.GK_STALE_PUSH_COMMENT
+    try:
+        c = subprocess.run(["gh", "issue", "comment", str(num), "--body", body],
+                           cwd=root, env=env, capture_output=True, text=True,
+                           timeout=15)
+    except Exception:
+        return False
+    return c is not None and c.returncode == 0
+
+
+def _stale_handoff_session_nudge(state, pid, root, pushed, run, now,
+                                 projects_dir, sleep_fn, dry_run):
+    """#607 — fire ONE gk-session nudge naming the freshly-pushed stale hand-offs
+    `pushed`, REUSING the existing job-11 idle-pane keystroke channel
+    (`_send_bare_nudge_verified` — the SAME transcript-proof send the
+    needs-gatekeeper nudge uses, NEVER a new keystroke path). Only when a
+    supervisor pane is at TRUE REST (`_safe_to_bounce_nudge` + a bare idle
+    prompt); a busy / armed / drafted / absent pane gets NOTHING — the durable
+    comment `_stale_handoff_push` already posted is the record either way.
+    Returns log lines; never raises a keystroke into a working pane."""
+    logs = []
+    if not pushed or not pid:
+        return logs
+    tick_str = " ".join("#%d" % n for n in sorted(pushed))
+    if dry_run:
+        logs.append("gkstale-nudge %s %s (dry-run)" % (root, tick_str))
+        return logs
+    captured = watchdog.capture_pane(pid, run)
+    if watchdog.pane_in_mode(pid, run) \
+            or not _safe_to_bounce_nudge(captured, root, projects_dir):
+        logs.append("gkstale-nudge-skip %s %s (pane busy/unsafe — durable "
+                    "comment already posted)" % (root, tick_str))
+        return logs
+    if not watchdog.pane_at_idle_prompt(captured):
+        logs.append("gkstale-nudge-skip %s %s (draft on pane — durable comment "
+                    "already posted)" % (root, tick_str))
+        return logs
+    if _send_bare_nudge_verified(state, pid, root,
+                                 watchdog.GK_STALE_PUSH_NUDGE % tick_str,
+                                 run, now, projects_dir, sleep_fn, logs):
+        logs.append("gkstale-nudge %s %s" % (root, tick_str))
+    else:
+        logs.append("gkstale-nudge-unverified %s %s (durable comment already "
+                    "posted; retry next sweep)" % (root, tick_str))
+    return logs
+
+
+def _stale_handoff_push_step(state, pid, name, root, handoffs, g, now,
+                             push_apply, run, projects_dir, sleep_fn, home,
+                             dry_run, persist, schedule):
+    """#607 — the 24h-push kontrakt step of job 11 (one call from
+    `gk_request_backstop`, mirroring the `_stale_handoff_alarm` step): post a
+    durable "gk, vieš o tom?" comment on every >24h-working stale hand-off
+    (`_stale_handoff_push`, comment + per-ticket dedup) and, for the freshly
+    pushed tickets, fire ONE gk-session nudge on an idle supervisor pane
+    (`_stale_handoff_session_nudge`, reusing the existing keystroke channel).
+    Returns log lines. Kept a separate helper so the capped `gk_request_backstop`
+    grows by ONE call, not the whole block (#509/#530)."""
+    plogs, pushed = watchdog._stale_handoff_push(
+        name, root, handoffs, g, now,
+        lambda num, _r=root, _n=name: push_apply(_r, num, _n, home, dry_run),
+        dry_run=dry_run, persist=persist, schedule=schedule)
+    plogs += _stale_handoff_session_nudge(
+        state, pid, root, pushed, run, now, projects_dir, sleep_fn, dry_run)
+    return plogs
+
+
 def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
                         gh_fetch=None, interval=None,
                         schedule=None, persist=None,
-                        projects_dir=None, user=None, sleep_fn=None):
+                        projects_dir=None, user=None, sleep_fn=None,
+                        push_apply=None):
     """Job 11 — see the section comment. Mutates state['gkreq']; `persist` is
     invoked BEFORE any keystroke/ping leaves the process (the job-8 lesson:
     a TimeoutStartSec kill after the nudge but before save left dedup with no
@@ -726,6 +805,7 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
     state["gkreq"] = g
     fetch = gh_fetch or (lambda root: _fetch_gkreq_tickets(root, home))
     persist = persist or (lambda: None)
+    push_apply = push_apply or _apply_stale_handoff_comment   # #607 seam
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
     persist()                                  # cadence stamp survives a kill
     logs = []
@@ -786,6 +866,9 @@ def gk_request_backstop(now, run, state, send_fn, home=None, dry_run=False,
             stale_handled.add(name)
             logs += watchdog._stale_handoff_alarm(name, root, handoffs, g, now,
                                          send_fn, dry_run, persist, schedule)
+            logs += _stale_handoff_push_step(          # #607 24h-push kontrakt
+                state, pid, name, root, handoffs, g, now, push_apply, run,
+                projects_dir, sleep_fn, home, dry_run, persist, schedule)
         if tickets is None:
             continue                           # gh error → keep prior state
         if not tickets:

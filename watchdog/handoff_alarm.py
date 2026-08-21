@@ -11,7 +11,13 @@ must not grow):
                              accepting both the #399 dict shape and the legacy
                              bare-list contract.
   ``_stale_handoff_alarm`` -- the stale ready-for-review / needs-gatekeeper
-                             hand-off alarm step of job 11.
+                             hand-off alarm step of job 11 (#399, 6h owner ping).
+  ``_stale_handoff_push``  -- the 24h-push kontrakt (#607): a durable "does the
+                             gk even know?" comment on a >24h-working stale
+                             hand-off, weekend-aware, per-ticket ~daily dedup;
+                             returns the freshly-pushed numbers for the caller's
+                             gk-session nudge. Reaches `watchdog.GK_STALE_PUSH_S`
+                             / `watchdog._gkreq_reping_due` call-time (C3).
 
 Every name here is re-exported into the ``watchdog`` namespace by the
 positional facade import in ``__init__.py``, so all existing ``watchdog.<name>``
@@ -137,3 +143,90 @@ def _stale_handoff_alarm(name, root, handoffs, g, now, send_fn, dry_run,
                      dry_run=dry_run, project=stream_qualified(name))
     logs.append("gkstale-ping %s %s (send=%r)" % (name, tick_str, result))
     return logs
+
+
+def _stale_handoff_push(name, root, handoffs, g, now, comment_fn,
+                        dry_run=False, persist=None,
+                        threshold_s=None, schedule=GKREQ_REPING_SCHEDULE_S):
+    """#607 — the 24h-push kontrakt: given the fetched `handoffs` map ({num:
+    updated_epoch}) for ONE target, post a DURABLE "gk, vieš o tom?" comment on
+    every hand-off untouched for >`threshold_s` (default `GK_STALE_PUSH_S`, 24h)
+    of WORKING time — Sat/Sun in Europe/Bratislava EXCLUDED
+    (`working_time.working_seconds_between`, the SAME shared helper the CLI
+    `stale!` tag uses, so the two never drift). Returns `(logs, pushed)` — the
+    freshly-commented ticket numbers, which the caller uses to fire ONE gk-session
+    nudge (the durable comment is the primary record and fires even with no
+    session running — exactly the "does the gk even know?" case).
+
+    Per-TICKET dedup in `g["stale_push_seen"][name]` ({str(num): {ts,
+    reping_count}}) via the SAME staged 24h/3d/7d `_gkreq_reping_due` backoff the
+    sibling `_stale_handoff_alarm` uses — so one stale ticket is not re-commented
+    every 30-min sweep (the dispatch's "~daily cadence per ticket"). Fail-safe
+    biases to SILENCE (#539/#570): an unmeasurable `updated` (None / non-numeric)
+    is skipped; a `comment_fn` that returns falsy / raises does NOT advance the
+    dedup, so a failed post retries next sweep (the #551 comment-latch tri-state
+    — latch on the durable comment, retry on failure). A ticket that leaves the
+    open hand-off set is pruned from the dedup. `dry_run` posts nothing and
+    mutates NO persistent state (#516). `persist()` is called after a real push,
+    like the sibling job-11 flows."""
+    import working_time
+    logs = []
+    threshold_s = watchdog.GK_STALE_PUSH_S if threshold_s is None else threshold_s
+    persist = persist or (lambda: None)
+    seen_all = g.get("stale_push_seen")
+    if not isinstance(seen_all, dict):
+        seen_all = {}
+    g["stale_push_seen"] = seen_all
+    seen = seen_all.get(name)
+    if not isinstance(seen, dict):
+        seen = {}
+
+    live_nums, candidates = set(), []
+    for n, upd in handoffs.items():
+        if isinstance(upd, bool) or not isinstance(upd, (int, float)):
+            continue                      # unmeasurable → never push on a guess
+        try:
+            num = int(n)
+        except (TypeError, ValueError):
+            continue
+        live_nums.add(num)
+        if working_time.working_seconds_between(upd, now) > threshold_s:
+            candidates.append(num)
+
+    # prune dedup entries for tickets no longer an open hand-off (resolved)
+    for k in [k for k in list(seen)
+              if not (str(k).isdigit() and int(k) in live_nums)]:
+        seen.pop(k, None)
+
+    pushed = []
+    for num in sorted(candidates):
+        key = str(num)
+        prev = seen.get(key)
+        due, count = ((True, 1) if not isinstance(prev, dict)
+                      else watchdog._gkreq_reping_due(prev, now, schedule))
+        if not due:
+            continue
+        if dry_run:
+            logs.append("gkstale-push %s #%d -> WOULD-COMMENT (dry-run)"
+                        % (name, num))
+            continue
+        try:
+            ok = bool(comment_fn(num))
+        except Exception:
+            ok = False
+        if not ok:
+            logs.append("gkstale-push-failed %s #%d (comment did not post; "
+                        "dedup unchanged, retry next sweep)" % (name, num))
+            continue
+        seen[key] = {"ts": int(now), "reping_count": count}
+        pushed.append(num)
+        logs.append("gkstale-push %s #%d (durable comment posted)" % (name, num))
+
+    if not dry_run:
+        if seen:
+            seen_all[name] = seen
+        else:
+            seen_all.pop(name, None)
+        if pushed:
+            persist()
+    return logs, pushed

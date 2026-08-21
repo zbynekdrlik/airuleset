@@ -1043,11 +1043,40 @@ STALE_HANDOFF_ALARM = (
     "pipeline pre `%(name)s` zrejme stojí — spusti /process-subdev alebo "
     "supervízorskú session v `%(root)s`.")
 
+# (#607) The 24h-push kontrakt (owner 2026-08-21): a hand-off untouched
+# (updatedAt) for this long — 24h of WORKING time, Sat/Sun in Europe/Bratislava
+# EXCLUDED (`working_time.working_seconds_between`) — gets a DURABLE ticket
+# COMMENT ("gk, vieš o tom?") + a gk-session nudge, so the gatekeeper KNOWS the
+# request is aging even when no owner is watching GitHub. Deliberately DISTINCT
+# from `GKREQ_STALE_HANDOFF_S` (6h): that fires ONE Discord alarm to the OWNER's
+# phone (detection-only, #399); this fires a durable comment + a session nudge to
+# the GATEKEEPER at the harder 24h-working contract — two orthogonal channels,
+# each with its own dedup namespace (`stale_seen` vs `stale_push_seen`).
+GK_STALE_PUSH_S = 24 * 3600
+
+# (#607) The durable "does the gk even know?" comment posted on a >24h-working
+# stale hand-off. Re-comment cadence is per-ticket 24h/3d/7d (GKREQ_REPING_SCHEDULE_S).
+GK_STALE_PUSH_COMMENT = (
+    "⚠️ **gk-freshness (#607): tento hand-off čaká na akciu gatekeepera už "
+    ">24h pracovných dní bez pohybu.**\n> Vieš o ňom? Sprac ho (review / merge / "
+    "unblock) alebo komentárom napíš, na čo čaká. Ak sa nič nezmení, pripomeniem "
+    "sa zas (watchdog job 11, staged 24h/3d/7d).")
+
+# (#607) The gk-session nudge naming the freshly-pushed stale hand-offs — reuses
+# the existing job-11 idle-pane keystroke channel, fired only when a supervisor
+# session is at true rest (the durable comment above is the record either way).
+GK_STALE_PUSH_NUDGE = (
+    "gk-freshness backstop (#607): hand-off tikety %s čakajú >24h pracovných dní "
+    "na akciu gatekeepera bez pohybu — otázka či o nich vieš. Sprac ich "
+    "(review/merge/unblock) alebo komentárom napíš na čo čakajú; na každom už je "
+    "durable pripomienka.")
+
 
 from watchdog.handoff_alarm import (  # noqa: E402
     _parse_gh_ts as _parse_gh_ts,
     _normalize_gkreq as _normalize_gkreq,
     _stale_handoff_alarm as _stale_handoff_alarm,
+    _stale_handoff_push as _stale_handoff_push,
 )
 
 
