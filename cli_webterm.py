@@ -42,6 +42,7 @@ import sys
 from pathlib import Path
 
 import cli_aliases  # #592: the shared fleet target-alias derivation (stdlib-only)
+import cli_webterm_profiles as profiles  # #612: doména -> session set + auth realm
 
 REPO_DIR = Path(__file__).resolve().parent
 CLAUDE_DIR = Path.home() / ".claude"
@@ -77,11 +78,20 @@ WEBTERM_DASH_DIR = CLAUDE_DIR / "webterm-dash"
 WEBTERM_DASH_INDEX = WEBTERM_DASH_DIR / "index.html"
 WEBTERM_LAUNCH_PATH = CLAUDE_DIR / "airuleset-webterm-ttyd.sh"
 WEBTERM_CRED_PATH = SECRETS_DIR / "webterm_credential"
+# #612: the david profile's OWN credential file — a SEPARATE auth realm, so a
+# david login can never authenticate the owner gateway and vice versa. Lives on
+# the subdev david gateway box; delivered to David via `secret show` (one-shot).
+WEBTERM_DAVID_CRED_PATH = SECRETS_DIR / "webterm_david_credential"
 WEBTERM_GATEWAY_MODULE = REPO_DIR / "cli_webterm_gateway.py"
 WEBTERM_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-ttyd.service"
 WEBTERM_SERVICE_TEMPLATE = REPO_DIR / "settings" / "webterm-ttyd.service.template"
 WEBTERM_GATEWAY_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-gateway.service"
 WEBTERM_GATEWAY_SERVICE_TEMPLATE = REPO_DIR / "settings" / "webterm-gateway.service.template"
+# #612: the DAVID developer gateway (subdev) provisioning — its paths, units and
+# the setup function — lives in cli_webterm_david.py (kept OUT of this module so
+# it stays under its size cap and the owner path is untouched). maybe_setup_webterm
+# dispatches to it by box profile. WEBTERM_DAVID_CRED_PATH stays here because the
+# core `_cred_path` (the per-profile auth realm) needs it.
 # #584: the #579 static-dashboard http.server unit is superseded by the gateway;
 # its stale copy is removed at install (kept as a constant only for that cleanup).
 WEBTERM_OLD_DASH_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-dash.service"
@@ -99,11 +109,30 @@ def _sanitize_id(name):
     return re.sub(r"[^a-z0-9]+", "-", (name or "").lower()).strip("-")
 
 
-def webterm_inventory():
-    """The session inventory: dev1 (localhost) + every `_deployable_hosts()`
-    entry. Per-entry `preferred` tmux group = the unix user for a stream account
-    (in AUTHORITY_BY_USER, the #264 whoami convention), else `zbynek` (owner
-    group). Read the fleet table via the airuleset facade (test-patchable)."""
+def _login_user(profile):
+    """The gateway login username for `profile` — the david realm is `david`,
+    the owner realm is `zbynek` (WEBTERM_LOGIN_USER). Used by the credential
+    generator + the go-live message."""
+    return "david" if profile == profiles.DAVID else WEBTERM_LOGIN_USER
+
+
+def _cred_path(profile):
+    """The credential file for `profile` — a SEPARATE realm per profile. Reads
+    the module globals at call time so tests can patch either path."""
+    return WEBTERM_DAVID_CRED_PATH if profile == profiles.DAVID else WEBTERM_CRED_PATH
+
+
+def webterm_inventory(profile=profiles.OWNER):
+    """The session inventory for `profile`. `david` -> the SCOPED david set
+    (david1..4 + codex-bridge) — self-contained in cli_webterm_profiles, so no
+    airuleset/fleet import is needed for it. `owner` (default) -> dev1
+    (localhost) + every `_deployable_hosts()` entry, byte-identical to the
+    pre-#612 single-tenant inventory. Per-entry `preferred` tmux group = the
+    unix user for a stream account (in AUTHORITY_BY_USER, the #264 whoami
+    convention), else `zbynek` (owner group). Read the fleet table via the
+    airuleset facade (test-patchable)."""
+    if profile == profiles.DAVID:
+        return profiles.david_inventory()
     import airuleset  # facade: AUTHORITY_BY_USER (patched by ~30 tests)
     from cli_remote import _deployable_hosts
     stream_users = set(airuleset.AUTHORITY_BY_USER)
@@ -277,7 +306,20 @@ def connect_main(argv, inventory_path=None):
     URL (`?arg=<id>`, via ttyd's `-a`). Validate it against the generated
     inventory (allowlist — an unknown id is refused, never interpolated into a
     shell), then exec. Returns a non-zero rc only on a refusal/error; on success
-    it execs and never returns."""
+    it execs and never returns.
+
+    #612: an optional leading `--inventory <path>` (which the profile launcher
+    prepends before ttyd appends the url-arg id) selects the PROFILE's scoped
+    inventory. This is the security boundary made physical: david's ttyd is
+    launched with david's inventory, so an owner-fleet id is simply not present
+    in the allowlist and is refused below — never a client choice."""
+    argv = list(argv)
+    if argv and argv[0] == "--inventory":
+        if len(argv) < 2 or not argv[1]:
+            sys.stderr.write("webterm: --inventory needs a path\r\n")
+            return 2
+        inventory_path = argv[1]
+        argv = argv[2:]
     if not argv:
         sys.stderr.write("webterm: no session id given\r\n")
         return 2
@@ -603,31 +645,33 @@ if (CFG.sessions.length) activate(0);   // land in the first terminal, not a lan
 # serve config (#579). Mirrors `setup_filedrop_service()`.
 # --------------------------------------------------------------------------- #
 
-def _ensure_credential():
-    """`zbynek:<random>` login credential, generated once, mode 600, in
-    ~/.secrets. Returns the `user:pass` string. #584: the GATEWAY's login form
-    validates against this (constant-time) — ttyd no longer sees it, so the
-    credential is NO LONGER exposed in `ps` (a security improvement over the
-    #579 `ttyd -c` residual). The owner reads the file ONCE to save it in
-    Bitwarden; thereafter Bitwarden autofills the form. The existing credential
-    (from the basic-auth era) is preserved on re-install."""
+def _ensure_credential(profile=profiles.OWNER):
+    """`<login>:<random>` login credential for `profile`, generated once, mode
+    600, in ~/.secrets. Returns the `user:pass` string. #584: the GATEWAY's
+    login form validates against this (constant-time) — ttyd no longer sees it,
+    so the credential is NO LONGER exposed in `ps`. #612: the login user + file
+    are per-profile (owner -> `zbynek` in webterm_credential; david -> `david`
+    in webterm_david_credential), so each profile is a SEPARATE auth realm. The
+    owner reads the file ONCE for Bitwarden; David's is delivered via
+    `secret show`. The existing credential is preserved on re-install."""
     import secrets
     SECRETS_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(SECRETS_DIR, 0o700)  # never world-traversable
-    if WEBTERM_CRED_PATH.exists():
-        cred = WEBTERM_CRED_PATH.read_text(encoding="utf-8").strip()
+    cred_path = _cred_path(profile)
+    if cred_path.exists():
+        cred = cred_path.read_text(encoding="utf-8").strip()
         if cred and ":" in cred:
             return cred
-    cred = "%s:%s" % (WEBTERM_LOGIN_USER, secrets.token_hex(16))
+    cred = "%s:%s" % (_login_user(profile), secrets.token_hex(16))
     # Atomically create mode-600 (O_EXCL over a fresh temp, then rename) so the
     # 128-bit shell credential is NEVER briefly world-readable under the umask.
-    tmp = WEBTERM_CRED_PATH.with_suffix(".tmp")
+    tmp = cred_path.with_suffix(".tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, (cred + "\n").encode("utf-8"))
     finally:
         os.close(fd)
-    os.replace(str(tmp), str(WEBTERM_CRED_PATH))
+    os.replace(str(tmp), str(cred_path))
     return cred
 
 
@@ -645,18 +689,28 @@ _LAUNCH_TEMPLATE = """#!/usr/bin/env bash
 # same-origin gateway (cli_webterm_gateway.py) is the tailnet entry + login.
 set -euo pipefail
 exec ttyd -p %(ttyd_port)d -i %(ttyd_bind)s -b %(base_path)s -a -W \\
-  python3 %(repo_dir)s/cli_webterm.py webterm-connect
+  python3 %(repo_dir)s/cli_webterm.py webterm-connect%(connect_args)s
 """
 
 
-def render_webterm_launch_script():
+def render_webterm_launch_script(inventory_path=None, ttyd_port=None):
     """The ttyd launcher: loopback bind + `-b /t` base path, no basic-auth, no
-    `-O` (#584 — the gateway is the sole entry + authenticator)."""
+    `-O` (#584 — the gateway is the sole entry + authenticator). #612: when
+    `inventory_path` is given (the david profile), it is passed as
+    `webterm-connect --inventory <path>` BEFORE ttyd appends the url-arg id, so
+    that ttyd child's allowlist is physically the profile's scoped inventory;
+    `ttyd_port` overrides the owner default (the david gateway box uses its own
+    loopback port). Both default to the owner values so the owner launcher is
+    byte-identical to pre-#612."""
+    connect_args = ""
+    if inventory_path:
+        connect_args = " --inventory " + shlex.quote(str(inventory_path))
     return _LAUNCH_TEMPLATE % {
-        "ttyd_port": WEBTERM_TTYD_PORT,
+        "ttyd_port": ttyd_port if ttyd_port is not None else WEBTERM_TTYD_PORT,
         "ttyd_bind": shlex.quote(WEBTERM_TTYD_BIND),
         "base_path": shlex.quote(WEBTERM_TTYD_BASE),
         "repo_dir": shlex.quote(str(REPO_DIR)),
+        "connect_args": connect_args,
     }
 
 
@@ -831,8 +885,17 @@ def setup_webterm_service(run=None):
 
 
 def maybe_setup_webterm():
-    """Install-time entry point (cmd_install). No-op off dev1."""
-    return setup_webterm_service()
+    """Install-time entry point (cmd_install). Dispatches by box profile: dev1
+    -> owner gateway (unchanged); subdev -> the david developer gateway
+    (cli_webterm_david, lazily imported to avoid a module-level cycle;
+    prerequisite-gated no-op until go-live setup); any other box -> no-op."""
+    prof = profiles.profile_for_host(os.uname().nodename)
+    if prof == profiles.OWNER:
+        return setup_webterm_service()
+    if prof == profiles.DAVID:
+        import cli_webterm_david
+        return cli_webterm_david.setup_webterm_david_service()
+    return False
 
 
 def main(argv):
