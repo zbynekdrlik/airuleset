@@ -6,8 +6,8 @@ implementing a text-sniffing/heuristic-boundary era of this machinery) and
 wholesale along with the claim system it watched). See `watchdog/compact.py`'s
 own module docstring for the full design; this file locks its CONTRACT:
 
-  - Exactly two origins ever create a request (`self-callback`,
-    `subagent-stop`) — nothing text-sniffed, nothing context-size-derived.
+  - The delivery machinery accepts two origins (`self-callback`, and
+    `subagent-stop` whose producer was retired #610) — nothing text-sniffed.
   - `deliver_compact()`'s five named conditions (pane idle/no-draft, no live
     background tasks, not on a ⏳/❓ marker or unresumed API error, a 30-min
     per-session cooldown, a hard non-refreshable age cap) are ALL
@@ -546,6 +546,17 @@ class TestDeliverCompact(unittest.TestCase):
 
     def test_idle_bare_pane_sends(self):
         word, tmux, _ = self._go(CB_IDLE_CAP)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_610_self_callback_boundary_still_delivers_at_idle(self):
+        # #610 RETIRED the subagent-stop RECORD channel (the worker-return hook
+        # no longer records — see test_compact_subagent_retire_610.py). The
+        # designed per-ticket compact cadence is now ENTIRELY the supervisor's
+        # own `## ✅ Work Complete` -> `self-callback` record. This regression
+        # guard proves that path still delivers at a zero-lane idle pane,
+        # unaffected by the retirement (delivery machinery is unchanged).
+        word, tmux, _ = self._go(CB_IDLE_CAP, origin="self-callback")
         self.assertEqual(word, "sent")
         self.assertIn("/compact", tmux.typed_texts())
 

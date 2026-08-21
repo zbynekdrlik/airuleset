@@ -11,21 +11,34 @@ suite. Every one of those pieces existed to compensate for the trigger
 being an IMPLICIT, re-derived boundary GUESS (context size, idle
 duration, then a Stop-hook text-sniff) rather than an EXPLICIT, deliberate
 callback from the one entity that actually knows a ticket boundary
-occurred. #400 (2026-08-12) proved there are exactly two such entities —
-the session itself (`compact-request --self`) and the SubagentStop event
-when an autopilot-worker returns — and retired the third (text-sniffing)
-outright. Once the boundary is always TRUSTWORTHY, the guessing-era
-scaffolding is dead weight: this file is what is left once it is removed.
+occurred. #400 (2026-08-12) proved there were exactly two such entities —
+the session itself (`compact-request --self`) and the SubagentStop event on
+an autopilot-worker return (that second producer was RETIRED by #610 — a
+worker return is not the supervisor's ticket boundary under the fleet model;
+see the INPUT note below, self-callback is now the sole producer) — and it
+retired the third (text-sniffing) outright. Once the boundary is always
+TRUSTWORTHY, the guessing-era scaffolding is dead weight: this file is what
+is left once it is removed.
 
 THE MODEL (owner's own words): "session zavolá, systém overí, napíše
 /compact, zaloguje" — the session calls, the system verifies, it types
 `/compact`, it logs the outcome. Concretely:
 
-  INPUT   — exactly two origins create a pending request (below):
-            `record_compact_request(..., origin="self-callback")` from
-            `airuleset.py compact-request --self`, and
-            `record_compact_request(..., origin="subagent-stop")` from
-            `hooks/notify-compact-subagent-boundary.sh`. Nothing else.
+  INPUT   — the `self-callback` origin is now the SOLE production producer of
+            a pending request: `record_compact_request(..., origin=
+            "self-callback")` from `airuleset.py compact-request --self` (and
+            the equivalent `--record --origin self-callback` fired by
+            `hooks/stop-check-prose-violations.sh` at a `## ✅ Work Complete`
+            report, issue 411's Stop-hook backstop). #610 RETIRED the
+            `subagent-stop` PRODUCER: `hooks/notify-compact-subagent-boundary.sh`
+            no longer records anything — under the FLEET model (issues 317/456)
+            a worker RETURN is not the SUPERVISOR's ticket boundary (the serial
+            integration is), so a per-return compact fired mid-flow (montalu6:
+            5 mid-flow compacts, 0 Work-Complete between them). The delivery
+            machinery below still RECOGNISES `subagent-stop` as a proven origin
+            (harmless — no producer emits it any more; the delivery tests use it
+            generically), so a re-enable is a one-line hook restore if the model
+            ever reverts to workers that merge + report their own tickets.
 
   DELIVERY — ONE function, `deliver_compact()`. It checks, in order:
             (a) the pane is idle, with no unsent draft and no open dialog;
@@ -176,9 +189,14 @@ def _save_compact_requests(d, path=None):
 
 
 def record_compact_request(session, cwd, now=None, path=None, origin=None):
-    """Record / SUPERSEDE the pending `/compact` request for `session` — called
-    ONLY by the two proven origins (`compact-request --self` /
-    `--record --origin subagent-stop`). Overwrites any earlier pending request
+    """Record / SUPERSEDE the pending `/compact` request for `session` — in
+    production called ONLY via the `self-callback` proven origin
+    (`compact-request --self` and the issue-411 `--record --origin
+    self-callback` Stop-hook backstop); the `subagent-stop` PRODUCER was retired
+    by #610 (a worker return is not the supervisor's ticket boundary under the
+    fleet model), though the function and the delivery machinery still accept
+    that origin generically (see the INPUT note in the module docstring).
+    Overwrites any earlier pending request
     for the SAME session, INCLUDING its `ts`: `ts` is set to `now` on EVERY
     record (the #599 SUPERSEDE rule, REVERSING #400's non-refreshable anchor).
     Dedup is 1-pending-per-session (the dict is keyed by session). `cwd` and
@@ -871,11 +889,11 @@ def deliver_compact(sid, cwd, origin=None, run=None, projects_dir=None,
     if request_ts is not None:
         age = _safe_age(now, request_ts)
         if age is not None and age > COMPACT_REQUEST_MAX_AGE_S:
-            # #523: name the ORIGIN on the discard record. A lapsed
-            # `subagent-stop` request is the BY-DESIGN #425 outcome — a
-            # `⏳` supervisor that never self-declared its own
-            # `## ✅ Work Complete` boundary, so veto (c) correctly refused
-            # it every sweep until this cap. Surfacing the origin here (the
+            # #523: name the ORIGIN on the discard record. Post-#610 the sole
+            # producer is `self-callback`, so a lapse now means a gone-quiet
+            # session (no new boundary in 30 min, #599 supersede); the retired
+            # `subagent-stop` producer is what used to lapse under the old
+            # #425 `⏳` veto. Surfacing the origin here (the
             # #486 "silent suppression -> explicit decision log" guardrail,
             # logging-only) turns "half my per-ticket compacts lapse" triage
             # into a read instead of a re-investigation, without touching any
@@ -1123,10 +1141,10 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
                 handled.add(sid)
         elif word == "expired":
             # #523: name the ORIGIN on the LAPSE journal line too (the
-            # `deliver_compact` sync-log record above already does). A
-            # `subagent-stop` LAPSE is the expected #425 by-design outcome on
-            # a saturated `⏳` supervisor, not a failure — the origin is what
-            # lets triage tell the two apart at a glance.
+            # `deliver_compact` sync-log record above already does). Post-#610
+            # the sole producer is `self-callback`; a lapse now means a
+            # gone-quiet session (no new boundary in 30 min, #599), not a
+            # failure — the origin is what lets triage tell the two apart.
             logs.append("LAPSE (compact-sweep) sid=%s origin=%s "
                         "(age > cap, discarded)" % (sid, origin or "-"))
         else:

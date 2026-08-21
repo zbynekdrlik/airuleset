@@ -29,16 +29,19 @@ set -euo pipefail
 # marker-hold grace) actually hold: none of them can protect a request that
 # should never have existed in the first place.
 #
-# The two remaining origins are UNCHANGED by this removal (their
-# implementation collapsed into `watchdog/compact.py` by #402, 2026-08-12
-# — the two ORIGINS themselves did not change):
+# The remaining origins are UNCHANGED by this removal (their implementation
+# collapsed into `watchdog/compact.py` by #402, 2026-08-12):
 #   - `compact-request --self` (a session's own mid-turn Bash tool call,
 #     `watchdog.compact.resolve_self_pane` + `deliver_compact`) — origin
-#     `self-callback`.
-#   - `notify-compact-subagent-boundary.sh` (the SubagentStop EVENT hook,
-#     gated on `agent_type == "autopilot-worker"`, reads
-#     `background_tasks` directly from the harness payload) — origin
-#     `subagent-stop`.
+#     `self-callback`; also fired via `--record --origin self-callback` by
+#     `stop-check-prose-violations.sh` at a `## ✅ Work Complete` report
+#     (issue 411's backstop). This is now the SOLE production `/compact`
+#     recorder.
+#   - `notify-compact-subagent-boundary.sh` (the SubagentStop EVENT hook)
+#     USED to record `--origin subagent-stop` per autopilot-worker return, but
+#     #610 RETIRED that channel — a worker return is not the SUPERVISOR's ticket
+#     boundary under the fleet model (issues 317/456). The hook still runs (the
+#     #486 G1 heartbeat + an explicit DECLINE log line) but records nothing.
 #
 # This file is KEPT (rather than deleted) and its Stop-hook registration
 # in settings/hooks.json is KEPT — per this repo's own established

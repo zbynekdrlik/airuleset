@@ -4342,10 +4342,10 @@ def cmd_compact_request(args):
     simply LEFT PENDING for the periodic sweep (job 14, ~60s cadence) to
     pick up — bounded, eventually, by the hard age cap.
 
-    `--record --session <sid> --cwd <cwd> --origin <origin>`: the
-    SubagentStop hook's entry point (`hooks/notify-compact-subagent-
-    boundary.sh`, `--origin subagent-stop`) — the SAME ONE synchronous
-    attempt via the SAME shared helper.
+    `--record --session <sid> --cwd <cwd> --origin <origin>`: the hook-side
+    entry point (SAME ONE synchronous attempt). In production only
+    `stop-check-prose-violations.sh` fires it (`--origin self-callback`); #610
+    retired the `subagent-stop` producer (still accepted generically).
 
     Prints the disposition word verbatim (`sent` / `expired` /
     `already-queued` / `cooldown` / `skip:<reason>` — `skip:no-session`
@@ -5360,16 +5360,16 @@ def main():
              "boundary (#39 krok 1c, collapsed by #402) — consumed by "
              "watchdog job 14 (watchdog.compact.compact_sweep)")
     p_creq.add_argument("--record", action="store_true",
-                        help="Record the request (called by the SubagentStop "
-                             "hook, --origin subagent-stop)")
+                        help="Record the request (fired by "
+                             "stop-check-prose-violations.sh; #610 retired the subagent-stop producer)")
     p_creq.add_argument("--session", default="", help="Session id (transcript stem)")
     p_creq.add_argument("--cwd", default="", help="Session cwd")
     p_creq.add_argument("--origin", default="",
                         help="What PROVED this is a ticket boundary. "
-                             "'subagent-stop' = an autopilot-worker concluded "
-                             "with zero other live tasks in the session's task "
-                             "registry. Required for --record; --self supplies "
-                             "'self-callback' itself.")
+                             "'self-callback' = the session's own Work-Complete "
+                             "boundary (sole production origin post-#610; the "
+                             "subagent-stop producer hook was retired). Required "
+                             "for --record; --self supplies 'self-callback'.")
     p_creq.add_argument("--self", action="store_true",
                         help="#225 -- explicit self-callback: resolve THIS "
                              "session's own pane via $TMUX_PANE, record the "

@@ -1768,9 +1768,10 @@ fi
 # (the live david@subdev incident this ticket was filed from). Firing
 # `--record` here — never `--self`, which resolves the pane via $TMUX_PANE
 # and has none inside a hook process — reuses the payload's OWN
-# session_id/cwd fields directly, exactly like the SubagentStop sibling
-# channel (notify-compact-subagent-boundary.sh) already does for a worker's
-# ticket boundary. `--origin self-callback` is the SAME proven-boundary
+# session_id/cwd fields directly (the same `--record` entry point the
+# SubagentStop sibling channel USED to fire for a worker's ticket boundary,
+# before #610 RETIRED that channel — so this `self-callback` boundary is now
+# the SOLE mechanical `/compact` recorder). `--origin self-callback` is the SAME proven-boundary
 # origin `--self` uses, so it flows through the exact same delivery path
 # (post-#599: the `⏳`-marker veto and its self-callback-only #425 exemption
 # were removed — a recorded boundary now delivers at the next safe moment, so
