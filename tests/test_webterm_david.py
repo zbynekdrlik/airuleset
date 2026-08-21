@@ -62,9 +62,12 @@ class TestDavidUnitRender(unittest.TestCase):
         self.assertIn(
             "Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:"
             "/usr/sbin:/usr/bin:/sbin:/bin", unit)
-        # The PATH directive sits INSIDE the [Service] block (after its header).
+        # The PATH directive sits INSIDE the [Service] block — after its header
+        # AND before the [Install] section, so a mis-injection past [Install]
+        # would not pass either.
         self.assertIn("[Service]", unit)
         self.assertLess(unit.index("[Service]"), unit.index("Environment=PATH="))
+        self.assertLess(unit.index("Environment=PATH="), unit.index("[Install]"))
 
     def test_owner_ttyd_unit_has_no_path_env(self):
         # The PATH env is scoped to the DAVID render ONLY — the owner (dev1)
