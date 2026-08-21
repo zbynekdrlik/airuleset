@@ -10,9 +10,11 @@ completes go-live setup: it provisions only when running as the designated
 gateway account (david1) with the dedicated key present and ttyd installed;
 otherwise it prints the exact needs-owner-action steps and returns False,
 touching no systemd. The gateway binds LOOPBACK — a cloudflared tunnel is the
-public HTTPS front (no public port, no sudo). Its scoped inventory (via the ttyd
-launcher's `--inventory`) is david1..4 + codex-bridge ONLY, so the connect
-allowlist can never resolve an owner-fleet id.
+public HTTPS front (no public port, no sudo). Its scoped inventory — handed to
+the ttyd child via the `WEBTERM_INVENTORY` env var the launcher exports (NOT a
+client-injectable argv flag: ttyd's `-a` appends client `?arg=` values as argv,
+so an argv flag would be injectable — #612 review) — is david1..4 + codex-bridge
+ONLY, so the connect allowlist can never resolve an owner-fleet id.
 
 Imports cli_webterm for the shared render/credential helpers + templates; the
 dispatch in cli_webterm.maybe_setup_webterm imports THIS module lazily, so there
@@ -154,29 +156,37 @@ def setup_webterm_david_service(run=None):
               % (reason, _DAVID_GO_LIVE), file=sys.stderr)
         return False
 
-    from cli_filedrop_watchdog import _run_systemctl, _whoami
-    _write_david_artifacts()
-
+    # Post-gate body wrapped so a write/systemd failure is a logged False, never
+    # a raise into cmd_install (the "never raises" contract) — mirrors
+    # setup_webterm_service's own non-fatal-step discipline.
     try:
-        run(["loginctl", "enable-linger", _whoami()], capture_output=True,
-            text=True)
-    except Exception as e:
-        print("  webterm(david): loginctl enable-linger skipped (%s)" % e,
-              file=sys.stderr)
+        from cli_filedrop_watchdog import _run_systemctl, _whoami
+        _write_david_artifacts()
 
-    rc, _o, err = _run_systemctl(["daemon-reload"])
-    if rc != 0:
-        print("  webterm(david): daemon-reload FAILED: %s" % (err or "").strip(),
-              file=sys.stderr)
-    ok_all = True
-    for svc in ("webterm-david-ttyd.service", "webterm-david-gateway.service"):
-        rc, _o, err = _run_systemctl(["enable", "--now", svc])
+        try:
+            run(["loginctl", "enable-linger", _whoami()], capture_output=True,
+                text=True)
+        except Exception as e:
+            print("  webterm(david): loginctl enable-linger skipped (%s)" % e,
+                  file=sys.stderr)
+
+        rc, _o, err = _run_systemctl(["daemon-reload"])
         if rc != 0:
-            print("  webterm(david): enable --now %s FAILED: %s"
-                  % (svc, (err or "").strip()), file=sys.stderr)
-            ok_all = False
-            continue
-        _run_systemctl(["restart", svc])
+            print("  webterm(david): daemon-reload FAILED: %s"
+                  % (err or "").strip(), file=sys.stderr)
+        ok_all = True
+        for svc in ("webterm-david-ttyd.service", "webterm-david-gateway.service"):
+            rc, _o, err = _run_systemctl(["enable", "--now", svc])
+            if rc != 0:
+                print("  webterm(david): enable --now %s FAILED: %s"
+                      % (svc, (err or "").strip()), file=sys.stderr)
+                ok_all = False
+                continue
+            _run_systemctl(["restart", svc])
+    except Exception as e:
+        print("  webterm(david): provisioning errored (%r) — left un-provisioned."
+              % e, file=sys.stderr)
+        return False
     if ok_all:
         print("  webterm(david): gateway live on 127.0.0.1:%d (loopback — front "
               "with cloudflared). ttyd loopback 127.0.0.1:%d behind /t.\n%s"

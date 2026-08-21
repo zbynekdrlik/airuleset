@@ -4,8 +4,9 @@ The subdev live systemd path is unverifiable from dev1, so these pin the
 RENDER + GATE + ARTIFACT correctness (systemctl mocked, exactly like the owner
 provisioning test): the gate is a SAFE no-op unless prerequisites hold, the
 gateway unit binds LOOPBACK with the david realm's cred/dash and an `After=`
-pointing at the DAVID ttyd unit, and the written launcher carries the scoped
-`--inventory` so the connect allowlist is david's set.
+pointing at the DAVID ttyd unit, and the written launcher EXPORTS the scoped
+`WEBTERM_INVENTORY` env var (not a client-injectable argv flag) so the connect
+allowlist is david's set.
 """
 import contextlib
 import json

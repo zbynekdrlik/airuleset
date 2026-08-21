@@ -10,10 +10,14 @@ profily. Doména sa mapuje na (session set + auth realm):
     session set = david1..4 (subdev) + codex-bridge (dev2), login ``david``.
 
 Bezpečnostné invarianty (celé v tomto leaf + connect allowliste v cli_webterm):
-  1. Davidov inventár = { david1..4, codex-bridge } IBA. Jeho ttyd sa spúšťa s
-     TÝMTO inventárom (``--inventory``), takže ``connect_main`` allowlist NIKDY
-     nevie resolvnúť owner-fleet id (dev1/gk/marek/montalu…) → refused. Session
-     set je KONFIG brány, nie klientská voľba.
+  1. Davidov inventár = { david1..4, codex-bridge } IBA. Jeho ttyd child dostane
+     TENTO inventár cez ``WEBTERM_INVENTORY`` env premennú, ktorú launcher
+     EXPORTUJE — NIE cez klientsky argv flag (ttyd ``-a`` pridáva klientom
+     kontrolované ``?arg=`` hodnoty do argv, takže argv ``--inventory`` by bol
+     injectovateľný; env sa cez ttyd url-args injectovať nedá — #612 review).
+     Preto ``connect_main`` allowlist NIKDY nevie resolvnúť owner-fleet id
+     (dev1/gk/marek/montalu…) → refused. Session set je KONFIG brány, nie
+     klientská voľba.
   2. david1..4 sa dosahujú DEDIKOVANÝM kľúčom (``WEBTERM_DAVID_IDENTITY``)
      authorized VÝHRADNE na david1-4 — NIKDY fleet gatekeeper kľúč (ten dosiahne
      marek/montalu/simap/miva). Server-side reprezentácia Davidovho vlastného
