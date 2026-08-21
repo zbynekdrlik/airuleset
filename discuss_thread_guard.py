@@ -186,3 +186,115 @@ def evaluate(content, user):
     worst = max(offending, key=len)
     return Violation(number=number, names=offending,
                      suggestion=suggest_name(worst, number))
+
+
+# --------------------------------------------------------------------------- #
+# #609 -- message_post STREAM-SIGNATURE gate.
+#
+# THE PROBLEM. The #598 rule "every sub-dev Odoo Discuss message ENDS with a
+# `ZbynekAI <N>` signature line" landed only as PROSE in a situational-injected
+# skill companion (handover-compose.md) -- undiscoverable from the surface a
+# stream actually loads (montalu6 posted an UNSIGNED message working from
+# odoo-erp's OWN `discuss-client-posting` skill, which neither carries nor
+# points to the rule). Nothing MECHANICAL enforced it: the #596/#597 create
+# guard EXEMPTS message_post entirely. This gate closes that hole fleet-wide by
+# scanning the SAME Bash/Write/Edit content the create guard already sees, so it
+# fires regardless of which skill/prose the stream read (rule-intake gate step 1:
+# mechanically checkable -> hook).
+#
+# DETECTION keys on the message_post METHOD on discuss.channel (the #596 MAJOR-B
+# lesson: method, never a field), mirroring the create detectors. A create /
+# write / rename is a DIFFERENT method and is never touched here.
+#
+# COMPLIANCE. The mandatory signature is `ZbynekAI <N>` where N is the stream
+# number. The message body over RPC is frequently a VARIABLE (`body=body_html`),
+# so "the body ENDS with the signature" is not reliably provable from the tool-
+# call content; the reliable, low-false-positive check is that a COMPLIANT
+# `ZbynekAI <N>` token appears ANYWHERE in the posting content (whether in the
+# body-building assignment or the call). This catches the incident (no signature
+# at all) AND a wrong number; the exact last-line placement stays the prose
+# rule's + review's job. Accepted residuals (documented, not chased, per #319):
+#   * the body assembled in a SEPARATE statement from the model literal (a two-
+#     statement ORM `chan = env['discuss.channel'].browse(cid); chan.message_post(`)
+#     is not detected -- the same unmeasurable->allow bias the create ORM detector
+#     takes; the RPC `execute_kw(..., "discuss.channel", "message_post", ...)`
+#     form the recipe + incident use IS detected.
+#   * a .md doc/template that mentions message_post + discuss.channel with no
+#     `ZbynekAI <N>` would block for a stream user -- but a doc teaching the rule
+#     carries the signature example, so it passes; a stream rarely edits such a
+#     doc, and the fleet's unmeasurable->over-block direction is the safe one for
+#     a quality gate.
+# --------------------------------------------------------------------------- #
+
+SIGNATURE_WORD = "ZbynekAI"
+
+SIG_BYPASS_MARKER = "airuleset:discuss-sig-ok"
+
+# message_post on discuss.channel, mirroring the create detectors' three shapes.
+# RPC execute_kw model+method adjacency: "discuss.channel" , "message_post"
+_RPC_MSGPOST_RE = re.compile(
+    r"""['"]discuss\.channel['"]\s*,\s*['"]message_post['"]""")
+# ORM: <...>['discuss.channel']<.chain()...>.message_post( -- same bounded
+# `.method(...)` chain the create detector allows (`.browse()`/`.sudo()`/...).
+_ORM_MSGPOST_RE = re.compile(
+    r"""['"]discuss\.channel['"]\s*\]\s*(?:\.\s*\w+\s*\([^()]*\)\s*)*\.\s*message_post\s*\(""")
+# JSON-RPC / call_kw: "model":"discuss.channel" (reuses _JSONRPC_MODEL_RE) AND
+# "method":"message_post" both present.
+_JSONRPC_MSGPOST_RE = re.compile(r"""['"]method['"]\s*:\s*['"]message_post['"]""")
+
+MessagePostViolation = namedtuple("MessagePostViolation", "number expected")
+
+
+def is_channel_message_post(content):
+    """True iff `content` invokes the `message_post` METHOD on `discuss.channel`
+    (RPC adjacency, an ORM `['discuss.channel']<.chain()>.message_post(`, or a
+    JSON-RPC model+method co-occurrence). A create / write / rename invokes a
+    DIFFERENT method and returns False -- this gate touches ONLY a message_post,
+    exactly as the create gate touches only a create."""
+    if not content:
+        return False
+    if _RPC_MSGPOST_RE.search(content):
+        return True
+    if _ORM_MSGPOST_RE.search(content):
+        return True
+    if _JSONRPC_MODEL_RE.search(content) and _JSONRPC_MSGPOST_RE.search(content):
+        return True
+    return False
+
+
+def signature_present(content, number):
+    """True iff `content` carries the mandatory `ZbynekAI <number>` stream
+    signature: the word (case-insensitive) then whitespace then the EXACT stream
+    number as a standalone token (a trailing non-digit boundary, so `ZbynekAI 66`
+    is NOT number 6 and the unsubstituted `<N>` placeholder is NOT a signature).
+    `number` is a digit string from cli_aliases.stream_number, so re.escape keeps
+    the regex linear regardless of input size."""
+    if not content or not number:
+        return False
+    pat = re.compile(r"(?i)" + re.escape(SIGNATURE_WORD) + r"\s+"
+                     + re.escape(number) + r"(?![0-9])")
+    return bool(pat.search(content))
+
+
+def has_sig_bypass_marker(content):
+    """True iff the deliberate `airuleset:discuss-sig-ok` bypass marker appears
+    in `content` (rare, logged by the hook) -- for a genuine internal / legacy
+    channel post the owner accepts without the client signature."""
+    return SIG_BYPASS_MARKER in (content or "")
+
+
+def evaluate_message_post(content, user):
+    """A `MessagePostViolation` (number, expected signature) iff `content` is a
+    discuss.channel message_post by a stream `user` (cli_aliases.stream_number)
+    whose body carries NO compliant `ZbynekAI <N>` signature; None (silent)
+    otherwise -- a non-stream user, a non-message_post op, or a post that already
+    carries the signature."""
+    number = cli_aliases.stream_number(user)
+    if number is None:
+        return None
+    if not is_channel_message_post(content):
+        return None
+    if signature_present(content, number):
+        return None
+    return MessagePostViolation(number=number,
+                                expected=SIGNATURE_WORD + " " + number)

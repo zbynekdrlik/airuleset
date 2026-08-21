@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Hook: PreToolUse(Bash|Write|Edit) -- #596 + #597, client Discuss thread naming.
+# Hook: PreToolUse(Bash|Write|Edit) -- #596 + #597 client Discuss thread naming,
+# AND #609 client Discuss message SIGNATURE.
 #
 # A sub-dev stream (montaluN / davidN / simapN / mivaN) creating a client Odoo
 # `discuss.channel` (a top-level channel or a `parent_channel_id` sub-thread)
@@ -11,24 +12,36 @@ set -euo pipefail
 # prose rule (handover-compose.md #532/#537/#598) failed TWICE on montalu2 PROD;
 # the owner escalated to a hook ("nemal dovolene robit taku chybu").
 #
+# #609 adds a SIBLING check on the SAME payload: a sub-dev stream `message_post`
+# to a `discuss.channel` MUST carry the mandatory `ZbynekAI <N>` stream signature
+# (#598) somewhere in the posting content, else it is BLOCKED. This closes the
+# hole that let montalu6 post an UNSIGNED client message from odoo-erp's own
+# `discuss-client-posting` skill, which never carried the prose rule -- the guard
+# scans the actual tool-call content, so it fires regardless of which skill the
+# stream loaded. A `create` / `write`/rename is a DIFFERENT method and is never
+# touched by the signature check (it invokes its own #596/#597 name check).
+#
 # SCOPE (by DERIVATION, not an authority flag): the stream number comes from the
 # unix user via cli_aliases.stream_number -- a NON-stream user (owner /
 # gatekeeper / marek / unknown) derives None and the guard stays SILENT. So the
 # guard is active only for a numbered/base stream user, exactly as the ticket
-# specifies. FAIL-SAFE: a `message_post` to an EXISTING channel is NOT a create
-# and is never blocked; a `write` (rename) is NOT a create -- the name-
-# correction path must stay possible.
+# specifies. FAIL-SAFE (NAME check): a `write` (rename) is NOT a create -- the
+# name-correction path must stay possible; a `message_post` is NOT a create so
+# the NAME check never fires on it -- but #609 runs its own SIGNATURE check on a
+# message_post (a create/write is a DIFFERENT method and the signature check
+# never fires on those).
 #
-# All create-detection / name-extraction / compliance / number-derivation live
-# in the importable `discuss_thread_guard.py` (+ `cli_aliases.stream_number`),
-# the design_gate.py / block-commit-without-design.sh module+thin-hook split.
-# Reads the payload on STDIN (`.tool_input.command` for Bash, `.content` for
-# Write, `.new_string` for Edit), exits 2 with the reason on STDERR (stdout is
-# invisible to the model). Fail-open on any unmeasurable state (no jq/python3,
-# spawn error) -- the prose rule + review are the backstop.
+# All create/message_post-detection, name-extraction, compliance, signature and
+# number-derivation live in the importable `discuss_thread_guard.py` (+
+# `cli_aliases.stream_number`), the design_gate.py / block-commit-without-design.sh
+# module+thin-hook split. Reads the payload on STDIN (`.tool_input.command` for
+# Bash, `.content` for Write, `.new_string` for Edit), exits 2 with the reason on
+# STDERR (stdout is invisible to the model). Fail-open on any unmeasurable state
+# (no jq/python3, spawn error) -- the prose rule + review are the backstop.
 #
-# Bypass (rare, logged): `airuleset:discuss-name-ok` anywhere in the content
-# (a comment / token) -- for a genuine legacy thread the owner already accepted.
+# Bypass (rare, logged): `airuleset:discuss-name-ok` waives the NAME check (a
+# legacy thread the owner accepted); `airuleset:discuss-sig-ok` waives the
+# SIGNATURE check (a genuine internal/legacy post the owner accepts unsigned).
 #
 # Test seam: AIRULESET_DISCUSS_STREAM_USER overrides the derived unix user (the
 # stream identity is the unix account, not derivable from cwd/payload).
@@ -68,15 +81,31 @@ try:
     import discuss_thread_guard as g
 except Exception:
     sys.exit(0)
-if g.has_bypass_marker(content):
+name_bypassed = g.has_bypass_marker(content)
+sig_bypassed = g.has_sig_bypass_marker(content)
+# #596/#597 create-NAME check -- skipped when the name is deliberately bypassed.
+if not name_bypassed:
+    v = g.evaluate(content, user)
+    if v:
+        print("HIT")
+        print(v.number)
+        print(" | ".join(v.names))
+        print(v.suggestion)
+        sys.exit(0)
+# #609 message_post STREAM-SIGNATURE check -- skipped when sig-bypassed. Runs
+# even if the name was bypassed: a legacy-NAME create does not waive the SIGNATURE.
+if not sig_bypassed:
+    mv = g.evaluate_message_post(content, user)
+    if mv:
+        print("HITSIG")
+        print(mv.number)
+        print(mv.expected)
+        sys.exit(0)
+# nothing blocked -- surface a bypass for logging.
+if name_bypassed:
     print("BYPASS")
-    sys.exit(0)
-v = g.evaluate(content, user)
-if v:
-    print("HIT")
-    print(v.number)
-    print(" | ".join(v.names))
-    print(v.suggestion)
+elif sig_bypassed:
+    print("SIGBYPASS")
 PYEOF
 )
 
@@ -84,8 +113,45 @@ LINE1=$(printf '%s\n' "$OUT" | sed -n '1p')
 
 if [ "$LINE1" = "BYPASS" ]; then
     LOG="/tmp/airuleset-discuss-name-bypass-${EUID:-$(id -u)}.log"
-    { echo "$(date -Iseconds)  bypass: ${STREAM_USER}" >> "$LOG"; } 2>/dev/null || true
+    { echo "$(date -Iseconds)  name-bypass: ${STREAM_USER}" >> "$LOG"; } 2>/dev/null || true
     exit 0
+fi
+
+if [ "$LINE1" = "SIGBYPASS" ]; then
+    LOG="/tmp/airuleset-discuss-sig-bypass-${EUID:-$(id -u)}.log"
+    { echo "$(date -Iseconds)  sig-bypass: ${STREAM_USER}" >> "$LOG"; } 2>/dev/null || true
+    exit 0
+fi
+
+# #609 -- a discuss.channel message_post missing its `ZbynekAI <N>` signature.
+if [ "$LINE1" = "HITSIG" ]; then
+    NUMBER=$(printf '%s\n' "$OUT" | sed -n '2p')
+    EXPECTED=$(printf '%s\n' "$OUT" | sed -n '3p')
+    cat >&2 <<MSG
+
+🚫 BLOCKED: a client Discuss message is missing its stream signature (airuleset #598/#609).
+
+You are sub-dev stream number "${NUMBER}". EVERY Odoo Discuss message a sub-dev
+stream posts MUST end with a stream-identity signature line, so the owner sees
+at a glance WHICH subdev sent it and where to go resolve what the thread is about:
+
+  • the LAST line of the message body is:  ${EXPECTED}
+
+The message_post being sent carries no such signature (or a wrong number). Add
+"${EXPECTED}" as the final line of the body and re-run.
+
+Why: the shared sender name "zbynekai odovzdavac" tells the owner nothing about
+which subdev owns a thread (owner request, #598); montalu6 shipped an UNSIGNED
+message to a client because the rule was only in a skill the stream never loaded
+(#609). The canonical rule + a copy-paste template are in
+skills/odoo-discuss-xmlrpc/handover-compose.md.
+
+This gates only a discuss.channel message_post by a sub-dev stream — a create /
+rename and a non-stream user are never affected. Bypass (rare, logged, only for
+a genuine internal/legacy post the owner accepts unsigned): put
+airuleset:discuss-sig-ok in the content.
+MSG
+    exit 2
 fi
 
 [ "$LINE1" = "HIT" ] || exit 0

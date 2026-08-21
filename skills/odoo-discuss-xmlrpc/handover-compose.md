@@ -39,7 +39,8 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   owner then has to fix. Both conditions are now HOOK-ENFORCED at create time
   (`hooks/block-discuss-thread-name.sh`, airuleset #596/#597): a `discuss.channel`
   create whose name breaks either condition is BLOCKED before it reaches PROD (a
-  `message_post` to an existing channel and a `write`/rename are never blocked).
+  `write`/rename is never blocked; a `message_post` gets its own SIGNATURE check
+  instead — see the next bullet, airuleset #609).
 - **Every message ENDS with a stream-identity signature line.** The LAST line of
   EVERY message body is `ZbynekAI <N>`, so the owner sees at a glance WHICH stream
   sent it and where to go resolve what the thread discusses (owner request,
@@ -59,7 +60,13 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   follow-up — never dropped the way the greeting is. It is a POISTKA that works even
   while streams SHARE one Odoo account; if the accounts are ever renamed per stream
   ("ZbynekAI N" display name, airuleset #598 → odoo-erp #4624) the signature stays as
-  the short number line and the two layers do not conflict.
+  the short number line and the two layers do not conflict. The signature is now
+  HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`, airuleset #609): a sub-dev
+  stream `message_post` to a `discuss.channel` that carries no `ZbynekAI <N>`
+  signature is BLOCKED before it reaches PROD — regardless of which skill you
+  loaded, because the guard scans the actual post content (montalu6 shipped an
+  UNSIGNED client message from a skill that never carried this rule). Bypass for a
+  genuine internal/legacy post: `airuleset:discuss-sig-ok` in the content.
 - **The message body MUST carry a direct deep-link URL to the LIVE feature** on
   the client's PROD — the actual route / record / page URL the client clicks to
   SEE it, never a menu path ("Predaj → Objednávky → …") and never the bare
