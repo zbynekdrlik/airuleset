@@ -60,7 +60,17 @@ SK_INCIDENT = (
 SK_NEDA_SA = (
     "Na prode sa to nedá overiť, netuším či prišla kontrolná kópia mailu."
 )
-SK_SEE_DATA = "na prode nevidím kontrolné kópie mailov"
+# #608-review MAJOR #4: the incident's own verb `potvrdiť` (confirm) must be
+# covered (EN already had `confirm`).
+SK_POTVRDIT = (
+    "Neviem to na prode potvrdiť — netuším či prišli notifikácie klientovi."
+)
+# #608-review MAJOR #3: a capitulation that merely NAMES the RO channel it
+# gave up on (after one 500) must STILL block — naming the channel is not a
+# self-service SUCCESS.
+SK_RO_GAVE_UP = (
+    "RO read-only kanál vrátil 500, takže neviem overiť členstvo na prode."
+)
 
 # The #500 formulation: "membership on PROD I cannot verify".
 EN_500 = "The membership on PROD I cannot verify — no read-back available."
@@ -85,10 +95,17 @@ class ProdCapitulationIsBlocked(TestCase):
         # the detector must still fire on the standalone negation.
         self.assertTrue(_blocked(_run(SK_NEDA_SA)))
 
-    def test_sk_see_data_noun_is_blocked(self):
-        # "nevidím … kópie mailov" — the see-negation + a DATA noun, no
-        # explicit verify verb, still a prod-state-read capitulation.
-        self.assertTrue(_blocked(_run(SK_SEE_DATA)))
+    def test_sk_potvrdit_verb_is_blocked(self):
+        # #608-review MAJOR #4: "neviem … na prode potvrdiť" must block.
+        self.assertTrue(_blocked(_run(SK_POTVRDIT)))
+
+    def test_ro_channel_named_but_gave_up_is_blocked(self):
+        # #608-review MAJOR #3: naming the RO channel it surrendered on is NOT
+        # self-service evidence — must still block.
+        self.assertTrue(
+            _blocked(_run(SK_RO_GAVE_UP)),
+            "a capitulation that gave up after one 500 on the RO channel must "
+            "block — naming the channel is not a successful self-service read")
 
     def test_en_500_formulation_is_blocked(self):
         self.assertTrue(
@@ -126,6 +143,24 @@ NEVIDIM_DOVOD = "Nevidím dôvod meniť to na prode.\n\n✅ DONE: hotové."
 EN_CANT_SEE_WHY = "I can't see why we'd change prod deployment right now."
 SK_DECISION = "Neviem, či to na prode necháme alebo zmeníme neskôr?"
 EN_CANT_REPRODUCE = "I can't reproduce the crash on prod, but the fix is committed."
+# #608-review CRITICAL #1: "nevidím dôvod" + a DATA-noun substring
+# (`stav`⊂`nastaviť`) + prod must PASS (the see-branch was dropped; without an
+# unanchored substring match, these are ordinary prose).
+NEVIDIM_DOVOD_NASTAVIT = "Nevidím dôvod to na prode nastaviť inak."
+SUCCESS_WITH_DATA_NOUN = (
+    "Nasadenie na prode prebehlo, notifikácie chodia, nevidím dôvod niečo "
+    "meniť.\n\n✅ DONE: hotové."
+)
+PAST_TENSE_SUCCESS = (
+    "Overil som na prode, že notifikácia odišla, ale nevidím dôvod na obavy."
+)
+# A pure see-based read with NO verify verb — now a documented RESIDUAL
+# (dropped see-branch), must PASS.
+PURE_SEE_RESIDUAL = "na prode nevidím kontrolné kópie mailov"
+# #608-review MAJOR #2: EN metaphors ("can't see us shipping … on prod",
+# `foresee`) must PASS — the idiom is right-anchored to "what's on prod".
+EN_CANT_SEE_SHIPPING = "I can't see us shipping this on prod before Friday."
+EN_FORESEE = "I can't foresee problems on prod."
 
 
 class ProdCapitulationFalsePositiveControls(TestCase):
@@ -172,6 +207,39 @@ class ProdCapitulationFalsePositiveControls(TestCase):
     def test_en_cant_reproduce_passes(self):
         # "can't reproduce … on prod" — "reproduce" is not a read/verify verb.
         self.assertFalse(_blocked(_run(EN_CANT_REPRODUCE)))
+
+    def test_nevidim_dovod_with_data_noun_substring_passes(self):
+        # #608-review CRITICAL #1: "nevidím dôvod … nastaviť" (stav⊂nastaviť)
+        # + prode must PASS — the metaphor-prone see-branch was dropped.
+        self.assertFalse(
+            _blocked(_run(NEVIDIM_DOVOD_NASTAVIT)),
+            "an unanchored data-noun substring in ordinary prose must not "
+            "false-block")
+
+    def test_success_report_with_data_noun_passes(self):
+        self.assertFalse(
+            _blocked(_run(SUCCESS_WITH_DATA_NOUN)),
+            "a legitimate success report mentioning notifikácie + prod must "
+            "not false-block")
+
+    def test_past_tense_success_report_passes(self):
+        # "Overil som … na prode" — past tense is not a present/infinitive
+        # verify verb, so no capitulation cluster fires.
+        self.assertFalse(_blocked(_run(PAST_TENSE_SUCCESS)))
+
+    def test_pure_see_no_verify_verb_is_residual_and_passes(self):
+        # The dropped see-branch: a pure see-based read with no verify verb is
+        # now a documented residual — must PASS.
+        self.assertFalse(_blocked(_run(PURE_SEE_RESIDUAL)))
+
+    def test_en_cant_see_shipping_metaphor_passes(self):
+        # #608-review MAJOR #2: "can't see us shipping … on prod" is a
+        # scheduling opinion, not a state read.
+        self.assertFalse(_blocked(_run(EN_CANT_SEE_SHIPPING)))
+
+    def test_en_foresee_passes(self):
+        # `\bsee\b` must not match inside `foresee`.
+        self.assertFalse(_blocked(_run(EN_FORESEE)))
 
 
 class ProdCapitulationHookContract(TestCase):

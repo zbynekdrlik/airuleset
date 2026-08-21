@@ -62,6 +62,16 @@ INCIDENT_PILE = (
 INCIDENT_PILE_ASKED = INCIDENT_PILE.replace(
     "❓ NEEDS YOU:", "❓ ASKED:")
 
+# Exactly 3 separate #N…? ask-lines + a ❓ marker — pins the `-ge 3` boundary
+# from below (#606-review MAJOR #5).
+THREE_PILE = (
+    "Na tvojej strane (U 3):\n"
+    "- #606 (U doručenie) — spraviť hneď?\n"
+    "- #608 (prod gate) — potvrdíš znenie?\n"
+    "- #4619 (mail kópie) — schváliš návrh?\n\n"
+    "❓ NEEDS YOU: odpovedz na tieto tri."
+)
+
 
 class USummaryPileIsBlocked(TestCase):
     """The incident pile — an owner-facing question turn with 3+ #N …? asks —
@@ -79,6 +89,13 @@ class USummaryPileIsBlocked(TestCase):
         # The ❓ ASKED marker (ask-and-continue) is equally an owner-facing
         # question turn.
         self.assertTrue(_blocked(_run(INCIDENT_PILE_ASKED)))
+
+    def test_exactly_three_ask_lines_is_blocked(self):
+        # Pins the `-ge 3` boundary FROM BELOW: a `-ge 4` mutant would let a
+        # 3-line pile through.
+        self.assertTrue(
+            _blocked(_run(THREE_PILE)),
+            "exactly 3 separate #N…? ask-lines in a question turn must block")
 
     def test_stderr_names_the_step_by_step_remedy(self):
         p = _run(INCIDENT_PILE)
@@ -112,6 +129,24 @@ NO_QMARKER_REASONING = (
     "gate)? A ešte #4619 (kópie)? Zatiaľ poďme najprv doriešiť dizajn.\n\n"
     "✅ DONE: rozmyslené."
 )
+# Only 2 per-ticket ask-lines + a ❓ marker — pins the `-ge 3` threshold from
+# ABOVE: a `-ge 2` mutant would wrongly block this (#606-review MAJOR #5).
+TWO_PILE = (
+    "**Otázka — projekt airuleset:** Dve súvisiace rozhodnutia:\n"
+    "- #606 (U doručenie) — spraviť hneď?\n"
+    "- #608 (prod gate) — potvrdíš znenie?\n\n"
+    "❓ NEEDS YOU: ktoré vezmeme prvé?"
+)
+# 3 SEPARATE per-ticket ask-lines but NO ❓ NEEDS YOU/ASKED marker (ends
+# ✅ DONE) — pins the HAS_QMARKER gate: an `if true` mutant (detector runs on
+# every message) would wrongly block this (#606-review MAJOR #6).
+THREE_NO_MARKER = (
+    "Zvažoval som tri veci:\n"
+    "- #606 (U doručenie) — spraviť hneď?\n"
+    "- #608 (prod gate) — potvrdiť znenie?\n"
+    "- #4619 (mail kópie) — poslať dnes?\n\n"
+    "✅ DONE: rozmyslené, idem na to."
+)
 GENUINE_FORK = (
     "**Otázka — projekt airuleset:** V #606 sa rozhodujeme medzi dvoma "
     "prahmi detekcie, oba fungujú, líšia sa v riziku falošných blokov.\n\n"
@@ -138,11 +173,26 @@ class USummaryFalsePositiveControls(TestCase):
             "a plain status list enumerating tickets must not trip #606")
 
     def test_reasoning_without_qmarker_passes(self):
-        # 3+ #N with '?' but NO ❓ NEEDS YOU/ASKED marker → not an owner-facing
-        # question turn → must pass.
+        # #N with '?' but NO ❓ NEEDS YOU/ASKED marker → not an owner-facing
+        # question turn → must pass (this fixture crams them on one line, so
+        # its per-line count is low; THREE_NO_MARKER below is the one that
+        # actually reaches count 3 and pins the marker gate).
         self.assertFalse(
             _blocked(_run(NO_QMARKER_REASONING)),
             "internal reasoning without a ❓ marker must not trip #606")
+
+    def test_two_ask_lines_with_marker_passes(self):
+        # Pins the `-ge 3` threshold from ABOVE — a `-ge 2` mutant blocks this.
+        self.assertFalse(
+            _blocked(_run(TWO_PILE)),
+            "only 2 per-ticket ask-lines must not trip #606 (threshold is 3)")
+
+    def test_three_ask_lines_without_marker_passes(self):
+        # Pins the HAS_QMARKER gate — 3 separate #N…? lines but NO ❓ marker;
+        # an `if true` mutant (no marker gate) would wrongly block this.
+        self.assertFalse(
+            _blocked(_run(THREE_NO_MARKER)),
+            "3 per-ticket ask-lines with NO ❓ marker must not trip #606")
 
     def test_genuine_two_option_fork_passes(self):
         # A real design fork about ONE ticket, with bullet options and one ❓
