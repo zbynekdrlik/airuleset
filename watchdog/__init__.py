@@ -1362,8 +1362,26 @@ GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
 # wrapped-prose false-positive control (with/without punctuation, prefix
 # or not) is still rejected. A fractional-hour/nbsp render remains the
 # same accepted residual as before.
+# #617 (live montalu1@subdev, 2026-08-21) — the #487 MINOR-2 "widen only on a
+# real render" clause fired a SECOND time, for the CC PENDING-UPDATE
+# notification. When an update is downloaded-not-yet-restarted, Claude Code
+# renders `✔ Update installed · Restart to update` on the SAME standalone
+# header line the `◎ /goal` glyph rides on, and the glyph directly ABUTS the
+# word "update" with NO separator (byte-faithful hexdump of the raw capture:
+# `…to update` = `…20 75 70 64 61 74 65`, then `e2 97 8e`=◎, ` /goal active
+# (21m)`). The `^`-anchor plus the stash-only optional prefix therefore never
+# matched, so `pane_goal_armed` read a genuinely-armed pane as False (dark) —
+# dark-watch CONFIRMED-DEAD + re-armed the live loop and typed a truncated
+# second /goal into the box (the #617 poisoned draft). Add the CC update
+# notification as ANOTHER optional prefix alternative, anchored on its stable
+# actionable phrase `Restart to (update|apply)` immediately before the glyph.
+# The tail stays the SAME CLOSED form (` active`/` active (<1-3 digits><h|m|d>)`
+# then `$`), so every #393 wrapped-prose false-positive control — incl. a line
+# CARRYING the update phrase but CONTINUING past the glyph — is still rejected.
 _GOAL_HEADER_INDICATOR_RX = re.compile(
-    r"^(?:" + re.escape(STASH_MARKER + " · ") + r")?"
+    r"^(?:" + re.escape(STASH_MARKER + " · ")
+    + r"|.*?Restart to (?:update|apply)"
+    + r")?"
     + re.escape(GOAL_INDICATOR)
     + r"( active(\s\(\d{1,3}[hmd]\))?)?$")
 _GOAL_LCS_OPEN = "<local-command-stdout>"

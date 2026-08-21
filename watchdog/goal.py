@@ -296,7 +296,7 @@ _GOAL_AUTHORITY_BLOCK_RX = __import__("re").compile(
     r"\*\*AUTHORITY:\s*(\S+)\*\*.*?```\n(/goal [^\n]+)\n```", __import__("re").S)
 
 
-def goal_template_for_authority(authority, path=None):
+def goal_template_for_authority(authority, path=None, logs=None):
     """The exact `/goal ...` line shipped for authority profile `authority`
     (full / branch-merge / fork-no-merge), read fresh from the INSTALLED
     autopilot SKILL.md (`watchdog.goal_templates_path()`) every call --
@@ -308,7 +308,15 @@ def goal_template_for_authority(authority, path=None):
 
     None if the file is unreadable, no block for that authority exists, OR
     the extracted line exceeds `GOAL_ARM_CHAR_CAP` (#169 -- a template that
-    would be rejected by Claude Code itself must never be typed at all)."""
+    would be rejected by Claude Code itself must never be typed at all).
+
+    #617 -- an over-cap refusal is now LOUD, not silent: pass an optional
+    `logs` list (the dark-rearm path does) and an oversize template appends
+    one line NAMING the cap breach before returning None, so a re-grown
+    template (the #169 regression) surfaces in the watchdog log instead of
+    silently disabling the whole autopilot loop. A pure resolution call
+    (tests, the footer, every non-arm caller) passes nothing and is exactly
+    byte-identical to the prior behaviour."""
     authority = str(authority or "").strip()
     if not authority:
         return None
@@ -322,6 +330,12 @@ def goal_template_for_authority(authority, path=None):
         if m.group(1) == authority:
             line = m.group(2).strip()
             if len(line) > GOAL_ARM_CHAR_CAP:
+                if isinstance(logs, list):
+                    logs.append(
+                        "goal-template REFUSED oversize authority=%s len=%d "
+                        "cap=%d (#169 recurrence -- template re-grew over "
+                        "Claude Code's /goal cap; never typed)"
+                        % (authority, len(line), GOAL_ARM_CHAR_CAP))
                 return None
             return line
     return None
@@ -500,6 +514,16 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
         if watchdog._pane_shows_collapsed_paste(
                 watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40))):
             _log("goal-verify-abort: collapsed-paste")
+        # #617 -- NEVER leave our own partial/collapsed type in the box: it
+        # becomes a poisoned draft the next sweep can neither submit nor
+        # clear (the live montalu1 674-char stuck /goal). The box was
+        # verified BARE immediately above (entry gate + fresh re-capture), so
+        # backspacing len(text) provably reaches nothing of the user's -- a
+        # surplus backspace lands on an empty box (`_undo_typed_text`'s own
+        # proof). Never a submit here; the box goes back to bare.
+        watchdog._undo_and_release_slot(pid, run, text, False, _log,
+                                        "goal-verify-abort: truncated-type",
+                                        sleep_fn=sleep_fn)
         return False                       # never rendered -- never submit it
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     if _await_typed(pid, text, run, sleep_fn, want=False):
@@ -589,6 +613,68 @@ def _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath, run, state,
         return False
     return watchdog.submit_own_goal_verified(pid, text, run=run,
                                              sleep_fn=sleep_fn, logs=logs)
+
+
+def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
+                                   now, sleep_fn, dry_run, rearm_fn, loc):
+    """#617 -- clear a STRANDED, TRUNCATED own `/goal` draft left in a pane's
+    input box. A partial /goal type (a send-keys chunk interrupted mid-arm)
+    leaves a byte-exact PREFIX of THIS pane's own template in the box; the
+    next sweep can neither SUBMIT it (`_submit_stranded_own_goal` needs the
+    WHOLE literal text) nor stash around it, and once a LATER successful send
+    clears the janitor watch mark the generic `_janitor_recover` refuses it
+    for lack of provenance -- the live montalu1 674-char stuck draft no
+    watchdog job would touch. Runs REGARDLESS of arm state (the poison is
+    orthogonal to whether a goal is currently armed).
+
+    Ownership is proven by CONTENT, not provenance: the box HEAD is a byte-
+    exact leading substring of THIS pane's own `/goal` template AND the box
+    TAIL is a byte-exact interior substring of it, and it is NOT the complete
+    text (a WHOLE own draft is `_submit_stranded_own_goal`'s job). A human
+    never types a byte-exact prefix of the ~3.7k-char template, so this is
+    unforgeable -- the "unambiguously ours" standard #501 draws for the
+    submit-in-place path, one payload class over. Gated on the recent-human
+    check (never keystroke a human-active pane -- the owner may be sitting
+    there; wait it out, #35/2026-08-15), and the clear itself is the SAME
+    `_janitor_clear_box` the provenance-gated janitor already uses on own
+    `/goal` content, so the keystroke safety profile is identical.
+
+    Cheap: the (SKILL.md-reading) template resolve happens ONLY once the box
+    head already starts with the distinctive `/goal STOP CONDITIONS` opening
+    -- rare, so it costs nothing on an ordinary sweep. Returns log lines;
+    empty when nothing was stranded."""
+    head = watchdog._input_box_head_text(captured)
+    if not (head and head.startswith("/goal STOP CONDITIONS")):
+        return []
+    tail = watchdog._input_line_text(captured)
+    if not tail:
+        return []
+    text, _auth = (rearm_fn or _default_rearm_fn)(cwd)
+    if not text:
+        return []
+    # CONTENT-proof: the box holds a contiguous PREFIX of our own template --
+    # head is its leading slice, tail an interior slice, and NOT the complete
+    # text (a complete own draft is submitted, not cleared).
+    if not (text.startswith(head) and tail in text
+            and not text.endswith(tail)):
+        return []
+    recent, reason = watchdog._goal_autoarm_recent_human_activity(
+        sid, tpath, now)
+    if recent:
+        return ["dark-watch %s sid=%s -> truncated own /goal draft present, "
+                "recent-human VETO (%s)" % (loc, sid, reason)]
+    if dry_run:
+        return ["dark-watch %s sid=%s -> would CLEAR stranded truncated /goal "
+                "draft (#617)" % (loc, sid)]
+    logs = []
+    watchdog._draft_rescue_persist(pid, captured, logs=logs)   # snapshot first
+    if watchdog._janitor_clear_box(pid, run, sleep_fn, logs.append):
+        logs.append("dark-watch %s sid=%s -> CLEARED stranded truncated /goal "
+                    "draft (poisoned, #617)" % (loc, sid))
+    else:
+        logs.append("dark-watch %s sid=%s -> stranded truncated /goal clear "
+                    "did not converge, retry next sweep" % (loc, sid))
+    return logs
 
 
 def _resolve_stash_abort_livelock(sid, cwd, run, projects_dir, state, now,
@@ -1318,7 +1404,15 @@ def _default_rearm_fn(cwd):
     except Exception:
         return None, None
     try:
-        text = goal_template_for_authority(authority)
+        # #617 -- pass a logs sink so an OVER-CAP template (the #169
+        # regression) surfaces LOUDLY in the goal-sync forensic trail
+        # instead of silently degrading to a ping with no stated reason.
+        # `_log_goal_sync` collapses identical repeats, so a persistently
+        # over-cap template logs one line, not a per-sweep flood.
+        _logs = []
+        text = goal_template_for_authority(authority, logs=_logs)
+        for _ln in _logs:
+            _log_goal_sync(_ln)
     except Exception:
         text = None
     return (text or None), authority
@@ -1446,6 +1540,15 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         tpath, tmtime = tinfo
         sid = tpath.stem
         visited_sids.add(sid)   # #519 -- live this sweep -> never orphan-reaped
+
+        # #617 -- clear a STRANDED, TRUNCATED own /goal draft the provenance-
+        # gated `_janitor_recover` above refuses (see the helper's docstring).
+        clogs = _clear_stranded_truncated_goal(
+            sid, cwd, captured, tpath, pid, run, state, now, sleep_fn,
+            dry_run, rearm_fn, loc)
+        if clogs:
+            logs += clogs
+            continue
 
         rec = off_state.get(sid)
         off = rec.get("off") if isinstance(rec, dict) else None
