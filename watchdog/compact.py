@@ -665,7 +665,7 @@ def _compact_request_too_young(request_ts, now, min_age=None):
     to be trusted yet — closes the #238 same-turn-dispatch race (a
     sibling worker's own liveness signals can lag ~100ms behind its
     dispatch). Applied ONLY on the branch where
-    `_session_has_live_bg_tasks` already read False. A missing
+    `_live_bg_tasks_detail` already read no live lane. A missing
     `request_ts` (the periodic sweep, well past this floor by
     construction) is "not too young" — a complete no-op there."""
     if request_ts is None:
@@ -1035,7 +1035,7 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
     this box alone" took that slow path for want of exactly this (#238's
     own adversarial review, finding 🔴1). The floor's OWN purpose is real
     — a same-turn-dispatched sibling worker can be briefly invisible to
-    `_session_has_live_bg_tasks` — and this wait is what gives that
+    `_live_bg_tasks_detail` — and this wait is what gives that
     signal a genuine chance to catch up, exactly like the old retry loop
     did, without resurrecting the loop itself: the wait is computed from
     the REQUEST's own recorded `ts` (via a fresh `load_compact_requests`
