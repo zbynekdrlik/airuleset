@@ -115,10 +115,11 @@ REMOTE_HOSTS = [
         # THREE MORE parallel david streams, additional capacity for the
         # SAME external slovnormal odoo developer (fork-based, no sudo, no
         # prod keys), provisioned by gatekeeper on the SAME subdev VPS as
-        # david itself (odoo-erp#3282). Registered here as a data-only
-        # mirror of david's own entry (host + identity requirement) -- the
-        # identity ASSUMPTION is unverified for these specific accounts
-        # (mirroring david's shape is the registration; it does not confirm
+        # david1 itself (the renamed base david, #537; odoo-erp#3282).
+        # Registered here as a data-only mirror of david1's own entry (host +
+        # identity requirement) -- the identity ASSUMPTION is unverified for
+        # these specific accounts (mirroring david1's shape is the
+        # registration; it does not confirm
         # THIS account's authorized_keys accepts the same operator key --
         # #300's own precedent for this exact caveat). No ssh was attempted
         # from this worktree to verify it (fail2ban risk, #300).
@@ -319,7 +320,8 @@ AUTHORITY_BY_USER = {
     "miva1": "fork-no-merge",
     # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE clones of
     # the david external-developer fork stream (additional capacity for the
-    # same slovnormal odoo developer) -- same authority as david itself.
+    # same slovnormal odoo developer) -- same authority as david1 (the renamed
+    # base david, #537).
     "david2": "fork-no-merge",
     "david3": "fork-no-merge",
     "david4": "fork-no-merge",

@@ -177,9 +177,10 @@ def _refuse_unless_empty_is_trustworthy(cmd, quals, cwd=None):
         REST 110 open issues, every `--search` 0, `core-quals --count` -> `0`
         with rc 0. The gatekeeper pastes that 0, writes the mandated BACKLOG
         EMPTY line, and stops with the whole backlog outstanding.
-      * `cmd_slice_quals` on an OWN-account stream. `_slice_quals("david")` is
-        `['assignee:@me', 'author:@me', 'label:stream:david']`, so
-        `len(quals) == 1` is False and the guard was skipped in the very
+      * `cmd_slice_quals` on an OWN-account stream. `_slice_quals("david1")`
+        is `['assignee:@me', 'author:@me', 'label:stream:david1',
+        'label:stream:david']` (the #537 rename alias adds the legacy label),
+        so `len(quals) == 1` is False and the guard was skipped in the very
         command round 3 fixed: stdout `0`, no SystemExit.
 
     The rename is only the cheapest trigger; ANY state where search answers

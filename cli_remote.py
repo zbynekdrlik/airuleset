@@ -136,9 +136,10 @@ def _soniox_key_line(source: Path = None):
 def _deployable_hosts(hosts=None):
     """`REMOTE_HOSTS` entries that are LIVE ssh/deploy targets — i.e. NOT
     flagged `"pending": True` (#537). A pending entry names a base-stream
-    rename target whose LIVE unix rename has not landed yet (montalu1 and
-    simap1 already landed — only `david1` is still pending), so the account
-    does NOT exist on the box. BOTH ssh paths —
+    rename target whose LIVE unix rename has not landed yet, so the account
+    does NOT exist on the box (all three #537 renames — montalu1/simap1/david1
+    — are now live, so no host is currently pending; the flag stays for any
+    FUTURE rename). BOTH ssh paths —
     `cmd_push()`'s deploy loop AND `provision_subdev_soniox_key()` — filter
     through here so a pending target is NEVER contacted: a password/pubkey
     attempt against a non-existent account is a fail2ban strike
@@ -201,9 +202,11 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     control_opts = list(control_opts or [])
     import airuleset  # #433 L-E: REMOTE_HOSTS/AUTHORITY_BY_USER promoted to cli_fleet, read via facade
     # #537: filter pending (not-yet-live rename) targets out FIRST — a pending
-    # david1 IS in AUTHORITY_BY_USER, so it would otherwise pass the
+    # rename target IS in AUTHORITY_BY_USER, so it would otherwise pass the
     # stream-account filter and get an ssh (fail2ban strike against a
-    # non-existent account). (montalu1/simap1 renames already landed.)
+    # non-existent account). (All three #537 renames — montalu1/simap1/david1 —
+    # are now live, so no host is pending today; the filter stays for a future
+    # rename.)
     targets = [h for h in _deployable_hosts(hosts)
                if h.get("user") in airuleset.AUTHORITY_BY_USER or h.get("soniox")]
     if not targets:

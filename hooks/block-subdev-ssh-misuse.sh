@@ -137,7 +137,8 @@ GATEKEEPER_KEY_BASENAME = "gatekeeper_access_ed25519"
 # root (#68) — its deployed ~/.ssh/config carries `Host subdev { User root;
 # IdentityFile ~/.ssh/subdev_admin; IdentitiesOnly yes }`, the normal path
 # `process-subdev`'s bounce-nudge uses. Distinct from GATEKEEPER_KEY_BASENAME
-# (marek/david's identity) — root@subdev uses its OWN key, never that one.
+# (the marek/david1-family operator identity) — root@subdev uses its OWN key,
+# never that one.
 SUBDEV_ADMIN_KEY_BASENAME = "subdev_admin"
 ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
