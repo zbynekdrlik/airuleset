@@ -605,6 +605,16 @@ class TestHookBlocksSignature(_HookBase):
         r = self.run_hook(command="python3 -c '" + wrong + "'", user="montalu6")
         self.assertEqual(r.returncode, 2, r.stderr)
 
+    def test_name_bypass_does_not_waive_signature(self):
+        # review A MINOR: the NAME bypass (airuleset:discuss-name-ok) must NOT
+        # waive the SIGNATURE check -- an unsigned message_post carrying it still
+        # blocks. Pins the load-bearing hook control-flow (a refactor making the
+        # name-bypass short-circuit the sig check would otherwise pass silently).
+        cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-name-ok legacy")
+        r = self.run_hook(command=cmd, user="montalu6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("ZbynekAI 6", r.stderr)
+
 
 class TestHookPassesSignature(_HookBase):
     def test_signed_message_post_passes(self):
