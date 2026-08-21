@@ -44,30 +44,18 @@ CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.
 TMUX_CONF = Path.home() / ".tmux.conf"
 TMUX_HISTORY_LIMIT = 50000
 TMUX_DEFAULT_SIZE = "176x50"
-# #586: the `window-size` server option value that PINS the fixed geometry --
-# no attached client (whatever its size) can ever resize a window away from
-# `default-size`. This is the owner's governing agreement ("sme sa dohodli ze
-# tmux bude mat fixnu velkost aby sa toto nedialo") and directly fixes a
-# visible webterm client from shrinking a same-group Windows-Terminal client's
-# view (the Ctrl+B W blackening). It is EMITTED ONLY on a tmux version where
-# it is safe at conf-parse startup (see _tmux_supports_window_size_manual /
-# _MIN_WINDOW_SIZE_MANUAL_VERSION below and the incident-history comment above
-# render_tmux_history_block) -- never unconditionally, because #241 crashes
-# tmux 3.4 with it. Still CONF-ONLY (never live-applied), so no #236 live-apply
-# resize hazard.
-TMUX_WINDOW_SIZE = "manual"
-# #586: the MINIMUM (major, minor) tmux version at which `set-option -g
-# window-size manual` is SAFE in the conf at server-startup. Reproduced LIVE on
-# dev1: tmux 3.4 (/usr/bin/tmux, Ubuntu 24.04 noble stock) CRASHES at startup
-# with the line (`server exited unexpectedly`, exit 1); tmux 3.7b
-# (/usr/local/bin/tmux, the #242 cutover build) starts cleanly and holds a
-# fixed window against a differently-sized attached client. The fleet ships
-# ONLY 3.4 and 3.7b, so (3, 5) is the conservative boundary that excludes
-# exactly the known-bad 3.4 and includes the verified-good 3.7b. A future
-# newer build is "a distinct ticket with its own compatibility check" (see the
-# #242 cutover comment) that this >= boundary passes -- the same forward
-# assumption the cutover itself makes.
-_MIN_WINDOW_SIZE_MANUAL_VERSION = (3, 5)
+# #613 REOPEN: `window-size manual` (and its whole version-gate machinery) is
+# GONE. #586 shipped it to PIN a fixed 176x50 geometry so a small webterm client
+# could not shrink the owner's WT view -- but that pin was itself the persisting
+# Ctrl+B W dead border: it pins EVERY window to 176x50, so a browser client
+# LARGER than the SSH client (the owner runs the browser fullscreen) always sees
+# a dead dotted border. The conf now ships NO window-size line at all (tmux's own
+# default `latest` governs, universally safe on every tmux version -- no #241
+# 3.4 conf-parse crash to gate against), and the live-apply UNSETS any stale
+# `manual` on a running server (the #591-style `-gu` self-heal, see
+# apply_tmux_history_limit). The webterm clone attaches PLAIN (no ignore-size,
+# cli_webterm) so it sizes the windows it navigates to, to its own grid. See the
+# incident-history comment above render_tmux_history_block for the full trail.
 # #591: there is NO managed `destroy-unattached` value any more -- the global
 # option is REMOVED from the conf entirely (fresh servers inherit tmux's factory
 # default `off`, which never destroys a session). #254 shipped a GLOBAL
@@ -130,26 +118,32 @@ TMUX_MARK_END = "# <<< airuleset tmux <<<"
 # exact tmux subcommand name is deliberately not spelled out here so this
 # comment can't ever collide with that lock).
 #
-# #586: `window-size manual` is RESTORED -- but VERSION-GATED, not
-# unconditional (the #241 mistake was shipping it fleet-wide). Root cause of
-# the reopen: the fixed-geometry goal #236 wanted was the owner's actual
-# agreement ("sme sa dohodli ze tmux bude mat fixnu velkost"), and dropping
-# `manual` left the door open for #584 to re-introduce the OPPOSITE (`-gw
-# window-size latest` per webterm connect), so a small webterm client shrinks
-# a same-group Windows-Terminal client's window (the Ctrl+B W blackening).
-# Reproduced live AGAIN for #586: tmux 3.4 (/usr/bin/tmux) still crashes at
-# conf-parse startup with the line; tmux 3.7b (/usr/local/bin/tmux, the #242
-# cutover build now live on dev1) starts cleanly AND holds a fixed 176x50
-# window against a differently-sized attached client (plain + grouped clone).
-# So `window-size manual` is emitted into the conf ONLY when the PATH `tmux
-# -V` reads >= _MIN_WINDOW_SIZE_MANUAL_VERSION (see
-# _tmux_supports_window_size_manual): a box still on 3.4 (pre-cutover), or one
-# whose version we cannot probe, never gets the crashing line -- so the #241
-# catastrophe cannot recur, while a cutover 3.7b box gets the full fixed
-# geometry. It stays CONF-ONLY (never a live `set-option` call), so #236's
-# live-apply resize hazard also never fires. This delivers what
-# `default-size` alone could not: an existing window's LIVE size is pinned
-# against later attach/detach cycles on a supported box.
+# #586: `window-size manual` was RESTORED version-gated + conf-only (the #241
+# mistake was shipping it fleet-wide), to PIN a fixed 176x50 geometry so a small
+# webterm client could not shrink the owner's WT view (the #584 regression).
+#
+# #613 REOPEN: `window-size manual` is REMOVED ENTIRELY (conf + the whole
+# `_tmux_supports_window_size_manual` / `_MIN_WINDOW_SIZE_MANUAL_VERSION` /
+# `_parse_tmux_version` version-gate machinery). Root cause, proven EMPIRICALLY
+# (isolated `-L` tmux 3.7b + ttyd + headless Chrome, screenshots): the manual
+# pin was ITSELF the persisting dead border. It pins every window to 176x50, so
+# a browser client LARGER than the SSH client (the owner runs the browser
+# fullscreen, ~230x67) always sees a dead dotted border after Ctrl+B W -- the
+# exact "stmavol celý terminál" the pin was meant to prevent, now caused by it.
+# The webterm clone's `-f ignore-size` (cli_webterm, #586) did the same
+# independently (an ignore-size client is excluded from the size calc, so it
+# never grows a window it views to its own grid) -- removed there too. The fix
+# embraces tmux's NATIVE `latest` model: the conf ships NO window-size line
+# (tmux's own default `latest`, universally safe on 3.4 AND 3.7b -- no #241
+# crash to gate against), the clone attaches plain, and each client's keystrokes
+# size the windows IT navigates to. The multi-client tradeoff (a window BOTH
+# clients currently view sizes to whoever most recently pressed a key,
+# self-healing on the other's next keystroke -- streaming output does NOT re-pin
+# it, proven live) is the inherent tmux behaviour, milder than the manual pin's
+# guaranteed border. `default-size 176x50` STAYS (the clientless-window initial
+# size, safe on every version). The live-apply UNSETS any stale `manual`
+# (`set-option -gu window-size`) so a box restarted under the old conf converges
+# to `latest` without a restart -- the #591-style self-heal, verified live safe.
 #
 # #267: raising history-limit only fixed how much scrollback SURVIVES --
 # the user's live complaint ("neviem sa v tom pretacat, kolieskom cez ssh
@@ -442,8 +436,7 @@ def _tmux_conf_quote(word):
 
 
 def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
-                               default_size=TMUX_DEFAULT_SIZE,
-                               window_size_manual=False):
+                               default_size=TMUX_DEFAULT_SIZE):
     # #338: per-token _tmux_conf_quote (not a bare " ".join) -- required
     # the moment the S-PageUp entry's `"send-keys C-o"`/`"copy-mode -eu"`
     # nested-command tokens (each ONE tmux argv element, containing a
@@ -455,19 +448,17 @@ def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
     popup_lines = "\n".join(
         " ".join(_tmux_conf_quote(tok) for tok in argv)
         for argv in TMUX_POPUP_BIND_ARGVS)
-    # #586: `window-size manual` pins the fixed geometry -- but only when the
-    # caller has confirmed the reading tmux is a safe version (>= 3.5); a 3.4
-    # box would crash at conf-parse startup with it (#241). Emitted right
-    # before `default-size` so the two size options sit together.
-    window_size_line = (
-        f"set-option -g window-size {TMUX_WINDOW_SIZE}\n" if window_size_manual else "")
+    # #613 REOPEN: NO `window-size` line -- the `manual` pin was itself the
+    # persisting Ctrl+B W dead border (it pins every window to 176x50, so a
+    # larger browser client always sees a dead border); tmux's own default
+    # `latest` governs, and a running server carrying a stale `manual` is
+    # self-healed live by `set-option -gu window-size` in apply_tmux_history_limit.
     # #591: NO `destroy-unattached` line -- the global option is removed; the
     # base session must inherit tmux's default `off` (see the module comment
     # above), and the webterm clone self-cleans per-session instead.
     return (
         f"{TMUX_MARK_START}\n"
         f"set-option -g history-limit {limit}\n"
-        f"{window_size_line}"
         f"set-option -g default-size {default_size}\n"
         f"{keybind_lines}\n"
         f"{popup_lines}\n"
@@ -524,37 +515,11 @@ def _default_tmux_run(argv):
     return subprocess.run(argv, capture_output=True, text=True, timeout=8)
 
 
-def _parse_tmux_version(text):
-    """`(major, minor)` from a `tmux -V` line like `tmux 3.7b` / `tmux 3.4` /
-    `tmux next-3.8`, or None if unparseable/empty. Any trailing letter (the
-    `b` in `3.7b`) is ignored -- only the numeric major.minor decides the
-    version-gate. #586."""
-    if not text:
-        return None
-    m = re.search(r"(\d+)\.(\d+)", str(text))
-    if not m:
-        return None
-    return (int(m.group(1)), int(m.group(2)))
-
-
-def _tmux_supports_window_size_manual(run):
-    """True iff the PATH `tmux` that will READ the managed conf at its next
-    server start is a version where `set-option -g window-size manual` is SAFE
-    at conf-parse time. #586: reproduced live -- tmux 3.4 CRASHES at startup
-    with the line (`server exited unexpectedly`), tmux 3.7b starts cleanly.
-    `run(["tmux", "-V"])` uses the SAME injectable runner the live-apply calls
-    use (so tests never touch a real tmux server); the version is read from the
-    result's `.stdout`. Fails CLOSED -- any exception (tmux missing), a None
-    result (a `run` that never answers `-V`, e.g. the dead-socket default), or
-    an unparseable line all yield False, so a box whose version cannot be read
-    NEVER receives the crashing line. `run` is required (the caller passes
-    `run or _default_tmux_run`)."""
-    try:
-        result = run(["tmux", "-V"])
-    except Exception:
-        return False
-    ver = _parse_tmux_version(getattr(result, "stdout", None))
-    return ver is not None and ver >= _MIN_WINDOW_SIZE_MANUAL_VERSION
+# #613 REOPEN: the `_parse_tmux_version` / `_tmux_supports_window_size_manual`
+# version-gate helpers are REMOVED -- they existed only to decide whether the
+# conf could carry `window-size manual`, and that line is gone entirely (tmux's
+# default `latest` governs, which is safe on every tmux version, so nothing needs
+# probing). See render_tmux_history_block + the module incident-history comment.
 
 
 def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HISTORY_LIMIT,
@@ -565,15 +530,15 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     destroy-unattached (#591 self-heal; the conf no longer carries a
     destroy-unattached line at all) AND aggressive-resize (#613 self-heal --
     #584's connect live-set `aggressive-resize on` globally, the Ctrl+B W
-    blackening; the conf never carried it) on a running server.
-    `window-size manual` (#586) is emitted too, but ONLY VERSION-GATED and
-    CONF-ONLY: this probes the PATH `tmux -V` once via `run`
-    (`_tmux_supports_window_size_manual`) and includes the line ONLY when the
-    reading tmux is >= _MIN_WINDOW_SIZE_MANUAL_VERSION -- a box on tmux 3.4, or
-    one whose version cannot be read, NEVER receives it (it crashes 3.4 at
-    conf-parse startup, #241). It is never live-applied, so no #236 live-apply
-    resize hazard on any box (see the module-level comment above
-    `render_tmux_history_block` for the full incident history).
+    blackening; the conf never carried it) AND window-size (#613 REOPEN
+    self-heal -- #586's conf `window-size manual` pin was itself the persisting
+    dead border, so it is removed from the conf and a running server carrying a
+    stale `manual` is reverted to tmux's default `latest` via `set-option -gu
+    window-size`) on a running server. NO `window-size` line is emitted to the
+    conf on any box (tmux's own default `latest` governs -- universally safe, no
+    #241 3.4 crash to gate against, no version probe needed). See the
+    module-level comment above `render_tmux_history_block` for the full
+    incident history.
 
     Idempotent marker block: create the file if absent, rewrite ONLY the
     block's CONTENT in place if a clean pair of markers already exists
@@ -639,14 +604,10 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     failure when no server" acceptance."""
     path = tmux_conf_path or TMUX_CONF
     runner = run or _default_tmux_run
-    # #586: probe the PATH tmux version ONCE (via the same injectable runner) to
-    # decide whether the conf may carry `window-size manual` -- a conf-content
-    # decision, NOT a live-apply (the option is never `set-option`'d live). Fails
-    # closed: an unprobeable / <3.5 box gets no window-size line (never the #241
-    # 3.4 crash).
-    window_size_manual = _tmux_supports_window_size_manual(runner)
-    block = render_tmux_history_block(limit, default_size,
-                                       window_size_manual=window_size_manual)
+    # #613 REOPEN: no more `tmux -V` version probe -- the conf never carries a
+    # `window-size` line now (tmux's default `latest` governs), so there is
+    # nothing to version-gate.
+    block = render_tmux_history_block(limit, default_size)
 
     existing = path.read_text() if path.exists() else ""
     spans = _clean_tmux_block_spans(existing)
@@ -666,7 +627,7 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new)
 
-    # `runner` was already resolved above (for the #586 version probe).
+    # `runner` was already resolved above.
     live_argvs = [
         ["tmux", "set-option", "-g", "history-limit", str(limit)],
         # #591: UNSET (not set) the global destroy-unattached on any running
@@ -690,11 +651,24 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         # the larger client (the "stmavol celý terminál" report; reproduced live).
         # `-gwu` (window-option unset) reverts it to tmux's default `off`. Verified
         # live on tmux 3.7b: `-gwu`/`-gu` both revert on->off, idempotent, server
-        # unharmed. Unlike window-size, aggressive-resize is a plain window OPTION
-        # affecting only FUTURE resize computation, so it carries NONE of window-
-        # size's live-apply hazard (#236 snap-resize / #241 3.4 crash) -- which is
-        # why window-size stays conf-only (never live-applied) while this is safe.
+        # unharmed.
         ["tmux", "set-option", "-gwu", "aggressive-resize"],
+        # #613 REOPEN: UNSET the stale global window-size on any running server --
+        # the THIRD sibling self-heal. #586 pinned `window-size manual` fleet-wide
+        # (CONF-ONLY, so it takes effect only at the NEXT server start); that pin
+        # was itself the persisting dead border (it pins every window to 176x50, so
+        # a browser client LARGER than the SSH client always sees a dead dotted
+        # border after Ctrl+B W). The conf no longer carries a window-size line, so
+        # a RESTARTED server gets tmux's default `latest`; this `-gu` reverts a
+        # server that is CURRENTLY running under the old `manual` conf back to
+        # `latest` WITHOUT a restart, so the webterm can size its own windows.
+        # Safe live-apply, verified on tmux 3.7b: UNSET (not SET) so it carries
+        # NONE of the #236 `set manual` snap-resize / #241 3.4-crash hazard (those
+        # were about SETTING window-size against a running/parsing server) -- on an
+        # already-`latest` server it is a genuine no-op (no snap), and on a `manual`
+        # server it is a benign 176x50->176x49 correction, server unharmed. Same
+        # #591 self-heal shape as `-gu destroy-unattached` above.
+        ["tmux", "set-option", "-gu", "window-size"],
     ]
     live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
     live_argvs += [["tmux"] + argv for argv in TMUX_POPUP_BIND_ARGVS]

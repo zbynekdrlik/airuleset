@@ -5414,14 +5414,16 @@ class TestTmuxAggressiveResizeSelfHeal(TestCase):
             ["tmux", "set-option", "-g", "aggressive-resize", "on"], calls)
 
     def test_aggressive_resize_selfheal_sits_beside_destroy_unattached(self):
-        # #613: both `-gu` self-heals of stale #584/#254 globals are grouped --
-        # aggressive-resize immediately follows destroy-unattached in the
-        # live-apply order (calls[2] destroy, calls[3] aggressive-resize).
+        # #613 REOPEN: the version probe is gone, so the self-heals sit at
+        # calls[1..3] (calls[0] is history-limit now): destroy-unattached,
+        # aggressive-resize, then window-size -- the three grouped `-gu`/`-gwu`
+        # self-heals of stale #254/#584/#586 globals in a row.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(calls[2], ["tmux", "set-option", "-gu", "destroy-unattached"])
-        self.assertEqual(calls[3], ["tmux", "set-option", "-gwu", "aggressive-resize"])
+        self.assertEqual(calls[1], ["tmux", "set-option", "-gu", "destroy-unattached"])
+        self.assertEqual(calls[2], ["tmux", "set-option", "-gwu", "aggressive-resize"])
+        self.assertEqual(calls[3], ["tmux", "set-option", "-gu", "window-size"])
 
 
 class TestTmuxWindowSizeRemoved(TestCase):
