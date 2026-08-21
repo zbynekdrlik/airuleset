@@ -161,6 +161,37 @@ PURE_SEE_RESIDUAL = "na prode nevidím kontrolné kópie mailov"
 # `foresee`) must PASS — the idiom is right-anchored to "what's on prod".
 EN_CANT_SEE_SHIPPING = "I can't see us shipping this on prod before Friday."
 EN_FORESEE = "I can't foresee problems on prod."
+# --- round-2 review controls ---------------------------------------------- #
+# CRITICAL #1: `nevidím` + a present/infinitive verify verb + prod in a benign
+# SUCCESS report must PASS (the SEE stem was removed from the CANT set).
+NEVIDIM_SUCCESS_WITH_VERIFY = (
+    "Na prode nevidím žiadny problém, všetko beží; ešte to idem overiť na dev."
+)
+NEVIDIM_NEW_VERSION = (
+    "Na prode je nová verzia. Nevidím dôvod ju meniť. Ešte idem overiť logy."
+)
+# MAJOR #2: the doctrine's OWN self-service method names, phrased naturally,
+# must DISARM (a fresh copy of production / the read-only handover account).
+EN_FRESH_COPY_SELFSERVICE = (
+    "I couldn't verify prod membership via the API, so I pulled a fresh copy "
+    "of production and read the DB directly — the user IS in the group."
+)
+EN_RO_HANDOVER_SELFSERVICE = (
+    "I can't verify on prod directly; I used the read-only handover account "
+    "instead and confirmed it."
+)
+# MINOR #4: the genitive `čerstvej kópie` must disarm too.
+SK_GENITIVE_FRESH_COPY = (
+    "Neviem na prode overiť členstvo, tak čítam z čerstvej kópie produ "
+    "res.partner."
+)
+# MAJOR #3: outage / bug reports whose subject is users/systems (not the
+# agent) must PASS — `access` was dropped from the EN verb set.
+EN_OUTAGE_ACCESS = "Customers cannot access production checkout — rolling back."
+EN_USERS_ACCESS = (
+    "Users can't access prod dashboards after the deploy — investigating the "
+    "502."
+)
 
 
 class ProdCapitulationFalsePositiveControls(TestCase):
@@ -240,6 +271,45 @@ class ProdCapitulationFalsePositiveControls(TestCase):
     def test_en_foresee_passes(self):
         # `\bsee\b` must not match inside `foresee`.
         self.assertFalse(_blocked(_run(EN_FORESEE)))
+
+    def test_nevidim_success_with_verify_verb_passes(self):
+        # #608-review-2 CRITICAL #1: "Na prode nevidím žiadny problém … idem
+        # overiť na dev" is a benign success report — the SEE stem was removed
+        # from the CANT set so it must PASS.
+        self.assertFalse(
+            _blocked(_run(NEVIDIM_SUCCESS_WITH_VERIFY)),
+            "a benign 'nevidím … overiť … prod' success report must not block")
+
+    def test_nevidim_new_version_with_verify_passes(self):
+        self.assertFalse(_blocked(_run(NEVIDIM_NEW_VERSION)))
+
+    def test_en_fresh_copy_selfservice_disarms(self):
+        # #608-review-2 MAJOR #2: the doctrine's OWN fresh-copy method must
+        # disarm even without the REFRESH-DEV-BOX-FROM-PROD token.
+        self.assertFalse(
+            _blocked(_run(EN_FRESH_COPY_SELFSERVICE)),
+            "'pulled a fresh copy of production' is the doctrine's own method "
+            "— must disarm")
+
+    def test_en_ro_handover_selfservice_disarms(self):
+        self.assertFalse(
+            _blocked(_run(EN_RO_HANDOVER_SELFSERVICE)),
+            "'used the read-only handover account' is self-service — must "
+            "disarm")
+
+    def test_sk_genitive_fresh_copy_disarms(self):
+        # #608-review-2 MINOR #4: čerstvej kópie (genitive) must disarm.
+        self.assertFalse(_blocked(_run(SK_GENITIVE_FRESH_COPY)))
+
+    def test_en_outage_access_report_passes(self):
+        # #608-review-2 MAJOR #3: "customers cannot access production" is an
+        # outage report — `access` was dropped from the verb set.
+        self.assertFalse(
+            _blocked(_run(EN_OUTAGE_ACCESS)),
+            "an outage report about customers must not block")
+
+    def test_en_users_access_report_passes(self):
+        self.assertFalse(_blocked(_run(EN_USERS_ACCESS)))
 
 
 class ProdCapitulationHookContract(TestCase):

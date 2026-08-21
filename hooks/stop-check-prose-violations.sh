@@ -1054,49 +1054,63 @@ fi
 # checked: / an RO-channel read / has_group/search_read) OR an explicit
 # `UNVERIFIED:` line.
 #
-#   SK: a "can't" negation (nevie(m)/nedá/nedokáže/nevidím/nevidno) NEAR a
-#       PROD signal (prod/prode/produkci*/produkčn*), AND a verify/read verb
+#   SK: a "can't" negation (nevie(m)/nedá/nedokáže) NEAR a PROD signal
+#       (prod/prode/produkci*/produkčn*), AND a verify/read verb
 #       (zisti/overi/pozri/vidieť/skontrolova/potvrdi/preveri/dohľada) near
 #       PROD — a two-boolean AND (CLUSTER + VERIFY-CONTEXT). #608-review
-#       CRITICAL: an earlier draft had a THIRD branch (see-negation near a
-#       DATA noun) meant to catch "nevidím … za notifikácie"; it was DROPPED
-#       because it flooded false positives — the ubiquitous idiom "nevidím
-#       dôvod" + any prod + a data-noun substring (`stav`⊂`nastaviť`,
-#       `dát`⊂`dátum`, `log`⊂`logika`) blocked ordinary success reports. A
-#       governance gate fails toward NOT blocking, so the pure-see shape is
-#       now a documented residual (the real incident carried "zistiť", still
-#       caught via the verify branch).
+#       CRITICAL x2: an earlier draft had a THIRD branch (see-negation near a
+#       DATA noun) that flooded false positives (the ubiquitous "nevidím
+#       dôvod" + any prod + a data-noun SUBSTRING `stav`⊂`nastaviť` etc.); it
+#       was dropped — but round-2 found `nevidím`/`nevidno` were STILL in the
+#       CANT set, so "Na prode nevidím žiadny problém … idem overiť na dev"
+#       (a benign success report) still blocked via the verify branch. So the
+#       SEE stem is now removed from CANT ENTIRELY: a "can't SEE" claim is a
+#       documented residual (a governance gate fails toward NOT blocking); the
+#       real incident carried "neviem/nedá … zistiť/overiť/potvrdiť", still
+#       caught.
 #   EN: (can't/cannot/unable to/no way to) + (verify/check/read/confirm/
-#       inspect/determine/access) + prod, in the realistic orderings — plus
-#       the specific "(can't) \bsee\b … what's on prod" idiom (bare "see" is a
+#       inspect/determine) + prod, in the realistic orderings — plus the
+#       specific "(can't) \bsee\b … what's on prod" idiom (bare "see" is a
 #       metaphor magnet — "can't see why", `foresee` — so it counts ONLY
 #       inside that literal on-prod idiom with a word boundary, never in the
 #       verb set, and only for the "what's on prod" shape, never a bare
-#       "…on prod").
+#       "…on prod"). `access` was DROPPED from the verb set (#608-review
+#       MAJOR: "customers cannot access production" is an outage report, not a
+#       capitulation).
+#   Escape: the doctrine's OWN self-service method NAMES disarm — a fresh prod
+#       copy (`REFRESH-DEV-BOX-FROM-PROD` / `čerstv* kópi` / `fresh cop|prod`),
+#       the read-only handover account (`read-only handover|account|api` /
+#       `RO kanál|channel|handover` / `has_group` / `search_read`), an explicit
+#       `Self-service-checked:` line, or a bare `UNVERIFIED:`. #608-review
+#       MAJOR: the bare `read-only`/`fresh cop` tokens were narrowed to these
+#       method-name shapes so a capitulation that merely NAMES the RO channel
+#       it gave up on ("RO read-only kanál vrátil 500") is NOT disarmed.
 #
-# Accepted residuals (documented, not chased, per #319): a PURE see-based read
-# with no verify verb ("na prode nevidím kontrolné kópie mailov") is NOT
-# blocked (the dropped see-branch above); an exotic synonym verb (beží/padá/
-# dostal) can slip; "can't read the logs on prod" pairs read+prod on a non-
-# state read (fail-closed, low harm — reading logs on prod is common enough
-# that this over-blocks occasionally; the escape disarms it once self-service
-# is attempted); an owner-facing single-decision question that lists 3+
-# context tickets each ending a clause with "?" is treated as a per-ticket
+# Accepted residuals (documented, not chased, per #319): a PURE "can't see"
+# claim ("na prode nevidím kontrolné kópie mailov") is NOT blocked (SEE dropped
+# from CANT); an exotic synonym verb (beží/padá/dostal) can slip; "can't read
+# the config/logs on prod" pairs read+prod on a non-state read whose subject is
+# a script/user, not the agent (fail-closed, low harm — reading logs/config on
+# prod is common enough that this over-blocks occasionally; the escape disarms
+# it once self-service is attempted); an UNRELATED `UNVERIFIED:`/`has_group`
+# mention disarms a real capitulation (message-scoped escape, same as the
+# tester-handoff sibling); an owner-facing single-decision question that lists
+# 3+ context tickets each ending a clause with "?" is treated as a per-ticket
 # PILE by the #606 detector below, which is intended per the owner's "never a
 # U summary" directive; the formal register (vykanie) and a decoy inside an
 # interpreter heredoc body carry the same limitations every #319 detector in
 # this file already has.
-PC_CANT_SK='\b(nevie[mš]?|nevedia|nedok[áa][žz]e[mš]?|nevid[íi][mš]?|nevidno|ned[áa])\b'
+PC_CANT_SK='\b(nevie[mš]?|nevedia|nedok[áa][žz]e[mš]?|ned[áa])\b'
 PC_VERIFY_SK='\b(zisti[ťt]|zist[íi][mš]?|overi[ťt]|over[íi][mš]?|pozrie[ťt]|pozri[mš]?|skontrolova[ťt]|vidie[ťt]|potvrdi[ťt]|potvrd[íi][mš]?|preveri[ťt]|doh[ľl]ada[ťt])\b'
 PC_PROD_SK='\b(prode?|produkci[a-z]*|produk[čc]n[a-z]*)\b'
 PC_SK_A="(${PC_CANT_SK}).{0,40}(${PC_PROD_SK})|(${PC_PROD_SK}).{0,40}(${PC_CANT_SK})"
 PC_SK_B="(${PC_VERIFY_SK}).{0,60}(${PC_PROD_SK})|(${PC_PROD_SK}).{0,60}(${PC_VERIFY_SK})"
 PC_CANT_EN="\b(can'?t|cannot|can[[:space:]]+not|could[[:space:]]?n'?t|couldn'?t|unable[[:space:]]+to|no[[:space:]]+way[[:space:]]+to|have[[:space:]]+no[[:space:]]+way)\b"
-PC_VERIFY_EN='\b(verif[a-z]*|check[a-z]*|read|confirm[a-z]*|inspect[a-z]*|determine[a-z]*|access)\b'
+PC_VERIFY_EN='\b(verif[a-z]*|check[a-z]*|read|confirm[a-z]*|inspect[a-z]*|determine[a-z]*)\b'
 PC_PROD_EN='\b(prod|production)\b'
 PC_EN_MAIN="(${PC_CANT_EN}).{0,25}(${PC_VERIFY_EN}).{0,50}${PC_PROD_EN}|${PC_PROD_EN}.{0,50}(${PC_CANT_EN}).{0,25}(${PC_VERIFY_EN})|(${PC_VERIFY_EN}).{0,25}(${PC_CANT_EN}).{0,50}${PC_PROD_EN}|${PC_PROD_EN}.{0,50}(${PC_VERIFY_EN}).{0,25}(${PC_CANT_EN})"
 PC_EN_IDIOM="(${PC_CANT_EN}).{0,20}\bsee\b.{0,15}what'?s[[:space:]]+on[[:space:]]+prod"
-PC_ESCAPE='REFRESH-DEV-BOX-FROM-PROD|[čc]erstv[úuej][[:space:]]+k[óo]pi|Self-service-checked|has_group|search_read|RO[[:space:] -]?(kan[áa]l|channel|tunel|tunnel|handover)|UNVERIFIED:'
+PC_ESCAPE='REFRESH-DEV-BOX-FROM-PROD|[čc]erstv[a-záäéíóôúý]*[[:space:]]+k[óo]pi|fresh[[:space:]]+(cop|prod)|read-only[[:space:]]+(handover|account|api)|Self-service-checked|has_group|search_read|RO[[:space:] -]?(kan[áa]l|channel|tunel|tunnel|handover)|UNVERIFIED:'
 PC_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || PC_FLAT="$MSG_MENTION"
 PC_MATCH=0
 if LC_ALL=C.UTF-8 msg_has "$PC_FLAT" -qiE "$PC_SK_A" && \
