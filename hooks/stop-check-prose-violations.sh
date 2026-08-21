@@ -986,6 +986,135 @@ if [ "$HAS_SK_APPROVAL" = "1" ] && [ "$HAS_QMARKER" = "1" ] && [ "$NO_OPTION_BUL
     add_hard "Pre-answered Slovak prose question: spec/plan/design approval pause (schvaľuješ/schváliš/odsúhlasíš/potvrdíš/odobríš + spec/plán/návrh/dizajn)"
 fi
 
+# #606 — owner-facing PILE of per-ticket asks in ONE turn (U tickets must be
+# delivered STEP-BY-STEP, one full `**Otázka — projekt …:**` block at a time,
+# never a summary list). Owner directive (2026-08-21): "nikdy nemam dostavat
+# sumarne informacie u vsetkych U vzdy musis ist step by step". The doctrine
+# lives in the always-on modules (user-questions-slovak.md +
+# statusline-vocabulary.md U bullet) + the autopilot skill's #527 bullet; this
+# is the mechanical backstop for the RELIABLY-detectable subset only.
+#
+# Signature (narrow ON PURPOSE — the ticket explicitly warns against false
+# positives on legitimate STATUS REPORTS): the message is an owner-facing
+# QUESTION turn (carries a `❓ NEEDS YOU`/`❓ ASKED` marker — reuse the
+# HAS_QMARKER already computed for the SK-approval check above) AND it packs
+# 3+ physical LINES that each carry a `#N …?` per-ticket ask (a `#N` followed
+# within 120 chars, same line, by a `?`). A completion report ends with `✅`
+# or `❓ Question:` (never NEEDS YOU/ASKED) and its `Closes #N` lines carry no
+# `?`, so it never trips; a single compliant one-ticket question block has at
+# most one `#N …?` line. `msg_count` counts MATCHING LINES (grep -c), and its
+# `?` (undeterminable) verdict is SKIPPED here — a false-block on a legit
+# status report is a real harm, so this incriminating count fails OPEN on an
+# unanswerable grep rather than manufacturing a block (unlike the fail-CLOSED
+# banned-phrase checks, which are cheap to reword). MSG_MENTION so a quoted /
+# fenced `#N …?` example (this repo's own docs) is never counted.
+#
+# Accepted residuals (documented, not chased, per #319's own precedent): a
+# pile crammed onto FEWER than 3 physical lines (all tickets on one line)
+# escapes — the dominant incident shape is "one line each" (a bullet list);
+# a per-line count naturally handles that shape and NOT the rarer crammed one.
+# A pure SUMMARY status list with NO per-ticket `?` and NO ❓ marker is
+# indistinguishable from a legitimate backlog enumeration and is left to the
+# doctrine (and to message-status-marker.md's own marker gate) rather than a
+# false-positive-prone heuristic. Non-distinct tickets (the SAME `#N …?` on 3
+# lines) still count 3 — still a "pile" shape, so this is intended, not a gap.
+if [ "$HAS_QMARKER" = "1" ]; then
+    U_ASK_LINES=$(msg_count "$MSG_MENTION" -iE '#[0-9]+.{0,120}\?')
+    case "$U_ASK_LINES" in
+        '' | *[!0-9]*) : ;;  # '?' (undeterminable) or non-numeric — fail OPEN, no block
+        *)
+            if [ "$U_ASK_LINES" -ge 3 ]; then
+                echo "VIOLATION: Doručil si OWNEROVI zhrnutý ZOZNAM ${U_ASK_LINES}+ tiketov, kde každý nesie vlastnú otázku (#N …?) — presne to, čo owner zakázal (2026-08-21): 'nikdy nemam dostavat sumarne informacie u vsetkych U, vzdy musis ist step by step'. Owner NEVIE dekódovať ticket-po-tikete otázky zo stlačeného zoznamu. Každý U člen sa doručuje ako VLASTNÝ celý, self-contained blok '**Otázka — projekt …:**' (2-4 vety úvod čo tá vec JE + prečo čaká na neho, možnosti s dôsledkami, JEDNA rozhodovacia ❓ linka), PO JEDNOM, na ďalší až keď je predošlý zodpovedaný. Raw '--waiting' tabuľka je LEN machine context, owenerovi sa nikdy nerenderuje. Prepíš správu: pošli len PRVÝ U člen ako celý blok. See user-questions-slovak.md ('Ask in SMALL parts') + statusline-vocabulary.md (U bullet) + skills/autopilot/SKILL.md (#527)." >&2
+                add_hard "Owner-facing pile of ${U_ASK_LINES}+ per-ticket asks (#N …?) in one question turn — deliver U members STEP-BY-STEP, one full '**Otázka — projekt …:**' block at a time, never a summary list (#606)"
+            fi
+            ;;
+    esac
+fi
+
+# #608 — owner-chat PROD-READ CAPITULATION: a claim to the owner that prod
+# state cannot be read/verified/seen, with NO evidence of a self-service
+# attempt in the SAME message. Third recurrence of the #500 class (montalu3
+# 2026-08-21: told the owner "nevie na prode zistiť" though it had
+# REFRESH-DEV-BOX-FROM-PROD). #516 gated only the `gk-request` FILING path
+# (block-gk-request-without-selfservice.sh); the OWNER-CHAT path had no gate.
+# Doctrine (the decision tree: 1. RO channel → 2. fresh prod copy →
+# 3. UNVERIFIED last) stays in autonomous-verification.md; this makes the
+# owner-chat claim mechanical.
+#
+# Shape mirrors the sibling tester-handoff detector above VERBATIM (#319
+# methodology): newlines flattened to `_FLAT`, LC_ALL=C.UTF-8 forced on every
+# grep (`\b` next to a diacritic is locale-dependent — this repo's own twice-
+# documented gotcha), bounded `.{0,N}` windows, plain diacritic alternation in
+# bracket classes (no lookaround — ERE has none). Two-boolean AND on the SK
+# branch (CLUSTER + READ-CONTEXT) mirrors the credential detector's own
+# established anti-false-positive shape, so a bare "neviem, na prode to
+# necháme?" (a decision, no read verb) never fires. Escape is DISARMED — same
+# as the tester-handoff branch — when the message carries self-service
+# evidence (REFRESH-DEV-BOX-FROM-PROD / a fresh prod copy / Self-service-
+# checked: / an RO-channel read / has_group/search_read) OR an explicit
+# `UNVERIFIED:` line.
+#
+#   SK: a "can't / don't-see" negation (nevie(m)/nedá/nedokáže/nevidím/
+#       nevidno) NEAR a PROD signal (prod/prode/produkci*/produkčn*), AND
+#       EITHER a verify/read verb (zisti/overi/pozri/vidieť/skontrolova) near
+#       PROD, OR the see-negation near a DATA noun (notifikáci/kópi/mail/
+#       údaj/dáta/stav/členstv/záznam/…). The DATA-noun requirement on the
+#       standalone see branch is what separates the incident ("nevidím … za
+#       notifikácie") from a metaphorical "Nevidím dôvod … na prode" (dôvod
+#       is not a data noun → no match).
+#   EN: (can't/cannot/unable to/no way to) + (verify/check/read/confirm/
+#       inspect/determine/access) + prod, in the realistic orderings — plus
+#       the specific "(can't) see … (what's) on prod" idiom (bare "see" is a
+#       metaphor magnet — "can't see why" — so it counts ONLY inside that
+#       on-prod idiom, never in the verb set).
+#
+# Accepted residuals (documented, not chased, per #319): a pure see-based
+# read with no data noun ("nevidím na prode notifikácie" without the noun in
+# the list) or an exotic synonym verb (beží/padá/dostal) can slip; "can't
+# read the docs on prod" pairs read+prod on a non-state read (rare in a Stop
+# message, and the escape disarms it once self-service is attempted); the
+# formal register (vykanie) and a decoy inside an interpreter heredoc body
+# carry the same limitations every #319 detector in this file already has.
+PC_CANT_SK='\b(nevie[mš]?|nevedia|nedok[áa][žz]e[mš]?|nevid[íi][mš]?|nevidno|ned[áa])\b'
+PC_SEE_SK='\b(nevid[íi][mš]?|nevidno)\b'
+PC_VERIFY_SK='\b(zisti[ťt]|zist[íi][mš]?|overi[ťt]|over[íi][mš]?|pozrie[ťt]|pozri[mš]?|skontrolova[ťt]|vidie[ťt])\b'
+PC_PROD_SK='\b(prode?|produkci[a-z]*|produk[čc]n[a-z]*)\b'
+PC_DATA_SK='(notifik[áa]ci|k[óo]pi|mail|e-?mail|[úu]daj|d[áa]t|stav|[čc]lenstv|z[áa]znam|riadk|hodnot|z[áa]pis|log)'
+PC_SK_A="(${PC_CANT_SK}).{0,40}(${PC_PROD_SK})|(${PC_PROD_SK}).{0,40}(${PC_CANT_SK})"
+PC_SK_B="(${PC_VERIFY_SK}).{0,60}(${PC_PROD_SK})|(${PC_PROD_SK}).{0,60}(${PC_VERIFY_SK})"
+PC_SK_D="(${PC_SEE_SK}).{0,40}${PC_DATA_SK}|${PC_DATA_SK}.{0,40}(${PC_SEE_SK})"
+PC_SK_BD="(${PC_SK_B})|(${PC_SK_D})"
+PC_CANT_EN="\b(can'?t|cannot|can[[:space:]]+not|could[[:space:]]?n'?t|couldn'?t|unable[[:space:]]+to|no[[:space:]]+way[[:space:]]+to|have[[:space:]]+no[[:space:]]+way)\b"
+PC_VERIFY_EN='\b(verif[a-z]*|check[a-z]*|read|confirm[a-z]*|inspect[a-z]*|determine[a-z]*|access)\b'
+PC_PROD_EN='\b(prod|production)\b'
+PC_EN_MAIN="(${PC_CANT_EN}).{0,25}(${PC_VERIFY_EN}).{0,50}${PC_PROD_EN}|${PC_PROD_EN}.{0,50}(${PC_CANT_EN}).{0,25}(${PC_VERIFY_EN})|(${PC_VERIFY_EN}).{0,25}(${PC_CANT_EN}).{0,50}${PC_PROD_EN}|${PC_PROD_EN}.{0,50}(${PC_VERIFY_EN}).{0,25}(${PC_CANT_EN})"
+PC_EN_IDIOM="(${PC_CANT_EN}).{0,20}see.{0,25}(what'?s[[:space:]]+on[[:space:]]+prod|on[[:space:]]+prod)"
+PC_ESCAPE='REFRESH-DEV-BOX-FROM-PROD|[čc]erstv[úuej][[:space:]]+k[óo]pi|fresh[[:space:]]+cop|Self-service-checked|read-only|has_group|search_read|RO[[:space:] -]?(kan[áa]l|channel|tunel|tunnel|handover)|UNVERIFIED:'
+PC_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || PC_FLAT="$MSG_MENTION"
+PC_MATCH=0
+if LC_ALL=C.UTF-8 msg_has "$PC_FLAT" -qiE "$PC_SK_A" && \
+    LC_ALL=C.UTF-8 msg_has "$PC_FLAT" -qiE "$PC_SK_BD"; then
+    PC_MATCH=1
+fi
+if [ "$PC_MATCH" = "0" ]; then
+    if LC_ALL=C.UTF-8 msg_has "$PC_FLAT" -qiE "$PC_EN_MAIN" || \
+        LC_ALL=C.UTF-8 msg_has "$PC_FLAT" -qiE "$PC_EN_IDIOM"; then
+        PC_MATCH=1
+    fi
+fi
+if [ "$PC_MATCH" = "1" ]; then
+    # Exonerating: self-service evidence / UNVERIFIED present -> DISARM.
+    # msg_missing (unknown -> deny the exemption, fail-closed) matches this
+    # file's #194 taxonomy for an EXONERATING pattern, same as the
+    # tester-handoff branch's own UNVERIFIED escape.
+    if LC_ALL=C.UTF-8 msg_missing "$MSG_MENTION" -qiE "$PC_ESCAPE"; then
+        echo "VIOLATION: Povedal si OWNEROVI, že sa niečo na PRODE nedá zistiť/overiť/pozrieť/nevidíš — bez akéhokoľvek dôkazu, že si skúsil self-service cestu. Toto je tretí výskyt triedy #500 (montalu3 2026-08-21). 'Neviem na prode X zistiť' NIE JE poctivé UNVERIFIED pre prod-STATE READ — má self-service odpoveď. Decision tree (autonomous-verification.md → 'What''s on PROD?'): 1. vlastný read-only kanál (RO handover účet, has_group/search_read — pri 500 ČÍTAJ telo a skús užšiu metódu, nikdy sa nevzdaj po jednom 500); 2. ČERSTVÁ KÓPIA produ na vlastnom boxe (REFRESH-DEV-BOX-FROM-PROD → priame čítanie mail_mail/mail_message/DB, ~20-40 min); 3. UNVERIFIED až posledné, a LEN po vyčerpaní 1 aj 2. Sprav to a napíš čo si zistil — alebo, ak si cesty naozaj vyčerpal, napíš 'UNVERIFIED: <čo> — <vyčerpaná self-service cesta>'." >&2
+        echo "" >&2
+        echo "  See autonomous-verification.md → '\"What's on PROD?\" is a SELF-SERVICE question' (decision tree)." >&2
+        add_hard "Owner-chat prod-read capitulation ('neviem na prode zistiť/overiť' / 'cannot verify on PROD') with NO self-service evidence — try the RO channel, then a fresh prod copy (REFRESH-DEV-BOX-FROM-PROD); UNVERIFIED only after both. Or write 'UNVERIFIED:' with the exhausted self-service path. (#608 / #500 class)"
+    fi
+fi
+
 # === Unified completion-report detection ===
 # Agents sometimes write prose completion reports without the canonical heading,
 # silently bypassing every audit check below (slovnormal-mcp session shipped
