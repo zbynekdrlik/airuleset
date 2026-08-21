@@ -672,9 +672,9 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
 #
 # A saturated `/process-subdev` (or `/autopilot`) SUPERVISOR consumes a worker
 # return (task-notification) and continues `⏳ WORKING` WITHOUT writing the
-# per-ticket `## ✅ Work Complete` report. #599 fixed the COMPACT half of this
-# (a `subagent-stop` request no longer LAPSES on a `⏳` veto — that veto is
-# gone, so the per-ticket compact now delivers at the next safe moment); but
+# per-ticket `## ✅ Work Complete` report. #599 removed the `⏳` veto that
+# LAPSED the compact half; #610 then retired the `subagent-stop` producer, so
+# the only per-ticket compact now is the report's own `self-callback` record;
 # the missing REPORT itself is a separate, still-live concern — the ticket gets
 # no `## ✅ Work Complete` report at all, which is what job 25 nudges (the #411
 # `--self` compact is a CONSEQUENCE of the report, not job 25's target).
@@ -688,8 +688,8 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
 # swallowed delivery is never silent (#442-F2 / #502 / #509 / #511).
 #
 # It changes NOTHING about the compact veto: the supervisor writing the report
-# re-arms the per-ticket compact through the existing #411 `--self` path all on
-# its own (and post-#599 the subagent-stop request delivers on its own too).
+# re-arms the per-ticket compact through the existing #411 `--self` path — the
+# SOLE per-ticket compact producer post-#610 (the subagent-stop channel retired).
 # --------------------------------------------------------------------------- #
 
 # The SAME canonical heading `hooks/stop-check-prose-violations.sh` and

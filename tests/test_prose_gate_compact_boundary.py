@@ -8,9 +8,9 @@ calls it. `completion-report.md` only tells the SESSION to call it as its own
 last tool call BEFORE the report text; a sonnet-tier stream session (the live
 david@subdev incident this ticket was filed from) reliably skips that step.
 
-THE FIX (mirrors `hooks/notify-compact-subagent-boundary.sh`'s own shape,
-which already does the identical thing for the SubagentStop/worker-boundary
-case): `hooks/stop-check-prose-violations.sh` already computes
+THE FIX (this `--record --origin self-callback` path is now the SOLE mechanical
+`/compact` recorder -- #610 RETIRED the SubagentStop worker-boundary channel
+that used to do the identical thing): `hooks/stop-check-prose-violations.sh` already computes
 `IS_COMPLETION_HEADING` -- the SAME canonical `^## ✅ Work Complete|^✅ Work
 Complete` classifier `watchdog/compact.py`'s own `_COMPACT_COMPLETION_
 HEADING_RX` anchors on -- as part of validating the report's own structure.
@@ -25,7 +25,7 @@ so the origin now only affects the #188 unresumed-api-error gate). Never
 `--self` itself: that resolves the pane via `$TMUX_PANE`, which is correct
 for a session calling it as ITS OWN mid-turn tool call, but a HOOK process
 has no reliable `$TMUX_PANE` of its own -- `--record` takes the payload's own
-`session_id`/`cwd` directly, exactly like the SubagentStop sibling does.
+`session_id`/`cwd` directly (as the SubagentStop channel did before #610).
 
 These tests fake `python3` on PATH (the hook resolves `airuleset.py` via
 `BASH_SOURCE`-relative path, then shells out to it) so no real request state

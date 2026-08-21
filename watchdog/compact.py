@@ -21,11 +21,21 @@ THE MODEL (owner's own words): "session zavolá, systém overí, napíše
 /compact, zaloguje" — the session calls, the system verifies, it types
 `/compact`, it logs the outcome. Concretely:
 
-  INPUT   — exactly two origins create a pending request (below):
-            `record_compact_request(..., origin="self-callback")` from
-            `airuleset.py compact-request --self`, and
-            `record_compact_request(..., origin="subagent-stop")` from
-            `hooks/notify-compact-subagent-boundary.sh`. Nothing else.
+  INPUT   — the `self-callback` origin is now the SOLE production producer of
+            a pending request: `record_compact_request(..., origin=
+            "self-callback")` from `airuleset.py compact-request --self` (and
+            the equivalent `--record --origin self-callback` fired by
+            `hooks/stop-check-prose-violations.sh` at a `## ✅ Work Complete`
+            report, issue 411's Stop-hook backstop). #610 RETIRED the
+            `subagent-stop` PRODUCER: `hooks/notify-compact-subagent-boundary.sh`
+            no longer records anything — under the FLEET model (issues 317/456)
+            a worker RETURN is not the SUPERVISOR's ticket boundary (the serial
+            integration is), so a per-return compact fired mid-flow (montalu6:
+            5 mid-flow compacts, 0 Work-Complete between them). The delivery
+            machinery below still RECOGNISES `subagent-stop` as a proven origin
+            (harmless — no producer emits it any more; the delivery tests use it
+            generically), so a re-enable is a one-line hook restore if the model
+            ever reverts to workers that merge + report their own tickets.
 
   DELIVERY — ONE function, `deliver_compact()`. It checks, in order:
             (a) the pane is idle, with no unsent draft and no open dialog;
@@ -176,9 +186,14 @@ def _save_compact_requests(d, path=None):
 
 
 def record_compact_request(session, cwd, now=None, path=None, origin=None):
-    """Record / SUPERSEDE the pending `/compact` request for `session` — called
-    ONLY by the two proven origins (`compact-request --self` /
-    `--record --origin subagent-stop`). Overwrites any earlier pending request
+    """Record / SUPERSEDE the pending `/compact` request for `session` — in
+    production called ONLY via the `self-callback` proven origin
+    (`compact-request --self` and the issue-411 `--record --origin
+    self-callback` Stop-hook backstop); the `subagent-stop` PRODUCER was retired
+    by #610 (a worker return is not the supervisor's ticket boundary under the
+    fleet model), though the function and the delivery machinery still accept
+    that origin generically (see the INPUT note in the module docstring).
+    Overwrites any earlier pending request
     for the SAME session, INCLUDING its `ts`: `ts` is set to `now` on EVERY
     record (the #599 SUPERSEDE rule, REVERSING #400's non-refreshable anchor).
     Dedup is 1-pending-per-session (the dict is keyed by session). `cwd` and

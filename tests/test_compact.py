@@ -549,6 +549,17 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(word, "sent")
         self.assertIn("/compact", tmux.typed_texts())
 
+    def test_610_self_callback_boundary_still_delivers_at_idle(self):
+        # #610 RETIRED the subagent-stop RECORD channel (the worker-return hook
+        # no longer records — see test_compact_subagent_retire_610.py). The
+        # designed per-ticket compact cadence is now ENTIRELY the supervisor's
+        # own `## ✅ Work Complete` -> `self-callback` record. This regression
+        # guard proves that path still delivers at a zero-lane idle pane,
+        # unaffected by the retirement (delivery machinery is unchanged).
+        word, tmux, _ = self._go(CB_IDLE_CAP, origin="self-callback")
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
     def test_exact_keystrokes(self):
         word, tmux, _ = self._go(CB_IDLE_CAP)
         self.assertEqual(tmux.keys(), ["/compact", "Enter"])
