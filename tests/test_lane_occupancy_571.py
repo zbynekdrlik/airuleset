@@ -92,6 +92,26 @@ class TestWorkingNoTasksDecision(unittest.TestCase):
         self.assertEqual(d.streak, 0)
         self.assertIsNone(d.log)
 
+    def test_escalated_flag_set_only_on_escalation(self):
+        # #611: the verdict carries an `escalated` flag so the caller can bypass
+        # the empty-lane idle floor ONLY on a genuine WNT escalation (a ⏳ marker
+        # + 0 structured lanes + backlog confirmed over max_defers sweeps). It is
+        # True ONLY in the escalate branch; every OTHER verdict (branch-not-fire,
+        # lanes-live, bounded-defer, zero-backlog-defer) is False -- so a
+        # genuinely mid-dispatch or not-yet-confirmed pane never bypasses idle.
+        self.assertTrue(self._d(structured_live=False, defer_streak=2,
+                                max_defers=3).escalated)          # escalate
+        self.assertFalse(self._d(structured_live=False,
+                                 defer_streak=0).escalated)       # bounded defer
+        self.assertFalse(self._d(structured_live=True,
+                                 defer_streak=2).escalated)       # lanes live -> proceed
+        self.assertFalse(self._d(marker="✅",
+                                 defer_streak=2).escalated)       # branch not applicable
+        self.assertFalse(self._d(render_waiters=3,
+                                 defer_streak=2).escalated)       # render badges present
+        self.assertFalse(self._d(structured_live=False, defer_streak=9,
+                                 backlog=0, max_defers=3).escalated)  # zero backlog -> defer
+
 
 # --- RC2: the low-mem surface pure decider ------------------------------------
 

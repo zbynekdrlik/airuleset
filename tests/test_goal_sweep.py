@@ -1496,6 +1496,70 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("workers=0" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
+    # ---------------------------------------------------------------- #
+    # #611 -- the 0-worker EMPTY-lane branch's 15-min idle floor is
+    # STRUCTURALLY unreachable for a continuously serially-working armed
+    # session (writes a turn every ~10-13min so `idle` never reaches 15m),
+    # yet that is the WORST under-saturation (0 lanes + big backlog). The
+    # idle floor is now BYPASSED once the WNT gate has ESCALATED (a ⏳ marker
+    # + 0 structured lanes + backlog confirmed over GOAL_LANE_WNT_MAX_DEFERS
+    # sweeps); a session NOT in escalation keeps the 15-min behavior. The
+    # remaining delivery gates (boundary, recent-human, draft-diff, hourly
+    # cooldown, MAX_NUDGES) carry the mid-dispatch safety. camera-box: I=41,
+    # 0 workers, 184x skip:idle / 12h, 0 nudge -> "nikdy".
+    # ---------------------------------------------------------------- #
+
+    def test_611_wnt_escalated_zero_lane_fires_despite_fresh_transcript(self):
+        # THE headline lock: ⏳ marker, 0 render badges, 0 STRUCTURED live
+        # lanes, real backlog, FRESH transcript (idle=30s), and the WNT gate
+        # ESCALATES this sweep (wntd seeded to max-1) -> the empty-lane fill
+        # nudge FIRES, bypassing the idle floor. RED on the OLD code: escalation
+        # reached the idle gate and died on skip:idle (the dead-letter).
+        now = 100000
+        tmtime = now - 30  # fresh: transcript written 30s ago, idle << 15min
+        rec = {"wntd": goal.GOAL_LANE_WNT_MAX_DEFERS - 1}  # this sweep escalates
+        with m.patch.object(wd, "transcript_last_marker", return_value="⏳"), \
+             m.patch.object(wd, "_pane_live_task_count", return_value=0), \
+             m.patch.object(wd, "count_live_workers", return_value=(0, [])):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now,
+                                          tmtime, rec=rec)
+        self.assertTrue(owns)
+        self.assertTrue(any("working-no-tasks ESCALATE" in ln for ln in logs), logs)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("workers=0" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:idle" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+
+    def test_611_zero_lane_not_escalated_still_skips_idle(self):
+        # CONTROL: the SAME fresh-transcript 0-worker shape but NOT in WNT
+        # escalation (no ⏳ marker -> the working-no-tasks branch never fires ->
+        # escalated=False) keeps the original 15-min idle floor -> skip:idle.
+        # The bypass is gated STRICTLY on WNT escalation, never on 0 workers.
+        now = 100000
+        tmtime = now - 30  # fresh
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
+        self.assertFalse(owns)
+        self.assertTrue(any("skip:idle" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
+    def test_611_wnt_below_escalation_defers_never_fires(self):
+        # CONTROL: a ⏳ + 0-lane + fresh session whose WNT streak is BELOW the
+        # escalation threshold DEFERS (skip:working-no-tasks) and never fires --
+        # the bypass activates only AFTER the multi-sweep escalation confirms 0
+        # structured lanes, never on the first ⏳ sweep (a transient render flap).
+        now = 100000
+        tmtime = now - 30  # fresh
+        rec = {}  # wntd absent -> streak becomes 1, well below max (3)
+        with m.patch.object(wd, "transcript_last_marker", return_value="⏳"), \
+             m.patch.object(wd, "_pane_live_task_count", return_value=0), \
+             m.patch.object(wd, "count_live_workers", return_value=(0, [])):
+            logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now,
+                                          tmtime, rec=rec)
+        self.assertFalse(owns)
+        self.assertTrue(any("skip:working-no-tasks" in ln for ln in logs), logs)
+        self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
+
     def test_undersaturated_has_no_permanent_giveup(self):
         # A session that stays under-saturated for hours must keep being
         # pushed: GOAL_LANE_MAX_NUDGES is NOT a give-up for the fill-the-cap
