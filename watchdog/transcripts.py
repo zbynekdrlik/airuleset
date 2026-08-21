@@ -1131,43 +1131,108 @@ def transcript_worker_finished(path):
     return ""
 
 
-# --- #599: live run_in_background Bash job detection (STRUCTURED transcript
+# --- #599/#604: live run_in_background Bash job detection (STRUCTURED transcript
 # signal, #486 direction — no pane heuristics). Measured live against the real
-# `~/.claude/projects` corpus (read-only) so the shape is not guessed:
-#   START      — an assistant `tool_use` block, name=="Bash", whose
-#                `input.run_in_background is True`; carries a `tool_use` `id`.
-#   COMPLETION — a LATER `user`/`queue-operation` entry whose string content
-#                holds a `<task-notification>` block naming that same id inside
-#                `<tool-use-id>…</tool-use-id>` (CC injects it when the bg job
-#                finishes — verified on cambox's transcript, 1402 bg jobs).
-# A live bg-bash job == a START with no matching COMPLETION in the bounded tail.
-# Consumed ONLY by compact's veto (`_session_has_live_bg_tasks`), never folded
-# into `count_live_workers`/`lane_has_live_evidence` — a bg-bash job is NOT a
-# worker lane, so the lane-occupancy (#571) / gk-fill consumers whose danger is
-# UNDER-counting a live lane must not see it (they'd suppress their fill nudge).
+# `~/.claude/projects` corpus (read-only, 1459 launched jobs / 10 project dirs)
+# so the shape is not guessed. A bg job is LIVE only if it actually LAUNCHED and
+# has no terminal event:
+#   LAUNCH     — a `user` tool_result whose `toolUseResult` is a dict carrying
+#                `backgroundTaskId` (the bgid — proof the job STARTED), paired
+#                with that tool_result block's `tool_use_id` (the toolu id, for
+#                completion matching). #604 keys on this, NOT the assistant
+#                `run_in_background:true` tool_use the old #599 signal used: that
+#                tool_use is only the REQUEST to launch, so a PreToolUse-hook-
+#                BLOCKED / errored launch (error result, NO backgroundTaskId —
+#                11 such in the corpus, all under the old signal) read live even
+#                though nothing ran.
+#   COMPLETION — a LATER entry whose string content holds a `<task-notification>`
+#                naming that toolu id inside `<tool-use-id>…</tool-use-id>` (CC
+#                injects it when the bg job finishes — 1436/1459 in the corpus;
+#                read from all three content shapes by `_task_notification_ids`).
+#   KILL       — a `user` TaskStop tool_result: `toolUseResult` dict with
+#                `task_type=="local_bash"` + `task_id` (the bgid), content
+#                "Successfully stopped task: <bgid>". CC writes NO task-
+#                notification for a killed job, so the old signal read a
+#                TaskStop-killed job (this session's push43/b0tkvepdj) live
+#                forever within the window (#604).
+# A live bg-bash job == a LAUNCH whose toolu has no COMPLETION AND whose bgid has
+# no KILL in the bounded tail. Both the launch and kill readers key on the
+# structured `toolUseResult` dict, never an echo-spoofable content string (a
+# command that merely PRINTS "Command running in background with ID: X" would
+# false-register otherwise — seen in the corpus). Consumed ONLY by compact's
+# veto (`_session_has_live_bg_tasks`), never folded into `count_live_workers`/
+# `lane_has_live_evidence` — a bg-bash job is NOT a worker lane, so the lane-
+# occupancy (#571) / gk-fill consumers whose danger is UNDER-counting a live
+# lane must not see it (they'd suppress their fill nudge).
+# DELIBERATELY NO time-based staleness fallback (#604 evaluate-and-decline): a
+# launched job that vanishes with NEITHER a completion NOR a kill is ~0 in the
+# corpus (1/1459 — a one-shot whose START scrolled out long before session end),
+# already self-healed by the 200-entry window scroll + the #599 30-min age cap;
+# a time fallback would risk misreading a genuinely-live MULTI-HOUR bg job (a bg
+# CI waiter) as dead → a `/compact` orphans its completion (the #29193 harm this
+# veto exists to prevent). Re-open only if CC starts writing launched jobs with
+# no terminal record, or stops writing the confirmed TaskStop tool_result.
 _TASK_NOTIFICATION_TOOL_USE_ID_RX = re.compile(
     r"<\s*tool-use-id\s*>\s*([^<\s]+)\s*<\s*/\s*tool-use-id\s*>", re.I)
 
 
-def _entry_bg_bash_tool_use_ids(entry):
-    """tool_use ids of every `run_in_background:true` Bash tool_use in an
-    assistant entry (a START). [] for anything else. Never raises."""
-    ids = []
-    msg = entry.get("message") if isinstance(entry, dict) else None
+def _first_tool_result_id(msg):
+    """The `tool_use_id` of the first `tool_result` block in a `message`
+    (`{'content': [...]}`), or None. A bg LAUNCH / TaskStop result entry
+    carries exactly one such block. Never raises."""
     if not isinstance(msg, dict):
-        return ids
+        return None
     c = msg.get("content")
     if not isinstance(c, list):
-        return ids
+        return None
     for x in c:
-        if (isinstance(x, dict) and x.get("type") == "tool_use"
-                and x.get("name") == "Bash"):
-            inp = x.get("input")
-            if isinstance(inp, dict) and inp.get("run_in_background") is True:
-                tid = x.get("id")
-                if isinstance(tid, str) and tid:
-                    ids.append(tid)
-    return ids
+        if isinstance(x, dict) and x.get("type") == "tool_result":
+            tid = x.get("tool_use_id")
+            if isinstance(tid, str) and tid:
+                return tid
+    return None
+
+
+def _entry_bg_bash_launch(entry):
+    """`(bgid, toolu)` for a bg-bash LAUNCH entry — a `user` tool_result whose
+    `toolUseResult` is a dict carrying `backgroundTaskId` (the bgid, proof the
+    job actually STARTED) paired with the tool_result block's `tool_use_id`
+    (the toolu id, for completion matching). None for anything else (#604).
+
+    Keys on the STRUCTURED `toolUseResult.backgroundTaskId`, never the echo-
+    spoofable content string, and on the LAUNCH result rather than the assistant
+    `run_in_background:true` tool_use the old #599 signal used — a hook-BLOCKED /
+    errored launch has an error result with NO backgroundTaskId, so it correctly
+    does not register (nothing ran). Never raises."""
+    if not isinstance(entry, dict):
+        return None
+    tur = entry.get("toolUseResult")
+    if not isinstance(tur, dict):
+        return None
+    bgid = tur.get("backgroundTaskId")
+    if not (isinstance(bgid, str) and bgid):
+        return None
+    toolu = _first_tool_result_id(entry.get("message"))
+    if toolu is None:
+        return None
+    return (bgid, toolu)
+
+
+def _entry_taskstop_bgid(entry):
+    """The bgid a CONFIRMED TaskStop terminated — a `user` tool_result whose
+    `toolUseResult` is a dict with `task_type=="local_bash"` + `task_id` (the
+    bgid), content "Successfully stopped task: <bgid>". None for anything else.
+    CC writes NO `<task-notification>` for a killed job, so this is the only
+    terminal signal for the TaskStop-kill case (#604). Never raises."""
+    if not isinstance(entry, dict):
+        return None
+    tur = entry.get("toolUseResult")
+    if not isinstance(tur, dict):
+        return None
+    if tur.get("task_type") != "local_bash":
+        return None
+    bgid = tur.get("task_id")
+    return bgid if isinstance(bgid, str) and bgid else None
 
 
 def _task_notification_ids(entry):
@@ -1203,34 +1268,43 @@ def _task_notification_ids(entry):
 
 
 def session_live_bg_bash(entries):
-    """PURE (entries in / verdict out, #504) — True iff any `run_in_background`
-    Bash START in `entries` has NO later `<task-notification>` COMPLETION for
-    its tool_use id. `entries` are already-parsed transcript jsonl dicts (the
-    caller bounds how many). A completion whose START is outside the window is
-    IGNORED (an unmatched completion is not a live job); a START whose
-    completion is outside the window (below the tail) reads live — the
-    conservative direction for a VETO whose danger is orphaning a running job.
+    """PURE (entries in / verdict out, #504) — True iff some bg-bash job in
+    `entries` actually LAUNCHED and has NEITHER a `<task-notification>`
+    COMPLETION (via its toolu id) NOR a confirmed TaskStop KILL (via its bgid).
+    `entries` are already-parsed transcript jsonl dicts (the caller bounds how
+    many). All three signals are collected across the WHOLE window first (a
+    launch and its terminal event may be any distance apart), then a launched
+    bgid is live iff its toolu is absent from `notified` AND the bgid is absent
+    from `killed` (#604).
 
-    `notified` is collected across the WHOLE window first (a START and its
-    completion may be any distance apart, and CC writes a completion in three
-    entry shapes — `_task_notification_ids` reads all of them), then a START is
-    live iff its id is absent from `notified`. The START side is STRUCTURAL
-    (`_entry_bg_bash_tool_use_ids` reads only a parsed `tool_use` block), immune
-    to a `<task-notification>` merely QUOTED in assistant prose; a prose-quoted
-    completion whose text carries the exact unique `toolu_…` id of a still-live
-    START in the same window would false-CLEAR it, but that collision is
-    practically unreachable (an exact unique id, in prose, same 200-entry
-    window) — an accepted residual, the safe-side twin of #486's own
-    quoted-markup care. `_entry_text` raising on a wrong-typed (`"text": null`)
-    block is caught inside `_task_notification_ids`. Never raises."""
-    started = []
-    notified = set()
+    A completion/kill whose launch is outside the window is IGNORED (an
+    unmatched terminal event is not a live job); a launch whose terminal event
+    is outside the window (below the tail) reads live — the conservative
+    direction for a VETO whose danger is orphaning a running job. The LAUNCH
+    side is STRUCTURAL (`_entry_bg_bash_launch` keys on `toolUseResult.
+    backgroundTaskId`), so a hook-BLOCKED / errored launch (no bgid) never
+    registers, and a `<task-notification>` merely QUOTED in prose cannot fake a
+    launch; a prose-quoted completion whose text carries the exact unique
+    `toolu_…` id of a still-live launch in the same window would false-CLEAR it,
+    but that collision is practically unreachable (an exact unique id, in prose,
+    same 200-entry window) — an accepted residual, the safe-side twin of #486's
+    own quoted-markup care. `_entry_text` raising on a wrong-typed block is
+    caught inside `_task_notification_ids`. Never raises."""
+    launched = {}          # bgid -> toolu (a bg job that ACTUALLY started)
+    notified = set()       # toolu ids that got a completion notification
+    killed = set()         # bgids terminated by a confirmed TaskStop
     for e in entries:
         if not isinstance(e, dict):
             continue
-        started.extend(_entry_bg_bash_tool_use_ids(e))
+        pair = _entry_bg_bash_launch(e)
+        if pair is not None:
+            launched[pair[0]] = pair[1]
         notified.update(_task_notification_ids(e))
-    return any(tid not in notified for tid in started)
+        kb = _entry_taskstop_bgid(e)
+        if kb is not None:
+            killed.add(kb)
+    return any(toolu not in notified and bgid not in killed
+               for bgid, toolu in launched.items())
 
 
 def session_has_live_bg_bash(path, tail_bytes=1_000_000, max_entries=200):

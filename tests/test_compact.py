@@ -179,20 +179,21 @@ def _write_subagent_transcript(base, cwd, sid, mtime=None, error=False,
 def _write_bg_bash_transcript(base, cwd, sid, marker_text=None, live=True,
                               tool_use_id="toolu_bg1"):
     """A MAIN transcript at <base>/<encoded-cwd>/<sid>.jsonl whose tail carries
-    a `run_in_background:true` Bash tool_use (a START — the shape measured live
-    on cambox's transcript). `live=True` → NO completion follows, so
+    a bg-bash LAUNCH tool_result (a `toolUseResult.backgroundTaskId` — the shape
+    measured live, #604). `live=True` → NO completion follows, so
     `session_has_live_bg_bash` reads a LIVE bg job (a `/compact` would orphan
     it). `live=False` → a later `<task-notification>` names that tool_use id
     (COMPLETION), so the job reads NOT live. An optional trailing `marker_text`
     assistant turn lets a test combine the marker check with the bg-bash check;
-    with `marker_text=None` the last real turn is the bg START itself (marker
+    with `marker_text=None` the last real turn is the bg launch itself (marker
     '' — not a `❓`, so condition (c) passes and the bg-bash veto is what fires)."""
     d = Path(base) / _encode(cwd)
     d.mkdir(parents=True, exist_ok=True)
     p = d / (sid + ".jsonl")
-    lines = [{"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "id": tool_use_id, "name": "Bash",
-         "input": {"command": "bash fleet-upgrade.sh", "run_in_background": True}}]}}]
+    lines = [{"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": tool_use_id, "is_error": False,
+         "content": "Command running in background with ID: bg1. (fleet-upgrade.sh)"}]},
+        "toolUseResult": {"backgroundTaskId": "bg1"}}]
     if not live:
         lines.append({"type": "user", "message": {"content": (
             "<task-notification>\n<task-id>bq1</task-id>\n"
@@ -1830,9 +1831,13 @@ class TestBgBashDetector599(unittest.TestCase):
         return Path(d.name)
 
     def _bg_start(self, tid):
-        return {"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "id": tid, "name": "Bash",
-             "input": {"command": "x", "run_in_background": True}}]}}
+        # the launch-CONFIRMING tool_result (#604) — a structured
+        # `toolUseResult.backgroundTaskId` (proof of launch) paired with the
+        # tool_result block's tool_use_id (for completion matching).
+        return {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": tid, "is_error": False,
+             "content": "Command running in background with ID: bg%s." % tid}]},
+            "toolUseResult": {"backgroundTaskId": "bg%s" % tid}}
 
     def _completion(self, tid):
         return {"type": "user", "message": {"content": (
