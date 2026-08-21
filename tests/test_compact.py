@@ -1292,27 +1292,31 @@ class TestCompactConditionBAndMarker(unittest.TestCase):
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now)
         self.assertTrue(compact._session_has_live_bg_tasks(
-            None, self.SID, self.CWD, None, projects_dir=proj, now=now))
+            self.SID, self.CWD, projects_dir=proj, now=now))
 
-    def test_live_bg_tasks_pane_waiting_row_alone_is_live(self):
-        # signal (a): the "Waiting for N background agents" row, with no
-        # subagent transcript at all, is a genuine live positive.
+    def test_605_pane_waiting_row_alone_is_no_longer_live(self):
+        # #605 FLIP (was `test_live_bg_tasks_pane_waiting_row_alone_is_live`):
+        # signal (a) — the pane `_BG_AGENTS_WAIT_RX` "Waiting for N background
+        # agents" scrape — was REMOVED. It carried no timestamp (a stale
+        # scrollback render read live) and was only ever reached at an idle
+        # boundary where a live "Waiting" state does not occur. With NO subagent
+        # transcript (no fresh lane), condition (b) is now False — the exact
+        # false-positive the 02:50 incident on sid 2d02a127 suffered.
         proj = self._dir()
-        run = DeliverCompactFakeTmux([("%1", "claude", self.CWD, "111")],
-                                     CB_BG_AGENT_CAP)
-        self.assertTrue(compact._session_has_live_bg_tasks(
-            "%1", self.SID, self.CWD, run, projects_dir=proj))
+        self.assertFalse(compact._session_has_live_bg_tasks(
+            self.SID, self.CWD, projects_dir=proj))
+        self.assertEqual(compact._live_bg_tasks_detail(
+            self.SID, self.CWD, projects_dir=proj), "")
 
-    def test_live_bg_tasks_false_with_no_live_lane_and_no_pane_signal(self):
-        # no subagent transcript + an idle strip-row pane (no "Waiting" row)
-        # -> not live, even with a Work Complete heading present. Locks that
-        # #565's removal of the exemption did NOT introduce a false veto.
+    def test_live_bg_tasks_false_with_no_live_lane(self):
+        # no subagent transcript -> not live, even with a Work Complete heading
+        # present. Locks that #565's removal of the (b) exemption did NOT
+        # introduce a false veto (and #605's removal of the pane signal did not
+        # either). (Was `..._and_no_pane_signal`, dropped now signal (a) is gone.)
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
-        run = DeliverCompactFakeTmux([("%1", "claude", self.CWD, "111")],
-                                     CB_IDLE_STRIP_ROWS_CAP)
         self.assertFalse(compact._session_has_live_bg_tasks(
-            "%1", self.SID, self.CWD, run, projects_dir=proj))
+            self.SID, self.CWD, projects_dir=proj))
 
     def test_live_bg_tasks_false_for_a_stale_lane_past_the_freshness_window(self):
         # a subagent transcript older than COMPACT_LIVE_WORKER_FRESHNESS_S is
@@ -1324,7 +1328,7 @@ class TestCompactConditionBAndMarker(unittest.TestCase):
             proj, self.CWD, self.SID,
             mtime=now - compact.COMPACT_LIVE_WORKER_FRESHNESS_S - 60)
         self.assertFalse(compact._session_has_live_bg_tasks(
-            None, self.SID, self.CWD, None, projects_dir=proj, now=now))
+            self.SID, self.CWD, projects_dir=proj, now=now))
 
     def test_live_bg_tasks_true_for_a_fresh_wedged_lane_pending_auto_resume(self):
         # #565-review 🟡: count_live_workers EXCLUDES a fresh api-errored
@@ -1337,7 +1341,7 @@ class TestCompactConditionBAndMarker(unittest.TestCase):
         now = time.time()
         _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now, error=True)
         self.assertTrue(compact._session_has_live_bg_tasks(
-            None, self.SID, self.CWD, None, projects_dir=proj, now=now))
+            self.SID, self.CWD, projects_dir=proj, now=now))
 
     def test_live_bg_tasks_window_floor_strictly_exceeds_the_10min_bash_cap(self):
         # #565-review 🔵: the load-bearing correctness property is "the window
@@ -1350,7 +1354,7 @@ class TestCompactConditionBAndMarker(unittest.TestCase):
         now = time.time()
         _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now - 605)
         self.assertTrue(compact._session_has_live_bg_tasks(
-            None, self.SID, self.CWD, None, projects_dir=proj, now=now))
+            self.SID, self.CWD, projects_dir=proj, now=now))
 
     def test_live_bg_tasks_reads_count_live_workers_at_the_15min_window(self):
         # #565 wiring lock: (b) reads the STRUCTURED count_live_workers at
@@ -1369,10 +1373,37 @@ class TestCompactConditionBAndMarker(unittest.TestCase):
 
         with m.patch.object(wd, "count_live_workers", spy):
             result = compact._session_has_live_bg_tasks(
-                None, self.SID, self.CWD, None, projects_dir=proj, now=now)
+                self.SID, self.CWD, projects_dir=proj, now=now)
         self.assertTrue(result)
         self.assertEqual(seen["freshness"],
                          compact.COMPACT_LIVE_WORKER_FRESHNESS_S)
+
+    def test_605_live_lane_labels_name_live_and_exclude_stale_finished(self):
+        # #605 thread 3: live_lane_labels names exactly the LIVE lanes (live /
+        # wedged / unreadable), excluding stale + finished — the SAME
+        # `_LANE_NOT_LIVE_STATES` partition `lane_has_live_evidence` uses, so the
+        # SKIP live-tasks log detail can never disagree with the veto that fired.
+        proj = self._dir()
+        now = time.time()
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   agent_id="livea")                # live
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   error=True, agent_id="wedgb")    # wedged
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   finished=True, agent_id="finc")  # finished
+        _write_subagent_transcript(
+            proj, self.CWD, self.SID, agent_id="staled",
+            mtime=now - compact.COMPACT_LIVE_WORKER_FRESHNESS_S - 60)   # stale
+        _count, evidence = wd.count_live_workers(
+            proj, self.CWD, self.SID, now, compact.COMPACT_LIVE_WORKER_FRESHNESS_S)
+        joined = ",".join(wd.live_lane_labels(evidence))
+        self.assertIn("livea", joined)
+        self.assertIn("wedgb", joined)
+        self.assertNotIn("finc", joined)
+        self.assertNotIn("staled", joined)
+        # the detail is the SAME partition as the bool veto (no drift).
+        self.assertEqual(bool(wd.live_lane_labels(evidence)),
+                         wd.lane_has_live_evidence(evidence))
 
     # -- _compact_not_at_boundary: #599 `❓`-only veto --------------------- #
 
@@ -1937,6 +1968,33 @@ class TestBgBashDetector599(unittest.TestCase):
                           "<tool-use-id>toolu_att</tool-use-id>\n"
                           "</task-notification>")}}
         self.assertFalse(wd.session_live_bg_bash([self._bg_start("toolu_att"), att]))
+
+    def test_605_live_bg_bash_ids_names_the_live_bgids(self):
+        # #605 thread 3: live_bg_bash_ids (the id-returning sibling of
+        # session_live_bg_bash) returns exactly the LIVE bgids, so the SKIP
+        # live-bg-bash log can name the job. Two open (t2,t3), one completed (t1).
+        entries = [self._bg_start("t1"), self._completion("t1"),
+                   self._bg_start("t2"), self._bg_start("t3")]
+        ids = wd.live_bg_bash_ids(entries)
+        self.assertEqual(sorted(ids), ["bgt2", "bgt3"])
+        # the bool sibling is the SAME collection (single source of truth).
+        self.assertEqual(bool(ids), wd.session_live_bg_bash(entries))
+
+    def test_605_live_bg_bash_ids_empty_when_all_completed(self):
+        entries = [self._bg_start("t1"), self._completion("t1")]
+        self.assertEqual(wd.live_bg_bash_ids(entries), [])
+        self.assertFalse(wd.session_live_bg_bash(entries))
+
+    def test_605_session_live_bg_bash_ids_reads_the_bgid_from_a_transcript(self):
+        # #605: the I/O wrapper (session_live_bg_bash_ids) reads the live bgid
+        # from a real transcript tail — the SAME bounded read + window semantics
+        # as session_has_live_bg_bash (which is bool(...) of it).
+        proj = self._dir()
+        cwd = "/home/newlevel/devel/bgidtest"
+        sid = "sess-bgid-1"
+        p = _write_bg_bash_transcript(proj, cwd, sid, live=True)
+        self.assertEqual(wd.session_live_bg_bash_ids(str(p)), ["bg1"])
+        self.assertTrue(wd.session_has_live_bg_bash(str(p)))
 
     def test_bounded_marker_finds_marker_behind_a_large_trailing_entry(self):
         # #599 review 🔵: the bounded marker read (2MB default) must still find a

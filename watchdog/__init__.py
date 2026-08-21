@@ -422,6 +422,7 @@ from watchdog.transcripts import (  # noqa: E402
     _submit_confirmed as _submit_confirmed,
     count_live_workers as count_live_workers,   # #486 G2 -> consumed by G3
     lane_has_live_evidence as lane_has_live_evidence,   # #571 -> lane working-no-tasks
+    live_lane_labels as live_lane_labels,               # #605 -> compact SKIP live-tasks log detail
     transcript_current_context as transcript_current_context,
     transcript_last_marker as transcript_last_marker,
     transcript_last_marker_line as transcript_last_marker_line,
@@ -429,6 +430,8 @@ from watchdog.transcripts import (  # noqa: E402
     transcript_last_assistant_text as transcript_last_assistant_text,
     session_live_bg_bash as session_live_bg_bash,             # #599 pure bg-bash pairing
     session_has_live_bg_bash as session_has_live_bg_bash,     # #599 bg-bash veto (compact-only)
+    live_bg_bash_ids as live_bg_bash_ids,                     # #605 pure bg-bash live ids (log detail)
+    session_live_bg_bash_ids as session_live_bg_bash_ids,     # #605 bg-bash live ids I/O wrapper
     _read_jsonl_byte_tail as _read_jsonl_byte_tail,           # #599 bounded-seek reader
     question_repoke_run as question_repoke_run,           # #522
     question_repoke_streak as question_repoke_streak,     # #522
