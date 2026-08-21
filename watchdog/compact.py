@@ -11,11 +11,14 @@ suite. Every one of those pieces existed to compensate for the trigger
 being an IMPLICIT, re-derived boundary GUESS (context size, idle
 duration, then a Stop-hook text-sniff) rather than an EXPLICIT, deliberate
 callback from the one entity that actually knows a ticket boundary
-occurred. #400 (2026-08-12) proved there are exactly two such entities —
-the session itself (`compact-request --self`) and the SubagentStop event
-when an autopilot-worker returns — and retired the third (text-sniffing)
-outright. Once the boundary is always TRUSTWORTHY, the guessing-era
-scaffolding is dead weight: this file is what is left once it is removed.
+occurred. #400 (2026-08-12) proved there were exactly two such entities —
+the session itself (`compact-request --self`) and the SubagentStop event on
+an autopilot-worker return (that second producer was RETIRED by #610 — a
+worker return is not the supervisor's ticket boundary under the fleet model;
+see the INPUT note below, self-callback is now the sole producer) — and it
+retired the third (text-sniffing) outright. Once the boundary is always
+TRUSTWORTHY, the guessing-era scaffolding is dead weight: this file is what
+is left once it is removed.
 
 THE MODEL (owner's own words): "session zavolá, systém overí, napíše
 /compact, zaloguje" — the session calls, the system verifies, it types
