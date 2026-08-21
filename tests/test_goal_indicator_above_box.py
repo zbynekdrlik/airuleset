@@ -101,6 +101,18 @@ class GoalIndicatorAboveBox(unittest.TestCase):
             TOP, "❯ ", BOT, STAT, STRIP])
         self.assertIs(pane_goal_armed(cap), False)
 
+    def test_prose_quote_ending_exactly_at_the_glyph_is_never_armed(self):
+        # #617-review 🔴: the FIRST cut used a LAZY `.*?Restart to update`
+        # prefix, so a DARK pane whose header quoted the phrase and ENDED
+        # exactly at the closed-form glyph (`the banner reads: Restart to
+        # update◎ /goal active (21m)`) read armed=True and SUPPRESSED a legit
+        # re-arm. Anchoring the alternative on the banner's own line-start
+        # shape (`Update installed · Restart to …`) rejects this. NOT armed.
+        cap = "\n".join([
+            "  the banner reads: Restart to update◎ /goal active (21m)",
+            TOP, "❯ ", BOT, STAT, STRIP])
+        self.assertIs(pane_goal_armed(cap), False)
+
     def test_short_unpunctuated_continuation_is_also_never_armed(self):
         # #393-review MINOR-1 (fresh-context adversarial review,
         # 2026-08-12, executed against the real function) -- the FIRST
