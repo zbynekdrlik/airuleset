@@ -87,6 +87,12 @@ MESSAGE_POST = ('models.execute_kw(db,uid,key,"discuss.channel","message_post",'
                 '[cid],{"body":"Ahoj"})')
 CHANNEL_WRITE = ('models.execute_kw(db,uid,key,"discuss.channel","write",'
                  '[[cid]],{"name":"%s"})')
+# #609 -- message_post signature fixtures. UNSIGNED_MP is the incident shape
+# (a client Discuss post with no `ZbynekAI <N>` last line); SIGNED_MP carries
+# the mandatory signature for stream 2.
+UNSIGNED_MP = MESSAGE_POST                                    # {"body":"Ahoj"}
+SIGNED_MP = ('models.execute_kw(db,uid,key,"discuss.channel","message_post",'
+             '[cid],{"body":"<p>Ahoj, hotové.</p><p>ZbynekAI 2</p>"})')
 
 
 class TestIsChannelCreate(TestCase):
@@ -329,7 +335,9 @@ class TestHookPasses(_HookBase):
         self.assertEqual(self.run_hook(command=cmd).returncode, 0)
 
     def test_message_post_to_existing_channel_passes(self):
-        cmd = "python3 -c '" + MESSAGE_POST + "'"
+        # #609: a message_post is not a create (the name guard stays silent) AND,
+        # for a stream, it must carry the ZbynekAI <N> signature -- SIGNED_MP does.
+        cmd = "python3 -c '" + SIGNED_MP + "'"
         self.assertEqual(self.run_hook(command=cmd).returncode, 0)
 
     def test_channel_rename_write_passes(self):
@@ -349,7 +357,8 @@ class TestHookPasses(_HookBase):
         self.assertEqual(self.run_hook(command='echo "hello world"').returncode, 0)
 
     def test_unrelated_odoo_message_post_python_file_passes(self):
-        script = ("import xmlrpc.client\n" + MESSAGE_POST + "\n")
+        # #609: a SIGNED message_post script passes (not a create; signature present)
+        script = ("import xmlrpc.client\n" + SIGNED_MP + "\n")
         self.assertEqual(self.run_hook(content=script).returncode, 0)
 
 
@@ -458,6 +467,190 @@ class TestReviewFixHookEndToEnd(_HookBase):
                   'body = {"model":"discuss.channel","method":"create",'
                   '"args":[[{"name":"Zle bez cisla"}]]}\n')
         self.assertEqual(self.run_hook(content=script).returncode, 2)
+
+
+# --------------------------------------------------------------------------- #
+# Layer 5 -- #609: message_post STREAM-SIGNATURE gate (ZbynekAI <N> last line)
+# --------------------------------------------------------------------------- #
+
+class TestIsChannelMessagePost(TestCase):
+    def test_rpc_message_post_adjacency(self):
+        self.assertTrue(g.is_channel_message_post(UNSIGNED_MP))
+
+    def test_create_is_not_a_message_post(self):
+        self.assertFalse(g.is_channel_message_post(RPC_CREATE % "X 2"))
+
+    def test_write_is_not_a_message_post(self):
+        self.assertFalse(g.is_channel_message_post(CHANNEL_WRITE % "X 2"))
+
+    def test_orm_chain_message_post_detected(self):
+        self.assertTrue(g.is_channel_message_post(
+            "env['discuss.channel'].browse(cid).message_post(body='x')"))
+
+    def test_orm_sudo_chain_message_post_detected(self):
+        self.assertTrue(g.is_channel_message_post(
+            "self.env['discuss.channel'].browse(cid).sudo().message_post(body='x')"))
+
+    def test_jsonrpc_message_post_detected(self):
+        self.assertTrue(g.is_channel_message_post(
+            '{"model":"discuss.channel","method":"message_post","args":[[cid],{"body":"x"}]}'))
+
+    def test_jsonrpc_create_is_not_a_message_post(self):
+        self.assertFalse(g.is_channel_message_post(
+            '{"model":"discuss.channel","method":"create"}'))
+
+    def test_message_post_on_other_model_without_discuss_channel_not_detected(self):
+        # a sale.order chatter log carries no discuss.channel model string
+        self.assertFalse(g.is_channel_message_post(
+            'execute_kw(d,u,k,"sale.order","message_post",[oid],{"body":"log"})'))
+
+    def test_jsonrpc_message_post_on_other_model_not_detected(self):
+        # review B: the JSON-RPC branch requires BOTH the discuss.channel model
+        # AND the message_post method -- a message_post on a NON-discuss model
+        # (discuss.channel appearing only in a body string, never as "model")
+        # must NOT fire. Pins the `_JSONRPC_MODEL_RE and` requirement (a mutant
+        # dropping it survived every other test).
+        self.assertFalse(g.is_channel_message_post(
+            '{"model":"sale.order","method":"message_post",'
+            '"args":[[oid],{"body":"posted about the discuss.channel feature"}]}'))
+
+
+class TestSignaturePresent(TestCase):
+    def test_exact_signature_present(self):
+        self.assertTrue(g.signature_present("<p>Hotovo</p><p>ZbynekAI 2</p>", "2"))
+
+    def test_case_insensitive_word(self):
+        self.assertTrue(g.signature_present("koniec zbynekai 2", "2"))
+
+    def test_missing_signature(self):
+        self.assertFalse(g.signature_present("Ahoj, hotové bez podpisu.", "2"))
+
+    def test_wrong_number_fails(self):
+        self.assertFalse(g.signature_present("ZbynekAI 3", "2"))
+
+    def test_no_number_fails(self):
+        self.assertFalse(g.signature_present("ZbynekAI", "2"))
+
+    def test_unsubstituted_placeholder_fails(self):
+        # a copy-pasted template that never substituted the number is NOT signed
+        self.assertFalse(g.signature_present("ZbynekAI <N>", "2"))
+
+    def test_glued_higher_number_not_matched(self):
+        # "ZbynekAI 22" is stream 22, never a valid signature for stream 2
+        self.assertFalse(g.signature_present("ZbynekAI 22", "2"))
+
+    def test_multichar_number_boundary(self):
+        self.assertTrue(g.signature_present("ZbynekAI 10", "10"))
+        self.assertFalse(g.signature_present("ZbynekAI 100", "10"))
+
+
+class TestEvaluateMessagePost(TestCase):
+    def test_incident_unsigned_post_is_a_violation(self):
+        v = g.evaluate_message_post(UNSIGNED_MP, "montalu6")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.number, "6")
+        self.assertEqual(v.expected, "ZbynekAI 6")
+
+    def test_signed_post_passes(self):
+        self.assertIsNone(g.evaluate_message_post(SIGNED_MP, "montalu2"))
+
+    def test_wrong_number_signature_is_a_violation(self):
+        wrong = ('execute_kw(d,u,k,"discuss.channel","message_post",[cid],'
+                 '{"body":"Ahoj ZbynekAI 3"})')
+        self.assertIsNotNone(g.evaluate_message_post(wrong, "montalu6"))
+
+    def test_create_is_not_a_message_post_violation(self):
+        self.assertIsNone(g.evaluate_message_post(RPC_CREATE % "Zle bez cisla", "montalu2"))
+
+    def test_write_rename_is_not_a_message_post_violation(self):
+        self.assertIsNone(g.evaluate_message_post(CHANNEL_WRITE % "Zle", "montalu2"))
+
+    def test_non_stream_user_is_silent(self):
+        for u in ("newlevel", "marek", "gatekeeper", "", None):
+            self.assertIsNone(g.evaluate_message_post(UNSIGNED_MP, u), u)
+
+    def test_signature_as_variable_elsewhere_in_script_passes(self):
+        # the body is a variable but the signature literal is in the same script
+        script = ('body = "<p>Hotovo</p><p>ZbynekAI 2</p>"\n'
+                  'execute_kw(d,u,k,"discuss.channel","message_post",[cid],{"body":body})')
+        self.assertIsNone(g.evaluate_message_post(script, "montalu2"))
+
+    def test_base_stream_requires_signature_1(self):
+        self.assertIsNotNone(g.evaluate_message_post(UNSIGNED_MP, "montalu"))
+        signed1 = ('execute_kw(d,u,k,"discuss.channel","message_post",[cid],'
+                   '{"body":"Ahoj ZbynekAI 1"})')
+        self.assertIsNone(g.evaluate_message_post(signed1, "montalu"))
+
+
+class TestMessagePostReDoSAndBounds(TestCase):
+    def test_no_redos_on_repeated_stem_inputs(self):
+        payloads = ("message_post" * 3000, "ZbynekAI " * 3000,
+                    ('{"body":"' + "a" * 20000 + '"}'), "discuss.channel" * 3000)
+        start = time.perf_counter()
+        for p in payloads:
+            g.is_channel_message_post(p)
+            g.signature_present(p, "2")
+        self.assertLess(time.perf_counter() - start, 2.0)
+
+
+class TestHookBlocksSignature(_HookBase):
+    def test_unsigned_message_post_by_stream_is_blocked(self):
+        r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="montalu6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("598", r.stderr)
+        self.assertIn("ZbynekAI 6", r.stderr)
+
+    def test_unsigned_message_post_write_script_blocked(self):
+        script = "import xmlrpc.client\n" + UNSIGNED_MP + "\n"
+        r = self.run_hook(content=script, user="montalu6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_unsigned_message_post_edit_insert_blocked(self):
+        r = self.run_hook(new_string=UNSIGNED_MP, user="montalu6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_wrong_number_signature_blocked(self):
+        wrong = ('execute_kw(d,u,k,"discuss.channel","message_post",[cid],'
+                 '{"body":"Ahoj ZbynekAI 3"})')
+        r = self.run_hook(command="python3 -c '" + wrong + "'", user="montalu6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_name_bypass_does_not_waive_signature(self):
+        # review A MINOR: the NAME bypass (airuleset:discuss-name-ok) must NOT
+        # waive the SIGNATURE check -- an unsigned message_post carrying it still
+        # blocks. Pins the load-bearing hook control-flow (a refactor making the
+        # name-bypass short-circuit the sig check would otherwise pass silently).
+        cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-name-ok legacy")
+        r = self.run_hook(command=cmd, user="montalu6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("ZbynekAI 6", r.stderr)
+
+
+class TestHookPassesSignature(_HookBase):
+    def test_signed_message_post_passes(self):
+        # SIGNED_MP carries ZbynekAI 2 -> passes for the default montalu2 user
+        self.assertEqual(self.run_hook(command="python3 -c '" + SIGNED_MP + "'").returncode, 0)
+
+    def test_non_stream_user_unsigned_post_passes(self):
+        self.assertEqual(
+            self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user=None).returncode, 0)
+
+    def test_sig_bypass_marker_passes(self):
+        cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok internal channel")
+        self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
+
+    def test_non_discuss_message_post_passes(self):
+        cmd = ('python3 -c \'execute_kw(d,u,k,"sale.order","message_post",'
+               '[oid],{"body":"internal log"})\'')
+        self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
+
+    def test_create_still_blocks_bad_name_alongside_signature_gate(self):
+        cmd = "python3 -c '" + (RPC_CREATE % "Viditeľnosť leadov pre obchodníkov") + "'"
+        self.assertEqual(self.run_hook(command=cmd, user="montalu2").returncode, 2)
+
+    def test_compliant_create_still_passes(self):
+        cmd = "python3 -c '" + (RPC_CREATE % "Oprava filtra 2") + "'"
+        self.assertEqual(self.run_hook(command=cmd, user="montalu2").returncode, 0)
 
 
 if __name__ == "__main__":
