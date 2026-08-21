@@ -290,11 +290,15 @@ class TestAttachSnippetBehavior(unittest.TestCase):
     forces ANY window-size policy on the target -- it drops the #584 `-gw
     window-size latest` + `aggressive-resize on` overrides (that was the ROOT
     regression: `latest` shrinks the shared window to whoever is active, so a
-    small webterm client blackens the owner's WT view) and instead attaches the
-    clone with the `ignore-size` CLIENT flag, so the webterm client can NEVER
-    influence window sizing regardless of the target's own window-size policy
-    (belt-and-suspenders on top of the fleet-wide `window-size manual`, which is
-    the primary fix in cli_tmux_provisioning)."""
+    small webterm client blackens the owner's WT view). #613 REOPEN: the
+    `-f ignore-size` flag #586 added is now REMOVED -- it was the PERSISTING
+    cause of the dead-border blackening (an ignore-size client is excluded from
+    tmux's window-size calc, so a LARGER browser client could never grow a
+    window it viewed to its own grid and always saw a dead border). The clone
+    now attaches plain, sizing the windows it navigates to, to its own grid
+    (full render); the shared-window tradeoff self-heals on the SSH client's
+    next keystroke. #615: the clone session also gets `mouse on` (session-
+    scoped) so the browser scroll-wheel reaches tmux copy-mode."""
 
     def setUp(self):
         import subprocess
@@ -346,26 +350,51 @@ class TestAttachSnippetBehavior(unittest.TestCase):
     def test_does_not_force_any_window_size_policy_on_the_target(self):
         # #586: the ROOT regression was `-gw window-size latest` (+ aggressive-
         # resize) — that shrinks the shared window to the active client, so a
-        # small webterm client blackens the owner's WT choose-tree. The webterm
-        # client must set NEITHER: the target's own managed conf (window-size
-        # manual on a supported box) governs, and ignore-size on the clone is
-        # the client-level belt-and-suspenders.
+        # small webterm client blackens the owner's WT choose-tree. The connect
+        # script must set NEITHER: global window-size policy is
+        # cli_tmux_provisioning's concern (the fleet default is tmux's own
+        # `latest`, #613 REOPEN), never the connect script's. #615's `mouse on`
+        # is a per-SESSION option on the clone, not a global window-size policy,
+        # so it does not violate this.
         log = self._run("zbynek", "zbynek::zbynek-4")
         self.assertNotIn("window-size latest", log)
         self.assertNotIn("aggressive-resize", log)
+        self.assertNotIn("set-option -g window-size", log)
 
-    def test_clone_attaches_with_ignore_size_client_flag(self):
-        # #586: the grouped clone carries `-f ignore-size` so it can NEVER
-        # resize the shared window (verified live: under `window-size latest` a
-        # clone with ignore-size held the WT window at its size, without it the
-        # window shrank to the small client). The base's own `new-session -A`
-        # fallback (no existing session) must NOT carry it — that client IS the
-        # owner's real view. #591: the clone is now created DETACHED, so the
-        # `-f ignore-size` CLIENT flag moves to the `attach-session` that
-        # actually attaches the webterm client (a detached new-session has no
-        # client, so the flag would be moot there).
+    def test_clone_attaches_WITHOUT_ignore_size_so_it_renders_full(self):
+        # #613 REOPEN: `-f ignore-size` on the clone is REMOVED. It was the
+        # persisting cause of the "stmavol celý terminál" dead border: an
+        # ignore-size client is EXCLUDED from tmux's window-size calc, so the
+        # webterm clone NEVER grew a window it viewed to its own (larger)
+        # browser grid — the window stayed at whatever the SSH client (176x50)
+        # left it, and the larger browser saw a dead dotted border (proven live:
+        # `latest+ignore-size` → webterm-solo window 176x49 = BORDER; removing
+        # it → 250x59 full render, screenshots BEFORE-latest-ig vs
+        # AFTER-latest-noig). The tradeoff (a window SHARED with the SSH client
+        # sizes to whoever most recently pressed a KEY — streaming output does
+        # NOT re-pin it — self-healing on the SSH's next keystroke) is the
+        # inherent tmux multi-client behaviour, milder than the manual pin.
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertRegex(log, r"attach-session -t zbynek-4-web-\d+ -f ignore-size")
+        self.assertRegex(log, r"attach-session -t zbynek-4-web-\d+\b")
+        self.assertNotIn("ignore-size", log)
+
+    def test_clone_enables_mouse_scoped_to_the_clone_session_only(self):
+        # #615: the webterm clone session gets `mouse on` so the browser
+        # scroll-wheel enters tmux copy-mode (the 50000-line history is
+        # otherwise unreachable — the wheel spews raw `^[[A` escapes into the
+        # shell, proven live: MOUSE-off-wheelup.png). It is a SESSION option set
+        # on the clone (`-t "$C"`), so the owner's own SSH session stays
+        # `mouse off` (its terminal's behaviour is unchanged). NEVER a global
+        # `set-option -g mouse on` (that would flip the owner's WT session too).
+        # Verified live: clone mouse on, base mouse off (exp7); the browser
+        # wheel enters copy-mode (MOUSE-on-wheelup.png) and wheel-down returns
+        # to live view (MOUSE-on-wheeldown.png).
+        log = self._run("zbynek", "zbynek::zbynek-4")
+        self.assertRegex(log, r"set-option -t zbynek-4-web-\d+ mouse on")
+        self.assertNotIn("set-option -g mouse", log)
+        # fake tmux strips the quotes; prove the real command targets the clone.
+        cmd = w._remote_command("zbynek")
+        self.assertIn('tmux set-option -t "$C" mouse on', cmd)
 
     def test_clone_arms_per_session_destroy_unattached_hook(self):
         # #591 THE FIX: the throwaway clone gets its OWN `destroy-unattached on`
@@ -399,10 +428,12 @@ class TestAttachSnippetBehavior(unittest.TestCase):
             self.assertNotIn("set-option -g destroy-unattached", log)
             self.assertNotIn("destroy-unattached keep-last", log)
 
-    def test_fresh_base_session_is_not_ignore_size(self):
+    def test_fresh_base_session_is_never_ignore_size(self):
         # No existing session -> the owner's own base is created; it is the real
-        # viewing client, so it must NOT be ignore-size (only the throwaway
-        # webterm clone is).
+        # viewing client, so it must NOT be ignore-size. #613 REOPEN: ignore-size
+        # is now removed from the clone path too, so no attach in ANY resolution
+        # path is ignore-size — but this fresh-base path was never ignore-size
+        # to begin with, so the invariant is unchanged here.
         log = self._run("zbynek", "")
         self.assertNotIn("ignore-size", log)
 

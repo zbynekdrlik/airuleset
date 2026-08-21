@@ -4897,11 +4897,13 @@ class TestTmuxHistoryLimit(TestCase):
     live: active panes saturated at ~1940/2000), PLUS default-size 176x50
     (#236: the fixed size new windows get). #236 originally also shipped
     `window-size manual`; #241 removed it (it CRASHES tmux 3.4's server at
-    conf-parse startup, `server exited unexpectedly`); #586 RESTORED it
-    VERSION-GATED + conf-only -- emitted ONLY when the PATH `tmux -V` reads
-    >= 3.5 (so a 3.4 box never gets the crashing line). See
-    TestTmuxWindowSizeVersionGated (the version-gate) and
-    TestTmuxWindowSizeRemoved (the fail-closed / never-live-applied lock)
+    conf-parse startup); #586 RESTORED it version-gated + conf-only; #613
+    REOPEN removes it ENTIRELY -- the manual pin was itself the persisting
+    Ctrl+B W dead-border cause (it pins every window to 176x50, so a larger
+    browser client always sees a dead border), so the conf ships no window-size
+    line (tmux default `latest` governs) and the live-apply UNSETS any stale
+    `manual` on a running server. See TestTmuxWindowSizeRemoved (never emitted
+    / never SET live) and TestTmuxWindowSizeSelfHeal (the `-gu` self-heal)
     below. Same idempotent-
     marker-block shape as apply_ultracode_launcher (#77) -- create if
     missing, rewrite CONTENT in place if present, never touch anything
@@ -5001,10 +5003,9 @@ class TestTmuxHistoryLimit(TestCase):
         # what an unpatched box still has) must self-heal on the very next
         # run: the block CONTENT is rewritten in place -- the surroundings
         # stay byte-identical, exactly like the stale-value rewrite case
-        # above. #586: this drives it with run=lambda:None (version
-        # UNPROBEABLE), so window-size is dropped exactly as before -- the
-        # crashing 3.4/unknown-version path. On a probed 3.7b box the line
-        # would be re-added (TestTmuxWindowSizeVersionGated covers that).
+        # above. #613 REOPEN: window-size manual is no longer emitted on ANY
+        # box (the version gate is gone entirely), so a conf still carrying the
+        # old line self-heals to the no-window-size block, unconditionally.
         pre_241_block = (
             f"{airuleset.TMUX_MARK_START}\n"
             "set-option -g history-limit 50000\n"
@@ -5100,26 +5101,29 @@ class TestTmuxHistoryLimit(TestCase):
         # calls remove S-F1/S-DC from an ALREADY-RUNNING server that was
         # live-bound before this fix deployed -- rewriting the conf file
         # alone does not retroactively unbind a live key-table entry.
-        # #586: the FIRST call is the CONF-CONTENT version probe (`tmux -V`,
-        # deciding whether `window-size manual` may be emitted) -- NOT a
-        # live-apply. #591: the 2nd live-apply is an UNSET of the global
-        # destroy-unattached (`set-option -gu`) -- a self-heal that reverts any
-        # running server still carrying the old, base-session-killing `keep-last`
-        # back to tmux's default `off` on the next install; verified live that
-        # `-gu` on a keep-last server -> off, idempotent. #613: the 3rd live-apply
-        # is now the SIBLING self-heal `set-option -gwu aggressive-resize` --
-        # reverting the stale `aggressive-resize on` #584 live-set globally (the
-        # Ctrl+B W blackening) back to tmux's default `off`, verified live on
-        # 3.7b. Now 1 probe + 9 live = 10. `window-size` is STILL never
-        # live-applied (conf-only).
+        # #613 REOPEN: the `window-size manual` version-gate is REMOVED (the
+        # manual pin was itself the persisting Ctrl+B W dead-border cause -- it
+        # pins every window to 176x50, so a larger browser client always sees a
+        # dead border), so there is NO more `tmux -V` probe as calls[0].
+        # #591: the 2nd self-heal is an UNSET of the global destroy-unattached
+        # (`set-option -gu`) -- reverts a running server still carrying the old,
+        # base-session-killing `keep-last` back to tmux's default `off`;
+        # verified live `-gu` on a keep-last server -> off, idempotent. #613:
+        # the aggressive-resize `-gwu` sibling self-heal stays. #613 REOPEN
+        # ADDS a fourth self-heal `set-option -gu window-size` -- reverts a
+        # running server still carrying the stale `manual` (from a restart under
+        # the old conf) back to tmux's default `latest`, so the browser can size
+        # its own windows; verified live: no-op on an already-latest server (no
+        # snap), a benign 176x50->176x49 correction on a manual server, server
+        # unharmed. Now 0 probe + 10 live = 10 calls.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
         self.assertEqual(len(calls), 10)
-        self.assertEqual(calls[0], ["tmux", "-V"])
-        self.assertEqual(calls[1], ["tmux", "set-option", "-g", "history-limit", "50000"])
-        self.assertEqual(calls[2], ["tmux", "set-option", "-gu", "destroy-unattached"])
-        self.assertEqual(calls[3], ["tmux", "set-option", "-gwu", "aggressive-resize"])
+        self.assertEqual(calls[0], ["tmux", "set-option", "-g", "history-limit", "50000"])
+        self.assertEqual(calls[1], ["tmux", "set-option", "-gu", "destroy-unattached"])
+        self.assertEqual(calls[2], ["tmux", "set-option", "-gwu", "aggressive-resize"])
+        self.assertEqual(calls[3], ["tmux", "set-option", "-gu", "window-size"])
         self.assertEqual(calls[4], [
             "tmux", "bind-key", "-n", "S-PageUp", "if", "-F",
             "#{==:#{pane_current_command},claude}",
@@ -5135,10 +5139,10 @@ class TestTmuxHistoryLimit(TestCase):
     def test_a_failing_keybind_call_does_not_skip_the_remaining_ones(self):
         # #267: each live-apply call is independently guarded -- a runner
         # that raises on a live-apply call must not prevent the following
-        # ones from being attempted. #586: call 1 is now the version probe
-        # (`tmux -V`); call 3 (destroy-unattached, the 2nd live-apply) raises,
-        # and the remaining live-apply calls must still run -> 10 total
-        # (#613 added the aggressive-resize `-gwu` self-heal as the 4th call).
+        # ones from being attempted. #613 REOPEN: the version probe is gone,
+        # so call 3 (the aggressive-resize `-gwu` self-heal) raises, and the
+        # remaining live-apply calls -- incl. the new `-gu window-size`
+        # self-heal (call 4) -- must still run -> 10 total.
         p = self._tmp()
         calls = []
 
@@ -5171,8 +5175,8 @@ class TestTmuxHistoryLimit(TestCase):
 
         def _runner(argv):
             calls.append(argv)
-            # #586: call 1 is the version probe; call 3 (a live-apply) returns
-            # a nonzero-rc result WITHOUT raising -- the loop must not break.
+            # #613 REOPEN: no version probe; call 3 (a live-apply) returns a
+            # nonzero-rc result WITHOUT raising -- the loop must not break.
             if len(calls) == 3:
                 return _FakeFailedResult()
             return None
@@ -5422,28 +5426,30 @@ class TestTmuxAggressiveResizeSelfHeal(TestCase):
 
 class TestTmuxWindowSizeRemoved(TestCase):
     """#241: `window-size manual` -- shipped fleet-wide by #236 -- CRASHES
-    tmux 3.4's server outright at startup (`server exited unexpectedly`),
-    confirmed live against the real 3.4 binary. #586 RESTORES it, but ONLY
-    version-gated (never fleet-wide unconditional, the #241 mistake) and
-    still CONF-ONLY: a box we cannot probe, or one on the crashing 3.4,
-    NEVER receives the line -- so what this class still locks is the
-    fail-closed behaviour (the #241 catastrophe cannot recur) and the fact
-    that window-size is NEVER live-applied (no #236 live-apply resize
-    hazard). The POSITIVE emit-on-3.7b case lives in
-    TestTmuxWindowSizeVersionGated above. default-size 176x50 is unaffected
-    and stays; only history-limit/destroy-unattached/keybinds are
-    live-applied (window-size never is)."""
+    tmux 3.4's server outright at startup (`server exited unexpectedly`).
+    #586 RESTORED it version-gated + conf-only. #613 REOPEN removes it
+    ENTIRELY (conf + the whole version-gate machinery): the manual pin was
+    itself the persisting Ctrl+B W dead-border cause -- it pins every window
+    to 176x50, so a browser client larger than the SSH client always sees a
+    dead border. The conf now ships NO window-size line at all (tmux's own
+    default `latest` governs), and the live-apply UNSETS any stale global
+    `manual` (`set-option -gu window-size`, the #591-style self-heal, verified
+    live safe). What this class locks: window-size manual is NEVER emitted to
+    the conf, and window-size is NEVER SET to a value live (only UNSET) -- so
+    the #236 live-apply `set manual` resize/crash hazard cannot return.
+    default-size 176x50 is unaffected and stays. The positive self-heal case
+    lives in TestTmuxWindowSizeSelfHeal below."""
 
-    def test_window_size_not_emitted_when_tmux_version_is_unprobeable(self):
-        # run=lambda: None never answers `tmux -V` -> version undetectable ->
-        # fail CLOSED, no window-size line (the #241 3.4 crash can never
-        # recur on an unprobeable box).
+    def test_window_size_manual_is_never_emitted_to_the_conf(self):
+        # #613 REOPEN: no version gate, no `set-option -g window-size manual`
+        # line, on any box / any tmux version.
         d = tempfile.mkdtemp()
         p = Path(d) / ".tmux.conf"
         airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         text = p.read_text()
-        self.assertNotIn("window-size", text)
-        # the surviving options are still both present.
+        self.assertNotIn("window-size manual", text)
+        self.assertNotIn("set-option -g window-size", text)
+        # the surviving conf options are both present.
         self.assertIn("set-option -g history-limit 50000", text)
         self.assertIn("set-option -g default-size 176x50", text)
 
@@ -5458,115 +5464,56 @@ class TestTmuxWindowSizeRemoved(TestCase):
         # dropped from the feature.
         self.assertIn("set-option -g default-size 176x50", p.read_text())
 
-    def test_no_window_size_or_resize_shaped_live_call_is_ever_issued(self):
-        # #267 widened the live-apply call count from 1 (history-limit
-        # alone) to 4 (history-limit + the three Shift+PgUp/PgDn
-        # `bind-key` calls, see TestTmuxHistoryLimit above) -- what THIS
-        # class still locks is narrower and unaffected by that widening:
-        # no call ever mentions window-size, resize-window or list-windows.
+    def test_window_size_is_never_SET_to_a_value_live_only_unset(self):
+        # #613 REOPEN: the ONLY window-size live call is the UNSET self-heal
+        # (`set-option -gu window-size`) -- proven live safe (resets a stale
+        # manual server to the default `latest`, no snap on an already-latest
+        # server). A window-size SET (`window-size manual`/`latest`) is the
+        # banned #236 live-apply resize/crash hazard and must NEVER be issued;
+        # neither must resize-window / list-windows.
         p = Path(tempfile.mkdtemp()) / ".tmux.conf"
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
         joined = " ".join(" ".join(c) for c in calls)
-        self.assertNotIn("window-size", joined)
+        self.assertIn("set-option -gu window-size", joined)   # the safe unset self-heal
+        self.assertNotIn("window-size manual", joined)        # never a live SET
+        self.assertNotIn("window-size latest", joined)        # never a live SET
         self.assertNotIn("resize-window", joined)
         self.assertNotIn("list-windows", joined)
 
 
-class _FakeTmuxVersion:
-    """A `run(argv)` double that answers ONLY `tmux -V` (with a fixed version
-    line), and returns None for every other tmux call — so a version-gated
-    caller detects the version while the live-apply calls stay no-ops, exactly
-    like the production `run=None` default against a dead socket. #586."""
+class TestTmuxWindowSizeSelfHeal(TestCase):
+    """#613 REOPEN: the fleet conf's `window-size manual` (+ default-size) pin
+    and the webterm clone's `-f ignore-size` flag were BOTH pinning every
+    window to the SSH client's 176x50, so the owner's larger browser client
+    always saw a dead dotted border after Ctrl+B W (the persisting symptom
+    across 5 reports). The conf pin is REMOVED (tmux default `latest` governs),
+    and this live self-heal UNSETS any stale `manual` on a RUNNING server so a
+    box restarted under the old conf converges to `latest` WITHOUT a restart --
+    the SAME #591 pattern as `-gu destroy-unattached` / `-gwu aggressive-resize`.
+    Verified live on tmux 3.7b: `-gu window-size` on a manual server -> latest
+    (a benign 176x50->176x49 correction, server unharmed), a no-op on an
+    already-latest server (no snap)."""
 
-    def __init__(self, version_line):
-        self.version_line = version_line
-        self.calls = []
+    def test_live_apply_UNSETS_the_stale_global_window_size(self):
+        p = Path(tempfile.mkdtemp()) / ".tmux.conf"
+        calls = []
+        airuleset.apply_tmux_history_limit(p, run=calls.append)
+        self.assertIn(["tmux", "set-option", "-gu", "window-size"], calls)
+        # never a live SET of window-size (the banned #236 hazard).
+        self.assertNotIn(["tmux", "set-option", "-g", "window-size", "manual"], calls)
+        self.assertNotIn(["tmux", "set-option", "-g", "window-size", "latest"], calls)
 
-    def __call__(self, argv):
-        self.calls.append(argv)
-        if argv[:2] == ["tmux", "-V"]:
-            class _R:
-                pass
-            r = _R()
-            r.stdout = self.version_line
-            r.returncode = 0
-            return r
-        return None
-
-
-class TestTmuxWindowSizeVersionGated(TestCase):
-    """#586: `window-size manual` is RESTORED to the managed block — the owner's
-    governing agreement is a FIXED tmux size fleet-wide (`sme sa dohodli ze tmux
-    bude mat fixnu velkost aby sa toto nedialo`), which #584's `-gw window-size
-    latest` per-connect override directly violated. It is VERSION-GATED, not
-    unconditional: #241 proved (reproduced live again on dev1's real
-    /usr/bin/tmux 3.4 for #586) that the line CRASHES tmux 3.4 at conf-parse
-    startup (`server exited unexpectedly`) — a fleet-wide catastrophe — while
-    tmux 3.7b starts cleanly (also reproduced live). So the option is emitted
-    ONLY when the PATH `tmux -V` reads >= (3,5); a box we cannot probe, or one
-    still on 3.4 (pre-#242-cutover), never gets the crashing line. Still
-    CONF-ONLY (never live-applied), so no #236 live-apply resize hazard on any
-    box."""
-
-    def _tmp(self):
-        return Path(tempfile.mkdtemp()) / ".tmux.conf"
-
-    def test_window_size_manual_emitted_when_tmux_is_3_7b(self):
-        p = self._tmp()
-        airuleset.apply_tmux_history_limit(p, run=_FakeTmuxVersion("tmux 3.7b\n"))
-        self.assertIn("set-option -g window-size manual", p.read_text())
-
-    def test_window_size_manual_not_emitted_on_tmux_3_4_the_crashing_version(self):
-        p = self._tmp()
-        airuleset.apply_tmux_history_limit(p, run=_FakeTmuxVersion("tmux 3.4\n"))
-        self.assertNotIn("window-size", p.read_text())
-
-    def test_window_size_manual_not_emitted_when_version_undetectable(self):
-        # run() that never answers `tmux -V` (returns None) -> fail CLOSED,
-        # never ship the crashing line to a box whose version we cannot read.
-        p = self._tmp()
-        airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
-        self.assertNotIn("window-size", p.read_text())
-
-    def test_window_size_manual_is_conf_only_never_live_applied(self):
-        # Even on a supported version, window-size is written to the CONF
-        # (takes effect at next server start) and NEVER passed to a live
-        # `run` call — the #236 live-apply resize hazard must not return.
-        p = self._tmp()
-        fake = _FakeTmuxVersion("tmux 3.7b\n")
-        airuleset.apply_tmux_history_limit(p, run=fake)
-        self.assertIn("set-option -g window-size manual", p.read_text())
-        live_joined = " ".join(" ".join(c) for c in fake.calls)
-        self.assertNotIn("window-size", live_joined)
-
-    def test_version_probe_is_a_single_tmux_dash_V_call_first(self):
-        p = self._tmp()
-        fake = _FakeTmuxVersion("tmux 3.7b\n")
-        airuleset.apply_tmux_history_limit(p, run=fake)
-        self.assertEqual(fake.calls[0], ["tmux", "-V"])
-        self.assertEqual(sum(1 for c in fake.calls if c == ["tmux", "-V"]), 1)
-
-    def test_parse_tmux_version_handles_letter_suffix_and_plain(self):
-        self.assertEqual(airuleset._parse_tmux_version("tmux 3.7b\n"), (3, 7))
-        self.assertEqual(airuleset._parse_tmux_version("tmux 3.4"), (3, 4))
-        self.assertEqual(airuleset._parse_tmux_version("tmux next-3.8"), (3, 8))
-        self.assertIsNone(airuleset._parse_tmux_version(""))
-        self.assertIsNone(airuleset._parse_tmux_version(None))
-        self.assertIsNone(airuleset._parse_tmux_version("garbage"))
-
-    def test_supports_gate_boundary_3_4_false_3_5_and_up_true(self):
-        self.assertFalse(airuleset._tmux_supports_window_size_manual(
-            _FakeTmuxVersion("tmux 3.4\n")))
-        self.assertTrue(airuleset._tmux_supports_window_size_manual(
-            _FakeTmuxVersion("tmux 3.5\n")))
-        self.assertTrue(airuleset._tmux_supports_window_size_manual(
-            _FakeTmuxVersion("tmux 3.7b\n")))
-
-        # a runner that raises (tmux missing) -> False, never propagates.
-        def _boom(argv):
-            raise OSError("tmux not found")
-        self.assertFalse(airuleset._tmux_supports_window_size_manual(_boom))
+    def test_window_size_selfheal_sits_beside_the_other_selfheals(self):
+        # the window-size `-gu` self-heal follows the destroy-unattached and
+        # aggressive-resize self-heals (calls[1] destroy, calls[2] aggressive,
+        # calls[3] window-size), the three global self-heals in a row.
+        p = Path(tempfile.mkdtemp()) / ".tmux.conf"
+        calls = []
+        airuleset.apply_tmux_history_limit(p, run=calls.append)
+        self.assertEqual(calls[1], ["tmux", "set-option", "-gu", "destroy-unattached"])
+        self.assertEqual(calls[2], ["tmux", "set-option", "-gwu", "aggressive-resize"])
+        self.assertEqual(calls[3], ["tmux", "set-option", "-gu", "window-size"])
 
 
 class TestTmuxWindowSizeNoResize(TestCase):
@@ -5649,10 +5596,12 @@ class TestTmuxScrollbackKeybinds(TestCase):
         p = Path(tempfile.mkdtemp()) / ".tmux.conf"
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        # #586: calls[0] is the version probe (`tmux -V`); calls[1] is
-        # history-limit, calls[2] is #254's destroy-unattached, calls[3] is
-        # #613's aggressive-resize `-gu` self-heal -- the probe plus three
-        # plain set-option calls, none part of the keybind list.
+        # #613 REOPEN: no version probe anymore, so calls[0] is history-limit,
+        # calls[1] is #254's destroy-unattached `-gu`, calls[2] is #613's
+        # aggressive-resize `-gwu` self-heal, calls[3] is #613-reopen's
+        # window-size `-gu` self-heal -- four plain set-option calls, none part
+        # of the keybind list, so the keybinds still start at calls[4] (the
+        # dropped probe and the added window-size self-heal cancel out).
         # #289: the popup binds (TMUX_POPUP_BIND_ARGVS) are live-applied
         # AFTER the scrollback keybinds -- slice to exactly the scrollback
         # portion so this test stays scoped to TMUX_SCROLLBACK_KEYBINDS
