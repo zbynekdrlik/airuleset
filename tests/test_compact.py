@@ -597,10 +597,57 @@ class TestDeliverCompact(unittest.TestCase):
 
     # -- condition (b): no live background tasks ------------------------- #
 
-    def test_live_bg_task_pane_signal_skips(self):
+    def test_605_stale_bg_agent_waiting_row_at_idle_prompt_no_longer_blocks(self):
+        # #605 FLIP (was `test_live_bg_task_pane_signal_skips`): the pane
+        # `_BG_AGENTS_WAIT_RX` scrape (signal (a)) was REMOVED. Condition (b) is
+        # reached ONLY at an idle `❯` boundary (past the busy check), where a
+        # "Waiting for N background agents" row is necessarily STALE scrollback
+        # left by a worker that already finished — the exact 02:50 incident on
+        # sid 2d02a127 (idle prompt, ZERO fresh lanes, yet 30 min of false
+        # SKIP live-tasks). With no live subagent lane, the stale row no longer
+        # vetoes: compact SENDs.
         word, tmux, _ = self._go(CB_BG_AGENT_CAP)
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
+
+    def test_605_live_tasks_log_names_the_lane(self):
+        # #605 thread 3: the SKIP live-tasks decision log must NAME the live
+        # lane(s) so the veto is never blind-diagnosed again (the incident was
+        # diagnosed twice from a bare `SKIP live-tasks sid=... cwd=...`). A
+        # genuine fresh live lane → skip:live-tasks AND the log carries
+        # `lanes=<agent-id>(<state>)`.
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID)
+        _write_subagent_transcript(proj, self.CWD, self.SID, mtime=now,
+                                   agent_id="ghost123")   # bare -> reads live
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, run=tmux,
+                                       projects_dir=proj, delivered_path=self.delp,
+                                       now=now)
         self.assertEqual(word, "skip:live-tasks")
-        self.assertEqual(tmux.sent, [])
+        log_text = self.syncp.read_text()
+        self.assertIn("lanes=", log_text)
+        self.assertIn("ghost123", log_text)
+
+    def test_605_refreshed_request_with_stale_waiting_row_delivers_not_expired(self):
+        # #605 threads 1+2 together: the incident's self-callback request had its
+        # `ts` REFRESHED at the 02:22:55 Work Complete boundary (#599 supersede —
+        # `record_compact_request` sets ts=now on every record), so the standing
+        # claim held for the full 30 min; it expired ONLY because a false
+        # SKIP live-tasks (stale Waiting row) ate every delivery window. With
+        # signal (a) removed AND a fresh request_ts (well under the 30-min cap),
+        # the SAME idle-with-stale-Waiting-row pane DELIVERS instead of expiring.
+        proj = self._dir()
+        now = time.time()
+        _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")],
+                                      CB_BG_AGENT_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp, now=now,
+                                       request_ts=now - 10)
+        self.assertEqual(word, "sent")
 
     def test_live_bg_task_transcript_signal_skips(self):
         proj = self._dir()
@@ -745,10 +792,14 @@ class TestDeliverCompact(unittest.TestCase):
     #    has no live sibling lanes (the exemption stays only for condition
     #    (c)'s ⏳-marker veto) -- #
 
-    def test_heading_plus_tail_no_longer_exempts_the_pane_text_live_task_signal(self):
-        # #565 (inverts the pre-#565 exemption): the "Waiting for N background
-        # agents" row is a genuine live signal; a Work Complete heading no
-        # longer overrides it.
+    def test_605_stale_pane_waiting_row_with_work_complete_heading_still_sends(self):
+        # #605 FLIP (was `..._no_longer_exempts_the_pane_text_live_task_signal`,
+        # #565): the #565 premise "the Waiting row is a genuine live signal" is
+        # SUPERSEDED for the pane scrape specifically — signal (a) is removed, so
+        # a stale Waiting row is not live regardless of a Work Complete heading.
+        # This is the FAITHFUL 02:22:55-report + 02:50-idle incident shape: a
+        # real supervisor's own Work Complete boundary, an idle prompt with a
+        # stale Waiting row, ZERO fresh lanes → the self-callback compact SENDs.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")],
@@ -756,7 +807,7 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "skip:live-tasks")
+        self.assertEqual(word, "sent")
 
     def test_heading_plus_tail_no_longer_exempts_the_subagent_transcript_live_task_signal(self):
         # #565 (inverts the pre-#565 exemption): a fresh, genuinely-live
@@ -771,11 +822,12 @@ class TestDeliverCompact(unittest.TestCase):
                                        delivered_path=self.delp, now=now)
         self.assertEqual(word, "skip:live-tasks")
 
-    def test_heading_plus_tail_live_task_veto_at_the_raced_recheck_no_longer_exempted(self):
-        # #565: the #333 fresh-recapture-before-typing re-check re-runs the
-        # live-tasks veto -- which is no longer exempted by a Work Complete
-        # heading either, so a lane that appears in the raced recapture still
-        # blocks. (Was `..._exemption_honoured_at_the_raced_recheck`.)
+    def test_605_stale_pane_waiting_row_at_the_raced_recheck_no_longer_blocks(self):
+        # #605 FLIP (was `..._veto_at_the_raced_recheck_no_longer_exempted`): the
+        # #333 fresh-recapture-before-typing re-check re-runs condition (b) — now
+        # STRUCTURED-only. A stale "Waiting" row appearing in the raced recapture
+        # is no longer signal (a), so with no fresh lane the raced recheck passes
+        # and compact SENDs.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID, _WORK_COMPLETE_PLUS_TAIL)
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP,
@@ -783,7 +835,7 @@ class TestDeliverCompact(unittest.TestCase):
         word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
                                        run=tmux, projects_dir=proj,
                                        delivered_path=self.delp)
-        self.assertEqual(word, "skip:live-tasks-raced")
+        self.assertEqual(word, "sent")
 
     def test_565_genuinely_all_done_still_delivers_even_with_a_stale_lane_file(self):
         # #565 no-false-veto regression: removing the (b) exemption must NOT
@@ -1042,10 +1094,13 @@ class TestDeliverCompact(unittest.TestCase):
         self.assertEqual(word, "skip:raced")
         self.assertEqual(tmux.sent, [])
 
-    def test_raced_live_tasks_since_the_sweep_is_refused(self):
+    def test_605_stale_waiting_row_at_the_raced_sweep_no_longer_refused(self):
+        # #605 FLIP (was `test_raced_live_tasks_since_the_sweep_is_refused`): the
+        # raced recapture showing a stale "Waiting" row was signal (a); with (a)
+        # removed it is not a live signal, so the send is no longer refused.
         word, tmux, _ = self._go(CB_IDLE_CAP, cap_seq=[CB_IDLE_CAP, CB_BG_AGENT_CAP])
-        self.assertEqual(word, "skip:live-tasks-raced")
-        self.assertEqual(tmux.sent, [])
+        self.assertEqual(word, "sent")
+        self.assertIn("/compact", tmux.typed_texts())
 
     # -- logging -------------------------------------------------------------- #
 
@@ -2080,6 +2135,21 @@ class TestCompactBgBashVeto599(unittest.TestCase):
                                        delivered_path=self.delp)
         self.assertEqual(word, "skip:live-bg-bash")
         self.assertEqual(tmux.sent, [])
+
+    def test_605_live_bg_bash_log_names_the_job(self):
+        # #605 thread 3: the SKIP live-bg-bash decision log must NAME the live
+        # bgid so it is never blind-diagnosed. A live bg job → skip:live-bg-bash
+        # AND the log carries `jobs=<bgid>` (the transcript fixture's bgid "bg1").
+        proj = self._dir()
+        _write_bg_bash_transcript(proj, self.CWD, self.SID, live=True)
+        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
+        word = compact.deliver_compact(self.SID, self.CWD, origin="self-callback",
+                                       run=tmux, projects_dir=proj,
+                                       delivered_path=self.delp)
+        self.assertEqual(word, "skip:live-bg-bash")
+        log_text = self.syncp.read_text()
+        self.assertIn("jobs=", log_text)
+        self.assertIn("bg1", log_text)
 
     def test_completed_bg_bash_delivers(self):
         # a bg job whose completion notification arrived is NOT live → the
