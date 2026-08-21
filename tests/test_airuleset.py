@@ -5102,37 +5102,43 @@ class TestTmuxHistoryLimit(TestCase):
         # alone does not retroactively unbind a live key-table entry.
         # #586: the FIRST call is the CONF-CONTENT version probe (`tmux -V`,
         # deciding whether `window-size manual` may be emitted) -- NOT a
-        # live-apply. #591: the 2nd live-apply is now an UNSET of the global
+        # live-apply. #591: the 2nd live-apply is an UNSET of the global
         # destroy-unattached (`set-option -gu`) -- a self-heal that reverts any
         # running server still carrying the old, base-session-killing `keep-last`
         # back to tmux's default `off` on the next install; verified live that
-        # `-gu` on a keep-last server -> off, idempotent. Still 1 probe + 8 live
-        # = 9. `window-size` is STILL never live-applied (conf-only).
+        # `-gu` on a keep-last server -> off, idempotent. #613: the 3rd live-apply
+        # is now the SIBLING self-heal `set-option -gu aggressive-resize` --
+        # reverting the stale `aggressive-resize on` #584 live-set globally (the
+        # Ctrl+B W blackening) back to tmux's default `off`, verified live on
+        # 3.7b. Now 1 probe + 9 live = 10. `window-size` is STILL never
+        # live-applied (conf-only).
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 9)
+        self.assertEqual(len(calls), 10)
         self.assertEqual(calls[0], ["tmux", "-V"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "history-limit", "50000"])
         self.assertEqual(calls[2], ["tmux", "set-option", "-gu", "destroy-unattached"])
-        self.assertEqual(calls[3], [
+        self.assertEqual(calls[3], ["tmux", "set-option", "-gu", "aggressive-resize"])
+        self.assertEqual(calls[4], [
             "tmux", "bind-key", "-n", "S-PageUp", "if", "-F",
             "#{==:#{pane_current_command},claude}",
             "send-keys C-o", "copy-mode -eu"])
-        self.assertEqual(calls[4], ["tmux", "bind-key", "-T", "copy-mode", "S-PageDown",
+        self.assertEqual(calls[5], ["tmux", "bind-key", "-T", "copy-mode", "S-PageDown",
                                      "send-keys", "-X", "page-down"])
-        self.assertEqual(calls[5], ["tmux", "bind-key", "-T", "copy-mode-vi", "S-PageDown",
+        self.assertEqual(calls[6], ["tmux", "bind-key", "-T", "copy-mode-vi", "S-PageDown",
                                      "send-keys", "-X", "page-down"])
-        self.assertEqual(calls[6], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[0])
-        self.assertEqual(calls[7], ["tmux", "unbind-key", "-n", "S-F1"])
-        self.assertEqual(calls[8], ["tmux", "unbind-key", "-n", "S-DC"])
+        self.assertEqual(calls[7], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[0])
+        self.assertEqual(calls[8], ["tmux", "unbind-key", "-n", "S-F1"])
+        self.assertEqual(calls[9], ["tmux", "unbind-key", "-n", "S-DC"])
 
     def test_a_failing_keybind_call_does_not_skip_the_remaining_ones(self):
         # #267: each live-apply call is independently guarded -- a runner
         # that raises on a live-apply call must not prevent the following
         # ones from being attempted. #586: call 1 is now the version probe
         # (`tmux -V`); call 3 (destroy-unattached, the 2nd live-apply) raises,
-        # and the remaining live-apply calls must still run -> 9 total.
+        # and the remaining live-apply calls must still run -> 10 total
+        # (#613 added the aggressive-resize `-gu` self-heal as the 4th call).
         p = self._tmp()
         calls = []
 
@@ -5143,7 +5149,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 9)
+        self.assertEqual(len(calls), 10)
 
     def test_a_nonzero_rc_keybind_call_does_not_skip_the_remaining_ones(self):
         # ADVERSARIAL-REVIEW FINDING (#267, MAJOR -- F1): the RAISING case
@@ -5172,7 +5178,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 9)
+        self.assertEqual(len(calls), 10)
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
@@ -5347,6 +5353,69 @@ class TestTmuxDestroyUnattached(TestCase):
         changed = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
         self.assertFalse(changed)
         self.assertEqual(p.read_text(), before_text)
+
+
+class TestTmuxAggressiveResizeSelfHeal(TestCase):
+    """#613: #584's webterm connect ran `tmux set-option -gw aggressive-resize
+    on` (AND `-gw window-size latest`) GLOBALLY on the running server; a global
+    set-option PERSISTS for the server's life. #586 removed those lines from the
+    connect code and added conf `window-size manual` (version-gated, CONF-ONLY --
+    applies only on the NEXT server restart), but added NO live-revert of the
+    stale globals. The owner's long-running server therefore still carries
+    `aggressive-resize on`, which OVERRIDES the `ignore-size` clone protection
+    #586 relies on: a small ignore-size webterm clone shrinks whatever window it
+    is current on, so windows in one session drift to different sizes and
+    `Ctrl+B W` (switching to a smaller-drifted window) leaves a dead dark border
+    -- the reported "stmavol celý terminál". Reproduced live (isolated `-L`
+    server + ttyd + headless Chrome).
+
+    Fix: extend the existing live-apply self-heal in apply_tmux_history_limit to
+    UNSET the global (`set-option -gu aggressive-resize`) on any running server,
+    reverting it to tmux's default `off` -- the SAME self-heal shape and safety
+    class as #591's `-gu destroy-unattached`. Verified live on tmux 3.7b: `-gu`
+    on an `aggressive-resize on` server -> off, idempotent, server unharmed (it
+    is a plain window option, not window-size, so it carries none of window-
+    size's #236 snap-resize / #241 3.4-crash hazard). window-size stays
+    conf-only (never live-applied), so this fix touches ONLY aggressive-resize."""
+
+    def _tmp(self, content=None):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        if content is not None:
+            p.write_text(content)
+        return p
+
+    def test_conf_never_emits_aggressive_resize(self):
+        # airuleset never sets aggressive-resize -- a fresh server inherits
+        # tmux's default `off`. The managed conf block must never carry it
+        # (it was #584's live-only mutation, never a conf line).
+        p = self._tmp()
+        airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertNotIn("aggressive-resize", p.read_text())
+
+    def test_live_apply_UNSETS_the_stale_global_aggressive_resize(self):
+        # #613: the live-apply self-heals a running server still carrying
+        # #584's `aggressive-resize on` by UNSETTING the global (`-gu`),
+        # reverting it to tmux's default `off` -- verified live: `-gu` on an
+        # `aggressive-resize on` server -> off, idempotent. It never SETS `on`.
+        p = self._tmp()
+        calls = []
+        airuleset.apply_tmux_history_limit(p, run=calls.append)
+        self.assertIn(["tmux", "set-option", "-gu", "aggressive-resize"], calls)
+        self.assertNotIn(
+            ["tmux", "set-option", "-gw", "aggressive-resize", "on"], calls)
+        self.assertNotIn(
+            ["tmux", "set-option", "-g", "aggressive-resize", "on"], calls)
+
+    def test_aggressive_resize_selfheal_sits_beside_destroy_unattached(self):
+        # #613: both `-gu` self-heals of stale #584/#254 globals are grouped --
+        # aggressive-resize immediately follows destroy-unattached in the
+        # live-apply order (calls[2] destroy, calls[3] aggressive-resize).
+        p = self._tmp()
+        calls = []
+        airuleset.apply_tmux_history_limit(p, run=calls.append)
+        self.assertEqual(calls[2], ["tmux", "set-option", "-gu", "destroy-unattached"])
+        self.assertEqual(calls[3], ["tmux", "set-option", "-gu", "aggressive-resize"])
 
 
 class TestTmuxWindowSizeRemoved(TestCase):
@@ -5579,8 +5648,9 @@ class TestTmuxScrollbackKeybinds(TestCase):
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
         # #586: calls[0] is the version probe (`tmux -V`); calls[1] is
-        # history-limit, calls[2] is #254's destroy-unattached -- the probe
-        # plus two plain set-option calls, none part of the keybind list.
+        # history-limit, calls[2] is #254's destroy-unattached, calls[3] is
+        # #613's aggressive-resize `-gu` self-heal -- the probe plus three
+        # plain set-option calls, none part of the keybind list.
         # #289: the popup binds (TMUX_POPUP_BIND_ARGVS) are live-applied
         # AFTER the scrollback keybinds -- slice to exactly the scrollback
         # portion so this test stays scoped to TMUX_SCROLLBACK_KEYBINDS
@@ -5589,7 +5659,7 @@ class TestTmuxScrollbackKeybinds(TestCase):
         # quoting -- so this stays a plain equality check even for #338's
         # new multi-word-token entry.
         n = len(airuleset.TMUX_SCROLLBACK_KEYBINDS)
-        keybind_calls = calls[3:3 + n]
+        keybind_calls = calls[4:4 + n]
         self.assertEqual(len(keybind_calls), n)
         for call, argv in zip(keybind_calls, airuleset.TMUX_SCROLLBACK_KEYBINDS):
             self.assertEqual(call, ["tmux"] + argv)
