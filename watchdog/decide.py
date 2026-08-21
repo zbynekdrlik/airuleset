@@ -209,6 +209,53 @@ def is_account_dispatch_block(text):
     return bool(_MONTHLY_SPEND_RX.search(text) or _ORG_DISABLED_RX.search(text))
 
 
+# #602 -- the OAuth-ROTATION 401 REVOKED class. On every ~11-12h token rotation
+# of a bound account, Anthropic INSTANTLY revokes the previous access token; a
+# running session holds the stale token in memory, so its in-flight request
+# 401s with
+#   "Please run /login · API Error: 401 OAuth access token has been revoked."
+# and a terminally-killed background Agent surfaces the SAME
+#   "Agent … failed: … API Error: 401 OAuth access token has been revoked"
+# WITHOUT the /login prefix. Both phrasings carry the literal
+# "access token has been revoked", which is the ONLY thing this matches --
+# DELIBERATELY NOT a bare "Please run /login". A corpus scan (#602 adversarial
+# review) of 270 real `isApiErrorMessage` /login-bearing entries found only
+# 77 were the genuine rotation revoke; 181 were "Login expired · Please run
+# /login" and 12 "Not logged in · Please run /login" -- re-auth states that are
+# NOT a rotation, where the enriched prompt's "rotation happened, old token
+# revoked, fresh token already on disk" narrative would be factually WRONG.
+# Those keep job 1's existing bare-`continue` recovery (they still resume,
+# unchanged); only the genuine REVOKE -- where that narrative and the
+# re-dispatch-of-killed-agents concern actually hold -- gets the enriched
+# prompt. This is NOT a time-based cap: claudy pushes a fresh token to disk
+# < 1s after the revoke, so a single `continue` resumes the session (verified
+# across the real transcript corpus). So it must NEVER be read as a usage-cap /
+# session-limit park -- is_usage_cap / is_account_dispatch_block /
+# pane_session_limited ALL return False for it, locked by
+# tests/test_oauth_revoked_resume_602.py. Job 1 uses this classifier ONLY to
+# SELECT an enriched resume prompt that also names the
+# re-dispatch-from-durable-state duty (subagent-continuation.md); the resume
+# PATH itself is job 1's normal generic `continue` nudge, unchanged. The input
+# is always an `isApiErrorMessage` transcript entry (CC's own definitive error
+# marker, never prose), so the match domain is already constrained to real
+# errors CC actually hit.
+_OAUTH_REVOKED_RX = re.compile(r"(?:OAuth )?access token has been revoked", re.I)
+
+
+def is_oauth_revoked(text):
+    """True for the OAuth-rotation 401 REVOKED class (#602) -- the literal
+    "access token has been revoked" (the full "Please run /login · … revoked"
+    banner AND the "Agent … failed: … revoked" agent-death variant). A bare
+    "Please run /login" (login-expired / not-logged-in, the 71% non-rotation
+    majority in the corpus) is DELIBERATELY excluded -- it is not a rotation
+    revoke and keeps job 1's bare-`continue` recovery. Time-INdependent (unlike
+    is_usage_cap): the rotation writes a fresh token to disk within ~1s, so a
+    single `continue` resumes -- this class therefore stays on job 1's generic
+    `continue` path and is used ONLY to select the enriched re-dispatch resume
+    prompt, never to park for a reset clock. Returns False on empty/None."""
+    return bool(text) and bool(_OAUTH_REVOKED_RX.search(text))
+
+
 # --- 5-HOUR SESSION LIMIT (a distinct, TIME-BASED cap) --------------------------
 # Claude Code's session-limit banner shows in the PANE, e.g.
 #   "You've hit your session limit · resets 6:10pm (Europe/Prague)"

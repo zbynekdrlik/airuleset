@@ -183,6 +183,31 @@ MAX_NUDGES = 3
 # once the fixed 3-strike policy used to run out after ~15-20 min.
 BACKOFF_CAP_SECONDS = 30 * 60
 NUDGE_TEXT = "continue"
+# #602 -- the resume prompt job 1 types INSTEAD of a bare `continue` when the
+# api-error is the OAuth-rotation 401 REVOKED class (`is_oauth_revoked`). A
+# rotation revokes the old access token INSTANTLY and the SAME kill-window
+# terminates in-flight background agents; a bare `continue` resumes the main
+# session but leaves that dead agent work lying (the gk incident 2026-08-20).
+# So this text (a) still tells the session to continue -- the fresh token is
+# already on disk, `continue`-class text resumes -- and (b) names the
+# re-dispatch-from-durable-state duty (subagent-continuation.md) with a
+# CONDITIONAL clause ("if any agent died…"), so it is HARMLESS for a solo
+# session with no agents (it just reads it and continues). Starts with the
+# `oauth-resume:` prefix registered in `_MACHINE_PROMPT_PREFIXES` below, so the
+# submitted `user` turn is never misread as a human answer (`_last_human_prompt_ts`
+# / `_is_genuine_human_prompt`) -- the same guarantee bare `continue` gets from
+# `_MACHINE_PROMPT_EXACT`. Delivered through job 1's normal generic-nudge path
+# (`send_verified` / `deliver_with_stash`), not a new mechanism.
+OAUTH_REVOKED_NUDGE_TEXT = (
+    "oauth-resume: práve prebehla rotácia OAuth tokenu — starý access token bol "
+    "revoknutý a session dostala 401 (Please run /login). Čerstvý token je už na "
+    "disku, takže pokračuj v rozrobenej práci. DÔLEŽITÉ: tá istá rotácia mohla "
+    "TERMINÁLNE zabiť tvojich background agentov (Agent … failed: … 401 OAuth "
+    "access token has been revoked) a watchdog ich NEVIE oživiť. Ak ti nejaký "
+    "padol, nečakaj naň ako na „waiting for background agents“ — re-dispatchni "
+    "každú padnutú prácu z durable state (subagent-continuation.md): otvorený "
+    "PR/branch, gh issue stav, súbory na disku. Ak žiadny nepadol, len pokračuj."
+)
 # A session sitting on an interactive prompt (AskUserQuestion / permission /
 # plan-approval) this long with no progress = the user is away → ping (NEVER act).
 WAIT_GRACE_SECONDS = 2 * 60
@@ -287,6 +312,7 @@ from watchdog.decide import (  # noqa: E402
     _TRANSIENT_RX as _TRANSIENT_RX,
     is_usage_cap as is_usage_cap,
     is_account_dispatch_block as is_account_dispatch_block,
+    is_oauth_revoked as is_oauth_revoked,
     _SESSION_LIMIT_RX as _SESSION_LIMIT_RX,
     _RESET_TIME_RX as _RESET_TIME_RX,
     _RESET_MONTH_NUM as _RESET_MONTH_NUM,
@@ -579,6 +605,11 @@ from watchdog.pane_text import (  # noqa: E402
 # never count as "the user answered the pending ❓ at the terminal".
 _MACHINE_PROMPT_EXACT = ("continue",)
 _MACHINE_PROMPT_PREFIXES = (
+    # #602 -- the OAuth-rotation 401-revoked resume prompt (OAUTH_REVOKED_NUDGE_TEXT)
+    # is machine-injected by job 1, not a human answer, so its `user` turn must
+    # not count as "the user answered at the terminal" (mirrors bare `continue`
+    # in _MACHINE_PROMPT_EXACT).
+    "oauth-resume:",
     "stuck-check:", "Priorita: prio:bounce", "bounce-backstop:",
     "gk-request backstop:", "/goal ",
     "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku",
@@ -2889,6 +2920,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             owner=owner, dedup_key="apierr:%s:%s:%s" % (key, err_hash, fs), dry_run=dry_run)
                 elif action == "nudge":
                     n = len(entry["nudges"])
+                    # #602: the OAuth-rotation 401 REVOKED class gets an ENRICHED
+                    # resume prompt naming the re-dispatch-from-durable-state duty
+                    # (its kill-window kills in-flight agents a bare `continue`
+                    # would orphan); every other api-error stays bare `continue`.
+                    # Selection only — delivery/lifecycle/dedup all unchanged.
+                    resume_text = (OAUTH_REVOKED_NUDGE_TEXT
+                                   if is_oauth_revoked(err_text) else NUDGE_TEXT)
                     if draft_pending:
                         # #176 item 1: idle-with-a-draft delivers via the VERIFIED
                         # stash protocol, never a raw keystroke over the user's own
@@ -2936,7 +2974,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             continue
                         _logs_before = len(logs)
                         delivered = True if dry_run else deliver_with_stash(
-                            pid, NUDGE_TEXT, run, captured=fresh, logs=logs)
+                            pid, resume_text, run, captured=fresh, logs=logs)
                         if not delivered:
                             # #176 F1: the shipped fix RELOCATED the silent unbounded
                             # skip from the busy branch to HERE instead of eliminating
@@ -2968,7 +3006,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         # log the delivery result honestly (napísané ≠ odoslané).
                         ok = True
                         if not dry_run:
-                            ok = send_verified(pid, NUDGE_TEXT, run, tpath,
+                            ok = send_verified(pid, resume_text, run, tpath,
                                                sleep_fn=sleep_fn, logs=logs)
                         logs.append("nudge#%d %s [%s]%s"
                                     % (n, project, key,
