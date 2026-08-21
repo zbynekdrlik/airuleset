@@ -79,11 +79,16 @@ AUTO_DEDUP_WINDOW_S = 300
 # existed — harmless, since the env override is checked FIRST in
 # resolve_owner() and carries the identical value either way.
 STREAM_NOTIFY_OWNER = {
-    "david": "david",
-    # david1/montalu1/simap1 (#537): the numbered ALIASES of the unnumbered
-    # base streams (rename prep). Each mirrors its base's routing decision
-    # EXACTLY — same human owner, same thread — so the live rename flips the
-    # linux user without touching Discord routing. marek deliberately stays
+    # david1/montalu1/simap1 (#537): the NUMBERED names for the base-stream
+    # rename — all three now LIVE (montalu1 2026-08-19, simap1 2026-08-18,
+    # david1 2026-08-21). Each mirrors its base's routing decision EXACTLY —
+    # same human owner, same thread — so the live rename flipped the linux user
+    # without touching Discord routing. The bare `david` self-map is GONE (the
+    # OS account no longer exists); `david1 -> david` carries the routing. Note
+    # `david` STAYS a valid map VALUE (the owner of david1/david2/3/4, a real
+    # Discord thread) — exactly like marek is a value but not a key; dropping
+    # the self-map is behaviour-neutral (resolve_owner falls back to the tmux
+    # session group for a self-mapped stream). marek deliberately stays
     # unnumbered (and out of this map, per the header comment above).
     "david1": "david",
     "montalu1": "zbynek",   # #537 rename of montalu (live 2026-08-19) — see the david1 comment above
@@ -119,8 +124,10 @@ STREAM_NOTIFY_OWNER = {
     "miva1": "zbynek",
     # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE parallel
     # david streams -- additional capacity for the SAME external developer
-    # david already is, so they redirect to david's own already-self-mapped
-    # thread (never a NEW DISCORD_MIRROR_DAVID2/3/4 local .env key, which
+    # david1 is, so they redirect to owner `david`'s own thread (the map VALUE
+    # `david`, still a real Discord thread after the #537 self-map drop; the
+    # base stream is david1 now, but the OWNER/thread stays `david`) -- never a
+    # NEW DISCORD_MIRROR_DAVID2/3/4 local .env key, which
     # this repo's code cannot provision or deploy at all -- the ticket's own
     # suggested shape, rejected in favour of this code-side redirect, the
     # same #300 precedent already established for miva1). This also
@@ -307,8 +314,10 @@ def stream_redirect(raw_owner):
     `resolve_owner()` applies to `_current_user()` internally, exposed here
     as a standalone form for a caller resolving SOMEONE/SOMETHING ELSE's raw
     owner string. Returns `raw_owner` UNCHANGED for anyone not in the map (a
-    real person's own box, or an already-self-mapped stream like 'david').
-    Empty/falsy input passes through unchanged. Never raises.
+    real person's own box, or a name that IS its own owner — e.g. 'david',
+    which is a map VALUE/owner-thread but not a key after the #537 self-map
+    drop, so it passes through to itself). Empty/falsy input passes through
+    unchanged. Never raises.
 
     airuleset#212: `watchdog.pane_owner()` resolves a SPECIFIC PANE's owner
     straight from its tmux session name/group — a completely separate

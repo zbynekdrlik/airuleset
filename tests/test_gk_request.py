@@ -177,7 +177,7 @@ class TestGkRequestBackstop(unittest.TestCase):
         # the requester must not be nudged about its own request — only a
         # supervisor session works gk-requests (fresh home: no cached roots)
         with TemporaryDirectory() as home2:
-            root = "/home/david/devel/odoo-erp"
+            root = "/home/david1/devel/odoo-erp"
             tmux = FakeTmux([("%9", root)])
             logs = wd.gk_request_backstop(
                 time.time(), tmux, {}, self._send, home=home2,
@@ -766,14 +766,14 @@ class TestStaleHandoffAlarm(unittest.TestCase):
         # the requester's own box must never alarm about its own hand-off —
         # only a full-authority/supervisor root watches the queue.
         with TemporaryDirectory() as home2:
-            root = "/home/david/devel/odoo-erp"
+            root = "/home/david1/devel/odoo-erp"
             tmux = FakeTmux([("%9", root)])
             now = time.time()
             upd = int(now - wd.GKREQ_STALE_HANDOFF_S - 3600)
             wd.gk_request_backstop(
                 now, tmux, {}, self._send, home=home2,
                 gh_fetch=lambda r: {"tickets": [], "handoffs": {7: upd}},
-                user="david")
+                user="david1")
         self.assertFalse(self.pings)
 
     def test_same_name_double_target_alarms_once_per_sweep(self):

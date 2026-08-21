@@ -115,10 +115,11 @@ REMOTE_HOSTS = [
         # THREE MORE parallel david streams, additional capacity for the
         # SAME external slovnormal odoo developer (fork-based, no sudo, no
         # prod keys), provisioned by gatekeeper on the SAME subdev VPS as
-        # david itself (odoo-erp#3282). Registered here as a data-only
-        # mirror of david's own entry (host + identity requirement) -- the
-        # identity ASSUMPTION is unverified for these specific accounts
-        # (mirroring david's shape is the registration; it does not confirm
+        # david1 itself (the renamed base david, #537; odoo-erp#3282).
+        # Registered here as a data-only mirror of david1's own entry (host +
+        # identity requirement) -- the identity ASSUMPTION is unverified for
+        # these specific accounts (mirroring david1's shape is the
+        # registration; it does not confirm
         # THIS account's authorized_keys accepts the same operator key --
         # #300's own precedent for this exact caveat). No ssh was attempted
         # from this worktree to verify it (fail2ban risk, #300).
@@ -303,6 +304,8 @@ REMOTE_HOSTS = [
 AUTHORITY_PROFILES = ("full", "branch-merge", "fork-no-merge")
 AUTHORITY_BY_USER = {
     "marek": "branch-merge",
+    # david (airuleset#23) was renamed to david1 (#537, 2026-08-21) — its row
+    # moved to the numbered block below; the OS account `david` is gone.
     # montalu (airuleset#33) was renamed to montalu1 (#537, 2026-08-19) — its
     # row moved to the numbered block below; the OS account `montalu` is gone.
     # simap (airuleset#143) was renamed to simap1 (#537, 2026-08-18) — its
@@ -317,7 +320,8 @@ AUTHORITY_BY_USER = {
     "miva1": "fork-no-merge",
     # david2/david3/david4 (airuleset#326, 2026-08-08): three MORE clones of
     # the david external-developer fork stream (additional capacity for the
-    # same slovnormal odoo developer) -- same authority as david itself.
+    # same slovnormal odoo developer) -- same authority as david1 (the renamed
+    # base david, #537).
     "david2": "fork-no-merge",
     "david3": "fork-no-merge",
     "david4": "fork-no-merge",
@@ -330,15 +334,13 @@ AUTHORITY_BY_USER = {
     "montalu8": "branch-merge",
     # montalu1/david1/simap1 (#537): the NUMBERED names for the base-stream
     # rename (owner directive on #532 — montalu->montalu1, david->david1,
-    # simap->simap1; marek STAYS marek, deliberately NOT renamed). montalu1
-    # (rename live 2026-08-19) and simap1 (rename live 2026-08-18) now run as
-    # the new OS account — their base row is gone; david1 stays a pre-rename
-    # ALIAS added ALONGSIDE its base david (which stays until david's live
-    # rename lands — removing it is the live-op ticket's job). Each inherits
-    # its base's authority profile so the moment a box runs as the new name it
-    # resolves correctly. STREAM_RENAME_ALIASES (below) drives the transition
-    # alias so old `stream:<base>` tickets keep working during the switch, in
-    # BOTH directions.
+    # simap->simap1; marek STAYS marek, deliberately NOT renamed). All three
+    # renames are now LIVE (montalu1 2026-08-19, simap1 2026-08-18, david1
+    # 2026-08-21) — each runs as the new OS account, so every base row above is
+    # gone. Each keeps its base's authority profile. STREAM_RENAME_ALIASES
+    # (below) is KEPT so old `stream:<base>` tickets still resolve via
+    # `_stream_rename_equivalents`, in BOTH directions, until no open
+    # `stream:<base>` ticket remains.
     "montalu1": "branch-merge",
     "david1": "fork-no-merge",
     "simap1": "fork-no-merge",

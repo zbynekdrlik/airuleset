@@ -997,10 +997,12 @@ def _origin_reduced_stream(labels):
     `_ticket_is_stream_labeled` use), so a request FILED before a base-stream
     rename (a legacy `handed-by:montalu` label) still attributes to its stream.
     Returns the matched REGISTRY name `u` — for a rename whose old account is
-    already gone (montalu->montalu1) that is the numbered name (montalu is no
-    longer a key); for a still-in-progress transition where BOTH keys are
-    present (david + david1) it is the base name `david`, since it is iterated
-    first and `david` ∈ equivalents(`david`). Either way the bounce routes
+    already gone (all three #537 renames now live: montalu->montalu1,
+    simap->simap1, david->david1) that is the numbered name (the base is no
+    longer a key, so a legacy `handed-by:david` attributes to `david1`). If a
+    FUTURE rename were still mid-transition with BOTH keys present, it would
+    return the base name, since the base is iterated first and is in its own
+    equivalents — the defensive branch, with no current member. Either way the bounce routes
     correctly: `_apply_selfservice_bounce` stamps `stream:<returned>`, and every
     box in that rename family reads BOTH labels in its own (now alias-expanded,
     #564 item 2) bounce slice, so the ticket surfaces on the right lane

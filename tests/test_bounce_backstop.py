@@ -346,14 +346,17 @@ class TestBounceQuals(unittest.TestCase):
         # _bounce_quals scopes by the /home/<name>/ path, so it follows the
         # account. #564: the own-slice now ALSO covers the legacy stream label
         # (via _stream_rename_equivalents) so the box does not under-nudge itself
-        # about its own old-labeled bounce tickets. david (a rename base whose
-        # live rename has not landed) expands to david + david1.
+        # about its own old-labeled bounce tickets. #537: david's live rename
+        # landed (2026-08-21), so /home/david1 is its home and _REDUCED_STREAM_
+        # USERS carries david1 (not david) — david1 expands to david1 + david.
         self.assertIn("montalu1", wd._REDUCED_STREAM_USERS)
         self.assertNotIn("montalu", wd._REDUCED_STREAM_USERS)
+        self.assertIn("david1", wd._REDUCED_STREAM_USERS)
+        self.assertNotIn("david", wd._REDUCED_STREAM_USERS)
         self.assertEqual(wd._bounce_quals("/home/montalu1/devel/odoo-erp"),
                          ["label:stream:montalu1", "label:stream:montalu"])
-        self.assertEqual(wd._bounce_quals("/home/david/devel/x"),
-                         ["label:stream:david", "label:stream:david1"])
+        self.assertEqual(wd._bounce_quals("/home/david1/devel/x"),
+                         ["label:stream:david1", "label:stream:david"])
 
     def test_montalu_family_home_scopes_by_own_label(self):
         # airuleset#251: montalu2/3/4 work on odoo-erp (a _CROSS_STREAM_REPOS
@@ -414,7 +417,7 @@ class TestBounceQuals(unittest.TestCase):
         # Full authority = the core slice (same exclusions as tickets-status).
         quals = wd._bounce_quals("/home/newlevel/devel/demo")
         self.assertEqual(len(quals), 1)
-        for u in ("david", "marek", "montalu1", "montalu2", "montalu3",
+        for u in ("david1", "marek", "montalu1", "montalu2", "montalu3",
                   "montalu4", "david2", "david3", "david4"):
             self.assertIn("-label:stream:%s" % u, quals[0])
 
