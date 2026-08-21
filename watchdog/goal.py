@@ -2490,14 +2490,14 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
     ``rec['wntd']`` (rides in the existing goal_lane rec, so the #531 orphan
     reaper already covers it -- no new state namespace) -- but ONLY on a REAL
     sweep; ``dry_run`` mutates NO persisted state (#516). Returns
-    ``(defer:bool, log:str|None, live_workers:int, backlog_n)``."""
+    ``(defer, escalated, log, live_workers, backlog_n)`` -- #611 escalated flag."""
     live_workers, ev = watchdog.count_live_workers(
         projects_dir, cwd, sid, now, GOAL_LANE_LIVE_WINDOW_S)
     backlog_n = watchdog._cached_backlog_count(cwd, backlog_fetch, state, now)
     wnt = _one_glance.lane_working_no_tasks_decision(
         marker=marker, render_waiters=waiters,
         structured_live=watchdog.lane_has_live_evidence(ev),
-        backlog=(backlog_n if isinstance(backlog_n, int) else 0),
+        backlog=(backlog_n if isinstance(backlog_n, int) and backlog_n >= GOAL_LANE_MIN_BACKLOG else 0),  # #611: sub-min never escalates (would only skip:min-backlog)
         defer_streak=rec.get("wntd", 0), max_defers=GOAL_LANE_WNT_MAX_DEFERS)
     if not dry_run:
         rec["wntd"] = wnt.streak
@@ -2505,7 +2505,7 @@ def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
     if wnt.log:
         log = ("lane-occupancy %s waiters=%d workers=%d -> %s"
                % (loc, waiters, live_workers, wnt.log))
-    return wnt.defer, log, live_workers, backlog_n
+    return wnt.defer, wnt.escalated, log, live_workers, backlog_n
 
 
 def _lane_lowmem_reset(rec, dry_run):
@@ -2628,9 +2628,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               "delivered to this session this cycle)")
         return logs, False
     waiters = watchdog._pane_live_task_count(captured)
-    _wnt_defer, _wnt_log, live_workers, backlog_n = _lane_wnt_gate(
+    _wnt_defer, _wnt_escalated, _wnt_log, live_workers, backlog_n = _lane_wnt_gate(
         rec, marker, waiters, projects_dir, cwd, sid, now, backlog_fetch, state,
-        loc, dry_run)   # #571 -- structured live-lane gate; counts reused below
+        loc, dry_run)   # #571/#611 -- structured live-lane gate; counts reused below
     if _wnt_log:
         logs.append(_wnt_log)
     if _wnt_defer:
@@ -2743,15 +2743,15 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # #442 THIRD GAP -- the idle gate, now applied PER BRANCH (was a silent
     # top-of-function early-return that structurally excluded every busy
     # under-saturated session). The 0-worker EMPTY-lane branch keeps the
-    # original 15-min idle requirement -- a box being actively typed into may
-    # be mid-dispatch, so wait for quiet -- but now LOGS the skip with numbers
-    # instead of returning empty logs. The UNDER-SATURATED fill-the-cap branch
-    # has NO idle floor: firing exactly when the supervisor is spinning with
-    # too few workers is the entire point, and delivery is still gated by
-    # _boundary_ok (idle prompt), the two-capture draft-diff, the recent-human
-    # window and the per-fire cooldown below (so a fresh transcript never spams
-    # -- it just stops SILENTLY excluding the busy state).
-    if not under_saturated and idle < GOAL_LANE_IDLE_S:
+    # original 15-min idle floor UNLESS the WNT gate has ESCALATED (#611: a ⏳
+    # marker + 0 structured lanes + backlog confirmed over N sweeps -- the WORST
+    # under-saturation, yet a continuously serially-working session writes a turn
+    # every ~10-13min so idle NEVER reaches 15m -> the fill nudge was structurally
+    # unreachable, 184x skip:idle/12h, 0 nudge). Post-escalation it fires like the
+    # under-saturated branch; a session NOT escalated (not ⏳ / a live structured
+    # lane / streak < max = genuinely mid-dispatch) keeps the 15-min floor. Delivery
+    # is still gated by _boundary_ok, draft-diff, recent-human, cooldown, MAX_NUDGES.
+    if not under_saturated and idle < GOAL_LANE_IDLE_S and not _wnt_escalated:
         _lane_idle_reset(rec, backlog_n)   # #530 -- backlog-gated give-up reset
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d idle=%ds "
                     "-> skip:idle (empty-lane, < %dm since last transcript write)"
@@ -2761,14 +2761,14 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     n = rec.get("ln", 0)
     aborts = rec.get("lna", 0)
     # #442 THIRD GAP -- the nudge-count give-up (GOAL_LANE_MAX_NUDGES) applies
-    # ONLY to the 0-worker empty-lane branch: a truly stalled box gets a
-    # bounded number of pokes then one give-up ping. The UNDER-SATURATED
-    # fill-the-cap branch has NO permanent give-up -- a session that stays
-    # under-saturated for hours must keep being pushed every
-    # GOAL_LANE_INTERVAL_S (constant #365 anti-annoyance give-up structurally
-    # disabled saturation enforcement). The stash-abort give-up (a delivery
-    # that permanently FAILS) stays for BOTH branches -- it is a
-    # delivery-mechanics bound, not a "stop nudging" decision.
+    # ONLY to the 0-worker empty-lane branch: a truly stalled box gets a bounded
+    # number of pokes then one give-up OWNER ping. #611 EXPLICIT DECISION: a
+    # WNT-ESCALATED empty-lane box is bounded by this SAME give-up (2 pokes ->
+    # ping "look at the session", never a forever-nudge of a perpetually-⏳-0-lane
+    # session that ignored them); the #530 backlog-change re-arm still fires on
+    # its NON-escalated fresh sweeps. The UNDER-SATURATED branch has NO permanent
+    # give-up (pushed every GOAL_LANE_INTERVAL_S). The stash-abort give-up stays
+    # for BOTH branches -- a delivery-mechanics bound, not a "stop nudging" one.
     count_gaveup = (not under_saturated) and n >= GOAL_LANE_MAX_NUDGES
     stash_gaveup = aborts >= GOAL_LANE_MAX_STASH_ABORTS
     if count_gaveup or stash_gaveup:
