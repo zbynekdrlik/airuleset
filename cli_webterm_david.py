@@ -71,10 +71,29 @@ _DAVID_UNIT_NOTE = (
     "# inventory: david1-4 + codex-bridge only (never the owner fleet).\n#\n")
 
 
+# The david ttyd binary is a NO-SUDO user-space static binary in ~/.local/bin
+# (subdev accounts have no sudo), which is NOT on the systemd --user manager's
+# default PATH — and `daemon-reexec` does not re-read ~/.config/environment.d.
+# So the DAVID unit carries its OWN PATH, making the launcher's bare `exec ttyd`
+# resolve on a clean manager start (reboot / fresh re-provision) WITHOUT a
+# hand-placed .d/ drop-in (#614 — moving the #612 go-live drop-in into code).
+# Byte-identical to that drop-in's PATH; `%h` is the systemd home specifier.
+# Scoped to the DAVID render ONLY — the owner (dev1) unit, where ttyd is a
+# system /usr/bin binary already on the manager PATH, never gets this line.
+_DAVID_TTYD_PATH_ENV = (
+    "# #614: self-contained PATH so the launcher's bare `exec ttyd` resolves\n"
+    "# the no-sudo ~/.local/bin user-space static binary on a clean systemd\n"
+    "# --user manager start (subdev has no sudo; the manager default PATH\n"
+    "# excludes ~/.local/bin).\n"
+    "Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:"
+    "/usr/sbin:/usr/bin:/sbin:/bin\n")
+
+
 def render_david_ttyd_unit():
     tmpl = w.WEBTERM_SERVICE_TEMPLATE.read_text(encoding="utf-8")
     return _DAVID_UNIT_NOTE + (
         tmpl.replace("{{LAUNCH_SCRIPT}}", str(WEBTERM_DAVID_LAUNCH_PATH))
+        .replace("[Service]\n", "[Service]\n" + _DAVID_TTYD_PATH_ENV)
         .replace("(dev1-only)", "(subdev david)"))
 
 
@@ -131,7 +150,15 @@ def prerequisites_ready():
         return False, ("install runs as %r, not the gateway account %r"
                        % (who, profiles.DAVID_GATEWAY_USER))
     key = Path(os.path.expanduser(profiles.WEBTERM_DAVID_IDENTITY))
-    have_ttyd = shutil.which("ttyd") is not None
+    # ttyd on subdev is a no-sudo user-space static binary in ~/.local/bin,
+    # which the install PROCESS's PATH (a push-driven NON-login ssh shell as
+    # david1) does NOT include — so `shutil.which("ttyd")` alone would no-op
+    # this gate and the box would never re-provision (#614). Accept the
+    # explicit ~/.local/bin/ttyd location too (an executable file), mirroring
+    # cli_binary_installers._binary_reachable's dest-or-PATH check.
+    local_ttyd = Path.home() / ".local" / "bin" / "ttyd"
+    have_ttyd = (shutil.which("ttyd") is not None
+                 or (local_ttyd.is_file() and os.access(local_ttyd, os.X_OK)))
     if not key.exists() or not have_ttyd:
         return False, ("prerequisites missing (dedicated key present: %s; "
                        "ttyd: %s)" % (key.exists(), have_ttyd))

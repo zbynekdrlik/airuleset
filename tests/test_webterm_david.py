@@ -10,6 +10,7 @@ allowlist is david's set.
 """
 import contextlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -52,6 +53,28 @@ class TestDavidUnitRender(unittest.TestCase):
         self.assertIn(str(d.WEBTERM_DAVID_LAUNCH_PATH), unit)
         self.assertNotIn("(dev1-only)", unit)
 
+    def test_ttyd_unit_carries_self_contained_path(self):
+        # #614: the DAVID ttyd unit must be PATH self-contained so bare
+        # `exec ttyd` in the launcher resolves the no-sudo ~/.local/bin
+        # user-space static binary on a clean systemd --user manager start
+        # (reboot / fresh re-provision), WITHOUT a hand-placed .d/ drop-in.
+        unit = d.render_david_ttyd_unit()
+        self.assertIn(
+            "Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:"
+            "/usr/sbin:/usr/bin:/sbin:/bin", unit)
+        # The PATH directive sits INSIDE the [Service] block — after its header
+        # AND before the [Install] section, so a mis-injection past [Install]
+        # would not pass either.
+        self.assertIn("[Service]", unit)
+        self.assertLess(unit.index("[Service]"), unit.index("Environment=PATH="))
+        self.assertLess(unit.index("Environment=PATH="), unit.index("[Install]"))
+
+    def test_owner_ttyd_unit_has_no_path_env(self):
+        # The PATH env is scoped to the DAVID render ONLY — the owner (dev1)
+        # unit, where ttyd is a system /usr/bin binary already on the manager
+        # PATH, must NOT gain the line (#614).
+        self.assertNotIn("Environment=PATH=", w._render_webterm_unit())
+
 
 class TestDavidPrerequisiteGate(unittest.TestCase):
     def test_no_op_when_not_the_gateway_account(self):
@@ -64,6 +87,44 @@ class TestDavidPrerequisiteGate(unittest.TestCase):
         with m.patch.object(fw, "_whoami", lambda: p.DAVID_GATEWAY_USER), \
                 m.patch.object(d.shutil, "which", return_value=None):
             ok, reason = d.prerequisites_ready()
+        self.assertFalse(ok)
+        self.assertIn("prerequisites missing", reason)
+
+    def test_ready_when_ttyd_only_in_local_bin(self):
+        # On subdev ttyd is a no-sudo ~/.local/bin static binary that the
+        # push-driven ssh install PATH does NOT include, so `shutil.which`
+        # returns None even though ttyd is genuinely present — the gate must
+        # still be READY via the explicit ~/.local/bin/ttyd check (#614),
+        # else the box would never re-provision.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".local" / "bin").mkdir(parents=True)
+            ttyd = home / ".local" / "bin" / "ttyd"
+            ttyd.write_text("#!/bin/sh\n", encoding="utf-8")
+            os.chmod(ttyd, 0o755)
+            key = home / "webterm_david_ed25519"
+            key.write_text("dummy", encoding="utf-8")
+            with m.patch.dict(os.environ, {"HOME": str(home)}), \
+                    m.patch.object(fw, "_whoami", lambda: p.DAVID_GATEWAY_USER), \
+                    m.patch.object(d.shutil, "which", return_value=None), \
+                    m.patch.object(p, "WEBTERM_DAVID_IDENTITY", str(key)):
+                ok, reason = d.prerequisites_ready()
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "ready")
+
+    def test_still_no_op_when_ttyd_absent_everywhere(self):
+        # Belt-and-suspenders: with `which` None AND no ~/.local/bin/ttyd, the
+        # gate stays a SAFE no-op (the new local-bin check must not make the
+        # gate pass on a genuinely ttyd-less box) (#614).
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            key = home / "webterm_david_ed25519"
+            key.write_text("dummy", encoding="utf-8")
+            with m.patch.dict(os.environ, {"HOME": str(home)}), \
+                    m.patch.object(fw, "_whoami", lambda: p.DAVID_GATEWAY_USER), \
+                    m.patch.object(d.shutil, "which", return_value=None), \
+                    m.patch.object(p, "WEBTERM_DAVID_IDENTITY", str(key)):
+                ok, reason = d.prerequisites_ready()
         self.assertFalse(ok)
         self.assertIn("prerequisites missing", reason)
 
