@@ -83,6 +83,7 @@ except Exception:
     sys.exit(0)
 name_bypassed = g.has_bypass_marker(content)
 sig_bypassed = g.has_sig_bypass_marker(content)
+approval_bypassed = g.has_approval_bypass_marker(content)
 # #596/#597 create-NAME check -- skipped when the name is deliberately bypassed.
 if not name_bypassed:
     v = g.evaluate(content, user)
@@ -101,11 +102,23 @@ if not sig_bypassed:
         print(mv.number)
         print(mv.expected)
         sys.exit(0)
+# #628 message_post OWNER-APPROVAL check -- skipped only when approval-bypassed.
+# Runs even if the name OR the signature was bypassed: neither of those waives
+# the owner-approval requirement (checked AFTER the signature so an unsigned
+# post still reports the #609 signature issue first, preserving that behaviour).
+if not approval_bypassed:
+    av = g.evaluate_message_post_approval(content, user)
+    if av:
+        print("HITAPPROVAL")
+        print(av.number)
+        sys.exit(0)
 # nothing blocked -- surface a bypass for logging.
 if name_bypassed:
     print("BYPASS")
 elif sig_bypassed:
     print("SIGBYPASS")
+elif approval_bypassed:
+    print("APPROVALBYPASS")
 PYEOF
 )
 
@@ -121,6 +134,49 @@ if [ "$LINE1" = "SIGBYPASS" ]; then
     LOG="/tmp/airuleset-discuss-sig-bypass-${EUID:-$(id -u)}.log"
     { echo "$(date -Iseconds)  sig-bypass: ${STREAM_USER}" >> "$LOG"; } 2>/dev/null || true
     exit 0
+fi
+
+if [ "$LINE1" = "APPROVALBYPASS" ]; then
+    LOG="/tmp/airuleset-discuss-approval-bypass-${EUID:-$(id -u)}.log"
+    { echo "$(date -Iseconds)  approval-bypass: ${STREAM_USER}" >> "$LOG"; } 2>/dev/null || true
+    exit 0
+fi
+
+# #628 -- a discuss.channel message_post by a sub-dev stream carrying no
+# owner-approval evidence marker.
+if [ "$LINE1" = "HITAPPROVAL" ]; then
+    NUMBER=$(printf '%s\n' "$OUT" | sed -n '2p')
+    cat >&2 <<MSG
+
+🚫 BLOCKED: a client Discuss message has no owner-approval evidence (airuleset #628).
+
+You are sub-dev stream number "${NUMBER}". The owner must APPROVE the exact text
+of EVERY client-facing Discuss message BEFORE it is posted -- the OPENING message
+AND every follow-up reply / question / reminder into an existing thread, without
+exception (owner ruling after montalu6 posted an unapproved message to a live
+client thread on PROD, 2026-08-22, thread 283 -- it was deleted within a minute
+but the notification had already reached the client, irreversible).
+
+The message_post being sent carries no owner-approval evidence. AFTER the owner
+approves the text, record a FALSIFIABLE claim (a reference to HOW/WHEN they
+approved this exact text -- never a bare "approved") in the tool-call content and
+re-run:
+
+  • airuleset:owner-approved <ref>
+    e.g.  # airuleset:owner-approved owner odsúhlasil znenie 2026-08-22 na Discorde
+
+This is the same logged-falsifiable-claim model as Discuss-closed: /
+Self-service-checked: -- a bare "airuleset:owner-approved" with no reference is
+NOT accepted. How to compose + present the message to the owner for approval
+(complete proposal in the chat, per-person address register, react to the
+client's previous answer first): skills/odoo-discuss-xmlrpc/handover-compose.md.
+
+This gates only a discuss.channel message_post by a sub-dev stream -- a create /
+rename and a non-stream user are never affected. Bypass (rare, logged, only for
+a genuine internal / non-client post that needs no owner approval): put
+airuleset:discuss-approval-ok in the content.
+MSG
+    exit 2
 fi
 
 # #609 -- a discuss.channel message_post missing its `ZbynekAI <N>` signature.

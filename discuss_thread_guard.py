@@ -309,3 +309,91 @@ def evaluate_message_post(content, user):
         return None
     return MessagePostViolation(number=number,
                                 expected=SIGNATURE_WORD + " " + number)
+
+
+# --------------------------------------------------------------------------- #
+# #628 -- message_post OWNER-APPROVAL gate.
+#
+# THE PROBLEM (root cause, two halves). A stream posted a message into a LIVE
+# client Discuss thread on PROD WITHOUT the owner approving the text (montalu6,
+# 2026-08-22, thread 283); it was deleted within a minute but the bus push +
+# notification had already reached the client -- irreversible. (1) The prose
+# approval doctrine (handover-compose.md) was framed around HANDOVER threads and
+# their creation, so a stream read it as not applying to a "work question in an
+# existing thread". (2) Nothing MECHANICAL stopped the post: the #596/#597 create
+# guard exempts message_post, and the #609 gate only checks the SIGNATURE -- so a
+# SIGNED but UNAPPROVED body posts freely. The owner's ruling: approval applies to
+# EVERY client-facing message, without exception. This gate closes hole (2),
+# fleet-wide, on the SAME message_post content the #609 signature gate already
+# scans (rule-intake gate step 1: mechanically checkable -> hook); the doctrine
+# in handover-compose.md closes hole (1).
+#
+# THE EVIDENCE is a LOGGED, FALSIFIABLE CLAIM, never a bare assertion "it's
+# approved" -- the exact model of Discuss-closed: / Self-service-checked:. The
+# marker `airuleset:owner-approved <ref>` must carry a NON-EMPTY reference (the
+# `\s+\S` tail): a bare `airuleset:owner-approved` with no reference is NOT
+# accepted. The reference points at HOW/WHEN the owner approved this exact text;
+# a reviewer/owner can falsify it (did the owner really approve?) the same way a
+# faked Discuss-closed: message-id is falsifiable. Detection reuses
+# `is_channel_message_post` (the 3 RPC/ORM/JSON-RPC shapes) + `stream_number`
+# (non-stream user -> None -> silent) -- never a second detection or derivation.
+# Fail-safe direction = OVER-block (a safety/quality gate), like the signature
+# gate. The genuine internal / non-client post carries the
+# `airuleset:discuss-approval-ok` bypass (rare, logged) -- the sibling of
+# `airuleset:discuss-sig-ok`. Accepted residuals mirror the #609 gate: the marker
+# built at RUNTIME (a variable) is over-blocked (fail-safe, bypassable); a
+# multi-op tool-call could mask an unapproved post via another op's marker (the
+# same unmeasurable->allow bias the create/signature gates take). A name/sig
+# bypass does NOT waive approval -- the hook runs this check independently.
+# --------------------------------------------------------------------------- #
+
+APPROVAL_MARKER_WORD = "airuleset:owner-approved"
+
+APPROVAL_BYPASS_MARKER = "airuleset:discuss-approval-ok"
+
+# `airuleset:owner-approved <ref>`: the marker word then SAME-LINE horizontal
+# whitespace then at least one non-whitespace char -- a real, NON-EMPTY reference
+# on the marker's OWN line. `[^\S\r\n]` is horizontal whitespace only (space/tab,
+# never \r/\n), so the reference cannot be satisfied by a LATER line's content:
+# a bare marker on its own line (no reference) is NOT a match, even in the common
+# multi-line script where the message_post call follows on a later line (#628
+# review MAJOR: a `\s+\S` that spanned the newline let a bare, reference-less
+# marker pass in exactly that shape, defeating the falsifiable-claim requirement
+# -- never a bare assertion). `re.escape` keeps the pattern linear regardless of
+# input size.
+_APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"[^\S\r\n]+\S")
+
+ApprovalViolation = namedtuple("ApprovalViolation", "number")
+
+
+def approval_present(content):
+    """True iff `content` carries the `airuleset:owner-approved <ref>` evidence
+    marker WITH a non-empty reference after it. A bare `airuleset:owner-approved`
+    (no reference) is NOT accepted -- the falsifiable-claim requirement."""
+    if not content:
+        return False
+    return bool(_APPROVAL_RE.search(content))
+
+
+def has_approval_bypass_marker(content):
+    """True iff the deliberate `airuleset:discuss-approval-ok` bypass marker
+    appears in `content` (rare, logged by the hook) -- for a genuine internal /
+    non-client channel post that needs no owner approval."""
+    return APPROVAL_BYPASS_MARKER in (content or "")
+
+
+def evaluate_message_post_approval(content, user):
+    """An `ApprovalViolation` (number) iff `content` is a discuss.channel
+    message_post by a stream `user` (cli_aliases.stream_number) that carries NO
+    `airuleset:owner-approved <ref>` evidence marker; None (silent) otherwise --
+    a non-stream user, a non-message_post op, or a post that already carries the
+    approval evidence. The `airuleset:discuss-approval-ok` bypass is handled by
+    the hook (like the signature bypass), not here."""
+    number = cli_aliases.stream_number(user)
+    if number is None:
+        return None
+    if not is_channel_message_post(content):
+        return None
+    if approval_present(content):
+        return None
+    return ApprovalViolation(number=number)
