@@ -78,7 +78,14 @@ _DAVID_UNIT_NOTE = (
     "# reaches the tunnel; the gateway runs in --trust-access-header mode and just\n"
     "# trusts the Cf-Access-Authenticated-User-Email header Cloudflare injects.\n"
     "# The shared template's 'form login / credential / constant-time compare'\n"
-    "# wording refers to the OWNER (password) deployment — it does NOT apply here.\n#\n")
+    "# wording refers to the OWNER (password) deployment — it does NOT apply here.\n"
+    "#\n"
+    "# EXPOSURE: unlike the OWNER unit, the shared template's 'tailnet-only entry\n"
+    "# point' / 'security boundary is tailnet-only exposure' claims below are FALSE\n"
+    "# for THIS gateway — it is PUBLIC (Cloudflare Access at the edge is the\n"
+    "# boundary). And 'failed logins rate-limited per source IP' does NOT hold at\n"
+    "# the origin: behind cloudflared the gateway sees only 127.0.0.1, so any\n"
+    "# per-real-IP brute-force protection lives on the Cloudflare EDGE, not here.\n#\n")
 
 
 # The david ttyd binary is a NO-SUDO user-space static binary in ~/.local/bin

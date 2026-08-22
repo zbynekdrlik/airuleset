@@ -26,10 +26,15 @@ origin. The boundary is: Access-at-edge (email OTP) + the loopback-only gateway
 reachable ONLY through the cloudflared tunnel (which serves only the
 Access-protected hostname) + Cloudflare STRIPPING client-supplied `Cf-*` headers
 before setting authentic ones. A local process on subdev that reaches
-127.0.0.1:<gwport> could forge the trust header — but that already requires a
-local subdev account (a higher level of access than the webterm itself grants).
-Parallels the existing "rate limiter behind cloudflared sees only 127.0.0.1"
-residual (#612 R2 review).
+127.0.0.1:<gwport> could forge the trust header — but the local floor is already
+the pre-existing LOOPBACK ttyd (127.0.0.1:<ttydport>, no auth of its own): a
+local subdev account can reach that directly regardless, so header-trust adds no
+local exposure the fleet did not already have, and retiring the password does not
+worsen the local posture. Parallels the existing "rate limiter behind cloudflared
+sees only 127.0.0.1" residual (#612 R2 review). A stronger stdlib-friendly
+hardening (out of scope here — it would need to cover ttyd too) is a mode-0600
+unix-domain socket owned by david1 so only cloudflared/david1 can reach the
+origin; filed as a possible future improvement, not required for this change.
 """
 import json
 import os
@@ -151,12 +156,16 @@ class AccessClient:
 
     def find_app_by_domain(self, domain):
         """Return (app_dict_or_None, (status, body)). Idempotency hinges on this:
-        an app already present for `domain` is UPDATED, never duplicated."""
+        an app already present for `domain` is UPDATED, never duplicated. The
+        compare is NORMALIZED (case-fold + strip a trailing slash) so a Cloudflare
+        response that echoes the domain in a slightly different form does not slip
+        past and cause a duplicate POST."""
+        want = _norm_domain(domain)
         st, d = self._call("GET", self._base("/apps"))
         if st != 200 or not d.get("success"):
             return None, (st, d)
         for app in (d.get("result") or []):
-            if app.get("domain") == domain:
+            if _norm_domain(app.get("domain")) == want:
                 return app, (st, d)
         return None, (st, d)
 
@@ -264,6 +273,13 @@ def apply_profile(client, spec, dry_run=True):
     return result
 
 
+def _norm_domain(domain):
+    """Normalize a hostname for idempotent create-vs-update matching: case-fold
+    and drop a trailing slash. A None domain normalizes to "" (never matches a
+    real hostname)."""
+    return (domain or "").strip().rstrip("/").casefold()
+
+
 def _ok(status, body):
     return status in (200, 201) and bool(body.get("success"))
 
@@ -293,7 +309,9 @@ def cmd_webterm_access(args):
     limits to one profile. The token value is never printed."""
     profiles_to_do = ([args.profile] if getattr(args, "profile", None)
                       else list(WEBTERM_ACCESS_APPS))
-    dry_run = not getattr(args, "apply", False)
+    # An explicit --dry-run ALWAYS wins (a safety flag is never silently ignored),
+    # even if --apply is also passed; otherwise dry-run is the default (no --apply).
+    dry_run = getattr(args, "dry_run", False) or not getattr(args, "apply", False)
 
     # The token is loaded in BOTH modes — a dry-run still READS (GET /apps) to
     # report create-vs-update. Dry-run safety is that apply_profile(dry_run=True)

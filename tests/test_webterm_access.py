@@ -142,5 +142,45 @@ class TestConfigAndTrustHeader(unittest.TestCase):
                          "Cf-Access-Authenticated-User-Email")
 
 
+class TestReviewFixes(unittest.TestCase):
+    """#612 review round 1 fixes: normalized domain match (🔵#3), --dry-run wins
+    over --apply (🔵#2)."""
+
+    def test_norm_domain_casefold_and_trailing_slash(self):
+        self.assertEqual(acc._norm_domain("David.Newlevel.Media/"),
+                         "david.newlevel.media")
+        self.assertEqual(acc._norm_domain(None), "")
+
+    def test_find_app_matches_a_normalized_domain_no_duplicate(self):
+        # Cloudflare echoing the domain in a different case / with a trailing
+        # slash must still MATCH (update), never miss and POST a duplicate app.
+        t = _FakeTransport(apps=[{"id": "a1", "domain": "David.Newlevel.Media/"}])
+        client = acc.AccessClient("acct", token="tok", transport=t)
+        app, _meta = client.find_app_by_domain("david.newlevel.media")
+        self.assertIsNotNone(app)
+        self.assertEqual(app["id"], "a1")
+
+    def test_dry_run_flag_forces_dry_run_even_with_apply(self):
+        import argparse
+        import unittest.mock as m
+        calls = []
+
+        def rec(self, method, path, body):
+            calls.append((method, path))
+            if path.endswith("/apps"):
+                return 200, {"success": True, "result": []}
+            return 200, {"success": True, "result": {}}
+
+        args = argparse.Namespace(apply=True, dry_run=True, profile="david")
+        with m.patch.object(acc, "_load_token", return_value="tok"), \
+                m.patch.dict(acc.WEBTERM_ACCESS_APPS["david"],
+                             {"allowed_emails": ["x@y.z"]}), \
+                m.patch.object(acc.AccessClient, "_http", rec):
+            acc.cmd_webterm_access(args)
+        # --dry-run wins: only GET(s), never a POST/PUT, despite --apply.
+        self.assertTrue(calls)
+        self.assertEqual({mth for (mth, _p) in calls}, {"GET"})
+
+
 if __name__ == "__main__":
     unittest.main()
