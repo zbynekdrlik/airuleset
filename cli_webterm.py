@@ -26,6 +26,13 @@ z `_deployable_hosts()` + dev1, NIKDY ručný zoznam. Provisioning dev1-only
 (`os.uname().nodename == "dev1"`), systemd --user unity podľa vzoru
 `setup_filedrop_service()`, `ttyd` inštalovaný dev1-lokálne.
 
+#635 (owner ROZHODNUTÉ 2026-08-22): owner-ova doména `zbynek.newlevel.media`
+prechádza z tailnet-only na Cloudflare Access (email OTP, ako Davidova), gated cez
+`OWNER_GATEWAY_ACCESS_MODE` (default False). Keď je True, `setup_webterm_service`
+provisiuje bránu v Access režime — LOOPBACK bind + `--trust-access-header` (heslo
+zaniká), fronted cloudflared tunelom; default False necháva tailnet+heslo bránu
+byte-identickú.
+
 Dve úlohy modulu, oddelené aby CONNECT cesta (beží per-terminal-open, ttyd child)
 mala minimálne importy: (1) INVENTORY/PROVISIONING (install-time, dev1) generuje
 inventár + dashboard + unit; (2) CONNECT (`python3 cli_webterm.py webterm-connect
@@ -885,6 +892,34 @@ def _render_webterm_unit():
     return tmpl.replace("{{LAUNCH_SCRIPT}}", str(WEBTERM_LAUNCH_PATH))
 
 
+# #635: prepended to the OWNER gateway unit ONLY in Cloudflare-Access mode, so a
+# human reading the installed file is not misled by the shared template's
+# tailnet/password wording — the SAME honesty-bar correction cli_webterm_david's
+# _DAVID_UNIT_NOTE makes for the david lane. Every claim it corrects is FALSE for
+# the loopback + cloudflared + Access owner gateway.
+_OWNER_ACCESS_UNIT_NOTE = (
+    "# NOTE (#635, owner ROZHODNUTÉ 2026-08-22): this is the OWNER gateway in\n"
+    "# CLOUDFLARE-ACCESS mode — it binds LOOPBACK (127.0.0.1) and is fronted by a\n"
+    "# cloudflared tunnel for https://zbynek.newlevel.media/. The shared template's\n"
+    "# 'bound to dev1's tailscale IP', 'the ONE tailnet-only entry point' and\n"
+    "# 'security boundary is tailnet-only exposure' wording below is FALSE here: this\n"
+    "# gateway binds LOOPBACK (not a tailscale IP) and is PUBLIC behind Cloudflare\n"
+    "# Access (the edge email-OTP check is the boundary).\n"
+    "#\n"
+    "# AUTH: NO password / credential / login form / constant-time compare.\n"
+    "# Cloudflare Access does email one-time-PIN verification at the EDGE before any\n"
+    "# request reaches the tunnel; the gateway runs in --trust-access-header mode and\n"
+    "# just trusts the Cf-Access-Authenticated-User-Email header. The template's\n"
+    "# 'credential (…) validated constant-time' + 'Bitwarden login form' wording is\n"
+    "# the OWNER (password) deployment being RETIRED here — it does NOT apply.\n"
+    "#\n"
+    "# 'failed logins rate-limited per source IP' does NOT hold at the origin: behind\n"
+    "# cloudflared the gateway sees only 127.0.0.1, so per-real-IP brute-force\n"
+    "# protection lives on the Cloudflare EDGE. And 'install REFUSES to provision\n"
+    "# rather than bind a public interface' does not apply — Access mode binds\n"
+    "# loopback and needs no tailscale IP at all.\n#\n")
+
+
 def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     """The same-origin gateway systemd --user unit: runs
     `cli_webterm_gateway.py` bound to `bind_ip` on the single gateway port,
@@ -900,8 +935,11 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     unit) — NO password/credential is validated; Cloudflare email-OTP at the edge
     is the whole gate, and `bind_ip` is loopback (a cloudflared tunnel fronts it).
     The password-model `{{CRED_PATH}}` still present in the template's COMMENT is
-    neutralised to n/a so no human reads a live credential path into a passwordless
-    unit. When off, the emitted unit is BYTE-IDENTICAL to the pre-#635 render."""
+    neutralised to n/a, AND `_OWNER_ACCESS_UNIT_NOTE` is prepended (mirroring
+    cli_webterm_david's _DAVID_UNIT_NOTE) to correct every OTHER now-false
+    tailnet/password claim in the shared template header, so a human reading the
+    installed Access-mode unit is never misled. When off, the emitted unit is
+    BYTE-IDENTICAL to the pre-#635 render."""
     tmpl = WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
     if access_mode:
         import cli_webterm_access as access
@@ -914,15 +952,17 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
         # render is the single place that guarantees no tailnet bind can leak here
         # (mirrors cli_webterm_david's hardcoded loopback bind).
         bind_ip = WEBTERM_TTYD_BIND
+        note = _OWNER_ACCESS_UNIT_NOTE
     else:
         cred_sub = str(WEBTERM_CRED_PATH)
-    return (tmpl.replace("{{BIND_IP}}", bind_ip)
-            .replace("{{GATEWAY_MODULE}}", str(WEBTERM_GATEWAY_MODULE))
-            .replace("{{GATEWAY_PORT}}", str(WEBTERM_GATEWAY_PORT))
-            .replace("{{DASH_INDEX}}", str(WEBTERM_DASH_INDEX))
-            .replace("{{CRED_PATH}}", cred_sub)
-            .replace("{{TTYD_PORT}}", str(WEBTERM_TTYD_PORT))
-            .replace("{{TTYD_BASE}}", WEBTERM_TTYD_BASE))
+        note = ""
+    return note + (tmpl.replace("{{BIND_IP}}", bind_ip)
+                   .replace("{{GATEWAY_MODULE}}", str(WEBTERM_GATEWAY_MODULE))
+                   .replace("{{GATEWAY_PORT}}", str(WEBTERM_GATEWAY_PORT))
+                   .replace("{{DASH_INDEX}}", str(WEBTERM_DASH_INDEX))
+                   .replace("{{CRED_PATH}}", cred_sub)
+                   .replace("{{TTYD_PORT}}", str(WEBTERM_TTYD_PORT))
+                   .replace("{{TTYD_BASE}}", WEBTERM_TTYD_BASE))
 
 
 # dev1's tailscale IP must be inside the CGNAT block tailscale uses

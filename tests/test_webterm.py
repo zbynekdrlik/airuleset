@@ -619,12 +619,30 @@ class TestOwnerAccessModeUnit(unittest.TestCase):
         self.assertIn("--bind 127.0.0.1", exec_line)
         self.assertNotIn("--bind 0.0.0.0", exec_line)
 
+    def test_access_mode_unit_prepends_honesty_correction_note(self):
+        # #635 review 🟡: the installed Access-mode unit must NOT be left asserting
+        # the shared template's now-false tailnet/password wording — a correction
+        # note (like David's _DAVID_UNIT_NOTE) is prepended BEFORE the [Unit]
+        # section, naming Cloudflare Access + loopback and marking the template's
+        # tailnet-only claims FALSE.
+        unit = w._render_webterm_gateway_unit("100.104.8.125", access_mode=True)
+        self.assertIn("CLOUDFLARE-ACCESS mode", unit)
+        self.assertIn("FALSE here", unit)
+        self.assertLess(unit.index("#635"), unit.index("[Unit]"))
+        # the default (password) render carries NO such note
+        self.assertNotIn("CLOUDFLARE-ACCESS mode",
+                         w._render_webterm_gateway_unit("100.104.8.125"))
+
     def test_default_mode_render_is_unchanged_password_tailnet(self):
-        # Regression guard: with access_mode off (the default) the owner unit is
-        # byte-identical to the pre-#635 password/tailnet render.
+        # Regression guard: with access_mode off (the default) the owner unit keeps
+        # the password/tailnet ExecStart, matches an explicit access_mode=False
+        # call, and — crucially — DIFFERS from the access-mode render (proving the
+        # flag actually changes the emitted unit, not a tautology).
         default = w._render_webterm_gateway_unit("100.104.8.125")
         explicit_off = w._render_webterm_gateway_unit("100.104.8.125", access_mode=False)
+        access_on = w._render_webterm_gateway_unit("100.104.8.125", access_mode=True)
         self.assertEqual(default, explicit_off)
+        self.assertNotEqual(default, access_on)            # the flag has real teeth
         self.assertIn("--cred %s" % str(w.WEBTERM_CRED_PATH), default)
         self.assertIn("--bind 100.104.8.125", default)
         self.assertNotIn("--trust-access-header", default)
