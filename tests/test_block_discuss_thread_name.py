@@ -684,6 +684,17 @@ class TestApprovalPresent(TestCase):
         self.assertFalse(g.approval_present("# airuleset:owner-approved   "))
         self.assertFalse(g.approval_present("# airuleset:owner-approved\n"))
 
+    def test_bare_marker_then_later_script_line_is_not_accepted(self):
+        # #628 review MAJOR: the reference must be on the marker's OWN line. A
+        # `\s+\S` regex spans the newline, so a BARE marker on its own line
+        # followed by the message_post call on a LATER line wrongly satisfied
+        # `\S` from the call — the common multi-line-script shape. The reference
+        # must be same-line horizontal whitespace + a non-whitespace char.
+        self.assertFalse(g.approval_present("# airuleset:owner-approved\n" + SIGNED_MP))
+        self.assertFalse(g.approval_present("# airuleset:owner-approved\nowner ok"))
+        # a genuine SAME-LINE reference still passes
+        self.assertTrue(g.approval_present("# airuleset:owner-approved owner ok\n" + SIGNED_MP))
+
     def test_missing_marker(self):
         self.assertFalse(g.approval_present('{"body":"Ahoj, hotové."}'))
 
@@ -759,6 +770,16 @@ class TestHookBlocksApproval(_HookBase):
     def test_signed_but_unapproved_message_post_is_blocked(self):
         # #628: a SIGNED post with no owner-approval evidence is blocked
         r = self.run_hook(command="python3 -c '" + SIGNED_MP + "'", user="montalu2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("628", r.stderr)
+
+    def test_bare_marker_on_own_line_in_multiline_script_still_blocks(self):
+        # #628 review MAJOR: a bare `airuleset:owner-approved` on its OWN line,
+        # then the signed message_post call on a later line, must STILL block —
+        # the reference has to be on the marker's own line, never smuggled from
+        # the call below it.
+        script = "# airuleset:owner-approved\n" + SIGNED_MP + "\n"
+        r = self.run_hook(content=script, user="montalu2")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("628", r.stderr)
 

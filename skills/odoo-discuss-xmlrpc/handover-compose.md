@@ -8,7 +8,9 @@ owner would be a member; earlier montalu / montalu2). Do NOT keep private
 per-stream notes for it. The SEND mechanics (body_is_html, partner_ids incl. the
 owner, sub-thread by name, post-verify) live in the sibling `odoo-discuss-xmlrpc`
 skill (`SKILL.md`); THIS is the COMPOSE — what the message must contain and how
-its proposal is presented to the OWNER for approval BEFORE it is posted.
+it — and EVERY message it carries, the opening one AND every follow-up — is
+presented to the OWNER for approval BEFORE it is posted (the approval rule below
+is the FIRST rule for a reason).
 
 - **The owner must APPROVE the exact text of EVERY client-facing Discuss message
   BEFORE it is posted — the OPENING message AND every follow-up reply / question /

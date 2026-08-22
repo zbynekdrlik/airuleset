@@ -351,11 +351,17 @@ APPROVAL_MARKER_WORD = "airuleset:owner-approved"
 
 APPROVAL_BYPASS_MARKER = "airuleset:discuss-approval-ok"
 
-# `airuleset:owner-approved <ref>`: the marker word then whitespace then at least
-# one non-whitespace char (a real, NON-EMPTY reference). A bare marker with no
-# reference is NOT a match -- the falsifiable-claim requirement (never a bare
-# assertion). `re.escape` keeps the pattern linear regardless of input size.
-_APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"\s+\S")
+# `airuleset:owner-approved <ref>`: the marker word then SAME-LINE horizontal
+# whitespace then at least one non-whitespace char -- a real, NON-EMPTY reference
+# on the marker's OWN line. `[^\S\r\n]` is horizontal whitespace only (space/tab,
+# never \r/\n), so the reference cannot be satisfied by a LATER line's content:
+# a bare marker on its own line (no reference) is NOT a match, even in the common
+# multi-line script where the message_post call follows on a later line (#628
+# review MAJOR: a `\s+\S` that spanned the newline let a bare, reference-less
+# marker pass in exactly that shape, defeating the falsifiable-claim requirement
+# -- never a bare assertion). `re.escape` keeps the pattern linear regardless of
+# input size.
+_APPROVAL_RE = re.compile(re.escape(APPROVAL_MARKER_WORD) + r"[^\S\r\n]+\S")
 
 ApprovalViolation = namedtuple("ApprovalViolation", "number")
 

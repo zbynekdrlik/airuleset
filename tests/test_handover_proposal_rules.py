@@ -90,6 +90,15 @@ def hook_max_total():
     return int(m.group(1))
 
 
+def hook_max_body():
+    """Read MAX_BODY out of the injector — the per-BODY truncation cap (#576).
+    A single injected body longer than this is silently TRUNCATED (its tail —
+    here the register + reflection rules at the bottom — dropped)."""
+    m = re.search(r"MAX_BODY\s*=\s*(\d+)", read(HOOK))
+    assert m, "MAX_BODY not found in inject-situational-rule.sh"
+    return int(m.group(1))
+
+
 class TestCompositionRulesInCompanionFile(TestCase):
     """The canonical composition rules (R1/R2/R3-state/R5-live + reassurance)
     live in the companion file — anchored on short phrases run against the
@@ -822,6 +831,28 @@ class TestAddressRegisterPerPerson(TestCase):
         w = self._bullet_window()
         self.assertIn("register is PER-PROJECT and grows by ONE line", w)
         self.assertIn("Before every `message_post`", w)
+
+
+class TestCompanionUnderInjectorBodyCap(TestCase):
+    """#628 review NIT: the companion injects on the odoo-discuss-handover
+    trigger and is NOT co-fit-budgeted (that guard is only SKILL.md +
+    comprehensive-logging), but it IS subject to the injector's per-BODY
+    truncation cap (MAX_BODY, #576) — a body over the cap is silently truncated,
+    dropping its TAIL (the register + reflection rules sit at the bottom). This
+    locks the companion under MAX_BODY so future doctrine growth can never
+    silently truncate the delivered rules. Measures what the injector measures
+    (the frontmatter-stripped body; handover-compose.md has no frontmatter, so
+    it is the whole file)."""
+
+    def test_companion_stays_under_injector_max_body(self):
+        body = strip_frontmatter(read(COMPOSE)).strip()
+        cap = hook_max_body()
+        self.assertLess(
+            len(body), cap,
+            "handover-compose.md injected body (%d) >= MAX_BODY (%d) — the injector "
+            "would TRUNCATE it, dropping the register/reflection rules at the tail. "
+            "Condense existing prose; never raise MAX_BODY (fleet-wide blast radius)."
+            % (len(body), cap))
 
 
 if __name__ == "__main__":
