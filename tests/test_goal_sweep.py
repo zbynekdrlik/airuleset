@@ -1259,13 +1259,44 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("skip:gave-up" in ln for ln in logs), logs)
 
-    def test_reduced_authority_is_deliberately_silent(self):
-        # A reduced-authority box has no worktree lanes -> structurally N/A,
-        # deliberately silent (locks the documented no-log decision).
+    def test_branch_merge_box_also_nudges(self):
+        # #618: a reduced-authority STREAM box (branch-merge — montalu/marek)
+        # DOES run a parallel worktree fleet under /autopilot (SKILL fleet
+        # default; owner's #618 expected behaviour), so it must get the
+        # lane-occupancy nudge exactly like a full-authority box. The old
+        # `authority != "full"` early-skip (a stale #403 assumption, pre-#317
+        # fleet-default) silently starved montalu1 of every saturation nudge —
+        # ZERO lane-occupancy journal lines live. Rewritten from the former
+        # `test_reduced_authority_is_deliberately_silent` (which locked the
+        # wrong behaviour) with that justification.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
                                       authority="branch-merge")
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+
+    def test_fork_no_merge_box_also_nudges(self):
+        # #618: a fork-no-merge STREAM box (david) also fleets parallel
+        # worktree lanes (each produces a fork branch + hand-off), so it too
+        # must reach the nudge, never the silent authority skip.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      authority="fork-no-merge")
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_unresolvable_authority_is_still_deliberately_silent(self):
+        # #618: the remaining guard — an UNRESOLVABLE authority (resolve_authority
+        # raised → None) is a degraded/unknown box, never a lane decision worth
+        # journalling. Only None skips silently now; the three real profiles all
+        # nudge.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      authority=None)
         self.assertEqual(logs, [])
         self.assertFalse(owns)
         self.assertEqual(tmux.sent, [])

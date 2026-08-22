@@ -10809,7 +10809,27 @@ class TestWatchdogBacklogFetch(TestCase):
     --count` -- the SAME commands the `/goal` stop-proof templates
     themselves use -- so this check reads exactly the population the
     session's own claim is about, and inherits their refuse-rather-than-
-    guess contract (a non-zero exit prints no number at all)."""
+    guess contract (a non-zero exit prints no number at all).
+
+    #618: the fetch now reads the tickets-status cache FIRST (the ONE-derivation
+    principle — the SAME `open` the footer + goal_dark_watch already read via
+    `statusbar.obligation_count`) and only shells the live `--count` as a
+    cache-miss/stale FALLBACK, warming the cache for the next sweep via
+    `statusbar._spawn_refresh`. setUp defaults the cache to a MISS + neuters the
+    refresh spawn, so the pre-existing subprocess-path tests below exercise the
+    cache-miss fallback deterministically (no real Popen, no dependence on the
+    box's real ~/.claude cache); the #618 tests re-patch the cache locally."""
+
+    def setUp(self):
+        # #618 — default every test to a cache MISS (so the historic subprocess
+        # tests take the live fallback path) and neuter the detached refresh
+        # spawn (never Popen a real `tickets-status --refresh` in a unit test).
+        p1 = m.patch("statusbar.obligation_count", return_value=(None, None))
+        p2 = m.patch("statusbar._spawn_refresh")
+        self._obl = p1.start()
+        self._spawn = p2.start()
+        self.addCleanup(p1.stop)
+        self.addCleanup(p2.stop)
 
     def _fake(self, stdout="", returncode=0, raises=None):
         calls = []
@@ -10915,6 +10935,66 @@ class TestWatchdogBacklogFetch(TestCase):
         argv, _kw = calls[0]
         self.assertEqual(argv[0], sys.executable)
         self.assertTrue(os.path.isabs(argv[1]))
+
+    # ---- #618: cache-first backlog read (ONE-derivation, no tight-timeout) --
+
+    def test_fresh_cache_is_read_without_any_subprocess(self):
+        # #618: a fresh tickets-status cache is the SAME `open` the footer
+        # renders (statusbar.obligation_count). Reading it means NO live
+        # `slice-quals`/`core-quals --count` subprocess at all — which is the
+        # whole point: that subprocess is 16-17s on a big shared-account slice
+        # and ALWAYS timed out at 15s → backlog=n/a. A fresh cache never
+        # touches it and never spawns a refresh.
+        import time
+        fake_run, calls = self._fake(stdout="99\n")   # would return 99 if shelled
+        self._obl.return_value = (30, time.time())
+        with m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 30)      # from the cache, NOT the 99 subprocess
+        self.assertEqual(calls, [])       # no subprocess ran
+        self._spawn.assert_not_called()   # fresh cache needs no refresh
+
+    def test_stale_cache_spawns_a_refresh_and_falls_back_to_live_count(self):
+        # #618: a hours-stale cache (montalu1's live 7h-stale state) must NOT be
+        # trusted; the fetch warms it for the NEXT sweep via _spawn_refresh and
+        # falls back to the live count for THIS sweep (self-heals next sweep).
+        import time
+        fake_run, calls = self._fake(stdout="30\n")
+        self._obl.return_value = (25, time.time() - 100000)   # ~28h stale
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority",
+                            return_value="branch-merge"), \
+             m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 30)          # live fallback this sweep
+        self.assertEqual(len(calls), 1)       # subprocess DID run
+        self._spawn.assert_called_once()      # refresh warmed for next sweep
+
+    def test_missing_cache_spawns_a_refresh_and_falls_back(self):
+        # #618: a MISSING cache (obligation_count -> (None, None)) also warms +
+        # falls back — same path the pre-existing subprocess tests take.
+        fake_run, calls = self._fake(stdout="7\n")
+        # setUp already set the cache to a miss.
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 7)
+        self.assertEqual(len(calls), 1)
+        self._spawn.assert_called_once()
+
+    def test_a_non_int_cached_open_is_treated_as_a_miss(self):
+        # #618: obligation_count returns (None, ts) when the cache carries no
+        # int `open` — never trust it, warm + fall back.
+        import time
+        fake_run, calls = self._fake(stdout="5\n")
+        self._obl.return_value = (None, time.time())   # fresh ts, but no int open
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 5)
+        self._spawn.assert_called_once()
 
 
 class TestTier0BuildBlock(TestCase):
