@@ -380,8 +380,9 @@ def connect_main(argv, inventory_path=None):
 # Dashboard — a single-page Windows-Terminal-style tabbed UI generated from the
 # inventory (#579). A top tab bar (one short-alias tab per session) + one lazily
 # created iframe per session pointing at the SAME-ORIGIN ttyd URL (`/t/?arg=<id>`
-# under the #584 gateway). Tab switching hides/reconnects (a remote target's
-# switch-back incurs an SSH-reconnect flash, not instant), and ONE gateway form login
+# under the #584 gateway). Tab switching is a PURE show/hide (every tab is
+# preloaded + stays connected, see `preloadAll()` below — instant, no reconnect),
+# and ONE gateway form login
 # (session cookie) covers every tab — no per-tab auth. #585 originally
 # disconnected every hidden tab so it could not shrink the shared window;
 # #586's preload-all (every tab kept connected, see `preloadAll()`) SUPERSEDED
@@ -676,6 +677,9 @@ function fitFixedGrid(win) {
   const screenEl = () => doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
   const el = screenEl();
   if (!el) return false;                        // xterm not painted yet -> retry
+  // reads the element size right after resize/fontSize assuming xterm updates
+  // the DOM synchronously (verified live: real ttyd + headless Chrome); the
+  // bounded shrink loop below is the safety net if it ever lags by a frame.
   const r = el.getBoundingClientRect();
   const availW = win.innerWidth, availH = win.innerHeight;
   if (!r.width || !r.height || !availW || !availH) return false;  // hidden/0 -> retry

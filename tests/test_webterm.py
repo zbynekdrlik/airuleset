@@ -23,7 +23,12 @@ import cli_webterm as w  # noqa: E402
 
 def _extract_js_function(html, name):
     """The source of the top-level `function <name>(...) { ... }` from the
-    rendered dashboard's <script>, brace-matched so nested `{}` are handled."""
+    rendered dashboard's <script>, brace-matched so nested `{}` are handled.
+    NB: the naive `{`/`}` counter does not skip braces inside string literals --
+    it works because the extracted functions' string literals (the injected CSS)
+    are net brace-balanced; a future unbalanced string brace would mis-extract,
+    which the node behavioral test (`test_fit_behaviour_...`) catches as a
+    SyntaxError. If that ever bites, make this string-aware."""
     start = html.index("function %s(" % name)
     i = html.index("{", start)
     depth = 0
@@ -487,10 +492,10 @@ class TestAttachSnippetBehavior(unittest.TestCase):
 
     def test_fresh_base_session_is_never_ignore_size(self):
         # No existing session -> the owner's own base is created; it is the real
-        # viewing client, so it must NOT be ignore-size. #613 REOPEN: ignore-size
-        # is now removed from the clone path too, so no attach in ANY resolution
-        # path is ignore-size — but this fresh-base path was never ignore-size
-        # to begin with, so the invariant is unchanged here.
+        # viewing client, so it must NOT be ignore-size. #613 REOPEN-2: the CLONE
+        # attach IS `-f ignore-size` again (test_clone_attaches_WITH_ignore_size…),
+        # so this fresh-base path is the SOLE resolution path that is deliberately
+        # NOT ignore-size — the owner's own base must size its own windows.
         log = self._run("zbynek", "")
         self.assertNotIn("ignore-size", log)
 
