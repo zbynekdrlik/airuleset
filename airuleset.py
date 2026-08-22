@@ -3820,6 +3820,21 @@ def _watchdog_delivery_probe(root, base):
 # strictly under the bound at every instant.
 _BACKLOG_STATUS_CACHE_MAX_AGE_S = 15 * 60
 
+# #619 -- the cache-miss LIVE `--count` fallback's subprocess timeout. The
+# measured `slice-quals --count` on a big shared-account slice is 16-17s
+# (O(backlog) serial gh timeline reads, #618), so the #618 timeout=15 ALWAYS
+# expired -> backlog=None on every cache-miss sweep (92x/9h on montalu1), which
+# starved the saturation nudge's under-saturation confirmation. Bumped to 30s
+# (comfortable margin over 17s) so the synchronous fallback COMPLETES instead of
+# bailing; the result then caches for 10min (BACKLOG_CHECK_INTERVAL_S) PER cwd, so
+# the 30s cost is paid at most once per that window per REPO, never per sweep.
+# Interaction noted (adversarial review): a cold fetch starting late in a sweep can
+# overshoot the unit's TimeoutStartSec (~120s) by ~15s more than the old 15s did --
+# but a mid-sweep kill is designed-for + self-recovering (a few/day), the cold path
+# is rare (cache-first), and the warmed cache serves the next sweep, so the wider
+# overshoot window is an accepted tradeoff for a reliable backlog read.
+_BACKLOG_LIVE_COUNT_TIMEOUT_S = 30
+
 
 def _watchdog_backlog_fetch(cwd):
     """#160 defect 1 / defect 4 — does THIS BOX's own slice of the repo at
@@ -3871,21 +3886,22 @@ def _watchdog_backlog_fetch(cwd):
     background refresh; the ONE-derivation principle #367/#468, sibling of the
     #459 goal_dark_watch reader) — and only shells the live `--count`
     subprocess as a cache-miss/stale/untrusted FALLBACK. That subprocess is
-    16-17s on a big shared-account slice (O(backlog) serial gh timeline reads)
-    and ALWAYS timed out at 15s → backlog=n/a → the saturation nudge
-    (goal_lane_occupancy_nudge) could never confirm under-saturation, so
-    montalu1 with 28+ workable issues + 1 worker got no fill nudge. A fresh
-    POSITIVE cache read is instant + never times out. A cached 0 is NOT trusted
-    (the tickets-status writer has no #181 refuse-guard — cmd_tickets_status's
-    own note — so a broken-index 0 can land in it), so it falls through to the
+    16-17s on a big shared-account slice (O(backlog) serial gh timeline reads);
+    the #618 timeout=15 ALWAYS expired → backlog=n/a → the saturation nudge
+    (goal_lane_occupancy_nudge) could never confirm under-saturation (92
+    backlog=None sweeps/9h on montalu1). #619 bumped it to
+    `_BACKLOG_LIVE_COUNT_TIMEOUT_S` (30s) so the synchronous fallback COMPLETES
+    on THIS sweep instead of bailing. A fresh POSITIVE cache read is still the
+    fast path (instant, never times out). A cached 0 is NOT trusted (the
+    tickets-status writer has no #181 refuse-guard — cmd_tickets_status's own
+    note — so a broken-index 0 can land in it), so it falls through to the
     live count, which DOES refuse an untrustworthy empty as None: the #181
-    contract above is preserved. A stale/missing/untrusted read WARMS the cache
-    for the next sweep via the same detached, rate-limited `_spawn_refresh` the
-    statusline uses (so an idle box whose footer isn't rendering — montalu1's
-    7h-stale cache — is re-warmed by the watchdog's own 60s cadence) and
-    attempts the live count for THIS sweep. On a big slice that live attempt may
-    still time out (None); the warmed cache then serves the NEXT sweep — that
-    (not the timing-out live call) is the real self-heal."""
+    contract above is preserved. A stale/missing/untrusted read ALSO WARMS the
+    cache for the next sweep via the same detached, rate-limited `_spawn_refresh`
+    the statusline uses (so an idle box whose footer isn't rendering — montalu1's
+    7h-stale cache — is re-warmed by the watchdog's own 60s cadence). The bumped
+    live count now serves THIS sweep; the warmed cache is the belt-and-suspenders
+    for the next one."""
     import time
     try:
         import statusbar
@@ -3917,7 +3933,8 @@ def _watchdog_backlog_fetch(cwd):
     try:
         r = subprocess.run(
             [sys.executable, os.path.abspath(__file__), cmd_name, "--count"],
-            cwd=cwd, capture_output=True, text=True, timeout=15)
+            cwd=cwd, capture_output=True, text=True,
+            timeout=_BACKLOG_LIVE_COUNT_TIMEOUT_S)   # #619: 30s, was 15s (always timed out on a 16-17s slice)
     except Exception:
         return None
     if r.returncode != 0:

@@ -259,7 +259,7 @@ def evaluate(now, sid, cwd, projects_dir, state, backlog_fetch, goal_mark_entry,
 # `goal.goal_lane_occupancy_nudge` consumes them through thin module-level
 # helpers and never grows, and every branch is mutation-lockable in isolation.
 
-LaneWorkingNoTasks = namedtuple("LaneWorkingNoTasks", "defer streak log escalated")
+LaneWorkingNoTasks = namedtuple("LaneWorkingNoTasks", "defer streak log")
 
 
 def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
@@ -276,7 +276,7 @@ def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
     any non-stale lane, the #565 evidence predicate, NEVER the wedged-excluding
     count).
 
-    Verdict (`LaneWorkingNoTasks(defer, streak, log, escalated)`):
+    Verdict (`LaneWorkingNoTasks(defer, streak, log)`):
 
       * NOT applicable (``marker != "⏳"`` or ``render_waiters > 0``): the branch
         does not fire → ``defer=False``, streak RESET (0), ``log=None`` (silent —
@@ -287,30 +287,30 @@ def lane_working_no_tasks_decision(*, marker, render_waiters, structured_live,
       * ``structured_live`` False (genuinely 0 non-stale lanes): a ``⏳`` claiming
         work with nothing running → BOUNDED defer. ``defer=True`` while
         ``streak < max_defers`` OR ``backlog <= 0`` (nothing to nudge for). At
-        ``streak >= max_defers`` WITH ``backlog > 0`` → ESCALATE: stop deferring
-        (``defer=False``) so the pane reaches the gated empty-lane nudge path
-        (its own idle / cooldown / GOAL_LANE_MAX_NUDGES give-up bound the
-        keystrokes) — never an unbounded identical skip loop (the #566 livelock
-        class). Both defer and escalate journal a greppable ``log``.
+        ``streak >= max_defers`` WITH ``backlog > 0`` → stop deferring
+        (``defer=False``) so the pane reaches the empty-lane nudge path (its own
+        cooldown / GOAL_LANE_MAX_NUDGES give-up bound the keystrokes) — never an
+        unbounded identical skip loop (the #566 livelock class). Both defer and
+        the stop-deferring case journal a greppable ``log``.
 
-    ``escalated`` is True ONLY in the escalate branch -- #611: the empty-lane
-    caller uses it to BYPASS its 15-min idle floor, never on any other verdict.
-    ``streak`` is the caller's NEW persisted defer streak.
+    ``streak`` is the caller's NEW persisted defer streak. (#619: the #611
+    ``escalated`` field is retired -- the 15-min idle floor it bypassed is gone,
+    so the stop-deferring case simply reaches the nudge like any ``defer=False``.)
     """
     if marker != "⏳" or render_waiters > 0:
-        return LaneWorkingNoTasks(False, 0, None, False)  # branch does not fire
+        return LaneWorkingNoTasks(False, 0, None)  # branch does not fire
     if structured_live:
-        return LaneWorkingNoTasks(False, 0, None, False)  # lanes live -> proceed
+        return LaneWorkingNoTasks(False, 0, None)  # lanes live -> proceed
     streak = defer_streak + 1
     if backlog > 0 and streak >= max_defers:
         return LaneWorkingNoTasks(
             False, streak,
             "working-no-tasks ESCALATE (%d defers, backlog>0, 0 structured live "
-            "lanes -- proceeding to the gated nudge path)" % streak, True)
+            "lanes -- proceeding to the gated nudge path)" % streak)
     return LaneWorkingNoTasks(
         True, streak,
         "skip:working-no-tasks (⏳ marker, 0 structured live lanes, defer %d/%d)"
-        % (streak, max_defers), False)
+        % (streak, max_defers))
 
 
 LaneLowMemSurface = namedtuple("LaneLowMemSurface", "surface streak surfaced")

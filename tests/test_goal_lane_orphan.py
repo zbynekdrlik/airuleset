@@ -88,7 +88,7 @@ class TestGoalLaneOrphanReap(_LaneSweepBase):
         # An aged entry for a session with NO live candidate pane this sweep is
         # an orphan -> reaped. RED pre-fix: no reaper, so it survives forever.
         state = {"goal_lane": {
-            "orphan-531": {"lts": NOW - 3 * DAY, "ln": 2, "lnbk": 4}}}
+            "orphan-531": {"lts": NOW - 3 * DAY, "ln": 2}}}
         live = self._armed_sweep(state)
         recs = state["goal_lane"]
         self.assertNotIn("orphan-531", recs,
