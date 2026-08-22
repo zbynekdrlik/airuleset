@@ -187,6 +187,80 @@ class CloudflareInvalidFalsePositiveControls(TestCase):
             "a backticked MENTION describing the gate must not block")
 
 
+# --- review r2 counterexamples: cross-service / unrelated-topic / benign ---- #
+# These must PASS. Before the r2 fix (CF_SIGNAL decoupled from CF_NEAR) they
+# WRONGLY BLOCKED. The MATCH now requires a CLOUDFLARE-QUALIFIED credential.
+XSERVICE_GITHUB_PLUS_CF = (
+    "The GitHub token is invalid, please regenerate the PAT. Separately, I "
+    "finished the Cloudflare DNS setup and the site resolves."
+)
+UNRELATED_SORTKEY_PLUS_CF = (
+    "Moved the site behind Cloudflare last week. Separately, the sort key on the "
+    "events table is invalid after the migration, so I re-ran the index rebuild."
+)
+CF_KEY_METRIC = (
+    "Cloudflare Analytics shows the key metric for cache-hit-ratio is invalid "
+    "right now because the beacon script failed to load."
+)
+BENIGN_REVOKED = (
+    "Cleanup: I revoked the old unused Cloudflare API token in the dashboard; "
+    "the new scoped token is the only active one now and DNS works."
+)
+BENIGN_REJECTED = (
+    "Cloudflare rejected the request because the API key was missing the "
+    "Zone:Read scope. I added the scope and it works now."
+)
+BENIGN_EXPIRED_ROTATION = (
+    "Rotated the Cloudflare API token: the old token was expired, so I generated "
+    "a fresh one, stored it in ~/.secrets, and the DNS sync succeeded."
+)
+BENIGN_ODMIETOL = (
+    "Cloudflare odmietol starý formát pri API, ale token funguje spravne a DNS "
+    "zaznam je vytvoreny."
+)
+
+
+class CloudflareInvalidReviewControls(TestCase):
+    """Fresh-context adversarial review (r2) counterexamples — all must PASS."""
+
+    def test_cross_service_github_plus_cloudflare_passes(self):
+        self.assertFalse(
+            _blocked(_run(XSERVICE_GITHUB_PLUS_CF)),
+            "a non-Cloudflare token claim + an UNRELATED cloudflare mention must "
+            "NOT block (the NON_CF_TOKEN invariant must hold even WITH a "
+            "cloudflare word present)")
+
+    def test_unrelated_sortkey_plus_cloudflare_passes(self):
+        self.assertFalse(
+            _blocked(_run(UNRELATED_SORTKEY_PLUS_CF)),
+            "'sort key ... is invalid' near a cloudflare mention must not block")
+
+    def test_cloudflare_key_metric_passes(self):
+        self.assertFalse(
+            _blocked(_run(CF_KEY_METRIC)),
+            "'key metric ... is invalid' is not a credential-invalid claim")
+
+    def test_benign_revoked_hygiene_passes(self):
+        self.assertFalse(
+            _blocked(_run(BENIGN_REVOKED)),
+            "'I revoked the old token' is a hygiene action, not an invalid verdict")
+
+    def test_benign_rejected_request_passes(self):
+        self.assertFalse(
+            _blocked(_run(BENIGN_REJECTED)),
+            "'Cloudflare rejected the request ... fixed' is a success report")
+
+    def test_benign_expired_rotation_passes(self):
+        self.assertFalse(
+            _blocked(_run(BENIGN_EXPIRED_ROTATION)),
+            "a rotation success report mentioning an expired old token must pass")
+
+    def test_benign_sk_odmietol_passes(self):
+        self.assertFalse(
+            _blocked(_run(BENIGN_ODMIETOL)),
+            "'Cloudflare odmietol ... ale token funguje' is benign")
+
+
 class CloudflareInvalidHookContract(TestCase):
     def test_block_is_json_stdout_exit0_with_probe_named_on_stderr(self):
         p = _run(SK_NEFUNGUJE)
