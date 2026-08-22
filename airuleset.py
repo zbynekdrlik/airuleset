@@ -2381,11 +2381,11 @@ def cmd_tickets_status(args):
                 # ticket that is BOTH handed-off AND parked (user-waiting/ops-wait)
                 # is counted in its parked bucket (`U`/`W`), never `gk` — the same
                 # surface treatment #468 already gives a handed + user-waiting row.
-                # #539: a bare needs-acceptance with no DELIVERED draft is the
-                # stream's own chained work → I, not U (`_acceptance_present_set`,
-                # question map only — the footer already reads that file).
-                workable_rows, waiting, ops_wait = _partition_workable(
-                    rows, acceptance_present=_acceptance_present_set(rows, cwd=cwd))
+                # #622: a bare needs-acceptance → U unconditionally (queued for
+                # owner approval, never dispatchable-now I). Pure label partition;
+                # the queued/delivered display distinction lives on the on-demand
+                # `--waiting` path, never this hot footer refresh.
+                workable_rows, waiting, ops_wait = _partition_workable(rows)
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
@@ -2442,9 +2442,9 @@ def cmd_tickets_status(args):
                 # user-waiting split (both surface as their own footer buckets —
                 # `U N`/`W N`). ONE partition of the SAME fetch the /goal
                 # stop-proof (`core-quals --count`) uses (#367/#468 guard).
-                # #539: bare needs-acceptance with no delivered draft → I (chained).
-                workable, waiting, ops_wait = _partition_workable(
-                    seen, acceptance_present=_acceptance_present_set(seen, cwd=cwd))
+                # #622: bare needs-acceptance → U unconditionally (queued for owner
+                # approval, never dispatchable-now I).
+                workable, waiting, ops_wait = _partition_workable(seen)
                 entry["open"] = len(workable)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)

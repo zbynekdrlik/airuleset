@@ -759,18 +759,17 @@ class RefreshCLI(unittest.TestCase):
                 "only the genuinely-parked ready-for-review ticket (#2) is "
                 "gk; the processed needs-acceptance ticket (#1) must not be "
                 "re-counted by its stale READY-FOR-REVIEW comment")
-            # #539 REFINES #512: a bare needs-acceptance goes to U only once a
-            # DRAFT has been presented for approval (a ❓ ping references #N). No
-            # question map is seeded here, so #1 is the stream's OWN not-yet-
-            # presented chained work → it stays in the workable I N (open), NOT
-            # U N. (Its gk-suppression — the test's core purpose — is unchanged.)
+            # #622 (REVERSES #539 chained-I): a bare needs-acceptance is queued for
+            # owner approval → U unconditionally, whether or not a draft was
+            # delivered. So #1 leaves the workable I N into U N. (Its gk-suppression
+            # — the test's core purpose — is unchanged.)
             self.assertEqual(
-                cache["open"], 1,
-                "#539: a bare needs-acceptance with no delivered draft is "
-                "chained-I (workable), not U — #1 counts in open")
+                cache["open"], 0,
+                "#622: the bare needs-acceptance #1 is queued → U, not the "
+                "workable I; only the gk-parked #2 remains, netted out of open")
             self.assertEqual(
-                cache.get("user_waiting"), 0,
-                "#539: #1 reaches U only after a draft ping is fired; none here")
+                cache.get("user_waiting"), 1,
+                "#622: #1 (bare needs-acceptance) is queued on the owner → U N")
 
     def test_refresh_a_needs_acceptance_ticket_still_labeled_ready_for_review_stays_gk(self):
         # #507 adversarial defense: the needs-acceptance suppression must
@@ -875,12 +874,11 @@ class RefreshCLI(unittest.TestCase):
                 "is gk; the processed needs-acceptance ticket (#1) must not be "
                 "re-counted by its stale comment nor re-added by the recovery "
                 "block")
-            # #539 REFINES #512: with no draft ping seeded, the bare
-            # needs-acceptance ticket (#1) is chained-I (workable), not U, on the
-            # shared-account topology too — it reaches U only once a draft is
-            # presented (a ❓ ping references #N).
-            self.assertEqual(cache["open"], 1)
-            self.assertEqual(cache.get("user_waiting"), 0)
+            # #622 (REVERSES #539 chained-I): the bare needs-acceptance #1 is
+            # queued for owner approval → U unconditionally, on the shared-account
+            # topology too. Only the gk-parked #2 remains, netted out of open.
+            self.assertEqual(cache["open"], 0)
+            self.assertEqual(cache.get("user_waiting"), 1)
 
     def test_refresh_a_comment_only_re_handoff_of_needs_acceptance_is_a_known_safe_under_count(self):
         # #507 review MAJOR (accepted, SAFE-direction residual): the label-based
@@ -938,22 +936,23 @@ class RefreshCLI(unittest.TestCase):
                 "re-hand-off of a needs-acceptance ticket is not re-counted as "
                 "gk by label alone (the auto-labeller unreliability #313 exists "
                 "for) -- so it must NOT falsely stop the loop")
-            # #539 REFINES #512: with no draft ping, a BARE needs-acceptance
-            # ticket (all this comment-only case has, by label) is the stream's
-            # OWN not-yet-presented chained work → it stays in the workable I N,
-            # NOT U N. This RESTORES the pre-#512 "stays workable to keep the loop
-            # alive" behaviour for the un-presented case (the loop works it —
-            # composing/presenting the draft — rather than parking on the owner),
-            # which is the correct disposition for chained work; it moves to U N
-            # only once a draft ping is fired.
+            # #622 (REVERSES #539 chained-I): a bare needs-acceptance is queued for
+            # owner approval → U unconditionally. So this comment-only re-hand-off
+            # (needs-acceptance by label, not gk-detected) leaves the workable I N
+            # into U N — SURFACED on this fork box in `--waiting` (U), where the
+            # loop PARKS on it (not silently dropped). NOTE the honest narrowing of
+            # the #507/#508 residual: it is NOT picked up gk-side either (a
+            # `needs-acceptance` ticket is in GATEKEEPER_PROCESSED_LABELS, EXCLUDED
+            # from the READY-FOR-REVIEW comment fallback, and the gk core set is
+            # label-based + stream-excluded), so it self-heals ONLY when the repo
+            # auto-labeller re-adds `ready-for-review` — #622 trades #507/#508's
+            # keep-alive-in-I for this narrow residual per the owner's I/U/W model.
             self.assertEqual(
-                cache["open"], 1,
-                "#539: a bare needs-acceptance with no delivered draft stays in "
-                "the workable I N (chained work), not U N")
+                cache["open"], 0,
+                "#622: a bare needs-acceptance is queued → U, not the workable I N")
             self.assertEqual(
-                cache.get("user_waiting"), 0,
-                "#539: it reaches U N only once a draft is presented (a ❓ ping "
-                "references #N); none is seeded here")
+                cache.get("user_waiting"), 1,
+                "#622: the comment-only re-hand-off needs-acceptance is in U N")
 
     def test_footer_refresh_actually_calls_the_shared_handed_derivation(self):
         # MAJOR-2 (fresh-context adversarial review of #391): mirrors the

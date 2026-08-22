@@ -21,13 +21,14 @@ Locks:
      full-authority box's own umbrella tickets stay counted (deliberate).
   3. the deliberate-`stream:core` decision is documented in the code (a #498
      content-lock so the reasoning can't be silently dropped).
-  4. `_partition_workable` DOES route a bare needs-acceptance with no delivered
-     draft to `workable` (I) — the #539 chained-I behaviour that makes the
-     search exclusion load-bearing for a full-authority box.
-  5-6. END-TO-END (a filter-aware fake gh + a readable-empty question map, the
-     production gk chained-I route): the #4007-shaped foreign acceptance is
-     ABSENT from `core-quals` `--list`/`--waiting`/`--ops-wait`/`--count`, while
-     the `stream:core` umbrella (#4520 shape) IS counted.
+  4. `_partition_workable` routes a bare needs-acceptance to `user_waiting` (U)
+     UNCONDITIONALLY (#622 reversed the #539 chained-I → I disposition), so a
+     leaked foreign one would inflate `U` — the search exclusion stays the ONE
+     guard that keeps it out of the obligation set for a full-authority box.
+  5-6. END-TO-END (a filter-aware fake gh): the #4007-shaped foreign acceptance is
+     ABSENT from `core-quals` `--list`/`--waiting`/`--ops-wait`/`--count` (excluded
+     at the SEARCH layer, so its U-vs-I routing never even matters here), while the
+     `stream:core` umbrella (#4520 shape) IS counted.
 """
 
 import json
@@ -102,24 +103,25 @@ class StreamCoreDocumentedLock(unittest.TestCase):
                             "missing #578 stream:core doc anchor: %r" % needle)
 
 
-class ChainedIForeignAcceptanceRoute(unittest.TestCase):
-    """Pure partition — the #539 chained-I branch that makes the search exclusion
-    load-bearing. A bare needs-acceptance with a readable-but-EMPTY
-    `acceptance_present` (no delivered draft — the production gk state for a
-    foreign ticket) routes to `workable` (I). This is EXISTING #539 behaviour;
-    locking it here documents WHY a leaked foreign acceptance would inflate `I`."""
+class ForeignAcceptanceRoute(unittest.TestCase):
+    """Pure partition — the search exclusion stays load-bearing under #622. A bare
+    needs-acceptance routes to `user_waiting` (U) UNCONDITIONALLY now (#622 reversed
+    the #539 chained-I → I disposition), so a FOREIGN one leaking past the search
+    exclusion would inflate a full-authority `U` (not `I`). The search exclusion is
+    still the ONE guard that keeps it out of the gk obligation set entirely."""
 
-    def test_bare_needs_acceptance_no_draft_routes_to_workable_I(self):
+    def test_bare_needs_acceptance_no_draft_routes_to_user_waiting_U(self):
         rows = {4007: {"number": 4007,
                        "labels": _labels("needs-acceptance", "stream:montalu3")}}
-        # acceptance_present is a readable-empty set (map readable, #4007 not in
-        # it) -> the #539 chained-I branch -> workable, NOT user-waiting.
-        w, u, ow = airuleset._partition_workable(rows, acceptance_present=set())
-        self.assertEqual(set(w), {4007},
-                         "a bare needs-acceptance with no delivered draft is #539 "
-                         "chained-I -> workable; so a FOREIGN one leaking past the "
-                         "search exclusion would inflate a full-authority `I`")
-        self.assertEqual(u, {})
+        # #622: a bare needs-acceptance → U unconditionally (pure label partition,
+        # no acceptance_present routing param). A leaked foreign one inflates U.
+        w, u, ow = airuleset._partition_workable(rows)
+        self.assertEqual(set(u), {4007},
+                         "#622: a bare needs-acceptance is queued for owner approval "
+                         "→ U; so a FOREIGN one leaking past the search exclusion "
+                         "would inflate a full-authority `U` (the exclusion is still "
+                         "the guard that keeps it out of the obligation set)")
+        self.assertEqual(w, {})
         self.assertEqual(ow, {})
 
 
@@ -180,10 +182,10 @@ class ForeignAcceptanceCountingEndToEnd(unittest.TestCase):
         gh = Path(bindir) / "gh"
         gh.write_text(_FAKE_GH % json.dumps(_FIXTURE))
         gh.chmod(0o755)
-        # A READABLE-but-empty question map -> _acceptance_present_set returns an
-        # empty set (map readable, no refs) so a bare needs-acceptance routes to
-        # chained-I (the production gk box state), NOT the unreadable-map -> U
-        # fallback. This is what makes a leaked #4007 land in --list (mutation RED).
+        # A readable-empty question map — harmless here: #622 routes a bare
+        # needs-acceptance to U regardless of the map, and the foreign #4007 is
+        # excluded at the SEARCH layer anyway, so it never reaches the partition.
+        # The search exclusion (not any U-vs-I routing) is what keeps #4007 out.
         claude = Path(home) / ".claude"
         claude.mkdir(parents=True, exist_ok=True)
         (claude / "discord-questions.json").write_text("{}")

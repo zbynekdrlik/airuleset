@@ -90,9 +90,11 @@ def _core_search_excl():
     `needs-acceptance` (a reduced-authority `stream:<user>` in AUTHORITY_BY_USER,
     with NO `ready-for-review`/`needs-gatekeeper`) IS excluded here, so it never
     reaches the core obligation `seen` — the ONE mechanical guard against a
-    foreign acceptance being routed to `I` by `_partition_workable`'s #539
-    chained-I branch (which cannot see box authority and would treat any bare
-    needs-acceptance with no delivered draft as this box's own chained work).
+    foreign acceptance leaking into the full-authority partition, where
+    `_partition_workable` (which cannot see box authority) would now route it to
+    `U` (#622: a bare needs-acceptance is queued for owner approval → U
+    unconditionally; the exclusion keeps a FOREIGN one out of this box's counts
+    entirely, be that `U` or `I`).
 
     #561: each excluded stream is EXPANDED via `_stream_rename_equivalents()`
     — the SAME single alias primitive `_slice_quals()`/`_ticket_is_stream_
@@ -481,13 +483,18 @@ NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = (
 # processed ticket with a stale comment — telling them apart needs a per-ticket
 # timeline query (was the comment newer than the needs-acceptance labeling?),
 # the exact cost this fix rejected (issue #507, ~1 extra gh call per candidate
-# into the shared graphql bucket, #370). Such a ticket is UNDER-counted (shown
-# as the stream's own workable `I N` instead of gk). This is the SAFE failure
-# direction: it moves the ticket INTO the loop's workable set, so the /goal
-# stop-proof keeps it alive and never falsely declares "backlog empty" — a
-# bounded, self-healing under-count (it resolves the moment the auto-labeller
-# lands the label), replacing the reported PERMANENT over-count. A precise
-# timeline-based fix is tracked as a needs-user-decision follow-up.
+# into the shared graphql bucket, #370). Such a ticket is UNDER-counted as gk
+# (it carries no `ready-for-review`/`needs-gatekeeper` label). #622 changed WHERE
+# it then lands: a bare `needs-acceptance` is queued for owner approval → `U`
+# (leaves the workable `--count`), no longer the stream's own workable `I N` (the
+# pre-#622 chained-I disposition). It is still SURFACED, not lost — it shows in
+# `--waiting` (U) and the loop PARKS on it — but the safe-direction guarantee is
+# narrower than #507/#508's "kept alive in the workable set": a bare
+# needs-acceptance is NOT re-detected as gk by the READY-FOR-REVIEW comment
+# fallback either (this label is in GATEKEEPER_PROCESSED_LABELS, so it is
+# EXCLUDED from that candidate walk), so this comment-only re-hand-off self-heals
+# ONLY when the repo auto-labeller re-adds `ready-for-review` (the #508 residual;
+# a precise timeline-based fix is the tracked needs-user-decision follow-up).
 #
 # Streams without a needs-acceptance model simply never match — zero behaviour
 # change there.
@@ -627,7 +634,7 @@ def _ops_wait_reason(labels):
     return "ops-wait"
 
 
-def _partition_workable(rows, acceptance_present=None):
+def _partition_workable(rows):
     """Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
     (`{number: {"number","title","createdAt","labels"}}`) THREE ways:
     `(workable, user_waiting, ops_wait)`. Both the user-waiting (#468) and the
@@ -655,45 +662,45 @@ def _partition_workable(rows, acceptance_present=None):
     either way; the precedence only decides which DISPLAY bucket (U vs W) the row
     lands in.
 
-    `acceptance_present` (#539, THIRD acceptance branch): a set of issue numbers
-    whose BARE `needs-acceptance` has a DELIVERED draft (a question presented for
-    the owner's approval — see `_acceptance_present_set`). When `None` (the
-    default — every unit-test caller), the #526 routing is byte-identical (a bare
-    needs-acceptance → U). When a set IS given (the production callers), a bare
-    `needs-acceptance` (reason == "acceptance", no `ops-wait`, no gk-override)
-    routes to U only if its number is IN the set (a live owner-approval
-    question); otherwise it routes to `workable` (I) — the stream's OWN chained
-    responsibility, e.g. an acceptance whose thread cannot be composed until a
-    sequenced SIBLING ticket the stream is still working completes. That case is
-    neither a live owner question (not U) nor a third-party wait (not W); it is
-    Claude's own chained work → I. This enforces the owner-UX invariant "otázky
-    na mňa?" never truthfully answers NIE while U > 0: a bare needs-acceptance
-    only reaches U once a draft was actually presented (a ❓ ping fired).
+    #622 (owner directive 2026-08-22): a BARE `needs-acceptance` (no `ops-wait`,
+    no gk-override) → U UNCONDITIONALLY. The code is merged and its only next step
+    is an owner-approved client message, so it is never dispatchable-now code work
+    (I = only that). This REVERSED #539's chained-I branch, which routed a bare
+    needs-acceptance with no DELIVERED draft to `workable` (I) using "no delivered
+    ping" as a proxy for "the stream's own chained work". #606 (2026-08-21) made
+    that proxy wrong for the common case: with owner-questions delivered ONE AT A
+    TIME, "no delivered ping" overwhelmingly means QUEUED-behind-others = waiting
+    on the owner (→ U). The genuinely-chained case collapses into "queued in U"
+    honestly (its dispatchable sibling work is its OWN ticket, still in I, so the
+    loop never falsely disarms). The delivered-vs-queued distinction is now a
+    DISPLAY tag only, computed on the on-demand `--waiting` path from
+    `_acceptance_present_set` (delivered → `acceptance`, undelivered → `queued`) —
+    it no longer routes, so this function is a PURE label partition again (no
+    question-map read on the hot footer/count path).
 
     `needs-owner-action` (#601, the owner's own physical/manual step) routes to U
     via the `else` branch below WHEN it is the HIGHEST-precedence user-waiting
     label on the row — i.e. `_user_waiting_reason` reads `action` (no co-present
     needs-answer/needs-decision/needs-acceptance, all of which outrank it). In
     that normal case: (1) an owner-action + `ops-wait` row still lands in U
-    (owner beats third-party framing — the owner is not a third party); (2) it
-    never enters the `ops_wait` bucket, so the #570 stale! W-freshness path can
-    never touch it; and (3) it has NO #539 chained-I analog — a physical owner
-    step is always the owner's court (→ U), never the stream's own deferrable
-    work, so it stays U even with an empty `acceptance_present` set.
+    (owner beats third-party framing — the owner is not a third party); and (2)
+    it never enters the `ops_wait` bucket, so the #570 stale! W-freshness path can
+    never touch it. (Since #622 a bare needs-acceptance is ALSO always U, so
+    owner-action no longer differs from it on the I-vs-U axis — both are the
+    owner's court.)
 
     Because `action` is the LOWEST precedence (deliberately, so needs-answer/
-    needs-decision/needs-acceptance stay byte-exact per #507/#526/#539), a
+    needs-decision/needs-acceptance stay byte-exact per #507/#526), a
     PATHOLOGICAL row that ALSO carries a higher-precedence user-waiting label
     follows THAT label's routing, not action's: e.g. `needs-acceptance` +
     `needs-owner-action` + `ops-wait` reads reason `acceptance` and routes to W
-    by the acceptance-scoped override (and the #507 gk-override / #539
-    chained-I paths a co-present `needs-acceptance` triggers apply too). Such a
-    contradictory combo does not occur in practice — the byte-exact preservation
-    of the co-present label's established semantics is the intended design, and a
-    genuine owner-only-blocked ticket never carries a competing acceptance/answer
-    label. The labelled-but-not-yet-announced defect is surfaced by the
-    `no-action!` display flag (`_no_question_flagged` + `_print_issue_rows`), not
-    by a routing-to-I gate."""
+    by the acceptance-scoped override (and the #507 gk-override a co-present
+    `needs-acceptance` triggers applies too). Such a contradictory combo does not
+    occur in practice — the byte-exact preservation of the co-present label's
+    established semantics is the intended design, and a genuine owner-only-blocked
+    ticket never carries a competing acceptance/answer label. The
+    labelled-but-not-yet-announced defect is surfaced by the `no-action!` display
+    flag (`_no_question_flagged` + `_print_issue_rows`), not by a routing gate."""
     workable, user_waiting, ops_wait = {}, {}, {}
     for number, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None
@@ -702,16 +709,13 @@ def _partition_workable(rows, acceptance_present=None):
             # thread already sent, marked by the stream's `ops-wait`) is waiting
             # on the CLIENT, not the owner → route it to W. A pending owner
             # answer (needs-answer/needs-decision → reason != "acceptance")
-            # keeps the row in U regardless of ops-wait.
+            # keeps the row in U regardless of ops-wait. #622: every OTHER
+            # user-waiting row — incl. a bare needs-acceptance queued for owner
+            # approval, whether or not its draft was delivered — is the owner's
+            # court → U.
             if (_user_waiting_reason(labels) == "acceptance"
                     and _row_is_ops_wait(labels)):
                 ops_wait[number] = row
-            elif (acceptance_present is not None
-                  and _user_waiting_reason(labels) == "acceptance"
-                  and number not in acceptance_present):
-                # #539 THIRD branch: a bare needs-acceptance whose draft is NOT
-                # yet delivered is the stream's own chained work → I, not U.
-                workable[number] = row
             else:
                 user_waiting[number] = row
         elif _row_is_ops_wait(labels):
@@ -723,29 +727,32 @@ def _partition_workable(rows, acceptance_present=None):
 
 def _acceptance_present_set(rows, cwd=None, home=None):
     """The set of BARE `needs-acceptance` issue numbers in `rows` whose
-    acceptance DRAFT has been delivered — a question-map ping references `#N`,
-    the "presented for the owner's approval" signal (#539, THIRD branch). Passed
-    as `_partition_workable(..., acceptance_present=...)` so a bare
-    needs-acceptance with NO delivered draft routes to `workable` (I, the
-    stream's own chained work) instead of U.
+    acceptance DRAFT has been DELIVERED — a question-map ping references `#N`, the
+    "presented for the owner's approval" signal. #622 REPURPOSED this from the
+    #539 routing gate to a DISPLAY-only signal: a bare needs-acceptance is now
+    always U (`_partition_workable` no longer takes an `acceptance_present`
+    param), and this set only decides the `--waiting` reason TAG — a member IN the
+    set is a live owner-approval question (tagged `acceptance`), a member NOT in it
+    is QUEUED awaiting #606 one-at-a-time delivery (tagged `queued`).
 
     Deliberately the question map ALONE (`statusbar.question_map_ticket_refs`,
-    local, no gh) — the partition feeds the HOT footer-count / `/goal` stop-proof
-    path, which must stay off the shared graphql bucket (#370); a presented draft
-    ALWAYS fires a ❓ ping (`notify.record_question`), so the map is the
-    authoritative "owner was actually asked" signal. The gh comment fallback
-    stays in the `--waiting` DISPLAY tag (`_no_question_flagged`), never here.
-    `cwd` (the caller's repo root) SCOPES the map read to THIS project — a MUST on
-    a multi-repo box, where issue numbers collide across repos (#539 review
-    MAJOR-1); every production call site passes its resolved root.
+    local, no gh) — a presented draft ALWAYS fires a ❓ ping
+    (`notify.record_question`), so the map is the authoritative "owner was
+    actually asked" signal, and reading it costs no gh (#370). It runs ONLY on the
+    on-demand `--waiting` display path now, never the hot footer/`/goal`-count
+    path (which no longer computes this at all — #622). `cwd` (the caller's repo
+    root) SCOPES the map read to THIS project — a MUST on a multi-repo box, where
+    issue numbers collide across repos (#539 review MAJOR-1); every production call
+    site passes its resolved root.
 
     Fail-safe: an UNREADABLE map (`question_map_ticket_refs` → None) returns ALL
-    bare-needs-acceptance numbers — preserving the #526 U default on a map error
-    (never HIDE a possible owner-approval from U). A readable-but-ABSENT map
-    yields an empty ref set, so a bare needs-acceptance with no draft correctly
-    routes to I. Only bare needs-acceptance rows are considered — a needs-answer/
-    needs-decision row (→ U by label) and a needs-acceptance+ops-wait row (→ W)
-    are never in the returned set, so the partition's gate never touches them."""
+    bare-needs-acceptance numbers — the conservative DISPLAY default (show them all
+    as `acceptance`/delivered rather than falsely tagging a possibly-delivered
+    draft `queued`). A readable-but-ABSENT map yields an empty ref set, so a bare
+    needs-acceptance with no draft is correctly tagged `queued`. Only bare
+    needs-acceptance rows are considered — a needs-answer/needs-decision row (→ U
+    by label) and a needs-acceptance+ops-wait row (→ W) are never in the returned
+    set, so the display tag never touches them."""
     import statusbar
     bare = set()
     for number, row in rows.items():
@@ -869,7 +876,17 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
       - a member's gh comment fetch FAILS (None) -> that member is not flagged.
     An ABSENT map (never pinged) reads as an empty ref set (readable), so its
     members ARE checked via the comment fallback — that is the montalu3 defect
-    this catches, not a fail-safe case."""
+    this catches, not a fail-safe case.
+
+    #622: an `acceptance`-reason member is EXEMPT — a bare needs-acceptance is
+    QUEUED for one-at-a-time (#606) owner-approval delivery, so a not-yet-delivered
+    draft is a legitimate reason for non-delivery, not a forgotten question ("no-
+    question! defekt by sa na queued člena nevzťahoval", owner). This REVISES the
+    #527 invariant: U>0 ⟹ every U member is a delivered question/notice OR a queued
+    acceptance awaiting #606 delivery. answer/decision/action still flag (they
+    SHOULD carry a delivered question/notice); a DELIVERED acceptance is already
+    ref-covered, so exempting the whole acceptance reason only spares the queued
+    ones."""
     import statusbar
     try:
         refs = statusbar.question_map_ticket_refs(cwd, home)   # #539 MAJOR-1: cwd-scoped
@@ -879,9 +896,12 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
         return set()                             # unreadable map -> tag NOTHING
     check = comment_state_fn or _issue_question_comment_state
     flagged = set()
-    for number in rows:
+    for number, row in rows.items():
         if number in refs:
             continue                             # delivered ping references it
+        labels = row.get("labels") if isinstance(row, dict) else None
+        if _user_waiting_reason(labels) == "acceptance":
+            continue                             # #622: queued acceptance is exempt
         try:
             state = check(number, cwd)
         except Exception:

@@ -32,7 +32,8 @@ anything to audit (`I > 0` OR `--ops-wait` members parked), deliver ONE verified
 keystroke that reminds the session to re-audit its WHOLE partition against the
 #526/#539 shapes — the I→W/U clause (re-audit each `I` member: fix-class /
 sent-thread / deferred-thread → `ops-wait`=W; delivered owner-question →
-needs-answer/decision=U; chained-I + dispatchable stay I) AND, when W members are
+needs-answer/decision=U; a bare `needs-acceptance` queued for owner approval → U
+(#622); only genuinely-dispatchable code work stays I) AND, when W members are
 parked, the W→I clause (re-check the external event named in the park comment,
 then clear `ops-wait` WITH evidence or confirm the wait). The JUDGMENT stays in
 the session (the watchdog cannot judge a #526/#539 shape); only the SCHEDULER is
@@ -411,7 +412,8 @@ _I_CLAUSE = (
     "`ops-wait` (W); deferred-thread na pomenovanú udalosť → `ops-wait` (W); "
     "doručená živá owner-otázka → needs-answer/needs-decision (U); owner fyzický/"
     "manuálny krok pri rigu → `needs-owner-action` (U, #601 — owner nie je tretia "
-    "strana); chained-I a reálne dispatchovateľné ostávajú `I`.")
+    "strana); bare `needs-acceptance` queued na owner-schválenie → `U` (#622 — "
+    "nikdy `I`); len reálne dispatchovateľná kódová práca ostáva `I`.")
 
 # #578 — the NAMED per-I-member audit. The gk `I 16` incident showed the generic
 # clause above is too weak: the session COULD enumerate its I members and STILL
@@ -483,8 +485,9 @@ def _i_clause_named(i_members, now):
             "DISPATCHNI ju (neparkuj); bare/umbrella člen gated na release/"
             "checklist/iný ticket → olabeluj `ops-wait` s pomenovaným eventom "
             "(supervisor, s dôkazom); label mení supervisor s dôkazom, nikdy "
-            "automaticky. Členovia: %s%s; chained-I a reálne dispatchovateľné "
-            "ostávajú `I`." % (body, tail_str))
+            "automaticky. Členovia: %s%s; bare `needs-acceptance` queued na "
+            "owner-schválenie → `U` (#622); len reálne dispatchovateľná kódová "
+            "práca ostáva `I`." % (body, tail_str))
 
 # The W→I re-check clause (#547, preserved as a subset of the combined nudge):
 # names the parked W numbers each with ITS OWN park age (#594 — per-ticket, not a

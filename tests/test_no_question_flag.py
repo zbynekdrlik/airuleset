@@ -373,64 +373,60 @@ class WaitingTagsQuestionLessMember(unittest.TestCase):
 # partition routes a bare needs-acceptance to U only when a DRAFT was delivered
 # (a question-map ping references #N); else it stays workable (I).
 # --------------------------------------------------------------------------- #
-class PartitionGatesBareAcceptanceOnDraftPresence(unittest.TestCase):
-    """#539 addendum: `_partition_workable(rows, acceptance_present=...)` — a
-    bare needs-acceptance routes to U only if its number is in the injected
-    `acceptance_present` set (a draft was delivered), else to I. `None` (the
-    default, every existing unit-test caller) keeps the #526 routing."""
+class PartitionRoutesBareAcceptanceToU(unittest.TestCase):
+    """#622 (REVERSES the #539 chained-I gate): `_partition_workable` routes a
+    bare needs-acceptance to U UNCONDITIONALLY — the `acceptance_present` routing
+    param is REMOVED (pure label partition). The delivered-vs-queued distinction
+    is a display tag only, computed on the on-demand `--waiting` path. answer/
+    decision route to U by label; needs-acceptance+ops-wait still routes to W."""
 
-    def test_default_no_signal_keeps_526_bare_acceptance_in_U(self):
+    def test_bare_acceptance_routes_to_U(self):
         rows = {4: {"number": 4, "labels": _labels("needs-acceptance")}}
         workable, user_waiting, ops_wait = airuleset._partition_workable(rows)
         self.assertEqual(set(user_waiting), {4},
-                         "#526 default (no signal) keeps a bare needs-acceptance in U")
+                         "#622: a bare needs-acceptance is queued for owner "
+                         "approval → U, never the workable I")
         self.assertEqual(set(workable), set())
 
-    def test_bare_acceptance_with_draft_stays_in_U(self):
-        rows = {4: {"number": 4, "labels": _labels("needs-acceptance")}}
-        workable, user_waiting, ops_wait = airuleset._partition_workable(
-            rows, acceptance_present={4})
-        self.assertEqual(set(user_waiting), {4},
-                         "a bare needs-acceptance WITH a delivered draft is a "
-                         "live owner-approval question → U")
+    def test_partition_workable_takes_no_acceptance_present_param(self):
+        import inspect
+        self.assertNotIn(
+            "acceptance_present",
+            inspect.signature(airuleset._partition_workable).parameters,
+            "#622: the #539 chained-I routing gate is removed — pure partition")
 
-    def test_bare_acceptance_without_draft_routes_to_I(self):
+    def test_delivered_or_undelivered_a_bare_acceptance_is_still_U(self):
+        # #622: neither a delivered draft nor its absence changes the ROUTING —
+        # both are U. (The distinction is only the `--waiting` display tag.)
         rows = {4: {"number": 4, "labels": _labels("needs-acceptance")}}
-        workable, user_waiting, ops_wait = airuleset._partition_workable(
-            rows, acceptance_present=set())
-        self.assertEqual(set(workable), {4},
-                         "a bare needs-acceptance with NO delivered draft is the "
-                         "stream's own chained work → I (workable), never U")
-        self.assertEqual(set(user_waiting), set())
-        self.assertEqual(set(ops_wait), set())
+        _, user_waiting, _ = airuleset._partition_workable(rows)
+        self.assertEqual(set(user_waiting), {4})
 
-    def test_answer_and_decision_ignore_the_acceptance_gate(self):
-        # needs-answer / needs-decision route to U by LABEL — the acceptance
-        # gate must NOT move them, even when absent from the present set.
+    def test_answer_and_decision_route_to_U_by_label(self):
         rows = {
             4: {"number": 4, "labels": _labels("needs-answer")},
             5: {"number": 5, "labels": _labels("needs-decision")},
         }
-        workable, user_waiting, ops_wait = airuleset._partition_workable(
-            rows, acceptance_present=set())
+        workable, user_waiting, ops_wait = airuleset._partition_workable(rows)
         self.assertEqual(set(user_waiting), {4, 5},
-                         "the acceptance gate is scoped to reason=='acceptance' "
-                         "only; answer/decision stay in U by label")
+                         "answer/decision route to U by label")
 
     def test_acceptance_plus_ops_wait_still_routes_to_W(self):
-        # ops-wait wins for a needs-acceptance regardless of the acceptance gate.
+        # A SENT acceptance (ops-wait) is waiting on the CLIENT → W, unchanged.
         rows = {8: {"number": 8, "labels": _labels("needs-acceptance", "ops-wait")}}
-        workable, user_waiting, ops_wait = airuleset._partition_workable(
-            rows, acceptance_present=set())
+        workable, user_waiting, ops_wait = airuleset._partition_workable(rows)
         self.assertEqual(set(ops_wait), {8},
-                         "a SENT acceptance (ops-wait) stays W, not I")
+                         "a SENT acceptance (ops-wait) stays W, not U")
 
 
 class AcceptancePresentSet(unittest.TestCase):
-    """#539 addendum: `_acceptance_present_set(rows, home)` — the set of
-    bare-needs-acceptance numbers with a delivered draft (map ping), cheap +
-    local (no gh), fail-safe on an unreadable map to ALL bare-acceptance
-    (preserve the #526 U default)."""
+    """`_acceptance_present_set(rows, home)` — the set of bare-needs-acceptance
+    numbers with a delivered draft (map ping), cheap + local (no gh). #622
+    REPURPOSED it from the #539 routing gate to the `--waiting` DISPLAY-tag signal
+    (a member IN the set is tagged `acceptance`/delivered, one NOT in it is
+    `queued`); the function itself is unchanged, incl. the unreadable-map fail-safe
+    to ALL bare-acceptance (the conservative display default — show them all as
+    delivered rather than falsely tagging a possibly-delivered draft `queued`)."""
 
     def _write_map(self, home, content):
         d = statusbar._claude_dir(home)
@@ -468,7 +464,7 @@ class AcceptancePresentSet(unittest.TestCase):
             got = fn(self._rows(), cwd="/proj/a", home=home)
             self.assertEqual(got, set(),
                              "project A's #4 has no OWN draft ping; project B's #4 "
-                             "ping is scoped out → not present → routes to I")
+                             "ping is scoped out → not present → tagged `queued`")
 
     def test_unreadable_map_returns_all_bare_acceptance(self):
         fn = getattr(airuleset, "_acceptance_present_set", None)
@@ -478,14 +474,15 @@ class AcceptancePresentSet(unittest.TestCase):
             got = fn(self._rows(), cwd="/proj/a", home=home)
             self.assertEqual(got, {4, 5},
                              "unreadable map → ALL bare needs-acceptance present "
-                             "(fail-safe to the #526 U default; #8 is W, #6 not "
-                             "acceptance)")
+                             "(conservative display default — all tagged "
+                             "`acceptance`; #8 is W, #6 not acceptance)")
 
 
-class WaitingRoutesChainedAcceptanceOutOfU(unittest.TestCase):
-    """#539 addendum, end-to-end: a bare needs-acceptance with NO delivered
-    draft is NOT listed by `core-quals --waiting` (it is the stream's chained I
-    work) and IS included in `--count`; one WITH a draft ping stays in U."""
+class WaitingRoutesQueuedAcceptanceIntoU(unittest.TestCase):
+    """#622 (REVERSES #539 chained-I), end-to-end: a bare needs-acceptance with
+    NO delivered draft IS listed by `core-quals --waiting` (U, tagged `queued`)
+    and is NOT in the workable `--count`; one WITH a draft ping stays in U tagged
+    `acceptance`."""
 
     def _fake_gh(self, bindir, rows):
         gh = Path(bindir) / "gh"
@@ -507,7 +504,7 @@ class WaitingRoutesChainedAcceptanceOutOfU(unittest.TestCase):
     def _nums(self, stdout):
         return {ln.split("\t", 1)[0] for ln in stdout.splitlines() if ln.strip()}
 
-    def test_chained_acceptance_is_not_in_waiting_and_is_counted(self):
+    def test_queued_acceptance_is_in_waiting_and_not_counted(self):
         rows = json.dumps([
             {"number": 1, "labels": _labels("bug")},
             {"number": 4, "labels": _labels("needs-acceptance")},  # no draft ping
@@ -518,14 +515,14 @@ class WaitingRoutesChainedAcceptanceOutOfU(unittest.TestCase):
             self._fake_gh(bindir, rows)   # no question map seeded → #4 has no draft
             w = _run_quals("core-quals", "--waiting", repo, home, bindir)
             self.assertEqual(w.returncode, 0, w.stderr)
-            self.assertNotIn("4", self._nums(w.stdout),
-                             "#4 bare needs-acceptance with no draft is chained I "
-                             "work → NOT listed in --waiting (U)")
+            self.assertIn("4", self._nums(w.stdout),
+                          "#622: #4 bare needs-acceptance queued for owner approval "
+                          "IS listed in --waiting (U), not the workable I")
             c = _run_quals("core-quals", "--count", repo, home, bindir)
             self.assertEqual(c.returncode, 0, c.stderr)
-            self.assertEqual(c.stdout.strip(), "2",
-                             "#1 + #4 are both workable I (the chained acceptance "
-                             "counts as this box's own responsibility)")
+            self.assertEqual(c.stdout.strip(), "1",
+                             "#622: only #1 is workable; the queued acceptance #4 "
+                             "left I for U")
 
     def test_presented_acceptance_stays_in_waiting(self):
         rows = json.dumps([
@@ -544,38 +541,36 @@ class WaitingRoutesChainedAcceptanceOutOfU(unittest.TestCase):
                           "live owner-approval question → listed in --waiting (U)")
 
 
-class DoctrineNamesChainedAcceptanceBranch(unittest.TestCase):
-    """#539 addendum: both surfaces must name the THIRD branch (acceptance
-    waiting on the stream's OWN sequenced work → I) and state the owner-UX
-    invariant ("otázky na mňa?" never NIE while U > 0)."""
+class DoctrineNamesQueuedAcceptanceBranch(unittest.TestCase):
+    """#622 (REVERSES the #539 chained-I THIRD branch): both surfaces must name
+    the QUEUED = U disposition (a bare needs-acceptance is queued for owner
+    approval → U, no longer chained-I → I) and state the REVISED owner-UX
+    invariant ("otázky na mňa?" answered by #606 step-by-step delivery)."""
 
     def _norm(self, f):
         return " ".join(f.read_text(encoding="utf-8").split()).lower()
 
-    def test_skill_names_chained_branch_and_invariant(self):
-        # "chained" is absent from both surfaces today, so it has TEETH (a bare
-        # pre-existing "sequenced" at SKILL.md:384 must NOT satisfy this).
+    def test_skill_names_queued_branch_in_acceptance_context(self):
         t = self._norm(SKILL)
-        i = t.find("chained")
+        i = t.find("queued = u (#622")
         self.assertGreaterEqual(i, 0,
-                                "SKILL.md must name the CHAINED (own-sequenced-work) "
-                                "acceptance branch (#539)")
+                                "SKILL.md must name the #622 QUEUED = U branch")
         window = t[i:i + 400]
         self.assertIn("acceptance", window,
-                      "the chained branch must be in the acceptance context")
+                      "the queued branch must be in the acceptance context")
 
-    def test_skill_states_the_owner_ux_invariant(self):
+    def test_skill_states_the_revised_owner_ux_invariant(self):
         t = self._norm(SKILL)
         self.assertIn("otázky na mňa", t,
                       "SKILL.md must state the owner-UX invariant — "
-                      '"otázky na mňa?" never NIE while U > 0 (#539)')
+                      '"otázky na mňa?" answered by #606 step-by-step (#622)')
 
-    def test_vocab_names_chained_branch(self):
+    def test_vocab_names_queued_branch(self):
         t = self._norm(VOCAB)
-        i = t.find("chained")
+        i = t.find("queued = u (#622")
         self.assertGreaterEqual(i, 0,
-                                "statusline-vocabulary.md must name the CHAINED "
-                                "acceptance branch (#539)")
+                                "statusline-vocabulary.md must name the #622 "
+                                "QUEUED = U acceptance branch")
         self.assertIn("acceptance", t[i:i + 400])
 
 

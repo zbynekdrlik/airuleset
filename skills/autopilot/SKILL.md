@@ -160,19 +160,23 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   `needs-acceptance` ticket waiting on a THIRD PARTY (a client / a named person) is `ops-wait` → `W`,
   never a bare `U`. In every branch the supervisor SETS and CLEARS `ops-wait` with evidence — never
   auto-labelled. (montalu3 left 13 fix-class/deferred + 1 third-party acceptances as bare `U` = `U 15`
-  with zero real questions — exactly what these branches prevent.) **THIRD branch — CHAINED-I (#539,
-  montalu5).** A bare `needs-acceptance` whose acceptance draft cannot be composed yet because it
-  waits on the STREAM'S OWN sequenced work (a sibling ticket a stream worker is still finishing) is
-  NEITHER a live owner question (not `U`) NOR a third-party wait (not `W`) — it is Claude's OWN chained
-  responsibility, so it stays in `I` (workable/chained). MECHANIZED: `_partition_workable` routes a
-  bare `needs-acceptance` to `U` ONLY once a DRAFT has actually been presented for approval (a ❓ ping
-  was fired — the question map references `#N`); until then it stays in `I`. So a bare
-  `needs-acceptance` reaches `U` only when there IS a real owner-approval question. (Release-wait
-  tickets — merged to develop but not yet on PROD, so the handover thread may announce only what lives
-  on PROD — are the deferred-thread branch: `ops-wait` "waiting on release" → `W`.) **Owner-UX
-  invariant (#539): "otázky na mňa?" must NEVER truthfully answer NIE while `U > 0`** — a positive `U`
-  is only ever real, already-delivered questions (a `no-question!`-tagged member is the defect to ask
-  or reclassify NOW). **W re-check is now MECHANICAL (#547):** the `ops-wait` re-entry is no longer
+  with zero real questions — exactly what these branches prevent.) **THIRD branch — QUEUED = U (#622,
+  owner directive 2026-08-22, REVERSES #539 chained-I).** A bare `needs-acceptance` (no `ops-wait`, no
+  gk-override) is QUEUED for owner approval and ALWAYS `U` — the code is merged and its only next step
+  is an owner-approved client message, never dispatchable-now `I` code work (`I` = only that; owner:
+  "I29 = 29 ticketov na ktorych mozes robit … no nie na mna"). #539 had routed a bare needs-acceptance
+  with NO delivered draft to `I` ("chained-I"), reading "no delivered ping" as the stream's OWN chained
+  work; #606 (one-at-a-time owner-question delivery, AFTER #539) made that wrong for the common case —
+  "no delivered ping" now overwhelmingly means QUEUED-behind-others = waiting on the owner. MECHANIZED:
+  `_partition_workable` routes a bare `needs-acceptance` to `U` UNCONDITIONALLY (the #539
+  `acceptance_present` routing param is removed — pure label partition); the delivered-vs-queued
+  distinction is a DISPLAY tag only — `--waiting` tags a DELIVERED one `acceptance` (a live
+  owner-approval question, ❓ ping fired) and an undelivered one `queued` (draft ready, awaiting #606
+  delivery, no-question!-exempt). (Release-wait tickets — merged to develop but not yet on PROD, so the
+  handover thread may announce only what lives on PROD — are the deferred-thread branch: `ops-wait`
+  "waiting on release" → `W`.) **Owner-UX invariant, REVISED (#622): "otázky na mňa?" while `U > 0`** is
+  answered by the #606 STEP-BY-STEP delivery — a positive `U` is real delivered questions PLUS queued
+  acceptances (draft ready, delivered one at a time), never a phantom NIE. **W re-check is now MECHANICAL (#547):** the `ops-wait` re-entry is no longer
   prose-only — watchdog job 20 reads each armed loop's `--ops-wait` members and, on a ~daily cadence,
   types a `stuck-check:` re-check nudge into that session ("W #N parked — re-check the external state,
   clear `ops-wait` WITH evidence or confirm still waiting"), so a parked W ticket whose reply/release
@@ -206,18 +210,18 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   (merged/queued, čaká na pomenovaný INTERNÝ release event — napr. „2.180 stage-3") je `ops-wait` → W
   s tým pomenovaným eventom (supervisor SETuje s dôkazom, CLEARuje pri landnutí stage), NIKDY bare
   `I`; (2) **umbrella/tracking ticket gated na INÝ ticket** je `ops-wait` → W s odkazom na blocker
-  ticket, nikdy bare `I`. ODLÍŠ od #539 chained-I (nezamieňaj ich): chained-I je bare
-  `needs-acceptance` ktorého acceptance DRAFT sa NEDÁ zložiť, lebo čaká na stream-ovho SIBLING workera
-  (sibling ticket) — žiadny externý release event, žiadny blocker ticket → OSTÁVA `I` (Claudova
-  vlastná sekvenčná práca); pipeline-gated/umbrella čaká na RELEASE stage ALEBO na BLOCKER ticket → W.
+  ticket, nikdy bare `I`. ODLÍŠ od bare `needs-acceptance`: tá je od #622 vždy `U` (queued na
+  owner-schválenie klientskej správy — #539 chained-I `I`-fallback zrušený, bare acceptance už nikdy
+  nesedí v `I`); pipeline-gated/umbrella čaká na RELEASE stage ALEBO na BLOCKER ticket → W.
   **Owner fyzická akcia = U, nikdy W (#601, owner ruling 2026-08-20).** Ticket, ktorý čaká na OWNEROV
   vlastný fyzický/manuálny krok (príď k rigu, sprav hardvérovú akciu, buď pri tom), NIE JE tretia
   strana — patrí do `U`, nie `W`: olabeluj `needs-owner-action` (v `--waiting` tagovaný `action`;
   doručené OZNÁMENIE = ❓ ping/komentár menujúci konkrétny krok, chýbajúce = `no-action!`).
   `needs-owner-action` + `ops-wait` → `U` (owner beats third-party framing); owner-action NIKDY nevojde
-  do `W` bucketu, takže #570 `stale!` sa naň nevzťahuje, a NEMÁ #539 `I`-fallback (na rozdiel od bare
-  `needs-acceptance` bez draftu je fyzický owner-krok vždy owner-ova zodpovednosť, nie odložiteľná
-  vlastná práca streamu → vždy `U`). Owner nie je
+  do `W` bucketu, takže #570 `stale!` sa naň nevzťahuje; fyzický owner-krok je vždy owner-ova
+  zodpovednosť → vždy `U` (rovnako ako bare `needs-acceptance`, ktorý je od #622 tiež vždy `U` — queued
+  na owner-schválenie, nie odložiteľná vlastná práca streamu; #539 chained-I `I`-fallback zrušený).
+  Owner nie je
   tretia strana — owner-blocked `ops-wait` je mis-shape, ktorý job-20 partition-audit nudge fleet-wide
   pomenúva, aby si bežiace slučky opravili svoje W tikety samy. Čistí ho SUPERVISOR s dôkazom, že owner
   krok spravil (paralela k `ops-wait`, nie auto Discord-answer).
