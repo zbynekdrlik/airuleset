@@ -214,6 +214,12 @@ from cli_webterm import (  # noqa: E402
     webterm_inventory as webterm_inventory,
 )
 
+# --- webterm Cloudflare Access (#612): email-OTP gate in front of the public
+# david gateway; declared allow-list applied idempotently via the Access API. ---
+from cli_webterm_access import (  # noqa: E402
+    cmd_webterm_access as cmd_webterm_access,
+)
+
 
 # Skills directories in the repo that should be symlinked
 SKILL_NAMES = ["ci-monitor", "deploy-ssh", "windows-remote-gui", "issue-planner", "plan-check", "rules-audit", "mdreview", "fast-iterate", "architecture-check", "autopilot", "autopilot-dialog", "mutation-sweep", "meeting-analysis", "playbook-review", "playbook-cleanup", "mutation-testing", "local-builds", "batch-issue-development", "view-image-urls", "version-on-dashboard", "process-subdev", "autopilot-master", "fable-advisor",
@@ -5689,6 +5695,19 @@ def main():
     p_gate.add_argument("--threshold", type=int, default=None,
                         help="Gate percent (default 80 / AIRULESET_FABLE_GATE_PCT)")
 
+    p_wacc = sub.add_parser(
+        "webterm-access",
+        help="#612: reconcile the Cloudflare Access email-OTP app(s) in front of "
+             "the public webterm hostname(s) from the declared allow-list")
+    p_wacc.add_argument("--apply", action="store_true",
+                        help="perform the create/update (default is dry-run: reads "
+                             "only, prints the plan, changes nothing)")
+    p_wacc.add_argument("--dry-run", action="store_true",
+                        help="explicit no-op flag (dry-run is already the default "
+                             "without --apply); accepted for clarity")
+    p_wacc.add_argument("--profile", default=None,
+                        help="limit to one profile (default: every declared profile)")
+
     p_burn = sub.add_parser(
         "burn",
         help="Token-spend report from local Claude Code transcripts — "
@@ -6060,6 +6079,7 @@ SUBCOMMANDS = {
     "compact-request": cmd_compact_request,
     "goal-arm": cmd_goal_arm,
     "fable-gate": cmd_fable_gate,
+    "webterm-access": cmd_webterm_access,
     "burn": cmd_burn,
     "delegation": cmd_delegation,
     "authority": cmd_authority,

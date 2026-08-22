@@ -14,12 +14,27 @@ Routes (all on the single gateway origin):
                         127.0.0.1:<ttyd>; unauthed: 401 (WS) / 303 /login (HTTP)
   everything else    -> 404
 
-Auth model. The session cookie value is a SERVER-minted random token
-(`secrets.token_urlsafe`), NEVER the credential, HttpOnly + SameSite=Strict +
-Path=/. The credential (`user:pass` in ~/.secrets/webterm_credential) is compared
-constant-time (`hmac.compare_digest`). ttyd binds 127.0.0.1 only, behind
-`-b /t`, with NO basic-auth of its own — the gateway is the sole entry AND the
-sole authenticator, so a tailnet peer cannot reach ttyd around the gateway.
+Auth model (default — PASSWORD mode, `--cred`). The session cookie value is a
+SERVER-minted random token (`secrets.token_urlsafe`), NEVER the credential,
+HttpOnly + SameSite=Strict + Path=/. The credential (`user:pass` in
+~/.secrets/webterm_credential) is compared constant-time (`hmac.compare_digest`).
+ttyd binds 127.0.0.1 only, behind `-b /t`, with NO basic-auth of its own — the
+gateway is the sole entry AND the sole authenticator, so a tailnet peer cannot
+reach ttyd around the gateway.
+
+Auth model (#612 — CLOUDFLARE-ACCESS mode, `--trust-access-header`). For the
+PUBLIC david gateway the password is RETIRED: Cloudflare Access at the edge does
+email one-time-PIN verification BEFORE any request reaches the tunnel, and the
+gateway simply trusts the identity header Cloudflare injects downstream of a
+passed check (`Cf-Access-Authenticated-User-Email`) — no login form, no cookie,
+no credential file. FAIL-CLOSED: a request with no such header did not pass
+Access and is refused (403). Cloudflare strips client-supplied `Cf-*` headers
+before setting the authentic one, and the gateway binds loopback reachable only
+via the cloudflared tunnel (which serves only the Access-protected hostname).
+The two modes are mutually exclusive; `main()` refuses to start with neither or
+both (an unauthenticated shell is never bound). Pure stdlib has no RSA, so the
+Access JWT is NOT cryptographically validated at the origin — the honest
+residual is documented in cli_webterm_access.py.
 
 Defence in depth. Failed logins are rate-limited PER SOURCE IP (a tailnet peer
 has its own 100.x address), so an attacker throttles only itself and never locks
@@ -395,7 +410,7 @@ def parse_login_form(body_bytes):
 
 class Gateway:
     def __init__(self, dash_index, cred_path, ttyd_host, ttyd_port, base_path,
-                 origins, sessions=None, limiter=None):
+                 origins, sessions=None, limiter=None, trust_access_header=None):
         self.dash_index = dash_index
         self.cred_path = cred_path
         self.ttyd_host = ttyd_host
@@ -404,6 +419,18 @@ class Gateway:
         self.origins = set(origins)          # allowed WS origins (own origin(s))
         self.sessions = sessions if sessions is not None else SessionStore()
         self.limiter = limiter if limiter is not None else RateLimiter()
+        # #612 Cloudflare-Access mode: when set, this is the identity header
+        # Cloudflare injects downstream of a PASSED email-OTP Access check
+        # (`Cf-Access-Authenticated-User-Email`). In this mode there is NO
+        # password / login form / credential — the request is authenticated iff
+        # that header is present and non-empty (FAIL-CLOSED: a request that did
+        # NOT traverse Access carries no such header and is refused). Default
+        # None = the unchanged password/session model (owner profile, byte-
+        # identical). Cloudflare strips client-supplied `Cf-*` headers before
+        # setting the authentic one; the gateway binds loopback and is reachable
+        # only via the cloudflared tunnel (see cli_webterm_access.py's honest
+        # residual note on the absence of stdlib RSA JWT validation).
+        self.trust_access_header = trust_access_header
 
     # -- helpers ---------------------------------------------------------- #
 
@@ -418,7 +445,29 @@ class Gateway:
         path = target.split("?", 1)[0]
         return path == self.base_path or path.startswith(self.base_path + "/")
 
+    def _access_identity(self, headers):
+        """In Cloudflare-Access mode, the trusted, non-empty identity header set
+        by Cloudflare after a passed email-OTP check, else None. FAIL-CLOSED: any
+        absent/blank header yields None (a request that did not go through Access
+        carries no such header). A DUPLICATE trust header (more than one
+        occurrence) also yields None — Cloudflare sets exactly one, so a second
+        occurrence is a smuggling attempt and `header_get` would otherwise return
+        the FIRST (client-controlled) value (#612 R2 review)."""
+        if not self.trust_access_header:
+            return None
+        name = self.trust_access_header.lower()
+        seen = [v for (k, v) in headers if k.lower() == name]
+        if len(seen) != 1:
+            return None
+        val = (seen[0] or "").strip()
+        return val or None
+
     def _authed(self, headers):
+        # Access mode: authenticated iff the trusted Cloudflare identity header is
+        # present + non-empty. No cookie/session/credential is involved. Password
+        # mode (trust_access_header is None): the unchanged session-cookie check.
+        if self.trust_access_header:
+            return self._access_identity(headers) is not None
         return self.sessions.valid(cookie_token(headers))
 
     # -- read a request head with a hard size cap ------------------------- #
@@ -494,6 +543,10 @@ class Gateway:
         if path == "/":
             if self._authed(headers):
                 await self._send(writer, http_response("200 OK", self._dashboard_bytes()))
+            elif self.trust_access_header:
+                # Access mode, no trusted identity header => the request did not
+                # pass Cloudflare Access. Fail closed (no login form to send to).
+                await self._send(writer, self._access_denied())
             else:
                 await self._send(writer, self._redirect("/login"))
             return
@@ -506,6 +559,12 @@ class Gateway:
     # -- routes ----------------------------------------------------------- #
 
     async def _route_login(self, reader, writer, method, headers, peer_ip):
+        if self.trust_access_header:
+            # Access mode has no password/login form — Cloudflare Access at the
+            # edge is the login. Bounce to `/` (which serves the dashboard when
+            # the trusted identity header is present, else fails closed).
+            await self._send(writer, self._redirect("/"))
+            return
         if method == "GET":
             await self._send(writer, http_response("200 OK", login_form_html()))
             return
@@ -539,9 +598,12 @@ class Gateway:
         is_ws = is_websocket_upgrade(headers)
         if not self._authed(headers):
             # A WS handshake cannot be a redirect; deny outright. An HTTP request
-            # (a stray asset fetch) gets sent to the login page.
+            # (a stray asset fetch) gets sent to the login page — except in Access
+            # mode, where there is no login form, so it fails closed with 403.
             if is_ws:
                 await self._send(writer, http_response("401 Unauthorized", "login required"))
+            elif self.trust_access_header:
+                await self._send(writer, self._access_denied())
             else:
                 await self._send(writer, self._redirect("/login"))
             return
@@ -631,6 +693,16 @@ class Gateway:
         return http_response("303 See Other", b"", extra_headers=extra,
                              content_type="text/plain")
 
+    def _access_denied(self):
+        """Fail-closed response for Access mode when the trusted Cloudflare
+        identity header is absent — the request did not pass Cloudflare Access."""
+        return http_response(
+            "403 Forbidden",
+            b"<!DOCTYPE html><meta charset=utf-8><title>Access required</title>"
+            b"<p>This terminal is protected by Cloudflare Access. Reach it via "
+            b"its https:// hostname so Cloudflare can verify you by e-mail first.",
+            content_type="text/html; charset=utf-8")
+
     async def _send(self, writer, data):
         try:
             writer.write(data)
@@ -641,12 +713,13 @@ class Gateway:
 
 async def start_gateway(host, port, dash_index, cred_path, ttyd_host="127.0.0.1",
                         ttyd_port=7682, base_path="/t", origins=None,
-                        sessions=None, limiter=None):
+                        sessions=None, limiter=None, trust_access_header=None):
     """Bind + start the gateway on `host:port`. Returns the asyncio.Server (the
     caller reads `server.sockets[0].getsockname()` for an ephemeral port and
     `server.serve_forever()` / `server.close()`)."""
     gw = Gateway(dash_index, cred_path, ttyd_host, ttyd_port, base_path,
-                 origins or [], sessions=sessions, limiter=limiter)
+                 origins or [], sessions=sessions, limiter=limiter,
+                 trust_access_header=trust_access_header)
     return await asyncio.start_server(gw.handle, host, port)
 
 
@@ -665,7 +738,8 @@ async def _main_async(args):
     server = await start_gateway(
         args.bind, args.port, args.dash_index, args.cred,
         ttyd_host=args.ttyd_host, ttyd_port=args.ttyd_port,
-        base_path=args.base_path, origins=origins)
+        base_path=args.base_path, origins=origins,
+        trust_access_header=args.trust_access_header)
     sock = server.sockets[0].getsockname()
     sys.stderr.write("webterm-gateway: listening on http://%s:%d/ -> ttyd %s:%d%s\n"
                      % (sock[0], sock[1], args.ttyd_host, args.ttyd_port,
@@ -679,11 +753,23 @@ def main(argv):
     p.add_argument("--bind", required=True, help="tailscale IP to bind (never 0.0.0.0)")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--dash-index", required=True, help="path to the generated dashboard index.html")
-    p.add_argument("--cred", required=True, help="path to the user:pass credential file")
+    p.add_argument("--cred", default=None,
+                   help="path to the user:pass credential file (password mode)")
+    p.add_argument("--trust-access-header", dest="trust_access_header", default=None,
+                   help="#612 Cloudflare-Access mode: trust this Cloudflare-injected "
+                        "identity header (e.g. Cf-Access-Authenticated-User-Email) "
+                        "instead of a password/login form. Mutually exclusive with "
+                        "--cred.")
     p.add_argument("--ttyd-host", default="127.0.0.1")
     p.add_argument("--ttyd-port", type=int, default=7682)
     p.add_argument("--base-path", default="/t")
     args = p.parse_args(argv)
+    # Fail-CLOSED: exactly one auth mode. Neither would serve the terminal with
+    # NO gate at all; both is contradictory. This refuses to start rather than
+    # bind an unauthenticated shell.
+    if bool(args.cred) == bool(args.trust_access_header):
+        p.error("exactly one of --cred (password mode) or --trust-access-header "
+                "(Cloudflare Access mode) is required")
     try:
         asyncio.run(_main_async(args))
     except KeyboardInterrupt:

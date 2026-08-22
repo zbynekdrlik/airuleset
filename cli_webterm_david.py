@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 
 import cli_webterm as w
+import cli_webterm_access as access
 import cli_webterm_profiles as profiles
 
 # The david deployment's own artifact paths + loopback ports (distinct from the
@@ -46,16 +47,18 @@ WEBTERM_DAVID_GATEWAY_SERVICE_DEST = (
     Path.home() / ".config" / "systemd" / "user" / "webterm-david-gateway.service")
 
 _DAVID_GO_LIVE = (
-    "  webterm(david): needs-owner-action to go live —\n"
-    "    1. DNS (Cloudflare): david.newlevel.media -> cloudflared tunnel (or a\n"
-    "       proxied A -> subdev 116.203.108.177); zbynek.newlevel.media A ->\n"
-    "       100.104.8.125 (DNS-only/grey, tailnet-only).\n"
+    "  webterm(david): needs setup to go live —\n"
+    "    1. DNS (Cloudflare): david.newlevel.media -> cloudflared tunnel (proxied\n"
+    "       CNAME); zbynek.newlevel.media A -> 100.104.8.125 (DNS-only/grey,\n"
+    "       tailnet-only — Cloudflare Access is inapplicable to a grey record).\n"
     "    2. Install ttyd on subdev + run a cloudflared tunnel (as david1, no\n"
     "       sudo) fronting HTTPS david.newlevel.media -> 127.0.0.1:%d.\n"
-    "    3. Deploy the dedicated key %s (authorized ONLY on david1-4) and\n"
-    "       deliver the david credential (%s) via `secret show`.\n"
-    % (WEBTERM_DAVID_GATEWAY_PORT, profiles.WEBTERM_DAVID_IDENTITY,
-       w.WEBTERM_DAVID_CRED_PATH))
+    "    3. Deploy the dedicated key %s (authorized ONLY on david1-4).\n"
+    "    4. AUTH (#612 owner directive): NO password. Put a Cloudflare Access\n"
+    "       email-OTP app in front — set WEBTERM_ACCESS_APPS['david'] allow-list\n"
+    "       and run `airuleset.py webterm-access --apply`. Adding a person\n"
+    "       (marek) is one more e-mail in that list. No credential is delivered.\n"
+    % (WEBTERM_DAVID_GATEWAY_PORT, profiles.WEBTERM_DAVID_IDENTITY))
 
 
 # Prepended to each rendered david unit so a human reading the installed file on
@@ -68,7 +71,23 @@ _DAVID_UNIT_NOTE = (
     "# 7682 and the 'webterm-gateway.service' name inherited from the shared\n"
     "# template below refer to the OWNER deployment — the DAVID ports are ttyd\n"
     "# 7683 / gateway 8081 and the units are webterm-david-*.service. Scoped\n"
-    "# inventory: david1-4 + codex-bridge only (never the owner fleet).\n#\n")
+    "# inventory: david1-4 + codex-bridge only (never the owner fleet).\n"
+    "#\n"
+    "# AUTH (#612 owner directive 2026-08-22): NO password / credential. Cloudflare\n"
+    "# Access does email one-time-PIN verification at the EDGE before any request\n"
+    "# reaches the tunnel; the gateway runs in --trust-access-header mode and just\n"
+    "# trusts the Cf-Access-Authenticated-User-Email header Cloudflare injects.\n"
+    "# The shared template's 'form login / credential / constant-time compare'\n"
+    "# wording refers to the OWNER (password) deployment — it does NOT apply here.\n"
+    "#\n"
+    "# EXPOSURE: unlike the OWNER unit, the shared template's 'tailnet-only entry\n"
+    "# point' / 'security boundary is tailnet-only exposure' claims below are FALSE\n"
+    "# for THIS gateway — it is PUBLIC (Cloudflare Access at the edge is the\n"
+    "# boundary). And 'failed logins rate-limited per source IP' does NOT hold at\n"
+    "# the origin: behind cloudflared the gateway sees only 127.0.0.1, so any\n"
+    "# per-real-IP brute-force protection lives on the Cloudflare EDGE, not here.\n"
+    "# (The template's 'bound to dev1's tailscale IP (127.0.0.1)' line is doubly\n"
+    "# wrong here: this gateway binds LOOPBACK on subdev, not a tailscale IP.)\n#\n")
 
 
 # The david ttyd binary is a NO-SUDO user-space static binary in ~/.local/bin
@@ -99,24 +118,56 @@ def render_david_ttyd_unit():
 
 def render_david_gateway_unit():
     """The david gateway unit: LOOPBACK bind (cloudflared fronts it), david
-    dash/cred/ports, and its `After=` repointed to the david ttyd unit (the
-    shared template hardcodes the owner ttyd service name)."""
+    dash/ports, `After=` repointed to the david ttyd unit — and, per the #612
+    owner directive, Cloudflare-ACCESS mode instead of a password: the ExecStart's
+    `--cred {{CRED_PATH}}` is swapped for `--trust-access-header <header>` so NO
+    credential file is validated. The remaining `{{CRED_PATH}}` token lives only
+    in the shared template's password-model COMMENT — neutralised to n/a here,
+    with the extended _DAVID_UNIT_NOTE stating the real (Access) auth model."""
     tmpl = w.WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
     return _DAVID_UNIT_NOTE + (
-        tmpl.replace("{{BIND_IP}}", WEBTERM_DAVID_BIND)
+        # ExecStart: password -> Cloudflare Access header trust (retire --cred).
+        tmpl.replace("--cred {{CRED_PATH}}",
+                     "--trust-access-header " + access.WEBTERM_ACCESS_TRUST_HEADER)
+            .replace("{{BIND_IP}}", WEBTERM_DAVID_BIND)
             .replace("{{GATEWAY_MODULE}}", str(w.WEBTERM_GATEWAY_MODULE))
             .replace("{{GATEWAY_PORT}}", str(WEBTERM_DAVID_GATEWAY_PORT))
             .replace("{{DASH_INDEX}}", str(WEBTERM_DAVID_DASH_INDEX))
-            .replace("{{CRED_PATH}}", str(w.WEBTERM_DAVID_CRED_PATH))
+            # Only the shared template's password-model comment still references
+            # this token now — the ExecStart no longer does. Mark it n/a so no
+            # human reads a live credential path into a passwordless unit.
+            .replace("{{CRED_PATH}}", "n/a (Cloudflare Access — no credential)")
             .replace("{{TTYD_PORT}}", str(WEBTERM_DAVID_TTYD_PORT))
             .replace("{{TTYD_BASE}}", w.WEBTERM_TTYD_BASE)
             .replace("webterm-ttyd.service", "webterm-david-ttyd.service")
             .replace("(dev1-only)", "(subdev david)"))
 
 
+def _retire_david_credential():
+    """Delete the now-dead david password credential file (#612 owner directive:
+    Cloudflare Access replaces the password, so the old `secret show` credential
+    channel is retired). Best-effort + idempotent — a missing file is the normal
+    steady state, never an error. Only the mode-600 credential FILE is removed;
+    the dedicated ssh key (webterm_david_ed25519) is untouched (still needed for
+    the david1-4 tabs). Returns True iff a file was actually removed."""
+    cred = Path(str(w.WEBTERM_DAVID_CRED_PATH))
+    try:
+        if cred.exists():
+            cred.unlink()
+            print("  webterm(david): retired dead password credential %s "
+                  "(Cloudflare Access replaces it)." % cred, file=sys.stderr)
+            return True
+    except OSError as e:
+        print("  webterm(david): could not remove old credential %s (%s) — "
+              "harmless, Access is the gate now." % (cred, e), file=sys.stderr)
+    return False
+
+
 def _write_david_artifacts():
-    """Write the scoped inventory + dashboard + launcher + credential + units.
-    Pure filesystem writes (no systemd), split out so the render/write path is
+    """Write the scoped inventory + dashboard + launcher + units — and RETIRE any
+    dead password credential (NO credential is provisioned any more; Cloudflare
+    Access replaces the password, #612 owner directive 2026-08-22). Pure
+    filesystem writes (no systemd), split out so the render/write path is
     unit-testable without the enable/restart plumbing."""
     w.CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
     WEBTERM_DAVID_DASH_DIR.mkdir(parents=True, exist_ok=True)
@@ -126,7 +177,12 @@ def _write_david_artifacts():
     WEBTERM_DAVID_DASH_INDEX.write_text(
         w.render_dashboard_html(inv, ttyd_base=w.WEBTERM_TTYD_BASE),
         encoding="utf-8")
-    w._ensure_credential(profile=profiles.DAVID)
+    # #612 owner directive 2026-08-22: NO credential. Cloudflare Access (email
+    # OTP) at the edge is the whole gate, so the gateway runs in
+    # --trust-access-header mode and NO credential is provisioned. Retire the
+    # dead password file (the old `secret show` path) so no stale credential
+    # channel is left lying around.
+    _retire_david_credential()
     WEBTERM_DAVID_LAUNCH_PATH.write_text(
         w.render_webterm_launch_script(
             inventory_path=WEBTERM_DAVID_INVENTORY_PATH,

@@ -600,5 +600,156 @@ class TestGatewayIntegration(unittest.TestCase):
         _run(go())
 
 
+# --------------------------------------------------------------------------- #
+# #612 Cloudflare-Access mode — the gateway trusts a Cloudflare identity header
+# instead of a password/login form (retires the credential).
+# --------------------------------------------------------------------------- #
+
+ACCESS_HEADER = "Cf-Access-Authenticated-User-Email"
+
+
+def _access_gateway():
+    return g.Gateway("dash.html", None, "127.0.0.1", 7683, "/t", [],
+                     trust_access_header=ACCESS_HEADER)
+
+
+class TestAccessModeAuth(unittest.TestCase):
+    """Pure auth-decision tests — no sockets, just _authed / _access_identity."""
+
+    def test_authed_when_trusted_header_present(self):
+        gw = _access_gateway()
+        self.assertTrue(gw._authed([(ACCESS_HEADER, "david@example.com")]))
+        self.assertEqual(gw._access_identity([(ACCESS_HEADER, "david@example.com")]),
+                         "david@example.com")
+
+    def test_not_authed_when_header_absent_fail_closed(self):
+        gw = _access_gateway()
+        self.assertFalse(gw._authed([("Host", "x")]))
+        self.assertIsNone(gw._access_identity([("Host", "x")]))
+
+    def test_not_authed_when_header_blank(self):
+        gw = _access_gateway()
+        self.assertFalse(gw._authed([(ACCESS_HEADER, "   ")]))
+
+    def test_not_authed_when_trust_header_duplicated(self):
+        # #612 R2: Cloudflare sets exactly ONE trust header; a second occurrence
+        # is a smuggling attempt (header_get would return the first, client-
+        # controlled value) — fail closed on any duplicate.
+        gw = _access_gateway()
+        self.assertFalse(gw._authed([(ACCESS_HEADER, "attacker@evil.com"),
+                                     (ACCESS_HEADER, "david@example.com")]))
+        self.assertIsNone(gw._access_identity([(ACCESS_HEADER, "a@x"),
+                                               (ACCESS_HEADER, "b@y")]))
+
+    def test_access_mode_ignores_a_session_cookie(self):
+        # In Access mode there is NO cookie/session concept — only the trusted
+        # header authenticates. A forged session cookie must not authenticate.
+        sessions = g.SessionStore()
+        gw = g.Gateway("dash.html", None, "127.0.0.1", 7683, "/t", [],
+                       sessions=sessions, trust_access_header=ACCESS_HEADER)
+        tok = sessions.create()
+        self.assertFalse(gw._authed([("Cookie", "webterm_session=%s" % tok)]))
+
+    def test_password_mode_unchanged_ignores_access_header(self):
+        # Regression: default (password) mode must NOT be swayed by an Access
+        # header — a client-forged Cf-Access-* header authenticates nothing.
+        sessions = g.SessionStore()
+        gw = g.Gateway("dash.html", "cred", "127.0.0.1", 7683, "/t", [],
+                       sessions=sessions)                    # trust_access_header=None
+        self.assertFalse(gw._authed([(ACCESS_HEADER, "attacker@evil.com")]))
+        tok = sessions.create()
+        self.assertTrue(gw._authed([("Cookie", "webterm_session=%s" % tok)]))
+
+
+class TestAccessModeMainGuard(unittest.TestCase):
+    """main() is FAIL-CLOSED on auth mode: exactly one of --cred /
+    --trust-access-header, else it refuses to start (never an open shell)."""
+
+    def test_neither_auth_mode_refused(self):
+        with self.assertRaises(SystemExit):
+            g.main(["--bind", "127.0.0.1", "--dash-index", "x"])
+
+    def test_both_auth_modes_refused(self):
+        with self.assertRaises(SystemExit):
+            g.main(["--bind", "127.0.0.1", "--dash-index", "x",
+                    "--cred", "c", "--trust-access-header", ACCESS_HEADER])
+
+
+class TestAccessModeRoutes(unittest.TestCase):
+    """Integration over real sockets — Access-mode routing: with the trusted
+    header the dashboard/proxy are served; without it, fail-closed 403 (never a
+    redirect to a login form that does not exist)."""
+
+    async def _harness(self):
+        h = _GatewayHarness()
+        h.tmp = tempfile.mkdtemp()
+        h.dash_path = Path(h.tmp) / "index.html"
+        h.dash_path.write_text("<!DOCTYPE html>DASHBOARD", encoding="utf-8")
+        h.ttyd_port = await h.fake.start()
+        probe = await asyncio.start_server(lambda r, w: w.close(), "127.0.0.1", 0)
+        port = probe.sockets[0].getsockname()[1]
+        probe.close()
+        await probe.wait_closed()
+        h.origin = "http://127.0.0.1:%d" % port
+        h.server = await g.start_gateway(
+            "127.0.0.1", port, str(h.dash_path), None,
+            ttyd_host="127.0.0.1", ttyd_port=h.ttyd_port, base_path="/t",
+            origins=[h.origin], trust_access_header=ACCESS_HEADER)
+        h.port = port
+        return h
+
+    async def _teardown(self, h):
+        h.server.close()
+        await h.server.wait_closed()
+        await h.fake.stop()
+
+    def test_root_403_without_access_header(self):
+        async def go():
+            h = await self._harness()
+            try:
+                resp = await h.request(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertIn(b"403", resp)
+                self.assertNotIn(b"Location: /login", resp)   # no login form to send to
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_root_dashboard_with_access_header(self):
+        async def go():
+            h = await self._harness()
+            try:
+                resp = await h.request(
+                    b"GET / HTTP/1.1\r\nHost: x\r\n"
+                    b"Cf-Access-Authenticated-User-Email: david@example.com\r\n\r\n")
+                self.assertIn(b"200 OK", resp)
+                self.assertIn(b"DASHBOARD", resp)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_login_route_bounces_to_root_no_form(self):
+        async def go():
+            h = await self._harness()
+            try:
+                resp = await h.request(b"GET /login HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertIn(b"303", resp)
+                self.assertIn(b"Location: /", resp)
+                self.assertNotIn(b"current-password", resp)   # no login form served
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_proxy_403_without_access_header(self):
+        async def go():
+            h = await self._harness()
+            try:
+                resp = await h.request(b"GET /t/ HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertIn(b"403", resp)
+                self.assertNotIn(b"Location: /login", resp)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+
 if __name__ == "__main__":
     unittest.main()
