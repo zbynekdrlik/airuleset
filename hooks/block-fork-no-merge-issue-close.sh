@@ -113,19 +113,30 @@ fi
 # (network-free, unit-tested); this shell part only detects the issue + repo,
 # fetches the ticket text, and pipes it to the module.
 #
+# EVERY `gh issue close <N>` in the command is checked, not just the first — a
+# compound that batch-closes the sibling tickets of one thread (the likely
+# N-tickets-one-thread flow) would otherwise smuggle a bound, note-less close
+# past a head-1 check (#627 review MAJOR).
+#
 # FAIL-OPEN throughout — the gate's DEFAULT is ALLOW (most closes are not
-# thread-bound), so any unverifiable state (no python3, unparseable issue
+# thread-bound), so any unverifiable state (no python3, no `gh issue close`
 # number, a gh error, a non-odoo-erp repo) FALLS THROUGH to the authority logic
 # below, never a false block (the sibling authority guard's default is BLOCK, so
 # it keeps its OWN safe default — each fails toward its own default). Documented
-# residuals (#319): the gh-api PATCH-close form leaves the issue number empty
-# (falls through — the dominant `gh issue close N` form is covered); a marker
-# QUOTED in prose without a real posted note is a false-PASS (falsifiability +
-# review, the #516 model). Bypass (rare, logged): `airuleset:discuss-close-ok`
-# in the command. Test seam: AIRULESET_DISCUSS_CLOSE_FIXTURE=<file> supplies the
-# ticket JSON instead of a live `gh issue view`.
+# residuals (#319): a `gh api ... PATCH ... state=closed` REST close is not
+# detected here (the dominant `gh issue close N` form — including a COMPOUND of
+# several — IS covered); a MIXED-repo compound (a different -R per close) is
+# resolved against ONE repo (the command's first -R, else the cwd remote), so a
+# bound odoo-erp close smuggled behind a non-odoo-erp -R falls through — the
+# natural SAME-repo sibling batch is fully covered; a marker QUOTED in prose
+# without a real posted note is a false-PASS (falsifiability + review, the #516
+# model). Bypass (rare, logged): `airuleset:discuss-close-ok` anywhere in the
+# command (a deliberate, self-opt-in escape hatch — the token appears nowhere
+# else, so a close carrying it is unambiguously opting out). Test seam:
+# AIRULESET_DISCUSS_CLOSE_FIXTURE=<file> supplies the ticket JSON for EVERY
+# target instead of a live `gh issue view`.
 # ---------------------------------------------------------------------------
-_DHERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+_DHERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
 _DREPO="$(dirname "$_DHERE")"
 _d_run_gate=1
 if printf '%s' "$CMD" | grep -q 'airuleset:discuss-close-ok'; then
@@ -137,11 +148,13 @@ command -v python3 >/dev/null 2>&1 || _d_run_gate=0
 [ -f "$_DREPO/discuss_close_guard.py" ] || _d_run_gate=0
 
 if [ "$_d_run_gate" = "1" ]; then
-    # Issue number from the `gh issue close` form (the dominant close shape for
-    # both sub-devs and the gatekeeper). Same grep the authority block uses.
-    _D_NUM=$(printf '%s' "$CMD" | grep -oE 'gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?([0-9]+)' | grep -oE '[0-9]+' | head -1 || echo "")
-    _D_REPO_ARG=$(printf '%s' "$CMD" | grep -oE "(-R|--repo)[[:space:]=]+[\"']?[A-Za-z0-9._/-]+" | head -1 | sed -E "s/^(-R|--repo)[[:space:]=]+[\"']?//" || echo "")
-    if [ -n "$_D_NUM" ]; then
+    # EVERY `gh issue close <N>` number in the command (not head -1) — a compound
+    # batch-close of one thread's sibling tickets must have EACH target checked.
+    _D_NUMS=$(printf '%s' "$CMD" | grep -oE 'gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?[0-9]+' | grep -oE '[0-9]+' || echo "")
+    # Repo for the command: the first -R/--repo — separated (`-R x`), =-joined
+    # (`-R=x`) OR glued (`-Rx`, the `*` after the class) — else the cwd remote.
+    _D_REPO_ARG=$(printf '%s' "$CMD" | grep -oE "(-R|--repo)[[:space:]=]*[\"']?[A-Za-z0-9._/-]+" | head -1 | sed -E "s/^(-R|--repo)[[:space:]=]*[\"']?//" || echo "")
+    if [ -n "$_D_NUMS" ]; then
         # odoo-erp repo-scope (Odoo Discuss threads are an odoo-erp / client
         # thing): a non-odoo-erp close never engages the gate, killing the
         # cross-repo meta false-positive (e.g. this very airuleset ticket #627,
@@ -158,19 +171,28 @@ if [ "$_d_run_gate" = "1" ]; then
         _D_REPONAME="${_D_REPONAME##*/}"
         _D_REPONAME="${_D_REPONAME##*:}"
         if [ "${_D_REPONAME,,}" = "odoo-erp" ]; then
-            # Ticket JSON: fixture seam (tests / demonstration) OR a live fetch.
-            _D_JSON=""
-            if [ -n "${AIRULESET_DISCUSS_CLOSE_FIXTURE:-}" ] && [ -f "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" ]; then
-                _D_JSON=$(cat "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" 2>/dev/null || echo "")
-            elif [ -n "$_D_REPO_ARG" ]; then
-                _D_JSON=$(gh issue view "$_D_NUM" -R "$_D_REPO_ARG" --json body,comments 2>/dev/null || echo "")
-            else
-                _D_JSON=$(gh issue view "$_D_NUM" --json body,comments 2>/dev/null || echo "")
-            fi
-            if [ -n "$_D_JSON" ]; then
-                _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" 2>/dev/null || echo "OK")
-                if [ "$_D_VERDICT" = "BLOCK" ]; then
-                    cat >&2 <<MSG
+            # Check EACH close target (numbers are pure digits — safe to word-split).
+            # Block on the FIRST bound-no-disposition target found.
+            _D_BLOCK_NUM=""
+            for _D_NUM in $_D_NUMS; do
+                _D_JSON=""
+                if [ -n "${AIRULESET_DISCUSS_CLOSE_FIXTURE:-}" ] && [ -f "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" ]; then
+                    _D_JSON=$(cat "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" 2>/dev/null || echo "")
+                elif [ -n "$_D_REPO_ARG" ]; then
+                    _D_JSON=$(gh issue view "$_D_NUM" -R "$_D_REPO_ARG" --json body,comments 2>/dev/null || echo "")
+                else
+                    _D_JSON=$(gh issue view "$_D_NUM" --json body,comments 2>/dev/null || echo "")
+                fi
+                if [ -n "$_D_JSON" ]; then
+                    _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" 2>/dev/null || echo "OK")
+                    if [ "$_D_VERDICT" = "BLOCK" ]; then
+                        _D_BLOCK_NUM="$_D_NUM"
+                        break
+                    fi
+                fi
+            done
+            if [ -n "$_D_BLOCK_NUM" ]; then
+                cat >&2 <<MSG
 
 🚫 BLOCKED: this ticket has a bound Odoo Discuss thread (a Discuss-thread: line
 on the ticket) but carries no closing-note evidence — closing it now would leave
@@ -184,11 +206,11 @@ CURRENTLY owns the thread must post a closing note INTO that Odoo Discuss thread
 always from the sub-dev — then record the evidence on THIS ticket. Add ONE of:
 
   • the closing note was posted (this is the LAST ticket bound to the thread):
-      gh issue comment ${_D_NUM} --body "Discuss-closed: msg <message-id>  (thread <channel-id>)"
+      gh issue comment ${_D_BLOCK_NUM} --body "Discuss-closed: msg <message-id>  (thread <channel-id>)"
 
   • the thread STAYS OPEN because sibling tickets remain (the closing note goes
     at the LAST close, not here — name the still-open siblings):
-      gh issue comment ${_D_NUM} --body "Discuss-defer: siblings #<A> #<B> still open — note goes at the last close"
+      gh issue comment ${_D_BLOCK_NUM} --body "Discuss-defer: siblings #<A> #<B> still open — note goes at the last close"
 
 Then re-run the close.
 
@@ -205,8 +227,7 @@ the ZbynekAI <N> signature): skills/odoo-discuss-xmlrpc/handover-compose.md.
 Bypass (rare, logged, ONLY a genuine non-client / meta ticket that merely names
 these markers in prose): put  airuleset:discuss-close-ok  in the close command.
 MSG
-                    exit 2
-                fi
+                exit 2
             fi
         fi
     fi

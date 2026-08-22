@@ -30,12 +30,27 @@ mutable `stream:` label, so it survives the move — airuleset #627 STEP-0).
 WHY a structured marker and not the free-text real convention ("vlákno 257 /
 msg 1731437", airuleset #627 STEP-0): a free-text scan would be GUESSING
 (false positives/negatives), which the ticket forbids ("bez hádania"). The
-structured `Discuss-thread:` marker is the deterministic recognition; it
-CARRIES the same real channel id as its value, so it bridges the real
-convention (the id) with a non-guessy recognition (the fixed prefix). A
-COMMENT (not a label) is the binding: it works at read/collaborator role
-where a fork-derived stream cannot add a label (403 — airuleset #589), and
-it is untouched by a cross-stream move.
+structured `Discuss-thread:` marker is the deterministic recognition, and it
+is a COMMENT (not a label): a comment works at read/collaborator role where a
+fork-derived stream cannot add a label (403 — airuleset #589), and it is
+untouched by a cross-stream move.
+
+WHAT THE GATE ACTUALLY KEYS ON (precise — the channel id is NOT consumed by
+the code). This decision is PER TICKET: `is_thread_bound(text) and not
+has_disposition(text)`. The gate reads only whether the `Discuss-thread:`
+marker is PRESENT (a binding exists) and whether a disposition is present — it
+never parses, groups, or compares the channel-id VALUE. The channel id inside
+the marker is the HUMAN-READABLE correlation key: it lets a reviewer / the
+owner see at a glance which tickets belong to the same thread and validate a
+`Discuss-defer:`'s named siblings — it is not a machine group key. So the two
+load-bearing properties rest on per-ticket text + a human-declared claim, NOT
+on any code-level grouping: (a) cross-stream-move survival works because the
+binding is a durable comment that no `stream:` re-label touches and the gate is
+authorship-blind; (b) note-once (one thread, many tickets) works because the
+CLOSER self-declares last-vs-non-last via `Discuss-closed:` (I am last, note
+posted) vs `Discuss-defer:` (siblings remain), a falsifiable claim a human
+reviews (the #516 model) — the gate never queries GitHub for sibling states
+(that would be the forbidden heuristic layer).
 
 FAIL DIRECTION. This gate's DEFAULT is ALLOW (most closes are not
 thread-bound). So anything UNVERIFIABLE — malformed JSON, a non-object
@@ -66,9 +81,12 @@ import sys
 # only trailing spaces) is NOT a binding / NOT a disposition. Case-insensitive
 # so a lower-cased marker still counts (recognition fails toward MORE scrutiny;
 # a lower-cased disposition still satisfies the gate — the goal is to force the
-# claim to be MADE, its truth is a review/falsifiability matter, #516).
+# claim to be MADE, its truth is a review/falsifiability matter, #516). The
+# `[ \t*]*` before the colon tolerates the common markdown bold-label form
+# `**Discuss-thread**: 257` (colon OUTSIDE the emphasis), which the open-class
+# alone would miss — again the over-recognition (safe) direction.
 _MARK_OPEN = r"(?im)^[ \t>*#-]*"
-_MARK_TAIL = r"[ \t]*:[ \t]*\S"
+_MARK_TAIL = r"[ \t*]*:[ \t]*\S"
 
 _THREAD_RE = re.compile(_MARK_OPEN + r"Discuss-thread" + _MARK_TAIL)
 _CLOSED_RE = re.compile(_MARK_OPEN + r"Discuss-closed" + _MARK_TAIL)

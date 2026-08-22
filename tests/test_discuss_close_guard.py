@@ -126,6 +126,31 @@ class TestFormatting(TestCase):
         # A marker indented under a bullet/quote is still a marker.
         self.assertIsNotNone(g.evaluate_close(_issue(body="  - Discuss-thread: 257")))
 
+    def test_open_class_members_asterisk_gt_hash_are_recognised(self):
+        # Every member of _MARK_OPEN's leading class must be tested — a mutant
+        # narrowing it to `[ \t-]` would silently under-recognise these real
+        # markdown forms (the dangerous under-block direction). #627 review.
+        for prefix in ("* ", "> ", "## ", "*", ">"):
+            with self.subTest(prefix=prefix):
+                self.assertIsNotNone(
+                    g.evaluate_close(_issue(body=prefix + "Discuss-thread: 257")),
+                    "prefix %r must be recognised as a binding" % prefix,
+                )
+
+    def test_bold_label_with_colon_outside_emphasis_is_recognised(self):
+        # `**Discuss-thread**: 257` — the common markdown bold-label form where
+        # the colon sits OUTSIDE the `**` emphasis (#627 review R1). Missing it
+        # would under-block a genuinely thread-bound ticket.
+        self.assertIsNotNone(g.evaluate_close(_issue(body="**Discuss-thread**: 257")))
+        self.assertIsNone(
+            g.evaluate_close(
+                _issue(
+                    body="**Discuss-thread**: 257",
+                    comments=["**Discuss-closed**: msg 9"],
+                )
+            )
+        )
+
 
 class TestFailOpen(TestCase):
     def test_malformed_json_is_allowed(self):
@@ -219,6 +244,10 @@ class TestHookIntegration(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("Discuss-thread", r.stderr)
         self.assertIn("handover-compose.md", r.stderr)
+        # The load-bearing both-paths routing (#627 review R2): the OWNING stream
+        # posts the note; the gatekeeper does NOT post to the client thread.
+        self.assertIn("gatekeeper does NOT post", r.stderr)
+        self.assertIn("OWNING stream posts", r.stderr)
 
     def test_gate_is_authority_independent_full_authority_still_blocks(self):
         # A FULL-authority close would sail through the authority guard (exit 0);
@@ -278,6 +307,111 @@ class TestHookIntegration(TestCase):
             fixture=fx,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_glued_repo_flag_still_engages_the_gate(self):
+        # `-Rzbynekdrlik/odoo-erp` (no separator) must still resolve to odoo-erp
+        # and engage the gate (#627 review R1 residual, now closed).
+        fx = self._fixture(body="Discuss-thread: 257")
+        r = self._run(
+            "gh issue close 4811 -Rzbynekdrlik/odoo-erp",
+            self._authority_cwd("full"),
+            fixture=fx,
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
+class TestHookIntegrationCompound(TestCase):
+    """A COMPOUND that batch-closes sibling tickets of one thread (the likely
+    N-tickets-one-thread flow) must have EVERY `gh issue close <N>` target
+    checked, not just the first — else a bound sibling smuggles a note-less
+    close past a head-1 check (#627 review MAJOR). Uses a per-number fake `gh`
+    (the fixture seam is one file, so it cannot distinguish targets)."""
+
+    HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
+
+    # Returns a bound-no-disposition ticket for $FAKE_BOUND_NUM, else an
+    # ordinary (unbound) ticket. Only `gh issue view` is exercised.
+    _FAKE_GH = (
+        "#!/usr/bin/env bash\n"
+        'if [ "$1 $2" = "issue view" ]; then\n'
+        '  num=""\n'
+        '  for a in "$@"; do\n'
+        '    if [[ "$a" =~ ^[0-9]+$ ]]; then num="$a"; break; fi\n'
+        "  done\n"
+        '  if [ "$num" = "${FAKE_BOUND_NUM:-}" ]; then\n'
+        "    printf '%s' '{\"body\":\"Discuss-thread: 257\",\"comments\":[]}'\n"
+        "  else\n"
+        "    printf '%s' '{\"body\":\"ordinary ticket\",\"comments\":[]}'\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+    def _authority_cwd(self, profile):
+        import tempfile
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text(
+            "# proj\n<!-- airuleset:authority=%s -->\n" % profile
+        )
+        return d
+
+    def _run(self, cmd, bound_num):
+        import os
+        import tempfile
+        d = tempfile.mkdtemp()
+        gh = Path(d) / "gh"
+        gh.write_text(self._FAKE_GH)
+        gh.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = d + os.pathsep + env.get("PATH", "")
+        env["FAKE_BOUND_NUM"] = bound_num
+        payload = json.dumps({"tool_input": {"command": cmd}})
+        return subprocess.run(
+            ["bash", str(self.HOOK)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            cwd=self._authority_cwd("full"),
+            env=env,
+        )
+
+    def test_a_later_bound_sibling_is_checked_not_just_head_1(self):
+        # 4811 (the SECOND close, bound) must be caught even though 4812 (first,
+        # unbound) would pass — proves the loop, not head -1.
+        r = self._run(
+            "gh issue close 4812 -R zbynekdrlik/odoo-erp --comment a "
+            "&& gh issue close 4811 -R zbynekdrlik/odoo-erp --comment b",
+            bound_num="4811",
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("Discuss-thread", r.stderr)
+
+    def test_the_blocking_number_is_named_in_the_message(self):
+        r = self._run(
+            "gh issue close 4812 -R zbynekdrlik/odoo-erp --comment a "
+            "&& gh issue close 4811 -R zbynekdrlik/odoo-erp --comment b",
+            bound_num="4811",
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("gh issue comment 4811", r.stderr)
+
+    def test_compound_all_unbound_passes(self):
+        r = self._run(
+            "gh issue close 4812 -R zbynekdrlik/odoo-erp --comment a "
+            "&& gh issue close 4811 -R zbynekdrlik/odoo-erp --comment b",
+            bound_num="0",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_compound_first_bound_blocks(self):
+        r = self._run(
+            "gh issue close 4812 -R zbynekdrlik/odoo-erp --comment a "
+            "&& gh issue close 4811 -R zbynekdrlik/odoo-erp --comment b",
+            bound_num="4812",
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("gh issue comment 4812", r.stderr)
 
 
 if __name__ == "__main__":
