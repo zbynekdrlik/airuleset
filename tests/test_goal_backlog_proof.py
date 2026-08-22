@@ -737,15 +737,19 @@ class TestFullAuthorityTemplateCallsTheSelfCallback(TestCase):
             self.assertIn("compact-request --self", line)
 
     def test_every_template_says_to_hold_before_dispatching(self):
+        # #621: the compact boundary now paces exactly ONE integration/hand-off
+        # per turn (the reconciled tail), REPLACING the old "do NOT dispatch the
+        # next issue in the same turn" — that phrasing serialized the WHOLE loop
+        # and suppressed the parallel worktree fleet (the whole point of #621).
+        # --self must still come first (calling it only makes sense before the
+        # turn ends).
         for idx, line in enumerate(goal_lines()):
-            marker = ("the next issue" if idx == FULL
-                      else "the next assigned issue")
-            self.assertIn("do NOT dispatch %s in the same turn" % marker,
-                          line)
-            # the new instruction must come BEFORE the existing hold, not
-            # after (calling --self only makes sense before moving on)
+            hold = ("do NOT hand off a SECOND branch this turn"
+                    if idx == FORK_NO_MERGE
+                    else "do NOT integrate a SECOND branch this turn")
+            self.assertIn(hold, line)
             self.assertLess(line.index("compact-request --self"),
-                            line.index("do NOT dispatch %s" % marker))
+                            line.index(hold))
 
 
 class TestClauseARearmHintIsFullAuthorityOnlyByDesign(TestCase):

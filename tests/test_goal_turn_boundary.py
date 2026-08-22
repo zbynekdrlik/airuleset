@@ -46,10 +46,16 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
             self.assertNotIn("immediately pick the next assigned issue.", line)
 
     def test_every_template_ends_the_turn_before_the_next_ticket(self):
-        for line in goal_lines():
+        # #621 reconciled the tail: the compact boundary now paces exactly ONE
+        # integration/hand-off per turn (the parallel worker lanes keep building
+        # meanwhile), REPLACING the old "do NOT dispatch the next ... in the
+        # same turn" that serialized the whole loop and suppressed the fleet.
+        # Its twin in test_goal_backlog_proof.py was reconciled the same way.
+        for idx, line in enumerate(goal_lines()):
+            hold = ("do NOT hand off a SECOND branch this turn" if idx == 2
+                    else "do NOT integrate a SECOND branch this turn")
             self.assertIn("END the turn", line)
-            self.assertIn("do NOT dispatch the next", line)
-            self.assertIn("in the same turn", line)
+            self.assertIn(hold, line)
             self.assertIn("NEXT TURN", line)
             self.assertIn("✅ DONE:", line)
             self.assertIn("ARMED GOAL", line)
@@ -66,13 +72,16 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
     def test_branch_merge_references_its_reduced_authority_variant(self):
         branch_merge = goal_lines()[1]
         self.assertIn("completion-report.md", branch_merge)
-        self.assertIn("branch-merge reduced-authority variant", branch_merge)
+        # #621 tightened "branch-merge reduced-authority variant" -> the shorter
+        # "the branch-merge variant" to make room for the saturation clause; the
+        # completion-report.md reference (which variant to use) is preserved.
+        self.assertIn("the branch-merge variant", branch_merge)
         self.assertIn("After every merge,", branch_merge)
 
     def test_fork_no_merge_references_its_hand_off_variant(self):
         fork = goal_lines()[2]
         self.assertIn("completion-report.md", fork)
-        self.assertIn("fork-no-merge reduced-authority variant", fork)
+        self.assertIn("the fork-no-merge variant", fork)
         self.assertIn("READY-FOR-REVIEW", fork)
         self.assertIn("After every hand-off,", fork)
 
