@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 5731,
+    "airuleset.py": 5764,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 99,
@@ -36,7 +36,7 @@
     "tests/_hook_state_cleanup.py": 164,
     "tests/conftest.py": 187,
     "tests/test_account_limit_backoff.py": 283,
-    "tests/test_airuleset.py": 14735,
+    "tests/test_airuleset.py": 14767,
     "tests/test_architecture_first_414.py": 120,
     "tests/test_ask_before_assuming.py": 46,
     "tests/test_ask_before_assuming_dropped_rows.py": 576,
@@ -103,7 +103,7 @@
     "tests/test_goal_question_repoke.py": 351,
     "tests/test_goal_stranded_truncated_617.py": 315,
     "tests/test_goal_strictness_clause.py": 51,
-    "tests/test_goal_sweep.py": 2462,
+    "tests/test_goal_sweep.py": 2493,
     "tests/test_goal_sweep_hermeticity.py": 74,
     "tests/test_goal_turn_boundary.py": 112,
     "tests/test_goal_undeterminable_pane.py": 111,

@@ -3812,6 +3812,13 @@ def _watchdog_delivery_probe(root, base):
     return None
 
 
+# #618 -- how fresh the tickets-status cache must be for the watchdog backlog
+# read to trust it over a live (slow) `--count` subprocess. Generous: a
+# saturation-nudge decision tolerates a count minutes old, and the watchdog's
+# own _spawn_refresh keeps the cache within this bound on an idle box.
+_BACKLOG_STATUS_CACHE_MAX_AGE_S = 15 * 60
+
+
 def _watchdog_backlog_fetch(cwd):
     """#160 defect 1 / defect 4 — does THIS BOX's own slice of the repo at
     `cwd` still have open, non-`autopilot-skip` backlog work, or None on any
@@ -3855,7 +3862,34 @@ def _watchdog_backlog_fetch(cwd):
     would independently choose for itself.
 
     Wired HERE, like every other network call in this file, so run_once's
-    unit tests stay network-free."""
+    unit tests stay network-free.
+
+    #618: reads the tickets-status cache FIRST — the SAME workable `open` the
+    footer renders (`statusbar.obligation_count`, written by an UNTIMED
+    background refresh) — and only shells the live `--count` subprocess as a
+    cache-miss/stale FALLBACK. That subprocess is 16-17s on a big
+    shared-account slice (O(backlog) serial gh timeline reads) and ALWAYS timed
+    out at 15s → backlog=n/a → the saturation nudge (goal_lane_occupancy_nudge)
+    could never confirm under-saturation, so montalu1 with 28+ workable issues
+    + 1 worker got no fill nudge. A fresh cache read is instant + never times
+    out; a stale/missing one WARMS the cache for the next sweep via the same
+    detached, rate-limited `_spawn_refresh` the statusline uses (so an idle box
+    whose footer isn't rendering — montalu1's 7h-stale cache — self-heals
+    within one sweep) and falls back to the live count for this sweep."""
+    import time
+    try:
+        import statusbar
+        open_n, ts = statusbar.obligation_count(cwd)
+    except Exception:
+        statusbar, open_n, ts = None, None, None
+    if isinstance(open_n, int) and ts is not None and \
+            (time.time() - ts) < _BACKLOG_STATUS_CACHE_MAX_AGE_S:
+        return open_n
+    # Cache missing/stale: warm it for the NEXT sweep (detached, untimed,
+    # rate-limited by SPAWN_GUARD_S; _spawn_refresh swallows its own errors),
+    # then take the live count for THIS sweep (self-heals next sweep).
+    if statusbar is not None:
+        statusbar._spawn_refresh(cwd)
     import subprocess
     try:
         root = _repo_root(cwd=cwd) or cwd
