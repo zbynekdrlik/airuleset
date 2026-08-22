@@ -90,9 +90,11 @@ def _core_search_excl():
     `needs-acceptance` (a reduced-authority `stream:<user>` in AUTHORITY_BY_USER,
     with NO `ready-for-review`/`needs-gatekeeper`) IS excluded here, so it never
     reaches the core obligation `seen` — the ONE mechanical guard against a
-    foreign acceptance being routed to `I` by `_partition_workable`'s #539
-    chained-I branch (which cannot see box authority and would treat any bare
-    needs-acceptance with no delivered draft as this box's own chained work).
+    foreign acceptance leaking into the full-authority partition, where
+    `_partition_workable` (which cannot see box authority) would now route it to
+    `U` (#622: a bare needs-acceptance is queued for owner approval → U
+    unconditionally; the exclusion keeps a FOREIGN one out of this box's counts
+    entirely, be that `U` or `I`).
 
     #561: each excluded stream is EXPANDED via `_stream_rename_equivalents()`
     — the SAME single alias primitive `_slice_quals()`/`_ticket_is_stream_
@@ -481,13 +483,18 @@ NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = (
 # processed ticket with a stale comment — telling them apart needs a per-ticket
 # timeline query (was the comment newer than the needs-acceptance labeling?),
 # the exact cost this fix rejected (issue #507, ~1 extra gh call per candidate
-# into the shared graphql bucket, #370). Such a ticket is UNDER-counted (shown
-# as the stream's own workable `I N` instead of gk). This is the SAFE failure
-# direction: it moves the ticket INTO the loop's workable set, so the /goal
-# stop-proof keeps it alive and never falsely declares "backlog empty" — a
-# bounded, self-healing under-count (it resolves the moment the auto-labeller
-# lands the label), replacing the reported PERMANENT over-count. A precise
-# timeline-based fix is tracked as a needs-user-decision follow-up.
+# into the shared graphql bucket, #370). Such a ticket is UNDER-counted as gk
+# (it carries no `ready-for-review`/`needs-gatekeeper` label). #622 changed WHERE
+# it then lands: a bare `needs-acceptance` is queued for owner approval → `U`
+# (leaves the workable `--count`), no longer the stream's own workable `I N` (the
+# pre-#622 chained-I disposition). It is still SURFACED, not lost — it shows in
+# `--waiting` (U) and the loop PARKS on it — but the safe-direction guarantee is
+# narrower than #507/#508's "kept alive in the workable set": a bare
+# needs-acceptance is NOT re-detected as gk by the READY-FOR-REVIEW comment
+# fallback either (this label is in GATEKEEPER_PROCESSED_LABELS, so it is
+# EXCLUDED from that candidate walk), so this comment-only re-hand-off self-heals
+# ONLY when the repo auto-labeller re-adds `ready-for-review` (the #508 residual;
+# a precise timeline-based fix is the tracked needs-user-decision follow-up).
 #
 # Streams without a needs-acceptance model simply never match — zero behaviour
 # change there.

@@ -939,9 +939,14 @@ class RefreshCLI(unittest.TestCase):
             # #622 (REVERSES #539 chained-I): a bare needs-acceptance is queued for
             # owner approval → U unconditionally. So this comment-only re-hand-off
             # (needs-acceptance by label, not gk-detected) leaves the workable I N
-            # into U N — still SURFACED (never lost): the gk/supervisor box's own
-            # obligation set detects the fresh READY-FOR-REVIEW comment via its
-            # comment fallback and reviews it, while this fork box shows it in U.
+            # into U N — SURFACED on this fork box in `--waiting` (U), where the
+            # loop PARKS on it (not silently dropped). NOTE the honest narrowing of
+            # the #507/#508 residual: it is NOT picked up gk-side either (a
+            # `needs-acceptance` ticket is in GATEKEEPER_PROCESSED_LABELS, EXCLUDED
+            # from the READY-FOR-REVIEW comment fallback, and the gk core set is
+            # label-based + stream-excluded), so it self-heals ONLY when the repo
+            # auto-labeller re-adds `ready-for-review` — #622 trades #507/#508's
+            # keep-alive-in-I for this narrow residual per the owner's I/U/W model.
             self.assertEqual(
                 cache["open"], 0,
                 "#622: a bare needs-acceptance is queued → U, not the workable I N")
