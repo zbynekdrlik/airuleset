@@ -36,10 +36,23 @@ class TestDavidUnitRender(unittest.TestCase):
         self.assertNotIn("--bind 0.0.0.0", unit)
         self.assertIn("--port %d" % d.WEBTERM_DAVID_GATEWAY_PORT, unit)
         self.assertIn("--ttyd-port %d" % d.WEBTERM_DAVID_TTYD_PORT, unit)
-        self.assertIn(str(w.WEBTERM_DAVID_CRED_PATH), unit)
         self.assertIn(str(d.WEBTERM_DAVID_DASH_INDEX), unit)
         # NOT the owner credential/dashboard realm.
         self.assertNotIn(str(w.WEBTERM_CRED_PATH), unit)
+
+    def test_gateway_unit_is_cloudflare_access_mode_no_credential(self):
+        # #612 owner directive 2026-08-22: NO password. The ExecStart runs the
+        # gateway in --trust-access-header mode (Cloudflare Access email OTP at
+        # the edge), and NEVER validates a --cred credential.
+        unit = d.render_david_gateway_unit()
+        self.assertIn("--trust-access-header Cf-Access-Authenticated-User-Email",
+                      unit)
+        self.assertNotIn("--cred ", unit)                 # no credential flag
+        # The dead credential PATH must not appear as a live ExecStart argument.
+        self.assertNotIn("--cred %s" % w.WEBTERM_DAVID_CRED_PATH, unit)
+        # The prepended NOTE states the Access auth model explicitly.
+        self.assertIn("Cloudflare", unit)
+        self.assertIn("email one-time-PIN", unit)
 
     def test_gateway_after_points_at_david_ttyd_unit(self):
         unit = d.render_david_gateway_unit()
@@ -183,10 +196,27 @@ class TestDavidArtifactsWrite(unittest.TestCase):
             self.assertIn("webterm-david-inventory.json", launcher)
             self.assertNotIn("--inventory", launcher)
             self.assertIn("-p %d" % d.WEBTERM_DAVID_TTYD_PORT, launcher)
-            # The david credential realm was created with the david login.
-            cred = (secrets / "webterm_david_credential").read_text(
-                encoding="utf-8").strip()
-            self.assertTrue(cred.startswith("david:"))
+            # #612 owner directive: NO credential is provisioned any more
+            # (Cloudflare Access replaces the password) — the file is absent.
+            self.assertFalse((secrets / "webterm_david_credential").exists())
+
+    def test_write_artifacts_retires_a_pre_existing_credential(self):
+        # A subdev box that carried the OLD password credential must have it
+        # DELETED on the next provision (retire the dead `secret show` channel).
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            _claude, secrets = self._isolate(st, tmp)
+            secrets.mkdir(parents=True, exist_ok=True)
+            cred = secrets / "webterm_david_credential"
+            cred.write_text("david:oldpassword\n", encoding="utf-8")
+            self.assertTrue(cred.exists())
+            d._write_david_artifacts()
+            self.assertFalse(cred.exists())          # retired
+
+    def test_retire_credential_is_a_safe_noop_when_absent(self):
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            _claude, secrets = self._isolate(st, tmp)
+            # No credential file exists — retirement must return False, not raise.
+            self.assertFalse(d._retire_david_credential())
 
     def test_full_setup_when_ready_provisions_and_enables(self):
         calls = []
