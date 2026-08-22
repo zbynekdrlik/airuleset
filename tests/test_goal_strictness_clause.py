@@ -43,8 +43,11 @@ class TestGoalTemplatesCarryVerificationClause(TestCase):
             self.assertIn("as strictly as the first", line)
 
     def test_every_template_rejects_worker_claim_alone(self):
+        # #621 tightened "never from the worker's claim alone" -> "never the
+        # worker's claim alone" to reclaim cap headroom for the saturation
+        # clause; the worker-claim rejection is unchanged.
         for line in self.goal_lines():
-            self.assertIn("never from the worker", line)
+            self.assertIn("the worker's claim alone", line)
 
 
 if __name__ == "__main__":

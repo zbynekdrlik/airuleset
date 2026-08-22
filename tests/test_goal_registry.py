@@ -101,6 +101,27 @@ class TestClauseCoverage(TestCase):
             ids = gr.clause_ids(p)
             self.assertEqual(len(ids), len(set(ids)), p)
 
+    def test_profile_specific_load_bearing_clauses_are_required(self):
+        # the coverage guard must protect NON-shared load-bearing clauses too:
+        # full's prod-gate (approval-scope.md "never gate on events/prod" hardest
+        # rule) + parked, and the reduced review-watch/authority-ends.
+        self.assertIn("prod-gate", gr.REQUIRED_BY_PROFILE["full"])
+        self.assertIn("parked", gr.REQUIRED_BY_PROFILE["full"])
+        for p in ("branch-merge", "fork-no-merge"):
+            self.assertIn("review-watch", gr.REQUIRED_BY_PROFILE[p])
+            self.assertIn("authority-ends", gr.REQUIRED_BY_PROFILE[p])
+
+    def test_dropping_a_full_only_clause_is_a_red_coverage_result(self):
+        # deleting prod-gate from the registry must now be CAUGHT (it wasn't
+        # before REQUIRED_BY_PROFILE existed — the #621 review finding).
+        saved = list(gr.CLAUSES)
+        try:
+            gr.CLAUSES[:] = [c for c in gr.CLAUSES if c.id != "prod-gate"]
+            self.assertIn("prod-gate", gr.missing_required("full"))
+        finally:
+            gr.CLAUSES[:] = saved
+        self.assertEqual(gr.missing_required("full"), [])
+
 
 class TestSaturationDirectiveIsReal(TestCase):
     """Acceptance guard: "the template contains the word worktree" is NOT the
@@ -128,7 +149,8 @@ class TestSaturationReconcilesCompactBoundary(TestCase):
 
     def test_the_reconciled_pair_is_registered(self):
         self.assertEqual(gr.SATURATION_RECONCILES_COMPACT,
-                         ("saturation-core", "compact-boundary"))
+                         ("saturation-core", "saturation-delivery",
+                          "compact-boundary"))
 
     def test_compact_boundary_paces_one_per_turn_and_keeps_lanes(self):
         for p in gr.PROFILES:
@@ -227,6 +249,16 @@ class TestRenderIntoIsSurgical(TestCase):
         once = gr.render_into(skill_text())
         twice = gr.render_into(once)
         self.assertEqual(once, twice)
+
+    def test_render_into_cannot_fix_a_corrupted_prefix_and_drift_shows_it(self):
+        # if a /goal line's `STOP CONDITIONS` prefix is corrupted, _SHIPPED_RE
+        # skips the block, so render_into is a NO-OP for it and drift() still
+        # flags it — the guard `--write` relies on to avoid a false "in sync".
+        corrupted = skill_text().replace(
+            "/goal STOP CONDITIONS", "/goal STOMP CONDITIONS", 1)
+        self.assertNotEqual(corrupted, skill_text())
+        residual = gr.drift(gr.render_into(corrupted))
+        self.assertTrue(residual, "render_into silently 'fixed' a corrupted block")
 
     def test_render_into_makes_shipped_equal_render(self):
         rendered = gr.render_into(skill_text())

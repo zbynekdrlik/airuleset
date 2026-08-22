@@ -53,22 +53,35 @@ class Clause:
 
 
 # The reconciliation the owner asked to be VISIBLE in the registry, not buried
-# in prose: the saturation directive dispatches PARALLEL worktree lanes and
-# integrates SERIALLY one-per-turn; the compact-boundary clause paces exactly
-# ONE integration/hand-off per turn and states the parallel lanes keep building
-# meanwhile. Both clauses encode the SAME one-per-turn cadence, so they cannot
-# contradict. A test asserts `compact-boundary` carries the reconciliation marker.
-SATURATION_RECONCILES_COMPACT = ("saturation-core", "compact-boundary")
+# in prose: `saturation-core` is the PARALLEL-dispatch half (dispatch worktree
+# lanes to saturation, never one ticket per turn); `saturation-delivery` and
+# `compact-boundary` are the SERIAL half — delivery integrates returned branches
+# one-per-turn, and compact-boundary paces exactly ONE integration/hand-off per
+# turn while the parallel lanes keep building. So dispatch is parallel and
+# integration is serial one-per-turn; the clauses cannot contradict. Tests
+# assert compact-boundary carries the reconciliation marker and that the old
+# serializing "do NOT dispatch the next ... in the same turn" is gone.
+SATURATION_RECONCILES_COMPACT = ("saturation-core", "saturation-delivery",
+                                 "compact-boundary")
 
-# Clause KINDS every profile MUST carry (a missing one is a red coverage test —
-# the mechanical guard that prevents another silently-absent clause like the
-# saturation directive was for months, #621).
+# Clause KINDS a profile MUST carry (a missing one is a red coverage test — the
+# mechanical guard that prevents another silently-absent clause like the
+# saturation directive was for months, #621). `REQUIRED_CLAUSES` is the shared
+# base every profile carries; `REQUIRED_BY_PROFILE` adds the profile-specific
+# load-bearing clauses so a full-only clause (prod-gate — the approval-scope.md
+# "never gate on events/prod" hardest rule; parked) or a reduced-only clause
+# (review-watch, authority-ends) can never be silently dropped either.
 REQUIRED_CLAUSES = (
     "header", "stop-a", "stop-b-header", "obligation", "proof",
     "how-to-tell", "done-never", "cannot-tell", "produce-proof",
     "irreversible", "work-intro", "saturation-core", "saturation-delivery",
     "ask", "night", "bounce", "verify-sources", "compact-boundary",
 )
+REQUIRED_BY_PROFILE = {
+    "full": REQUIRED_CLAUSES + ("stream-note", "prod-gate", "parked"),
+    "branch-merge": REQUIRED_CLAUSES + ("review-watch", "authority-ends"),
+    "fork-no-merge": REQUIRED_CLAUSES + ("review-watch", "authority-ends"),
+}
 
 # The ORDERED clause registry. render(profile) walks this list, keeps the
 # clauses that profile carries, and joins their text with a single space.
@@ -130,7 +143,7 @@ CLAUSES = [
         "fork-no-merge": "While NEITHER holds, work the assigned backlog —",
     }),
     Clause("saturation-core", PROFILES,
-        "SATURATE, never one ticket per turn: refill PARALLEL `isolation:worktree` background autopilot-worker lanes to saturation, backing off only on a real resource signal;"),
+        "SATURATE, never one ticket per turn: refill PARALLEL `isolation:worktree` autopilot-worker lanes to saturation, backing off only on a resource signal;"),
     Clause("saturation-delivery", PROFILES, {
         "full": "integrate returned branches SERIALLY, ONE per turn under the integration mutex.",
         "branch-merge": "merge returned branches into the integration branch SERIALLY, ONE per turn under the integration mutex;",
@@ -149,7 +162,7 @@ CLAUSES = [
         "00:00–06:00 Europe/Bratislava: defer only while other tickets are workable; a NECESSARY question is asked even at night."),
     Clause("bounce", PROFILES, {
         "full": "Bounce lane: open tickets labeled prio:bounce jump the queue — every NEW batch seeds oldest-first (never preempting a running batch); a named nudge gets a one-line ACK + prio:bounce label, taken next turn, never worked inline.",
-        "branch-merge": "Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label, taken next turn, never worked inline.",
+        "branch-merge": "Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label next turn, never inline.",
         "fork-no-merge": "Bounce lane: my prio:bounce tickets seed each NEW batch oldest-first (never preempting a running one); a named nudge gets a one-line ACK + label (best-effort), taken next turn, never worked inline.",
     }),
     Clause("verify-sources", PROFILES, {
@@ -192,9 +205,11 @@ def over_budget(profile):
 
 
 def missing_required(profile):
-    """REQUIRED_CLAUSES this profile fails to carry (empty == fully covered)."""
+    """Required clauses this profile fails to carry (empty == fully covered) —
+    the shared base plus the profile's own load-bearing clauses."""
     have = set(clause_ids(profile))
-    return [c for c in REQUIRED_CLAUSES if c not in have]
+    required = REQUIRED_BY_PROFILE.get(profile, REQUIRED_CLAUSES)
+    return [c for c in required if c not in have]
 
 
 def inventory(profile):

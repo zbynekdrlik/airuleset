@@ -5951,11 +5951,27 @@ def cmd_goal_inventory(args):
     and --write reconcile the shipped /goal lines with the registry."""
     import goal_registry as gr
 
+    path = gr.skill_path()
+
     if args.write:
-        path = gr.skill_path()
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except FileNotFoundError:
+            print("goal-inventory: SKILL.md not found at %s" % path)
+            sys.exit(1)
         new = gr.render_into(text)
+        # render_into can only rewrite a block whose /goal line still starts
+        # with `STOP CONDITIONS`; if any block is left drifted, it could NOT be
+        # re-rendered (a corrupted prefix) — fail loudly instead of a false
+        # "in sync" (which --check would still flag).
+        residual = gr.drift(new)
+        if residual:
+            print("goal-inventory: could NOT re-render %d block(s) in %s — a "
+                  "/goal line's `STOP CONDITIONS` prefix is corrupted: %s"
+                  % (len(residual), gr.SKILL_REL,
+                     ", ".join(p for p, _, _ in residual)))
+            sys.exit(1)
         if new == text:
             print("goal-inventory: SKILL.md already in sync with the registry")
             return
@@ -5967,8 +5983,12 @@ def cmd_goal_inventory(args):
         return
 
     if args.check:
-        with open(gr.skill_path(), encoding="utf-8") as fh:
-            d = gr.drift(fh.read())
+        try:
+            with open(path, encoding="utf-8") as fh:
+                d = gr.drift(fh.read())
+        except FileNotFoundError:
+            print("goal-inventory: SKILL.md not found at %s" % path)
+            sys.exit(1)
         if d:
             print("goal-inventory: DRIFT — SKILL.md /goal lines differ from the "
                   "registry (run: airuleset.py goal-inventory --write):")
