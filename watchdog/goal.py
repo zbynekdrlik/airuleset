@@ -935,8 +935,16 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if request_ts is not None:
         age = _safe_age(now, request_ts)
         if age is not None and age > GOAL_REQUEST_MAX_AGE_S:
-            _log_goal_sync("SKIP expired sid=%s cwd=%s" % (sid, cwd))
-            if send_fn is not None and not dry_run:
+            _log_goal_sync("SKIP expired sid=%s cwd=%s origin=%s"
+                           % (sid, cwd, origin))
+            # #623-review -- SILENT expiry for the stale-rearm origin: the loop
+            # is ALIVE and armed (just carries an old condition), so the "arm
+            # failed, re-run /autopilot" ping is a false alarm. dark_watch
+            # re-detects staleness next sweep (bounded by the shared 24h/2 cap).
+            # Only dark-rearm / normal origins ping (a genuinely dead/undelivered
+            # arm). Still returns "expired" -> goal_sweep clears the request.
+            if (send_fn is not None and not dry_run
+                    and origin != _GOAL_STALE_REARM_ORIGIN):
                 from notify import stream_redirect
                 pid_for_owner = _compact._find_pane_for_session(
                     sid, cwd, run=run, projects_dir=projects_dir)
@@ -1029,8 +1037,19 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # already-current goal), and if so fall through to type -> a /goal
         # REPLACE. Every other origin drops as before.
         if origin == _GOAL_STALE_REARM_ORIGIN:
+            # #623-review -- RE-VERIFY with the SAME reach dark_watch used to
+            # DETECT (`seed_goal_marker`'s bounded reverse-scan), NOT the 4 MB
+            # tail `mark` above: CC writes the `Goal set:` marker ONCE at arm
+            # time, so a loop armed far back in a large (hundreds-of-MB) main
+            # transcript has its marker PAST the tail. The tail read would be
+            # None -> a genuinely still-stale loop would wrongly drop and never
+            # be delivered (record->drop churn under the cap, never re-armed) --
+            # exactly the long-running loops most likely to be stale after a
+            # template deploy. A fresh re-arm / clear always writes at EOF (in
+            # the tail), so this still catches a loop the user fixed meanwhile.
+            _soff, smark, _sst = watchdog.seed_goal_marker(tpath)
             verdict = _classify_armed_condition(
-                mark.get("payload") if isinstance(mark, dict) else None, text)
+                smark.get("payload") if isinstance(smark, dict) else None, text)
             if verdict != "stale":
                 _log_goal_sync("DROP stale-rearm-%s sid=%s cwd=%s"
                                % (verdict, sid, cwd))
@@ -1591,9 +1610,12 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
     text, authority = (rearm_fn or _default_rearm_fn)(cwd)
     if _classify_armed_condition(payload, text) != "stale":
         return None
-    pending = load_goal_requests(requests_path).get(sid)
-    if isinstance(pending, dict) and pending.get("origin") == _GOAL_STALE_REARM_ORIGIN:
-        return None                       # already queued -> goal_sweep delivers
+    # #623-review -- defer to ANY pending request (not just a stale-rearm): a
+    # pending self-callback / dark-rearm is already being delivered (and arms
+    # the SAME current template -> the loop becomes current), so never pile on
+    # or clobber it. This also covers the already-queued stale-rearm case.
+    if isinstance(load_goal_requests(requests_path).get(sid), dict):
+        return None
     open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
     fresh = cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S
     if not (isinstance(open_n, int) and open_n > 0 and fresh):

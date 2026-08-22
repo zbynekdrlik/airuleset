@@ -193,6 +193,19 @@ class TestStaleArmedRearmRecorded(unittest.TestCase):
         self.assertEqual(reqs["sess-stale-pend"]["ts"], 90000)
         self.assertFalse(any("recording re-arm" in ln for ln in logs), logs)
 
+    def test_defers_to_a_pending_request_of_any_origin(self):
+        # #623-review 🔵: a pending self-callback (user /autopilot) is already
+        # being delivered and arms the SAME current template -> the stale-rearm
+        # must never clobber it (nor pile on a pending dark-rearm).
+        reqs_path = self._dir() / "goal-requests.json"
+        goal.record_goal_request("sess-defer", self.CWD, _NEW_TEMPLATE,
+                                 "branch-merge", now=90000, path=reqs_path,
+                                 origin="self-callback")
+        reqs, _, logs, _ = self._sweep("sess-defer", _OLD_COND, reqs=reqs_path)
+        self.assertEqual(reqs["sess-defer"]["origin"], "self-callback",
+                         "a pending self-callback is never clobbered")
+        self.assertFalse(any("recording re-arm" in ln for ln in logs), logs)
+
     def test_attempt_cap_bounds_the_rearm(self):
         # SHARES the dark-rearm 24h/2 cap: after 2 records the sweep skips.
         state = {}
@@ -263,6 +276,65 @@ class TestDeliverStaleRearmReplaces(unittest.TestCase):
         word, tmux = self._deliver("sess-repl-4", _OLD_COND, recent=True)
         self.assertEqual(word, "skip:recent-human")
         self.assertEqual(tmux.sent, [], "never keystroke a human-active pane")
+
+    def test_replace_uses_seed_reach_when_marker_is_past_the_tail(self):
+        # #623-review 🟡: the stale marker is PAST the 4 MB tail
+        # (`scan_goal_markers` returns None) but findable by `seed_goal_marker`'s
+        # reverse-scan. The re-verify MUST use seed's reach, else a still-stale
+        # long-running loop (the ones most likely to be stale after a deploy)
+        # drops forever. Simulate the past-tail read by patching
+        # `scan_goal_markers` to None; `seed_goal_marker` still reads the file.
+        proj = self._dir()
+        sid = "sess-repl-seed"
+        _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: " + _OLD_COND,
+                           ts_epoch=500)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True)
+        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
+                            return_value=(False, "")), \
+             m.patch.object(wd, "scan_goal_markers", return_value=(0, None)):
+            word = goal.deliver_goal(
+                sid, self.CWD, _NEW_TEMPLATE, "branch-merge", run=tmux,
+                projects_dir=proj, now=100000, request_ts=100000,
+                sleep_fn=lambda s: None, origin="stale-rearm")
+        self.assertEqual(word, "sent",
+                         "seed_goal_marker's reach finds the past-tail stale marker")
+        self.assertEqual("".join(tmux.typed_texts()), _NEW_TEMPLATE)
+
+    def test_stale_rearm_expiry_is_silent_no_false_ping(self):
+        # #623-review 🟡: an ALIVE (just stale) loop must NOT get the "arm
+        # failed, re-run /autopilot" ping when its stale-rearm request expires.
+        proj = self._dir()
+        sid = "sess-exp-stale"
+        _write_marker_transcript(proj, self.CWD, sid)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP)
+        pings = []
+        word = goal.deliver_goal(
+            sid, self.CWD, _NEW_TEMPLATE, "branch-merge", run=tmux,
+            projects_dir=proj, now=100000 + goal.GOAL_REQUEST_MAX_AGE_S + 10,
+            request_ts=100000, send_fn=lambda mm, **k: pings.append(mm),
+            sleep_fn=lambda s: None, origin="stale-rearm")
+        self.assertEqual(word, "expired")
+        self.assertEqual(pings, [],
+                         "an alive stale loop gets NO false arm-failed ping")
+
+    def test_dark_rearm_expiry_still_pings(self):
+        # contrast: a dead-loop dark-rearm expiry DOES ping (unchanged).
+        proj = self._dir()
+        sid = "sess-exp-dark"
+        _write_marker_transcript(proj, self.CWD, sid)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP)
+        pings = []
+        word = goal.deliver_goal(
+            sid, self.CWD, "/goal x", "full", run=tmux, projects_dir=proj,
+            now=100000 + goal.GOAL_REQUEST_MAX_AGE_S + 10, request_ts=100000,
+            send_fn=lambda mm, **k: pings.append(mm), sleep_fn=lambda s: None,
+            origin="dark-rearm")
+        self.assertEqual(word, "expired")
+        self.assertEqual(len(pings), 1, "a dead-loop dark-rearm expiry pings")
 
     def test_drop_already_current_is_terminal_so_goal_sweep_clears_it(self):
         self.assertIn("drop:already-current", goal._GOAL_TERMINAL_WORDS)
