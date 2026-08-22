@@ -23,6 +23,9 @@ join byte-exact: each clause is a contiguous run of words, joined by one
 space, reproducing the original line exactly.
 """
 
+import os as _os
+import re as _re
+
 PROFILES = ("full", "branch-merge", "fork-no-merge")
 
 # Claude Code refuses a `/goal` condition longer than this and never arms
@@ -239,9 +242,6 @@ def inventory(profile):
 # heading followed by a fenced `/goal STOP CONDITIONS ...` line) mirrors
 # goal.py's own reader; the drift test locks that they agree on the shipped file.
 # --------------------------------------------------------------------------- #
-
-import os as _os
-import re as _re
 
 SKILL_REL = _os.path.join("skills", "autopilot", "SKILL.md")
 
