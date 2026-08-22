@@ -886,7 +886,7 @@ _GOAL_TERMINAL_WORDS = frozenset((
 
 def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                  now=None, state=None, request_ts=None, send_fn=None,
-                 dry_run=False, sleep_fn=None, logs=None, origin=None):
+                 dry_run=False, sleep_fn=None, logs=None, origin=None, out=None):
     """Evaluate every arm-delivery condition for `sid` ONCE and act. Called
     from BOTH `_goal_sync_attempt` (the CLI's own immediate synchronous
     attempt) AND `goal_sweep` (the periodic re-evaluation of a still-
@@ -920,7 +920,17 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     docstring for why that would be a structurally-always-refuses bug here,
     not a safety net. The #478 auto-re-arm origin (`origin=="dark-rearm"`)
     is the exception: it IS watchdog-initiated, so it DOES honour that gate
-    (`skip:recent-human`) exactly like the lane nudge."""
+    (`skip:recent-human`) exactly like the lane nudge.
+
+    `out` (#624, optional): when a dict is passed, `deliver_goal` records the
+    journal-facing observability the flat return word cannot carry -- `out["loc"]`
+    (the family-canonical `watchdog._pane_location` = the `montalu1:0.0` key every
+    sibling goal-family line uses, set once after pid resolution) and, where a skip
+    has detail beyond its word, `out["detail"]` (currently the recent-human
+    `presence marker Ns old` -- otherwise the word is self-complete). `goal_sweep`
+    reads these to render a loc-keyed, self-describing decision line; `out=None`
+    (the `_goal_sync_attempt` CLI caller) is byte-identical to before. The same
+    opt-in-out-dict shape #594 gave `send_verified`."""
     now = now if now is not None else time.time()
     if watchdog._owner_disabled("goal"):
         _log_goal_sync("SKIP disabled-by-owner sid=%s cwd=%s" % (sid, cwd))
@@ -978,6 +988,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if not pid:
         _log_goal_sync("SKIP no-pane sid=%s cwd=%s" % (sid, cwd))
         return "skip:no-pane"
+    # #624 -- surface the family loc for goal_sweep's journal line, from the
+    # SAME `_pane_location` every sibling goal line uses (no parallel derivation).
+    if out is not None:
+        out["loc"] = watchdog._pane_location(pid, run) or pid
     if watchdog.pane_in_mode(pid, run):
         _log_goal_sync("SKIP in-mode sid=%s cwd=%s" % (sid, cwd))
         return "skip:in-mode"
@@ -1018,6 +1032,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             if recent:
                 _log_goal_sync("SKIP recent-human(%s) sid=%s cwd=%s -> %s"
                                % (origin, sid, cwd, reason))
+                if out is not None:
+                    out["detail"] = reason   # #624 -- the `presence marker Ns old`
                 return "skip:recent-human"
     elif origin in (_GOAL_REARM_ORIGIN, _GOAL_STALE_REARM_ORIGIN):
         # #478 review MINOR — no active transcript (a delete/archive race
@@ -1201,52 +1217,62 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
         authority = entry.get("authority", "")
         if not text:
             # malformed/legacy entry -- nothing to type; drop rather than
-            # retry forever on an empty payload.
+            # retry forever on an empty payload. #624 -- name the drop, never
+            # a SILENT branch (no pane resolved -> the cwd-derived label).
+            logs.append("DROP (goal-sweep) %s sid=%s -> drop:malformed-empty "
+                        "(no text)" % (watchdog.project_label(cwd), sid))
             aborts.pop(sid, None)
             clear_goal_request(sid, path=requests_path)
             continue
         if handled is not None and sid in handled:
-            logs.append("SKIP (goal-sweep) sid=%s -> handled this sweep already"
-                        % sid)
+            logs.append("SKIP (goal-sweep) %s sid=%s -> handled this sweep already"
+                        % (watchdog.project_label(cwd), sid))
             continue
         if dry_run:
-            logs.append("DRY-RUN goal-sweep would evaluate sid=%s" % sid)
+            logs.append("DRY-RUN goal-sweep %s would evaluate sid=%s"
+                        % (watchdog.project_label(cwd), sid))
             continue
         # a fresh per-request log list so the stash-abort REASON is derivable
         # (deliver_goal returns `skip:stash-abort-slot-occupied` only for the
         # slot-occupied livelock, never a transient abort).
         call_logs = []
+        # #624 -- `out` carries deliver_goal's family loc + skip detail back for
+        # a loc-keyed, self-describing journal line (falls back to the cwd label
+        # for an early return that never resolved a pane).
+        _out = {}
         word = deliver_goal(sid, cwd, text, authority, run=run,
                             projects_dir=projects_dir, now=now, state=state,
                             request_ts=entry.get("ts"), send_fn=send_fn,
                             dry_run=dry_run, sleep_fn=sleep_fn,
-                            origin=entry.get("origin"), logs=call_logs)
+                            origin=entry.get("origin"), logs=call_logs, out=_out)
+        loc = _out.get("loc") or watchdog.project_label(cwd)
+        dsuf = (" (%s)" % _out["detail"]) if _out.get("detail") else ""
         prior_aborts = aborts.get(sid, 0)
         if word in _GOAL_TERMINAL_WORDS:
             aborts.pop(sid, None)
             clear_goal_request(sid, path=requests_path)
         if word == "sent":
-            logs.append("OK (goal-sweep) sid=%s -> sent" % sid)
+            logs.append("OK (goal-sweep) %s sid=%s -> sent" % (loc, sid))
             if handled is not None:
                 handled.add(sid)
         elif word == "expired":
             # #566 -- a request must not lapse in SILENCE while its delivery was
             # provably stuck by our own state: name the blocking state.
             if prior_aborts >= GOAL_STASH_ABORT_LIVELOCK:
-                logs.append("LAPSE (goal-sweep) sid=%s (age > cap, discarded; "
+                logs.append("LAPSE (goal-sweep) %s sid=%s (age > cap, discarded; "
                             "blocked %d sweeps on stash-abort: slot occupied)"
-                            % (sid, prior_aborts))
+                            % (loc, sid, prior_aborts))
             else:
-                logs.append("LAPSE (goal-sweep) sid=%s (age > cap, discarded)"
-                            % sid)
+                logs.append("LAPSE (goal-sweep) %s sid=%s (age > cap, discarded)"
+                            % (loc, sid))
         elif word == "skip:stash-abort-slot-occupied":
             # #566 -- count the identical livelock and, at the threshold, ORDER
             # owned janitor recovery (job 9 is not budget-deferred like job 20),
             # so the stale own stash slot is resolved BEFORE the age cap lapses.
             n = prior_aborts + 1
             aborts[sid] = n
-            logs.append("SKIP (goal-sweep) sid=%s -> %s (%d/%d)"
-                        % (sid, word, n, GOAL_STASH_ABORT_LIVELOCK))
+            logs.append("SKIP (goal-sweep) %s sid=%s -> %s (%d/%d)"
+                        % (loc, sid, word, n, GOAL_STASH_ABORT_LIVELOCK))
             if n >= GOAL_STASH_ABORT_LIVELOCK:
                 logs += _resolve_stash_abort_livelock(
                     sid, cwd, run, projects_dir, state, now, send_fn,
@@ -1255,7 +1281,8 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
                     handled.add(sid)
         else:
             aborts.pop(sid, None)
-            logs.append("SKIP (goal-sweep) sid=%s -> %s" % (sid, word))
+            logs.append("SKIP (goal-sweep) %s sid=%s -> %s%s"
+                        % (loc, sid, word, dsuf))
     return logs
 
 
