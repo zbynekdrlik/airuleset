@@ -422,6 +422,8 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
     TMUX_CONF,
     TMUX_HISTORY_LIMIT,
     TMUX_DEFAULT_SIZE,
+    TMUX_WINDOW_SIZE,
+    _MIN_WINDOW_SIZE_MANUAL_VERSION,
     TMUX_MARK_START,
     TMUX_MARK_END,
     TMUX_SCROLLBACK_KEYBINDS,
@@ -436,6 +438,8 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
     SUBDEV_ADMIN_IDENTITY,
     _tmux_popup_bind_argv,
     _tmux_conf_quote,
+    _parse_tmux_version,
+    _tmux_supports_window_size_manual,
     render_tmux_history_block,
     _clean_tmux_block_spans,
     _default_tmux_run,
@@ -964,21 +968,22 @@ def cmd_install(args):
     # resize from a different-sized terminal, not just scrollback rotation.
     # #236 originally also shipped `window-size manual`; #241 removed it
     # (it crashes tmux 3.4 at conf-parse startup); #586 RESTORED it
-    # version-gated + conf-only; #613 REOPEN removed it ENTIRELY -- the manual
-    # pin was itself the persisting Ctrl+B W dead border (it pins every window
-    # to 176x50, so a larger browser client always sees a dead border), so the
-    # conf ships NO window-size line (tmux's default `latest` governs) and a
-    # running server carrying a stale `manual` is self-healed live by
-    # `set-option -gu window-size`. history-limit is live-applied to any RUNNING
-    # tmux server (#235's proven-safe scope); default-size is conf-only and
-    # takes effect for the next server/session (see apply_tmux_history_limit's
-    # own docstring, and the module-level comment above
-    # render_tmux_history_block, for the full history).
+    # version-gated + conf-only; #613 REOPEN removed it (mis-targeting the browser
+    # client); #613 REOPEN-2 (owner directive 2026-08-22) RESTORES it version-
+    # gated + conf-only again -- the owner's fixed-size invariant (`manual` pins
+    # every window to default-size so no client resizes another's window; the
+    # browser's OWN appearance is solved on the browser side). history-limit is
+    # live-applied to any RUNNING tmux server (#235's proven-safe scope);
+    # window-size + default-size are conf-only and take effect for the next
+    # server/session (see apply_tmux_history_limit's own docstring, and the
+    # module-level comment above render_tmux_history_block, for the full history).
     try:
         tmux_changed = apply_tmux_history_limit()
+        _ws = ("window-size manual (tmux>=3.5 only)"
+               if _tmux_supports_window_size_manual(_default_tmux_run)
+               else "no window-size (tmux<3.5 -- would crash 3.4)")
         tmux_desc = (f"history-limit {TMUX_HISTORY_LIMIT}, "
-                     f"default-size {TMUX_DEFAULT_SIZE} "
-                     f"(no window-size -- tmux default latest, #613)")
+                     f"default-size {TMUX_DEFAULT_SIZE}, {_ws} (#613)")
         if tmux_changed:
             print(f"  Updated:   {TMUX_CONF} ({tmux_desc})")
         else:

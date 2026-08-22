@@ -71,6 +71,13 @@ WEBTERM_GATEWAY_PORT = 8080
 # own session is named after its unix user (#264 whoami auto-attach convention).
 OWNER_GROUP = "zbynek"
 WEBTERM_LOGIN_USER = "zbynek"
+# #613 REOPEN-2: a tmux CLIENT of C x R rows shows an (R - status_rows)-row
+# WINDOW; the fleet runs the default 1-row status line (airuleset never sets
+# `status off`), and the owner's live Windows-Terminal client is 176x51 -> a
+# 176x50 window (== TMUX_DEFAULT_SIZE) + 1 status row. The browser xterm is
+# force-fit to that SAME fixed CLIENT grid (see _webterm_term_grid / the
+# dashboard fitFixedGrid JS) so it is a twin of the owner's WT.
+WEBTERM_STATUS_ROWS = 1
 
 WEBTERM_INVENTORY_PATH = CLAUDE_DIR / "webterm-inventory.json"
 # The dashboard index the gateway serves at `/` for an authed session.
@@ -177,26 +184,26 @@ def webterm_inventory(profile=profiles.OWNER):
 #      shrinks/blackens the owner's WT view). Those overrides are REMOVED.
 #      #586 then pinned the window fleet-wide (`window-size manual` +
 #      `default-size 176x50`) AND made the clone `-f ignore-size` so the webterm
-#      could never influence sizing. #613 REOPEN proved that this pair is itself
-#      the PERSISTING dead border: pinning every window to 176x50 (or excluding
-#      the clone from the size calc) means a browser client LARGER than the SSH
-#      client (the owner runs the browser fullscreen) always sees a dead dotted
-#      border after Ctrl+B W. So the clone now attaches PLAIN (no ignore-size),
-#      and cli_tmux_provisioning drops the `window-size manual` pin (tmux's own
-#      `latest` governs + a live self-heal). The clone then sizes the windows it
-#      navigates to, to its own grid → full render (verified live in a real
-#      browser). The tradeoff — a window BOTH clients currently view sizes to
-#      whoever most recently pressed a key, self-healing on the SSH client's
-#      next keystroke — is the inherent tmux multi-client behaviour; global
-#      window-size policy stays cli_tmux_provisioning's concern, not this
-#      script's.
+#      could never influence sizing. #613 REOPEN removed both on a theory that
+#      measured the BROWSER client (wrong client) -- switching to `latest` let a
+#      SMALLER browser re-pin the owner's real windows, so his larger Windows
+#      Terminal was left rendering a DARK unused region (his SURFACE; the browser
+#      the CAUSE). #613 REOPEN-2 (owner directive 2026-08-22) RESTORES the
+#      fixed-size invariant: `window-size manual` + `default-size 176x50`
+#      (cli_tmux_provisioning) pins every window regardless of any client, and
+#      this clone re-attaches with `-f ignore-size` so a box still running the
+#      first-reopen `latest` server is fixed immediately (no restart). No client
+#      resizes another's window -- no "resizovanie hore-dole". The browser's OWN
+#      appearance at the fixed grid (no dark area) is solved on the BROWSER side
+#      (the dashboard fit-to-fixed-grid JS), never by resizing tmux.
 #   2. resolve the base session to JOIN: exact `=$P` -> group survivor -> the
 #      single existing session -> else create `$P` fresh;
 #   3. an existing base is joined via a THROWAWAY GROUPED clone: created
 #      DETACHED (`new-session -d -t <base> -s <base>-web-$$`), armed with a
 #      per-session `client-attached` destroy-unattached hook + `mouse on`
-#      (#615, session-scoped), then attached PLAIN (`attach-session -t <clone>`,
-#      #613 REOPEN — no ignore-size) — an independent VIEW onto the same
+#      (#615, session-scoped), then attached with `-f ignore-size`
+#      (`attach-session -t <clone> -f ignore-size`, #613 REOPEN-2) — an
+#      independent VIEW onto the same
 #      windows, never a mirror, NEVER `attach -d` (the only verb that detaches
 #      other clients). The clone is killed on disconnect (trap, EXIT + signals)
 #      AND self-destructs on its own client-detach via the per-session
@@ -239,10 +246,9 @@ _ATTACH_BODY = (
     # (2) `set-option`/`set-hook` `-t` do NOT accept the `=` exact-match anchor
     # (only has-session/kill-session do), so `$C` is targeted bare — safe because
     # the exact-named session was just created, so prefix resolution matches it
-    # exactly. #613 REOPEN: `-f ignore-size` (added by #586) is GONE from the
-    # attach — it was the persisting dead-border cause (an ignore-size client
-    # is excluded from window-size calc, so it can never grow a window it views
-    # to its own grid; see the plain `attach-session` below). The attach is
+    # exactly. #613 REOPEN-2: the attach carries `-f ignore-size` (#586, restored
+    # -- see the header comment + the `attach-session` line below for why: it
+    # keeps a smaller browser from shrinking the owner's window). The attach is
     # NOT `exec`ed, so the EXIT/HUP trap still fires to kill the clone (the
     # per-session `on` is the belt-and-suspenders for a trap that never fires).
     # TRANSITION RESIDUAL (#591-review B1, documented not guarded): on a target
@@ -265,13 +271,22 @@ _ATTACH_BODY = (
     # history is otherwise unreachable — the wheel just spews raw `^[[A`
     # escapes into the shell). NEVER a global `set-option -g mouse on`.
     'tmux set-option -t "$C" mouse on; '
-    # #613 REOPEN: NO `-f ignore-size`. The flag excluded the webterm client
-    # from tmux's window-size calc, so it never grew a window it viewed to its
-    # own (larger browser) grid — the window stayed at the SSH client's 176x50
-    # and the browser saw a dead dotted border after Ctrl+B W (the persisting
-    # symptom). Attaching plain lets the clone size the windows it navigates
-    # to, to its own grid → full render (verified live in a real browser).
-    'tmux attach-session -t "$C"; '
+    # #613 REOPEN-2 (owner directive 2026-08-22): `-f ignore-size` is RESTORED.
+    # The owner's invariant is a FIXED terminal size for every client so no
+    # client resizes another's window. `-f ignore-size` EXCLUDES the webterm
+    # clone from tmux's window-size calc, so a smaller browser client can never
+    # shrink the owner's Windows-Terminal window (which then rendered a dark
+    # unused region -- his SURFACE; the browser is the CAUSE). This bridges a box
+    # still RUNNING the first-reopen `latest` server immediately, and is belt-and-
+    # suspenders under the restored conf `window-size manual` (which already pins
+    # every window regardless of any client). The browser's OWN appearance (it
+    # must show the fixed 176x50 window filling its viewport, not a dead region)
+    # is solved on the BROWSER side (the dashboard fit-to-fixed-grid JS below),
+    # never by letting the browser resize tmux. Proven live (isolated tmux 3.7b +
+    # pty clients): under `latest`+plain-clone a 160x46 webterm shrinks the owner's
+    # window to 160x45 (owner DARK); with `-f ignore-size` the owner's window
+    # stays 176x50 (full) at every attach + window-switch from both sides.
+    'tmux attach-session -t "$C" -f ignore-size; '
     'exit; '
     'fi; '
     'exec tmux new-session -A -s "$P"'
@@ -370,11 +385,14 @@ def connect_main(argv, inventory_path=None):
 # (session cookie) covers every tab — no per-tab auth. #585 originally
 # disconnected every hidden tab so it could not shrink the shared window;
 # #586's preload-all (every tab kept connected, see `preloadAll()`) SUPERSEDED
-# that, and #613 REOPEN removed the window-size pin entirely. Under tmux's
-# default `latest` the shared window sizes to the most-recent-KEYSTROKE client
-# (streaming output / a fresh attach does NOT re-pin it, proven live), and a
-# hidden preloaded clone sends no keystrokes — so keeping hidden tabs connected
-# is safe without any server-side size pin.
+# that. #613 REOPEN-2 (owner directive 2026-08-22): the tmux side pins a FIXED
+# window size (`window-size manual` + `default-size 176x50`) and the clone is
+# `-f ignore-size`, so no tab (hidden or active) can EVER resize a window --
+# keeping every tab connected is unconditionally safe. On the BROWSER side, each
+# ttyd xterm is forced to the owner's fixed grid (176 cols x 51 rows = the 176x50
+# window + 1 status row) and its font is scaled to fill the viewport (see
+# `fitFixedGrid` in the page JS), so the fixed window fills the browser with no
+# dark unused region and without the browser ever influencing tmux sizing.
 # --------------------------------------------------------------------------- #
 
 def _html_escape(s):
@@ -440,12 +458,27 @@ def _json_for_script(obj):
             .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
 
 
-def render_dashboard_html(inventory, ttyd_base=None):
+def _webterm_term_grid():
+    """The owner's FIXED terminal CLIENT grid `(cols, rows)` the browser xterm is
+    force-fit to (#613 REOPEN-2). Derived from the tmux WINDOW size
+    (cli_tmux_provisioning.TMUX_DEFAULT_SIZE, e.g. `176x50`) + WEBTERM_STATUS_ROWS
+    status rows -- NOT a duplicated literal, so it can never drift from the conf's
+    `default-size`. Lazy import so the connect path (connect_main) stays
+    import-light -- this is only ever called at dashboard render (install time)."""
+    from cli_tmux_provisioning import TMUX_DEFAULT_SIZE
+    w, h = (int(x) for x in TMUX_DEFAULT_SIZE.lower().split("x"))
+    return (w, h + WEBTERM_STATUS_ROWS)
+
+
+def render_dashboard_html(inventory, ttyd_base=None, term_grid=None):
     """The single-page tabbed terminal UI. `ttyd_base` is the SAME-ORIGIN ttyd
     base path under the #584 gateway (`/t`); the page's JS builds each tab's
     iframe src as `<ttyd_base>/?arg=<id>` on first activation — same-origin, so
-    the per-iframe Ctrl+Alt+N forwarder works while typing."""
+    the per-iframe Ctrl+Alt+N forwarder works while typing. `term_grid` is the
+    fixed (cols, rows) client grid the browser xterm is force-fit to (#613
+    REOPEN-2, defaults to `_webterm_term_grid()` = the owner's fixed terminal)."""
     ttyd_base = (ttyd_base or "").rstrip("/")
+    term_cols, term_rows = term_grid or _webterm_term_grid()
     tabs = _tab_sessions(inventory)
 
     def _tab_button(i, t):
@@ -459,7 +492,8 @@ def render_dashboard_html(inventory, ttyd_base=None):
                 % (i, _html_escape(t["title"]), ordinal, _html_escape(t["alias"])))
 
     buttons = "\n".join(_tab_button(i, t) for i, t in enumerate(tabs))
-    cfg = {"ttyd_base": ttyd_base, "sessions": tabs}
+    cfg = {"ttyd_base": ttyd_base, "sessions": tabs,
+           "term_cols": term_cols, "term_rows": term_rows}
     subst = {"@@COUNT@@": str(len(tabs)), "@@BUTTONS@@": buttons,
              "@@CFG_JSON@@": _json_for_script(cfg)}
     # SINGLE PASS over the TEMPLATE — inserted content (an inventory label in a
@@ -541,12 +575,12 @@ function preloadAll() {                     // #586: connect EVERY tab at login.
   CFG.sessions.forEach((s, i) => makeFrame(i, s));   // disconnect-on-hide, which made switching
 }                                           // slow (a reconnect each time) AND fired ttyd's own
                                             // beforeunload ("Leave site?") on every tab click.
-                                            // #613 REOPEN: no server-side size pin any more (tmux
-                                            // default `latest`). A hidden-but-still-connected tab is
-                                            // safe because it sends no KEYSTROKES, and only a
-                                            // keystroke re-pins the shared window under `latest`
-                                            // (streaming output / a fresh attach does not) — proven
-                                            // live — so a hidden clone can never shrink the view.
+                                            // #613 REOPEN-2: the tmux window is FIXED (window-size
+                                            // manual + default-size 176x50) and the clone is
+                                            // -f ignore-size, so NO tab — hidden or active — can ever
+                                            // resize a window; keeping every tab connected is
+                                            // unconditionally safe. Each ttyd xterm is force-fit to the
+                                            // fixed grid on the browser side (applyFixedGrid).
 function hasLiveTerminal() {                // gate for the beforeunload close-confirm
   for (const k in made) if (made[k].dataset.live === '1') return true;
   return false;
@@ -570,6 +604,7 @@ function activate(idx) {
     if (on) t.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
   });
   current = idx;
+  applyFixedGrid(made[idx]);                 // #613 REOPEN-2: fit the now-VISIBLE tab
 }
 function cycle(delta) {                    // step to prev/next session, wrapping both ways
   const n = CFG.sessions.length;
@@ -605,6 +640,71 @@ function attachForwarder(f) {
     const w = f.contentWindow;
     if (w) w.addEventListener('keydown', onHotkey, true);
   } catch (err) { /* never same-origin under the gateway; switching stays alive */ }
+}
+// #613 REOPEN-2: force each ttyd xterm to the owner's FIXED client grid
+// (CFG.term_cols x CFG.term_rows = the fixed 176x50 tmux window + 1 status row)
+// and scale the font so that grid FILLS the iframe viewport, centred. The tmux
+// window is a FIXED size (window-size manual) and the clone is -f ignore-size,
+// so the browser NEVER resizes tmux; this only makes the browser SHOW the fixed
+// window filling its viewport instead of a dark unused region. ttyd 1.7.4
+// exposes the xterm Terminal as `window.term` in each same-origin iframe; we
+// clamp term.resize so ttyd's own FitAddon can never change the grid, then
+// scale term.options.fontSize (crisp re-render, unlike a blurry CSS transform).
+// Verified live against real ttyd + headless Chrome: grid forced 176x51, no
+// dead dotted region, status bar full width.
+function fitFixedGrid(win) {
+  const term = win && win.term, cols = CFG.term_cols, rows = CFG.term_rows;
+  if (!term || !cols || !rows) return false;   // ttyd not connected yet -> retry
+  const doc = win.document;
+  if (!term.__wtClamped) {                      // clamp resize -> defeat ttyd's FitAddon
+    const real = term.resize.bind(term);
+    term.resize = () => real(cols, rows);
+    term.__wtClamped = true;
+  }
+  try { term.resize(cols, rows); } catch (e) { return false; }
+  const bg = (term.options.theme && term.options.theme.background) || '#0d1117';
+  if (!doc.getElementById('wt-fit-style')) {    // centre + letterbox = terminal bg
+    const st = doc.createElement('style');
+    st.id = 'wt-fit-style';
+    st.textContent =
+      'html,body{width:100%;height:100%;margin:0;overflow:hidden;background:' + bg + ';}' +
+      '#terminal-container{position:absolute!important;inset:0!important;display:flex!important;' +
+      'align-items:center!important;justify-content:center!important;background:' + bg + ';}' +
+      '#terminal-container .xterm{position:static!important;}';
+    doc.head.appendChild(st);
+  }
+  const screenEl = () => doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
+  const el = screenEl();
+  if (!el) return false;                        // xterm not painted yet -> retry
+  const r = el.getBoundingClientRect();
+  const availW = win.innerWidth, availH = win.innerHeight;
+  if (!r.width || !r.height || !availW || !availH) return false;  // hidden/0 -> retry
+  const F0 = term.options.fontSize || 13;
+  let F = Math.max(6, Math.min(40, Math.floor(F0 * Math.min(availW / r.width, availH / r.height))));
+  term.options.fontSize = F;
+  for (let i = 0; i < 8 && F > 6; i++) {        // bounded shrink so the grid never overflows
+    const rr = (screenEl() || el).getBoundingClientRect();
+    if (rr.width <= availW + 1 && rr.height <= availH + 1) break;
+    term.options.fontSize = --F;
+  }
+  return true;
+}
+function applyFixedGrid(f) {                     // poll for window.term, fit, then watch resize
+  if (!f) return;
+  const win = f.contentWindow;
+  if (!win) return;
+  let tries = 0;
+  const poll = () => {
+    if (fitFixedGrid(win)) {
+      if (!win.__wtResize) {                     // re-fit when the browser window resizes
+        win.__wtResize = true;
+        try { win.addEventListener('resize', () => fitFixedGrid(win)); } catch (e) {}
+      }
+      return;
+    }
+    if (++tries < 100) setTimeout(poll, 100);    // ttyd connects async after iframe load
+  };
+  poll();
 }
 document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
