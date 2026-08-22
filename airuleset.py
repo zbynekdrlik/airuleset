@@ -5918,6 +5918,24 @@ def main():
                            help="Registry file path (default: the repo's "
                                 "projects-registry.json)")
 
+    p_goalinv = sub.add_parser(
+        "goal-inventory",
+        help="Inventory the /goal autopilot condition COMPOSED from goal_registry.py "
+             "(#621) — per profile: which clauses it carries, the rendered length, "
+             "and the remaining char budget; --check drift vs SKILL.md, --write "
+             "re-renders the shipped /goal lines from the registry")
+    p_goalinv.add_argument(
+        "--profile", choices=["full", "branch-merge", "fork-no-merge"], default=None,
+        help="Limit to one authority profile (also prints its per-clause breakdown)")
+    p_goalinv.add_argument(
+        "--check", action="store_true",
+        help="Verify SKILL.md's /goal lines equal render(registry); exit 1 on drift")
+    p_goalinv.add_argument(
+        "--write", action="store_true",
+        help="Re-render SKILL.md's /goal lines from the registry (regeneration)")
+    p_goalinv.add_argument(
+        "--json", action="store_true", help="Print the inventory as JSON")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -5925,6 +5943,62 @@ def main():
         sys.exit(1)
 
     commands[args.command](args)
+
+
+def cmd_goal_inventory(args):
+    """Mechanical answer to "which /goal solves what and what does it contain"
+    (#621): reads the composed goal_registry.py, never SKILL.md's prose. --check
+    and --write reconcile the shipped /goal lines with the registry."""
+    import goal_registry as gr
+
+    if args.write:
+        path = gr.skill_path()
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        new = gr.render_into(text)
+        if new == text:
+            print("goal-inventory: SKILL.md already in sync with the registry")
+            return
+        changed = [p for p, _, _ in gr.drift(text)]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(new)
+        print("goal-inventory: re-rendered %d /goal line(s) in %s (%s)"
+              % (len(changed), gr.SKILL_REL, ", ".join(changed)))
+        return
+
+    if args.check:
+        with open(gr.skill_path(), encoding="utf-8") as fh:
+            d = gr.drift(fh.read())
+        if d:
+            print("goal-inventory: DRIFT — SKILL.md /goal lines differ from the "
+                  "registry (run: airuleset.py goal-inventory --write):")
+            for profile, _got, _exp in d:
+                print("  %-14s shipped != render(registry)" % profile)
+            sys.exit(1)
+        print("goal-inventory: SKILL.md matches the registry (%d profiles)"
+              % len(gr.PROFILES))
+        return
+
+    profiles = [args.profile] if args.profile else list(gr.PROFILES)
+
+    if args.json:
+        data = (gr.inventory(profiles[0]) if args.profile
+                else [gr.inventory(p) for p in profiles])
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return
+
+    for profile in profiles:
+        inv = gr.inventory(profile)
+        flag = "  ** OVER BUDGET **" if inv["over_budget"] else ""
+        print("%-14s %d/%d chars  headroom %d  %d clauses%s"
+              % (profile, inv["length"], inv["cap"], inv["headroom"],
+                 inv["clause_count"], flag))
+        if inv["missing_required"]:
+            print("  MISSING REQUIRED CLAUSE(S): %s"
+                  % ", ".join(inv["missing_required"]))
+        if args.profile:
+            for clause in inv["clauses"]:
+                print("    %-22s %4d" % (clause["id"], clause["len"]))
 
 
 # Command dispatch table (module-level so tests can assert registration).
@@ -5960,6 +6034,7 @@ SUBCOMMANDS = {
     "gk-request": cmd_gk_request,
     "autopilot-lock": cmd_autopilot_lock,
     "onboard-project": cmd_onboard_project,
+    "goal-inventory": cmd_goal_inventory,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

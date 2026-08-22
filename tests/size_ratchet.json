@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 5969,
+    "airuleset.py": 6044,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 99,
@@ -283,7 +283,7 @@
     "airuleset.py::_notify_run_card": 288,
     "airuleset.py::cmd_install": 519,
     "airuleset.py::cmd_notify": 320,
-    "airuleset.py::main": 620,
+    "airuleset.py::main": 638,
     "cli_remote.py::cmd_push": 389,
     "cli_vault.py::cmd_secret": 228,
     "cli_worktree_sweep.py::purge_merged_lane_targets": 219,
