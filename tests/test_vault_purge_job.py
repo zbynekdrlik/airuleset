@@ -235,7 +235,13 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # comment-handoff pass's own wired=on fetch seam), so the
                # signature-lock anchor's LAST line moved (the #504/#547/#551
                # re-pin-on-every-signature-change discipline).
-               "             gkorphan_fetch=None, gkorphan_handoff_fetch=None):")
+               # #616 re-pin: release_state_fetch=None (job 20's release-gap
+               # rider seam) was appended on a NEW trailing line after
+               # gkorphan_handoff_fetch=None, so the closing `):` moved off that
+               # line again; the anchor's LAST line grew, the mutation target
+               # vault_purge=None is untouched.
+               "             gkorphan_fetch=None, gkorphan_handoff_fetch=None,\n"
+               "             release_state_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

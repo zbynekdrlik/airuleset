@@ -4067,6 +4067,125 @@ def _watchdog_i_members_fetch(cwd):
     return _parse_i_audit_lines(r.stdout or "")
 
 
+def _parse_origin_slug(url):
+    """owner/name from a git remote URL, or None. Pure + testable (#616). Handles
+    the https form (`https://github.com/owner/name[.git]`), the scp form
+    (`git@github.com:owner/name[.git]`) and the ssh-url form
+    (`ssh://git@github.com/owner/name[.git]`) by stripping the `.git` tail,
+    folding the scp `:` into `/`, and taking the last two path components."""
+    if not isinstance(url, str):
+        return None
+    u = url.strip()
+    if not u:
+        return None
+    if u.endswith(".git"):
+        u = u[:-4]
+    parts = [p for p in u.replace(":", "/").split("/") if p]
+    if len(parts) < 2:
+        return None
+    owner, name = parts[-2], parts[-1]
+    if not owner or not name:
+        return None
+    return "%s/%s" % (owner, name)
+
+
+def _watchdog_release_state_fetch(cwd):
+    """#616 — the release-train state for the repo at `cwd`:
+    `{"ahead": <integration commits ahead of prod>, "in_flight": <bool>}`, or
+    None on any failure/refusal (undetermined -> the job-20 release-gap rider
+    fails safe to no-nudge). This RAW fetch is uncached; the caller reads it
+    through `release_gap._cached_release_state` (a per-repo TTL cache, the sibling
+    of `_cached_ops_wait`) so it fires at most once per repo per TTL, never every
+    sweep per pane. Wired HERE like every network call so run_once's unit tests
+    stay network-free.
+
+    Repo slug comes from the LOCAL `remote.origin.url` (no network). The gap is
+    read from GitHub (`gh api .../compare/{prod}...{integration} .ahead_by`) so a
+    stale local ref never mis-measures it; a repo with no integration branch 404s
+    -> None -> the rider skips (a 2-branch repo simply never nudges). When there
+    IS a gap, in-flight is TRUE iff an open release PR (base staging|prod) exists
+    OR a deploy/release workflow is running/queued (on staging|prod, or named
+    deploy/release). Branch names default develop/staging/main, env-overridable
+    (AIRULESET_RELEASE_*), read at call time (#574 pattern)."""
+    import subprocess
+    integ = os.environ.get("AIRULESET_RELEASE_INTEGRATION_BRANCH", "develop")
+    prod = os.environ.get("AIRULESET_RELEASE_PROD_BRANCH", "main")
+    staging = os.environ.get("AIRULESET_RELEASE_STAGING_BRANCH", "staging")
+    try:
+        r = subprocess.run(
+            ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    repo = _parse_origin_slug(r.stdout or "")
+    if not repo:
+        return None
+    # (1) gap: integration ahead of prod. A 404 (no integration branch) or any
+    # other non-zero -> None (undetermined -> skip).
+    try:
+        r = subprocess.run(
+            ["gh", "api", "repos/%s/compare/%s...%s" % (repo, prod, integ),
+             "--jq", ".ahead_by"],
+            cwd=cwd, capture_output=True, text=True, timeout=20)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        ahead = int((r.stdout or "").strip())
+    except (ValueError, TypeError):
+        return None
+    if ahead <= 0:
+        return {"ahead": 0, "in_flight": False}   # drained -> 1 call, short-circuit
+    # (2) in-flight: an open release PR whose base is staging or prod.
+    import json
+    in_flight = False
+    try:
+        r = subprocess.run(
+            ["gh", "pr", "list", "--repo", repo, "--state", "open",
+             "--json", "baseRefName"],
+            capture_output=True, text=True, timeout=20)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        prs = json.loads(r.stdout or "[]")
+    except (ValueError, TypeError):
+        return None
+    if any(isinstance(p, dict) and p.get("baseRefName") in (staging, prod)
+           for p in prs):
+        in_flight = True
+    # (3) a running/queued deploy or release workflow (only if no release PR).
+    if not in_flight:
+        try:
+            r = subprocess.run(
+                ["gh", "run", "list", "--repo", repo, "-L", "20",
+                 "--json", "status,headBranch,name"],
+                capture_output=True, text=True, timeout=20)
+        except Exception:
+            return None
+        if r.returncode != 0:
+            return None
+        try:
+            runs = json.loads(r.stdout or "[]")
+        except (ValueError, TypeError):
+            return None
+        for run_ in runs:
+            if not isinstance(run_, dict):
+                continue
+            if run_.get("status") not in ("in_progress", "queued"):
+                continue
+            nm = (run_.get("name") or "").lower()
+            if (run_.get("headBranch") in (staging, prod)
+                    or "deploy" in nm or "release" in nm):
+                in_flight = True
+                break
+    return {"ahead": ahead, "in_flight": in_flight}
+
+
 def _watchdog_vault_purge():
     """Job 29's credential-store sweep (#144) — the injection point so run_once
     never imports the store (or touches a real `~/.claude/secrets/`) in a test.
@@ -4336,6 +4455,13 @@ def cmd_watchdog(args):
                     # `_cached_ops_wait`), so the `--audit` subprocess fires at
                     # most once per repo per TTL and only when actually nudging.
                     i_members_fetch=_watchdog_i_members_fetch,
+                    # #616 — job 20's release-gap rider reads the release-train
+                    # state (integration-ahead-of-prod + release-in-flight) per
+                    # repo. Read only inside the ~6h nudge branch, through
+                    # `release_gap._cached_release_state` (per-repo TTL cache), so
+                    # the gh calls fire at most once per repo per TTL and only for
+                    # a FULL-authority armed pane (the #618 MIRROR).
+                    release_state_fetch=_watchdog_release_state_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and
                     # each box holds the airuleset checkout it can measure.

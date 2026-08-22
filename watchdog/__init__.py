@@ -1870,7 +1870,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
              owner_decision_fetch=None, gk_selfservice_fetch=None,
              u_reconcile_clear=None, conformance_root=None,
              conformance_is_target=None, conformance_hb_enabled=False,
-             gkorphan_fetch=None, gkorphan_handoff_fetch=None):
+             gkorphan_fetch=None, gkorphan_handoff_fetch=None,
+             release_state_fetch=None):
     """Scan every `claude` pane once. 36 numbered jobs per poll — 30 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -2104,7 +2105,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           `goal.goal_lane_sweep` is the ONE watchdog-INITIATED keystroke
           left in the whole family (#365/#351's own lane-occupancy nudge,
           functionally unchanged) and needs `compact_handled_this_sweep`
-          for the same coordination reason job 9 above does.
+          for the same coordination reason job 9 above does. It also carries
+          the per-armed-pane RIDERS (ZERO extra pane walk, same `handled`
+          coordination, NOT separately numbered): the W/I partition-audit
+          re-check (#547/#552/#578, `ops_wait_recheck`) and, when
+          `release_state_fetch` is wired, the release-gap nudge (#616,
+          `release_gap.goal_release_gap_recheck`) — on a FULL-authority box
+          (the #618 MIRROR) whose integration branch is ahead of prod with NO
+          release in flight, it keystrokes the armed loop to run its release
+          pipeline (the recurring "merged into develop but never released").
       (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
           a turn that simply RUNS for hours is a fault state of its own:
           nothing compacts, no question is delivered, and every keystroke
@@ -3952,7 +3961,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
             backlog_fetch=backlog_fetch, send_fn=send_fn,
             sleep_fn=sleep_fn, time_fn=time_fn,
             sweep_deadline=tail_deadline, ops_wait_fetch=ops_wait_fetch,
-            i_members_fetch=i_members_fetch)   # #578
+            i_members_fetch=i_members_fetch,             # #578
+            release_state_fetch=release_state_fetch)     # #616
     _add("goal_lane_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_lane_sweep, "goal-lane-sweep error")
 
