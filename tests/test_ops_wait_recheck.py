@@ -635,16 +635,17 @@ class TestLaneSweepWiring(unittest.TestCase):
                                    transcript_path=tpath)
         with m.patch("airuleset.resolve_authority", return_value=authority), \
                 m.patch.object(wd, "_owner_disabled", return_value=False):
-            # backlog 0 + full authority (the DEFAULT) -> the lane-occupancy
-            # nudge skips (no-backlog), so this sweep's ONLY possible keystroke
-            # is the partition-audit re-check under test (clean isolation from
-            # the sibling lane nudge; the `handled` coordination when the lane
-            # nudge DOES fire is locked by
-            # TestOrchestrator.test_due_but_already_handled_defers). A caller
-            # exercising the #552 I-direction passes backlog>0 (so
-            # glance.backlog>0 = I>0) together with a NON-full authority, which
-            # makes the full-authority-only lane nudge skip WITHOUT claiming the
-            # pane, isolating the partition-audit I clause under test.
+            # backlog 0 (the DEFAULT) -> the lane-occupancy nudge skips
+            # (no-backlog), so this sweep's ONLY possible keystroke is the
+            # partition-audit re-check under test (clean isolation from the
+            # sibling lane nudge; the `handled` coordination when the lane nudge
+            # DOES fire is locked by
+            # TestOrchestrator.test_due_but_already_handled_defers). #618: the
+            # lane nudge now runs on reduced-authority boxes too, so a caller
+            # exercising the #552 I-direction (backlog>0) must ALSO seed the
+            # lane cooldown (state["goal_lane"][sid] = {"llast": now-1}) so the
+            # lane nudge hits its hourly-cap skip WITHOUT a keystroke or a
+            # `handled` claim, isolating the partition-audit I clause.
             goal.goal_lane_sweep(
                 NOW, run=tmux, projects_dir=proj, state=state, dry_run=dry_run,
                 handled=handled, backlog_fetch=lambda cwd: backlog,
@@ -669,12 +670,15 @@ class TestLaneSweepWiring(unittest.TestCase):
         # parking shapes. RED on the pre-#552 tree (W==[] -> `clear` -> no
         # keystroke; the I count is never consulted). GREEN once goal_lane_sweep
         # passes glance.backlog and goal_ops_wait_recheck folds i_count into the
-        # partition-audit decider. Non-full authority so the full-authority-only
-        # lane-occupancy nudge skips WITHOUT claiming the pane (isolating the
-        # partition-audit I clause; backlog>0 alone would make a full pane
-        # "stuck" and fire the lane nudge, which would defer this job).
+        # partition-audit decider. #618: the lane nudge now runs on
+        # reduced-authority boxes too, and with backlog>0 + 0 workers it WOULD
+        # fire and claim `handled` (deferring this recheck) — so seed the lane
+        # cooldown (llast=now-1) so the lane nudge hits its hourly-cap skip with
+        # no keystroke + no `handled` claim, isolating the recheck's I clause
+        # (a realistic scenario: the lane nudge already fired within the hour).
         state = {"ops_wait_recheck": {
-            "sess-547-lane": {"first_seen": NOW - 5 * DAY, "last_nudge": None}}}
+                     "sess-547-lane": {"first_seen": NOW - 5 * DAY, "last_nudge": None}},
+                 "goal_lane": {"sess-547-lane": {"llast": NOW - 1}}}
         sid, tmux = self._armed_sweep(state, ops_wait_fetch=lambda cwd: [],
                                       backlog=3, authority="branch-merge")
         # send_verified chunks the payload across several `send-keys -l` calls
@@ -686,6 +690,10 @@ class TestLaneSweepWiring(unittest.TestCase):
                       "nudged to re-audit I->W/U (RED before #552 folds i_count "
                       "into the partition-audit decider)")
         self.assertIn("stuck-check:", typed)
+        # #618 isolation teeth: the sibling lane-occupancy nudge must NOT have
+        # fired this sweep (else it would have claimed `handled` and deferred
+        # the recheck) — its delivered text is `lane-check:`.
+        self.assertNotIn("lane-check:", typed)
         self.assertEqual(state["ops_wait_recheck"][sid]["last_nudge"], NOW)
 
     def test_no_w_members_clears_state(self):

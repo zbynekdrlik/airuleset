@@ -3812,6 +3812,15 @@ def _watchdog_delivery_probe(root, base):
     return None
 
 
+# #618 -- how fresh the tickets-status cache must be for the watchdog backlog
+# read to trust it over a live (slow) `--count` subprocess. Generous: a
+# saturation-nudge decision tolerates a count minutes old. The cache
+# periodically dips just out of this bound by design (the watchdog re-warms it
+# only when it reads stale) and self-heals one sweep later — it is not held
+# strictly under the bound at every instant.
+_BACKLOG_STATUS_CACHE_MAX_AGE_S = 15 * 60
+
+
 def _watchdog_backlog_fetch(cwd):
     """#160 defect 1 / defect 4 — does THIS BOX's own slice of the repo at
     `cwd` still have open, non-`autopilot-skip` backlog work, or None on any
@@ -3855,7 +3864,49 @@ def _watchdog_backlog_fetch(cwd):
     would independently choose for itself.
 
     Wired HERE, like every other network call in this file, so run_once's
-    unit tests stay network-free."""
+    unit tests stay network-free.
+
+    #618: reads the tickets-status cache FIRST — the SAME workable `open` the
+    footer renders (`statusbar.obligation_count`, written by an UNTIMED
+    background refresh; the ONE-derivation principle #367/#468, sibling of the
+    #459 goal_dark_watch reader) — and only shells the live `--count`
+    subprocess as a cache-miss/stale/untrusted FALLBACK. That subprocess is
+    16-17s on a big shared-account slice (O(backlog) serial gh timeline reads)
+    and ALWAYS timed out at 15s → backlog=n/a → the saturation nudge
+    (goal_lane_occupancy_nudge) could never confirm under-saturation, so
+    montalu1 with 28+ workable issues + 1 worker got no fill nudge. A fresh
+    POSITIVE cache read is instant + never times out. A cached 0 is NOT trusted
+    (the tickets-status writer has no #181 refuse-guard — cmd_tickets_status's
+    own note — so a broken-index 0 can land in it), so it falls through to the
+    live count, which DOES refuse an untrustworthy empty as None: the #181
+    contract above is preserved. A stale/missing/untrusted read WARMS the cache
+    for the next sweep via the same detached, rate-limited `_spawn_refresh` the
+    statusline uses (so an idle box whose footer isn't rendering — montalu1's
+    7h-stale cache — is re-warmed by the watchdog's own 60s cadence) and
+    attempts the live count for THIS sweep. On a big slice that live attempt may
+    still time out (None); the warmed cache then serves the NEXT sweep — that
+    (not the timing-out live call) is the real self-heal."""
+    import time
+    try:
+        import statusbar
+    except Exception:
+        statusbar = None
+    open_n = ts = None
+    if statusbar is not None:
+        try:
+            open_n, ts = statusbar.obligation_count(cwd)
+        except Exception:
+            open_n, ts = None, None
+    # Trust the cache ONLY when POSITIVE and non-future-fresh (see the docstring
+    # for why a cached 0 / future ts is not trusted).
+    if isinstance(open_n, int) and open_n > 0 and isinstance(ts, (int, float)) \
+            and 0 <= (time.time() - ts) < _BACKLOG_STATUS_CACHE_MAX_AGE_S:
+        return open_n
+    # Cache missing/stale/untrusted: warm it for the NEXT sweep (detached,
+    # untimed, rate-limited by SPAWN_GUARD_S; _spawn_refresh swallows its own
+    # errors), then attempt the live count for THIS sweep.
+    if statusbar is not None:
+        statusbar._spawn_refresh(cwd)
     import subprocess
     try:
         root = _repo_root(cwd=cwd) or cwd

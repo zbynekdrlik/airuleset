@@ -1007,7 +1007,8 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         return Path(d.name)
 
     def _call(self, captured, backlog_fetch, now, tmtime, rec=None, state=None,
-             authority="full", handled=None, enters_swallowed=0):
+             authority="full", handled=None, enters_swallowed=0,
+             authority_raises=None):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
@@ -1018,7 +1019,15 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], captured,
                                    model_type=True, transcript_path=tpath,
                                    enters_swallowed=enters_swallowed)
-        with m.patch("airuleset.resolve_authority", return_value=authority):
+        # #618: authority_raises models the PRODUCTION None path (resolve_authority
+        # never returns None — it defaults "full" — so None only arises from the
+        # except branch); return_value=None models a defensive read of that None.
+        auth_patch = (m.patch("airuleset.resolve_authority",
+                              side_effect=authority_raises)
+                      if authority_raises is not None
+                      else m.patch("airuleset.resolve_authority",
+                                   return_value=authority))
+        with auth_patch:
             logs, owns = goal.goal_lane_occupancy_nudge(
                 now, tmux, rec if rec is not None else {}, self.SID, self.CWD,
                 "111", captured, tpath, tmtime, "loc", None, False, handled,
@@ -1259,13 +1268,56 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
         self.assertTrue(any("skip:gave-up" in ln for ln in logs), logs)
 
-    def test_reduced_authority_is_deliberately_silent(self):
-        # A reduced-authority box has no worktree lanes -> structurally N/A,
-        # deliberately silent (locks the documented no-log decision).
+    def test_branch_merge_box_also_nudges(self):
+        # #618: a reduced-authority STREAM box (branch-merge — montalu/marek)
+        # DOES run a parallel worktree fleet under /autopilot (SKILL fleet
+        # default; owner's #618 expected behaviour), so it must get the
+        # lane-occupancy nudge exactly like a full-authority box. The old
+        # `authority != "full"` early-skip (a stale full-only assumption)
+        # silently starved montalu1 of every saturation nudge — ZERO
+        # lane-occupancy journal lines live. Rewritten from the former
+        # `test_reduced_authority_is_deliberately_silent` (which locked the
+        # wrong behaviour) with that justification.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
                                       authority="branch-merge")
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+
+    def test_fork_no_merge_box_also_nudges(self):
+        # #618: a fork-no-merge STREAM box (david) also fleets parallel
+        # worktree lanes (each produces a fork branch + hand-off), so it too
+        # must reach the nudge, never the silent authority skip.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      authority="fork-no-merge")
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+
+    def test_unresolvable_authority_is_still_deliberately_silent(self):
+        # #618: the remaining guard — an UNRESOLVABLE authority (resolve_authority
+        # raised → None) is a degraded/unknown box, never a lane decision worth
+        # journalling. Only None skips silently now; the three real profiles all
+        # nudge.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      authority=None)
+        self.assertEqual(logs, [])
+        self.assertFalse(owns)
+        self.assertEqual(tmux.sent, [])
+
+    def test_authority_resolution_raising_is_silent(self):
+        # #618: the PRODUCTION shape of the None case — resolve_authority RAISES
+        # (its own try/except sets authority=None). Same silent, no-keystroke
+        # skip as the returned-None case above.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
+                                      authority_raises=RuntimeError("boom"))
         self.assertEqual(logs, [])
         self.assertFalse(owns)
         self.assertEqual(tmux.sent, [])

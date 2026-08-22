@@ -2756,12 +2756,12 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         authority = airuleset.resolve_authority(cwd)
     except Exception:
         authority = None
-    if authority != "full":
-        # #475 deliberately silent: lane occupancy fills PARALLEL WORKTREE lanes,
-        # which only a full-authority box has -- a reduced-authority sub-dev
-        # stream has no lanes to fill, so this is structurally N/A, not a
-        # decision. Logging it for every armed sub-dev pane every sweep would be
-        # pure noise.
+    if authority is None:
+        # #618 deliberately silent: an UNRESOLVABLE authority (resolve_authority
+        # raised) is a degraded/unknown box, not a lane decision. A RESOLVED
+        # reduced-authority stream (branch-merge/fork-no-merge) DOES fleet parallel
+        # worktree lanes under /autopilot (SKILL fleet default), so it gets the
+        # nudge like full authority (was `!= "full"`, a stale full-only assumption).
         return logs, False
     idle = now - (tmtime or now)
     # #442 THIRD GAP -- the old top-of-function idle gate returned HERE with

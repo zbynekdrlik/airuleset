@@ -84,10 +84,10 @@ def obligation_count(cwd, home=None):
     count — `len(mine) - gk` for a reduced-authority stream) plus the cache
     write time. `(None, None)` when the cache is absent/unparseable or
     carries no int `open`. Reads only — never spawns a refresh, never
-    touches the network; the sole caller (watchdog `goal_dark_watch`, #459)
-    uses `open > 0` as its death-vs-achievement discriminator ("the goal's
-    own SLICE-EMPTY stop condition is NOT met, so this dark goal is a
-    genuine stall, not a legitimately-achieved completion")."""
+    touches the network. Callers: watchdog `goal_dark_watch` (#459 — its
+    death-vs-achievement discriminator, `open > 0` = the goal's own
+    SLICE-EMPTY stop condition is NOT met, a genuine stall) AND the #618
+    backlog fetch; each caller applies its OWN freshness gate on `ts`."""
     if not cwd:
         return None, None
     cache = _load(cache_dir(home) / (cwd_key(cwd) + ".json"))
@@ -102,7 +102,7 @@ def obligation_count(cwd, home=None):
 
 def _spawn_refresh(cwd, home=None):
     """Kick a DETACHED `tickets-status --refresh` for `cwd` — guarded by a marker
-    mtime so a burst of statusline renders spawns at most one per SPAWN_GUARD_S."""
+    mtime so a burst of statusline renders / watchdog sweeps (#618) spawns at most one per SPAWN_GUARD_S."""
     guard = cache_dir(home) / (".spawn-" + cwd_key(cwd))
     try:
         if guard.exists() and time.time() - guard.stat().st_mtime < SPAWN_GUARD_S:
