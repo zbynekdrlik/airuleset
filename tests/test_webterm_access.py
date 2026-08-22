@@ -157,17 +157,68 @@ class TestApplyIdempotent(unittest.TestCase):
 
 
 class TestConfigAndTrustHeader(unittest.TestCase):
-    def test_owner_side_is_not_declared_stays_tailnet_only(self):
-        # zbynek.newlevel.media is a grey/DNS-only record — Access is
-        # inapplicable, so it must NOT be a declared Access app.
+    def test_owner_side_is_now_a_declared_access_app(self):
+        # #635 scope change (owner ROZHODNUTÉ 2026-08-22): the owner chose to move
+        # zbynek.newlevel.media behind Cloudflare Access like David's side — so it
+        # is NOW a declared Access app (reverses the pre-#635 "grey/tailnet-only,
+        # not declared" state that this test used to assert).
         self.assertIn("david", acc.WEBTERM_ACCESS_APPS)
-        self.assertNotIn("owner", acc.WEBTERM_ACCESS_APPS)
-        for spec in acc.WEBTERM_ACCESS_APPS.values():
-            self.assertNotIn("zbynek", spec["hostname"])
+        self.assertIn("owner", acc.WEBTERM_ACCESS_APPS)
+        owner = acc.WEBTERM_ACCESS_APPS["owner"]
+        self.assertEqual(owner["hostname"], "zbynek.newlevel.media")
+        # The single owner-provided allow-list entry (coordinator 2026-08-22).
+        self.assertIn("drlik.zbynek@gmail.com", owner["allowed_emails"])
 
     def test_trust_header_is_the_cloudflare_identity_header(self):
         self.assertEqual(acc.WEBTERM_ACCESS_TRUST_HEADER,
                          "Cf-Access-Authenticated-User-Email")
+
+
+class TestOwnerAccessApp(unittest.TestCase):
+    """#635: the owner (zbynek.newlevel.media) Access app mirrors David's lane —
+    a self-hosted email-OTP app whose allow-list holds exactly the owner, is
+    extensible by one line (marek next), and refuses an empty list (open door)."""
+
+    def _owner(self):
+        return acc.WEBTERM_ACCESS_APPS["owner"]
+
+    def test_owner_app_payload_is_self_hosted_email_otp_with_owner(self):
+        p = acc.build_app_payload(self._owner())
+        self.assertEqual(p["domain"], "zbynek.newlevel.media")
+        self.assertEqual(p["type"], "self_hosted")
+        self.assertEqual(p["allowed_idps"], [])            # email OTP login page
+        self.assertIs(p["auto_redirect_to_identity"], False)
+        self.assertEqual(len(p["policies"]), 1)
+        self.assertEqual(p["policies"][0]["decision"], "allow")
+        self.assertIn({"email": {"email": "drlik.zbynek@gmail.com"}},
+                      p["policies"][0]["include"])
+
+    def test_owner_allowlist_extensible_by_one_line(self):
+        # Adding marek must be ONE more include entry, no redesign (#612 property
+        # carried to the owner app per the coordinator).
+        one = acc.build_policy_payload(self._owner())
+        two_spec = dict(self._owner(),
+                        allowed_emails=list(self._owner()["allowed_emails"])
+                        + ["marek@example.com"])
+        two = acc.build_policy_payload(two_spec)
+        self.assertEqual(len(two["include"]) - len(one["include"]), 1)
+        self.assertIn({"email": {"email": "marek@example.com"}}, two["include"])
+
+    def test_owner_empty_allowlist_is_refused_no_open_door(self):
+        t = _FakeTransport(apps=[])
+        client = acc.AccessClient("acct", token="tok", transport=t)
+        spec = dict(self._owner(), allowed_emails=[])
+        res = acc.apply_profile(client, spec, dry_run=False)
+        self.assertFalse(res["ok"])
+        self.assertIn("empty", res["error"])
+        self.assertEqual(t.calls, [])                       # fail-closed, no writes
+
+    def test_owner_apply_creates_the_app_when_absent(self):
+        t = _FakeTransport(apps=[])
+        client = acc.AccessClient("acct", token="tok", transport=t)
+        res = acc.apply_profile(client, self._owner(), dry_run=False)
+        self.assertTrue(res["ok"], res["error"])
+        self.assertIn("POST", t.methods())
 
 
 class TestReviewFixes(unittest.TestCase):
