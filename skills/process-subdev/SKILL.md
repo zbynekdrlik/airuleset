@@ -226,6 +226,12 @@ repo's own CLAUDE.md / playbook is what names the command.
      THEN close the stream's tickets with merge evidence and remove whichever hand-off
      label was applied (`ready-for-review` and/or `needs-gatekeeper` — a carve-out
      stream's hand-off carries `needs-gatekeeper`, not `ready-for-review`).
+     For a ticket BOUND to an Odoo Discuss thread (a `Discuss-thread:` line on it),
+     the OWNING stream must have posted the thread's closing note and recorded
+     `Discuss-closed:` (or `Discuss-defer:` for a non-last sibling) on the ticket
+     FIRST — `hooks/block-fork-no-merge-issue-close.sh` BLOCKS your close otherwise
+     (airuleset #627, for any authority). If it is missing, do NOT close: bounce it
+     back so the stream posts the closing note (you never post to the client thread).
 - **FINDINGS → the bounce lane** (`## Cross-stream protocol` in the autopilot skill is
   canonical): post the findings as a precise comment on each affected ticket (file:line,
   what is wrong, what evidence is missing — the ticket carries the FULL content),
