@@ -93,6 +93,11 @@ CHANNEL_WRITE = ('models.execute_kw(db,uid,key,"discuss.channel","write",'
 UNSIGNED_MP = MESSAGE_POST                                    # {"body":"Ahoj"}
 SIGNED_MP = ('models.execute_kw(db,uid,key,"discuss.channel","message_post",'
              '[cid],{"body":"<p>Ahoj, hotové.</p><p>ZbynekAI 2</p>"})')
+# #628 -- owner-approval fixtures. APPROVAL_EVID is the falsifiable evidence
+# marker (a NON-EMPTY reference after airuleset:owner-approved -- never a bare
+# assertion). APPROVED_MP is a fully valid client post: signed AND owner-approved.
+APPROVAL_EVID = "airuleset:owner-approved owner odsúhlasil znenie 2026-08-22"
+APPROVED_MP = SIGNED_MP + "  # " + APPROVAL_EVID
 
 
 class TestIsChannelCreate(TestCase):
@@ -336,8 +341,9 @@ class TestHookPasses(_HookBase):
 
     def test_message_post_to_existing_channel_passes(self):
         # #609: a message_post is not a create (the name guard stays silent) AND,
-        # for a stream, it must carry the ZbynekAI <N> signature -- SIGNED_MP does.
-        cmd = "python3 -c '" + SIGNED_MP + "'"
+        # for a stream, it must carry the ZbynekAI <N> signature; #628: it must
+        # ALSO carry the owner-approval evidence -- APPROVED_MP has both.
+        cmd = "python3 -c '" + APPROVED_MP + "'"
         self.assertEqual(self.run_hook(command=cmd).returncode, 0)
 
     def test_channel_rename_write_passes(self):
@@ -357,8 +363,9 @@ class TestHookPasses(_HookBase):
         self.assertEqual(self.run_hook(command='echo "hello world"').returncode, 0)
 
     def test_unrelated_odoo_message_post_python_file_passes(self):
-        # #609: a SIGNED message_post script passes (not a create; signature present)
-        script = ("import xmlrpc.client\n" + SIGNED_MP + "\n")
+        # #609+#628: a SIGNED + owner-APPROVED message_post script passes (not a
+        # create; signature present; approval evidence present)
+        script = ("import xmlrpc.client\n" + APPROVED_MP + "\n")
         self.assertEqual(self.run_hook(content=script).returncode, 0)
 
 
@@ -627,16 +634,21 @@ class TestHookBlocksSignature(_HookBase):
 
 
 class TestHookPassesSignature(_HookBase):
-    def test_signed_message_post_passes(self):
-        # SIGNED_MP carries ZbynekAI 2 -> passes for the default montalu2 user
-        self.assertEqual(self.run_hook(command="python3 -c '" + SIGNED_MP + "'").returncode, 0)
+    def test_signed_and_approved_message_post_passes(self):
+        # #628: SIGNED_MP alone no longer passes the full hook (it lacks the
+        # owner-approval evidence); APPROVED_MP carries ZbynekAI 2 AND the
+        # airuleset:owner-approved marker -> passes for the default montalu2 user.
+        self.assertEqual(self.run_hook(command="python3 -c '" + APPROVED_MP + "'").returncode, 0)
 
     def test_non_stream_user_unsigned_post_passes(self):
         self.assertEqual(
             self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user=None).returncode, 0)
 
     def test_sig_bypass_marker_passes(self):
-        cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok internal channel")
+        # a genuine internal channel post bypasses BOTH the signature (#609) and
+        # the owner-approval (#628) checks -- it needs both bypass markers.
+        cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok "
+               "airuleset:discuss-approval-ok internal channel")
         self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
 
     def test_non_discuss_message_post_passes(self):
@@ -651,6 +663,158 @@ class TestHookPassesSignature(_HookBase):
     def test_compliant_create_still_passes(self):
         cmd = "python3 -c '" + (RPC_CREATE % "Oprava filtra 2") + "'"
         self.assertEqual(self.run_hook(command=cmd, user="montalu2").returncode, 0)
+
+
+# --------------------------------------------------------------------------- #
+# Layer 6 -- #628: message_post OWNER-APPROVAL gate. A sub-dev stream may not
+# post ANY body to a client Discuss channel without recording a falsifiable
+# owner-approval claim (`airuleset:owner-approved <ref>`). Sibling of the #609
+# signature gate on the SAME message_post path; bypass `airuleset:discuss-
+# approval-ok` for a genuine internal/non-client post.
+# --------------------------------------------------------------------------- #
+
+class TestApprovalPresent(TestCase):
+    def test_marker_with_reference_present(self):
+        self.assertTrue(g.approval_present(
+            "body=h  # airuleset:owner-approved owner odsúhlasil 2026-08-22"))
+
+    def test_bare_marker_without_reference_is_not_accepted(self):
+        # a falsifiable CLAIM needs a non-empty reference, never a bare assertion
+        self.assertFalse(g.approval_present("# airuleset:owner-approved"))
+        self.assertFalse(g.approval_present("# airuleset:owner-approved   "))
+        self.assertFalse(g.approval_present("# airuleset:owner-approved\n"))
+
+    def test_missing_marker(self):
+        self.assertFalse(g.approval_present('{"body":"Ahoj, hotové."}'))
+
+    def test_approval_evidence_in_fixtures(self):
+        self.assertTrue(g.approval_present(APPROVED_MP))
+        self.assertFalse(g.approval_present(SIGNED_MP))
+
+    def test_bypass_marker_is_not_an_approval_marker(self):
+        # the bypass token must NOT satisfy approval_present (distinct concepts)
+        self.assertFalse(g.approval_present("# airuleset:discuss-approval-ok"))
+
+
+class TestApprovalBypassMarker(TestCase):
+    def test_present(self):
+        self.assertTrue(g.has_approval_bypass_marker(
+            "# airuleset:discuss-approval-ok internal"))
+
+    def test_absent(self):
+        self.assertFalse(g.has_approval_bypass_marker(SIGNED_MP))
+        self.assertFalse(g.has_approval_bypass_marker(APPROVED_MP))
+
+
+class TestEvaluateMessagePostApproval(TestCase):
+    def test_signed_unapproved_post_is_a_violation(self):
+        # signature present but NO owner-approval evidence -> a violation
+        v = g.evaluate_message_post_approval(SIGNED_MP, "montalu2")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.number, "2")
+
+    def test_incident_unapproved_post_is_a_violation(self):
+        v = g.evaluate_message_post_approval(UNSIGNED_MP, "montalu6")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.number, "6")
+
+    def test_approved_post_passes(self):
+        self.assertIsNone(g.evaluate_message_post_approval(APPROVED_MP, "montalu2"))
+
+    def test_create_is_not_a_message_post_approval_violation(self):
+        self.assertIsNone(
+            g.evaluate_message_post_approval(RPC_CREATE % "Zle bez cisla", "montalu2"))
+
+    def test_write_rename_is_not_a_message_post_approval_violation(self):
+        self.assertIsNone(
+            g.evaluate_message_post_approval(CHANNEL_WRITE % "Zle", "montalu2"))
+
+    def test_non_stream_user_is_silent(self):
+        for u in ("newlevel", "marek", "gatekeeper", "", None):
+            self.assertIsNone(g.evaluate_message_post_approval(SIGNED_MP, u), u)
+
+    def test_base_stream_requires_approval(self):
+        self.assertIsNotNone(g.evaluate_message_post_approval(SIGNED_MP, "montalu"))
+        approved = SIGNED_MP + "  # airuleset:owner-approved ok"
+        self.assertIsNone(g.evaluate_message_post_approval(approved, "montalu"))
+
+    def test_approval_evidence_as_variable_elsewhere_passes(self):
+        # the marker can live in a comment/variable anywhere in the content
+        script = ("# airuleset:owner-approved owner ok 2026-08-22\n" + SIGNED_MP)
+        self.assertIsNone(g.evaluate_message_post_approval(script, "montalu2"))
+
+
+class TestApprovalReDoSAndBounds(TestCase):
+    def test_no_redos_on_repeated_inputs(self):
+        payloads = ("airuleset:owner-approved" * 3000, "message_post" * 3000,
+                    ('{"body":"' + "a" * 20000 + '"}'))
+        start = time.perf_counter()
+        for p in payloads:
+            g.approval_present(p)
+            g.is_channel_message_post(p)
+        self.assertLess(time.perf_counter() - start, 2.0)
+
+
+class TestHookBlocksApproval(_HookBase):
+    def test_signed_but_unapproved_message_post_is_blocked(self):
+        # #628: a SIGNED post with no owner-approval evidence is blocked
+        r = self.run_hook(command="python3 -c '" + SIGNED_MP + "'", user="montalu2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("628", r.stderr)
+
+    def test_signed_but_unapproved_write_script_blocked(self):
+        script = "import xmlrpc.client\n" + SIGNED_MP + "\n"
+        r = self.run_hook(content=script, user="montalu2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_signed_but_unapproved_edit_insert_blocked(self):
+        r = self.run_hook(new_string=SIGNED_MP, user="montalu2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_unsigned_unapproved_blocks_for_signature_first(self):
+        # precedence: an UNSIGNED + UNAPPROVED post blocks for the SIGNATURE
+        # first (the #609 gate runs before the #628 gate), so #609 behaviour is
+        # preserved unchanged.
+        r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="montalu6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("598", r.stderr)
+
+    def test_sig_bypass_does_not_waive_approval(self):
+        # a sig bypass must NOT waive the owner-approval check -- an UNSIGNED
+        # post carrying ONLY the sig bypass still blocks for approval (#628).
+        cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok internal")
+        r = self.run_hook(command=cmd, user="montalu6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("628", r.stderr)
+
+    def test_name_bypass_does_not_waive_approval(self):
+        # a name bypass must NOT waive the owner-approval check -- a SIGNED
+        # (sig-passing) post carrying only the name bypass still blocks (#628).
+        cmd = ("python3 -c '" + SIGNED_MP + "'  # airuleset:discuss-name-ok legacy")
+        r = self.run_hook(command=cmd, user="montalu2")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("628", r.stderr)
+
+
+class TestHookPassesApproval(_HookBase):
+    def test_signed_and_approved_passes(self):
+        cmd = "python3 -c '" + APPROVED_MP + "'"
+        self.assertEqual(self.run_hook(command=cmd, user="montalu2").returncode, 0)
+
+    def test_approval_bypass_marker_passes(self):
+        # a genuine internal post: unsigned + BOTH bypass markers
+        cmd = ("python3 -c '" + UNSIGNED_MP + "'  # airuleset:discuss-sig-ok "
+               "airuleset:discuss-approval-ok internal channel")
+        self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
+
+    def test_non_stream_user_unapproved_passes(self):
+        cmd = "python3 -c '" + SIGNED_MP + "'"
+        self.assertEqual(self.run_hook(command=cmd, user=None).returncode, 0)
+
+    def test_non_discuss_message_post_passes(self):
+        cmd = ('python3 -c \'execute_kw(d,u,k,"sale.order","message_post",'
+               '[oid],{"body":"internal log"})\'')
+        self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
 
 
 if __name__ == "__main__":
