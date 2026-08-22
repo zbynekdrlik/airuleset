@@ -1535,38 +1535,42 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("workers=2" in ln for ln in logs), logs)
         self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
-    def test_zero_worker_active_session_logs_skip_idle_not_silent(self):
-        # The 0-worker EMPTY-lane branch keeps its 15-min idle requirement --
-        # a box being actively typed into may be mid-dispatch. But it must no
-        # longer be SILENT: an active 0-worker sweep now logs `skip:idle` with
-        # the numbers (the old code returned empty logs -> undiagnosable).
+    def test_619_zero_worker_active_session_fires_no_more_skip_idle(self):
+        # #619 OVERTURNS the pre-#619 "empty-lane keeps its 15-min idle floor"
+        # lock: an active (fresh-transcript) 0-worker box with a backlog is the
+        # busy-solo under-saturation the fill nudge must reach, so it FIRES instead
+        # of logging skip:idle. `skip:idle` is retired for the empty-lane branch
+        # (montalu1: 114x skip:idle/9h, 0 fill nudge). Keystroke safety is carried
+        # by _lane_boundary_ok (only delivered at an idle prompt) + the hourly cap.
         now = 100000
-        tmtime = now - 30  # active
+        tmtime = now - 30  # active / fresh transcript
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
-        self.assertFalse(owns)
-        self.assertTrue(any("skip:idle" in ln for ln in logs), logs)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertTrue(any("workers=0" in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [])
+        self.assertFalse(any("skip:idle" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
     # ---------------------------------------------------------------- #
-    # #611 -- the 0-worker EMPTY-lane branch's 15-min idle floor is
+    # #611/#619 -- the 0-worker EMPTY-lane branch's 15-min idle floor was
     # STRUCTURALLY unreachable for a continuously serially-working armed
-    # session (writes a turn every ~10-13min so `idle` never reaches 15m),
-    # yet that is the WORST under-saturation (0 lanes + big backlog). The
-    # idle floor is now BYPASSED once the WNT gate has ESCALATED (a ⏳ marker
-    # + 0 structured lanes + backlog confirmed over GOAL_LANE_WNT_MAX_DEFERS
-    # sweeps); a session NOT in escalation keeps the 15-min behavior. The
-    # remaining delivery gates (boundary, recent-human, draft-diff, hourly
-    # cooldown, MAX_NUDGES) carry the mid-dispatch safety. camera-box: I=41,
-    # 0 workers, 184x skip:idle / 12h, 0 nudge -> "nikdy".
+    # session (writes a turn every few min so `idle` never reaches 15m), yet
+    # that is the WORST under-saturation (0 lanes + big backlog). #611 added a
+    # WNT-escalated BYPASS; #619 removed the idle floor for the empty-lane
+    # branch ENTIRELY (the bypass is subsumed -- the floor was structurally
+    # self-suppressing AND the marker flaps so the 3-sweep escalation streak
+    # rarely accumulated). The surviving delivery gates (boundary, recent-human,
+    # draft-diff, hourly cooldown, MAX_NUDGES) carry the mid-dispatch safety. The
+    # WNT gate still DEFERS a ⏳-0-lane box for a few sweeps then STOPS deferring
+    # (the ESCALATE log), reaching the nudge like any other empty-lane sweep.
     # ---------------------------------------------------------------- #
 
     def test_611_wnt_escalated_zero_lane_fires_despite_fresh_transcript(self):
-        # THE headline lock: ⏳ marker, 0 render badges, 0 STRUCTURED live
-        # lanes, real backlog, FRESH transcript (idle=30s), and the WNT gate
-        # ESCALATES this sweep (wntd seeded to max-1) -> the empty-lane fill
-        # nudge FIRES, bypassing the idle floor. RED on the OLD code: escalation
-        # reached the idle gate and died on skip:idle (the dead-letter).
+        # ⏳ marker, 0 render badges, 0 STRUCTURED live lanes, real backlog, FRESH
+        # transcript (idle=30s), and the WNT gate stops deferring this sweep (wntd
+        # seeded to max-1, the ESCALATE log) -> the empty-lane fill nudge FIRES.
+        # (#619: it would fire even without the escalation now -- the idle floor is
+        # gone -- but this locks that the ESCALATE branch still reaches the nudge.)
         now = 100000
         tmtime = now - 30  # fresh: transcript written 30s ago, idle << 15min
         rec = {"wntd": goal.GOAL_LANE_WNT_MAX_DEFERS - 1}  # this sweep escalates
@@ -1582,17 +1586,20 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(any("skip:idle" in ln for ln in logs), logs)
         self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
-    def test_611_zero_lane_not_escalated_still_skips_idle(self):
-        # CONTROL: the SAME fresh-transcript 0-worker shape but NOT in WNT
-        # escalation (no ⏳ marker -> the working-no-tasks branch never fires ->
-        # escalated=False) keeps the original 15-min idle floor -> skip:idle.
-        # The bypass is gated STRICTLY on WNT escalation, never on 0 workers.
+    def test_619_zero_lane_fires_without_wnt_escalation(self):
+        # #619 OVERTURNS the #611 control ("non-escalated fresh 0-worker keeps the
+        # idle floor"): the empty-lane fill nudge no longer depends on WNT
+        # escalation to fire on a fresh transcript. A non-⏳ 0-worker box (the
+        # working-no-tasks branch never fires, so the pre-#611 escalated bypass
+        # would not apply) now FIRES anyway -- the 15-min idle floor the escalation
+        # used to bypass is gone entirely, so the bypass mechanism is subsumed.
         now = 100000
         tmtime = now - 30  # fresh
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
-        self.assertFalse(owns)
-        self.assertTrue(any("skip:idle" in ln for ln in logs), logs)
-        self.assertEqual(tmux.sent, [])
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:idle" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
     def test_611_wnt_below_escalation_defers_never_fires(self):
         # CONTROL: a ⏳ + 0-lane + fresh session whose WNT streak is BELOW the
@@ -1613,12 +1620,12 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertEqual(tmux.sent, [])
 
     def test_611_escalated_gives_up_after_max_nudges_no_forever_nudge(self):
-        # #611 EXPLICIT-DECISION lock: the WNT-escalated empty-lane branch is
-        # still bounded by GOAL_LANE_MAX_NUDGES -- after the budget it GIVES UP
-        # (one owner ping) instead of nudging a perpetually-⏳-0-lane session
-        # forever. The #530 backlog-change re-arm still fires on the NON-escalated
-        # fresh sweeps; it is deliberately not re-granted on the escalated path,
-        # where a box that ignored 2 fill nudges needs a human, not more pokes.
+        # #611 EXPLICIT-DECISION lock: the empty-lane branch is bounded by
+        # GOAL_LANE_MAX_NUDGES -- after the budget it GIVES UP (one owner ping)
+        # instead of nudging a perpetually-⏳-0-lane session forever. #620: the
+        # give-up is now reset ONLY on lane appearance (workers>0), never on a
+        # backlog change, so a box that ignored 2 fill nudges and never dispatched
+        # stays given-up (needs a human) rather than re-arming every sweep.
         now = 100000
         tmtime = now - 30  # fresh: the escalated path would FIRE if not gave-up
         rec = {"wntd": goal.GOAL_LANE_WNT_MAX_DEFERS - 1,
@@ -1811,23 +1818,25 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertTrue(any("GAVE UP after" in ln and "stash abort" in ln
                             for ln in all_logs), all_logs)
 
-    def test_zero_worker_active_rearms_giveup_counters(self):
-        # #442-review F1 / #530: on an active empty-lane sweep the stash-abort
-        # streak (lna/lnpark) always resets, and the COUNT give-up (ln/lpinged)
-        # re-arms too here because this seed carries NO give-up baseline
-        # (`lnbk` absent -> treated as "backlog changed" -> reset). A seed WITH
-        # lnbk == backlog holds the give-up instead
-        # (test_530_active_sweep_holds_giveup_when_backlog_unchanged).
+    def test_620_giveup_does_not_rearm_on_active_sweep(self):
+        # #620 OVERTURNS the pre-#620 "active empty-lane sweep re-arms the give-up"
+        # lock: an active (fresh-transcript) sweep with the give-up already reached
+        # must HOLD it and fire GAVE UP, NOT re-arm the counter. The backlog-change
+        # re-arm (which a busy-solo box tripped every sweep, wiping `ln`) is gone;
+        # the counter now resets only on lane appearance (workers>0). The
+        # stash-abort streak is no longer reset here either (it self-heals via the
+        # #479 park + successful-delivery reset).
         now = 100000
         tmtime = now - 30  # active
         rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lna": 3, "lpinged": True}
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now,
                                       tmtime, rec=rec)
-        self.assertFalse(owns)
-        self.assertEqual(rec.get("ln"), 0)
-        self.assertEqual(rec.get("lna"), 0)
-        self.assertFalse(rec.get("lpinged"))
-        self.assertTrue(any("skip:idle" in ln for ln in logs), logs)
+        self.assertTrue(owns)
+        self.assertEqual(rec.get("ln"), goal.GOAL_LANE_MAX_NUDGES)  # HELD, not re-armed
+        # already escalated (lpinged) -> holds, never re-arms + re-nudges
+        self.assertTrue(any("skip:gave-up" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:idle" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [])
 
     # ---------------------------------------------------------------- #
     # #442 — the lane-fill path gets its OWN, much shorter "live
@@ -2386,18 +2395,19 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(any("skip:min-backlog" in ln for ln in logs), logs)
         self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
 
-    def test_530_landed_nudge_records_backlog_baseline(self):
-        # A landed empty-lane nudge must record `lnbk` (the give-up baseline) so
-        # the idle-branch reset can tell "backlog unchanged" from "changed".
-        # Mutation lock: without the `_lane_record_nudge` lnbk write, lnbk stays
-        # absent and the give-up would reset on every fresh sweep (the old bug).
+    def test_620_landed_nudge_advances_giveup_counter_no_lnbk(self):
+        # #620 OVERTURNS the pre-#620 "landed nudge records the lnbk baseline"
+        # lock: a landed empty-lane nudge advances the give-up counter `ln` and NO
+        # LONGER writes the retired `lnbk` baseline (the backlog-change reset it fed
+        # is gone). Mutation lock: a fresh seed -> one landed nudge -> ln == 1.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {}
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 7, now, tmtime,
                                       rec=rec)
         self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertEqual(rec.get("lnbk"), 7, rec)
+        self.assertEqual(rec.get("ln"), 1, rec)
+        self.assertIsNone(rec.get("lnbk"), rec)
 
     def test_530_hourly_cap_empty_lane(self):
         # A second empty-lane nudge 1000s (past the OLD 15-min cooldown, INSIDE
@@ -2427,49 +2437,47 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
-    def test_530_active_sweep_holds_giveup_when_backlog_unchanged(self):
-        # THE core trace lock: an ACTIVE (fresh-transcript) empty-lane sweep with
-        # the give-up already reached and the backlog UNCHANGED since the last
-        # nudge (lnbk == backlog) must NOT reset `ln`/`lpinged` -- otherwise the
-        # nudge's own delivery (which refreshes mtime) wipes the counter one
-        # sweep later and GOAL_LANE_MAX_NUDGES is unreachable. The stash-abort
-        # streak (lna) still resets on session-active. RED on the old code (the
-        # idle-branch reset zeroed ln/lpinged unconditionally on freshness).
+    def test_620_giveup_holds_and_fires_when_backlog_unchanged(self):
+        # #620: an empty-lane sweep with the give-up already reached HOLDS the
+        # counter and fires GAVE UP, whatever the backlog (here unchanged from the
+        # seed). The pre-#620 idle-branch reset zeroed `ln` on transcript freshness;
+        # #619 removed that branch and the give-up now resets only on lane
+        # appearance. The stash-abort streak (lna) is NOT reset here anymore -- it
+        # self-heals via the #479 park + successful-delivery reset.
         now = 100000
         tmtime = now - 30  # active / fresh transcript
-        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lnbk": 5, "lpinged": True,
-               "lna": 3}
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lna": 3}  # not yet pinged -> fires GAVE UP
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime,
                                       rec=rec)
         self.assertEqual(rec.get("ln"), goal.GOAL_LANE_MAX_NUDGES)  # HELD
-        self.assertTrue(rec.get("lpinged"))                         # HELD
-        self.assertEqual(rec.get("lna"), 0)  # stash streak still resets on active
-        self.assertTrue(any("skip:idle" in ln for ln in logs), logs)
+        self.assertTrue(any("GAVE UP" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:idle" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
-    def test_530_active_sweep_resets_giveup_when_backlog_changed(self):
-        # The reset that SHOULD fire: the backlog genuinely changed since the last
-        # nudge -> fresh work to consider -> the give-up re-arms. (Green before
-        # AND after: the old code also reset here, only for the wrong reason.)
+    def test_620_giveup_survives_a_backlog_change(self):
+        # #620 OVERTURNS the pre-#620 #530 "backlog change re-arms the give-up": a
+        # busy-solo box churns its backlog inline, so a backlog change must NOT
+        # reset the give-up (that reset wiped `ln` between every nudge -> all
+        # nudges (1/2), give-up never fired). The give-up HOLDS across a backlog
+        # change and fires GAVE UP; it resets only on lane appearance (workers>0).
         now = 100000
         tmtime = now - 30
-        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lnbk": 5, "lpinged": True,
-               "lna": 0}
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lna": 0}  # not yet pinged -> fires GAVE UP
         logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 9, now, tmtime,
-                                      rec=rec)
-        self.assertEqual(rec.get("ln"), 0)
-        self.assertFalse(rec.get("lpinged"))
-        self.assertTrue(any("skip:idle" in ln for ln in logs), logs)
+                                      rec=rec)   # backlog 9 (changed from any baseline)
+        self.assertEqual(rec.get("ln"), goal.GOAL_LANE_MAX_NUDGES)  # HELD despite change
+        self.assertTrue(any("GAVE UP" in ln for ln in logs), logs)
 
-    def test_530_giveup_fires_after_holding_across_active_sweep(self):
-        # End-to-end of the trace: the give-up SURVIVES an active/quiet
-        # oscillation (backlog unchanged) and fires GAVE UP on the next quiet
-        # sweep. RED on the old code: the active sweep wiped `ln`, so the quiet
-        # sweep never reached the give-up.
+    def test_620_giveup_survives_active_quiet_oscillation(self):
+        # End-to-end: the give-up SURVIVES an active/quiet oscillation and fires
+        # GAVE UP. #620: the give-up now resets only on lane appearance (workers>0),
+        # never on transcript freshness or a backlog change -- so a 0-worker box
+        # holds `ln` at the cap across both an active and a quiet sweep. (Pre-#620
+        # the active sweep's idle-branch reset wiped `ln` on freshness, so the
+        # give-up was structurally unreachable on a live supervisor.)
         now = 100000
-        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lnbk": 5, "lpinged": False,
-               "lna": 0}
-        # active sweep (fresh transcript, idle << 15min): must HOLD the counter
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lpinged": False, "lna": 0}
+        # active sweep (fresh transcript, idle << 15min): HOLDS the counter
         self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, now - 30, rec=rec)
         self.assertEqual(rec.get("ln"), goal.GOAL_LANE_MAX_NUDGES)
         # quiet again (idle >= 15min): the held give-up fires GAVE UP

@@ -92,25 +92,16 @@ class TestWorkingNoTasksDecision(unittest.TestCase):
         self.assertEqual(d.streak, 0)
         self.assertIsNone(d.log)
 
-    def test_escalated_flag_set_only_on_escalation(self):
-        # #611: the verdict carries an `escalated` flag so the caller can bypass
-        # the empty-lane idle floor ONLY on a genuine WNT escalation (a ⏳ marker
-        # + 0 structured lanes + backlog confirmed over max_defers sweeps). It is
-        # True ONLY in the escalate branch; every OTHER verdict (branch-not-fire,
-        # lanes-live, bounded-defer, zero-backlog-defer) is False -- so a
-        # genuinely mid-dispatch or not-yet-confirmed pane never bypasses idle.
-        self.assertTrue(self._d(structured_live=False, defer_streak=2,
-                                max_defers=3).escalated)          # escalate
-        self.assertFalse(self._d(structured_live=False,
-                                 defer_streak=0).escalated)       # bounded defer
-        self.assertFalse(self._d(structured_live=True,
-                                 defer_streak=2).escalated)       # lanes live -> proceed
-        self.assertFalse(self._d(marker="✅",
-                                 defer_streak=2).escalated)       # branch not applicable
-        self.assertFalse(self._d(render_waiters=3,
-                                 defer_streak=2).escalated)       # render badges present
-        self.assertFalse(self._d(structured_live=False, defer_streak=9,
-                                 backlog=0, max_defers=3).escalated)  # zero backlog -> defer
+    def test_611_escalated_flag_retired_by_619(self):
+        # #619 RETIRED the #611 `escalated` flag: it existed ONLY to let the caller
+        # bypass the 15-min empty-lane idle floor, and #619 removed that floor
+        # entirely, so the verdict no longer carries the flag. The escalate
+        # BEHAVIOR (stop deferring at max_defers, so the pane reaches the nudge) is
+        # preserved and locked by test_nth_identical_defer_escalates_not_forever.
+        self.assertNotIn("escalated", og.LaneWorkingNoTasks._fields)
+        d = self._d(structured_live=False, defer_streak=2, max_defers=3)
+        self.assertFalse(d.defer)   # still stops deferring -> reaches the nudge path
+        self.assertIn("ESCALATE", d.log)
 
 
 # --- RC2: the low-mem surface pure decider ------------------------------------
