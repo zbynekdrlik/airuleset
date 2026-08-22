@@ -988,8 +988,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
 
     tpath = None            # #566: defined for the case-(a) recovery below even
                             # when there is no active transcript (normal origin)
-    mark = None             # #623: the newest marker, read below when a
-                            # transcript exists; the stale-rearm replace reads it
+    mark = None             # #623: the newest marker from the 4 MB tail, read
+                            # below when a transcript exists; used ONLY for the
+                            # cleared-after-request check -- the stale-rearm
+                            # replace re-reads via seed_goal_marker (32 MB reach)
     tinfo = watchdog.find_active_transcript(projects_dir, cwd)
     if tinfo:
         tpath, _tmtime = tinfo
