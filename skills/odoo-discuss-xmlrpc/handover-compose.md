@@ -113,6 +113,33 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   The `ZbynekAI <N>` line is MANDATORY on this and every message (signature rule
   above) — it is the LAST line even here in the template a stream copies verbatim.
 
+- **A ticket that BOUND an Odoo Discuss thread may be CLOSED only after a
+  closing note lands in that thread — the LAST message in the thread is ALWAYS
+  the sub-dev's (airuleset #627, owner directive 2026-08-22).** When you open or
+  first post into a client thread for a ticket, record the binding on the ticket
+  as a line-anchored comment `Discuss-thread: <channel-id>` (the id you already
+  cite as "vlákno N") — that is the durable, non-guessy group key, orthogonal to
+  the mutable `stream:` label, so it survives a ticket moving between streams.
+  Before that ticket is closed, whoever CURRENTLY owns the thread posts a closing
+  note into it ("Dobrý deň / Ahoj `<mená>`, všetko z tejto témy je vyriešené,
+  vlákno uzatváram — ďakujeme"; still `partner_ids` incl. the owner, still the
+  `ZbynekAI <N>` signature), then records the evidence on the ticket:
+  `Discuss-closed: msg <message-id>` citing the posted note. **N tickets, one
+  thread:** the note goes ONCE, at the LAST ticket bound to the thread; a
+  non-last ticket closes with `Discuss-defer: siblings #<A> #<B> still open —
+  note goes at the last close` instead (you self-declare last vs non-last,
+  naming the siblings — falsifiable, so no code has to guess which is last).
+  **The obligation FOLLOWS THE TICKET to its current owner / the closing hand,
+  never the author** — on the sub-dev path YOU post the note + record the line +
+  close; on the branch-merge path the OWNING stream posts the note + records
+  `Discuss-closed:` at hand-off, and the gatekeeper's later release-close finds
+  the evidence (the gatekeeper never posts to the client thread — the owning
+  stream does). This is HOOK-ENFORCED: `hooks/block-fork-no-merge-issue-close.sh`
+  BLOCKS a `gh issue close` of a thread-bound odoo-erp ticket that carries no
+  such disposition, for any authority (its own `discuss_close_guard.py` reads the
+  ticket text at close time). Bypass only a genuine non-client / meta ticket
+  (`airuleset:discuss-close-ok` in the close command).
+
 One thread = one topic, a sub-thread under the channel the owner named (montalu:
 IT-support) — never a new top-level channel or group chat (see `## Channel +
 recipients` in `SKILL.md`). Ask the owner ONE decision at a time, and re-ask a

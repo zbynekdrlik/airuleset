@@ -91,6 +91,128 @@ elif _is_patch_close_cmd "$CMD"; then
 fi
 [ "$is_close" -eq 0 ] && exit 0
 
+# ---------------------------------------------------------------------------
+# #627 Discuss closing-note gate — authority-INDEPENDENT, odoo-erp-scoped.
+# Runs BEFORE the authority resolution below, so it fires for EVERY closing
+# hand: a sub-dev closing its own ticket AND the gatekeeper (full authority)
+# closing a branch-merge ticket after the release pipeline. The obligation to
+# leave the sub-dev's closing note as the LAST message in a bound Odoo Discuss
+# thread FOLLOWS THE TICKET to its CURRENT owner / the closing hand — NEVER the
+# author of the thread or the ticket (owner correction, airuleset #627,
+# 2026-08-22: tickets move between streams by topic, so binding the obligation
+# to the author would park it on a stream that no longer owns the topic). This
+# gate never reads authorship — only the ticket's own text — so a ticket that
+# MOVED between streams is handled natively (the `Discuss-thread:` binding is a
+# durable comment, orthogonal to the mutable `stream:` label, so it survives
+# the move — #627 STEP-0).
+#
+# Recognition = a line-anchored `Discuss-thread: <channel-id>` marker on the
+# ticket; the close is blocked until a `Discuss-closed: <msg-id>` (note posted,
+# last ticket) OR `Discuss-defer: <reason>` (deferred to the last ticket)
+# disposition is ALSO present. The pure decision is in discuss_close_guard.py
+# (network-free, unit-tested); this shell part only detects the issue + repo,
+# fetches the ticket text, and pipes it to the module.
+#
+# FAIL-OPEN throughout — the gate's DEFAULT is ALLOW (most closes are not
+# thread-bound), so any unverifiable state (no python3, unparseable issue
+# number, a gh error, a non-odoo-erp repo) FALLS THROUGH to the authority logic
+# below, never a false block (the sibling authority guard's default is BLOCK, so
+# it keeps its OWN safe default — each fails toward its own default). Documented
+# residuals (#319): the gh-api PATCH-close form leaves the issue number empty
+# (falls through — the dominant `gh issue close N` form is covered); a marker
+# QUOTED in prose without a real posted note is a false-PASS (falsifiability +
+# review, the #516 model). Bypass (rare, logged): `airuleset:discuss-close-ok`
+# in the command. Test seam: AIRULESET_DISCUSS_CLOSE_FIXTURE=<file> supplies the
+# ticket JSON instead of a live `gh issue view`.
+# ---------------------------------------------------------------------------
+_DHERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+_DREPO="$(dirname "$_DHERE")"
+_d_run_gate=1
+if printf '%s' "$CMD" | grep -q 'airuleset:discuss-close-ok'; then
+    _DLOG="/tmp/airuleset-discuss-close-bypass-${EUID:-$(id -u)}.log"
+    { echo "$(date -Iseconds)  discuss-close bypass" >> "$_DLOG"; } 2>/dev/null || true
+    _d_run_gate=0
+fi
+command -v python3 >/dev/null 2>&1 || _d_run_gate=0
+[ -f "$_DREPO/discuss_close_guard.py" ] || _d_run_gate=0
+
+if [ "$_d_run_gate" = "1" ]; then
+    # Issue number from the `gh issue close` form (the dominant close shape for
+    # both sub-devs and the gatekeeper). Same grep the authority block uses.
+    _D_NUM=$(printf '%s' "$CMD" | grep -oE 'gh[[:space:]]+issue[[:space:]]+close[[:space:]]+"?#?([0-9]+)' | grep -oE '[0-9]+' | head -1 || echo "")
+    _D_REPO_ARG=$(printf '%s' "$CMD" | grep -oE "(-R|--repo)[[:space:]=]+[\"']?[A-Za-z0-9._/-]+" | head -1 | sed -E "s/^(-R|--repo)[[:space:]=]+[\"']?//" || echo "")
+    if [ -n "$_D_NUM" ]; then
+        # odoo-erp repo-scope (Odoo Discuss threads are an odoo-erp / client
+        # thing): a non-odoo-erp close never engages the gate, killing the
+        # cross-repo meta false-positive (e.g. this very airuleset ticket #627,
+        # whose prose names these markers). Resolve the repo from -R, else the
+        # cwd git remote; basename, strip trailing slash + .git, compare
+        # case-insensitively (the #477 _is_camera_box_repo parse order).
+        _D_REPONAME="$_D_REPO_ARG"
+        if [ -z "$_D_REPONAME" ]; then
+            _D_REPONAME=$(git remote get-url origin 2>/dev/null || echo "")
+        fi
+        _D_REPONAME="${_D_REPONAME%/}"
+        _D_REPONAME="${_D_REPONAME%.git}"
+        _D_REPONAME="${_D_REPONAME%/}"
+        _D_REPONAME="${_D_REPONAME##*/}"
+        _D_REPONAME="${_D_REPONAME##*:}"
+        if [ "${_D_REPONAME,,}" = "odoo-erp" ]; then
+            # Ticket JSON: fixture seam (tests / demonstration) OR a live fetch.
+            _D_JSON=""
+            if [ -n "${AIRULESET_DISCUSS_CLOSE_FIXTURE:-}" ] && [ -f "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" ]; then
+                _D_JSON=$(cat "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" 2>/dev/null || echo "")
+            elif [ -n "$_D_REPO_ARG" ]; then
+                _D_JSON=$(gh issue view "$_D_NUM" -R "$_D_REPO_ARG" --json body,comments 2>/dev/null || echo "")
+            else
+                _D_JSON=$(gh issue view "$_D_NUM" --json body,comments 2>/dev/null || echo "")
+            fi
+            if [ -n "$_D_JSON" ]; then
+                _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" 2>/dev/null || echo "OK")
+                if [ "$_D_VERDICT" = "BLOCK" ]; then
+                    cat >&2 <<MSG
+
+🚫 BLOCKED: this ticket has a bound Odoo Discuss thread (a Discuss-thread: line
+on the ticket) but carries no closing-note evidence — closing it now would leave
+the client thread with our message (or their question) as the LAST message, then
+silence (airuleset #627, owner directive 2026-08-22).
+
+Whoever closes the ticket carries the obligation — it FOLLOWS THE TICKET to its
+current owner, never the author. Before this ticket is closed, the sub-dev that
+CURRENTLY owns the thread must post a closing note INTO that Odoo Discuss thread
+("všetko vyriešené, tému uzatvárame"), so the LAST message in the thread is
+always from the sub-dev — then record the evidence on THIS ticket. Add ONE of:
+
+  • the closing note was posted (this is the LAST ticket bound to the thread):
+      gh issue comment ${_D_NUM} --body "Discuss-closed: msg <message-id>  (thread <channel-id>)"
+
+  • the thread STAYS OPEN because sibling tickets remain (the closing note goes
+    at the LAST close, not here — name the still-open siblings):
+      gh issue comment ${_D_NUM} --body "Discuss-defer: siblings #<A> #<B> still open — note goes at the last close"
+
+Then re-run the close.
+
+Both paths:
+  • a sub-dev closing its own ticket: YOU post the note + record the line + close.
+  • the gatekeeper closing a branch-merge ticket after the release pipeline: the
+    OWNING stream posts the note + records Discuss-closed: at hand-off; the
+    gatekeeper's close then finds the evidence. The gatekeeper does NOT post to
+    the client thread — the stream that owns the thread does.
+
+How to compose + post the closing note (body_is_html, owner on partner_ids,
+the ZbynekAI <N> signature): skills/odoo-discuss-xmlrpc/handover-compose.md.
+
+Bypass (rare, logged, ONLY a genuine non-client / meta ticket that merely names
+these markers in prose): put  airuleset:discuss-close-ok  in the close command.
+MSG
+                    exit 2
+                fi
+            fi
+        fi
+    fi
+fi
+# ---- end #627 Discuss gate; fall through to the authority logic below ----
+
 # Resolve THIS stream's authority (marker-aware; the python reads the cwd project
 # CLAUDE.md override, else the per-user map). The hook's cwd IS the session's cwd,
 # i.e. the project dir — so the project's authority marker (if any) is honored.

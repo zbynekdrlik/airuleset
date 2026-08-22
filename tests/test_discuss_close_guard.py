@@ -168,5 +168,117 @@ class TestCli(TestCase):
         self.assertEqual(self._run("not json at all"), "OK")
 
 
+class TestHookIntegration(TestCase):
+    """Drives the REAL hooks/block-fork-no-merge-issue-close.sh through its #627
+    Discuss section, via the AIRULESET_DISCUSS_CLOSE_FIXTURE test seam (so no
+    live `gh` / network). A `gh issue close ...` payload is only INSPECTED — a
+    PreToolUse hook never runs the command. The gate is authority-INDEPENDENT
+    and odoo-erp-scoped; these lock both."""
+
+    HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
+
+    def _authority_cwd(self, profile):
+        import tempfile
+        d = tempfile.mkdtemp()
+        (Path(d) / "CLAUDE.md").write_text(
+            "# proj\n<!-- airuleset:authority=%s -->\n" % profile
+        )
+        return d
+
+    def _fixture(self, body="", comments=()):
+        import tempfile
+        fd = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        fd.write(_issue(body=body, comments=comments))
+        fd.close()
+        return fd.name
+
+    def _run(self, cmd, cwd, fixture=None):
+        import os
+        payload = json.dumps({"tool_input": {"command": cmd}})
+        env = dict(os.environ)
+        if fixture is not None:
+            env["AIRULESET_DISCUSS_CLOSE_FIXTURE"] = fixture
+        return subprocess.run(
+            ["bash", str(self.HOOK)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            env=env,
+        )
+
+    def test_blocks_thread_bound_close_without_disposition(self):
+        fx = self._fixture(body="Fix X.\n\nDiscuss-thread: 257")
+        r = self._run(
+            "gh issue close 4811 -R zbynekdrlik/odoo-erp --comment done",
+            self._authority_cwd("full"),
+            fixture=fx,
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("Discuss-thread", r.stderr)
+        self.assertIn("handover-compose.md", r.stderr)
+
+    def test_gate_is_authority_independent_full_authority_still_blocks(self):
+        # A FULL-authority close would sail through the authority guard (exit 0);
+        # an exit 2 here proves the Discuss gate fired FIRST — the gatekeeper /
+        # branch-merge-close path. The obligation follows the ticket, not authorship.
+        fx = self._fixture(body="Discuss-thread: 257")
+        r = self._run(
+            "gh issue close 4811 -R zbynekdrlik/odoo-erp",
+            self._authority_cwd("full"),
+            fixture=fx,
+        )
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_allows_close_with_closed_note(self):
+        fx = self._fixture(
+            body="Discuss-thread: 257",
+            comments=["Discuss-closed: msg 1731999 (thread 257)"],
+        )
+        r = self._run(
+            "gh issue close 4811 -R zbynekdrlik/odoo-erp --comment done",
+            self._authority_cwd("full"),
+            fixture=fx,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_allows_close_with_defer(self):
+        fx = self._fixture(
+            body="Discuss-thread: 257",
+            comments=["Discuss-defer: siblings #4812 still open"],
+        )
+        r = self._run(
+            "gh issue close 4811 -R zbynekdrlik/odoo-erp",
+            self._authority_cwd("full"),
+            fixture=fx,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_repo_scope_skips_non_odoo_erp(self):
+        # The SAME bound-no-disposition fixture on a NON-odoo-erp repo must NOT
+        # engage the gate (Discuss threads are an odoo-erp/client thing) — kills
+        # the cross-repo meta false-positive. Full authority → overall exit 0.
+        fx = self._fixture(body="Discuss-thread: 257")
+        r = self._run(
+            "gh issue close 627 -R zbynekdrlik/airuleset --comment done",
+            self._authority_cwd("full"),
+            fixture=fx,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Discuss-thread", r.stderr)
+
+    def test_bypass_marker_skips_the_gate(self):
+        fx = self._fixture(body="Discuss-thread: 257")
+        r = self._run(
+            "gh issue close 4811 -R zbynekdrlik/odoo-erp "
+            "--comment 'closing, airuleset:discuss-close-ok meta ticket'",
+            self._authority_cwd("full"),
+            fixture=fx,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     main()
