@@ -114,6 +114,15 @@ curl -s -H "Authorization: Bearer $CF_TOKEN" \
 the API is. Rejecting a token on its length is how a valid token got called
 invalid three times.
 
+**Hook-gated (#631).** An owner-facing claim that a Cloudflare credential is invalid
+is now BLOCKED by `stop-check-prose-violations.sh` unless the same message shows a
+capability probe (`GET /zones` or `GET /accounts/{id}/tokens/verify`) or an explicit
+`UNVERIFIED:`. `/user/tokens/verify` is NOT accepted as a probe — treating its answer
+as a verdict is exactly the error that cost the owner his master token. And the
+situational trigger now injects THIS skill on any script touching `api.cloudflare.com`
+(quoted URLs, heredocs, `cfat_`, `secret request cloudflare*`, `~/.secrets/cloudflare*`,
+`webterm-access`), so the warning reaches the moment of decision.
+
 ## 3. Which token for which job
 
 - **DNS work (the common case): `Zone → DNS → Edit`, scoped to ONE zone.** The

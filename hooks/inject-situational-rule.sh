@@ -92,6 +92,7 @@ def strip_carried_text(cmd):
 if event == "UserPromptSubmit" or (not tool and payload.get("prompt")):
     surface = "UserPromptSubmit"
     haystack = str(payload.get("prompt") or "")
+    raw_haystack = haystack
     out_event = "UserPromptSubmit"
 else:
     surface = tool or "Bash"
@@ -99,12 +100,22 @@ else:
     out_event = "PreToolUse"
     if surface == "Bash":
         # the real command only — not the document it carries
-        haystack = strip_carried_text(str(tool_input.get("command") or ""))
+        raw_cmd = str(tool_input.get("command") or "")
+        haystack = strip_carried_text(raw_cmd)
+        # #631 -- a RAW copy that KEEPS quoted strings + heredoc bodies, for
+        # the RAW_BASH_MATCH_TOPICS rows below. strip_carried_text() is the
+        # RIGHT default (it stops a `git commit -m "... gh pr merge ..."`
+        # MENTION from injecting), but it deletes the api.cloudflare.com URL
+        # from a token-verifying script that carries it INSIDE a quoted
+        # Python/heredoc string -- exactly the shape that most needs the skill.
+        raw_haystack = raw_cmd
         if tool_input.get("run_in_background") is True:
             haystack += " run_in_background=true"
+            raw_haystack += " run_in_background=true"
     else:
         try:
             haystack = json.dumps(tool_input, ensure_ascii=False)
+            raw_haystack = haystack
         except Exception:
             sys.exit(0)
 
@@ -119,6 +130,16 @@ MAX_BODY = 24000
 # over the budget is DEFERRED, not consumed — its marker stays unset so its
 # own action can still load it later.
 MAX_TOTAL = 14000
+
+# #631 -- Bash topics whose PATTERN is matched against the RAW command
+# (quotes + heredoc bodies intact), NOT the strip_carried_text()-stripped
+# haystack every other Bash row uses. A false-positive here is cheap (one
+# deferred injection, once per session); a false-NEGATIVE deleted the owner's
+# master Cloudflare token (the verify endpoint LIES for cfat_ tokens, a script
+# calls it from inside a quoted string, the quote-stripping erased the URL, the
+# skill never loaded). So the cloudflare row -- the one shape that most needs
+# the skill (a script actually touching the API) -- matches the raw command.
+RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens"}
 
 
 def strip_frontmatter(text):
@@ -142,12 +163,18 @@ for line in open(conf_path, encoding="utf-8"):
     topic, tool_pat, pattern, body_rel = parts[:4]
     exclude = parts[4] if len(parts) == 5 else ""
 
+    # #631 -- a RAW_BASH_MATCH_TOPICS row on a Bash surface matches (and is
+    # excluded) against the un-stripped command, so a quoted/heredoc
+    # api.cloudflare.com URL still fires. Every other row keeps the stripped
+    # haystack, so the merge/push/deploy MENTION false-positives stay fixed.
+    hay = raw_haystack if (surface == "Bash" and topic in RAW_BASH_MATCH_TOPICS) else haystack
+
     try:
         if not re.fullmatch(tool_pat, surface):
             continue
-        if not re.search(pattern, haystack):
+        if not re.search(pattern, hay):
             continue
-        if exclude and re.search(exclude, haystack):
+        if exclude and re.search(exclude, hay):
             continue
     except re.error:
         continue

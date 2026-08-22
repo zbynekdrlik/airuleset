@@ -1138,6 +1138,103 @@ if [ "$PC_MATCH" = "1" ]; then
     fi
 fi
 
+# #631 — owner-chat CLOUDFLARE CREDENTIAL-INVALID claim with NO capability
+# probe. The owner deleted his master Cloudflare token from Bitwarden because a
+# session declared it invalid, and Cloudflare never shows a token value twice —
+# so it is gone. The claim was wrong: `GET /user/tokens/verify` returns
+# `Invalid API Token` for account-owned `cfat_` tokens BY DESIGN. The knowledge
+# (skills/cloudflare-api-tokens §0/§2) existed and did not reach the moment of
+# decision. This makes the owner-chat claim mechanical — the structural sibling
+# of the #608 prod-read capitulation gate above.
+#
+# MATCH runs on CF_FLAT (the MENTION-stripped message, MSG_MENTION) so a message
+# that merely QUOTES the error string in backticks/double-quotes (`Invalid API
+# Token`) or discusses the endpoint in the abstract has the cluster STRIPPED and
+# does NOT fire — the #96 use-vs-mention discipline and the ticket's own boundary.
+# ESCAPE runs on CF_RAW_FLAT (the RAW message) because the probe that disarms is
+# a curl that normally lives inside a code fence / quoted string that MSG_MENTION
+# would strip — the deliberate difference from #608 (whose escape tokens are
+# prose markers). Acceptance (b): "the same message carrying a probe passes".
+#
+# The MATCH requires a CLOUDFLARE-QUALIFIED credential (CF_QCRED — a cloudflare/
+# cfat/wrangler SIGNAL adjacent, within 30 chars, to a CREDENTIAL noun, OR the
+# self-qualifying `cfat` prefix) within 60 chars of an INVALID/non-functional
+# VERDICT. Tying the cloudflare context DIRECTLY to the credential (not two
+# independent "cloudflare-anywhere AND invalid-somewhere" booleans) is what
+# stops the cross-service / unrelated-topic over-block a fresh-context
+# adversarial review demonstrated (#631 review r2 MAJOR-1: "the GitHub token is
+# invalid … separately, the Cloudflare DNS is set up" must NOT block; "moved the
+# site behind Cloudflare … the sort key is invalid" must NOT block).
+#   CF_QCRED  : cfat | (cloudflare|cfat|wrangler).{0,30}(token|kľúč|credential|
+#               api-key) | the reverse ordering.
+#   CF_INVALID: SK neplatn*/nefunk*/nefunguje/nefungoval*; EN invalid/not valid/
+#               isn't valid/doesn't work/not working/won't work/no longer works.
+#               DELIBERATELY EXCLUDES revoked/rejected/expired/odmiet/zrušen/
+#               zamietnut/expirovan/vypršal/mŕtv — those are action- or
+#               state-overloaded and fire in BENIGN hygiene/rotation/success
+#               reports ("I revoked the old token", "the old token was expired,
+#               I rotated it", "Cloudflare rejected the request, fixed the
+#               scope") — #631 review r2 MAJOR-3. The verify-endpoint LIE this
+#               gate targets produces "invalid" / "doesn't work" / "neplatný" /
+#               "nefunguje", which is exactly the retained set.
+#   Escape    : a REAL capability probe — `…/v4/zones`, an
+#               `accounts/{id}/tokens/verify`, the phrase "capability probe" — or
+#               an explicit `UNVERIFIED:`. DELIBERATELY NOT `/user/tokens/verify`
+#               (treating that endpoint's answer as a verdict IS the error): the
+#               `accounts/` prefix + the `[^/]` class in CF_PROBE cannot span the
+#               `/user/` segment, so the trap endpoint can never disarm.
+#
+# Accepted residuals (documented, not chased, per #319 — honesty bar, r2 MINOR):
+#   OVER-block (fail-safe — a credential whose false-negative is irreversible
+#   fails toward MORE scrutiny; cheap fix is backtick / add a probe / UNVERIFIED):
+#     - a bare-prose ABSTRACT discussion that does NOT backtick its error string
+#       ("the verify endpoint returns invalid for cfat tokens by design");
+#     - a "not invalid" double negative (contains the `invalid` substring);
+#     - a cloudflare SIGNAL that happens to sit within 30 chars of an unrelated
+#       credential noun that itself sits within 60 of an unrelated `invalid`
+#       (tighter than a decoupled match, but still possible in one dense clause);
+#     - the escape is message-scoped, so an UNRELATED `v4/zones`/`UNVERIFIED:`
+#       mention disarms a real claim (same as the #608 sibling).
+#   UNDER-block (misses a real claim — cheap to write the same claim plainly):
+#     - the credential noun or the cloudflare signal QUOTED inside backticks /
+#       double-quotes is stripped, so `The \`Cloudflare token\` is invalid` slips
+#       (the inherent use-vs-mention cost; the bare-prose incident is caught);
+#     - a single-quoted error string is NOT stripped by strip_mentions (it strips
+#       only backticks/double-quotes/fences), so a single-quoted mention can
+#       over-block — inherited, not #631-specific;
+#     - a verdict more than 60 chars from the qualified credential.
+CF_SIG='cloudflare|cfat|\bwrangler\b'
+CF_CREDNOUN='token[a-z]*|k[ľl][úu][čc][a-z]*|credential[a-z]*|api[[:space:]-]*key[a-z]*'
+CF_QCRED="cfat|(${CF_SIG}).{0,30}(${CF_CREDNOUN})|(${CF_CREDNOUN}).{0,30}(${CF_SIG})"
+CF_INVALID_SK='neplatn[a-z]*|nefunk[čc]n[a-z]*|nefunguje|nefungoval[a-z]*'
+CF_INVALID_EN='invalid|not[[:space:]]+valid|isn.?t[[:space:]]+valid|does[[:space:]]?n.?t[[:space:]]+work|do[[:space:]]+not[[:space:]]+work|not[[:space:]]+working|won.?t[[:space:]]+work|no[[:space:]]+longer[[:space:]]+works?'
+CF_INVALID="(${CF_INVALID_SK})|(${CF_INVALID_EN})"
+CF_MATCH_RE="((${CF_INVALID}).{0,60}(${CF_QCRED}))|((${CF_QCRED}).{0,60}(${CF_INVALID}))"
+CF_PROBE='v4/zones|accounts/[a-zA-Z0-9._-]+/tokens/verify|capabilit[a-z]*[[:space:]]+probe|UNVERIFIED:'
+CF_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || CF_FLAT="$MSG_MENTION"
+CF_RAW_FLAT=$(tr '\n' ' ' <<<"$MSG") || CF_RAW_FLAT="$MSG"
+CF_MATCH=0
+# Cheap pre-gate: only a cloudflare-mentioning (mention-stripped) message pays
+# the full match. CF_MATCH_RE already requires a cloudflare-qualified credential,
+# so this only short-circuits the common non-cloudflare message.
+if LC_ALL=C.UTF-8 msg_has "$CF_FLAT" -qiE "$CF_SIG"; then
+    if LC_ALL=C.UTF-8 msg_has "$CF_FLAT" -qiE "$CF_MATCH_RE"; then
+        CF_MATCH=1
+    fi
+fi
+if [ "$CF_MATCH" = "1" ]; then
+    # Exonerating: a capability probe / UNVERIFIED in the message -> DISARM.
+    # msg_missing (unknown -> deny the exemption, fail-closed) is the same #194
+    # taxonomy the #608/tester-handoff escapes use. On CF_RAW_FLAT so a
+    # code-fenced curl probe still disarms (acceptance b).
+    if LC_ALL=C.UTF-8 msg_missing "$CF_RAW_FLAT" -qiE "$CF_PROBE"; then
+        echo "VIOLATION: Vyhlásil si Cloudflare credential (token/kľúč) za neplatný/nefunkčný v správe pre OWNERA — BEZ doloženého CAPABILITY PROBE. Presne takto sa dnes STRATIL master token: owner ho zmazal z Bitwardenu na základe tohto tvrdenia a Cloudflare hodnotu tokenu už nikdy nezobrazí. \`GET /user/tokens/verify\` vracia \`Invalid API Token\` pre účtovo-viazané \`cfat_\` tokeny BY DESIGN — jeho odpoveď NIE JE verdikt (brať ju ako verdikt JE tá chyba). Než vyhlásiš token za neplatný, MUSÍŠ v tej istej správe ukázať CAPABILITY PROBE proti reálnemu zdroju: \`GET https://api.cloudflare.com/client/v4/zones\` (success:true + zóny = token funguje) ALEBO \`GET /accounts/<account_id>/tokens/verify\`. Ak probe naozaj zlyhal, ukáž ho + jeho výstup; ak ho nevieš spustiť, napíš \`UNVERIFIED: <čo> — <čo si skúsil>\`. NIKDY neber odpoveď z \`/user/tokens/verify\` ako verdikt." >&2
+        echo "" >&2
+        echo "  See skills/cloudflare-api-tokens §0/§2 (the verify endpoint LIES for cfat_ tokens; the /zones capability probe is the only verdict)." >&2
+        add_hard "Owner-chat Cloudflare credential-invalid claim ('token je neplatný/nefunguje' / 'the Cloudflare token is invalid') with NO capability probe — show a GET /zones (or /accounts/<account_id>/tokens/verify) probe + its output, or write 'UNVERIFIED:'. NEVER treat /user/tokens/verify as a verdict (it returns Invalid API Token for cfat_ tokens BY DESIGN). (#631 / #500 class — the owner lost his master token this way)"
+    fi
+fi
+
 # === Unified completion-report detection ===
 # Agents sometimes write prose completion reports without the canonical heading,
 # silently bypassing every audit check below (slovnormal-mcp session shipped
