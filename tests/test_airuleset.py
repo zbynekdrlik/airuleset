@@ -10858,6 +10858,9 @@ class TestWatchdogBacklogFetch(TestCase):
         # #619: bumped 15s -> _BACKLOG_LIVE_COUNT_TIMEOUT_S (30s) so the cache-miss
         # live fallback COMPLETES on a 16-17s slice instead of always timing out.
         self.assertEqual(kw.get("timeout"), airuleset._BACKLOG_LIVE_COUNT_TIMEOUT_S)
+        # value-teeth: the constant must give real margin over the measured 16-17s
+        # slice (a regression to e.g. 5s would re-introduce the always-timeout bug).
+        self.assertGreaterEqual(airuleset._BACKLOG_LIVE_COUNT_TIMEOUT_S, 20)
 
     def test_reduced_authority_shells_slice_quals(self):
         fake_run, calls = self._fake(stdout="0\n")

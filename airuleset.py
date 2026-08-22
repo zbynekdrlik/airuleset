@@ -3826,8 +3826,13 @@ _BACKLOG_STATUS_CACHE_MAX_AGE_S = 15 * 60
 # expired -> backlog=None on every cache-miss sweep (92x/9h on montalu1), which
 # starved the saturation nudge's under-saturation confirmation. Bumped to 30s
 # (comfortable margin over 17s) so the synchronous fallback COMPLETES instead of
-# bailing; the result then caches for 10min (BACKLOG_CHECK_INTERVAL_S), so the
-# 30s cost is paid at most once per that window per box, never per sweep.
+# bailing; the result then caches for 10min (BACKLOG_CHECK_INTERVAL_S) PER cwd, so
+# the 30s cost is paid at most once per that window per REPO, never per sweep.
+# Interaction noted (adversarial review): a cold fetch starting late in a sweep can
+# overshoot the unit's TimeoutStartSec (~120s) by ~15s more than the old 15s did --
+# but a mid-sweep kill is designed-for + self-recovering (a few/day), the cold path
+# is rare (cache-first), and the warmed cache serves the next sweep, so the wider
+# overshoot window is an accepted tradeoff for a reliable backlog read.
 _BACKLOG_LIVE_COUNT_TIMEOUT_S = 30
 
 

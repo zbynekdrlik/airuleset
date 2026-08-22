@@ -1720,6 +1720,23 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(rec.get("lpinged"))
         self.assertFalse(rec.get("ln"))
 
+    def test_620_lane_appearance_resets_giveup_even_with_no_backlog(self):
+        # #620 (adversarial-review 🔵): _lane_count_giveup_reset is placed BEFORE
+        # the boundary + backlog gates, so a lane appearance (workers>0) refreshes
+        # the give-up latch even when the backlog reads None (a cold cache) or the
+        # pane is busy. Mutation lock: if the reset moved back after the backlog
+        # check, this backlog=None sweep would return first and leave ln/lpinged
+        # latched -> a false give-up owner ping once a worker drains.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lpinged": True}
+        with m.patch.object(wd, "count_live_workers", return_value=(2, [])):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: None,
+                                          now, tmtime, rec=rec)
+        self.assertTrue(any("no measurable open backlog" in ln for ln in logs), logs)
+        self.assertFalse(rec.get("lpinged"))   # reset fired BEFORE the backlog skip
+        self.assertFalse(rec.get("ln"))
+
     def test_undersaturated_has_no_permanent_giveup(self):
         # A session that stays under-saturated for hours must keep being
         # pushed: GOAL_LANE_MAX_NUDGES is NOT a give-up for the fill-the-cap

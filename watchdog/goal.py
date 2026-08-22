@@ -2515,7 +2515,16 @@ def _lane_count_giveup_reset(rec):
     (`lna`/`lnpark`) is NOT touched here: it self-heals via the #479 park + the
     successful-delivery reset in `_lane_record_nudge` (dropping the old
     session-active reset avoids re-opening the #479 retry hammer now that #619
-    lets the empty-lane flow fall through to delivery instead of skip:idle)."""
+    lets the empty-lane flow fall through to delivery instead of skip:idle).
+
+    The CALLER invokes this the moment `live_workers > 0` is known -- BEFORE the
+    boundary / backlog / saturation gates -- so a lane appearance is observed even
+    when the pane is busy/non-idle (`_lane_boundary_ok` would skip) or the backlog
+    reads None. Otherwise a box that dispatched a worker then went straight back to
+    working inline (pane busy -> boundary skip -> this reset never reached) whose
+    worker drained before the pane next idled would reach the next 0-worker sweep
+    with `ln` still latched at the cap and fire a FALSE give-up owner ping
+    (adversarial-review 🔵)."""
     for k in ("ln", "lnbk"):
         rec.pop(k, None)
     if rec.get("lna", 0) < GOAL_LANE_MAX_STASH_ABORTS:
@@ -2755,17 +2764,17 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # nudge like full authority (was `!= "full"`, a stale full-only assumption).
         return logs, False
     idle = now - (tmtime or now)
-    # #442 THIRD GAP -- the old top-of-function idle gate returned HERE with
-    # EMPTY logs whenever the transcript was fresh -- which a BUSY
-    # under-saturated session ALWAYS is (turns spinning -> mtime fresh) -- so
-    # it never reached the fill-the-cap decision and journalled nothing (the
-    # reopen-3 root cause: gk 2 workers, I 32, guard silent 20+ min). The idle
-    # requirement is now applied PER BRANCH below, and the session-active
-    # give-up reset moved WITH it into the 0-worker branch: a busy
-    # under-saturated session must NOT re-arm every sweep (#442-review F1 --
-    # the reset here zeroed the stash-abort streak before it could reach its
-    # cap, so the give-up was structurally unreachable on exactly the
-    # population this fix newly enables).
+    # #442 THIRD GAP / #619 -- the old top-of-function idle gate returned HERE
+    # with EMPTY logs whenever the transcript was fresh -- which a BUSY
+    # under-saturated session ALWAYS is (turns spinning -> mtime fresh) -- so it
+    # never reached the fill-the-cap decision and journalled nothing (gk 2
+    # workers, I 32, guard silent 20+ min). #619 removed the empty-lane idle
+    # floor ENTIRELY (it was structurally self-suppressing on a busy-solo box);
+    # `idle` below is now logging-only. Keystroke safety is carried by the gates
+    # that fire AT the keystroke (`_lane_boundary_ok` idle-prompt + recent-human
+    # + draft-diff + hourly cap + MAX_NUDGES give-up). The give-up counter reset
+    # is now on lane appearance (`_lane_count_giveup_reset`, #620), not on a
+    # session-active/backlog-change signal.
     marker = watchdog.transcript_last_marker(tpath)
     if marker == "❓":
         _lane_skip(logs, loc, "skip:awaiting-user (❓ marker -- session blocked "
@@ -2784,9 +2793,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # below. `pane_waiting_on_user` STAYS -- it is a genuine delivery-safety gate (a
     # blocking dialog occupies the input area, so there is no free prompt to deliver
     # into); worker presence is not. The `_boundary_ok` idle-prompt gate below still
-    # refuses to type into a non-idle pane, and the 15-min supervisor-idle gate
-    # above already prevents nudging right after a dispatch, so folding worker
-    # presence into the count is safe.
+    # refuses to type into a non-idle pane (so a mid-dispatch spinning pane is
+    # skipped there), and the hourly cap bounds re-nudging, so folding worker
+    # presence into the count is safe even without the (removed, #619) idle floor.
     if watchdog.pane_waiting_on_user(captured):
         _lane_skip(logs, loc, "skip:blocking-dialog (a dialog/prompt occupies "
                               "the input area -- no free prompt to deliver into)")
@@ -2806,6 +2815,11 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         logs.append(_wnt_log)
     if _wnt_defer:
         return logs, False
+    if live_workers > 0:
+        # #620 -- a lane appeared -> refresh the empty-lane give-up budget. Placed
+        # BEFORE the boundary/backlog gates (see _lane_count_giveup_reset) so a
+        # busy/non-idle pane's lane still resets `ln`.
+        _lane_count_giveup_reset(rec)
     # #502 -- ACCOUNT-LIMIT BACK-OFF (extracted helper, keeps this function small).
     # When the supervisor's OWN transcript shows a recent account-level dispatch
     # block, dispatching a fresh worker is a certain loss (it dies on the SAME cap
@@ -2874,12 +2888,11 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # a just-finished-but-free lane (the intended #587 fill direction: a freed lane
     # with backlog SHOULD be filled on the real gap). The old completion-recency
     # anti-flap (a just-merged worker counted through its integration window) is
-    # gone (it WAS the #587 ghost); now = 15-min cooldown + 3-min recent-human +
-    # empty-lane idle gate + ~30s FINISH_SETTLE_S debounce. At/above floor = silent.
+    # gone (it WAS the #587 ghost); now = 1-hour cooldown + 3-min recent-human +
+    # ~30s FINISH_SETTLE_S debounce (#619 removed the empty-lane idle gate). At/
+    # above floor = silent.
     mem_mb = None
     floor = min(GOAL_LANE_SATURATION_WORKERS, backlog_n)
-    if live_workers > 0:
-        _lane_count_giveup_reset(rec)   # #620 -- box HAS a lane -> refresh give-up budget
     if live_workers >= floor:
         _lane_clear_effectiveness(rec)   # #509: filled -> re-probe fresh on next dip
         _lane_lowmem_reset(rec, dry_run)   # #571: box filled -> low-mem episode over
