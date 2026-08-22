@@ -1654,6 +1654,65 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         self.assertFalse(any("skip:min-backlog" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [])
 
+    # ---------------------------------------------------------------- #
+    # #619 / #620 -- busy-solo (0 lanes, big backlog, session solving
+    # tickets INLINE so the transcript is always fresh). The empty-lane
+    # 15-min idle floor was structurally unreachable here (114x skip:idle
+    # /9h on montalu1, 0 fill nudge, #611 escalated-bypass dead because the
+    # marker flaps), AND the give-up counter reset on every backlog change
+    # (all 4 landed nudges logged (1/2), the give-up owner ping never fired).
+    # ---------------------------------------------------------------- #
+
+    def test_619_empty_lane_fires_despite_fresh_transcript_no_escalation(self):
+        # #619 THE headline lock: a busy-solo empty-lane box (0 workers, big
+        # backlog, FRESH transcript idle=30s, NON-⏳ marker so the #611 WNT
+        # escalation never applies) must FIRE the fill nudge -- idle << 15m is
+        # EXACTLY the busy-solo state the nudge must reach, and _lane_boundary_ok
+        # (already passed above) is the real keystroke gate. RED: the empty-lane
+        # 15-min idle floor early-returned skip:idle here.
+        now = 100000
+        tmtime = now - 30  # fresh: idle << 15min, no WNT escalation (non-⏳)
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 5, now, tmtime)
+        self.assertTrue(owns)
+        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("workers=0" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:idle" in ln for ln in logs), logs)
+        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)
+
+    def test_620_giveup_advances_despite_backlog_change(self):
+        # #620 THE headline lock: the empty-lane give-up counter (ln) must
+        # survive a BACKLOG CHANGE. A busy-solo box churns its backlog inline
+        # (33->25); the pre-#620 _lane_idle_reset wiped `ln` on every change, so
+        # count_gaveup (n>=MAX_NUDGES) was never reached and the give-up owner
+        # ping never fired -- all nudges repeated as (1/2). A box already at the
+        # give-up cap must GIVE UP even though the backlog differs from the last
+        # nudge's baseline. RED: the idle-floor branch reset ln->0 + skip:idle.
+        now = 100000
+        tmtime = now - 30  # busy: fresh transcript, idle << 15min
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lnbk": 33}  # cap reached at old backlog
+        logs, owns, tmux = self._call(GOAL_ARMED_CAP, lambda cwd: 25, now,
+                                      tmtime, rec=rec)   # backlog now 25 (changed)
+        self.assertTrue(owns)
+        self.assertTrue(any("GAVE UP" in ln for ln in logs), logs)
+        self.assertFalse(any("skip:idle" in ln for ln in logs), logs)
+
+    def test_620_giveup_latch_clears_when_a_lane_appears(self):
+        # #620 -- the empty-lane give-up (ln + its lpinged latch) refreshes when
+        # the box GETS a lane (workers>0 = "the nudge worked / it dispatched"),
+        # NOT on a backlog change. A saturated sweep (no nudge fires, so
+        # _lane_record_nudge never runs) with a latched give-up must still clear
+        # it so a future give-up can re-escalate. RED: only _lane_clear_
+        # effectiveness ran there (lineff/lnw/lnb), leaving ln + lpinged latched.
+        now = 100000
+        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
+        rec = {"ln": goal.GOAL_LANE_MAX_NUDGES, "lpinged": True}
+        with m.patch.object(wd, "count_live_workers", return_value=(5, [])):
+            logs, owns, tmux = self._call(GOAL_ARMED_STRIP_CAP, lambda cwd: 32,
+                                          now, tmtime, rec=rec)
+        self.assertTrue(any("saturated" in ln for ln in logs), logs)
+        self.assertFalse(rec.get("lpinged"))
+        self.assertFalse(rec.get("ln"))
+
     def test_undersaturated_has_no_permanent_giveup(self):
         # A session that stays under-saturated for hours must keep being
         # pushed: GOAL_LANE_MAX_NUDGES is NOT a give-up for the fill-the-cap
