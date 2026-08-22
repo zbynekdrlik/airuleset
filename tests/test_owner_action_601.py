@@ -9,7 +9,8 @@ Layers, mirroring the #539 test shape:
   (a) ROUTING — `needs-owner-action` is a new USER_WAITING label routed to U with
       `--waiting` reason `action`; owner beats third-party (+ops-wait → U); it
       NEVER enters the W (ops_wait) bucket, so the #570 stale! path can never
-      touch it; it has NO #539 chained-I analog (always U).
+      touch it; it is always U (as is a bare needs-acceptance since #622 removed
+      the #539 chained-I gate — both are the owner's court).
   (b) DISPLAY — a flagged action member shows `no-action!` (missing delivered
       ACTION notice), not `no-question!`.
   (c) DIGEST — `needs-owner-action` is NOT in OWNER_DECISION_LABELS: the daily
@@ -124,22 +125,21 @@ class OwnerActionRoutesToU(unittest.TestCase):
             airuleset._user_waiting_reason(
                 _labels("needs-owner-action", "needs-decision")), "decision")
 
-    def test_owner_action_has_no_chained_I_analog(self):
-        # Unlike a bare needs-acceptance (which routes to chained-I when its
-        # draft was never presented), an owner-action is ALWAYS the owner's
-        # court → U regardless of acceptance_present. A physical step is never
-        # the stream's own deferrable work.
+    def test_owner_action_is_always_U(self):
+        # An owner-action is ALWAYS the owner's court → U. (#622 removed the #539
+        # chained-I gate, so a bare needs-acceptance is ALSO always U now — both
+        # are the owner's court, and `_partition_workable` is a pure label
+        # partition with no acceptance_present routing param.)
         rows = {9: _row(9, "needs-owner-action")}
-        workable, user_waiting, ops_wait = airuleset._partition_workable(
-            rows, acceptance_present=set())
+        workable, user_waiting, ops_wait = airuleset._partition_workable(rows)
         self.assertEqual(set(user_waiting), {9},
-                         "#601: owner-action stays U even with an empty "
-                         "acceptance_present set (no chained-I analog)")
+                         "#601: owner-action is a physical owner step → U")
         self.assertEqual(set(workable), set())
 
     def test_acceptance_present_set_never_includes_an_action_member(self):
         # `_acceptance_present_set` only considers bare needs-acceptance rows, so
-        # the #539 chained-I gate never touches an owner-action ticket.
+        # the #622 `queued`-vs-`acceptance` display tag never touches an
+        # owner-action ticket (it stays tagged `action`).
         rows = {9: _row(9, "needs-owner-action")}
         with mock.patch.object(statusbar, "question_map_ticket_refs",
                                lambda cwd=None, home=None: set()):

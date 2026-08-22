@@ -22,19 +22,16 @@ STATUS = REPO / "modules" / "core" / "statusline-vocabulary.md"
 SKILL = REPO / "skills" / "autopilot" / "SKILL.md"
 
 FINDER = "Pipeline-gated tail + umbrella = W (#578)"
-# Operative tokens UNIQUE to the #578 clause (never elsewhere on the surface, so
-# a partial revert of the clause drops them — the #498 begs-the-question guard).
+# Operative tokens UNIQUE to the #578 W-disposition clause (never elsewhere on the
+# surface, so a partial revert of the clause drops them — the #498
+# begs-the-question guard). #622 REMOVED the old chained-I → I disposition tokens
+# ("acceptance DRAFT"/"sekvenčná práca"/"OSTÁVA") — a bare needs-acceptance is now
+# always U, distinguished from the #578 W set by `test_distinguishes_*` below; the
+# pipeline/umbrella → W teeth here are UNCHANGED.
 TOKENS = (
     "release-gated tail",
     "umbrella/tracking ticket gated na INÝ ticket",
     "blocker ticket",
-    "acceptance DRAFT",
-    # #578 review 🔵 (both reviewers): "sibling" pre-exists in the #539 chained-I
-    # clause on the SAME physical STATUS W-bullet line, so it carried no
-    # partial-revert teeth there. "sekvenčná práca" (Slovak) is unique to the
-    # #578 clause on BOTH surfaces (the base #539 clause uses English "sequenced
-    # work"), so a partial revert of the distinction sentence turns this RED.
-    "sekvenčná práca",
 )
 
 
@@ -69,14 +66,15 @@ class PipelineGatedDoctrineLock(unittest.TestCase):
             self.assertTrue(tok in win,
                             "autopilot SKILL lost the #578 token %r" % tok)
 
-    def test_distinguishes_from_chained_i_on_both_surfaces(self):
-        # the boundary with #539 chained-I is stated on BOTH surfaces (a bare
-        # needs-acceptance whose DRAFT waits on a sibling STAYS I; a release/
-        # blocker-gated ticket goes to W).
+    def test_distinguishes_from_bare_acceptance_on_both_surfaces(self):
+        # #622: the boundary is now stated on BOTH surfaces as the #539 chained-I
+        # → I fallback being CANCELLED — a bare needs-acceptance is queued → U,
+        # while a release/blocker-gated pipeline/umbrella ticket goes to W.
         for path in (STATUS, SKILL):
             text = path.read_text(encoding="utf-8")
-            self.assertTrue("chained-I" in text and "OSTÁVA" in text,
-                            "%s must distinguish #578 W from #539 chained-I"
+            self.assertTrue("chained-I" in text and "zrušený" in text,
+                            "%s must distinguish #578 W from a bare needs-acceptance "
+                            "(the #539 chained-I I-fallback is cancelled, #622)"
                             % path.name)
 
 

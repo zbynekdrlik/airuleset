@@ -53,7 +53,7 @@ def _row_action(row, own_stream=None):
 
 
 def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
-                      stale_numbers=None):
+                      stale_numbers=None, queued_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -80,9 +80,17 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     NO fresh (≤24h) evidence of a stream push — ` stale!` is APPENDED to their
     reason column, the SAME space-separated-within-field-3 mechanism as
     `flag_numbers`. Only meaningful alongside `reason_fn`; a member can carry
-    both warnings (order: no-question! then stale!)."""
+    both warnings (order: no-question! then stale!).
+
+    `queued_numbers` (#622, `--waiting` only): a set of `acceptance`-reason
+    U-member numbers whose draft is NOT yet delivered — their reason is RE-LABELLED
+    `acceptance` → `queued` (draft ready, awaiting #606 one-at-a-time owner-approval
+    delivery), so the reader tells a queued acceptance from a live delivered one.
+    Only meaningful alongside `reason_fn`; a queued member is `_no_question_flagged`-
+    exempt (#622), so it never also carries `no-question!`."""
     flag_numbers = flag_numbers or set()
     stale_numbers = stale_numbers or set()
+    queued_numbers = queued_numbers or set()
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
         action = _row_action(row, own_stream)
@@ -91,6 +99,8 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                                       action, row.get("title") or ""))
         else:
             reason = reason_fn(row.get("labels"))
+            if reason == "acceptance" and n in queued_numbers:
+                reason = "queued"                # #622: undelivered → queued
             if n in flag_numbers:
                 # #601: an owner-action member's missing DELIVERED signal is a
                 # missing ACTION notice, not a missing question — render
@@ -129,6 +139,22 @@ def _print_audit_rows(rows, own_stream=None):
             (lb or {}).get("name") or "" for lb in (row.get("labels") or [])
             if isinstance(lb, dict) and (lb or {}).get("name"))
         print("%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "", action, names))
+
+
+def _queued_acceptance_numbers(waiting, root):
+    """#622: the `acceptance`-reason members of the `waiting` (U) bucket whose
+    draft is NOT yet delivered — a live `_acceptance_present_set` (question map,
+    no gh) does NOT include them, so they are QUEUED awaiting #606 one-at-a-time
+    owner-approval delivery and get the `queued` display tag instead of a live
+    `acceptance`. On-demand `--waiting`/`--ops-wait` display path only, never the
+    hot footer/count path. A member IN the present set is a live delivered
+    question → stays `acceptance`."""
+    import airuleset
+    present = airuleset._acceptance_present_set(waiting, cwd=root)
+    return {n for n, row in waiting.items()
+            if airuleset._user_waiting_reason(
+                row.get("labels") if isinstance(row, dict) else None) == "acceptance"
+            and n not in present}
 
 
 def _print_ping_rows(ping_entries):
@@ -486,11 +512,11 @@ def cmd_slice_quals(args):
     if extra:
         workable_rows, waiting, ops_wait = rows, {}, {}
     else:
-        # #539: a bare needs-acceptance with no DELIVERED draft is the stream's
-        # own chained work → I, not U (`_acceptance_present_set`, question map
-        # only — no gh, safe on the count path).
-        workable_rows, waiting, ops_wait = airuleset._partition_workable(
-            rows, acceptance_present=airuleset._acceptance_present_set(rows, cwd=root))
+        # #622: a bare needs-acceptance → U unconditionally (queued for owner
+        # approval, never dispatchable-now I work). Pure label partition; the
+        # question map is read only on the on-demand `--waiting` display path
+        # below, never here on the count path (#370).
+        workable_rows, waiting, ops_wait = airuleset._partition_workable(rows)
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
@@ -508,9 +534,12 @@ def cmd_slice_quals(args):
         # acceptance), then the ticketless ❓ pings (reason=ping) so the list
         # matches the footer's `U N` count. #539: tag a member carrying NO
         # delivered question `no-question!` (the #527 invariant, mechanized).
+        # #622: an undelivered bare acceptance is re-tagged `queued` (draft ready,
+        # awaiting #606 delivery) and is no-question!-exempt.
         _print_issue_rows(waiting, own_stream=user,
                           reason_fn=airuleset._user_waiting_reason,
-                          flag_numbers=airuleset._no_question_flagged(waiting, cwd=root))
+                          flag_numbers=airuleset._no_question_flagged(waiting, cwd=root),
+                          queued_numbers=_queued_acceptance_numbers(waiting, root))
         _print_ping_rows(_waiting_ping_entries())
         return
     if want_count:
@@ -652,9 +681,10 @@ def cmd_core_quals(args):
     if extra:
         workable, waiting, ops_wait = seen, {}, {}
     else:
-        # #539: bare needs-acceptance with no delivered draft → I (chained).
-        workable, waiting, ops_wait = airuleset._partition_workable(
-            seen, acceptance_present=airuleset._acceptance_present_set(seen, cwd=root))
+        # #622: bare needs-acceptance → U unconditionally (queued for owner
+        # approval, never dispatchable-now I). Pure label partition; the question
+        # map is read only on the on-demand `--waiting` display path (#370).
+        workable, waiting, ops_wait = airuleset._partition_workable(seen)
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:
@@ -701,9 +731,12 @@ def cmd_core_quals(args):
         # member (answer/decision/acceptance) + the ticketless ❓ pings
         # (reason=ping), matching the footer's `U N` count. #539: tag a member
         # carrying NO delivered question `no-question!` (#527, mechanized).
+        # #622: an undelivered bare acceptance is re-tagged `queued` and is
+        # no-question!-exempt (the #606 queue is a legit reason for non-delivery).
         _print_issue_rows(waiting, own_stream=None,
                           reason_fn=airuleset._user_waiting_reason,
-                          flag_numbers=airuleset._no_question_flagged(waiting, cwd=root))
+                          flag_numbers=airuleset._no_question_flagged(waiting, cwd=root),
+                          queued_numbers=_queued_acceptance_numbers(waiting, root))
         _print_ping_rows(_waiting_ping_entries())
         return
     if want_count:
