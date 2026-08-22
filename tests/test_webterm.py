@@ -9,6 +9,7 @@ unit rendering, and the dev1-only provisioning gate.
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,65 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_webterm as w  # noqa: E402
+
+
+def _extract_js_function(html, name):
+    """The source of the top-level `function <name>(...) { ... }` from the
+    rendered dashboard's <script>, brace-matched so nested `{}` are handled.
+    NB: the naive `{`/`}` counter does not skip braces inside string literals --
+    it works because the extracted functions' string literals (the injected CSS)
+    are net brace-balanced; a future unbalanced string brace would mis-extract,
+    which the node behavioral test (`test_fit_behaviour_...`) catches as a
+    SyntaxError. If that ever bites, make this string-aware."""
+    start = html.index("function %s(" % name)
+    i = html.index("{", start)
+    depth = 0
+    for j in range(i, len(html)):
+        c = html[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start:j + 1]
+    raise AssertionError("unbalanced braces extracting %s" % name)
+
+
+# A tiny node harness: runs the REAL extracted fitFixedGrid against a fake window
+# whose fake xterm reports a cell size that scales with term.options.fontSize (so
+# the font-fit loop converges), a viewport LARGER than the fixed grid at the base
+# font, and a term.resize we can watch. Proves: the grid is FORCED to CFG's fixed
+# (cols,rows), a later ttyd-style resize is CLAMPED, and the font is raised to fill.
+_FIT_HARNESS = r"""
+const CFG = { term_cols: 176, term_rows: 51 };
+const CW = 0.6, CH = 1.2;                 // fake monospace cell = 0.6*fs x 1.2*fs
+function rect(term){ return { width: term.cols*CW*term.options.fontSize,
+                              height: term.rows*CH*term.options.fontSize }; }
+const term = {
+  cols: 80, rows: 24,
+  options: { fontSize: 13, theme: { background: '#0d1117' } },
+  resize(c, r){ this.cols = c; this.rows = r; },
+};
+const styleStore = {};
+const screenEl = { getBoundingClientRect(){ return rect(term); } };
+const doc = {
+  head: { appendChild(){} },
+  getElementById(id){ return styleStore[id] || null; },
+  createElement(){ const e = { set id(v){ this._id=v; styleStore[v]=e; }, get id(){ return this._id; } }; return e; },
+  querySelector(){ return screenEl; },
+};
+const win = { term, document: doc, innerWidth: 1600, innerHeight: 1000 };
+%(fit)s
+const baseFont = 13;
+const ok = fitFixedGrid(win);
+term.resize(300, 80);                     // simulate ttyd's own FitAddon firing
+const r = rect(term);
+process.stdout.write(JSON.stringify({
+  ok, cols: term.cols, rows: term.rows, clampedTo: [term.cols, term.rows],
+  fontSize: term.options.fontSize, baseFont,
+  gridW: r.width, gridH: r.height, availW: win.innerWidth, availH: win.innerHeight,
+}) + "\n");
+"""
 
 
 # A small, controlled fleet: one owner box (identity), one owner box (no
@@ -290,15 +350,17 @@ class TestAttachSnippetBehavior(unittest.TestCase):
     forces ANY window-size policy on the target -- it drops the #584 `-gw
     window-size latest` + `aggressive-resize on` overrides (that was the ROOT
     regression: `latest` shrinks the shared window to whoever is active, so a
-    small webterm client blackens the owner's WT view). #613 REOPEN: the
-    `-f ignore-size` flag #586 added is now REMOVED -- it was the PERSISTING
-    cause of the dead-border blackening (an ignore-size client is excluded from
-    tmux's window-size calc, so a LARGER browser client could never grow a
-    window it viewed to its own grid and always saw a dead border). The clone
-    now attaches plain, sizing the windows it navigates to, to its own grid
-    (full render); the shared-window tradeoff self-heals on the SSH client's
-    next keystroke. #615: the clone session also gets `mouse on` (session-
-    scoped) so the browser scroll-wheel reaches tmux copy-mode."""
+    small webterm client blackens the owner's WT view). #613 REOPEN-2 (owner
+    directive 2026-08-22): the `-f ignore-size` flag #586 added is RESTORED (the
+    first reopen removed it, mis-targeting the browser client). It EXCLUDES the
+    webterm clone from tmux's window-size calc, so a SMALLER browser client can
+    never shrink the owner's Windows-Terminal window (which then rendered a dark
+    unused region -- his SURFACE; the browser the CAUSE). This is belt-and-
+    suspenders under the restored conf `window-size manual` and fixes a box still
+    running the first-reopen `latest` server immediately. The browser's OWN
+    appearance at the fixed grid is solved on the browser side (the dashboard
+    fit JS). #615: the clone session also gets `mouse on` (session-scoped) so the
+    browser scroll-wheel reaches tmux copy-mode."""
 
     def setUp(self):
         import subprocess
@@ -347,36 +409,36 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # never a kill of the bare base session (either `=zbynek-4` or `zbynek-4`)
         self.assertNotRegex(log, r"kill-session -t =?zbynek-4(?!-web)")
 
-    def test_does_not_force_any_window_size_policy_on_the_target(self):
+    def test_does_not_force_any_GLOBAL_window_size_policy_on_the_target(self):
         # #586: the ROOT regression was `-gw window-size latest` (+ aggressive-
         # resize) — that shrinks the shared window to the active client, so a
         # small webterm client blackens the owner's WT choose-tree. The connect
-        # script must set NEITHER: global window-size policy is
-        # cli_tmux_provisioning's concern (the fleet default is tmux's own
-        # `latest`, #613 REOPEN), never the connect script's. #615's `mouse on`
-        # is a per-SESSION option on the clone, not a global window-size policy,
-        # so it does not violate this.
+        # script must set NEITHER: GLOBAL window-size policy is
+        # cli_tmux_provisioning's concern (the conf pins `window-size manual`
+        # version-gated, #613 REOPEN-2), never the connect script's. The clone's
+        # `-f ignore-size` is a per-ATTACH client flag (checked below), NOT a
+        # global `set-option -g window-size`; #615's `mouse on` is a per-SESSION
+        # clone option — neither is a global window-size policy.
         log = self._run("zbynek", "zbynek::zbynek-4")
         self.assertNotIn("window-size latest", log)
         self.assertNotIn("aggressive-resize", log)
         self.assertNotIn("set-option -g window-size", log)
 
-    def test_clone_attaches_WITHOUT_ignore_size_so_it_renders_full(self):
-        # #613 REOPEN: `-f ignore-size` on the clone is REMOVED. It was the
-        # persisting cause of the "stmavol celý terminál" dead border: an
-        # ignore-size client is EXCLUDED from tmux's window-size calc, so the
-        # webterm clone NEVER grew a window it viewed to its own (larger)
-        # browser grid — the window stayed at whatever the SSH client (176x50)
-        # left it, and the larger browser saw a dead dotted border (proven live:
-        # `latest+ignore-size` → webterm-solo window 176x49 = BORDER; removing
-        # it → 250x59 full render, screenshots BEFORE-latest-ig vs
-        # AFTER-latest-noig). The tradeoff (a window SHARED with the SSH client
-        # sizes to whoever most recently pressed a KEY — streaming output does
-        # NOT re-pin it — self-healing on the SSH's next keystroke) is the
-        # inherent tmux multi-client behaviour, milder than the manual pin.
+    def test_clone_attaches_WITH_ignore_size_so_it_never_shrinks_owner_window(self):
+        # #613 REOPEN-2 (owner directive 2026-08-22): `-f ignore-size` on the
+        # clone is RESTORED (the first reopen removed it, mis-targeting the
+        # browser). It EXCLUDES the webterm clone from tmux's window-size calc, so
+        # a SMALLER browser client can never shrink the owner's Windows-Terminal
+        # window (which then rendered a dark unused region — the owner's SURFACE;
+        # the browser the CAUSE). Proven live (isolated tmux 3.7b + pty clients):
+        # under `latest`+plain-clone a 160x46 webterm shrinks the owner's window
+        # 176x50 -> 160x45 (owner DARK); with `-f ignore-size` the owner's window
+        # stays 176x50 (full) at every attach + window-switch from both sides. It
+        # is a per-ATTACH flag on the CLONE only (never the fresh-base fallback —
+        # see test_fresh_base_session_is_never_ignore_size).
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertRegex(log, r"attach-session -t zbynek-4-web-\d+\b")
-        self.assertNotIn("ignore-size", log)
+        self.assertRegex(log, r"attach-session -t zbynek-4-web-\d+ -f ignore-size\b")
+        self.assertIn("ignore-size", log)
 
     def test_clone_enables_mouse_scoped_to_the_clone_session_only(self):
         # #615: the webterm clone session gets `mouse on` so the browser
@@ -430,10 +492,10 @@ class TestAttachSnippetBehavior(unittest.TestCase):
 
     def test_fresh_base_session_is_never_ignore_size(self):
         # No existing session -> the owner's own base is created; it is the real
-        # viewing client, so it must NOT be ignore-size. #613 REOPEN: ignore-size
-        # is now removed from the clone path too, so no attach in ANY resolution
-        # path is ignore-size — but this fresh-base path was never ignore-size
-        # to begin with, so the invariant is unchanged here.
+        # viewing client, so it must NOT be ignore-size. #613 REOPEN-2: the CLONE
+        # attach IS `-f ignore-size` again (test_clone_attaches_WITH_ignore_size…),
+        # so this fresh-base path is the SOLE resolution path that is deliberately
+        # NOT ignore-size — the owner's own base must size its own windows.
         log = self._run("zbynek", "")
         self.assertNotIn("ignore-size", log)
 
@@ -820,12 +882,13 @@ class TestAllTabsPreloaded(unittest.TestCase):
     feel) AND caused a "Leave site?" dialog on every tab click (navigating the
     iframe to about:blank unloads ttyd's page, firing ttyd's OWN beforeunload).
     #586 made every tab PRELOAD + stay connected instead of disconnecting hidden
-    ones. #613 REOPEN removed the server-side size pin entirely: keeping hidden
-    tabs connected is safe because a hidden preloaded clone sends no KEYSTROKES,
-    and only a keystroke re-pins the shared window under tmux's default `latest`
-    (streaming output / a fresh attach does NOT, proven live). All tabs PRELOAD
-    at login and stay connected; switching is pure show/hide (instant, no
-    reconnect, no iframe navigation, so no beforeunload dialog on a tab click)."""
+    ones. #613 REOPEN-2: the tmux window is FIXED (`window-size manual` +
+    `default-size 176x50`) and the clone is `-f ignore-size`, so NO tab — hidden
+    or active — can ever resize a window; keeping every tab connected is
+    unconditionally safe. All tabs PRELOAD at login and stay connected; switching
+    is pure show/hide (instant, no reconnect, no iframe navigation, so no
+    beforeunload dialog on a tab click). Each ttyd xterm is force-fit to the fixed
+    grid on the browser side (see TestBrowserFixedGridFit)."""
 
     def _inv(self, n=3):
         return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
@@ -887,6 +950,92 @@ class TestAllTabsPreloaded(unittest.TestCase):
         self.assertNotIn("odpojí", hint)              # no disconnect language
         self.assertTrue("prednač" in hint.lower() or "instant" in hint.lower(),
                         "hint must advertise preloaded/instant switching")
+
+
+class TestBrowserFixedGridFit(unittest.TestCase):
+    """#613 REOPEN-2 (owner directive 2026-08-22): the owner's fixed terminal
+    size is the invariant (`window-size manual`), so the tmux window never
+    resizes to any client. The BROWSER adapts to that fixed grid instead of the
+    other way round: each ttyd xterm is forced to the owner's fixed CLIENT grid
+    (`_webterm_term_grid()` = TMUX_DEFAULT_SIZE 176x50 window + 1 status row =
+    176x51) and its font is scaled to fill the viewport, so the fixed window
+    fills the browser with no dark unused region AND without the browser ever
+    influencing tmux sizing (the clone is `-f ignore-size`). ttyd 1.7.4 exposes
+    the xterm Terminal as `window.term` in each same-origin iframe; the dashboard
+    clamps `term.resize` so ttyd's own FitAddon can never change the grid, then
+    scales `term.options.fontSize` (crisp re-render, not a blurry CSS scale)."""
+
+    def _inv(self):
+        return [{"id": "s1", "label": "sess 1", "kind": "owner",
+                 "local": False, "host": "10.0.0.1", "user": "u1"}]
+
+    def test_grid_is_derived_from_default_size_plus_status_row(self):
+        # The fixed CLIENT grid = the tmux WINDOW size (TMUX_DEFAULT_SIZE) +
+        # WEBTERM_STATUS_ROWS — DERIVED, never a duplicated literal, so it can
+        # never drift from the conf's default-size (a parity lock).
+        import cli_tmux_provisioning as prov
+        cols, rows = w._webterm_term_grid()
+        dw, dh = (int(x) for x in prov.TMUX_DEFAULT_SIZE.lower().split("x"))
+        self.assertEqual(cols, dw)
+        self.assertEqual(rows, dh + w.WEBTERM_STATUS_ROWS)
+        # today's concrete value: the owner's live Windows-Terminal client.
+        self.assertEqual((cols, rows), (176, 51))
+
+    def test_cfg_carries_the_fixed_grid(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        m = re.search(r"const CFG = (\{.*?\});", html)
+        self.assertIsNotNone(m, "CFG literal not found")
+        cfg = json.loads(m.group(1))
+        self.assertEqual(cfg["term_cols"], 176)
+        self.assertEqual(cfg["term_rows"], 51)
+
+    def test_activate_fits_the_now_visible_tab(self):
+        # the fit runs when a tab becomes VISIBLE (a hidden iframe has a 0-size
+        # viewport), so activate() must call applyFixedGrid on the shown frame.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        m = re.search(r"function activate\(idx\)\s*\{(.*?)\n\}", html, re.S)
+        self.assertIn("applyFixedGrid(", m.group(1))
+
+    def test_fit_clamps_resize_and_scales_fontsize(self):
+        # source-lock the two load-bearing mechanics: (1) term.resize is
+        # OVERRIDDEN to clamp to the fixed grid (defeats ttyd's FitAddon), and
+        # (2) term.options.fontSize is set (crisp font scaling, not CSS scale).
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        fn = _extract_js_function(html, "fitFixedGrid")
+        self.assertIn("term.resize =", fn)             # clamp installed
+        self.assertIn("real(cols, rows)", fn)          # clamped to the fixed grid
+        self.assertIn("term.options.fontSize", fn)     # font scaling (crisp)
+        self.assertNotIn("transform", fn)              # never a blurry CSS scale
+        apply = _extract_js_function(html, "applyFixedGrid")
+        self.assertIn("win.term", _extract_js_function(html, "fitFixedGrid"))
+        self.assertIn("setTimeout", apply)             # polls for async ttyd term
+
+    def test_fit_behaviour_forces_grid_and_scales_font_with_a_fake_term(self):
+        # BEHAVIOURAL proof (node, no jsdom needed): run the REAL extracted
+        # fitFixedGrid against a fake window whose xterm reports a viewport
+        # LARGER than the fixed grid at the base font -> the function must clamp
+        # term.resize to the fixed (176,51), keep cols/rows there even when ttyd
+        # later "fits" to a big size, and RAISE the font so the grid fills the
+        # viewport. (The live real-ttyd proof is the worker's browser run.)
+        if shutil.which("node") is None:
+            self.skipTest("node not available")
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        fit = _extract_js_function(html, "fitFixedGrid")
+        harness = _FIT_HARNESS % {"fit": fit}
+        d = tempfile.mkdtemp()
+        hp = Path(d) / "fitharness.js"
+        hp.write_text(harness, encoding="utf-8")
+        import subprocess
+        r = subprocess.run(["node", str(hp)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, "node harness failed:\n%s\n%s" % (r.stdout, r.stderr))
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertTrue(out["ok"])                      # fit applied
+        self.assertEqual(out["cols"], 176)              # grid FORCED to the fixed cols
+        self.assertEqual(out["rows"], 51)               # ... and rows
+        self.assertEqual(out["clampedTo"], [176, 51])   # a later ttyd fit is clamped
+        self.assertGreater(out["fontSize"], out["baseFont"])  # font raised to fill
+        self.assertLessEqual(out["gridW"], out["availW"] + 1)  # never overflows width
+        self.assertLessEqual(out["gridH"], out["availH"] + 1)  # ... nor height
 
 
 class TestCtrlWProtection(unittest.TestCase):
