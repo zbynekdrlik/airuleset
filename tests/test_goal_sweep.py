@@ -125,6 +125,16 @@ class TestGoalSweep(unittest.TestCase):
         # line naming the reason, like every other pending-entry disposition.
         self.assertTrue(any("malformed" in ln for ln in logs), logs)
 
+    def test_non_dict_entry_is_dropped_not_silently_skipped(self):
+        # #624-review -- a corrupt NON-dict entry is malformed like the
+        # empty-text one: it must emit a decision line AND be cleared, never a
+        # silent `continue` that re-skips (and would re-log) it every sweep.
+        reqp = self._reqp()
+        Path(reqp).write_text(json.dumps({"sess-nd": "not-a-dict"}))
+        logs = goal.goal_sweep(1000, requests_path=reqp, run=lambda *a, **k: "")
+        self.assertTrue(any("non-dict" in ln for ln in logs), logs)
+        self.assertEqual(goal.load_goal_requests(reqp), {})
+
     def test_already_handled_this_sweep_is_skipped(self):
         proj = self._dir()
         sid = "sess-sweep-4"

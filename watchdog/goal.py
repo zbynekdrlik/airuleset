@@ -1211,6 +1211,13 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
         aborts.pop(_dead, None)
     for sid, entry in list(reqs.items()):
         if not isinstance(entry, dict):
+            # #624-review -- a corrupt non-dict entry is malformed like the
+            # empty-text one below: NAME the drop (no dict -> no cwd, so no loc)
+            # and CLEAR it, so it is neither silently re-skipped every sweep nor
+            # re-logged forever.
+            logs.append("DROP (goal-sweep) sid=%s -> drop:non-dict-entry" % sid)
+            aborts.pop(sid, None)
+            clear_goal_request(sid, path=requests_path)
             continue
         cwd = entry.get("cwd", "")
         text = entry.get("text", "")
