@@ -119,8 +119,11 @@ class TestGoalSweep(unittest.TestCase):
     def test_malformed_entry_with_no_text_is_dropped_not_retried_forever(self):
         reqp = self._reqp()
         Path(reqp).write_text(json.dumps({"sess-x": {"cwd": "/x"}}))
-        goal.goal_sweep(1000, requests_path=reqp, run=lambda *a, **k: "")
+        logs = goal.goal_sweep(1000, requests_path=reqp, run=lambda *a, **k: "")
         self.assertEqual(goal.load_goal_requests(reqp), {})
+        # #624 -- the drop is no longer a SILENT branch: it emits one decision
+        # line naming the reason, like every other pending-entry disposition.
+        self.assertTrue(any("malformed" in ln for ln in logs), logs)
 
     def test_already_handled_this_sweep_is_skipped(self):
         proj = self._dir()
@@ -159,6 +162,70 @@ class TestGoalSweep(unittest.TestCase):
                                    run=lambda *a, **k: "")
         self.assertTrue(any("DISABLED" in ln for ln in logs), logs)
         self.assertIn("sess-x", goal.load_goal_requests(reqp))  # untouched
+
+    # ------------------------------------------------------------------ #
+    # #624 -- delivery decision line OBSERVABILITY. The line was the ONE
+    # goal-family journal line keyed on the bare opaque sid (every sibling
+    # -- stale-rearm / lane-occupancy / ops-wait-recheck / one-glance -- is
+    # keyed `<verb> <loc> ...`), so a loc-scoped grep of the journal could
+    # never find it and it read as silence (the ticket's "the two cases are
+    # indistinguishable from outside"). Every disposition line must now carry
+    # the family loc (`_pane_location`, which the fake renders as `sess:0.0`).
+    # ------------------------------------------------------------------ #
+    def test_skip_decision_line_carries_the_project_loc(self):
+        proj = self._dir()
+        sid = "sess-sweep-loc"
+        _write_marker_transcript(proj, self.CWD, sid)
+        reqp = self._reqp()
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=reqp, origin="self-callback")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_BUSY_CAP)
+        logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                               requests_path=reqp, sleep_fn=lambda s: None)
+        line = next((ln for ln in logs if "(goal-sweep)" in ln), None)
+        self.assertIsNotNone(line, logs)
+        self.assertIn("sess:0.0", line)
+
+    def test_sent_decision_line_carries_the_project_loc(self):
+        proj = self._dir()
+        sid = "sess-sweep-loc2"
+        _write_marker_transcript(proj, self.CWD, sid)
+        reqp = self._reqp()
+        goal.record_goal_request(sid, self.CWD, "/goal x", "full",
+                                 now=1000, path=reqp, origin="self-callback")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True)
+        logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                               requests_path=reqp, sleep_fn=lambda s: None)
+        line = next((ln for ln in logs if "OK (goal-sweep)" in ln), None)
+        self.assertIsNotNone(line, logs)
+        self.assertIn("sess:0.0", line)
+
+    def test_recent_human_skip_line_carries_loc_and_reason_detail(self):
+        # The LIVE montalu1 case: a stale-rearm request CORRECTLY deferring on
+        # a genuine human presence. The journal line must SAY the reason detail
+        # (the `presence marker Ns old` deliver_goal already computes for
+        # goal-sync.log), so case-1 is self-evident without a second file.
+        proj = self._dir()
+        sid = "sess-sweep-rh-" + uuid.uuid4().hex[:8]
+        _write_marker_transcript(proj, self.CWD, sid)
+        reqp = self._reqp()
+        goal.record_goal_request(sid, self.CWD, "/goal x", "branch-merge",
+                                 now=1000, path=reqp, origin="stale-rearm")
+        marker = "/tmp/claude-user-active-%s" % sid
+        Path(marker).write_text("")
+        self.addCleanup(lambda: Path(marker).unlink(missing_ok=True))
+        # 100s before now=2000 -> within GOAL_AUTOARM_RECENT_HUMAN_S (1800s).
+        os.utime(marker, (1900, 1900))
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_IDLE_CAP)
+        logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                               requests_path=reqp, sleep_fn=lambda s: None)
+        line = next((ln for ln in logs if "skip:recent-human" in ln), None)
+        self.assertIsNotNone(line, logs)
+        self.assertIn("sess:0.0", line)
+        self.assertIn("presence marker", line)
 
 
 # --------------------------------------------------------------------------- #

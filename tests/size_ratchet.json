@@ -103,7 +103,7 @@
     "tests/test_goal_question_repoke.py": 351,
     "tests/test_goal_stranded_truncated_617.py": 315,
     "tests/test_goal_strictness_clause.py": 54,
-    "tests/test_goal_sweep.py": 2598,
+    "tests/test_goal_sweep.py": 2665,
     "tests/test_goal_sweep_hermeticity.py": 74,
     "tests/test_goal_turn_boundary.py": 121,
     "tests/test_goal_undeterminable_pane.py": 111,
