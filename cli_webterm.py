@@ -71,6 +71,21 @@ WEBTERM_GATEWAY_PORT = 8080
 # own session is named after its unix user (#264 whoami auto-attach convention).
 OWNER_GROUP = "zbynek"
 WEBTERM_LOGIN_USER = "zbynek"
+# #635 GO-LIVE GATE (owner ROZHODNUTÉ 2026-08-22): move zbynek.newlevel.media
+# behind Cloudflare Access like David's side. When True, setup_webterm_service
+# provisions the owner gateway in Cloudflare-Access mode — LOOPBACK bind (a
+# cloudflared tunnel fronts it, so NO direct tailnet exposure and NO tailscale IP
+# is needed) + `--trust-access-header` (the password/login form is RETIRED,
+# Cloudflare email-OTP at the edge is the whole gate). Default **False** keeps the
+# current password/tailnet gateway BYTE-IDENTICAL, so a routine `install`/`push`
+# NEVER flips the owner's live terminal to loopback before the tunnel + DNS +
+# Access app exist (which would lock him out — the exact failure the coordinator
+# flagged). It is flipped to True as the LAST go-live step, AFTER the Access app is
+# applied, the dedicated cloudflared tunnel routes zbynek.newlevel.media ->
+# 127.0.0.1:8080, and the DNS grey A-record is cut over to a proxied CNAME onto
+# that tunnel — all proven live first. See cli_webterm_access.WEBTERM_ACCESS_APPS
+# ['owner'].
+OWNER_GATEWAY_ACCESS_MODE = False
 # #613 REOPEN-2: a tmux CLIENT of C x R rows shows an (R - status_rows)-row
 # WINDOW; the fleet runs the default 1-row status line (airuleset never sets
 # `status off`), and the owner's live Windows-Terminal client is 176x51 -> a
@@ -803,6 +818,26 @@ def _ensure_credential(profile=profiles.OWNER):
     return cred
 
 
+def _retire_owner_credential():
+    """#635: delete the now-dead owner password credential when the gateway moves
+    to Cloudflare-Access mode (email OTP at the edge replaces the password, so the
+    login form + credential file are retired — mirrors
+    cli_webterm_david._retire_david_credential). Best-effort + idempotent — a
+    missing file is the normal steady state, never an error. Returns True iff a
+    file was actually removed."""
+    cred = Path(str(WEBTERM_CRED_PATH))
+    try:
+        if cred.exists():
+            cred.unlink()
+            print("  webterm: retired dead password credential %s "
+                  "(Cloudflare Access replaces it)." % cred, file=sys.stderr)
+            return True
+    except OSError as e:
+        print("  webterm: could not remove old credential %s (%s) — harmless, "
+              "Cloudflare Access is the gate now." % (cred, e), file=sys.stderr)
+    return False
+
+
 # #584: ttyd binds LOOPBACK only (127.0.0.1) behind a `-b /t` base path. The
 # gateway is the sole tailnet entry AND authenticator (cookie-gated), so ttyd
 # needs NO basic-auth of its own (`-c` gone — the native dialog was exactly what
@@ -850,17 +885,42 @@ def _render_webterm_unit():
     return tmpl.replace("{{LAUNCH_SCRIPT}}", str(WEBTERM_LAUNCH_PATH))
 
 
-def _render_webterm_gateway_unit(bind_ip):
+def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     """The same-origin gateway systemd --user unit: runs
-    `cli_webterm_gateway.py` bound to `bind_ip` (dev1's tailscale IP) on the
-    single gateway port, proxying /t/* to the loopback ttyd. `bind_ip` MUST be a
-    validated tailscale IP (see `_tailscale_ip`) — never 0.0.0.0/public."""
+    `cli_webterm_gateway.py` bound to `bind_ip` on the single gateway port,
+    proxying /t/* to the loopback ttyd.
+
+    Default (password mode): `bind_ip` MUST be a validated tailscale IP (see
+    `_tailscale_ip`) — never 0.0.0.0/public — and the login form validates the
+    credential (`--cred`).
+
+    #635 `access_mode=True` (Cloudflare Access): the `--cred {{CRED_PATH}}` in the
+    shared template's ExecStart is swapped for `--trust-access-header <header>`
+    (the SAME transform David's lane uses, cli_webterm_david.render_david_gateway_
+    unit) — NO password/credential is validated; Cloudflare email-OTP at the edge
+    is the whole gate, and `bind_ip` is loopback (a cloudflared tunnel fronts it).
+    The password-model `{{CRED_PATH}}` still present in the template's COMMENT is
+    neutralised to n/a so no human reads a live credential path into a passwordless
+    unit. When off, the emitted unit is BYTE-IDENTICAL to the pre-#635 render."""
     tmpl = WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
+    if access_mode:
+        import cli_webterm_access as access
+        tmpl = tmpl.replace(
+            "--cred {{CRED_PATH}}",
+            "--trust-access-header " + access.WEBTERM_ACCESS_TRUST_HEADER)
+        cred_sub = "n/a (Cloudflare Access — no credential)"
+        # Defense in depth: in Access mode the gateway ALWAYS binds loopback
+        # (cloudflared is the front), regardless of what the caller passes — the
+        # render is the single place that guarantees no tailnet bind can leak here
+        # (mirrors cli_webterm_david's hardcoded loopback bind).
+        bind_ip = WEBTERM_TTYD_BIND
+    else:
+        cred_sub = str(WEBTERM_CRED_PATH)
     return (tmpl.replace("{{BIND_IP}}", bind_ip)
             .replace("{{GATEWAY_MODULE}}", str(WEBTERM_GATEWAY_MODULE))
             .replace("{{GATEWAY_PORT}}", str(WEBTERM_GATEWAY_PORT))
             .replace("{{DASH_INDEX}}", str(WEBTERM_DASH_INDEX))
-            .replace("{{CRED_PATH}}", str(WEBTERM_CRED_PATH))
+            .replace("{{CRED_PATH}}", cred_sub)
             .replace("{{TTYD_PORT}}", str(WEBTERM_TTYD_PORT))
             .replace("{{TTYD_BASE}}", WEBTERM_TTYD_BASE))
 
@@ -935,15 +995,22 @@ def setup_webterm_service(run=None):
                   "ttyd` failed — skipping the gateway", file=sys.stderr)
             return False
 
-    # #579/#584: resolve dev1's tailscale IP ONCE — the GATEWAY's bind. ttyd is
-    # loopback now, so this IP is only the gateway's `--bind`. REFUSE LOUDLY if
-    # there is none — NEVER write a unit that could bind 0.0.0.0.
-    bind_ip = _tailscale_ip(run=run)
-    if not bind_ip:
-        print("  webterm: no tailscale IP (`tailscale ip -4` gave nothing in "
-              "100.64.0.0/10) — REFUSING to provision (never binds 0.0.0.0/"
-              "public). Bring tailscale up and re-run install.", file=sys.stderr)
-        return False
+    # #635: Cloudflare-Access mode (owner go-live) binds LOOPBACK — a cloudflared
+    # tunnel is the public front, so NO tailscale IP is needed and there is no
+    # direct tailnet exposure. Default (password mode): resolve dev1's tailscale IP
+    # ONCE as the GATEWAY's bind (ttyd is loopback, so this IP is only the
+    # gateway's `--bind`); REFUSE LOUDLY if there is none — NEVER write a unit that
+    # could bind 0.0.0.0.
+    access_mode = OWNER_GATEWAY_ACCESS_MODE
+    if access_mode:
+        bind_ip = WEBTERM_TTYD_BIND          # 127.0.0.1 — cloudflared fronts it
+    else:
+        bind_ip = _tailscale_ip(run=run)
+        if not bind_ip:
+            print("  webterm: no tailscale IP (`tailscale ip -4` gave nothing in "
+                  "100.64.0.0/10) — REFUSING to provision (never binds 0.0.0.0/"
+                  "public). Bring tailscale up and re-run install.", file=sys.stderr)
+            return False
 
     from cli_filedrop_watchdog import _run_systemctl, _whoami
 
@@ -962,14 +1029,20 @@ def setup_webterm_service(run=None):
         render_dashboard_html(inv, ttyd_base=WEBTERM_TTYD_BASE), encoding="utf-8")
     # Remove the old serve-fronted single-file dashboard (superseded — #579).
     (CLAUDE_DIR / "webterm-dashboard.html").unlink(missing_ok=True)
-    _ensure_credential()
+    # #635: Cloudflare-Access mode has NO password — retire the dead credential;
+    # password mode ensures it as before.
+    if access_mode:
+        _retire_owner_credential()
+    else:
+        _ensure_credential()
     WEBTERM_LAUNCH_PATH.write_text(render_webterm_launch_script(), encoding="utf-8")
     os.chmod(WEBTERM_LAUNCH_PATH, 0o755)
 
     WEBTERM_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
     WEBTERM_SERVICE_DEST.write_text(_render_webterm_unit(), encoding="utf-8")
     WEBTERM_GATEWAY_SERVICE_DEST.write_text(
-        _render_webterm_gateway_unit(bind_ip), encoding="utf-8")
+        _render_webterm_gateway_unit(bind_ip, access_mode=access_mode),
+        encoding="utf-8")
 
     try:
         run(["loginctl", "enable-linger", _whoami()], capture_output=True, text=True)
@@ -1007,11 +1080,18 @@ def setup_webterm_service(run=None):
                   "live): %s" % (svc, (err or "").strip()), file=sys.stderr)
 
     if ok_all:
-        print("  webterm: gateway live — http://%s:%d/ (tailnet-only, form login "
-              "user %r; credential in %s — read it once to save in Bitwarden). "
-              "ttyd loopback 127.0.0.1:%d behind /t."
-              % (bind_ip, WEBTERM_GATEWAY_PORT, WEBTERM_LOGIN_USER,
-                 WEBTERM_CRED_PATH, WEBTERM_TTYD_PORT))
+        if access_mode:
+            print("  webterm: gateway live (Cloudflare Access mode, #635) — bound "
+                  "127.0.0.1:%d, fronted by cloudflared for https://"
+                  "zbynek.newlevel.media/ (email-OTP gate; password retired). "
+                  "ttyd loopback 127.0.0.1:%d behind /t."
+                  % (WEBTERM_GATEWAY_PORT, WEBTERM_TTYD_PORT))
+        else:
+            print("  webterm: gateway live — http://%s:%d/ (tailnet-only, form "
+                  "login user %r; credential in %s — read it once to save in "
+                  "Bitwarden). ttyd loopback 127.0.0.1:%d behind /t."
+                  % (bind_ip, WEBTERM_GATEWAY_PORT, WEBTERM_LOGIN_USER,
+                     WEBTERM_CRED_PATH, WEBTERM_TTYD_PORT))
     return ok_all
 
 
