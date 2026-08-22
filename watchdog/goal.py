@@ -1601,13 +1601,14 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
     Bounds + fail-safe, all mirroring the sibling dark-rearm path:
       * classify via `_classify_armed_condition` -- only a `stale` AUTOPILOT
         condition proceeds; `foreign` (a hand-armed goal) is NEVER touched;
-      * a stale-rearm already pending (goal_sweep is delivering it) -> silent, no
-        re-record every sweep;
+      * a pending request of ANY origin (goal_sweep is delivering it) -> silent,
+        no re-record / never clobber a self-callback or dark-rearm;
       * requires a WORKABLE, fresh backlog (open>0) -- an achieved/empty loop is
         not worth a keystroke;
-      * SHARES the dark-rearm 24h/2 per-sid attempt cap (a loop is either dead
-        (dark) or alive-stale, never both; both are watchdog auto-types under one
-        per-sid daily budget), so a non-converging comparison burns at most 2/day."""
+      * SHARES the dark-rearm 24h/2 per-sid attempt cap: in any ONE sweep a loop
+        is either dead-dark OR alive-stale (the two record paths sit in mutually-
+        exclusive `armed` branches), so across sweeps both count against one
+        per-sid daily budget and a non-converging comparison burns at most 2/day."""
     payload = mark.get("payload") if isinstance(mark, dict) else None
     text, authority = (rearm_fn or _default_rearm_fn)(cwd)
     if _classify_armed_condition(payload, text) != "stale":
