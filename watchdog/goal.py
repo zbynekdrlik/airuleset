@@ -88,6 +88,18 @@ through a callback in the /autopilot command." Concretely:
              wholesale without keeping SOME caller of the recovery driver
              would have silently regressed job 14's own recovery too.
 
+  CLEAR   -- `_clear_stranded_truncated_goal()` (#617), also called from
+             `goal_dark_watch()`'s per-pane loop: it clears a STRANDED,
+             TRUNCATED own `/goal` draft that the provenance-gated JANITOR
+             above refuses (a later successful send cleared its watch mark).
+             Ownership is proven by a byte-exact CONTIGUOUS-prefix content
+             match against the pane's own template (>= GOAL_STRANDED_MIN_MATCH
+             chars, reconstructed from every wrapped row -- NOT head+tail),
+             gated on a clean input boundary + the fail-closed recent-human
+             check + a bounded give-up. This is the ONE keystroke path in
+             `goal_dark_watch()` itself (Escape+BSpace via
+             `_janitor_clear_box`); the RE-ARM path only WRITES a request.
+
 WHAT WAS DELETED, not "kept as dead code" (see the design comment on issue
 #403 for the full function-by-function accounting): `goal_rearm` itself
 (968 lines) and everything it orchestrated for the heuristic re-arm --
@@ -296,7 +308,7 @@ _GOAL_AUTHORITY_BLOCK_RX = __import__("re").compile(
     r"\*\*AUTHORITY:\s*(\S+)\*\*.*?```\n(/goal [^\n]+)\n```", __import__("re").S)
 
 
-def goal_template_for_authority(authority, path=None):
+def goal_template_for_authority(authority, path=None, logs=None):
     """The exact `/goal ...` line shipped for authority profile `authority`
     (full / branch-merge / fork-no-merge), read fresh from the INSTALLED
     autopilot SKILL.md (`watchdog.goal_templates_path()`) every call --
@@ -308,7 +320,15 @@ def goal_template_for_authority(authority, path=None):
 
     None if the file is unreadable, no block for that authority exists, OR
     the extracted line exceeds `GOAL_ARM_CHAR_CAP` (#169 -- a template that
-    would be rejected by Claude Code itself must never be typed at all)."""
+    would be rejected by Claude Code itself must never be typed at all).
+
+    #617 -- an over-cap refusal is now LOUD, not silent: pass an optional
+    `logs` list (the dark-rearm path does) and an oversize template appends
+    one line NAMING the cap breach before returning None, so a re-grown
+    template (the #169 regression) surfaces in the watchdog log instead of
+    silently disabling the whole autopilot loop. A pure resolution call
+    (tests, the footer, every non-arm caller) passes nothing and is exactly
+    byte-identical to the prior behaviour."""
     authority = str(authority or "").strip()
     if not authority:
         return None
@@ -322,6 +342,12 @@ def goal_template_for_authority(authority, path=None):
         if m.group(1) == authority:
             line = m.group(2).strip()
             if len(line) > GOAL_ARM_CHAR_CAP:
+                if isinstance(logs, list):
+                    logs.append(
+                        "goal-template REFUSED oversize authority=%s len=%d "
+                        "cap=%d (#169 recurrence -- template re-grew over "
+                        "Claude Code's /goal cap; never typed)"
+                        % (authority, len(line), GOAL_ARM_CHAR_CAP))
                 return None
             return line
     return None
@@ -343,11 +369,13 @@ def goal_sync_log_path():
 
 def _log_goal_sync(line, path=None):
     """Best-effort append-only log line for every `/goal` arm delivery/skip
-    decision -- the ONE call site (`deliver_goal`) that ever writes here.
-    Never raises. Bounded to the last `GOAL_SYNC_LOG_LINES_MAX` lines.
-    Collapses an identical repeat of the log's own last line (content only,
-    ignoring the timestamp) into a timestamp refresh instead of a duplicate
-    append."""
+    decision -- written by `deliver_goal` and, for the #617 over-cap refusal,
+    by `_default_rearm_fn`. Never raises. Bounded to the last
+    `GOAL_SYNC_LOG_LINES_MAX` lines. Collapses an identical repeat of the
+    log's own LAST line (content only, ignoring the timestamp) into a
+    timestamp refresh -- so a persistently-over-cap template logs one line
+    while it stays the last line; an interleaved decision from another pane
+    breaks that collapse, but the whole log is bounded to 2000 lines."""
     path = path or goal_sync_log_path()
     from datetime import datetime, timezone
     ts = datetime.now(timezone.utc).isoformat()
@@ -500,6 +528,20 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None)
         if watchdog._pane_shows_collapsed_paste(
                 watchdog._input_line_text(watchdog.capture_pane(pid, run, lines=40))):
             _log("goal-verify-abort: collapsed-paste")
+        # #617 -- NEVER leave our own TRUNCATED type in the box: it becomes a
+        # poisoned draft the next sweep can neither submit nor clear (the live
+        # montalu1 674-char stuck /goal). The box was verified BARE
+        # immediately above (entry gate + fresh re-capture), so backspacing
+        # len(text) provably reaches nothing of the user's -- a surplus
+        # backspace lands on an empty box (`_undo_typed_text`'s own proof).
+        # The #322 `paste again to expand` collapse also lands here (logged
+        # above): backspacing len(text) over that short placeholder render is
+        # the same safe over-backspace, and the fail direction (an
+        # unconverged "typed-NOT-undone" log) is exactly the pre-#617
+        # behaviour, never a regression. Never a submit here.
+        watchdog._undo_and_release_slot(pid, run, text, False, _log,
+                                        "goal-verify-abort: truncated-type",
+                                        sleep_fn=sleep_fn)
         return False                       # never rendered -- never submit it
     run(["tmux", "send-keys", "-t", pid, "Enter"])
     if _await_typed(pid, text, run, sleep_fn, want=False):
@@ -589,6 +631,121 @@ def _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath, run, state,
         return False
     return watchdog.submit_own_goal_verified(pid, text, run=run,
                                              sleep_fn=sleep_fn, logs=logs)
+
+
+# #617 -- a stranded truncated /goal type always FAR exceeds this (montalu1's
+# was 674 chars; a real arm is ~3.8k); a human hand-typing the short `/goal
+# STOP CONDITIONS` opening (21 chars) or pasting a small snippet never reaches
+# it. The floor is what makes the byte-exact-prefix proof unforgeable in
+# practice (#617-review 🔴).
+GOAL_STRANDED_MIN_MATCH = 200
+# #617 -- one loud give-up on a box that never converges (a genuinely busy
+# pane), never a forever-retry that also starves the pane's dark-watch (#566
+# livelock class).
+GOAL_STRANDED_CLEAR_GIVEUP = 3
+
+
+def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
+                                   now, sleep_fn, dry_run, rearm_fn, loc):
+    """#617 -- clear a STRANDED, TRUNCATED own `/goal` draft left in a pane's
+    input box. A partial /goal type (a send-keys chunk interrupted mid-arm)
+    leaves a byte-exact PREFIX of THIS pane's own template in the box; the
+    next sweep can neither SUBMIT it (`_submit_stranded_own_goal` needs the
+    WHOLE literal text) nor stash around it, and once a LATER successful send
+    clears the janitor watch mark the generic `_janitor_recover` refuses it
+    for lack of provenance -- the live montalu1 674-char stuck draft no
+    watchdog job would touch. Runs REGARDLESS of arm state (the poison is
+    orthogonal to whether a goal is currently armed).
+
+    Ownership is proven by CONTENT, not provenance -- and the proof is a
+    byte-exact CONTIGUOUS prefix of THIS pane's own template, NOT head+tail
+    (which cannot establish contiguity: a paste of the template start + an
+    edited middle + a template-substring tail matches BOTH ends -- the
+    #617-review 🔴, and the #372 CRITICAL-1 "content alone can't prove
+    ownership for /goal" because of the documented manual paste-the-template
+    arm flow). The WHOLE box content is reconstructed from every wrapped row
+    and must be a whitespace-normalised prefix of the template, at least
+    `GOAL_STRANDED_MIN_MATCH` chars and NOT the complete text (a complete own
+    draft is `_submit_stranded_own_goal`'s job). A user would have to paste
+    the exact first 200+ chars of the ~3.8k template with zero edits -- and
+    the recent-human gate still VETOES if they just did.
+
+    Gates, all required: a CLEAN idle input boundary (`_classify_boundary`
+    == "input" -- never Escape a spinner / dialog / non-boundary); the
+    FAIL-CLOSED recent-human check (`_recovery_recent_human` -- an unreadable
+    transcript VETOES, unlike the raw gate, #566-review A1); a bounded
+    give-up (one loud escalation, never a forever-retry). The clear itself is
+    the SAME `_janitor_clear_box` the provenance-gated janitor already uses on
+    own `/goal` content, so the keystroke safety profile matches it.
+
+    Cheap: the (SKILL.md-reading) template resolve happens ONLY once the box
+    head starts with the distinctive `/goal STOP CONDITIONS` opening -- rare.
+
+    Returns `(logs, cleared)`: `cleared` is True ONLY on a verified box-clear
+    (the caller re-evaluates the pane next sweep off a fresh capture); False
+    on no-stranded-draft / VETO / give-up / non-convergence, so the caller
+    does NOT skip the pane's ordinary dark-watch work.
+
+    RESIDUAL (honest): a routine airuleset push that REWORDS the template
+    between the poisoning and this sweep makes the box no longer a prefix of
+    the NEW template -> the stranded draft is not auto-cleared here (it falls
+    back to pre-#617 stuck behaviour + the eventual #459 ping)."""
+    seen = state.setdefault("trunc_clear", {}) if state is not None else {}
+    head = watchdog._input_box_head_text(captured)
+    if not (head and head.startswith("/goal STOP CONDITIONS")):
+        return [], False
+    # a CLEAN idle input boundary only -- never Escape a spinner / dialog.
+    kind, _t = watchdog._classify_boundary(captured)
+    if kind != "input":
+        return [], False
+    text, _auth = (rearm_fn or _default_rearm_fn)(cwd)
+    if not text:
+        return [], False
+    rows = watchdog._input_box_rows_raw(captured)
+    if not rows:
+        return [], False
+    box_full = rows[0].lstrip("❯").strip()
+    if len(rows) > 1:
+        box_full = (box_full + " " + " ".join(rows[1:])).strip()
+    box_norm = " ".join(box_full.split())
+    text_norm = " ".join(text.split())
+    if not (len(box_norm) >= GOAL_STRANDED_MIN_MATCH
+            and len(box_norm) < len(text_norm)
+            and text_norm.startswith(box_norm)):
+        return [], False
+    # PROVEN a stranded truncated own /goal. The give-up rec is keyed on the
+    # content signature so a DIFFERENT/gone draft starts a fresh episode.
+    rec = seen.get(sid) or {}
+    if rec.get("sig") != box_norm[:80]:
+        rec = {"sig": box_norm[:80]}
+    if rec.get("gaveup"):
+        seen[sid] = rec
+        return [], False   # already escalated -> never re-attempt, never starve
+    if _recovery_recent_human(sid, cwd, tpath, now):
+        return (["dark-watch %s sid=%s -> stranded truncated /goal draft, "
+                 "recent-human VETO" % (loc, sid)], False)
+    if dry_run:
+        return (["dark-watch %s sid=%s -> would CLEAR stranded truncated "
+                 "/goal draft (#617)" % (loc, sid)], False)
+    logs = []
+    watchdog._draft_rescue_persist(pid, captured, logs=logs)   # snapshot first
+    if watchdog._janitor_clear_box(pid, run, sleep_fn, logs.append):
+        seen.pop(sid, None)
+        logs.append("dark-watch %s sid=%s -> CLEARED stranded truncated /goal "
+                    "draft (poisoned, #617)" % (loc, sid))
+        return logs, True
+    rec["fails"] = int(rec.get("fails", 0)) + 1
+    seen[sid] = rec
+    if rec["fails"] >= GOAL_STRANDED_CLEAR_GIVEUP:
+        rec["gaveup"] = True
+        logs.append("dark-watch %s sid=%s -> stranded truncated /goal clear "
+                    "FAILED %d× -- giving up (human must clear it)"
+                    % (loc, sid, rec["fails"]))
+    else:
+        logs.append("dark-watch %s sid=%s -> stranded truncated /goal clear "
+                    "did not converge (%d), retry next sweep"
+                    % (loc, sid, rec["fails"]))
+    return logs, False
 
 
 def _resolve_stash_abort_livelock(sid, cwd, run, projects_dir, state, now,
@@ -1318,7 +1475,15 @@ def _default_rearm_fn(cwd):
     except Exception:
         return None, None
     try:
-        text = goal_template_for_authority(authority)
+        # #617 -- pass a logs sink so an OVER-CAP template (the #169
+        # regression) surfaces LOUDLY in the goal-sync forensic trail
+        # instead of silently degrading to a ping with no stated reason.
+        # `_log_goal_sync` collapses identical repeats, so a persistently
+        # over-cap template logs one line, not a per-sweep flood.
+        _logs = []
+        text = goal_template_for_authority(authority, logs=_logs)
+        for _ln in _logs:
+            _log_goal_sync(_ln)
     except Exception:
         text = None
     return (text or None), authority
@@ -1358,10 +1523,14 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     an idle-but-ALIVE session whose glyph merely flickers never reaches it
     (montalu 2026-08-16). A workable loop the watchdog cannot yet confirm (or
     cannot self-heal: no template / cap exhausted) accumulates SILENTLY or
-    falls to the #459 ping. This function STILL types nothing -- it only WRITES
-    the request; the keystroke + its recent-human + delivery-freshness gates
-    live in `deliver_goal`. A user-CLEARED goal (mark != "set") never reaches
-    this branch at all."""
+    falls to the #459 ping. For the RE-ARM path this function types nothing --
+    it only WRITES the request; that keystroke + its recent-human + delivery-
+    freshness gates live in `deliver_goal`. (The #617 stranded-truncated-/goal
+    CLEAR, run first via `_clear_stranded_truncated_goal`, is the one keystroke
+    path here -- Escape+BSpace, gated on a clean boundary + fail-closed
+    recent-human + a byte-exact-prefix content proof + a bounded give-up.) A
+    user-CLEARED goal (mark != "set") never reaches the re-arm branch at
+    all."""
     logs = []
     if watchdog._owner_disabled("goal"):
         logs.append("goal jobs DISABLED by owner flag "
@@ -1446,6 +1615,17 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         tpath, tmtime = tinfo
         sid = tpath.stem
         visited_sids.add(sid)   # #519 -- live this sweep -> never orphan-reaped
+
+        # #617 -- clear a STRANDED, TRUNCATED own /goal draft the provenance-
+        # gated `_janitor_recover` above refuses (see the helper's docstring).
+        # Only a VERIFIED clear (stale capture) skips the rest of this pane's
+        # sweep; a VETO / give-up / non-convergence lets dark-watch proceed.
+        clogs, _cleared = _clear_stranded_truncated_goal(
+            sid, cwd, captured, tpath, pid, run, state, now, sleep_fn,
+            dry_run, rearm_fn, loc)
+        logs += clogs
+        if _cleared:
+            continue
 
         rec = off_state.get(sid)
         off = rec.get("off") if isinstance(rec, dict) else None

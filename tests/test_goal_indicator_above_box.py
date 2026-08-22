@@ -73,6 +73,46 @@ class GoalIndicatorAboveBox(unittest.TestCase):
             TOP, "❯ ", BOT, STAT, STRIP])
         self.assertIs(pane_goal_armed(cap), False)
 
+    def test_pending_cc_update_notification_prefix_before_glyph_reads_True(self):
+        # #617 -- live montalu1@subdev 2026-08-21: when Claude Code has a
+        # PENDING UPDATE it renders its own update-notification chrome on the
+        # SAME standalone line the glyph rides on, directly above the box:
+        # `✔ Update installed · Restart to update◎ /goal active (21m)` (the
+        # glyph directly ABUTS "update", no separator -- byte-faithful from a
+        # hexdump of the real capture). The `^`-anchored header regex missed
+        # it -> pane_goal_armed returned False on a genuinely ARMED, alive
+        # loop -> dark-watch re-armed it and typed a second (truncated) /goal
+        # into the box (the #617 poisoned draft). Same class as #487 (the
+        # stash-marker prefix), one chrome prefix over.
+        upd = "✔ Update installed · Restart to update◎ /goal active (21m)"
+        cap = "\n".join(["  ✻ Waiting for 1 background agent to finish",
+                         upd, TOP, "❯ ", BOT, STAT, STRIP, WORKER])
+        self.assertIs(pane_goal_armed(cap), True)
+
+    def test_update_notification_prefix_with_trailing_prose_is_never_armed(
+            self):
+        # #617 -- the widened prefix must NOT re-open the #393 wrapped-prose
+        # false-positive: the CLOSED-form tail ($ right after the glyph +
+        # optional age) still rejects a line that CONTINUES past the glyph,
+        # even one carrying the update-notification phrase. NOT armed.
+        cap = "\n".join([
+            "  Discussing the CC banner: Restart to update◎ /goal active and "
+            "the loop keeps going",
+            TOP, "❯ ", BOT, STAT, STRIP])
+        self.assertIs(pane_goal_armed(cap), False)
+
+    def test_prose_quote_ending_exactly_at_the_glyph_is_never_armed(self):
+        # #617-review 🔴: the FIRST cut used a LAZY `.*?Restart to update`
+        # prefix, so a DARK pane whose header quoted the phrase and ENDED
+        # exactly at the closed-form glyph (`the banner reads: Restart to
+        # update◎ /goal active (21m)`) read armed=True and SUPPRESSED a legit
+        # re-arm. Anchoring the alternative on the banner's own line-start
+        # shape (`Update installed · Restart to …`) rejects this. NOT armed.
+        cap = "\n".join([
+            "  the banner reads: Restart to update◎ /goal active (21m)",
+            TOP, "❯ ", BOT, STAT, STRIP])
+        self.assertIs(pane_goal_armed(cap), False)
+
     def test_short_unpunctuated_continuation_is_also_never_armed(self):
         # #393-review MINOR-1 (fresh-context adversarial review,
         # 2026-08-12, executed against the real function) -- the FIRST

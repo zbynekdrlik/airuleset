@@ -1301,9 +1301,11 @@ from watchdog.long_turn import (  # noqa: E402
 # (#478/#524 -- records a request for job 9 to type, ONLY after a hardened
 # death-confirmation run; an idle-but-alive flicker never reaches it) or, when
 # it cannot self-heal the loop, sends ONE Discord ping asking the user to
-# re-run `/autopilot`. `goal_dark_watch` ITSELF still types nothing -- the
-# keystroke happens in `goal_sweep`/`deliver_goal`, so the delivery-discipline
-# concerns (fresh-capture verify, the #36 truncation hazard,
+# re-run `/autopilot`. For the RE-ARM path `goal_dark_watch` types nothing --
+# that keystroke happens in `goal_sweep`/`deliver_goal` (the #617 stranded-
+# truncated-/goal CLEAR is the one keystroke path in `goal_dark_watch` itself,
+# `_clear_stranded_truncated_goal` -> `_janitor_clear_box`), so the delivery-
+# discipline concerns (fresh-capture verify, the #36 truncation hazard,
 # `deliver_with_stash` coordination) apply to `goal_sweep`'s own delivery of a
 # genuinely PENDING (explicitly recorded) request -- INCLUDING a `dark-rearm`
 # one -- and to `goal_lane_sweep`'s watchdog-initiated nudge.
@@ -1362,8 +1364,39 @@ GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
 # wrapped-prose false-positive control (with/without punctuation, prefix
 # or not) is still rejected. A fractional-hour/nbsp render remains the
 # same accepted residual as before.
+# #617 (live montalu1@subdev, 2026-08-21) — the #487 MINOR-2 "widen only on a
+# real render" clause fired a SECOND time, for the CC PENDING-UPDATE
+# notification. When an update is downloaded-not-yet-restarted, Claude Code
+# renders `✔ Update installed · Restart to update` on the SAME standalone
+# header line the `◎ /goal` glyph rides on, and the glyph directly ABUTS the
+# word "update" with NO separator (byte-faithful hexdump of the raw capture:
+# `…to update` = `…20 75 70 64 61 74 65`, then `e2 97 8e`=◎, ` /goal active
+# (21m)`). The `^`-anchor plus the stash-only optional prefix therefore never
+# matched, so `pane_goal_armed` read a genuinely-armed pane as False (dark) —
+# dark-watch CONFIRMED-DEAD + re-armed the live loop and typed a truncated
+# second /goal into the box (the #617 poisoned draft). Add the CC update
+# notification as ANOTHER optional prefix alternative.
+#
+# #617-review — the FIRST cut anchored on a LAZY `.*?Restart to (?:update|
+# apply)`, which re-opened a #393-class FALSE POSITIVE: a dark pane whose
+# header carried a prose/quote row ending exactly at the glyph (`the banner
+# reads: Restart to update◎ /goal active (21m)` — likely in a session working
+# on THIS code) read armed=True and SUPPRESSED a legit re-arm. Anchored the
+# alternative on the banner's own LINE-START shape instead — the CC glyph +
+# `Update installed · Restart to (update|apply)` — so ordinary prose that
+# merely quotes the phrase mid-line no longer matches. The tail stays the SAME
+# CLOSED form (` active`/` active (<1-3 digits><h|m|d>)` then `$`), so every
+# #393 wrapped-prose control is still rejected. ACCEPTED RESIDUALS (the #393
+# MINOR-2 "fix what failed in production, widen on a real render" discipline):
+# (1) a DIFFERENT CC banner in the same chrome slot — the theorised
+# `✗ Auto-update failed · Try claude doctor …◎ /goal` — is UNOBSERVED, so it
+# is NOT matched (its glyph would re-darken; add it if seen live); (2) a
+# banner render whose wording differs from `Update installed · Restart to
+# update|apply` likewise re-darkens.
 _GOAL_HEADER_INDICATOR_RX = re.compile(
-    r"^(?:" + re.escape(STASH_MARKER + " · ") + r")?"
+    r"^(?:" + re.escape(STASH_MARKER + " · ")
+    + r"|(?:[✔✓]\s*)?Update installed\s*·\s*Restart to (?:update|apply)"
+    + r")?"
     + re.escape(GOAL_INDICATOR)
     + r"( active(\s\(\d{1,3}[hmd]\))?)?$")
 _GOAL_LCS_OPEN = "<local-command-stdout>"
@@ -2060,10 +2093,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           mismatch: it debounces the dark observation across >= 2 sweeps,
           then sends ONE Discord ping asking the user to re-run
           `/autopilot`, which re-arms via the SAME proven callback job 9
-          already uses. Zero keystrokes ever, so none of the old delivery-
-          discipline machinery (retry caps, streak windows, template-drift
-          detection, achieved-marker forensics, `❓`-blocked suppression)
-          is needed any more — a false ping just costs the user one glance
+          already uses. The re-arm/ping path types nothing (the #617
+          stranded-truncated-/goal CLEAR is the one keystroke it makes,
+          Escape+BSpace via `_clear_stranded_truncated_goal`), so none of the
+          old re-arm delivery-discipline machinery (retry caps, streak
+          windows, template-drift detection, achieved-marker forensics,
+          `❓`-blocked suppression) is needed any more — a false ping just
+          costs the user one glance
           and a cheap re-run.
           `goal.goal_lane_sweep` is the ONE watchdog-INITIATED keystroke
           left in the whole family (#365/#351's own lane-occupancy nudge,
@@ -3869,9 +3905,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     #     says armed but whose footer has gone dark, either RE-ARMS a
     #     CONFIRMED-dead loop (#478/#524 -- records a request for job 9 to
     #     type, gated on a hardened death-confirmation run) or pings the user;
-    #     `goal_dark_watch` itself never types (the keystroke is job 9's).
-    #   * `goal_lane_sweep` is the ONE watchdog-INITIATED keystroke left in
-    #     the whole family (#365/#351's own lane-occupancy nudge,
+    #     for the RE-ARM path `goal_dark_watch` itself never types (that
+    #     keystroke is job 9's) -- its ONLY keystroke is the #617 stranded-
+    #     truncated-/goal CLEAR (`_clear_stranded_truncated_goal`, Escape+
+    #     BSpace, gated on a clean boundary + fail-closed recent-human + a
+    #     byte-exact-prefix content proof + a bounded give-up).
+    #   * `goal_lane_sweep` is the OTHER watchdog-INITIATED keystroke in
+    #     the family (#365/#351's own lane-occupancy nudge,
     #     functionally unchanged) and needs `compact_handled_this_sweep`
     #     for the identical reason job 9 above does.
     def _job_goal_dark_watch():
