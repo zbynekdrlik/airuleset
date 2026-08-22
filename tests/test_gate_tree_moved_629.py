@@ -183,6 +183,9 @@ class TestTreeMovedReport(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestClassifyPushGateOutcome(unittest.TestCase):
+    # The classifier owns tree-moved / tests-failed / clean; the TMPDIR litter
+    # guard stays its own separate branch in cmd_push (checked AFTER a clean
+    # classifier verdict), so the tree-moved precedence beats litter too.
     def _fp(self, files, error=None):
         return {"head": "h", "files": files, "error": error}
 
@@ -195,15 +198,13 @@ class TestClassifyPushGateOutcome(unittest.TestCase):
 
     def test_clean_run_proceeds(self):
         b, a = self._stable()
-        ok, reason, msg = cli_remote._classify_push_gate_outcome(
-            0, True, 0, 6000, b, a)
+        ok, reason, msg = cli_remote._classify_push_gate_outcome(0, b, a)
         self.assertTrue(ok)
         self.assertEqual(reason, "clean")
 
     def test_tree_moved_voids_even_when_tests_failed(self):
         b, a = self._moved()
-        ok, reason, msg = cli_remote._classify_push_gate_outcome(
-            1, True, 0, 6000, b, a)
+        ok, reason, msg = cli_remote._classify_push_gate_outcome(1, b, a)
         self.assertFalse(ok)
         self.assertEqual(reason, "tree-moved",
                          "a mid-run mutation takes precedence over the test result")
@@ -213,32 +214,21 @@ class TestClassifyPushGateOutcome(unittest.TestCase):
     def test_tree_moved_voids_even_a_green_run(self):
         """A pass DURING a mid-run mutation is not trustworthy either — still void."""
         b, a = self._moved()
-        ok, reason, msg = cli_remote._classify_push_gate_outcome(
-            0, True, 0, 6000, b, a)
+        ok, reason, msg = cli_remote._classify_push_gate_outcome(0, b, a)
         self.assertFalse(ok)
         self.assertEqual(reason, "tree-moved")
 
     def test_stable_tree_tests_failed_is_a_real_regression(self):
         b, a = self._stable()
-        ok, reason, msg = cli_remote._classify_push_gate_outcome(
-            1, True, 0, 6000, b, a)
+        ok, reason, msg = cli_remote._classify_push_gate_outcome(1, b, a)
         self.assertFalse(ok)
         self.assertEqual(reason, "tests-failed")
         self.assertIn("TESTS FAILED", msg)
 
-    def test_stable_tree_litter_over_cap(self):
-        b, a = self._stable()
-        ok, reason, msg = cli_remote._classify_push_gate_outcome(
-            0, False, 9999, 6000, b, a)
-        self.assertFalse(ok)
-        self.assertEqual(reason, "litter")
-        self.assertIn("9999", msg)
-
     def test_detection_unavailable_never_blocks_a_clean_run(self):
         """git unavailable → detection skipped, NOT a block; the normal result stands."""
         fp = self._fp(None, error="git not available")
-        ok, reason, msg = cli_remote._classify_push_gate_outcome(
-            0, True, 0, 6000, fp, fp)
+        ok, reason, msg = cli_remote._classify_push_gate_outcome(0, fp, fp)
         self.assertTrue(ok)
         self.assertEqual(reason, "clean")
 
@@ -246,8 +236,7 @@ class TestClassifyPushGateOutcome(unittest.TestCase):
         """git unavailable + tests failed → still 'tests-failed', but the message
         notes detection could not rule out a mid-run mutation (never swallowed)."""
         fp = self._fp(None, error="git not available")
-        ok, reason, msg = cli_remote._classify_push_gate_outcome(
-            1, True, 0, 6000, fp, fp)
+        ok, reason, msg = cli_remote._classify_push_gate_outcome(1, fp, fp)
         self.assertFalse(ok)
         self.assertEqual(reason, "tests-failed")
         self.assertIn("detection", msg.lower())

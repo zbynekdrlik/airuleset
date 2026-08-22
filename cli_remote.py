@@ -77,6 +77,151 @@ def _check_push_tmpdir_litter(run_dir, cap=None):
     return (count <= cap, count)
 
 
+# --- #629: push-gate mid-run tree-mutation detection ------------------------- #
+# The gate runs the whole suite (`unittest discover`) against the SHARED main
+# checkout. Four wiring tests assert on `inspect.getsource(airuleset.<fn>)`,
+# which is correct ONLY while `airuleset.py` on disk stays byte-identical to the
+# version the running process imported. When a concurrent integration merges the
+# NEXT lane into the shared checkout WHILE the gate's suite is still running, the
+# file changes size mid-run, `getsource` slices the NEW source at the OLD
+# `co_firstlineno`, and those tests fail with a wrong-non-empty-content signature
+# that reads EXACTLY like a code regression (a full diagnostic cycle lost).
+#
+# A before/after content fingerprint of every TRACKED file, taken immediately
+# around the suite subprocess, lets the gate REPORT that its own tree moved
+# instead of letting it masquerade as a test failure -- never a retry, never
+# swallowing a genuine failure (if a real failure and a mid-run mutation
+# coincide, both stay visible). Only TRACKED files are hashed, so `.claude/*`
+# (hence the gitignored `.claude/worktrees/` a concurrent worker builds in) can
+# never false-trigger -- only a mutation to the main checkout's tracked files (a
+# supervisor merge/checkout) does. Detection is FAIL-OPEN: any inability to take
+# a fingerprint disables it (it never blocks the gate merely because it could not
+# run, and never suppresses a genuine test result).
+TREE_MOVED_CHANGED_FILES_SHOWN = 20     # cap the report's changed-file list
+
+
+def _tracked_tree_fingerprint(repo_dir):
+    """Snapshot of every git-tracked file's working-tree content, for #629.
+    Returns `{"head": <sha or None>, "files": {relpath: sha256hex} or None,
+    "error": <str or None>}`. NEVER raises: on any git/read failure `files` is
+    None and `error` is set, which disables detection (fail-open)."""
+    import hashlib
+    import subprocess
+    repo = str(repo_dir)
+    try:
+        ls = subprocess.run(
+            ["git", "-C", repo, "ls-files", "-z"],
+            capture_output=True, timeout=120)
+        if ls.returncode != 0:
+            return {"head": None, "files": None,
+                    "error": "git ls-files rc=%s: %s" % (
+                        ls.returncode,
+                        ls.stderr.decode("utf-8", "replace").strip())}
+        rels = [p for p in ls.stdout.split(b"\0") if p]
+        files = {}
+        for rel in rels:
+            relpath = rel.decode("utf-8", "surrogateescape")
+            try:
+                with open(os.path.join(repo, relpath), "rb") as fh:
+                    files[relpath] = hashlib.sha256(fh.read()).hexdigest()
+            except OSError as e:
+                # A tracked file unreadable AT this instant is itself evidence
+                # the tree is moving -- a distinct sentinel so the before/after
+                # diff flags it, never a crash.
+                files[relpath] = "<unreadable:%s>" % type(e).__name__
+        head = None
+        hr = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30)
+        if hr.returncode == 0:
+            head = hr.stdout.strip() or None
+        return {"head": head, "files": files, "error": None}
+    except Exception as e:  # noqa: BLE001 -- fail-open by contract (never raises)
+        return {"head": None, "files": None,
+                "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def _diff_tracked_tree_fingerprints(before, after):
+    """`(moved, changed_paths, available)` for two `_tracked_tree_fingerprint`
+    snapshots. `available` is False when EITHER snapshot could not be taken (git
+    unavailable) -- then detection is OFF (`moved` False, `changed_paths` []).
+    Otherwise `moved` is True iff the tracked-content sets differ, and
+    `changed_paths` names every added / removed / changed relpath."""
+    fb = (before or {}).get("files")
+    fa = (after or {}).get("files")
+    if fb is None or fa is None:
+        return (False, [], False)
+    changed = sorted(k for k in set(fb) | set(fa) if fb.get(k) != fa.get(k))
+    return (bool(changed), changed, True)
+
+
+def _fp_unavailable_reason(before, after):
+    """First snapshot error string, for logging WHY detection was skipped."""
+    for fp in (before, after):
+        if fp and fp.get("error"):
+            return fp["error"]
+    return "tracked-tree fingerprint unavailable"
+
+
+def _render_tree_moved_report(before, after, changed_paths, test_returncode):
+    """The unambiguous VOID report (#629). A reader must immediately understand
+    the tree moved mid-run and that the suite result is not trustworthy -- never
+    mistake it for a regression."""
+    head_b = (before or {}).get("head") or "<unknown>"
+    head_a = (after or {}).get("head") or "<unknown>"
+    shown = changed_paths[:TREE_MOVED_CHANGED_FILES_SHOWN]
+    lines = [
+        "",
+        "=" * 78,
+        "PUSH GATE VOID — tracked files changed on disk during the test run (#629)",
+        "=" * 78,
+        "A concurrent integration mutated the shared checkout while this gate's",
+        "test suite was running, so the suite read a mix of the old and new tree.",
+        "Its result is NOT trustworthy — this is NOT (necessarily) a code regression.",
+        "",
+        "  HEAD before run:  %s" % head_b,
+        "  HEAD after run:   %s" % head_a,
+        "  Test suite exit code: %s  (VOID — see above)" % test_returncode,
+        "  Tracked files that changed mid-run (%d):" % len(changed_paths),
+    ]
+    lines += ["    - %s" % p for p in shown]
+    if len(changed_paths) > len(shown):
+        lines.append("    ... and %d more" % (len(changed_paths) - len(shown)))
+    lines += [
+        "",
+        "Do NOT read the test failures above as a regression. Re-run",
+        "`airuleset.py push` on a SETTLED tree (serialize the concurrent",
+        "integration first). Refusing to push.",
+        "=" * 78,
+    ]
+    return "\n".join(lines)
+
+
+def _classify_push_gate_outcome(test_returncode, fp_before, fp_after):
+    """Single decision function for the push gate's suite outcome (#629).
+    Returns `(ok, reason, message)` with `reason` in
+    {"tree-moved", "tests-failed", "clean"}. Precedence: a mid-run tree mutation
+    VOIDS the run and is reported FIRST (so it never masquerades as a regression),
+    then a genuine test failure. The TMPDIR litter guard stays its OWN separate
+    branch in `cmd_push` (checked only after a clean verdict here), so tree-moved
+    beats it too. Detection being UNAVAILABLE never blocks a clean run and never
+    swallows a real failure -- it only adds a note that a mid-run mutation could
+    not be ruled out."""
+    moved, changed, available = _diff_tracked_tree_fingerprints(fp_before, fp_after)
+    if moved:
+        return (False, "tree-moved",
+                _render_tree_moved_report(fp_before, fp_after, changed, test_returncode))
+    skip_note = ""
+    if not available:
+        skip_note = ("\n  [tree-move detection skipped: %s — a mid-run mutation "
+                     "could not be ruled out]"
+                     % _fp_unavailable_reason(fp_before, fp_after))
+    if test_returncode != 0:
+        return (False, "tests-failed",
+                "  TESTS FAILED — refusing to push untested code." + skip_note)
+    return (True, "clean", "  Tests passed." + skip_note)
+
+
 # Per-remote SSH deploy timeout (#263): `cmd_install()` now includes best-
 # effort network-heavy provisioning that can legitimately take well over the
 # old 60s bound on a first-time run — the sum of the INNER timeouts a single
@@ -712,16 +857,30 @@ def cmd_push(args):
         # `tempfile.mkdtemp`/`mkstemp` call sites are contained — point the
         # WHOLE subprocess at a per-run TMPDIR removed on context exit.
         test_env["TMPDIR"] = str(_suite_tmp)
+        # #629: bracket the suite subprocess with a tracked-tree content
+        # fingerprint (as tightly as possible around subprocess.run) so a
+        # concurrent integration mutating the shared checkout MID-RUN is
+        # reported as its own cause, not as a masquerading test failure.
+        _fp_before = _tracked_tree_fingerprint(REPO_DIR)
         test_result = subprocess.run(
             [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
             cwd=str(REPO_DIR), env=test_env,
         )
+        _fp_after = _tracked_tree_fingerprint(REPO_DIR)
         # #548 point 3 — measure the leak INSIDE the with (before _suite_tmp is
         # removed); the per-run dir is unique + private to this subprocess, so
         # its leftover count is the suite's litter with zero shared-box noise.
         _litter_ok, _litter_count = _check_push_tmpdir_litter(_suite_tmp)
-    if test_result.returncode != 0:
-        print("  TESTS FAILED — refusing to push untested code.", file=sys.stderr)
+    # #629: a mid-run tree mutation VOIDS the run and is reported FIRST (so it
+    # never masquerades as a regression), then a genuine test failure. The raw
+    # suite output already streamed to the terminal (inherited stdio), so BOTH
+    # stay visible when they coincide. The TMPDIR litter guard (#548) stays its
+    # own branch below, reached only after a clean verdict here — so a
+    # tree-moved verdict beats it too.
+    _gate_ok, _gate_reason, _gate_msg = _classify_push_gate_outcome(
+        test_result.returncode, _fp_before, _fp_after)
+    if not _gate_ok:
+        print(_gate_msg, file=sys.stderr)
         sys.exit(1)
     if not _litter_ok:
         print("  TMPDIR LITTER GUARD: the test suite leaked %d entries into its "
@@ -731,7 +890,7 @@ def cmd_push(args):
               "deliberately." % (_litter_count, _effective_push_tmpdir_cap()),
               file=sys.stderr)
         sys.exit(1)
-    print("  Tests passed.")
+    print(_gate_msg)
 
     # 1. Push to GitHub
     print("\nPushing to GitHub...")
