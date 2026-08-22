@@ -595,6 +595,109 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
                 self.assertNotIn("Browsing / Exporting / Archiving Transcripts", ctx, prompt)
 
 
+class TestCloudflareQuotedTrigger631(TestCase):
+    """#631 — the cloudflare row is a RAW_BASH_MATCH_TOPICS row now, so the
+    shapes that actually verify a token (api.cloudflare.com inside a QUOTED
+    Python/heredoc string, the cfat_ prefix, a `secret request cloudflare*`,
+    a read of ~/.secrets/cloudflare*, `webterm-access`) INJECT the skill.
+
+    Root cause the fix removes: strip_carried_text() erased quoted spans +
+    heredoc bodies from the Bash haystack BEFORE the cloudflare pattern ran,
+    so the one shape most needing the skill (a script calling the API) was
+    the one shape that could never match. The owner deleted his master token
+    because the skill's verify-endpoint warning never reached the moment of
+    decision.
+    """
+
+    CF_MARK = "Using Cloudflare API Tokens"  # exists ONLY in the skill body
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def _cf(self, command, tool_name="Bash", tool_input=None, session=None):
+        ti = tool_input if tool_input is not None else {"command": command}
+        session = session or ("cf631-" + command[:8]).replace(" ", "_")
+        ctx = injected(run(ti, tool_name=tool_name, session_id=session, tmpdir=self.tmpdir))
+        return ctx
+
+    def test_raw_match_topics_set_is_defined_for_cloudflare(self):
+        text = HOOK.read_text(encoding="utf-8")
+        self.assertIn("RAW_BASH_MATCH_TOPICS", text,
+                      "the raw-match mechanism must exist in the injector")
+        self.assertIn('"cloudflare-api-tokens"', text,
+                      "the cloudflare topic must be a raw-match topic")
+
+    def test_python_quoted_verify_url_injects(self):
+        # THE INCIDENT: a script calling api.cloudflare.com from inside a
+        # QUOTED Python string. This is the exact shape that caused the loss.
+        ctx = self._cf(
+            'python3 -c \'import requests; '
+            'requests.get("https://api.cloudflare.com/client/v4/user/tokens/verify")\'')
+        self.assertIsNotNone(ctx, "the quoted-URL verify script must load the skill")
+        self.assertIn(self.CF_MARK, ctx)
+
+    def test_curl_quoted_zones_url_injects(self):
+        ctx = self._cf(
+            'curl -s -H "Authorization: Bearer $CF_TOKEN" '
+            '"https://api.cloudflare.com/client/v4/zones"')
+        self.assertIsNotNone(ctx, "a normal quoted curl probe must load the skill")
+        self.assertIn(self.CF_MARK, ctx)
+
+    def test_heredoc_python_call_injects(self):
+        cmd = (
+            "python3 - <<'PY'\n"
+            "import requests\n"
+            "requests.get('https://api.cloudflare.com/client/v4/zones')\n"
+            "PY"
+        )
+        ctx = self._cf(cmd)
+        self.assertIsNotNone(ctx, "a heredoc python call must load the skill")
+        self.assertIn(self.CF_MARK, ctx)
+
+    def test_cfat_prefix_injects(self):
+        ctx = self._cf(
+            'curl -H "Authorization: Bearer cfat_00example001token" https://x.test/')
+        self.assertIsNotNone(ctx, "the cfat_ account-token prefix must load the skill")
+        self.assertIn(self.CF_MARK, ctx)
+
+    def test_webterm_access_injects(self):
+        # webterm-access = Cloudflare Access (Zero Trust) config, #612.
+        ctx = self._cf("python3 ~/devel/airuleset/airuleset.py webterm-access --apply")
+        self.assertIsNotNone(ctx, "webterm-access is Cloudflare Access config")
+        self.assertIn(self.CF_MARK, ctx)
+
+    def test_secret_request_cloudflare_injects(self):
+        ctx = self._cf(
+            "python3 ~/devel/airuleset/airuleset.py secret request cloudflare_spinbike")
+        self.assertIsNotNone(ctx, "requesting a cloudflare secret must load the skill")
+        self.assertIn(self.CF_MARK, ctx)
+
+    def test_read_secrets_cloudflare_file_injects(self):
+        ctx = self._cf("cat ~/.secrets/cloudflare-spinbike")
+        self.assertIsNotNone(ctx, "reading a ~/.secrets/cloudflare* file must load the skill")
+        self.assertIn(self.CF_MARK, ctx)
+
+    # --- the raw-match must NOT leak to the other rows ------------------- #
+
+    def test_other_rows_still_use_the_stripped_haystack(self):
+        # A git commit MENTIONING `gh pr merge` must NOT inject pr-merge-policy
+        # (pr-merge-policy is NOT a raw-match topic — its stripping is intact).
+        ctx = self._cf('git commit -m "docs: explain gh pr merge gating"')
+        if ctx is not None:
+            self.assertNotIn("pr-merge-policy", ctx,
+                             "the cloudflare raw-match must not disable the other "
+                             "rows' quote-stripping")
+
+    def test_unrelated_cloudflare_filename_does_not_inject(self):
+        # A bare "cloudflare" filename (no api.cloudflare.com / cfat_ / secret /
+        # ~/.secrets / webterm-access) must NOT inject.
+        ctx = self._cf("cat cloudflare-notes.md")
+        if ctx is not None:
+            self.assertNotIn(self.CF_MARK, ctx)
+
+
 class TestWiring(TestCase):
     def test_hook_is_wired_on_pretooluse(self):
         conf = json.loads((ROOT / "settings" / "hooks.json").read_text())
