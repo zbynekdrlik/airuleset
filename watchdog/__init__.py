@@ -2111,9 +2111,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           re-check (#547/#552/#578, `ops_wait_recheck`) and, when
           `release_state_fetch` is wired, the release-gap nudge (#616,
           `release_gap.goal_release_gap_recheck`) — on a FULL-authority box
-          (the #618 MIRROR) whose integration branch is ahead of prod with NO
-          release in flight, it keystrokes the armed loop to run its release
-          pipeline (the recurring "merged into develop but never released").
+          only (the INVERSE of #618's lane-nudge authority gate) whose
+          integration branch is ahead of prod, a `staging` branch exists, and
+          NO release is in flight, it keystrokes the armed loop to run its
+          release pipeline (the recurring "merged into develop but never
+          released").
       (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
           a turn that simply RUNS for hours is a fault state of its own:
           nothing compacts, no question is delivered, and every keystroke

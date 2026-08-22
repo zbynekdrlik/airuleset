@@ -4089,100 +4089,161 @@ def _parse_origin_slug(url):
     return "%s/%s" % (owner, name)
 
 
+def _gh_not_found(stderr):
+    """True iff a `gh api` stderr is a STRUCTURAL 404 (the resource genuinely
+    doesn't exist — e.g. a branch that isn't there) as opposed to a transient
+    network/auth failure. `gh` prints `Not Found (HTTP 404)` for a real 404;
+    anything else (a connection error, a 5xx, a rate-limit) is treated as
+    transient. Used to distinguish "not a release-train repo" (a clean, full-TTL
+    'no gap' result) from "couldn't check right now" (None -> fail-TTL retry)."""
+    s = (stderr or "").lower()
+    return "404" in s or "not found" in s
+
+
+def _release_train_run_in_flight(runs, staging, prod):
+    """#616 (review F1) — PURE: is any workflow run a genuine release/deploy in
+    flight? A run counts ONLY when it is in_progress/queued AND event-triggered
+    by `push`/`workflow_dispatch` (this EXCLUDES the constant `issue_comment` /
+    `issues` utility workflows that a busy repo runs on `main` — 'Sub-dev Handoff
+    Gate', 'Bounce Label Hygiene', … — which would otherwise ALL read as a
+    release-in-flight on `main` and starve the nudge forever) AND is on the
+    staging/prod branch OR is a deploy/release-named workflow. Malformed elements
+    are skipped; an empty list -> False."""
+    for r in runs or []:
+        if not isinstance(r, dict):
+            continue
+        if r.get("status") not in ("in_progress", "queued"):
+            continue
+        if r.get("event") not in ("push", "workflow_dispatch"):
+            continue
+        nm = (r.get("name") or "").lower()
+        if (r.get("headBranch") in (staging, prod)
+                or "deploy" in nm or "release" in nm):
+            return True
+    return False
+
+
 def _watchdog_release_state_fetch(cwd):
     """#616 — the release-train state for the repo at `cwd`:
     `{"ahead": <integration commits ahead of prod>, "in_flight": <bool>}`, or
-    None on any failure/refusal (undetermined -> the job-20 release-gap rider
-    fails safe to no-nudge). This RAW fetch is uncached; the caller reads it
+    None on any TRANSIENT failure/refusal (undetermined -> the job-20 release-gap
+    rider fails safe to no-nudge). This RAW fetch is uncached; the caller reads it
     through `release_gap._cached_release_state` (a per-repo TTL cache, the sibling
     of `_cached_ops_wait`) so it fires at most once per repo per TTL, never every
     sweep per pane. Wired HERE like every network call so run_once's unit tests
     stay network-free.
 
-    Repo slug comes from the LOCAL `remote.origin.url` (no network). The gap is
+    Repo slug comes from the LOCAL `remote.origin.url` (no network). It is used
+    ONLY when the URL names an allowed host (default github.com,
+    AIRULESET_RELEASE_ALLOWED_HOST) — a foreign/self-hosted origin returns None
+    rather than resolving a same-named github.com repo (review F5). The gap is
     read from GitHub (`gh api .../compare/{prod}...{integration} .ahead_by`) so a
-    stale local ref never mis-measures it; a repo with no integration branch 404s
-    -> None -> the rider skips (a 2-branch repo simply never nudges). When there
-    IS a gap, in-flight is TRUE iff an open release PR (base staging|prod) exists
-    OR a deploy/release workflow is running/queued (on staging|prod, or named
-    deploy/release). Branch names default develop/staging/main, env-overridable
-    (AIRULESET_RELEASE_*), read at call time (#574 pattern)."""
+    stale local ref never mis-measures it.
+
+    A repo that is NOT a 3-branch release repo returns a CLEAN `{"ahead": 0,
+    "in_flight": False}` (full-TTL cached, decider -> clear), NEVER None — so a
+    2-branch repo does not re-fetch every 60s sweep (review F2): a compare 404 (no
+    integration branch) OR, when a gap exists, a MISSING `staging` branch (review
+    F6 — the distinctive 3-branch marker; a stray/legacy `develop` on a 2-branch
+    repo must not nudge) both resolve to "no release train". A NON-404 error
+    stays None (transient -> fail-TTL retry).
+
+    When there IS a real gap on a real release repo, in-flight is TRUE iff an open
+    release PR (base staging OR prod, server-side `--base`-filtered so a busy
+    repo's older release PR is never truncated out of a default-30 window —
+    review F1) exists, OR a genuine deploy/release workflow is running
+    (`_release_train_run_in_flight`, event-filtered). Branch names default
+    develop/staging/main, env-overridable (AIRULESET_RELEASE_*), read at call
+    time (#574). Timeouts are kept tight (git 5s, each gh 15s); only a real gap
+    with no release in flight reaches the extra PR/run calls (rare + cached)."""
     import subprocess
+    import json
     integ = os.environ.get("AIRULESET_RELEASE_INTEGRATION_BRANCH", "develop")
     prod = os.environ.get("AIRULESET_RELEASE_PROD_BRANCH", "main")
     staging = os.environ.get("AIRULESET_RELEASE_STAGING_BRANCH", "staging")
+    allowed_host = os.environ.get("AIRULESET_RELEASE_ALLOWED_HOST", "github.com")
     try:
         r = subprocess.run(
             ["git", "-C", cwd, "config", "--get", "remote.origin.url"],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, timeout=5)
     except Exception:
         return None
     if r.returncode != 0:
         return None
-    repo = _parse_origin_slug(r.stdout or "")
+    url = r.stdout or ""
+    if allowed_host.lower() not in url.lower():
+        return None
+    repo = _parse_origin_slug(url)
     if not repo:
         return None
-    # (1) gap: integration ahead of prod. A 404 (no integration branch) or any
-    # other non-zero -> None (undetermined -> skip).
+    # (1) gap: integration ahead of prod. A 404 (no integration branch) -> not a
+    # release repo (clean "no gap", full-TTL). Any OTHER error -> None (transient).
     try:
         r = subprocess.run(
             ["gh", "api", "repos/%s/compare/%s...%s" % (repo, prod, integ),
              "--jq", ".ahead_by"],
-            cwd=cwd, capture_output=True, text=True, timeout=20)
+            cwd=cwd, capture_output=True, text=True, timeout=15)
     except Exception:
         return None
     if r.returncode != 0:
-        return None
+        return {"ahead": 0, "in_flight": False} if _gh_not_found(r.stderr) else None
     try:
         ahead = int((r.stdout or "").strip())
     except (ValueError, TypeError):
         return None
     if ahead <= 0:
-        return {"ahead": 0, "in_flight": False}   # drained -> 1 call, short-circuit
-    # (2) in-flight: an open release PR whose base is staging or prod.
-    import json
-    in_flight = False
+        return {"ahead": 0, "in_flight": False}   # drained -> 1 gh call, short-circuit
+    # (2) 3-branch gate (review F6): a real release train has a `staging` branch.
+    # Missing -> not a release repo (clean "no gap"); a non-404 error -> None.
     try:
         r = subprocess.run(
-            ["gh", "pr", "list", "--repo", repo, "--state", "open",
-             "--json", "baseRefName"],
-            capture_output=True, text=True, timeout=20)
+            ["gh", "api", "repos/%s/branches/%s" % (repo, staging), "--jq", ".name"],
+            cwd=cwd, capture_output=True, text=True, timeout=15)
     except Exception:
         return None
     if r.returncode != 0:
-        return None
-    try:
-        prs = json.loads(r.stdout or "[]")
-    except (ValueError, TypeError):
-        return None
-    if any(isinstance(p, dict) and p.get("baseRefName") in (staging, prod)
-           for p in prs):
-        in_flight = True
-    # (3) a running/queued deploy or release workflow (only if no release PR).
-    if not in_flight:
+        return {"ahead": 0, "in_flight": False} if _gh_not_found(r.stderr) else None
+    # (3) in-flight: an open release PR whose base is staging or prod, queried
+    # server-side per base (review F1 — never a truncated default-limit window).
+    in_flight = False
+    for base in (staging, prod):
         try:
             r = subprocess.run(
-                ["gh", "run", "list", "--repo", repo, "-L", "20",
-                 "--json", "status,headBranch,name"],
-                capture_output=True, text=True, timeout=20)
+                ["gh", "pr", "list", "--repo", repo, "--state", "open",
+                 "--base", base, "--json", "number", "--limit", "1"],
+                capture_output=True, text=True, timeout=15)
         except Exception:
             return None
         if r.returncode != 0:
             return None
         try:
-            runs = json.loads(r.stdout or "[]")
+            prs = json.loads(r.stdout or "[]")
         except (ValueError, TypeError):
             return None
-        for run_ in runs:
-            if not isinstance(run_, dict):
-                continue
-            if run_.get("status") not in ("in_progress", "queued"):
-                continue
-            nm = (run_.get("name") or "").lower()
-            if (run_.get("headBranch") in (staging, prod)
-                    or "deploy" in nm or "release" in nm):
-                in_flight = True
-                break
+        if isinstance(prs, list) and prs:
+            in_flight = True
+            break
+    # (4) a genuine deploy/release workflow running/queued (only if no release PR),
+    # server-side status-filtered + event-filtered (review F1 both directions).
+    if not in_flight:
+        runs = []
+        for st in ("in_progress", "queued"):
+            try:
+                r = subprocess.run(
+                    ["gh", "run", "list", "--repo", repo, "--status", st,
+                     "-L", "30", "--json", "status,headBranch,name,event"],
+                    capture_output=True, text=True, timeout=15)
+            except Exception:
+                return None
+            if r.returncode != 0:
+                return None
+            try:
+                page = json.loads(r.stdout or "[]")
+            except (ValueError, TypeError):
+                return None
+            if isinstance(page, list):
+                runs.extend(page)
+        in_flight = _release_train_run_in_flight(runs, staging, prod)
     return {"ahead": ahead, "in_flight": in_flight}
 
 
@@ -4457,10 +4518,11 @@ def cmd_watchdog(args):
                     i_members_fetch=_watchdog_i_members_fetch,
                     # #616 — job 20's release-gap rider reads the release-train
                     # state (integration-ahead-of-prod + release-in-flight) per
-                    # repo. Read only inside the ~6h nudge branch, through
-                    # `release_gap._cached_release_state` (per-repo TTL cache), so
-                    # the gh calls fire at most once per repo per TTL and only for
-                    # a FULL-authority armed pane (the #618 MIRROR).
+                    # repo. Read on EVERY recheck of a FULL-authority armed pane
+                    # (the decision NEEDS it — the #547 placement, not the #578
+                    # nudge-branch one), but through `release_gap.
+                    # _cached_release_state` (per-repo TTL cache) so the gh calls
+                    # fire at most once per repo per TTL, never every 60s sweep.
                     release_state_fetch=_watchdog_release_state_fetch,
                     # Job 34 (#535) — per-box conformance check runs on EVERY
                     # managed box: config/repo drift is a per-box failure, and

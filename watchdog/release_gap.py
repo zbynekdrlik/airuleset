@@ -15,18 +15,24 @@ structural, traced in `watchdog/__init__.py` run_once():
     work over a frozen base", but structurally cannot serve this: they are
     DETECTION-ONLY (a deduped Discord ping, never a keystroke — "what to do about
     a blocked merge is the user's call"), they measure the CHECKED-OUT branch vs
-    its base (the gk odoo-erp checkout is a detached HEAD, not develop), they go
-    SILENT past DELIVERY_STALL_MAX_S (exactly the "sits for days" state), and
-    they never check "a release is in flight". So the owner gets, at best, a
-    phone ping that ages out — never an in-session nudge to run the release.
+    its base (the gk odoo-erp checkout is a detached HEAD, not develop), they
+    dedup to ONE ping per repo per day (so a days-old stall surfaces at most once
+    and is easily lost in the feed), and they never check "a release is in
+    flight". So the owner gets, at best, a phone ping — never an in-session nudge
+    to run the release.
 
 WHAT THIS DOES: on a per-session cadence (~6h, env-tunable), for an armed `/goal`
 pane on a FULL-authority box whose integration branch is ahead of prod AND no
 release is in flight, deliver ONE verified keystroke reminding the session to run
-its release pipeline. The FULL-authority gate is the MIRROR of #618 (which
-narrowed the lane-occupancy nudge to `authority is None`): a release train is run
-ONLY by the gatekeeper, so this fires ONLY where `resolve_authority(cwd) ==
-"full"`. A release IN FLIGHT (an open develop->staging / staging->main PR, or a
+its release pipeline. The FULL-authority gate is the INVERSE of #618: #618
+narrowed the lane-occupancy nudge's SKIP to `authority is None` (widening THAT
+nudge to reduced-authority stream boxes too), whereas a release train is run ONLY
+by the gatekeeper, so THIS nudge fires ONLY where `resolve_authority(cwd) ==
+"full"`. `resolve_authority` DEFAULTS to "full" for any unmapped user, so the
+honest gk-narrowing is the release-train SHAPE, not the authority word: the fetch
+requires BOTH an integration branch ahead of prod AND a `staging` branch to
+exist, so a full-authority box that is not a 3-branch release repo is never
+nudged. A release IN FLIGHT (an open develop->staging / staging->main PR, or a
 running deploy/release workflow) suppresses the nudge and RESETS the stall anchor
 — the train is already moving.
 
@@ -233,7 +239,10 @@ def _release_decision(rec, rstate, now, cadence, min_ahead):
         return ("skip", rec, "undetermined")
     ahead = rstate.get("ahead")
     in_flight = rstate.get("in_flight")
-    if not isinstance(ahead, int) or not isinstance(in_flight, bool):
+    # `bool` is an `int` subclass — exclude it so a stray True never reads as a
+    # 1-commit gap (review F10, unreachable from this fetch but closed anyway).
+    if (not isinstance(ahead, int) or isinstance(ahead, bool)
+            or not isinstance(in_flight, bool)):
         return ("skip", rec, "undetermined")
     if ahead < min_ahead:
         return ("clear", None, "no-gap")

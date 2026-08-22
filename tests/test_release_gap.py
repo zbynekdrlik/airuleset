@@ -11,8 +11,9 @@ flight" — so they structurally cannot serve this.
 
 This rider on `goal_lane_sweep`'s armed-pane loop (the mirror of #547/#578)
 detects "integration branch is ahead of prod AND no release is in flight" on a
-FULL-authority box (the #618 MIRROR — #618 narrowed the lane nudge to
-`authority is None`; this nudges ONLY `== "full"`) and keystrokes the armed
+FULL-authority box (the INVERSE of #618's lane-nudge authority gate — #618
+narrowed that nudge's SKIP to `authority is None`, i.e. widened it to reduced-
+authority boxes; this one nudges ONLY `== "full"`) and keystrokes the armed
 session to run its release pipeline.
 
 RED (this file, against the pre-implementation tree): `from watchdog import
@@ -136,6 +137,33 @@ class TestReleaseDecision(unittest.TestCase):
             "junk", {"ahead": 5, "in_flight": False}, NOW, CAD, MIN)
         self.assertEqual(action, "wait")
         self.assertEqual(out["first_seen"], NOW)
+
+    def test_ahead_equals_min_ahead_is_a_gap(self):
+        # `ahead == min_ahead` MUST count as a gap (the documented "any
+        # unreleased integration commit qualifies" default). A `<` -> `<=`
+        # mutation would drop the commonest 1-commit case (review F7).
+        rec = {"first_seen": NOW - CAD - 1, "last_nudge": None}
+        action, out, reason = rg._release_decision(
+            rec, {"ahead": 3, "in_flight": False}, NOW, CAD, 3)
+        self.assertEqual(action, "nudge")
+
+    def test_ahead_just_below_min_ahead_clears(self):
+        action, out, reason = rg._release_decision(
+            {}, {"ahead": 2, "in_flight": False}, NOW, CAD, 3)
+        self.assertEqual(action, "clear")
+
+    def test_exactly_at_cadence_boundary_nudges(self):
+        # now - anchor == cadence -> due (a `>=` -> `>` mutation would delay it).
+        rec = {"first_seen": NOW - CAD, "last_nudge": None}
+        action, out, reason = rg._release_decision(
+            rec, {"ahead": 5, "in_flight": False}, NOW, CAD, MIN)
+        self.assertEqual(action, "nudge")
+
+    def test_bool_ahead_is_undetermined(self):
+        # bool is an int subclass; True must NOT read as a 1-commit gap (F10).
+        action, out, reason = rg._release_decision(
+            {}, {"ahead": True, "in_flight": False}, NOW, CAD, MIN)
+        self.assertEqual(action, "skip")
 
 
 # --------------------------------------------------------------------------- #
@@ -586,6 +614,203 @@ class TestRunOnceWiring(unittest.TestCase):
 
     def test_job20_docstring_mentions_release_gap(self):
         self.assertIn("release-gap", (wd.run_once.__doc__ or ""))
+
+
+# --------------------------------------------------------------------------- #
+# 9. #594 busy-pane re-fire lock (review F2) — a delivered-but-unconfirmed nudge
+#    into an actively-cycling armed loop must NOT re-deliver every sweep.
+# --------------------------------------------------------------------------- #
+
+class TestBusyPaneRefire594(_OrchBase):
+    def _tmux_unconfirmed(self):
+        # transcript_path=None: the Enter SUBMITS (clears the box —
+        # delivered/queued) but writes NO `user` turn in the window, so
+        # `send_verified` returns False yet sets out["delivered_unconfirmed"].
+        return DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   transcript_path=None)
+
+    def test_delivered_unconfirmed_holds_dedup_across_sweeps(self):
+        # A `delivered = ok` mutation (dropping the delivered_unconfirmed OR-half)
+        # re-fires the ~600-char release nudge every 60s into the live gk loop —
+        # the #594 incident. GREEN: ONE delivery, last_nudge advanced.
+        rrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
+        state = {}
+        tmux = self._tmux_unconfirmed()
+        for _ in range(3):
+            with m.patch("airuleset.resolve_authority", return_value="full"):
+                rg.goal_release_gap_recheck(
+                    NOW, tmux, rrecs, self.sid, self.CWD, "%9", self.tpath,
+                    "sess:0", False, set(),
+                    release_state_fetch=lambda cwd: {"ahead": 7,
+                                                     "in_flight": False},
+                    state=state, sleep_fn=lambda *a, **k: None, cadence=CAD,
+                    min_ahead=MIN)
+        deliveries = [t for t in tmux.typed_texts() if "stuck-check" in t]
+        self.assertEqual(len(deliveries), 1,
+                         "a delivered-but-unconfirmed release nudge must NOT "
+                         "re-deliver across sweeps (busy-pane spam, #594): got %d"
+                         % len(deliveries))
+        self.assertEqual(rrecs[self.sid]["last_nudge"], NOW)
+
+
+# --------------------------------------------------------------------------- #
+# 10. The raw fetch classifier (review F1/F3) — subprocess-mocked, per branch.
+# --------------------------------------------------------------------------- #
+
+class TestReleaseTrainRunInFlight(unittest.TestCase):
+    def test_deploy_push_run_is_in_flight(self):
+        runs = [{"status": "in_progress", "event": "push",
+                 "headBranch": "main", "name": "Deploy to PROD"}]
+        self.assertTrue(
+            airuleset._release_train_run_in_flight(runs, "staging", "main"))
+
+    def test_issue_comment_utility_run_on_main_is_not(self):
+        # THE F1 fix: a constant issue_comment utility workflow on main must NOT
+        # read as a release in flight (else it starves the nudge forever).
+        runs = [{"status": "in_progress", "event": "issue_comment",
+                 "headBranch": "main", "name": "Sub-dev Handoff Gate"}]
+        self.assertFalse(
+            airuleset._release_train_run_in_flight(runs, "staging", "main"))
+
+    def test_release_named_workflow_dispatch_is_in_flight(self):
+        runs = [{"status": "queued", "event": "workflow_dispatch",
+                 "headBranch": "wip", "name": "Release Pipeline"}]
+        self.assertTrue(
+            airuleset._release_train_run_in_flight(runs, "staging", "main"))
+
+    def test_completed_run_is_not(self):
+        runs = [{"status": "completed", "event": "push",
+                 "headBranch": "main", "name": "Deploy to PROD"}]
+        self.assertFalse(
+            airuleset._release_train_run_in_flight(runs, "staging", "main"))
+
+    def test_feature_branch_non_deploy_push_is_not(self):
+        runs = [{"status": "in_progress", "event": "push",
+                 "headBranch": "feature-x", "name": "CI"}]
+        self.assertFalse(
+            airuleset._release_train_run_in_flight(runs, "staging", "main"))
+
+    def test_empty_and_malformed(self):
+        self.assertFalse(
+            airuleset._release_train_run_in_flight([], "staging", "main"))
+        self.assertFalse(
+            airuleset._release_train_run_in_flight([None, "x", 5], "staging",
+                                                  "main"))
+
+    def test_gh_not_found(self):
+        self.assertTrue(airuleset._gh_not_found("gh: Not Found (HTTP 404)"))
+        self.assertTrue(airuleset._gh_not_found("HTTP 404"))
+        self.assertFalse(airuleset._gh_not_found("error connecting to github.com"))
+        self.assertFalse(airuleset._gh_not_found(""))
+
+
+def _fake_run_factory(*, origin="https://github.com/o/n.git", origin_rc=0,
+                      compare=None, staging=None, prs=None, runs=None):
+    """A subprocess.run replacement dispatching on argv (order-independent).
+    compare/staging: (rc, stdout, stderr). prs: {base: [rows]}. runs: {status:
+    [rows]}."""
+    import json as _json
+    from subprocess import CompletedProcess
+
+    def fake(argv, **kw):
+        if argv[:2] == ["git", "-C"]:
+            return CompletedProcess(argv, origin_rc, stdout=origin, stderr="")
+        if argv[:2] == ["gh", "api"] and "compare" in argv[2]:
+            rc, out, err = compare
+            return CompletedProcess(argv, rc, stdout=out, stderr=err)
+        if argv[:2] == ["gh", "api"] and "/branches/" in argv[2]:
+            rc, out, err = staging
+            return CompletedProcess(argv, rc, stdout=out, stderr=err)
+        if argv[:3] == ["gh", "pr", "list"]:
+            base = argv[argv.index("--base") + 1]
+            return CompletedProcess(argv, 0,
+                                    stdout=_json.dumps((prs or {}).get(base, [])),
+                                    stderr="")
+        if argv[:3] == ["gh", "run", "list"]:
+            st = argv[argv.index("--status") + 1]
+            return CompletedProcess(argv, 0,
+                                    stdout=_json.dumps((runs or {}).get(st, [])),
+                                    stderr="")
+        raise AssertionError("unexpected argv: %r" % argv)
+
+    return fake
+
+
+class TestWatchdogReleaseStateFetch(unittest.TestCase):
+    def _fetch(self, **kw):
+        with m.patch("subprocess.run", side_effect=_fake_run_factory(**kw)):
+            return airuleset._watchdog_release_state_fetch("/r")
+
+    def test_non_github_origin_is_none(self):
+        self.assertIsNone(self._fetch(origin="https://gitlab.com/o/n.git"))
+
+    def test_origin_read_failure_is_none(self):
+        self.assertIsNone(self._fetch(origin_rc=1))
+
+    def test_no_develop_branch_compare_404_is_clean_no_gap(self):
+        self.assertEqual(
+            self._fetch(compare=(1, "", "gh: Not Found (HTTP 404)")),
+            {"ahead": 0, "in_flight": False})
+
+    def test_compare_transient_error_is_none(self):
+        self.assertIsNone(self._fetch(compare=(1, "", "error connecting")))
+
+    def test_ahead_zero_short_circuits_clean(self):
+        self.assertEqual(self._fetch(compare=(0, "0", "")),
+                         {"ahead": 0, "in_flight": False})
+
+    def test_unparsable_ahead_is_none(self):
+        self.assertIsNone(self._fetch(compare=(0, "nope", "")))
+
+    def test_gap_but_no_staging_is_clean_no_gap(self):
+        # review F6: a gap on a 2-branch repo with a stray develop but no staging
+        # is NOT a release train -> clean no-gap, never a spurious nudge.
+        self.assertEqual(
+            self._fetch(compare=(0, "9", ""),
+                        staging=(1, "", "Not Found (HTTP 404)")),
+            {"ahead": 0, "in_flight": False})
+
+    def test_staging_transient_error_is_none(self):
+        self.assertIsNone(self._fetch(compare=(0, "9", ""),
+                                      staging=(1, "", "error connecting")))
+
+    def test_gap_staging_release_pr_is_in_flight(self):
+        self.assertEqual(
+            self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
+                        prs={"staging": [{"number": 1}]}),
+            {"ahead": 9, "in_flight": True})
+
+    def test_gap_prod_release_pr_is_in_flight(self):
+        self.assertEqual(
+            self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
+                        prs={"main": [{"number": 2}]}),
+            {"ahead": 9, "in_flight": True})
+
+    def test_gap_no_pr_deploy_run_is_in_flight(self):
+        self.assertEqual(
+            self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
+                        prs={}, runs={"in_progress": [
+                            {"status": "in_progress", "event": "push",
+                             "headBranch": "main", "name": "Deploy"}]}),
+            {"ahead": 9, "in_flight": True})
+
+    def test_gap_no_pr_only_utility_run_is_stalled(self):
+        # THE NUDGE CASE (review F1 both directions): real gap, no release PR,
+        # and only a utility issue_comment workflow running on main -> NOT in
+        # flight, so the loop is genuinely stalled and will be nudged.
+        self.assertEqual(
+            self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
+                        prs={}, runs={"in_progress": [
+                            {"status": "in_progress", "event": "issue_comment",
+                             "headBranch": "main", "name": "Bounce Label Hygiene"}]}),
+            {"ahead": 9, "in_flight": False})
+
+    def test_gap_no_pr_no_run_is_stalled(self):
+        self.assertEqual(
+            self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
+                        prs={}, runs={}),
+            {"ahead": 9, "in_flight": False})
 
 
 if __name__ == "__main__":

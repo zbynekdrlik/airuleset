@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 5907,
+    "airuleset.py": 5969,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 99,
@@ -248,7 +248,7 @@
     "tests/test_working_time_607.py": 137,
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_wrapped_draft.py": 619,
-    "watchdog/__init__.py": 4184,
+    "watchdog/__init__.py": 4186,
     "watchdog/burn_jobs.py": 338,
     "watchdog/card_flags.py": 300,
     "watchdog/cards.py": 1044,
@@ -287,7 +287,7 @@
     "cli_remote.py::cmd_push": 389,
     "cli_vault.py::cmd_secret": 228,
     "cli_worktree_sweep.py::purge_merged_lane_targets": 219,
-    "watchdog/__init__.py::run_once": 2337,
+    "watchdog/__init__.py::run_once": 2339,
     "watchdog/cards.py::card_reconcile": 326,
     "watchdog/cards.py::report_reconcile": 225,
     "watchdog/cross_stream.py::gk_request_backstop": 240,
