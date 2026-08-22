@@ -154,6 +154,7 @@ from watchdog import compact as _compact
 from watchdog import one_glance as _one_glance          # #486 G3
 from watchdog import session_status as _session_status  # #486 G3 (reaper)
 from watchdog import ops_wait_recheck as _ops_wait_recheck  # #547 (W re-check)
+from watchdog import release_gap as _release_gap             # #616 (release gap)
 
 
 # --------------------------------------------------------------------------- #
@@ -3186,7 +3187,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, ops_wait_fetch=None,
-                    i_members_fetch=None):
+                    i_members_fetch=None, release_state_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -3220,6 +3221,9 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # #547 -- the W/ops-wait re-check job's own per-sid namespace, riding this
     # same armed-pane loop (ZERO new pane walk). Distinct from `goal_lane`.
     wrecs = state.setdefault("ops_wait_recheck", {}) if ops_wait_fetch else {}
+    # #616 -- the release-gap re-check's own per-sid namespace, riding this SAME
+    # armed-pane loop (ZERO new pane walk). Distinct from goal_lane / ops_wait.
+    rrecs = state.setdefault("release_gap", {}) if release_state_fetch else {}
     # #486 G6 -- dark_watch's tail-proof `state["goal_mark"]` marker (populated
     # BEFORE this job in the same run_once, sharing `state`) is the authoritative
     # structured armed signal. Read-only here: dark_watch owns its lifecycle.
@@ -3294,8 +3298,20 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 now, run, wrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 ops_wait_fetch=ops_wait_fetch, state=state, sleep_fn=sleep_fn,
                 i_count=glance.backlog, i_members_fetch=i_members_fetch)  # #578
+        # #616 -- release-gap re-check for this SAME armed pane. Runs AFTER the
+        # lane nudge + ops-wait recheck so a pane they already typed (sid in
+        # `handled`) is deferred to next sweep; it owns its own `handled` check +
+        # send + state writes (verified delivery, dry-run safe, full-authority
+        # gated internally -- the #618 MIRROR).
+        if release_state_fetch is not None:
+            logs += _release_gap.goal_release_gap_recheck(
+                now, run, rrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
+                release_state_fetch=release_state_fetch, state=state,
+                sleep_fn=sleep_fn)
     if not dry_run:   # #531 -- prune goal_lane for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_lane_orphans(recs, visited_sids, now)
         # #547 -- the same orphan prune for the ops-wait re-check namespace.
         _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)
+        # #616 -- the same orphan prune for the release-gap namespace.
+        _release_gap._prune_release_gap_orphans(rrecs, visited_sids, now)
     return logs
