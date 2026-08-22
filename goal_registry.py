@@ -76,7 +76,7 @@ CLAUSES = [
     Clause("header", PROFILES,
         "STOP CONDITIONS — the loop is DONE the moment EITHER holds, both checkable from the transcript:"),
     Clause("stop-a", PROFILES, {
-        "full": "(A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, this /goal line re-prints if issues remain).",
+        "full": "(A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU` (after I answer, Claude resolves that ticket and re-prints this /goal line if issues remain).",
         "branch-merge": "(A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`.",
         "fork-no-merge": "(A) BLOCKED ON MY ANSWER — the latest assistant message ends with a line starting `❓ NEEDS YOU:` and there is NO user message after it; NEVER continue me past an unanswered `❓ NEEDS YOU`.",
     }),
@@ -92,8 +92,8 @@ CLAUSES = [
     }),
     Clause("proof", PROFILES, {
         "full": "and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker.",
-        "branch-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all four proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `gh run list -b <integration> -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND `git merge-base --is-ancestor <my last integration merge> origin/main && echo RELEASED` printing exactly `RELEASED` under it, AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` in it is parked — gatekeeper-owned/user-parked/ops-wait — not mine to wait on, never blocks 🏁; blank = unmeasurable, not zero), AND then the line `🏁 BACKLOG EMPTY: 0 open, integration green, released` directly above the terminal `✅ DONE:` marker.",
-        "fork-no-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all three proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `git merge-base --is-ancestor <my last merged commit> origin/main && echo RELEASED` printing exactly `RELEASED` under it (release still pending is STILL review-watch, not done), AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` in it is parked — gatekeeper-owned/user-parked/ops-wait — not mine to wait on, never blocks 🏁; blank = unmeasurable, not zero), AND then the line `🏁 BACKLOG EMPTY: 0 open, released` directly above the terminal `✅ DONE:` marker.",
+        "branch-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all four proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `gh run list -b <integration> -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND `git merge-base --is-ancestor <my last integration merge> origin/main && echo RELEASED` printing exactly `RELEASED` under it, AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` is parked — gatekeeper-owned/user-parked/ops-wait, not mine to wait on, never blocks 🏁; blank = unmeasurable), AND then the line `🏁 BACKLOG EMPTY: 0 open, integration green, released` directly above the terminal `✅ DONE:` marker.",
+        "fork-no-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all three proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `git merge-base --is-ancestor <my last merged commit> origin/main && echo RELEASED` printing exactly `RELEASED` under it (release still pending is STILL review-watch, not done), AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` is parked — gatekeeper-owned/user-parked/ops-wait, not mine to wait on, never blocks 🏁; blank = unmeasurable), AND then the line `🏁 BACKLOG EMPTY: 0 open, released` directly above the terminal `✅ DONE:` marker.",
     }),
     Clause("how-to-tell", PROFILES,
         "HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted."),
@@ -112,12 +112,12 @@ CLAUSES = [
     Clause("stream-note", ("full",),
         "A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code (a bare sub-dev bounce is NOT in this set — `/process-subdev`'s loop holds it)."),
     Clause("review-watch", ("branch-merge", "fork-no-merge"), {
-        "branch-merge": "A handed-off ticket or an empty backlog, release still pending, is NOT done — REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; NEVER a wakeup/schedule — spins tokens), end ⏳ WORKING; never park silently — work any new stream/bounce ticket immediately.",
-        "fork-no-merge": "An open ticket carrying my READY-FOR-REVIEW comment (names the fork branch + green local verification; the comment is the signal, the label best-effort) never blocks 🏁, but PREFER REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; NEVER a wakeup/schedule — spins tokens), end ⏳ WORKING listing awaiting tickets; never park silently — work any gatekeeper bounce immediately.",
+        "branch-merge": "A handed-off ticket or an empty backlog, release still pending, is NOT done — REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; never a wakeup/schedule), end ⏳ WORKING; never park silently — work any new stream/bounce ticket.",
+        "fork-no-merge": "An open ticket carrying my READY-FOR-REVIEW comment (names the fork branch + green local verification; the comment is the signal, the label best-effort) never blocks 🏁, but PREFER REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; never a wakeup/schedule), end ⏳ WORKING; never park silently — work any gatekeeper bounce.",
     }),
     Clause("authority-ends", ("branch-merge", "fork-no-merge"), {
         "branch-merge": "My authority ENDS at the integration branch: never promote to staging/main, never deploy, never touch other streams'.",
-        "fork-no-merge": "My authority ENDS at the hand-off: I push MY fork branches + comment evidence — NEVER open/merge a PR, never push upstream, never deploy, never close the issue, never touch other streams'.",
+        "fork-no-merge": "My authority ENDS at the hand-off: I push MY fork branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, never close the issue, never touch other streams'.",
     }),
     Clause("irreversible", PROFILES, {
         "full": "Also stop for a genuinely-irreversible approval or a CI failure unfixable after two real attempts.",
@@ -139,9 +139,9 @@ CLAUSES = [
     Clause("prod-gate", ("full",),
         "Never gate, classify, skip, or warn based on prod-usage / events / off-air / hardware — I alone guard whether prod is live."),
     Clause("ask", PROFILES, {
-        "full": "ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, work other tickets, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable.",
-        "branch-merge": "ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, work other tickets, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable — never bury it or blame my silence.",
-        "fork-no-merge": "ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, work other tickets, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable.",
+        "full": "ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable.",
+        "branch-merge": "ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable.",
+        "fork-no-merge": "ASK the moment input is needed (it ALWAYS pings) — prefer ASK-AND-CONTINUE (`❓ ASKED` + `needs-answer` comment, end `⏳ WORKING`); `❓ NEEDS YOU` only if nothing else is workable.",
     }),
     Clause("parked", ("full",),
         "A `needs-answer`/`needs-decision`/`needs-acceptance`/`ops-wait` ticket is parked — never counted, never blocks 🏁 (paste `core-quals --waiting`/`--ops-wait`). NEVER bury a question or blame my silence."),
@@ -154,7 +154,7 @@ CLAUSES = [
     }),
     Clause("verify-sources", PROFILES, {
         "full": "Count a ticket done ONLY after verifying from primary sources — `gh pr view` (merged, closingIssuesReferences), `gh run list` (main green), `gh issue view` (closed), the deployed version on the live target — never the worker's claim alone; verify the LAST ticket as strictly as the first.",
-        "branch-merge": "Count a hand-off done ONLY after verifying from primary sources — `gh pr view` (merged into integration), that branch's CI run, the READY-FOR-REVIEW comment posted — never the worker's claim alone; verify the LAST as strictly as the first.",
+        "branch-merge": "Count a hand-off done ONLY after verifying it from primary sources — `gh pr view` (merged into integration), that branch's CI run, the READY-FOR-REVIEW comment posted — never the worker's claim alone; verify the LAST as strictly as the first.",
         "fork-no-merge": "Count a hand-off done ONLY after verifying from primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the fork branch pushed, local test/lint output shown — never the worker's claim alone; verify the LAST as strictly as the first.",
     }),
     Clause("compact-boundary", PROFILES, {

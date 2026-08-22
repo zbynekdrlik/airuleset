@@ -207,15 +207,21 @@ class TestShippedSkillMatchesRegistry(TestCase):
 
 class TestRenderIntoIsSurgical(TestCase):
     def test_render_into_only_touches_the_goal_lines(self):
-        skill = skill_text()
-        new = gr.render_into(skill)
-        old_lines, new_lines = skill.split("\n"), new.split("\n")
+        # Start from a DRIFTED copy (one full-profile token mangled, prefix
+        # intact so the block still matches) so this proves surgery regardless
+        # of whether the shipped file is currently in sync with the registry.
+        drifted = skill_text().replace(
+            gr.render("full"), "/goal STOP CONDITIONS drifted stub for the test", 1)
+        self.assertNotEqual(drifted, skill_text(), "could not build a drifted fixture")
+        new = gr.render_into(drifted)
+        old_lines, new_lines = drifted.split("\n"), new.split("\n")
         self.assertEqual(len(old_lines), len(new_lines))
         changed = [i for i in range(len(old_lines)) if old_lines[i] != new_lines[i]]
-        self.assertTrue(changed, "render_into changed nothing (already in sync?)")
+        self.assertTrue(changed, "render_into changed nothing")
         for i in changed:
-            self.assertTrue(old_lines[i].startswith("/goal "),
+            self.assertTrue(new_lines[i].startswith("/goal "),
                             "render_into touched a NON-/goal line: %r" % old_lines[i])
+        self.assertEqual(gr.shipped_lines(new)["full"], gr.render("full"))
 
     def test_render_into_is_idempotent(self):
         once = gr.render_into(skill_text())
