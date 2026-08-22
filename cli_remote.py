@@ -871,12 +871,11 @@ def cmd_push(args):
         # removed); the per-run dir is unique + private to this subprocess, so
         # its leftover count is the suite's litter with zero shared-box noise.
         _litter_ok, _litter_count = _check_push_tmpdir_litter(_suite_tmp)
-    # #629: a mid-run tree mutation VOIDS the run and is reported FIRST (so it
-    # never masquerades as a regression), then a genuine test failure. The raw
-    # suite output already streamed to the terminal (inherited stdio), so BOTH
-    # stay visible when they coincide. The TMPDIR litter guard (#548) stays its
-    # own branch below, reached only after a clean verdict here — so a
-    # tree-moved verdict beats it too.
+    # #629: classify tree-moved / tests-failed / clean (precedence + rationale
+    # in _classify_push_gate_outcome). A tree-moved verdict is reported FIRST so
+    # the race never masquerades as a regression; the litter guard (#548) stays
+    # its own branch below, reached only after a clean verdict, so tree-moved
+    # beats it too.
     _gate_ok, _gate_reason, _gate_msg = _classify_push_gate_outcome(
         test_result.returncode, _fp_before, _fp_after)
     if not _gate_ok:
