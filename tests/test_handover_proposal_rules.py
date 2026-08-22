@@ -693,5 +693,136 @@ class TestSkillPointsAtIdentityAndUrlRule(TestCase):
         self.assertNotIn("montaluN", self.raw)
 
 
+class TestApprovalOnEveryClientMessage(TestCase):
+    """#628 — owner approval is required for EVERY client-facing Discuss message
+    (the OPENING message AND every follow-up reply/question/reminder into an
+    EXISTING thread), not just a handover proposal or a new thread — the exact
+    mis-reading that caused the montalu6 PROD incident. The mechanical gate is
+    tested in test_block_discuss_thread_name.py; here we lock the DOCTRINE.
+
+    Teeth per #500/#532: the rule wraps across several physical lines, so bound a
+    norm()-collapsed WINDOW to the bullet (unique start anchor → next `- **`) and
+    assert the operative tokens inside it; the coarse whole-file assertIn catches
+    a full deletion, the window a PARTIAL revert."""
+
+    START = "The owner must APPROVE the exact text of EVERY client-facing"
+
+    def setUp(self):
+        self.raw = read(COMPOSE)
+        self.t = norm(self.raw)
+
+    def _bullet_window(self):
+        i = self.raw.index(self.START)
+        j = self.raw.find("\n- **", i + len(self.START))
+        self.assertNotEqual(j, -1, "approval bullet must be followed by another `- **` bullet")
+        return norm(self.raw[i:j])
+
+    def test_operative_rule_present_whole_file(self):
+        self.assertIn(self.START, self.t)
+
+    def test_applies_to_every_message_not_just_thread_creation(self):
+        w = self._bullet_window()
+        self.assertIn("OPENING message AND every follow-up reply / question / reminder", w)
+        self.assertIn("without exception", w)
+        # explicitly names + refutes the thread-creation-only mis-reading
+        self.assertIn("applying only to thread CREATION is exactly what caused it", w)
+        self.assertIn("it applies to every message", w)
+
+    def test_names_the_incident_and_the_mechanical_gate(self):
+        w = self._bullet_window()
+        self.assertIn("airuleset #628", w)
+        self.assertIn("thread 283", w)
+        self.assertIn("hooks/block-discuss-thread-name.sh", w)
+
+    def test_falsifiable_evidence_marker_and_bypass(self):
+        w = self._bullet_window()
+        self.assertIn("airuleset:owner-approved <ref>", w)
+        self.assertIn("never a bare", w)
+        self.assertIn("airuleset:discuss-approval-ok", w)
+
+
+class TestReflectClientPreviousAnswerFirst(TestCase):
+    """#625 — a new question/message into an EXISTING client thread must react to
+    the client's last unreflected answer FIRST; stated so it cannot be read as
+    applying only to thread creation (the same #628 mis-reading class).
+
+    Teeth per #500/#532: norm()-collapsed WINDOW bound to the bullet."""
+
+    START = "React to the client's previous answer FIRST"
+
+    def setUp(self):
+        self.raw = read(COMPOSE)
+        self.t = norm(self.raw)
+
+    def _bullet_window(self):
+        i = self.raw.index(self.START)
+        j = self.raw.find("\n- **", i + len(self.START))
+        self.assertNotEqual(j, -1, "reflection bullet must be followed by another `- **` bullet")
+        return norm(self.raw[i:j])
+
+    def test_operative_rule_present_whole_file(self):
+        self.assertIn(self.START, self.t)
+
+    def test_react_before_asking_and_applies_to_follow_ups(self):
+        w = self._bullet_window()
+        self.assertIn("never drop a new question", w)
+        self.assertIn("only THEN ask the next thing", w)
+        # explicitly a follow-up, not just opening — the anti-mis-reading clause
+        self.assertIn("applies to a follow-up into an existing thread, not just to opening one", w)
+
+    def test_names_the_incident(self):
+        w = self._bullet_window()
+        self.assertIn("airuleset #625", w)
+        self.assertIn("Etapy zákaziek vo výrobe 1", w)
+
+
+class TestAddressRegisterPerPerson(TestCase):
+    """#625/#626 — the address register is PER PERSON: vykanie only for the CEO,
+    tykanie for the other named contacts, VYKANIE by default for anyone not yet
+    listed. The register is per-project and extends by one line.
+
+    Teeth per #500/#532: norm()-collapsed WINDOW bound to the bullet — the
+    nested `  - **montalu**` sub-bullet is INSIDE the window (an indented `  - **`
+    does not match the top-level `\\n- **` window boundary)."""
+
+    START = "Address register PER PERSON"
+
+    def setUp(self):
+        self.raw = read(COMPOSE)
+        self.t = norm(self.raw)
+
+    def _bullet_window(self):
+        i = self.raw.index(self.START)
+        j = self.raw.find("\n- **", i + len(self.START))
+        self.assertNotEqual(j, -1, "register bullet must be followed by another `- **` bullet")
+        return norm(self.raw[i:j])
+
+    def test_operative_rule_present_whole_file(self):
+        self.assertIn(self.START, self.t)
+
+    def test_per_person_registers_and_default(self):
+        w = self._bullet_window()
+        self.assertIn("vykanie only for the CEO", w)
+        self.assertIn("tykanie for the other", w)
+        self.assertIn("VYKANIE by default for anyone not yet listed", w)
+
+    def test_montalu_register_row_names_the_contacts(self):
+        w = self._bullet_window()
+        # the per-project row (extend by one line), inside the window
+        self.assertIn("VYKANIE: CEO Pavol Špetta", w)
+        self.assertIn("TYKANIE: Patrik Javorský, Dominik Volek, Peter Hollý", w)
+        self.assertIn("DEFAULT for anyone NOT listed here: VYKANIE", w)
+
+    def test_new_person_defaults_to_vykanie(self):
+        w = self._bullet_window()
+        self.assertIn("A NEW client person you have not been told how to address is VYKANIE", w)
+        self.assertIn("#626", w)
+
+    def test_register_is_per_project_and_extends_by_one_line(self):
+        w = self._bullet_window()
+        self.assertIn("register is PER-PROJECT and grows by ONE line", w)
+        self.assertIn("Before every `message_post`", w)
+
+
 if __name__ == "__main__":
     main()

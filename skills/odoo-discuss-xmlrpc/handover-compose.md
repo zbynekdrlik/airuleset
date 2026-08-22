@@ -10,6 +10,26 @@ owner, sub-thread by name, post-verify) live in the sibling `odoo-discuss-xmlrpc
 skill (`SKILL.md`); THIS is the COMPOSE — what the message must contain and how
 its proposal is presented to the OWNER for approval BEFORE it is posted.
 
+- **The owner must APPROVE the exact text of EVERY client-facing Discuss message
+  BEFORE it is posted — the OPENING message AND every follow-up reply / question /
+  reminder into an EXISTING thread, without exception.** This is NOT limited to a
+  handover proposal or a new thread: whatever you send to a client is approved
+  first ("co posieláš" — owner ruling after montalu6 posted an unapproved message
+  into a live client thread on PROD, 2026-08-22, thread 283; it was deleted within
+  a minute but the bus push + notification had already reached the client —
+  irreversible). A stream that read the approval rule as applying only to thread
+  CREATION is exactly what caused it; it applies to every message. This is
+  HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`, airuleset #628): a sub-dev
+  stream `message_post` to a `discuss.channel` is BLOCKED until the tool-call
+  content carries the falsifiable evidence marker `airuleset:owner-approved <ref>`
+  — a reference to HOW/WHEN the owner approved THIS text, never a bare "approved"
+  (the same logged-falsifiable-claim model as `Discuss-closed:` /
+  `Self-service-checked:`); also record the approval on the ticket
+  (`durable-decisions-to-tickets.md`). Bypass for a genuine internal / non-client
+  post: `airuleset:discuss-approval-ok`. OPEN sub-question for the owner: do the
+  daily #4515 substantive reminders need per-message approval, or a template
+  approved ONCE (then cited by the marker `<ref>`)? — until the owner settles it,
+  the safe default is per-message approval.
 - **The proposal you present to the owner is COMPLETE and lives IN THE CHAT.**
   Put in the chat message itself: (1) the exact thread name, (2) the FULL message
   body verbatim, (3) the member list. NEVER "the text is on the ticket / in the
@@ -97,6 +117,29 @@ its proposal is presented to the OWNER for approval BEFORE it is posted.
   19) had three same-day follow-ups all reopening with „Dobrý deň…" (airuleset
   #573, 2026-08-19). Greet once, at the top of the thread; after that, just the
   message.
+- **React to the client's previous answer FIRST — never drop a new question into
+  a thread that ignores what the client last said.** Before you post any new
+  question or message into an EXISTING client thread, check the thread for the
+  client's last answer that you have not yet reacted to, and OPEN by briefly
+  reacting to it (confirmation / thanks / what it means for the work); only THEN
+  ask the next thing. This applies to a follow-up into an existing thread, not
+  just to opening one — a reply that reflects nothing reads as machine-sent
+  (incident montalu1, CEO Špetta's thread „Etapy zákaziek vo výrobe 1": a draft
+  would have asked a fresh question without a word about Špetta's own prior
+  confirmation + new request in the same thread, airuleset #625, 2026-08-22).
+- **Address register PER PERSON — vykanie only for the CEO, tykanie for the other
+  named contacts, VYKANIE by default for anyone not yet listed.** Before every
+  `message_post`, check the register below and use the right register for that
+  person; never address a formal-register contact informally (airuleset #625/#626,
+  owner ruling 2026-08-22: „vykame len ceo speta … ak nie je definovane tykanie
+  tak sa vyka no uz ostatnym tykame"). The register is PER-PROJECT and grows by
+  ONE line as new client people appear — add a contact to its project's row:
+  - **montalu** — VYKANIE: CEO Pavol Špetta (menovite). TYKANIE: Patrik Javorský,
+    Dominik Volek, Peter Hollý. DEFAULT for anyone NOT listed here: VYKANIE, until
+    the owner says otherwise.
+
+  A NEW client person you have not been told how to address is VYKANIE by default
+  (#626) — never guess tykanie; ask the owner, then add the line.
 - **Close the client message with named recipients + the self-blame reassurance**,
   so a client who cannot see the feature reports it back to YOU instead of
   assuming they did something wrong. The `Ahoj <mená>…` opening below is the
