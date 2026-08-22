@@ -10996,6 +10996,80 @@ class TestWatchdogBacklogFetch(TestCase):
         self.assertEqual(result, 5)
         self._spawn.assert_called_once()
 
+    def test_cache_within_the_freshness_bound_is_served(self):
+        # #618: mutation-lock on _BACKLOG_STATUS_CACHE_MAX_AGE_S — a count aged
+        # just INSIDE the bound is served from cache (no subprocess). A mutant
+        # shrinking the bound (e.g. to 60s) would fail this (the age exceeds it).
+        import time
+        fake_run, calls = self._fake(stdout="99\n")
+        age = airuleset._BACKLOG_STATUS_CACHE_MAX_AGE_S - 60   # comfortably inside
+        self._obl.return_value = (30, time.time() - age)
+        with m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 30)
+        self.assertEqual(calls, [])
+        self._spawn.assert_not_called()
+
+    def test_cache_just_past_the_freshness_bound_falls_back(self):
+        # #618: the other side of the mutation-lock — a count aged just PAST the
+        # bound is NOT trusted (warm + live fallback).
+        import time
+        fake_run, calls = self._fake(stdout="30\n")
+        age = airuleset._BACKLOG_STATUS_CACHE_MAX_AGE_S + 60
+        self._obl.return_value = (25, time.time() - age)
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority",
+                            return_value="branch-merge"), \
+             m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 30)
+        self.assertEqual(len(calls), 1)
+        self._spawn.assert_called_once()
+
+    def test_future_dated_cache_ts_is_not_trusted(self):
+        # #618: clock skew / a cross-box-synced cache can carry a FUTURE ts;
+        # `0 <= (now - ts)` rejects it as not-fresh (mirrors the #459
+        # goal_dark_watch sibling reader), warming + falling back.
+        import time
+        fake_run, calls = self._fake(stdout="30\n")
+        self._obl.return_value = (25, time.time() + 3600)   # ts an hour ahead
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 30)
+        self._spawn.assert_called_once()
+
+    def test_int_open_with_missing_ts_is_treated_as_a_miss(self):
+        # #618: obligation_count can return (int, None) — an int `open` but a
+        # malformed/absent `ts` (statusbar coerces a non-numeric ts to None).
+        # `isinstance(ts, (int, float))` rejects it (no TypeError), warm + fall back.
+        fake_run, calls = self._fake(stdout="8\n")
+        self._obl.return_value = (30, None)
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 8)
+        self._spawn.assert_called_once()
+
+    def test_fresh_cached_zero_falls_through_to_the_refusing_subprocess(self):
+        # #618: a cached 0 is NOT trusted (the tickets-status writer has no #181
+        # refuse-guard, so a broken-search-index 0 can land in it) — it falls
+        # through to the live `--count`, which DOES refuse an untrustworthy empty
+        # as None. Here the fresh cache says 0 but the subprocess REFUSES
+        # (rc != 0) → the result is None, not the false cached 0.
+        import time
+        fake_run, calls = self._fake(returncode=1, stdout="")
+        self._obl.return_value = (0, time.time())   # fresh, but 0 (untrusted)
+        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
+             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch("subprocess.run", side_effect=fake_run):
+            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertIsNone(result)          # cached 0 was NOT returned
+        self.assertEqual(len(calls), 1)    # fell through to the live count
+        self._spawn.assert_called_once()
+
 
 class TestTier0BuildBlock(TestCase):
     """PreToolUse(Bash) hook block-tier0-local-build.sh — ALL local cargo

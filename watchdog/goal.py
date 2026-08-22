@@ -2760,8 +2760,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         # #618 deliberately silent: an UNRESOLVABLE authority (resolve_authority
         # raised) is a degraded/unknown box, not a lane decision. A RESOLVED
         # reduced-authority stream (branch-merge/fork-no-merge) DOES fleet parallel
-        # worktree lanes under /autopilot, so it gets the nudge like full authority
-        # (was `!= "full"`, a stale #403 pre-#317 assumption that starved montalu1).
+        # worktree lanes under /autopilot (SKILL fleet default), so it gets the
+        # nudge like full authority (was `!= "full"`, a stale full-only assumption).
         return logs, False
     idle = now - (tmtime or now)
     # #442 THIRD GAP -- the old top-of-function idle gate returned HERE with
