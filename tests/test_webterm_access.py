@@ -15,34 +15,44 @@ import cli_webterm_access as acc  # noqa: E402
 
 
 class _FakeTransport:
-    """Records (method, path) and returns canned responses per (method, path).
+    """Records (method, path) + bodies and returns canned responses. The Allow
+    policy is now INLINE in the app POST/PUT, so there is no separate policy
+    endpoint. `apps` seeds the GET /apps?... result. `fail_write` makes any
+    POST/PUT to /apps return a 4xx (to exercise the loud-failure path)."""
 
-    `apps` seeds the GET /apps result; `responses` overrides specific calls."""
-
-    def __init__(self, apps=None, policies=None):
+    def __init__(self, apps=None, fail_write=False):
         self.calls = []
         self.bodies = []
         self._apps = apps or []
-        self._policies = policies or []
+        self._fail_write = fail_write
 
     def __call__(self, method, path, body):
         self.calls.append((method, path))
         self.bodies.append(body)
-        if method == "GET" and path.endswith("/apps"):
+        base = path.split("?", 1)[0]
+        if method == "GET" and base.endswith("/apps"):
             return 200, {"success": True, "result": self._apps}
-        if method == "GET" and path.endswith("/policies"):
-            return 200, {"success": True, "result": self._policies}
-        if method == "POST" and path.endswith("/apps"):
+        if method == "POST" and base.endswith("/apps"):
+            if self._fail_write:
+                return 422, {"success": False,
+                             "errors": [{"message": "invalid app payload"}]}
             return 201, {"success": True, "result": {"id": "new-app-id",
                                                      "domain": (body or {}).get("domain")}}
-        if method == "PUT" and "/apps/" in path and not path.endswith("/policies"):
-            return 200, {"success": True, "result": {"id": path.rsplit("/", 1)[-1]}}
-        if method in ("POST", "PUT") and "/policies" in path:
-            return 200, {"success": True, "result": {"id": "pol-id"}}
+        if method == "PUT" and "/apps/" in base:
+            if self._fail_write:
+                return 400, {"success": False,
+                             "errors": [{"message": "invalid update"}]}
+            return 200, {"success": True, "result": {"id": base.rsplit("/", 1)[-1]}}
         return 200, {"success": True, "result": {}}
 
     def methods(self):
         return [m for (m, _p) in self.calls]
+
+    def body_for(self, method, path_contains):
+        for (m, p), b in zip(self.calls, self.bodies):
+            if m == method and path_contains in p:
+                return b
+        return None
 
 
 DAVID_SPEC = {
@@ -62,6 +72,11 @@ class TestPayloadBuilders(unittest.TestCase):
         # PAGE (email One-Time PIN input) is shown, not an IdP jump.
         self.assertEqual(p["allowed_idps"], [])
         self.assertIs(p["auto_redirect_to_identity"], False)
+        # The Allow policy is INLINE (atomic app+policy, no deny-all window).
+        self.assertEqual(len(p["policies"]), 1)
+        self.assertEqual(p["policies"][0]["decision"], "allow")
+        self.assertEqual(p["policies"][0]["include"],
+                         [{"email": {"email": "david@example.com"}}])
 
     def test_policy_includes_exactly_the_declared_emails(self):
         p = acc.build_policy_payload(DAVID_SPEC)
@@ -80,8 +95,8 @@ class TestPayloadBuilders(unittest.TestCase):
 
 
 class TestApplyIdempotent(unittest.TestCase):
-    def _client(self, apps=None, policies=None):
-        t = _FakeTransport(apps=apps, policies=policies)
+    def _client(self, apps=None, fail_write=False):
+        t = _FakeTransport(apps=apps, fail_write=fail_write)
         return acc.AccessClient("acct", token="tok", transport=t), t
 
     def test_creates_app_when_absent(self):
@@ -118,14 +133,27 @@ class TestApplyIdempotent(unittest.TestCase):
         self.assertIn("empty", res["error"])
         self.assertEqual(t.calls, [])            # not a single API call issued
 
-    def test_policy_updated_when_already_present(self):
+    def test_update_carries_the_policy_inline_no_policy_endpoint(self):
         existing_app = [{"id": "app1", "domain": "david.newlevel.media"}]
-        existing_pol = [{"id": "polX", "name": acc.POLICY_NAME}]
-        client, t = self._client(apps=existing_app, policies=existing_pol)
+        client, t = self._client(apps=existing_app)
         res = acc.apply_profile(client, DAVID_SPEC, dry_run=False)
         self.assertTrue(res["ok"], res["error"])
-        self.assertIn(
-            ("PUT", "/accounts/acct/access/apps/app1/policies/polX"), t.calls)
+        # A single PUT to the app carries the policy inline; NO separate
+        # (legacy) app-scoped /policies endpoint is ever called.
+        self.assertIn(("PUT", "/accounts/acct/access/apps/app1"), t.calls)
+        self.assertFalse(any("/policies" in p for (_m, p) in t.calls))
+        put_body = t.body_for("PUT", "/apps/app1")
+        self.assertEqual(put_body["policies"][0]["include"],
+                         [{"email": {"email": "david@example.com"}}])
+
+    def test_write_failure_surfaces_loud(self):
+        # 🔵-4: a non-2xx on the app write must fail LOUD (ok=False + error),
+        # never a silent partial apply.
+        client, t = self._client(apps=[], fail_write=True)
+        res = acc.apply_profile(client, DAVID_SPEC, dry_run=False)
+        self.assertFalse(res["ok"])
+        self.assertIsNotNone(res["error"])
+        self.assertIn("create app failed", res["error"])
 
 
 class TestConfigAndTrustHeader(unittest.TestCase):

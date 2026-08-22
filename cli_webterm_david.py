@@ -85,7 +85,9 @@ _DAVID_UNIT_NOTE = (
     "# for THIS gateway — it is PUBLIC (Cloudflare Access at the edge is the\n"
     "# boundary). And 'failed logins rate-limited per source IP' does NOT hold at\n"
     "# the origin: behind cloudflared the gateway sees only 127.0.0.1, so any\n"
-    "# per-real-IP brute-force protection lives on the Cloudflare EDGE, not here.\n#\n")
+    "# per-real-IP brute-force protection lives on the Cloudflare EDGE, not here.\n"
+    "# (The template's 'bound to dev1's tailscale IP (127.0.0.1)' line is doubly\n"
+    "# wrong here: this gateway binds LOOPBACK on subdev, not a tailscale IP.)\n#\n")
 
 
 # The david ttyd binary is a NO-SUDO user-space static binary in ~/.local/bin
@@ -162,8 +164,10 @@ def _retire_david_credential():
 
 
 def _write_david_artifacts():
-    """Write the scoped inventory + dashboard + launcher + credential + units.
-    Pure filesystem writes (no systemd), split out so the render/write path is
+    """Write the scoped inventory + dashboard + launcher + units — and RETIRE any
+    dead password credential (NO credential is provisioned any more; Cloudflare
+    Access replaces the password, #612 owner directive 2026-08-22). Pure
+    filesystem writes (no systemd), split out so the render/write path is
     unit-testable without the enable/restart plumbing."""
     w.CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
     WEBTERM_DAVID_DASH_DIR.mkdir(parents=True, exist_ok=True)

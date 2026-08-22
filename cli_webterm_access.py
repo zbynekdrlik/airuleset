@@ -81,7 +81,12 @@ POLICY_NAME = "webterm allowed developers"
 # --------------------------------------------------------------------------- #
 
 def build_app_payload(spec):
-    """Cloudflare Access self-hosted application payload for one profile spec.
+    """Cloudflare Access self-hosted application payload for one profile spec,
+    with its Allow policy INLINE in `policies` (the unified application-definition
+    shape). One POST/PUT creates/updates the app AND its policy atomically — no
+    separate app-scoped policy endpoint (legacy) and no deny-all window between
+    the app create and a follow-up policy create. Valid on both the legacy and
+    the unified Access API (#612 R2 review).
 
     `auto_redirect_to_identity=False` so the Access login PAGE (with the e-mail
     One-Time PIN input) is shown rather than jumping to an IdP; `allowed_idps=[]`
@@ -95,6 +100,7 @@ def build_app_payload(spec):
         "auto_redirect_to_identity": False,
         "allowed_idps": [],
         "app_launcher_visible": False,
+        "policies": [build_policy_payload(spec)],
     }
 
 
@@ -161,21 +167,14 @@ class AccessClient:
         response that echoes the domain in a slightly different form does not slip
         past and cause a duplicate POST."""
         want = _norm_domain(domain)
-        st, d = self._call("GET", self._base("/apps"))
+        # per_page=1000 so the target app is never MISSED on a later page (a miss
+        # would POST a DUPLICATE app, defeating idempotency) — #612 R2 review.
+        st, d = self._call("GET", self._base("/apps?per_page=1000"))
         if st != 200 or not d.get("success"):
             return None, (st, d)
         for app in (d.get("result") or []):
             if _norm_domain(app.get("domain")) == want:
                 return app, (st, d)
-        return None, (st, d)
-
-    def find_policy_by_name(self, app_id, name):
-        st, d = self._call("GET", self._base("/apps/%s/policies" % app_id))
-        if st != 200 or not d.get("success"):
-            return None, (st, d)
-        for pol in (d.get("result") or []):
-            if pol.get("name") == name:
-                return pol, (st, d)
         return None, (st, d)
 
     # -- writes ------------------------------------------------------------ #
@@ -185,13 +184,6 @@ class AccessClient:
 
     def update_app(self, app_id, payload):
         return self._call("PUT", self._base("/apps/%s" % app_id), payload)
-
-    def create_policy(self, app_id, payload):
-        return self._call("POST", self._base("/apps/%s/policies" % app_id), payload)
-
-    def update_policy(self, app_id, policy_id, payload):
-        return self._call(
-            "PUT", self._base("/apps/%s/policies/%s" % (app_id, policy_id)), payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -222,11 +214,14 @@ def apply_profile(client, spec, dry_run=True):
                             % (st, _first_err(body)))
         return result
 
+    # The app payload carries its Allow policy INLINE, so a single POST (create)
+    # or PUT (update) reconciles both — the app always ends with exactly the
+    # declared allow-list, never a deny-all window (#612 R2 review).
     app_payload = build_app_payload(spec)
-    policy_payload = build_policy_payload(spec)
+    result["actions"].append("policy include: %d e-mail(s)" % len(emails))
 
     if app is None:
-        result["actions"].append("create app %s" % spec["hostname"])
+        result["actions"].append("create app %s (+ inline policy)" % spec["hostname"])
         if not dry_run:
             st, body = client.create_app(app_payload)
             if not _ok(st, body):
@@ -234,7 +229,7 @@ def apply_profile(client, spec, dry_run=True):
                 return result
             app = (body.get("result") or {})
     else:
-        result["actions"].append("update app %s (id %s)"
+        result["actions"].append("update app %s (id %s, + inline policy)"
                                  % (spec["hostname"], app.get("id")))
         if not dry_run:
             st, body = client.update_app(app["id"], app_payload)
@@ -243,32 +238,7 @@ def apply_profile(client, spec, dry_run=True):
                 return result
             app = (body.get("result") or app)
 
-    app_id = app.get("id") if app else None
-    result["app_id"] = app_id
-    result["actions"].append("policy include: %d e-mail(s)" % len(emails))
-
-    if dry_run:
-        result["ok"] = True
-        return result
-
-    if not app_id:
-        result["error"] = "no app id after upsert — cannot attach policy"
-        return result
-
-    pol, (st, body) = client.find_policy_by_name(app_id, POLICY_NAME)
-    if st != 200:
-        result["error"] = "cannot read policies (HTTP %s): %s" % (st, _first_err(body))
-        return result
-    if pol is None:
-        st, body = client.create_policy(app_id, policy_payload)
-        action = "create policy"
-    else:
-        st, body = client.update_policy(app_id, pol["id"], policy_payload)
-        action = "update policy %s" % pol.get("id")
-    if not _ok(st, body):
-        result["error"] = "%s failed (HTTP %s): %s" % (action, st, _first_err(body))
-        return result
-    result["actions"].append(action)
+    result["app_id"] = app.get("id") if app else None
     result["ok"] = True
     return result
 

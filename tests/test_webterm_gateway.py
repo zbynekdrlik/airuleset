@@ -631,6 +631,16 @@ class TestAccessModeAuth(unittest.TestCase):
         gw = _access_gateway()
         self.assertFalse(gw._authed([(ACCESS_HEADER, "   ")]))
 
+    def test_not_authed_when_trust_header_duplicated(self):
+        # #612 R2: Cloudflare sets exactly ONE trust header; a second occurrence
+        # is a smuggling attempt (header_get would return the first, client-
+        # controlled value) — fail closed on any duplicate.
+        gw = _access_gateway()
+        self.assertFalse(gw._authed([(ACCESS_HEADER, "attacker@evil.com"),
+                                     (ACCESS_HEADER, "david@example.com")]))
+        self.assertIsNone(gw._access_identity([(ACCESS_HEADER, "a@x"),
+                                               (ACCESS_HEADER, "b@y")]))
+
     def test_access_mode_ignores_a_session_cookie(self):
         # In Access mode there is NO cookie/session concept — only the trusted
         # header authenticates. A forged session cookie must not authenticate.

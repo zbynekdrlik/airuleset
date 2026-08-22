@@ -449,11 +449,17 @@ class Gateway:
         """In Cloudflare-Access mode, the trusted, non-empty identity header set
         by Cloudflare after a passed email-OTP check, else None. FAIL-CLOSED: any
         absent/blank header yields None (a request that did not go through Access
-        carries no such header)."""
+        carries no such header). A DUPLICATE trust header (more than one
+        occurrence) also yields None — Cloudflare sets exactly one, so a second
+        occurrence is a smuggling attempt and `header_get` would otherwise return
+        the FIRST (client-controlled) value (#612 R2 review)."""
         if not self.trust_access_header:
             return None
-        val = header_get(headers, self.trust_access_header)
-        val = (val or "").strip()
+        name = self.trust_access_header.lower()
+        seen = [v for (k, v) in headers if k.lower() == name]
+        if len(seen) != 1:
+            return None
+        val = (seen[0] or "").strip()
         return val or None
 
     def _authed(self, headers):
