@@ -600,6 +600,54 @@ class TestGatewayUnit(unittest.TestCase):
         self.assertNotIn("http.server", exec_line)         # not the old static server
 
 
+class TestOwnerAccessModeUnit(unittest.TestCase):
+    """#635: the owner gateway can render in Cloudflare-Access mode (loopback bind
+    + trust-header, password retired) — mirroring David's lane — while the default
+    (password/tailnet) render stays byte-identical."""
+
+    def test_access_mode_unit_uses_trust_header_and_loopback_no_cred(self):
+        import cli_webterm_access as acc
+        unit = w._render_webterm_gateway_unit("100.104.8.125", access_mode=True)
+        self.assertNotIn("{{", unit)                       # every placeholder filled
+        exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+        # Cloudflare Access replaces the password: trust the injected identity
+        # header, and NEVER pass --cred on this path.
+        self.assertIn("--trust-access-header %s" % acc.WEBTERM_ACCESS_TRUST_HEADER,
+                      exec_line)
+        self.assertNotIn("--cred ", exec_line)
+        # Loopback bind — cloudflared fronts it; no direct tailnet exposure.
+        self.assertIn("--bind 127.0.0.1", exec_line)
+        self.assertNotIn("--bind 0.0.0.0", exec_line)
+
+    def test_access_mode_unit_prepends_honesty_correction_note(self):
+        # #635 review 🟡: the installed Access-mode unit must NOT be left asserting
+        # the shared template's now-false tailnet/password wording — a correction
+        # note (like David's _DAVID_UNIT_NOTE) is prepended BEFORE the [Unit]
+        # section, naming Cloudflare Access + loopback and marking the template's
+        # tailnet-only claims FALSE.
+        unit = w._render_webterm_gateway_unit("100.104.8.125", access_mode=True)
+        self.assertIn("CLOUDFLARE-ACCESS mode", unit)
+        self.assertIn("FALSE here", unit)
+        self.assertLess(unit.index("#635"), unit.index("[Unit]"))
+        # the default (password) render carries NO such note
+        self.assertNotIn("CLOUDFLARE-ACCESS mode",
+                         w._render_webterm_gateway_unit("100.104.8.125"))
+
+    def test_default_mode_render_is_unchanged_password_tailnet(self):
+        # Regression guard: with access_mode off (the default) the owner unit keeps
+        # the password/tailnet ExecStart, matches an explicit access_mode=False
+        # call, and — crucially — DIFFERS from the access-mode render (proving the
+        # flag actually changes the emitted unit, not a tautology).
+        default = w._render_webterm_gateway_unit("100.104.8.125")
+        explicit_off = w._render_webterm_gateway_unit("100.104.8.125", access_mode=False)
+        access_on = w._render_webterm_gateway_unit("100.104.8.125", access_mode=True)
+        self.assertEqual(default, explicit_off)
+        self.assertNotEqual(default, access_on)            # the flag has real teeth
+        self.assertIn("--cred %s" % str(w.WEBTERM_CRED_PATH), default)
+        self.assertIn("--bind 100.104.8.125", default)
+        self.assertNotIn("--trust-access-header", default)
+
+
 class TestShortAlias(unittest.TestCase):
     def _e(self, **kw):
         base = {"id": kw.get("id"), "label": kw.get("label", kw.get("id")),
@@ -745,6 +793,28 @@ class TestSetupWiring(unittest.TestCase):
             self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
             self.assertEqual(first, pt["WEBTERM_DASH_INDEX"].read_text())
             self.assertEqual(first_unit, pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text())
+
+    def test_access_mode_binds_loopback_retires_cred_needs_no_tailscale_ip(self):
+        # #635: with the go-live flag ON, the owner gateway provisions in
+        # Cloudflare-Access mode — loopback bind + trust-header, the password
+        # credential RETIRED, and NO tailscale IP required (cloudflared fronts it).
+        import contextlib
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            pt = self._isolate(st, tmp)
+            st.enter_context(m.patch.object(w, "OWNER_GATEWAY_ACCESS_MODE", True))
+            # a stale password credential must be retired by the Access-mode path
+            pt["WEBTERM_CRED_PATH"].write_text("zbynek:deadbeef\n")
+            rec = self._RunRec(ip="")            # tailscale ip -4 returns nothing
+            ok = w.setup_webterm_service(run=rec)
+            self.assertTrue(ok)                  # Access mode does NOT need a tailnet IP
+            unit = pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text()
+            import cli_webterm_access as acc
+            self.assertIn("--trust-access-header %s"
+                          % acc.WEBTERM_ACCESS_TRUST_HEADER, unit)
+            self.assertNotIn("--cred ", unit)
+            self.assertIn("--bind 127.0.0.1", unit)
+            # the password credential is retired (no password path any more)
+            self.assertFalse(pt["WEBTERM_CRED_PATH"].exists())
 
 
 class TestTabSwitchingUX(unittest.TestCase):

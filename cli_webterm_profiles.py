@@ -3,9 +3,12 @@
 Rozširuje JEDNONÁJOMNÚ webterm mašinériu (#555/#584/#586) o per-developer
 profily. Doména sa mapuje na (session set + auth realm):
 
-  * ``owner`` — dev1, tailnet-only (zbynek.newlevel.media / dnešný prístup cez
-    tailscale IP), CELÝ fleet inventár, login ``zbynek``. Byte-identické s
-    pred-#612 správaním — owner sa nič nemení.
+  * ``owner`` — dev1, zbynek.newlevel.media, CELÝ fleet inventár, login
+    ``zbynek``. Session set je byte-identický s pred-#612 správaním. EXPONOVANIE
+    brány sa mení (#635, owner ROZHODNUTÉ 2026-08-22): owner prechádza z
+    tailnet-only na Cloudflare Access (email OTP, ako David), gated cez
+    ``OWNER_GATEWAY_ACCESS_MODE`` v cli_webterm.py — session set + login sa
+    nemenia, mení sa len front (cloudflared tunel + Access namiesto tailnet+hesla).
   * ``david`` — subdev, VEREJNÝ HTTPS front (david.newlevel.media, Cloudflare),
     session set = david1..4 (subdev) + codex-bridge (dev2), login ``david``.
 

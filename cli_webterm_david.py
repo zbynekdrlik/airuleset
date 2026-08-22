@@ -49,8 +49,8 @@ WEBTERM_DAVID_GATEWAY_SERVICE_DEST = (
 _DAVID_GO_LIVE = (
     "  webterm(david): needs setup to go live —\n"
     "    1. DNS (Cloudflare): david.newlevel.media -> cloudflared tunnel (proxied\n"
-    "       CNAME); zbynek.newlevel.media A -> 100.104.8.125 (DNS-only/grey,\n"
-    "       tailnet-only — Cloudflare Access is inapplicable to a grey record).\n"
+    "       CNAME). (zbynek.newlevel.media is a SEPARATE owner lane now moving to\n"
+    "       its OWN Cloudflare Access app + dedicated dev1 tunnel — #635.)\n"
     "    2. Install ttyd on subdev + run a cloudflared tunnel (as david1, no\n"
     "       sudo) fronting HTTPS david.newlevel.media -> 127.0.0.1:%d.\n"
     "    3. Deploy the dedicated key %s (authorized ONLY on david1-4).\n"

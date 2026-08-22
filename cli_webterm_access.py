@@ -71,15 +71,28 @@ WEBTERM_ACCESS_TRUST_HEADER = "Cf-Access-Authenticated-User-Email"
 # `Access: Apps and Policies: Edit` at WEBTERM_ACCESS_TOKEN_FILE (see above — the
 # existing account token is read-only for Access). marek is added the SAME
 # one-line way once the owner confirms #612 works reliably (incl. #613/#615).
-# The OWNER side
-# (`zbynek.newlevel.media`) is DELIBERATELY ABSENT: it is a grey/DNS-only record
-# on the tailscale IP, so Cloudflare Access is architecturally inapplicable (the
-# traffic never traverses the Cloudflare proxy) — it stays tailnet-only.
+#
+# The OWNER side (`zbynek.newlevel.media`) is NOW a declared Access app (#635,
+# owner ROZHODNUTÉ 2026-08-22, REVERSING the pre-#635 "grey/DNS-only, Access
+# inapplicable, tailnet-only" state): the owner chose to move his terminal behind
+# Cloudflare Access like David's, trading direct tailnet-only exposure for
+# any-network access with email-OTP instead of a password. `allowed_emails` is the
+# whole authorization — the owner today; marek is ONE more line once the owner
+# says so (the #612 one-line-extensibility property, carried here). The gateway on
+# this hostname switches to `--trust-access-header` mode (password retired) via the
+# `OWNER_GATEWAY_ACCESS_MODE` go-live gate in cli_webterm.py, and the grey DNS
+# A-record is cut over to a proxied CNAME onto a dedicated cloudflared tunnel.
 WEBTERM_ACCESS_APPS = {
     "david": {
         "hostname": "david.newlevel.media",
         "name": "webterm — david",
         "allowed_emails": ["david@grena.biz"],   # owner-provided, #612 go-live
+        "session_duration": "24h",
+    },
+    "owner": {
+        "hostname": "zbynek.newlevel.media",
+        "name": "webterm — zbynek",
+        "allowed_emails": ["drlik.zbynek@gmail.com"],  # owner, #635; marek = +1 line
         "session_duration": "24h",
     },
 }
