@@ -146,7 +146,15 @@ def _diff_tracked_tree_fingerprints(before, after):
     snapshots. `available` is False when EITHER snapshot could not be taken (git
     unavailable) -- then detection is OFF (`moved` False, `changed_paths` []).
     Otherwise `moved` is True iff the tracked-content sets differ, and
-    `changed_paths` names every added / removed / changed relpath."""
+    `changed_paths` names every added / removed / changed relpath.
+
+    Accepted residual: a change-then-exact-revert entirely within the
+    before/after window evades this (start == end). That is not a real
+    integration pattern -- a merge ADVANCES the tree, it never restores
+    byte-identical prior content -- and the suite still read a transient
+    inconsistent tree; a before/after diff was chosen over continuous
+    monitoring (a new concurrent heuristic layer) as the simplest thing that
+    reliably catches the case that actually happens."""
     fb = (before or {}).get("files")
     fa = (after or {}).get("files")
     if fb is None or fa is None:

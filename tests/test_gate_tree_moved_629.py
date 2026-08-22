@@ -30,6 +30,7 @@ Covers four units in `cli_remote`:
 """
 
 import inspect
+import os
 import subprocess
 import sys
 import unittest
@@ -140,6 +141,25 @@ class TestTrackedTreeFingerprint(unittest.TestCase):
             self.assertFalse(available, "an unavailable snapshot disables detection")
             self.assertFalse(moved)
 
+    def test_unreadable_tracked_file_is_a_sentinel_not_a_crash(self):
+        """A tracked file unreadable at snapshot time yields a distinct
+        `<unreadable:...>` sentinel (the snapshot still succeeds — never a
+        crash), so the before/after diff flags it as a change rather than
+        blowing up mid-gate."""
+        if os.getuid() == 0:
+            self.skipTest("root bypasses file permission bits")
+        before = cli_remote._tracked_tree_fingerprint(self.repo)
+        (self.repo / "b.txt").chmod(0o000)
+        self.addCleanup(lambda: (self.repo / "b.txt").chmod(0o644))
+        after = cli_remote._tracked_tree_fingerprint(self.repo)
+        self.assertIsNone(after["error"], "the snapshot must still succeed")
+        self.assertTrue(after["files"]["b.txt"].startswith("<unreadable:"),
+                        "an unreadable tracked file becomes a sentinel, not a crash")
+        moved, changed, available = cli_remote._diff_tracked_tree_fingerprints(before, after)
+        self.assertTrue(available)
+        self.assertTrue(moved)
+        self.assertIn("b.txt", changed)
+
 
 # --------------------------------------------------------------------------- #
 # The report — must be unambiguous.
@@ -166,7 +186,8 @@ class TestTreeMovedReport(unittest.TestCase):
         self.assertIn("regression", low)
         self.assertIn("settled", low)
         # the suite's own exit code is surfaced, marked void
-        self.assertIn("1", msg)
+        self.assertIn("exit code: 1", low)
+        self.assertIn("void", msg.split("exit code: 1", 1)[1].lower())
 
     def test_changed_file_list_is_capped(self):
         many = ["f%03d.py" % i for i in range(50)]
