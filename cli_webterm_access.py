@@ -42,12 +42,20 @@ import sys
 import urllib.error
 import urllib.request
 
-# NEWLEVELMEDIA account — owns the newlevel.media zone + the david tunnel
-# (STEP-0 #612: `~/.secrets/cloudflare-account-tokens` is write-authorized for
-# `Access: Apps and Policies: Edit` on this account — verified non-destructively).
+# NEWLEVELMEDIA account — owns the newlevel.media zone + the david tunnel.
+# STEP-0 #612 (CORRECTED after a live probe): the existing account token
+# `~/.secrets/cloudflare-account-tokens` can READ Access apps/idps (GET 200) but
+# CANNOT create/edit them — a live `POST /access/apps` returns 403
+# `auth.forbidden` (the earlier PUT-to-a-bogus-UUID → 404 was a FALSE POSITIVE;
+# Cloudflare returns 404 for a PUT to a non-existent app before asserting create
+# authz). So `--apply` needs a DEDICATED token with the permission group
+# `Account > Access: Apps and Policies > Edit` on this account (owner-provided
+# via the vault channel `airuleset.py secret request`, persisted to the file
+# below). Until that file exists, `webterm-access` cannot apply — that is the one
+# blocked go-live step, surfaced honestly (never a password/read-token fallback).
 CF_API = "https://api.cloudflare.com/client/v4"
 WEBTERM_ACCESS_ACCOUNT_ID = "8f3efbc0edbe05bd6fdcab10cd63876a"
-WEBTERM_ACCESS_TOKEN_FILE = "~/.secrets/cloudflare-account-tokens"
+WEBTERM_ACCESS_TOKEN_FILE = "~/.secrets/cloudflare-newlevel-access"
 
 # The identity header Cloudflare injects downstream of a PASSED Access check and
 # which the gateway trusts in `--trust-access-header` mode. Client-supplied
@@ -58,9 +66,12 @@ WEBTERM_ACCESS_TRUST_HEADER = "Cf-Access-Authenticated-User-Email"
 # (deny-by-default: anything not listed is refused). Adding a person is ONE line
 # here + `airuleset.py webterm-access --apply`.
 #
-# david's list is OWNER-PROVIDED (#612 needs-answer) — filling it is the ONLY
-# owner input required for go-live. marek is added the SAME one-line way once the
-# owner confirms #612 works reliably (incl. #613/#615). The OWNER side
+# david's list is OWNER-PROVIDED (#612 needs-answer). Go-live needs TWO owner
+# inputs: (1) David's email here (one line), and (2) a Cloudflare token with
+# `Access: Apps and Policies: Edit` at WEBTERM_ACCESS_TOKEN_FILE (see above — the
+# existing account token is read-only for Access). marek is added the SAME
+# one-line way once the owner confirms #612 works reliably (incl. #613/#615).
+# The OWNER side
 # (`zbynek.newlevel.media`) is DELIBERATELY ABSENT: it is a grey/DNS-only record
 # on the tailscale IP, so Cloudflare Access is architecturally inapplicable (the
 # traffic never traverses the Cloudflare proxy) — it stays tailnet-only.
