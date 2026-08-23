@@ -1270,13 +1270,46 @@ CF_PROBE='v4/zones|accounts/[a-zA-Z0-9._-]+/tokens/verify|capabilit[a-z]*[[:spac
 #       (e.g. "the gate blocks it and the Cloudflare token is invalid") disarms --
 #       rare, and the author has to construct it; the message-scoped alternative
 #       (rejected) would under-block on any unrelated gate/incident mention.
-NF_FRAMENOUN='spr[aá]v.{0,3}[[:space:]]ktor|message.{0,3}[[:space:]](that|which)|tvrdeni|a[[:space:]]claim[[:space:]]that|the[[:space:]]claim|prose[[:space:]]that'
+NF_FRAMENOUN='spr[aá]v.{0,3}[[:space:]](ktor|[žz]e)|message.{0,3}[[:space:]](that|which)|tvrdeni|a[[:space:]]claim[[:space:]]that|the[[:space:]]claim|prose[[:space:]]that'
 NF_SUBJDECL='(session|spr[aá]v).{0,20}(tvrd|vyhl[aá]s|declar)'
-NF_CONDREL='(ke[dď]|\bwhen\b|\bif\b|ktor[aáeéyý]).{0,30}(vyhl[aá]s|tvrd[íia]|declar|\bsays?\b|\bsaid\b)'
-NF_GATEACT='(br[aá]n|\bgate\b|\bhook\b|detektor|\bdetector\b).{0,24}(blokuj|zablokuj|zabr[aá]n|\bblock|\bfires?\b|catch|chyt[íia])'
-NF_TOPIC='playbook|over-?block|stop-check|post-?mortem|retrospekt|retrospective'
-CF_NARR_SIG="${NF_FRAMENOUN}|${NF_SUBJDECL}|${NF_CONDREL}|${NF_GATEACT}|${NF_TOPIC}"
+NF_TOPIC='playbook|over-?block|stop-check|post-?mortem|retrospekt|retrospective|\blekcia\b|\blesson\b'
+CF_NARR_SIG="${NF_FRAMENOUN}|${NF_SUBJDECL}|${NF_TOPIC}"
 CF_NARR_ADJ_RE="((${CF_NARR_SIG}).{0,64}(${CF_MATCH_RE}))|((${CF_MATCH_RE}).{0,64}(${CF_NARR_SIG}))"
+# #634-review -- LIVE CREDENTIAL-ACTION override. Both fresh-context reviews found
+# the narration disarm fail-UNSAFE: a live verdict-to-owner naturally carries a
+# frame word ("Per the playbook, the token is invalid, regenerate it"; "the
+# endpoint says the token is invalid, vygeneruj nový") near the cluster, so the
+# disarm let a real unprobed claim -- incl. the exact incident relay -- pass. The
+# clean separator BOTH reviews converged on: a live verdict ASKS THE OWNER TO ACT
+# ON THE CREDENTIAL (regenerate / make a new one / need a new one / vygeneruj /
+# treba nový) -- the precise directive that made the owner delete his token --
+# while narration ABOUT the gate/incident/playbook never does. So a CF_ACTION
+# directive DISARMS THE DISARM: present -> BLOCK regardless of any narration frame.
+# Message-scoped (a directive ANYWHERE re-blocks -- the fail-safe direction for an
+# irreversible loss) and checked on CF_RAW_FLAT so a directive stays visible even
+# if oddly quoted. DELIBERATELY directive-only (regenerate/create-new/need-new
+# imperatives), NOT bare "new token" nor a PAST-tense report ("owner deleted it",
+# "vygeneroval som nový") -- a completed-action recount is narration, not a live ask.
+# Also from review: NF_CONDREL (bare when/if/ktorá + declare verb) and NF_GATEACT
+# ("gate blocks"/"hook fires") were DROPPED -- they matched the endpoint-relay
+# incident ("endpoint tvrdí, že ... neplatný") and live deploy status ("the hook
+# blocks the release because ... invalid"); no narration fixture needs them (each
+# is also carried by a frame-noun/subject-declare/topic marker), so dropping them
+# removes an under-block surface at zero cost to the passing set.
+#
+# Accepted residuals (documented, not chased, per #319 -- fail-safe = OVER-block):
+#   - imperative-less narration-framed live-ish verdicts ("this session declares
+#     the token invalid" with NO directive) still disarm -- genuinely ambiguous
+#     English; the actionable (harmful) form is caught by CF_ACTION;
+#   - near-neighbour narration verbs a supervisor might write (prevents / message
+#     saying|claiming / reported / uviedla|oznámila|povedala / a bare "nikdy
+#     nevyhlás ..." with no Lekcia/playbook word) still OVER-block -- the safe
+#     direction, cheap to reword/backtick, NOT the core recurrence the ticket
+#     targets (summary / incident post-mortem / playbook lesson / gate description
+#     all pass);
+#   - a narration that QUOTES a remediation directive ("... regenerate it AFTER a
+#     probe") over-blocks via CF_ACTION -- fail-safe, cheap to backtick.
+CF_ACTION_RE='regenerat[a-z]*|re-?generate|\brotate\b|\brevoke\b|re-?issue[a-z]*|make[[:space:]]+a[[:space:]]+new|create[[:space:]]+a[[:space:]]+new|generate[[:space:]]+a[[:space:]]+new|issue[[:space:]]+a[[:space:]]+new|get[[:space:]]+a[[:space:]]+new|need[[:space:]]+a[[:space:]]+(new|fresh)|ask[[:space:]]+(you[[:space:]]+)?for[[:space:]]+a[[:space:]]+new|vygeneruj[a-z]*|vygenerova[ťt]|potrebujem[[:space:]]+nov[a-z]*|treba[[:space:]]+nov[a-z]*|treba[[:space:]].{0,15}vygenerova|sprav[[:space:]]+nov[a-z]*|vytvor[[:space:]]+nov[a-z]*|vyrob[[:space:]]+nov[a-z]*|rotuj[a-z]*'
 CF_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || CF_FLAT="$MSG_MENTION"
 CF_RAW_FLAT=$(tr '\n' ' ' <<<"$MSG") || CF_RAW_FLAT="$MSG"
 CF_MATCH=0
@@ -1292,13 +1325,27 @@ if [ "$CF_MATCH" = "1" ]; then
     # Exonerating: a capability probe / UNVERIFIED in the message -> DISARM.
     # msg_missing (unknown -> deny the exemption, fail-closed) is the same #194
     # taxonomy the #608/tester-handoff escapes use. On CF_RAW_FLAT so a
-    # code-fenced curl probe still disarms (acceptance b). #634 adds a SECOND
-    # disarm on CF_FLAT: a NARRATIVE FRAME adjacent to the cluster (the message
-    # DESCRIBES/QUOTES the claim, not asserts it live). BLOCK only when BOTH are
-    # absent -- no probe AND no narration frame. Both msg_missing calls fail
-    # toward "missing" on an UNKNOWN grep, so a grep error still BLOCKS.
-    if LC_ALL=C.UTF-8 msg_missing "$CF_RAW_FLAT" -qiE "$CF_PROBE" \
-       && LC_ALL=C.UTF-8 msg_missing "$CF_FLAT" -qiE "$CF_NARR_ADJ_RE"; then
+    # code-fenced curl probe still disarms (acceptance b). #634 adds a narration
+    # disarm on CF_FLAT (a NARRATIVE FRAME adjacent to the cluster -- the message
+    # DESCRIBES/QUOTES the claim), OVERRIDDEN by the #634-review CF_ACTION guard: a
+    # live credential-action directive (regenerate/vygeneruj/treba nový/...) means
+    # a real ASK on the owner, so it re-BLOCKS even when a narration frame is
+    # present. BLOCK when: no probe AND (no narration frame OR a live-action
+    # directive). Every msg_* here fails toward BLOCK on an UNKNOWN grep
+    # (msg_missing UNKNOWN->"missing", msg_has UNKNOWN->"present"), the correct
+    # fail-safe for a gate guarding an irreversible credential loss.
+    CF_DO_BLOCK=0
+    if LC_ALL=C.UTF-8 msg_missing "$CF_RAW_FLAT" -qiE "$CF_PROBE"; then
+        CF_DO_BLOCK=1
+        if LC_ALL=C.UTF-8 msg_missing "$CF_FLAT" -qiE "$CF_NARR_ADJ_RE"; then
+            : # no narration frame -> stays a BLOCK
+        elif LC_ALL=C.UTF-8 msg_has "$CF_RAW_FLAT" -qiE "$CF_ACTION_RE"; then
+            : # narration frame present BUT a live credential-action directive -> stays a BLOCK
+        else
+            CF_DO_BLOCK=0 # narration frame, no directive -> narration, DISARM
+        fi
+    fi
+    if [ "$CF_DO_BLOCK" = "1" ]; then
         echo "VIOLATION: Vyhlásil si Cloudflare credential (token/kľúč) za neplatný/nefunkčný v správe pre OWNERA — BEZ doloženého CAPABILITY PROBE. Presne takto sa dnes STRATIL master token: owner ho zmazal z Bitwardenu na základe tohto tvrdenia a Cloudflare hodnotu tokenu už nikdy nezobrazí. \`GET /user/tokens/verify\` vracia \`Invalid API Token\` pre účtovo-viazané \`cfat_\` tokeny BY DESIGN — jeho odpoveď NIE JE verdikt (brať ju ako verdikt JE tá chyba). Než vyhlásiš token za neplatný, MUSÍŠ v tej istej správe ukázať CAPABILITY PROBE proti reálnemu zdroju: \`GET https://api.cloudflare.com/client/v4/zones\` (success:true + zóny = token funguje) ALEBO \`GET /accounts/<account_id>/tokens/verify\`. Ak probe naozaj zlyhal, ukáž ho + jeho výstup; ak ho nevieš spustiť, napíš \`UNVERIFIED: <čo> — <čo si skúsil>\`. NIKDY neber odpoveď z \`/user/tokens/verify\` ako verdikt." >&2
         echo "" >&2
         echo "  See skills/cloudflare-api-tokens §0/§2 (the verify endpoint LIES for cfat_ tokens; the /zones capability probe is the only verdict)." >&2

@@ -444,5 +444,120 @@ class CloudflareLiveClaimStillBlocked634(TestCase):
         self._b(LIVE_EN_REPORT, "a deploy report asserting the token is invalid must block")
 
 
+# --- #634 adversarial-review LOCKS: the two fresh-context reviews found the first
+# narration-disarm cut fail-UNSAFE — a live verdict-to-owner naturally carries a
+# frame word ("Per the playbook, ... invalid, regenerate it"; "endpoint tvrdí, že
+# ... neplatný, vygeneruj nový") near the cluster, letting a real unprobed claim
+# (incl. the exact incident relay) through. The fix adds a LIVE CREDENTIAL-ACTION
+# override (a regenerate/vygeneruj/treba-nový directive re-BLOCKS even with a
+# narration frame present) and drops the NF_CONDREL/NF_GATEACT families. Every
+# under-block below carries such a directive and MUST stay blocked. --- #
+
+# Reviewer 1 (under-block / fail-direction) — all had a narration frame + directive:
+RV_PLAYBOOK_INCIDENT = (
+    "Per the playbook: I checked the Cloudflare token with GET /user/tokens/verify "
+    "and it returned Invalid API Token, so the token is invalid - please regenerate it.")
+RV_HOOK_BLOCKS_DEPLOY = (
+    "The pre-deploy hook blocks the release because the Cloudflare token is invalid; "
+    "please regenerate it and I'll retry.")
+RV_PER_PLAYBOOK = "Per the playbook, the Cloudflare token is invalid - please regenerate it now."
+RV_PODLA_PLAYBOOK = "Podľa playbooku, Cloudflare token je neplatný, vygeneruj prosím nový."
+RV_GATE_BLOCKS_ASK = (
+    "My gate blocks the release. The Cloudflare token is invalid - I'm going to ask "
+    "you for a new one.")
+RV_PLAYBOOK_CHECK = "Playbook check: Cloudflare API token je neplatný, treba nový."
+RV_BRANA_CHYTI = "Brána to chytí: ten cfat_ token je nefunkčný, treba ho vygenerovať znova."
+RV_HOOK_FIRES = "The hook fires: wrangler deploy zlyhal, ten API token je neplatný, potrebujem nový."
+RV_STOPCHECK_FRESH = "stop-check note: The Cloudflare API token doesn't work, we need a fresh one."
+RV_SESSION_DECLARES_REGEN = "This session declares the Cloudflare token invalid - please regenerate it."
+RV_SPRAVA_VYHLASUJE = "Tato správa vyhlasuje Cloudflare token za neplatný - vygeneruj nový."
+# Reviewer 2 (MAJOR): the endpoint-RELAY incident shape (dropped NF_CONDREL + directive):
+RV_RELAY_ENDPOINT_SK = "Ked som spustil verify, endpoint tvrdi, ze Cloudflare token je neplatny, vygeneruj novy."
+RV_RELAY_WHEN_SAID = "When verify responded, it said the Cloudflare token is invalid. Regenerate it."
+RV_RELAY_API_TREBA = "Ked som to overil, API tvrdi ze Cloudflare token je neplatny — treba novy."
+RV_RELAY_IF_SYNC = "If the sync says the Cloudflare token is invalid, please regenerate it now."
+
+
+class Cloudflare634ReviewUnderblocksBlocked(TestCase):
+    """#634 adversarial-review locks — a narration frame does NOT disarm a live
+    credential-action directive; the endpoint-relay incident shape blocks."""
+
+    def _b(self, msg, why):
+        self.assertTrue(_blocked(_run(msg)), why)
+
+    def test_playbook_prefix_on_incident_blocks(self):
+        self._b(RV_PLAYBOOK_INCIDENT,
+                "the exact incident relay with a 'Per the playbook:' prefix must still block")
+
+    def test_hook_blocks_deploy_verdict_blocks(self):
+        self._b(RV_HOOK_BLOCKS_DEPLOY, "'hook blocks the release ... regenerate it' must block")
+
+    def test_per_playbook_regenerate_blocks(self):
+        self._b(RV_PER_PLAYBOOK, "'Per the playbook ... regenerate it now' must block")
+
+    def test_podla_playbooku_vygeneruj_blocks(self):
+        self._b(RV_PODLA_PLAYBOOK, "'Podľa playbooku ... vygeneruj nový' must block")
+
+    def test_gate_blocks_ask_for_new_blocks(self):
+        self._b(RV_GATE_BLOCKS_ASK, "'gate blocks ... ask you for a new one' must block")
+
+    def test_playbook_check_treba_novy_blocks(self):
+        self._b(RV_PLAYBOOK_CHECK, "'Playbook check ... treba nový' must block")
+
+    def test_brana_chyti_treba_vygenerovat_blocks(self):
+        self._b(RV_BRANA_CHYTI, "'Brána to chytí ... treba ho vygenerovať znova' must block")
+
+    def test_hook_fires_potrebujem_novy_blocks(self):
+        self._b(RV_HOOK_FIRES, "'The hook fires ... potrebujem nový' must block")
+
+    def test_stopcheck_need_fresh_blocks(self):
+        self._b(RV_STOPCHECK_FRESH, "'stop-check note ... we need a fresh one' must block")
+
+    def test_session_declares_regenerate_blocks(self):
+        self._b(RV_SESSION_DECLARES_REGEN, "'session declares ... regenerate it' must block")
+
+    def test_sprava_vyhlasuje_vygeneruj_blocks(self):
+        self._b(RV_SPRAVA_VYHLASUJE, "'správa vyhlasuje ... vygeneruj nový' must block")
+
+    def test_relay_endpoint_sk_blocks(self):
+        self._b(RV_RELAY_ENDPOINT_SK, "'endpoint tvrdí, že ... neplatný, vygeneruj nový' must block")
+
+    def test_relay_when_said_blocks(self):
+        self._b(RV_RELAY_WHEN_SAID, "'when verify ... it said ... invalid. Regenerate it.' must block")
+
+    def test_relay_api_treba_blocks(self):
+        self._b(RV_RELAY_API_TREBA, "'API tvrdí že ... neplatný — treba nový' must block")
+
+    def test_relay_if_sync_blocks(self):
+        self._b(RV_RELAY_IF_SYNC, "'If the sync says ... invalid, regenerate it now' must block")
+
+
+# New narration PASS controls for the review-driven changes (broadened "správa, že"
+# frame + lekcia/lesson topic). None carries a live credential-action directive.
+NARR_SPRAVA_ZE = (
+    "Detektor teraz zablokuje správu, že Cloudflare token je neplatný, ak nemá skúšku.")
+NARR_LEKCIA = (
+    "Lekcia z incidentu: session vyhlásila Cloudflare token za neplatný, odteraz to brána chytí.")
+NARR_LESSON_FRAME = (
+    "The playbook lesson: a message that the Cloudflare token is invalid must carry a probe.")
+
+
+class Cloudflare634NarrationPassesAfterReview(TestCase):
+    """#634 review — the broadened 'správa, že' frame and lekcia/lesson topic keep
+    genuine narration passing; none carries a live directive."""
+
+    def _p(self, msg, why):
+        self.assertFalse(_blocked(_run(msg)), why)
+
+    def test_sprava_ze_frame_passes(self):
+        self._p(NARR_SPRAVA_ZE, "'správu, že ... neplatný' narration frame must pass")
+
+    def test_lekcia_topic_passes(self):
+        self._p(NARR_LEKCIA, "a Slovak 'Lekcia:' post-mortem must pass")
+
+    def test_lesson_frame_passes(self):
+        self._p(NARR_LESSON_FRAME, "'playbook lesson: a message that ... invalid' must pass")
+
+
 if __name__ == "__main__":
     main()
