@@ -5429,6 +5429,92 @@ class TestTmuxAggressiveResizeSelfHeal(TestCase):
         self.assertNotIn(["tmux", "set-option", "-gu", "window-size"], calls)
 
 
+class TestTmuxMouseOn(TestCase):
+    """#646: `mouse on` is a managed FLEET-WIDE default -- the owner wants the
+    scroll-wheel to reach tmux's scrollback over ssh (`kolieskom cez ssh sa to
+    blbo pouziva`), which needs `set-option -g mouse on`. It was never
+    provisioned: the global option defaulted to tmux's `off`, and #615 only
+    turned mouse on session-scoped for the throwaway WEBTERM clone, never for a
+    plain ssh session. The managed block now carries `set-option -g mouse on`
+    (with a `#`-comment recording the Shift+drag native-selection caveat), and
+    the live-apply flips a RUNNING server too -- SAFE, same class as
+    history-limit / the bind-keys and UNLIKE window-size: a plain server/session
+    option toggle, no geometry recalc, no screen redraw (proven live: the
+    supervisor ran `tmux set-option -g mouse on` on dev2 with no disruption).
+    A permanent global `-g` latch is the DESIRED state here, so -- unlike #615's
+    temporary per-session webterm flip -- no disconnect-trap revert is needed."""
+
+    def _tmp(self, content=None):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".tmux.conf"
+        if content is not None:
+            p.write_text(content)
+        return p
+
+    def test_conf_block_carries_mouse_on_with_the_shift_drag_caveat(self):
+        # The managed block emits `set-option -g mouse on`, INSIDE the markers,
+        # with a `#`-comment noting the Shift+drag native-selection caveat right
+        # by the line (the owner explicitly asked for the scroll behaviour).
+        p = self._tmp()
+        airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        text = p.read_text()
+        self.assertIn("set-option -g mouse on", text)
+        self.assertIn("Shift+drag", text)  # the native-selection caveat comment
+        # the mouse line sits INSIDE the managed marker block, not loose.
+        start = text.index(airuleset.TMUX_MARK_START)
+        end = text.index(airuleset.TMUX_MARK_END)
+        self.assertLess(start, text.index("set-option -g mouse on"))
+        self.assertLess(text.index("set-option -g mouse on"), end)
+
+    def test_render_block_carries_mouse_on(self):
+        # Straight from the renderer (no file round-trip), so a caller that
+        # embeds render_tmux_history_block() elsewhere also gets it.
+        block = airuleset.render_tmux_history_block()
+        self.assertIn("set-option -g mouse on", block)
+
+    def test_live_apply_SETS_the_global_mouse_on(self):
+        # #646: the live-apply flips a RUNNING server to `mouse on` (a plain
+        # `set-option -g mouse on`), so an already-running session picks up the
+        # wheel-scroll immediately at install/push -- never a restart. It is
+        # SET (never UNSET): the fleet default is `on`.
+        p = self._tmp()
+        calls = []
+        airuleset.apply_tmux_history_limit(p, run=calls.append)
+        self.assertIn(["tmux", "set-option", "-g", "mouse", "on"], calls)
+        self.assertNotIn(["tmux", "set-option", "-gu", "mouse"], calls)
+        self.assertNotIn(["tmux", "set-option", "-g", "mouse", "off"], calls)
+
+    def test_mouse_line_is_added_to_a_stale_block_preserving_surroundings(self):
+        # A conf carrying a managed block WITHOUT the mouse line (a box
+        # provisioned before #646) self-heals in place on the next run: the
+        # mouse line lands inside the markers, the surrounding non-managed lines
+        # stay byte-for-byte.
+        stale_block = (
+            f"{airuleset.TMUX_MARK_START}\n"
+            "set-option -g history-limit 50000\n"
+            "set-option -g default-size 176x50\n"
+            f"{airuleset.TMUX_MARK_END}"
+        )
+        original = f"set -g status-bg colour234\n\n{stale_block}\n"
+        p = self._tmp(original)
+        changed = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertIn("set -g status-bg colour234", text)  # untouched surround
+        self.assertEqual(text.count(airuleset.TMUX_MARK_START), 1)
+        self.assertIn("set-option -g mouse on", text)
+
+    def test_idempotent_once_mouse_present(self):
+        # A block already carrying the mouse line is a no-op on a second run.
+        p = self._tmp()
+        self.assertTrue(airuleset.apply_tmux_history_limit(p, run=lambda argv: None))
+        before = p.read_text()
+        self.assertIn("set-option -g mouse on", before)
+        changed = airuleset.apply_tmux_history_limit(p, run=lambda argv: None)
+        self.assertFalse(changed)
+        self.assertEqual(p.read_text(), before)
+
+
 class TestTmuxWindowSizeRemoved(TestCase):
     """#241: `window-size manual` -- shipped fleet-wide by #236 -- CRASHES
     tmux 3.4's server outright at startup (`server exited unexpectedly`),
