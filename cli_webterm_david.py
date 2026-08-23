@@ -120,6 +120,18 @@ _DAVID_UNIT_NOTE = (
 # Byte-identical to that drop-in's PATH; `%h` is the systemd home specifier.
 # Scoped to the DAVID render ONLY — the owner (dev1) unit, where ttyd is a
 # system /usr/bin binary already on the manager PATH, never gets this line.
+#
+# #638 — INVARIANT + FOOTGUN. airuleset renders this MAIN unit and, by
+# deliberate invariant (#614, adversarially upheld), never writes or deletes
+# `.d/` drop-ins. The #612 go-live hand-placed
+# `webterm-david-ttyd.service.d/10-path.conf` with this same PATH before this
+# code existed; #638 confirmed it is REDUNDANT and is removed by a ONE-TIME
+# MANUAL step (owner-action recorded on the ticket), never by code — a tool
+# that deletes files a human hand-placed is a more dangerous tool. FOOTGUN: if
+# you ever CHANGE the PATH below, a stale hand-placed drop-in would silently
+# OVERRIDE it (drop-ins load last) and airuleset will NOT clean it up — verify
+# none remains on the box first with
+# `systemctl --user show webterm-david-ttyd.service -p DropInPaths`.
 _DAVID_TTYD_PATH_ENV = (
     "# #614: self-contained PATH so the launcher's bare `exec ttyd` resolves\n"
     "# the no-sudo ~/.local/bin user-space static binary on a clean systemd\n"
