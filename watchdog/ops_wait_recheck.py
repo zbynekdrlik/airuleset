@@ -273,6 +273,17 @@ def _stale_numbers(members):
             and isinstance(m.get("number"), int)]
 
 
+def _gk_handoff_numbers(members):
+    """The subset of `_member_numbers` flagged `gk_handoff!` (#636) — a parked W
+    ticket that ALSO carries a gk hand-off label (the post-release-limbo
+    contradiction). Only the structured shape carries the flag, so a legacy int
+    list yields an EMPTY list (no gk-handoff sub-clause — the safe/unchanged
+    direction, exactly like `_stale_numbers`)."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and m.get("gk_handoff")
+            and isinstance(m.get("number"), int)]
+
+
 def _sig(members):
     """A stable signature of the parked W set (sorted numbers, comma-joined) —
     stored so a reader can see WHICH tickets a rec is tracking, and so a future
@@ -413,7 +424,10 @@ _I_CLAUSE = (
     "doručená živá owner-otázka → needs-answer/needs-decision (U); owner fyzický/"
     "manuálny krok pri rigu → `needs-owner-action` (U, #601 — owner nie je tretia "
     "strana); bare `needs-acceptance` queued na owner-schválenie → `U` (#622 — "
-    "nikdy `I`); len reálne dispatchovateľná kódová práca ostáva `I`.")
+    "nikdy `I`); HOTOVÝ tiket (merged/released/akceptovaný) čakajúci UŽ LEN na "
+    "gatekeepera aby ho ZAVREL → `GATEKEEPER-ACTION:` (`needs-gatekeeper`) → gk N, "
+    "NIE `ops-wait` (gatekeeper nie je tretia strana, #636); len reálne "
+    "dispatchovateľná kódová práca ostáva `I`.")
 
 # #578 — the NAMED per-I-member audit. The gk `I 16` incident showed the generic
 # clause above is too weak: the session COULD enumerate its I members and STILL
@@ -504,7 +518,12 @@ _W_CLAUSE = (
     "`needs-owner-action` a tiket sa presunie do U (owner nie je tretia strana). "
     "MIS-SHAPE (#607): ak re-entry event je ROZHODNUTIE/ODPOVEĎ OWNERA (nie tretej "
     "strany, nie fyzický krok), tiež NIE JE to W — „na U sa vždy pýtam“: prelabeluj "
-    "`needs-answer`/`needs-decision` a DORUČ otázku (❓ ping), tiket sa presunie do U.")
+    "`needs-answer`/`needs-decision` a DORUČ otázku (❓ ping), tiket sa presunie do U. "
+    "MIS-SHAPE (#636): ak je blocker GATEKEEPER (review / release / ZAVRIEŤ po "
+    "release+akceptácii), NIE JE to W — gatekeeper NIE JE tretia strana, je to "
+    "menovaný fleet aktér s vlastnou hand-off lane: podaj `GATEKEEPER-ACTION:` "
+    "(auto-label `needs-gatekeeper`) A ZLOŽ `ops-wait` — tiket sa presunie do gk N "
+    "(stream) / do I gk-boxu, nie visí vo W ktoré nikto netlačí.")
 
 # The #570 stale sub-clause — appended to the W clause when any parked W member
 # has gone COLD (no fresh ≤24h stream-push evidence: `stale!` in `--ops-wait`,
@@ -519,6 +538,20 @@ _W_STALE_CLAUSE = (
     "prázdny ack), over blocker RE-ČÍTANÍM referencovaného tiketu a na tikete "
     "komentárom zaznač že pripomienka odišla (ten komentár JE evidencia).")
 
+# The #636 gk-handoff sub-clause — appended to the W clause when any parked W
+# member ALSO carries a gk hand-off label (`gk-handoff!` in `--ops-wait`, parsed
+# into `member["gk_handoff"]`). NAMES the contradictory members and states the
+# doctrine action: this is post-release limbo — the ticket is a gk hand-off the
+# stale `ops-wait` HIDES from gk N (stream) / the gk box's I, so DROP the
+# `ops-wait` (the gatekeeper is not a third party, #601 parallel); if it is not
+# yet in the gk queue, also add `needs-gatekeeper` (GATEKEEPER-ACTION: close #N).
+_W_GK_HANDOFF_CLAUSE = (
+    "GK-HANDOFF (post-release limbo, #636) %s: tento W tiket NESIE aj "
+    "needs-gatekeeper/ready-for-review — je to gk hand-off, NIE tretia strana. "
+    "ZLOŽ `ops-wait` (a ak ešte nie je v gk fronte, podaj `GATEKEEPER-ACTION:` → "
+    "`needs-gatekeeper`), aby sa presunul do gk N / do I gk-boxu a gatekeeper ho "
+    "zavrel — nesmie visieť vo W, ktoré nikto netlačí. Label mení supervisor.")
+
 
 def _nudge_text(i_count, w_members, now, w_seen, i_members=None):
     """The partition-audit keystroke injected into the armed loop. Carries the
@@ -528,8 +561,11 @@ def _nudge_text(i_count, w_members, now, w_seen, i_members=None):
     (naming the parked W numbers each with ITS OWN per-ticket park age from
     `w_seen`, #594) when W is non-empty. When ONLY W applies (I==0), the text
     degrades to #547's W-only nudge; when both apply, both clauses ride one
-    keystroke. The label change is always the SUPERVISOR's with evidence, never
-    an auto-unlabel by the watchdog.
+    keystroke. Two W SUB-clauses are appended when their flags fire: the #636
+    `gk-handoff!` sub-clause (a W member ALSO carrying needs-gatekeeper/
+    ready-for-review — the post-release-limbo contradiction; drop ops-wait) and
+    the #570 `stale!` sub-clause. The label change is always the SUPERVISOR's with
+    evidence, never an auto-unlabel by the watchdog.
 
     `w_seen` (#594): the PER-TICKET first-seen map ({str(number): ts}) that ages
     each W member from its OWN W entry, never a single stale partition-level
@@ -550,6 +586,10 @@ def _nudge_text(i_count, w_members, now, w_seen, i_members=None):
         clauses.append(_i_clause_named(valid, now) if valid else _I_CLAUSE)
     if w_pos:
         clauses.append(_W_CLAUSE % _members_line_aged(w_members, w_seen, now))
+        gk_handoff = _gk_handoff_numbers(w_members)
+        if gk_handoff:
+            clauses.append(_W_GK_HANDOFF_CLAUSE
+                           % " ".join("#%d" % n for n in sorted(gk_handoff)))
         stale = _stale_numbers(w_members)
         if stale:
             clauses.append(_W_STALE_CLAUSE

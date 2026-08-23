@@ -1062,6 +1062,61 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
     return flagged
 
 
+# #636: the gk hand-off labels that CONTRADICT an `ops-wait` park. Either means
+# "parked with the gatekeeper for a gk ACTION" — the gatekeeper is a named fleet
+# actor with a dedicated hand-off lane, NOT a third party (the exact parallel of
+# #601's owner-is-not-a-third-party ruling), so a ticket blocked on a gk action
+# belongs in gk N (stream) / the gk box's actionable I, NEVER in W. `ready-for-
+# review` is the repo-workflow hand-off, `needs-gatekeeper` is airuleset's own
+# gk-request lane (#191/#223 fold both into the same gk bucket).
+_GK_HANDOFF_LABELS = ("needs-gatekeeper", "ready-for-review")
+
+# #636 review 🟡: a `prio:bounce` OVERRIDES a co-present gk hand-off label back to
+# "the STREAM's own court" (the #313 pt-2 override that `_slice_mine_and_handed`
+# and NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS already honour — a bounced ticket is
+# NOT counted in gk). So a bounced ticket is NEVER post-release limbo: it must be
+# REWORKED in I, not re-handed-off. Excluding it keeps the gk-handoff! flag
+# consistent with the handed/gk count and stops the nudge driving a premature
+# re-hand-off (a bounce↔hand-off loop).
+_GK_HANDOFF_BOUNCE_OVERRIDE = "prio:bounce"
+
+
+def _gk_handoff_ops_wait_flagged(rows):
+    """The set of ops-wait (W) member numbers to tag `gk-handoff!` (#636) — a
+    parked W ticket that ALSO carries a `_GK_HANDOFF_LABELS` label. This is the
+    contradictory "post-release limbo" shape: the footer partition routes a
+    handed+parked row to the W bucket (`_partition_workable` +
+    `cmd_tickets_status`), so the stale `ops-wait` HIDES the gk hand-off from
+    `gk N` (stream) and the gk box's own actionable I — leaving the ticket stuck
+    in a W nobody pushes forward (`gk` is not a third party, so the #570 daily-
+    push doctrine has no valid action for it, odoo-erp #3108/#4600).
+
+    PURE label check — no gh, no timeline, no heuristic (the whole reason #636
+    chose this signal over the ticket's proposed timeline-verdict + release-
+    evidence sweep). The FIX the tag prompts is to DROP the `ops-wait` label so
+    the ticket surfaces in gk N (stream) / the gk box's I via its already-present
+    `needs-gatekeeper` — the label change is the SUPERVISOR's with evidence,
+    never auto-applied (the tag only surfaces).
+
+    Requires BOTH `ops-wait` AND a gk label present, so the function is correct
+    standalone (a genuine contradiction), not merely "the caller passed the W
+    bucket". A co-present `prio:bounce` (#636 review 🟡) EXCLUDES the row — a
+    bounced ticket is back in the stream's own court (the #313 override the
+    handed/gk count already honours), never a gk hand-off. Never a false
+    accusation ("nikdy falošný", the #539/#570 bias): a missing/malformed
+    `labels` value on a row is simply not flagged."""
+    flagged = set()
+    for number, row in (rows or {}).items():
+        labels = row.get("labels") if isinstance(row, dict) else None
+        names = {(lb or {}).get("name") for lb in (labels or [])
+                 if isinstance(lb, dict)}
+        if ("ops-wait" in names
+                and _GK_HANDOFF_BOUNCE_OVERRIDE not in names
+                and any(lb in names for lb in _GK_HANDOFF_LABELS)):
+            flagged.add(number)
+    return flagged
+
+
 def _authority_marker(cwd=None):
     """Read an `<!-- airuleset:authority=<profile> -->` override from the project
     CLAUDE.md (cwd-relative), or None. Lets a project raise/lower a stream's default

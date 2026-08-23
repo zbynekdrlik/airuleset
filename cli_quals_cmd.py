@@ -53,7 +53,8 @@ def _row_action(row, own_stream=None):
 
 
 def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
-                      stale_numbers=None, queued_numbers=None):
+                      stale_numbers=None, queued_numbers=None,
+                      gk_handoff_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -87,10 +88,20 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     `acceptance` → `queued` (draft ready, awaiting #606 one-at-a-time owner-approval
     delivery), so the reader tells a queued acceptance from a live delivered one.
     Only meaningful alongside `reason_fn`; a queued member is `_no_question_flagged`-
-    exempt (#622), so it never also carries `no-question!`."""
+    exempt (#622), so it never also carries `no-question!`.
+
+    `gk_handoff_numbers` (#636, `--ops-wait` only): a set of W-member numbers that
+    ALSO carry a gk hand-off label (`needs-gatekeeper`/`ready-for-review`) — the
+    contradictory post-release-limbo shape — ` gk-handoff!` is APPENDED to their
+    reason column, the SAME space-separated-within-field-3 mechanism as
+    `stale_numbers`. Only meaningful alongside `reason_fn`; a member can carry
+    both warnings (order: gk-handoff! then stale!). The tag prompts DROPPING the
+    stale `ops-wait` (the gatekeeper is not a third party, so a gk hand-off
+    belongs in gk N / the gk box's I, never W)."""
     flag_numbers = flag_numbers or set()
     stale_numbers = stale_numbers or set()
     queued_numbers = queued_numbers or set()
+    gk_handoff_numbers = gk_handoff_numbers or set()
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
         action = _row_action(row, own_stream)
@@ -107,6 +118,8 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                 # `no-action!` so the tag reads correctly for a physical step.
                 warn = " no-action!" if reason == "action" else " no-question!"
                 reason = (reason + warn).strip()
+            if n in gk_handoff_numbers:
+                reason = (reason + " gk-handoff!").strip()
             if n in stale_numbers:
                 reason = (reason + " stale!").strip()
             print("%s\t%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
@@ -524,10 +537,15 @@ def cmd_slice_quals(args):
         # #570: also tag `stale!` a member with no fresh (≤24h) stream-push
         # evidence — one per-member `gh issue view` on this on-demand path (the
         # #539 `no-question!` shape), never on the hot footer refresh.
+        # #636: tag `gk-handoff!` a member ALSO carrying needs-gatekeeper/
+        # ready-for-review — the post-release-limbo contradiction (pure label
+        # check, no gh; drop the stale ops-wait so it enters gk N / the gk box's I).
         _print_issue_rows(ops_wait, own_stream=user,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=airuleset._stale_ops_wait_flagged(
-                              ops_wait, cwd=root))
+                              ops_wait, cwd=root),
+                          gk_handoff_numbers=airuleset._gk_handoff_ops_wait_flagged(
+                              ops_wait))
         return
     if want_waiting:
         # #512: each labeled member gets a reason tag (answer/decision/
@@ -720,10 +738,16 @@ def cmd_core_quals(args):
         # `acceptance` (client thread sent) vs `ops-wait` (external event).
         # #570: also tag `stale!` a member with no fresh (≤24h) stream-push
         # evidence (one per-member `gh issue view`, on-demand path only).
+        # #636: tag `gk-handoff!` a member ALSO carrying needs-gatekeeper/
+        # ready-for-review — the post-release-limbo contradiction (pure label,
+        # no gh). On a gk-model box this NAMES a stream ticket whose hand-off the
+        # stale ops-wait hides from THIS box's own I; drop the ops-wait to close it.
         _print_issue_rows(ops_wait, own_stream=None,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=airuleset._stale_ops_wait_flagged(
-                              ops_wait, cwd=root))
+                              ops_wait, cwd=root),
+                          gk_handoff_numbers=airuleset._gk_handoff_ops_wait_flagged(
+                              ops_wait))
         return
     if want_waiting:
         # own_stream=None: a full-authority box owns no stream, so EVERY
