@@ -30,6 +30,7 @@ from pathlib import Path
 import cli_webterm as w
 import cli_webterm_access as access
 import cli_webterm_profiles as profiles
+import cli_webterm_tunnel as tun  # #635: shared managed-tunnel render helpers
 
 # The david deployment's own artifact paths + loopback ports (distinct from the
 # owner's, so the subdev box is self-documenting; the gateway binds loopback and
@@ -45,6 +46,26 @@ WEBTERM_DAVID_SERVICE_DEST = (
     Path.home() / ".config" / "systemd" / "user" / "webterm-david-ttyd.service")
 WEBTERM_DAVID_GATEWAY_SERVICE_DEST = (
     Path.home() / ".config" / "systemd" / "user" / "webterm-david-gateway.service")
+
+# #635: bring david's cloudflared tunnel under airuleset management (it was a
+# HAND-MADE unit — its own header said "Hand-managed on subdev … needs-owner-
+# action" — the exact "deployed ≠ managed, vanishes on re-provision" class #635
+# exists to kill). The tunnel already exists (created via dev2's origin cert in
+# #612); airuleset now WRITES + reconciles its config + systemd --user unit,
+# functionally identical to the working hand-made one. The UUID is public (the
+# DNS CNAME target); the per-tunnel creds JSON on subdev is the only secret, and
+# setup_webterm_david_tunnel is prerequisite-gated on it.
+WEBTERM_DAVID_TUNNEL_UUID = "1564fe31-a95f-4053-93d4-baff2b8a6e97"
+WEBTERM_DAVID_TUNNEL_CREDS = tun.WEBTERM_CLOUDFLARED_DIR / (
+    WEBTERM_DAVID_TUNNEL_UUID + ".json")
+# david's box has no other tunnel, so the default ~/.cloudflared/config.yml is its
+# own — kept as-is (matches the current working unit's --config path).
+WEBTERM_DAVID_TUNNEL_CONFIG = tun.WEBTERM_CLOUDFLARED_DIR / "config.yml"
+WEBTERM_DAVID_TUNNEL_SERVICE_DEST = (
+    Path.home() / ".config" / "systemd" / "user" / "webterm-david-tunnel.service")
+WEBTERM_DAVID_TUNNEL_HOSTNAME = "david.newlevel.media"
+# subdev cloudflared is the no-sudo user-space static binary in ~/.local/bin.
+WEBTERM_DAVID_CLOUDFLARED_BIN = str(Path.home() / ".local" / "bin" / "cloudflared")
 
 _DAVID_GO_LIVE = (
     "  webterm(david): needs setup to go live —\n"
@@ -221,6 +242,40 @@ def prerequisites_ready():
     return True, "ready"
 
 
+def setup_webterm_david_tunnel(run=None):
+    """subdev-only: provision + enable the MANAGED cloudflared tunnel fronting
+    https://david.newlevel.media/ -> the loopback david gateway. REPLACES the
+    hand-made webterm-david-tunnel.service with an airuleset-written, functionally
+    identical one (same UUID + config path + ExecStart). Renders the david-specific
+    config/unit, then hands off to the SHARED `tun._provision_managed_tunnel` (the
+    same never-raises, prereq-gated, linger+enable+restart orchestration the owner
+    lane uses — so the two lanes cannot drift). Returns its result.
+
+    Config path stays the box-default ~/.cloudflared/config.yml (matches the current
+    working unit exactly — lowest-risk for a live external-dev terminal; subdev has
+    no other tunnel today, so no collision — a review-noted accepted tradeoff)."""
+    # subdev's no-sudo user-space binary is NOT on the install-process PATH, so try
+    # ~/.local/bin/cloudflared explicitly first (cli_binary_installers pattern, #614).
+    local_bin = Path.home() / ".local" / "bin" / "cloudflared"
+    cloudflared_bin = (str(local_bin) if local_bin.is_file()
+                       else (shutil.which("cloudflared") or WEBTERM_DAVID_CLOUDFLARED_BIN))
+    config_text = tun.render_cloudflared_tunnel_config(
+        WEBTERM_DAVID_TUNNEL_UUID, str(WEBTERM_DAVID_TUNNEL_CREDS),
+        WEBTERM_DAVID_TUNNEL_HOSTNAME,
+        "http://%s:%d" % (WEBTERM_DAVID_BIND, WEBTERM_DAVID_GATEWAY_PORT))
+    unit_text = tun.render_cloudflared_tunnel_unit(
+        "david webterm cloudflared tunnel (%s -> 127.0.0.1:%d)"
+        % (WEBTERM_DAVID_TUNNEL_HOSTNAME, WEBTERM_DAVID_GATEWAY_PORT),
+        str(WEBTERM_DAVID_TUNNEL_CONFIG), cloudflared_bin,
+        after="network-online.target webterm-david-gateway.service")
+    return tun._provision_managed_tunnel(
+        WEBTERM_DAVID_TUNNEL_CREDS, cloudflared_bin, WEBTERM_DAVID_TUNNEL_CONFIG,
+        config_text, WEBTERM_DAVID_TUNNEL_SERVICE_DEST,
+        "webterm-david-tunnel.service", unit_text, run=run, lane="(david)",
+        creds_absent_hint=" (the webterm-david-612 creds JSON must be present "
+        "on subdev).")
+
+
 def setup_webterm_david_service(run=None):
     """subdev-only: provision the david developer gateway (#612). Prerequisite-
     gated (see `prerequisites_ready`) so an ordinary subdev install can never
@@ -266,6 +321,12 @@ def setup_webterm_david_service(run=None):
                 ok_all = False
                 continue
             _run_systemctl(["restart", svc])
+        # #635: bring the (previously hand-made) public HTTPS front under airuleset
+        # management too — but ONLY once the loopback gateway/ttyd came up (ok_all),
+        # so the tunnel never fronts a dead origin. Prereq-gated no-op if the creds
+        # JSON is not present.
+        if ok_all:
+            setup_webterm_david_tunnel(run=run)
     except Exception as e:
         print("  webterm(david): provisioning errored (%r) — left un-provisioned."
               % e, file=sys.stderr)

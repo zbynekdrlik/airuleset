@@ -707,6 +707,7 @@ class TestSetupWiring(unittest.TestCase):
         p = Path(tmp)
         (p / ".claude").mkdir(parents=True, exist_ok=True)
         (p / ".secrets").mkdir(parents=True, exist_ok=True)
+        (p / ".cloudflared").mkdir(parents=True, exist_ok=True)
         (p / ".config" / "systemd" / "user").mkdir(parents=True, exist_ok=True)
         patches = {
             "CLAUDE_DIR": p / ".claude",
@@ -722,6 +723,20 @@ class TestSetupWiring(unittest.TestCase):
         }
         for name, val in patches.items():
             stack.enter_context(m.patch.object(w, name, val))
+        # #635: the go-live DEFAULT is Access mode, whose success path calls into the
+        # cli_webterm_tunnel leaf. Redirect ITS owner-tunnel path constants into tmp —
+        # on dev1 the REAL creds JSON exists, so an unpatched run would write real
+        # ~/.cloudflared / systemd files. No creds JSON is created in tmp, so
+        # setup_webterm_owner_tunnel stays a safe no-op in these tests.
+        import cli_webterm_tunnel as tun
+        (p / ".cloudflared").mkdir(parents=True, exist_ok=True)
+        for name, val in {
+            "WEBTERM_CLOUDFLARED_DIR": p / ".cloudflared",
+            "WEBTERM_OWNER_TUNNEL_CREDS": p / ".cloudflared" / (tun.WEBTERM_OWNER_TUNNEL_UUID + ".json"),
+            "WEBTERM_OWNER_TUNNEL_CONFIG": p / ".cloudflared" / "webterm-owner.yml",
+            "WEBTERM_OWNER_TUNNEL_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-owner-tunnel.service",
+        }.items():
+            stack.enter_context(m.patch.object(tun, name, val))
         fake = os.uname_result(("Linux", "dev1", "x", "x", "x"))
         stack.enter_context(m.patch.object(w.os, "uname", return_value=fake))
         stack.enter_context(m.patch.object(w.shutil, "which", return_value="/usr/bin/ttyd"))
@@ -748,6 +763,9 @@ class TestSetupWiring(unittest.TestCase):
         import contextlib
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
             pt = self._isolate(st, tmp)
+            # #635: the go-live DEFAULT is now Access mode; this test exercises the
+            # still-present PASSWORD/tailnet code path, so pin the flag OFF.
+            st.enter_context(m.patch.object(w, "OWNER_GATEWAY_ACCESS_MODE", False))
             rec = self._RunRec()
             ok = w.setup_webterm_service(run=rec)
             self.assertTrue(ok)
@@ -776,6 +794,10 @@ class TestSetupWiring(unittest.TestCase):
         import contextlib
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
             pt = self._isolate(st, tmp)
+            # #635: the "refuse with no tailscale IP" guard is the PASSWORD-mode
+            # invariant (Access mode binds loopback + needs no tailnet IP), so pin
+            # the flag OFF to exercise it.
+            st.enter_context(m.patch.object(w, "OWNER_GATEWAY_ACCESS_MODE", False))
             rec = self._RunRec(ip="")          # tailscale ip -4 returns nothing
             ok = w.setup_webterm_service(run=rec)
             self.assertFalse(ok)               # LOUD refusal
@@ -815,6 +837,33 @@ class TestSetupWiring(unittest.TestCase):
             self.assertIn("--bind 127.0.0.1", unit)
             # the password credential is retired (no password path any more)
             self.assertFalse(pt["WEBTERM_CRED_PATH"].exists())
+
+    def test_access_mode_provisions_the_managed_owner_tunnel(self):
+        # #635: the go-live DEFAULT (Access mode) must CALL the managed-tunnel
+        # provisioner — the public front is a reconciled cloudflared unit, not a
+        # hand-made one. Behavioral (a spy), not a brittle getsource text check.
+        import contextlib
+        import cli_webterm_tunnel as tun
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            self._isolate(st, tmp)
+            spy = []
+            st.enter_context(m.patch.object(
+                tun, "setup_webterm_owner_tunnel", lambda run=None: spy.append(True)))
+            # Access mode needs no tailscale IP; the default flag is now True.
+            self.assertTrue(w.setup_webterm_service(run=self._RunRec(ip="")))
+            self.assertEqual(spy, [True])       # tunnel provisioned in access mode
+
+    def test_password_mode_does_not_provision_owner_tunnel(self):
+        import contextlib
+        import cli_webterm_tunnel as tun
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            self._isolate(st, tmp)
+            st.enter_context(m.patch.object(w, "OWNER_GATEWAY_ACCESS_MODE", False))
+            spy = []
+            st.enter_context(m.patch.object(
+                tun, "setup_webterm_owner_tunnel", lambda run=None: spy.append(True)))
+            self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
+            self.assertEqual(spy, [])           # password mode never touches the tunnel
 
 
 class TestTabSwitchingUX(unittest.TestCase):

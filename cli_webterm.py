@@ -92,7 +92,13 @@ WEBTERM_LOGIN_USER = "zbynek"
 # 127.0.0.1:8080, and the DNS grey A-record is cut over to a proxied CNAME onto
 # that tunnel — all proven live first. See cli_webterm_access.WEBTERM_ACCESS_APPS
 # ['owner'].
-OWNER_GATEWAY_ACCESS_MODE = False
+#
+# FLIPPED TRUE at go-live (#635, 2026-08-23): the dedicated `webterm-owner`
+# cloudflared tunnel (WEBTERM_OWNER_TUNNEL_UUID) is stood up + managed, the DNS
+# grey A-record is cut over to a proxied CNAME onto it, and the Access app is live
+# — so a routine install now correctly provisions the owner gateway in loopback +
+# Access mode AND the managed tunnel that fronts it (setup_webterm_owner_tunnel).
+OWNER_GATEWAY_ACCESS_MODE = True
 # #613 REOPEN-2: a tmux CLIENT of C x R rows shows an (R - status_rows)-row
 # WINDOW; the fleet runs the default 1-row status line (airuleset never sets
 # `status off`), and the owner's live Windows-Terminal client is 176x51 -> a
@@ -124,6 +130,14 @@ WEBTERM_GATEWAY_SERVICE_TEMPLATE = REPO_DIR / "settings" / "webterm-gateway.serv
 # #584: the #579 static-dashboard http.server unit is superseded by the gateway;
 # its stale copy is removed at install (kept as a constant only for that cleanup).
 WEBTERM_OLD_DASH_SERVICE_DEST = Path.home() / ".config" / "systemd" / "user" / "webterm-dash.service"
+
+# #635: the MANAGED cloudflared tunnel provisioning (shared render helpers + the
+# OWNER provisioner + the owner-tunnel path constants) lives in its OWN leaf
+# cli_webterm_tunnel.py — the same size-cap-driven leaf split the webterm code
+# already uses (cli_webterm_david / _access / _profiles / _gateway). It is imported
+# LAZILY inside setup_webterm_service (no module-level cycle: the tunnel leaf imports
+# cli_webterm lazily too). The david lane's tunnel provisioner (cli_webterm_david)
+# reuses the same render helpers.
 
 
 # --------------------------------------------------------------------------- #
@@ -1118,6 +1132,15 @@ def setup_webterm_service(run=None):
         if rc != 0:
             print("  webterm: systemctl restart %s FAILED (new config may not be "
                   "live): %s" % (svc, (err or "").strip()), file=sys.stderr)
+
+    # #635: in Access mode the public front is the MANAGED cloudflared tunnel —
+    # provision it here (prereq-gated no-op until the creds JSON exists) so a routine
+    # install reconciles it, and it survives reboot. A tunnel skip does NOT fail the
+    # gateway (the loopback gateway still serves for the tunnel to front). Lazy import
+    # of the tunnel leaf avoids a module-level cycle.
+    if access_mode and ok_all:
+        import cli_webterm_tunnel
+        cli_webterm_tunnel.setup_webterm_owner_tunnel(run=run)
 
     if ok_all:
         if access_mode:
