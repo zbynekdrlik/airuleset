@@ -24,6 +24,7 @@ import cli_webterm_david as d  # noqa: E402
 import cli_webterm_profiles as p  # noqa: E402
 import cli_webterm_tunnel as tun  # noqa: E402
 import cli_filedrop_watchdog as fw  # noqa: E402
+import cli_binary_installers as binstall  # noqa: E402  (#614 ttyd auto-install)
 
 
 class TestDavidUnitRender(unittest.TestCase):
@@ -317,6 +318,41 @@ class TestDavidDropInInvariant638(unittest.TestCase):
         unit = d.render_david_ttyd_unit()
         self.assertIn("Environment=PATH=%h/.local/bin:", unit)
         self.assertNotIn(".service.d", unit)
+
+
+class TestDavidTtydAutoInstall(unittest.TestCase):
+    """#614 (owner decision 2026-08-23, Approach 2): auto-install the ttyd
+    BINARY into ~/.local/bin so a fresh subdev re-provision no longer depends on
+    the #612 hand install. It runs BEFORE the prerequisite gate (which REQUIRES
+    ttyd) and is best-effort/non-fatal, exactly how cmd_install calls the
+    ffmpeg/claude installers."""
+
+    def test_installer_runs_before_the_prerequisite_gate(self):
+        # Order is load-bearing: prerequisites_ready() gates on ttyd being
+        # PRESENT, so a fresh (ttyd-absent) box would no-op the gate forever
+        # unless the binary is installed FIRST.
+        order = []
+
+        def fake_gate():
+            order.append("gate")
+            return False, "not the gateway account"
+
+        with m.patch.object(binstall, "ensure_ttyd_static_binary",
+                            lambda *a, **k: order.append("install")), \
+                m.patch.object(d, "prerequisites_ready", side_effect=fake_gate):
+            self.assertFalse(d.setup_webterm_david_service())
+        self.assertEqual(order, ["install", "gate"])
+
+    def test_installer_failure_never_breaks_setup(self):
+        # Best-effort/non-fatal: a raise inside the installer must not crash the
+        # never-raises setup — it just no-ops on the gate as usual, touching no
+        # systemd.
+        with m.patch.object(binstall, "ensure_ttyd_static_binary",
+                            side_effect=RuntimeError("network down")), \
+                m.patch.object(fw, "_whoami", lambda: "marek"), \
+                m.patch.object(fw, "_run_systemctl",
+                               side_effect=AssertionError("must not touch systemd")):
+            self.assertFalse(d.setup_webterm_david_service())   # must not raise
 
 
 if __name__ == "__main__":
