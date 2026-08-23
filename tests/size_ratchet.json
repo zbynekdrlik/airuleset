@@ -109,7 +109,7 @@
     "tests/test_goal_sweep_hermeticity.py": 74,
     "tests/test_goal_turn_boundary.py": 121,
     "tests/test_goal_undeterminable_pane.py": 111,
-    "tests/test_handover_proposal_rules.py": 921,
+    "tests/test_handover_proposal_rules.py": 923,
     "tests/test_hook_state_cleanup.py": 250,
     "tests/test_hosted_reply_delivery.py": 268,
     "tests/test_item95_item9_question_skill.py": 218,

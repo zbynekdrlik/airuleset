@@ -902,9 +902,11 @@ class TestApprovalQuestionNamesTargetThreadSeparately(TestCase):
     def test_standard_vlakno_line_format(self):
         w = self._bullet_window()
         # ASCII-safe tokens of the owner's standard line (avoid fancy-quote
-        # matching): the label, the example name, and the parent+PROD context
+        # matching). Both occur ONCE in the R2 window and vanish together if the
+        # `Vlákno:` example line is reverted, so the method keeps real teeth. (A
+        # bare "Tabula objednavok 1" assertion was dropped — that token also
+        # appears in the incident sentence, so it was toothless; #632 review.)
         self.assertIn("Vlákno:", w)
-        self.assertIn("Tabula objednavok 1", w)
         self.assertIn("(pod IT-support, montalu PROD)", w)
 
     def test_applies_to_the_approval_question_for_every_message(self):
