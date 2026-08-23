@@ -3977,9 +3977,11 @@ def _watchdog_ops_wait_fetch(cwd):
     `--ops-wait` prints `number<TAB>createdAt<TAB>action<TAB>reason<TAB>title`
     per member (oldest-first); field 0 is the issue number, field 3 the reason
     (which carries a ` stale!` warning for a member with no fresh (≤24h) stream
-    push — #570). Returns a list of `{"number": int, "stale": bool}` so the job
-    20 nudge can NAME the stale members; the sibling `ops_wait_recheck` helpers
-    accept BOTH this dict shape AND a legacy bare `int` (back-compat). A None
+    push — #570 — and/or a ` gk-handoff!` warning for a member ALSO carrying a
+    gk hand-off label — #636). Returns a list of `{"number": int, "stale": bool,
+    "gk_handoff": bool}` so the job 20 nudge can NAME the stale + gk-handoff
+    members; the sibling `ops_wait_recheck` helpers accept BOTH this dict shape
+    AND a legacy bare `int` (back-compat). A None
     return (non-zero exit — the #181 untrustworthy-empty refusal — or an
     unparsable line) is UNDETERMINED and the nudge job fails safe to no-nudge.
     An empty but SUCCESSFUL result (exit 0, no lines) returns `[]` (genuinely no
@@ -4022,11 +4024,12 @@ def _watchdog_ops_wait_fetch(cwd):
             return None   # a malformed line -> undetermined, never a partial set
         # `--ops-wait` always prints the FULL 5-field form (reason_fn is always
         # given), so field 3 IS the reason column (`ops-wait`/`acceptance` +
-        # optional ` stale!`). Require >=5 fields so a hypothetical degraded
-        # 4-field line (title at index 3) can never be misread as `stale!`
-        # (#570 review nit); anything shorter -> not stale.
+        # optional ` gk-handoff!` (#636) + optional ` stale!`). Require >=5 fields
+        # so a hypothetical degraded 4-field line (title at index 3) can never be
+        # misread as a flag (#570 review nit); anything shorter -> no flag.
         reason = parts[3] if len(parts) >= 5 else ""
-        members.append({"number": num, "stale": "stale!" in reason})
+        members.append({"number": num, "stale": "stale!" in reason,
+                        "gk_handoff": "gk-handoff!" in reason})
     return members
 
 
@@ -5103,6 +5106,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _stream_self_login as _stream_self_login,
     _issue_comment_ages as _issue_comment_ages,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
+    _gk_handoff_ops_wait_flagged as _gk_handoff_ops_wait_flagged,
     _authority_marker as _authority_marker,
     resolve_authority as resolve_authority,
     cmd_authority as cmd_authority,
