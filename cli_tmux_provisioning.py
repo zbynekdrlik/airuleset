@@ -491,11 +491,22 @@ def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
     # #591: NO `destroy-unattached` line -- the global option is removed; the
     # base session must inherit tmux's default `off` (see the module comment
     # above), and the webterm clone self-cleans per-session instead.
+    # #646: `mouse on` is the managed FLEET-WIDE default -- the owner wants the
+    # scroll-wheel to reach tmux's copy-mode scrollback over ssh (`kolieskom cez
+    # ssh sa to blbo pouziva`; #267 built the Shift+PgUp keybind for the SAME
+    # complaint, this adds the wheel). The `#`-comment records the ONE caveat
+    # (native text selection then needs Shift+drag) right by the line, per the
+    # ticket. UNLIKE window-size this is a plain server/session option toggle --
+    # it also carries a live-apply (below), safe for the same reason as
+    # history-limit / the bind-keys.
     return (
         f"{TMUX_MARK_START}\n"
         f"set-option -g history-limit {limit}\n"
         f"{window_size_line}"
         f"set-option -g default-size {default_size}\n"
+        "# #646: mouse on -- scroll-wheel reaches tmux's scrollback over ssh. Native\n"
+        "# text selection then needs Shift+drag (a plain drag goes to tmux copy-mode).\n"
+        "set-option -g mouse on\n"
         f"{keybind_lines}\n"
         f"{popup_lines}\n"
         f"{TMUX_MARK_END}"
@@ -588,7 +599,9 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
                               default_size: str = TMUX_DEFAULT_SIZE,
                               run=None) -> bool:
     """Ensure `~/.tmux.conf` carries the managed tmux block: history-limit
-    (#235), default-size (#236), AND `window-size manual` (#586, restored by
+    (#235), default-size (#236), `mouse on` (#646 -- the fleet-wide
+    scroll-wheel-into-scrollback default, ALSO live-applied), AND `window-size
+    manual` (#586, restored by
     #613 REOPEN-2 -- the owner's fixed-size invariant, version-gated so a tmux
     3.4 box that would crash at conf-parse never receives the line) -- and UNSETS
     any stale global destroy-unattached (#591 self-heal; the conf no longer
@@ -617,6 +630,15 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     for the next server start; EXISTING panes keep their creation-time
     limit (tmux has no way to grow an existing pane's history buffer in
     place). This is a server OPTION set, never a keystroke into any pane.
+
+    #646: `mouse on` is live-applied the SAME way (`set-option -g mouse on`),
+    for the SAME reason -- a running tmux never re-reads the conf, so a running
+    session picks up the wheel-scroll into scrollback immediately at
+    install/push without a restart. Same safety class as history-limit (a plain
+    option toggle -- no geometry recalc, no screen redraw), proven live on
+    dev2 by the supervisor. SET, never UNSET: the fleet default is `on`, a
+    permanent latch is DESIRED (unlike #615's temporary per-session webterm
+    flip), so there is no revert path.
 
     #591: the global destroy-unattached is UNSET (`set-option -gu`) right
     after history-limit -- not SET to any value. #254 introduced a global
@@ -719,6 +741,22 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         # 3.4 crash) -- which is why window-size stays conf-only (never live-
         # applied) while this is safe.
         ["tmux", "set-option", "-gwu", "aggressive-resize"],
+        # #646: SET the managed fleet-wide default `mouse on` on any running
+        # server, so an already-running session picks up wheel-scroll into
+        # tmux's scrollback immediately at install/push -- never a restart (a
+        # running tmux never re-reads the conf; the conf line above only takes
+        # effect at the next server start). SAFE to live-apply, same class as
+        # history-limit above and the bind-keys below and UNLIKE window-size: a
+        # plain server/session option toggle -- it does not touch any window's
+        # geometry, force a recalculate_sizes() pass, or read/write anything CC's
+        # renderer has drawn. Proven live: the supervisor ran exactly
+        # `tmux set-option -g mouse on` on dev2's real server (read-back `on`)
+        # with no disruption. SET (never UNSET/`off`) -- the fleet default is on;
+        # a permanent latch is the DESIRED state, so no revert path (unlike
+        # #615's temporary per-session webterm clone flip). It sits AFTER the two
+        # self-heal UNSETs so calls[1..3] (history-limit + the two self-heals)
+        # keep their positions; mouse is calls[4].
+        ["tmux", "set-option", "-g", "mouse", "on"],
         # #613 REOPEN-2: window-size is NEVER live-applied (no `-gu`/`-g` call).
         # The first reopen live-UNSET it (`set-option -gu window-size`) to force a
         # running server to `latest`; that is the OPPOSITE of the owner's restored
