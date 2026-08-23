@@ -1071,6 +1071,15 @@ def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=N
 # gk-request lane (#191/#223 fold both into the same gk bucket).
 _GK_HANDOFF_LABELS = ("needs-gatekeeper", "ready-for-review")
 
+# #636 review 🟡: a `prio:bounce` OVERRIDES a co-present gk hand-off label back to
+# "the STREAM's own court" (the #313 pt-2 override that `_slice_mine_and_handed`
+# and NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS already honour — a bounced ticket is
+# NOT counted in gk). So a bounced ticket is NEVER post-release limbo: it must be
+# REWORKED in I, not re-handed-off. Excluding it keeps the gk-handoff! flag
+# consistent with the handed/gk count and stops the nudge driving a premature
+# re-hand-off (a bounce↔hand-off loop).
+_GK_HANDOFF_BOUNCE_OVERRIDE = "prio:bounce"
+
 
 def _gk_handoff_ops_wait_flagged(rows):
     """The set of ops-wait (W) member numbers to tag `gk-handoff!` (#636) — a
@@ -1091,14 +1100,19 @@ def _gk_handoff_ops_wait_flagged(rows):
 
     Requires BOTH `ops-wait` AND a gk label present, so the function is correct
     standalone (a genuine contradiction), not merely "the caller passed the W
-    bucket". Never a false accusation ("nikdy falošný", the #539/#570 bias): a
-    missing/malformed `labels` value on a row is simply not flagged."""
+    bucket". A co-present `prio:bounce` (#636 review 🟡) EXCLUDES the row — a
+    bounced ticket is back in the stream's own court (the #313 override the
+    handed/gk count already honours), never a gk hand-off. Never a false
+    accusation ("nikdy falošný", the #539/#570 bias): a missing/malformed
+    `labels` value on a row is simply not flagged."""
     flagged = set()
     for number, row in (rows or {}).items():
         labels = row.get("labels") if isinstance(row, dict) else None
         names = {(lb or {}).get("name") for lb in (labels or [])
                  if isinstance(lb, dict)}
-        if "ops-wait" in names and any(lb in names for lb in _GK_HANDOFF_LABELS):
+        if ("ops-wait" in names
+                and _GK_HANDOFF_BOUNCE_OVERRIDE not in names
+                and any(lb in names for lb in _GK_HANDOFF_LABELS)):
             flagged.add(number)
     return flagged
 

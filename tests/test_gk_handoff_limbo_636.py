@@ -58,6 +58,16 @@ class GkHandoffDecider(unittest.TestCase):
         rows = _row(51, "needs-gatekeeper")
         self.assertEqual(cli_quals._gk_handoff_ops_wait_flagged(rows), set())
 
+    def test_bounced_ticket_is_not_flagged(self):
+        # #636 review 🟡: a `prio:bounce` ticket the gk returned to the STREAM's
+        # court is NOT a gk hand-off — it must be REWORKED in I, not re-handed-off.
+        # Mirror NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS / _slice_mine_and_handed's
+        # prio:bounce override, which already un-counts it from gk.
+        rows = _row(70, "ops-wait", "ready-for-review", "prio:bounce")
+        self.assertEqual(cli_quals._gk_handoff_ops_wait_flagged(rows), set())
+        rows2 = _row(71, "ops-wait", "needs-gatekeeper", "prio:bounce")
+        self.assertEqual(cli_quals._gk_handoff_ops_wait_flagged(rows2), set())
+
     def test_unreadable_labels_never_flagged(self):
         # fail-safe / never-false-accuse (#539 bias): missing/malformed labels.
         rows = {60: {"number": 60}, 61: {"number": 61, "labels": None},
