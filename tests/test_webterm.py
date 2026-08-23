@@ -373,10 +373,10 @@ class TestAttachSnippetBehavior(unittest.TestCase):
     for the live pty-driven regression proof of the actual chooser bug this
     fixes. #615's `mouse on` is RETARGETED, not dropped: it is now set on
     the shared base session itself (`-t "$T"`), since there is no more an
-    independent clone session to scope it to -- a recorded trade-off (the
-    owner's own ssh client also gains tmux mouse mode once a webterm
-    browser is connected), not a silent regression. See the `_ATTACH_BODY`
-    header comment in cli_webterm.py for the full record."""
+    independent clone session to scope it to. HONESTY NOTE (#647): post-#646
+    that session-scoped set is REDUNDANT with the fleet `-g mouse on` (the
+    owner's ssh is mouse-on by that global, not "gaining" it here). See the
+    `_ATTACH_BODY` header comment in cli_webterm.py + #648 for the record."""
 
     def setUp(self):
         import subprocess
