@@ -232,10 +232,13 @@ def evaluate(content, user):
 # zbynek stream). The message body over RPC is frequently a VARIABLE (`body=body_html`),
 # so "the body ENDS with the signature" is not reliably provable from the tool-
 # call content; the reliable, low-false-positive check is that a COMPLIANT
-# `ZbynekAI <N>` token appears ANYWHERE in the posting content (whether in the
-# body-building assignment or the call). This catches the incident (no signature
-# at all) AND a wrong number; the exact last-line placement stays the prose
-# rule's + review's job. Accepted residuals (documented, not chased, per #319):
+# `<word> <N>` token appears ANYWHERE in the posting content (whether in the
+# body-building assignment or the call), where `<word>` is the stream's IDENTITY
+# word (#641: `MarekAI` for a marek stream, default `ZbynekAI`; the `ZbynekAI`
+# examples in the residuals below are the DEFAULT case). This catches the incident
+# (no signature at all), a wrong number, AND the wrong identity; the exact
+# last-line placement stays the prose rule's + review's job. Accepted residuals
+# (documented, not chased, per #319):
 #   * the body assembled in a SEPARATE statement from the model literal (a two-
 #     statement ORM `chan = env['discuss.channel'].browse(cid); chan.message_post(`)
 #     is not detected -- the same unmeasurable->allow bias the create ORM detector
@@ -246,12 +249,19 @@ def evaluate(content, user):
 #     carries the signature example, so it passes; a stream rarely edits such a
 #     doc, and the fleet's unmeasurable->over-block direction is the safe one for
 #     a quality gate.
-#   * a RUNTIME-built signature (`f"ZbynekAI {n}"`, `"ZbynekAI "+str(n)`, a `%d`)
+#   * a RUNTIME-built signature (`f"ZbynekAI {n}"` / `f"MarekAI {n}"`, a `%d`)
 #     is OVER-blocked -- the signature literal is not visible in the tool-call
 #     content. This is the fail-safe (over-block) direction, off the recipe (which
-#     mandates a literal `ZbynekAI <N>` last line), and carries the
+#     mandates a literal `<word> <N>` last line), and carries the
 #     `airuleset:discuss-sig-ok` bypass.
-#   * because the check is "a compliant `ZbynekAI <N>` appears ANYWHERE in the
+#   * IDENTITY DEGRADATION (#641): if `notify` is unimportable / the owner is
+#     unresolvable, `signature_word` degrades to the DEFAULT `ZbynekAI`, so a
+#     marek stream (montalu4) is then OVER-blocked on its truthful `MarekAI <N>`
+#     post (the exact pre-#641 contradiction, but only in that rare fail-safe) --
+#     the same unmeasurable->default bias, bypassable via `airuleset:discuss-sig-ok`.
+#     The signature REQUIREMENT itself is never waived (the gate keys on
+#     stream_number, evaluated before + independently of owner resolution).
+#   * because the check is "a compliant `<word> <N>` appears ANYWHERE in the
 #     content", a MULTI-OP single tool-call can mask an unsigned post: two
 #     message_posts where only the first is signed, or a signed create/other op
 #     bundled with an unsigned post, both slip. The realistic single-post shape
@@ -265,11 +275,22 @@ SIGNATURE_WORD = "ZbynekAI"
 # token is the COMPACT form of the handover account's client-visible display
 # name ("Marek AI - odovzdavky" -> "MarekAI", odoo-erp #3864; the shared
 # "Zbynek AI - odovzdavky" account -> "ZbynekAI"), mirroring the existing
-# ZbynekAI compaction, never invented. Only marek needs an own word today; every
-# other owner (zbynek, david, ...) uses the DEFAULT SIGNATURE_WORD. This is NOT a
-# second stream->owner map -- the stream->owner resolution is reused wholesale
-# from notify.STREAM_NOTIFY_OWNER (via `_stream_owner`); this table only supplies
-# the display token, a genuinely NEW datum that lives nowhere else.
+# ZbynekAI compaction, never invented. Only marek needs an own word today: marek
+# is the ONLY stream with its OWN client-visible handover account (odoo-erp #3864).
+# EVERY other stream (zbynek's montaluN, david, simap, miva) posts under the SHARED
+# "Zbynek AI - odovzdavky" account (odoo-erp #3176/#3527), so the DEFAULT ZbynekAI
+# is the CORRECT identity for them, not a latent wrong-identity bug -- confirmed by
+# an odoo-erp search: no "DavidAI"/own-account ticket exists for any other stream.
+# WHEN a future stream gets its OWN handover account (the #3864 pattern repeated),
+# ADD its owner here. This is NOT a second stream->owner map -- the stream->owner
+# resolution is reused wholesale from notify.STREAM_NOTIFY_OWNER (via
+# `_stream_owner`); this table only supplies the display token, a genuinely NEW
+# datum that lives nowhere else. NB: STREAM_NOTIFY_OWNER also routes non-stream
+# accounts to marek (admin/stepan, forestshop-dev), so `_stream_owner("admin")`
+# -> "marek" -> "MarekAI" -- but that is UNREACHABLE: this table is only ever
+# consulted via `signature_word`, which is only ever called for a user that
+# already has a `cli_aliases.stream_number` (the gate is silent otherwise), and
+# admin/stepan/marek all resolve stream_number None. So the conflation never bites.
 _OWNER_SIGNATURE_WORD = {
     "marek": "MarekAI",
 }
