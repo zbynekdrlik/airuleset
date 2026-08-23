@@ -1211,6 +1211,72 @@ CF_INVALID_EN='invalid|not[[:space:]]+valid|isn.?t[[:space:]]+valid|does[[:space
 CF_INVALID="(${CF_INVALID_SK})|(${CF_INVALID_EN})"
 CF_MATCH_RE="((${CF_INVALID}).{0,60}(${CF_QCRED}))|((${CF_QCRED}).{0,60}(${CF_INVALID}))"
 CF_PROBE='v4/zones|accounts/[a-zA-Z0-9._-]+/tokens/verify|capabilit[a-z]*[[:space:]]+probe|UNVERIFIED:'
+# #634 -- NARRATION-CONTEXT disarm. The #631 MATCH fires on the invalid-credential
+# CLUSTER whether the message ASSERTS the verdict live ("Cloudflare token je
+# neplatný, vygeneruj nový") or merely DESCRIBES/QUOTES it (a summary of what the
+# gate does, an incident post-mortem, a playbook lesson) -- so a retrospective
+# sentence about THIS very gate over-blocked the supervisor twice, and would recur
+# in every future summary/playbook/report on the topic. #631's own comment already
+# lists this bare-prose case as an accepted OVER-block residual; #634 closes it.
+#
+# The fix RHYMES with #631: #631 refused to fire on two loose booleans and tied
+# the cloudflare SIGNAL to the credential via ADJACENCY; here a NARRATIVE FRAME
+# adjacent (within 64 chars, the #631 60-char scale) to the cluster DISARMS -- the
+# message is describing/quoting the claim, not asserting a live verdict. Run on
+# CF_FLAT (the SAME mention-stripped flattened text the cluster is matched on) so
+# the adjacency is measured against the cluster's own position; via msg_missing
+# (UNKNOWN -> "missing" -> proceed to BLOCK), a grep error fails toward MORE
+# scrutiny -- the correct fail-safe for a gate guarding an irreversible loss.
+#
+# A "frame" is deliberately a FRAMING CONSTRUCT, never a bare topic noun -- a
+# genuine live verdict-to-owner essentially never carries one adjacent to the
+# cluster, whereas "gate"/"incident"/"hook" ALONE routinely sit near unrelated
+# prose (an adversarial live claim that mentions unrelated gate/incident/hook work
+# must still block). The five families:
+#   NF_FRAMENOUN: the cluster is the OBJECT of a describing/quoting frame
+#                 ("správa, ktorá" / "message that|which" / "tvrdenie" /
+#                 "a claim that" / "the claim" / "prose that").
+#   NF_SUBJDECL : a subject NOUN declares it ("session tvrdila" / "správa vyhlási"
+#                 / "a session declared") -- session|správa within 20 of a
+#                 declare verb.
+#   NF_CONDREL  : a conditional/relative frame governs a declare verb ("keď ...
+#                 vyhlási" / "when a message says" / "that ... claims"). \bif\b /
+#                 \bwhen\b anchored so "verify"/"modify" never match; the trap
+#                 endpoint /user/tokens/verify carries NO declare verb, so the
+#                 #631 incident case still blocks.
+#   NF_GATEACT  : a gate/hook/detector that BLOCKS/PREVENTS/FIRES/CATCHES ("brána
+#                 blokuje", "gate blocks", "detektor zablokuje", "brána chytí") --
+#                 the bare noun is folded into a compound with a block verb, so
+#                 "git hook na commit" / "leak detector" (no block verb) never
+#                 disarm.
+#   NF_TOPIC    : narration-specific dev-process TOPIC words that ~never sit near a
+#                 live token verdict (playbook / over-block / stop-check /
+#                 post-mortem / retrospective). Bare "incident"/"hook"/"gate" and a
+#                 bare "#631"/"#634" ticket ref are DELIBERATELY EXCLUDED (common
+#                 words / a live claim may sit next to the ticket it works on) --
+#                 no real narration needs them standalone (each also carries a
+#                 frame/subject/topic marker).
+#
+# Accepted residuals (documented, not chased, per #319 -- honesty bar):
+#   OVER-block (fail-safe -- the credential's false-negative is irreversible;
+#   cheap fix is backtick / add a probe / reword):
+#     - narration whose only marker sits > 64 chars from the cluster;
+#     - a narration marker QUOTED inside backticks / double quotes is stripped by
+#       strip_mentions (inherited #96 use-vs-mention cost);
+#     - a gate word paired with an unusual block verb outside the compound's set.
+#   UNDER-block (misses a real claim -- the disarm is a FRAMING construct, so this
+#   needs an adversarially-shaped verdict):
+#     - a live verdict that puts a framing construct within 64 chars of the cluster
+#       (e.g. "the gate blocks it and the Cloudflare token is invalid") disarms --
+#       rare, and the author has to construct it; the message-scoped alternative
+#       (rejected) would under-block on any unrelated gate/incident mention.
+NF_FRAMENOUN='spr[aá]v.{0,3}[[:space:]]ktor|message.{0,3}[[:space:]](that|which)|tvrdeni|a[[:space:]]claim[[:space:]]that|the[[:space:]]claim|prose[[:space:]]that'
+NF_SUBJDECL='(session|spr[aá]v).{0,20}(tvrd|vyhl[aá]s|declar)'
+NF_CONDREL='(ke[dď]|\bwhen\b|\bif\b|ktor[aáeéyý]).{0,30}(vyhl[aá]s|tvrd[íia]|declar|\bsays?\b|\bsaid\b)'
+NF_GATEACT='(br[aá]n|\bgate\b|\bhook\b|detektor|\bdetector\b).{0,24}(blokuj|zablokuj|zabr[aá]n|\bblock|\bfires?\b|catch|chyt[íia])'
+NF_TOPIC='playbook|over-?block|stop-check|post-?mortem|retrospekt|retrospective'
+CF_NARR_SIG="${NF_FRAMENOUN}|${NF_SUBJDECL}|${NF_CONDREL}|${NF_GATEACT}|${NF_TOPIC}"
+CF_NARR_ADJ_RE="((${CF_NARR_SIG}).{0,64}(${CF_MATCH_RE}))|((${CF_MATCH_RE}).{0,64}(${CF_NARR_SIG}))"
 CF_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || CF_FLAT="$MSG_MENTION"
 CF_RAW_FLAT=$(tr '\n' ' ' <<<"$MSG") || CF_RAW_FLAT="$MSG"
 CF_MATCH=0
@@ -1226,8 +1292,13 @@ if [ "$CF_MATCH" = "1" ]; then
     # Exonerating: a capability probe / UNVERIFIED in the message -> DISARM.
     # msg_missing (unknown -> deny the exemption, fail-closed) is the same #194
     # taxonomy the #608/tester-handoff escapes use. On CF_RAW_FLAT so a
-    # code-fenced curl probe still disarms (acceptance b).
-    if LC_ALL=C.UTF-8 msg_missing "$CF_RAW_FLAT" -qiE "$CF_PROBE"; then
+    # code-fenced curl probe still disarms (acceptance b). #634 adds a SECOND
+    # disarm on CF_FLAT: a NARRATIVE FRAME adjacent to the cluster (the message
+    # DESCRIBES/QUOTES the claim, not asserts it live). BLOCK only when BOTH are
+    # absent -- no probe AND no narration frame. Both msg_missing calls fail
+    # toward "missing" on an UNKNOWN grep, so a grep error still BLOCKS.
+    if LC_ALL=C.UTF-8 msg_missing "$CF_RAW_FLAT" -qiE "$CF_PROBE" \
+       && LC_ALL=C.UTF-8 msg_missing "$CF_FLAT" -qiE "$CF_NARR_ADJ_RE"; then
         echo "VIOLATION: Vyhlásil si Cloudflare credential (token/kľúč) za neplatný/nefunkčný v správe pre OWNERA — BEZ doloženého CAPABILITY PROBE. Presne takto sa dnes STRATIL master token: owner ho zmazal z Bitwardenu na základe tohto tvrdenia a Cloudflare hodnotu tokenu už nikdy nezobrazí. \`GET /user/tokens/verify\` vracia \`Invalid API Token\` pre účtovo-viazané \`cfat_\` tokeny BY DESIGN — jeho odpoveď NIE JE verdikt (brať ju ako verdikt JE tá chyba). Než vyhlásiš token za neplatný, MUSÍŠ v tej istej správe ukázať CAPABILITY PROBE proti reálnemu zdroju: \`GET https://api.cloudflare.com/client/v4/zones\` (success:true + zóny = token funguje) ALEBO \`GET /accounts/<account_id>/tokens/verify\`. Ak probe naozaj zlyhal, ukáž ho + jeho výstup; ak ho nevieš spustiť, napíš \`UNVERIFIED: <čo> — <čo si skúsil>\`. NIKDY neber odpoveď z \`/user/tokens/verify\` ako verdikt." >&2
         echo "" >&2
         echo "  See skills/cloudflare-api-tokens §0/§2 (the verify endpoint LIES for cfat_ tokens; the /zones capability probe is the only verdict)." >&2
