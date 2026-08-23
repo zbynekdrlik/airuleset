@@ -1859,6 +1859,58 @@ class BookkeepingWritesExempt178(unittest.TestCase):
                           content="n" * 131072)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
+    # ---- #640: a DURABLE work-product dir joins the same bookkeeping ----
+    # exemption. A large main-session WRITE of a work-product (an unapproved
+    # client draft, a generated document, a recipe) must NOT be forced into
+    # /tmp (which the fleet subdev-disk-hygiene.sh + airuleset's own
+    # sweep_claude_scratch both delete) — the montalu6 loss. The durable home
+    # is ~/.claude/work-products/** (hook glob `*/.claude/work-products/*`):
+    # the sibling of the ~/.claude/projects/*/memory/* note exemption, and
+    # anchored UNDER .claude/ so it can never false-match a repo's own
+    # work-products/ subdir (the rejected `*/work-products/*` hole).
+
+    def test_write_to_claude_work_products_allowed_over_edit_max(self):
+        # the hook only STRING-MATCHES the path — the payload path is built
+        # literally, home-agnostic like the memory-note test above.
+        wp = str(Path.home() / ".claude" / "work-products" / "draft.md")
+        out = self._write(wp)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_claude_work_products_write_over_the_cap_is_blocked(self):
+        wp = str(Path.home() / ".claude" / "work-products" / "big.md")
+        out = self._write(wp, content="n" * (131072 + 1))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_claude_work_products_write_at_the_cap_is_allowed(self):
+        wp = str(Path.home() / ".claude" / "work-products" / "atcap.md")
+        out = self._write(wp, content="n" * 131072)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_claude_work_products_path_with_traversal_is_never_exempt(self):
+        # `.../.claude/work-products/../../../<repo>/app.py` string-matches
+        # `*/.claude/work-products/*` but resolves OUTSIDE it — the `*..*)`
+        # arm (first in the case) must still deny it (#178 review invariant).
+        trav = str(Path.home() / ".claude" / "work-products"
+                   / ".." / ".." / ".." / "app.py")
+        out = self._write(trav)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_repo_work_products_subdir_is_NOT_exempt(self):
+        # the REJECTED-approach hole: a bare `*/work-products/*` glob would
+        # exempt a repo's OWN work-products/ subdir, letting a main session
+        # stage implementation into the tree. The chosen `.claude`-anchored
+        # glob must NOT — this repo path carries `/work-products/` but no
+        # `.claude/work-products/`, so it stays BLOCKED.
+        out = self._write("/home/x/devel/some-repo/work-products/models.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_bare_home_work_products_is_NOT_exempt(self):
+        # ~/work-products (NOT under .claude) is likewise the rejected option
+        # and stays BLOCKED — only ~/.claude/work-products/** is durable-exempt.
+        bare = str(Path.home() / "work-products" / "draft.md")
+        out = self._write(bare)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
 
 class SmallBoundedReadsStillBlockedControls178(unittest.TestCase):
     """#178 controls: the nonexistent / oversize / glob / poisoned-token
