@@ -34,6 +34,14 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 INTERNALS = REPO / ".claude" / "rules" / "internals-hooks.md"  # #482: #419 decision moved here
+# #641: internals-hooks.md has a documented ROTATION lifecycle — when it nears
+# the byte cap, its OLDEST lessons are moved VERBATIM into the on-demand archive
+# (`.claude/rules-reference/internals-archive.md`, grep-able, never deleted). The
+# #419 decision was rotated there for cap room; a relocation to the sanctioned
+# archive is NOT the silent DROP this lock guards against, so the decision-
+# recorded check spans BOTH tiers of the durable store. A real drop (gone from
+# BOTH) still fails the anchors below.
+ARCHIVE = REPO / ".claude" / "rules-reference" / "internals-archive.md"
 AIRULESET = REPO / "airuleset.py"
 # #433 L-A: skill_names_for_user was relocated VERBATIM into this leaf, still
 # re-exported by airuleset.py — a relocation is not a deletion, so the #419
@@ -73,14 +81,19 @@ class TestMarketplacePayloadDeferRecorded(unittest.TestCase):
         )
 
     def test_decision_recorded_verbatim(self):
+        # #641: the durable store is TWO-TIER (the path-scoped rule + its
+        # rotation archive); the decision must be present verbatim in EITHER,
+        # never dropped from BOTH.
         text = INTERNALS.read_text(encoding="utf-8")
+        if ARCHIVE.exists():
+            text += "\n" + ARCHIVE.read_text(encoding="utf-8")
         for anchor in DECISION_ANCHORS:
             # assertTrue (not assertIn) so a failure does NOT dump the whole
-            # ~1MB internals file as the mismatch haystack.
+            # ~1MB internals/archive text as the mismatch haystack.
             self.assertTrue(
                 anchor in text,
-                "#419 decision anchor missing from the internals rule "
-                "(silently dropped?): %r" % anchor[:70],
+                "#419 decision anchor missing from BOTH the internals rule and "
+                "its archive (silently dropped?): %r" % anchor[:70],
             )
 
 
