@@ -289,5 +289,160 @@ class CloudflareInvalidDoctrinePointer(TestCase):
                       "the pointer must name the enforcing hook")
 
 
+# --- #634: narration/retrospective description of the gate/incident must PASS,
+# while a LIVE unprobed claim about a specific credential must stay BLOCKED. --- #
+# The #631 detector fires on the invalid-credential CLUSTER regardless of whether
+# the message ASSERTS the verdict (live) or merely DESCRIBES/QUOTES it (narration
+# about the mechanism, the incident, or the gate). It over-blocked the supervisor
+# twice while writing summaries of what the just-deployed #631 gate does. The fix
+# rhymes with #631's own move: instead of firing on a bare cluster, a NARRATIVE
+# FRAME adjacent to the cluster (a describing/quoting frame, a subject+declare, a
+# gate-action compound, or a dev-process TOPIC word) disarms it — never a bare
+# topic noun like "gate"/"incident"/"hook", which can sit near a genuine verdict.
+
+# NARRATION — must PASS (retrospective/mechanism/incident/gate prose). Each carries
+# a FRAMING construct adjacent to the cluster, NOT a probe.
+NARR_TICKET_SUMMARY = (
+    "Nová brána #631 je nasadená. Keď owner-facing správa vyhlási, že Cloudflare "
+    "token je neplatný, bez doloženej skúšky sa nepošle. Presne to dnes zachránilo token.")
+NARR_INCIDENT_PM = (
+    "V incidente #631 session tvrdila, že Cloudflare token je neplatný, a owner ho "
+    "na základe toho zmazal z Bitwardenu.")
+NARR_GATE_DESC = (
+    "Brána teraz zabráni tomu, aby odišla správa, ktorá tvrdí, že Cloudflare token "
+    "je neplatný, bez doloženej skúšky.")
+NARR_PLAYBOOK_SK = (
+    "Playbook lekcia: nikdy nevyhlás Cloudflare token za neplatný bez skúšky na "
+    "reálnom endpointe.")
+NARR_EN_GATE = (
+    "The new gate blocks any owner-facing message that says the Cloudflare token is "
+    "invalid unless the same message shows a real probe.")
+NARR_EN_INCIDENT = (
+    "In the #631 incident a session declared the Cloudflare token invalid and the "
+    "owner deleted it from his password manager as a result.")
+NARR_EN_OVER = (
+    "This is the fourth over-block of the #631 detector: retrospective prose that the "
+    "Cloudflare token is invalid must not be blocked.")
+NARR_SK_HOOK_FRAME = (
+    "Tento hook blokuje tvrdenie, že Cloudflare token je neplatný, ak chýba skúška.")
+NARR_EN_CLAIM_THAT = (
+    "The gate rejects a claim that the Cloudflare token is invalid unless a real "
+    "endpoint check backs it.")
+NARR_SK_POSTMORTEM = (
+    "Post-mortem: session vyhlásila Cloudflare token za neplatný, owner ho zmazal. "
+    "Odteraz to brána chytí.")
+NARR_EN_PLAYBOOK = (
+    "Playbook lesson: never declare the Cloudflare token invalid without a real "
+    "probe on the live endpoint.")
+NARR_SK_DETEKTOR_ACT = (
+    "Náš detektor teraz zablokuje správu, že Cloudflare token je neplatný, ak nemá "
+    "skúšku.")
+
+
+class CloudflareNarrationPasses634(TestCase):
+    """#634: retrospective/mechanism/incident/gate narration must NOT block."""
+
+    def _p(self, msg, why):
+        self.assertFalse(_blocked(_run(msg)), why)
+
+    def test_ticket_summary_of_gate_passes(self):
+        self._p(NARR_TICKET_SUMMARY,
+                "a summary of what the #631 gate does must not block")
+
+    def test_incident_postmortem_passes(self):
+        self._p(NARR_INCIDENT_PM,
+                "a past-tense description of the incident must not block")
+
+    def test_gate_description_prose_passes(self):
+        self._p(NARR_GATE_DESC,
+                "prose describing what the gate prevents must not block")
+
+    def test_playbook_lesson_sk_passes(self):
+        self._p(NARR_PLAYBOOK_SK, "a playbook lesson (imperative rule) must not block")
+
+    def test_en_gate_narration_passes(self):
+        self._p(NARR_EN_GATE, "'the gate blocks a message that says ...' must not block")
+
+    def test_en_incident_passes(self):
+        self._p(NARR_EN_INCIDENT, "'a session declared ...' narration must not block")
+
+    def test_en_over_block_prose_passes(self):
+        self._p(NARR_EN_OVER, "'over-block of the detector: prose that ...' must not block")
+
+    def test_sk_hook_frame_passes(self):
+        self._p(NARR_SK_HOOK_FRAME, "'hook blokuje tvrdenie, že ...' must not block")
+
+    def test_en_claim_that_frame_passes(self):
+        self._p(NARR_EN_CLAIM_THAT, "'a claim that ... is invalid' frame must not block")
+
+    def test_sk_postmortem_passes(self):
+        self._p(NARR_SK_POSTMORTEM, "'session vyhlásila ...' post-mortem must not block")
+
+    def test_en_playbook_passes(self):
+        self._p(NARR_EN_PLAYBOOK, "'never declare the token invalid ...' lesson must not block")
+
+    def test_sk_detektor_action_passes(self):
+        self._p(NARR_SK_DETEKTOR_ACT, "'detektor zablokuje správu, že ...' must not block")
+
+
+# LIVE CLAIMS — must stay BLOCKED even after the #634 narration disarm, INCLUDING
+# adversarial cases where an UNRELATED narration-topic word sits far from a genuine
+# unprobed verdict (the fail-safe direction: a real claim without a probe blocks).
+LIVE_PLAIN = "Cloudflare token je neplatný, vygeneruj prosím nový."
+LIVE_EN = "The Cloudflare token is invalid — please regenerate it."
+LIVE_FAR_GATE = (
+    "Pridal som nový gate na disk-hygienu. Mimochodom, tvoj Cloudflare token je "
+    "neplatný, vygeneruj nový, lebo inak sa nedostaneme na dashboard.")
+LIVE_FAR_INCIDENT = (
+    "Riešim incident na inom projekte. Nesúvisí, ale tvoj Cloudflare token je "
+    "neplatný, vygeneruj nový.")
+LIVE_HOOK_WORD_FAR = (
+    "Upravil som git hook na commit. Btw Cloudflare token je neplatný, treba nový.")
+LIVE_DETECTOR_FAR = (
+    "Nasadil som leak detector. Nesúvisiace: Cloudflare token je neplatný, vygeneruj nový.")
+LIVE_FAR_TICKET = (
+    "Dokončil som ticket #700 o cache. Cloudflare token je neplatný, treba nový, aby DNS fungovalo.")
+LIVE_WHEN_FOUND = (
+    "Keď som skúsil deploy, zistil som, že Cloudflare token je neplatný. Vygeneruj nový.")
+LIVE_EN_REPORT = (
+    "Deploy report: the Cloudflare API token is invalid, so the DNS sync failed. Make a new one.")
+
+
+class CloudflareLiveClaimStillBlocked634(TestCase):
+    """#634: the disarm must NOT weaken the gate — a live unprobed claim blocks,
+    even when an unrelated narration-topic word sits far from the cluster."""
+
+    def _b(self, msg, why):
+        self.assertTrue(_blocked(_run(msg)), why)
+
+    def test_plain_live_claim_blocks(self):
+        self._b(LIVE_PLAIN, "a bare live verdict with no probe must still block")
+
+    def test_en_live_claim_blocks(self):
+        self._b(LIVE_EN, "a bare EN live verdict with no probe must still block")
+
+    def test_far_gate_word_does_not_disarm(self):
+        self._b(LIVE_FAR_GATE, "an unrelated 'gate' far from a live verdict must not disarm")
+
+    def test_far_incident_word_does_not_disarm(self):
+        self._b(LIVE_FAR_INCIDENT, "an unrelated 'incident' far from a verdict must not disarm")
+
+    def test_far_hook_word_does_not_disarm(self):
+        self._b(LIVE_HOOK_WORD_FAR, "an unrelated 'hook' far from a verdict must not disarm")
+
+    def test_far_detector_word_does_not_disarm(self):
+        self._b(LIVE_DETECTOR_FAR, "an unrelated 'detector' far from a verdict must not disarm")
+
+    def test_far_ticket_ref_does_not_disarm(self):
+        self._b(LIVE_FAR_TICKET, "an unrelated ticket number must not disarm a live verdict")
+
+    def test_when_found_is_not_a_declare_frame(self):
+        self._b(LIVE_WHEN_FOUND,
+                "'keď som ... zistil, že token je neplatný' is a live finding, not narration")
+
+    def test_en_deploy_report_blocks(self):
+        self._b(LIVE_EN_REPORT, "a deploy report asserting the token is invalid must block")
+
+
 if __name__ == "__main__":
     main()
