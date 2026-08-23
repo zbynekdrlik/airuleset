@@ -74,14 +74,21 @@ is the FIRST rule for a reason).
   `write`/rename is never blocked; a `message_post` gets its own SIGNATURE check
   instead — see the next bullet, airuleset #609).
 - **Every message ENDS with a stream-identity signature line.** The LAST line of
-  EVERY message body is `ZbynekAI <N>`, so the owner sees at a glance WHICH stream
-  sent it and where to go resolve what the thread discusses (owner request,
-  airuleset #598: the shared sender display name "zbynekai odovzdavac" told the
-  owner nothing about which subdev owns it). `<N>` is the SAME stream number as the
+  EVERY message body is the stream's identity signature `<WORD> <N>` — `ZbynekAI <N>`
+  by DEFAULT, and `MarekAI <N>` for a marek-owned stream (montalu4, which posts via
+  Marek's OWN handover account "Marek AI - odovzdávky", airuleset #641 → odoo-erp
+  #3864). The owner sees at a glance WHICH stream sent it and where to go resolve
+  what the thread discusses (owner request, airuleset #598: a bare shared sender
+  display name told the owner nothing about which subdev owns it). `<WORD>` is the
+  compact form of the account's client-visible display name (mirroring ZbynekAI),
+  derived from the stream's OWNER via `notify.STREAM_NOTIFY_OWNER` — the SAME single
+  source that routes the stream's Discord notifications, NEVER a second map. Signing
+  the WRONG person's name (a marek stream signing ZbynekAI, or vice versa) is BLOCKED
+  too, not silently accepted. `<N>` is the SAME stream number as the
   thread-name suffix above — the trailing digits of the unix user, or "1" for an
-  UNNUMBERED base stream (montalu, david, simap) — marek does no client handovers, so
-  never signs: montaluN → N, davidN → N (base david → 1), simapN → N (base → 1),
-  miva1 → 1 / mivaN → N. It REUSES the project's existing stream number, NEVER a
+  UNNUMBERED base stream (montalu, david, simap): montaluN → N, davidN → N (base
+  david → 1), simapN → N (base → 1), miva1 → 1 / mivaN → N (montalu4 = Marek's own
+  stream, so it signs MarekAI 4). It REUSES the project's existing stream number, NEVER a
   second derivation — for a NUMBERED stream it matches `cli_aliases.short_target_alias`'s
   family regexes (montalu/david/simap/miva, each capturing that numeric suffix) and the
   #532 thread-name suffix; the base → 1 case is the #532/#537 convention's own mapping
@@ -94,8 +101,9 @@ is the FIRST rule for a reason).
   ("ZbynekAI N" display name, airuleset #598 → odoo-erp #4624) the signature stays as
   the short number line and the two layers do not conflict. The signature is now
   HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`, airuleset #609): a sub-dev
-  stream `message_post` to a `discuss.channel` that carries no `ZbynekAI <N>`
-  signature is BLOCKED before it reaches PROD — regardless of which skill you
+  stream `message_post` to a `discuss.channel` that carries no valid identity
+  signature (`ZbynekAI <N>` / `MarekAI <N>`, or that carries the WRONG identity, #641)
+  is BLOCKED before it reaches PROD — regardless of which skill you
   loaded, because the guard scans the actual post content (montalu6 shipped an
   UNSIGNED client message from a skill that never carried this rule). Bypass for a
   genuine internal/legacy post: `airuleset:discuss-sig-ok` in the content.
@@ -167,6 +175,8 @@ is the FIRST rule for a reason).
 
   The `ZbynekAI <N>` line is MANDATORY on this and every message (signature rule
   above) — it is the LAST line even here in the template a stream copies verbatim.
+  A marek-owned stream (montalu4) substitutes its own identity here: `MarekAI <N>`
+  (#641) — sign YOUR stream's word, never the wrong person's.
 
 - **A ticket that BOUND an Odoo Discuss thread may be CLOSED only after a
   closing note lands in that thread — the LAST message in the thread is ALWAYS
