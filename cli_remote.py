@@ -124,7 +124,7 @@ def _deployable_hosts(hosts=None):
     does NOT exist on the box (all three #537 renames — montalu1/simap1/david1
     — are now live, so no host is currently pending; the flag stays for any
     FUTURE rename). BOTH ssh paths —
-    `cmd_push()`'s deploy loop AND `provision_subdev_soniox_key()` — filter
+    `_deploy_to_all_remotes()` AND `provision_subdev_soniox_key()` — filter
     through here so a pending target is NEVER contacted: a password/pubkey
     attempt against a non-existent account is a fail2ban strike
     (#341/#300/#326), and the montalu family uses the shared default-key
@@ -148,7 +148,7 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     box that still runs meeting-analysis, e.g. newlevel@dev2 (#451).
 
     `control_opts` (#358): the SAME `_ssh_multiplex_opts()` list
-    `cmd_push()`'s own deploy loop built for this run, so an account
+    `_deploy_to_all_remotes()`'s deploy loop built for this run, so an account
     contacted here for a SECOND time (already dialed once by the deploy
     loop above) reuses that account's already-authenticated ssh master
     connection instead of paying for a fresh TCP+SSH handshake. Defaults
@@ -173,7 +173,7 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     `failed` accumulator shape.
 
     `skip_names` (#341): a set of `remote["name"]` values ALREADY known to
-    have failed ssh auth this run (`cmd_push()`'s own deploy loop passes its
+    have failed ssh auth this run (`_deploy_to_all_remotes()` passes its
     own `auth_failed` set here) -- each is skipped with a loud stderr line
     and a `failed` entry, never given a fresh ssh connection. A second
     connection attempt against an account the deploy loop already proved is
@@ -252,7 +252,7 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
         # #358 adversarial-review F2 (MAJOR): this call used to be a
         # single, un-retried attempt -- a connection-closed/reset drop
         # here permanently lost that account's soniox key, the exact hole
-        # cmd_push()'s own deploy-loop retry exists to close, one
+        # _deploy_to_all_remotes()'s deploy-loop retry exists to close, one
         # function over. Same bounded target-level retry shape as that
         # loop: only a genuine ssh connection-establishment failure
         # (never an ordinary write failure) gets retried, up to
@@ -611,177 +611,24 @@ def unregistered_home_accounts(host, home_listing):
     return sorted(names - registered - {"lost+found"})
 
 
-def cmd_push(args):
-    """Push to GitHub and deploy to all remote machines.
+def _deploy_to_all_remotes(failed, auth_failed):
+    """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
-    Fail-closed: `ruff check .` runs FIRST, then the full test suite — a lint
-    error or a single failing test aborts the push (and therefore the dev2
-    deploy) so unlinted/untested code never ships. `git push` here is an
-    internal subprocess call, so the PreToolUse pre-push-lint.sh hook (which
-    only fires for a real Bash `git push` tool invocation) never sees this
-    flow — this in-process gate is what actually protects it (issue #7)."""
+    Extracted VERBATIM from cmd_push (#633, follow-up to #630) to bring the
+    function under the ~300-line guideline; the deploy loop is the push-
+    critical path, so it was moved as its own reviewed unit rather than
+    riding on #630's leaf-move. It runs the per-remote ssh install (retry/
+    backoff + ControlMaster multiplex + the #347 /home-audit ride-along),
+    delivers the Soniox key (3b), owns the `control_dir` try/finally, and
+    exits non-zero if any remote failed. It MUTATES the passed `failed`
+    list + `auth_failed` set in place — cmd_push declares them (its own
+    local-install step already appends to `failed`) and passes them in, so
+    every failure across local install + this loop is counted together.
+    """
     import shlex
     import subprocess
     import time
-    import airuleset  # #433 L-E: cmd_install resident + REMOTE_HOSTS in cli_fleet, via facade
-
-    # 0a. Lint the whole repo — fail-closed before any push/deploy. Unlike the
-    # PreToolUse hook (which lints only the files a real `git push` command
-    # changed), this runs from inside the process itself, so a whole-repo
-    # check is the only way to guarantee it; keep it fast by keeping the repo
-    # clean (see the ruff cleanup commit for #7 — this is cheap post-cleanup).
-    print("Running ruff check (fail-closed before push)...")
-    try:
-        ruff_result = subprocess.run(
-            ["ruff", "check", "."],
-            cwd=str(REPO_DIR),
-        )
-    except FileNotFoundError:
-        print("  RUFF NOT INSTALLED — refusing to push unlinted code.", file=sys.stderr)
-        print("  Install ruff (e.g. `pip install ruff` / `pipx install ruff`) and retry.",
-              file=sys.stderr)
-        sys.exit(1)
-    if ruff_result.returncode != 0:
-        print("  RUFF FAILED — refusing to push unlinted code.", file=sys.stderr)
-        sys.exit(1)
-    print("  Ruff clean.")
-
-    # 0b. Run the full test suite — fail-closed before any push/deploy.
-    print("Running test suite (fail-closed before push)...")
-    import tempfile
-    # #271: `deliver_with_stash`/`_send_goal_verified` persist non-empty
-    # input-box content to `watchdog.draft_rescue_dir()` (default
-    # `~/.claude/draft-rescue/`) BEFORE any keystroke — and the live
-    # systemd api-watchdog timer executes THIS repo's working tree every
-    # 60s on this box, so a test process writing into the REAL directory
-    # would be indistinguishable from production activity. Rather than
-    # isolate every one of the ~19 test files whose fixtures transitively
-    # reach these two functions via `run_once`, point the WHOLE test-suite
-    # subprocess at one throwaway directory here — `AIRULESET_DRAFT_RESCUE_DIR`
-    # is `draft_rescue_dir()`'s own env-override, so this is the single
-    # place that has to know it exists.
-    with tempfile.TemporaryDirectory() as _rescue_tmp, \
-            tempfile.TemporaryDirectory() as _lock_tmp, \
-            tempfile.TemporaryDirectory() as _suite_tmp:
-        test_env = dict(os.environ)
-        test_env["AIRULESET_DRAFT_RESCUE_DIR"] = str(
-            Path(_rescue_tmp) / "draft-rescue")
-        # #400 owner kill-switch: the pre-push suite must stay green on a
-        # box whose owner has genuinely disabled the compact/goal jobs --
-        # the flag files are production state, not test state.
-        test_env["AIRULESET_TEST_IGNORE_DISABLE"] = "1"
-        # #385: `tests/test_autopilot_lock.py` spawns a REAL `autopilot-lock`
-        # CLI subprocess on every test, against a fresh never-reused repo
-        # path — without this, every push leaves a permanent orphaned lock
-        # (plus `.mutex`/symlink/directory artifacts) in the REAL system
-        # `/tmp`. `tests/conftest.py`'s `_isolate_autopilot_lock_dir` covers
-        # a `pytest`-direct run; `conftest.py` is NOT read by `unittest
-        # discover` at all, so this is the single place that has to know
-        # `AIRULESET_AUTOPILOT_LOCK_DIR` exists for THIS subprocess.
-        test_env["AIRULESET_AUTOPILOT_LOCK_DIR"] = str(
-            Path(_lock_tmp) / "autopilot-lock")
-        # #486 G1: the session-heartbeat producer (watchdog/session_status.py),
-        # now invoked by the notify-discord-pending / notify-compact-subagent-
-        # boundary / session-start-fetch hooks, writes
-        # ~/.claude/session-status/<sid>.json via AIRULESET_SESSION_STATUS_DIR.
-        # Existing TestCase tests that spawn those hooks would otherwise litter
-        # the REAL home under `unittest discover` (which does not read
-        # conftest.py's own isolation fixture) — same single-place-that-knows
-        # rule as the two env-overrides above.
-        test_env["AIRULESET_SESSION_STATUS_DIR"] = str(
-            Path(_lock_tmp) / "session-status")
-        # #548 CORE (dual-coverage): conftest.py's session-scoped tempfile
-        # redirect is pytest-only and is NEVER read by `unittest discover`, so
-        # this is the single place the push gate's own ~459 raw
-        # `tempfile.mkdtemp`/`mkstemp` call sites are contained — point the
-        # WHOLE subprocess at a per-run TMPDIR removed on context exit.
-        test_env["TMPDIR"] = str(_suite_tmp)
-        # #629: bracket the suite subprocess with a tracked-tree content
-        # fingerprint (as tightly as possible around subprocess.run) so a
-        # concurrent integration mutating the shared checkout MID-RUN is
-        # reported as its own cause, not as a masquerading test failure.
-        _fp_before = _tracked_tree_fingerprint(REPO_DIR)
-        test_result = subprocess.run(
-            [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
-            cwd=str(REPO_DIR), env=test_env,
-        )
-        _fp_after = _tracked_tree_fingerprint(REPO_DIR)
-        # #548 point 3 — measure the leak INSIDE the with (before _suite_tmp is
-        # removed); the per-run dir is unique + private to this subprocess, so
-        # its leftover count is the suite's litter with zero shared-box noise.
-        _litter_ok, _litter_count = _check_push_tmpdir_litter(_suite_tmp)
-    # #629: classify tree-moved / tests-failed / clean (precedence + rationale
-    # in _classify_push_gate_outcome). A tree-moved verdict is reported FIRST so
-    # the race never masquerades as a regression; the litter guard (#548) stays
-    # its own branch below, reached only after a clean verdict, so tree-moved
-    # beats it too.
-    _gate_ok, _gate_reason, _gate_msg = _classify_push_gate_outcome(
-        test_result.returncode, _fp_before, _fp_after)
-    if not _gate_ok:
-        print(_gate_msg, file=sys.stderr)
-        sys.exit(1)
-    if not _litter_ok:
-        print("  TMPDIR LITTER GUARD: the test suite leaked %d entries into its "
-              "per-run TMPDIR (cap %d) — a `tempfile.mkdtemp` without cleanup "
-              "regression (#548). Fix the leaking test(s) (addCleanup / "
-              "TemporaryDirectory) or raise AIRULESET_PUSH_TMPDIR_LITTER_CAP "
-              "deliberately." % (_litter_count, _effective_push_tmpdir_cap()),
-              file=sys.stderr)
-        sys.exit(1)
-    print(_gate_msg)
-
-    # 1. Push to GitHub
-    print("\nPushing to GitHub...")
-    result = subprocess.run(
-        ["git", "push", "origin", "main"],
-        cwd=str(REPO_DIR),
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"  FAILED: {result.stderr.strip()}")
-        sys.exit(1)
-    print(f"  {result.stdout.strip() or result.stderr.strip()}")
-
-    # #263: `failed` accumulates every remote (and now the local install
-    # itself) that did NOT deploy cleanly. An adversarial review of the
-    # first version of this timeout fix caught a real regression it
-    # introduced: BEFORE, an uncaught TimeoutExpired propagated out of
-    # cmd_push() with a loud traceback and a non-zero exit — impossible to
-    # miss. The `continue` below (needed so one slow remote can't abort
-    # deployment to every REMAINING host) turned that into a single line
-    # among hundreds, with the run still ending "All deployments complete."
-    # at exit 0 — a SILENT partial deploy. Tracking every failure and
-    # exiting non-zero if any occurred restores the "impossible to miss"
-    # property without reintroducing the abort-the-whole-loop defect.
-    failed = []
-    # #341: host NAMES whose deploy leg failed with a genuine ssh AUTH
-    # failure this run ("Permission denied" — never a timeout, never a
-    # plain remote-command failure, both of which mean auth actually
-    # succeeded). Passed to provision_subdev_soniox_key() below so it never
-    # opens a SECOND connection against an account already proven
-    # unprovisioned/unreachable this run — contacting the same known-bad
-    # account twice (once here, once again independently in the soniox
-    # phase) is what compounded the fail2ban risk this set exists to close.
-    auth_failed = set()
-
-    # 2. Install locally
-    # Adversarial-review CRITICAL finding (plugin-marketplace fix,
-    # 2026-08-06): cmd_install() can now sys.exit(1) on a still-failing
-    # managed-plugin install (script-failure-policy). Left uncaught here,
-    # that SystemExit propagated straight out of cmd_push() BEFORE the
-    # remote-deploy loop below ever ran — git had ALREADY pushed to
-    # GitHub by this point, so main would advance and ZERO of the 9 remote
-    # hosts (including montalu2/montalu3/montalu4, the very accounts this
-    # fix exists for) would ever deploy it. Give the local step the exact
-    # same "track it, keep going" treatment the remote loop already gets.
-    print("\nInstalling locally...")
-    try:
-        airuleset.cmd_install(args)
-    except SystemExit as e:
-        if e.code:
-            print(f"  FAILED: local install exited {e.code} — continuing to remotes")
-            failed.append(("local(dev1)", "install rc=%s" % e.code))
+    import airuleset  # #433 L-E: REMOTE_HOSTS read via the airuleset facade
 
     # 3. Deploy to each remote
     # #358: one per-run ssh ControlMaster socket directory, shared by the
@@ -1013,3 +860,176 @@ def cmd_push(args):
         # exits (success, a failed target, or `sys.exit(1)` above).
         if control_dir:
             shutil.rmtree(control_dir, ignore_errors=True)
+
+
+def cmd_push(args):
+    """Push to GitHub and deploy to all remote machines.
+
+    Fail-closed: `ruff check .` runs FIRST, then the full test suite — a lint
+    error or a single failing test aborts the push (and therefore the dev2
+    deploy) so unlinted/untested code never ships. `git push` here is an
+    internal subprocess call, so the PreToolUse pre-push-lint.sh hook (which
+    only fires for a real Bash `git push` tool invocation) never sees this
+    flow — this in-process gate is what actually protects it (issue #7)."""
+    import subprocess
+    import airuleset  # #433 L-E: cmd_install resident + REMOTE_HOSTS in cli_fleet, via facade
+
+    # 0a. Lint the whole repo — fail-closed before any push/deploy. Unlike the
+    # PreToolUse hook (which lints only the files a real `git push` command
+    # changed), this runs from inside the process itself, so a whole-repo
+    # check is the only way to guarantee it; keep it fast by keeping the repo
+    # clean (see the ruff cleanup commit for #7 — this is cheap post-cleanup).
+    print("Running ruff check (fail-closed before push)...")
+    try:
+        ruff_result = subprocess.run(
+            ["ruff", "check", "."],
+            cwd=str(REPO_DIR),
+        )
+    except FileNotFoundError:
+        print("  RUFF NOT INSTALLED — refusing to push unlinted code.", file=sys.stderr)
+        print("  Install ruff (e.g. `pip install ruff` / `pipx install ruff`) and retry.",
+              file=sys.stderr)
+        sys.exit(1)
+    if ruff_result.returncode != 0:
+        print("  RUFF FAILED — refusing to push unlinted code.", file=sys.stderr)
+        sys.exit(1)
+    print("  Ruff clean.")
+
+    # 0b. Run the full test suite — fail-closed before any push/deploy.
+    print("Running test suite (fail-closed before push)...")
+    import tempfile
+    # #271: `deliver_with_stash`/`_send_goal_verified` persist non-empty
+    # input-box content to `watchdog.draft_rescue_dir()` (default
+    # `~/.claude/draft-rescue/`) BEFORE any keystroke — and the live
+    # systemd api-watchdog timer executes THIS repo's working tree every
+    # 60s on this box, so a test process writing into the REAL directory
+    # would be indistinguishable from production activity. Rather than
+    # isolate every one of the ~19 test files whose fixtures transitively
+    # reach these two functions via `run_once`, point the WHOLE test-suite
+    # subprocess at one throwaway directory here — `AIRULESET_DRAFT_RESCUE_DIR`
+    # is `draft_rescue_dir()`'s own env-override, so this is the single
+    # place that has to know it exists.
+    with tempfile.TemporaryDirectory() as _rescue_tmp, \
+            tempfile.TemporaryDirectory() as _lock_tmp, \
+            tempfile.TemporaryDirectory() as _suite_tmp:
+        test_env = dict(os.environ)
+        test_env["AIRULESET_DRAFT_RESCUE_DIR"] = str(
+            Path(_rescue_tmp) / "draft-rescue")
+        # #400 owner kill-switch: the pre-push suite must stay green on a
+        # box whose owner has genuinely disabled the compact/goal jobs --
+        # the flag files are production state, not test state.
+        test_env["AIRULESET_TEST_IGNORE_DISABLE"] = "1"
+        # #385: `tests/test_autopilot_lock.py` spawns a REAL `autopilot-lock`
+        # CLI subprocess on every test, against a fresh never-reused repo
+        # path — without this, every push leaves a permanent orphaned lock
+        # (plus `.mutex`/symlink/directory artifacts) in the REAL system
+        # `/tmp`. `tests/conftest.py`'s `_isolate_autopilot_lock_dir` covers
+        # a `pytest`-direct run; `conftest.py` is NOT read by `unittest
+        # discover` at all, so this is the single place that has to know
+        # `AIRULESET_AUTOPILOT_LOCK_DIR` exists for THIS subprocess.
+        test_env["AIRULESET_AUTOPILOT_LOCK_DIR"] = str(
+            Path(_lock_tmp) / "autopilot-lock")
+        # #486 G1: the session-heartbeat producer (watchdog/session_status.py),
+        # now invoked by the notify-discord-pending / notify-compact-subagent-
+        # boundary / session-start-fetch hooks, writes
+        # ~/.claude/session-status/<sid>.json via AIRULESET_SESSION_STATUS_DIR.
+        # Existing TestCase tests that spawn those hooks would otherwise litter
+        # the REAL home under `unittest discover` (which does not read
+        # conftest.py's own isolation fixture) — same single-place-that-knows
+        # rule as the two env-overrides above.
+        test_env["AIRULESET_SESSION_STATUS_DIR"] = str(
+            Path(_lock_tmp) / "session-status")
+        # #548 CORE (dual-coverage): conftest.py's session-scoped tempfile
+        # redirect is pytest-only and is NEVER read by `unittest discover`, so
+        # this is the single place the push gate's own ~459 raw
+        # `tempfile.mkdtemp`/`mkstemp` call sites are contained — point the
+        # WHOLE subprocess at a per-run TMPDIR removed on context exit.
+        test_env["TMPDIR"] = str(_suite_tmp)
+        # #629: bracket the suite subprocess with a tracked-tree content
+        # fingerprint (as tightly as possible around subprocess.run) so a
+        # concurrent integration mutating the shared checkout MID-RUN is
+        # reported as its own cause, not as a masquerading test failure.
+        _fp_before = _tracked_tree_fingerprint(REPO_DIR)
+        test_result = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+            cwd=str(REPO_DIR), env=test_env,
+        )
+        _fp_after = _tracked_tree_fingerprint(REPO_DIR)
+        # #548 point 3 — measure the leak INSIDE the with (before _suite_tmp is
+        # removed); the per-run dir is unique + private to this subprocess, so
+        # its leftover count is the suite's litter with zero shared-box noise.
+        _litter_ok, _litter_count = _check_push_tmpdir_litter(_suite_tmp)
+    # #629: classify tree-moved / tests-failed / clean (precedence + rationale
+    # in _classify_push_gate_outcome). A tree-moved verdict is reported FIRST so
+    # the race never masquerades as a regression; the litter guard (#548) stays
+    # its own branch below, reached only after a clean verdict, so tree-moved
+    # beats it too.
+    _gate_ok, _gate_reason, _gate_msg = _classify_push_gate_outcome(
+        test_result.returncode, _fp_before, _fp_after)
+    if not _gate_ok:
+        print(_gate_msg, file=sys.stderr)
+        sys.exit(1)
+    if not _litter_ok:
+        print("  TMPDIR LITTER GUARD: the test suite leaked %d entries into its "
+              "per-run TMPDIR (cap %d) — a `tempfile.mkdtemp` without cleanup "
+              "regression (#548). Fix the leaking test(s) (addCleanup / "
+              "TemporaryDirectory) or raise AIRULESET_PUSH_TMPDIR_LITTER_CAP "
+              "deliberately." % (_litter_count, _effective_push_tmpdir_cap()),
+              file=sys.stderr)
+        sys.exit(1)
+    print(_gate_msg)
+
+    # 1. Push to GitHub
+    print("\nPushing to GitHub...")
+    result = subprocess.run(
+        ["git", "push", "origin", "main"],
+        cwd=str(REPO_DIR),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"  FAILED: {result.stderr.strip()}")
+        sys.exit(1)
+    print(f"  {result.stdout.strip() or result.stderr.strip()}")
+
+    # #263: `failed` accumulates every remote (and now the local install
+    # itself) that did NOT deploy cleanly. An adversarial review of the
+    # first version of this timeout fix caught a real regression it
+    # introduced: BEFORE, an uncaught TimeoutExpired propagated out of
+    # cmd_push() with a loud traceback and a non-zero exit — impossible to
+    # miss. The `continue` in the deploy helper below (needed so one slow remote can't abort
+    # deployment to every REMAINING host) turned that into a single line
+    # among hundreds, with the run still ending "All deployments complete."
+    # at exit 0 — a SILENT partial deploy. Tracking every failure and
+    # exiting non-zero if any occurred restores the "impossible to miss"
+    # property without reintroducing the abort-the-whole-loop defect.
+    failed = []
+    # #341: host NAMES whose deploy leg failed with a genuine ssh AUTH
+    # failure this run ("Permission denied" — never a timeout, never a
+    # plain remote-command failure, both of which mean auth actually
+    # succeeded). Passed to provision_subdev_soniox_key() in the deploy helper below so it never
+    # opens a SECOND connection against an account already proven
+    # unprovisioned/unreachable this run — contacting the same known-bad
+    # account twice (once here, once again independently in the soniox
+    # phase) is what compounded the fail2ban risk this set exists to close.
+    auth_failed = set()
+
+    # 2. Install locally
+    # Adversarial-review CRITICAL finding (plugin-marketplace fix,
+    # 2026-08-06): cmd_install() can now sys.exit(1) on a still-failing
+    # managed-plugin install (script-failure-policy). Left uncaught here,
+    # that SystemExit propagated straight out of cmd_push() BEFORE the
+    # remote-deploy loop below ever ran — git had ALREADY pushed to
+    # GitHub by this point, so main would advance and ZERO of the 9 remote
+    # hosts (including montalu2/montalu3/montalu4, the very accounts this
+    # fix exists for) would ever deploy it. Give the local step the exact
+    # same "track it, keep going" treatment the remote loop already gets.
+    print("\nInstalling locally...")
+    try:
+        airuleset.cmd_install(args)
+    except SystemExit as e:
+        if e.code:
+            print(f"  FAILED: local install exited {e.code} — continuing to remotes")
+            failed.append(("local(dev1)", "install rc=%s" % e.code))
+
+    _deploy_to_all_remotes(failed, auth_failed)

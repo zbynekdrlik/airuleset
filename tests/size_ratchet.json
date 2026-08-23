@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 6106,
+    "airuleset.py": 6107,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 99,
@@ -17,7 +17,7 @@
     "cli_push_gate.py": 218,
     "cli_quals.py": 1615,
     "cli_quals_cmd.py": 753,
-    "cli_remote.py": 1015,
+    "cli_remote.py": 1035,
     "cli_scratch_sweep.py": 1505,
     "cli_target_purge.py": 892,
     "cli_tmux_provisioning.py": 1250,
@@ -73,7 +73,7 @@
     "tests/test_deploy_watch_recipe.py": 218,
     "tests/test_design_before_code.py": 137,
     "tests/test_design_gate.py": 1599,
-    "tests/test_dev_env_provisioning.py": 1824,
+    "tests/test_dev_env_provisioning.py": 1843,
     "tests/test_discord_notify_check.py": 108,
     "tests/test_discord_reply.py": 1997,
     "tests/test_dispatch_floor.py": 601,

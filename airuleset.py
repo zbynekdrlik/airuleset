@@ -3520,6 +3520,7 @@ from cli_remote import (  # noqa: E402, F401
     _parse_home_names as _parse_home_names,
     _home_listing_trustworthy as _home_listing_trustworthy,
     unregistered_home_accounts as unregistered_home_accounts,
+    _deploy_to_all_remotes as _deploy_to_all_remotes,
     cmd_push as cmd_push,
 )
 

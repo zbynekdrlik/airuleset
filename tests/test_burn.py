@@ -234,7 +234,7 @@ class TestCmdBurnRegistration(unittest.TestCase):
 # #342: `_remote_ssh_prefix()` is the ONE shared ssh-command builder
 # `_burn_remote_cmd`/`_delegation_remote_cmd` both call — it never got the
 # same two per-connection retry-cap flags a sibling ticket (#341) already
-# added to `cmd_push`'s deploy loop and `provision_subdev_soniox_key()`:
+# added to `_deploy_to_all_remotes` and `provision_subdev_soniox_key()`:
 # `-o BatchMode=yes` on the identity (pubkey) branch (a failed pubkey
 # attempt must fail immediately, never fall through to an interactive
 # password retry) and `-o NumberOfPasswordPrompts=1` on the sshpass branch

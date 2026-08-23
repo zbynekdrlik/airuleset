@@ -486,7 +486,7 @@ class TestSonioxFlaggedNonSubdevHost(TestCase):
 # account's soniox delivery, precisely the hole #358's own ticket text
 # says the deploy loop's retry exists to close. Uses the SAME
 # `_is_ssh_transient_failure` classifier and `SSH_RETRY_MAX_ATTEMPTS`/
-# backoff as cmd_push()'s own deploy loop.
+# backoff as _deploy_to_all_remotes()'s own deploy loop.
 # ---------------------------------------------------------------------------
 
 class TestProvisionSubdevSonioxKeyRetry(TestCase):
