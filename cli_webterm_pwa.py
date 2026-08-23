@@ -134,6 +134,13 @@ def _png_bytes(width, height, pixels):
             + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b""))
 
 
+def _hex_rgba(h):
+    """`#RRGGBB` -> opaque `(r, g, b, 255)` — so the icon colours DERIVE from
+    CAMPBELL_THEME (single source of truth) instead of drifting literals."""
+    h = h.lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 255)
+
+
 def _dist_to_segment(px, py, x1, y1, x2, y2):
     dx, dy = x2 - x1, y2 - y1
     length2 = dx * dx + dy * dy
@@ -149,8 +156,9 @@ def render_icon_png(size, maskable=False):
     `maskable=True` insets the glyph further (a larger safe-zone margin) for the
     circular crop platforms apply to maskable icons."""
     s = int(size)
-    bg = bytes((0x0C, 0x0C, 0x0C, 255))            # Campbell background
-    fg = (0x16, 0xC6, 0x0C, 255)                   # Campbell brightGreen — vivid
+    # Derived from the palette so an edit to CAMPBELL_THEME propagates here too.
+    bg = bytes(_hex_rgba(w.CAMPBELL_THEME["background"]))      # Campbell black
+    fg = _hex_rgba(w.CAMPBELL_THEME["brightGreen"])            # vivid green glyph
     px = bytearray(bg * (s * s))
     pad = 0.28 if maskable else 0.20               # extra margin for maskable crop
     span = (1.0 - 2.0 * pad) * s

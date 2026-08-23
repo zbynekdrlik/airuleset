@@ -514,12 +514,16 @@ def _webterm_term_grid():
 # theme=` flag — so it is DAEMON-AGNOSTIC and survives a possible ttyd -> GoTTY
 # switch (#642). `background_color`/`theme_color` in the PWA manifest (#644)
 # reuse CAMPBELL_THEME["background"]. Exact values from the #643 issue body.
+# NB: xterm.js `ITheme` names the magenta slots `magenta`/`brightMagenta` — the
+# Windows-Terminal scheme's own `purple`/`brightPurple` keys are UNKNOWN to
+# xterm.js and would silently leave ANSI magenta at the xterm default. The VALUES
+# are the owner's Campbell purples; the KEYS are the xterm.js ones (#643 review).
 CAMPBELL_THEME = {
     "background": "#0C0C0C", "foreground": "#CCCCCC", "cursor": "#FFFFFF",
     "black": "#0C0C0C", "red": "#C50F1F", "green": "#13A10E", "yellow": "#C19C00",
-    "blue": "#0037DA", "purple": "#881798", "cyan": "#3A96DD", "white": "#CCCCCC",
+    "blue": "#0037DA", "magenta": "#881798", "cyan": "#3A96DD", "white": "#CCCCCC",
     "brightBlack": "#767676", "brightRed": "#E74856", "brightGreen": "#16C60C",
-    "brightYellow": "#F9F1A5", "brightBlue": "#3B78FF", "brightPurple": "#B4009E",
+    "brightYellow": "#F9F1A5", "brightBlue": "#3B78FF", "brightMagenta": "#B4009E",
     "brightCyan": "#61D6D6", "brightWhite": "#F2F2F2",
 }
 
@@ -571,7 +575,7 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <!-- #644: installable PWA — standalone window, no browser chrome. The manifest
      (per-domain name), icons and service worker are served by the gateway from
      the dash dir (behind Cloudflare Access). theme-color matches #643 Campbell. -->
-<link rel="manifest" href="/manifest.webmanifest">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
 <meta name="theme-color" content="#0C0C0C">
 <link rel="icon" href="/icon-192.png">
 <link rel="apple-touch-icon" href="/icon-192.png">

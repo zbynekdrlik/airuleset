@@ -7,10 +7,12 @@ wiring (manifest link + theme-color + SW registration in
 route contract with the gateway.
 """
 import json
+import math
 import struct
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -24,6 +26,29 @@ def _png_dims(b):
     assert b[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
     assert b[12:16] == b"IHDR", "no IHDR"
     return struct.unpack(">II", b[16:24])
+
+
+def _decode_rgba(b):
+    """Decode a filter-0, 8-bit RGBA PNG (what render_icon_png emits) to
+    (width, height, pixels-bytes). Concatenates IDAT chunks, inflates, and
+    strips the per-scanline filter byte (always 0/None here)."""
+    assert b[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height = struct.unpack(">II", b[16:24])
+    i, idat = 8, bytearray()
+    while i < len(b):
+        ln = struct.unpack(">I", b[i:i + 4])[0]
+        typ = b[i + 4:i + 8]
+        if typ == b"IDAT":
+            idat += b[i + 8:i + 8 + ln]
+        i += 12 + ln
+    raw = zlib.decompress(bytes(idat))
+    stride = width * 4
+    pixels = bytearray()
+    for y in range(height):
+        off = y * (stride + 1)
+        assert raw[off] == 0, "unexpected filter type"
+        pixels += raw[off + 1:off + 1 + stride]
+    return width, height, bytes(pixels)
 
 
 class TestManifest(unittest.TestCase):
@@ -79,11 +104,36 @@ class TestIcons(unittest.TestCase):
         self.assertEqual(_png_dims(pwa.render_icon_png(512, maskable=True)),
                          (512, 512))
 
-    def test_icon_has_both_background_and_glyph_pixels(self):
-        # Sanity: the PNG is not a solid block — it decodes and is non-trivial.
-        b = pwa.render_icon_png(192)
-        self.assertGreater(len(b), 200)             # real compressed raster
-        self.assertEqual(b[:8], b"\x89PNG\r\n\x1a\n")
+    def test_icon_actually_draws_a_glyph_on_the_background(self):
+        # Decode the raster and prove BOTH background AND foreground (glyph)
+        # pixels exist — a blank/solid icon (feature broken) would fail here.
+        fg = pwa._hex_rgba(w.CAMPBELL_THEME["brightGreen"])[:3]
+        bg = pwa._hex_rgba(w.CAMPBELL_THEME["background"])[:3]
+        width, height, px = _decode_rgba(pwa.render_icon_png(192))
+        n_fg = n_bg = 0
+        for j in range(0, len(px), 4):
+            rgb = (px[j], px[j + 1], px[j + 2])
+            if rgb == fg:
+                n_fg += 1
+            elif rgb == bg:
+                n_bg += 1
+        self.assertGreater(n_fg, 0, "no glyph pixels — icon is blank")
+        self.assertGreater(n_bg, 0, "no background pixels")
+
+    def test_maskable_glyph_stays_within_the_safe_zone(self):
+        # A maskable icon may be cropped to a circle (~center 80%); every glyph
+        # pixel must sit within radius 0.40 of the centre or it clips.
+        fg = pwa._hex_rgba(w.CAMPBELL_THEME["brightGreen"])[:3]
+        width, height, px = _decode_rgba(pwa.render_icon_png(512, maskable=True))
+        max_r = 0.0
+        for j in range(0, len(px), 4):
+            if (px[j], px[j + 1], px[j + 2]) == fg:
+                p = j // 4
+                x, y = p % width, p // width
+                r = math.hypot((x + 0.5) / width - 0.5, (y + 0.5) / height - 0.5)
+                max_r = max(max_r, r)
+        self.assertGreater(max_r, 0.0)              # a glyph is actually present
+        self.assertLess(max_r, 0.40, "maskable glyph escapes the safe zone")
 
 
 class TestDashboardHeadWiring(unittest.TestCase):
@@ -92,10 +142,18 @@ class TestDashboardHeadWiring(unittest.TestCase):
                 "local": True, "host": None, "user": None}]
         return w.render_dashboard_html(inv, ttyd_base="/t")
 
-    def test_head_links_the_manifest(self):
+    def test_head_links_the_manifest_with_credentials(self):
         html = self._dash()
         self.assertIn('rel="manifest"', html)
         self.assertIn(pwa.MANIFEST_FILE, html)
+        # The manifest is auth-gated, so the link MUST fetch with credentials or
+        # the browser's anonymous fetch fails and the app never becomes
+        # installable (MDN: use-credentials required for a gated manifest).
+        self.assertIn('crossorigin="use-credentials"', html)
+
+    def test_head_references_the_icon(self):
+        html = self._dash()
+        self.assertIn(pwa.ICON_192, html)          # drift-locked to the constant
 
     def test_head_has_campbell_theme_color(self):
         html = self._dash()

@@ -503,6 +503,21 @@ class TestGatewayIntegration(unittest.TestCase):
                 await self._teardown(h)
         _run(go())
 
+    def test_pwa_missing_asset_file_is_404_when_authed(self):
+        async def go():
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions)
+            try:
+                # authed, but no PWA files written to the dash dir
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /manifest.webmanifest HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"404", r)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
     def test_pwa_manifest_requires_auth(self):
         async def go():
             h = await self._harness()

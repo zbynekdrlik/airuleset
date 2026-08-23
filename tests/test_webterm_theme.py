@@ -21,13 +21,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import cli_webterm as w  # noqa: E402
 
 
-# The exact Campbell palette from the #643 issue body.
+# The Campbell palette from the #643 issue body — using xterm.js ITheme KEY
+# names (magenta/brightMagenta, not the Windows-Terminal purple/brightPurple,
+# which xterm.js would silently ignore). The colour VALUES are unchanged.
 CAMPBELL = {
     "background": "#0C0C0C", "foreground": "#CCCCCC", "cursor": "#FFFFFF",
     "black": "#0C0C0C", "red": "#C50F1F", "green": "#13A10E", "yellow": "#C19C00",
-    "blue": "#0037DA", "purple": "#881798", "cyan": "#3A96DD", "white": "#CCCCCC",
+    "blue": "#0037DA", "magenta": "#881798", "cyan": "#3A96DD", "white": "#CCCCCC",
     "brightBlack": "#767676", "brightRed": "#E74856", "brightGreen": "#16C60C",
-    "brightYellow": "#F9F1A5", "brightBlue": "#3B78FF", "brightPurple": "#B4009E",
+    "brightYellow": "#F9F1A5", "brightBlue": "#3B78FF", "brightMagenta": "#B4009E",
     "brightCyan": "#61D6D6", "brightWhite": "#F2F2F2",
 }
 
@@ -123,6 +125,8 @@ class TestThemeIsActuallyApplied(unittest.TestCase):
             + "  green: term.options.theme.green,\n"
             + "  cursor: term.options.theme.cursor,\n"
             + "  brightBlue: term.options.theme.brightBlue,\n"
+            + "  magenta: term.options.theme.magenta,\n"
+            + "  brightMagenta: term.options.theme.brightMagenta,\n"
             + "  font: term.options.fontFamily,\n"
             + "}));\n"
         )
@@ -143,6 +147,9 @@ class TestThemeIsActuallyApplied(unittest.TestCase):
         self.assertEqual(out["green"], "#13A10E")
         self.assertEqual(out["cursor"], "#FFFFFF")
         self.assertEqual(out["brightBlue"], "#3B78FF")
+        # xterm.js ITheme key names must be used — magenta, not purple.
+        self.assertEqual(out["magenta"], "#881798")
+        self.assertEqual(out["brightMagenta"], "#B4009E")
         self.assertIn("Cascadia", out["font"])
         self.assertIn("monospace", out["font"])
 
