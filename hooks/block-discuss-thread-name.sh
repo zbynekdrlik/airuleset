@@ -13,8 +13,12 @@ set -euo pipefail
 # the owner escalated to a hook ("nemal dovolene robit taku chybu").
 #
 # #609 adds a SIBLING check on the SAME payload: a sub-dev stream `message_post`
-# to a `discuss.channel` MUST carry the mandatory `ZbynekAI <N>` stream signature
-# (#598) somewhere in the posting content, else it is BLOCKED. This closes the
+# to a `discuss.channel` MUST carry the mandatory `<identity> <N>` stream
+# signature (#598) somewhere in the posting content, else it is BLOCKED. The
+# identity token is IDENTITY-AWARE (#641): `MarekAI <N>` for a marek-owned stream
+# (montalu4, via Marek's own handover account), the default `ZbynekAI <N>`
+# otherwise -- so the WRONG identity (a marek stream signing ZbynekAI, or vice
+# versa) is a violation too, never silently accepted. This closes the
 # hole that let montalu6 post an UNSIGNED client message from odoo-erp's own
 # `discuss-client-posting` skill, which never carried the prose rule -- the guard
 # scans the actual tool-call content, so it fires regardless of which skill the
@@ -193,14 +197,16 @@ at a glance WHICH subdev sent it and where to go resolve what the thread is abou
 
   • the LAST line of the message body is:  ${EXPECTED}
 
-The message_post being sent carries no such signature (or a wrong number). Add
-"${EXPECTED}" as the final line of the body and re-run.
+The message_post being sent carries no such signature (or the WRONG identity /
+number). Add "${EXPECTED}" as the final line of the body and re-run.
 
-Why: the shared sender name "zbynekai odovzdavac" tells the owner nothing about
-which subdev owns a thread (owner request, #598); montalu6 shipped an UNSIGNED
-message to a client because the rule was only in a skill the stream never loaded
-(#609). The canonical rule + a copy-paste template are in
-skills/odoo-discuss-xmlrpc/handover-compose.md.
+Why: a bare shared sender name tells the owner nothing about which subdev owns a
+thread (owner request, #598); montalu6 shipped an UNSIGNED message to a client
+because the rule was only in a skill the stream never loaded (#609). The required
+identity token depends on WHOSE stream this is (#641): a marek-owned stream signs
+"MarekAI <N>", every other stream the default "ZbynekAI <N>" -- so signing the
+wrong person's name is blocked, not accepted. The canonical rule + a copy-paste
+template are in skills/odoo-discuss-xmlrpc/handover-compose.md.
 
 This gates only a discuss.channel message_post by a sub-dev stream — a create /
 rename and a non-stream user are never affected. Bypass (rare, logged, only for

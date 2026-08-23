@@ -222,7 +222,7 @@ Both paths:
     the client thread — the stream that owns the thread does.
 
 How to compose + post the closing note (body_is_html, owner on partner_ids,
-the ZbynekAI <N> signature): skills/odoo-discuss-xmlrpc/handover-compose.md.
+the identity signature "<MarekAI|ZbynekAI> <N>", #641): skills/odoo-discuss-xmlrpc/handover-compose.md.
 
 Bypass (rare, logged, ONLY a genuine non-client / meta ticket that merely names
 these markers in prose): put  airuleset:discuss-close-ok  in the close command.

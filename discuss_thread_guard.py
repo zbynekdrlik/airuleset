@@ -82,6 +82,18 @@ from collections import namedtuple
 
 import cli_aliases
 
+# #641 -- resolve a stream's OWNER (for the identity-aware signature word below)
+# through notify.STREAM_NOTIFY_OWNER, the SAME single source that routes the
+# stream's Discord notifications, reused via the already-exposed
+# `notify.stream_redirect` (NEVER a second stream->owner map). Fail-safe: if
+# notify is ever unimportable the owner resolution degrades to the user string
+# itself, which falls through to the DEFAULT signature word -- the fleet's
+# standard unmeasurable->allow/default bias, never a crash.
+try:
+    from notify import stream_redirect as _stream_redirect
+except Exception:  # pragma: no cover - notify unimportable (partial checkout etc.)
+    _stream_redirect = None
+
 # ~30 chars INCLUDING the trailing stream number (owner directive, #597). Char
 # count, never bytes. Owner's good example "Oprava filtra rozmerov 2" == 24;
 # the rejected "Viditeľnosť leadov pre obchodníkov 2" == 36.
@@ -206,14 +218,27 @@ def evaluate(content, user):
 # lesson: method, never a field), mirroring the create detectors. A create /
 # write / rename is a DIFFERENT method and is never touched here.
 #
-# COMPLIANCE. The mandatory signature is `ZbynekAI <N>` where N is the stream
-# number. The message body over RPC is frequently a VARIABLE (`body=body_html`),
+# COMPLIANCE. The mandatory signature is `<WORD> <N>` where N is the stream
+# number and <WORD> is the stream's identity token -- IDENTITY-AWARE since #641:
+# `MarekAI` for a marek-owned stream (montalu4, posting via Marek's own handover
+# account "Marek AI - odovzdavky" -> compact "MarekAI", odoo-erp #3864), the
+# default `ZbynekAI` for every other owner (zbynek, david, ...). The word is
+# derived from the posting stream's OWNER (notify.STREAM_NOTIFY_OWNER, reused via
+# notify.stream_redirect -- NEVER a second stream->owner map). Before #641 the
+# word was hardcoded ZbynekAI, which BLOCKED a truthful `MarekAI <N>` post AND
+# ACCEPTED the wrong-identity `ZbynekAI <N>` one (live PROD contradiction,
+# montalu thread 291 msg 1731669); the identity-aware word keeps the enforcement
+# intact in BOTH directions (the wrong identity blocks for a marek stream AND a
+# zbynek stream). The message body over RPC is frequently a VARIABLE (`body=body_html`),
 # so "the body ENDS with the signature" is not reliably provable from the tool-
 # call content; the reliable, low-false-positive check is that a COMPLIANT
-# `ZbynekAI <N>` token appears ANYWHERE in the posting content (whether in the
-# body-building assignment or the call). This catches the incident (no signature
-# at all) AND a wrong number; the exact last-line placement stays the prose
-# rule's + review's job. Accepted residuals (documented, not chased, per #319):
+# `<word> <N>` token appears ANYWHERE in the posting content (whether in the
+# body-building assignment or the call), where `<word>` is the stream's IDENTITY
+# word (#641: `MarekAI` for a marek stream, default `ZbynekAI`; the `ZbynekAI`
+# examples in the residuals below are the DEFAULT case). This catches the incident
+# (no signature at all), a wrong number, AND the wrong identity; the exact
+# last-line placement stays the prose rule's + review's job. Accepted residuals
+# (documented, not chased, per #319):
 #   * the body assembled in a SEPARATE statement from the model literal (a two-
 #     statement ORM `chan = env['discuss.channel'].browse(cid); chan.message_post(`)
 #     is not detected -- the same unmeasurable->allow bias the create ORM detector
@@ -224,12 +249,19 @@ def evaluate(content, user):
 #     carries the signature example, so it passes; a stream rarely edits such a
 #     doc, and the fleet's unmeasurable->over-block direction is the safe one for
 #     a quality gate.
-#   * a RUNTIME-built signature (`f"ZbynekAI {n}"`, `"ZbynekAI "+str(n)`, a `%d`)
+#   * a RUNTIME-built signature (`f"ZbynekAI {n}"` / `f"MarekAI {n}"`, a `%d`)
 #     is OVER-blocked -- the signature literal is not visible in the tool-call
 #     content. This is the fail-safe (over-block) direction, off the recipe (which
-#     mandates a literal `ZbynekAI <N>` last line), and carries the
+#     mandates a literal `<word> <N>` last line), and carries the
 #     `airuleset:discuss-sig-ok` bypass.
-#   * because the check is "a compliant `ZbynekAI <N>` appears ANYWHERE in the
+#   * IDENTITY DEGRADATION (#641): if `notify` is unimportable / the owner is
+#     unresolvable, `signature_word` degrades to the DEFAULT `ZbynekAI`, so a
+#     marek stream (montalu4) is then OVER-blocked on its truthful `MarekAI <N>`
+#     post (the exact pre-#641 contradiction, but only in that rare fail-safe) --
+#     the same unmeasurable->default bias, bypassable via `airuleset:discuss-sig-ok`.
+#     The signature REQUIREMENT itself is never waived (the gate keys on
+#     stream_number, evaluated before + independently of owner resolution).
+#   * because the check is "a compliant `<word> <N>` appears ANYWHERE in the
 #     content", a MULTI-OP single tool-call can mask an unsigned post: two
 #     message_posts where only the first is signed, or a signed create/other op
 #     bundled with an unsigned post, both slip. The realistic single-post shape
@@ -238,6 +270,58 @@ def evaluate(content, user):
 # --------------------------------------------------------------------------- #
 
 SIGNATURE_WORD = "ZbynekAI"
+
+# #641 -- owner -> client-facing signature IDENTITY word. The body-signature
+# token is the COMPACT form of the handover account's client-visible display
+# name ("Marek AI - odovzdavky" -> "MarekAI", odoo-erp #3864; the shared
+# "Zbynek AI - odovzdavky" account -> "ZbynekAI"), mirroring the existing
+# ZbynekAI compaction, never invented. Only marek needs an own word today: marek
+# is the ONLY stream with its OWN client-visible handover account (odoo-erp #3864).
+# EVERY other stream (zbynek's montaluN, david, simap, miva) posts under the SHARED
+# "Zbynek AI - odovzdavky" account (odoo-erp #3176/#3527), so the DEFAULT ZbynekAI
+# is the CORRECT identity for them, not a latent wrong-identity bug -- confirmed by
+# an odoo-erp search: no "DavidAI"/own-account ticket exists for any other stream.
+# WHEN a future stream gets its OWN handover account (the #3864 pattern repeated),
+# ADD its owner here. This is NOT a second stream->owner map -- the stream->owner
+# resolution is reused wholesale from notify.STREAM_NOTIFY_OWNER (via
+# `_stream_owner`); this table only supplies the display token, a genuinely NEW
+# datum that lives nowhere else. NB: STREAM_NOTIFY_OWNER also routes non-stream
+# accounts to marek (admin/stepan, forestshop-dev), so `_stream_owner("admin")`
+# -> "marek" -> "MarekAI" -- but that is UNREACHABLE: this table is only ever
+# consulted via `signature_word`, which is only ever called for a user that
+# already has a `cli_aliases.stream_number` (the gate is silent otherwise), and
+# admin/stepan/marek all resolve stream_number None. So the conflation never bites.
+_OWNER_SIGNATURE_WORD = {
+    "marek": "MarekAI",
+}
+
+
+def _stream_owner(user):
+    """The stream's OWNER (zbynek / marek / david / ...) for a unix `user`,
+    resolved through notify.STREAM_NOTIFY_OWNER -- the SAME single source that
+    routes the stream's Discord notifications (reused via notify.stream_redirect,
+    never a second stream->owner map). Fail-safe: if notify is unimportable, or
+    stream_redirect raises, the owner is the (stripped) user string itself, which
+    falls through to the DEFAULT signature word in `signature_word` -- the
+    fleet's standard unmeasurable->default bias, never a crash."""
+    u = (user or "").strip()
+    if _stream_redirect is None:
+        return u
+    try:
+        return _stream_redirect(u)
+    except Exception:  # pragma: no cover - stream_redirect is itself fail-safe
+        return u
+
+
+def signature_word(user):
+    """The client-facing signature WORD for a stream `user`, derived from the
+    stream's OWNER (`_stream_owner`, reusing notify.STREAM_NOTIFY_OWNER): a
+    marek-owned stream (montalu4) signs "MarekAI"; every other owner
+    (zbynek, david, ...) and any non-stream / unknown / empty user signs the
+    default "ZbynekAI". The guard is silent for a non-stream user anyway
+    (cli_aliases.stream_number is None), so the default there is harmless."""
+    return _OWNER_SIGNATURE_WORD.get(_stream_owner(user), SIGNATURE_WORD)
+
 
 SIG_BYPASS_MARKER = "airuleset:discuss-sig-ok"
 
@@ -273,16 +357,19 @@ def is_channel_message_post(content):
     return False
 
 
-def signature_present(content, number):
-    """True iff `content` carries the mandatory `ZbynekAI <number>` stream
+def signature_present(content, number, word=SIGNATURE_WORD):
+    """True iff `content` carries the mandatory `<word> <number>` stream
     signature: the word (case-insensitive) then whitespace then the EXACT stream
     number as a standalone token (a trailing non-digit boundary, so `ZbynekAI 66`
     is NOT number 6 and the unsubstituted `<N>` placeholder is NOT a signature).
-    `number` is a digit string from cli_aliases.stream_number, so re.escape keeps
-    the regex linear regardless of input size."""
+    `word` is the stream's IDENTITY token (#641; `signature_word(user)` derives it
+    -- "MarekAI" for a marek stream, default "ZbynekAI"); it defaults to
+    SIGNATURE_WORD so the 2-arg form is unchanged. `number` is a digit string from
+    cli_aliases.stream_number, and `word` is one of a fixed set of literals, so
+    re.escape keeps the regex linear regardless of input size."""
     if not content or not number:
         return False
-    pat = re.compile(r"(?i)" + re.escape(SIGNATURE_WORD) + r"\s+"
+    pat = re.compile(r"(?i)" + re.escape(word) + r"\s+"
                      + re.escape(number) + r"(?![0-9])")
     return bool(pat.search(content))
 
@@ -297,18 +384,23 @@ def has_sig_bypass_marker(content):
 def evaluate_message_post(content, user):
     """A `MessagePostViolation` (number, expected signature) iff `content` is a
     discuss.channel message_post by a stream `user` (cli_aliases.stream_number)
-    whose body carries NO compliant `ZbynekAI <N>` signature; None (silent)
+    whose body carries NO compliant `<word> <N>` signature; None (silent)
     otherwise -- a non-stream user, a non-message_post op, or a post that already
-    carries the signature."""
+    carries the signature. #641: `<word>` is IDENTITY-AWARE, derived from the
+    stream's OWNER via `signature_word(user)` -- "MarekAI <N>" for a marek stream
+    (montalu4), default "ZbynekAI <N>" otherwise. The wrong identity therefore
+    BLOCKS in both directions (a marek stream signing ZbynekAI, or a zbynek stream
+    signing MarekAI, each fails the accept-regex for its own demanded word)."""
     number = cli_aliases.stream_number(user)
     if number is None:
         return None
     if not is_channel_message_post(content):
         return None
-    if signature_present(content, number):
+    word = signature_word(user)
+    if signature_present(content, number, word):
         return None
     return MessagePostViolation(number=number,
-                                expected=SIGNATURE_WORD + " " + number)
+                                expected=word + " " + number)
 
 
 # --------------------------------------------------------------------------- #
