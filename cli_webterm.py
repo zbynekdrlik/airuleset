@@ -219,42 +219,134 @@ def webterm_inventory(profile=profiles.OWNER):
 #      to make the webterm fit — the OPPOSITE regression (a small webterm client
 #      shrinks/blackens the owner's WT view). Those overrides are REMOVED.
 #      #586 then pinned the window fleet-wide (`window-size manual` +
-#      `default-size 176x50`) AND made the clone `-f ignore-size` so the webterm
-#      could never influence sizing. #613 REOPEN removed both on a theory that
-#      measured the BROWSER client (wrong client) -- switching to `latest` let a
-#      SMALLER browser re-pin the owner's real windows, so his larger Windows
-#      Terminal was left rendering a DARK unused region (his SURFACE; the browser
-#      the CAUSE). #613 REOPEN-2 (owner directive 2026-08-22) RESTORES the
-#      fixed-size invariant: `window-size manual` + `default-size 176x50`
+#      `default-size 176x50`) AND attached the (then-existing) clone with
+#      `-f ignore-size` so the webterm could never influence sizing. #613
+#      REOPEN removed both on a theory that measured the BROWSER client (wrong
+#      client) -- switching to `latest` let a SMALLER browser re-pin the
+#      owner's real windows, so his larger Windows Terminal was left rendering
+#      a DARK unused region (his SURFACE; the browser the CAUSE). #613
+#      REOPEN-2 (owner directive 2026-08-22) RESTORES the fixed-size
+#      invariant: `window-size manual` + `default-size 176x50`
 #      (cli_tmux_provisioning) pins every window regardless of any client, and
-#      this clone re-attaches with `-f ignore-size` so a box still running the
-#      first-reopen `latest` server is fixed immediately (no restart). No client
-#      resizes another's window -- no "resizovanie hore-dole". The browser's OWN
-#      appearance at the fixed grid (no dark area) is solved on the BROWSER side
-#      (the dashboard fit-to-fixed-grid JS), never by resizing tmux.
+#      the webterm attach carries `-f ignore-size` so a box still running the
+#      first-reopen `latest` server is fixed immediately (no restart). No
+#      client resizes another's window -- no "resizovanie hore-dole". The
+#      browser's OWN appearance at the fixed grid (no dark area) is solved on
+#      the BROWSER side (the dashboard fit-to-fixed-grid JS), never by
+#      resizing tmux.
 #   2. resolve the base session to JOIN: exact `=$P` -> group survivor -> the
 #      single existing session -> else create `$P` fresh;
-#   3. an existing base is joined via a THROWAWAY GROUPED clone: created
-#      DETACHED (`new-session -d -t <base> -s <base>-web-$$`), armed with a
-#      per-session `client-attached` destroy-unattached hook + `mouse on`
-#      (#615, session-scoped), then attached with `-f ignore-size`
-#      (`attach-session -t <clone> -f ignore-size`, #613 REOPEN-2) — an
-#      independent VIEW onto the same
-#      windows, never a mirror, NEVER `attach -d` (the only verb that detaches
-#      other clients). The clone is killed on disconnect (trap, EXIT + signals)
-#      AND self-destructs on its own client-detach via the per-session
-#      `destroy-unattached on` (#591 belt-and-suspenders for a trap that never
-#      fires). The base — which holds the group's windows, so the shell
-#      survives — is NEVER killed (the trap targets only the named clone, and
-#      the base keeps tmux's default `off`). The `-A` fresh-base fallback is the
-#      owner's OWN real view.
+#   3. #613 REOPEN-3 (supervisor finding, 2026-08-23, issue #613 comment
+#      5387073996): an existing base used to be JOINED via a THROWAWAY
+#      GROUPED CLONE — a second, same-group session (`new-session -d -t
+#      <base> -s <base>-web-$$`), its own per-session `destroy-unattached on`
+#      hook + `mouse on` (#615), attached with `-f ignore-size`, killed on
+#      disconnect (trap). That topology is GONE — it silently broke
+#      `Ctrl+B w` (tmux's own window-chooser, `choose-tree`/`choose-window`)
+#      for the OTHER client already attached to the base (the owner's
+#      ssh/Windows Terminal) the instant the webterm browser also joined:
+#      the chooser's active mode still received keys (Enter still worked)
+#      but painted NOTHING — a black screen. Measured on an isolated scratch
+#      tmux 3.7b server: one client alone renders ~4500 printable chars
+#      after Ctrl+B w (full tree); the SAME client with a grouped clone ALSO
+#      attached renders ~300 (status line only, dead) — reproduced across
+#      three chooser variants (`choose-tree -Zw`/`-w`, `choose-window`) and
+#      two client sizes, ruling out both the `-Z` zoom flag and any size
+#      mismatch. The grouped-CLONE topology itself was the cause.
+#
+#      THE FIX: join an existing base by attaching to it DIRECTLY --
+#      `tmux attach-session -t "$T" -f ignore-size` -- no clone, no `$$`
+#      session name, no disconnect trap, no per-session `destroy-unattached`
+#      hook to arm. Verified live (same comment): a 49-row ssh client
+#      renders 4681 chars and a web client renders 14669, BOTH after
+#      Ctrl+B w, with every window staying the owner's fixed 176x50 for the
+#      whole test — see tests/test_webterm_ctrlbw_darkening.py for the
+#      mechanical regression lock (RED on the removed clone shape, GREEN on
+#      this direct attach) plus a structural lock against the clone shape
+#      ever coming back.
+#
+#      `-f ignore-size` is KEPT on the direct attach for the SAME reason
+#      #586/#613 REOPEN-2 put it on the (now-removed) clone: together with
+#      the conf's `window-size manual` (cli_tmux_provisioning, version-gated)
+#      it is what holds the owner's fixed-size invariant ("dohodli sme sa ze
+#      budeme mat fixnu velkost terminalov pre vsetkych") -- `window-size
+#      manual` already pins every window regardless of any client, and
+#      `ignore-size` is belt-and-suspenders for a box still running an older
+#      server. Nothing about THAT invariant changed; only the clone
+#      TOPOLOGY that used to carry it is gone.
+#
+#      The base session is NEVER destroyed by a browser disconnect: there is
+#      no more a clone to arm a per-session `destroy-unattached on` onto
+#      (#591's own fix), and there never is (#591 also removed) a GLOBAL
+#      `destroy-unattached` -- the base keeps tmux's factory default (`off`),
+#      so a client detaching (browser OR ssh) just leaves; nothing in this
+#      file arms a sweep against the base. Proven live in
+#      TestBaseSessionSurvivesBrowserDisconnect
+#      (tests/test_webterm_ctrlbw_darkening.py).
+#
+#      DELIBERATE TRADE-OFF (recorded on #613's design comment, not to be
+#      reopened here): the browser and the owner's ssh client now attach to
+#      the SAME session, so they share its CURRENT window -- switching
+#      windows in one moves the other. The removed clone kept those
+#      independent (each grouped client keeps its own current-window
+#      pointer), but that independence was a SIDE EFFECT of the old
+#      resize-protection shape, never something the owner asked for, while a
+#      broken window-chooser was reported repeatedly -- a working switcher
+#      beats independent views.
+#
+#      MOUSE (#615) RESTORED ON THE SHARED BASE, SCOPED TO THE CONNECTION,
+#      NOT A PERMANENT LATCH (revised after adversarial review 🟡 on this
+#      ticket -- the first cut left `mouse on` set with no revert path,
+#      which a REAL disconnect trap now fixes): `mouse` is a tmux SESSION
+#      option, never per-client -- #615's `mouse on` used to live on the
+#      clone alone (an independent session sharing the same windows)
+#      precisely BECAUSE the clone existed, so the owner's own ssh session
+#      (a DIFFERENT session, `$T`) stayed `mouse off`. With a direct attach
+#      there is only ONE session, so `mouse on` is set on `$T` itself for
+#      the DURATION of the webterm connection, then explicitly reverted to
+#      `mouse off` on disconnect (trap, below) -- NEVER left on
+#      permanently. The first cut of this fix set `mouse on` with no revert
+#      at all: since `_ATTACH_BODY` no longer keeps a wrapper shell alive
+#      after `exec`, nothing could ever turn it back off, so the FIRST
+#      webterm connection EVER, to a session this fleet deliberately keeps
+#      alive indefinitely (#591), would have latched mouse mode on for that
+#      session's entire remaining lifetime -- including every future
+#      ssh-only reattach with no browser involved at all, directly
+#      reintroducing the exact "kolieskom cez ssh sa to blbo pouziva"
+#      awkwardness #267 (cli_tmux_provisioning.py) built the Shift+PageUp
+#      keybind to avoid. That is fixed by trapping the browser client's own
+#      disconnect and reverting `mouse off` right there -- `_ATTACH_BODY`
+#      therefore no longer `exec`s into the attach on the join path (a
+#      wrapper shell must stay alive to run the trap after the client
+#      detaches; the pre-clone-removal code already ran this same branch
+#      un-exec'd, so this is not new complexity, just restored). This is
+#      NOT reference-counted against multiple simultaneous webterm tabs to
+#      the SAME target -- the dashboard's own design (#579) is one tab per
+#      DISTINCT target, never two tabs at the same target, so an
+#      unconditional on-connect/off-disconnect toggle matches how the
+#      feature is actually used; a would-be second simultaneous connect to
+#      the same target is a rare, self-correcting edge (a reconnect simply
+#      re-arms `mouse on` for its own duration). While connected, the
+#      owner's ssh client (attached to the SAME session via the separate
+#      fleet ssh auto-attach convention below, not this script -- and, for
+#      a stream box, that SAME account's own ssh session, not only the
+#      owner's) also gains tmux mouse-reporting mode: click switches
+#      panes/windows and the wheel scrolls tmux's own history (the exact
+#      scroll-into-history convenience #615 built for the browser) at the
+#      cost of native terminal click-drag selection for that window; MOST
+#      terminals (incl. Windows Terminal) support Shift+click/Shift+drag to
+#      get native selection even with tmux mouse mode on -- stated as the
+#      general, widely-documented tmux/terminal convention, NOT verified
+#      against this fleet's actual client software, unlike the char-count
+#      measurements elsewhere in this comment. Accepted for the DURATION of
+#      an active webterm connection (owner's own #613 finding: a working
+#      window-chooser + working #615 scroll beat a mouse-off ssh session);
+#      never accepted as a permanent, always-on change.
 # Mirrors the fleet ssh auto-attach convention
 # (cli_bashrc_appliers.STREAM_SSH_ATTACH_BLOCK). Reused for local (dev1) and
-# remote (ssh) alike. Residual (documented, not chased): if the owner's WT is
-# already gone so this clone is the group's only remaining session,
-# disconnecting the web client ends that ownerless shell — an expected, benign
-# outcome (nothing left to protect), NOT the #591 base-kill the per-session
-# scoping fixes (that was a GLOBAL keep-last destroying a LIVE base).
+# remote (ssh) alike. The `-A` fresh-base fallback (no existing session at
+# all) is the owner's own real, ONLY view -- unaffected by any of the above,
+# and (like before) never `-f ignore-size` (it must size its own windows).
 _ATTACH_BODY = (
     'T=""; '
     'if tmux has-session -t "=$P" 2>/dev/null; then T="$P"; else '
@@ -265,64 +357,28 @@ _ATTACH_BODY = (
     'if [ "$(printf %s "$N" | grep -c .)" = "1" ]; then T="$N"; fi; '
     'fi; fi; '
     'if [ -n "$T" ]; then '
-    'C="${T}-web-$$"; '
-    # `=$C` = tmux EXACT-match (like `=$P` above): a prefix `kill-session -t
-    # "$C"` could match a live sibling clone whose pid is a numeric extension of
-    # this one (…-web-123 vs …-web-1234) and kill the wrong web view (#584 review).
-    "trap 'tmux kill-session -t \"=$C\" 2>/dev/null || true' EXIT HUP INT TERM; "
-    # #591: the clone is created DETACHED, then a PER-SESSION `client-attached`
-    # hook arms its OWN `destroy-unattached on`, then it is attached. This scopes
-    # the sweep to the clone ALONE — the base session keeps tmux's default `off`
-    # and is NEVER destroyed, so the owner detaching from the base while the clone
-    # lives can no longer kill the base (the gk 2026-08-20 total-death; the old
-    # GLOBAL `destroy-unattached keep-last` in cli_tmux_provisioning did that and
-    # is removed). Two live-verified tmux constraints shape this: (1) setting
-    # `destroy-unattached on` on a DETACHED (zero-client) session destroys it
-    # IMMEDIATELY, so the hook defers the set to attach time, when `on` is safe;
-    # (2) `set-option`/`set-hook` `-t` do NOT accept the `=` exact-match anchor
-    # (only has-session/kill-session do), so `$C` is targeted bare — safe because
-    # the exact-named session was just created, so prefix resolution matches it
-    # exactly. #613 REOPEN-2: the attach carries `-f ignore-size` (#586, restored
-    # -- see the header comment + the `attach-session` line below for why: it
-    # keeps a smaller browser from shrinking the owner's window). The attach is
-    # NOT `exec`ed, so the EXIT/HUP trap still fires to kill the clone (the
-    # per-session `on` is the belt-and-suspenders for a trap that never fires).
-    # TRANSITION RESIDUAL (#591-review B1, documented not guarded): on a target
-    # NOT yet re-installed after #591 whose RUNNING server still carries the old
-    # live GLOBAL `keep-last`, `new-session -d` creates the clone DETACHED and
-    # keep-last destroys it AT CREATION (before set-hook/attach), so this connect
-    # FAILS (the base is still safe — the #591 goal holds; only the webterm view
-    # to that one target breaks). Closed by CO-DEPLOYMENT: the same install/push
-    # that ships this code runs apply_tmux_history_limit's `set-option -gu
-    # destroy-unattached` on that box's running server, reverting keep-last to
-    # `off`. So the window is a transient failed-connect (never a death) that
-    # self-heals on that target's install; global tmux policy is deliberately
-    # kept OUT of this connect script (cli_tmux_provisioning owns it). Distinct
-    # from the ownerless-clone residual noted in the header comment above.
-    'tmux new-session -d -t "$T" -s "$C"; '
-    'tmux set-hook -t "$C" client-attached "set-option destroy-unattached on"; '
-    # #615: enable mouse on the CLONE session only (a SESSION option, so the
-    # owner's own SSH session stays `mouse off` — its terminal is unchanged),
-    # so the browser scroll-wheel reaches tmux copy-mode (the 50000-line
-    # history is otherwise unreachable — the wheel just spews raw `^[[A`
-    # escapes into the shell). NEVER a global `set-option -g mouse on`.
-    'tmux set-option -t "$C" mouse on; '
-    # #613 REOPEN-2 (owner directive 2026-08-22): `-f ignore-size` is RESTORED.
-    # The owner's invariant is a FIXED terminal size for every client so no
-    # client resizes another's window. `-f ignore-size` EXCLUDES the webterm
-    # clone from tmux's window-size calc, so a smaller browser client can never
-    # shrink the owner's Windows-Terminal window (which then rendered a dark
-    # unused region -- his SURFACE; the browser is the CAUSE). This bridges a box
-    # still RUNNING the first-reopen `latest` server immediately, and is belt-and-
-    # suspenders under the restored conf `window-size manual` (which already pins
-    # every window regardless of any client). The browser's OWN appearance (it
-    # must show the fixed 176x50 window filling its viewport, not a dead region)
-    # is solved on the BROWSER side (the dashboard fit-to-fixed-grid JS below),
-    # never by letting the browser resize tmux. Proven live (isolated tmux 3.7b +
-    # pty clients): under `latest`+plain-clone a 160x46 webterm shrinks the owner's
-    # window to 160x45 (owner DARK); with `-f ignore-size` the owner's window
-    # stays 176x50 (full) at every attach + window-switch from both sides.
-    'tmux attach-session -t "$C" -f ignore-size; '
+    # #615 (restored on the shared base, SCOPED to this connection -- see
+    # the block comment above for the full record, incl. why the first cut
+    # of this fix was wrong): mouse mode so the browser's scroll-wheel
+    # reaches tmux copy-mode. Session-scoped (`-t "$T"`), never `-g`
+    # (global) -- the fresh-base fallback below (no browser has ever
+    # joined yet) stays untouched.
+    'tmux set-option -t "$T" mouse on; '
+    # Revert on disconnect -- the SAME shell-level deferred-expansion trap
+    # pattern the removed clone used for its own cleanup (`$T` is expanded
+    # when the trap FIRES, not when it is armed, exactly like the old `$C`
+    # trap). This does NOT create any session (unlike the removed clone),
+    # so it cannot reproduce the #613 REOPEN-3 chooser bug -- only the
+    # GROUPED-CLONE topology caused that, never "a trap exists" alone.
+    "trap 'tmux set-option -t \"$T\" mouse off 2>/dev/null || true' EXIT HUP INT TERM; "
+    # #613 REOPEN-3: DIRECT attach, no clone (see the block comment above
+    # for the full root-cause + fix + trade-off record). NOT `exec`ed --
+    # the wrapper shell must stay alive so the trap above can run once the
+    # client detaches (mirrors the pre-clone-removal code, which never
+    # exec'd this branch either). The explicit `exit` after keeps
+    # execution from ever falling through to the fresh-create fallback
+    # once a real join was resolved.
+    'tmux attach-session -t "$T" -f ignore-size; '
     'exit; '
     'fi; '
     'exec tmux new-session -A -s "$P"'
@@ -423,9 +479,11 @@ def connect_main(argv, inventory_path=None):
 # disconnected every hidden tab so it could not shrink the shared window;
 # #586's preload-all (every tab kept connected, see `preloadAll()`) SUPERSEDED
 # that. #613 REOPEN-2 (owner directive 2026-08-22): the tmux side pins a FIXED
-# window size (`window-size manual` + `default-size 176x50`) and the clone is
-# `-f ignore-size`, so no tab (hidden or active) can EVER resize a window --
-# keeping every tab connected is unconditionally safe. On the BROWSER side, each
+# window size (`window-size manual` + `default-size 176x50`) and every webterm
+# attach is `-f ignore-size` (#613 REOPEN-3: a DIRECT attach now, no clone --
+# see the `_ATTACH_BODY` header comment), so no tab (hidden or active) can EVER
+# resize a window -- keeping every tab connected is unconditionally safe. On
+# the BROWSER side, each
 # ttyd xterm is forced to the owner's fixed grid (176 cols x 51 rows = the 176x50
 # window + 1 status row) and its font is scaled to fill the viewport (see
 # `fitFixedGrid` in the page JS), so the fixed window fills the browser with no
@@ -613,8 +671,9 @@ function preloadAll() {                     // #586: connect EVERY tab at login.
 }                                           // slow (a reconnect each time) AND fired ttyd's own
                                             // beforeunload ("Leave site?") on every tab click.
                                             // #613 REOPEN-2: the tmux window is FIXED (window-size
-                                            // manual + default-size 176x50) and the clone is
-                                            // -f ignore-size, so NO tab — hidden or active — can ever
+                                            // manual + default-size 176x50) and every webterm attach
+                                            // is -f ignore-size (#613 REOPEN-3: a direct attach now,
+                                            // no clone), so NO tab — hidden or active — can ever
                                             // resize a window; keeping every tab connected is
                                             // unconditionally safe. Each ttyd xterm is force-fit to the
                                             // fixed grid on the browser side (applyFixedGrid).
@@ -681,8 +740,9 @@ function attachForwarder(f) {
 // #613 REOPEN-2: force each ttyd xterm to the owner's FIXED client grid
 // (CFG.term_cols x CFG.term_rows = the fixed 176x50 tmux window + 1 status row)
 // and scale the font so that grid FILLS the iframe viewport, centred. The tmux
-// window is a FIXED size (window-size manual) and the clone is -f ignore-size,
-// so the browser NEVER resizes tmux; this only makes the browser SHOW the fixed
+// window is a FIXED size (window-size manual) and every webterm attach is
+// -f ignore-size (#613 REOPEN-3: a direct attach now, no clone), so the
+// browser NEVER resizes tmux; this only makes the browser SHOW the fixed
 // window filling its viewport instead of a dark unused region. ttyd 1.7.4
 // exposes the xterm Terminal as `window.term` in each same-origin iframe; we
 // clamp term.resize so ttyd's own FitAddon can never change the grid, then
