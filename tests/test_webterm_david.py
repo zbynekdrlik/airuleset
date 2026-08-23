@@ -256,5 +256,68 @@ class TestDavidArtifactsWrite(unittest.TestCase):
                             for f in flat))
 
 
+class TestDavidDropInInvariant638(unittest.TestCase):
+    """#638: the #614 invariant — airuleset renders the MAIN unit and NEVER
+    writes or deletes `.d/` drop-ins — STANDS. The redundant hand-placed
+    `10-path.conf` is removed once by hand (owner-action), never by code.
+    These lock the decision mechanically so a future worker cannot QUIETLY
+    add drop-in write/deletion (or a `.d/` scanner) next to an invariant that
+    says the opposite — the exact "not defensible" outcome the ticket names."""
+
+    _SRC = Path(__file__).resolve().parent.parent / "cli_webterm_david.py"
+
+    def test_module_never_touches_a_dropin_in_code(self):
+        # The invariant, mechanically: any reference to a `.service.d` drop-in
+        # path in this module's SOURCE must live in a comment. The module
+        # renders the MAIN unit only — it never writes, deletes, or otherwise
+        # references a `.service.d/` path in code. A future change that adds any
+        # drop-in handling would put `service.d` on an executable line and trip
+        # this, forcing the invariant change to be NAMED, not made quietly
+        # (#614/#638). Accepted residual: a path built via string indirection
+        # that never contains the literal `service.d` would evade it — the
+        # realistic/naive footgun form is caught; see the #638 design comment.
+        offenders = [
+            (i, line.strip())
+            for i, line in enumerate(self._SRC.read_text(
+                encoding="utf-8").splitlines(), 1)
+            if "service.d" in line and not line.strip().startswith("#")
+        ]
+        self.assertEqual(
+            offenders, [],
+            "cli_webterm_david.py references a .service.d drop-in path OUTSIDE "
+            "a comment — the #614/#638 invariant is that airuleset renders the "
+            "MAIN unit and NEVER writes or deletes .d/ drop-ins. If you are "
+            "deliberately changing that invariant, say so on the ticket and "
+            "update this test with justification. Offending: %r" % offenders)
+
+    def test_638_decision_recorded_at_the_path_risk_site(self):
+        # The risk-site comment near _DAVID_TTYD_PATH_ENV must warn a future
+        # PATH editor that a stale hand-placed drop-in would silently override
+        # a changed PATH and airuleset will not clean it (the ticket's fear:
+        # "nobody will know why"). Content-lock so the warning is never dropped.
+        src = self._SRC.read_text(encoding="utf-8")
+        flat = src.replace("\n", " ")
+        # assertTrue(needle in text, msg) — never assertIn, so a miss does not
+        # dump the whole module source as the mismatch haystack (#419 lesson).
+        for needle, hay in (("#638", src), ("10-path.conf", src),
+                            ("DropInPaths", src),
+                            ("never writes or deletes", flat)):
+            self.assertTrue(
+                needle in hay,
+                "cli_webterm_david.py risk-site comment is missing %r — the "
+                "#638 decision (invariant stands; stale drop-in silently "
+                "overrides a changed PATH; airuleset never cleans .d/) must "
+                "stay recorded where a future PATH editor will read it." % needle)
+
+    def test_main_unit_still_carries_the_path_so_no_dropin_is_needed(self):
+        # The machinery the decision KEEPS: the PATH lives in the MAIN unit,
+        # so a clean start needs no drop-in at all (#614). If this regresses,
+        # the "invariant stands" decision is no longer safe. And the render
+        # itself must never emit a drop-in path.
+        unit = d.render_david_ttyd_unit()
+        self.assertIn("Environment=PATH=%h/.local/bin:", unit)
+        self.assertNotIn(".service.d", unit)
+
+
 if __name__ == "__main__":
     unittest.main()
