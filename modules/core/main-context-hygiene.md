@@ -22,3 +22,5 @@ Use `Explore` (read-only) or `general-purpose`, cheap model per `model-awareness
 - The high-level conversation, the user's goals, and the orchestration decisions themselves.
 
 **The discipline:** before reading a pile of files into your own context, ask "do I need this verbatim, or just the conclusion?" Conclusion → dispatch a subagent and STAY THIN. Reading 10 files yourself to answer one question is the anti-pattern — it bloats the main thread and makes you forget what the user wants. Applies to all rewordings and semantic equivalents.
+
+**Scratch → `/tmp`; a WORK-PRODUCT → `~/.claude/work-products/` immediately** — the context window is disposable and `/tmp` is swept, so an artifact the owner/client will read (a draft, a document, a report not yet on a ticket) is saved to the durable dir the moment it exists, never left only in the `/tmp` scratchpad (`durable-decisions-to-tickets.md`, #640).

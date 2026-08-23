@@ -381,6 +381,22 @@ else
     # AIRULESET_FABLE_EDIT_MAX threshold, checked BEFORE the ordinary
     # length gate below. The hook only STRING-MATCHES the path; no
     # filesystem check. Repo files keep the existing threshold unchanged.
+    # #640: ~/.claude/work-products/** joins the SAME size-capped,
+    # traversal-guarded branch — a DURABLE, sweep-safe home for a large
+    # main-session WORK-PRODUCT (an unapproved client draft, a generated
+    # document, a recipe). It is NOT under /tmp, so neither the fleet
+    # subdev-disk-hygiene.sh nor airuleset's own sweep_claude_scratch (both
+    # /tmp-scoped) deletes it. WHY the pattern is $HOME-ANCHORED
+    # (`"$HOME"/.claude/work-products/*`), not a bare glob (#640 review):
+    # this exemption must reach ONLY the ONE home-dir work-products dir, and
+    # NEITHER of the two repo-subdir shapes that would reopen the #178
+    # stage-implementation-into-the-tree hole — a bare `*/work-products/*`
+    # would match `<repo>/work-products/x.py`, AND an unanchored
+    # `*/.claude/work-products/*` would match `<repo>/.claude/work-products/
+    # x.py` (every managed repo carries a project-local `.claude/`). Anchoring
+    # to the literal $HOME (quoted → matched literally; the running user's own
+    # home per box, so still home-agnostic across dev1/dev2/subdev) excludes
+    # both: a repo lives under $HOME/devel/<repo>/, never at $HOME/.claude/.
     FILE_PATH_EARLY=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty' \
         2>/dev/null || echo "")
     LEN=$(echo "$INPUT" | jq -r \
@@ -396,7 +412,7 @@ else
         # path string-matches `/tmp/*` but resolves outside it, so it falls
         # straight through to the ordinary threshold below, fail-closed.
         *..*) : ;;
-        /tmp/*|*/.claude/projects/*/memory/*)
+        /tmp/*|*/.claude/projects/*/memory/*|"$HOME"/.claude/work-products/*)
             # size-capped, not unlimited (#178 review) — a non-numeric LEN
             # gets no exemption either, fail-closed to the ordinary check.
             [ "$LEN" -le "$BOOKKEEPING_READ_MAX" ] 2>/dev/null && exit 0
@@ -1304,10 +1320,12 @@ david@subdev inline-354-edits incident):
     work under an armed /goal use the autopilot-worker; for plan execution
     use superpowers:subagent-driven-development.
   • then REVIEW the worker's diff here — that is the coordinator's job.
-  • a /tmp scratchpad file or a ~/.claude/projects/*/memory/ note is
-    exempt from this threshold up to AIRULESET_MAIN_READ_MAX_BYTES
-    (default 128 KB, #178) — this file is neither, is over that cap, or
-    its path contains ".." (never exempt, #178 review).
+  • a /tmp scratchpad file, a ~/.claude/projects/*/memory/ note, or a
+    durable WORK-PRODUCT under ~/.claude/work-products/ (a draft, a
+    generated document, a recipe — #640) is exempt from this threshold up
+    to AIRULESET_MAIN_READ_MAX_BYTES (default 128 KB, #178) — this file is
+    none of those, is over that cap, or its path contains ".." (never
+    exempt, #178 review).
 
 Deliberate exception (one-shot, logged, and it must SAY WHY):
   echo "<why this one call must run here>" > /tmp/airuleset-main-exec-ok-${SESSION_ID}

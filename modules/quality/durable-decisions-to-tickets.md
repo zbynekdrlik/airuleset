@@ -21,6 +21,15 @@
 
 If yes, you are already late: write it to the ticket(s) in THIS turn, before any other work. Run this test after every user answer that settles something and after every substantive discovery — not once at the end. (The Stop-hook net in `no-dropped-work.md` catches dropped-work PHRASES; nothing mechanical can catch an unsaved decision — this discipline is the only guard.)
 
+#### A WORK-PRODUCT is durable the MOMENT it exists — /tmp is never its only copy (#640)
+
+The same disposability that eats a decision eats a **work-product** — anything the owner or a client will READ that cannot go on a ticket yet: an unapproved client text, a generated document, a report draft, a multi-day composition. `/tmp` is where session SCRATCH lives (intermediate computation, throwaway probes) and it is SWEPT — the fleet hygiene job deletes `/tmp/claude-<uid>/` on a cadence, and airuleset's own scratch sweep ages out `/tmp` scratchpads — so a work-product whose ONLY copy is the `/tmp` scratchpad is a work-product about to be deleted (the montalu6 loss: acceptance drafts + recipes gone). So the split:
+
+- **Session SCRATCH → `/tmp`** (the scratchpad). Intermediate values, throwaway files, anything you can regenerate.
+- **A WORK-PRODUCT → `~/.claude/work-products/` IMMEDIATELY at creation**, before any other work — a DURABLE, sweep-safe dir (outside `/tmp`, so no hygiene job deletes it). `/tmp` may hold a WORKING copy, but never the ONLY copy. This is the artifact sibling of the same-turn rule above: a decision goes on its ticket the moment it lands; a work-product that cannot go on a ticket yet goes to the durable dir the moment it exists.
+
+The main-session write guard (`block-main-implementation.sh`) EXEMPTS `~/.claude/work-products/**` from its size limit exactly so "save the draft durably" is a normal action, never an exceptional one.
+
 #### Anti-patterns (intent — all rewordings and semantic equivalents)
 
 - "Spravím to podľa toho, čo sme si povedali" / "as we discussed" / "per our agreement" — with the agreement existing ONLY in the conversation → **WRONG.** Write it to the ticket, then reference the ticket.
@@ -28,5 +37,6 @@ If yes, you are already late: write it to the ticket(s) in THIS turn, before any
 - Holding findings for the completion report ("zhrniem to na konci") → **WRONG.** The report may never come — compaction, a crash, a session end all eat it. Persist as you go.
 - Answering the user's design question, getting their pick, and moving straight to code without `gh issue comment` → **WRONG.** The pick is a decision; it lands on the ticket first.
 - Treating auto-memory as the store for project decisions → **WRONG.** Memory is for preferences and cross-session agent context; PROJECT decisions belong on the project's tickets where the user and every future session can read them.
+- Composing a client draft / document / report and leaving its ONLY copy in the `/tmp` scratchpad ("I'll save it properly later") → **WRONG.** `/tmp` is swept; a work-product goes to `~/.claude/work-products/` the moment it exists, not at the end.
 
 The intent: nothing the conversation establishes is ever lost to compaction — every decision and finding is on a ticket within the turn it was made, and converged plans execute ticket-by-ticket. Applies to all rewordings and semantic equivalents.
