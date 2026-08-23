@@ -22,6 +22,7 @@ import re
 import stat as _stat
 import sys
 from collections import namedtuple
+from datetime import datetime
 from pathlib import Path
 
 from watchdog import _SENTINELS
@@ -94,6 +95,141 @@ def _read_jsonl_byte_tail(path, tail_bytes, max_entries):
         except Exception:
             continue
     return out
+
+
+# --------------------------------------------------------------------------- #
+# #645 — per-PANE session resolution via the transcript's RESUME BOUNDARY.
+#
+# Two claude panes can share ONE project cwd (marek + zbynek both in
+# presenter-dev2), so `find_active_transcript` (cwd-keyed, newest jsonl) resolves
+# the SAME sid for both → `compact._find_pane_for_session` sees 2 matches →
+# `skip:no-pane` FOREVER. The per-PANE discriminator is the claude PROCESS start
+# time (fd/env/cmdline/lock-file all carry NO sid — measured live on dev1+dev2):
+# a session's transcript carries a RESUME BOUNDARY at the CURRENT process start —
+# a quiet GAP just before it, then a startup BURST just after. MEASURED on dev2:
+# `d306e5ce` (a 202 MB `-c` session BORN months earlier, so its BIRTH is useless
+# as a signal) has a 5.7 h gap before its Aug-23 12:51 process start and a burst
+# 102 s after; a binary-search-by-timestamp finds it in 26 reads / 2.3 ms.
+RESUME_GAP_BEFORE_S = 120      # a (re)start has >=2 min quiet before its burst;
+                               # continuous activity (an entry within 2 min
+                               # BEFORE the start) is NOT a boundary — this is
+                               # what excludes a co-active sibling pane so the
+                               # real owner is the UNIQUE match.
+RESUME_BURST_AFTER_S = 300     # the process writes its startup entry within
+                               # ~5 min of start (measured <=102 s); generous.
+
+# How far to scan for the nearest entry BEFORE the pivot. Entries are usually
+# ~KB; 256 KB comfortably spans several even with the occasional multi-KB
+# tool-result. If a giant (>256 KB) entry adjacent to the boundary leaves a
+# real before-entry undiscovered, the `lo > 0` guard in the reader REFUSES the
+# boundary rather than mistaking it for a fresh onset (an unseen before-entry
+# is the match-MORE direction, never a safe skip — #645 review).
+_RESUME_PRE_WINDOW_BYTES = 262144
+
+
+def _jsonl_entry_epoch(line):
+    """Epoch seconds of a JSONL line's ISO `timestamp`, or None (no timestamp /
+    unparseable line). Used by the resume-boundary binary search (#645)."""
+    try:
+        ts = json.loads(line).get("timestamp")
+    except Exception:
+        return None
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _transcript_resume_boundary_at(path, start_epoch,
+                                   gap_before_s=RESUME_GAP_BEFORE_S,
+                                   burst_after_s=RESUME_BURST_AFTER_S):
+    """True iff transcript `path` has a RESUME BOUNDARY at `start_epoch`: no
+    entry in the `gap_before_s` window just BEFORE it (a fresh/quiet gap) AND an
+    entry within `burst_after_s` AFTER it (the process's startup burst). This is
+    the strongest per-PANE owner signal available (#645) — the pane whose claude
+    process started at `start_epoch` owns this transcript. It is PROBABILISTIC,
+    not a proof of ownership: two same-cwd processes whose starts both frame a
+    quiet-then-active window stay ambiguous (the caller's uniqueness gate turns
+    that into a safe skip), and an owner whose first entry lands >burst_after_s
+    after its start is never boundary-resolved. Every failure leans to the
+    safe-skip / refuse-boundary side, never a wrong match.
+
+    A JSONL is append-ordered, so a BINARY SEARCH by timestamp locates the
+    boundary in O(log filesize) BOUNDED reads even for a hundreds-of-MB `-c`
+    transcript (measured 26 reads / 2.3 ms on a 202 MB file) — never a whole-file
+    read. Fail-safe False on any read/stat error (the safe-skip direction)."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size <= 0:
+        return False
+    before = None
+    after = None
+    lo = 0
+    try:
+        with open(path, "rb") as f:
+            # Binary-search for the first byte offset whose line-timestamp is
+            # >= start_epoch. A mid-file seek lands inside a line, so discard the
+            # partial line, then take the first line that actually carries a ts.
+            # AFTER the search, `lo` advances (via `f.tell()`) ONLY on the
+            # `t < start_epoch` branch, so `lo > 0` PROVES at least one entry
+            # before start_epoch exists; `lo == 0` PROVES none does (a genuine
+            # fresh onset). The gap guard below relies on that invariant.
+            hi = size
+            while lo < hi:
+                mid = (lo + hi) // 2
+                f.seek(mid)
+                if mid:
+                    f.readline()
+                t = None
+                while True:
+                    ln = f.readline()
+                    if not ln:
+                        break
+                    t = _jsonl_entry_epoch(ln)
+                    if t is not None:
+                        break
+                if t is None or t >= start_epoch:
+                    hi = mid
+                else:
+                    lo = f.tell()
+            # Read a bounded window straddling the pivot: nearest entry before
+            # start_epoch and the first entry at/after it. Guard the partial-line
+            # discard on the SEEK TARGET `pre`, never on `lo` — when the pivot
+            # sits in the first `_RESUME_PRE_WINDOW_BYTES` (every young/short
+            # transcript), `pre` clamps to 0, which is a TRUE line start; a `lo`
+            # guard would throw the file's genuine FIRST line away (#645 review).
+            pre = max(0, lo - _RESUME_PRE_WINDOW_BYTES)
+            f.seek(pre)
+            if pre:
+                f.readline()
+            scanned = 0
+            while scanned < 8000:
+                ln = f.readline()
+                if not ln:
+                    break
+                scanned += 1
+                t = _jsonl_entry_epoch(ln)
+                if t is None:
+                    continue
+                if t < start_epoch:
+                    before = t
+                else:
+                    after = t
+                    break
+    except OSError:
+        return False
+    # `before is None` means EITHER a genuine fresh onset (no before-entry, so
+    # `lo == 0`) → gap ok, OR the window missed a real before-entry that DOES
+    # exist (`lo > 0`: a before-entry beyond the pre-window, e.g. one giant
+    # entry) → REFUSE the boundary (conservative: an unseen before-entry is a
+    # possible co-active sibling, the match-MORE direction, never the safe one).
+    gap_ok = (start_epoch - before) >= gap_before_s if before is not None else lo == 0
+    burst_ok = after is not None and (after - start_epoch) <= burst_after_s
+    return gap_ok and burst_ok
 
 
 def _entry_text(entry):

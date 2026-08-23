@@ -139,6 +139,69 @@ def _hosted_claude_cwd(claude_pid, pane_cwd):
     return pane_cwd
 
 
+def _proc_start_epoch(pid):
+    """Epoch seconds when process `pid` STARTED — `/proc/<pid>/stat` field 22
+    (`starttime`, clock ticks since boot) + `/proc/stat` `btime`. None on any
+    read/parse failure. This is the per-PANE session discriminator (#645): the
+    claude process's start aligns with a RESUME BOUNDARY in the session's
+    transcript, the only signal that holds (fd/env/cmdline carry no sid)."""
+    stat = _proc_read("/proc/%s/stat" % pid)
+    if not stat:
+        return None
+    # comm can contain spaces/parens, so split AFTER the last ") " — field 3
+    # (state) is then index 0, field 22 (starttime) index 19.
+    try:
+        after = stat.rsplit(") ", 1)[-1].split()
+        ticks = int(after[19])
+    except (IndexError, ValueError):
+        return None
+    btime = None
+    for line in _proc_read("/proc/stat").splitlines():
+        if line.startswith("btime "):
+            try:
+                btime = int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+            break
+    if btime is None:
+        return None
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+    except (ValueError, OSError):
+        return None
+    if not hz:
+        return None
+    return btime + ticks / hz
+
+
+def _pane_claude_pid(pane_pid):
+    """The `claude` PID for a pane: `pane_pid` itself when it IS claude (an
+    `exec claude` launch), else the claude descendant in its process tree (the
+    normal shell-forks-claude launch — reuses `_pane_hosted_claude_pid`). None if
+    neither. Fail-safe None on a bad pane_pid."""
+    p = str(pane_pid).strip()
+    if not p.isdigit():
+        return None
+    if "claude" in _proc_read("/proc/%s/comm" % p):
+        return p
+    return watchdog._pane_hosted_claude_pid(p)
+
+
+def _pane_claude_start_epoch(pane_id, run=None):
+    """Start-epoch of the claude process hosting tmux pane `pane_id`:
+    `#{pane_pid}` → `_pane_claude_pid` → `_proc_start_epoch`. None when
+    unresolved (fail-safe: the #645 disambiguation then safe-skips this pane)."""
+    run = run or watchdog._default_run
+    ppid = (run(["tmux", "display-message", "-p", "-t", pane_id,
+                 "#{pane_pid}"]) or "").strip()
+    if not ppid.isdigit():
+        return None
+    cpid = watchdog._pane_claude_pid(ppid)
+    if not cpid:
+        return None
+    return watchdog._proc_start_epoch(cpid)
+
+
 def _tmux_default_socket_path():
     """The tmux server's DEFAULT control socket path -- `$TMUX_TMPDIR` (or
     `/tmp` when unset) + `tmux-<uid>/default` -- what every managed session
