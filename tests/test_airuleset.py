@@ -5039,6 +5039,11 @@ class TestTmuxHistoryLimit(TestCase):
             "set-option -g history-limit 50000\n"
             # #591: no `destroy-unattached` line at all -- removed globally.
             "set-option -g default-size 176x50\n"
+            # #646: mouse on (+ the Shift+drag native-selection caveat comment),
+            # emitted right after default-size, before the bind-keys.
+            "# #646: mouse on -- scroll-wheel reaches tmux's scrollback over ssh. Native\n"
+            "# text selection then needs Shift+drag (a plain drag goes to tmux copy-mode).\n"
+            "set-option -g mouse on\n"
             'bind-key -n S-PageUp if -F '
             '"#{==:#{pane_current_command},claude}" '
             '"send-keys C-o" "copy-mode -eu"\n'
@@ -5112,29 +5117,35 @@ class TestTmuxHistoryLimit(TestCase):
         # idempotent. #613: the aggressive-resize `-gwu` sibling self-heal stays.
         # window-size is NOT live-applied (the first reopen's `-gu window-size`
         # self-heal is removed -- it forced a running server to `latest` against
-        # the fixed-size invariant); it is conf-only (version-gated). So
-        # 1 probe + 9 live = 10 calls.
+        # the fixed-size invariant); it is conf-only (version-gated).
+        # #646: `mouse on` IS live-applied -- a positive `set-option -g mouse on`
+        # sitting at calls[4], AFTER the two self-heal UNSETs (so calls[1..3]
+        # keep their positions), before the keybinds. So 1 probe + 10 live = 11
+        # calls.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 11)
         self.assertEqual(calls[0], ["tmux", "-V"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "history-limit", "50000"])
         self.assertEqual(calls[2], ["tmux", "set-option", "-gu", "destroy-unattached"])
         self.assertEqual(calls[3], ["tmux", "set-option", "-gwu", "aggressive-resize"])
-        self.assertEqual(calls[4], [
+        self.assertEqual(calls[4], ["tmux", "set-option", "-g", "mouse", "on"])
+        self.assertEqual(calls[5], [
             "tmux", "bind-key", "-n", "S-PageUp", "if", "-F",
             "#{==:#{pane_current_command},claude}",
             "send-keys C-o", "copy-mode -eu"])
-        self.assertEqual(calls[5], ["tmux", "bind-key", "-T", "copy-mode", "S-PageDown",
+        self.assertEqual(calls[6], ["tmux", "bind-key", "-T", "copy-mode", "S-PageDown",
                                      "send-keys", "-X", "page-down"])
-        self.assertEqual(calls[6], ["tmux", "bind-key", "-T", "copy-mode-vi", "S-PageDown",
+        self.assertEqual(calls[7], ["tmux", "bind-key", "-T", "copy-mode-vi", "S-PageDown",
                                      "send-keys", "-X", "page-down"])
-        self.assertEqual(calls[7], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[0])
-        self.assertEqual(calls[8], ["tmux", "unbind-key", "-n", "S-F1"])
-        self.assertEqual(calls[9], ["tmux", "unbind-key", "-n", "S-DC"])
+        self.assertEqual(calls[8], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[0])
+        self.assertEqual(calls[9], ["tmux", "unbind-key", "-n", "S-F1"])
+        self.assertEqual(calls[10], ["tmux", "unbind-key", "-n", "S-DC"])
         # window-size is NEVER a live call (conf-only).
         self.assertNotIn(["tmux", "set-option", "-gu", "window-size"], calls)
+        # #646: mouse is only ever SET on, never UNSET or set off.
+        self.assertNotIn(["tmux", "set-option", "-gu", "mouse"], calls)
 
     def test_a_failing_keybind_call_does_not_skip_the_remaining_ones(self):
         # #267: each live-apply call is independently guarded -- a runner
@@ -5142,7 +5153,7 @@ class TestTmuxHistoryLimit(TestCase):
         # ones from being attempted. #613 REOPEN-2: the version probe is
         # RESTORED (call 1 = `tmux -V`), so call 3 (the destroy-unattached
         # `-gu` self-heal) raises, and the remaining live-apply calls must
-        # still run -> 10 total.
+        # still run -> 11 total (#646 mouse on adds a live call at calls[4]).
         p = self._tmp()
         calls = []
 
@@ -5153,7 +5164,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 11)
 
     def test_a_nonzero_rc_keybind_call_does_not_skip_the_remaining_ones(self):
         # ADVERSARIAL-REVIEW FINDING (#267, MAJOR -- F1): the RAISING case
@@ -5185,7 +5196,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 11)
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
@@ -5753,12 +5764,11 @@ class TestTmuxScrollbackKeybinds(TestCase):
         p = Path(tempfile.mkdtemp()) / ".tmux.conf"
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        # #613 REOPEN: no version probe anymore, so calls[0] is history-limit,
-        # calls[1] is #254's destroy-unattached `-gu`, calls[2] is #613's
-        # aggressive-resize `-gwu` self-heal, calls[3] is #613-reopen's
-        # window-size `-gu` self-heal -- four plain set-option calls, none part
-        # of the keybind list, so the keybinds still start at calls[4] (the
-        # dropped probe and the added window-size self-heal cancel out).
+        # #613 REOPEN-2: the version probe is RESTORED, so calls[0] is the
+        # `tmux -V` probe, calls[1] history-limit, calls[2] #254's
+        # destroy-unattached `-gu`, calls[3] #613's aggressive-resize `-gwu`
+        # self-heal, and #646's `set-option -g mouse on` is calls[4] -- five
+        # non-keybind calls, so the scrollback keybinds now start at calls[5].
         # #289: the popup binds (TMUX_POPUP_BIND_ARGVS) are live-applied
         # AFTER the scrollback keybinds -- slice to exactly the scrollback
         # portion so this test stays scoped to TMUX_SCROLLBACK_KEYBINDS
@@ -5767,7 +5777,7 @@ class TestTmuxScrollbackKeybinds(TestCase):
         # quoting -- so this stays a plain equality check even for #338's
         # new multi-word-token entry.
         n = len(airuleset.TMUX_SCROLLBACK_KEYBINDS)
-        keybind_calls = calls[4:4 + n]
+        keybind_calls = calls[5:5 + n]
         self.assertEqual(len(keybind_calls), n)
         for call, argv in zip(keybind_calls, airuleset.TMUX_SCROLLBACK_KEYBINDS):
             self.assertEqual(call, ["tmux"] + argv)
