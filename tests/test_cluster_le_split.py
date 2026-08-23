@@ -67,6 +67,7 @@ REMOTE_NAMES = [
     "_parse_home_names",
     "_home_listing_trustworthy",
     "unregistered_home_accounts",
+    "_deploy_to_all_remotes",  # #633: cmd_push's extracted deploy loop
     "cmd_push",
 ]
 

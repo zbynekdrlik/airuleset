@@ -1151,6 +1151,25 @@ class TestInstallWiresDevEnvProvisioning(TestCase):
 # ---------------------------------------------------------------------------
 
 class TestPushRemoteDeployTimeoutAndStderr(TestCase):
+    """The #263 timeout/stderr/failure-tracking source-locks. #633 extracted
+    the deploy loop out of cmd_push into cli_remote._deploy_to_all_remotes
+    (function-length cap), so these locks now read the HELPER's source — the
+    tokens they assert (REMOTE_DEPLOY_TIMEOUT_S / subprocess.TimeoutExpired /
+    stderr_out / failed.append / if failed: / sys.exit(1)) all moved with the
+    loop. cmd_push's own delegation is characterized by
+    test_cmd_push_delegates_the_deploy_loop_to_the_helper below."""
+
+    def test_cmd_push_delegates_the_deploy_loop_to_the_helper(self):
+        # #633 characterization: cmd_push (still) reduces to gate -> git push
+        # -> local install -> _deploy_to_all_remotes(...). Proves the loop was
+        # extracted (not duplicated) and cmd_push actually calls the helper.
+        src = inspect.getsource(airuleset.cmd_push)
+        self.assertIn("_deploy_to_all_remotes(failed, auth_failed)", src)
+        # the loop's own tokens must NOT still live in cmd_push (would mean a
+        # copy, not a move)
+        self.assertNotIn("subprocess.TimeoutExpired", src)
+        self.assertNotIn("stderr_out", src)
+
     def test_timeout_constant_exceeds_the_worst_case_inner_timeout_sum(self):
         # #263 review MAJOR finding: the first version set this to 300s,
         # which is LESS than the sum of the inner best-effort timeouts a
@@ -1177,18 +1196,18 @@ class TestPushRemoteDeployTimeoutAndStderr(TestCase):
         self.assertGreater(airuleset.REMOTE_DEPLOY_TIMEOUT_S, worst_case_inner_sum)
 
     def test_cmd_push_uses_the_named_timeout_constant(self):
-        src = inspect.getsource(airuleset.cmd_push)
+        src = inspect.getsource(airuleset._deploy_to_all_remotes)
         self.assertIn("REMOTE_DEPLOY_TIMEOUT_S", src)
         self.assertNotIn("timeout=60,", src)
 
     def test_cmd_push_catches_timeout_expired_around_the_ssh_call(self):
-        src = inspect.getsource(airuleset.cmd_push)
+        src = inspect.getsource(airuleset._deploy_to_all_remotes)
         self.assertIn("subprocess.TimeoutExpired", src)
 
     def test_cmd_push_surfaces_stderr_on_a_successful_remote_call(self):
         # a successful remote install's own loud warnings go to stderr --
         # cmd_push used to discard it entirely on success.
-        src = inspect.getsource(airuleset.cmd_push)
+        src = inspect.getsource(airuleset._deploy_to_all_remotes)
         self.assertIn("stderr_out", src)
 
     def test_cmd_push_tracks_failures_and_exits_non_zero_when_any_occur(self):
@@ -1201,7 +1220,7 @@ class TestPushRemoteDeployTimeoutAndStderr(TestCase):
         # -- a SILENT partial deploy. Every failure (timeout or non-zero
         # rc) must be tracked and the whole command must exit non-zero if
         # any occurred.
-        src = inspect.getsource(airuleset.cmd_push)
+        src = inspect.getsource(airuleset._deploy_to_all_remotes)
         self.assertIn("failed.append", src)
         self.assertIn("if failed:", src)
         self.assertIn("sys.exit(1)", src)
