@@ -65,6 +65,20 @@ class TestDurableDecisionsRule(TestCase):
         self.assertIn("Decisions & findings land on the ticket THE MOMENT they happen", w)
         self.assertIn("durable-decisions-to-tickets.md", w)
 
+    def test_work_product_goes_durable_immediately_640(self):
+        # #640: scratch -> /tmp, but a work-product goes to the durable
+        # sweep-safe dir the MOMENT it exists, /tmp never its only copy.
+        t = read(self.MOD)
+        self.assertIn("WORK-PRODUCT", t)
+        self.assertIn("~/.claude/work-products/", t)
+        self.assertIn("never its only copy", t)
+        self.assertIn("Session SCRATCH", t)
+
+    def test_main_context_hygiene_points_at_the_durable_work_product_dir_640(self):
+        m = read("modules/core/main-context-hygiene.md")
+        self.assertIn("~/.claude/work-products/", m)
+        self.assertIn("durable-decisions-to-tickets.md", m)
+
 
 if __name__ == "__main__":
     main()
