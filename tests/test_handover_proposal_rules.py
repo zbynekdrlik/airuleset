@@ -855,5 +855,69 @@ class TestCompanionUnderInjectorBodyCap(TestCase):
             % (len(body), cap))
 
 
+class TestApprovalQuestionNamesTargetThreadSeparately(TestCase):
+    """#632 — the owner-approval question for a client Discuss message must name
+    the target thread CLEARLY and SEPARATELY: the full human thread NAME on its
+    OWN labelled line, never only the internal channel number and never only
+    wrapped in prose. Applies to the approval question for EVERY message (the
+    OPENING handover AND every follow-up), not just a new thread. Owner directive
+    2026-08-22; incident montalu1: an approval question for a production-board
+    notice referenced its target only as „vlákno 250" and the owner had to ask
+    „do akého vlákna to má ísť?".
+
+    Refines the EXISTING R2 (COMPLETE-proposal-in-chat) bullet in place — its
+    pre-#632 tokens stay in the same bullet, so a full revert also fails test_r1.
+
+    Teeth per #500/#532/#573: the rule wraps across several physical lines, so
+    bound a norm()-collapsed WINDOW to the R2 bullet (its unique start anchor →
+    the next `- **` marker) and assert the operative tokens inside it; the coarse
+    whole-file assertIn catches a full deletion, the window a PARTIAL revert."""
+
+    START = "The proposal you present to the owner is COMPLETE and lives IN THE CHAT"
+
+    def setUp(self):
+        self.raw = read(COMPOSE)
+        self.t = norm(self.raw)
+
+    def _bullet_window(self):
+        i = self.raw.index(self.START)
+        j = self.raw.find("\n- **", i + len(self.START))
+        self.assertNotEqual(j, -1, "R2 bullet must be followed by another `- **` bullet")
+        return norm(self.raw[i:j])
+
+    def test_operative_rule_present_whole_file(self):
+        # coarse full-deletion guard (clean assertIn message)
+        self.assertIn(self.START, self.t)
+
+    def test_thread_named_on_its_own_separate_line(self):
+        w = self._bullet_window()
+        self.assertIn("its OWN SEPARATE, clearly-shown line", w)
+        self.assertIn("the full human NAME", w)
+
+    def test_never_internal_number_or_prose_only(self):
+        w = self._bullet_window()
+        self.assertIn("NEVER only the internal channel number", w)
+        self.assertIn("NEVER only wrapped in prose", w)
+
+    def test_standard_vlakno_line_format(self):
+        w = self._bullet_window()
+        # ASCII-safe tokens of the owner's standard line (avoid fancy-quote
+        # matching). Both occur ONCE in the R2 window and vanish together if the
+        # `Vlákno:` example line is reverted, so the method keeps real teeth. (A
+        # bare "Tabula objednavok 1" assertion was dropped — that token also
+        # appears in the incident sentence, so it was toothless; #632 review.)
+        self.assertIn("Vlákno:", w)
+        self.assertIn("(pod IT-support, montalu PROD)", w)
+
+    def test_applies_to_the_approval_question_for_every_message(self):
+        w = self._bullet_window()
+        self.assertIn("approval question for EVERY message", w)
+
+    def test_names_the_incident(self):
+        w = self._bullet_window()
+        self.assertIn("airuleset #632", w)
+        self.assertIn("vlákno 250", w)
+
+
 if __name__ == "__main__":
     main()

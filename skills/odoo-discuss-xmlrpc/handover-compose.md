@@ -32,11 +32,21 @@ is the FIRST rule for a reason).
   daily #4515 substantive reminders need per-message approval, or a template
   approved ONCE (then cited by the marker `<ref>`)? — until the owner settles it,
   the safe default is per-message approval.
-- **The proposal you present to the owner is COMPLETE and lives IN THE CHAT.**
-  Put in the chat message itself: (1) the exact thread name, (2) the FULL message
-  body verbatim, (3) the member list. NEVER "the text is on the ticket / in the
-  PR" — the owner does not read tickets, so a proposal that points at a ticket
-  instead of carrying the whole text is not a proposal.
+- **The proposal you present to the owner is COMPLETE and lives IN THE CHAT —
+  and it is the approval question for EVERY message (the OPENING handover AND
+  every follow-up reply / question / reminder), never only a new thread.** Put
+  in the chat message itself: (1) the target thread on its OWN SEPARATE,
+  clearly-shown line — the exact thread name, i.e. the full human NAME (+ its
+  parent channel where that helps context), NEVER only the internal channel
+  number and NEVER only wrapped in prose:
+  `Vlákno: „Tabula objednavok 1" (pod IT-support, montalu PROD)`; (2) the FULL
+  message body verbatim; (3) the member list. NEVER "the text is on the ticket /
+  in the PR" — the owner does not read tickets, so a proposal that points at a
+  ticket instead of carrying the whole text is not a proposal. Naming the target
+  only by its internal number is exactly what forced the owner to ask „do akého
+  vlákna to má ísť?" (airuleset #632, montalu1: an approval question for a
+  production-board notice referenced its target only as „vlákno 250" — it should
+  have carried „Tabula objednavok 1" as a separate, visible field from the start).
 - **The thread NAME ends with the owning stream's NUMBER**, so the owner sees at
   a glance which stream owns the thread (montalu3 → "Kontrola zákazníckych
   e-mailov 3"). This formalizes the de-facto IT-support convention already on
