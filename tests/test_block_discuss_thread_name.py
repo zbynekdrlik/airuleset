@@ -838,5 +838,108 @@ class TestHookPassesApproval(_HookBase):
         self.assertEqual(self.run_hook(command=cmd, user="montalu6").returncode, 0)
 
 
+# --------------------------------------------------------------------------- #
+# Layer 7 -- #641: IDENTITY-AWARE signature word. The mandatory signature token
+# is derived from the posting stream's OWNER (notify.STREAM_NOTIFY_OWNER, reused
+# via notify.stream_redirect -- NEVER a second stream->owner map): a marek-owned
+# stream (montalu4) signs "MarekAI <N>"; every other owner (zbynek, david, ...)
+# signs the default "ZbynekAI <N>". Since odoo-erp #3864 montalu4 posts via
+# Marek's own handover account (client-visible name "Marek AI - odovzdávky",
+# compact "MarekAI"); the old hardcoded ZbynekAI both BLOCKED the truthful
+# MarekAI post AND ACCEPTED the wrong-identity ZbynekAI post (live PROD
+# contradiction, montalu thread 291 msg 1731669). #609's mechanical teeth stay
+# intact in BOTH directions: the wrong identity must keep BLOCKING for a marek
+# stream AND for a zbynek stream.
+# --------------------------------------------------------------------------- #
+
+# a montalu4 (marek-owned) message_post signed with the CORRECT MarekAI identity
+MAREK_MP_MARKEAI = ('models.execute_kw(db,uid,key,"discuss.channel","message_post",'
+                    '[cid],{"body":"<p>Ahoj, hotové.</p><p>MarekAI 4</p>"})')
+# the WRONG identity for a marek stream: signed ZbynekAI 4 instead of MarekAI 4
+MAREK_MP_WRONG_ZBYNEK = ('models.execute_kw(db,uid,key,"discuss.channel","message_post",'
+                         '[cid],{"body":"<p>Ahoj, hotové.</p><p>ZbynekAI 4</p>"})')
+# a fully valid marek client post: MarekAI signature AND owner-approval evidence
+MAREK_MP_APPROVED = MAREK_MP_MARKEAI + "  # " + APPROVAL_EVID
+
+
+class TestSignatureWord(TestCase):
+    def test_marek_stream_signs_marekai(self):
+        # montalu4 -> owner marek -> "MarekAI" (odoo-erp #3864 handover account)
+        self.assertEqual(g.signature_word("montalu4"), "MarekAI")
+
+    def test_zbynek_streams_sign_zbynekai(self):
+        for u in ("montalu2", "montalu6", "montalu"):
+            self.assertEqual(g.signature_word(u), "ZbynekAI", u)
+
+    def test_default_owner_signs_zbynekai(self):
+        # david1 -> owner david (NOT marek) -> the default ZbynekAI word
+        self.assertEqual(g.signature_word("david1"), "ZbynekAI")
+
+    def test_unknown_or_empty_user_defaults_to_zbynekai(self):
+        for u in ("bob", "", None, "newlevel"):
+            self.assertEqual(g.signature_word(u), "ZbynekAI", u)
+
+
+class TestSignaturePresentIdentityAware(TestCase):
+    def test_default_word_backcompat(self):
+        # the 2-arg form still defaults to ZbynekAI (unchanged behaviour)
+        self.assertTrue(g.signature_present("<p>Hotovo</p><p>ZbynekAI 2</p>", "2"))
+
+    def test_explicit_marek_word_accepts_marekai(self):
+        self.assertTrue(g.signature_present("koniec MarekAI 4", "4", "MarekAI"))
+
+    def test_explicit_marek_word_rejects_zbynekai(self):
+        # wrong identity for the demanded word -> not present
+        self.assertFalse(g.signature_present("koniec ZbynekAI 4", "4", "MarekAI"))
+
+    def test_explicit_default_word_rejects_marekai(self):
+        self.assertFalse(g.signature_present("koniec MarekAI 2", "2", "ZbynekAI"))
+
+
+class TestEvaluateMessagePostIdentity(TestCase):
+    def test_marek_stream_expected_is_marekai(self):
+        v = g.evaluate_message_post(UNSIGNED_MP, "montalu4")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.number, "4")
+        self.assertEqual(v.expected, "MarekAI 4")
+
+    def test_marek_stream_correct_marekai_passes(self):
+        self.assertIsNone(g.evaluate_message_post(MAREK_MP_MARKEAI, "montalu4"))
+
+    def test_marek_stream_wrong_zbynekai_is_a_violation(self):
+        v = g.evaluate_message_post(MAREK_MP_WRONG_ZBYNEK, "montalu4")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.expected, "MarekAI 4")
+
+    def test_zbynek_stream_wrong_marekai_is_a_violation(self):
+        # the REVERSE direction: a zbynek stream signing MarekAI must still BLOCK
+        v = g.evaluate_message_post(
+            'execute_kw(d,u,k,"discuss.channel","message_post",'
+            '[cid],{"body":"Ahoj MarekAI 2"})', "montalu2")
+        self.assertIsNotNone(v)
+        self.assertEqual(v.expected, "ZbynekAI 2")
+
+    def test_zbynek_stream_correct_zbynekai_still_passes(self):
+        self.assertIsNone(g.evaluate_message_post(SIGNED_MP, "montalu2"))
+
+
+class TestHookSignatureIdentity(_HookBase):
+    def test_marek_stream_wrong_zbynekai_blocked_with_marekai_expected(self):
+        r = self.run_hook(command="python3 -c '" + MAREK_MP_WRONG_ZBYNEK + "'",
+                          user="montalu4")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("MarekAI 4", r.stderr)
+        self.assertNotIn("ZbynekAI 4", r.stderr)
+
+    def test_marek_stream_unsigned_blocked_with_marekai_expected(self):
+        r = self.run_hook(command="python3 -c '" + UNSIGNED_MP + "'", user="montalu4")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("MarekAI 4", r.stderr)
+
+    def test_marek_stream_signed_and_approved_passes(self):
+        cmd = "python3 -c '" + MAREK_MP_APPROVED + "'"
+        self.assertEqual(self.run_hook(command=cmd, user="montalu4").returncode, 0)
+
+
 if __name__ == "__main__":
     main()
