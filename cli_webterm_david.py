@@ -212,6 +212,10 @@ def _write_david_artifacts():
     WEBTERM_DAVID_DASH_INDEX.write_text(
         w.render_dashboard_html(inv, ttyd_base=w.WEBTERM_TTYD_BASE),
         encoding="utf-8")
+    # #644: david's own installable-PWA assets (manifest name "Webterm david")
+    # next to his index.html; the david gateway serves them from his dash dir.
+    import cli_webterm_pwa
+    cli_webterm_pwa.write_pwa_assets(WEBTERM_DAVID_DASH_DIR, profiles.DAVID)
     # #612 owner directive 2026-08-22: NO credential. Cloudflare Access (email
     # OTP) at the edge is the whole gate, so the gateway runs in
     # --trust-access-header mode and NO credential is provisioned. Retire the

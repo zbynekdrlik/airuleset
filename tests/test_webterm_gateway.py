@@ -443,6 +443,95 @@ class TestGatewayIntegration(unittest.TestCase):
                 await self._teardown(h)
         _run(go())
 
+    # -- #644 PWA assets (manifest / network-only SW / icons) ------------- #
+
+    def _write_pwa(self, h):
+        d = Path(h.dash_path).parent
+        (d / "manifest.webmanifest").write_bytes(b'{"name":"Webterm dev1"}')
+        (d / "sw.js").write_bytes(b"self.addEventListener('fetch',function(e){});")
+        (d / "icon-192.png").write_bytes(b"\x89PNG\r\n\x1a\nICON192")
+
+    def test_pwa_manifest_served_authed_with_correct_type(self):
+        async def go():
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions)
+            try:
+                self._write_pwa(h)
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /manifest.webmanifest HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"200 OK", r)
+                self.assertIn(b"application/manifest+json", r)
+                self.assertIn(b"Webterm dev1", r)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_pwa_service_worker_served_as_js_with_scope_header(self):
+        async def go():
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions)
+            try:
+                self._write_pwa(h)
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /sw.js HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"200 OK", r)
+                self.assertIn(b"javascript", r.lower())
+                self.assertIn(b"Service-Worker-Allowed: /", r)
+                self.assertIn(b"addEventListener('fetch'", r)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_pwa_icon_served_as_png(self):
+        async def go():
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions)
+            try:
+                self._write_pwa(h)
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /icon-192.png HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"200 OK", r)
+                self.assertIn(b"image/png", r)
+                self.assertIn(b"\x89PNG", r)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_pwa_missing_asset_file_is_404_when_authed(self):
+        async def go():
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions)
+            try:
+                # authed, but no PWA files written to the dash dir
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /manifest.webmanifest HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"404", r)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_pwa_manifest_requires_auth(self):
+        async def go():
+            h = await self._harness()
+            try:
+                self._write_pwa(h)
+                r = await h.request(
+                    b"GET /manifest.webmanifest HTTP/1.1\r\nHost: x\r\n\r\n")
+                self.assertIn(b"303", r)
+                self.assertIn(b"Location: /login", r)
+                self.assertNotIn(b"Webterm dev1", r)   # not served unauthenticated
+            finally:
+                await self._teardown(h)
+        _run(go())
+
     def test_unauth_proxy_http_redirects_to_login(self):
         async def go():
             h = await self._harness()
