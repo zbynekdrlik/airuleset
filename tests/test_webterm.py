@@ -317,7 +317,8 @@ _FAKE_TMUX = r"""#!/usr/bin/env bash
 # Fake tmux: LOGS every invocation's argv to $FAKETMUX_LOG (one line each) and
 # answers has-session/list-sessions from FAKETMUX_SESSIONS (newline-separated
 # `group::name`, group may be empty). Proves the REAL _ATTACH_BODY builds the
-# right grouped-clone multi-attach commands and NEVER detaches another client.
+# right direct-attach multi-attach commands (#613 REOPEN-3) and NEVER
+# detaches another client.
 echo "$*" >> "$FAKETMUX_LOG"
 cmd="$1"; shift
 case "$cmd" in
@@ -344,23 +345,38 @@ exit 0
 class TestAttachSnippetBehavior(unittest.TestCase):
     """#584: standard tmux multi-attach that NEVER disturbs an existing client.
     Run the REAL _ATTACH_BODY against a logging fake tmux and prove: an existing
-    session is JOINED via a throwaway GROUPED clone (independent view, cleaned
-    up on disconnect, base never touched), and `attach -d` (the only verb that
-    detaches other clients) is NEVER used. #586: the webterm client no longer
-    forces ANY window-size policy on the target -- it drops the #584 `-gw
-    window-size latest` + `aggressive-resize on` overrides (that was the ROOT
-    regression: `latest` shrinks the shared window to whoever is active, so a
-    small webterm client blackens the owner's WT view). #613 REOPEN-2 (owner
-    directive 2026-08-22): the `-f ignore-size` flag #586 added is RESTORED (the
-    first reopen removed it, mis-targeting the browser client). It EXCLUDES the
-    webterm clone from tmux's window-size calc, so a SMALLER browser client can
+    session is JOINED, and `attach -d` (the only verb that detaches other
+    clients) is NEVER used. #586: the webterm client no longer forces ANY
+    window-size policy on the target -- it drops the #584 `-gw window-size
+    latest` + `aggressive-resize on` overrides (that was the ROOT regression:
+    `latest` shrinks the shared window to whoever is active, so a small webterm
+    client blackens the owner's WT view). #613 REOPEN-2 (owner directive
+    2026-08-22): the `-f ignore-size` flag #586 added is RESTORED (the first
+    reopen removed it, mis-targeting the browser client). It EXCLUDES the
+    webterm client from tmux's window-size calc, so a SMALLER browser client can
     never shrink the owner's Windows-Terminal window (which then rendered a dark
     unused region -- his SURFACE; the browser the CAUSE). This is belt-and-
     suspenders under the restored conf `window-size manual` and fixes a box still
     running the first-reopen `latest` server immediately. The browser's OWN
     appearance at the fixed grid is solved on the browser side (the dashboard
-    fit JS). #615: the clone session also gets `mouse on` (session-scoped) so the
-    browser scroll-wheel reaches tmux copy-mode."""
+    fit JS).
+
+    #613 REOPEN-3 (supervisor finding, 2026-08-23, issue #613 comment
+    5387073996): the THROWAWAY GROUPED CLONE this class used to prove (a
+    second, same-group session created per webterm connect, cleaned up on
+    disconnect) is REMOVED -- it silently blackened `Ctrl+B w` (tmux's own
+    window-chooser) for the owner's OTHER attached client the instant the
+    webterm browser also joined. An existing base is now joined by attaching
+    to it DIRECTLY (`tmux attach-session -t "$T" -f ignore-size`) -- no
+    clone, no `$$` session naming, no disconnect trap, no per-session
+    `destroy-unattached` hook. See tests/test_webterm_ctrlbw_darkening.py
+    for the live pty-driven regression proof of the actual chooser bug this
+    fixes. #615's `mouse on` is RETARGETED, not dropped: it is now set on
+    the shared base session itself (`-t "$T"`), since there is no more an
+    independent clone session to scope it to -- a recorded trade-off (the
+    owner's own ssh client also gains tmux mouse mode once a webterm
+    browser is connected), not a silent regression. See the `_ATTACH_BODY`
+    header comment in cli_webterm.py for the full record."""
 
     def setUp(self):
         import subprocess
@@ -379,35 +395,53 @@ class TestAttachSnippetBehavior(unittest.TestCase):
                             text=True, env=env, timeout=10)
         return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
 
-    def test_grouped_owner_joins_survivor_via_grouped_clone(self):
+    def test_grouped_owner_joins_survivor_directly(self):
         # dev1: zbynek + marek co-tenant. P=zbynek joins zbynek-4 (group
-        # survivor) via a NEW grouped clone, never marek, never a bare attach.
-        # #591: the clone is created DETACHED (`-d`) so a per-session sweep
-        # hook can be armed before attaching (see below).
+        # survivor) via a DIRECT attach, never marek, never a clone. #613
+        # REOPEN-3: no more `new-session -d -t ... -s ...-web-<pid>` clone
+        # creation anywhere on this path.
         log = self._run("zbynek", "zbynek::zbynek-4\nmarek::marek-12")
-        self.assertRegex(log, r"new-session -d -t zbynek-4 -s zbynek-4-web-\d+")
+        self.assertRegex(log, r"\battach-session -t zbynek-4 -f ignore-size\b")
         self.assertNotIn("attach -d", log)
-        self.assertNotRegex(log, r"\battach -t\b")     # never a shared mirror attach
+        self.assertNotRegex(log, r"new-session -d -t \S+ -s \S+-web-")
 
-    def test_standalone_stream_joins_exact_via_grouped_clone(self):
+    def test_standalone_stream_joins_exact_directly(self):
         log = self._run("david", "::david\n::montalu")
-        self.assertRegex(log, r"new-session -d -t david -s david-web-\d+")
+        self.assertRegex(log, r"\battach-session -t david -f ignore-size\b")
+        self.assertNotRegex(log, r"new-session -d -t \S+ -s \S+-web-")
 
-    def test_single_session_joins_via_grouped_clone_not_shared_attach(self):
-        # gk: one session "0". Previously a bare `attach -t 0` (shared/mirrored
-        # view); now an independent grouped clone.
+    def test_single_session_joins_via_direct_attach(self):
+        # gk: one session "0". This IS now a shared/direct attach (the fix)
+        # -- the independent grouped-clone view #584/#613-REOPEN-2 used to
+        # build is exactly what #613 REOPEN-3 removed (it broke Ctrl+B w).
         log = self._run("zbynek", "::0")
-        self.assertRegex(log, r"new-session -d -t 0 -s 0-web-\d+")
-        self.assertNotRegex(log, r"\battach -t 0\b")
+        self.assertRegex(log, r"\battach-session -t 0 -f ignore-size\b")
+        self.assertNotRegex(log, r"new-session -d -t \S+ -s \S+-web-")
 
-    def test_cleanup_kills_only_the_clone_never_the_base(self):
-        # The disconnect trap fires on EXIT (the fake new-session returns at
-        # once) -> the throwaway clone is killed, the BASE session never is.
-        log = self._run("zbynek", "zbynek::zbynek-4")
-        # exact-match (`=`) kill of ONLY the throwaway clone
-        self.assertRegex(log, r"kill-session -t =zbynek-4-web-\d+")
-        # never a kill of the bare base session (either `=zbynek-4` or `zbynek-4`)
-        self.assertNotRegex(log, r"kill-session -t =?zbynek-4(?!-web)")
+    def test_no_clone_lifecycle_machinery_anywhere(self):
+        # #613 REOPEN-3 negative lock: the whole clone-cleanup apparatus
+        # (disconnect trap, per-session destroy-unattached arming, kill of a
+        # throwaway `-web-<pid>` session) must never reappear on the join
+        # path -- there is no clone left to clean up. This is the "test
+        # that fails if the grouped-clone shape is reintroduced" the ticket
+        # asked for, at the shell-snippet level (see
+        # tests/test_webterm_ctrlbw_darkening.py for the LIVE behavioral
+        # lock proving WHY it must never come back).
+        cases = (
+            ("zbynek", "zbynek::zbynek-4\nmarek::marek-12"),
+            ("zbynek", "::0"),
+            ("david", "::david"),
+        )
+        for preferred, sess in cases:
+            log = self._run(preferred, sess)
+            self.assertNotIn("kill-session", log)
+            self.assertNotRegex(log, r"new-session -d -t")
+            self.assertNotIn("client-attached", log)
+            self.assertNotIn("destroy-unattached", log)
+        cmd = w._remote_command("zbynek")
+        self.assertNotIn("trap", cmd)
+        self.assertNotIn("$$", cmd)
+        self.assertNotIn("-web-", cmd)
 
     def test_does_not_force_any_GLOBAL_window_size_policy_on_the_target(self):
         # #586: the ROOT regression was `-gw window-size latest` (+ aggressive-
@@ -415,87 +449,74 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # small webterm client blackens the owner's WT choose-tree. The connect
         # script must set NEITHER: GLOBAL window-size policy is
         # cli_tmux_provisioning's concern (the conf pins `window-size manual`
-        # version-gated, #613 REOPEN-2), never the connect script's. The clone's
-        # `-f ignore-size` is a per-ATTACH client flag (checked below), NOT a
-        # global `set-option -g window-size`; #615's `mouse on` is a per-SESSION
-        # clone option — neither is a global window-size policy.
+        # version-gated, #613 REOPEN-2), never the connect script's. The direct
+        # attach's `-f ignore-size` (#613 REOPEN-3) is a per-ATTACH client flag
+        # (checked below), NOT a global `set-option -g window-size`.
         log = self._run("zbynek", "zbynek::zbynek-4")
         self.assertNotIn("window-size latest", log)
         self.assertNotIn("aggressive-resize", log)
         self.assertNotIn("set-option -g window-size", log)
 
-    def test_clone_attaches_WITH_ignore_size_so_it_never_shrinks_owner_window(self):
+    def test_direct_attach_uses_ignore_size_so_it_never_shrinks_owner_window(self):
         # #613 REOPEN-2 (owner directive 2026-08-22): `-f ignore-size` on the
-        # clone is RESTORED (the first reopen removed it, mis-targeting the
-        # browser). It EXCLUDES the webterm clone from tmux's window-size calc, so
-        # a SMALLER browser client can never shrink the owner's Windows-Terminal
-        # window (which then rendered a dark unused region — the owner's SURFACE;
-        # the browser the CAUSE). Proven live (isolated tmux 3.7b + pty clients):
-        # under `latest`+plain-clone a 160x46 webterm shrinks the owner's window
-        # 176x50 -> 160x45 (owner DARK); with `-f ignore-size` the owner's window
-        # stays 176x50 (full) at every attach + window-switch from both sides. It
-        # is a per-ATTACH flag on the CLONE only (never the fresh-base fallback —
-        # see test_fresh_base_session_is_never_ignore_size).
+        # webterm attach is RESTORED (the first reopen removed it, mis-targeting
+        # the browser client). #613 REOPEN-3: the attach target is now the base
+        # session DIRECTLY (no more clone), but the flag itself is unchanged --
+        # it EXCLUDES the webterm attach from tmux's window-size calc, so a
+        # SMALLER browser client can never shrink the owner's Windows-Terminal
+        # window (which then rendered a dark unused region — the owner's
+        # SURFACE; the browser the CAUSE). Proven live (isolated tmux 3.7b + pty
+        # clients, issue #613 comment 5387073996): with `-f ignore-size` the
+        # owner's window stays 176x50 (full) at every attach + window-switch
+        # from both sides -- AND (the actual #613 REOPEN-3 finding) the direct
+        # attach is what keeps `Ctrl+B w` alive, unlike the removed clone shape
+        # (see tests/test_webterm_ctrlbw_darkening.py). Never the fresh-base
+        # fallback (see test_fresh_base_session_is_never_ignore_size).
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertRegex(log, r"attach-session -t zbynek-4-web-\d+ -f ignore-size\b")
+        self.assertRegex(log, r"\battach-session -t zbynek-4 -f ignore-size\b")
         self.assertIn("ignore-size", log)
 
-    def test_clone_enables_mouse_scoped_to_the_clone_session_only(self):
-        # #615: the webterm clone session gets `mouse on` so the browser
-        # scroll-wheel enters tmux copy-mode (the 50000-line history is
-        # otherwise unreachable — the wheel spews raw `^[[A` escapes into the
-        # shell, proven live: MOUSE-off-wheelup.png). It is a SESSION option set
-        # on the clone (`-t "$C"`), so the owner's own SSH session stays
-        # `mouse off` (its terminal's behaviour is unchanged). NEVER a global
-        # `set-option -g mouse on` (that would flip the owner's WT session too).
-        # Verified live: clone mouse on, base mouse off (exp7); the browser
-        # wheel enters copy-mode (MOUSE-on-wheelup.png) and wheel-down returns
-        # to live view (MOUSE-on-wheeldown.png).
+    def test_mouse_is_restored_on_the_shared_base_session_only(self):
+        # #613 REOPEN-3: #615's `mouse on` is RETARGETED, not dropped. On the
+        # (now-removed) clone it was scoped to the browser's own independent
+        # session; with a direct attach there is only ONE session, so it is
+        # now set on the BASE itself (`-t "$T"`) -- a recorded trade-off (the
+        # owner's own ssh client also gains tmux mouse mode once a webterm
+        # browser is connected, see the `_ATTACH_BODY` header comment), never
+        # a silent drop of the #615 feature. Session-scoped, NEVER global
+        # (`-g`) -- global would flip mouse mode fleet-wide even for a
+        # session no browser has ever joined.
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertRegex(log, r"set-option -t zbynek-4-web-\d+ mouse on")
+        self.assertRegex(log, r"set-option -t zbynek-4 mouse on")
         self.assertNotIn("set-option -g mouse", log)
-        # fake tmux strips the quotes; prove the real command targets the clone.
         cmd = w._remote_command("zbynek")
-        self.assertIn('tmux set-option -t "$C" mouse on', cmd)
+        self.assertIn('tmux set-option -t "$T" mouse on', cmd)
 
-    def test_clone_arms_per_session_destroy_unattached_hook(self):
-        # #591 THE FIX: the throwaway clone gets its OWN `destroy-unattached on`
-        # via a `client-attached` hook (fires only once a client is attached,
-        # when `on` is safe -- setting it on a DETACHED session self-destructs
-        # it, verified live). This scopes the sweep to the clone ALONE; the base
-        # session (default `off`) is never touched, so the owner detaching from
-        # the base while the clone lives can NEVER kill the base (the gk 09:58
-        # total-death). Armed on the clone (`-t "$C"`), NEVER `-g` (global).
-        # The fake tmux logs `echo "$*"`, so the shell already stripped the
-        # quotes around the one-argument hook command -- match the unquoted form.
-        log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertRegex(
-            log,
-            r'set-hook -t zbynek-4-web-\d+ client-attached '
-            r'set-option destroy-unattached on')
-        # And prove (fake-independent) that the hook command is a SINGLE quoted
-        # argument to set-hook in the real command string, targeting the clone.
-        cmd = w._remote_command("zbynek")
-        self.assertIn(
-            'tmux set-hook -t "$C" client-attached '
-            '"set-option destroy-unattached on"', cmd)
+    def test_mouse_is_never_set_on_the_fresh_base_fallback(self):
+        # No existing session -> nothing to share mouse mode with yet (no
+        # browser has ever joined this session). The fresh-base path stays
+        # exactly as before #615: no mouse option touched at all.
+        log = self._run("zbynek", "")
+        self.assertNotIn("mouse", log)
 
     def test_connect_never_sets_a_global_destroy_unattached(self):
-        # #591: the per-session scoping must NEVER become a global -- a global
-        # `destroy-unattached` (any value/unset) is exactly the base-killer this
-        # fix removes, and global tmux policy is cli_tmux_provisioning's concern,
-        # never the connect script's.
+        # #591/#613 REOPEN-3: no destroy-unattached policy, session-scoped OR
+        # global, is ever set by this connect script any more -- a global
+        # `destroy-unattached` (any value/unset) is exactly the base-killer
+        # #591 removed, and global tmux policy is cli_tmux_provisioning's
+        # concern, never the connect script's; the per-session variant #591
+        # added for the (now-removed) clone has nothing left to scope to.
         for sess in ("zbynek::zbynek-4", "::0", ""):
             log = self._run("zbynek", sess)
-            self.assertNotIn("set-option -g destroy-unattached", log)
-            self.assertNotIn("destroy-unattached keep-last", log)
+            self.assertNotIn("destroy-unattached", log)
 
     def test_fresh_base_session_is_never_ignore_size(self):
         # No existing session -> the owner's own base is created; it is the real
-        # viewing client, so it must NOT be ignore-size. #613 REOPEN-2: the CLONE
-        # attach IS `-f ignore-size` again (test_clone_attaches_WITH_ignore_size…),
-        # so this fresh-base path is the SOLE resolution path that is deliberately
-        # NOT ignore-size — the owner's own base must size its own windows.
+        # viewing client, so it must NOT be ignore-size. The DIRECT attach to an
+        # existing base IS `-f ignore-size` (#613 REOPEN-3,
+        # test_direct_attach_uses_ignore_size…), so this fresh-base path is the
+        # SOLE resolution path that is deliberately NOT ignore-size — the
+        # owner's own base must size its own windows.
         log = self._run("zbynek", "")
         self.assertNotIn("ignore-size", log)
 
@@ -1002,8 +1023,9 @@ class TestAllTabsPreloaded(unittest.TestCase):
     iframe to about:blank unloads ttyd's page, firing ttyd's OWN beforeunload).
     #586 made every tab PRELOAD + stay connected instead of disconnecting hidden
     ones. #613 REOPEN-2: the tmux window is FIXED (`window-size manual` +
-    `default-size 176x50`) and the clone is `-f ignore-size`, so NO tab — hidden
-    or active — can ever resize a window; keeping every tab connected is
+    `default-size 176x50`) and every webterm attach is `-f ignore-size` (#613
+    REOPEN-3: a direct attach now, no clone), so NO tab — hidden or active —
+    can ever resize a window; keeping every tab connected is
     unconditionally safe. All tabs PRELOAD at login and stay connected; switching
     is pure show/hide (instant, no reconnect, no iframe navigation, so no
     beforeunload dialog on a tab click). Each ttyd xterm is force-fit to the fixed
@@ -1079,7 +1101,8 @@ class TestBrowserFixedGridFit(unittest.TestCase):
     (`_webterm_term_grid()` = TMUX_DEFAULT_SIZE 176x50 window + 1 status row =
     176x51) and its font is scaled to fill the viewport, so the fixed window
     fills the browser with no dark unused region AND without the browser ever
-    influencing tmux sizing (the clone is `-f ignore-size`). ttyd 1.7.4 exposes
+    influencing tmux sizing (every webterm attach is `-f ignore-size` --
+    #613 REOPEN-3: a direct attach now, no clone). ttyd 1.7.4 exposes
     the xterm Terminal as `window.term` in each same-origin iframe; the dashboard
     clamps `term.resize` so ttyd's own FitAddon can never change the grid, then
     scales `term.options.fontSize` (crisp re-render, not a blurry CSS scale)."""
