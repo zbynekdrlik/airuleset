@@ -1526,7 +1526,7 @@ class TestResumeBoundaryReader(unittest.TestCase):
             if e is None:
                 lines.append(json.dumps({"type": "summary", "leafUuid": "x"}))
             else:
-                iso = _dt.fromtimestamp(e, _tz).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                iso = _dt.fromtimestamp(e, _tz.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
                 lines.append(json.dumps({"type": "user", "timestamp": iso}))
         p.write_text("\n".join(lines) + "\n")
         return p
@@ -1594,23 +1594,26 @@ class TestProcStartEpoch(unittest.TestCase):
 
 
 class TestPaneClaudeStartEpoch(unittest.TestCase):
+    @staticmethod
+    def _run_pid(_argv, timeout=8):
+        return "4242"           # `#{pane_pid}` -> 4242
+
     def test_resolves_via_pane_pid_then_claude_pid_then_start(self):
-        tmux = DeliverCompactFakeTmux([], "")
-        # `#{pane_pid}` -> "sess:0.0" from the fake; override display-message
-        with m.patch.object(tmux, "__call__", return_value="4242"):
-            with m.patch.object(wd, "_pane_claude_pid", return_value="99"), \
-                 m.patch.object(wd, "_proc_start_epoch", return_value=123.0):
-                self.assertEqual(
-                    wd._pane_claude_start_epoch("%1", run=tmux), 123.0)
+        run = self._run_pid
+        with m.patch.object(wd, "_pane_claude_pid", return_value="99") as pcp, \
+             m.patch.object(wd, "_proc_start_epoch", return_value=123.0) as pse:
+            self.assertEqual(wd._pane_claude_start_epoch("%1", run=run), 123.0)
+            pcp.assert_called_once_with("4242")
+            pse.assert_called_once_with("99")
 
     def test_non_numeric_pane_pid_is_none(self):
-        run = lambda argv, timeout=8: "not-a-pid"
+        def run(_argv, timeout=8):
+            return "not-a-pid"
         self.assertIsNone(wd._pane_claude_start_epoch("%1", run=run))
 
     def test_no_claude_pid_is_none(self):
-        run = lambda argv, timeout=8: "4242"
         with m.patch.object(wd, "_pane_claude_pid", return_value=None):
-            self.assertIsNone(wd._pane_claude_start_epoch("%1", run=run))
+            self.assertIsNone(wd._pane_claude_start_epoch("%1", run=self._run_pid))
 
 
 class TestFindPaneAmbiguousResolution(unittest.TestCase):
@@ -1707,29 +1710,30 @@ class TestFindPaneAmbiguousResolution(unittest.TestCase):
                 compact._find_pane_for_session(self.SID, self.CWD,
                                                run=tmux, projects_dir=base), "%15")
 
-    def test_e_different_cwd_pane_never_a_candidate(self):
-        # a pane in a DIFFERENT cwd is never checked for the boundary (its
-        # process cannot own sid's transcript) — even if it would "match".
+    def test_e_different_cwd_pane_never_boundary_checked(self):
+        # Ambiguous cwd (two same-cwd panes) forces the boundary branch; a THIRD
+        # pane in a DIFFERENT cwd must NEVER be boundary-checked (its process
+        # cannot own sid's transcript) even though it would "match".
         proj = self._proj_sid_newest()
         other = "/home/newlevel/devel/montalu/report_tabulka"
-        tmux = self._tmux([("%16", "claude", self.CWD, "222"),
+        tmux = self._tmux([("%15", "claude", self.CWD, "111"),
+                           ("%16", "claude", self.CWD, "222"),
                            ("%28", "claude", other, "333")])
         seen = []
 
         def _boundary(path, st, *a, **k):
             seen.append(st)
-            return True   # would match ANY pane checked
+            return st == 200.0   # only %16's start is a genuine boundary
         with m.patch.object(wd, "_pane_claude_start_epoch",
                             side_effect=lambda pid, run=None:
-                            {"%16": 200.0, "%28": 999.0}[pid]), \
+                            {"%15": 100.0, "%16": 200.0, "%28": 999.0}[pid]), \
              m.patch.object(wd, "_transcript_resume_boundary_at",
                             side_effect=_boundary):
-            # only %16 is in sid's cwd -> only its start is boundary-checked ->
-            # unique -> deliver %16; %28's start (999.0) never reaches _boundary
             self.assertEqual(
                 compact._find_pane_for_session(self.SID, self.CWD,
                                                run=tmux, projects_dir=proj), "%16")
-        self.assertEqual(seen, [200.0])
+        self.assertNotIn(999.0, seen)   # the other-cwd pane was never checked
+        self.assertEqual(sorted(seen), [100.0, 200.0])
 
 
 class TestResolveSelfPane(unittest.TestCase):

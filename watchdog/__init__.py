@@ -433,6 +433,10 @@ from watchdog.transcripts import (  # noqa: E402
     live_bg_bash_ids as live_bg_bash_ids,                     # #605 pure bg-bash live ids (log detail)
     session_live_bg_bash_ids as session_live_bg_bash_ids,     # #605 bg-bash live ids I/O wrapper
     _read_jsonl_byte_tail as _read_jsonl_byte_tail,           # #599 bounded-seek reader
+    _jsonl_entry_epoch as _jsonl_entry_epoch,                       # #645
+    _transcript_resume_boundary_at as _transcript_resume_boundary_at,  # #645
+    RESUME_GAP_BEFORE_S as RESUME_GAP_BEFORE_S,                     # #645
+    RESUME_BURST_AFTER_S as RESUME_BURST_AFTER_S,                   # #645
     question_repoke_run as question_repoke_run,           # #522
     question_repoke_streak as question_repoke_streak,     # #522
     supervisor_responded_to_nudge as supervisor_responded_to_nudge,
@@ -481,6 +485,9 @@ from watchdog.tmux_io import (  # noqa: E402
     _proc_read as _proc_read,
     _pane_hosted_claude_pid as _pane_hosted_claude_pid,
     _hosted_claude_cwd as _hosted_claude_cwd,
+    _proc_start_epoch as _proc_start_epoch,                     # #645
+    _pane_claude_pid as _pane_claude_pid,                       # #645
+    _pane_claude_start_epoch as _pane_claude_start_epoch,       # #645
     _tmux_default_socket_path as _tmux_default_socket_path,
     _tmux_socket_missing as _tmux_socket_missing,
     _tmux_server_pids as _tmux_server_pids,

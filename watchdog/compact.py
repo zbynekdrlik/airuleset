@@ -699,23 +699,59 @@ def _compact_request_too_young(request_ts, now, min_age=None):
 # --------------------------------------------------------------------------- #
 
 def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
-    """Resolve the SINGLE current live pane hosting session `sid` — used
-    by the `--record` (SubagentStop) origin and by the periodic sweep,
-    neither of which has `$TMUX_PANE` available. Matches by TRANSCRIPT
-    STEM, never by cwd alone. Ambiguous (0 or >1 matching pane) → None,
-    so the caller leaves the request pending for the next sweep rather
-    than risk typing into the wrong pane."""
+    """Resolve the SINGLE current live pane hosting session `sid` — used by the
+    `--record` origin and by the periodic sweep, neither of which has
+    `$TMUX_PANE` available.
+
+    Cheap pass: the pane whose cwd's NEWEST transcript stem == `sid`. Correct and
+    unambiguous for the overwhelmingly common one-live-session-per-cwd case.
+
+    #645 — when TWO claude panes share ONE project cwd (marek + zbynek both in
+    presenter-dev2), `find_active_transcript` (cwd-keyed) resolves the SAME
+    newest transcript for both, so the cheap pass sees the sid MATCH on BOTH and
+    used to return None → `skip:no-pane` forever. It also missed the OPPOSITE
+    shape: `sid` is NOT its cwd's newest (an OLDER session sharing the cwd), so
+    the cheap pass sees ZERO matches. Both are resolved per-PANE by the claude
+    PROCESS start time → a RESUME BOUNDARY (a quiet gap before + a startup burst
+    after) in `sid`'s transcript — the only signal that holds (fd/env/cmdline
+    carry no sid; the transcript BIRTH is the original session's, months old for
+    a `-c` loop; all measured live on dev1+dev2). Ambiguous even there (0 or >1
+    boundary owner, an unreadable /proc) → None, the pre-existing safe skip,
+    retried next sweep."""
     run = run or watchdog._default_run
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
-    matches = []
+    # Defensive dedup by pane_id: grouped tmux sessions list one physical pane
+    # once per group member (the live presenter case listed one pane 3×).
+    # `list_claude_panes` already dedups, but keeping it here makes the match
+    # self-contained — a duplicated pane_id can never manufacture false ambiguity.
+    panes, seen = [], set()
     for pid, pcwd in watchdog.list_claude_panes(run):
-        tinfo = watchdog.find_active_transcript(projects_dir, pcwd)
-        if not tinfo:
+        if pid in seen:
             continue
-        tpath, _tmtime = tinfo
-        if tpath.stem == sid:
-            matches.append(pid)
-    return matches[0] if len(matches) == 1 else None
+        seen.add(pid)
+        panes.append((pid, pcwd))
+    cwd_matches = []
+    for pid, pcwd in panes:
+        tinfo = watchdog.find_active_transcript(projects_dir, pcwd)
+        if tinfo and tinfo[0].stem == sid:
+            cwd_matches.append(pid)
+    if len(cwd_matches) == 1:
+        return cwd_matches[0]
+    # Ambiguous per cwd — disambiguate per-PANE via the resume boundary.
+    tpath = Path(projects_dir) / watchdog.encode_project_dir(cwd) / (sid + ".jsonl")
+    if not tpath.exists():
+        return None
+    key = watchdog.encode_project_dir(cwd)
+    owners = []
+    for pid, pcwd in panes:
+        if watchdog.encode_project_dir(pcwd) != key:
+            continue      # sid's owner is same-cwd; never boundary-check others
+        start = watchdog._pane_claude_start_epoch(pid, run=run)
+        if start is None:
+            continue
+        if watchdog._transcript_resume_boundary_at(tpath, start):
+            owners.append(pid)
+    return owners[0] if len(owners) == 1 else None
 
 
 def resolve_self_pane(run=None, projects_dir=None, pane_env=None):
