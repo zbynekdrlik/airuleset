@@ -455,19 +455,18 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         self.assertNotIn("kill-server", trap_match.group(1))
 
     def test_mouse_reverts_off_on_disconnect_trap(self):
-        # #613 REOPEN-3 review fix (🟡, adversarial review 2): the FIRST
-        # cut of this fix set `mouse on` with NO revert path at all, which
-        # -- since sessions on this fleet are deliberately kept alive
-        # indefinitely (#591) -- would have PERMANENTLY latched mouse mode
-        # on for a session's whole remaining lifetime from the very FIRST
-        # webterm connection ever, including every future ssh-only
-        # reattach with no browser involved. The trap below is the fix:
-        # `mouse off` fires when the webterm CLIENT disconnects (EXIT/HUP/
-        # INT/TERM), reverting the session to its pre-connect state. `$T`
-        # is deferred-expanded at trap-FIRE time (single-quoted at
-        # trap-SET time -- the same pattern the removed clone's own `$C`
-        # kill-session trap used), so it always targets the session that
-        # was actually joined, not whatever `$T` happened to be later.
+        # #613 REOPEN-3: the connect-set `mouse on` is reverted by a
+        # disconnect trap. HONESTY NOTE (#647): #646 later made `-g mouse
+        # on` the fleet default, so this trap's `mouse off` now writes a
+        # session-LOCAL override that DEVIATES from the global (it no longer
+        # reverts to a clean pre-connect state -- the pre-connect state is
+        # now mouse-ON from the global). The trap + this assertion are kept
+        # AS-IS by the comment-only #647; the behavior fix (drop the block,
+        # or switch the trap to `set-option -u`) is tracked in #648. What
+        # this still locks mechanically: `$T` is deferred-expanded at
+        # trap-FIRE time (single-quoted at trap-SET time -- the same pattern
+        # the removed clone's own `$C` kill-session trap used), so it always
+        # targets the session actually joined, not whatever `$T` was later.
         log = self._run("zbynek", "zbynek::zbynek-4")
         self.assertRegex(log, r"set-option -t zbynek-4 mouse off")
         cmd = w._remote_command("zbynek")
@@ -522,12 +521,13 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # #613 REOPEN-3: #615's `mouse on` is RETARGETED, not dropped. On the
         # (now-removed) clone it was scoped to the browser's own independent
         # session; with a direct attach there is only ONE session, so it is
-        # now set on the BASE itself (`-t "$T"`) -- a recorded trade-off (the
-        # owner's own ssh client also gains tmux mouse mode once a webterm
-        # browser is connected, see the `_ATTACH_BODY` header comment), never
-        # a silent drop of the #615 feature. Session-scoped, NEVER global
-        # (`-g`) -- global would flip mouse mode fleet-wide even for a
-        # session no browser has ever joined.
+        # now set on the BASE itself (`-t "$T"`). HONESTY NOTE (#647): #646
+        # made `-g mouse on` the fleet default, so post-#646 this
+        # session-scoped set is REDUNDANT with the global (and the owner's
+        # ssh session is now mouse-on by that global -- see #648). This test
+        # still locks the RIGHT thing: this join path never emits a global
+        # `-g mouse` (that is cli_tmux_provisioning's job, #646) -- hence the
+        # `assertNotIn("set-option -g mouse", log)` below stays valid.
         log = self._run("zbynek", "zbynek::zbynek-4")
         self.assertRegex(log, r"set-option -t zbynek-4 mouse on")
         self.assertNotIn("set-option -g mouse", log)
