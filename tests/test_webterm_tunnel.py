@@ -3,12 +3,13 @@
 The webterm public front (a cloudflared tunnel) was unmanaged runtime state on
 BOTH lanes — the owner's did not exist (manual NAT patch instead) and david's was
 a HAND-MADE systemd unit airuleset did not reconcile. These tests prove the shared
-render helpers + the two prerequisite-gated provisioners write the right config +
-systemd --user unit, and are a SAFE no-op until the per-tunnel creds JSON exists
-(the one-time cert.pem bootstrap), mirroring cli_webterm_david.prerequisites_ready.
+render helpers (cli_webterm_tunnel) + the two prerequisite-gated provisioners write
+the right config + systemd --user unit, and are a SAFE no-op until the per-tunnel
+creds JSON exists (the one-time cert.pem bootstrap), mirroring
+cli_webterm_david.prerequisites_ready.
 """
 import contextlib
-import os
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,11 +17,12 @@ from unittest import mock as m
 
 import cli_webterm as w
 import cli_webterm_david as dv
+import cli_webterm_tunnel as tun
 
 
 class TestRenderTunnelConfig(unittest.TestCase):
     def test_config_has_tunnel_creds_and_ingress(self):
-        cfg = w.render_cloudflared_tunnel_config(
+        cfg = tun.render_cloudflared_tunnel_config(
             "abc-123", "/home/u/.cloudflared/abc-123.json",
             "zbynek.newlevel.media", "http://127.0.0.1:8080")
         self.assertIn("tunnel: abc-123", cfg)
@@ -33,7 +35,7 @@ class TestRenderTunnelConfig(unittest.TestCase):
 
 class TestRenderTunnelUnit(unittest.TestCase):
     def test_unit_execstart_config_run_and_restart(self):
-        unit = w.render_cloudflared_tunnel_unit(
+        unit = tun.render_cloudflared_tunnel_unit(
             "owner webterm tunnel", "/home/u/.cloudflared/webterm-owner.yml",
             "/usr/local/bin/cloudflared",
             after="network-online.target webterm-gateway.service")
@@ -59,13 +61,13 @@ class _TunnelIsolate:
         (p / ".config" / "systemd" / "user").mkdir(parents=True, exist_ok=True)
         pt = {
             "WEBTERM_CLOUDFLARED_DIR": p / ".cloudflared",
-            "WEBTERM_OWNER_TUNNEL_CREDS": p / ".cloudflared" / (w.WEBTERM_OWNER_TUNNEL_UUID + ".json"),
+            "WEBTERM_OWNER_TUNNEL_CREDS": p / ".cloudflared" / (tun.WEBTERM_OWNER_TUNNEL_UUID + ".json"),
             "WEBTERM_OWNER_TUNNEL_CONFIG": p / ".cloudflared" / "webterm-owner.yml",
             "WEBTERM_OWNER_TUNNEL_SERVICE_DEST": p / ".config" / "systemd" / "user" / "webterm-owner-tunnel.service",
         }
         for name, val in pt.items():
-            stack.enter_context(m.patch.object(w, name, val))
-        stack.enter_context(m.patch.object(w.shutil, "which", return_value="/usr/local/bin/cloudflared"))
+            stack.enter_context(m.patch.object(tun, name, val))
+        stack.enter_context(m.patch.object(tun.shutil, "which", return_value="/usr/local/bin/cloudflared"))
         import cli_filedrop_watchdog as fw
         self.sysctl = []
         stack.enter_context(m.patch.object(
@@ -78,7 +80,7 @@ class TestOwnerTunnelProvision(_TunnelIsolate, unittest.TestCase):
     def test_no_op_when_creds_absent(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
             pt = self._iso(st, tmp)
-            ok = w.setup_webterm_owner_tunnel(run=lambda *a, **k: None)
+            ok = tun.setup_webterm_owner_tunnel(run=lambda *a, **k: None)
             self.assertFalse(ok)                         # prereq-gated safe no-op
             self.assertFalse(pt["WEBTERM_OWNER_TUNNEL_CONFIG"].exists())
             self.assertFalse(pt["WEBTERM_OWNER_TUNNEL_SERVICE_DEST"].exists())
@@ -88,10 +90,10 @@ class TestOwnerTunnelProvision(_TunnelIsolate, unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
             pt = self._iso(st, tmp)
             pt["WEBTERM_OWNER_TUNNEL_CREDS"].write_text('{"TunnelID":"x"}\n')
-            ok = w.setup_webterm_owner_tunnel(run=lambda *a, **k: None)
+            ok = tun.setup_webterm_owner_tunnel(run=lambda *a, **k: None)
             self.assertTrue(ok)
             cfg = pt["WEBTERM_OWNER_TUNNEL_CONFIG"].read_text()
-            self.assertIn("tunnel: " + w.WEBTERM_OWNER_TUNNEL_UUID, cfg)
+            self.assertIn("tunnel: " + tun.WEBTERM_OWNER_TUNNEL_UUID, cfg)
             self.assertIn("hostname: zbynek.newlevel.media", cfg)
             self.assertIn("service: http://127.0.0.1:8080", cfg)
             unit = pt["WEBTERM_OWNER_TUNNEL_SERVICE_DEST"].read_text()
@@ -107,16 +109,10 @@ class TestSetupServiceWiresOwnerTunnel(unittest.TestCase):
     (the go-live default is now access mode)."""
 
     def test_access_mode_setup_calls_owner_tunnel(self):
-        with contextlib.ExitStack() as st:
-            called = {}
-            st.enter_context(m.patch.object(w, "OWNER_GATEWAY_ACCESS_MODE", True))
-            st.enter_context(m.patch.object(
-                w, "setup_webterm_owner_tunnel",
-                lambda run=None: called.setdefault("hit", True)))
-            # short-circuit the heavy gateway body: prove the wiring via a spy on
-            # the real function; the gateway provisioning is covered elsewhere.
-            self.assertIn("setup_webterm_owner_tunnel",
-                          __import__("inspect").getsource(w.setup_webterm_service))
+        src = inspect.getsource(w.setup_webterm_service)
+        self.assertIn("setup_webterm_owner_tunnel", src)
+        # guarded so it never runs before the gateway is up + only in access mode
+        self.assertIn("access_mode and ok_all", src)
 
 
 class _DavidTunnelIsolate:
@@ -124,7 +120,7 @@ class _DavidTunnelIsolate:
         p = Path(tmp)
         (p / ".cloudflared").mkdir(parents=True, exist_ok=True)
         (p / ".config" / "systemd" / "user").mkdir(parents=True, exist_ok=True)
-        stack.enter_context(m.patch.object(w, "WEBTERM_CLOUDFLARED_DIR", p / ".cloudflared"))
+        stack.enter_context(m.patch.object(tun, "WEBTERM_CLOUDFLARED_DIR", p / ".cloudflared"))
         pt = {
             "WEBTERM_DAVID_TUNNEL_CREDS": p / ".cloudflared" / (dv.WEBTERM_DAVID_TUNNEL_UUID + ".json"),
             "WEBTERM_DAVID_TUNNEL_CONFIG": p / ".cloudflared" / "config.yml",
