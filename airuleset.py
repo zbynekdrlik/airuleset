@@ -1520,6 +1520,11 @@ from cli_binary_installers import (  # noqa: E402, F401
     _binary_reachable,
     _ffmpeg_available,
     ensure_ffmpeg_static_binary,
+    TTYD_STATIC_URL,
+    TTYD_STATIC_BIN_DIR,
+    TTYD_STATIC_DEST,
+    _ttyd_available,
+    ensure_ttyd_static_binary,
 )
 
 

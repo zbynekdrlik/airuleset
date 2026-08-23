@@ -31,6 +31,7 @@ import cli_webterm as w
 import cli_webterm_access as access
 import cli_webterm_profiles as profiles
 import cli_webterm_tunnel as tun  # #635: shared managed-tunnel render helpers
+import cli_binary_installers as binstall  # #614: ttyd static-binary auto-install
 
 # The david deployment's own artifact paths + loopback ports (distinct from the
 # owner's, so the subdev box is self-documenting; the gateway binds loopback and
@@ -296,6 +297,19 @@ def setup_webterm_david_service(run=None):
     no systemd. Idempotent. Returns True on success, False on any skip/failure
     (never raises)."""
     run = run or subprocess.run
+    # #614 (owner decision 2026-08-23, Approach 2): auto-install the ttyd BINARY
+    # into ~/.local/bin BEFORE the prerequisite gate checks for it — the gate
+    # REQUIRES ttyd present, so a fresh subdev re-provision (ttyd absent) would
+    # otherwise no-op provisioning forever and stay dependent on the #612 hand
+    # install. Best-effort/non-fatal, exactly how cmd_install calls the
+    # ffmpeg/claude installers; a harmless no-op wherever ttyd already resolves.
+    # maybe_setup_webterm dispatches here ONLY on the DAVID-profile host
+    # (subdev), so this never runs on dev1/dev2/gatekeeper.
+    try:
+        binstall.ensure_ttyd_static_binary()
+    except Exception as e:
+        print("  webterm(david): ttyd static install error (non-fatal): %r" % e,
+              file=sys.stderr)
     try:
         ok, reason = prerequisites_ready()
     except Exception as e:  # a gate that itself errors is a SAFE no-op, never a raise

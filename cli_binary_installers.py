@@ -239,3 +239,87 @@ def ensure_ffmpeg_static_binary(dest: Path = None, probe_dest: Path = None):
               "install manually: curl -fsSL %s | tar -xJ -C /tmp && "
               "cp /tmp/*/ffmpeg %s && cp /tmp/*/ffprobe %s && chmod 755 %s %s"
               % (e, FFMPEG_STATIC_URL, d, p, d, p), file=sys.stderr)
+
+
+# tsl0922/ttyd's per-release STATIC x86_64 asset. The GitHub `/releases/latest/
+# download/<asset>` form is an UNPINNED "latest" redirect (302 to the newest
+# release's asset) — owner decision 2026-08-23 chose exactly this (#614 Approach
+# 2): "always the newest static version, no checksum", precisely the
+# FFMPEG_STATIC_URL precedent above. `curl -fsSL` follows the redirect (`-L`).
+TTYD_STATIC_URL = ("https://github.com/tsl0922/ttyd/releases/latest/download/"
+                   "ttyd.x86_64")
+# ~/.local/bin, NOT ~/bin — the ONLY directory on PATH inside a real Bash tool
+# call / the managed launcher's own fix-up, AND the exact dir the webterm-david
+# ttyd unit's self-contained PATH env prepends (#614). Same rule the ffmpeg
+# dest follows (#275 review MAJOR-2).
+TTYD_STATIC_BIN_DIR = Path.home() / ".local" / "bin"
+TTYD_STATIC_DEST = TTYD_STATIC_BIN_DIR / "ttyd"
+
+
+def _ttyd_available(dest: Path = None) -> bool:
+    """True iff ttyd is already reachable — our own ~/.local/bin/ttyd is a
+    genuinely executable file, or `ttyd` is otherwise on PATH (dev1's system
+    /usr/bin/ttyd, or a prior/hand install here — the #612 go-live installed it
+    by hand). Single-binary sibling of `_ffmpeg_available`; reuses
+    `_binary_reachable`'s dest-or-PATH check so a hand-installed ttyd is
+    recognized as already-done and never reinstalled over."""
+    d = dest or TTYD_STATIC_DEST
+    return _binary_reachable(d, "ttyd")
+
+
+def ensure_ttyd_static_binary(dest: Path = None):
+    """Best-effort, time-boxed, non-fatal static-ttyd install into `~/.local/bin`
+    (#614, owner decision 2026-08-23 — Approach 2: unpinned "latest" static
+    binary, NO checksum, EXACTLY the `ensure_ffmpeg_static_binary` precedent):
+    the DAVID webterm gateway on subdev has NO sudo, so `ttyd` — which the ttyd
+    unit's launcher `exec`s — must live as a user-space static binary in
+    ~/.local/bin. #612 go-live placed it BY HAND; this makes a fresh subdev
+    re-provision self-sufficient (the gate `prerequisites_ready()` REQUIRES ttyd
+    present, so an absent binary would no-op provisioning forever).
+
+    Same shape as `ensure_ffmpeg_static_binary()`, minus the tar step: ttyd
+    ships as a SINGLE static binary asset (ttyd.x86_64), so ONE `curl -o`
+    downloads it — no extraction. The download+chmod happen inside a SCRATCH
+    subdir of the FINAL destination's OWN parent (never the final path
+    directly, and never a separate /tmp — same filesystem is what makes the
+    final `mv` an atomic rename), only `mv`d into place once the file is
+    confirmed non-empty and chmod'd: a hard-killed subprocess (this call's own
+    180s `timeout=` sends SIGKILL, which no shell `trap` can intercept) must
+    never leave a truncated-but-"executable" binary at the final path that
+    `_ttyd_available()` would then report as done FOREVER (#275 review MAJOR-3,
+    same guarantee for ttyd).
+
+    Harmless no-op wherever ttyd already resolves (dev1's system /usr/bin/ttyd,
+    or an already-completed prior run here — including the #612 hand install).
+    Only ever dispatched on the DAVID-profile host (subdev) via
+    `setup_webterm_david_service`, so it never runs on dev1/dev2/gatekeeper."""
+    import subprocess
+    import shlex
+    d = dest or TTYD_STATIC_DEST
+    if _ttyd_available(d):
+        return
+    script = (
+        "set -o pipefail; "
+        "mkdir -p %s && "
+        "TMP=$(mktemp -d -p %s) && trap 'rm -rf \"$TMP\"' EXIT && "
+        "curl -fsSL %s -o \"$TMP/ttyd.new\" && "
+        "[ -s \"$TMP/ttyd.new\" ] && "
+        "chmod 755 \"$TMP/ttyd.new\" && "
+        "mv \"$TMP/ttyd.new\" %s"
+    ) % (shlex.quote(str(d.parent)), shlex.quote(str(d.parent)),
+         shlex.quote(TTYD_STATIC_URL), shlex.quote(str(d)))
+    try:
+        r = subprocess.run(["bash", "-c", script],
+                            capture_output=True, text=True, timeout=180)
+        if r.returncode == 0 and _ttyd_available(d):
+            print("    ttyd: installed static ttyd -> %s" % d.parent)
+        else:
+            print("    ⚠ ttyd static install failed (rc=%s): %s\n"
+                  "    Install manually: curl -fsSL %s -o %s && chmod 755 %s"
+                  % (r.returncode, (r.stderr or r.stdout).strip()[:200],
+                     TTYD_STATIC_URL, d, d),
+                  file=sys.stderr)
+    except Exception as e:
+        print("    ⚠ ttyd static install skipped (%s) — "
+              "install manually: curl -fsSL %s -o %s && chmod 755 %s"
+              % (e, TTYD_STATIC_URL, d, d), file=sys.stderr)
