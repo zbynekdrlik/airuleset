@@ -568,6 +568,13 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>work.newlevel.media — fleet terminal</title>
+<!-- #644: installable PWA — standalone window, no browser chrome. The manifest
+     (per-domain name), icons and service worker are served by the gateway from
+     the dash dir (behind Cloudflare Access). theme-color matches #643 Campbell. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0C0C0C">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <style>
 /* #643: Campbell-consistent dark chrome (pure black + neutral near-black
    shades), so the whole surface matches the vivid Campbell terminals inside
@@ -833,6 +840,11 @@ if (fsBtn) {
 window.addEventListener('keydown', onHotkey);   // Ctrl+Alt+1..9 when the bar is focused
 preloadAll();                           // #586: connect every tab up front (instant switching)
 if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page
+// #644: register the minimal NETWORK-ONLY service worker (Chromium
+// installability). Best-effort — a registration failure never breaks the page.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(function () {});
+}
 </script>
 </body>
 </html>
@@ -1118,6 +1130,11 @@ def setup_webterm_service(run=None):
     # so the iframes are same-origin (Ctrl+Alt+N works while typing).
     WEBTERM_DASH_INDEX.write_text(
         render_dashboard_html(inv, ttyd_base=WEBTERM_TTYD_BASE), encoding="utf-8")
+    # #644: the installable-PWA assets (manifest + network-only SW + icons) next
+    # to index.html; the gateway serves them from the dash dir. Lazy import to
+    # avoid a module-level cycle (cli_webterm_pwa imports this module).
+    import cli_webterm_pwa
+    cli_webterm_pwa.write_pwa_assets(WEBTERM_DASH_DIR, profiles.OWNER)
     # Remove the old serve-fronted single-file dashboard (superseded — #579).
     (CLAUDE_DIR / "webterm-dashboard.html").unlink(missing_ok=True)
     # #635: Cloudflare-Access mode has NO password — retire the dead credential;

@@ -409,9 +409,24 @@ def parse_login_form(body_bytes):
 # --------------------------------------------------------------------------- #
 
 class Gateway:
+    # #644: the installable-PWA assets, served (auth-gated, like `/`) from the
+    # dash dir next to index.html. `route -> (filename, content_type)`. The
+    # FILENAMES are written by cli_webterm_pwa.write_pwa_assets; a test locks
+    # this table's filenames == cli_webterm_pwa.PWA_FILENAMES so the two stay in
+    # sync WITHOUT this lean gateway importing the generator.
+    _PWA_ASSETS = {
+        "/manifest.webmanifest": ("manifest.webmanifest",
+                                  "application/manifest+json"),
+        "/sw.js": ("sw.js", "text/javascript; charset=utf-8"),
+        "/icon-192.png": ("icon-192.png", "image/png"),
+        "/icon-512.png": ("icon-512.png", "image/png"),
+        "/icon-maskable-512.png": ("icon-maskable-512.png", "image/png"),
+    }
+
     def __init__(self, dash_index, cred_path, ttyd_host, ttyd_port, base_path,
                  origins, sessions=None, limiter=None, trust_access_header=None):
         self.dash_index = dash_index
+        self.dash_dir = Path(dash_index).parent   # #644: PWA assets live here
         self.cred_path = cred_path
         self.ttyd_host = ttyd_host
         self.ttyd_port = ttyd_port
@@ -537,6 +552,9 @@ class Gateway:
         if path == "/logout":
             await self._route_logout(writer, headers)
             return
+        if path in self._PWA_ASSETS:
+            await self._route_pwa_asset(writer, path, headers)
+            return
         if self._is_proxy_path(target):
             await self._route_proxy(reader, writer, head, headers)
             return
@@ -593,6 +611,33 @@ class Gateway:
         self.sessions.drop(cookie_token(headers))
         await self._send(writer, self._redirect(
             "/login", set_cookie=build_set_cookie("", 0, clear=True)))
+
+    async def _route_pwa_asset(self, writer, path, headers):
+        # #644: PWA assets (manifest / network-only SW / icons) are auth-gated
+        # exactly like `/` — installation is "po prihlásení". In Access mode the
+        # edge already authenticated the request; in password mode a valid
+        # session cookie is required. Unauthenticated: fail closed like `/`.
+        if not self._authed(headers):
+            if self.trust_access_header:
+                await self._send(writer, self._access_denied())
+            else:
+                await self._send(writer, self._redirect("/login"))
+            return
+        fname, ctype = self._PWA_ASSETS[path]
+        try:
+            body = (self.dash_dir / fname).read_bytes()
+        except OSError:
+            await self._send(writer, http_response("404 Not Found", "not found"))
+            return
+        extra = None
+        if path == "/sw.js":
+            # Re-check the SW script on each load (no stale worker), and allow it
+            # to control the whole origin. The SW is NETWORK-ONLY itself, so this
+            # Cache-Control governs only the script fetch, never terminal data.
+            extra = ["Cache-Control: no-cache", "Service-Worker-Allowed: /"]
+        await self._send(writer, http_response("200 OK", body,
+                                               extra_headers=extra,
+                                               content_type=ctype))
 
     async def _route_proxy(self, reader, writer, head, headers):
         is_ws = is_websocket_upgrade(headers)

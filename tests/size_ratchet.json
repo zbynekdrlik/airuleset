@@ -22,7 +22,7 @@
     "cli_target_purge.py": 892,
     "cli_tmux_provisioning.py": 1250,
     "cli_vault.py": 1012,
-    "cli_webterm.py": 1220,
+    "cli_webterm.py": 1237,
     "cli_worktree_sweep.py": 1750,
     "design_gate.py": 876,
     "filedrop/__init__.py": 281,
