@@ -56,7 +56,7 @@ def _remote_ssh_prefix(remote):
     — `hooks/block-subdev-ssh-misuse.sh` guards exactly this.
 
     #342: the same per-connection retry-cap hardening a sibling ticket
-    already added to `cmd_push`'s deploy loop and
+    already added to `_deploy_to_all_remotes` and
     `provision_subdev_soniox_key()` — BatchMode=yes on the identity branch
     so a failed pubkey attempt against an unprovisioned/misconfigured
     account fails IMMEDIATELY instead of falling through to an interactive

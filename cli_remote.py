@@ -124,7 +124,7 @@ def _deployable_hosts(hosts=None):
     does NOT exist on the box (all three #537 renames — montalu1/simap1/david1
     — are now live, so no host is currently pending; the flag stays for any
     FUTURE rename). BOTH ssh paths —
-    `cmd_push()`'s deploy loop AND `provision_subdev_soniox_key()` — filter
+    `_deploy_to_all_remotes()` AND `provision_subdev_soniox_key()` — filter
     through here so a pending target is NEVER contacted: a password/pubkey
     attempt against a non-existent account is a fail2ban strike
     (#341/#300/#326), and the montalu family uses the shared default-key
@@ -148,7 +148,7 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     box that still runs meeting-analysis, e.g. newlevel@dev2 (#451).
 
     `control_opts` (#358): the SAME `_ssh_multiplex_opts()` list
-    `cmd_push()`'s own deploy loop built for this run, so an account
+    `_deploy_to_all_remotes()`'s deploy loop built for this run, so an account
     contacted here for a SECOND time (already dialed once by the deploy
     loop above) reuses that account's already-authenticated ssh master
     connection instead of paying for a fresh TCP+SSH handshake. Defaults
@@ -173,7 +173,7 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     `failed` accumulator shape.
 
     `skip_names` (#341): a set of `remote["name"]` values ALREADY known to
-    have failed ssh auth this run (`cmd_push()`'s own deploy loop passes its
+    have failed ssh auth this run (`_deploy_to_all_remotes()` passes its
     own `auth_failed` set here) -- each is skipped with a loud stderr line
     and a `failed` entry, never given a fresh ssh connection. A second
     connection attempt against an account the deploy loop already proved is
@@ -252,7 +252,7 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
         # #358 adversarial-review F2 (MAJOR): this call used to be a
         # single, un-retried attempt -- a connection-closed/reset drop
         # here permanently lost that account's soniox key, the exact hole
-        # cmd_push()'s own deploy-loop retry exists to close, one
+        # _deploy_to_all_remotes()'s deploy-loop retry exists to close, one
         # function over. Same bounded target-level retry shape as that
         # loop: only a genuine ssh connection-establishment failure
         # (never an ordinary write failure) gets retried, up to
@@ -997,7 +997,7 @@ def cmd_push(args):
     # first version of this timeout fix caught a real regression it
     # introduced: BEFORE, an uncaught TimeoutExpired propagated out of
     # cmd_push() with a loud traceback and a non-zero exit — impossible to
-    # miss. The `continue` below (needed so one slow remote can't abort
+    # miss. The `continue` in the deploy helper below (needed so one slow remote can't abort
     # deployment to every REMAINING host) turned that into a single line
     # among hundreds, with the run still ending "All deployments complete."
     # at exit 0 — a SILENT partial deploy. Tracking every failure and
@@ -1007,7 +1007,7 @@ def cmd_push(args):
     # #341: host NAMES whose deploy leg failed with a genuine ssh AUTH
     # failure this run ("Permission denied" — never a timeout, never a
     # plain remote-command failure, both of which mean auth actually
-    # succeeded). Passed to provision_subdev_soniox_key() below so it never
+    # succeeded). Passed to provision_subdev_soniox_key() in the deploy helper below so it never
     # opens a SECOND connection against an account already proven
     # unprovisioned/unreachable this run — contacting the same known-bad
     # account twice (once here, once again independently in the soniox

@@ -49,6 +49,7 @@ REMOTE_NAMES = [
     "REMOTE_DEPLOY_TIMEOUT_S",
     "SONIOX_KEY_SOURCE",
     "_soniox_key_line",
+    "_deployable_hosts",  # #633: pre-existing facade-identity gap in the move checklist
     "provision_subdev_soniox_key",
     "_SSH_AUTH_DENIED_RX",
     "_is_ssh_auth_failure",

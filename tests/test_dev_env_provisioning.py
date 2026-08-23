@@ -1147,7 +1147,7 @@ class TestInstallWiresDevEnvProvisioning(TestCase):
 
 
 # ---------------------------------------------------------------------------
-# cmd_push: the remote-deploy timeout/stderr companion fix (#263)
+# _deploy_to_all_remotes: the remote-deploy timeout/stderr companion fix (#263)
 # ---------------------------------------------------------------------------
 
 class TestPushRemoteDeployTimeoutAndStderr(TestCase):
@@ -1260,7 +1260,7 @@ class TestPushSshHardeningFlags(TestCase):
 
     def _deploy_calls(self, calls):
         # the deploy leg's remote command always ends in this literal
-        # suffix (see cmd_push's own `remote_cmd` string) -- the soniox
+        # suffix (see _deploy_to_all_remotes's own `remote_cmd` string) -- the soniox
         # phase's own remote command never contains it, so this is a safe
         # way to isolate deploy-leg argv from soniox-leg argv.
         return [c for c in calls
