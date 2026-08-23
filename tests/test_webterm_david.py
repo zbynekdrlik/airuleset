@@ -269,10 +269,13 @@ class TestDavidDropInInvariant638(unittest.TestCase):
     def test_module_never_touches_a_dropin_in_code(self):
         # The invariant, mechanically: any reference to a `.service.d` drop-in
         # path in this module's SOURCE must live in a comment. The module
-        # renders the MAIN unit only — it never writes, deletes, OR scans
-        # `.d/`. A future change that adds any drop-in handling would put
-        # `service.d` on an executable line and trip this, forcing the
-        # invariant change to be NAMED, not made quietly (#614/#638).
+        # renders the MAIN unit only — it never writes, deletes, or otherwise
+        # references a `.service.d/` path in code. A future change that adds any
+        # drop-in handling would put `service.d` on an executable line and trip
+        # this, forcing the invariant change to be NAMED, not made quietly
+        # (#614/#638). Accepted residual: a path built via string indirection
+        # that never contains the literal `service.d` would evade it — the
+        # realistic/naive footgun form is caught; see the #638 design comment.
         offenders = [
             (i, line.strip())
             for i, line in enumerate(self._SRC.read_text(
