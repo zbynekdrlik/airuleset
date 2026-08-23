@@ -507,6 +507,23 @@ def _webterm_term_grid():
     return (w, h + WEBTERM_STATUS_ROWS)
 
 
+# #643: the owner's Windows-Terminal "Campbell" palette — the SINGLE source of
+# truth for the terminal colours. It is injected into the dashboard <script> as
+# an xterm.js `ITheme` object and applied via `term.options.theme` on the
+# same-origin `window.term` (the #613 integration point), NOT via a ttyd `-t
+# theme=` flag — so it is DAEMON-AGNOSTIC and survives a possible ttyd -> GoTTY
+# switch (#642). `background_color`/`theme_color` in the PWA manifest (#644)
+# reuse CAMPBELL_THEME["background"]. Exact values from the #643 issue body.
+CAMPBELL_THEME = {
+    "background": "#0C0C0C", "foreground": "#CCCCCC", "cursor": "#FFFFFF",
+    "black": "#0C0C0C", "red": "#C50F1F", "green": "#13A10E", "yellow": "#C19C00",
+    "blue": "#0037DA", "purple": "#881798", "cyan": "#3A96DD", "white": "#CCCCCC",
+    "brightBlack": "#767676", "brightRed": "#E74856", "brightGreen": "#16C60C",
+    "brightYellow": "#F9F1A5", "brightBlue": "#3B78FF", "brightPurple": "#B4009E",
+    "brightCyan": "#61D6D6", "brightWhite": "#F2F2F2",
+}
+
+
 def render_dashboard_html(inventory, ttyd_base=None, term_grid=None):
     """The single-page tabbed terminal UI. `ttyd_base` is the SAME-ORIGIN ttyd
     base path under the #584 gateway (`/t`); the page's JS builds each tab's
@@ -532,11 +549,14 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None):
     cfg = {"ttyd_base": ttyd_base, "sessions": tabs,
            "term_cols": term_cols, "term_rows": term_rows}
     subst = {"@@COUNT@@": str(len(tabs)), "@@BUTTONS@@": buttons,
-             "@@CFG_JSON@@": _json_for_script(cfg)}
+             "@@CFG_JSON@@": _json_for_script(cfg),
+             # #643: the Campbell palette as an xterm.js theme object literal.
+             "@@THEME_JSON@@": _json_for_script(CAMPBELL_THEME)}
     # SINGLE PASS over the TEMPLATE — inserted content (an inventory label in a
-    # button, the config JSON) is never re-scanned, so a label that happens to
-    # equal a `@@…@@` sentinel can't splice a later substitution into itself.
-    return re.sub(r"@@(?:COUNT|BUTTONS|CFG_JSON)@@",
+    # button, the config JSON, the theme object) is never re-scanned, so a label
+    # that happens to equal a `@@…@@` sentinel can't splice a later substitution
+    # into itself.
+    return re.sub(r"@@(?:COUNT|BUTTONS|CFG_JSON|THEME_JSON)@@",
                   lambda mo: subst[mo.group(0)], _DASHBOARD_TEMPLATE)
 
 
@@ -549,38 +569,41 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>work.newlevel.media — fleet terminal</title>
 <style>
+/* #643: Campbell-consistent dark chrome (pure black + neutral near-black
+   shades), so the whole surface matches the vivid Campbell terminals inside
+   the iframes instead of the old grey GitHub-dark theme. */
 :root { color-scheme: dark; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
-body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf3;
-  font: 13px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCCC;
+  font: 13px/1.3 "Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", Menlo, Monaco, "Liberation Mono", monospace;
   overflow: hidden; }
 #tabbar { display: flex; align-items: stretch; gap: 2px; padding: 4px 6px 0;
-  background: #161b22; border-bottom: 1px solid #30363d; overflow-x: auto;
+  background: #0C0C0C; border-bottom: 1px solid #2b2b2b; overflow-x: auto;
   flex: 0 0 auto; white-space: nowrap; }
 .tab { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
   padding: 6px 12px; border: 1px solid transparent; border-bottom: none;
-  border-radius: 7px 7px 0 0; background: #21262d; color: #adbac7;
+  border-radius: 7px 7px 0 0; background: #1b1b1b; color: #9a9a9a;
   font: inherit; line-height: 1; max-width: 170px; flex: 0 0 auto; }
-.tab:hover { background: #2a3038; color: #e6edf3; }
-.tab.active { background: #0d1117; color: #fff; border-color: #30363d; }
-.tab .ico { color: #2f81f7; font-size: 11px; }
+.tab:hover { background: #262626; color: #CCCCCC; }
+.tab.active { background: #0C0C0C; color: #F2F2F2; border-color: #2b2b2b; }
+.tab .ico { color: #13A10E; font-size: 11px; }
 .tab .al { overflow: hidden; text-overflow: ellipsis; }
 .tab .ord { display: inline-flex; align-items: center; justify-content: center;
   min-width: 15px; height: 15px; padding: 0 3px; border-radius: 3px;
-  background: #30363d; color: #8b949e; font-size: 10px; line-height: 1; }
-.tab.active .ord { background: #2f81f7; color: #fff; }
+  background: #2b2b2b; color: #767676; font-size: 10px; line-height: 1; }
+.tab.active .ord { background: #3B78FF; color: #F2F2F2; }
 #nav { position: sticky; left: 0; z-index: 1; display: inline-flex; gap: 2px;
-  padding-right: 4px; margin-right: 2px; background: #161b22; flex: 0 0 auto; }
-.cyc { cursor: pointer; border: 1px solid #30363d; border-radius: 6px;
-  background: #21262d; color: #adbac7; font: inherit; line-height: 1;
+  padding-right: 4px; margin-right: 2px; background: #0C0C0C; flex: 0 0 auto; }
+.cyc { cursor: pointer; border: 1px solid #2b2b2b; border-radius: 6px;
+  background: #1b1b1b; color: #9a9a9a; font: inherit; line-height: 1;
   padding: 6px 9px; }
-.cyc:hover { background: #2a3038; color: #e6edf3; }
+.cyc:hover { background: #262626; color: #CCCCCC; }
 #frames { position: relative; flex: 1 1 auto; }
 #frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
-  border: 0; background: #0d1117; }
-#hint { flex: 0 0 auto; padding: 3px 10px; color: #6e7681; font-size: 11px;
-  background: #161b22; border-top: 1px solid #21262d; }
+  border: 0; background: #0C0C0C; }
+#hint { flex: 0 0 auto; padding: 3px 10px; color: #767676; font-size: 11px;
+  background: #0C0C0C; border-top: 1px solid #1e1e1e; }
 </style>
 </head>
 <body>
@@ -592,6 +615,19 @@ body { display: flex; flex-direction: column; background: #0d1117; color: #e6edf
 <div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku (funguje aj počas písania v termináli) · všetky záložky sú prednačítané a stále pripojené — prepínanie je instantné, bez reconnectu (scrollback ostáva v tmuxe) · Ctrl+W: potvrdenie pri zatváraní chráni vždy; &#9974; Fullscreen (Keyboard Lock) pošle Ctrl+W priamo do terminálu — vyžaduje HTTPS/localhost; PWA/app-okno zmenší riziko náhodného zatvorenia · prihlásenie raz (tailnet-only)</div>
 <script>
 const CFG = @@CFG_JSON@@;
+// #643: the Campbell palette (single source of truth) + a Cascadia-ish system
+// monospace stack (no external font fetch — CSP/Cloudflare-Access safe). Applied
+// to each terminal via `term.options.theme` on the same-origin `window.term`
+// (the #613 integration point), so it is DAEMON-AGNOSTIC (ttyd AND a future
+// GoTTY both expose `window.term`) — never baked into a ttyd -t theme= flag.
+const CAMPBELL_THEME = @@THEME_JSON@@;
+const TERM_FONT_STACK = '"Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", Menlo, Monaco, "Liberation Mono", monospace';
+function themeTerminal(term) {           // idempotent: applied once per terminal
+  if (!term || term.__wtThemed) return;
+  term.options.theme = CAMPBELL_THEME;
+  term.options.fontFamily = TERM_FONT_STACK;
+  term.__wtThemed = true;
+}
 const frames = document.getElementById('frames');
 const made = {};
 let current = 0;                          // the active tab index (drives cycle())
@@ -699,7 +735,7 @@ function fitFixedGrid(win) {
     term.__wtClamped = true;
   }
   try { term.resize(cols, rows); } catch (e) { return false; }
-  const bg = (term.options.theme && term.options.theme.background) || '#0d1117';
+  const bg = (term.options.theme && term.options.theme.background) || '#0C0C0C';
   if (!doc.getElementById('wt-fit-style')) {    // centre + letterbox = terminal bg
     const st = doc.createElement('style');
     st.id = 'wt-fit-style';
@@ -735,6 +771,7 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
   if (!win) return;
   let tries = 0;
   const poll = () => {
+    themeTerminal(win.term);                     // #643: Campbell palette + font, once term exists
     if (fitFixedGrid(win)) {
       if (!win.__wtResize) {                     // re-fit when the browser window resizes
         win.__wtResize = true;
