@@ -129,7 +129,10 @@ class ReExportIdentity(unittest.TestCase):
         # token, so only genuine code references are checked.
         SEAMS = {"_default_run", "_pane_hosted_claude_pid", "_hosted_claude_cwd",
                  "list_claude_panes", "capture_pane", "pane_owner",
-                 "pane_in_mode", "send_continue"}
+                 "pane_in_mode", "send_continue",
+                 # #645 — test_compact patches these on the `watchdog` namespace,
+                 # so a bare intra-module call would silently bypass the seam.
+                 "_proc_start_epoch", "_pane_claude_pid", "_pane_claude_start_epoch"}
         src = Path(tmux_io.__file__).read_text()
         toks = [t for t in tokenize.generate_tokens(io.StringIO(src).readline)
                 if t.type == tokenize.NAME or t.type == tokenize.OP]

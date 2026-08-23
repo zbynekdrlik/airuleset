@@ -737,9 +737,13 @@ def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
             cwd_matches.append(pid)
     if len(cwd_matches) == 1:
         return cwd_matches[0]
-    # Ambiguous per cwd — disambiguate per-PANE via the resume boundary.
+    # Ambiguous per cwd — disambiguate per-PANE via the resume boundary. The
+    # DISTINCT skip reasons are debug-logged (#486 "silent suppression ->
+    # explicit decision log"): the caller only sees one `SKIP no-pane`, so the
+    # next #645-class triage reads WHY here instead of re-investigating.
     tpath = Path(projects_dir) / watchdog.encode_project_dir(cwd) / (sid + ".jsonl")
     if not tpath.exists():
+        _log.debug("find-pane %s: no-transcript (cwd_matches=%d)", sid, len(cwd_matches))
         return None
     key = watchdog.encode_project_dir(cwd)
     owners = []
@@ -751,7 +755,11 @@ def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
             continue
         if watchdog._transcript_resume_boundary_at(tpath, start):
             owners.append(pid)
-    return owners[0] if len(owners) == 1 else None
+    if len(owners) == 1:
+        return owners[0]
+    _log.debug("find-pane %s: %s (owners=%s)", sid,
+               "no-boundary-owner" if not owners else "ambiguous-boundary", owners)
+    return None
 
 
 def resolve_self_pane(run=None, projects_dir=None, pane_env=None):

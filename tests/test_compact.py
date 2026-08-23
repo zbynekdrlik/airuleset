@@ -1574,6 +1574,50 @@ class TestResumeBoundaryReader(unittest.TestCase):
         p = self._write(epochs)
         self.assertTrue(wd._transcript_resume_boundary_at(p, S))
 
+    def test_single_entry_just_before_is_not_a_boundary(self):
+        # #645 review 🔴: ONE entry 30s before the pivot must NOT read as a fresh
+        # onset — the pre-window seek clamps to 0 and MUST NOT discard that first
+        # line (else gap_ok is wrongly True -> a co-active sibling false-matches).
+        p = self._write([self.S - 30, self.S + 40])
+        self.assertFalse(wd._transcript_resume_boundary_at(p, self.S))
+
+    def test_giant_before_entry_beyond_the_pre_window_refuses_boundary(self):
+        # A real before-entry that sits >256KB back (one giant entry) is not
+        # found by the bounded pre-window scan -> `before is None` but `lo > 0`
+        # -> REFUSE (never mistake an unseen before-entry for a fresh onset).
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "t.jsonl"
+        big = "x" * 300000
+        lines = [
+            json.dumps({"type": "user", "pad": big,
+                        "timestamp": _dt.fromtimestamp(self.S - 30, _tz.utc)
+                        .strftime("%Y-%m-%dT%H:%M:%S.000Z")}),
+            json.dumps({"type": "user",
+                        "timestamp": _dt.fromtimestamp(self.S + 40, _tz.utc)
+                        .strftime("%Y-%m-%dT%H:%M:%S.000Z")}),
+        ]
+        p.write_text("\n".join(lines) + "\n")
+        self.assertFalse(wd._transcript_resume_boundary_at(p, self.S))
+
+    def test_gap_exactly_at_threshold_is_a_boundary(self):
+        # gap == RESUME_GAP_BEFORE_S (120s) satisfies `>=` (locks >= vs >)
+        p = self._write([self.S - wd.RESUME_GAP_BEFORE_S, self.S + 50])
+        self.assertTrue(wd._transcript_resume_boundary_at(p, self.S))
+
+    def test_gap_one_second_under_threshold_is_not_a_boundary(self):
+        p = self._write([self.S - (wd.RESUME_GAP_BEFORE_S - 1), self.S + 50])
+        self.assertFalse(wd._transcript_resume_boundary_at(p, self.S))
+
+    def test_burst_exactly_at_threshold_is_a_boundary(self):
+        # burst == RESUME_BURST_AFTER_S (300s) satisfies `<=` (locks <= vs <)
+        p = self._write([self.S - 6000, self.S + wd.RESUME_BURST_AFTER_S])
+        self.assertTrue(wd._transcript_resume_boundary_at(p, self.S))
+
+    def test_burst_one_second_over_threshold_is_not_a_boundary(self):
+        p = self._write([self.S - 6000, self.S + (wd.RESUME_BURST_AFTER_S + 1)])
+        self.assertFalse(wd._transcript_resume_boundary_at(p, self.S))
+
 
 class TestProcStartEpoch(unittest.TestCase):
     """`_proc_start_epoch` parses /proc/<pid>/stat field 22 + /proc/stat btime."""
@@ -1638,12 +1682,34 @@ class TestFindPaneAmbiguousResolution(unittest.TestCase):
         return DeliverCompactFakeTmux(rows, CB_IDLE_CAP)
 
     def test_a_grouped_dup_pane_still_delivers(self):
-        # (a) one physical pane listed 3× (grouped sessions) -> dedup -> deliver
+        # (a) `list_claude_panes` returning ONE physical pane 3× (a grouped
+        # session, if its own dedup ever regressed) must still deliver via the
+        # DEFENSIVE dedup in `_find_pane_for_session`. Patch list_claude_panes to
+        # emit raw duplicates so the compact-side dedup is genuinely under test
+        # (without it: 3 cwd_matches -> ambiguous -> boundary branch -> None).
         proj = self._proj_sid_newest()
-        tmux = self._tmux([("%16", "claude", self.CWD, "111")] * 3)
-        self.assertEqual(
-            compact._find_pane_for_session(self.SID, self.CWD,
-                                           run=tmux, projects_dir=proj), "%16")
+        tmux = self._tmux([("%16", "claude", self.CWD, "111")])
+        with m.patch.object(wd, "list_claude_panes",
+                            return_value=[("%16", self.CWD)] * 3):
+            self.assertEqual(
+                compact._find_pane_for_session(self.SID, self.CWD,
+                                               run=tmux, projects_dir=proj), "%16")
+
+    def test_f_unresolvable_start_pane_skipped_not_crashing(self):
+        # a candidate whose claude process start can't be read (None) is simply
+        # excluded — the OTHER candidate's genuine boundary still resolves it,
+        # and None never reaches the reader (which would TypeError on it).
+        proj = self._proj_sid_newest()
+        tmux = self._tmux([("%15", "claude", self.CWD, "111"),
+                           ("%16", "claude", self.CWD, "222")])
+        starts = {"%15": None, "%16": 200.0}
+        with m.patch.object(wd, "_pane_claude_start_epoch",
+                            side_effect=lambda pid, run=None: starts.get(pid)), \
+             m.patch.object(wd, "_transcript_resume_boundary_at",
+                            side_effect=lambda path, st, *a, **k: st == 200.0):
+            self.assertEqual(
+                compact._find_pane_for_session(self.SID, self.CWD,
+                                               run=tmux, projects_dir=proj), "%16")
 
     def test_b_two_panes_one_cwd_unique_boundary_delivers(self):
         # (b) two distinct panes share the cwd; only %16's process has the
