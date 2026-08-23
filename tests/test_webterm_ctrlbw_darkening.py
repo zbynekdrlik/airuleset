@@ -65,6 +65,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -254,12 +255,20 @@ class _IsolatedTmuxServer:
     def wait_for_clients(self, name, expected, timeout=6.0):
         """Poll `list-clients` until `expected` clients are attached, or
         `timeout` -- robust to a busy box where tmux's own accept lags a
-        fixed sleep."""
+        fixed sleep. ASSERTS the expected count was actually reached
+        (adversarial review 🟡: an unchecked return value here let a
+        SILENT attach failure masquerade as a false GREEN on the fix-proof
+        test -- Ctrl+B w naturally renders fine on a single client, so a
+        webterm client that silently never attached would still pass)."""
         deadline = time.time() + timeout
         n = self.client_count(name)
         while time.time() < deadline and n < expected:
             time.sleep(0.1)
             n = self.client_count(name)
+        assert n == expected, (
+            "expected %d client(s) attached to %r within %.1fs, got %d -- "
+            "an attach silently failed or is still pending" % (
+                expected, name, timeout, n))
         return n
 
     def attach_client(self, argv, rows, cols=_COLS):
@@ -268,7 +277,24 @@ class _IsolatedTmuxServer:
         ...]`, or via `_scoped_connect_argv()`), pinned to an exact
         (rows, cols) via TIOCSWINSZ before tmux ever negotiates a size --
         mirrors the supervisor's own probe technique. Returns the master
-        fd."""
+        fd.
+
+        RUNTIME safety guard (adversarial review 🟡: unlike `self.tmux()`,
+        whose own literal `-S` is structurally visible to
+        tests/test_tmux_test_isolation_lock.py's static AST scan, this
+        method takes an arbitrary caller-supplied `argv` -- a Name node,
+        invisible to that same static scan, so a future call site with no
+        `-S` anywhere would be caught by NEITHER the static lock nor a
+        docstring convention alone). Refuses at RUNTIME, before spawning
+        anything, unless `-S` appears as a standalone token somewhere in
+        `argv` -- covering both the direct `["tmux", "-S", sock, ...]`
+        shape and the `["sh", "-c", "<scoped shell text>"]` shape (the
+        `-S` lives inside the joined text either way)."""
+        joined = " ".join(str(a) for a in argv)
+        assert re.search(r"(?<!\S)-S(?!\S)", joined), (
+            "attach_client() refuses an argv with no explicit -S guard "
+            "anywhere -- exactly the #613 incident's failure class. "
+            "argv=%r" % (argv,))
         master, slave = os.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ,
                     struct.pack("HHHH", rows, cols, 0, 0))
@@ -284,7 +310,10 @@ class _IsolatedTmuxServer:
         """Terminate the client owning `master_fd` (SIGTERM, then SIGKILL
         if it hasn't exited within 3s -- verified live during this
         ticket's own dev-time probing that a tmux attach client does NOT
-        reliably honour plain SIGTERM, unlike most processes)."""
+        reliably honour plain SIGTERM, unlike most processes). Forceful,
+        guaranteed cleanup -- for a GRACEFUL disconnect that gives a
+        disconnect TRAP its fair chance to run first, use
+        `disconnect_client()` instead."""
         for i, (proc, fd) in enumerate(self._clients):
             if fd != master_fd:
                 continue
@@ -298,25 +327,80 @@ class _IsolatedTmuxServer:
             del self._clients[i]
             return
 
+    def disconnect_client(self, master_fd, timeout=5.0):
+        """A GRACEFUL disconnect, distinct from `kill_client()`'s forceful
+        one: closes the pty MASTER fd first (the kernel's own "controlling
+        terminal hung up" mechanism -- the exact way a real ttyd child
+        learns its browser/websocket disconnected), which delivers SIGHUP
+        to the WHOLE foreground process group attached to that pty (both
+        the wrapper shell AND its `tmux attach-session` child, since the
+        child inherits the shell's `setsid`-created group and never calls
+        setsid itself). This gives `_ATTACH_BODY`'s disconnect trap (armed
+        on EXIT/HUP/INT/TERM) its natural, unforced chance to run BEFORE
+        any signal is sent directly -- needed to prove the trap's SIDE
+        EFFECT (mouse reverting off) actually happens, not just that the
+        process eventually dies. Falls back to the forceful `_kill_proc`
+        (process-group SIGTERM/SIGKILL) only if the process does not exit
+        within `timeout` on its own."""
+        for i, (proc, fd) in enumerate(self._clients):
+            if fd != master_fd:
+                continue
+            try:
+                os.close(fd)
+            except OSError as e:
+                print("_IsolatedTmuxServer.disconnect_client: close(fd=%r) "
+                      "failed (already closed?): %r" % (fd, e),
+                      file=sys.stderr)
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                print("_IsolatedTmuxServer.disconnect_client: pid %d did "
+                      "not exit within %.1fs of its pty master closing; "
+                      "falling back to a forceful kill" % (proc.pid, timeout),
+                      file=sys.stderr)
+                self._kill_proc(proc)
+            del self._clients[i]
+            return
+
     def _kill_proc(self, proc):
+        """Forceful teardown: SIGTERM then SIGKILL, delivered to the
+        WHOLE PROCESS GROUP (`os.killpg`), not just `proc.pid` alone.
+        Every client here is spawned with `preexec_fn=os.setsid`, so
+        `proc.pid` doubles as the group id for its whole subtree -- this
+        matters because the mouse-revert fix (#613 REOPEN-3 review round)
+        removed the join branch's `exec`, so `proc.pid` is now the WRAPPER
+        SHELL, with `tmux attach-session` running as its own separate
+        CHILD process; signaling only the shell's single pid would leave
+        that child tmux process orphaned and still attached, which would
+        hang every `wait_for_clients(..., 0)` assertion in this file."""
         if proc.poll() is not None:
             return
-        proc.terminate()
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            return
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
         try:
             proc.wait(timeout=3)
             return
         except subprocess.TimeoutExpired:
-            print("_IsolatedTmuxServer._kill_proc: pid %d did not exit on "
+            print("_IsolatedTmuxServer._kill_proc: pgid %d did not exit on "
                   "SIGTERM within 3s (expected for a tmux attach client, "
                   "see module docstring); sending SIGKILL"
-                  % proc.pid, file=sys.stderr)
-        proc.kill()
+                  % pgid, file=sys.stderr)
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            print("_IsolatedTmuxServer._kill_proc: pid %d still alive "
+            print("_IsolatedTmuxServer._kill_proc: pgid %d still alive "
                   "after SIGKILL+5s; leaving it to kill-server/teardown "
-                  "to reclaim (best-effort test cleanup)" % proc.pid,
+                  "to reclaim (best-effort test cleanup)" % pgid,
                   file=sys.stderr)
 
     def close(self):
@@ -427,7 +511,16 @@ class TestCtrlBWindowChooserRegression613(unittest.TestCase):
             ["tmux", "-S", self.cluster.sock, "attach-session", "-t", clone,
              "-f", "ignore-size"],
             rows=_SSH_CLIENT_ROWS)
-        self.cluster.wait_for_clients("base", 2)
+        # `list-clients -t <target>` counts clients by their CURRENT
+        # SESSION NAME, not by group membership -- a client attached to
+        # the CLONE is counted under the clone's own name, never under
+        # "base", even though they share a window group. Wait on each
+        # target separately (an earlier version of this test waited on
+        # "base" for both clients and silently proceeded with only 1
+        # actually attached -- caught by wait_for_clients()'s own
+        # adversarial-review-added assertion).
+        self.cluster.wait_for_clients("base", 1)
+        self.cluster.wait_for_clients(clone, 1)
         _drain(self.ssh_fd, 1.0)
 
         rendered, text = self._press_ctrl_b_w_and_check()
@@ -488,6 +581,54 @@ class TestBaseSessionSurvivesBrowserDisconnect(unittest.TestCase):
             "the base session must survive a lone browser disconnect -- "
             "#613 REOPEN-3 explicit requirement (no clone-only sweep hook "
             "left armed against it)")
+
+
+class TestMouseRevertsOnDisconnect(unittest.TestCase):
+    """Adversarial review 🟡 fix, live proof: the FIRST cut of the #615
+    mouse retarget set `mouse on` with no revert path at all -- since
+    sessions on this fleet are kept alive indefinitely (#591), the very
+    FIRST webterm connection ever would have latched mouse mode on
+    PERMANENTLY, including every future ssh-only reattach with no browser
+    involved. The fix adds a disconnect trap reverting `mouse off`. This
+    proves it end-to-end against the REAL, unmodified production connect
+    path -- not just that the trap TEXT is present (that is
+    tests/test_webterm.py::test_mouse_reverts_off_on_disconnect_trap's
+    job), but that a REAL tmux server's session option actually flips back
+    off once the client genuinely disconnects."""
+
+    def setUp(self):
+        self.cluster = _IsolatedTmuxServer()
+        self.addCleanup(self.cluster.close)
+        self.cluster.start_base("base")
+
+    def _mouse_option(self):
+        r = self.cluster.tmux("show-options", "-t", "base", "mouse")
+        return r.stdout.strip()
+
+    def test_mouse_on_while_connected_off_after_disconnect(self):
+        self.assertEqual(
+            self._mouse_option(), "",
+            "sanity: mouse must be unset (inherits factory default off) "
+            "before any webterm client ever connects")
+
+        entry = {"local": True, "preferred": "base"}
+        argv = _scoped_connect_argv(entry, self.cluster.sock)
+        web_fd = self.cluster.attach_client(argv, rows=_SSH_CLIENT_ROWS)
+        self.cluster.wait_for_clients("base", 1)
+        _drain(web_fd, 1.0)
+
+        self.assertEqual(
+            self._mouse_option(), "mouse on",
+            "mouse must be ON while a webterm client is connected (#615)")
+
+        self.cluster.disconnect_client(web_fd)
+        self.cluster.wait_for_clients("base", 0)
+
+        self.assertEqual(
+            self._mouse_option(), "mouse off",
+            "mouse must revert to OFF once the webterm client disconnects "
+            "-- a permanent on-latch is exactly the regression adversarial "
+            "review caught in the first cut of this fix")
 
 
 if __name__ == "__main__":  # pragma: no cover

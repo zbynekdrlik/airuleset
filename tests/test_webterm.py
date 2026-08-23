@@ -420,13 +420,18 @@ class TestAttachSnippetBehavior(unittest.TestCase):
 
     def test_no_clone_lifecycle_machinery_anywhere(self):
         # #613 REOPEN-3 negative lock: the whole clone-cleanup apparatus
-        # (disconnect trap, per-session destroy-unattached arming, kill of a
-        # throwaway `-web-<pid>` session) must never reappear on the join
-        # path -- there is no clone left to clean up. This is the "test
-        # that fails if the grouped-clone shape is reintroduced" the ticket
-        # asked for, at the shell-snippet level (see
-        # tests/test_webterm_ctrlbw_darkening.py for the LIVE behavioral
-        # lock proving WHY it must never come back).
+        # (disconnect trap that KILLS a session, per-session
+        # destroy-unattached arming, kill of a throwaway `-web-<pid>`
+        # session) must never reappear on the join path -- there is no
+        # clone left to clean up. This is the "test that fails if the
+        # grouped-clone shape is reintroduced" the ticket asked for, at the
+        # shell-snippet level (see tests/test_webterm_ctrlbw_darkening.py
+        # for the LIVE behavioral lock proving WHY it must never come
+        # back). A disconnect TRAP itself is NOT banned any more -- the
+        # #615 mouse-revert trap (test_mouse_reverts_off_on_disconnect_trap
+        # below) legitimately adds one, but it only ever runs a
+        # `set-option ... mouse off`, never a `kill-session`/`new-session`
+        # (checked explicitly here, not just "no trap at all").
         cases = (
             ("zbynek", "zbynek::zbynek-4\nmarek::marek-12"),
             ("zbynek", "::0"),
@@ -439,9 +444,46 @@ class TestAttachSnippetBehavior(unittest.TestCase):
             self.assertNotIn("client-attached", log)
             self.assertNotIn("destroy-unattached", log)
         cmd = w._remote_command("zbynek")
-        self.assertNotIn("trap", cmd)
         self.assertNotIn("$$", cmd)
         self.assertNotIn("-web-", cmd)
+        # The one trap that DOES exist is mouse-revert only -- never a
+        # session-killing one.
+        trap_match = re.search(r"trap '([^']*)'", cmd)
+        self.assertIsNotNone(trap_match, "expected exactly one trap (mouse revert)")
+        self.assertIn("mouse off", trap_match.group(1))
+        self.assertNotIn("kill-session", trap_match.group(1))
+        self.assertNotIn("kill-server", trap_match.group(1))
+
+    def test_mouse_reverts_off_on_disconnect_trap(self):
+        # #613 REOPEN-3 review fix (🟡, adversarial review 2): the FIRST
+        # cut of this fix set `mouse on` with NO revert path at all, which
+        # -- since sessions on this fleet are deliberately kept alive
+        # indefinitely (#591) -- would have PERMANENTLY latched mouse mode
+        # on for a session's whole remaining lifetime from the very FIRST
+        # webterm connection ever, including every future ssh-only
+        # reattach with no browser involved. The trap below is the fix:
+        # `mouse off` fires when the webterm CLIENT disconnects (EXIT/HUP/
+        # INT/TERM), reverting the session to its pre-connect state. `$T`
+        # is deferred-expanded at trap-FIRE time (single-quoted at
+        # trap-SET time -- the same pattern the removed clone's own `$C`
+        # kill-session trap used), so it always targets the session that
+        # was actually joined, not whatever `$T` happened to be later.
+        log = self._run("zbynek", "zbynek::zbynek-4")
+        self.assertRegex(log, r"set-option -t zbynek-4 mouse off")
+        cmd = w._remote_command("zbynek")
+        self.assertIn(
+            'trap \'tmux set-option -t "$T" mouse off 2>/dev/null || true\' '
+            'EXIT HUP INT TERM', cmd)
+        # armed BEFORE the attach (so it is live for the WHOLE connection,
+        # not just after it), and the join path is no longer `exec`ed (an
+        # exec'd process replaces the shell outright, which would prevent
+        # the trap from ever running once the client detaches).
+        mouse_on_pos = cmd.index("mouse on")
+        trap_pos = cmd.index("trap '")
+        attach_pos = cmd.index("attach-session")
+        self.assertLess(mouse_on_pos, trap_pos)
+        self.assertLess(trap_pos, attach_pos)
+        self.assertNotRegex(cmd, r"exec tmux attach-session")
 
     def test_does_not_force_any_GLOBAL_window_size_policy_on_the_target(self):
         # #586: the ROOT regression was `-gw window-size latest` (+ aggressive-

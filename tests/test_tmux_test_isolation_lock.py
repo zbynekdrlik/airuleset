@@ -77,6 +77,7 @@ trip its own scan; see tests/test_no_session_kill.py's identical,
 already-established self-exclusion for the same reason.
 """
 import ast
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -85,7 +86,20 @@ REPO = Path(__file__).resolve().parent.parent
 _SELF = Path(__file__).resolve()
 
 _SCAN_DIRS = ("tests", "hooks")
-_DESTRUCTIVE_SUBCOMMANDS = ("kill-server", "set-option -g", "new-session")
+# Canonical destructive subcommands + the tmux-recognized SHORT ALIASES a
+# first draft of this lock missed (adversarial review on #613: confirmed
+# live via `tmux list-commands` -- `new-session` aliases to `new`,
+# `set-option` aliases to `set`; `kill-server` has no alias at all, so it
+# stays a plain literal). `new`/`set` alone are risky bare substrings (an
+# unrelated word merely CONTAINING them), so every pattern here is matched
+# as a whole WORD (`\b`), never plain `in` containment.
+_DESTRUCTIVE_SUBCOMMAND_PATTERNS = (
+    ("kill-server", re.compile(r"\bkill-server\b")),
+    ("set-option -g (or its alias 'set -g')",
+     re.compile(r"\bset-option\s+-g\b|\bset\s+-g\b")),
+    ("new-session (or its alias 'new')",
+     re.compile(r"\bnew-session\b|\bnew\b")),
+)
 _GUARD_FLAGS = ("-S", "-L")
 _EXEC_CALL_NAMES = {"run", "Popen", "call", "check_call", "check_output"}
 
@@ -106,8 +120,13 @@ def _tracked_files():
 def _clause_violations(text, label):
     """`text` (a shell-command string, or a whole comment-stripped .sh
     file) for a `tmux` token followed, within the SAME shell clause, by a
-    destructive subcommand with no `-S`/`-L` guard also in that clause."""
-    import re
+    destructive subcommand (canonical name OR tmux short alias -- see
+    `_DESTRUCTIVE_SUBCOMMAND_PATTERNS`) with no `-S`/`-L` guard also in
+    that clause. The 300-char lookahead window is generous against every
+    real invocation in this repo's current corpus (the longest matched
+    clause is well under 150 chars) -- a genuinely longer unbroken clause
+    would need a wider window, but 300 already covers a `tmux -S <path>
+    <subcommand> <several flags>` shape with room to spare."""
     violations = []
     for m in re.finditer(r"\btmux\b", text):
         window = text[m.start():m.start() + 300]
@@ -117,14 +136,14 @@ def _clause_violations(text, label):
             if idx != -1:
                 clause_end = min(clause_end, idx)
         clause = window[:clause_end]
-        for sub in _DESTRUCTIVE_SUBCOMMANDS:
-            if sub not in clause:
+        for label_text, pattern in _DESTRUCTIVE_SUBCOMMAND_PATTERNS:
+            if not pattern.search(clause):
                 continue
             if any(flag in clause for flag in _GUARD_FLAGS):
                 continue
             line_no = text.count("\n", 0, m.start()) + 1
             violations.append("%s:%d: unguarded 'tmux ... %s' -- clause: %r"
-                              % (label, line_no, sub, clause.strip()))
+                              % (label, line_no, label_text, clause.strip()))
     return violations
 
 
