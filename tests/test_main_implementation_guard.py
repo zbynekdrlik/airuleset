@@ -1911,6 +1911,19 @@ class BookkeepingWritesExempt178(unittest.TestCase):
         out = self._write(bare)
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
 
+    def test_repo_dot_claude_work_products_subdir_is_NOT_exempt(self):
+        # #640 review (MAJOR): every managed repo carries a project-local
+        # `.claude/` dir, so an UNANCHORED `*/.claude/work-products/*` would
+        # exempt `<repo>/.claude/work-products/impl.py` — implementation code
+        # landing IN THE TREE. The pattern is $HOME-ANCHORED, so a repo's own
+        # .claude/work-products/ (under $HOME/devel/<repo>/, NOT $HOME/.claude/)
+        # stays BLOCKED. This path lives under the real home but in a repo
+        # subdir — the reviewer's exact live exit-0 repro, now denied.
+        repo_dc = str(Path.home() / "devel" / "some-repo"
+                      / ".claude" / "work-products" / "impl.py")
+        out = self._write(repo_dc)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
 
 class SmallBoundedReadsStillBlockedControls178(unittest.TestCase):
     """#178 controls: the nonexistent / oversize / glob / poisoned-token
