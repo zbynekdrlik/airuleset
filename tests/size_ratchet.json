@@ -242,7 +242,7 @@
     "tests/test_watchdog_tmux_io_split.py": 156,
     "tests/test_watchdog_transcripts_split.py": 114,
     "tests/test_watchdog_wedge_split.py": 371,
-    "tests/test_webterm.py": 1209,
+    "tests/test_webterm.py": 1236,
     "tests/test_worker_attestation.py": 97,
     "tests/test_worker_evidence_reachability.py": 378,
     "tests/test_worker_review_dispatch_shape.py": 235,

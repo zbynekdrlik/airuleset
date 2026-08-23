@@ -9,13 +9,11 @@ creds JSON exists (the one-time cert.pem bootstrap), mirroring
 cli_webterm_david.prerequisites_ready.
 """
 import contextlib
-import inspect
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock as m
 
-import cli_webterm as w
 import cli_webterm_david as dv
 import cli_webterm_tunnel as tun
 
@@ -104,17 +102,6 @@ class TestOwnerTunnelProvision(_TunnelIsolate, unittest.TestCase):
             self.assertIn(["restart", "webterm-owner-tunnel.service"], self.sysctl)
 
 
-class TestSetupServiceWiresOwnerTunnel(unittest.TestCase):
-    """In Access mode setup_webterm_service must CALL the owner-tunnel provisioner
-    (the go-live default is now access mode)."""
-
-    def test_access_mode_setup_calls_owner_tunnel(self):
-        src = inspect.getsource(w.setup_webterm_service)
-        self.assertIn("setup_webterm_owner_tunnel", src)
-        # guarded so it never runs before the gateway is up + only in access mode
-        self.assertIn("access_mode and ok_all", src)
-
-
 class _DavidTunnelIsolate:
     def _iso(self, stack, tmp):
         p = Path(tmp)
@@ -128,7 +115,11 @@ class _DavidTunnelIsolate:
         }
         for name, val in pt.items():
             stack.enter_context(m.patch.object(dv, name, val))
+        # dv.shutil.which resolves the bin in setup_webterm_david_tunnel; tun.shutil.which
+        # is the shared helper's bin-present check — patch BOTH so the test is
+        # deterministic regardless of whether the box happens to have cloudflared.
         stack.enter_context(m.patch.object(dv.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
+        stack.enter_context(m.patch.object(tun.shutil, "which", return_value="/home/u/.local/bin/cloudflared"))
         import cli_filedrop_watchdog as fw
         self.sysctl = []
         stack.enter_context(m.patch.object(

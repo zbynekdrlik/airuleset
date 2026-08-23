@@ -246,49 +246,34 @@ def setup_webterm_david_tunnel(run=None):
     """subdev-only: provision + enable the MANAGED cloudflared tunnel fronting
     https://david.newlevel.media/ -> the loopback david gateway. REPLACES the
     hand-made webterm-david-tunnel.service with an airuleset-written, functionally
-    identical one (same UUID + config + ExecStart). PREREQUISITE-GATED on the
-    per-tunnel creds JSON present (a safe no-op otherwise). Idempotent. Returns
-    True on success, False on any skip/failure (never raises)."""
-    run = run or subprocess.run
-    from cli_filedrop_watchdog import _run_systemctl
-    if not WEBTERM_DAVID_TUNNEL_CREDS.exists():
-        print("  webterm(david): tunnel creds %s absent — tunnel NO-OP (the "
-              "webterm-david-612 creds JSON must be present on subdev)."
-              % WEBTERM_DAVID_TUNNEL_CREDS, file=sys.stderr)
-        return False
+    identical one (same UUID + config path + ExecStart). Renders the david-specific
+    config/unit, then hands off to the SHARED `tun._provision_managed_tunnel` (the
+    same never-raises, prereq-gated, linger+enable+restart orchestration the owner
+    lane uses — so the two lanes cannot drift). Returns its result.
+
+    Config path stays the box-default ~/.cloudflared/config.yml (matches the current
+    working unit exactly — lowest-risk for a live external-dev terminal; subdev has
+    no other tunnel today, so no collision — a review-noted accepted tradeoff)."""
+    # subdev's no-sudo user-space binary is NOT on the install-process PATH, so try
+    # ~/.local/bin/cloudflared explicitly first (cli_binary_installers pattern, #614).
     local_bin = Path.home() / ".local" / "bin" / "cloudflared"
     cloudflared_bin = (str(local_bin) if local_bin.is_file()
                        else (shutil.which("cloudflared") or WEBTERM_DAVID_CLOUDFLARED_BIN))
-    try:
-        tun.WEBTERM_CLOUDFLARED_DIR.mkdir(parents=True, exist_ok=True)
-        WEBTERM_DAVID_TUNNEL_CONFIG.write_text(
-            tun.render_cloudflared_tunnel_config(
-                WEBTERM_DAVID_TUNNEL_UUID, str(WEBTERM_DAVID_TUNNEL_CREDS),
-                WEBTERM_DAVID_TUNNEL_HOSTNAME,
-                "http://%s:%d" % (WEBTERM_DAVID_BIND, WEBTERM_DAVID_GATEWAY_PORT)),
-            encoding="utf-8")
-        WEBTERM_DAVID_TUNNEL_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
-        WEBTERM_DAVID_TUNNEL_SERVICE_DEST.write_text(
-            tun.render_cloudflared_tunnel_unit(
-                "david webterm cloudflared tunnel (%s -> 127.0.0.1:%d)"
-                % (WEBTERM_DAVID_TUNNEL_HOSTNAME, WEBTERM_DAVID_GATEWAY_PORT),
-                str(WEBTERM_DAVID_TUNNEL_CONFIG), cloudflared_bin,
-                after="network-online.target webterm-david-gateway.service"),
-            encoding="utf-8")
-    except OSError as e:
-        print("  webterm(david): tunnel write FAILED (%s) — left un-provisioned."
-              % e, file=sys.stderr)
-        return False
-    _run_systemctl(["daemon-reload"])
-    rc, _o, err = _run_systemctl(["enable", "--now", "webterm-david-tunnel.service"])
-    if rc != 0:
-        print("  webterm(david): enable tunnel FAILED: %s" % (err or "").strip(),
-              file=sys.stderr)
-        return False
-    _run_systemctl(["restart", "webterm-david-tunnel.service"])
-    print("  webterm(david): tunnel live + MANAGED (%s -> 127.0.0.1:%d)."
-          % (WEBTERM_DAVID_TUNNEL_HOSTNAME, WEBTERM_DAVID_GATEWAY_PORT))
-    return True
+    config_text = tun.render_cloudflared_tunnel_config(
+        WEBTERM_DAVID_TUNNEL_UUID, str(WEBTERM_DAVID_TUNNEL_CREDS),
+        WEBTERM_DAVID_TUNNEL_HOSTNAME,
+        "http://%s:%d" % (WEBTERM_DAVID_BIND, WEBTERM_DAVID_GATEWAY_PORT))
+    unit_text = tun.render_cloudflared_tunnel_unit(
+        "david webterm cloudflared tunnel (%s -> 127.0.0.1:%d)"
+        % (WEBTERM_DAVID_TUNNEL_HOSTNAME, WEBTERM_DAVID_GATEWAY_PORT),
+        str(WEBTERM_DAVID_TUNNEL_CONFIG), cloudflared_bin,
+        after="network-online.target webterm-david-gateway.service")
+    return tun._provision_managed_tunnel(
+        WEBTERM_DAVID_TUNNEL_CREDS, cloudflared_bin, WEBTERM_DAVID_TUNNEL_CONFIG,
+        config_text, WEBTERM_DAVID_TUNNEL_SERVICE_DEST,
+        "webterm-david-tunnel.service", unit_text, run=run, lane="(david)",
+        creds_absent_hint=" (the webterm-david-612 creds JSON must be present "
+        "on subdev).")
 
 
 def setup_webterm_david_service(run=None):
@@ -337,8 +322,11 @@ def setup_webterm_david_service(run=None):
                 continue
             _run_systemctl(["restart", svc])
         # #635: bring the (previously hand-made) public HTTPS front under airuleset
-        # management too — prereq-gated no-op if the creds JSON is not present.
-        setup_webterm_david_tunnel(run=run)
+        # management too — but ONLY once the loopback gateway/ttyd came up (ok_all),
+        # so the tunnel never fronts a dead origin. Prereq-gated no-op if the creds
+        # JSON is not present.
+        if ok_all:
+            setup_webterm_david_tunnel(run=run)
     except Exception as e:
         print("  webterm(david): provisioning errored (%r) — left un-provisioned."
               % e, file=sys.stderr)

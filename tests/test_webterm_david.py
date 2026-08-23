@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import cli_webterm as w  # noqa: E402
 import cli_webterm_david as d  # noqa: E402
 import cli_webterm_profiles as p  # noqa: E402
+import cli_webterm_tunnel as tun  # noqa: E402
 import cli_filedrop_watchdog as fw  # noqa: E402
 
 
@@ -175,6 +176,22 @@ class TestDavidArtifactsWrite(unittest.TestCase):
         stack.enter_context(m.patch.object(
             d, "WEBTERM_DAVID_GATEWAY_SERVICE_DEST",
             base / "systemd" / "webterm-david-gateway.service"))
+        # #635: redirect the david TUNNEL path constants into tmp too — on the subdev
+        # box the REAL creds JSON (1564fe31-….json) exists, so setup_webterm_david_
+        # service now transitively calls setup_webterm_david_tunnel, which would write
+        # the real ~/.cloudflared/config.yml + unit (systemctl is mocked, so only the
+        # file writes would leak). No creds JSON is created in tmp, so the tunnel stays
+        # a safe no-op in these tests (mirrors the owner isolation in test_webterm.py).
+        stack.enter_context(m.patch.object(tun, "WEBTERM_CLOUDFLARED_DIR",
+                                           base / ".cloudflared"))
+        stack.enter_context(m.patch.object(
+            d, "WEBTERM_DAVID_TUNNEL_CREDS",
+            base / ".cloudflared" / (d.WEBTERM_DAVID_TUNNEL_UUID + ".json")))
+        stack.enter_context(m.patch.object(
+            d, "WEBTERM_DAVID_TUNNEL_CONFIG", base / ".cloudflared" / "config.yml"))
+        stack.enter_context(m.patch.object(
+            d, "WEBTERM_DAVID_TUNNEL_SERVICE_DEST",
+            base / "systemd" / "webterm-david-tunnel.service"))
         return claude, secrets
 
     def test_write_artifacts_scoped_inventory_and_launcher(self):

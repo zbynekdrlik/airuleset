@@ -838,6 +838,33 @@ class TestSetupWiring(unittest.TestCase):
             # the password credential is retired (no password path any more)
             self.assertFalse(pt["WEBTERM_CRED_PATH"].exists())
 
+    def test_access_mode_provisions_the_managed_owner_tunnel(self):
+        # #635: the go-live DEFAULT (Access mode) must CALL the managed-tunnel
+        # provisioner — the public front is a reconciled cloudflared unit, not a
+        # hand-made one. Behavioral (a spy), not a brittle getsource text check.
+        import contextlib
+        import cli_webterm_tunnel as tun
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            self._isolate(st, tmp)
+            spy = []
+            st.enter_context(m.patch.object(
+                tun, "setup_webterm_owner_tunnel", lambda run=None: spy.append(True)))
+            # Access mode needs no tailscale IP; the default flag is now True.
+            self.assertTrue(w.setup_webterm_service(run=self._RunRec(ip="")))
+            self.assertEqual(spy, [True])       # tunnel provisioned in access mode
+
+    def test_password_mode_does_not_provision_owner_tunnel(self):
+        import contextlib
+        import cli_webterm_tunnel as tun
+        with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
+            self._isolate(st, tmp)
+            st.enter_context(m.patch.object(w, "OWNER_GATEWAY_ACCESS_MODE", False))
+            spy = []
+            st.enter_context(m.patch.object(
+                tun, "setup_webterm_owner_tunnel", lambda run=None: spy.append(True)))
+            self.assertTrue(w.setup_webterm_service(run=self._RunRec()))
+            self.assertEqual(spy, [])           # password mode never touches the tunnel
+
 
 class TestTabSwitchingUX(unittest.TestCase):
     """#582: Ctrl+Alt+N can't switch tabs while focus is inside a cross-origin

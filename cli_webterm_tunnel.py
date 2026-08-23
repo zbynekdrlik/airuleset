@@ -94,65 +94,85 @@ def render_cloudflared_tunnel_unit(description, config_path, cloudflared_bin,
 
 def resolve_cloudflared_bin(fallback):
     """cloudflared path for the unit ExecStart: prefer whatever `shutil.which`
-    finds (dev1: /usr/local/bin), else the given fallback literal."""
+    finds (dev1: /usr/local/bin), else the given fallback literal (subdev's no-sudo
+    ~/.local/bin binary, which is NOT on the install process PATH)."""
     return shutil.which("cloudflared") or fallback
+
+
+def _provision_managed_tunnel(creds_path, cloudflared_bin, config_path, config_text,
+                              unit_path, service_name, unit_text, run=None,
+                              lane="", creds_absent_hint=""):
+    """SHARED orchestration for a managed cloudflared tunnel — owner (dev1) AND
+    david (subdev) both call this, so the two lanes can NEVER drift (the review
+    found the copy-paste twin was the source of several parity gaps). The CALLER
+    renders `config_text`/`unit_text` (each lane resolves its own cloudflared_bin +
+    ports + `After=`); this owns the identical write + linger + systemd enable/restart.
+
+    PREREQUISITE-GATED on `creds_path` (the per-tunnel secret JSON) — a safe no-op
+    printing the go-live step otherwise; the whole body is try-wrapped so it NEVER
+    raises (returns False on any skip/failure). Idempotent (`enable --now` no-ops a
+    running unit, so an explicit `restart` applies a changed config/unit). Returns
+    True only when the unit is written + enabled + restarted."""
+    run = run or subprocess.run
+    try:
+        from cli_filedrop_watchdog import _run_systemctl, _whoami
+        if not creds_path.exists():
+            print("  webterm%s: tunnel creds %s absent — tunnel NO-OP until go-live.%s"
+                  % (lane, creds_path, creds_absent_hint), file=sys.stderr)
+            return False
+        if shutil.which("cloudflared") is None and not Path(cloudflared_bin).exists():
+            print("  webterm%s: cloudflared binary not found — tunnel skipped (the "
+                  "loopback gateway still serves for the tunnel to front)." % lane,
+                  file=sys.stderr)
+            return False
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(config_text, encoding="utf-8")
+        unit_path.parent.mkdir(parents=True, exist_ok=True)
+        unit_path.write_text(unit_text, encoding="utf-8")
+        # linger makes the --user unit reboot-durable (the whole point of #635) even
+        # when this provisioner is reached standalone, not only via a caller that
+        # already lingered.
+        try:
+            run(["loginctl", "enable-linger", _whoami()], capture_output=True, text=True)
+        except Exception as e:
+            print("  webterm%s: tunnel enable-linger skipped (%s)" % (lane, e),
+                  file=sys.stderr)
+        _run_systemctl(["daemon-reload"])
+        rc, _o, err = _run_systemctl(["enable", "--now", service_name])
+        if rc != 0:
+            print("  webterm%s: enable %s FAILED: %s"
+                  % (lane, service_name, (err or "").strip()), file=sys.stderr)
+            return False
+        _run_systemctl(["restart", service_name])
+    except Exception as e:
+        print("  webterm%s: tunnel provisioning errored (%r) — left un-provisioned."
+              % (lane, e), file=sys.stderr)
+        return False
+    print("  webterm%s: tunnel live + MANAGED (%s)." % (lane, service_name),
+          file=sys.stderr)
+    return True
 
 
 def setup_webterm_owner_tunnel(run=None):
     """dev1-only (called from cli_webterm.setup_webterm_service's Access-mode
     branch): provision + enable the MANAGED cloudflared tunnel that fronts
-    https://zbynek.newlevel.media/ -> the loopback owner gateway. PREREQUISITE-GATED
-    on the per-tunnel creds JSON (a safe no-op printing the go-live step otherwise),
-    so a fresh dev1 that lacks the creds never fails — it just does not stand the
-    tunnel up. Idempotent. Returns True on success, False on any skip/failure (never
-    raises — mirrors setup_webterm_service)."""
-    run = run or subprocess.run
+    https://zbynek.newlevel.media/ -> the loopback owner gateway. Renders the
+    owner-specific config/unit, then hands off to `_provision_managed_tunnel` (the
+    shared, never-raises, prereq-gated orchestration). Returns its result."""
     import cli_webterm as w
-    from cli_filedrop_watchdog import _run_systemctl, _whoami
-    if not WEBTERM_OWNER_TUNNEL_CREDS.exists():
-        print("  webterm: owner tunnel creds %s absent — tunnel NO-OP until go-live "
-              "(create the `webterm-owner` tunnel via dev2's origin cert and copy its "
-              "creds JSON here)." % WEBTERM_OWNER_TUNNEL_CREDS, file=sys.stderr)
-        return False
     cloudflared_bin = resolve_cloudflared_bin(WEBTERM_CLOUDFLARED_BIN)
-    if shutil.which("cloudflared") is None and not Path(WEBTERM_CLOUDFLARED_BIN).exists():
-        print("  webterm: cloudflared binary not found — owner tunnel skipped "
-              "(the gateway still serves loopback:%d for the tunnel to front)."
-              % w.WEBTERM_GATEWAY_PORT, file=sys.stderr)
-        return False
-    try:
-        WEBTERM_CLOUDFLARED_DIR.mkdir(parents=True, exist_ok=True)
-        WEBTERM_OWNER_TUNNEL_CONFIG.write_text(
-            render_cloudflared_tunnel_config(
-                WEBTERM_OWNER_TUNNEL_UUID, str(WEBTERM_OWNER_TUNNEL_CREDS),
-                WEBTERM_OWNER_TUNNEL_HOSTNAME,
-                "http://%s:%d" % (w.WEBTERM_TTYD_BIND, w.WEBTERM_GATEWAY_PORT)),
-            encoding="utf-8")
-        WEBTERM_OWNER_TUNNEL_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
-        WEBTERM_OWNER_TUNNEL_SERVICE_DEST.write_text(
-            render_cloudflared_tunnel_unit(
-                "owner webterm cloudflared tunnel (%s -> 127.0.0.1:%d)"
-                % (WEBTERM_OWNER_TUNNEL_HOSTNAME, w.WEBTERM_GATEWAY_PORT),
-                str(WEBTERM_OWNER_TUNNEL_CONFIG), cloudflared_bin,
-                after="network-online.target webterm-gateway.service"),
-            encoding="utf-8")
-    except OSError as e:
-        print("  webterm: owner tunnel write FAILED (%s) — left un-provisioned."
-              % e, file=sys.stderr)
-        return False
-    try:
-        run(["loginctl", "enable-linger", _whoami()], capture_output=True, text=True)
-    except Exception as e:
-        print("  webterm: owner tunnel enable-linger skipped (%s)" % e, file=sys.stderr)
-    _run_systemctl(["daemon-reload"])
-    rc, _o, err = _run_systemctl(["enable", "--now", "webterm-owner-tunnel.service"])
-    if rc != 0:
-        print("  webterm: enable owner tunnel FAILED: %s" % (err or "").strip(),
-              file=sys.stderr)
-        return False
-    # `enable --now` no-ops an already-running unit, so a re-install that changed the
-    # config/unit needs an explicit restart to take effect.
-    _run_systemctl(["restart", "webterm-owner-tunnel.service"])
-    print("  webterm: owner tunnel live + MANAGED (%s -> 127.0.0.1:%d)."
-          % (WEBTERM_OWNER_TUNNEL_HOSTNAME, w.WEBTERM_GATEWAY_PORT))
-    return True
+    config_text = render_cloudflared_tunnel_config(
+        WEBTERM_OWNER_TUNNEL_UUID, str(WEBTERM_OWNER_TUNNEL_CREDS),
+        WEBTERM_OWNER_TUNNEL_HOSTNAME,
+        "http://%s:%d" % (w.WEBTERM_TTYD_BIND, w.WEBTERM_GATEWAY_PORT))
+    unit_text = render_cloudflared_tunnel_unit(
+        "owner webterm cloudflared tunnel (%s -> 127.0.0.1:%d)"
+        % (WEBTERM_OWNER_TUNNEL_HOSTNAME, w.WEBTERM_GATEWAY_PORT),
+        str(WEBTERM_OWNER_TUNNEL_CONFIG), cloudflared_bin,
+        after="network-online.target webterm-gateway.service")
+    return _provision_managed_tunnel(
+        WEBTERM_OWNER_TUNNEL_CREDS, cloudflared_bin, WEBTERM_OWNER_TUNNEL_CONFIG,
+        config_text, WEBTERM_OWNER_TUNNEL_SERVICE_DEST,
+        "webterm-owner-tunnel.service", unit_text, run=run, lane="",
+        creds_absent_hint=" (create the `webterm-owner` tunnel via dev2's origin "
+        "cert and copy its creds JSON here).")
