@@ -118,14 +118,15 @@ class TestTmuxWrapperRewrite(unittest.TestCase):
         self.assertEqual(rec, ["new-session -A -s other"])
 
     def test_functions_defined_only_when_interactive(self):
-        # Interactive: both defined.
-        interactive = _declared_funcs(self.block, interactive=True)
-        self.assertIn("declare -f t", interactive)
-        self.assertIn("declare -f tmux", interactive)
-        # Non-interactive: guard skips -> neither defined.
-        noninteractive = _declared_funcs(self.block, interactive=False)
-        self.assertNotIn("declare -f t", noninteractive)
-        self.assertNotIn("declare -f tmux", noninteractive)
+        # `declare -F t tmux` prints just the bare names of the DEFINED
+        # functions (nothing for an undefined one). Interactive: both defined.
+        interactive = _declared_funcs(self.block, interactive=True).split()
+        self.assertIn("t", interactive)
+        self.assertIn("tmux", interactive)
+        # Non-interactive: guard skips -> neither defined -> empty output.
+        noninteractive = _declared_funcs(self.block, interactive=False).split()
+        self.assertNotIn("t", noninteractive)
+        self.assertNotIn("tmux", noninteractive)
 
 
 class TestOwnerSessionDefault(unittest.TestCase):
