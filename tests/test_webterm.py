@@ -50,6 +50,11 @@ def _extract_js_function(html, name):
 # (cols,rows), a later ttyd-style resize is CLAMPED, and the font is raised to fill.
 _FIT_HARNESS = r"""
 const CFG = { term_cols: 176, term_rows: 51 };
+// #655: the fill caps are top-level consts in the real dashboard script (outside
+// fitFixedGrid), so the harness must define them for the extracted function to
+// reference. Kept in sync with cli_webterm.py by test_fit_fill_caps_match_source.
+const WT_FILL_MAX_CELL_STRETCH = 1.5;
+const WT_FILL_MAX_LINE_STRETCH = 1.8;
 const CW = 0.6, CH = 1.2;                 // fake monospace cell = 0.6*fs x 1.2*fs
 // #655: the fake cell now models the two native xterm.js FILL options the
 // browser-side fit uses -- `letterSpacing` (px added to each cell's WIDTH) and
@@ -1281,7 +1286,7 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         fit = _extract_js_function(html, "fitFixedGrid")
         for vw, vh, tag in ((1920, 1011, "laptop wide (horizontal margin)"),
-                            (1200, 1400, "portrait (vertical margin)")):
+                            (1400, 1000, "tall-ish window (vertical margin)")):
             out = _run_fit_harness(fit, vw, vh)
             fillW = out["gridW"] / out["availW"]
             fillH = out["gridH"] / out["availH"]
@@ -1297,6 +1302,17 @@ class TestBrowserFixedGridFit(unittest.TestCase):
                 "(lineHeight=%s)" % (tag, fillH * 100, out["lineHeight"]))
             self.assertLessEqual(out["gridW"], out["availW"] + 1, "%s: no overflow W" % tag)
             self.assertLessEqual(out["gridH"], out["availH"] + 1, "%s: no overflow H" % tag)
+
+    def test_fit_fill_caps_match_source(self):
+        # #655: the node harness hardcodes the fill caps (they are top-level
+        # consts in the dashboard script, outside fitFixedGrid). Lock that the
+        # harness values equal the source values so the behavioural tests can
+        # never silently drift from what ships.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertRegex(html, r"WT_FILL_MAX_CELL_STRETCH\s*=\s*1\.5\b")
+        self.assertRegex(html, r"WT_FILL_MAX_LINE_STRETCH\s*=\s*1\.8\b")
+        self.assertIn("const WT_FILL_MAX_CELL_STRETCH = 1.5;", _FIT_HARNESS)
+        self.assertIn("const WT_FILL_MAX_LINE_STRETCH = 1.8;", _FIT_HARNESS)
 
     def test_fit_stretch_is_bounded_so_extreme_viewport_never_distorts(self):
         # #655: an EXTREME viewport (very wide-and-short, or very tall-narrow)

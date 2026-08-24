@@ -629,7 +629,7 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>work.newlevel.media — fleet terminal</title>
+<title>fleet terminal</title><!-- #655: real domain set client-side from location.hostname (below) -->
 <!-- #644: installable PWA — standalone window, no browser chrome. The manifest
      (per-domain name), icons and service worker are served by the gateway from
      the dash dir (behind Cloudflare Access). theme-color matches #643 Campbell. -->
@@ -671,13 +671,22 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 #frames { position: relative; flex: 1 1 auto; }
 #frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
   border: 0; background: #0C0C0C; }
-#hint { flex: 0 0 auto; padding: 3px 10px; color: #767676; font-size: 11px;
-  background: #0C0C0C; border-top: 1px solid #1e1e1e; }
+/* #655: the help text is no longer a persistent 11px micro-bar at the bottom
+   (the owner's "nezrozumiteľný mikro text dole"). It is a READABLE overlay panel,
+   hidden by default and opened by the ? button in the tab bar; being position:fixed
+   it also leaves the flex column, so the terminal gets that vertical space back. */
+#hint { display: none; position: fixed; left: 50%; bottom: 14px;
+  transform: translateX(-50%); z-index: 20; max-width: min(900px, 94vw);
+  max-height: 60vh; overflow: auto; padding: 12px 16px; color: #CCCCCC;
+  font-size: 13px; line-height: 1.55; background: #161616;
+  border: 1px solid #2b2b2b; border-radius: 8px; cursor: pointer;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.55); }
+#hint.show { display: block; }
 </style>
 </head>
 <body>
 <div id="tabbar">
-<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session">&#9654;</button><button class="cyc" id="fs" title="Fullscreen — Ctrl+W pôjde do terminálu (Keyboard Lock)">&#9974;</button></span>
+<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session">&#9654;</button><button class="cyc" id="fs" title="Fullscreen — Ctrl+W pôjde do terminálu (Keyboard Lock)">&#9974;</button><button class="cyc" id="help" title="Nápoveda — klávesové skratky a tipy">?</button></span>
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
@@ -691,6 +700,18 @@ const CFG = @@CFG_JSON@@;
 // GoTTY both expose `window.term`) — never baked into a ttyd -t theme= flag.
 const CAMPBELL_THEME = @@THEME_JSON@@;
 const TERM_FONT_STACK = '"Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", Menlo, Monaco, "Liberation Mono", monospace';
+// #655: dynamic document title from the ACTUAL serving host. The old hardcoded
+// legacy domain was NXDOMAIN; the live hosts are zbynek/david.newlevel.media, and
+// this static file is served across BOTH. location.hostname is the honest
+// per-viewer value, so the PWA/browser window title always names the real domain.
+try { document.title = location.hostname + ' — fleet terminal'; } catch (e) {}
+// #655: FILL-the-viewport caps for fitFixedGrid. The fixed 176x51 grid letterboxes
+// on any viewport whose aspect != the grid's; we stretch the LOOSE dimension to
+// fill via native xterm letterSpacing/lineHeight (crisp, no glyph distortion --
+// they only add SPACING). BOUNDED so an extreme viewport (a phone) degrades to a
+// residual letterbox instead of grotesque spacing, rather than distorting text.
+const WT_FILL_MAX_CELL_STRETCH = 1.5;   // cell width may grow up to 1.5x (letterSpacing)
+const WT_FILL_MAX_LINE_STRETCH = 1.8;   // row height may grow up to 1.8x (lineHeight)
 function themeTerminal(term) {           // idempotent: applied once per terminal
   if (!term || term.__wtThemed) return;
   term.options.theme = CAMPBELL_THEME;
@@ -805,6 +826,11 @@ function fitFixedGrid(win) {
     term.resize = () => real(cols, rows);
     term.__wtClamped = true;
   }
+  // #655: reset the FILL stretch so the natural-cell measurement below is honest
+  // (a re-fit on window-resize must recompute from the natural aspect, not last
+  // run's stretched cells).
+  term.options.letterSpacing = 0;
+  term.options.lineHeight = 1;
   try { term.resize(cols, rows); } catch (e) { return false; }
   const bg = (term.options.theme && term.options.theme.background) || '#0C0C0C';
   if (!doc.getElementById('wt-fit-style')) {    // centre + letterbox = terminal bg
@@ -834,6 +860,26 @@ function fitFixedGrid(win) {
     if (rr.width <= availW + 1 && rr.height <= availH + 1) break;
     term.options.fontSize = --F;
   }
+  // #655 FILL: the crisp min-fit font above LETTERBOXES whenever the viewport
+  // aspect != the fixed 176x51 grid aspect (the owner's "okno v strede" — 12%
+  // horizontal margin measured live at 1920x1080). Stretch the LOOSE dimension
+  // to fill the viewport via native xterm options: letterSpacing widens each
+  // cell, lineHeight raises each row. Both are CRISP xterm re-renders (never a
+  // blurry CSS scale) and add only SPACING, so glyphs are never distorted. Capped
+  // (WT_FILL_MAX_*) so an extreme viewport degrades to a residual letterbox
+  // instead of grotesque spacing. The min-fit above already made the TIGHT
+  // dimension fill, so at most one of these two branches stretches meaningfully.
+  const g = (screenEl() || el).getBoundingClientRect();
+  if (g.width > 0 && availW > g.width) {
+    const cellW = g.width / cols;
+    const add = Math.min((availW - g.width) / cols,
+                         cellW * (WT_FILL_MAX_CELL_STRETCH - 1));
+    term.options.letterSpacing = Math.max(0, add);
+  }
+  if (g.height > 0 && availH > g.height) {
+    term.options.lineHeight =
+        Math.max(1, Math.min(WT_FILL_MAX_LINE_STRETCH, availH / g.height));
+  }
   return true;
 }
 function applyFixedGrid(f) {                     // poll for window.term, fit, then watch resize
@@ -856,8 +902,20 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
 }
 document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
-document.querySelectorAll('.cyc[data-cyc]').forEach((b) =>   // fs button has no data-cyc
+document.querySelectorAll('.cyc[data-cyc]').forEach((b) =>   // fs/help buttons have no data-cyc
   b.addEventListener('click', () => cycle(+b.dataset.cyc)));
+// #655: the ? button toggles the readable help panel (replaces the old 11px
+// persistent micro-bar). Clicking the panel itself, or Escape, closes it.
+(function () {
+  const helpBtn = document.getElementById('help');
+  const hintEl = document.getElementById('hint');
+  if (!helpBtn || !hintEl) return;
+  helpBtn.addEventListener('click', () => hintEl.classList.toggle('show'));
+  hintEl.addEventListener('click', () => hintEl.classList.remove('show'));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hintEl.classList.remove('show');
+  });
+})();
 // #585(b): Ctrl+W is readline delete-word in the terminal but the browser
 // consumes it as close-tab (a reserved shortcut a normal window cannot
 // preventDefault). Layer 1 — a beforeunload confirm armed WHILE a terminal is
