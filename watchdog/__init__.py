@@ -1202,6 +1202,7 @@ from watchdog.goal_scan import (  # noqa: E402
     _goal_autoarm_recent_human_activity as _goal_autoarm_recent_human_activity,
     goal_templates_path as goal_templates_path,
     _goal_marker_content as _goal_marker_content,
+    _parse_error_clear_payload as _parse_error_clear_payload,
     _parse_goal_marker as _parse_goal_marker,
     _newest_marker as _newest_marker,
     scan_goal_markers as scan_goal_markers,
