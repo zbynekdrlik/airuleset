@@ -1839,5 +1839,351 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertIn('rename-window m2', after)  # #592: alias, not full username
 
 
+# ---------------------------------------------------------------------------
+# #656: owner-VPS ssh auto-attach (spinbike-vps) — parity with the subdev
+# #264 block, but the OWNER-session naming convention (session=<owner group>,
+# window=<project>, cwd=<project dev dir>) and a stray-free create/attach
+# split so a hung attach can never strand a standalone idle-bash session.
+# ---------------------------------------------------------------------------
+
+
+class TestOwnerVpsProjectPredicate(TestCase):
+    def test_spinbike_vps_is_an_owner_vps_project(self):
+        # newlevel unix account + a spinbike-* hostname -> the registered
+        # single-project owner VPS.
+        proj = airuleset._owner_vps_project(user="newlevel", hostname="spinbike-vps")
+        self.assertIsNotNone(proj)
+        window, rel_dir = proj
+        self.assertEqual(window, "spinbike")
+        self.assertEqual(rel_dir, "devel/spinbike")
+
+    def test_dev1_and_dev2_are_never_owner_vps_projects(self):
+        # the owner MULTI-project boxes share the `newlevel` account but must
+        # NEVER match — one fixed window/session would destroy navigation.
+        self.assertIsNone(airuleset._owner_vps_project(user="newlevel", hostname="dev1"))
+        self.assertIsNone(airuleset._owner_vps_project(user="newlevel", hostname="dev2"))
+
+    def test_subdev_streams_and_gatekeeper_are_never_owner_vps_projects(self):
+        # they have their own #264/#562 subdev block; a stream account on a
+        # spinbike-named host must still be refused (the user gate).
+        self.assertIsNone(airuleset._owner_vps_project(user="montalu2", hostname="subdev"))
+        self.assertIsNone(airuleset._owner_vps_project(user="gatekeeper", hostname="gk"))
+        self.assertIsNone(
+            airuleset._owner_vps_project(user="montalu2", hostname="spinbike-vps"))
+
+    def test_registry_is_keyed_by_hostname_prefix_not_the_webterm_alias(self):
+        # robustness: keyed by the hostname prefix (`spinbike`), so it does not
+        # depend on the #661 `sb` short-alias choice.
+        self.assertIn("spinbike", airuleset.OWNER_VPS_PROJECTS)
+
+
+class TestRenderOwnerVpsBlock(TestCase):
+    def test_block_bakes_owner_session_project_window_and_dir(self):
+        block = airuleset.render_owner_vps_ssh_attach_block(
+            "zbynek", "spinbike", "devel/spinbike")
+        self.assertIn(airuleset.OWNER_VPS_SSH_ATTACH_MARK_START, block)
+        self.assertIn(airuleset.OWNER_VPS_SSH_ATTACH_MARK_END, block)
+        self.assertIn('__airuleset_sess="zbynek"', block)
+        self.assertIn('__airuleset_win="spinbike"', block)
+        self.assertIn('__airuleset_dir="$HOME/devel/spinbike"', block)
+
+    def test_block_carries_the_three_guards_plus_tmux_availability(self):
+        block = airuleset.render_owner_vps_ssh_attach_block(
+            "zbynek", "spinbike", "devel/spinbike")
+        self.assertIn("$- == *i*", block)          # interactive shell
+        self.assertIn('${SSH_TTY:-}', block)       # a real ssh TTY
+        self.assertIn('${TMUX:-}', block)          # not already inside tmux
+        self.assertIn("command -v tmux", block)    # tmux present before exec
+
+    def test_block_exports_local_bin_on_path_before_exec(self):
+        block = airuleset.render_owner_vps_ssh_attach_block(
+            "zbynek", "spinbike", "devel/spinbike")
+        self.assertIn('export PATH="$HOME/.local/bin:$PATH"', block)
+
+    def test_block_attaches_never_creates_via_dash_A(self):
+        # the #660 stray-avoidance invariant: the FINAL attach is
+        # `attach-session` (never creates), and the banned `new-session -A -s`
+        # shape (whose hung attach strands a standalone idle-bash session)
+        # never appears.
+        block = airuleset.render_owner_vps_ssh_attach_block(
+            "zbynek", "spinbike", "devel/spinbike")
+        self.assertIn('exec tmux attach-session -t "=$__airuleset_sess"', block)
+        self.assertNotIn("new-session -A -s", block)
+
+    def test_render_rejects_unsafe_session_window_or_dir(self):
+        with self.assertRaises(ValueError):
+            airuleset.render_owner_vps_ssh_attach_block("zby; rm -rf /", "spinbike", "devel/spinbike")
+        with self.assertRaises(ValueError):
+            airuleset.render_owner_vps_ssh_attach_block("zbynek", "spin bike", "devel/spinbike")
+        with self.assertRaises(ValueError):
+            airuleset.render_owner_vps_ssh_attach_block("zbynek", "spinbike", "../etc")
+        with self.assertRaises(ValueError):
+            airuleset.render_owner_vps_ssh_attach_block("zbynek", "spinbike", "/abs/path")
+
+
+class TestApplyOwnerVpsSshAttach(TestCase):
+    def _tmp(self, content=None):
+        d = tempfile.mkdtemp()
+        p = Path(d) / ".bashrc"
+        if content is not None:
+            p.write_text(content)
+        return p
+
+    def test_adds_block_on_spinbike_vps(self):
+        p = self._tmp("# existing\n")
+        changed = airuleset.apply_owner_vps_ssh_attach(
+            p, user="newlevel", host="spinbike-vps")
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertIn(airuleset.OWNER_VPS_SSH_ATTACH_MARK_START, text)
+        self.assertIn('__airuleset_win="spinbike"', text)
+        self.assertIn('exec tmux attach-session', text)
+
+    def test_never_added_on_dev2(self):
+        p = self._tmp("# existing\n")
+        changed = airuleset.apply_owner_vps_ssh_attach(
+            p, user="newlevel", host="dev2")
+        self.assertFalse(changed)
+        self.assertNotIn(airuleset.OWNER_VPS_SSH_ATTACH_MARK_START, p.read_text())
+
+    def test_never_added_on_a_subdev_stream(self):
+        p = self._tmp("# existing\n")
+        changed = airuleset.apply_owner_vps_ssh_attach(
+            p, user="montalu2", host="subdev")
+        self.assertFalse(changed)
+        self.assertNotIn(airuleset.OWNER_VPS_SSH_ATTACH_MARK_START, p.read_text())
+
+    def test_removes_block_from_an_ineligible_box_if_ever_present(self):
+        seeded = airuleset.render_owner_vps_ssh_attach_block(
+            "zbynek", "spinbike", "devel/spinbike")
+        p = self._tmp(f"# before\n{seeded}\n# after\n")
+        changed = airuleset.apply_owner_vps_ssh_attach(
+            p, user="newlevel", host="dev2")
+        self.assertTrue(changed)
+        text = p.read_text()
+        self.assertNotIn(airuleset.OWNER_VPS_SSH_ATTACH_MARK_START, text)
+        self.assertIn("# before", text)
+        self.assertIn("# after", text)
+
+    def test_idempotent_second_call_is_a_no_op(self):
+        p = self._tmp("# existing\n")
+        airuleset.apply_owner_vps_ssh_attach(p, user="newlevel", host="spinbike-vps")
+        changed = airuleset.apply_owner_vps_ssh_attach(
+            p, user="newlevel", host="spinbike-vps")
+        self.assertFalse(changed)
+
+    def test_uses_the_owner_session_not_whoami(self):
+        # the owner-session convention: session == zbynek (OWNER_GROUP), NOT
+        # the unix account `newlevel` the subdev block would use.
+        p = self._tmp()
+        airuleset.apply_owner_vps_ssh_attach(p, user="newlevel", host="spinbike-vps")
+        text = p.read_text()
+        self.assertIn('__airuleset_sess="zbynek"', text)
+        self.assertNotIn('__airuleset_sess="newlevel"', text)
+
+
+# --- fake-tmux argv-log tests (the #284 pattern): drive the REAL bash of the
+#     block through `bash --norc -i -c` against a scripted fake tmux on PATH,
+#     asserting the exact command SHAPES (never a string/regex proxy). --------
+
+_VPS_FAKE_TMUX_SRC = r"""#!/usr/bin/env bash
+if [ -n "${FAKE_TMUX_LOG:-}" ]; then
+  printf '[%d] %s\n' "$#" "$*" >> "$FAKE_TMUX_LOG"
+fi
+case "$1" in
+  has-session)
+    rc=1
+    if [ -n "${FAKE_TMUX_HAS_SESSION_RC:-}" ] && [ -f "$FAKE_TMUX_HAS_SESSION_RC" ]; then
+      rc="$(cat "$FAKE_TMUX_HAS_SESSION_RC")"
+    fi
+    exit "${rc:-1}"
+    ;;
+  list-windows)
+    if [ -n "${FAKE_TMUX_LIST_WINDOWS_OUT:-}" ] && [ -f "$FAKE_TMUX_LIST_WINDOWS_OUT" ]; then
+      cat "$FAKE_TMUX_LIST_WINDOWS_OUT"
+    fi
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"""
+
+
+class TestOwnerVpsBlockCommandShapes(TestCase):
+    def _run(self, has_session_rc=1, list_windows_out=""):
+        d = Path(tempfile.mkdtemp())
+        bin_dir = d / "bin"
+        bin_dir.mkdir()
+        fake_tmux = bin_dir / "tmux"
+        fake_tmux.write_text(_VPS_FAKE_TMUX_SRC)
+        fake_tmux.chmod(0o755)
+        rc_file = d / "has_session_rc"
+        rc_file.write_text(str(has_session_rc))
+        lw_file = d / "list_windows_out"
+        lw_file.write_text(list_windows_out)
+        log_path = d / "tmux.log"
+        home_dir = d / "home"
+        (home_dir / "devel" / "spinbike").mkdir(parents=True)
+        env = {
+            "PATH": "%s:/usr/bin:/bin" % bin_dir,
+            "HOME": str(home_dir),
+            "SSH_TTY": "/dev/pts/0",
+            "FAKE_TMUX_LOG": str(log_path),
+            "FAKE_TMUX_HAS_SESSION_RC": str(rc_file),
+            "FAKE_TMUX_LIST_WINDOWS_OUT": str(lw_file),
+        }
+        block = airuleset.render_owner_vps_ssh_attach_block(
+            "zbynek", "spinbike", "devel/spinbike")
+        subprocess.run(
+            ["bash", "--norc", "-i", "-c", block],
+            env=env, capture_output=True, text=True, timeout=15,
+            stdin=subprocess.DEVNULL,
+        )
+        return log_path.read_text() if log_path.exists() else ""
+
+    def test_final_attach_is_attach_session_never_new_session_dash_A(self):
+        # the load-bearing stray-avoidance invariant, proven against the REAL
+        # bash of the block in BOTH scenarios.
+        for rc in (0, 1):
+            log = self._run(has_session_rc=rc)
+            self.assertIn("attach-session -t =zbynek", log)
+            self.assertNotIn("new-session -A -s", log)
+
+    def test_missing_session_is_created_detached_with_the_project_window(self):
+        log = self._run(has_session_rc=1)
+        # DETACHED create with the project window baked in (never `-A -s`),
+        # so a hung ATTACH later can never strand a bash@$HOME stray.
+        self.assertIn("new-session -d -s zbynek -n spinbike", log)
+
+    def test_existing_session_is_not_recreated(self):
+        log = self._run(has_session_rc=0)
+        self.assertNotIn("new-session", log)
+        self.assertIn("has-session -t =zbynek", log)
+
+    def test_missing_project_window_is_created(self):
+        # session exists, list-windows has no `spinbike` -> new-window.
+        log = self._run(has_session_rc=0, list_windows_out="bash\n")
+        self.assertIn("new-window -t =zbynek -n spinbike", log)
+
+    def test_watchdog_default_window_is_absorbed(self):
+        # session exists with the watchdog default (name bash, cmd bash,
+        # cwd == $HOME) AND a spinbike window -> the default is killed.
+        d = Path(tempfile.mkdtemp())
+        bin_dir = d / "bin"
+        bin_dir.mkdir()
+        fake_tmux = bin_dir / "tmux"
+        fake_tmux.write_text(_VPS_FAKE_TMUX_SRC)
+        fake_tmux.chmod(0o755)
+        rc_file = d / "has_session_rc"
+        rc_file.write_text("0")
+        lw_file = d / "list_windows_out"
+        home_dir = d / "home"
+        (home_dir / "devel" / "spinbike").mkdir(parents=True)
+        # both list-windows calls read this file; the name-format first call
+        # sees `@0`/`spinbike` tokens (spinbike present -> no new-window), the
+        # 4-field absorb call sees the watchdog default line matching all three.
+        lw_file.write_text("@0 bash bash %s\n@1 spinbike bash %s/devel/spinbike\n"
+                           % (home_dir, home_dir))
+        log_path = d / "tmux.log"
+        env = {
+            "PATH": "%s:/usr/bin:/bin" % bin_dir,
+            "HOME": str(home_dir),
+            "SSH_TTY": "/dev/pts/0",
+            "FAKE_TMUX_LOG": str(log_path),
+            "FAKE_TMUX_HAS_SESSION_RC": str(rc_file),
+            "FAKE_TMUX_LIST_WINDOWS_OUT": str(lw_file),
+        }
+        block = airuleset.render_owner_vps_ssh_attach_block(
+            "zbynek", "spinbike", "devel/spinbike")
+        subprocess.run(["bash", "--norc", "-i", "-c", block], env=env,
+                       capture_output=True, text=True, timeout=15,
+                       stdin=subprocess.DEVNULL)
+        log = log_path.read_text() if log_path.exists() else ""
+        # @0 (bash + bash + $HOME) killed; @1 (spinbike, cwd != $HOME) never.
+        self.assertIn("kill-window -t @0", log)
+        self.assertNotIn("kill-window -t @1", log)
+
+    def test_exec_runs_after_the_process_substitution_loops(self):
+        # #284 CRITICAL-1: an `exec` inside a `done < <(...)` loop inherits the
+        # pipe as stdin and a real tmux client then refuses to attach. The
+        # final exec MUST appear after the last process-substitution loop.
+        block = airuleset.render_owner_vps_ssh_attach_block(
+            "zbynek", "spinbike", "devel/spinbike")
+        last_done = block.rfind("done < <(tmux list-windows")
+        self.assertGreater(last_done, 0)
+        exec_idx = block.index('exec tmux attach-session -t "=$__airuleset_sess"')
+        self.assertGreater(exec_idx, last_done)
+
+
+class TestOwnerVpsBlockNoStrayAgainstRealTmux(TestCase):
+    """The authoritative stray proof: run the REAL block against an ISOLATED
+    real tmux server (own TMUX_TMPDIR, env stripped of TMUX/TMUX_PANE) and
+    assert the end state is exactly one `zbynek` session with one `spinbike`
+    window and NO stray, in every scenario."""
+
+    def _tmux_env(self, scratch, home):
+        # explicit env, NEVER {**os.environ} — this worker's own $TMUX must
+        # never leak into the throwaway server (the #385/#655 hygiene rule).
+        return {"TMUX_TMPDIR": scratch, "HOME": home,
+                "PATH": "/usr/local/bin:/usr/bin:/bin"}
+
+    def _run_block(self, env):
+        block = airuleset.render_owner_vps_ssh_attach_block(
+            "zbynek", "spinbike", "devel/spinbike")
+        # the final `exec tmux attach-session` fails with no PTY, but every
+        # session/window mutation is applied BEFORE it — exactly the point.
+        renv = dict(env)
+        renv["SSH_TTY"] = "/dev/pts/0"
+        subprocess.run(["bash", "--norc", "-i", "-c", block], env=renv,
+                       capture_output=True, text=True, timeout=20,
+                       stdin=subprocess.DEVNULL)
+
+    def _tmux(self, env, *argv):
+        return subprocess.run(["tmux", *argv], env=env, capture_output=True,
+                              text=True, timeout=15)
+
+    def _windows(self, env):
+        r = self._tmux(env, "list-windows", "-t", "=zbynek", "-F",
+                       "#{window_name}")
+        return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+    def _sessions(self, env):
+        r = self._tmux(env, "list-sessions", "-F", "#{session_name}")
+        return [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+    def setUp(self):
+        import shutil
+        if not shutil.which("tmux"):
+            self.skipTest("tmux not available")
+        self.scratch = tempfile.mkdtemp()
+        self.home = tempfile.mkdtemp()
+        (Path(self.home) / "devel" / "spinbike").mkdir(parents=True)
+        self.env = self._tmux_env(self.scratch, self.home)
+        self.addCleanup(self._tmux, self.env, "kill-server")
+
+    def test_no_stray_when_watchdog_precreated_the_session(self):
+        # mimic api-watchdog: owner session with a DEFAULT bash window at $HOME
+        r = self._tmux(self.env, "new-session", "-d", "-s", "zbynek", "-c", self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self._run_block(self.env)
+        self.assertEqual(self._sessions(self.env), ["zbynek"])   # no zbynek-0 stray
+        self.assertEqual(self._windows(self.env), ["spinbike"])  # default absorbed
+
+    def test_no_stray_on_a_fresh_box(self):
+        # no session pre-exists — the block creates zbynek:spinbike, no stray
+        self._run_block(self.env)
+        self.assertEqual(self._sessions(self.env), ["zbynek"])
+        self.assertEqual(self._windows(self.env), ["spinbike"])
+
+    def test_relogin_stays_a_single_project_window(self):
+        self._tmux(self.env, "new-session", "-d", "-s", "zbynek", "-c", self.home)
+        self._run_block(self.env)   # first login
+        self._run_block(self.env)   # second login — must NOT duplicate
+        self.assertEqual(self._sessions(self.env), ["zbynek"])
+        self.assertEqual(self._windows(self.env), ["spinbike"])
+
+
 if __name__ == "__main__":
     main()
