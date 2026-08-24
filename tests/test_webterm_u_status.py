@@ -8,6 +8,7 @@ The gateway /u-status route is tested in test_webterm_gateway.py.
 """
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -214,6 +215,101 @@ class TestDashboardDot(unittest.TestCase):
         # maps the tab's session id to the u-status map (per-box keying)
         self.assertIn("CFG.sessions", apply)
         self.assertIn(".id", apply)
+
+
+class TestUCollectOwnerGating(unittest.TestCase):
+    """#677 review 🟡: the U-dot poll + collection are OWNER-ONLY. The david/marek
+    gateways render the SAME dashboard (human=None / "marek") and reuse the SAME
+    gateway module; without gating, a sub-dev gateway would spawn an owner-fleet
+    collector AS the sub-dev account (a cross-tenant ssh read via the shared
+    password). Gated two ways: the dashboard poll ACTIVATION on CFG.u_status
+    (owner-render only), and the gateway feature off unless --u-collect (which only
+    the owner gateway unit injects)."""
+
+    def _dev1_inv(self):
+        return [{"id": "dev1", "label": "dev1", "kind": "owner", "local": True,
+                 "host": None, "user": None, "identity": None, "preferred": "zbynek"}]
+
+    def _cfg(self, html):
+        return json.loads(re.search(r"const CFG = (\{.*?\});", html).group(1))
+
+    def test_owner_render_activates_poll_non_owner_does_not(self):
+        owner = w.render_dashboard_html(self._dev1_inv(), ttyd_base="/t",
+                                        human=w.WEBTERM_LOGIN_USER)
+        nonowner = w.render_dashboard_html(self._dev1_inv(), ttyd_base="/t",
+                                           human=None)              # david/marek path
+        self.assertTrue(self._cfg(owner)["u_status"])               # owner: poll on
+        self.assertFalse(self._cfg(nonowner)["u_status"])           # non-owner: poll off
+        # the activation is GATED on the flag (never an unconditional pollUStatus()).
+        self.assertIn("if (CFG.u_status)", owner)
+        self.assertIn("if (CFG.u_status)", nonowner)
+
+    def test_owner_gateway_unit_enables_u_collect_david_marek_do_not(self):
+        import cli_webterm_david as dv
+        import cli_webterm_marek as mk
+        owner_unit = w._render_webterm_gateway_unit("127.0.0.1", access_mode=True)
+        self.assertIn("--u-collect", owner_unit)                    # owner gateway: on
+        self.assertNotIn("--u-collect", dv.render_david_gateway_unit())   # david: off
+        self.assertNotIn("--u-collect", mk.render_marek_gateway_unit())   # marek: off
+
+    def test_ssh_read_identity_decision_matches_interactive(self):
+        # #677 review 🔵3: _ssh_read_prefix is a non-interactive variant, but its
+        # identity-vs-sshpass DECISION must not drift from _ssh_interactive_prefix
+        # (which the deploy-loop drift guard already covers).
+        e_id = {"identity": "~/.secrets/gatekeeper_access_ed25519"}
+        e_no = {"identity": None}
+        self.assertIn("-i", w._ssh_read_prefix(e_id))
+        self.assertEqual(w._ssh_read_prefix(e_id)[0], "ssh")
+        self.assertEqual(w._ssh_read_prefix(e_no)[0], "sshpass")
+        # same identity DECISION as the interactive prefix
+        self.assertEqual("-i" in w._ssh_read_prefix(e_id),
+                         "-i" in w._ssh_interactive_prefix(e_id))
+        self.assertEqual("-i" in w._ssh_read_prefix(e_no),
+                         "-i" in w._ssh_interactive_prefix(e_no))
+        # ... but NON-interactive: no PTY, BatchMode on (fail fast, never prompt)
+        self.assertNotIn("-t", w._ssh_read_prefix(e_no))
+        self.assertIn("BatchMode=yes", w._ssh_read_prefix(e_no))
+
+
+_USTATUS_APPLY_HARNESS = r"""
+const CFG = { sessions: [{id:'dev1'},{id:'dev2'}] };
+function fakeTab(idx){ const cls=new Set(); return {
+  dataset:{idx:String(idx)},
+  classList:{ toggle(n,on){ if(on)cls.add(n); else cls.delete(n); }, contains(n){return cls.has(n);} } }; }
+const tabs=[fakeTab(0),fakeTab(1)];
+const document={ querySelectorAll(){ return tabs; } };
+%(apply)s
+const out={};
+applyUStatus({dev2:3});  out.gt0=[tabs[0].classList.contains('has-u'), tabs[1].classList.contains('has-u')];
+applyUStatus({dev2:0});  out.zero=tabs[1].classList.contains('has-u');
+applyUStatus({});        out.omit=tabs[1].classList.contains('has-u');
+applyUStatus({dev2:5});  out.back=tabs[1].classList.contains('has-u');
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+class TestApplyUStatusBehaviour(unittest.TestCase):
+    """#677 review 🔵4: EXECUTE applyUStatus (not just assert its source) to prove
+    the dot toggles BOTH directions: shown at U>0, cleared at U=0 AND on an omitted
+    box, and shown again when U returns."""
+
+    def test_dot_toggles_both_directions(self):
+        if shutil.which("node") is None:
+            self.skipTest("node not available")
+        html = w.render_dashboard_html(
+            [{"id": "dev2", "label": "dev2", "kind": "owner", "local": False,
+              "host": "1", "user": "u"}], ttyd_base="/t")
+        apply = re.search(r"function applyUStatus\(.*?\n\}", html, re.S).group(0)
+        d = tempfile.mkdtemp()
+        hp = Path(d) / "applyharness.js"
+        hp.write_text(_USTATUS_APPLY_HARNESS % {"apply": apply}, encoding="utf-8")
+        r = subprocess.run(["node", str(hp)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout.strip())
+        self.assertEqual(out["gt0"], [False, True])   # dev1 absent -> no dot; dev2 U>0 -> dot
+        self.assertFalse(out["zero"])                 # U=0 -> cleared
+        self.assertFalse(out["omit"])                 # omitted box -> cleared
+        self.assertTrue(out["back"])                  # U>0 again -> re-shown
 
 
 if __name__ == "__main__":

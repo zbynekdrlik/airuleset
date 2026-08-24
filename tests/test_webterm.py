@@ -170,6 +170,9 @@ out.reconnecting = r.dispatched.slice();
 let h = makeFrame('Press ⏎ to Reconnect', '0');      // hidden overlay -> nothing
 reviveTerminal(h.f, 3);
 out.hidden = h.dispatched.slice();
+let cc = makeFrame('Connection Closed', '0.75');         // stuck close -> also revive
+reviveTerminal(cc.f, 4);
+out.connclosed = cc.dispatched.slice();
 reviveTerminal(d.f, 0);                                   // cooldown: no 2nd dispatch
 out.deadAfterSecond = d.dispatched.length;
 process.stdout.write(JSON.stringify(out) + "\n");
@@ -1304,6 +1307,7 @@ class TestReconnectOnActivate673(unittest.TestCase):
         self.assertEqual(out["connected"], [])             # connected -> untouched
         self.assertEqual(out["reconnecting"], [])          # ttyd auto-recovering -> untouched
         self.assertEqual(out["hidden"], [])                # hidden overlay -> untouched
+        self.assertEqual(out["connclosed"], ["keydown:Enter"])  # stuck "Connection Closed" -> revive
         self.assertEqual(out["deadAfterSecond"], 1)        # cooldown blocks a 2nd press
 
 

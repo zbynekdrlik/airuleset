@@ -477,9 +477,12 @@ class Gateway:
         self.dash_index = dash_index
         self.dash_dir = Path(dash_index).parent   # #644: PWA assets live here
         # #677: the aggregate U map served at /u-status + a detached spawner that
-        # refreshes it when stale. Both injectable (tests); defaults are the real
-        # ~/.claude path and a detached `cli_webterm.py webterm-u-collect`.
-        self.u_status_path = Path(u_status_path) if u_status_path else _default_u_status_path()
+        # refreshes it when stale. The feature is OFF unless a `u_status_path` is
+        # given (#677 review 🟡): only the OWNER gateway enables it (via --u-collect
+        # in its unit); the shared david/marek gateways run WITHOUT it, so their
+        # /u-status serves an empty map and NEVER spawns an owner-fleet collector as
+        # the sub-dev account. Both injectable (tests).
+        self.u_status_path = Path(u_status_path) if u_status_path else None
         self.u_collect_spawn = u_collect_spawn or _default_u_collect_spawn
         self._u_spawn_at = 0.0
         self.cred_path = cred_path
@@ -716,10 +719,13 @@ class Gateway:
             content_type="application/json; charset=utf-8"))
 
     def _u_status_body(self):
-        """The current aggregate U JSON (bytes). Reads the file; when it is
-        absent or older than U_STATUS_STALE_S, fire-and-forgets a detached
-        collector (rate-limited) so the NEXT poll is fresh. Always returns a
-        valid JSON map -- never raises, never a 500."""
+        """The current aggregate U JSON (bytes). When the feature is OFF (no
+        u_status_path -- the david/marek gateways), serve an empty map and NEVER
+        spawn a collector. When ON, read the file; if it is absent or older than
+        U_STATUS_STALE_S, fire-and-forget a detached collector (rate-limited) so
+        the NEXT poll is fresh. Always returns a valid JSON map -- never a 500."""
+        if self.u_status_path is None:      # #677 review 🟡: off on non-owner gateways
+            return b'{"u":{},"ts":0}'
         now = time.time()
         raw = None
         stale = True
@@ -887,11 +893,16 @@ def _origins_for(host, port):
 
 async def _main_async(args):
     origins = _origins_for(args.bind, args.port)
+    # #677: the U-dot data channel is OWNER-ONLY — enabled only by --u-collect,
+    # which only the owner gateway unit passes (the david/marek units do not), so a
+    # sub-dev gateway never spawns an owner-fleet collector as its own account.
+    u_status_path = str(_default_u_status_path()) if args.u_collect else None
     server = await start_gateway(
         args.bind, args.port, args.dash_index, args.cred,
         ttyd_host=args.ttyd_host, ttyd_port=args.ttyd_port,
         base_path=args.base_path, origins=origins,
-        trust_access_header=args.trust_access_header)
+        trust_access_header=args.trust_access_header,
+        u_status_path=u_status_path)
     sock = server.sockets[0].getsockname()
     sys.stderr.write("webterm-gateway: listening on http://%s:%d/ -> ttyd %s:%d%s\n"
                      % (sock[0], sock[1], args.ttyd_host, args.ttyd_port,
@@ -907,6 +918,10 @@ def main(argv):
     p.add_argument("--dash-index", required=True, help="path to the generated dashboard index.html")
     p.add_argument("--cred", default=None,
                    help="path to the user:pass credential file (password mode)")
+    p.add_argument("--u-collect", dest="u_collect", action="store_true",
+                   help="#677: enable the owner-only per-box U map at /u-status "
+                        "(the OWNER gateway unit sets this; david/marek omit it, so "
+                        "their gateway never spawns an owner-fleet collector).")
     p.add_argument("--trust-access-header", dest="trust_access_header", default=None,
                    help="#612 Cloudflare-Access mode: trust this Cloudflare-injected "
                         "identity header (e.g. Cf-Access-Authenticated-User-Email) "

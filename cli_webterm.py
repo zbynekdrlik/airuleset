@@ -733,15 +733,19 @@ def cmd_webterm_u_collect(argv):
     /u-status read, so it never blocks a request. Best-effort: a box that can't be
     read is simply omitted (no dot). Returns 0 always (a collection failure must
     not crash the spawn)."""
-    try:
-        entries = _owner_u_entries()
-    except Exception:
-        entries = []
-    u = collect_fleet_u(entries)
+    try:                                    # #677 review 🔵: the whole collect is
+        entries = _owner_u_entries()        # guarded, so the docstring's "always 0"
+        u = collect_fleet_u(entries)        # holds even for a malformed entry.
+    except Exception as e:
+        sys.stderr.write("webterm-u-collect: collection failed: %r\n" % e)
+        u = {}
     payload = {"u": u, "ts": int(time.time())}
     try:
         WEBTERM_U_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = WEBTERM_U_STATUS_PATH.with_suffix(".tmp")
+        # #677 review 🔵: a PER-PROCESS unique tmp (a slow fleet read can outlast the
+        # 60 s in-memory spawn guard, so two collectors can overlap) -> no torn write.
+        tmp = WEBTERM_U_STATUS_PATH.with_name(
+            WEBTERM_U_STATUS_PATH.name + ".%d.tmp" % os.getpid())
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(str(tmp), str(WEBTERM_U_STATUS_PATH))
     except OSError as e:                     # disk-pressure is exactly when this runs
@@ -837,8 +841,15 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
                 % (i, _html_escape(t["title"]), ordinal, _html_escape(t["alias"])))
 
     buttons = "\n".join(_tab_button(i, t) for i, t in enumerate(tabs))
+    # #677 review 🟡: the U-dot poll is OWNER-ONLY. The david/marek gateways render
+    # the SAME dashboard (human=None / "marek"); if they polled /u-status their
+    # gateway would spawn an owner-fleet collector AS the sub-dev account (a
+    # cross-tenant ssh read via the shared password). Gate the poll ACTIVATION on
+    # this flag so only the owner dashboard (human == WEBTERM_LOGIN_USER) ever polls
+    # -- the gateway route is ALSO default-off and owner-enabled (defence in depth).
     cfg = {"ttyd_base": ttyd_base, "sessions": tabs,
-           "term_cols": term_cols, "term_rows": term_rows}
+           "term_cols": term_cols, "term_rows": term_rows,
+           "u_status": human == WEBTERM_LOGIN_USER}
     subst = {"@@COUNT@@": str(len(tabs)), "@@BUTTONS@@": buttons,
              "@@CFG_JSON@@": _json_for_script(cfg),
              # #643: the Campbell palette as an xterm.js theme object literal.
@@ -1408,9 +1419,11 @@ function pollUStatus() {
     .then((d) => { if (d && d.u) applyUStatus(d.u); })
     .catch(() => {});                     // absent/failed -> leave the dots as-is
 }
-pollUStatus();
-[4000, 12000, 30000].forEach((ms) => setTimeout(pollUStatus, ms));   // burst after a fresh collect
-setInterval(pollUStatus, 120000);                                     // then minutes-fresh
+if (CFG.u_status) {                       // #677 review: OWNER dashboard only
+  pollUStatus();
+  [4000, 12000, 30000].forEach((ms) => setTimeout(pollUStatus, ms));   // burst after a fresh collect
+  setInterval(pollUStatus, 120000);                                     // then minutes-fresh
+}
 </script>
 </body>
 </html>
@@ -1570,6 +1583,12 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     installed Access-mode unit is never misled. When off, the emitted unit is
     BYTE-IDENTICAL to the pre-#635 render."""
     tmpl = WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
+    # #677: the OWNER gateway (this renderer only) enables the U-dot data channel.
+    # david/marek render the SAME shared template in their OWN functions and do NOT
+    # inject this, so their gateway runs WITHOUT --u-collect -> /u-status serves an
+    # empty map and never spawns an owner-fleet collector as the sub-dev account.
+    tmpl = tmpl.replace("--base-path {{TTYD_BASE}}",
+                        "--base-path {{TTYD_BASE}} --u-collect")
     if access_mode:
         import cli_webterm_access as access
         tmpl = tmpl.replace(

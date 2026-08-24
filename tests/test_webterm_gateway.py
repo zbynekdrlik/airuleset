@@ -850,6 +850,55 @@ class TestUStatusRoute(unittest.TestCase):
                 await self._teardown(h)
         _run(go())
 
+    def test_feature_off_serves_empty_and_never_spawns(self):
+        # #677 review 🟡: a NON-owner gateway (no u_status_path -> feature off, the
+        # david/marek case) serves an empty map and NEVER spawns an owner-fleet
+        # collector, even when authenticated.
+        async def go():
+            spawned = []
+            sessions = g.SessionStore()
+            h = await self._harness(sessions=sessions, u_status_path=None,
+                                    u_collect_spawn=lambda: spawned.append(1))
+            try:
+                tok = sessions.create()
+                r = await h.request(
+                    b"GET /u-status HTTP/1.1\r\nHost: x\r\n"
+                    b"Cookie: webterm_session=%s\r\n\r\n" % tok.encode())
+                self.assertIn(b"200 OK", r)
+                self.assertIn(b'"u": {}', r.replace(b'"u":{}', b'"u": {}'))
+                self.assertEqual(spawned, [])       # OFF -> no collector spawn ever
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_u_status_fail_closed_in_access_mode(self):
+        # #677 review 🔵4: exercise the ACCESS-mode unauth path for /u-status — with
+        # no trusted Cloudflare header the route denies (403) and never leaks the U
+        # map (same fail-closed gate as `/` and the PWA assets).
+        up = Path(tempfile.mkdtemp()) / "u.json"
+        up.write_text(json.dumps({"u": {"dev2": 9}, "ts": int(time.time())}),
+                      encoding="utf-8")
+        gw = g.Gateway("dash.html", None, "127.0.0.1", 7683, "/t", [],
+                       trust_access_header=ACCESS_HEADER, u_status_path=str(up))
+
+        class _W:
+            def __init__(self):
+                self.buf = b""
+
+            def write(self, d):
+                self.buf += d
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+        w_ = _W()
+        asyncio.run(gw._route_u_status(w_, [("Host", "x")]))    # NO access header
+        self.assertIn(b"403", w_.buf)
+        self.assertNotIn(b"dev2", w_.buf)                       # U map never leaked
+
 
 class TestAccessModeAuth(unittest.TestCase):
     """Pure auth-decision tests — no sockets, just _authed / _access_identity."""
