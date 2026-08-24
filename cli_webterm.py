@@ -679,7 +679,7 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
   transform: translateX(-50%); z-index: 20; max-width: min(900px, 94vw);
   max-height: 60vh; overflow: auto; padding: 12px 16px; color: #CCCCCC;
   font-size: 13px; line-height: 1.55; background: #161616;
-  border: 1px solid #2b2b2b; border-radius: 8px; cursor: pointer;
+  border: 1px solid #2b2b2b; border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0,0,0,0.55); }
 #hint.show { display: block; }
 </style>
@@ -705,13 +705,15 @@ const TERM_FONT_STACK = '"Cascadia Mono", "Cascadia Code", Consolas, "DejaVu San
 // this static file is served across BOTH. location.hostname is the honest
 // per-viewer value, so the PWA/browser window title always names the real domain.
 try { document.title = location.hostname + ' — fleet terminal'; } catch (e) {}
-// #655: FILL-the-viewport caps for fitFixedGrid. The fixed 176x51 grid letterboxes
-// on any viewport whose aspect != the grid's; we stretch the LOOSE dimension to
-// fill via native xterm letterSpacing/lineHeight (crisp, no glyph distortion --
-// they only add SPACING). BOUNDED so an extreme viewport (a phone) degrades to a
-// residual letterbox instead of grotesque spacing, rather than distorting text.
-const WT_FILL_MAX_CELL_STRETCH = 1.5;   // cell width may grow up to 1.5x (letterSpacing)
-const WT_FILL_MAX_LINE_STRETCH = 1.8;   // row height may grow up to 1.8x (lineHeight)
+// #655: caps that BOUND the residual CSS-transform fill in fillFixedGrid. The
+// fixed 176x51 grid letterboxes on any viewport whose aspect != the grid's;
+// fillFixedGrid fills the residual with a small CSS scale on .xterm (the fontSize
+// min-fit does the crisp bulk; the residual scale is small, see fillFixedGrid for
+// why NOT xterm letterSpacing/lineHeight -- integer-px rounding). These cap the
+// scale so an extreme viewport (a phone) degrades to a residual letterbox instead
+// of a grotesque stretch, rather than distorting text.
+const WT_FILL_MAX_CELL_STRETCH = 1.5;   // horizontal scale (sx) may grow up to 1.5x
+const WT_FILL_MAX_LINE_STRETCH = 1.8;   // vertical scale (sy) may grow up to 1.8x
 function themeTerminal(term) {           // idempotent: applied once per terminal
   if (!term || term.__wtThemed) return;
   term.options.theme = CAMPBELL_THEME;
@@ -919,12 +921,15 @@ function fillFixedGrid(win) {
 }
 // #655: the FILL must re-run whenever the NATURAL grid size settles/changes.
 // xterm's grid layout can settle noticeably AFTER first paint (font metrics, the
-// multi-tab layout), so a few fixed delays catch it mid-settle and over/under-
-// fill. A ResizeObserver on .xterm-screen fires on the REAL layout size (content
-// box -- unaffected by our CSS transform, so NO ping-pong), so the fill always
-// tracks the true natural grid and converges exactly. fillFixedGrid is
-// self-contained + idempotent (clears its own scale, re-measures, re-applies).
-// Timed passes are kept as a fallback for a browser without ResizeObserver.
+// multi-tab layout). The AUTHORITATIVE driver is a ResizeObserver on .xterm-screen,
+// which fires on the REAL layout size (content box -- unaffected by our CSS
+// transform, so NO ping-pong) both on observe AND on every late settle, so the
+// fill always tracks the true natural grid and converges exactly. The immediate
+// call + the timed passes are only a best-effort first paint and a fallback for a
+// browser without ResizeObserver: they may run on a still-settling (stale-small)
+// grid and briefly over-scale, but fillFixedGrid is self-contained + idempotent
+// (clears its own scale, re-measures, re-applies) and the RO corrects it the
+// instant the layout settles -- no persistent clip.
 function scheduleFill(win) {
   try { fillFixedGrid(win); } catch (e) {}
   try {
@@ -936,7 +941,7 @@ function scheduleFill(win) {
     }
   } catch (e) {}
   [200, 800, 2000].forEach((ms) => {
-    try { setTimeout(() => fillFixedGrid(win), ms); } catch (e) {}
+    setTimeout(() => { try { fillFixedGrid(win); } catch (e) {} }, ms);   // guard the CALL
   });
 }
 function applyFixedGrid(f) {                     // poll for window.term, fit, then watch resize
@@ -971,7 +976,9 @@ document.querySelectorAll('.cyc[data-cyc]').forEach((b) =>   // fs/help buttons 
   const hintEl = document.getElementById('hint');
   if (!helpBtn || !hintEl) return;
   helpBtn.addEventListener('click', () => hintEl.classList.toggle('show'));
-  hintEl.addEventListener('click', () => hintEl.classList.remove('show'));
+  // #655: the panel does NOT close on its own click (a selection drag's mouseup
+  // would fire click and close it, so its text stays selectable/copyable) --
+  // close via the ? button (toggle) or Escape.
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') hintEl.classList.remove('show');
   });

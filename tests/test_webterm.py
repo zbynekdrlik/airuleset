@@ -1290,9 +1290,9 @@ class TestBrowserFixedGridFit(unittest.TestCase):
     def test_fit_fills_the_viewport_no_letterbox_via_bounded_stretch(self):
         # #655 RED->GREEN: the min-fit font alone LETTERBOXES whenever the
         # viewport aspect != the fixed 176x51 grid aspect (the owner's "okno v
-        # strede"). The fix stretches the LOOSE dimension to fill the viewport
-        # via native xterm letterSpacing/lineHeight (crisp, no glyph distortion),
-        # BOUNDED so an extreme viewport degrades to a residual letterbox. Proven
+        # strede"). The fix fills the residual via a bounded CSS transform scale
+        # (fillFixedGrid) -- the fontSize min-fit does the crisp bulk -- BOUNDED so
+        # an extreme viewport degrades to a residual letterbox. Proven
         # at the owner's real laptop shape (~12% horizontal margin, measured live)
         # AND at the opposite (tall) shape, so the fill handles BOTH loose dims.
         if shutil.which("node") is None:

@@ -900,7 +900,7 @@ class TestChooseTreeMultiSession649(unittest.TestCase):
 
 class TestForeignSizeNoOwnerResize655(unittest.TestCase):
     """#655 behavioural lock (isolated -S server): the browser-side FILL fix
-    (cli_webterm.py fitFixedGrid stretches the fixed grid to fill the viewport)
+    (cli_webterm.py fillFixedGrid scales the fixed grid to fill the viewport)
     is only SAFE because a webterm client at ANY size can NEVER resize the
     owner's window -- the tmux invariant the whole design rests on. This is the
     "the other client's size is untouched" half of #655's acceptance, proven

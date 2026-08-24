@@ -351,8 +351,10 @@ def http_response(status_line, body_bytes, extra_headers=None,
 # NOTE: `.replace()` substitution (not `%`-formatting) — the CSS body is full of
 # `%` (e.g. `100%`) which `%`-formatting would misread as a format spec (ruff
 # F509), the SAME reason `cli_webterm.render_dashboard_html` uses `.replace()`.
-# `@@ERR@@` is replaced with a FIXED server string (never user input), so there
-# is no injection surface.
+# `@@ERR@@` is a FIXED server string. `@@TITLE@@` (#655) DOES carry request-derived
+# input (the Host header) — it is injection-safe because `_login_title` accepts
+# ONLY the strict `_HOSTNAME_CHARS` set (no HTML-special char), falling back to a
+# neutral title otherwise; see `_login_title`.
 _LOGIN_TEMPLATE = """<!DOCTYPE html>
 <html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
