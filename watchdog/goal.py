@@ -2672,6 +2672,23 @@ def _lane_cooldown_decision(rec, now, under_saturated, eff_workers, backlog_n,
                       "skip:hourly-cap remaining=%ds"
                       % (loc, live_workers, waiters, backlog_n,
                          int(GOAL_LANE_INTERVAL_S - (now - last)))), moved
+    # #670 -- DEDUP on UNCHANGED lane state (owner 2026-08-24). PAST the hourly
+    # cap, an IDENTICAL (workers, backlog) signature to the last LANDED nudge
+    # never re-nudges: the supervisor already saw+acted-on (or correctly
+    # DECLINED -- e.g. file-deps on unmerged branches) this exact state, so
+    # repeating the same "fill your lanes" line every hour is the "kazdu chvilu"
+    # spam. Only a genuinely CHANGED state re-nudges (still under the 1h floor).
+    # lsw/lsb are stamped by `_lane_record_nudge` on a LANDED nudge ONLY (both
+    # branches), so: a never-nudged sid (last is None) returned above and always
+    # fires its first; a pre-#670 rec (llast set, no lsw/lsb) sees None != int
+    # -> one grace nudge, then dedup engages. Applies to BOTH branches, which
+    # subsumes the empty-lane MAX_NUDGES give-up on a FROZEN state (a correctly-
+    # declining supervisor is not a stall -- an explicit decision, #620/#670).
+    if rec.get("lsw") == eff_workers and rec.get("lsb") == backlog_n:
+        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                      "skip:dedup-unchanged (workers+backlog unchanged since "
+                      "last nudge)"
+                      % (loc, live_workers, waiters, backlog_n)), moved
     if not under_saturated:
         return False, None, moved
     streak = rec.get("lineff", 0)
@@ -2708,6 +2725,11 @@ def _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, moved, n, n
         rec["lnb"] = backlog_n
     rec["ln"] = n + 1
     rec["llast"] = now
+    # #670 -- stamp the dedup signature on BOTH branches (unlike the under-
+    # saturated-only lnw/lnb effectiveness baseline): the next sweep suppresses
+    # an identical (workers, backlog) past the cooldown (skip:dedup-unchanged).
+    rec["lsw"] = eff_workers
+    rec["lsb"] = backlog_n
 
 
 def _lane_clear_effectiveness(rec):
