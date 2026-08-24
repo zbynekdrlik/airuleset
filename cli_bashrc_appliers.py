@@ -604,6 +604,16 @@ def render_owner_vps_ssh_attach_block(session, window, rel_dir):
         if not re.fullmatch(r"[A-Za-z0-9._-]+", val or ""):
             raise ValueError(
                 "unsafe %s for #656 owner-VPS block: %r" % (label, val))
+    # A project window literally named `bash` would MATCH the watchdog-default
+    # absorb condition (name==bash AND cmd==bash AND cwd==$HOME) whenever the
+    # dev dir is absent (so `__airuleset_dir` falls back to $HOME) -- the
+    # absorb would then kill the very project window it just ensured, emptying
+    # the session. A named project window named `bash` is nonsensical anyway;
+    # reject it at config time so that failure path can never be reached.
+    if window == "bash":
+        raise ValueError(
+            "owner-VPS project window may not be named 'bash' (#656): it would "
+            "collide with the watchdog-default absorb condition")
     if (not rel_dir
             or not re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*", rel_dir)
             or ".." in rel_dir.split("/")):
