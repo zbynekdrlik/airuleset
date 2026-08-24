@@ -162,6 +162,12 @@ MENTION_FENCED = (
 MENTION_ASCII_QUOTE = (
     'Do Odoo Discuss doktríny som pridal zákaz tvaru "vlákno 288"; commit hotový.'
 )
+# GUILLEMET mention — the doctrine's OWN canonical Slovak quote „…“. strip_mentions
+# does NOT strip guillemets, so the check strips them locally into $MSG_BARE.
+MENTION_GUILLEMET = (
+    "Doktrína pre Odoo Discuss: zakázali sme bare id tvaru „vlákno 288“ bez URL; "
+    "test zelený."
+)
 
 # A Sales-Channel note in an Odoo context that never says "Discuss" — must PASS
 # (the anchor is discuss-specific, not bare "odoo"; #657 review 🟡 fix).
@@ -267,6 +273,15 @@ class TestMentionAndDomainCollisionsPass(TestCase):
         self.assertFalse(
             _blocked(p),
             "an ASCII-double-quoted \"vlákno 288\" mention was false-blocked: %r"
+            % _reason(p))
+
+    def test_guillemet_mention_passes(self):
+        # #657 review 🟡#1: the doctrine's OWN „…“ delimiter must be mention-exempt.
+        p = _run(MENTION_GUILLEMET)
+        self.assertFalse(
+            _blocked(p),
+            "a Slovak guillemet „vlákno 288“ mention (the doctrine's own quote) "
+            "was false-blocked — the exemption must strip guillemets too: %r"
             % _reason(p))
 
     def test_sales_channel_no_discuss_passes(self):
