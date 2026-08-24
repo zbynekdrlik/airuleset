@@ -801,7 +801,7 @@ function themeTerminal(term) {           // idempotent: applied once per termina
 }
 const frames = document.getElementById('frames');
 const made = {};
-let current = 0;                          // the active tab index (drives cycle())
+let current = 0;                          // the active tab index (tab click / Ctrl+Alt+1..9)
 function ttydSrc(s) { return CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id); }
 function makeFrame(idx, s) {                // #586: create + CONNECT one iframe ONCE, hidden.
   if (made[idx]) return made[idx];         // idempotent — an iframe is never re-created/reloaded,
@@ -844,7 +844,8 @@ function activate(idx) {
     const on = +t.dataset.idx === idx;
     t.classList.toggle('active', on);
     // #582: keep the active tab visible even when the bar has scrolled past it
-    // (the exact case the ◀ ▶ cycle buttons exist for — stepping past tab 9).
+    // (e.g. a Ctrl+Alt+9 jump to a tab scrolled off-screen). #674 removed the
+    // ◀ ▶ cycle buttons, so tab clicks + Ctrl+Alt+1..9 are the switch paths now.
     // Optional call: a browser without scrollIntoView must never break switching.
     if (on) t.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
   });
@@ -861,7 +862,7 @@ function activate(idx) {
 // stopPropagation keeps xterm from also acting on the (unused) Ctrl+Alt+digit
 // chord. (Still no Ctrl+Alt+arrow binding: Ctrl+Alt+Left/Right is the Linux
 // desktop workspace-switch shortcut, grabbed by the compositor before the page
-// sees it — advertising it would over-promise; the ◀ ▶ buttons cover cycling.)
+// sees it — advertising it would over-promise; a tab click covers arbitrary jumps.)
 function onHotkey(e) {
   if (!(e.ctrlKey && e.altKey)) return;
   if (e.key >= '1' && e.key <= '9') {
@@ -882,9 +883,9 @@ function attachForwarder(f) {
     if (w) w.addEventListener('keydown', onHotkey, true);
   } catch (err) { /* never same-origin under the gateway; switching stays alive */ }
 }
-// #661: move keyboard focus INTO the shown terminal after a tab switch (mouse
-// click, ◀ ▶ cycle, AND Ctrl+Alt+N all route through activate()), so the owner
-// can type immediately with no extra click into the prompt. Same-origin under
+// #661: move keyboard focus INTO the shown terminal after a tab switch (a tab
+// click AND Ctrl+Alt+N both route through activate()), so the owner can type
+// immediately with no extra click into the prompt. Same-origin under
 // the gateway, so we reach the iframe's own xterm: `window.term.focus()` (which
 // focuses xterm's helper textarea). ttyd connects async, so the term/textarea
 // may not exist for the first activate(0) at load — retry briefly, best-effort.
@@ -1115,6 +1116,17 @@ document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
 // #674: the prev/next cycle arrows and the ? help toggle are removed (owner: keep
 // only fullscreen); tab switching stays via tab clicks + Ctrl+Alt+1..9 (onHotkey).
+// #671 HONESTY (mirrors the #585 Ctrl+W isSecureContext honesty below): the
+// mouse-select copy bridge writes navigator.clipboard, which exists ONLY in a
+// secure context (HTTPS). Over the plain-HTTP tailnet the copy bridge is inert,
+// so the footer must NOT promise mouse-copy there — rewrite it to the honest
+// message (paste via Ctrl+Shift+V is a native browser paste and still works).
+(function () {
+  const ch = document.getElementById('clip-hint');
+  if (ch && !(window.isSecureContext && navigator.clipboard)) {
+    ch.textContent = 'Vložiť: Ctrl+Shift+V (nie Ctrl+V) · kopírovanie myšou vyžaduje HTTPS';
+  }
+})();
 // #585(b): Ctrl+W is readline delete-word in the terminal but the browser
 // consumes it as close-tab (a reserved shortcut a normal window cannot
 // preventDefault). Layer 1 — a beforeunload confirm armed WHILE a terminal is

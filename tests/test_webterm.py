@@ -1496,6 +1496,18 @@ class TestClipboardBridge(unittest.TestCase):
         self.assertIn("Ctrl+V", foot)                # names the NON-working one ("nie Ctrl+V")
         self.assertIn("myš", foot.lower())           # mouse-select copies
 
+    def test_footer_hint_honest_over_http_feature_detect(self):
+        # #671 review: navigator.clipboard needs a secure context; over the
+        # plain-HTTP tailnet the copy bridge is inert, so the footer is
+        # feature-detected and rewritten to an honest message when clipboard is
+        # unavailable (mirrors the #585 Ctrl+W isSecureContext honesty) — never a
+        # false "mouse copies" promise. Paste (Ctrl+Shift+V) still works there.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("getElementById('clip-hint')", html)      # footer is feature-detected
+        self.assertIn("window.isSecureContext", html)           # secure-context gate
+        # the honest fallback names the real reason, not a false browser-unsupported
+        self.assertIn("kopírovanie myšou vyžaduje HTTPS", html)
+
 
 class TestTopBarOnlyFullscreen(unittest.TestCase):
     """#674 (owner directive 2026-08-24, verbatim "nechaj tam len fullscreen"):
