@@ -40,20 +40,35 @@ airuleset modul — leaf ako ``cli_aliases.py``, drží connect cestu ľahkú.
 
 OWNER = "owner"
 DAVID = "david"
+MAREK = "marek"
 
 # --------------------------------------------------------------------------- #
-# Box -> profile mapping (provisioning selects the profile by hostname).
+# Box -> profile mapping (provisioning selects the profile by hostname + the
+# install ACCOUNT). subdev hosts MORE THAN ONE per-developer gateway (david as
+# david1, marek as marek), so the account disambiguates which one this install
+# provisions.
 # --------------------------------------------------------------------------- #
 
-def profile_for_host(nodename):
-    """Which webterm profile a box provisions, by its ``os.uname().nodename``:
-    dev1 -> owner (the single tailnet gateway, unchanged), subdev -> david (the
-    public developer gateway). Any other box -> None (webterm is not a service
-    there). The hostnames are the fleet's real, stable node names
+def profile_for_host(nodename, account=None):
+    """Which webterm profile a box provisions, by its ``os.uname().nodename`` and
+    the install ``account`` (``_whoami()``): dev1 -> owner (the single gateway,
+    unchanged, account-independent); subdev -> marek when the install runs as the
+    ``marek`` account, else david (its own account david1, and the safe default —
+    each provisioner ALSO prereq-gates on its own account, so a non-matching
+    account is a no-op there anyway). Any other box -> None (webterm is not a
+    service there). ``account`` defaults to None so the pre-#612-scope-add call
+    ``profile_for_host(nodename)`` is byte-identical (subdev -> david).
+
+    subdev is a MULTI-developer box (#612 marek scope-add 2026-08-24): david and
+    marek each run their OWN gateway as their OWN unix account, so the security
+    boundary is per-account (a separate scoped inventory + Access realm + tunnel
+    each). The hostnames are the fleet's real, stable node names
     (machine-identities: dev1/dev2/subdev == hostname == MagicDNS)."""
     if nodename == "dev1":
         return OWNER
     if nodename == "subdev":
+        if account == MAREK_GATEWAY_USER:
+            return MAREK
         return DAVID
     return None
 
@@ -123,13 +138,51 @@ def david_inventory():
     return entries
 
 
+# --------------------------------------------------------------------------- #
+# marek profile — session set (#612 scope-add 2026-08-24).
+# --------------------------------------------------------------------------- #
+
+# marek's gateway runs AS this account on subdev, so his session set is a single
+# LOCAL tmux attach — NO ssh, NO key. That is a STRICTLY SMALLER reachability than
+# david's ssh-based set: marek's ttyd child has zero ssh capability, so even a
+# gateway compromise reaches nothing but the local marek tmux group.
+MAREK_GATEWAY_USER = "marek"
+
+# marek's single scoped session id — matches the owner-defined #661 tab policy
+# WEBTERM_DASHBOARD_TABS["marek"] = ["marek-subdev"].
+MAREK_ID = "marek-subdev"
+
+
+def marek_inventory():
+    """marek's SCOPED session set — a SINGLE LOCAL entry: his own tmux group on
+    subdev (the gateway runs as marek, so this is a local attach, never ssh).
+    This — and ONLY this — is what marek's ttyd is launched against, so it is his
+    full connect allowlist: no owner-fleet id and no david id can ever be present.
+
+    A ``local`` entry (like the owner's dev1 entry) makes ``build_connect_argv``
+    emit ``sh -c <tmux attach>`` with NO ssh/identity — the strongest possible
+    scoping (no key to compromise, no host to reach)."""
+    return [{
+        "id": MAREK_ID,
+        "label": "marek@subdev",
+        "kind": "stream",
+        "local": True,
+        "host": None,
+        "user": MAREK_GATEWAY_USER,
+        "identity": None,
+        "preferred": MAREK_GATEWAY_USER,   # the local `marek` tmux group
+    }]
+
+
 def profile_inventory(profile, fleet_inventory):
-    """The session set for ``profile``: the david set for ``david``, else the
-    full ``fleet_inventory`` (owner — unchanged). Only the OWNER path needs the
-    fleet (built by the caller via the airuleset facade); the david set is
-    self-contained here so this leaf never imports airuleset."""
+    """The session set for ``profile``: the david set for ``david``, the marek set
+    for ``marek``, else the full ``fleet_inventory`` (owner — unchanged). Only the
+    OWNER path needs the fleet (built by the caller via the airuleset facade); the
+    david/marek sets are self-contained here so this leaf never imports airuleset."""
     if profile == DAVID:
         return david_inventory()
+    if profile == MAREK:
+        return marek_inventory()
     return list(fleet_inventory)
 
 

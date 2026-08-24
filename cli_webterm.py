@@ -154,9 +154,14 @@ def _sanitize_id(name):
 
 def _login_user(profile):
     """The gateway login username for `profile` — the david realm is `david`,
-    the owner realm is `zbynek` (WEBTERM_LOGIN_USER). Used by the credential
-    generator + the go-live message."""
-    return "david" if profile == profiles.DAVID else WEBTERM_LOGIN_USER
+    the marek realm is `marek`, the owner realm is `zbynek` (WEBTERM_LOGIN_USER).
+    Used by the go-live message (the david/marek gateways are Cloudflare-Access
+    mode, so no credential is generated for them)."""
+    if profile == profiles.DAVID:
+        return "david"
+    if profile == profiles.MAREK:
+        return profiles.MAREK_GATEWAY_USER
+    return WEBTERM_LOGIN_USER
 
 
 def _cred_path(profile):
@@ -176,6 +181,8 @@ def webterm_inventory(profile=profiles.OWNER):
     airuleset facade (test-patchable)."""
     if profile == profiles.DAVID:
         return profiles.david_inventory()
+    if profile == profiles.MAREK:
+        return profiles.marek_inventory()
     import airuleset  # facade: AUTHORITY_BY_USER (patched by ~30 tests)
     from cli_remote import _deployable_hosts
     stream_users = set(airuleset.AUTHORITY_BY_USER)
@@ -506,9 +513,12 @@ def _short_alias(entry):
     never a parallel map. This wrapper only unwraps the webterm inventory entry
     into (user, box_name): a `local` entry (dev1) forces the box name to `dev1`
     (the old `local or id=="dev1"` short-circuit), otherwise the box name is the
-    inventory id/label."""
-    box_name = "dev1" if entry.get("local") else (
-        entry.get("id") or entry.get("label") or "")
+    inventory id/label. #612: the OWNER dev1 local entry (no `user`) keeps the
+    `dev1` short-circuit; a NON-owner local entry (marek's `marek-subdev`, with
+    `user="marek"`) keeps its own id so it aliases via its user (`marek`), never
+    mislabelled `dev1`."""
+    box_name = ("dev1" if entry.get("local") and not entry.get("user")
+                else (entry.get("id") or entry.get("label") or ""))
     return cli_aliases.short_target_alias(entry.get("user"), box_name)
 
 
@@ -1519,16 +1529,26 @@ def setup_webterm_service(run=None):
 
 
 def maybe_setup_webterm():
-    """Install-time entry point (cmd_install). Dispatches by box profile: dev1
-    -> owner gateway (unchanged); subdev -> the david developer gateway
-    (cli_webterm_david, lazily imported to avoid a module-level cycle;
-    prerequisite-gated no-op until go-live setup); any other box -> no-op."""
-    prof = profiles.profile_for_host(os.uname().nodename)
+    """Install-time entry point (cmd_install). Dispatches by box profile AND the
+    install account: dev1 -> owner gateway (unchanged); subdev + the `marek`
+    account -> the marek developer gateway; subdev (its own account david1, or the
+    default) -> the david developer gateway. subdev is a MULTI-developer box (#612
+    marek scope-add) — david and marek each run their OWN gateway as their OWN
+    account, so the install-as-account selects which one this run provisions. Each
+    provisioner is ALSO prerequisite-gated on its own account (a safe no-op
+    otherwise), so a non-matching account never touches systemd. Any other box ->
+    no-op. The developer modules are lazily imported to avoid a module-level
+    cycle."""
+    from cli_filedrop_watchdog import _whoami
+    prof = profiles.profile_for_host(os.uname().nodename, account=_whoami())
     if prof == profiles.OWNER:
         return setup_webterm_service()
     if prof == profiles.DAVID:
         import cli_webterm_david
         return cli_webterm_david.setup_webterm_david_service()
+    if prof == profiles.MAREK:
+        import cli_webterm_marek
+        return cli_webterm_marek.setup_webterm_marek_service()
     return False
 
 

@@ -1166,8 +1166,8 @@ def cmd_install(args):
     except Exception as e:
         print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 5b. web terminal gateway (#555/#612): dev1 -> owner, subdev -> david
-    # gateway (gated no-op till go-live), else no-op (dispatch by nodename). ---
+    # --- 5b. web terminal gateway (#555/#612): dispatch by (nodename, account) —
+    # dev1->owner, subdev+marek->marek, subdev(david1/default)->david; else no-op. ---
     try:
         maybe_setup_webterm()
     except Exception as e:
