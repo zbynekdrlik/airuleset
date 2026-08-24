@@ -64,14 +64,24 @@ if [ -n "$CWD" ]; then
                   | xargs basename 2>/dev/null || basename "$CWD")
     fi
 fi
-[ -z "$PROJECT" ] && PROJECT="unknown"
+# #668: NEVER decorate the ping with a meaningless "unknown" (David got a
+# "✅ unknown — hotovo" ping because the idle-event cwd was empty). If the
+# project genuinely can't be resolved, render the header WITHOUT a fabricated
+# name and record the miss LOUD (below, once _delivery_log is defined) — the
+# message still delivers (it is a real notification), just without a bogus label.
+PROJECT_UNRESOLVED=0
+[ -z "$PROJECT" ] && PROJECT_UNRESOLVED=1
 
 case "$EMOJI" in
     "❓") STATUS="otázka" ;;
     "✅") STATUS="hotovo" ;;
     *)    STATUS="" ;;
 esac
-HEADER="**${EMOJI} ${PROJECT}**"
+if [ -n "$PROJECT" ]; then
+    HEADER="**${EMOJI} ${PROJECT}**"
+else
+    HEADER="**${EMOJI}**"
+fi
 [ -n "$STATUS" ] && HEADER="${HEADER} — ${STATUS}"
 # BASE body WITHOUT the @mention — the mention is per-target, because each
 # recipient gets THEIR OWN @mention in THEIR OWN thread.
@@ -291,6 +301,13 @@ emit_one() {
         esac
     ) &
 }
+
+# #668: a resolved-project MISS is logged LOUD (never a silent decorative
+# "unknown") — the ping still delivers, just unlabelled. _delivery_log self-gates
+# on dry-run, so a preview stays silent (the dry-run-logs-nothing contract).
+if [ "${PROJECT_UNRESOLVED:-0}" = "1" ]; then
+    _delivery_log "unresolved-project" "no-cwd-or-origin"
+fi
 
 emit_one "$PRIMARY_OWNER"      # primary — always fires (owner may be empty)
 for T in $MIRRORS; do          # mirrors — only when DISCORD_MIRROR_<OWNER> lists them

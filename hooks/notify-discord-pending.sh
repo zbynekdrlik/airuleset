@@ -41,6 +41,11 @@ SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
 [ -z "$SID" ] && SID="unknown"
 PENDING="/tmp/claude-discord-pending-${SID}"
+# #668: the ✅ RECORD-time cwd, carried to the idle DELIVERY. The idle hook
+# otherwise re-derives the project from its OWN (possibly empty) event cwd and
+# mislabels the ping "unknown"; a sibling file keeps the pending line format
+# untouched, and emit() always overwrites it, so a stale value cannot deliver.
+PENDING_CWD="/tmp/claude-discord-pending-cwd-${SID}"
 # Last-pinged ❓ content for this session — the dedup state. Cleared by
 # clear-question-dedup.sh (UserPromptSubmit) whenever the user actually types.
 LASTQ="/tmp/claude-discord-lastq-${SID}"
@@ -159,6 +164,9 @@ emit() {
     local c
     c=$(strip_md "$2" | jq -Rrs 'rtrimstr("\n") | .[0:250]')
     printf '%s %s' "$1" "$c" > "$PENDING"
+    # #668: record the reliable Stop-time cwd next to the ✅ so the idle
+    # delivery resolves the real project even when the idle event carries none.
+    printf '%s' "$CWD" > "$PENDING_CWD"
 }
 
 extract_block() {

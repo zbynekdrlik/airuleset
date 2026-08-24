@@ -175,23 +175,40 @@ class PendingCarriesCwd(_Base):
     the idle delivery resolves the real project even when the idle event cwd is
     empty. Before the fix the label collapsed to "unknown"."""
 
+    def _repo_with_origin(self, name):
+        """A real git repo whose origin names a known project, so
+        project_label_for resolves it. A fresh temp dir (never the live repo
+        ROOT — a running bg shell there would trip the idle hook's own
+        bg-shell defer and this test would race it)."""
+        r = Path(tempfile.mkdtemp(prefix="airuleset-668-repo-"))
+        self.addCleanup(shutil.rmtree, r, True)
+        env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_CONFIG_SYSTEM": os.devnull}
+        subprocess.run(["git", "-C", str(r), "init", "-q", "-b", "main"],
+                       check=True, env=env)
+        subprocess.run(["git", "-C", str(r), "remote", "add", "origin",
+                        "https://github.com/test/%s.git" % name],
+                       check=True, env=env)
+        return r
+
     def test_recorded_cwd_resolves_the_project_when_idle_cwd_is_empty(self):
         sid = self._sid()
         out = self.home / "dry.txt"
-        # 1) Stop hook records a ✅ DONE with a real repo cwd (airuleset ROOT).
+        repo = self._repo_with_origin("mytestproj")
+        # 1) Stop hook records a ✅ DONE with a real repo cwd.
         stop_env = {**os.environ, "HOME": str(self.home), "TMUX_PANE": "",
                     "AIRULESET_NOTIFY_OWNER": "", "ND_BLOCK_SETTLE": "0"}
         stop_env.pop("DISCORD_NOTIFY_DRYRUN", None)
         stop_env.pop("ND_DRYRUN_FILE", None)
         stop_payload = json.dumps({
-            "session_id": sid, "cwd": str(ROOT),
+            "session_id": sid, "cwd": str(repo),
             "last_assistant_message": "✅ DONE: hotovo"})
         rs = subprocess.run(["bash", str(STOP)], input=stop_payload, text=True,
                             capture_output=True, env=stop_env)
         self.assertEqual(rs.returncode, 0, rs.stdout + rs.stderr)
         self.assertTrue(os.path.exists(self._pending(sid)),
                         "the ✅ must be recorded to a pending file")
-        # 2) idle delivers with an EMPTY event cwd — the recorded ROOT cwd must
+        # 2) idle delivers with an EMPTY event cwd — the recorded repo cwd must
         #    still resolve the project name (never "unknown").
         idle_env = {**os.environ, "HOME": str(self.home),
                     "DISCORD_NOTIFY_DRYRUN": "1", "ND_DRYRUN_FILE": str(out),
@@ -201,7 +218,7 @@ class PendingCarriesCwd(_Base):
                             capture_output=True, env=idle_env)
         self.assertEqual(ri.returncode, 0, ri.stdout + ri.stderr)
         content = out.read_text()
-        self.assertIn("airuleset", content,
+        self.assertIn("mytestproj", content,
                       "the recorded cwd must resolve the real project label")
         self.assertNotIn("unknown", content)
 
