@@ -236,15 +236,36 @@ REMOTE_HOSTS = [
         "user": "newlevel",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.ssh/spinbike_vps",
+        # #669: pinned PUBLIC ssh host keys for this raw-public-IP target.
+        # Every OTHER managed host is a private tailscale/subdev address where a
+        # StrictHostKeyChecking=no (TOFU) posture is acceptable; spinbike-vps is
+        # the FIRST target reached over the public internet by raw IP, so its
+        # push-path ssh legs must verify the host key STRICTLY (see
+        # cli_remote.host_key_check_opts). PUBLIC key material -- safe to commit,
+        # exactly like cli_owner_keys.OWNER_PUBKEYS. Each line is `<type>
+        # <base64>` WITHOUT the address; cli_remote materializes them into a
+        # known_hosts file keyed to `host` for `-o UserKnownHostsFile`.
+        # Captured on dev1 (the maintainer box) with auth-less `ssh-keyscan`,
+        # cross-verified byte-for-byte against dev1's existing authenticated-
+        # deploy known_hosts entries AND an authenticated `ssh -i
+        # ~/.ssh/spinbike_vps` connection (ed25519 fingerprint
+        # SHA256:biFKgHhb7NP//kfDbvUzEe1R/ZDJkKhRe7hTy7CmS6c). A genuine host-key
+        # rotation on spinbike will hard-fail the deploy LOUDLY until these are
+        # re-captured + re-committed -- the intended fail-safe direction.
+        "host_keys": [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4gdjBncONNRHmRw+W8hNFBDkkvEORFWLBxXUWS2r7g",
+            "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBOGOPIXqySpMtYUHf3LOdpOWUwhUqxQb6tPwohllTPO0jtjF7YgTw7BKT+NQlFL2QapbGET925FaO/ZIPamFFm8=",
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDJdt/emE+jSbKDUgS2WBAPicPNJaVGFSPZ2svAtkfzDWxTS3duvDNR/i9S1D9Rv1VWbAzBrBFyXDZG/UmblLatzozd+DJjl7lf2/5opuW4qrtyqwNqr6rpyClo2U5xH3ftR6atZu+T4uJnAWBjasH9WLD7TvV/IU0m/627tEkwOJollYKdEz1bEVcYW697CHFROAmEehgThm8Ikio0vBPhUHG7POigquZS/ZDgJNqcaBPpeWgni0NRRcn/pmoKwEywUJx4DgKw6Okulan27Scx3K2E7luRa6xZsEbtQWTNiNOoBQM2+MyFwLxZwi3P+CiINcrYeactngnmSrwtH6tcNlGUmqHp8zF7rEZESpAlvwoErK7XjAO8ML76JuwwDmAcOXDwfUKJzWO6tNYjMeaEQOdEVNodpyesRFM2qvBAzn8FQWeoGRoBEPDAVNTpRzv6jmMgkXeB0Lu3TwqlZ3bhSn1vXdxbTXMinTNXp0lcsmLGz9g78VXCvybUj52LFYE=",
+        ],
         # #659: a VPS-class OWNER target (the owner's own box, full authority).
         # This flag gates the owner-VPS-only provisioning: the deploy loop sets
         # AIRULESET_OWNER_VPS=1 for this host so cmd_install's
-        # provision_owner_sudo() installs NOPASSWD sudo for the owner user, and
-        # provision_owner_headless_token() delivers the managed
-        # CLAUDE_CODE_OAUTH_TOKEN here so first-run claude never shows the
-        # interactive login dialog. Sub-dev stream accounts carry NO such flag
-        # (they stay sudo-less + do their own OAuth), so this is per-target,
-        # never a blanket rule.
+        # provision_owner_sudo() installs NOPASSWD sudo for the owner user.
+        # (#669: the #659 headless CLAUDE_CODE_OAUTH_TOKEN delivery was REMOVED
+        # -- login/auth on a target is the PROJECT claudy's job, airuleset never
+        # touches auth; owner ROZHODNUTÉ #659.) Sub-dev stream accounts carry NO
+        # such flag (they stay sudo-less), so this is per-target, never a
+        # blanket rule.
         "owner_vps": True,
     },
     {

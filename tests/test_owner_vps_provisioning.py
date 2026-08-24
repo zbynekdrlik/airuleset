@@ -1,6 +1,11 @@
 """#659 — VPS-class owner-target provisioning: native user-space claude (never
-root-npm), NOPASSWD sudo for the owner user, and headless OAuth-token delivery
-so first-run claude never shows the interactive login dialog.
+root-npm) + NOPASSWD sudo for the owner user.
+
+#669 (owner ROZHODNUTÉ, 2026-08-24): the #659 headless CLAUDE_CODE_OAUTH_TOKEN
+delivery leg was REMOVED — login/auth ON a target is the PROJECT claudy's
+responsibility, airuleset never touches auth (#537 machine-identity boundary).
+`TestNoAuthTokenStep` locks that the owner_vps flow now carries NO auth/token
+step at all.
 
 Mirrors the offline / injected-`run` discipline of test_owner_key_provisioning
 and test_soniox_provisioning: NO real ssh, NO real sudo, NO real network —
@@ -250,90 +255,6 @@ class TestProvisionOwnerSudo(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # Gap 3 — headless OAuth token so first-run claude never shows the login dialog
 # --------------------------------------------------------------------------- #
-class TestHeadlessTokenValue(unittest.TestCase):
-    def test_none_when_source_missing(self):
-        self.assertIsNone(
-            cli_remote._owner_headless_token_value(Path("/nope/absent")))
-
-    def test_strips_and_returns_value(self):
-        import tempfile
-        with tempfile.NamedTemporaryFile("w", suffix=".tok", delete=False) as fh:
-            fh.write("sk-oauth-abc123\n")
-            p = fh.name
-        try:
-            self.assertEqual(
-                cli_remote._owner_headless_token_value(Path(p)), "sk-oauth-abc123")
-        finally:
-            os.unlink(p)
-
-    def test_none_when_empty(self):
-        import tempfile
-        with tempfile.NamedTemporaryFile("w", suffix=".tok", delete=False) as fh:
-            fh.write("   \n")
-            p = fh.name
-        try:
-            self.assertIsNone(cli_remote._owner_headless_token_value(Path(p)))
-        finally:
-            os.unlink(p)
-
-
-class TestProvisionOwnerHeadlessToken(unittest.TestCase):
-    OWNER = {"name": "spinbike-vps", "host": "1.2.3.4", "user": "newlevel",
-             "repo_path": "~/devel/airuleset", "identity": "~/.ssh/spinbike_vps",
-             "owner_vps": True}
-    SUBDEV = {"name": "montalu2@subdev", "host": "5.6.7.8", "user": "montalu2",
-              "repo_path": "~/devel/airuleset"}
-
-    def test_no_targets_returns_empty(self):
-        calls, run = _rec()
-        with m.patch.object(airuleset, "REMOTE_HOSTS", [self.SUBDEV]):
-            self.assertEqual(
-                cli_remote.provision_owner_headless_token(run=run), [])
-        self.assertEqual(calls, [])   # source never even read
-
-    def test_loud_fail_when_source_missing(self):
-        out = StringIO()
-        calls, run = _rec()
-        with m.patch.object(airuleset, "REMOTE_HOSTS", [self.OWNER, self.SUBDEV]), \
-                m.patch.object(cli_remote, "_owner_headless_token_value",
-                               return_value=None), \
-                m.patch("sys.stderr", out):
-            failed = cli_remote.provision_owner_headless_token(run=run)
-        self.assertEqual(failed, [("spinbike-vps", "headless-token-source-missing")])
-        self.assertIn("setup-token", out.getvalue())
-        self.assertEqual(calls, [])   # nothing delivered
-
-    def test_delivers_only_to_owner_vps_via_stdin(self):
-        calls, run = _rec()
-        with m.patch.object(airuleset, "REMOTE_HOSTS", [self.OWNER, self.SUBDEV]), \
-                m.patch.object(cli_remote, "_owner_headless_token_value",
-                               return_value="sk-oauth-XYZ"):
-            failed = cli_remote.provision_owner_headless_token(run=run)
-        self.assertEqual(failed, [])
-        self.assertEqual(len(calls), 1)   # ONLY the owner_vps target
-        argv = calls[0]["argv"]
-        # value delivered via stdin, NEVER in argv
-        self.assertEqual(calls[0]["input"], "sk-oauth-XYZ\n")
-        self.assertNotIn("sk-oauth-XYZ", " ".join(argv))
-        self.assertIn("newlevel@1.2.3.4", argv)
-        # lands in ~/.secrets, mode 600
-        remote_cmd = argv[-1]
-        self.assertIn("~/.secrets/claude-code-oauth-token", remote_cmd)
-        self.assertIn("chmod 600", remote_cmd)
-
-    def test_skips_known_auth_failure(self):
-        out = StringIO()
-        calls, run = _rec()
-        with m.patch.object(airuleset, "REMOTE_HOSTS", [self.OWNER]), \
-                m.patch.object(cli_remote, "_owner_headless_token_value",
-                               return_value="tok"), \
-                m.patch("sys.stderr", out):
-            failed = cli_remote.provision_owner_headless_token(
-                run=run, skip_names={"spinbike-vps"})
-        self.assertEqual(failed, [("spinbike-vps", "skipped-known-auth-failure")])
-        self.assertEqual(calls, [])
-
-
 class TestDeliverSecretToHosts(unittest.TestCase):
     OWNER = {"name": "spinbike-vps", "host": "1.2.3.4", "user": "newlevel",
              "identity": "~/.ssh/spinbike_vps", "owner_vps": True}
@@ -399,8 +320,6 @@ class TestWiring(unittest.TestCase):
     def test_facade_reexports(self):
         self.assertIs(airuleset.provision_owner_sudo,
                       cli_owner_vps.provision_owner_sudo)
-        self.assertIs(airuleset.provision_owner_headless_token,
-                      cli_remote.provision_owner_headless_token)
         self.assertIs(airuleset.ensure_claude_native_userspace,
                       cli_binary_installers.ensure_claude_native_userspace)
         self.assertIs(airuleset._deliver_secret_to_hosts,
@@ -422,23 +341,6 @@ class TestWiring(unittest.TestCase):
             re.search(r"(?m)^\s*ensure_claude_native_userspace\(\)", src),
             "cmd_install must actually CALL ensure_claude_native_userspace()")
 
-    def test_headless_source_and_delivered_names_are_distinct(self):
-        # #659 review RED-1 regression lock: the driver's SOURCE basename must
-        # differ from the launcher-guarded DELIVERED basename, else dev1 (which
-        # hosts the source AND runs the launcher) would export the token into
-        # the owner's interactive sessions.
-        self.assertNotEqual(airuleset.OWNER_HEADLESS_TOKEN_SOURCE.name,
-                            airuleset.OWNER_HEADLESS_TOKEN_DELIVERED_NAME)
-        launcher = airuleset.CLAUDE_LAUNCH_SCRIPT_CONTENT
-        # the launcher's export guard checks the DELIVERED .secrets/ path ...
-        self.assertIn(".secrets/" + airuleset.OWNER_HEADLESS_TOKEN_DELIVERED_NAME,
-                      launcher)
-        # ... and NEVER guards on the driver SOURCE .secrets/ path (so dev1,
-        # which holds only the source file, never exports). (The source basename
-        # may appear in an explanatory COMMENT -- only the `.secrets/<src>` guard
-        # path must be absent.)
-        self.assertNotIn(".secrets/" + airuleset.OWNER_HEADLESS_TOKEN_SOURCE.name,
-                         launcher)
     def test_spinbike_flagged_owner_vps(self):
         sb = [h for h in airuleset.REMOTE_HOSTS if h.get("name") == "spinbike-vps"]
         self.assertEqual(len(sb), 1)
@@ -449,15 +351,6 @@ class TestWiring(unittest.TestCase):
             if h.get("name") != "spinbike-vps":
                 self.assertFalse(h.get("owner_vps"),
                                  "%s must not be owner_vps" % h.get("name"))
-
-    def test_launcher_guards_headless_token_export(self):
-        s = airuleset.CLAUDE_LAUNCH_SCRIPT_CONTENT
-        # export happens ONLY behind the file-exists guard (never unconditional)
-        self.assertIn('[ -s "$HOME/.secrets/claude-code-oauth-token" ]', s)
-        self.assertIn("export CLAUDE_CODE_OAUTH_TOKEN", s)
-        guard_idx = s.index("claude-code-oauth-token")
-        export_idx = s.index("export CLAUDE_CODE_OAUTH_TOKEN")
-        self.assertLess(guard_idx, export_idx)
 
     def test_deploy_loop_sets_owner_vps_env_only_for_owner_vps_host(self):
         calls = []
@@ -474,9 +367,7 @@ class TestWiring(unittest.TestCase):
         with m.patch("subprocess.run", side_effect=fake_run), \
                 m.patch.object(airuleset, "cmd_install"), \
                 m.patch.object(airuleset, "REMOTE_HOSTS", [owner, plain]), \
-                m.patch.object(airuleset, "AUTHORITY_BY_USER", {}), \
-                m.patch.object(cli_remote, "provision_owner_headless_token",
-                               return_value=[]):
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", {}):
             airuleset.cmd_push(args)
         deploy = [c for c in calls
                   if any("python3 airuleset.py install" in str(a) for a in c)]
@@ -488,6 +379,61 @@ class TestWiring(unittest.TestCase):
                             for a in owner_cmds[0]))
         self.assertFalse(any("AIRULESET_OWNER_VPS=1" in str(a)
                              for a in plain_cmds[0]))
+
+
+class TestNoAuthTokenStep(unittest.TestCase):
+    """#669 — the owner_vps flow contains NO auth/token step. Login/auth ON a
+    target is the PROJECT claudy's responsibility; airuleset never touches auth
+    (owner ROZHODNUTÉ #659, #537 machine-identity boundary)."""
+
+    def test_headless_token_symbols_are_gone(self):
+        for name in ("provision_owner_headless_token",
+                     "_owner_headless_token_value",
+                     "OWNER_HEADLESS_TOKEN_SOURCE",
+                     "OWNER_HEADLESS_TOKEN_DELIVERED_NAME"):
+            self.assertFalse(hasattr(airuleset, name),
+                             "airuleset.%s must be removed" % name)
+            self.assertFalse(hasattr(cli_remote, name),
+                             "cli_remote.%s must be removed" % name)
+
+    def test_deploy_flow_has_no_token_delivery_step(self):
+        import inspect
+        for fn in (airuleset.cmd_push, cli_remote._deploy_to_all_remotes):
+            src = inspect.getsource(fn)
+            self.assertNotIn("provision_owner_headless_token", src)
+            self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", src)
+
+    def test_launcher_has_no_oauth_token_export(self):
+        s = airuleset.CLAUDE_LAUNCH_SCRIPT_CONTENT
+        # no ACTIVE token export, and no guard reading the delivered secret file
+        self.assertNotIn("export CLAUDE_CODE_OAUTH_TOKEN", s)
+        self.assertNotIn(".secrets/claude-code-oauth-token", s)
+
+    def test_push_to_owner_vps_exits_zero_with_no_token_warning(self):
+        # A push whose only target is an owner_vps host must complete with NO
+        # token warning and NO nonzero exit — there is no owner-secret ssh
+        # phase any more.
+        calls = []
+
+        def fake_run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return m.Mock(returncode=0, stdout="ok", stderr="")
+        owner = {"name": "spinbike-vps", "host": "1.2.3.4", "user": "newlevel",
+                 "repo_path": "~/devel/airuleset", "identity": "~/.ssh/sb",
+                 "owner_vps": True}
+        out = StringIO()
+        args = m.Mock()
+        with m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch.object(airuleset, "cmd_install"), \
+                m.patch.object(airuleset, "REMOTE_HOSTS", [owner]), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER", {}), \
+                m.patch("sys.stderr", out):
+            airuleset.cmd_push(args)   # must NOT raise SystemExit(1)
+        combined = out.getvalue()
+        for banned in ("headless", "setup-token", "OAUTH TOKEN",
+                       "CLAUDE_CODE_OAUTH_TOKEN"):
+            self.assertNotIn(banned, combined,
+                             "owner_vps push must emit no token warning")
 
 
 if __name__ == "__main__":
