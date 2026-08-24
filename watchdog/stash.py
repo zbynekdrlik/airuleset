@@ -182,60 +182,118 @@ def _type_literal(pid, run, text, sleep_fn=None):
 
 
 GOAL_TYPE_VERIFY_RETRIES = 2         # #670: first-byte-race undo+retype budget
+# #670-review R1 -- bounded render-SETTLE poll BEFORE concluding a type failed,
+# the SAME 8x1s magnitude as tmux_io's SEND_TYPE_SETTLE_* the old send_verified
+# path (`_await_typed_landed`) carried: a ~700-char chunked type renders with
+# lag (#354/#176 F4), so a single immediate capture can read a genuinely-landed
+# type mid-render -- and reacting to that with a DESTRUCTIVE undo+retype is
+# worse than the bug this fixes. Duplicated here (not imported) to keep stash's
+# `import watchdog`-only module boundary, the same idiom the STASH_*_SETTLE
+# constants above already use.
+TYPE_VERIFY_SETTLE_POLLS = 8
+TYPE_VERIFY_SETTLE_S = 1
+
+# #670-review R2 -- the three shapes `_type_verify_class` distinguishes so the
+# undo fires ONLY where it is safe: only a CORRUPT box (readable, holding OUR
+# OWN text with a swallowed head) may be backspaced; a HOLD box (unreadable, or
+# a collapsed-paste buffer) must NEVER get keystrokes.
+_TV_LANDED = "landed"
+_TV_HOLD = "hold"
+_TV_CORRUPT = "corrupt"
 
 
-def _type_verify_landed(pid, run, text, cap=None):
-    """#670 -- read the box back HEAD-INCLUSIVELY after a type. True iff it
-    holds `text` byte-exact: the HEAD row (`_input_box_head_text`) is a
-    whitespace-normalised, NON-EMPTY PREFIX of `text` (a dropped FIRST char
-    makes the head NOT a prefix -- the send-keys first-byte race, `ane-check`
-    for `lane-check`), AND the TAIL satisfies the existing `_typed_landed`
-    suffix contract. CC's collapsed `[Pasted text #N]` placeholder is exempt
-    (landed, exactly as `_typed_landed` treats it) -- checked FIRST, since its
-    head IS the placeholder, not a text prefix. The `_typed_landed` tail check
-    ALONE is head-blind (`ane-check...` IS a suffix of `lane-check...`), which
-    is precisely how the swallowed head passed the old verify (#670 root).
+def _type_verify_class(pid, run, text, cap=None):
+    """#670 -- classify the box after a type into LANDED / HOLD / CORRUPT.
+
+    LANDED: the HEAD row (`_input_box_head_text`) is a whitespace-normalised,
+    NON-EMPTY PREFIX of `text` AND the TAIL satisfies the `_typed_landed` suffix
+    contract -- OR the box is CC's collapsed `[Pasted text #N]` placeholder
+    (landed exactly as `_typed_landed` treats it). The tail check ALONE is
+    head-blind (`ane-check...` IS a suffix of `lane-check...`, the #670 root);
+    the head PREFIX is the missing half. (Head+tail is not a full byte-exact
+    proof of the interior, but the first-byte swallow this ticket is about lands
+    on the head, and the mid-chunk drop vector was closed by #322's `--`.)
+
+    HOLD: the box is UNREADABLE (`_input_line_text` None -- a turn/dialog started
+    mid-type) OR shows the `paste again to expand` collapse hint. NO keystrokes
+    may follow (the #233 unreadable-pane discipline; the #322/#372 collapsed-
+    buffer state `_undo_typed_text` explicitly excludes) -- the caller aborts.
+
+    CORRUPT: a READABLE box holding a variant of OUR OWN text whose head lost its
+    first char, or a truncated type. The box was verified BARE before the type,
+    so every char in it is ours -> the caller may safely undo + retype.
 
     `cap` (optional): a capture the caller ALREADY took right after the type --
-    passed by `deliver_with_stash` so both head and tail are read from the SAME
-    snapshot and NO extra `capture-pane` is issued (its fixed-sequence test
-    fakes count captures). Default None -> a fresh capture (`_type_literal_verified`)."""
+    passed by `deliver_with_stash` so head and tail come from the SAME snapshot
+    and NO extra `capture-pane` is issued (its fixed-sequence test fakes count
+    captures). Default None -> a fresh capture."""
     if cap is None:
         cap = watchdog.capture_pane(pid, run, lines=40)
     tail = watchdog._input_line_text(cap)
-    if _PASTED_PLACEHOLDER_RX.match((tail or "").strip()):
-        return True
+    if tail is None:
+        return _TV_HOLD                          # unreadable pane -> withhold (#233)
+    if _PASTED_PLACEHOLDER_RX.match(tail.strip()):
+        return _TV_LANDED                        # collapsed placeholder = landed
+    if _pane_shows_collapsed_paste(tail):
+        return _TV_HOLD                          # 'paste again to expand' -> withhold (#322/#372)
     if not _typed_landed(text, tail):
-        return False
+        return _TV_CORRUPT                        # tail not a suffix -> our own truncated type
     head = watchdog._input_box_head_text(cap)
-    if not head:
-        return False
-    return " ".join(text.split()).startswith(" ".join(head.split()))
+    if head and " ".join(text.split()).startswith(" ".join(head.split())):
+        return _TV_LANDED
+    return _TV_CORRUPT                            # head not a prefix -> swallowed first char
+
+
+def _type_verify_landed(pid, run, text, cap=None):
+    """#670 -- thin bool wrapper (`_type_verify_class == LANDED`). Used by
+    `deliver_with_stash`'s bare branch for DETECTION only: it aborts to the next
+    sweep on not-landed via its OWN `_undo_and_release_slot`, exactly as it did
+    with the head-blind `_typed_landed` (a HOLD/CORRUPT both read not-landed, its
+    pre-#670 behaviour on a non-suffix box -- unchanged). The undo+retry loop
+    lives in `_type_literal_verified` (send_verified's path) ONLY."""
+    return _type_verify_class(pid, run, text, cap=cap) == _TV_LANDED
 
 
 def _type_literal_verified(pid, run, text, sleep_fn=None):
-    """#670 -- type `text` into a BARE box and VERIFY it landed byte-exact
-    (head + tail), retrying (undo + re-type) on a first-byte swallow. The
-    SHARED verified member of the type primitive: `send_verified` and
-    `deliver_with_stash`'s bare (PARKED/NOOP) branch both call it, so a
-    swallowed FIRST char is DETECTED and re-typed instead of submitted -- the
-    tail-only `_typed_landed` verify they used before is head-blind.
+    """#670 -- type `text` into a BARE box and VERIFY the box holds it head+tail,
+    retrying (undo + re-type) ONLY on a genuine first-byte swallow. This is
+    `send_verified`'s verified typed path (all nudge kinds -- lane-check, job-1
+    stuck-check/continue, ops-wait, release-gap, Discord reply, cards,
+    cross_stream); `deliver_with_stash`'s bare branch calls the lighter
+    `_type_verify_landed` (detection, abort-to-next-sweep) instead.
 
-    PRECONDITION: the box was verified BARE by the caller (both do), so
-    `_undo_typed_text`'s len(text) over-backspace can reach nothing of the
-    user's. On EVERY failed attempt (retry OR final give-up) the typed text is
-    backed off, so the box is left BARE on failure -- never a stranded
-    `ane-check...`. Returns True iff the box holds `text` byte-exact within
-    GOAL_TYPE_VERIFY_RETRIES retries; False otherwise -- the caller ABORTS
-    (retries next sweep), never submitting a head-corrupted prompt."""
+    Each attempt runs a bounded render-SETTLE poll (`TYPE_VERIFY_SETTLE_*`,
+    the 8x1s magnitude the old `_await_typed_landed` carried) BEFORE concluding
+    failure, so a genuinely-landed type read mid-render is NOT mistaken for a
+    swallow and destructively undone (#670-review R1). On the settled verdict:
+      * LANDED  -> True.
+      * HOLD (unreadable / collapsed paste) -> False with ZERO keystrokes -- not
+        a box `_undo_typed_text` may safely backspace (#233/#322/#372,
+        #670-review R2); the caller aborts + retries next sweep, and the box is
+        left as CC rendered it (the #372 janitor backstops any residual, never a
+        blind backspace).
+      * CORRUPT (readable, OUR OWN swallowed-head text) -> back it off
+        (`_undo_typed_text`; over-backspace safe -- the caller verified the box
+        BARE, so every char is ours) and retry. If undo cannot confirm bare,
+        abort. On a CORRUPT give-up the last undo leaves the box BARE (no
+        stranded `ane-check...`).
+    Returns True iff head+tail-verified within GOAL_TYPE_VERIFY_RETRIES retries."""
     sleep_fn = sleep_fn or time.sleep
     for _attempt in range(GOAL_TYPE_VERIFY_RETRIES + 1):
         _type_literal(pid, run, text, sleep_fn)
-        if _type_verify_landed(pid, run, text):
+        cls = _TV_HOLD
+        for i in range(TYPE_VERIFY_SETTLE_POLLS):
+            cls = _type_verify_class(pid, run, text)
+            if cls != _TV_CORRUPT:               # LANDED or a stable HOLD -> stop settling
+                break
+            if i < TYPE_VERIFY_SETTLE_POLLS - 1:
+                sleep_fn(TYPE_VERIFY_SETTLE_S)
+        if cls == _TV_LANDED:
             return True
-        # Head corrupted (first-byte race): back our own text off the bare-
-        # verified box before re-typing OR giving up. If we cannot confirm
-        # bare, abort rather than re-type onto a non-bare box (no blind retype).
+        if cls == _TV_HOLD:
+            return False                         # unreadable / collapsed -> NO keystrokes (R2)
+        # CORRUPT: our own swallowed-head text on a bare-verified box -> back it
+        # off and retry. If undo cannot confirm bare, abort (no blind retype).
         if not _undo_typed_text(pid, run, text, sleep_fn):
             return False
     return False

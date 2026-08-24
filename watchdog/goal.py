@@ -2585,8 +2585,11 @@ GOAL_LANE_UNDERSAT_SURPLUS = 5
 # covered, nothing to lift" -- the live incident). A nudge is EFFECTIVE iff the
 # STRUCTURED live-worker count (`count_live_workers` -- wedged-excluding, #486 G2,
 # NEVER pane text) ROSE since it fired; an ineffective nudge widens the NEXT
-# interval along this schedule, holding at the cap FOREVER (re-probes at the widest
-# stage, never permanently silent -- #134 anti-silence). Mirrors the repo's
+# interval along this schedule, holding at the widest stage (#134 anti-silence).
+# #670 REFINES this: an EXACTLY-unchanged (workers, backlog) signature is now
+# DEDUPED before this backoff (permanently silent until the state moves -- owner
+# directive); the staged re-probe governs only a CHANGED-but-ineffective state
+# (a shrinking backlog, workers flat). Mirrors the repo's
 # staged-schedule PATTERN (GOAL_LANE_STASH_ABORT_BACKOFF_S / #502 limit-backoff):
 # an explicit tuple of widening intervals, min(streak, len-1) indexing. The FIRST
 # stage equals GOAL_LANE_INTERVAL_S so the first repeat is unchanged; the streak
@@ -2654,8 +2657,17 @@ def _lane_cooldown_decision(rec, now, under_saturated, eff_workers, backlog_n,
     GOAL_LANE_INEFFECTIVE_BACKOFF_S per consecutive ineffective nudge; a nudge
     that MOVED the fleet resets the streak to 0 (so the interval narrows back).
     The effectiveness reset is computed BEFORE the hourly-cap early-return so a
-    mid-cooldown recovery still resets the streak (#509 semantics preserved);
-    holds at the cap forever -- never permanently silent."""
+    mid-cooldown recovery still resets the streak (#509 semantics preserved).
+
+    #670 DEDUP: past the hourly cap, an EXACTLY-unchanged (eff_workers, backlog_n)
+    signature to the last landed nudge (`rec["lsw"]`/`rec["lsb"]`, stamped by
+    `_lane_record_nudge`) returns `skip:dedup-unchanged` -- deliberately
+    PERMANENTLY SILENT until the state MOVES (owner directive: rovnaký počet lán
+    + rovnaký backlog ⇒ žiadny nový prompt ani po hodine). This subsumes the
+    empty-lane MAX_NUDGES give-up on a frozen state (a correctly-declining
+    supervisor is not a stall) and preempts the under-saturated backoff below for
+    the exactly-unchanged case; the backoff still governs a CHANGED-but-
+    ineffective state (shrinking backlog / workers flat, #509 preserved)."""
     last = rec.get("llast")
     if last is None:
         return False, None, None

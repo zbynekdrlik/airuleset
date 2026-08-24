@@ -131,14 +131,62 @@ class TypeLiteralVerifiedContract(unittest.TestCase):
         self.assertTrue(ok, "one swallow must be undone + re-typed byte-exact")
         self.assertEqual(tmux.box, TEXT)
 
-    def test_persistent_swallow_returns_false_never_corrupt(self):
+    def test_persistent_swallow_returns_false_and_leaves_box_bare(self):
         # Every fresh type swallows -> after the bounded retries it gives up
-        # with False (the caller aborts, never submits). The box must NOT hold
-        # a head-corrupted string presented as landed.
+        # with False (the caller aborts, never submits). A CORRUPT give-up backs
+        # our own text off, so the box is left BARE -- never a stranded
+        # 'ane-check...' (#670-review R2 / 🔵6).
         tmux = self._fake(swallow_budget=99)
         ok = wd._type_literal_verified(PID, tmux, TEXT, sleep_fn=lambda *_: None)
         self.assertFalse(ok)
-        self.assertNotEqual(tmux.box, TEXT)
+        self.assertEqual(tmux.box, "")
+
+
+class _RunningTurnFake(DeliverGoalFakeTmux):
+    """After a type, `capture-pane` shows a RUNNING-TURN frame with NO input box
+    (`_input_line_text` -> None) -- a turn/dialog started mid-type. Records every
+    keystroke so the test can prove NONE were sent into the unreadable pane."""
+
+    def __call__(self, argv, timeout=8):
+        if "capture-pane" in " ".join(argv):
+            return "● Pracujem na tom…\n  (esc na prerušenie)\n  ctx ███░\n"
+        return super().__call__(argv, timeout)
+
+
+class _CollapsedPasteFake(DeliverGoalFakeTmux):
+    """After a type, `capture-pane` shows CC's 'paste again to expand' collapse
+    hint (#322) -- a box `_undo_typed_text` must never backspace."""
+
+    def __call__(self, argv, timeout=8):
+        if "capture-pane" in " ".join(argv):
+            return "● hotovo\n❯ paste again to expand\n  ctx ███░\n"
+        return super().__call__(argv, timeout)
+
+
+class HoldBoxesGetNoKeystrokes(unittest.TestCase):
+    # #670-review R2: an UNREADABLE or COLLAPSED box (HOLD) must return False
+    # WITHOUT any keystroke -- never a blind backspace into a pane we cannot read
+    # (#233) or a collapsed buffer (#322/#372). The old always-undo did the wrong
+    # thing here.
+    def _bspaces(self, tmux):
+        return [a for a in tmux.sent
+                if len(a) > 4 and all(k == "BSpace" for k in a[4:])]
+
+    def test_unreadable_box_aborts_with_no_keystrokes(self):
+        tmux = _RunningTurnFake([(PID, "s", "1", "1")], GOAL_IDLE_CAP,
+                                model_type=True, wrap_width=WRAP)
+        ok = wd._type_literal_verified(PID, tmux, TEXT, sleep_fn=lambda *_: None)
+        self.assertFalse(ok)
+        self.assertEqual(self._bspaces(tmux), [],
+                         "no backspaces may be sent into an unreadable pane")
+
+    def test_collapsed_paste_aborts_with_no_keystrokes(self):
+        tmux = _CollapsedPasteFake([(PID, "s", "1", "1")], GOAL_IDLE_CAP,
+                                   model_type=True, wrap_width=WRAP)
+        ok = wd._type_literal_verified(PID, tmux, TEXT, sleep_fn=lambda *_: None)
+        self.assertFalse(ok)
+        self.assertEqual(self._bspaces(tmux), [],
+                         "no backspaces may be sent into a collapsed buffer")
 
 
 if __name__ == "__main__":
