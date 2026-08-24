@@ -788,26 +788,43 @@ class TestWindowMenuRebind613Round2(unittest.TestCase):
         _drain(base_fd, 1.0)
 
         os.write(base_fd, b"\x02w")
-        names = ("beta", "gamma", "delta")
+        # The MENU-SPECIFIC discriminator is the picker's own title "Okná"
+        # (adversarial review #613r2, B1): window NAMES leak into tmux's default
+        # status line, so they render even in the choose-tree blackout ("status
+        # line only") -- name-presence has no RED/GREEN teeth. The menu title
+        # appears ONLY when display-menu actually paints, never in the status
+        # line or a choose-tree render.
         text = ""
         for _ in range(8):
-            text = _visible(_drain(base_fd, 1.0))
-            if all(n in text for n in names):
+            text += _visible(_drain(base_fd, 1.0))
+            if "Okná" in text:
                 break
-        os.write(base_fd, b"q")      # close the menu / back out, tidy
-        _drain(base_fd, 0.5)
+        # Press the digit shown on window index 1's row (base-index defaults to
+        # 0, so index 1 == the "beta" window). With the picker painted and the
+        # hot-key == the shown index (A1), this SELECTS that window -- proving
+        # the menu is live AND the key mapping is correct, not just that pixels
+        # appeared. This is the real behavioral teeth.
+        os.write(base_fd, b"1")
+        _drain(base_fd, 0.8)
+        cur = cluster.tmux(
+            "display-message", "-p", "-t", "base", "#{window_index}").stdout.strip()
 
         self.assertTrue(
             applied,
             "the production window-menu rebind was not found in "
             "apply_tmux_history_limit's live-apply calls -- the fix is not "
             "wired in (RED)")
-        self.assertTrue(
-            all(n in text for n in names),
-            "prefix+w on the OLDER grouped base client must paint the window "
-            "picker listing every window (%r); got %d visible chars, this is "
-            "the exact upstream choose-tree blackout the rebind fixes:\n%s"
-            % (names, len(text), text[:600]))
+        self.assertIn(
+            "Okná", text,
+            "prefix+w on the OLDER grouped base client must PAINT the window "
+            "picker (its title 'Okná'); got %d visible chars, this is the exact "
+            "upstream choose-tree blackout the rebind fixes:\n%s"
+            % (len(text), text[:600]))
+        self.assertEqual(
+            cur, "1",
+            "pressing the digit shown on a menu row must select that window "
+            "index (base-index 0 -> row '1:' selects window 1); current window "
+            "index is %r -- the number hot-key is wrong (A1)" % cur)
 
     def _apply_production_rebind(self, cluster):
         """Capture the rebind argv `apply_tmux_history_limit` would live-apply,

@@ -500,13 +500,27 @@ sess="$(tmux display-message -p -c "$client" '#{session_name}' 2>/dev/null || tr
 
 # display-menu argv: `-c <client>` paints on the pressing (dead) client, then a
 # title, then a (label, key, command) triplet per window.
+#
+# #{window_name} is read LAST (adversarial review #613r2, A2): IFS=$'\t' treats
+# tab as IFS-WHITESPACE, so consecutive tabs collapse -- with name in the MIDDLE
+# an EMPTY window name would swallow the following field (the active flag lands
+# in $name, the `*` marker is lost). As the final field a trailing empty name is
+# safely dropped and any embedded tab is tolerated (`read` puts the remainder
+# verbatim into the last var).
 menu_args=(-c "$client" -T '#[align=centre] Okná ')
 n=0
-while IFS=$'\t' read -r wid idx name active; do
+while IFS=$'\t' read -r wid idx active name; do
   n=$((n + 1))
-  # number keys for the first 9 windows; beyond that, unnumbered rows still
-  # selectable with the arrow keys.
-  if [ "$n" -le 9 ]; then key="$n"; else key=""; fi
+  # The number HOT-KEY is the window INDEX itself when single-digit, so the
+  # number the row DISPLAYS is exactly the key you press (adversarial review
+  # #613r2, A1: base-index defaults to 0 and the managed conf never sets it, so
+  # keying off a 1..9 list ordinal was off-by-one from the shown index and left
+  # index 0 unreachable). Window indices are unique, so no key collides; a
+  # 2+-digit index gets no key and stays arrow-selectable.
+  case "$idx" in
+    [0-9]) key="$idx" ;;
+    *)     key="" ;;
+  esac
   mark=" "
   if [ "$active" = "1" ]; then mark="*"; fi
   # `#`-double the name so a window named e.g. `#{foo}` cannot inject a tmux
@@ -514,7 +528,7 @@ while IFS=$'\t' read -r wid idx name active; do
   safe_name="${name//#/##}"
   menu_args+=("${mark}${idx}: ${safe_name}" "$key" "select-window -t $wid")
 done < <(tmux list-windows -t "$sess" \
-         -F $'#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}')
+         -F $'#{window_id}\t#{window_index}\t#{window_active}\t#{window_name}')
 
 [ "$n" -gt 0 ] || exit 0
 tmux display-menu "${menu_args[@]}"

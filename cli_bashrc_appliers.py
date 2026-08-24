@@ -98,7 +98,10 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     parallel marker-block machinery) AND the claude-history POPUP
     companion script (#289 -- see the module comment above
     CLAUDE_HISTORY_POPUP_SCRIPT_DEST for why this is its OWN script file
-    rather than an inline shell command in the tmux bind-key line).
+    rather than an inline shell command in the tmux bind-key line) AND the
+    tmux prefix+w WINDOW-MENU helper (#613 REOPEN-2 round-2 -- same
+    OWN-script-file reason, see WINDOW_MENU_SCRIPT_CONTENT in
+    cli_tmux_provisioning).
 
     The SCRIPT (script_path, default CLAUDE_LAUNCH_SCRIPT_DEST) is written and
     chmod +x UNCONDITIONALLY on every call — like the caveman shim, it must
@@ -107,10 +110,12 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     actual logic, so a `push` changes launch behavior in every already-running
     shell immediately, with no `source ~/.bashrc` and no restart. The
     claude-history script (history_script_path, default
-    CLAUDE_HISTORY_SCRIPT_DEST) and the claude-history POPUP script
-    (popup_script_path, default CLAUDE_HISTORY_POPUP_SCRIPT_DEST) both get
-    the IDENTICAL unconditional write + chmod +x + missing-after-write
-    RuntimeError treatment.
+    CLAUDE_HISTORY_SCRIPT_DEST), the claude-history POPUP script
+    (popup_script_path, default CLAUDE_HISTORY_POPUP_SCRIPT_DEST) and the
+    tmux window-menu helper (menu_script_path, default co-located with the
+    popup script in ~/.claude -- see its write below) all get the IDENTICAL
+    unconditional write + chmod +x + missing-after-write RuntimeError
+    treatment.
 
     The ~/.bashrc block is idempotent (replaces the marked block if present,
     else appends it) and holds ONLY thin wrapper functions with no flag
@@ -149,7 +154,14 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     # this resolves to exactly WINDOW_MENU_SCRIPT_DEST (the absolute path the
     # conf's `w` bind points at); a test that redirects the popup path to a
     # tempdir automatically lands this there too, so no caller writes into the
-    # real `~/.claude`.
+    # real `~/.claude`. This co-location is DELIBERATE (adversarial review
+    # #613r2, A3): a plain `menu_script_path or WINDOW_MENU_SCRIPT_DEST` default
+    # would decouple the two, but WINDOW_MENU_SCRIPT_DEST is frozen at import to
+    # the real `~/.claude`, so it would make ALL ~19 existing 4-positional-arg
+    # test callers write the helper into the real home. Deploy ordering is safe:
+    # cmd_install runs apply_ultracode_launcher (this write) BEFORE
+    # apply_tmux_history_limit (the live `w` bind), so the bind never points at a
+    # not-yet-written script on a normal push.
     mpath = menu_script_path or (ppath.parent / WINDOW_MENU_SCRIPT_DEST.name)
     mpath.parent.mkdir(parents=True, exist_ok=True)
     mpath.write_text(render_window_menu_script())
