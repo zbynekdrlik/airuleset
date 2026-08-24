@@ -116,6 +116,25 @@ class SuppressionContrast(unittest.TestCase):
             self.assertIsNone(notify._suppressed_alert_class(k), k)
 
 
+class NeedsInteractiveLoginPredicate(unittest.TestCase):
+    """#662 widening: the escalation valve fires for the WHOLE persistent
+    interactive-/login class, not just the token-revoke sub-class."""
+
+    def test_revoke_texts_are_interactive_login(self):
+        self.assertTrue(wd._needs_interactive_login(REVOKED_BANNER))
+        self.assertTrue(wd._needs_interactive_login(AGENT_DEATH))
+
+    def test_login_expired_and_not_logged_in_are_interactive_login(self):
+        self.assertTrue(wd._needs_interactive_login("Login expired · Please run /login"))
+        self.assertTrue(wd._needs_interactive_login("Not logged in · Please run /login"))
+
+    def test_transient_and_unrelated_are_not(self):
+        self.assertFalse(wd._needs_interactive_login("API Error: 529 overloaded"))
+        self.assertFalse(wd._needs_interactive_login("pracujem na tickete…"))
+        self.assertFalse(wd._needs_interactive_login(""))
+        self.assertFalse(wd._needs_interactive_login(None))
+
+
 class SuppressionThroughSend(unittest.TestCase):
     """The valves reach the real send path when configured (not swallowed)."""
 
@@ -158,10 +177,11 @@ class SuppressionThroughSend(unittest.TestCase):
 
 
 class ComposeHelpers(unittest.TestCase):
-    def test_compose_oauth_block_alert_names_project_and_login(self):
-        body = notify.compose_oauth_block_alert("camera-box", 3)
+    def test_compose_oauth_block_alert_names_project_login_and_loc(self):
+        body = notify.compose_oauth_block_alert("camera-box", "zbynek-2:0.%3", 3)
         self.assertIn("camera-box", body)
         self.assertIn("/login", body.lower())
+        self.assertIn("zbynek-2:0.%3", body)   # names WHICH session/pane (#645)
         self.assertTrue(len(body) > 20)
 
     def test_compose_stuck_owner_alert_names_project_and_location(self):
@@ -179,9 +199,11 @@ class Job1OAuthEscapeValve(unittest.TestCase):
     PANE = "%7"
     SID = "9a8b7c6d-0000-4000-8000-000000000662"
 
-    def _spy_run_to_escalation(self, err_text):
+    def _spy_run_to_escalation(self, err_text, offsets=None):
         """Drive run_once through max_nudges+1 sweeps (reused state) so the
-        escalation transition fires, capturing every send_fn(dedup_key)."""
+        escalation transition fires, capturing every send_fn(dedup_key).
+        `offsets` overrides the per-sweep `now` offsets (e.g. [0] for a single
+        pre-escalation sweep)."""
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         proj = Path(tmp.name) / "projects"
@@ -216,7 +238,7 @@ class Job1OAuthEscapeValve(unittest.TestCase):
         # every sweep re-detects the stall.
         base = 1_800_000_000.0
         os.utime(tpath, (base - 700, base - 700))
-        offsets = [0, 300, 600, 1200, 1300]
+        offsets = offsets if offsets is not None else [0, 300, 600, 1200, 1300]
         for off in offsets:
             wd.run_once(now=base + off, dry_run=False, run=fake_run,
                         send_fn=spy_send, projects_dir=proj, state_path=state_path,
@@ -224,19 +246,50 @@ class Job1OAuthEscapeValve(unittest.TestCase):
                         grace=300, interval=300, max_nudges=3)
         return sends
 
-    def test_revoked_fires_oauthblock_alert_at_escalation(self):
-        sends = self._spy_run_to_escalation(REVOKED_BANNER)
-        oauth = [k for _b, k in sends if k and k.startswith("oauthblock:")]
-        self.assertTrue(oauth,
-                        "a persistent 401-revoke that survived max_nudges must "
-                        "fire an un-suppressed oauthblock alert: %r" % sends)
+    def _spy_run_one_sweep(self, err_text):
+        """Drive run_once ONCE — nudge #1, BEFORE escalation — to prove the valve
+        is escalation-gated (a revoke that self-heals on the first `continue`, as
+        #602 does, never fires it)."""
+        return self._spy_run_to_escalation(err_text, offsets=[0])
 
-    def test_normal_529_fires_no_oauthblock_alert(self):
+    def test_revoked_fires_oauthblock_alert_at_escalation(self):
+        # both the /login banner AND the agent-death variant (no /login prefix).
+        for err in (REVOKED_BANNER, AGENT_DEATH):
+            sends = self._spy_run_to_escalation(err)
+            oauth = [k for _b, k in sends if k and k.startswith("oauthblock:")]
+            self.assertTrue(oauth,
+                            "a persistent revoke (%r) that survived max_nudges "
+                            "must fire an un-suppressed oauthblock alert: %r"
+                            % (err[:30], sends))
+
+    def test_login_expired_fires_oauthblock_at_escalation(self):
+        # #662 widening: the bare "Please run /login" login-expired class ALSO
+        # needs interactive /login; if it survived every continue it is a
+        # persistent block and must alarm (not just the revoke sub-class).
+        sends = self._spy_run_to_escalation("Login expired · Please run /login")
+        oauth = [k for _b, k in sends if k and k.startswith("oauthblock:")]
+        self.assertTrue(oauth, "a persistent login-expired must alarm: %r" % sends)
+
+    def test_valve_is_escalation_gated_not_on_first_nudge(self):
+        # A revoke that would self-heal on continue #1 (#602) never reaches
+        # escalation, so a single sweep fires NO oauthblock.
+        sends = self._spy_run_one_sweep(REVOKED_BANNER)
+        oauth = [k for _b, k in sends if k and k.startswith("oauthblock:")]
+        self.assertEqual(oauth, [],
+                         "the valve must fire ONLY at escalation, never on the "
+                         "first nudge (self-heal window): %r" % sends)
+
+    def test_normal_529_fires_giveup_but_no_oauthblock(self):
         sends = self._spy_run_to_escalation("API Error: 529 overloaded — retrying")
         oauth = [k for _b, k in sends if k and k.startswith("oauthblock:")]
+        giveup = [k for _b, k in sends if k and k.startswith("apierr-giveup:")]
         self.assertEqual(oauth, [],
                          "a transient 529 must NEVER fire the oauthblock valve: %r"
                          % sends)
+        self.assertTrue(giveup,
+                        "the 529 run must itself reach escalation (the giveup "
+                        "ping fires) — else the oauthblock-absence is vacuous: %r"
+                        % sends)
 
 
 # --------------------------------------------------------------------------- #
@@ -283,6 +336,28 @@ class StuckOwnerAlertDecision(unittest.TestCase):
         self.assertFalse(d.alert)
         self.assertTrue(d.alerted, "the episode stays latched until recovery")
 
+    def test_recovery_clears_the_alerted_latch(self):
+        # THE teeth for the reset return: a non-stuck verdict after an alerted
+        # episode must clear `alerted` (return False, NOT `already_alerted`) so a
+        # FUTURE stuck episode alarms afresh. Mutating the reset to
+        # `StuckOwnerAlert(False, 0, already_alerted)` survives every other test.
+        d = self._run("working", 9, True)
+        self.assertFalse(d.alerted,
+                         "recovery must clear the alerted latch, not carry it")
+        self.assertEqual(d.streak, 0)
+
+    def test_full_two_episode_sequence(self):
+        # episode1: accumulate → fire → latch; recover; episode2: fire again.
+        streak, alerted, fires = 0, False, 0
+        seq = (["stuck"] * (self.MAX + 1) + ["working"] * 2
+               + ["stuck"] * (self.MAX + 1))
+        for v in seq:
+            d = self._run(v, streak, alerted)
+            streak, alerted = d.streak, d.alerted
+            if d.alert:
+                fires += 1
+        self.assertEqual(fires, 2, "each stuck episode fires exactly once")
+
 
 # --------------------------------------------------------------------------- #
 # SILENCE B fix — the lane sweep routes a PERSISTENT stuck to ONE owner alert
@@ -298,17 +373,19 @@ class SweepStuckOwnerAlert(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def _heartbeat(self, sid, *, age_s, now):
+    def _heartbeat(self, sid, *, age_s, now, goal_armed=True):
         p = ss.status_path(sid)
         p.parent.mkdir(parents=True, exist_ok=True)
         data = {"schema": 1, "sid": sid, "kind": "main", "last_turn": "stop",
                 "ts": int(now - age_s), "cwd": self.CWD, "marker": "working",
-                "goal_armed": True, "_note": "test"}
+                "goal_armed": goal_armed, "_note": "test"}
         p.write_text(json.dumps(data), encoding="utf-8")
         os.utime(p, (now - age_s, now - age_s))
         return p
 
-    def _sweep_n(self, n_sweeps):
+    def _run(self, armed_seq, *, send_result="sent", dry_run=False, state=None):
+        """Drive goal_lane_sweep once per element of `armed_seq` (a list of
+        `goal_armed` values), sharing `state`, returning (sends, state, sid)."""
         from _goal_arm_helpers import DeliverGoalFakeTmux, _write_marker_transcript
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
@@ -316,37 +393,76 @@ class SweepStuckOwnerAlert(unittest.TestCase):
         base = 1_000_000
         tpath = _write_marker_transcript(proj, self.CWD, "sess-662")
         sid = tpath.stem
-        state = {}
+        state = {} if state is None else state
         sends = []
 
         def spy_send(*a, **k):
             sends.append((a[0] if a else k.get("body"), k.get("dedup_key")))
-            return "sent"
+            return send_result
 
         armed_cap = ("● Predošlá práca hotová.\n❯ \n"
                      "  ctx ███░  caveman:lite  ◎ /goal active\n")
-        for i in range(n_sweeps):
+        for i, armed in enumerate(armed_seq):
             now = base + i * 60
             # keep the heartbeat well past the idle threshold every sweep → stuck
-            self._heartbeat(sid, age_s=goal.GOAL_LANE_IDLE_S + 600, now=now)
+            self._heartbeat(sid, age_s=goal.GOAL_LANE_IDLE_S + 600, now=now,
+                            goal_armed=armed)
             tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], armed_cap)
             goal.goal_lane_sweep(now, run=tmux, projects_dir=proj, state=state,
-                                 backlog_fetch=lambda cwd: 40, send_fn=spy_send)
-        return sends
+                                 backlog_fetch=lambda cwd: 40, send_fn=spy_send,
+                                 dry_run=dry_run)
+        return sends, state, sid
+
+    def _stuck(self, n):
+        return [True] * n
+
+    def _alerts(self, sends):
+        return [k for _b, k in sends if k and k.startswith("stuckalert:")]
 
     def test_persistent_stuck_fires_one_owner_alert(self):
-        sends = self._sweep_n(goal.GOAL_LANE_STUCK_ALERT_STREAK + 3)
-        alerts = [k for _b, k in sends if k and k.startswith("stuckalert:")]
-        self.assertEqual(len(alerts), 1,
+        sends, _s, _sid = self._run(self._stuck(goal.GOAL_LANE_STUCK_ALERT_STREAK + 3))
+        self.assertEqual(len(self._alerts(sends)), 1,
                          "a persistent structural stuck must fire EXACTLY one "
-                         "owner alert (keystroke recovery provably failed): %r"
-                         % sends)
+                         "owner alert (session did not revive): %r" % sends)
 
     def test_short_stuck_run_does_not_fire(self):
-        sends = self._sweep_n(2)   # below the streak threshold
-        alerts = [k for _b, k in sends if k and k.startswith("stuckalert:")]
-        self.assertEqual(alerts, [],
+        sends, _s, _sid = self._run(self._stuck(2))   # below the threshold
+        self.assertEqual(self._alerts(sends), [],
                          "a brief stuck window must NOT alarm: %r" % sends)
+
+    def test_dry_run_mutates_no_soa_state(self):
+        # #516: a diagnostic sweep advances no persisted episode state.
+        _sends, state, sid = self._run(self._stuck(3), dry_run=True)
+        rec = state.get("goal_lane", {}).get(sid, {})
+        self.assertNotIn("soa", rec, "dry_run must not persist a streak: %r" % rec)
+
+    def test_send_failure_retries_next_sweep(self):
+        # a send that fails (no-config/error) must NOT latch the episode — it
+        # keeps re-firing until a delivery lands (#134/#551 latch discipline).
+        sends, _s, _sid = self._run(
+            self._stuck(goal.GOAL_LANE_STUCK_ALERT_STREAK + 3),
+            send_result="error")
+        self.assertGreater(len(self._alerts(sends)), 1,
+                           "a failed send must retry, not consume the episode: %r"
+                           % sends)
+
+    def test_clear_then_rearm_resets_and_re_alerts(self):
+        # episode1 → alert; goal cleared (not-armed) → episode reset; a fresh
+        # stuck run → alerts AGAIN (never suppressed forever — the Silence-B
+        # recurrence class the reviewers flagged).
+        N = goal.GOAL_LANE_STUCK_ALERT_STREAK
+        seq = self._stuck(N + 1) + [False, False] + self._stuck(N + 1)
+        sends, _s, _sid = self._run(seq)
+        self.assertEqual(len(self._alerts(sends)), 2,
+                         "a re-armed loop that goes stuck again must re-alert "
+                         "(the episode must reset on a goal-clear): %r" % sends)
+
+    def test_alert_dedup_key_is_stable_across_the_episode(self):
+        # the ONE alert of an episode carries a single stable stuckalert key.
+        sends, _s, _sid = self._run(self._stuck(goal.GOAL_LANE_STUCK_ALERT_STREAK + 4))
+        keys = self._alerts(sends)
+        self.assertEqual(len(set(keys)), len(keys), "no dup keys: %r" % keys)
+        self.assertEqual(len(keys), 1, "exactly one alert per episode: %r" % keys)
 
 
 if __name__ == "__main__":
