@@ -699,5 +699,142 @@ class TestMouseRevertsOnDisconnect(unittest.TestCase):
             "off once the local override is unset")
 
 
+class TestWindowMenuRebind613Round2(unittest.TestCase):
+    """#613 REOPEN-2 round-2: the owner's Ctrl+B w blackout is an UPSTREAM
+    tmux 3.7b bug -- `choose-tree` renders ONLY to clients of the NEWEST
+    grouped session, so the client of an OLDER grouped session (the owner's
+    webterm, attached to the base while `tmux new -t zbynek` keeps forming a
+    newer grouped sibling on every terminal attach) gets a black screen. The
+    fix rebinds `prefix+w` fleet-wide to a `run-shell` window picker built
+    from `display-menu`, which renders on EVERY client (measured 17952 chars
+    on the exact dead base client, vs 176 for choose-tree). See the design +
+    validation comments on issue #613 (2026-08-24).
+
+    Three locks, mirroring #646's mouse-line shape (render + live-apply) plus
+    a REAL isolated-tmux behavioral regression using this module's own
+    `_IsolatedTmuxServer` harness -- RED before the rebind exists (default
+    choose-tree on a base-with-sibling paints no window list), GREEN once the
+    managed conf carries the rebind."""
+
+    # (a) the managed conf marker block carries the rebind (render lock,
+    # mirrors #646's mouse-line conf-block test).
+    def test_managed_block_rebinds_prefix_w_to_the_window_menu(self):
+        block = tp.render_tmux_history_block(window_size_manual=True)
+        self.assertIn(
+            "bind-key w run-shell", block,
+            "the managed tmux block must rebind prefix+w to a run-shell "
+            "window picker (dodging the upstream grouped-session choose-tree "
+            "bug), so choose-tree never blackens an older grouped client:\n%s"
+            % block)
+        self.assertIn(
+            "airuleset-tmux-window-menu.sh", block,
+            "the rebind must invoke the deployed window-menu helper script "
+            "by absolute path (the #289 popup-script precedent -- inline "
+            "shell is impossible, _tmux_conf_quote refuses the literal $ the "
+            "menu generator needs):\n%s" % block)
+        self.assertIn(
+            "#{client_name}", block,
+            "the rebind must hand run-shell the pressing client's name so "
+            "the helper's `display-menu -c` targets the exact (dead) "
+            "client:\n%s" % block)
+
+    # (b) the rebind is live-applied to a running server (a running tmux
+    # never re-reads the conf -- same live-apply class as the popup bind).
+    def test_window_menu_rebind_is_live_applied(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = os.path.join(d, "tmux.conf")
+            calls = []
+            tp.apply_tmux_history_limit(Path(conf), run=calls.append)
+        menu = [c for c in calls
+                if list(c[:3]) == ["tmux", "bind-key", "w"]
+                and any("run-shell" in str(x) for x in c)]
+        self.assertEqual(
+            len(menu), 1,
+            "apply_tmux_history_limit must live-apply the prefix+w window-menu "
+            "rebind exactly once (a running server never re-reads the conf); "
+            "found %d such calls in:\n%s" % (len(menu), calls))
+        self.assertTrue(
+            any("airuleset-tmux-window-menu.sh" in str(x) for x in menu[0]),
+            "the live-applied rebind must point at the deployed helper "
+            "script: %r" % (menu[0],))
+
+    # (c) THE behavioral regression: the exact dead-client shape (a client
+    # on the OLDER grouped base, a newer grouped sibling present) -- press
+    # Ctrl+B w and require the window picker to actually paint the window
+    # list. RED with the default binding (choose-tree paints nothing here),
+    # GREEN with the production rebind applied.
+    def test_window_menu_renders_on_the_dead_grouped_base_client(self):
+        cluster = _IsolatedTmuxServer()
+        self.addCleanup(cluster.close)
+        cluster.start_base("base")   # base + windows beta/gamma/delta
+
+        # Derive the EXACT rebind argv production would live-apply (never a
+        # hand-written one) -- absent in RED, so nothing is applied and the
+        # default choose-tree stays bound.
+        applied = self._apply_production_rebind(cluster)
+
+        # A NEWER grouped sibling with its own client -- the owner's real
+        # topology (webterm on the older base, WT on the newer sibling). This
+        # is the shape the round-2 matrix measured as dead for choose-tree.
+        cluster.tmux("new-session", "-d", "-t", "base", "-s", "sib")
+        base_fd = cluster.attach_client(
+            ["tmux", "-S", cluster.sock, "attach", "-t", "base"],
+            rows=_SSH_CLIENT_ROWS)
+        cluster.attach_client(
+            ["tmux", "-S", cluster.sock, "attach", "-t", "sib"],
+            rows=_SSH_CLIENT_ROWS)
+        cluster.wait_for_clients("base", 1)
+        cluster.wait_for_clients("sib", 1)
+        _drain(base_fd, 1.0)
+
+        os.write(base_fd, b"\x02w")
+        names = ("beta", "gamma", "delta")
+        text = ""
+        for _ in range(8):
+            text = _visible(_drain(base_fd, 1.0))
+            if all(n in text for n in names):
+                break
+        os.write(base_fd, b"q")      # close the menu / back out, tidy
+        _drain(base_fd, 0.5)
+
+        self.assertTrue(
+            applied,
+            "the production window-menu rebind was not found in "
+            "apply_tmux_history_limit's live-apply calls -- the fix is not "
+            "wired in (RED)")
+        self.assertTrue(
+            all(n in text for n in names),
+            "prefix+w on the OLDER grouped base client must paint the window "
+            "picker listing every window (%r); got %d visible chars, this is "
+            "the exact upstream choose-tree blackout the rebind fixes:\n%s"
+            % (names, len(text), text[:600]))
+
+    def _apply_production_rebind(self, cluster):
+        """Capture the rebind argv `apply_tmux_history_limit` would live-apply,
+        deploy the REAL helper script to a throwaway path, repoint the argv at
+        it, and apply it to `cluster`'s isolated server. Returns True iff a
+        rebind argv existed (False in RED -> nothing applied)."""
+        with tempfile.TemporaryDirectory() as d:
+            conf = os.path.join(d, "tmux.conf")
+            calls = []
+            tp.apply_tmux_history_limit(Path(conf), run=calls.append)
+        menu = [c for c in calls
+                if list(c[:3]) == ["tmux", "bind-key", "w"]
+                and any("run-shell" in str(x) for x in c)]
+        dest = getattr(tp, "WINDOW_MENU_SCRIPT_DEST", None)
+        render = getattr(tp, "render_window_menu_script", None)
+        if not menu or dest is None or render is None:
+            return False
+        script = os.path.join(cluster.dir, "window-menu.sh")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(render())
+        os.chmod(script, 0o755)
+        # repoint the (baked-in absolute) helper path at the throwaway copy
+        argv = [str(x).replace(str(dest), script) for x in menu[0]]
+        r = cluster.tmux(*argv[1:])   # argv[0] == "tmux"; cluster.tmux adds -S
+        self.assertEqual(r.returncode, 0, "live-applying the rebind failed: %s" % r.stderr)
+        return True
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
