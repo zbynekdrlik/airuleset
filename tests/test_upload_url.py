@@ -452,7 +452,7 @@ class TestMultiInterfaceUrls(TestCase):
                             return_value=["203.0.113.9", "127.0.0.1"]):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port))
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port, public=False))
             out = buf.getvalue()
         self.assertIn(f"http://127.0.0.1:{port}/", out)
         self.assertNotIn("203.0.113.9", out)   # unbindable interface not advertised
@@ -507,7 +507,7 @@ def _cmd_upload_output(test, dest, ttl=5, max_attempts=5):
         buf = io.StringIO()
         try:
             with contextlib.redirect_stdout(buf):
-                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=ttl, port=port))
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=ttl, port=port, public=False))
         except SystemExit:
             continue   # the probed port lost the race -- try a fresh one
         out = buf.getvalue()
@@ -1064,7 +1064,7 @@ class TestFreePortScanSeesTheServersOwnBinds(TestCase):
              m.patch.object(airuleset, "_pick_free_port",
                             return_value=port) as pick:
             with contextlib.redirect_stdout(io.StringIO()):
-                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=None))
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=None, public=False))
         self.assertEqual(ips, list(pick.call_args[0][0]))
 
 
@@ -1121,7 +1121,7 @@ class TestUploadLogPathIsPerUser(TestCase):
              contextlib.redirect_stderr(err), \
              contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as ctx:
-                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port))
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port, public=False))
         self.assertNotEqual(0, ctx.exception.code)
         self.assertIn(str(log), err.getvalue(),
                       "the failure must name the log it could not open")
@@ -1150,7 +1150,7 @@ class TestUploadLogsDoNotLitterTmp(TestCase):
         _log_dir(self)
         with m.patch.object(filedrop, "bind_ips", return_value=["127.0.0.1"]):
             with contextlib.redirect_stdout(io.StringIO()):
-                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port))
+                airuleset.cmd_upload(m.Mock(dir=str(dest), ttl=5, port=port, public=False))
         self.assertFalse(
             legacy.exists(),
             "the run wrote %s — a world-shared /tmp log keyed on the port "

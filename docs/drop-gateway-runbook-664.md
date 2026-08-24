@@ -51,13 +51,37 @@ go-live.
    `sudo -n systemctl restart spinbike-tunnel.service` (SYSTEM unit); on subdev
    it is `systemctl --user restart webterm-david-tunnel.service`.
 
-4. **Verify**:
+4. **Sibling accounts (subdev only)** — the marker (`~/.cloudflared/airuleset-drop.conf`)
+   is per-unix-account, but the loopback origin `127.0.0.1:8828` is box-wide. So a
+   SIBLING account that should also use the lane (e.g. `david2` alongside `david1`)
+   needs its OWN marker. `drop-gateway --apply` in that account fails (no tunnel
+   config there), so seed the marker directly:
+   ```
+   # as david2 on subdev, after david1's go-live above:
+   printf 'host=drop-david.newlevel.media\nport=8828\n' > ~/.cloudflared/airuleset-drop.conf
+   chmod 600 ~/.cloudflared/airuleset-drop.conf
+   ```
+   (spinbike is single-account, so this step does not apply there.)
+
+5. **Verify**:
    ```
    curl -sI https://drop-<box>.newlevel.media/         # 302 -> Access login (david) / reachable
    airuleset.py upload --public                          # prints https://drop-<box>.newlevel.media/<token>/
    ```
    On a no-tailscale box `--public` is the default anyway; on a tailscale box it
    forces the public lane.
+
+**Survives re-installs (subdev):** the subdev `webterm-david-tunnel` provisioner
+rewrites `config.yml` from scratch on every install, which would delete the drop
+ingress. `cmd_install` now re-asserts the ingress (idempotently, restarting the
+tunnel) whenever the marker is present, so a `push`/`install` after go-live keeps
+the lane working — no manual re-apply needed.
+
+**If `--apply` fails:** a non-zero exit is now surfaced (the process exits
+non-zero), and the LIVE marker is written ONLY after a successful tunnel restart
+AND (for david) a successful Access reconcile. Fix the reported cause (NOPASSWD
+sudo for spinbike's system unit, the `cloudflare-newlevel-access` token for
+david's Access app) and re-run `--apply`.
 
 ## What stayed UNVERIFIED in the #664 worktree (proven at deploy)
 

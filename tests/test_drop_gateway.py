@@ -127,6 +127,17 @@ class TestMarker(unittest.TestCase):
         Path(self.path).write_text("host=h\nport=notaninteger\n", encoding="utf-8")
         self.assertIsNone(dg.read_drop_marker(self.path))
 
+    def test_out_of_range_port_reads_none(self):
+        # An out-of-range port must fail-safe to None, never reach socket.bind
+        # (which would raise OverflowError) — #664 review.
+        for bad in ("0", "-1", "70000", "999999"):
+            Path(self.path).write_text("host=h\nport=%s\n" % bad, encoding="utf-8")
+            self.assertIsNone(dg.read_drop_marker(self.path), bad)
+
+    def test_marker_file_is_mode_600(self):
+        dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.path)
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+
 
 class TestResolvePublicLane(unittest.TestCase):
     def setUp(self):
@@ -134,27 +145,41 @@ class TestResolvePublicLane(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.present = os.path.join(self.tmp, "present.conf")
         self.absent = os.path.join(self.tmp, "absent.conf")
+        # A marker matching subdev's registered lane host.
         dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.present)
+
+    def _r(self, want, have, marker, nodename="subdev"):
+        return dg.resolve_public_lane(want, have, marker_path=marker, nodename=nodename)
 
     def test_no_marker_never_offers_public(self):
         # Even with --public, no live drop lane on this box → None (no 404 URL).
-        self.assertIsNone(dg.resolve_public_lane(True, False, marker_path=self.absent))
-        self.assertIsNone(dg.resolve_public_lane(True, True, marker_path=self.absent))
+        self.assertIsNone(self._r(True, False, self.absent))
+        self.assertIsNone(self._r(True, True, self.absent))
 
-    def test_explicit_public_uses_lane(self):
-        self.assertEqual(
-            dg.resolve_public_lane(True, True, marker_path=self.present),
-            ("drop-david.newlevel.media", 8828))
+    def test_explicit_public_uses_lane_from_registry(self):
+        # Returned host/port are the REGISTRY's, not the marker's raw strings.
+        self.assertEqual(self._r(True, True, self.present),
+                         ("drop-david.newlevel.media", dg.DROP_PORT))
 
     def test_auto_fallback_when_no_encrypted_private(self):
         # No tailscale (have_encrypted_private=False) → public even without --public.
-        self.assertEqual(
-            dg.resolve_public_lane(False, False, marker_path=self.present),
-            ("drop-david.newlevel.media", 8828))
+        self.assertEqual(self._r(False, False, self.present),
+                         ("drop-david.newlevel.media", dg.DROP_PORT))
 
     def test_encrypted_private_and_no_public_flag_keeps_today(self):
         # tailscale present + no --public → None (today's private-only behaviour).
-        self.assertIsNone(dg.resolve_public_lane(False, True, marker_path=self.present))
+        self.assertIsNone(self._r(False, True, self.present))
+
+    def test_box_with_no_registered_lane_never_offers_public(self):
+        # A marker on a box that isn't in DROP_LANES → None (registry-gated).
+        self.assertIsNone(self._r(True, False, self.present, nodename="dev1"))
+
+    def test_mismatched_marker_host_is_refused(self):
+        # A stale/foreign marker whose host != this box's registered lane host is
+        # refused — a credential URL is never routed to a mutable marker host (A-M2).
+        wrong = os.path.join(self.tmp, "wrong.conf")
+        dg.write_drop_marker("attacker.example.com", 8828, path=wrong)
+        self.assertIsNone(self._r(True, False, wrong))
 
 
 class TestUrlLine(unittest.TestCase):
@@ -257,18 +282,22 @@ class TestSecretPublicLaneHelper(unittest.TestCase):
     def test_no_tailscale_box_with_live_marker_auto_uses_public(self):
         from unittest import mock
         dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
+        lane = dg.drop_lane_for_box("subdev")
         with mock.patch("filedrop.bind_ips", return_value=["127.0.0.1"]), \
              mock.patch("filedrop._is_tailscale", return_value=False), \
+             mock.patch.object(dg, "drop_lane_for_box", return_value=lane), \
              mock.patch.object(dg, "DROP_MARKER", self.marker):
             host, port = self.cli_vault._secret_public_lane(
                 types.SimpleNamespace(public=False))
-        self.assertEqual((host, port), ("drop-david.newlevel.media", 8828))
+        self.assertEqual((host, port), ("drop-david.newlevel.media", dg.DROP_PORT))
 
     def test_tailscale_box_without_flag_keeps_private(self):
         from unittest import mock
         dg.write_drop_marker("drop-david.newlevel.media", 8828, path=self.marker)
+        lane = dg.drop_lane_for_box("subdev")
         with mock.patch("filedrop.bind_ips", return_value=["100.100.0.1"]), \
              mock.patch("filedrop._is_tailscale", return_value=True), \
+             mock.patch.object(dg, "drop_lane_for_box", return_value=lane), \
              mock.patch.object(dg, "DROP_MARKER", self.marker):
             host, port = self.cli_vault._secret_public_lane(
                 types.SimpleNamespace(public=False))
@@ -299,6 +328,195 @@ class TestUploadPublicLaneEndToEnd(unittest.TestCase):
         self.assertIn("[verejné", out)                 # the labelled public line
         # The loopback origin is NEVER advertised to the user.
         self.assertNotIn("http://127.0.0.1", out)
+
+
+class TestCmdDropGatewayRerunAfterFailedRestart(unittest.TestCase):
+    """#664 review C1: a re-run after a failed restart must RESTART again (not
+    silently write the LIVE marker over a tunnel that never reloaded the ingress).
+    Uses the spinbike lane (access=False) so Access never gates the marker."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.cfg = os.path.join(self.tmp, "config.yml")
+        self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
+        Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
+        self._orig = dg.DROP_LANES["spinbike"].tunnel_config
+        dg.DROP_LANES["spinbike"].tunnel_config = Path(self.cfg)
+
+    def tearDown(self):
+        dg.DROP_LANES["spinbike"].tunnel_config = self._orig
+
+    def test_second_apply_still_restarts_and_only_then_marks_live(self):
+        calls1, calls2 = [], []
+
+        def failing(argv, **kw):
+            calls1.append(argv)
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="down")
+
+        def ok(argv, **kw):
+            calls2.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        # Apply #1: config gets the ingress, restart FAILS → no marker.
+        rc1 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+                                        _marker_path=self.marker, _run=failing))
+        self.assertEqual(rc1, 1)
+        self.assertFalse(os.path.exists(self.marker))
+        self.assertTrue(calls1, "apply #1 must have attempted a restart")
+
+        # Apply #2: config already carries the ingress (changed=False) AND the
+        # marker is still absent → it MUST restart again, then mark live.
+        rc2 = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+                                        _marker_path=self.marker, _run=ok))
+        self.assertEqual(rc2, 0)
+        self.assertTrue(calls2, "apply #2 must restart even though config is unchanged")
+        self.assertEqual(dg.read_drop_marker(self.marker),
+                         ("drop-spinbike.newlevel.media", dg.DROP_PORT))
+
+
+class TestAccessGatedMarker(unittest.TestCase):
+    """#664 review B-M3: an access-gated lane goes LIVE only when the Access
+    reconcile succeeds — a failing Access must block the marker and return 1."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.cfg = os.path.join(self.tmp, "config.yml")
+        self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
+        # A david-shaped config (its tunnel uuid) so the m1 uuid check passes.
+        Path(self.cfg).write_text(
+            "tunnel: 1564fe31-a95f-4053-93d4-baff2b8a6e97\n"
+            "credentials-file: /home/david1/.cloudflared/x.json\n\n"
+            "ingress:\n"
+            "  - hostname: david.newlevel.media\n"
+            "    service: http://127.0.0.1:8081\n"
+            "  - service: http_status:404\n", encoding="utf-8")
+        self._orig = dg.DROP_LANES["subdev"].tunnel_config
+        dg.DROP_LANES["subdev"].tunnel_config = Path(self.cfg)
+
+    def tearDown(self):
+        dg.DROP_LANES["subdev"].tunnel_config = self._orig
+
+    def test_failed_access_reconcile_blocks_the_marker(self):
+        from unittest import mock
+
+        def ok_restart(argv, **kw):
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(dg, "_reconcile_access",
+                               return_value=(False, "Access ERROR: boom")):
+            rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="subdev",
+                                           _marker_path=self.marker, _run=ok_restart))
+        self.assertEqual(rc, 1)
+        self.assertFalse(os.path.exists(self.marker))
+
+
+class TestUuidMismatchRefused(unittest.TestCase):
+    """#664 review m1: refuse to edit a config whose `tunnel:` UUID is not the
+    lane's — never graft the drop ingress onto the wrong tunnel."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.cfg = os.path.join(self.tmp, "config.yml")
+        Path(self.cfg).write_text(
+            "tunnel: 00000000-dead-beef-0000-000000000000\n"
+            "ingress:\n  - service: http_status:404\n", encoding="utf-8")
+        self._orig = dg.DROP_LANES["spinbike"].tunnel_config
+        dg.DROP_LANES["spinbike"].tunnel_config = Path(self.cfg)
+
+    def tearDown(self):
+        dg.DROP_LANES["spinbike"].tunnel_config = self._orig
+
+    def test_wrong_tunnel_uuid_refused(self):
+        rc = dg.cmd_drop_gateway(_args(apply=True, _nodename="spinbike",
+                                       _marker_path=os.path.join(self.tmp, "m")))
+        self.assertEqual(rc, 1)
+
+
+class TestReconcileDropIngressOnInstall(unittest.TestCase):
+    """#664 review A-M1: install re-asserts a live drop ingress that a webterm
+    tunnel re-provision would otherwise clobber."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self.cfg = os.path.join(self.tmp, "config.yml")
+        self.marker = os.path.join(self.tmp, "airuleset-drop.conf")
+        self._orig = dg.DROP_LANES["spinbike"].tunnel_config
+        dg.DROP_LANES["spinbike"].tunnel_config = Path(self.cfg)
+
+    def tearDown(self):
+        dg.DROP_LANES["spinbike"].tunnel_config = self._orig
+
+    def _run_noop(self):
+        calls = []
+
+        def r(argv, **kw):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        return calls, r
+
+    def test_no_lane_box_is_noop(self):
+        calls, r = self._run_noop()
+        self.assertFalse(dg.reconcile_drop_ingress_on_install(
+            run=r, nodename="dev1", marker_path=self.marker))
+        self.assertEqual(calls, [])
+
+    def test_lane_without_marker_is_noop(self):
+        Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
+        calls, r = self._run_noop()
+        self.assertFalse(dg.reconcile_drop_ingress_on_install(
+            run=r, nodename="spinbike", marker_path=self.marker))  # no marker
+        self.assertEqual(calls, [])
+
+    def test_clobbered_ingress_is_re_added_and_restarted(self):
+        # Simulate the webterm re-provision: config WITHOUT the drop ingress, but
+        # the marker says the lane already went live.
+        Path(self.cfg).write_text(SPINBIKE_CONFIG, encoding="utf-8")
+        dg.write_drop_marker("drop-spinbike.newlevel.media", 8828, path=self.marker)
+        calls, r = self._run_noop()
+        self.assertTrue(dg.reconcile_drop_ingress_on_install(
+            run=r, nodename="spinbike", marker_path=self.marker))
+        self.assertIn("- hostname: drop-spinbike.newlevel.media",
+                      Path(self.cfg).read_text(encoding="utf-8"))
+        self.assertTrue(calls, "must restart after re-adding the ingress")
+
+    def test_present_ingress_is_noop_no_restart(self):
+        once = dg.render_drop_ingress_augmentation(
+            SPINBIKE_CONFIG, "drop-spinbike.newlevel.media")
+        Path(self.cfg).write_text(once, encoding="utf-8")
+        dg.write_drop_marker("drop-spinbike.newlevel.media", 8828, path=self.marker)
+        calls, r = self._run_noop()
+        self.assertTrue(dg.reconcile_drop_ingress_on_install(
+            run=r, nodename="spinbike", marker_path=self.marker))
+        self.assertEqual(calls, [], "no restart when the ingress is already present")
+
+
+class TestSecretShowLeadingFlagName(unittest.TestCase):
+    """#664 review: `secret show --public NAME` (flag before name) must recover
+    the NAME that argparse's REMAINDER swallowed, mirroring `secret request`."""
+
+    def test_recovers_name_from_remainder(self):
+        import cli_vault
+        # _secret_apply_remainder has already stripped the leading --public into
+        # args.public, leaving the NAME in cmd. _secret_show must adopt it and
+        # then fail at "not stored" (exit 1), NOT at "needs a NAME" (exit 2).
+        args = types.SimpleNamespace(name=None, file=None, cmd=["NOTSTORED664"],
+                                     public=True, ttl=None, allow_plain=False, port=None)
+        with self.assertRaises(SystemExit) as cm:
+            cli_vault._secret_show(args)
+        self.assertEqual(cm.exception.code, 1)
+        self.assertEqual(args.name, "NOTSTORED664")
+
+    def test_no_name_anywhere_still_errors(self):
+        import cli_vault
+        args = types.SimpleNamespace(name=None, file=None, cmd=[],
+                                     public=False, ttl=None, allow_plain=False, port=None)
+        with self.assertRaises(SystemExit) as cm:
+            cli_vault._secret_show(args)
+        self.assertEqual(cm.exception.code, 2)
 
 
 if __name__ == "__main__":

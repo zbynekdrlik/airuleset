@@ -53,9 +53,16 @@ DROP_HOST_SPINBIKE = "drop-spinbike.newlevel.media"
 DROP_HOST_DAVID = "drop-david.newlevel.media"
 
 # The go-live marker a `drop-gateway --apply` writes once a box's drop lane is
-# LIVE (ingress reconciled + local origin verified). The CLI's public channel is
+# LIVE (ingress reconciled + tunnel restarted). The CLI's public channel is
 # available IFF this file exists — so `--public` and the no-tailscale
 # auto-fallback never advertise a URL that would 404 before go-live.
+#
+# PER-UNIX-ACCOUNT (#664 review B-M2): the loopback origin 127.0.0.1:DROP_PORT is
+# box-wide, but this marker lives in the invoking account's own home. On subdev
+# the tunnel + config + `--user` unit belong to david1, so `drop-gateway --apply`
+# runs there; a SIBLING account (david2, …) that should also use the lane needs
+# its OWN marker seeded (the runbook documents this) — otherwise that account's
+# `secret request`/`upload` silently stays on the unreachable private URLs.
 DROP_MARKER = Path.home() / ".cloudflared" / "airuleset-drop.conf"
 
 _CFDIR = Path.home() / ".cloudflared"
@@ -133,16 +140,27 @@ def public_url_line(host, token):
 
 
 def write_drop_marker(host, port=DROP_PORT, path=None):
-    """Record that a live drop lane exists on this box (host + loopback port)."""
+    """Record that a live drop lane exists on this box (host + loopback port).
+
+    Written with `O_NOFOLLOW` + mode 0600 (the repo's #271 sensitive-write
+    discipline) — the marker gates a credential-intake URL, so a pre-planted
+    symlink at the path must not redirect the write and the file must not be
+    world-readable. Contents are non-secret (host+port), but a gratuitous
+    deviation from the vault-store bar is not warranted for a credential-routing
+    input."""
     p = Path(path if path is not None else DROP_MARKER)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("host=%s\nport=%d\n" % (host, port), encoding="utf-8")
+    data = ("host=%s\nport=%d\n" % (host, port)).encode("utf-8")
+    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
 
 
 def read_drop_marker(path=None):
     """(host, port) from the go-live marker, or None when absent / unreadable /
-    malformed. A malformed or empty marker reads as NO lane (fail-safe: the CLI
-    then keeps today's private-only behaviour, never a broken public URL)."""
+    malformed. A malformed / empty / out-of-range marker reads as NO lane
+    (fail-safe: the CLI then keeps today's private-only behaviour, never a broken
+    public URL or an uncaught bind error)."""
     p = Path(path if path is not None else DROP_MARKER)
     try:
         text = p.read_text(encoding="utf-8")
@@ -159,27 +177,41 @@ def read_drop_marker(path=None):
                 port = int(val)
             except ValueError:
                 return None
-    if not host or not port:
+    if not host or not port or not (1 <= port <= 65535):
         return None
     return host, port
 
 
-def resolve_public_lane(want_public, have_encrypted_private, marker_path=None):
+def resolve_public_lane(want_public, have_encrypted_private, marker_path=None,
+                        nodename=None):
     """(host, port) for the public drop lane, or None.
 
-    The public-TLS lane is used when the box HAS a live drop lane (marker
-    present) AND either the caller asked for it (`--public`) OR there is no
+    The host+port are the AUTHORITATIVE values from the git-controlled
+    `DROP_LANES` registry (`drop_lane_for_box`), NEVER the marker's own strings
+    (#664 review A-M2): the marker is a per-box go-live FLAG, so a credential
+    URL is never routed to a mutable/foreign marker host. A marker whose `host`
+    disagrees with this box's registered lane (a stale copy from a home-dir
+    migration, or a planted file) is refused outright.
+
+    The lane is used when this box HAS a registered drop lane, a matching live
+    marker exists, AND either the caller asked for it (`--public`) OR there is no
     encrypted private lane available (the no-tailscale auto-fallback — the
     ticket's channel order: tailscale → public). A box WITH an encrypted private
-    lane and NO `--public` keeps today's behaviour untouched (returns None).
-    A box with no marker never offers a public URL (returns None), so `--public`
-    before go-live degrades to today's private path rather than a 404 URL.
+    lane and NO `--public` keeps today's behaviour untouched (None). No marker /
+    no registered lane / a mismatched marker → None, so `--public` before go-live
+    degrades to today's private path rather than a 404 or a wrong-host URL.
     """
+    lane = drop_lane_for_box(nodename)
+    if lane is None:
+        return None
     marker = read_drop_marker(marker_path)
     if marker is None:
         return None
+    marker_host, _marker_port = marker
+    if marker_host != lane.host:                # stale / foreign marker — refuse
+        return None
     if want_public or not have_encrypted_private:
-        return marker
+        return lane.host, DROP_PORT             # authoritative, from the registry
     return None
 
 
@@ -226,33 +258,43 @@ def _restart_argv(lane):
     return ["systemctl", "--user", "restart", lane.tunnel_service]
 
 
+def _config_tunnel_uuid(config_text):
+    """The `tunnel:` UUID declared in a cloudflared config, or None."""
+    m = re.search(r"(?m)^\s*tunnel:\s*(\S+)\s*$", config_text)
+    return m.group(1) if m else None
+
+
 def _reconcile_access(lane, dry_run):
     """Reconcile the Cloudflare Access app for an access-gated drop lane, reusing
     cli_webterm_access.apply_profile (imported LAZILY to keep this a leaf). No-op
-    for a token-only lane. Returns a short status string (never the token)."""
+    for a token-only lane. Returns `(ok, msg)` — `ok` is False on a real reconcile
+    failure OR when the Access layer could not be applied for an access lane (so
+    the caller can refuse to mark an access-gated lane LIVE without its promised
+    Access protection). `msg` never contains the token. A DRY-RUN that only reads
+    is `ok=True` (nothing to fail)."""
     if not lane.access:
-        return "no Access (token-only TLS lane)"
+        return True, "no Access (token-only TLS lane)"
     spec = DROP_ACCESS_APPS.get(lane.host)
     if spec is None:
-        return "Access lane but no DROP_ACCESS_APPS spec for %s — skipped" % lane.host
+        return False, "Access lane but no DROP_ACCESS_APPS spec for %s" % lane.host
     try:
         import cli_webterm_access as acc
     except Exception as e:                             # pragma: no cover - defensive
-        return "Access reconcile skipped (cannot import cli_webterm_access: %s)" % e
+        return False, "Access reconcile skipped (cannot import cli_webterm_access: %s)" % e
     try:
         token = acc._load_token()
     except OSError as e:
-        return ("Access reconcile skipped — token %s unreadable (%s); run "
-                "`airuleset.py webterm-access` prerequisites first"
-                % (acc.WEBTERM_ACCESS_TOKEN_FILE, e))
+        return False, ("Access token %s unreadable (%s); run `airuleset.py "
+                       "webterm-access` prerequisites first"
+                       % (acc.WEBTERM_ACCESS_TOKEN_FILE, e))
     if not token:
-        return "Access reconcile skipped — token file empty"
+        return False, "Access token file empty"
     client = acc.AccessClient(acc.WEBTERM_ACCESS_ACCOUNT_ID, token=token)
     res = acc.apply_profile(client, spec, dry_run=dry_run)
     if res.get("error"):
-        return "Access ERROR: %s" % res["error"]
-    return "Access %s: %s" % ("(dry-run)" if dry_run else "applied",
-                              "; ".join(res.get("actions") or []) or "-")
+        return False, "Access ERROR: %s" % res["error"]
+    return True, "Access %s: %s" % ("(dry-run)" if dry_run else "applied",
+                                    "; ".join(res.get("actions") or []) or "-")
 
 
 def cmd_drop_gateway(args):
@@ -292,6 +334,16 @@ def cmd_drop_gateway(args):
               % (lane.tunnel_config, e), file=sys.stderr)
         return 1
 
+    # Refuse to edit a config that is NOT this lane's tunnel (m1): the augmenter
+    # and the restart both trust `lane.tunnel_config`, so a mismatched `tunnel:`
+    # would graft the drop ingress onto the wrong tunnel.
+    cfg_uuid = _config_tunnel_uuid(config_text)
+    if cfg_uuid is not None and cfg_uuid != lane.tunnel_uuid:
+        print("drop-gateway: %s declares tunnel %s, not this lane's %s — refusing "
+              "to edit the wrong tunnel's config"
+              % (lane.tunnel_config, cfg_uuid, lane.tunnel_uuid), file=sys.stderr)
+        return 1
+
     try:
         augmented = render_drop_ingress_augmentation(config_text, lane.host)
     except ValueError as e:
@@ -302,9 +354,9 @@ def cmd_drop_gateway(args):
     print("  ingress: %s"
           % ("ADD %s -> http://127.0.0.1:%d" % (lane.host, DROP_PORT) if changed
              else "already present (idempotent no-op)"))
-    print("  access:  %s" % _reconcile_access(lane, dry_run=True))
 
     if dry_run:
+        print("  access:  %s" % _reconcile_access(lane, dry_run=True)[1])
         print("  DNS (manual runbook): CNAME %s -> %s.cfargotunnel.com (proxied)"
               % (lane.host, lane.tunnel_uuid))
         print("  (dry-run — nothing changed; re-run with --apply)")
@@ -314,6 +366,13 @@ def cmd_drop_gateway(args):
         Path(lane.tunnel_config).write_text(augmented, encoding="utf-8")
         print("  wrote %s (drop ingress added, existing entries preserved)"
               % lane.tunnel_config)
+
+    # Restart whenever the config changed OR the lane is not yet LIVE (marker
+    # absent) — so a re-run AFTER a failed restart (config already carries the
+    # ingress from the prior run, `changed=False`) still restarts, instead of
+    # writing the LIVE marker over a tunnel that never reloaded the ingress
+    # (#664 review C1). A fully-live idempotent re-run skips the (prod) restart.
+    if changed or read_drop_marker(marker_path) is None:
         argv = _restart_argv(lane)
         try:
             r = run(argv, capture_output=True, text=True)
@@ -328,7 +387,16 @@ def cmd_drop_gateway(args):
                   file=sys.stderr)
             return 1
         print("  restarted %s" % lane.tunnel_service)
-    print("  access:  %s" % _reconcile_access(lane, dry_run=False))
+
+    access_ok, access_msg = _reconcile_access(lane, dry_run=False)
+    print("  access:  %s" % access_msg)
+    if not access_ok:
+        # An access-gated lane's Access IS the promised double protection —
+        # refuse to mark it LIVE without it (#664 review B-M3).
+        print("  NOT marking LIVE — Access reconcile did not succeed on an "
+              "access-gated lane; fix the token/app and re-run --apply",
+              file=sys.stderr)
+        return 1
 
     write_drop_marker(lane.host, DROP_PORT, path=marker_path)
     print("  marker written (%s) — public drop lane is now LIVE on this box"
@@ -336,3 +404,65 @@ def cmd_drop_gateway(args):
     print("  DNS: ensure CNAME %s -> %s.cfargotunnel.com (proxied) exists"
           % (lane.host, lane.tunnel_uuid))
     return 0
+
+
+def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None):
+    """Re-assert the drop ingress into this box's tunnel config at install time —
+    idempotently, and ONLY when the lane already went LIVE (marker present)
+    (#664 review A-M1).
+
+    WHY: the subdev david tunnel provisioner (`setup_webterm_david_tunnel`)
+    UNCONDITIONALLY rewrites `~/.cloudflared/config.yml` with just its own
+    hostname + the catch-all on every install — silently deleting a drop ingress
+    a prior `drop-gateway --apply` added, while the go-live marker survives. Left
+    unhealed, the CLI would then advertise a public URL that 404s. This runs
+    AFTER webterm setup in `cmd_install`, re-adds the ingress if it went missing,
+    and restarts the tunnel. It NEVER raises (best-effort, LOUD on failure) and
+    is a pure no-op on any box without a live drop lane (the overwhelming
+    majority — no lane, or a lane whose marker was never written).
+
+    Returns True when the ingress is present+live after this call, False on any
+    skip/failure.
+    """
+    run = run or __import__("subprocess").run
+    try:
+        lane = drop_lane_for_box(nodename)
+        if lane is None:
+            return False                        # no drop lane on this box — no-op
+        if read_drop_marker(marker_path) is None:
+            return False                        # lane never went live — nothing to preserve
+        try:
+            config_text = Path(lane.tunnel_config).read_text(encoding="utf-8")
+        except OSError as e:
+            print("  drop-gateway: cannot read %s to re-assert the drop ingress "
+                  "(%s)" % (lane.tunnel_config, e), file=sys.stderr)
+            return False
+        cfg_uuid = _config_tunnel_uuid(config_text)
+        if cfg_uuid is not None and cfg_uuid != lane.tunnel_uuid:
+            print("  drop-gateway: %s is not this lane's tunnel — skipping ingress "
+                  "re-assert" % lane.tunnel_config, file=sys.stderr)
+            return False
+        try:
+            augmented = render_drop_ingress_augmentation(config_text, lane.host)
+        except ValueError:
+            print("  drop-gateway: %s has no catch-all — skipping ingress re-assert"
+                  % lane.tunnel_config, file=sys.stderr)
+            return False
+        if augmented == config_text:
+            return True                         # ingress already present — no restart
+        Path(lane.tunnel_config).write_text(augmented, encoding="utf-8")
+        argv = _restart_argv(lane)
+        r = run(argv, capture_output=True, text=True)
+        if getattr(r, "returncode", 1) != 0:
+            print("  drop-gateway: re-added the drop ingress to %s but restart "
+                  "FAILED (%s) — restart %s by hand"
+                  % (lane.tunnel_config, (getattr(r, "stderr", "") or "").strip(),
+                     lane.tunnel_service), file=sys.stderr)
+            return False
+        print("  drop-gateway: re-asserted the drop ingress into %s + restarted %s"
+              % (lane.tunnel_config, lane.tunnel_service), file=sys.stderr)
+        return True
+    except Exception as e:                             # pragma: no cover - defensive
+        print("  drop-gateway: ingress re-assert errored (%r) — skipped" % e,
+              file=sys.stderr)
+        return False

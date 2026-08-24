@@ -479,6 +479,17 @@ def _secret_show(args):
     vault entry is created or consumed — `show` neither stores nor forgets; the
     endpoint self-terminates on first view or TTL.
     """
+    # Recover a NAME that argparse's REMAINDER swallowed after a LEADING flag
+    # (`secret show --public NAME` parses to name=None, cmd=['NAME'] once
+    # `_secret_apply_remainder` stripped the flag), mirroring what
+    # `_secret_request_names` does for the request path (#664 review). The trailing
+    # form `secret show NAME --public` already sets args.name directly.
+    if getattr(args, "name", None) is None and not getattr(args, "file", None):
+        leftover = [t for t in (getattr(args, "cmd", None) or [])
+                    if not t.startswith("-")]
+        if leftover:
+            args.name = leftover[0]
+
     import secrets as _secrets
     import subprocess
     import time
@@ -500,10 +511,15 @@ def _secret_show(args):
     # Public-TLS drop lane (#664): same tailscale -> public fallback as request.
     public_host, port = _secret_public_lane(args)
     if public_host:
+        if getattr(args, "port", None) or getattr(args, "allow_plain", False):
+            print("secret show: public drop lane — ignoring --port/--allow-plain "
+                  "(fixed loopback port %d, TLS via the tunnel)" % port,
+                  file=sys.stderr)
         ips, dropped = ["127.0.0.1"], []
         if _pick_free_port(ips, [port]) is None:
-            print("secret show: public drop port %d is busy — wait for the "
-                  "previous endpoint to close" % port, file=sys.stderr)
+            print("secret show: public drop port %d is busy — another drop "
+                  "endpoint (secret/upload) holds it; wait for it to close" % port,
+                  file=sys.stderr)
             sys.exit(1)
     else:
         if not ips:
@@ -747,10 +763,15 @@ def _secret_request(args):
     # advertise ONE public HTTPS URL — never an ssh -L instruction.
     public_host, port = _secret_public_lane(args)
     if public_host:
+        if getattr(args, "port", None) or getattr(args, "allow_plain", False):
+            print("secret: public drop lane — ignoring --port/--allow-plain "
+                  "(fixed loopback port %d, TLS via the tunnel)" % port,
+                  file=sys.stderr)
         ips, dropped = ["127.0.0.1"], []
         if _pick_free_port(ips, [port]) is None:
-            print("secret: public drop port %d is busy — finish or `secret "
-                  "forget` the pending endpoint first" % port, file=sys.stderr)
+            print("secret: public drop port %d is busy — another drop endpoint "
+                  "(secret/upload) holds it; wait for it to close" % port,
+                  file=sys.stderr)
             sys.exit(1)
     else:
         if not ips:

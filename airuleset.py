@@ -1176,6 +1176,17 @@ def cmd_install(args):
     except Exception as e:
         print(f"  webterm setup error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 5c. #664: re-assert the public-TLS drop ingress AFTER webterm setup.
+    # setup_webterm_david_tunnel rewrites subdev's config.yml from scratch, which
+    # would delete a live drop ingress; this idempotently re-adds it (no-op unless
+    # this box has a LIVE drop lane). Never raises. ---
+    try:
+        import cli_drop_gateway
+        cli_drop_gateway.reconcile_drop_ingress_on_install()
+    except Exception as e:                             # pragma: no cover - defensive
+        print(f"  drop-gateway ingress re-assert error (non-fatal): {e}",
+              file=sys.stderr)
+
     # --- 6. caveman plugin: every machine (enable + stable statusline shim) ---
     # A still-failing plugin install (after correct marketplace registration)
     # is now a REQUIRED-step failure, not a silent best-effort one (issue:
@@ -5255,7 +5266,13 @@ def cmd_upload(args):
     public IP, since this is a WRITE endpoint) and advertises ONE URL per interface
     so the user has a working link whether they are on tailscale or the LAN. Each
     URL is verified to answer 200 BEFORE printing (no-localhost-urls); the endpoint
-    self-expires after --ttl seconds."""
+    self-expires after --ttl seconds.
+
+    #664 public-TLS drop lane: on a box with a LIVE drop lane AND (--public OR no
+    tailscale), it instead binds 127.0.0.1 on the fixed drop port that the box's
+    cloudflared tunnel fronts and advertises ONE public HTTPS URL (TLS at the
+    edge, the token unchanged) — never an scp / ssh -L ask. --port/--allow-plain
+    do not apply on that lane."""
     import secrets as _secrets
     import subprocess
     import time
@@ -5281,10 +5298,14 @@ def cmd_upload(args):
     public_lane = _dg.resolve_public_lane(getattr(args, "public", False), have_tailscale)
     if public_lane:
         public_host, port = public_lane
+        if getattr(args, "port", None):
+            print("upload: public drop lane — ignoring --port (fixed loopback "
+                  "port %d, TLS via the tunnel)" % port, file=sys.stderr)
         ips = ["127.0.0.1"]
         if _pick_free_port(ips, [port]) is None:
-            print("upload: public drop port %d is busy — wait for the previous "
-                  "endpoint to close" % port, file=sys.stderr)
+            print("upload: public drop port %d is busy — another drop endpoint "
+                  "(secret/upload) holds it; wait for it to close" % port,
+                  file=sys.stderr)
             sys.exit(1)
     else:
         public_host = None
@@ -5340,8 +5361,11 @@ def cmd_upload(args):
         for u in reachable:   # one URL per interface — open whichever your network reaches
             print(u)
     print(f"dest={dest}  ttl={ttl}s  log={log}")
-    print("Otvor ktorúkoľvek URL v prehliadači (podľa siete). Po nahratí over: grep SAVED "
-          + str(log))
+    if public_host:
+        print("Otvor URL v prehliadači. Po nahratí over: grep SAVED " + str(log))
+    else:
+        print("Otvor ktorúkoľvek URL v prehliadači (podľa siete). Po nahratí over: "
+              "grep SAVED " + str(log))
 
 
 # --- #433 cluster H: the whole `secret` (credential-vault) CLI cluster +
@@ -6121,7 +6145,12 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    commands[args.command](args)
+    rc = commands[args.command](args)
+    # Propagate a command's non-zero int return code to the process exit status
+    # (#664 review: a failed `drop-gateway --apply` / `webterm-access` must not
+    # exit 0, so a scripted go-live can see the failure). None / 0 → exit 0.
+    if isinstance(rc, int) and rc != 0:
+        sys.exit(rc)
 
 
 def cmd_goal_inventory(args):
