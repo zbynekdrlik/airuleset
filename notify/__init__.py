@@ -1263,10 +1263,15 @@ def compose_oauth_block_alert(project, loc, nudges):
     Please run /login") survived every one of the `nudges` automatic resume
     attempts — i.e. the #602 self-heal (fresh token on disk) provably did NOT
     land, so this is a non-self-healing AUTH block needing a MANUAL `/login`.
-    Keyed `oauthblock:` (OUTSIDE the #546 apierr family, exactly like
-    `acctblock:`) so it is NEVER swallowed — the montalu6 9,5h silent outage was
-    precisely this alarm not existing. `loc` names the session/pane. No @mention
-    here — send() prepends it."""
+    Keyed `oauthblock:`. #662 kept this OUTSIDE the #546 apierr family (like
+    `acctblock:`) so it would never be swallowed; #676 (owner ruling
+    2026-08-24) REVERSED that — a 401 OAuth-revoke is NORMAL subscription-
+    switching by the Claude project + watchers, not an incident, so the
+    `oauthblock:` class is now in `SUPPRESSED_ALERT_PREFIXES`: this body is
+    still COMPOSED and passed to send(), but send() suppresses the Discord PING
+    (the machine channel keeps the signal — watchdog journal + the `suppressed`
+    delivery-log line; the silent auto-resume is untouched). `loc` names the
+    session/pane. No @mention here — send() prepends it."""
     proj = stream_qualified((_clean(project) or "?").rstrip("/").split("/")[-1] or "?")
     where = _clean(loc) or "?"
     return ("⛔ **%s** — session (%s) potrebuje manuálny `/login` (odvolaný token "
@@ -2572,6 +2577,15 @@ SUPPRESSED_ALERT_PREFIXES = (
     ("usage", "usage-limit"),            # watchdog usage.py (weekly usage %)
     ("burn-alert", "token-burn"),        # watchdog job 19 (hourly token-burn)
     ("fleet-burn-budget", "fleet-budget"),  # watchdog job 16 (fleet spend budget)
+    # #676 (2026-08-24 owner ruling): #662's `oauthblock:` escalation alarm
+    # (watchdog job 1, the persistent /login-revoke valve) is SPAM — a 401
+    # "OAuth access token has been revoked" is NORMAL subscription-switching by
+    # the Claude project + its watchers, not an incident. Same #546 audience
+    # split: no Discord PING, the machine channel keeps the signal (watchdog
+    # journal + the `suppressed` delivery-log line). The watchdog's job stays
+    # the silent auto-resume (#675 owns the work-resume half). `acctblock:`
+    # (genuine account-block, needs a human) + `stuckalert:` stay un-suppressed.
+    ("oauthblock", "oauth-revoke (#676)"),  # watchdog job 1 escalation (#662 alarm — owner-ruled spam)
 )
 
 
@@ -2624,7 +2638,8 @@ def send(body, env=None, owner=None, dedup_key=None, dry_run=False,
     every existing caller.
 
     #546: a `dedup_key` belonging to an owner-suppressed ALERT class
-    (`SUPPRESSED_ALERT_PREFIXES` — api-error / limit / token-burn) POSTs
+    (`SUPPRESSED_ALERT_PREFIXES` — api-error / limit / token-burn, plus the
+    #676 oauth-revoke class) POSTs
     NOTHING and returns "suppressed" — logged as an explicit decision (never a
     silent drop), never dry-run-mutating. The gate runs FIRST so a suppressed
     class never claims a dedup marker, resolves a channel, or reaches the
