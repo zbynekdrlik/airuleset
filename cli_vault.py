@@ -192,6 +192,33 @@ def _secret_select_ips(ips, allow_plain=False):
     return enc, plain
 
 
+def _secret_public_lane(args):
+    """(public_host, port) for the public-TLS drop lane, or (None, None) (#664).
+
+    Delegates the decision to `cli_drop_gateway.resolve_public_lane`: the lane is
+    used only when this box has a LIVE drop marker AND (`--public` was passed OR
+    the box has no tailscale — the no-tailscale auto-fallback). "Has tailscale" is
+    the user-reachable encrypted transport; loopback/LAN do not count (loopback
+    is never reachable BY the user, LAN is unencrypted), so the check keys on a
+    real tailscale interface. A box with tailscale and no `--public` returns
+    (None, None) — today's behaviour untouched.
+    """
+    from filedrop import _is_tailscale
+    from filedrop import bind_ips
+    import cli_drop_gateway as _dg
+    have_tailscale = any(_is_tailscale(ip) for ip in bind_ips())
+    lane = _dg.resolve_public_lane(getattr(args, "public", False), have_tailscale)
+    if lane:
+        return lane[0], lane[1]
+    return None, None
+
+
+def _secret_public_url_line(host, token):
+    """The advertised public HTTPS URL line (delegates to cli_drop_gateway)."""
+    import cli_drop_gateway as _dg
+    return _dg.public_url_line(host, token)
+
+
 def _secret_url_line(ip, port, token, iface=None):
     """One advertised URL plus its TRANSPORT, spelled out.
 
@@ -340,7 +367,7 @@ def _secret_apply_remainder(args):
         if tok == "--":
             rest.pop(0)
             break
-        if tok in ("--stdin", "--replace", "--allow-plain"):
+        if tok in ("--stdin", "--replace", "--allow-plain", "--public"):
             setattr(args, tok[2:].replace("-", "_"), True)
             rest.pop(0)
             continue
@@ -469,18 +496,27 @@ def _secret_show(args):
         sys.exit(1)
     ips, dropped = _secret_select_ips(private,
                                       allow_plain=getattr(args, "allow_plain", False))
-    if not ips:
-        print("secret show: only unencrypted interfaces are available (%s). A "
-              "credential would cross the LAN in cleartext — re-run with "
-              "--allow-plain if that is acceptable here."
-              % ", ".join(dropped), file=sys.stderr)
-        sys.exit(1)
 
-    port = int(getattr(args, "port", None) or 0) or _pick_free_port(ips, SHOW_PORTS)
-    if port is None:
-        print("secret show: no free port in %d-%d" % (SHOW_PORTS[0], SHOW_PORTS[-1]),
-              file=sys.stderr)
-        sys.exit(1)
+    # Public-TLS drop lane (#664): same tailscale -> public fallback as request.
+    public_host, port = _secret_public_lane(args)
+    if public_host:
+        ips, dropped = ["127.0.0.1"], []
+        if _pick_free_port(ips, [port]) is None:
+            print("secret show: public drop port %d is busy — wait for the "
+                  "previous endpoint to close" % port, file=sys.stderr)
+            sys.exit(1)
+    else:
+        if not ips:
+            print("secret show: only unencrypted interfaces are available (%s). A "
+                  "credential would cross the LAN in cleartext — re-run with "
+                  "--allow-plain if that is acceptable here."
+                  % ", ".join(dropped), file=sys.stderr)
+            sys.exit(1)
+        port = int(getattr(args, "port", None) or 0) or _pick_free_port(ips, SHOW_PORTS)
+        if port is None:
+            print("secret show: no free port in %d-%d" % (SHOW_PORTS[0], SHOW_PORTS[-1]),
+                  file=sys.stderr)
+            sys.exit(1)
 
     token = _secrets.token_urlsafe(24)      # 24 bytes = 192 bits (>= 128)
     st.log_event("show", label, ttl=ttl)
@@ -522,7 +558,8 @@ def _secret_show(args):
 
     for ip in ips:
         if _live(_secret_health_url(ip, port)):
-            print(_secret_url_line(ip, port, token))
+            print(_secret_public_url_line(public_host, token) if public_host
+                  else _secret_url_line(ip, port, token))
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))
@@ -547,7 +584,8 @@ def _secret_request_names(args):
     """
     ints = {"--ttl": "ttl", "--keep": "keep", "--port": "port"}
     strs = {"--persist": "persist", "--persist-map": "persist_map"}
-    bools = {"--allow-plain": "allow_plain", "--replace": "replace"}
+    bools = {"--allow-plain": "allow_plain", "--replace": "replace",
+             "--public": "public"}
     toks = ([args.name] if getattr(args, "name", None) else []) \
         + list(getattr(args, "cmd", None) or [])
     names, i = [], 0
@@ -702,18 +740,30 @@ def _secret_request(args):
         sys.exit(1)
     ips, dropped = _secret_select_ips(private,
                                       allow_plain=getattr(args, "allow_plain", False))
-    if not ips:
-        print("secret: only unencrypted interfaces are available (%s). A "
-              "credential would cross the LAN in cleartext — re-run with "
-              "--allow-plain if that is acceptable here."
-              % ", ".join(dropped), file=sys.stderr)
-        sys.exit(1)
 
-    port = int(getattr(args, "port", None) or 0) or _pick_free_port(ips, SECRET_PORTS)
-    if port is None:
-        print("secret: no free port in %d-%d" % (SECRET_PORTS[0], SECRET_PORTS[-1]),
-              file=sys.stderr)
-        sys.exit(1)
+    # Public-TLS drop lane (#664): channel order is tailscale -> public. When
+    # this box has a LIVE drop lane AND (--public OR no tailscale), bind loopback
+    # on the fixed drop port that a managed cloudflared tunnel fronts and
+    # advertise ONE public HTTPS URL — never an ssh -L instruction.
+    public_host, port = _secret_public_lane(args)
+    if public_host:
+        ips, dropped = ["127.0.0.1"], []
+        if _pick_free_port(ips, [port]) is None:
+            print("secret: public drop port %d is busy — finish or `secret "
+                  "forget` the pending endpoint first" % port, file=sys.stderr)
+            sys.exit(1)
+    else:
+        if not ips:
+            print("secret: only unencrypted interfaces are available (%s). A "
+                  "credential would cross the LAN in cleartext — re-run with "
+                  "--allow-plain if that is acceptable here."
+                  % ", ".join(dropped), file=sys.stderr)
+            sys.exit(1)
+        port = int(getattr(args, "port", None) or 0) or _pick_free_port(ips, SECRET_PORTS)
+        if port is None:
+            print("secret: no free port in %d-%d" % (SECRET_PORTS[0], SECRET_PORTS[-1]),
+                  file=sys.stderr)
+            sys.exit(1)
 
     token = _secrets.token_urlsafe(24)          # 24 bytes = 192 bits (>= 128)
     nonces = {n: st.register_request(n, endpoint_ttl_s=ttl, keep_s=keep,
@@ -763,7 +813,8 @@ def _secret_request(args):
 
     for ip in ips:
         if _live(_secret_health_url(ip, port)):
-            print(_secret_url_line(ip, port, token))
+            print(_secret_public_url_line(public_host, token) if public_host
+                  else _secret_url_line(ip, port, token))
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))

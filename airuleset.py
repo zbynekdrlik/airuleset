@@ -219,6 +219,9 @@ from cli_webterm import (  # noqa: E402
 from cli_webterm_access import (  # noqa: E402
     cmd_webterm_access as cmd_webterm_access,
 )
+from cli_drop_gateway import (  # noqa: E402  #664 public-TLS drop lane
+    cmd_drop_gateway as cmd_drop_gateway,
+)
 
 
 # Skills directories in the repo that should be symlinked
@@ -5268,13 +5271,30 @@ def cmd_upload(args):
     # FRESH here (unsandboxed) so it always reflects the current network.
     ips = bind_ips()
 
-    port = int(getattr(args, "port", None) or 0) or None
-    if port is None:
-        # Probe the addresses the server is ABOUT TO BIND, not loopback (#115).
-        port = _pick_free_port(ips, range(8799, 8820))
-        if port is None:
-            print("upload: no free port in 8799-8819", file=sys.stderr)
+    # Public-TLS drop lane (#664): channel order tailscale -> public. On a box
+    # with a LIVE drop lane AND (--public OR no tailscale), bind loopback on the
+    # fixed drop port a managed cloudflared tunnel fronts and advertise ONE public
+    # HTTPS URL — never an scp/ssh -L ask.
+    from filedrop import _is_tailscale
+    import cli_drop_gateway as _dg
+    have_tailscale = any(_is_tailscale(ip) for ip in ips)
+    public_lane = _dg.resolve_public_lane(getattr(args, "public", False), have_tailscale)
+    if public_lane:
+        public_host, port = public_lane
+        ips = ["127.0.0.1"]
+        if _pick_free_port(ips, [port]) is None:
+            print("upload: public drop port %d is busy — wait for the previous "
+                  "endpoint to close" % port, file=sys.stderr)
             sys.exit(1)
+    else:
+        public_host = None
+        port = int(getattr(args, "port", None) or 0) or None
+        if port is None:
+            # Probe the addresses the server is ABOUT TO BIND, not loopback (#115).
+            port = _pick_free_port(ips, range(8799, 8820))
+            if port is None:
+                print("upload: no free port in 8799-8819", file=sys.stderr)
+                sys.exit(1)
 
     token = _secrets.token_urlsafe(12)
     log = _upload_log_path(port)
@@ -5310,9 +5330,15 @@ def cmd_upload(args):
     else:
         print(f"upload: endpoint failed to come up — see {log}", file=sys.stderr)
         sys.exit(1)
-    reachable = [u for u in urls if _live(u)] or [urls[0]]
-    for u in reachable:   # one URL per interface — open whichever your network reaches
-        print(u)
+    if public_host:
+        # The loopback bind is the origin; the tunnel fronts it under TLS. Print
+        # the ONE public URL (its reachability is a go-live property gated by the
+        # marker the reconciler wrote), not the un-routable loopback address.
+        print(_dg.public_url_line(public_host, token))
+    else:
+        reachable = [u for u in urls if _live(u)] or [urls[0]]
+        for u in reachable:   # one URL per interface — open whichever your network reaches
+            print(u)
     print(f"dest={dest}  ttl={ttl}s  log={log}")
     print("Otvor ktorúkoľvek URL v prehliadači (podľa siete). Po nahratí over: grep SAVED "
           + str(log))
@@ -5804,6 +5830,19 @@ def main():
     p_wacc.add_argument("--profile", default=None,
                         help="limit to one profile (default: every declared profile)")
 
+    p_dg = sub.add_parser(
+        "drop-gateway",
+        help="#664: reconcile THIS box's public-TLS drop lane — add a drop-host "
+             "ingress to its existing cloudflared tunnel so secret/upload can "
+             "print a simple public HTTPS URL (no tailscale, no ssh -L)")
+    p_dg.add_argument("--apply", action="store_true",
+                      help="perform the augment + Access reconcile + tunnel restart "
+                           "+ marker write (default is dry-run: reads only, prints "
+                           "the plan, changes nothing)")
+    p_dg.add_argument("--dry-run", action="store_true",
+                      help="explicit no-op flag (dry-run is already the default "
+                           "without --apply); accepted for clarity")
+
     p_burn = sub.add_parser(
         "burn",
         help="Token-spend report from local Claude Code transcripts — "
@@ -5862,6 +5901,10 @@ def main():
                       help="Endpoint self-shutdown after N seconds (default 7200)")
     p_up.add_argument("--port", type=int, default=None,
                       help="Port (default: first free in 8799-8819)")
+    p_up.add_argument("--public", action="store_true",
+                      help="#664: force the public-TLS drop URL (loopback fronted "
+                           "by the box's cloudflared tunnel) — auto-used anyway on "
+                           "a box with no tailscale; needs `drop-gateway --apply` first")
 
     p_sec = sub.add_parser(
         "secret",
@@ -5895,6 +5938,10 @@ def main():
     p_sec.add_argument("--allow-plain", action="store_true",
                        help="request: also offer UNENCRYPTED LAN URLs (a "
                             "credential would cross the network in cleartext)")
+    p_sec.add_argument("--public", action="store_true",
+                       help="#664: request/show over the public-TLS drop URL "
+                            "(loopback fronted by the box's cloudflared tunnel) — "
+                            "auto-used on a no-tailscale box; go-live: `drop-gateway`")
     p_sec.add_argument("--replace", action="store_true",
                        help="request: cancel an existing pending request for "
                             "this name (stopping its endpoint) and issue a new URL")
@@ -6176,6 +6223,7 @@ SUBCOMMANDS = {
     "goal-arm": cmd_goal_arm,
     "fable-gate": cmd_fable_gate,
     "webterm-access": cmd_webterm_access,
+    "drop-gateway": cmd_drop_gateway,
     "burn": cmd_burn,
     "delegation": cmd_delegation,
     "authority": cmd_authority,
