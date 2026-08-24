@@ -19,12 +19,16 @@ ZERO owner alarm. TWO independent silences both held:
   persistent `stuck` to an owner alert.
 
 These lock the fix (RED against the pre-#662 tree):
-  * the swallow is REAL (apierr-giveup suppressed) and the two NEW alert
-    namespaces (`oauthblock:` / `stuckalert:`) are NOT suppressed;
+  * the swallow is REAL (apierr-giveup suppressed); at #662 both NEW alert
+    namespaces (`oauthblock:` / `stuckalert:`) were un-suppressed. #676 (owner
+    ruling 2026-08-24) then REVERSED oauthblock — a 401 OAuth-revoke is normal
+    subscription-switching, not an incident — so `oauthblock:` is now
+    owner-suppressed (POSTs nothing), while `stuckalert:` stays un-suppressed;
   * `compose_oauth_block_alert` / `compose_stuck_owner_alert` exist + name
     the session and the human action (/login, coverage outage);
-  * job 1 fires the un-suppressed oauthblock alert at escalation for a
-    401-revoked transcript, but NOT for a normal 529;
+  * job 1 still EMITS the oauthblock send at escalation for a 401-revoked
+    transcript (the send()-layer suppression is what drops the PING), but NOT
+    for a normal 529;
   * `stuck_owner_alert_decision` fires ONCE per episode after the streak and
     RESETS on recovery;
   * the lane sweep routes a PERSISTENT structural stuck to ONE owner alert.
@@ -100,20 +104,27 @@ class SuppressionContrast(unittest.TestCase):
             notify._suppressed_alert_class("apierr-giveup:key:hash:123"),
             "apierr-giveup must be suppressed (the swallow this ticket fixes)")
 
-    def test_oauthblock_is_not_suppressed(self):
-        self.assertIsNone(
+    def test_oauthblock_is_suppressed_676(self):
+        # #676 (owner ruling 2026-08-24) REVERSED #662's "never swallowed" —
+        # a 401 OAuth-revoke is normal subscription-switching, not an incident,
+        # so the oauthblock class is now #546-owner-suppressed. See
+        # test_oauth_suppression_676.py for the full lock.
+        self.assertIsNotNone(
             notify._suppressed_alert_class("oauthblock:key:hash:123"),
-            "oauthblock is the persistent-revoke escape valve — must POST")
+            "oauthblock is now owner-suppressed (#676) — must NOT ping")
 
     def test_stuckalert_is_not_suppressed(self):
         self.assertIsNone(
             notify._suppressed_alert_class("stuckalert:sid:123"),
-            "stuckalert is the structural-stuck escape valve — must POST")
+            "stuckalert is the structural-stuck escape valve — must POST "
+            "(#676 objected ONLY to the oauth class)")
 
     def test_new_namespaces_have_no_prefix_collision(self):
-        # boundary-matched: neither new key may accidentally match apierr/usage/…
-        for k in ("oauthblock:x:y:1", "stuckalert:s:2"):
-            self.assertIsNone(notify._suppressed_alert_class(k), k)
+        # boundary-matched: oauthblock resolves to its OWN class (#676), never
+        # accidentally to api-error/usage/…; stuckalert stays un-suppressed.
+        self.assertEqual(
+            notify._suppressed_alert_class("oauthblock:x:y:1"), "oauth-revoke (#676)")
+        self.assertIsNone(notify._suppressed_alert_class("stuckalert:s:2"))
 
 
 class NeedsInteractiveLoginPredicate(unittest.TestCase):
@@ -165,10 +176,11 @@ class SuppressionThroughSend(unittest.TestCase):
         self.assertEqual(r, "suppressed")
         self.assertEqual(self.posts, [])
 
-    def test_oauthblock_posts(self):
+    def test_oauthblock_suppressed_676(self):
+        # #676: the oauthblock class is now owner-suppressed — POSTs nothing.
         r = notify.send("body", dedup_key="oauthblock:k:h:1")
-        self.assertEqual(r, "sent")
-        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(r, "suppressed")
+        self.assertEqual(self.posts, [])
 
     def test_stuckalert_posts(self):
         r = notify.send("body", dedup_key="stuckalert:s:1")
