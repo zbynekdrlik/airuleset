@@ -202,5 +202,118 @@ class TestNormalizeOwnerSession(unittest.TestCase):
         # nothing to assert beyond "no crash + no rename"; a bare fn returns None
 
 
+# --------------------------------------------------------------------------- #
+# #660 — kill-sweep for standalone `<owner>-N` idle-shell strays.
+#
+# Root cause (repro'd live, isolated `-L` socket, tmux 3.7b): `tmux new -t
+# <owner>` with NO existing `<owner>` base names the session `<owner>-0`
+# (group-tagged); a lone grouped survivor KEEPS its group tag, so a
+# STANDALONE (no group tag) `<owner>-0` with its own bash window is an
+# INDEPENDENT session created via a path #651's interactive-only 3-token
+# `tmux()` wrapper does not cover. When the canonical `<owner>` already
+# exists, normalization now absorbs such a stray IFF it is unattached and
+# every pane runs a bare shell — NEVER one running claude or any non-shell
+# process (feedback_never_touch_stopped_sessions). Same dependency-injected
+# fake-`run` discipline as TestNormalizeOwnerSession above; no real tmux.
+# --------------------------------------------------------------------------- #
+class _FakeServer:
+    """Fake tmux runner: maps session name -> (attached_flag, [pane cmds]);
+    answers list-sessions / list-panes and records kill-session /
+    rename-session calls. No real tmux, invisible to the isolation lock."""
+    def __init__(self, sessions):
+        self._sessions = dict(sessions)  # name -> (attached_str, [cmds])
+        self.calls = []
+
+    @staticmethod
+    def _target(argv):
+        for i, a in enumerate(argv):
+            if a == "-t" and i + 1 < len(argv):
+                return argv[i + 1].lstrip("=")
+        return None
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        if "list-sessions" in argv:
+            out = "".join(n + "\n" for n in self._sessions)
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+        if "list-panes" in argv:
+            att, cmds = self._sessions.get(self._target(argv), ("0", []))
+            out = "".join("%s\t%s\n" % (att, c) for c in cmds)
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+        if "kill-session" in argv:
+            self._sessions.pop(self._target(argv), None)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    def kill_calls(self):
+        return [c for c in self.calls if "kill-session" in c]
+
+    def rename_calls(self):
+        return [c for c in self.calls if "rename-session" in c]
+
+
+class TestNormalizeKillSweep660(unittest.TestCase):
+    def _run(self, sessions, owner="zbynek", audit_dir=None):
+        srv = _FakeServer(sessions)
+        tmuxprov._live_normalize_owner_session(owner, run=srv, audit_dir=audit_dir)
+        return srv
+
+    def test_kills_idle_bare_shell_stray_when_owner_exists(self):
+        srv = self._run({"zbynek": ("1", ["node"]), "zbynek-0": ("0", ["bash"])})
+        self.assertEqual(srv.kill_calls(),
+                         [["tmux", "kill-session", "-t", "=zbynek-0"]])
+
+    def test_never_kills_stray_running_claude(self):
+        srv = self._run({"zbynek": ("1", ["bash"]), "zbynek-0": ("0", ["claude"])})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_never_kills_attached_stray(self):
+        srv = self._run({"zbynek": ("1", ["bash"]), "zbynek-0": ("1", ["bash"])})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_never_kills_when_any_pane_is_non_shell(self):
+        srv = self._run({"zbynek": ("1", ["bash"]),
+                         "zbynek-0": ("0", ["bash", "vim"])})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_does_not_touch_foreign_session(self):
+        # `marek` runs claude AND is outside the owner namespace -> untouched.
+        srv = self._run({"zbynek": ("1", ["bash"]),
+                         "marek": ("0", ["claude"])})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_kills_multiple_idle_strays(self):
+        srv = self._run({"zbynek": ("1", ["node"]),
+                         "zbynek-0": ("0", ["bash"]),
+                         "zbynek-2": ("0", ["-bash"])})
+        killed = {c[-1] for c in srv.kill_calls()}
+        self.assertEqual(killed, {"=zbynek-0", "=zbynek-2"})
+
+    def test_no_kill_sweep_when_owner_absent(self):
+        # owner missing -> the RENAME path runs, never the kill sweep.
+        srv = self._run({"zbynek-0": ("0", ["bash"])})
+        self.assertEqual(srv.kill_calls(), [])
+        self.assertEqual(srv.rename_calls(),
+                         [["tmux", "rename-session", "-t", "zbynek-0", "zbynek"]])
+
+    def test_audit_log_records_kill(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._run({"zbynek": ("1", ["node"]), "zbynek-0": ("0", ["bash"])},
+                      audit_dir=td)
+            log = Path(td) / "normalize.log"
+            self.assertTrue(log.is_file())
+            text = log.read_text()
+            self.assertIn("killed", text)
+            self.assertIn("zbynek-0", text)
+
+    def test_audit_log_records_skip_for_claude(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._run({"zbynek": ("1", ["bash"]), "zbynek-0": ("0", ["claude"])},
+                      audit_dir=td)
+            text = (Path(td) / "normalize.log").read_text()
+            self.assertIn("skip", text)
+            self.assertIn("zbynek-0", text)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
