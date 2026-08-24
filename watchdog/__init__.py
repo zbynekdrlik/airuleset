@@ -4003,7 +4003,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                                       send_fn=send_fn, dry_run=dry_run,
                                       delivery_probe=delivery_probe,
                                       owner_by_sid=owner_by_sid,
-                                      project_by_sid=project_by_sid),
+                                      project_by_sid=project_by_sid, authority=_box_authority()),  # #667
          "delivery-stall error")
 
     # Job 25 — CARD RECONCILIATION (#134): the mirror of job 24, same

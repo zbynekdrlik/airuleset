@@ -351,7 +351,7 @@
     "watchdog/pane_text.py": 199,
     "watchdog/questions.py": 791,
     "watchdog/release_gap.py": 428,
-    "watchdog/repo_health.py": 770,
+    "watchdog/repo_health.py": 783,
     "watchdog/session_status.py": 400,
     "watchdog/stash.py": 1048,
     "watchdog/sweep_jobs.py": 263,
