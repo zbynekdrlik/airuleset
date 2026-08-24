@@ -64,8 +64,13 @@ const CW = 0.6, CH = 1.2;                 // fake NATURAL monospace cell = 0.6*f
 // why xterm's own mouse hit-testing stays correct (it divides by that same cell).
 function natural(term){
   const lh = term.options.lineHeight || 1, ls = term.options.letterSpacing || 0;
-  return { width:  term.cols * (CW*term.options.fontSize + ls),
-           height: term.rows * (CH*term.options.fontSize * lh) };
+  // xterm quantizes cell dims to INTEGER px: cell width = round(char width) + the
+  // letterSpacing px, cell height = round(char height * lineHeight). Model that
+  // rounding (not a continuous float) so the fill's no-overflow FLOOR targets are
+  // exercised against real quantization -- a raw lineHeight would overflow here (#678).
+  const cellW = Math.round(CW*term.options.fontSize) + ls;
+  const cellH = Math.round(CH*term.options.fontSize * lh);
+  return { width: term.cols * cellW, height: term.rows * cellH };
 }
 const term = {
   cols: 80, rows: 24,
@@ -1278,18 +1283,22 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         self.assertLessEqual(out["gridW"], out["availW"] + 1)  # never overflows width
         self.assertLessEqual(out["gridH"], out["availH"] + 1)  # ... nor height
 
-    def test_fit_fills_the_viewport_no_letterbox_via_bounded_stretch(self):
-        # #655 RED->GREEN, mechanism updated by #678: the min-fit font alone
+    def test_fit_fills_the_viewport_reduced_letterbox_via_native_cells(self):
+        # #655 RED->GREEN, mechanism reworked by #678: the min-fit font alone
         # LETTERBOXES whenever the viewport aspect != the fixed 176x51 grid aspect
         # (the owner's "okno v strede"). #655 filled the residual with a CSS
-        # transform scale; #678 proved that BREAKS xterm's mouse hit-test, so the
-        # fill now grows the REAL cell via lineHeight (vertical) + letterSpacing
-        # (horizontal) instead -- correct mouse (see
-        # test_fill_does_not_offset_mouse_selection). lineHeight is a fine float
-        # multiplier so the VERTICAL loose dim fills near-exactly; letterSpacing is
-        # integer px/cell so the HORIZONTAL fill is COARSER (a small residual
-        # letterbox may remain -- #678: a working mouse outranks a pixel-exact
-        # fill). Either way it never OVERFLOWS and never CSS-scales the terminal.
+        # transform scale; #678 proved that BREAKS xterm's mouse hit-test (see
+        # test_fill_does_not_offset_mouse_selection), so the fill now grows the REAL
+        # cell via lineHeight (vertical) + letterSpacing (horizontal). BOTH are
+        # INTEGER-px per cell (xterm quantizes), so each floors to the largest cell
+        # that fits, REDUCING the letterbox (fills the tight axis fully + shrinks the
+        # loose-axis margin) without ELIMINATING it -- a small residual letterbox
+        # (up to ~one cell per axis) remains rather than the mouse-breaking exact
+        # transform (#678: a working mouse outranks a pixel-exact fill). It NEVER
+        # overflows (no clipped bottom row) and NEVER CSS-scales the terminal.
+        # (Fill % is measured against the harness's modelled INTEGER cell — the real
+        # ratio depends on the true cell aspect; the load-bearing invariants are
+        # no-overflow + no-transform, verified live for mouse correctness.)
         if shutil.which("node") is None:
             self.skipTest("node not available")
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
@@ -1298,18 +1307,16 @@ class TestBrowserFixedGridFit(unittest.TestCase):
             out = _run_fit_harness(html, vw, vh)
             fillW = out["gridW"] / out["availW"]
             fillH = out["gridH"] / out["availH"]
-            # vertical loose dim fills near-exactly via lineHeight; horizontal via
-            # coarse letterSpacing fills much better than the ~88% fontSize-only
-            # letterbox but not pixel-exact (RED #655: current code letterboxed the
-            # loose dim by 10%+). NEVER overflows, NEVER a CSS transform (#678).
+            # fills meaningfully (no BIG letterbox) but coarsely (integer cells);
+            # NEVER overflows, NEVER a CSS transform (#678).
             self.assertGreaterEqual(
-                fillW, 0.95,
-                "%s: grid must FILL the width via letterSpacing (coarse ok, no big "
-                "letterbox); filled %.1f%% (ls=%s)" % (tag, fillW * 100, out["letterSpacing"]))
+                fillW, 0.85,
+                "%s: grid must FILL most of the width (no big letterbox); filled "
+                "%.1f%% (ls=%s)" % (tag, fillW * 100, out["letterSpacing"]))
             self.assertGreaterEqual(
-                fillH, 0.98,
-                "%s: grid must FILL the height via lineHeight; filled %.1f%% "
-                "(lh=%s)" % (tag, fillH * 100, out["lineHeight"]))
+                fillH, 0.94,
+                "%s: grid must FILL most of the height (no big letterbox); filled "
+                "%.1f%% (lh=%s)" % (tag, fillH * 100, out["lineHeight"]))
             self.assertLessEqual(out["gridW"], out["availW"] + 1, "%s: no overflow W" % tag)
             self.assertLessEqual(out["gridH"], out["availH"] + 1, "%s: no overflow H" % tag)
             self.assertEqual(out["scaleX"], 1, "%s: no CSS transform (breaks mouse)" % tag)
@@ -1350,6 +1357,12 @@ class TestBrowserFixedGridFit(unittest.TestCase):
             self.assertGreaterEqual(out["letterSpacing"], 0)  # never negative
             # and the grid never overflows the viewport even at the cap
             self.assertLessEqual(out["gridH"], out["availH"] + 1, "%s: no overflow H" % tag)
+            # the WIDE extreme is exactly where the horizontal letterSpacing cap
+            # binds -- assert the fill never overflows width there (the tall extreme
+            # is excluded: 176 cols at the min font floor can exceed a <~700px
+            # viewport, a pre-existing fontSize-min-fit limit, not the fill's).
+            if vw > vh:
+                self.assertLessEqual(out["gridW"], out["availW"] + 1, "%s: no overflow W" % tag)
 
     def test_fill_does_not_offset_mouse_selection(self):
         # #678 REGRESSION (RED->GREEN): the #655 fill scaled `.xterm` with a CSS
@@ -1368,6 +1381,13 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         # For a click at the VISUAL centre of grid cell N, xterm reports (0-based)
         # `ceil((N+0.5)*scale) - 1` (transform-origin-center is self-cancelling in
         # rect.top, so only the scale factor matters). It equals N iff scale==1.
+        # SCOPE: this locks the ROOT CAUSE invariant -- the fill applies NO CSS
+        # transform (scale==1), so a regression re-introducing one re-breaks it. The
+        # harness has no getCoords dividing by cssCellHeight, so mouse-correctness of
+        # the native-cell fill itself rests on real-xterm behavior, verified LIVE
+        # (loopback ttyd: with lineHeight/letterSpacing, a fixed pixel at row N's
+        # visual centre hit-tests to N because visualCellH==cssCellH; the CSS
+        # transform made visualCellH!=cssCellH -> row 24->31).
         if shutil.which("node") is None:
             self.skipTest("node not available")
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
