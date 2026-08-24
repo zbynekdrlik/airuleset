@@ -114,8 +114,7 @@ def ensure_claude_cli_installed(env: dict = None):
         # correctly (the binary genuinely isn't there), but the printed
         # "rc=0" in that case is actively misleading to whoever reads it.
         r = subprocess.run(
-            ["bash", "-c",
-             "set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash"],
+            _claude_installer_argv(),
             capture_output=True, text=True, timeout=180, env=e)
         if r.returncode == 0 and _claude_cli_installed(e):
             print("    claude CLI: installed (curl -fsSL "
@@ -130,6 +129,149 @@ def ensure_claude_cli_installed(env: dict = None):
         print("    ⚠ claude CLI MISSING and auto-install skipped (%s) — "
               "install manually: curl -fsSL https://claude.ai/install.sh | "
               "bash" % ex, file=sys.stderr)
+
+
+def _claude_installer_argv():
+    """The one bash argv that runs Anthropic's official user-space installer.
+    Factored out so `ensure_claude_cli_installed()` (install when NOTHING
+    resolves) and `ensure_claude_native_userspace()` (FORCE the native install
+    when only a root/system copy resolves, #659) run byte-identical installer
+    commands. `set -o pipefail` so a curl failure is not masked by bash's own
+    exit code (the LAST command in the pipe)."""
+    return ["bash", "-c",
+            "set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash"]
+
+
+# --- #659: native user-space claude, never a root-npm copy -----------------
+# The system bin dirs to look for a NON-user-writable `claude` in -- a root
+# `npm -g` install (the spinbike-vps case: `/usr/bin/claude` that cannot
+# self-update, `Auto-update failed: no write permission to npm prefix`) or any
+# other system-path copy. Deliberately EXCLUDES ~/.local/bin so the native
+# install is never mistaken for a system copy to remove. `/snap/bin` is
+# deliberately OMITTED (#659 review): a snap-packaged claude's `/snap/bin/claude`
+# is a snapd-managed symlink that `rm -f` would only have snapd recreate on the
+# next refresh, and the correct removal is `snap remove` -- the fleet does not
+# use a snap claude, so excluding it avoids fighting snapd for no gain.
+_CLAUDE_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _native_claude_present() -> bool:
+    """True iff the native user-space claude (`~/.local/bin/claude`) resolves
+    and is executable -- the install we WANT (self-updating in user space).
+    Uses `shutil.which` scoped to `~/.local/bin` so a dangling symlink from a
+    partial install reads as absent (the executable-check discipline of
+    `_claude_cli_installed`); this DELIBERATELY omits that function's login-shell
+    `command -v` fallback -- here we specifically need the NATIVE ~/.local copy
+    present, not merely some `claude` on some login PATH."""
+    local_bin = str(Path.home() / ".local" / "bin")
+    return shutil.which("claude", path=local_bin) is not None
+
+
+def _system_claude_path():
+    """The path of a `claude` that resolves on a SYSTEM bin dir OUTSIDE $HOME
+    (a root-npm / system install -- the un-self-updatable kind, #659), or None.
+    Resolves the symlink so a `/usr/bin/claude -> ../lib/node_modules/...`
+    still counts as outside $HOME; a copy whose real target lives under $HOME
+    (an unusual layout) is NOT a system copy and returns None."""
+    p = shutil.which("claude", path=_CLAUDE_SYSTEM_PATH)
+    if not p:
+        return None
+    home = os.path.realpath(str(Path.home()))
+    if os.path.realpath(p).startswith(home + os.sep):
+        return None
+    return p
+
+
+def _remove_system_claude(syspath, run):
+    """Best-effort removal of a root/system `claude` at `syspath`, gated on
+    passwordless sudo (`sudo -n true` -- never prompts). NEVER raises. Only the
+    resolved system-bin path (from `_system_claude_path`, not user input) is
+    passed to `sudo -n rm -f` via argv (no shell), so there is no injection
+    surface. The caller has already confirmed the native `~/.local` install is
+    present, so this can never leave the box (for THIS user) with no `claude`.
+
+    Residuals accepted as best-effort (#659 review): (a) if the system copy was
+    a root-`npm -g` install, `rm -f` unlinks the launcher symlink but leaves the
+    npm PACKAGE tree, which a later root `npm update -g` could resurrect -- the
+    next install re-removes it, so it converges; (b) on a rare multi-user box a
+    non-managed account that relied on the shared `/usr/bin/claude` (and lacks
+    its own ~/.local copy) loses resolution -- every managed account carries the
+    native copy, and the fleet's boxes are single-owner, so this is not a real
+    case here."""
+    if not shutil.which("sudo"):
+        print("    claude: system copy %s left in place (no sudo to remove it)"
+              % syspath)
+        return
+    try:
+        probe = run(["sudo", "-n", "true"], capture_output=True, text=True,
+                    timeout=10)
+    except Exception as ex:  # noqa: BLE001 -- best-effort, never break install
+        print("    ⚠ claude: sudo probe error, leaving system copy %s: %r"
+              % (syspath, ex), file=sys.stderr)
+        return
+    if getattr(probe, "returncode", 1) != 0:
+        print("    claude: root/system copy %s left in place (no passwordless "
+              "sudo) -- the native ~/.local install already shadows it on the "
+              "managed PATH; remove it manually to stop a non-managed shell's "
+              "auto-update error" % syspath)
+        return
+    try:
+        r = run(["sudo", "-n", "rm", "-f", syspath], capture_output=True,
+                text=True, timeout=15)
+    except Exception as ex:  # noqa: BLE001
+        print("    ⚠ claude: removing system copy %s failed: %r"
+              % (syspath, ex), file=sys.stderr)
+        return
+    if getattr(r, "returncode", 1) == 0:
+        print("    claude: removed root/system copy %s (native ~/.local "
+              "install is now authoritative)" % syspath)
+    else:
+        print("    ⚠ claude: removing system copy %s failed (rc=%s): %s"
+              % (syspath, r.returncode, (r.stderr or "").strip()[:200]),
+              file=sys.stderr)
+
+
+def ensure_claude_native_userspace(env: dict = None, run=None):
+    """#659: make the resolvable `claude` the NATIVE user-space install
+    (`~/.local/bin/claude`, self-updating in user space), never a root-npm /
+    system copy that cannot self-update (the spinbike-vps `no write permission
+    to npm prefix` error). Runs AFTER `ensure_claude_cli_installed()` in
+    cmd_install, fleet-wide, best-effort, non-fatal:
+
+      * A box already fully native (no system-path `claude`) -> pure no-op.
+      * A box with ONLY a root/system copy -> lay down the native install
+        (`ensure_claude_cli_installed` skipped it precisely because the system
+        copy resolved), then remove the system copy (gated on passwordless
+        sudo, so a no-sudo subdev account is a safe no-op).
+      * The native install is NEVER removed, and the system copy is removed
+        ONLY once the native one is confirmed present -- so a box can never be
+        left with no `claude`.
+    """
+    import subprocess
+    e = env or _claude_cli_env()
+    run = run or subprocess.run
+    syspath = _system_claude_path()
+    if syspath is None:
+        return  # fully native or claude-less -- nothing to migrate
+    if not _native_claude_present():
+        # a root/system claude resolved, so ensure_claude_cli_installed()
+        # short-circuited; FORCE the native user-space install now.
+        try:
+            r = run(_claude_installer_argv(), capture_output=True, text=True,
+                    timeout=180, env=e)
+            if r.returncode == 0 and _native_claude_present():
+                print("    claude: native ~/.local user-space install laid "
+                      "down (was root/system-only: %s)" % syspath)
+        except Exception as ex:  # noqa: BLE001 -- non-fatal
+            print("    ⚠ claude: native user-space install skipped (%s) -- "
+                  "leaving system copy %s in place" % (ex, syspath),
+                  file=sys.stderr)
+    if not _native_claude_present():
+        print("    ⚠ claude: native user-space install still missing -- "
+              "leaving system copy %s in place (never removing the only "
+              "claude)" % syspath, file=sys.stderr)
+        return
+    _remove_system_claude(syspath, run)
 
 
 FFMPEG_STATIC_URL = ("https://johnvansickle.com/ffmpeg/releases/"

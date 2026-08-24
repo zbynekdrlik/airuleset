@@ -1001,6 +1001,17 @@ def cmd_install(args):
     except Exception as e:
         print(f"  owner-key provisioning error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-quater. Owner VPS NOPASSWD sudo (#659): on an owner VPS-class box
+    # (the deploy loop set AIRULESET_OWNER_VPS=1 for its owner_vps REMOTE_HOSTS
+    # entry), install visudo-validated NOPASSWD sudo for the owner user so the
+    # claude working there has full operational capability. A pure no-op on
+    # every other box (the env is unset) and on a box without passwordless sudo
+    # yet (LOUD one-time-bootstrap report). Non-fatal. ---
+    try:
+        provision_owner_sudo()
+    except Exception as e:
+        print(f"  owner-sudo provisioning error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3c. tmux managed block: every managed user's ~/.tmux.conf (#235/#236/#241) ---
     # tmux's own 2000-line default plus the current CC renderer's re-render
     # frame-stacking made real scrollback holey within minutes under
@@ -1089,6 +1100,19 @@ def cmd_install(args):
         ensure_claude_cli_installed()
     except Exception as e:
         print(f"  claude CLI install error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 3f-native. claude native user-space install, never root-npm (#659) ---
+    # A box carrying a root-npm `/usr/bin/claude` looks "installed" to
+    # ensure_claude_cli_installed() above, so it kept the un-updatable copy
+    # (the spinbike-vps `no write permission to npm prefix` error). Force the
+    # native ~/.local install where only a system copy resolves and remove the
+    # system copy (gated on passwordless sudo -- a safe no-op on a fully-native
+    # box and on the sudo-less subdev accounts). Fleet-wide, non-fatal.
+    try:
+        ensure_claude_native_userspace()
+    except Exception as e:
+        print(f"  claude native user-space migration error (non-fatal): {e}",
+              file=sys.stderr)
 
     # --- 3f-bis. ffmpeg static binary: fleet-wide, best-effort, no sudo
     # needed (#275) -- the meeting-analysis skill's own ffmpeg extraction
@@ -1584,6 +1608,11 @@ from cli_binary_installers import (  # noqa: E402, F401
     _claude_cli_env,
     _claude_cli_installed,
     ensure_claude_cli_installed,
+    _claude_installer_argv,
+    _native_claude_present,
+    _system_claude_path,
+    _remove_system_claude,
+    ensure_claude_native_userspace,
     FFMPEG_STATIC_URL,
     FFMPEG_STATIC_BIN_DIR,
     FFMPEG_STATIC_DEST,
@@ -3577,9 +3606,14 @@ def _notify_run_card(args, compose_autopilot_card, send):
 from cli_remote import (  # noqa: E402, F401
     REMOTE_DEPLOY_TIMEOUT_S as REMOTE_DEPLOY_TIMEOUT_S,
     SONIOX_KEY_SOURCE as SONIOX_KEY_SOURCE,
+    OWNER_HEADLESS_TOKEN_SOURCE as OWNER_HEADLESS_TOKEN_SOURCE,
+    OWNER_HEADLESS_TOKEN_DELIVERED_NAME as OWNER_HEADLESS_TOKEN_DELIVERED_NAME,
     _soniox_key_line as _soniox_key_line,
+    _owner_headless_token_value as _owner_headless_token_value,
+    _deliver_secret_to_hosts as _deliver_secret_to_hosts,
     _deployable_hosts as _deployable_hosts,
     provision_subdev_soniox_key as provision_subdev_soniox_key,
+    provision_owner_headless_token as provision_owner_headless_token,
     _SSH_AUTH_DENIED_RX as _SSH_AUTH_DENIED_RX,
     _is_ssh_auth_failure as _is_ssh_auth_failure,
     _SSH_TRANSIENT_RX as _SSH_TRANSIENT_RX,
@@ -3609,6 +3643,18 @@ from cli_remote import (  # noqa: E402, F401
 from cli_owner_keys import (  # noqa: E402, F401
     OWNER_PUBKEYS as OWNER_PUBKEYS,
     provision_owner_keys as provision_owner_keys,
+)
+
+# --- #659: owner VPS-class sudo provisioning -- a self-contained leaf,
+# consumed by cmd_install below (gated on the AIRULESET_OWNER_VPS=1 env the
+# deploy loop sets ONLY for owner_vps targets) so an owner VPS gets NOPASSWD
+# sudo for the owner user via the same zero-extra-ssh Pattern A as owner keys.
+# Re-exported here so cmd_install's `provision_owner_sudo()` call resolves as a
+# module global (and stays test-patchable via `airuleset.provision_owner_sudo`).
+from cli_owner_vps import (  # noqa: E402, F401
+    provision_owner_sudo as provision_owner_sudo,
+    _owner_vps_signalled as _owner_vps_signalled,
+    _sudoers_install_script as _sudoers_install_script,
 )
 
 # --- #433 cluster L-E: REMOTE_HOSTS (the fleet deploy-target registry) promoted
