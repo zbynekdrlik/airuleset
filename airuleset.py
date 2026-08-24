@@ -417,6 +417,11 @@ from cli_bashrc_appliers import (  # noqa: E402, F401
     _stream_marker_block_spans as _stream_marker_block_spans,
     apply_stream_ssh_attach as apply_stream_ssh_attach,
     is_single_session_box_user as is_single_session_box_user,
+    TMUX_ATTACH_MARK_START as TMUX_ATTACH_MARK_START,
+    TMUX_ATTACH_MARK_END as TMUX_ATTACH_MARK_END,
+    render_tmux_attach_block as render_tmux_attach_block,
+    _owner_session_default as _owner_session_default,
+    apply_tmux_attach_helpers as apply_tmux_attach_helpers,
 )
 
 
@@ -459,6 +464,7 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
     STREAM_TMUX_WINDOW_MARK_END,
     render_stream_tmux_window_block,
     _live_revert_stream_window_name,
+    _live_normalize_owner_session,
     apply_stream_tmux_window_name,
     _sudo_write_root_file,
     setup_tmux_cutover_provisioning,
@@ -969,6 +975,23 @@ def cmd_install(args):
     except Exception as e:
         print(f"  claude launcher error: {e}", file=sys.stderr)
 
+    # --- 3b-bis. tmux attach-or-create interactive helpers (#651) ---
+    # `t [name]` + a `tmux()` wrapper that rewrites the simple `new|new-session|
+    # a|attach|attach-session -t NAME` shapes to `command tmux new-session -A -s
+    # NAME` -- so an accidental `tmux new -t zbynek` from shell history attaches
+    # instead of piling up grouped siblings. Installed on EVERY managed box;
+    # interactive-only via the block's own `$-` guard, so scripts/webterm/
+    # watchdog never see it. Same idempotent ~/.bashrc marker-block shape as the
+    # launcher above; the baked-in `t` default is the box's owner session.
+    try:
+        attach_changed = apply_tmux_attach_helpers()
+        if attach_changed:
+            print(f"  Updated:   {BASHRC} (tmux attach-or-create helpers, #651)")
+        else:
+            print(f"  No change: {BASHRC} (tmux attach-or-create helpers, #651)")
+    except Exception as e:
+        print(f"  tmux attach-or-create helpers error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3c. tmux managed block: every managed user's ~/.tmux.conf (#235/#236/#241) ---
     # tmux's own 2000-line default plus the current CC renderer's re-render
     # frame-stacking made real scrollback holey within minutes under
@@ -1001,6 +1024,17 @@ def cmd_install(args):
             print(f"  No change: {TMUX_CONF} ({tmux_desc})")
     except Exception as e:
         print(f"  tmux managed-block error: {e}", file=sys.stderr)
+
+    # --- 3c-bis. tmux owner-session normalization (#651): live-rename a lone
+    # `<owner>-N` grouped-sibling survivor to `<owner>` (only when the exact
+    # `<owner>` is absent AND exactly one numbered survivor exists) so the #651
+    # `-A -s <owner>` helpers + webterm's exact join hit it. Never kills, never
+    # touches a session outside the owner namespace, no-op with no live server.
+    try:
+        _owner = _owner_session_default(_current_user())
+        _live_normalize_owner_session(_owner)
+    except Exception as e:
+        print(f"  tmux owner-session normalize error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3d. tmux boot-time cutover unit: points /usr/local/bin/tmux at the
     # newest managed build (tmux-3.7b) at THIS box's own next boot (#242).
