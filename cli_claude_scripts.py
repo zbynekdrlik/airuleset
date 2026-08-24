@@ -156,23 +156,12 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;;
 # named risk, tracked as #470).
 [ "$mode" = plain ] || export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1
 
-# Headless OAuth token for owner VPS-class boxes (#659): export
-# CLAUDE_CODE_OAUTH_TOKEN ONLY when the managed DELIVERED secret file exists and
-# is non-empty. That file (`claude-code-oauth-token`) is written ONLY on
-# owner_vps targets by provision_owner_headless_token; the dev1 DRIVER holds the
-# token under a DIFFERENT basename (`owner-vps-claude-oauth-token`, the delivery
-# SOURCE) that this guard never checks -- so this is a strict no-op on dev1/dev2
-# and every sub-dev account, where ~/.claude/.credentials.json is the login, and
-# never contaminates an interactive session. (Distinct source/delivered names
-# are the #659 review fix: a shared name would make dev1 -- which hosts the
-# source AND runs this launcher -- export the token into the owner's own
-# sessions.) Per the CC auth docs this env var is independent of the interactive
-# /login credential. Applied in ALL modes (incl. plain) so an owner VPS never
-# shows the first-run login dialog whichever way claude starts.
-if [ -s "$HOME/.secrets/claude-code-oauth-token" ]; then
-  CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.secrets/claude-code-oauth-token")"
-  export CLAUDE_CODE_OAUTH_TOKEN
-fi
+# #659/#669: the owner_vps headless OAuth-token export that once stood here was
+# REMOVED. login/auth ON a target is the PROJECT claudy's responsibility, and
+# airuleset never touches auth (owner ROZHODNUTÉ #659, #537 machine-identity
+# boundary). The launcher no longer delivers or exports any OAuth token;
+# ~/.claude/.credentials.json (managed by the box's own claudy) is the login on
+# every box, owner VPS included.
 
 _has_conversation() {
   local ccdir="${PWD//\//-}"; ccdir="${ccdir//./-}"; ccdir="${ccdir//_/-}"

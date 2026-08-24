@@ -98,31 +98,13 @@ REMOTE_DEPLOY_TIMEOUT_S = 1800
 # account, sourced from dev1's own local voiceagent checkout ------------------
 SONIOX_KEY_SOURCE = Path.home() / "devel" / "voiceagent" / ".env"
 
-# #659: the managed headless OAuth token (from `claude setup-token`) that lets
-# `claude` authenticate on an owner VPS-class box WITHOUT ever showing the
-# interactive login dialog on first run. Lives in the fleet's managed secret
-# store on the dev1 DRIVER at a DELIBERATELY DIFFERENT path from the one the
-# launcher exports (`~/.secrets/owner-vps-claude-oauth-token`, a bare token +
-# trailing newline -- persist it with `airuleset.py secret request
-# CLAUDE_CODE_OAUTH_TOKEN --persist ~/.secrets/owner-vps-claude-oauth-token`
-# after a one-time `claude setup-token`). `provision_owner_headless_token`
-# delivers its VALUE to each owner_vps target's `~/.secrets/
-# claude-code-oauth-token` (OWNER_HEADLESS_TOKEN_DELIVERED_NAME), which is the
-# path the launcher's export guard checks. The two names MUST stay distinct
-# (adversarial review, #659): if the driver's source lived at the launcher-
-# checked name, dev1 -- which both hosts the source AND runs the launcher --
-# would export CLAUDE_CODE_OAUTH_TOKEN into the owner's own interactive
-# sessions, silently switching dev1's auth to the headless token (which expires
-# ~yearly and is revocable). With distinct names, dev1 holds only the SOURCE
-# name, the launcher checks only the DELIVERED name, so a delivered file never
-# exists on dev1 and the launcher never exports there. Per the CC auth docs the
-# token is INDEPENDENT of the interactive `/login` credential -- delivering it
-# never rotates/invalidates the owner's primary login.
-OWNER_HEADLESS_TOKEN_SOURCE = Path.home() / ".secrets" / "owner-vps-claude-oauth-token"
-# The basename the token lands at on a target -- the SAME name the managed
-# launcher's export guard checks (cli_claude_scripts.py). Distinct from the
-# SOURCE basename above by construction (see the comment there).
-OWNER_HEADLESS_TOKEN_DELIVERED_NAME = "claude-code-oauth-token"
+# #659/#669: the headless CLAUDE_CODE_OAUTH_TOKEN delivery leg that once lived
+# here was REMOVED per the owner ruling (#659 ROZHODNUTÉ, 2026-08-24): login/
+# auth ON a target is the PROJECT claudy's responsibility, airuleset NEVER
+# touches auth (#537 machine-identity boundary). spinbike's claude is already
+# logged in via project dev1-claudy. What remains of owner_vps provisioning is
+# the native claude install (ensure_claude_native_userspace) + NOPASSWD sudo
+# (provision_owner_sudo) -- neither touches auth.
 
 
 def _soniox_key_line(source: Path = None):
@@ -264,20 +246,21 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
 # `cli_secret_delivery.py` leaf (facade re-export from airuleset.py) FIRST.
 def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
                              control_opts=None, require_identity=False):
-    """Shared per-host secret DELIVERY loop (#659 extraction) for
-    `provision_subdev_soniox_key` (the Soniox key) and
-    `provision_owner_headless_token` (the OAuth token). Delivers `value` to each
-    already-filtered host in `targets` by running `remote_write_cmd` there, with
-    the VALUE piped via ssh stdin -- NEVER in argv, NEVER printed by this
-    process. Carries the #341 ssh-prefix hardening (BatchMode / one password
-    prompt) and the #358 bounded, transient-only retry + backoff, so both
-    callers share ONE hardened copy instead of two hand-synchronised ones.
+    """Shared per-host secret DELIVERY loop (#659 extraction) -- the surviving
+    caller is `provision_subdev_soniox_key` (the Soniox key), a generic,
+    reviewed facility kept for any future owner-secret delivery. (The #659
+    headless-token caller was removed in #669 per the owner auth-boundary
+    ruling.) Delivers `value` to each already-filtered host in `targets` by
+    running `remote_write_cmd` there, with the VALUE piped via ssh stdin --
+    NEVER in argv, NEVER printed by this process. Carries the #341 ssh-prefix
+    hardening (BatchMode / one password prompt), the #358 bounded,
+    transient-only retry + backoff, and the #669 per-target host-key pin.
     `noun` names the payload in log lines. Returns the list of `(name, reason)`
     delivery failures.
 
-    `require_identity` (owner-secret classes, #659 review): a target WITHOUT an
-    `identity` is REFUSED with a `failed` entry -- an owner secret (the OAuth
-    token) must never ride the fleet-shared subdev password. Soniox passes False
+    `require_identity` (a general owner-secret safety option, #659 review): a
+    target WITHOUT an `identity` is REFUSED with a `failed` entry -- an owner
+    secret must never ride the fleet-shared subdev password. Soniox passes False
     (the montalu family authenticates via the shared default key by design)."""
     import time
     control_opts = list(control_opts or [])
@@ -351,110 +334,6 @@ def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
             failed.append((remote["name"], "rc=%d" % r.returncode))
         else:
             print("    %s: delivered to %s" % (noun, remote["name"]))
-    return failed
-
-
-def _owner_headless_token_value(source: Path = None):
-    """The headless OAuth token value out of the managed secret store on the
-    driver (`OWNER_HEADLESS_TOKEN_SOURCE`, a bare token + trailing newline).
-    Returns the stripped non-empty token, or None when the source is missing,
-    empty, or UNREADABLE (a permission / decode error while it exists) -- it
-    genuinely never raises (#659 review: `read_file_safe`'s `read_text()` can
-    raise on a 0400-root or non-utf8 file even though `is_file()` is true, and
-    the caller's delivery is inside a try/finally that would otherwise crash the
-    push tail). NEVER returns/prints the value anywhere but into the ssh
-    `input=` payload of the delivery below."""
-    src = source if source is not None else OWNER_HEADLESS_TOKEN_SOURCE
-    if not src.is_file():
-        return None
-    import airuleset  # #433 L-E: read_file_safe stays resident in airuleset.py
-    try:
-        val = airuleset.read_file_safe(src).strip()
-    except OSError as e:
-        print("  ⚠ headless token source %s exists but is unreadable "
-              "(non-fatal): %r" % (src, e), file=sys.stderr)
-        return None
-    except Exception as e:  # noqa: BLE001 -- a decode error must also degrade
-        print("  ⚠ headless token source %s could not be read (non-fatal): %r"
-              % (src, e), file=sys.stderr)
-        return None
-    return val or None
-
-
-def provision_owner_headless_token(hosts=None, run=None, source: Path = None,
-                                    skip_names=None, control_opts=None):
-    """Deliver the managed headless OAuth token to every owner VPS-class target
-    (#659) -- a REMOTE_HOSTS entry flagged `"owner_vps": True` -- so first-run
-    `claude` there NEVER shows the interactive login dialog. Driver-side
-    per-host secret delivery, the SAME Pattern B as `provision_subdev_soniox_key`
-    (ssh stdin, value never in argv, never printed by this process), sharing the
-    hardened `_deliver_secret_to_hosts` loop. The token's VALUE is read from the
-    driver's `OWNER_HEADLESS_TOKEN_SOURCE` (a DIFFERENT basename than the
-    launcher checks -- see that constant's comment for why) and lands at each
-    target's `~/.secrets/<OWNER_HEADLESS_TOKEN_DELIVERED_NAME>` (mode 600); the
-    managed launcher exports `CLAUDE_CODE_OAUTH_TOKEN` only when THAT delivered
-    file exists. dev1 (the driver) holds only the SOURCE name, so its launcher
-    never exports -- no contamination of the owner's interactive sessions.
-
-    Delivery `require_identity=True`: an owner_vps target without a pinned ssh
-    identity is REFUSED, never shipped over the fleet-shared password (an owner
-    OAuth token is secret-class).
-
-    A missing source on the driver is a LOUD stderr failure -- every owner_vps
-    target is reported failed (with the one-time `claude setup-token` + persist
-    instruction), never a silent skip (feedback_provisioning_base_activity: a
-    silent provisioning gap is a dead feature). Returns the list of
-    `(remote_name, reason)` failures, mirroring cmd_push()'s `failed` shape.
-
-    `control_opts`/`skip_names` behave exactly as in provision_subdev_soniox_key
-    (reuse this run's authenticated ssh master; skip a host that already failed
-    auth this run). A host list with no owner_vps target never reads the source
-    at all."""
-    import subprocess
-    run = run or subprocess.run
-    control_opts = list(control_opts or [])
-    targets = [h for h in _deployable_hosts(hosts) if h.get("owner_vps")]
-    if not targets:
-        return []
-
-    failed = []
-    skip = set(skip_names or ())
-    if skip:
-        deliverable = []
-        for h in targets:
-            if h["name"] in skip:
-                print("  ⚠ headless token delivery to %s SKIPPED — its deploy "
-                      "leg already failed auth this run (see the FAILED line "
-                      "above); not opening a second ssh connection against a "
-                      "known-unprovisioned/unreachable account." % h["name"],
-                      file=sys.stderr)
-                failed.append((h["name"], "skipped-known-auth-failure"))
-            else:
-                deliverable.append(h)
-        targets = deliverable
-        if not targets:
-            return failed
-
-    token = _owner_headless_token_value(source)
-    if token is None:
-        src = source if source is not None else OWNER_HEADLESS_TOKEN_SOURCE
-        print("  ⚠ HEADLESS OAUTH TOKEN SOURCE MISSING (%s) — skipping "
-              "CLAUDE_CODE_OAUTH_TOKEN delivery to %d owner VPS target(s). "
-              "One-time on the dev1 driver: run `claude setup-token`, then "
-              "`airuleset.py secret request CLAUDE_CODE_OAUTH_TOKEN --persist "
-              "%s` (or write the token to that file, mode 600). Never commit "
-              "or print the value." % (src, len(targets), src), file=sys.stderr)
-        return failed + [(h["name"], "headless-token-source-missing")
-                          for h in targets]
-
-    remote_cmd = (
-        "umask 077; mkdir -p ~/.secrets && "
-        "cat > ~/.secrets/%s && chmod 600 ~/.secrets/%s"
-        % (OWNER_HEADLESS_TOKEN_DELIVERED_NAME,
-           OWNER_HEADLESS_TOKEN_DELIVERED_NAME))
-    failed.extend(_deliver_secret_to_hosts(
-        targets, token, remote_cmd, "headless token", run,
-        control_opts=control_opts, require_identity=True))
     return failed
 
 
@@ -1094,23 +973,19 @@ def _deploy_to_all_remotes(failed, auth_failed):
         failed.extend(provision_subdev_soniox_key(skip_names=auth_failed,
                                                     control_opts=control_opts))
 
-        # 3c. Deliver the managed headless OAuth token to owner VPS-class
-        # targets (#659) so first-run claude never shows the login dialog -- a
-        # true no-op when REMOTE_HOSTS has no owner_vps entry (the source is
-        # never read). Same #341/#358 skip-known-auth-failure + shared control
-        # master reuse as the soniox phase above.
-        print(f"\n{'=' * 50}")
-        print("Delivering headless OAuth token to owner VPS targets...")
-        failed.extend(provision_owner_headless_token(skip_names=auth_failed,
-                                                       control_opts=control_opts))
+        # #659/#669: the "3c. deliver headless OAuth token to owner_vps targets"
+        # phase that once stood here was REMOVED -- login/auth ON a target is
+        # the PROJECT claudy's responsibility, airuleset never touches auth
+        # (owner ROZHODNUTÉ #659). owner_vps provisioning now happens entirely
+        # inside the deploy loop's own `install` connection (native claude
+        # install + NOPASSWD sudo), so there is no owner-secret ssh phase here.
 
         if failed:
             # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
-            # host now yields TWO `failed` entries by design (its own deploy
-            # `rc=...` PLUS a secret-phase `skipped-known-auth-failure` -- the
-            # soniox skip for a subdev host, or the headless-token skip for an
-            # owner_vps host, #659), so len(failed) double-counts -- report the
-            # DISTINCT host count; the full list still shows each reason.
+            # subdev host yields TWO `failed` entries by design (its own deploy
+            # `rc=...` PLUS the soniox-phase `skipped-known-auth-failure`), so
+            # len(failed) double-counts -- report the DISTINCT host count; the
+            # full list still shows each reason.
             distinct_failed = {name for name, _reason in failed}
             print(f"\n⚠ {len(distinct_failed)} of {len(airuleset.REMOTE_HOSTS)} remote(s) "
                   f"FAILED: {failed}", file=sys.stderr)

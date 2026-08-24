@@ -260,12 +260,12 @@ REMOTE_HOSTS = [
         # #659: a VPS-class OWNER target (the owner's own box, full authority).
         # This flag gates the owner-VPS-only provisioning: the deploy loop sets
         # AIRULESET_OWNER_VPS=1 for this host so cmd_install's
-        # provision_owner_sudo() installs NOPASSWD sudo for the owner user, and
-        # provision_owner_headless_token() delivers the managed
-        # CLAUDE_CODE_OAUTH_TOKEN here so first-run claude never shows the
-        # interactive login dialog. Sub-dev stream accounts carry NO such flag
-        # (they stay sudo-less + do their own OAuth), so this is per-target,
-        # never a blanket rule.
+        # provision_owner_sudo() installs NOPASSWD sudo for the owner user.
+        # (#669: the #659 headless CLAUDE_CODE_OAUTH_TOKEN delivery was REMOVED
+        # -- login/auth on a target is the PROJECT claudy's job, airuleset never
+        # touches auth; owner ROZHODNUTÉ #659.) Sub-dev stream accounts carry NO
+        # such flag (they stay sudo-less), so this is per-target, never a
+        # blanket rule.
         "owner_vps": True,
     },
     {
