@@ -261,13 +261,24 @@ class TestNoTcpLoopbackSurface(unittest.TestCase):
         self.assertIn("service: unix:/run/user/", owner)
         self.assertNotIn("http://127.0.0.1", owner)
 
-    def test_runtime_socket_abs_matches_systemd_specifier_basename(self):
-        # the %t/<basename> the units use and the /run/user/<uid>/<basename> the
-        # cloudflared config uses must resolve to the SAME file.
-        base = "webterm-gateway.sock"
-        abs_path = w.webterm_runtime_socket_abs(base)
-        self.assertEqual(abs_path, "/run/user/%d/%s" % (os.getuid(), base))
-        self.assertTrue(abs_path.endswith("/" + base))
+    def test_runtime_socket_abs_and_unit_specifier_name_the_same_file(self):
+        # Genuinely TIE the two surfaces the fix must keep in sync: the systemd unit
+        # reaches the socket via `%t/<basename>` (systemd resolves %t to
+        # /run/user/<uid>) and the cloudflared config via the absolute
+        # /run/user/<uid>/<basename>. Extract the basename from the RENDERED unit's
+        # `--socket %t/...` and assert webterm_runtime_socket_abs resolves that SAME
+        # basename under /run/user/<uid> — not a re-derivation of its own formula.
+        import re as _re
+        unit = w._render_webterm_gateway_unit(w.WEBTERM_TTYD_BIND, access_mode=True)
+        exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+        mo = _re.search(r"--socket %t/(\S+)", exec_line)
+        self.assertIsNotNone(mo, "Access-mode unit must bind --socket %t/<basename>")
+        base = mo.group(1)
+        self.assertEqual(base, w.WEBTERM_GATEWAY_SOCK_BASENAME)
+        # %t == $XDG_RUNTIME_DIR == /run/user/<uid>, so the unit's `%t/<base>` and the
+        # config's abs path are the SAME file for the account that runs the service.
+        self.assertEqual(w.webterm_runtime_socket_abs(base),
+                         "/run/user/%d/%s" % (os.getuid(), base))
 
 
 if __name__ == "__main__":

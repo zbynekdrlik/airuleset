@@ -29,12 +29,24 @@ gateway simply trusts the identity header Cloudflare injects downstream of a
 passed check (`Cf-Access-Authenticated-User-Email`) — no login form, no cookie,
 no credential file. FAIL-CLOSED: a request with no such header did not pass
 Access and is refused (403). Cloudflare strips client-supplied `Cf-*` headers
-before setting the authentic one, and the gateway binds loopback reachable only
-via the cloudflared tunnel (which serves only the Access-protected hostname).
-The two modes are mutually exclusive; `main()` refuses to start with neither or
-both (an unauthenticated shell is never bound). Pure stdlib has no RSA, so the
-Access JWT is NOT cryptographically validated at the origin — the honest
-residual is documented in cli_webterm_access.py.
+before setting the authentic one. The two auth modes are mutually exclusive;
+`main()` refuses to start with neither or both (an unauthenticated shell is never
+bound). Pure stdlib has no RSA, so the Access JWT is NOT cryptographically
+validated at the origin — the honest residual is documented in cli_webterm_access.py.
+
+TRANSPORT (#663 — the multi-tenant loopback fix). Two listener transports,
+selected by `main()` (exactly one, fail-closed): a TCP `--bind`/`--port` listener
+(password mode, tailnet-reachable by design) OR a `--socket` UNIX-domain socket
+(every live Access lane). On a SHARED box a TCP `127.0.0.1:<port>` origin is
+reachable by every local unix account — so a peer account could forge the trust
+header at another lane's gateway port OR reach its auth-less ttyd directly. In
+Access mode the gateway therefore binds a mode-0700 UNIX socket in the account's
+`/run/user/<uid>` runtime dir (`--socket`, bound under `umask 077` + chmod 0600)
+and reaches ttyd over its own UNIX socket (`--ttyd-socket`); cloudflared fronts it
+with `service: unix:<path>`. Filesystem permissions on the 0700 dir are the local
+account boundary — only the account (its own cloudflared) can traverse to either
+socket, closing both vectors with zero new deps. The default `--ttyd-host`/
+`--ttyd-port` TCP path (below, "127.0.0.1:<ttyd>") is the password-mode transport.
 
 Defence in depth. Failed logins are rate-limited PER SOURCE IP (a tailnet peer
 has its own 100.x address), so an attacker throttles only itself and never locks
@@ -840,7 +852,15 @@ async def start_gateway(host, port, dash_index, cred_path, ttyd_host="127.0.0.1"
                  trust_access_header=trust_access_header, ttyd_socket=ttyd_socket)
     if socket_path:
         _unlink_quiet(socket_path)      # clear a stale single-instance leftover
-        server = await asyncio.start_unix_server(gw.handle, path=socket_path)
+        # #663 review: bind UNDER umask 077 so the socket is owner-only from the
+        # instant it appears — no brief 0755 window before the chmod (systemd's
+        # default 022 umask would otherwise leave that gap), mirroring the ttyd
+        # launcher's own `umask 077`. The chmod stays as belt-and-suspenders.
+        old_umask = os.umask(0o077)
+        try:
+            server = await asyncio.start_unix_server(gw.handle, path=socket_path)
+        finally:
+            os.umask(old_umask)
         _chmod_quiet(socket_path, 0o600)
         return server
     return await asyncio.start_server(gw.handle, host, port)
@@ -916,10 +936,20 @@ def main(argv):
         p.error("exactly one of --cred (password mode) or --trust-access-header "
                 "(Cloudflare Access mode) is required")
     # #663: exactly one listener transport — a TCP `--bind` (tailnet/loopback) OR a
-    # `--socket` UNIX bind. Refuse both/neither rather than bind nothing or two.
+    # `--socket` UNIX bind. Refuse both/neither rather than bind nothing (a missing
+    # `--bind` would otherwise reach `start_server(handle, None, ...)`, which binds
+    # ALL interfaces — a fail-OPEN) or two. #663-review lock: TestTransportModeMainGuard.
     if bool(args.bind) == bool(args.socket):
         p.error("exactly one of --bind (TCP) or --socket (UNIX-domain, #663) "
                 "is required")
+    # #663-review NOTE (latent combos, not rejected because airuleset NEVER renders
+    # them): the two SANCTIONED shapes are password+TCP (owner tailnet fallback:
+    # --cred + --bind/--port + --ttyd-host/--ttyd-port) and Access+UNIX (every live
+    # lane: --trust-access-header + --socket + --ttyd-socket). Mixed shapes
+    # (--socket + --cred, or --socket + TCP --ttyd-host/--ttyd-port) parse but are
+    # UNSUPPORTED: password-over-unix shares the single `peer_ip="?"` rate-limit
+    # bucket (all unix clients look like one IP) and no render emits them. Treat any
+    # mixed invocation as a config bug, not a supported mode.
     try:
         asyncio.run(_main_async(args))
     except KeyboardInterrupt:

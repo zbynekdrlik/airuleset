@@ -31,25 +31,20 @@ R1 review, mirrors cli_webterm_access.py's own note). What it provides: the
 PUBLIC Access-gated path reaches ONLY marek's scoped session — the connect
 allowlist is physically `{marek-subdev}` (a single LOCAL attach, no ssh/key), so
 a marek WEB LOGIN can never drive an owner-fleet or david id, and marek's Access
-realm/tunnel are separate from every other developer's. What it does NOT close:
-the marek gateway/ttyd bind LOOPBACK on the SHARED subdev box, where 127.0.0.1 is
-reachable by every local unix account (and pure stdlib cannot verify the Access
-JWT signature at the origin — the same residual cli_webterm_access.py documents).
-So a marek UNIX SHELL — which the webterm legitimately gives marek to his OWN
-account, and which marek already has independently of webterm — can `curl` david's
-loopback ttyd (127.0.0.1:<port>, itself auth-less by design) and vice-versa. This
-is the PRE-EXISTING multi-tenant-subdev floor the david lane shipped with and the
-#612 R2 review accepted. Directionally (honest, #612 R2 review): this lane adds NO
-new reachability INTO owner/david (marek→david already held via david's live
-auth-less loopback ttyd, marek having his own independent subdev shell); it DOES
-newly expose marek's OWN account — any local subdev account gains a marek shell via
-marek's NEW loopback ttyd 7684 / header-forgeable gateway 8082, reachability that
-did not exist before (marek's account is keyed on the operator ssh identity, not a
-shared password). The party newly at risk is the lane's own tenant, and the class
-is the same accepted floor. Closing that floor (a mode-0600 unix-domain-socket origin per
-gateway user, or origin JWT verification) is CROSS-CUTTING — it must cover the
-LIVE owner + david gateways too — so it is the separate hardening ticket #663, not
-this scoped marek lane.
+realm/tunnel are separate from every other developer's.
+
+The multi-tenant LOOPBACK floor is now CLOSED (#663). The gateway + ttyd bind
+mode-0700 UNIX-domain sockets in marek's `/run/user/<uid>` runtime dir (cloudflared
+`service: unix:<path>`, ttyd `-i <sock>`), NOT TCP `127.0.0.1:<port>` — filesystem
+permissions on the 0700 dir are the account boundary, so a peer subdev account can
+no longer `curl` marek's gateway/ttyd (or, from marek, another lane's). BEFORE #663
+this lane shipped the same TCP-loopback floor the david lane had (#612 R2 accepted
+it): a peer account could forge the Access header at gateway :8082 or reach the
+auth-less ttyd :7684 directly — reachability that newly exposed marek's OWN account
+(marek's account is keyed on the operator ssh identity, not a shared password).
+#663 closed it for owner + david + marek together; the only remaining stdlib
+residual (no RS256 Access-JWT verification) is unrelated to local reachability —
+see cli_webterm_access.py's SECURITY NOTE.
 """
 import json
 import os
@@ -59,7 +54,6 @@ import sys
 from pathlib import Path
 
 import cli_webterm as w
-import cli_webterm_access as access
 import cli_webterm_profiles as profiles
 import cli_webterm_tunnel as tun     # shared managed-tunnel render helpers (#635)
 import cli_binary_installers as binstall  # #614: ttyd static-binary auto-install
@@ -129,15 +123,17 @@ _MAREK_GO_LIVE = (
 
 # Prepended to each rendered marek unit so a human reading the installed file on
 # subdev is never misled by the shared template's "dev1 / tailscale / password"
-# wording — the marek gateway is a DIFFERENT deployment (loopback + cloudflared +
-# Cloudflare Access), on the marek account.
+# wording — the marek gateway is a DIFFERENT deployment (#663 UNIX socket in the
+# account runtime dir + cloudflared + Cloudflare Access), on the marek account.
 _MAREK_UNIT_NOTE = (
-    "# NOTE (#612): this is the MAREK developer gateway on SUBDEV (marek account)\n"
-    "# — it binds LOOPBACK (127.0.0.1) and is fronted by a SEPARATE cloudflared\n"
-    "# public HTTPS tunnel for marek.newlevel.media. The 'dev1 / tailscale IP'\n"
-    "# wording, the ttyd port 7682 and the 'webterm-gateway.service' name inherited\n"
-    "# from the shared template below refer to the OWNER deployment — the MAREK\n"
-    "# ports are ttyd 7684 / gateway 8082 and the units are webterm-marek-*.service.\n"
+    "# NOTE (#612/#663): this is the MAREK developer gateway on SUBDEV (marek\n"
+    "# account) — #663 it binds a mode-0700 UNIX-domain socket in marek's\n"
+    "# /run/user/<uid> runtime dir (NOT TCP 127.0.0.1:<port>) and is fronted by a\n"
+    "# SEPARATE cloudflared public HTTPS tunnel (service: unix:<sock>) for\n"
+    "# marek.newlevel.media. The 'dev1 / tailscale IP' wording, the ttyd port 7682\n"
+    "# and the 'webterm-gateway.service' name inherited from the shared template\n"
+    "# below refer to the OWNER deployment — the MAREK sockets are\n"
+    "# %t/webterm-marek-{gateway,ttyd}.sock and the units are webterm-marek-*.service.\n"
     "# Scoped inventory: the LOCAL marek tmux session ONLY (never the owner fleet,\n"
     "# never david's accounts) — a local attach, no ssh, no key.\n"
     "#\n"
@@ -148,14 +144,14 @@ _MAREK_UNIT_NOTE = (
     "# The shared template's 'form login / credential / constant-time compare'\n"
     "# wording refers to the OWNER (password) deployment — it does NOT apply here.\n"
     "#\n"
-    "# EXPOSURE: unlike the OWNER unit, the shared template's 'tailnet-only entry\n"
-    "# point' / 'security boundary is tailnet-only exposure' claims below are FALSE\n"
-    "# for THIS gateway — it is PUBLIC (Cloudflare Access at the edge is the\n"
-    "# boundary). And 'failed logins rate-limited per source IP' does NOT hold at\n"
-    "# the origin: behind cloudflared the gateway sees only 127.0.0.1, so any\n"
-    "# per-real-IP brute-force protection lives on the Cloudflare EDGE, not here.\n"
-    "# (The template's 'bound to dev1's tailscale IP (127.0.0.1)' line is doubly\n"
-    "# wrong here: this gateway binds LOOPBACK on subdev, not a tailscale IP.)\n#\n")
+    "# EXPOSURE: unlike the shared template's OWNER (password) wording, this gateway\n"
+    "# is PUBLIC (Cloudflare Access at the edge is the boundary) AND #663 the origin\n"
+    "# is a UNIX socket in marek's 0700 runtime dir — filesystem permissions are the\n"
+    "# local account boundary, so a peer subdev account cannot reach the gateway or\n"
+    "# ttyd. The template's 'tailnet-only entry point' / 'bound to dev1's tailscale\n"
+    "# IP' / 'failed logins rate-limited per source IP' claims are all FALSE here\n"
+    "# (behind cloudflared the gateway sees only one peer, so per-real-IP\n"
+    "# brute-force protection lives on the Cloudflare EDGE, not here).\n#\n")
 
 
 # The marek ttyd binary is a NO-SUDO user-space static binary in ~/.local/bin
@@ -196,16 +192,12 @@ def render_marek_gateway_unit():
     remaining `{{CRED_PATH}}` token lives only in the shared template's
     password-model COMMENT — neutralised to n/a here."""
     tmpl = w.WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
-    # ExecStart transforms FIRST (before the {{TOKEN}} substitutions) so the flag
-    # substrings still carry their literal tokens: password --cred -> Access header
-    # trust; #663 TCP bind/ttyd -> UNIX sockets in the account runtime dir.
-    execstart = (
-        tmpl.replace("--cred {{CRED_PATH}}",
-                     "--trust-access-header " + access.WEBTERM_ACCESS_TRUST_HEADER)
-            .replace("--bind {{BIND_IP}} --port {{GATEWAY_PORT}}",
-                     "--socket %t/" + WEBTERM_MAREK_GATEWAY_SOCK_BASENAME)
-            .replace("--ttyd-host 127.0.0.1 --ttyd-port {{TTYD_PORT}}",
-                     "--ttyd-socket %t/" + WEBTERM_MAREK_TTYD_SOCK_BASENAME))
+    # #663: the SHARED Access ExecStart transform (password --cred -> Access header
+    # trust; TCP bind/ttyd -> UNIX sockets in the account runtime dir) runs FIRST,
+    # before the {{TOKEN}} substitutions. Shared across owner/david/marek so the
+    # three lanes cannot drift (cli_webterm.access_execstart_transform).
+    execstart = w.access_execstart_transform(
+        tmpl, WEBTERM_MAREK_GATEWAY_SOCK_BASENAME, WEBTERM_MAREK_TTYD_SOCK_BASENAME)
     return _MAREK_UNIT_NOTE + (
         execstart
             .replace("{{BIND_IP}}", WEBTERM_MAREK_BIND)
@@ -372,8 +364,10 @@ def setup_webterm_marek_service(run=None):
               % e, file=sys.stderr)
         return False
     if ok_all:
-        print("  webterm(marek): gateway live on 127.0.0.1:%d (loopback — front "
-              "with cloudflared). ttyd loopback 127.0.0.1:%d behind /t.\n%s"
-              % (WEBTERM_MAREK_GATEWAY_PORT, WEBTERM_MAREK_TTYD_PORT,
+        print("  webterm(marek): gateway live on UNIX socket %s (#663 account-scoped "
+              "0700 runtime dir — front with cloudflared service: unix:). ttyd UNIX "
+              "socket %s behind /t.\n%s"
+              % (w.webterm_runtime_socket_abs(WEBTERM_MAREK_GATEWAY_SOCK_BASENAME),
+                 w.webterm_runtime_socket_abs(WEBTERM_MAREK_TTYD_SOCK_BASENAME),
                  _MAREK_GO_LIVE))
     return ok_all

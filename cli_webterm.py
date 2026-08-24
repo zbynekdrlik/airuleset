@@ -1317,19 +1317,22 @@ def _render_webterm_unit():
     return tmpl.replace("{{LAUNCH_SCRIPT}}", str(WEBTERM_LAUNCH_PATH))
 
 
-# #635: prepended to the OWNER gateway unit ONLY in Cloudflare-Access mode, so a
-# human reading the installed file is not misled by the shared template's
+# #635/#663: prepended to the OWNER gateway unit ONLY in Cloudflare-Access mode, so
+# a human reading the installed file is not misled by the shared template's
 # tailnet/password wording — the SAME honesty-bar correction cli_webterm_david's
 # _DAVID_UNIT_NOTE makes for the david lane. Every claim it corrects is FALSE for
-# the loopback + cloudflared + Access owner gateway.
+# the #663 UNIX-socket + cloudflared + Access owner gateway.
 _OWNER_ACCESS_UNIT_NOTE = (
-    "# NOTE (#635, owner ROZHODNUTÉ 2026-08-22): this is the OWNER gateway in\n"
-    "# CLOUDFLARE-ACCESS mode — it binds LOOPBACK (127.0.0.1) and is fronted by a\n"
-    "# cloudflared tunnel for https://zbynek.newlevel.media/. The shared template's\n"
-    "# 'bound to dev1's tailscale IP', 'the ONE tailnet-only entry point' and\n"
-    "# 'security boundary is tailnet-only exposure' wording below is FALSE here: this\n"
-    "# gateway binds LOOPBACK (not a tailscale IP) and is PUBLIC behind Cloudflare\n"
-    "# Access (the edge email-OTP check is the boundary).\n"
+    "# NOTE (#635/#663, owner ROZHODNUTÉ 2026-08-22): this is the OWNER gateway in\n"
+    "# CLOUDFLARE-ACCESS mode — #663 it binds a mode-0700 UNIX-domain socket in the\n"
+    "# account's /run/user/<uid> runtime dir (%t/webterm-gateway.sock, NOT TCP\n"
+    "# 127.0.0.1:<port>) and is fronted by a cloudflared tunnel (service: unix:<sock>)\n"
+    "# for https://zbynek.newlevel.media/. The shared template's 'bound to dev1's\n"
+    "# tailscale IP', 'the ONE tailnet-only entry point' and 'security boundary is\n"
+    "# tailnet-only exposure' wording below is FALSE here: this gateway binds a UNIX\n"
+    "# socket (not a tailscale IP) and is PUBLIC behind Cloudflare Access (the edge\n"
+    "# email-OTP check is the boundary), with filesystem permissions on the 0700\n"
+    "# runtime dir as the LOCAL account boundary.\n"
     "#\n"
     "# AUTH: NO password / credential / login form / constant-time compare.\n"
     "# Cloudflare Access does email one-time-PIN verification at the EDGE before any\n"
@@ -1339,10 +1342,30 @@ _OWNER_ACCESS_UNIT_NOTE = (
     "# the OWNER (password) deployment being RETIRED here — it does NOT apply.\n"
     "#\n"
     "# 'failed logins rate-limited per source IP' does NOT hold at the origin: behind\n"
-    "# cloudflared the gateway sees only 127.0.0.1, so per-real-IP brute-force\n"
+    "# cloudflared the gateway sees only one peer, so per-real-IP brute-force\n"
     "# protection lives on the Cloudflare EDGE. And 'install REFUSES to provision\n"
-    "# rather than bind a public interface' does not apply — Access mode binds\n"
-    "# loopback and needs no tailscale IP at all.\n#\n")
+    "# rather than bind a public interface' does not apply — Access mode binds a UNIX\n"
+    "# socket and needs no tailscale IP at all.\n#\n")
+
+
+def access_execstart_transform(tmpl, gateway_sock_basename, ttyd_sock_basename):
+    """#663 (review): the SINGLE Access-mode ExecStart transform shared by ALL three
+    lanes (owner / david / marek) so they cannot drift — swap the shared gateway-unit
+    template's password/TCP flags for Cloudflare-Access + UNIX-socket flags:
+      --cred {{CRED_PATH}}                            -> --trust-access-header <hdr>
+      --bind {{BIND_IP}} --port {{GATEWAY_PORT}}      -> --socket %t/<gw basename>
+      --ttyd-host 127.0.0.1 --ttyd-port {{TTYD_PORT}} -> --ttyd-socket %t/<ttyd basename>
+    Run this BEFORE the per-lane `{{TOKEN}}` substitutions (the flag substrings still
+    carry their literal tokens at this point; `%t` == the account's $XDG_RUNTIME_DIR).
+    The three per-lane no-TCP-surface locks CATCH drift; this helper PREVENTS it."""
+    import cli_webterm_access as access
+    return (tmpl
+            .replace("--cred {{CRED_PATH}}",
+                     "--trust-access-header " + access.WEBTERM_ACCESS_TRUST_HEADER)
+            .replace("--bind {{BIND_IP}} --port {{GATEWAY_PORT}}",
+                     "--socket %t/" + gateway_sock_basename)
+            .replace("--ttyd-host 127.0.0.1 --ttyd-port {{TTYD_PORT}}",
+                     "--ttyd-socket %t/" + ttyd_sock_basename))
 
 
 def _render_webterm_gateway_unit(bind_ip, access_mode=False):
@@ -1367,23 +1390,14 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     BYTE-IDENTICAL to the pre-#635 render."""
     tmpl = WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
     if access_mode:
-        import cli_webterm_access as access
-        tmpl = tmpl.replace(
-            "--cred {{CRED_PATH}}",
-            "--trust-access-header " + access.WEBTERM_ACCESS_TRUST_HEADER)
         # #663: retire the TCP loopback origin entirely — bind + reach ttyd over
-        # mode-0700 UNIX sockets in the account runtime dir (`%t` == the account's
-        # $XDG_RUNTIME_DIR), so no peer unix account on a shared box can forge the
-        # trust header at the gateway port OR reach ttyd directly. These substrings
-        # are replaced BEFORE the individual {{TOKEN}} substitutions below, so the
-        # ExecStart carries the socket flags while the header COMMENT's tokens (now
-        # dead) are still corrected by the note.
-        tmpl = tmpl.replace(
-            "--bind {{BIND_IP}} --port {{GATEWAY_PORT}}",
-            "--socket %t/" + WEBTERM_GATEWAY_SOCK_BASENAME)
-        tmpl = tmpl.replace(
-            "--ttyd-host 127.0.0.1 --ttyd-port {{TTYD_PORT}}",
-            "--ttyd-socket %t/" + WEBTERM_TTYD_SOCK_BASENAME)
+        # mode-0700 UNIX sockets in the account runtime dir, so no peer unix account
+        # on a shared box can forge the trust header at the gateway port OR reach
+        # ttyd directly. The shared transform runs BEFORE the {{TOKEN}} substitutions
+        # so the ExecStart carries the socket flags while the header COMMENT's tokens
+        # (now dead) are still corrected by the note.
+        tmpl = access_execstart_transform(
+            tmpl, WEBTERM_GATEWAY_SOCK_BASENAME, WEBTERM_TTYD_SOCK_BASENAME)
         cred_sub = "n/a (Cloudflare Access — no credential)"
         # In Access mode {{BIND_IP}} survives only in the header COMMENT now; keep
         # it loopback there so no human reads a tailnet bind into a passwordless unit.
@@ -1583,11 +1597,12 @@ def setup_webterm_service(run=None):
 
     if ok_all:
         if access_mode:
-            print("  webterm: gateway live (Cloudflare Access mode, #635) — bound "
-                  "127.0.0.1:%d, fronted by cloudflared for https://"
-                  "zbynek.newlevel.media/ (email-OTP gate; password retired). "
-                  "ttyd loopback 127.0.0.1:%d behind /t."
-                  % (WEBTERM_GATEWAY_PORT, WEBTERM_TTYD_PORT))
+            print("  webterm: gateway live (Cloudflare Access mode, #635/#663) — "
+                  "bound on UNIX socket %s (account-scoped 0700 runtime dir), fronted "
+                  "by cloudflared (service: unix:) for https://zbynek.newlevel.media/ "
+                  "(email-OTP gate; password retired). ttyd UNIX socket %s behind /t."
+                  % (webterm_runtime_socket_abs(WEBTERM_GATEWAY_SOCK_BASENAME),
+                     webterm_runtime_socket_abs(WEBTERM_TTYD_SOCK_BASENAME)))
         else:
             print("  webterm: gateway live — http://%s:%d/ (tailnet-only, form "
                   "login user %r; credential in %s — read it once to save in "
