@@ -56,6 +56,7 @@ import argparse
 import asyncio
 import hmac
 import secrets
+import string
 import sys
 import time
 import urllib.parse
@@ -350,12 +351,14 @@ def http_response(status_line, body_bytes, extra_headers=None,
 # NOTE: `.replace()` substitution (not `%`-formatting) — the CSS body is full of
 # `%` (e.g. `100%`) which `%`-formatting would misread as a format spec (ruff
 # F509), the SAME reason `cli_webterm.render_dashboard_html` uses `.replace()`.
-# `@@ERR@@` is replaced with a FIXED server string (never user input), so there
-# is no injection surface.
+# `@@ERR@@` is a FIXED server string. `@@TITLE@@` (#655) DOES carry request-derived
+# input (the Host header) — it is injection-safe because `_login_title` accepts
+# ONLY the strict `_HOSTNAME_CHARS` set (no HTML-special char), falling back to a
+# neutral title otherwise; see `_login_title`.
 _LOGIN_TEMPLATE = """<!DOCTYPE html>
 <html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>work.newlevel.media — prihlásenie</title>
+<title>@@TITLE@@</title>
 <style>
 :root { color-scheme: dark; }
 html,body { height:100%; margin:0; }
@@ -385,12 +388,34 @@ button:hover { background:#2ea043; }
 </form></body></html>"""
 
 
-def login_form_html(error=False):
+# #655: hostname charset — a Host header validated to THIS set has no HTML-special
+# character (`< > & " '`), so a title built from it is injection-safe by
+# construction (no escaping / no `html`/`re` import needed). An out-of-set or
+# oversized Host degrades to the neutral title, never the stale work.newlevel.media.
+_HOSTNAME_CHARS = frozenset(string.ascii_letters + string.digits + ".-")
+
+
+def _login_title(host):
+    """The login page `<title>` for the ACTUAL serving host (#655). The stale
+    hardcoded `work.newlevel.media` (NXDOMAIN) is gone; the real hosts are
+    zbynek/david.newlevel.media. A missing/blank/invalid Host degrades to a
+    neutral title. `host` is the raw Host header (may carry a `:port`)."""
+    h = (host or "").split(":", 1)[0].strip()
+    if h and len(h) <= 253 and all(c in _HOSTNAME_CHARS for c in h):
+        return h + " — prihlásenie"
+    return "fleet terminal — prihlásenie"
+
+
+def login_form_html(error=False, host=None):
     """A Bitwarden-fillable login form: a real DOM `<form>` with the standard
     autocomplete tokens a password manager keys on (`username` +
-    `current-password`), which the native basic-auth dialog structurally lacks."""
+    `current-password`), which the native basic-auth dialog structurally lacks.
+    `host` (the request Host header) drives the `<title>` so it names the real
+    serving domain (#655), never a hardcoded legacy one."""
     err = ('<p class="err">Nesprávne meno alebo heslo.</p>' if error else "")
-    return _LOGIN_TEMPLATE.replace("@@ERR@@", err)
+    return (_LOGIN_TEMPLATE
+            .replace("@@TITLE@@", _login_title(host))
+            .replace("@@ERR@@", err))
 
 
 def parse_login_form(body_bytes):
@@ -583,15 +608,17 @@ class Gateway:
             # the trusted identity header is present, else fails closed).
             await self._send(writer, self._redirect("/"))
             return
+        host = header_get(headers, "host")   # #655: title reflects the real domain
         if method == "GET":
-            await self._send(writer, http_response("200 OK", login_form_html()))
+            await self._send(writer, http_response(
+                "200 OK", login_form_html(host=host)))
             return
         if method != "POST":
             await self._send(writer, http_response("405 Method Not Allowed", "no"))
             return
         if self.limiter.blocked(peer_ip):
             await self._send(writer, http_response(
-                "429 Too Many Requests", login_form_html(error=True),
+                "429 Too Many Requests", login_form_html(error=True, host=host),
                 extra_headers=["Retry-After: %d" % RL_WINDOW_S]))
             return
         body = await self._read_body(reader, headers, MAX_LOGIN_BODY)
@@ -604,8 +631,8 @@ class Gateway:
                 "/", set_cookie=build_set_cookie(token, SESSION_TTL_S)))
             return
         self.limiter.record_failure(peer_ip)
-        await self._send(writer, http_response("403 Forbidden",
-                                               login_form_html(error=True)))
+        await self._send(writer, http_response(
+            "403 Forbidden", login_form_html(error=True, host=host)))
 
     async def _route_logout(self, writer, headers):
         self.sessions.drop(cookie_token(headers))

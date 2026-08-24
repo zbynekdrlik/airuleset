@@ -38,8 +38,13 @@ import cli_webterm_profiles as profiles
 
 # Per-profile PWA identity: (name, short_name). Owner = the dev1 fleet gateway,
 # david = the subdev developer gateway. Rendered into a per-profile manifest.
+# #655 (#644 follow-up): the owner rejected the "dev1" suffix in his installed
+# PWA — plain "Webterm" for zbynek.newlevel.media. "Webterm david" stays for
+# david.newlevel.media (distinct installed app). short_name kept consistent with
+# name. NOTE: Chrome does not reliably refresh an installed manifest's name, so
+# the owner must re-add (re-install) the app for the new name to appear.
 APP_NAMES = {
-    profiles.OWNER: ("Webterm dev1", "dev1"),
+    profiles.OWNER: ("Webterm", "Webterm"),
     profiles.DAVID: ("Webterm david", "david"),
 }
 

@@ -898,5 +898,58 @@ class TestChooseTreeMultiSession649(unittest.TestCase):
         return True
 
 
+class TestForeignSizeNoOwnerResize655(unittest.TestCase):
+    """#655 behavioural lock (isolated -S server): the browser-side FILL fix
+    (cli_webterm.py fillFixedGrid scales the fixed grid to fill the viewport)
+    is only SAFE because a webterm client at ANY size can NEVER resize the
+    owner's window -- the tmux invariant the whole design rests on. This is the
+    "the other client's size is untouched" half of #655's acceptance, proven
+    end-to-end: a webterm client attached via the REAL production connect path
+    at a FOREIGN size (260x64, far larger than the owner's 176x51) leaves the
+    owner's window at the fixed 176x50 (`window-size manual` + `-f ignore-size`).
+    This is also WHY the #655 letterbox could NOT be fixed tmux-side by letting
+    the browser drive its own window size (proven live on the ticket: `latest`/
+    `largest` in a session group resizes the SHARED window and disturbs the
+    owner) -- so the fill had to be browser-side, and this lock guards the
+    invariant that makes it non-disturbing."""
+
+    def setUp(self):
+        self.cluster = _IsolatedTmuxServer()
+        self.addCleanup(self.cluster.close)
+        self.cluster.start_base("zbynek")     # window-size manual + default 176x50
+        self.owner_fd = self.cluster.attach_client(
+            ["tmux", "-S", self.cluster.sock, "attach", "-t", "zbynek"],
+            rows=_SSH_CLIENT_ROWS)            # the owner's 176x51 WT client
+        self.cluster.wait_for_clients("zbynek", 1)
+        _drain(self.owner_fd, 1.0)
+
+    def _owner_window_size(self):
+        r = self.cluster.tmux("display-message", "-t", "zbynek", "-p",
+                              "#{window_width}x#{window_height}")
+        return r.stdout.strip()
+
+    def test_foreign_sized_webterm_client_leaves_owner_window_at_176x50(self):
+        # baseline: the owner's window is the fixed 176x50 before the webterm joins
+        self.assertEqual(self._owner_window_size(), "176x50",
+                         "sanity: the owner window is the fixed 176x50 to start")
+        # a webterm client via the REAL production connect path, at a FOREIGN
+        # (much larger) client size -- the exact case that WOULD disturb the
+        # owner if the design used window-size latest/largest instead of
+        # manual + ignore-size.
+        entry = {"local": True, "preferred": "zbynek"}
+        argv = _scoped_connect_argv(entry, self.cluster.sock)
+        self.cluster.attach_client(argv, rows=64, cols=260)
+        self.cluster.wait_for_clients("zbynek", 2)
+        _drain(self.owner_fd, 1.0)
+        # THE INVARIANT: the owner's window is STILL the fixed 176x50 -- the
+        # 260x64 webterm client could not resize it (manual + ignore-size).
+        self.assertEqual(
+            self._owner_window_size(), "176x50",
+            "a foreign-sized (260x64) webterm client must NEVER resize the "
+            "owner's fixed 176x50 window -- the invariant the #655 browser-side "
+            "fill relies on (a tmux-side 'let the browser drive size' fix would "
+            "break exactly this)")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

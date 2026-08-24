@@ -629,7 +629,7 @@ _DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>work.newlevel.media — fleet terminal</title>
+<title>fleet terminal</title><!-- #655: real domain set client-side from location.hostname (below) -->
 <!-- #644: installable PWA — standalone window, no browser chrome. The manifest
      (per-domain name), icons and service worker are served by the gateway from
      the dash dir (behind Cloudflare Access). theme-color matches #643 Campbell. -->
@@ -671,13 +671,22 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 #frames { position: relative; flex: 1 1 auto; }
 #frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
   border: 0; background: #0C0C0C; }
-#hint { flex: 0 0 auto; padding: 3px 10px; color: #767676; font-size: 11px;
-  background: #0C0C0C; border-top: 1px solid #1e1e1e; }
+/* #655: the help text is no longer a persistent 11px micro-bar at the bottom
+   (the owner's "nezrozumiteľný mikro text dole"). It is a READABLE overlay panel,
+   hidden by default and opened by the ? button in the tab bar; being position:fixed
+   it also leaves the flex column, so the terminal gets that vertical space back. */
+#hint { display: none; position: fixed; left: 50%; bottom: 14px;
+  transform: translateX(-50%); z-index: 20; max-width: min(900px, 94vw);
+  max-height: 60vh; overflow: auto; padding: 12px 16px; color: #CCCCCC;
+  font-size: 13px; line-height: 1.55; background: #161616;
+  border: 1px solid #2b2b2b; border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.55); }
+#hint.show { display: block; }
 </style>
 </head>
 <body>
 <div id="tabbar">
-<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session">&#9654;</button><button class="cyc" id="fs" title="Fullscreen — Ctrl+W pôjde do terminálu (Keyboard Lock)">&#9974;</button></span>
+<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session">&#9654;</button><button class="cyc" id="fs" title="Fullscreen — Ctrl+W pôjde do terminálu (Keyboard Lock)">&#9974;</button><button class="cyc" id="help" title="Nápoveda — klávesové skratky a tipy">?</button></span>
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
@@ -691,6 +700,20 @@ const CFG = @@CFG_JSON@@;
 // GoTTY both expose `window.term`) — never baked into a ttyd -t theme= flag.
 const CAMPBELL_THEME = @@THEME_JSON@@;
 const TERM_FONT_STACK = '"Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", Menlo, Monaco, "Liberation Mono", monospace';
+// #655: dynamic document title from the ACTUAL serving host. The old hardcoded
+// legacy domain was NXDOMAIN; the live hosts are zbynek/david.newlevel.media, and
+// this static file is served across BOTH. location.hostname is the honest
+// per-viewer value, so the PWA/browser window title always names the real domain.
+try { document.title = location.hostname + ' — fleet terminal'; } catch (e) {}
+// #655: caps that BOUND the residual CSS-transform fill in fillFixedGrid. The
+// fixed 176x51 grid letterboxes on any viewport whose aspect != the grid's;
+// fillFixedGrid fills the residual with a small CSS scale on .xterm (the fontSize
+// min-fit does the crisp bulk; the residual scale is small, see fillFixedGrid for
+// why NOT xterm letterSpacing/lineHeight -- integer-px rounding). These cap the
+// scale so an extreme viewport (a phone) degrades to a residual letterbox instead
+// of a grotesque stretch, rather than distorting text.
+const WT_FILL_MAX_CELL_STRETCH = 1.5;   // horizontal scale (sx) may grow up to 1.5x
+const WT_FILL_MAX_LINE_STRETCH = 1.8;   // vertical scale (sy) may grow up to 1.8x
 function themeTerminal(term) {           // idempotent: applied once per terminal
   if (!term || term.__wtThemed) return;
   term.options.theme = CAMPBELL_THEME;
@@ -820,6 +843,11 @@ function fitFixedGrid(win) {
   const screenEl = () => doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
   const el = screenEl();
   if (!el) return false;                        // xterm not painted yet -> retry
+  // #655: clear any FILL scale from a previous pass so the natural-cell
+  // measurement below (and the font min-fit) is honest -- a re-fit on window
+  // resize must recompute from the natural grid, not last run's stretched one.
+  const fillTarget = () => doc.querySelector('.xterm') || el;
+  fillTarget().style.transform = 'none';
   // reads the element size right after resize/fontSize assuming xterm updates
   // the DOM synchronously (verified live: real ttyd + headless Chrome); the
   // bounded shrink loop below is the safety net if it ever lags by a frame.
@@ -834,7 +862,87 @@ function fitFixedGrid(win) {
     if (rr.width <= availW + 1 && rr.height <= availH + 1) break;
     term.options.fontSize = --F;
   }
+  // #655: the FILL (stretch the fixed grid to the viewport, killing the "okno v
+  // strede" letterbox) is a SEPARATE deferred pass -- fillFixedGrid(win) below.
+  // It must run AFTER this font change has settled: xterm re-renders ASYNC, so
+  // measuring the natural grid in the SAME synchronous call as the fontSize
+  // change reads a STALE size. fitFixedGrid does the CRISP bulk scaling (fontSize
+  // min-fit) and clears any prior fill scale (above); fillFixedGrid measures the
+  // settled natural grid and applies the small residual fill.
   return true;
+}
+// #655 FILL (deferred pass): the crisp fontSize min-fit in fitFixedGrid already
+// scales the grid to within ~6% of the viewport (the tight dimension fills; the
+// loose one is the residual letterbox -- the owner's "okno v strede"). This pass
+// fills that residual with a SMALL CSS scale on the .xterm element. Why a
+// transform and not xterm letterSpacing/lineHeight: xterm rounds letterSpacing to
+// INTEGER pixels PER CELL, so with 176 cells it can only add 0 or 176px -- never
+// the ~116px needed here (measured live: 0 => 94% letterbox, 176 => 103% clip).
+// A CSS scale fills EXACTLY. The #613 "crisp not blurry transform" rule is about
+// the PRIMARY scaling (a large font scale via transform is very blurry); here the
+// font min-fit does that crisply and only the <=~6% RESIDUAL is transform-scaled,
+// whose softening is imperceptible. Bounded (WT_FILL_MAX_*) so an extreme
+// viewport degrades to a residual letterbox instead of a grotesque stretch, and
+// never scales BELOW 1 (that would shrink, not fill). getBoundingClientRect
+// reflects the transform, so a re-fit re-measures naturally (fitFixedGrid clears
+// the scale first).
+function fillFixedGrid(win) {
+  const cols = CFG.term_cols, rows = CFG.term_rows;
+  if (!win || !win.term || !cols || !rows) return false;
+  const doc = win.document;
+  const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
+  const box = doc.querySelector('.xterm') || el;   // the element the scale is set on
+  if (!el || !box) return false;
+  // self-contained: CLEAR any prior fill scale first so the measurement below is
+  // the NATURAL grid -- a CSS transform is reflected SYNCHRONOUSLY by the
+  // getBoundingClientRect reflow, so this run is correct even when called
+  // repeatedly (the multi-delay schedule re-runs it until the async font
+  // re-render has settled the natural size).
+  box.style.transform = 'none';
+  const g = el.getBoundingClientRect();            // NATURAL grid (scale just cleared)
+  const availW = win.innerWidth, availH = win.innerHeight;
+  if (!g.width || !g.height || !availW || !availH) return false;
+  let sx = Math.max(1, Math.min(WT_FILL_MAX_CELL_STRETCH, availW / g.width));
+  let sy = Math.max(1, Math.min(WT_FILL_MAX_LINE_STRETCH, availH / g.height));
+  box.style.transformOrigin = 'center center';
+  box.style.transform = 'scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
+  // CORRECTIVE pass: the NATURAL measurement above can be off (the font
+  // re-render is async), but a CSS transform IS reflected SYNCHRONOUSLY by
+  // getBoundingClientRect (it forces a reflow) -- so re-measuring the SCALED grid
+  // and applying the residual ratio converges to an EXACT fill regardless of the
+  // natural read, and can only SHRINK back under the cap (never a clip).
+  const g2 = el.getBoundingClientRect();
+  if (g2.width > 1 && g2.height > 1) {
+    sx = Math.max(1, Math.min(WT_FILL_MAX_CELL_STRETCH, sx * availW / g2.width));
+    sy = Math.max(1, Math.min(WT_FILL_MAX_LINE_STRETCH, sy * availH / g2.height));
+    box.style.transform = 'scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
+  }
+  return true;
+}
+// #655: the FILL must re-run whenever the NATURAL grid size settles/changes.
+// xterm's grid layout can settle noticeably AFTER first paint (font metrics, the
+// multi-tab layout). The AUTHORITATIVE driver is a ResizeObserver on .xterm-screen,
+// which fires on the REAL layout size (content box -- unaffected by our CSS
+// transform, so NO ping-pong) both on observe AND on every late settle, so the
+// fill always tracks the true natural grid and converges exactly. The immediate
+// call + the timed passes are only a best-effort first paint and a fallback for a
+// browser without ResizeObserver: they may run on a still-settling (stale-small)
+// grid and briefly over-scale, but fillFixedGrid is self-contained + idempotent
+// (clears its own scale, re-measures, re-applies) and the RO corrects it the
+// instant the layout settles -- no persistent clip.
+function scheduleFill(win) {
+  try { fillFixedGrid(win); } catch (e) {}
+  try {
+    const doc = win.document;
+    const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
+    if (el && win.ResizeObserver && !win.__wtFillRO) {
+      win.__wtFillRO = new win.ResizeObserver(() => { try { fillFixedGrid(win); } catch (e) {} });
+      win.__wtFillRO.observe(el);
+    }
+  } catch (e) {}
+  [200, 800, 2000].forEach((ms) => {
+    setTimeout(() => { try { fillFixedGrid(win); } catch (e) {} }, ms);   // guard the CALL
+  });
 }
 function applyFixedGrid(f) {                     // poll for window.term, fit, then watch resize
   if (!f) return;
@@ -844,9 +952,12 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
   const poll = () => {
     themeTerminal(win.term);                     // #643: Campbell palette + font, once term exists
     if (fitFixedGrid(win)) {
-      if (!win.__wtResize) {                     // re-fit when the browser window resizes
+      scheduleFill(win);                           // deferred FILL passes (below)
+      if (!win.__wtResize) {                       // re-fit + re-fill on window resize
         win.__wtResize = true;
-        try { win.addEventListener('resize', () => fitFixedGrid(win)); } catch (e) {}
+        try {
+          win.addEventListener('resize', () => { fitFixedGrid(win); scheduleFill(win); });
+        } catch (e) {}
       }
       return;
     }
@@ -856,8 +967,22 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
 }
 document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
-document.querySelectorAll('.cyc[data-cyc]').forEach((b) =>   // fs button has no data-cyc
+document.querySelectorAll('.cyc[data-cyc]').forEach((b) =>   // fs/help buttons have no data-cyc
   b.addEventListener('click', () => cycle(+b.dataset.cyc)));
+// #655: the ? button toggles the readable help panel (replaces the old 11px
+// persistent micro-bar). Clicking the panel itself, or Escape, closes it.
+(function () {
+  const helpBtn = document.getElementById('help');
+  const hintEl = document.getElementById('hint');
+  if (!helpBtn || !hintEl) return;
+  helpBtn.addEventListener('click', () => hintEl.classList.toggle('show'));
+  // #655: the panel does NOT close on its own click (a selection drag's mouseup
+  // would fire click and close it, so its text stays selectable/copyable) --
+  // close via the ? button (toggle) or Escape.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hintEl.classList.remove('show');
+  });
+})();
 // #585(b): Ctrl+W is readline delete-word in the terminal but the browser
 // consumes it as close-tab (a reserved shortcut a normal window cannot
 // preventDefault). Layer 1 — a beforeunload confirm armed WHILE a terminal is

@@ -54,7 +54,8 @@ def _decode_rgba(b):
 class TestManifest(unittest.TestCase):
     def test_owner_manifest_is_valid_standalone_pwa(self):
         m = json.loads(pwa.render_manifest(profiles.OWNER).decode("utf-8"))
-        self.assertEqual(m["name"], "Webterm dev1")
+        # #655 (#644 follow-up): owner rejected the "dev1" suffix -> plain "Webterm".
+        self.assertEqual(m["name"], "Webterm")
         self.assertEqual(m["display"], "standalone")
         self.assertEqual(m["start_url"], "/")
         self.assertEqual(m["scope"], "/")
@@ -180,7 +181,8 @@ class TestWriteAssets(unittest.TestCase):
         pwa.write_pwa_assets(dd, profiles.DAVID)
         mo = (Path(do) / pwa.MANIFEST_FILE).read_text()
         md = (Path(dd) / pwa.MANIFEST_FILE).read_text()
-        self.assertIn("Webterm dev1", mo)
+        self.assertIn('"name": "Webterm"', mo)      # owner: plain "Webterm" (#655)
+        self.assertNotIn("Webterm dev1", mo)        # ... the dev1 suffix is gone
         self.assertIn("Webterm david", md)
         self.assertNotEqual(mo, md)
 
