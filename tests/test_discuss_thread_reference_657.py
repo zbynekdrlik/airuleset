@@ -129,21 +129,44 @@ WIFI_CHANNEL_NO_ANCHOR = (
     "Prepol som router na kanál 36 v pásme 5 GHz a latencia klesla."
 )
 
-# Odoo context present, but the thread number is a single digit (a concurrency
-# thread, not a channel id) — must PASS (the 2+digit floor).
+# Discuss anchor present, but the thread number is a single digit (a concurrency
+# thread, not a channel id) — must PASS (the 2+digit floor, under an ACTIVE anchor).
 SINGLE_DIGIT_THREAD = (
-    "V odoo teste som spustil vlákno 2 na paralelný import; prešlo bez chyby."
+    "V Odoo Discuss teste som spustil vlákno 2 na paralelný import; prešlo bez chyby."
 )
 
-# An ordinary Odoo status with NO thread reference at all — must PASS.
+# Discuss anchor present, NO thread reference at all — must PASS (no bare shape).
 ORDINARY_ODOO_NO_THREAD = (
-    "Nasadil som na odoo PROD opravu filtra rozmerov a overil som ju v UI."
+    "Na Odoo Discuss PROD som nasadil opravu filtra rozmerov a overil ju v UI."
 )
 
-# Odoo context + a thread NAME (quoted) with no bare id and no URL — the tight
+# Discuss anchor + a thread NAME (quoted) with no bare id and no URL — the tight
 # adjacency window must NOT match the name's own trailing stream digit.
 NAME_ONLY_NO_BARE = (
     "Otvoril som na Odoo Discuss nové vlákno „Kontrola e-mailov 3“ pre klienta."
+)
+
+# #657 review 🔴 — MENTION-BLINDNESS: a message that merely QUOTES the banned
+# form (backticks / fenced block / ASCII-double-quotes) while an anchor is present
+# and no bare UNQUOTED id exists must PASS (strip_mentions exempts it — the same
+# discipline the credential check applies). A completion report / playbook capture
+# that cites the rule is the real recurring case (incl. THIS ticket's own report).
+MENTION_BACKTICK = (
+    "V Odoo Discuss doktríne som opravil pravidlo — spomínam v ňom `vlákno 288` "
+    "ako príklad zlého tvaru; commit hotový, testy zelené."
+)
+MENTION_FENCED = (
+    "Report k Odoo Discuss doktríne. Príklad zlého tvaru:\n"
+    "```\nvlákno 288\n```\nHotové, doktrína pridaná."
+)
+MENTION_ASCII_QUOTE = (
+    'Do Odoo Discuss doktríny som pridal zákaz tvaru "vlákno 288"; commit hotový.'
+)
+
+# A Sales-Channel note in an Odoo context that never says "Discuss" — must PASS
+# (the anchor is discuss-specific, not bare "odoo"; #657 review 🟡 fix).
+SALES_CHANNEL_NO_DISCUSS = (
+    "Na odoo PROD som nastavil sales channel 01 pre e-shop a overil poradie."
 )
 
 
@@ -217,6 +240,42 @@ class TestCompliantAndOrdinaryPass(TestCase):
             _blocked(p),
             "a quoted thread NAME (no bare id) was falsely blocked by the "
             "adjacency window matching the name's stream digit: %r" % _reason(p))
+
+
+class TestMentionAndDomainCollisionsPass(TestCase):
+    """#657 review fixes — the BARE detection runs on $MSG_MENTION so a QUOTED
+    mention of the banned form is exempt (🔴 mention-blindness), and the anchor
+    is discuss-specific so Odoo's own 'Sales Channel' vocabulary is not caught
+    (🟡)."""
+
+    def test_backtick_mention_passes(self):
+        p = _run(MENTION_BACKTICK)
+        self.assertFalse(
+            _blocked(p),
+            "a backticked `vlákno 288` mention (a report/playbook citing the "
+            "rule) was false-blocked — mention-blindness 🔴: %r" % _reason(p))
+
+    def test_fenced_mention_passes(self):
+        p = _run(MENTION_FENCED)
+        self.assertFalse(
+            _blocked(p),
+            "a fenced-code-block 'vlákno 288' mention was false-blocked: %r"
+            % _reason(p))
+
+    def test_ascii_quoted_mention_passes(self):
+        p = _run(MENTION_ASCII_QUOTE)
+        self.assertFalse(
+            _blocked(p),
+            "an ASCII-double-quoted \"vlákno 288\" mention was false-blocked: %r"
+            % _reason(p))
+
+    def test_sales_channel_no_discuss_passes(self):
+        p = _run(SALES_CHANNEL_NO_DISCUSS)
+        self.assertFalse(
+            _blocked(p),
+            "an Odoo 'sales channel 01' note that never says Discuss was "
+            "false-blocked — the anchor must be discuss-specific 🟡: %r"
+            % _reason(p))
 
 
 class TestCheckImplementedInHook(TestCase):
