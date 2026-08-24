@@ -206,5 +206,24 @@ class TestUnselectedTabContrast(unittest.TestCase):
         self.assertIn("#F2F2F2", m.group(0))
 
 
+class TestTabLabelLeftPadding(unittest.TestCase):
+    """#661 owner-acceptance amendment (2026-08-24): the tab NAMES sit a bit
+    too close to the tab's left edge ("odsadit nazvy tabov z lavej strany, apon
+    trosicku"). The fix indents all tab content from the left by bumping ONLY
+    the `.tab` left padding 12px -> 16px (a restrained +4px), so the shorthand
+    becomes the 4-value `padding: 6px 12px 6px 16px` (top/right/bottom
+    unchanged). Locks the chosen value so a revert to the tighter 12px is RED."""
+
+    def test_tab_has_extra_left_padding(self):
+        html = _render_owner()
+        m = re.search(r"\.tab \{[^}]*\}", html)
+        self.assertIsNotNone(m, ".tab CSS rule not found")
+        rule = m.group(0)
+        # Left padding lifted to 16px via the 4-value shorthand; the tight
+        # 12px-all-round form must be gone.
+        self.assertIn("padding: 6px 12px 6px 16px", rule)
+        self.assertNotIn("padding: 6px 12px;", rule)
+
+
 if __name__ == "__main__":
     unittest.main()
