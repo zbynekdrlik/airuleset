@@ -188,6 +188,11 @@ class TestDeferredCouplingsAreLive(unittest.TestCase):
         self.assertEqual(s.read_text(), airuleset.render_claude_launch_script())
         self.assertEqual(h.read_text(), airuleset.render_claude_history_script())
         self.assertEqual(pp.read_text(), airuleset.render_claude_history_popup_script())
+        # #613 REOPEN-2 round-2: the window-menu helper co-locates in the same
+        # managed dir as the popup script (never the real ~/.claude in a test),
+        # and byte-matches its OWN renderer (same swap-the-renderer teeth).
+        mm = pp.parent / airuleset.WINDOW_MENU_SCRIPT_DEST.name
+        self.assertEqual(mm.read_text(), airuleset.render_window_menu_script())
 
 
 if __name__ == "__main__":

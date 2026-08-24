@@ -58,6 +58,14 @@ from cli_claude_scripts import (
     render_claude_history_script,
     render_claude_history_popup_script,
 )
+# #613 REOPEN-2 round-2: the prefix+w window-menu helper lives in the tmux leaf
+# (a pure tmux concern), written to disk here alongside the other managed
+# scripts. cli_tmux_provisioning has zero internal imports, so this direct
+# import adds no cycle (cli_claude_scripts already imports from it).
+from cli_tmux_provisioning import (
+    WINDOW_MENU_SCRIPT_DEST,
+    render_window_menu_script,
+)
 
 # Canonical dup of the two ultracode marker sentinels -- byte-identical to
 # airuleset.ULTRACODE_MARK_* (which stay resident for tests). Needed at
@@ -82,7 +90,8 @@ ULTRACODE_BASHRC_BLOCK = (
 
 def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
                               history_script_path: Path = None,
-                              popup_script_path: Path = None) -> bool:
+                              popup_script_path: Path = None,
+                              menu_script_path: Path = None) -> bool:
     """Install/refresh the managed claude launcher (#77) AND the
     claude-history companion (#267 -- same mechanism, same self-heal
     discipline, deliberately extended in place rather than given its own
@@ -130,6 +139,23 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     os.chmod(str(ppath), 0o755)
     if not ppath.exists():
         raise RuntimeError(f"claude-history popup script missing right after write: {ppath}")
+
+    # #613 REOPEN-2 round-2: the tmux prefix+w window-menu helper -- IDENTICAL
+    # unconditional write + chmod +x + missing-after-write RuntimeError, so the
+    # rebind's helper is always on disk (the managed conf's `w` bind invokes it
+    # by absolute path). It is a static script, so a same-content rewrite is a
+    # true no-op on disk. Default: co-located in the SAME managed dir as the
+    # popup script (`ppath.parent`) -- in production that dir is `~/.claude`, so
+    # this resolves to exactly WINDOW_MENU_SCRIPT_DEST (the absolute path the
+    # conf's `w` bind points at); a test that redirects the popup path to a
+    # tempdir automatically lands this there too, so no caller writes into the
+    # real `~/.claude`.
+    mpath = menu_script_path or (ppath.parent / WINDOW_MENU_SCRIPT_DEST.name)
+    mpath.parent.mkdir(parents=True, exist_ok=True)
+    mpath.write_text(render_window_menu_script())
+    os.chmod(str(mpath), 0o755)
+    if not mpath.exists():
+        raise RuntimeError(f"tmux window-menu script missing right after write: {mpath}")
 
     existing = bpath.read_text() if bpath.exists() else ""
     if ULTRACODE_MARK_START in existing and ULTRACODE_MARK_END in existing:
