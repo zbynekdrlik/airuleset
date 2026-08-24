@@ -37,6 +37,7 @@ from watchdog import PROJECTS_DIR
 
 DISCORD_REPLY_MAX_CHARS = 1500       # cap a typed answer (Discord msgs ≤ 2000)
 _DREPLY_DONE_CAP = 200               # bounded dedup set of delivered reply ids
+_DQ_POSTED_CAP = 200                 # #652: bounded memory of ❓ card ids we posted
 _MENTION_TOKEN_RX = re.compile(r"<@[!&]?\d+>")
 
 _CONTROL_CHAR_RX = re.compile(r"[\x00-\x1f\x7f\x80-\x9f]")
@@ -119,6 +120,45 @@ def _refresh_channel_memory(chan_seen, channels, q_channels, now):
         kept[chx] = {"ts": now, "q": prev_q or (chx in q_channels)}
     kept.pop("", None)
     return kept
+
+def _refresh_posted_memory(state_val, qmap, now):
+    """#652: the bounded per-box memory of ❓ card ids THIS box has POSTED,
+    used to scope the never-silent orphan floor to a reply to OUR OWN card (a
+    sibling box's card in the shared `-q` thread was never ours). Given the
+    on-state value and the currently-tracked `qmap` (= main map ∪ hosted maps
+    ∪ merged 24h grace), returns the updated {id: last_seen_ts} map:
+
+    - a tracked id's ts is REFRESHED to `now` every sweep (never frozen at
+      first sight), so the memory runs a full ORPHAN_ANSWER_WINDOW_S past the
+      card's LAST tracked sighting = past grace-end — the genuine #449
+      late-answer window. A `setdefault` anchor instead collapses that window
+      toward 0 for a question graced late in its life (the overnight shape),
+      which was a real silent-loss regression.
+    - age-pruned to ORPHAN_ANSWER_WINDOW_S. A FUTURE ts is deliberately KEPT
+      (never-silent prefers remembering a genuine card id; cap-eviction below
+      sorts oldest-first, so it is never evicted early) — hence no
+      `0 <= now - v` guard here.
+    - cap-bounded to _DQ_POSTED_CAP (newest kept) as a runaway-growth net far
+      above any real single-box question rate (a few/day).
+
+    ACCEPTED RESIDUAL: a reply to OUR OWN card arriving MORE than
+    ORPHAN_ANSWER_WINDOW_S after it fully dropped from grace is silent — the
+    safe-silence direction #652 wants (the daily re-ask keeps live questions
+    fresh; the david-incident class, answered hours-to-a-day late, is covered).
+
+    Pure — mutates nothing; the CALLER persists the result only on a real
+    sweep (#304)."""
+    src = state_val if isinstance(state_val, dict) else {}
+    dq = {k: v for k, v in src.items()
+          if isinstance(v, (int, float)) and not isinstance(v, bool)
+          and now - v <= watchdog.ORPHAN_ANSWER_WINDOW_S}
+    for qid in qmap:
+        dq[str(qid)] = now            # refresh while tracked, never setdefault
+    if len(dq) > _DQ_POSTED_CAP:
+        for k, _v in sorted(dq.items(),
+                            key=lambda kv: kv[1])[:len(dq) - _DQ_POSTED_CAP]:
+            dq.pop(k, None)
+    return dq
 
 def _orphan_floor(msg, ch, allowed, qmap, cardmap, q_channels, now, env,
                   dry_run, skip_ids, orphan_done, orphan_done_set,
@@ -412,27 +452,11 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     orphan_done = state.get("dorphan_done")
     orphan_done = list(orphan_done) if isinstance(orphan_done, list) else []
     orphan_done_set = set(orphan_done)
-    # #652: fold every id THIS box currently tracks (qmap here already = the
-    # main map + hosted maps + merged grace) into a persistent, age-pruned
-    # memory of "cards we posted", so the orphan floor below fires ONLY for a
-    # reply to OUR OWN card — never a sibling box's card in the shared `-q`
-    # thread. Populated every sweep (a card stays recognizable as ours even
-    # after it later drops past grace — the genuine #449 late-answer case).
-    # Mirrors dreply_channels/dreply_done: never persisted on a dry-run (#304).
-    dq_posted = state.get("dq_posted")
-    dq_posted = dict(dq_posted) if isinstance(dq_posted, dict) else {}
-    dq_posted = {k: v for k, v in dq_posted.items()
-                 if isinstance(v, (int, float)) and not isinstance(v, bool)
-                 and now - v <= watchdog.ORPHAN_ANSWER_WINDOW_S}
-    for qid in qmap:
-        dq_posted.setdefault(str(qid), now)
-    # The 48h age-prune above is the real bound; this cap is only a runaway-
-    # growth safety net, far above any real single-box question rate over the
-    # window (David's whole day = 4 questions), so the newest are kept.
-    if len(dq_posted) > _DREPLY_DONE_CAP:
-        for k, _v in sorted(dq_posted.items(),
-                            key=lambda kv: kv[1])[:len(dq_posted) - _DREPLY_DONE_CAP]:
-            dq_posted.pop(k, None)
+    # #652: the per-box memory of ❓ card ids THIS box posted (qmap here = the
+    # main map + hosted maps + merged 24h grace), so the orphan floor below
+    # fires ONLY for a reply to OUR OWN card — never a sibling box's card in
+    # the shared `-q` thread. Persisted only on a real sweep (#304).
+    dq_posted = _refresh_posted_memory(state.get("dq_posted"), qmap, now)
     posted_ids = set(dq_posted)
     if not dry_run:
         state["dq_posted"] = dq_posted

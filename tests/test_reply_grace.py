@@ -7,14 +7,16 @@ terminal" and hard-deleted the map entries; job 7 (deliver_discord_replies)
 then had nothing to match — with an empty map it returns before even fetching
 Discord — so the phone answer vanished with ZERO journal lines.
 
-These tests lock the #449 fix:
+These tests lock the #449 fix, as SCOPED by #652:
   (1) a pruned entry moves to a GRACE store and a reply still routes
       NORMALLY (typed into the asking session, with the original question
       wording) for QUESTION_GRACE_S;
-  (2) after grace expiry — or for any owner answer attempt that cannot be
-      matched at all (reply to an untracked id, plain non-reply message in a
-      questions thread) — job 7 must journal it AND ping the owner through
-      the sanctioned notify path: the never-silent floor;
+  (2) after grace expiry, a reply to a card THIS box posted (in dq_posted)
+      but can no longer route — the genuine never-silent floor — must
+      journal it AND ping the owner. #652 SCOPES this: a reply to a SIBLING
+      box's card in the shared `-q` thread, and any plain non-reply message,
+      trigger NOTHING (the pre-#652 "not-a-reply"/untracked-anyone firing is
+      retired — it spammed the shared thread);
   (3) the fix composes with #407: a superseded ask stays routable while its
       Discord card is still answerable, and a graced entry can never re-ping
       (reping reads the MAIN map only) or re-inflate the statusline Q badge
@@ -361,6 +363,66 @@ class SharedThreadOrphanScoping652(_Base):
             self.now, self._run, state, {}, dry_run=True,
             discord_fetch=self._fetch([]))
         self.assertNotIn("dq_posted", state)
+
+
+class PostedMemoryRetention652(_Base):
+    """#652 review: `_refresh_posted_memory` must run its retention window
+    from the card's LAST tracked sighting (= past grace-end), NOT frozen at
+    first sight — a `setdefault` anchor collapsed the #449 late-answer window
+    toward ~0h for a question graced late in its life (a real silent-loss
+    regression the reviewers reproduced)."""
+
+    HOUR = 3600
+
+    def test_a_tracked_card_ts_is_refreshed_not_frozen(self):
+        # THE 🔴 lock: an id folded 47h ago that is STILL tracked (in qmap)
+        # must have its ts re-stamped to `now`, so it stays remembered for a
+        # further full window past grace — never evicted at 48h-since-first.
+        old = self.now - 47 * self.HOUR
+        out = wd._refresh_posted_memory({"888001": old}, {"888001": {}}, self.now)
+        self.assertEqual(out["888001"], self.now,
+                         "a still-tracked card's memory ts must refresh to "
+                         "now (not stay frozen at first fold): %r" % out)
+
+    def test_an_untracked_expired_entry_is_pruned(self):
+        # past the retention window AND no longer tracked -> dropped.
+        out = wd._refresh_posted_memory(
+            {"888009": self.now - 49 * self.HOUR}, {}, self.now)
+        self.assertNotIn("888009", out)
+
+    def test_an_untracked_in_window_entry_is_kept(self):
+        out = wd._refresh_posted_memory(
+            {"888009": self.now - 10 * self.HOUR}, {}, self.now)
+        self.assertIn("888009", out)
+
+    def test_a_future_ts_entry_is_kept_never_silent(self):
+        # never-silent prefers remembering a genuine card id; the prune has no
+        # `0 <= now - v` guard on purpose.
+        out = wd._refresh_posted_memory(
+            {"888009": self.now + 1000}, {}, self.now)
+        self.assertIn("888009", out)
+
+    def test_non_dict_state_is_tolerated(self):
+        # a corrupt state value (list/None) must not crash a watchdog sweep.
+        self.assertEqual(
+            wd._refresh_posted_memory(["garbage"], {}, self.now), {})
+        self.assertEqual(
+            wd._refresh_posted_memory(None, {"x": {}}, self.now), {"x": self.now})
+
+    def test_reply_to_our_card_after_retention_window_is_silent(self):
+        # E2E boundary: a reply to OUR OWN card whose memory has aged out
+        # (>window since last tracked) fires NOTHING — the deliberate
+        # safe-silence residual #652 accepts.
+        state = {"dq_posted": {"888009": self.now - 49 * self.HOUR},
+                 "dreply_channels": {"777001": {"ts": self.now, "q": True}}}
+        msg = {"id": _snow(self.now), "author": {"id": OWNER},
+               "message_reference": {"message_id": "888009"},
+               "content": "Možnosť 1"}
+        logs = wd.deliver_discord_replies(
+            self.now, self._run, state, {SID: ("%1", IDLE)}, dry_run=False,
+            discord_fetch=self._fetch([msg]))
+        self.assertFalse(any("orphan" in ln for ln in logs), logs)
+        self.assertEqual(self.pings, [])
 
 
 class ExplicitPathSandboxesGrace(unittest.TestCase):

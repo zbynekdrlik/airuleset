@@ -92,7 +92,7 @@ class FreshSubprocessImportIsClean(unittest.TestCase):
         r = subprocess.run(
             [sys.executable, "-c",
              "import watchdog.questions as q; "
-             "print(q._orphan_ping_text({'content': 'HELLOFRAG'}, 'not-a-reply'))"],
+             "print(q._orphan_ping_text({'content': 'HELLOFRAG'}, 'untracked-ref'))"],
             capture_output=True, text=True, cwd=str(REPO),
         )
         self.assertEqual(r.returncode, 0, msg=f"stderr:\n{r.stderr}")
@@ -237,7 +237,7 @@ class FacadeReexportSeamsGoThroughPackage(unittest.TestCase):
     def test_orphan_ping_text_uses_patched_clean_reply_text(self):
         with mock.patch.object(wd, "clean_reply_text",
                                return_value="SENTINEL-CLEAN"):
-            out = wd._orphan_ping_text({"content": "raw"}, "not-a-reply")
+            out = wd._orphan_ping_text({"content": "raw"}, "untracked-ref")
         self.assertIn("SENTINEL-CLEAN", out)
 
     def test_orphan_answer_reason_uses_patched_snowflake_ts(self):

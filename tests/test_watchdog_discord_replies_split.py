@@ -5,7 +5,8 @@ The Discord-reply DELIVERY cluster — job 7's owner-reply router
 internally), its compose/record/verify helpers (`compose_reply_prompt`,
 `_record_dreply_typed`, `_is_dreply_machine_text`, `_box_holds_our_own_text`),
 the #449 never-silent orphan floor + grace/channel-memory merge
-(`_merge_grace_questions`, `_refresh_channel_memory`, `_orphan_floor`), the
+(`_merge_grace_questions`, `_refresh_channel_memory`, `_refresh_posted_memory`,
+`_orphan_floor`), the
 ticket-fallback gh-comment lane (`_ticket_fallback_text`, `_gh_comment`) and ALL
 eight `dreply` constants — was moved VERBATIM out of `watchdog/__init__.py` into
 `watchdog.discord_replies`, then re-exported IN PLACE by a single positional
@@ -61,6 +62,7 @@ import watchdog.discord_replies as discord_replies  # noqa: E402
 MOVED_FUNCS = [
     "_merge_grace_questions",
     "_refresh_channel_memory",
+    "_refresh_posted_memory",
     "_orphan_floor",
     "_ticket_fallback_text",
     "_gh_comment",
@@ -74,6 +76,7 @@ MOVED_FUNCS = [
 MOVED_CONSTS = [
     "DISCORD_REPLY_MAX_CHARS",
     "_DREPLY_DONE_CAP",
+    "_DQ_POSTED_CAP",
     "_MENTION_TOKEN_RX",
     "_CONTROL_CHAR_RX",
     "DREPLY_TICKET_FALLBACK_S",

@@ -527,6 +527,7 @@ from watchdog.tmux_io import (  # noqa: E402
 from watchdog.discord_replies import (  # noqa: E402
     DISCORD_REPLY_MAX_CHARS as DISCORD_REPLY_MAX_CHARS,
     _DREPLY_DONE_CAP as _DREPLY_DONE_CAP,
+    _DQ_POSTED_CAP as _DQ_POSTED_CAP,
     _MENTION_TOKEN_RX as _MENTION_TOKEN_RX,
     _CONTROL_CHAR_RX as _CONTROL_CHAR_RX,
     DREPLY_TICKET_FALLBACK_S as DREPLY_TICKET_FALLBACK_S,
@@ -535,6 +536,7 @@ from watchdog.discord_replies import (  # noqa: E402
     DREPLY_CHANNEL_MEMORY_S as DREPLY_CHANNEL_MEMORY_S,
     _merge_grace_questions as _merge_grace_questions,
     _refresh_channel_memory as _refresh_channel_memory,
+    _refresh_posted_memory as _refresh_posted_memory,
     _orphan_floor as _orphan_floor,
     _ticket_fallback_text as _ticket_fallback_text,
     _gh_comment as _gh_comment,

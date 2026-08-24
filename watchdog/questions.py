@@ -62,11 +62,14 @@ def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
       in `posted_ids` — the bounded per-box memory of ❓ card ids THIS box
       posted (deliver_discord_replies' state["dq_posted"]). A SIBLING box's
       card is "untracked by me" but was NEVER ours, so we stay silent; only
-      the ONE box that posted a card can ever react to a reply to it, giving
-      fleet-wide at-most-once by construction. The genuine #449 case (our own
-      card dropped past 24h grace, late answer) is preserved: many sweeps
-      folded that card into dq_posted while it lived in qmap/grace, and the
-      memory outlives the grace window.
+      the box(es) that posted a card can react to a reply to it — fleet-wide
+      at-most-ONCE by construction for the ordinary single-owner card, and
+      at-most-TWICE for the historical HOSTED-user shape (a hosted card id is
+      folded into both the host's and the hosted user's own dq_posted; no live
+      hosted stream today, and still far better than the pre-#652 N-box spam).
+      The genuine #449 case (our own card dropped past grace, late answer) is
+      preserved up to _refresh_posted_memory's retention window — see it for
+      the exact bound and the accepted >window residual.
 
     Gates kept from #449: scoped to QUESTION channels only (the per-owner
     `-q` threads, #296); owner-authored, usable text, recent
@@ -109,14 +112,13 @@ def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
 
 
 def _orphan_ping_text(msg, reason):
-    """The Slovak owner ping for an unroutable answer attempt (#449) — the
-    user must never learn about a lost answer only from silence."""
+    """The Slovak owner ping for an unroutable answer attempt to OUR OWN ❓
+    card (#449) — the user must never learn about a lost answer only from
+    silence. `reason` is retained for call compatibility but no longer
+    branches: post-#652 `_orphan_answer_reason` returns only "untracked-ref"
+    (the "not-a-reply" verdict was retired), so a single message renders for
+    any reason."""
     frag = watchdog.clean_reply_text((msg or {}).get("content"))[:120] or "(bez textu)"
-    if reason == "not-a-reply":
-        return ("⚠️ Tvoja správa na Discorde («%s») nie je Reply na konkrétnu "
-                "❓ otázku, takže sa nedá bezpečne priradiť k session. "
-                "Odpovedz prosím cez Reply priamo na ❓ kartu, alebo odpoveď "
-                "napíš do terminálu." % frag)
     return ("⚠️ Tvoja Discord odpoveď («%s») sa už nedá priradiť — pôvodná "
             "otázka medzitým prestala byť sledovaná (zodpovedaná v termináli "
             "alebo nahradená novšou). Ak stále platí, odpovedz prosím na "
