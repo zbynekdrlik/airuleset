@@ -422,6 +422,12 @@ from cli_bashrc_appliers import (  # noqa: E402, F401
     render_tmux_attach_block as render_tmux_attach_block,
     _owner_session_default as _owner_session_default,
     apply_tmux_attach_helpers as apply_tmux_attach_helpers,
+    OWNER_VPS_SSH_ATTACH_MARK_START as OWNER_VPS_SSH_ATTACH_MARK_START,
+    OWNER_VPS_SSH_ATTACH_MARK_END as OWNER_VPS_SSH_ATTACH_MARK_END,
+    OWNER_VPS_PROJECTS as OWNER_VPS_PROJECTS,
+    render_owner_vps_ssh_attach_block as render_owner_vps_ssh_attach_block,
+    _owner_vps_project as _owner_vps_project,
+    apply_owner_vps_ssh_attach as apply_owner_vps_ssh_attach,
 )
 
 
@@ -1108,6 +1114,19 @@ def cmd_install(args):
             print(f"  Updated:   {BASHRC} (subdev ssh auto-attach, #264)")
     except Exception as e:
         print(f"  ssh auto-attach setup error (non-fatal): {e}", file=sys.stderr)
+    try:
+        # #656: the OWNER-VPS counterpart of the #264 subdev block. A no-op on
+        # every box except a registered owner single-project VPS (spinbike-vps,
+        # `_owner_vps_project`); there it installs (or idempotently replaces the
+        # interim hand-block) an ssh auto-attach into the owner session's
+        # project window (session=<owner group>, window=<project>, cwd=<dev
+        # dir>), and STRIPS a stale block from any box that must not carry it.
+        vps_attach_changed = apply_owner_vps_ssh_attach()
+        if vps_attach_changed:
+            print(f"  Updated:   {BASHRC} (owner-VPS ssh auto-attach, #656)")
+    except Exception as e:
+        print(f"  owner-VPS ssh auto-attach setup error (non-fatal): {e}",
+              file=sys.stderr)
     try:
         # #554/#592: name the tmux WINDOW after the box's short TARGET ALIAS
         # (gk/mN/dN/...) so the owner sees WHERE they are. #593: renders ONLY on

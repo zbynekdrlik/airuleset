@@ -1,11 +1,11 @@
 {
   "files": {
-    "airuleset.py": 6172,
+    "airuleset.py": 6191,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 105,
     "cli_autopilot_lock.py": 793,
-    "cli_bashrc_appliers.py": 551,
+    "cli_bashrc_appliers.py": 741,
     "cli_binary_installers.py": 325,
     "cli_burn.py": 553,
     "cli_caveman_plugins.py": 565,
@@ -98,7 +98,7 @@
     "tests/test_deploy_watch_recipe.py": 218,
     "tests/test_design_before_code.py": 137,
     "tests/test_design_gate.py": 1599,
-    "tests/test_dev_env_provisioning.py": 1843,
+    "tests/test_dev_env_provisioning.py": 2189,
     "tests/test_discord_notify_check.py": 108,
     "tests/test_discord_reply.py": 1997,
     "tests/test_discuss_close_guard.py": 418,
@@ -366,7 +366,7 @@
   "functions": {
     "airuleset.py::_notify_run_card": 288,
     "airuleset.py::cmd_gk_request": 209,
-    "airuleset.py::cmd_install": 559,
+    "airuleset.py::cmd_install": 572,
     "airuleset.py::cmd_notify": 320,
     "airuleset.py::cmd_tickets_status": 203,
     "airuleset.py::cmd_watchdog": 209,
