@@ -185,9 +185,11 @@ class TestRootAppendScript(TestCase):
         self.assertNotIn("sed -i", script)
         self.assertNotIn("truncate", script)
         self.assertNotIn("tee ", script)  # tee w/o -a truncates
-        # a single '>' (truncating redirect) must not appear; only '>>' allowed
+        # a single '>' (truncating redirect) must not appear; only '>>' allowed.
+        # NOT exempting a digit-preceded '>' — an fd redirect like 2>"$f" also
+        # truncates, so it must fail this lock too.
         import re
-        self.assertIsNone(re.search(r"(?<![>0-9])>(?![>])", script),
+        self.assertIsNone(re.search(r"(?<!>)>(?![>&])", script),
                           "script contains a truncating '>' redirect: %r" % script)
         self.assertIn(">>", script)
         self.assertIn("grep", script)
@@ -214,6 +216,27 @@ class TestRootAppendScript(TestCase):
             content2 = Path(ak).read_text()
             self.assertEqual(content, content2)
             self.assertEqual(content2.count(WINDOWS_BLOB), 1)
+
+    def test_real_sh_preserves_newlineless_last_line(self):
+        # the root shell path must NOT glue the first owner key onto a
+        # pre-existing last line that lacks a trailing newline (which would
+        # both corrupt the existing key's comment AND bury the owner key).
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            ssh_dir = os.path.join(tmp, "root", ".ssh")
+            os.makedirs(ssh_dir)
+            ak = os.path.join(ssh_dir, "authorized_keys")
+            Path(ak).write_text(SESSION_KEY)  # NO trailing newline
+            script = cli_owner_keys._authorized_keys_append_script(ssh_dir)
+            keys_stdin = "".join(k + "\n" for k in cli_owner_keys.OWNER_PUBKEYS)
+            subprocess.run(["sh", "-c", script], input=keys_stdin, text=True,
+                           check=True, capture_output=True)
+            content = Path(ak).read_text()
+            # session key intact on its OWN line, not glued to an owner key
+            self.assertIn(SESSION_KEY + "\n", content)
+            self.assertNotIn(SESSION_KEY + "ssh-ed25519", content)
+            self.assertIn(WINDOWS_BLOB, content)
+            self.assertIn(GITHUB_BLOB, content)
 
 
 # --------------------------------------------------------------------------
@@ -293,6 +316,42 @@ class TestProvisionOwnerKeys(TestCase):
             self.assertEqual(res["root"], "skipped")
             self.assertEqual(ran_sudo, [], "provision_root=False must never touch sudo")
 
+    def test_running_as_root_with_nonroot_home_writes_root_directly(self):
+        # `sudo -E install` (HOME preserved != /root): the current-user path
+        # wrote a NON-root home, so /root must be provisioned DIRECTLY here
+        # (no sudo needed — we ARE root), never silently skipped.
+        import tempfile
+        sudo_calls = []
+
+        def fake_run(argv, **kw):
+            sudo_calls.append(argv)
+            return _fake_cp(returncode=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = os.path.join(tmp, "root", ".ssh")
+            with m.patch.object(os, "geteuid", lambda: 0), \
+                 m.patch.dict(os.environ, {"HOME": os.path.join(tmp, "home")}):
+                status = cli_owner_keys._provision_root_keys(
+                    cli_owner_keys.OWNER_PUBKEYS, fake_run, root_ssh_dir=root_dir)
+            self.assertEqual(status, "root-provisioned (direct, running as root)")
+            content = Path(os.path.join(root_dir, "authorized_keys")).read_text()
+            self.assertIn(WINDOWS_BLOB, content)
+            self.assertIn(GITHUB_BLOB, content)
+            self.assertEqual(sudo_calls, [], "already root — must not shell out to sudo")
+
+    def test_running_as_root_with_home_root_is_noop(self):
+        # plain `sudo install` (HOME=/root): the current-user path already IS
+        # /root/.ssh, so the root step is a no-op (never a double write).
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = os.path.join(tmp, ".ssh")  # HOME==tmp -> ~/.ssh == root_dir
+            with m.patch.object(os, "geteuid", lambda: 0), \
+                 m.patch.dict(os.environ, {"HOME": tmp}):
+                status = cli_owner_keys._provision_root_keys(
+                    cli_owner_keys.OWNER_PUBKEYS,
+                    lambda *a, **k: _fake_cp(), root_ssh_dir=root_dir)
+            self.assertEqual(status, "self-root (current-user path covers /root)")
+
 
 # --------------------------------------------------------------------------
 # Wiring — facade re-export + cmd_install actually calls it.
@@ -305,9 +364,16 @@ class TestWiring(TestCase):
 
     def test_cmd_install_invokes_provision_owner_keys(self):
         import inspect
+        import re
         src = inspect.getsource(airuleset.cmd_install)
-        self.assertIn("provision_owner_keys", src,
-                      "cmd_install must provision owner keys on every install")
+        # an UNCOMMENTED call at statement position (a bare mention in a comment
+        # would pass a plain assertIn but never actually run).
+        self.assertTrue(
+            re.search(r"(?m)^\s*provision_owner_keys\(\)", src),
+            "cmd_install must actually CALL provision_owner_keys(), not just mention it")
+        # and it must be wrapped non-fatal, so a provisioning hiccup never
+        # aborts the rest of install.
+        self.assertIn("owner-key provisioning error (non-fatal)", src)
 
 
 if __name__ == "__main__":

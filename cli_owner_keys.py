@@ -145,6 +145,12 @@ def _authorized_keys_append_script(ssh_dir):
         "set -e; umask 077; "
         "d=" + d + "; mkdir -p \"$d\"; chmod 700 \"$d\"; "
         "f=\"$d/authorized_keys\"; touch \"$f\"; chmod 600 \"$f\"; "
+        # append-only trailing-newline guard (mirrors the Python path): a
+        # pre-existing file whose last line lacks a newline must not have the
+        # first owner key GLUED onto it (which would both corrupt the existing
+        # line's comment AND bury the owner key inside a comment, silently
+        # never provisioning it). Uses only >> — never truncates.
+        "[ ! -s \"$f\" ] || [ -z \"$(tail -c 1 \"$f\")\" ] || printf '\\n' >> \"$f\"; "
         "while IFS= read -r key; do "
         "[ -n \"$key\" ] || continue; "
         "set -- $key; blob=$2; "
@@ -156,13 +162,26 @@ def _authorized_keys_append_script(ssh_dir):
 
 def _provision_root_keys(keys, run, root_ssh_dir="/root/.ssh"):
     """Best-effort root provisioning. Returns a short status string; NEVER
-    raises (the caller must never break install over root). Gated on
-    passwordless sudo so it never prompts on a no-sudo account (every subdev
-    stream account) — a `sudo -n true` probe fails instantly there and the
-    root append is skipped. When already running AS root, the current-user
-    path has already covered `~/.ssh` (== /root/.ssh), so this is a no-op."""
+    raises (the caller must never break install over root). Gated on sudo
+    that needs NO password right now (`sudo -n true` — NOPASSWD, or a live
+    sudo timestamp): it never prompts, so on a no-sudo account (every subdev
+    stream account) the probe fails instantly and the root append is skipped.
+    When ALREADY running as root, sudo is unnecessary — root's file is written
+    directly (via the same append-only Python path), unless the current-user
+    path already IS `/root/.ssh` (a plain `sudo install` with HOME=/root), in
+    which case it is a no-op. This also covers `sudo -E` (HOME preserved): the
+    current-user path then wrote a NON-root home, so /root is provisioned here
+    instead of being silently skipped."""
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        return "self-root (current-user path covers /root)"
+        user_ak = os.path.realpath(os.path.expanduser("~/.ssh"))
+        if user_ak == os.path.realpath(root_ssh_dir):
+            return "self-root (current-user path covers /root)"
+        try:
+            _append_missing_keys(os.path.join(root_ssh_dir, "authorized_keys"),
+                                 keys)
+        except OSError as e:
+            return "root-provision-error: %r" % e
+        return "root-provisioned (direct, running as root)"
     if not shutil.which("sudo"):
         return "no-sudo"
     try:
