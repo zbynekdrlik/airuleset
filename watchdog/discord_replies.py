@@ -37,6 +37,7 @@ from watchdog import PROJECTS_DIR
 
 DISCORD_REPLY_MAX_CHARS = 1500       # cap a typed answer (Discord msgs ≤ 2000)
 _DREPLY_DONE_CAP = 200               # bounded dedup set of delivered reply ids
+_DQ_POSTED_CAP = 200                 # #652: bounded memory of ❓ card ids we posted
 _MENTION_TOKEN_RX = re.compile(r"<@[!&]?\d+>")
 
 _CONTROL_CHAR_RX = re.compile(r"[\x00-\x1f\x7f\x80-\x9f]")
@@ -120,22 +121,64 @@ def _refresh_channel_memory(chan_seen, channels, q_channels, now):
     kept.pop("", None)
     return kept
 
+def _refresh_posted_memory(state_val, qmap, now):
+    """#652: the bounded per-box memory of ❓ card ids THIS box has POSTED,
+    used to scope the never-silent orphan floor to a reply to OUR OWN card (a
+    sibling box's card in the shared `-q` thread was never ours). Given the
+    on-state value and the currently-tracked `qmap` (= main map ∪ hosted maps
+    ∪ merged 24h grace), returns the updated {id: last_seen_ts} map:
+
+    - a tracked id's ts is REFRESHED to `now` every sweep (never frozen at
+      first sight), so the memory runs a full ORPHAN_ANSWER_WINDOW_S past the
+      card's LAST tracked sighting = past grace-end — the genuine #449
+      late-answer window. A `setdefault` anchor instead collapses that window
+      toward 0 for a question graced late in its life (the overnight shape),
+      which was a real silent-loss regression.
+    - age-pruned to ORPHAN_ANSWER_WINDOW_S. A FUTURE ts is deliberately KEPT
+      (never-silent prefers remembering a genuine card id; cap-eviction below
+      sorts oldest-first, so it is never evicted early) — hence no
+      `0 <= now - v` guard here.
+    - cap-bounded to _DQ_POSTED_CAP (newest kept) as a runaway-growth net far
+      above any real single-box question rate (a few/day).
+
+    ACCEPTED RESIDUAL: a reply to OUR OWN card arriving MORE than
+    ORPHAN_ANSWER_WINDOW_S after it fully dropped from grace is silent — the
+    safe-silence direction #652 wants (the daily re-ask keeps live questions
+    fresh; the david-incident class, answered hours-to-a-day late, is covered).
+
+    Pure — mutates nothing; the CALLER persists the result only on a real
+    sweep (#304)."""
+    src = state_val if isinstance(state_val, dict) else {}
+    dq = {k: v for k, v in src.items()
+          if isinstance(v, (int, float)) and not isinstance(v, bool)
+          and now - v <= watchdog.ORPHAN_ANSWER_WINDOW_S}
+    for qid in qmap:
+        dq[str(qid)] = now            # refresh while tracked, never setdefault
+    if len(dq) > _DQ_POSTED_CAP:
+        for k, _v in sorted(dq.items(),
+                            key=lambda kv: kv[1])[:len(dq) - _DQ_POSTED_CAP]:
+            dq.pop(k, None)
+    return dq
+
 def _orphan_floor(msg, ch, allowed, qmap, cardmap, q_channels, now, env,
                   dry_run, skip_ids, orphan_done, orphan_done_set,
-                  state, persist, logs):
-    """#449 NEVER-SILENT floor: an owner's answer attempt that cannot be
-    routed (a reply to a message no longer tracked — pruned/superseded past
-    grace — or a plain non-reply message in a questions thread the security
-    gate can never match) must leave a journal line AND ping the owner,
-    never vanish. The journal line is unconditional (the floor even when
-    Discord itself is down); the ping is deduped per message id —
-    state-marked only on a CONFIRMED send ("sent"/"dedup"), so a transient
-    send error retries next sweep, and a dry-run marks nothing (#304)."""
+                  state, persist, logs, posted_ids):
+    """#449 NEVER-SILENT floor, #652-SCOPED: an owner's answer attempt to a
+    card THIS box posted that cannot be routed (a reply to OUR OWN ❓ no
+    longer tracked — pruned/superseded/dropped past grace) must leave a
+    journal line AND ping the owner, never vanish. `posted_ids` is the
+    per-box memory of card ids this box posted — a reply to a SIBLING box's
+    card in the shared `-q` thread, and any plain non-reply message, is NOT
+    ours and fires nothing (#652 kills the shared-thread spam). The journal
+    line is unconditional (the floor even when Discord itself is down); the
+    ping is deduped per message id — state-marked only on a CONFIRMED send
+    ("sent"/"dedup"), so a transient send error retries next sweep, and a
+    dry-run marks nothing (#304)."""
     mid_o = str(msg.get("id") or "").strip() if isinstance(msg, dict) else ""
     if not mid_o or mid_o in skip_ids or mid_o in orphan_done_set:
         return
     reason = watchdog._orphan_answer_reason(msg, allowed, qmap, cardmap,
-                                   q_channels, ch, now)
+                                   q_channels, ch, now, posted_ids)
     if not reason:
         return
     logs.append("reply orphaned (%s) %s [%s]" % (reason, mid_o[-8:], ch))
@@ -409,6 +452,14 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     orphan_done = state.get("dorphan_done")
     orphan_done = list(orphan_done) if isinstance(orphan_done, list) else []
     orphan_done_set = set(orphan_done)
+    # #652: the per-box memory of ❓ card ids THIS box posted (qmap here = the
+    # main map + hosted maps + merged 24h grace), so the orphan floor below
+    # fires ONLY for a reply to OUR OWN card — never a sibling box's card in
+    # the shared `-q` thread. Persisted only on a real sweep (#304).
+    dq_posted = _refresh_posted_memory(state.get("dq_posted"), qmap, now)
+    posted_ids = set(dq_posted)
+    if not dry_run:
+        state["dq_posted"] = dq_posted
 
     def _ack(r):
         # ✅ = RECEIPT, fired the moment the reply is MATCHED (even while the
@@ -621,7 +672,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                               now, env, dry_run,
                               done_set | card_done_set,
                               orphan_done, orphan_done_set,
-                              state, persist, logs)
+                              state, persist, logs, posted_ids)
                 continue
             if r["reply_id"] in done_set:
                 continue

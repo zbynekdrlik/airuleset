@@ -44,26 +44,39 @@ from watchdog import PROJECTS_DIR
 
 
 def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
-                          channel, now):
-    """Classify `msg` as an owner ANSWER ATTEMPT that can no longer be routed
-    (#449) — returns "untracked-ref" (an explicit reply to a message we no
-    longer track: pruned past grace, superseded past grace, or simply never
-    ours) or "not-a-reply" (a plain message in a QUESTIONS thread — the
-    security gate requires an explicit reply, so it can never route), else
-    None. Pure and deliberately NARROW:
+                          channel, now, posted_ids=None):
+    """Classify `msg` as an owner ANSWER ATTEMPT to OUR OWN ❓ card that can
+    no longer be routed (#449) — returns "untracked-ref", else None. Pure and
+    deliberately NARROW.
 
-    - scoped to QUESTION channels only (the per-owner `-q` threads, #296 —
-      every bot message there is a ❓, so an unmatched owner message there is
-      near-certainly a lost answer; the main thread's cards/✅ chatter is
-      excluded, the card-reopen flow owns replies there);
-    - owner-authored, usable text, recent (ORPHAN_ANSWER_WINDOW_S via the
-      message's own snowflake — an unparsable id reads as too old, skip);
-    - a reply to another HUMAN's message (referenced_message present with a
-      non-bot author) is conversation, never an answer attempt — stay quiet.
-      A missing/deleted referenced_message stays classified as an orphan:
-      in a questions thread the referenced message was almost certainly our
-      own ❓, and the never-silent mandate prefers a rare extra ping over a
-      silent loss."""
+    #652 SCOPES this to a reply to a card THIS box actually posted, reversing
+    #449's two over-broad firings that spammed a SHARED `-q` thread (david1,
+    david2, codex-bridge, … all post to and fetch ONE thread, each running
+    its own job 7):
+
+    - a PLAIN non-reply message no longer fires at all — in a shared thread
+      the owner and the stream deliberately converse, and "my si tam chceme
+      aj pisat" must never trigger a bot warning (the old "not-a-reply"
+      verdict is retired);
+    - an explicit reply fires "untracked-ref" ONLY when its referenced id is
+      in `posted_ids` — the bounded per-box memory of ❓ card ids THIS box
+      posted (deliver_discord_replies' state["dq_posted"]). A SIBLING box's
+      card is "untracked by me" but was NEVER ours, so we stay silent; only
+      the box(es) that posted a card can react to a reply to it — fleet-wide
+      at-most-ONCE by construction for the ordinary single-owner card, and
+      at-most-TWICE for the historical HOSTED-user shape (a hosted card id is
+      folded into both the host's and the hosted user's own dq_posted; no live
+      hosted stream today, and still far better than the pre-#652 N-box spam).
+      The genuine #449 case (our own card dropped past grace, late answer) is
+      preserved up to _refresh_posted_memory's retention window — see it for
+      the exact bound and the accepted >window residual.
+
+    Gates kept from #449: scoped to QUESTION channels only (the per-owner
+    `-q` threads, #296); owner-authored, usable text, recent
+    (ORPHAN_ANSWER_WINDOW_S via the message's own snowflake — an unparsable
+    id reads as too old, skip). A reply to another HUMAN's message stays
+    quiet, though a reply whose ref is in `posted_ids` is by definition our
+    own bot card, so that guard is only a defensive backstop now."""
     if channel not in question_channels or not isinstance(msg, dict):
         return None
     mid = str(msg.get("id") or "").strip()
@@ -77,9 +90,13 @@ def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
         return None
     ref = str((msg.get("message_reference") or {}).get("message_id") or "").strip()
     if not ref:
-        return "not-a-reply"
+        return None                    # #652: a non-reply never fires
     if ref in qmap or ref in cardmap:
         return None                    # tracked — the normal flows own it
+    # #652: fire ONLY for a reply to a card THIS box posted. A sibling box's
+    # card in the shared thread was never in our posted memory — stay silent.
+    if ref not in (posted_ids or ()):
+        return None
     rm = msg.get("referenced_message")
     if isinstance(rm, dict):
         rauthor = rm.get("author")
@@ -95,14 +112,13 @@ def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
 
 
 def _orphan_ping_text(msg, reason):
-    """The Slovak owner ping for an unroutable answer attempt (#449) — the
-    user must never learn about a lost answer only from silence."""
+    """The Slovak owner ping for an unroutable answer attempt to OUR OWN ❓
+    card (#449) — the user must never learn about a lost answer only from
+    silence. `reason` is retained for call compatibility but no longer
+    branches: post-#652 `_orphan_answer_reason` returns only "untracked-ref"
+    (the "not-a-reply" verdict was retired), so a single message renders for
+    any reason."""
     frag = watchdog.clean_reply_text((msg or {}).get("content"))[:120] or "(bez textu)"
-    if reason == "not-a-reply":
-        return ("⚠️ Tvoja správa na Discorde («%s») nie je Reply na konkrétnu "
-                "❓ otázku, takže sa nedá bezpečne priradiť k session. "
-                "Odpovedz prosím cez Reply priamo na ❓ kartu, alebo odpoveď "
-                "napíš do terminálu." % frag)
     return ("⚠️ Tvoja Discord odpoveď («%s») sa už nedá priradiť — pôvodná "
             "otázka medzitým prestala byť sledovaná (zodpovedaná v termináli "
             "alebo nahradená novšou). Ak stále platí, odpovedz prosím na "
