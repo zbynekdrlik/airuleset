@@ -55,24 +55,29 @@ const CFG = { term_cols: 176, term_rows: 51 };
 // reference. Kept in sync with cli_webterm.py by test_fit_fill_caps_match_source.
 const WT_FILL_MAX_CELL_STRETCH = 1.5;
 const WT_FILL_MAX_LINE_STRETCH = 1.8;
-const CW = 0.6, CH = 1.2;                 // fake monospace cell = 0.6*fs x 1.2*fs
-// #655: the fake cell now models the two native xterm.js FILL options the
-// browser-side fit uses -- `letterSpacing` (px added to each cell's WIDTH) and
-// `lineHeight` (a multiplier on each cell's HEIGHT) -- so the harness can prove
-// the grid genuinely FILLS the viewport, not just that it never overflows.
-function rect(term){
-  const ls = term.options.letterSpacing || 0;
-  const lh = term.options.lineHeight || 1;
-  return { width:  term.cols * (CW*term.options.fontSize + ls),
-           height: term.rows * (CH*term.options.fontSize * lh) };
-}
+const CW = 0.6, CH = 1.2;                 // fake NATURAL monospace cell = 0.6*fs x 1.2*fs
+function natural(term){ return { width: term.cols*CW*term.options.fontSize,
+                                 height: term.rows*CH*term.options.fontSize }; }
 const term = {
   cols: 80, rows: 24,
   options: { fontSize: 13, theme: { background: '#0d1117' } },
   resize(c, r){ this.cols = c; this.rows = r; },
 };
 const styleStore = {};
-const screenEl = { getBoundingClientRect(){ return rect(term); } };
+// #655: the fake grid element carries a `style` whose `transform` the FILL pass
+// sets; getBoundingClientRect REFLECTS that scale (as real DOM does), so the
+// harness proves the CSS-scale fill genuinely FILLS the viewport. querySelector
+// returns this same element for both `.xterm` (the scale target) and
+// `.xterm-screen` (the measured grid), matching the real same-element wiring.
+const screenEl = {
+  style: {},
+  getBoundingClientRect(){
+    const m = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(this.style.transform || '');
+    const sx = m ? parseFloat(m[1]) : 1, sy = m ? parseFloat(m[2]) : 1;
+    const n = natural(term);
+    return { width: n.width*sx, height: n.height*sy };
+  },
+};
 const doc = {
   head: { appendChild(){} },
   getElementById(id){ return styleStore[id] || null; },
@@ -83,26 +88,40 @@ const VW = (typeof HARNESS_VW !== 'undefined') ? HARNESS_VW : 1600;
 const VH = (typeof HARNESS_VH !== 'undefined') ? HARNESS_VH : 1000;
 const win = { term, document: doc, innerWidth: VW, innerHeight: VH };
 %(fit)s
+%(fill)s
 const baseFont = 13;
+// #655: fitFixedGrid clamps+resets+min-fits the font; fillFixedGrid is the
+// DEFERRED pass that stretches the grid to fill. In the browser they run one
+// async tick apart (so the natural-grid measure is settled); the harness is
+// synchronous, so calling them back-to-back is the same contract.
 const ok = fitFixedGrid(win);
+const filled = fillFixedGrid(win);
 term.resize(300, 80);                     // simulate ttyd's own FitAddon firing
-const r = rect(term);
+const r = screenEl.getBoundingClientRect();   // FINAL size, reflects the fill scale
+const sm = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(screenEl.style.transform || '');
 process.stdout.write(JSON.stringify({
-  ok, cols: term.cols, rows: term.rows, clampedTo: [term.cols, term.rows],
+  ok, filled, cols: term.cols, rows: term.rows, clampedTo: [term.cols, term.rows],
   fontSize: term.options.fontSize, baseFont,
-  letterSpacing: term.options.letterSpacing || 0,
-  lineHeight: term.options.lineHeight || 1,
+  scaleX: sm ? parseFloat(sm[1]) : 1,
+  scaleY: sm ? parseFloat(sm[2]) : 1,
   gridW: r.width, gridH: r.height, availW: win.innerWidth, availH: win.innerHeight,
 }) + "\n");
 """
 
 
-def _run_fit_harness(fit_js, vw=1600, vh=1000):
-    """Run the extracted fitFixedGrid in node against a fake window of size
-    (vw, vh); return the parsed JSON result dict. Skips if node is absent."""
+def _run_fit_harness(html_or_fit, vw=1600, vh=1000, fill_js=None):
+    """Run the extracted fitFixedGrid + fillFixedGrid in node against a fake
+    window of size (vw, vh); return the parsed JSON result dict. `html_or_fit`
+    is either the fitFixedGrid source (with `fill_js` given) or the rendered
+    dashboard HTML (both functions extracted from it). Skips if node absent."""
     import subprocess
+    if fill_js is None:                 # `html_or_fit` is the rendered HTML
+        fit_js = _extract_js_function(html_or_fit, "fitFixedGrid")
+        fill_js = _extract_js_function(html_or_fit, "fillFixedGrid")
+    else:
+        fit_js = html_or_fit
     harness = ("const HARNESS_VW=%d, HARNESS_VH=%d;\n" % (vw, vh)) + (
-        _FIT_HARNESS % {"fit": fit_js})
+        _FIT_HARNESS % {"fit": fit_js, "fill": fill_js})
     d = tempfile.mkdtemp()
     hp = Path(d) / "fitharness.js"
     hp.write_text(harness, encoding="utf-8")
@@ -1235,13 +1254,16 @@ class TestBrowserFixedGridFit(unittest.TestCase):
     def test_fit_clamps_resize_and_scales_fontsize(self):
         # source-lock the two load-bearing mechanics: (1) term.resize is
         # OVERRIDDEN to clamp to the fixed grid (defeats ttyd's FitAddon), and
-        # (2) term.options.fontSize is set (crisp font scaling, not CSS scale).
+        # (2) term.options.fontSize is set (crisp font scaling for the PRIMARY
+        # scale). fitFixedGrid may CLEAR a fill scale (transform:'none') but must
+        # never itself SCALE via a CSS transform -- that lives in fillFixedGrid
+        # and is only the small residual (#655).
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         fn = _extract_js_function(html, "fitFixedGrid")
         self.assertIn("term.resize =", fn)             # clamp installed
         self.assertIn("real(cols, rows)", fn)          # clamped to the fixed grid
         self.assertIn("term.options.fontSize", fn)     # font scaling (crisp)
-        self.assertNotIn("transform", fn)              # never a blurry CSS scale
+        self.assertNotIn("scale(", fn)                 # never a CSS scale in the PRIMARY fit
         apply = _extract_js_function(html, "applyFixedGrid")
         self.assertIn("win.term", _extract_js_function(html, "fitFixedGrid"))
         self.assertIn("setTimeout", apply)             # polls for async ttyd term
@@ -1256,15 +1278,7 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         if shutil.which("node") is None:
             self.skipTest("node not available")
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        fit = _extract_js_function(html, "fitFixedGrid")
-        harness = _FIT_HARNESS % {"fit": fit}
-        d = tempfile.mkdtemp()
-        hp = Path(d) / "fitharness.js"
-        hp.write_text(harness, encoding="utf-8")
-        import subprocess
-        r = subprocess.run(["node", str(hp)], capture_output=True, text=True, timeout=30)
-        self.assertEqual(r.returncode, 0, "node harness failed:\n%s\n%s" % (r.stdout, r.stderr))
-        out = json.loads(r.stdout.strip().splitlines()[-1])
+        out = _run_fit_harness(html)                    # runs fit + deferred fill
         self.assertTrue(out["ok"])                      # fit applied
         self.assertEqual(out["cols"], 176)              # grid FORCED to the fixed cols
         self.assertEqual(out["rows"], 51)               # ... and rows
@@ -1284,10 +1298,9 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         if shutil.which("node") is None:
             self.skipTest("node not available")
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        fit = _extract_js_function(html, "fitFixedGrid")
         for vw, vh, tag in ((1920, 1011, "laptop wide (horizontal margin)"),
                             (1400, 1000, "tall-ish window (vertical margin)")):
-            out = _run_fit_harness(fit, vw, vh)
+            out = _run_fit_harness(html, vw, vh)
             fillW = out["gridW"] / out["availW"]
             fillH = out["gridH"] / out["availH"]
             # FILLS both dimensions within ~2% (RED: current code letterboxes the
@@ -1295,11 +1308,11 @@ class TestBrowserFixedGridFit(unittest.TestCase):
             self.assertGreaterEqual(
                 fillW, 0.98,
                 "%s: grid must FILL the width (no letterbox); filled %.1f%% "
-                "(letterSpacing=%s)" % (tag, fillW * 100, out["letterSpacing"]))
+                "(scaleX=%s)" % (tag, fillW * 100, out["scaleX"]))
             self.assertGreaterEqual(
                 fillH, 0.98,
                 "%s: grid must FILL the height (no letterbox); filled %.1f%% "
-                "(lineHeight=%s)" % (tag, fillH * 100, out["lineHeight"]))
+                "(scaleY=%s)" % (tag, fillH * 100, out["scaleY"]))
             self.assertLessEqual(out["gridW"], out["availW"] + 1, "%s: no overflow W" % tag)
             self.assertLessEqual(out["gridH"], out["availH"] + 1, "%s: no overflow H" % tag)
 
@@ -1321,13 +1334,15 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         if shutil.which("node") is None:
             self.skipTest("node not available")
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        fit = _extract_js_function(html, "fitFixedGrid")
-        out = _run_fit_harness(fit, 6000, 400)   # absurdly wide-and-short
-        # letterSpacing (px per cell) is capped relative to the natural cell,
-        # never unbounded; lineHeight likewise stays within a sane ceiling.
-        self.assertLess(out["lineHeight"], 2.0,
-                        "lineHeight stretch must be capped, got %s" % out["lineHeight"])
+        out = _run_fit_harness(html, 6000, 400)   # absurdly wide-and-short
+        # the fill scale is capped (WT_FILL_MAX_*), never unbounded -- so an
+        # extreme viewport letterboxes the remainder instead of distorting text.
+        self.assertLessEqual(out["scaleX"], 1.5 + 1e-6,
+                             "scaleX must be capped, got %s" % out["scaleX"])
+        self.assertLessEqual(out["scaleY"], 1.8 + 1e-6,
+                             "scaleY must be capped, got %s" % out["scaleY"])
         # and it still never overflows even when capped
+        self.assertLessEqual(out["gridW"], out["availW"] + 1)
         self.assertLessEqual(out["gridH"], out["availH"] + 1)
 
 

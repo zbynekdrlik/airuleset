@@ -826,11 +826,6 @@ function fitFixedGrid(win) {
     term.resize = () => real(cols, rows);
     term.__wtClamped = true;
   }
-  // #655: reset the FILL stretch so the natural-cell measurement below is honest
-  // (a re-fit on window-resize must recompute from the natural aspect, not last
-  // run's stretched cells).
-  term.options.letterSpacing = 0;
-  term.options.lineHeight = 1;
   try { term.resize(cols, rows); } catch (e) { return false; }
   const bg = (term.options.theme && term.options.theme.background) || '#0C0C0C';
   if (!doc.getElementById('wt-fit-style')) {    // centre + letterbox = terminal bg
@@ -846,6 +841,11 @@ function fitFixedGrid(win) {
   const screenEl = () => doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
   const el = screenEl();
   if (!el) return false;                        // xterm not painted yet -> retry
+  // #655: clear any FILL scale from a previous pass so the natural-cell
+  // measurement below (and the font min-fit) is honest -- a re-fit on window
+  // resize must recompute from the natural grid, not last run's stretched one.
+  const fillTarget = () => doc.querySelector('.xterm') || el;
+  fillTarget().style.transform = 'none';
   // reads the element size right after resize/fontSize assuming xterm updates
   // the DOM synchronously (verified live: real ttyd + headless Chrome); the
   // bounded shrink loop below is the safety net if it ever lags by a frame.
@@ -860,27 +860,84 @@ function fitFixedGrid(win) {
     if (rr.width <= availW + 1 && rr.height <= availH + 1) break;
     term.options.fontSize = --F;
   }
-  // #655 FILL: the crisp min-fit font above LETTERBOXES whenever the viewport
-  // aspect != the fixed 176x51 grid aspect (the owner's "okno v strede" — 12%
-  // horizontal margin measured live at 1920x1080). Stretch the LOOSE dimension
-  // to fill the viewport via native xterm options: letterSpacing widens each
-  // cell, lineHeight raises each row. Both are CRISP xterm re-renders (never a
-  // blurry CSS scale) and add only SPACING, so glyphs are never distorted. Capped
-  // (WT_FILL_MAX_*) so an extreme viewport degrades to a residual letterbox
-  // instead of grotesque spacing. The min-fit above already made the TIGHT
-  // dimension fill, so at most one of these two branches stretches meaningfully.
-  const g = (screenEl() || el).getBoundingClientRect();
-  if (g.width > 0 && availW > g.width) {
-    const cellW = g.width / cols;
-    const add = Math.min((availW - g.width) / cols,
-                         cellW * (WT_FILL_MAX_CELL_STRETCH - 1));
-    term.options.letterSpacing = Math.max(0, add);
-  }
-  if (g.height > 0 && availH > g.height) {
-    term.options.lineHeight =
-        Math.max(1, Math.min(WT_FILL_MAX_LINE_STRETCH, availH / g.height));
+  // #655: the FILL (stretch the fixed grid to the viewport, killing the "okno v
+  // strede" letterbox) is a SEPARATE deferred pass -- fillFixedGrid(win) below.
+  // It must run AFTER this font change has settled: xterm re-renders ASYNC, so
+  // measuring the natural grid in the SAME synchronous call as the fontSize
+  // change reads a STALE size. fitFixedGrid does the CRISP bulk scaling (fontSize
+  // min-fit) and clears any prior fill scale (above); fillFixedGrid measures the
+  // settled natural grid and applies the small residual fill.
+  return true;
+}
+// #655 FILL (deferred pass): the crisp fontSize min-fit in fitFixedGrid already
+// scales the grid to within ~6% of the viewport (the tight dimension fills; the
+// loose one is the residual letterbox -- the owner's "okno v strede"). This pass
+// fills that residual with a SMALL CSS scale on the .xterm element. Why a
+// transform and not xterm letterSpacing/lineHeight: xterm rounds letterSpacing to
+// INTEGER pixels PER CELL, so with 176 cells it can only add 0 or 176px -- never
+// the ~116px needed here (measured live: 0 => 94% letterbox, 176 => 103% clip).
+// A CSS scale fills EXACTLY. The #613 "crisp not blurry transform" rule is about
+// the PRIMARY scaling (a large font scale via transform is very blurry); here the
+// font min-fit does that crisply and only the <=~6% RESIDUAL is transform-scaled,
+// whose softening is imperceptible. Bounded (WT_FILL_MAX_*) so an extreme
+// viewport degrades to a residual letterbox instead of a grotesque stretch, and
+// never scales BELOW 1 (that would shrink, not fill). getBoundingClientRect
+// reflects the transform, so a re-fit re-measures naturally (fitFixedGrid clears
+// the scale first).
+function fillFixedGrid(win) {
+  const cols = CFG.term_cols, rows = CFG.term_rows;
+  if (!win || !win.term || !cols || !rows) return false;
+  const doc = win.document;
+  const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
+  const box = doc.querySelector('.xterm') || el;   // the element the scale is set on
+  if (!el || !box) return false;
+  // self-contained: CLEAR any prior fill scale first so the measurement below is
+  // the NATURAL grid -- a CSS transform is reflected SYNCHRONOUSLY by the
+  // getBoundingClientRect reflow, so this run is correct even when called
+  // repeatedly (the multi-delay schedule re-runs it until the async font
+  // re-render has settled the natural size).
+  box.style.transform = 'none';
+  const g = el.getBoundingClientRect();            // NATURAL grid (scale just cleared)
+  const availW = win.innerWidth, availH = win.innerHeight;
+  if (!g.width || !g.height || !availW || !availH) return false;
+  let sx = Math.max(1, Math.min(WT_FILL_MAX_CELL_STRETCH, availW / g.width));
+  let sy = Math.max(1, Math.min(WT_FILL_MAX_LINE_STRETCH, availH / g.height));
+  box.style.transformOrigin = 'center center';
+  box.style.transform = 'scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
+  // CORRECTIVE pass: the NATURAL measurement above can be off (the font
+  // re-render is async), but a CSS transform IS reflected SYNCHRONOUSLY by
+  // getBoundingClientRect (it forces a reflow) -- so re-measuring the SCALED grid
+  // and applying the residual ratio converges to an EXACT fill regardless of the
+  // natural read, and can only SHRINK back under the cap (never a clip).
+  const g2 = el.getBoundingClientRect();
+  if (g2.width > 1 && g2.height > 1) {
+    sx = Math.max(1, Math.min(WT_FILL_MAX_CELL_STRETCH, sx * availW / g2.width));
+    sy = Math.max(1, Math.min(WT_FILL_MAX_LINE_STRETCH, sy * availH / g2.height));
+    box.style.transform = 'scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
   }
   return true;
+}
+// #655: the FILL must re-run whenever the NATURAL grid size settles/changes.
+// xterm's grid layout can settle noticeably AFTER first paint (font metrics, the
+// multi-tab layout), so a few fixed delays catch it mid-settle and over/under-
+// fill. A ResizeObserver on .xterm-screen fires on the REAL layout size (content
+// box -- unaffected by our CSS transform, so NO ping-pong), so the fill always
+// tracks the true natural grid and converges exactly. fillFixedGrid is
+// self-contained + idempotent (clears its own scale, re-measures, re-applies).
+// Timed passes are kept as a fallback for a browser without ResizeObserver.
+function scheduleFill(win) {
+  try { fillFixedGrid(win); } catch (e) {}
+  try {
+    const doc = win.document;
+    const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
+    if (el && win.ResizeObserver && !win.__wtFillRO) {
+      win.__wtFillRO = new win.ResizeObserver(() => { try { fillFixedGrid(win); } catch (e) {} });
+      win.__wtFillRO.observe(el);
+    }
+  } catch (e) {}
+  [200, 800, 2000].forEach((ms) => {
+    try { setTimeout(() => fillFixedGrid(win), ms); } catch (e) {}
+  });
 }
 function applyFixedGrid(f) {                     // poll for window.term, fit, then watch resize
   if (!f) return;
@@ -890,9 +947,12 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
   const poll = () => {
     themeTerminal(win.term);                     // #643: Campbell palette + font, once term exists
     if (fitFixedGrid(win)) {
-      if (!win.__wtResize) {                     // re-fit when the browser window resizes
+      scheduleFill(win);                           // deferred FILL passes (below)
+      if (!win.__wtResize) {                       // re-fit + re-fill on window resize
         win.__wtResize = true;
-        try { win.addEventListener('resize', () => fitFixedGrid(win)); } catch (e) {}
+        try {
+          win.addEventListener('resize', () => { fitFixedGrid(win); scheduleFill(win); });
+        } catch (e) {}
       }
       return;
     }
