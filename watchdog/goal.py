@@ -970,19 +970,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                     dry_run=dry_run)
             return "expired"
 
-    # #524 -- a dark-rearm decision goes stale FAST: goal_dark_watch recorded it
-    # from a dark READ, and the loop's dark/idle state changes within a sweep or
-    # two. A dark-rearm not delivered within GOAL_DARK_REARM_STALE_S is acting on
-    # outdated darkness -> DROP (terminal), never type it late (this is the H1
-    # "stale request delivered late" concern from #524, closed on the ONE origin
-    # that can spontaneously TYPE). The 30-min age cap above stays the generic
-    # backstop; this is the tighter, dark-rearm-only freshness gate.
-    if origin == _GOAL_REARM_ORIGIN and request_ts is not None:
-        age = _safe_age(now, request_ts)
-        if age is not None and age > GOAL_DARK_REARM_STALE_S:
-            _log_goal_sync("DROP-AT-DELIVERY:stale-request sid=%s cwd=%s age=%ds"
-                           % (sid, cwd, int(age)))
-            return "drop:stale-rearm"
+    # #675 -- the tighter dark-rearm freshness gate (#524) moved BELOW the
+    # recent-human check (see its new position after that check).
 
     pid = _compact._find_pane_for_session(sid, cwd, run=run, projects_dir=projects_dir)
     if not pid:
@@ -1044,6 +1033,21 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # 30-min age cap) resolves it. #623: the stale-rearm origin is the same.
         _log_goal_sync("SKIP no-transcript(%s) sid=%s cwd=%s" % (origin, sid, cwd))
         return "skip:no-transcript"
+
+    # #524/#675 -- the tighter dark-rearm freshness gate, now REACHED ONLY AFTER
+    # the recent-human check above: a `dark-rearm` older than GOAL_DARK_REARM_STALE_S
+    # was recorded from a dark READ that has since gone stale -> DROP (terminal),
+    # never type it late (the H1 concern from #524). But a request the owner's
+    # PRESENCE has been deferring returns skip:recent-human above and never reaches
+    # here -- it WAITS for the next idle window (scope #675), bounded by the 30-min
+    # GOAL_REQUEST_MAX_AGE_S general cap. So this drops only a genuinely-stuck
+    # dark-rearm with NO human present (the #524 test case), preserving #524.
+    if origin == _GOAL_REARM_ORIGIN and request_ts is not None:
+        age = _safe_age(now, request_ts)
+        if age is not None and age > GOAL_DARK_REARM_STALE_S:
+            _log_goal_sync("DROP-AT-DELIVERY:stale-request sid=%s cwd=%s age=%ds"
+                           % (sid, cwd, int(age)))
+            return "drop:stale-rearm"
 
     # Tri-state already-armed check.
     armed = watchdog.pane_goal_armed(captured)
@@ -1674,6 +1678,52 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
             % (loc, sid, open_n, authority, len(attempts_state[sid])))
 
 
+def _auth_rearm_decide(sid, cwd, armed, now, loc, dry_run, rearm_fn,
+                       obligation_fn, requests_path, attempts_state):
+    """#675 -- re-arm a loop CC cleared on a TRANSIENT auth failure (the newest
+    marker is `cleared` with `clear_kind=="auth"`; the caller gates on that, the
+    #170 boundary -- a USER/`error` clear is NEVER re-armed). Mirrors
+    `_stale_rearm_decide`'s bounds and shares the dark-rearm 24h/2 attempt cap
+    (a loop is either dead-dark, alive-stale OR auth-cleared this sweep -- the
+    three record paths sit in mutually-exclusive `mark` branches). Returns ONE
+    explicit decision-log line, or None (silent) for the non-actionable cases.
+
+    Unlike the dead-dark path it needs NO 8-read death CONFIRMATION: the auth
+    clear is UNAMBIGUOUS (CC explicitly cleared it), so the only question is "is
+    the session ALIVE again to receive it" -- answered by `armed is False`, a
+    readable, dark, idle footer. `armed is None` (busy / no input box = dead or
+    undeterminable) or `armed is True` (already re-armed) -> nothing to do. The
+    keystroke + its recent-human + freshness gates live in `deliver_goal`."""
+    if armed is not False:
+        return None
+    # defer to ANY pending request (goal_sweep is already delivering it) -- never
+    # clobber a self-callback / dark-rearm / stale-rearm.
+    if isinstance(load_goal_requests(requests_path).get(sid), dict):
+        return None
+    text, authority = (rearm_fn or _default_rearm_fn)(cwd)
+    if not text:
+        return ("auth-rearm %s sid=%s -> cleared-by-auth but NO template "
+                "resolved -- skip" % (loc, sid))
+    open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
+    fresh = cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S
+    if not (isinstance(open_n, int) and open_n > 0 and fresh):
+        return ("auth-rearm %s sid=%s -> cleared-by-auth but backlog not "
+                "workable (open=%s) -- skip" % (loc, sid, open_n))
+    ok, pruned = _dark_rearm_attempt_ok(attempts_state.get(sid), now)
+    if not ok:
+        return ("auth-rearm %s sid=%s -> cleared-by-auth but ATTEMPT-CAP "
+                "(%d/24h) -- skip" % (loc, sid, GOAL_DARK_REARM_MAX_PER_DAY))
+    if dry_run:
+        return ("auth-rearm %s sid=%s -> cleared-by-auth would record re-arm "
+                "(dry-run, open=%s authority=%s)" % (loc, sid, open_n, authority))
+    attempts_state[sid] = pruned + [now]
+    record_goal_request(sid, cwd, text, authority, now=now,
+                        origin=_GOAL_REARM_ORIGIN, path=requests_path)
+    return ("auth-rearm %s sid=%s -> cleared-by-auth: recording re-arm (open=%s "
+            "authority=%s attempt=%d)"
+            % (loc, sid, open_n, authority, len(attempts_state[sid])))
+
+
 def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                     projects_dir=None, sleep_fn=None, time_fn=None,
                     sweep_deadline=None, obligation_fn=None, rearm_fn=None,
@@ -1848,6 +1898,19 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         armed = watchdog.pane_goal_armed(captured)
 
         if mark is None or mark.get("state") != "set":
+            # #675 -- CC cleared the goal on a TRANSIENT auth failure
+            # (clear_kind=="auth"): the session resumes in seconds, so re-arm it
+            # via the SAME dark-rearm channel (deliver_goal's recent-human +
+            # freshness gates apply). A USER `/goal clear` (or a non-auth `error`
+            # clear) is NEVER re-armed (#170) and just resets the ping/confirm
+            # state below.
+            if (mark is not None and mark.get("state") == "cleared"
+                    and mark.get("clear_kind") == "auth"):
+                ar = _auth_rearm_decide(sid, cwd, armed, now, loc, dry_run,
+                                        rearm_fn, obligation_fn, requests_path,
+                                        attempts_state)
+                if ar:
+                    logs.append(ar)
             seen_state.pop(sid, None)
             pinged_state.pop(sid, None)
             confirm_state.pop(sid, None)   # #524 -- episode over (clear/no marker)

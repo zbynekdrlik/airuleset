@@ -127,13 +127,18 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
     Discord-relayed answer to count (`_compact_recent_human_activity`)
     passes its own prefix set."""
     window_s = watchdog.GOAL_AUTOARM_RECENT_HUMAN_S if window_s is None else window_s
+    # #675 -- the future side of the clamp is a SMALL clock-skew tolerance, NOT the
+    # full window: a slightly-future value is mid-sweep drift (still recent), a
+    # GROSSLY future one is a clock/cross-box desync (never a live human, so it
+    # must not extend the recency window to a false ~30-min veto).
+    skew_s = watchdog.GOAL_PRESENCE_FUTURE_SKEW_S
     try:
         mtime = os.stat("/tmp/claude-user-active-%s" % sid).st_mtime
     except OSError:
         mtime = None
     if mtime is not None:
         age = now - mtime
-        if -window_s <= age < window_s:
+        if -skew_s <= age < window_s:
             return True, "presence marker %s" % watchdog._human_age_desc(age)
     try:
         hts = watchdog._last_human_prompt_ts(tpath, extra_human_prefixes=extra_human_prefixes)
@@ -141,7 +146,7 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
         hts = None
     if hts is not None:
         age = now - hts
-        if -window_s <= age < window_s:
+        if -skew_s <= age < window_s:
             return True, "transcript human prompt %s" % watchdog._human_age_desc(age)
     return False, ""
 
@@ -216,6 +221,16 @@ def _parse_goal_marker(content):
         if cut <= 0:
             return None
         return {"state": "set", "payload": rest[:cut].strip() or None}
+    # #675 -- CC's OWN clear on a TRANSIENT failure (a bare `system` message, NOT
+    # LCS-wrapped): "Goal cleared after an unrecoverable error (<reason>): …". The
+    # `(authentication failed)` reason is the owner-ruled NORMAL transient (#662/
+    # #676) -> `clear_kind="auth"` (auto-rearm eligible); any other reason is
+    # recognized as `cleared` (flips armed->false) but tagged `error` and NEVER
+    # auto-rearmed. A deliberate `<local-command-stdout>Goal cleared:` below is
+    # `clear_kind="user"` -- the #170 boundary a re-arm must never cross.
+    if s.startswith(watchdog._GOAL_CLEARED_ERROR_PREFIX):
+        kind = "auth" if "authentication" in s else "error"
+        return {"state": "cleared", "payload": None, "clear_kind": kind}
     if not s.startswith(watchdog._GOAL_LCS_OPEN):
         return None
     body = s[len(watchdog._GOAL_LCS_OPEN):]
@@ -225,7 +240,10 @@ def _parse_goal_marker(content):
         head = "Goal %s:" % kind
         if body.startswith(head):
             payload = body[len(head):].strip()
-            return {"state": kind, "payload": payload or None}
+            mark = {"state": kind, "payload": payload or None}
+            if kind == "cleared":
+                mark["clear_kind"] = "user"   # #675 -- a deliberate /goal clear
+            return mark
     return None
 
 
@@ -284,10 +302,13 @@ def _newest_marker(body):
     from datetime import datetime
     best = None
     for ln in body.splitlines():
-        # cheap pre-filter over the raw bytes — either of the TWO shapes CC
-        # writes (the `/goal` command's own stdout, or the arm instruction it
-        # injects, which is the only record a QUEUED arm leaves at all, #64).
-        if watchdog._GOAL_LCS_OPEN.encode() not in ln and watchdog._GOAL_ARM_PROBE not in ln:
+        # cheap pre-filter over the raw bytes — one of the THREE shapes CC
+        # writes (the `/goal` command's own stdout, the arm instruction it
+        # injects — the only record a QUEUED arm leaves at all, #64 — or the
+        # #675 transient-failure clear, which carries NEITHER of the other two).
+        if (watchdog._GOAL_LCS_OPEN.encode() not in ln
+                and watchdog._GOAL_ARM_PROBE not in ln
+                and watchdog._GOAL_CLEARED_ERROR_PROBE not in ln):
             continue
         try:
             entry = json.loads(ln)
