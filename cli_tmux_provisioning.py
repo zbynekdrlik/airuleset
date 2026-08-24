@@ -53,6 +53,20 @@ CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.
 TMUX_CONF = Path.home() / ".tmux.conf"
 TMUX_HISTORY_LIMIT = 50000
 TMUX_DEFAULT_SIZE = "176x50"
+
+# #660: audit trail for tmux stray-session hygiene on the OWNER box --
+# `normalize.log` (the kill-sweep's kill/skip decisions) and, from the
+# native session-created hook, `session-created.log` (creator capture).
+TMUX_AUDIT_DIR = CLAUDE_DIR / "tmux-audit"
+
+# #660: a session whose EVERY pane runs one of these bare shells (tmux's
+# `#{pane_current_command}`, which strips the login-shell leading dash) is
+# an IDLE shell -- safe to absorb. ANY other foreground command (claude,
+# node, an editor, ssh, python, ...) means the session is doing work and is
+# NEVER killed (feedback_never_touch_stopped_sessions).
+_BARE_SHELL_COMMANDS = frozenset({
+    "bash", "sh", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "ash", "mksh",
+})
 # #613 REOPEN-2 (owner directive 2026-08-22): `window-size manual` is RESTORED
 # (version-gated + conf-only, exactly #586), reversing the first reopen. The
 # owner's governing agreement is a FIXED terminal size for EVERY client so no
@@ -1063,29 +1077,103 @@ def _live_revert_stream_window_name(alias, run=None):
                   % (wid, e), file=sys.stderr)
 
 
-def _live_normalize_owner_session(owner, run=None):
-    """#651: idempotent live normalization on any RUNNING server for this box.
-    If the owner group has EXACTLY ONE surviving session named `<owner>-N`
-    (N all-digits -- an accidental `tmux new -t <owner>` grouped sibling, the
-    exact pile-up this ticket fixes) AND no session named `<owner>` exists,
-    rename that lone survivor to `<owner>` so the native `new-session -A -s
-    <owner>` (the #651 `t` / `tmux()` wrapper, and webterm's exact `=<owner>`
-    join) attaches to it instead of spawning yet another sibling.
+def _is_bare_shell(cmd):
+    """#660: True iff `cmd` (a tmux `#{pane_current_command}`) is one of the
+    bare interactive shells -- an IDLE pane. tmux strips the login-shell
+    leading dash from `pane_current_command`, but a defensive `lstrip('-')`
+    covers any variant that carries it."""
+    return (cmd or "").strip().lstrip("-") in _BARE_SHELL_COMMANDS
 
-    Conservative by construction:
-      * `rename-session` NEVER kills anything -- an attached survivor stays
-        attached (the 'never kill an attached session automatically' rule);
-      * only the `<owner>-<digits>` namespace is ever matched, never a session
-        the owner deliberately named (e.g. `<owner>-foo`), and never a session
-        outside the owner group;
-      * ANY ambiguity is a silent no-op: the exact `<owner>` already exists,
-        zero or >=2 numbered survivors (don't guess which becomes canonical),
-        or no reachable server / a non-zero list-sessions.
 
-    Same dependency-injectable `run` + failure-tolerant shape as
-    `_live_apply_stream_window_name`; config-path ONLY (`rename-session`,
-    NEVER a `send-keys` keystroke), and it NEVER creates or resurrects a
-    session -- `rename-session` only relabels one that already exists."""
+def _audit_normalize(audit_dir, action, session, reason):
+    """#660: append ONE tab-separated line (`<iso-ts> <action> session=<name>
+    <reason>`) recording a kill/skip decision to `<audit_dir>/normalize.log`.
+    Best-effort: audit logging NEVER breaks normalization -- an unwritable
+    dir is noted on stderr, never allowed to raise into the caller."""
+    import datetime
+    try:
+        d = Path(audit_dir) if audit_dir else TMUX_AUDIT_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        with open(d / "normalize.log", "a") as f:
+            f.write("%s\t%s\tsession=%s\t%s\n" % (ts, action, session, reason))
+    except Exception as e:
+        print("  tmux normalize-audit write skipped (non-fatal): %s" % e,
+              file=sys.stderr)
+
+
+def _maybe_absorb_idle_stray(stray, runner, audit_dir):
+    """#660: kill a standalone `<owner>-N` stray IFF it is provably an idle
+    bare shell -- unattached AND every pane running one of `_BARE_SHELL_
+    COMMANDS`. ANY other state (attached, any non-shell pane, no readable
+    pane data, or a tmux error) is a logged SKIP, never a kill. The target
+    is `=<name>` (tmux exact-match) so a kill can never prefix-match a
+    different session. Config-path ONLY (`kill-session`, never `send-keys`)."""
+    try:
+        res = runner(["tmux", "list-panes", "-s", "-t", "=" + stray, "-F",
+                      "#{session_attached}\t#{pane_current_command}"])
+    except Exception as e:
+        _audit_normalize(audit_dir, "skip", stray, "list-panes error: %s" % e)
+        return
+    if getattr(res, "returncode", 1) != 0:
+        _audit_normalize(audit_dir, "skip", stray, "list-panes non-zero")
+        return
+    lines = [ln for ln in (getattr(res, "stdout", "") or "").splitlines()
+             if ln.strip()]
+    if not lines:
+        # a real session always has >=1 pane -- empty output means we cannot
+        # confirm it is idle, so we NEVER kill (conservative).
+        _audit_normalize(audit_dir, "skip", stray, "no pane data")
+        return
+    attached = None
+    cmds = []
+    for ln in lines:
+        att, _, cmd = ln.partition("\t")
+        if attached is None:
+            attached = att.strip()
+        cmds.append(cmd.strip())
+    if attached != "0":
+        _audit_normalize(audit_dir, "skip", stray, "attached (%s)" % attached)
+        return
+    non_shell = sorted({c for c in cmds if not _is_bare_shell(c)})
+    if non_shell:
+        _audit_normalize(audit_dir, "skip", stray,
+                         "non-shell pane(s): %s" % ",".join(non_shell))
+        return
+    try:
+        runner(["tmux", "kill-session", "-t", "=" + stray])
+    except Exception as e:
+        _audit_normalize(audit_dir, "skip", stray, "kill-session error: %s" % e)
+        return
+    _audit_normalize(audit_dir, "killed", stray,
+                     "idle standalone bare-shell stray (%d pane(s))" % len(cmds))
+
+
+def _live_normalize_owner_session(owner, run=None, audit_dir=None):
+    """#651/#660: idempotent live normalization on any RUNNING server for this
+    box. Two mutually-exclusive branches, keyed on whether the canonical
+    `<owner>` session already exists:
+
+    * `<owner>` ABSENT (the #651 rename path, unchanged): if EXACTLY ONE
+      surviving `<owner>-N` (N all-digits -- an accidental `tmux new -t
+      <owner>` grouped sibling) exists, `rename-session` it to `<owner>` so
+      the native `-A -s <owner>` helpers attach to it. `rename-session` NEVER
+      kills; zero or >=2 survivors is a silent no-op (never guess which
+      becomes canonical).
+
+    * `<owner>` PRESENT (#660 kill sweep): the canonical session is safe, so
+      every OTHER `<owner>-N` stray is a duplicate. Absorb (`kill-session`)
+      each one that is provably an idle bare shell -- unattached AND every
+      pane a bare shell (`_maybe_absorb_idle_stray`); NEVER one running claude
+      or any non-shell process (feedback_never_touch_stopped_sessions). Every
+      kill/skip decision is logged to `<audit_dir>/normalize.log`.
+
+    Conservative by construction throughout: only the `<owner>-<digits>`
+    namespace is ever matched (never a deliberately-named `<owner>-foo`,
+    never a session outside it); config-path ONLY (`rename-session` /
+    `kill-session`, NEVER a `send-keys` keystroke); failure-tolerant (no
+    reachable server / a non-zero list-sessions -> silent no-op). Same
+    dependency-injectable `run` shape as `_live_apply_stream_window_name`."""
     import re
     runner = run or _default_tmux_run
     try:
@@ -1099,17 +1187,22 @@ def _live_normalize_owner_session(owner, run=None):
     names = [ln.strip()
              for ln in (getattr(result, "stdout", "") or "").splitlines()
              if ln.strip()]
-    if owner in names:
-        return  # the canonical session already exists -- nothing to normalize
     pat = re.compile(r"^" + re.escape(owner) + r"-\d+$")
-    survivors = [n for n in names if pat.match(n)]
-    if len(survivors) != 1:
-        return  # zero or ambiguous -- never guess which becomes canonical
-    try:
-        runner(["tmux", "rename-session", "-t", survivors[0], owner])
-    except Exception as e:
-        print("  tmux owner-session normalize (rename) skipped (non-fatal): %s"
-              % e, file=sys.stderr)
+    if owner not in names:
+        # #651 RENAME path (unchanged): promote a lone numbered survivor.
+        survivors = [n for n in names if pat.match(n)]
+        if len(survivors) != 1:
+            return  # zero or ambiguous -- never guess which becomes canonical
+        try:
+            runner(["tmux", "rename-session", "-t", survivors[0], owner])
+        except Exception as e:
+            print("  tmux owner-session normalize (rename) skipped (non-fatal):"
+                  " %s" % e, file=sys.stderr)
+        return
+    # #660 KILL SWEEP: the canonical `<owner>` exists, so every `<owner>-N`
+    # is a duplicate stray -- absorb each idle bare-shell one, log the rest.
+    for stray in [n for n in names if pat.match(n)]:
+        _maybe_absorb_idle_stray(stray, runner, audit_dir)
 
 
 def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
