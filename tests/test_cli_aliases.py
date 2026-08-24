@@ -43,8 +43,17 @@ class TestShortTargetAlias(unittest.TestCase):
         self.assertEqual(a, "admin")
 
     def test_empty_user_falls_back_to_box_name(self):
-        self.assertEqual(cli_aliases.short_target_alias("", "spinbike-vps"), "spinbike")
-        self.assertEqual(cli_aliases.short_target_alias(None, "spinbike-vps"), "spinbike")
+        # An UNRECOGNIZED owner box (spinbike is now recognized, see below) still
+        # falls back to its box name's first segment.
+        self.assertEqual(cli_aliases.short_target_alias("", "webbox-vps"), "webbox")
+        self.assertEqual(cli_aliases.short_target_alias(None, "webbox-vps"), "webbox")
+
+    def test_spinbike_box_alias_is_sb(self):
+        # #661: spinbike-vps -> "sb", the owner's canonical short alias, regardless
+        # of the box's unix user (it shares `newlevel` with dev2). Single alias
+        # source (#592), so the webterm tab and the tmux window name agree.
+        self.assertEqual(cli_aliases.short_target_alias("newlevel", "spinbike-vps"), "sb")
+        self.assertEqual(cli_aliases.short_target_alias("", "spinbike-vps"), "sb")
 
     def test_marek_owner_account(self):
         # marek is an owner account (not in any alias family) -> its own name.

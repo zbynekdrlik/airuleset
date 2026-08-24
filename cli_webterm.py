@@ -533,12 +533,72 @@ def _tab_order_key(alias):
     return (6, 0, alias)
 
 
-def _tab_sessions(inventory):
-    """Inventory entries as tab descriptors (short alias + full-id title),
-    sorted in the owner's stable Windows-Terminal order."""
+# --------------------------------------------------------------------------- #
+# #661 -- per-domain OWNER-DEFINED dashboard tab lists. The owner never asked for
+# a tab per fleet target (#579/#612 surfaced OTHER people's personal accounts on
+# his own dashboard); the tab set is now an EXCLUSIVE, owner-defined list per
+# domain: a domain renders EXACTLY the inventory ids listed for it, in the
+# owner's order, and an entry renders on NO dashboard unless explicitly listed.
+# The list VALUES are the OWNER's to edit; the mechanism is ours.
+#
+# This is tab VISIBILITY, NOT an auth boundary: the connect allowlist
+# (WEBTERM_INVENTORY_PATH) stays the FULL fleet, so the owner keeps webterm
+# reachability to any session he already has SSH access to (via dev1's keys), and
+# Cloudflare Access remains the sole auth layer. Filtering here only decides which
+# tabs the dashboard SHOWS.
+#
+# Keyed by the gateway's login user (== the domain's human): "zbynek" for the
+# owner gateway (WEBTERM_LOGIN_USER, zbynek.newlevel.media), "david"/"marek" for
+# theirs. A human with no list, or a render with human=None (the david gateway
+# path, whose scoped cli_webterm_profiles.david_inventory is ALREADY exactly
+# david1-4 + codex-bridge), is not filtered here. The ids are the sanitized fleet
+# inventory ids (_sanitize_id: marek@subdev -> marek-subdev).
+WEBTERM_DASHBOARD_TABS = {
+    # zbynek.newlevel.media -- owner ROZHODNUTÉ 2026-08-24, EXACT order (verbatim
+    # "dev1, dev2, gk, m1..m6, d1, d2, miva, sb"). EXCLUDES montalu7/8, david3/4,
+    # simap1, marek@subdev, stepan@forestshop-dev, admin@forestshop-dev.
+    "zbynek": [
+        "dev1", "dev2", "gatekeeper",
+        "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
+        "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
+        "david1-subdev", "david2-subdev", "miva1-subdev", "spinbike-vps",
+    ],
+    # marek.newlevel.media -- only Marek's own account (owner #661 amendment 1).
+    "marek": ["marek-subdev"],
+    # david.newlevel.media -- David's working accounts. The david GATEWAY renders
+    # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,
+    # ids david1..4 + codex-bridge) and does NOT consume this list; this records
+    # the same per-domain policy declaratively (and is what a full-fleet render
+    # for "david" would filter to -- exercised by the tests).
+    "david": ["david1-subdev", "david2-subdev", "david3-subdev", "david4-subdev"],
+}
+
+
+def _dashboard_tab_list(human):
+    """The owner-defined ordered tab-id list for `human`'s dashboard, or None if
+    `human` has no configured list (caller renders the given inventory
+    unfiltered)."""
+    return WEBTERM_DASHBOARD_TABS.get(human)
+
+
+def entries_for_tab_list(inventory, tab_ids):
+    """The inventory entries named by `tab_ids`, in the LIST's order, dropping any
+    id not present in `inventory`. EXCLUSIVE -- an entry not named is never
+    returned; ORDER is the list's, never the #579 WT `_tab_order_key` sort (the
+    owner gives an explicit order this must honour)."""
+    by_id = {e["id"]: e for e in inventory}
+    return [by_id[i] for i in tab_ids if i in by_id]
+
+
+def _tab_sessions(inventory, preserve_order=False):
+    """Inventory entries as tab descriptors (short alias + full-id title). By
+    default sorted in the owner's stable Windows-Terminal order (#579);
+    `preserve_order=True` keeps the given inventory order untouched -- used when
+    an EXCLUSIVE owner-defined tab list already dictates the exact order (#661)."""
     tabs = [{"id": e["id"], "alias": _short_alias(e),
              "title": e.get("label") or e["id"]} for e in inventory]
-    tabs.sort(key=lambda t: _tab_order_key(t["alias"]))
+    if not preserve_order:
+        tabs.sort(key=lambda t: _tab_order_key(t["alias"]))
     return tabs
 
 
@@ -586,16 +646,29 @@ CAMPBELL_THEME = {
 }
 
 
-def render_dashboard_html(inventory, ttyd_base=None, term_grid=None):
+def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None):
     """The single-page tabbed terminal UI. `ttyd_base` is the SAME-ORIGIN ttyd
     base path under the #584 gateway (`/t`); the page's JS builds each tab's
     iframe src as `<ttyd_base>/?arg=<id>` on first activation — same-origin, so
     the per-iframe Ctrl+Alt+N forwarder works while typing. `term_grid` is the
     fixed (cols, rows) client grid the browser xterm is force-fit to (#613
-    REOPEN-2, defaults to `_webterm_term_grid()` = the owner's fixed terminal)."""
+    REOPEN-2, defaults to `_webterm_term_grid()` = the owner's fixed terminal).
+
+    #661: when `human` names a domain with an owner-defined tab list
+    (WEBTERM_DASHBOARD_TABS), the inventory is filtered+ordered to EXACTLY that
+    list — unlisted entries are not rendered, and the tab ORDER is the owner's
+    list order (not the WT sort). `human=None` (the david gateway path, whose
+    inventory is already physically scoped) renders the given inventory
+    unfiltered. Filtering is tab VISIBILITY only; the connect allowlist is
+    unaffected (see WEBTERM_DASHBOARD_TABS)."""
     ttyd_base = (ttyd_base or "").rstrip("/")
     term_cols, term_rows = term_grid or _webterm_term_grid()
-    tabs = _tab_sessions(inventory)
+    tab_ids = _dashboard_tab_list(human) if human is not None else None
+    if tab_ids is not None:
+        inventory = entries_for_tab_list(inventory, tab_ids)
+        tabs = _tab_sessions(inventory, preserve_order=True)
+    else:
+        tabs = _tab_sessions(inventory)
 
     def _tab_button(i, t):
         # #582: an ordinal badge (1-9) on the first nine tabs = the VISIBLE
@@ -652,9 +725,13 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
   flex: 0 0 auto; white-space: nowrap; }
 .tab { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
   padding: 6px 12px; border: 1px solid transparent; border-bottom: none;
-  border-radius: 7px 7px 0 0; background: #1b1b1b; color: #9a9a9a;
+  border-radius: 7px 7px 0 0; background: #1b1b1b; color: #CCCCCC;
   font: inherit; line-height: 1; max-width: 170px; flex: 0 0 auto; }
-.tab:hover { background: #262626; color: #CCCCCC; }
+/* #661: unselected tab text lightened from #9a9a9a to the Campbell foreground
+   #CCCCCC (owner: hard to read); hover brightens to #F2F2F2; the ACTIVE tab stays
+   the lightest (#F2F2F2) and is further set apart by its #0C0C0C body-matching
+   background + border. Restrained Campbell greys, never garish. */
+.tab:hover { background: #262626; color: #F2F2F2; }
 .tab.active { background: #0C0C0C; color: #F2F2F2; border-color: #2b2b2b; }
 .tab .ico { color: #13A10E; font-size: 11px; }
 .tab .al { overflow: hidden; text-overflow: ellipsis; }
@@ -771,6 +848,7 @@ function activate(idx) {
   });
   current = idx;
   applyFixedGrid(made[idx]);                 // #613 REOPEN-2: fit the now-VISIBLE tab
+  focusTerminal(made[idx]);                  // #661: type immediately after a switch
 }
 function cycle(delta) {                    // step to prev/next session, wrapping both ways
   const n = CFG.sessions.length;
@@ -806,6 +884,29 @@ function attachForwarder(f) {
     const w = f.contentWindow;
     if (w) w.addEventListener('keydown', onHotkey, true);
   } catch (err) { /* never same-origin under the gateway; switching stays alive */ }
+}
+// #661: move keyboard focus INTO the shown terminal after a tab switch (mouse
+// click, ◀ ▶ cycle, AND Ctrl+Alt+N all route through activate()), so the owner
+// can type immediately with no extra click into the prompt. Same-origin under
+// the gateway, so we reach the iframe's own xterm: `window.term.focus()` (which
+// focuses xterm's helper textarea). ttyd connects async, so the term/textarea
+// may not exist for the first activate(0) at load — retry briefly, best-effort.
+// A cross-origin frame would throw (impossible under the gateway) — caught so a
+// focus attempt can never break switching.
+function focusTerminal(f) {
+  if (!f) return;
+  let tries = 0;
+  const tryFocus = () => {
+    try {
+      const w = f.contentWindow;
+      if (w && w.term && typeof w.term.focus === 'function') { w.term.focus(); return; }
+      const ta = w && w.document &&
+        w.document.querySelector('.xterm-helper-textarea, textarea');
+      if (ta) { ta.focus(); return; }
+    } catch (err) { return; }               // never same-origin-throws under gateway
+    if (++tries < 30) setTimeout(tryFocus, 100);   // ttyd/xterm still connecting
+  };
+  tryFocus();
 }
 // #613 REOPEN-2: force each ttyd xterm to the owner's FIXED client grid
 // (CFG.term_cols x CFG.term_rows = the fixed 176x50 tmux window + 1 status row)
@@ -1313,12 +1414,17 @@ def setup_webterm_service(run=None):
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
     WEBTERM_DASH_DIR.mkdir(parents=True, exist_ok=True)
     inv = webterm_inventory()
+    # #661: the connect allowlist stays the FULL fleet inventory (tab VISIBILITY
+    # is filtered, not reachability — the owner keeps his existing access).
     WEBTERM_INVENTORY_PATH.write_text(
         json.dumps(inv, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     # #584: the ttyd base is now RELATIVE (`/t`) — same-origin under the gateway,
     # so the iframes are same-origin (Ctrl+Alt+N works while typing).
+    # #661: the owner DASHBOARD renders only WEBTERM_LOGIN_USER's owner-defined
+    # tab list (zbynek.newlevel.media), in his order — NOT a tab per fleet target.
     WEBTERM_DASH_INDEX.write_text(
-        render_dashboard_html(inv, ttyd_base=WEBTERM_TTYD_BASE), encoding="utf-8")
+        render_dashboard_html(inv, ttyd_base=WEBTERM_TTYD_BASE,
+                              human=WEBTERM_LOGIN_USER), encoding="utf-8")
     # #644: the installable-PWA assets (manifest + network-only SW + icons) next
     # to index.html; the gateway serves them from the dash dir. Lazy import to
     # avoid a module-level cycle (cli_webterm_pwa imports this module).
