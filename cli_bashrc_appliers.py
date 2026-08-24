@@ -184,6 +184,112 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     return False
 
 
+# --- #651: tmux attach-or-create interactive helpers -----------------------
+# The owner's shell history strays between `tmux a -t zbynek` and `tmux new -t
+# zbynek`; the latter is the GROUP-target form of new-session, which ALWAYS
+# creates a new grouped sibling (`zbynek-1`, `zbynek-2`, ...) instead of
+# attaching -- so arrow-up + Enter piles them up. The native attach-or-create
+# primitive is `tmux new-session -A -s <name>` (#649: native beats a custom
+# layer). Managed provisioning installs, INTERACTIVE-ONLY, on EVERY managed
+# box, two thin wrappers around it: `t [name]` (short create-or-attach) and a
+# `tmux()` function that rewrites ONLY the simple `new|new-session|a|attach|
+# attach-session -t NAME` shapes (no other flags) and passes everything else
+# through verbatim. Same idempotent marker-block shape as the ultracode block
+# above; the interactive guard keeps scripts/webterm/watchdog from ever seeing
+# the functions, so no automation can be rewritten.
+TMUX_ATTACH_MARK_START = "# >>> airuleset: tmux attach-or-create >>>"
+TMUX_ATTACH_MARK_END = "# <<< airuleset: tmux attach-or-create <<<"
+
+
+def render_tmux_attach_block(default_session: str) -> str:
+    """The ~/.bashrc marker block adding the #651 `t` + `tmux()` interactive
+    attach-or-create helpers. `default_session` is baked in as the bare-`t`
+    default (the box's owner session -- see `_owner_session_default`), so the
+    predicate that resolves it lives in Python, never a hardcoded per-box
+    table in bash. Validated to a safe shell token (a tmux session name is
+    always one) so the literal is safe inside the `"${1:-...}"` expansion.
+
+    The `tmux()` wrapper matches EXACTLY the 3-token interactive shapes
+    (`$#`==3 AND `$2`=="-t") for the five verbs, rewriting them to
+    `command tmux new-session -A -s "$3"`; ANY extra flag (>=4 args) or any
+    other subcommand falls straight through to `command tmux "$@"`. `command`
+    bypasses this very function so there is no recursion and the real tmux
+    binary always runs the rewritten/passed-through call."""
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", default_session or ""):
+        raise ValueError(
+            "unsafe tmux default session name for #651 block: %r"
+            % (default_session,))
+    lines = [
+        TMUX_ATTACH_MARK_START,
+        "# #651: `tmux new -t <name>` is the GROUP-target form -- it always",
+        "# creates a new grouped sibling (<name>-1/-2/...), which is how an",
+        "# arrow-up from shell history piles them up. Native attach-or-create",
+        "# is `tmux new-session -A -s <name>` (attach if it exists, else",
+        "# create, NO grouping). INTERACTIVE-ONLY (`case $- in *i*`): a",
+        "# script, the webterm/ssh connect command, or watchdog automation",
+        "# never sees these functions, so nothing automated can be rewritten.",
+        "case $- in",
+        "  *i*)",
+        ('    t() { command tmux new-session -A -s "${1:-%s}"; }'
+         % default_session),
+        "    tmux() {",
+        '      if [ "$#" -eq 3 ] && [ "$2" = "-t" ]; then',
+        '        case "$1" in',
+        "          new|new-session|a|attach|attach-session)",
+        '            command tmux new-session -A -s "$3"; return ;;',
+        "        esac",
+        "      fi",
+        '      command tmux "$@"',
+        "    }",
+        "    ;;",
+        "esac",
+        TMUX_ATTACH_MARK_END,
+    ]
+    return "\n".join(lines)
+
+
+def _owner_session_default(user: str = None) -> str:
+    """The bare-`t` default session name for `user`'s box: the account's OWN
+    session (whoami) on a single-session-per-account box (subdev streams + the
+    gk `gatekeeper` account, `is_single_session_box_user`), else the owner tmux
+    group `OWNER_GROUP` (`zbynek`) on the owner's own multi-project dev1/dev2.
+
+    Sources the ONE canonical managed value (`cli_webterm.OWNER_GROUP`) via a
+    call-time deferred import -- by the time provisioning runs, airuleset (and
+    thus cli_webterm) is fully loaded, so there is no module-load cycle; this
+    mirrors the existing call-time `import airuleset` couplings in this file."""
+    import airuleset
+    from cli_webterm import OWNER_GROUP
+    u = user or airuleset._current_user()
+    return u if is_single_session_box_user(u) else OWNER_GROUP
+
+
+def apply_tmux_attach_helpers(bashrc_path: Path = None, user: str = None) -> bool:
+    """Idempotently add/refresh the #651 tmux attach-or-create marker block in
+    ~/.bashrc on EVERY managed box (the helpers are interactive-only via the
+    block's own `$-` guard, so a non-owner box is unaffected at runtime; there
+    is nothing to strip). Same replace-or-append shape as
+    apply_ultracode_launcher. Returns True iff ~/.bashrc changed."""
+    import re
+    import airuleset
+    bpath = bashrc_path or airuleset.BASHRC
+    block = render_tmux_attach_block(_owner_session_default(user))
+    existing = bpath.read_text() if bpath.exists() else ""
+    if TMUX_ATTACH_MARK_START in existing and TMUX_ATTACH_MARK_END in existing:
+        pattern = re.compile(
+            re.escape(TMUX_ATTACH_MARK_START) + r".*?" + re.escape(TMUX_ATTACH_MARK_END),
+            re.S)
+        new = pattern.sub(lambda _m: block, existing)
+    else:
+        sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+        new = f"{existing}{sep}\n{block}\n"
+    if new != existing:
+        bpath.write_text(new)
+        return True
+    return False
+
+
 # --- #263/#264/#563: subdev stream account dev-env convention --------------
 # The convention working directory for a subdev/gatekeeper account's tmux
 # session. NOT every account checks out at the same path (#563): montalu1

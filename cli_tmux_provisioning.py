@@ -1145,6 +1145,55 @@ def _live_revert_stream_window_name(alias, run=None):
                   % (wid, e), file=sys.stderr)
 
 
+def _live_normalize_owner_session(owner, run=None):
+    """#651: idempotent live normalization on any RUNNING server for this box.
+    If the owner group has EXACTLY ONE surviving session named `<owner>-N`
+    (N all-digits -- an accidental `tmux new -t <owner>` grouped sibling, the
+    exact pile-up this ticket fixes) AND no session named `<owner>` exists,
+    rename that lone survivor to `<owner>` so the native `new-session -A -s
+    <owner>` (the #651 `t` / `tmux()` wrapper, and webterm's exact `=<owner>`
+    join) attaches to it instead of spawning yet another sibling.
+
+    Conservative by construction:
+      * `rename-session` NEVER kills anything -- an attached survivor stays
+        attached (the 'never kill an attached session automatically' rule);
+      * only the `<owner>-<digits>` namespace is ever matched, never a session
+        the owner deliberately named (e.g. `<owner>-foo`), and never a session
+        outside the owner group;
+      * ANY ambiguity is a silent no-op: the exact `<owner>` already exists,
+        zero or >=2 numbered survivors (don't guess which becomes canonical),
+        or no reachable server / a non-zero list-sessions.
+
+    Same dependency-injectable `run` + failure-tolerant shape as
+    `_live_apply_stream_window_name`; config-path ONLY (`rename-session`,
+    NEVER a `send-keys` keystroke), and it NEVER creates or resurrects a
+    session -- `rename-session` only relabels one that already exists."""
+    import re
+    runner = run or _default_tmux_run
+    try:
+        result = runner(["tmux", "list-sessions", "-F", "#{session_name}"])
+    except Exception as e:
+        print("  tmux owner-session normalize (list) skipped (non-fatal): %s"
+              % e, file=sys.stderr)
+        return
+    if getattr(result, "returncode", 1) != 0:
+        return
+    names = [ln.strip()
+             for ln in (getattr(result, "stdout", "") or "").splitlines()
+             if ln.strip()]
+    if owner in names:
+        return  # the canonical session already exists -- nothing to normalize
+    pat = re.compile(r"^" + re.escape(owner) + r"-\d+$")
+    survivors = [n for n in names if pat.match(n)]
+    if len(survivors) != 1:
+        return  # zero or ambiguous -- never guess which becomes canonical
+    try:
+        runner(["tmux", "rename-session", "-t", survivors[0], owner])
+    except Exception as e:
+        print("  tmux owner-session normalize (rename) skipped (non-fatal): %s"
+              % e, file=sys.stderr)
+
+
 def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
                                    run=None):
     """Idempotently add/remove the #554/#592 window-naming marker block in
