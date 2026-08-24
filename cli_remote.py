@@ -560,7 +560,11 @@ def _ssh_multiplex_opts(control_dir):
 # inconsistent state is impossible by construction. Fail-closed
 # (script-failure-policy): a pinned host whose pin cannot be materialized RAISES
 # -- never a silent fall back to =no.
-_PINNED_KNOWN_HOSTS_FILES = {}  # host addr -> materialized known_hosts path
+# Cache key is (addr, tuple(host_keys)) -- NEVER addr alone (#669 review 🔵-1):
+# keying on addr only would return a stale earlier materialization if a later
+# call presented DIFFERENT keys for the same address (reachable from tests, and
+# a latent drift hazard), so the content is part of the key.
+_PINNED_KNOWN_HOSTS_FILES = {}  # (addr, tuple(normalized keys)) -> file path
 
 
 def _unlink_quiet(path):
@@ -579,26 +583,27 @@ def _materialize_pinned_known_hosts(addr, host_keys):
     address) as a known_hosts file keyed to `addr`, and return its path. The
     source of truth is the committed constant; this only MATERIALIZES it for
     ssh, so the pin is re-enforced fresh every push with no persistent drift.
-    Process-cached per address and unlinked atexit. RAISES (never returns None,
-    never a `=no` fallback) when the pin is empty or the file cannot be written
-    -- a pinned host must fail LOUD, never silently downgrade to TOFU
-    (script-failure-policy)."""
+    Process-cached per `(addr, normalized keys)` and unlinked atexit. RAISES
+    (never returns None, never a `=no` fallback) when the pin is empty or the
+    file cannot be written -- a pinned host must fail LOUD, never silently
+    downgrade to TOFU (script-failure-policy)."""
     import atexit
     import tempfile
-    cached = _PINNED_KNOWN_HOSTS_FILES.get(addr)
-    if cached and os.path.exists(cached):
-        return cached
-    lines = "".join("%s %s\n" % (addr, k.strip())
-                    for k in host_keys if k and k.strip())
-    if not lines:
+    norm = tuple(k.strip() for k in host_keys if k and k.strip())
+    if not norm:
         raise RuntimeError(
             "host-key pin for %s is empty -- refusing to deploy without a "
             "verifiable host key (never falling back to "
             "StrictHostKeyChecking=no)" % addr)
+    cache_key = (addr, norm)
+    cached = _PINNED_KNOWN_HOSTS_FILES.get(cache_key)
+    if cached and os.path.exists(cached):
+        return cached
+    lines = "".join("%s %s\n" % (addr, k) for k in norm)
     fd, path = tempfile.mkstemp(prefix="arpin-known-hosts-")
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(lines)
-    _PINNED_KNOWN_HOSTS_FILES[addr] = path
+    _PINNED_KNOWN_HOSTS_FILES[cache_key] = path
     atexit.register(_unlink_quiet, path)
     return path
 
@@ -607,18 +612,24 @@ def host_key_check_opts(remote):
     """The ssh `-o` host-key-verification options for `remote` (#669). A target
     carrying a committed PUBLIC `host_keys` pin is verified STRICTLY against that
     pin (`UserKnownHostsFile=<pin> GlobalKnownHostsFile=/dev/null
-    StrictHostKeyChecking=yes` -- refuses an unknown AND a changed key); every
-    other target keeps the unchanged `StrictHostKeyChecking=no` posture. Called
-    at every push-path ssh leg (the deploy loop AND the shared secret-delivery
-    loop) so the pin covers the whole surface and no leg can silently copy the
-    old =no default for a pinned host. Fail-closed: a pinned host whose pin
-    cannot be materialized propagates the RuntimeError, never a =no fallback."""
-    host_keys = remote.get("host_keys")
-    if not host_keys:
+    UpdateHostKeys=no StrictHostKeyChecking=yes` -- refuses an unknown AND a
+    changed key, and never lets a post-auth server update append keys to the
+    materialized pin); every other target keeps the unchanged
+    `StrictHostKeyChecking=no` posture. Called at every PUSH-PATH ssh leg (the
+    deploy loop AND the shared secret-delivery loop), so the pin covers the whole
+    push-path surface and no such leg can silently copy the old =no default for a
+    pinned host. (#669 review 🟡-2: OTHER ssh consumers -- webterm/burn/onboard --
+    are NOT yet pinned; tracked separately.) Fail-closed: a host whose `host_keys`
+    is PRESENT but empty/blank RAISES (never a =no fallback) -- only an ABSENT
+    `host_keys` is treated as an unpinned tailscale/subdev host."""
+    if remote.get("host_keys") is None:      # absent (or explicit None) = unpinned
         return ["-o", "StrictHostKeyChecking=no"]
-    path = _materialize_pinned_known_hosts(remote["host"], host_keys)
+    # present -- even if empty: _materialize RAISES on an empty/blank pin so a
+    # host someone MEANT to pin can never silently downgrade to TOFU.
+    path = _materialize_pinned_known_hosts(remote["host"], remote["host_keys"])
     return ["-o", "UserKnownHostsFile=%s" % path,
             "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "UpdateHostKeys=no",
             "-o", "StrictHostKeyChecking=yes"]
 
 

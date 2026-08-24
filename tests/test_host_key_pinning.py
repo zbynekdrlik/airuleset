@@ -104,20 +104,25 @@ class TestHostKeyCheckOpts(unittest.TestCase):
         opts = cli_remote.host_key_check_opts(PINNED)
         self.assertIn("StrictHostKeyChecking=yes", opts)
         self.assertIn("GlobalKnownHostsFile=/dev/null", opts)
+        self.assertIn("UpdateHostKeys=no", opts)   # pin can't drift post-auth
         self.assertTrue(any(o.startswith("UserKnownHostsFile=") for o in opts))
         self.assertNotIn("StrictHostKeyChecking=no", opts)
 
     def test_unpinned_host_keeps_strict_no(self):
-        # Regression: an ordinary tailscale/subdev host is unchanged.
+        # Regression: an ordinary tailscale/subdev host (absent host_keys) is
+        # unchanged.
         self.assertEqual(cli_remote.host_key_check_opts(PLAIN),
                          ["-o", "StrictHostKeyChecking=no"])
 
-    def test_empty_host_keys_is_treated_as_unpinned(self):
-        # `host_keys: []` (or absent) is not a pin — never strict.
-        self.assertEqual(
-            cli_remote.host_key_check_opts(
-                {"host": "203.0.113.9", "host_keys": []}),
-            ["-o", "StrictHostKeyChecking=no"])
+    def test_present_but_empty_host_keys_raises_never_downgrades(self):
+        # #669 review 🔵-2 (fail-closed): only an ABSENT host_keys is unpinned;
+        # a host someone MEANT to pin (key present) but whose list is empty/blank
+        # must RAISE, never silently downgrade to =no (e.g. keys commented out
+        # mid-rotation).
+        for empty in ([], ["   ", ""]):
+            with self.assertRaises(RuntimeError):
+                cli_remote.host_key_check_opts(
+                    {"host": "203.0.113.9", "host_keys": empty})
 
 
 class TestMaterializePinnedKnownHosts(unittest.TestCase):
@@ -154,18 +159,30 @@ class TestRealFleetPinScope(unittest.TestCase):
         self.assertIn("StrictHostKeyChecking=yes",
                       cli_remote.host_key_check_opts(sb[0]))
 
-    def test_every_other_real_host_stays_unpinned(self):
-        # Regression: pinning scope is spinbike-vps (raw public IP) ONLY —
-        # dev2/subdev/gatekeeper and every other target keep the =no posture.
+    def test_private_tailscale_hosts_stay_unpinned(self):
+        # Regression: a private tailscale target (100.64/10) must NEVER be
+        # pinned — pinning is for public-internet-reachable hosts only, and a
+        # tailscale host has no committed pin. (This deliberately does NOT
+        # forbid pinning OTHER public-IP hosts in a follow-up — #669 review
+        # 🟡-1: forestshop-dev is the same threat class and is tracked to be
+        # pinned separately; the earlier blanket "only spinbike may ever be
+        # pinned" assertion cemented that gap and was removed.)
         for h in airuleset.REMOTE_HOSTS:
-            if h.get("name") == "spinbike-vps":
-                continue
-            self.assertFalse(
-                h.get("host_keys"),
-                "%s must not carry a host-key pin (pinning scope is the "
-                "raw-public-IP owner_vps class only)" % h.get("name"))
-            self.assertEqual(cli_remote.host_key_check_opts(h),
-                             ["-o", "StrictHostKeyChecking=no"])
+            if h.get("host", "").startswith("100."):
+                self.assertIsNone(
+                    h.get("host_keys"),
+                    "%s is a private tailscale host — must not carry a pin"
+                    % h.get("name"))
+                self.assertEqual(cli_remote.host_key_check_opts(h),
+                                 ["-o", "StrictHostKeyChecking=no"])
+
+    def test_spinbike_is_the_only_currently_pinned_host(self):
+        # Documents CURRENT fleet state (not a forbid-future assertion): today
+        # only spinbike-vps carries a committed pin. A NEW pin (e.g. the
+        # forestshop-dev follow-up) updates this expected set.
+        pinned = sorted(h["name"] for h in airuleset.REMOTE_HOSTS
+                        if h.get("host_keys"))
+        self.assertEqual(pinned, ["spinbike-vps"])
 
 
 class TestSecretDeliveryLegPinsPinnedHost(unittest.TestCase):
