@@ -1,0 +1,205 @@
+"""#651 — managed `t`/`tmux()` interactive attach-or-create wrapper +
+idempotent owner-session normalization.
+
+Root cause (repro'd live, isolated `-S` socket): `tmux new -t <name>` is the
+GROUP-target form — it always creates a NEW grouped sibling (`<name>-1`,
+`<name>-2`, …), so the owner's arrow-up `tmux new -t zbynek` piles them up.
+The native attach-or-create primitive is `tmux new-session -A -s <name>`.
+
+These tests exercise the GENERATED bashrc block's shell functions with NO
+real tmux: a FAKE `command tmux` shim on PATH records the argv it receives,
+in a bash subshell whose env is scrubbed of TMUX/TMUX_PANE (so nothing can
+ever reach the box's real server — the #613 isolation discipline; the
+`tests/test_tmux_test_isolation_lock.py` lock is satisfied because no
+`subprocess.run` here passes a real destructive `tmux` argv literal at all).
+The `_live_normalize_owner_session` tests use the repo's established
+dependency-injected fake-`run` pattern (records argv, returns canned
+output) — also no real tmux.
+"""
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import cli_bashrc_appliers as appliers
+import cli_tmux_provisioning as tmuxprov
+
+
+# --------------------------------------------------------------------------- #
+# Shell-side harness: source the generated block, run one shell command line
+# against a fake `command tmux` recorder. No real tmux, no TTY.
+# --------------------------------------------------------------------------- #
+FAKE_TMUX = '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$REC"\n'
+
+
+def _run_shell(block, cmdline, interactive=True):
+    """Source `block` then run `cmdline` in a bash subshell. Returns
+    (recorded_argv_lines, declared_funcs). `interactive=True` forces the
+    `$- == *i*` guard branch on via `bash -ic` (TTY-free — verified);
+    `False` uses plain `-c` so the guard must SKIP."""
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        fake = tdp / "tmux"
+        fake.write_text(FAKE_TMUX)
+        os.chmod(str(fake), 0o755)
+        blockfile = tdp / "block.sh"
+        blockfile.write_text(block + "\n")
+        rec = tdp / "rec"
+        rec.write_text("")
+        env = dict(os.environ)
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
+        env["PATH"] = str(tdp) + os.pathsep + env.get("PATH", "")
+        env["REC"] = str(rec)
+        script = ('source "%s"; declare -F t tmux; echo "__RUN__"; %s'
+                  % (blockfile, cmdline))
+        flag = "-ic" if interactive else "-c"
+        subprocess.run(["bash", "--norc", "--noprofile", flag, script],
+                       env=env, capture_output=True, text=True, timeout=20)
+        recorded = [ln for ln in rec.read_text().splitlines() if ln.strip()]
+        return recorded
+
+
+def _declared_funcs(block, interactive):
+    """The `t`/`tmux` functions bash sees defined after sourcing `block`."""
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        blockfile = tdp / "block.sh"
+        blockfile.write_text(block + "\n")
+        env = dict(os.environ)
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
+        script = 'source "%s"; declare -F t tmux' % blockfile
+        flag = "-ic" if interactive else "-c"
+        out = subprocess.run(["bash", "--norc", "--noprofile", flag, script],
+                             env=env, capture_output=True, text=True, timeout=20)
+        return out.stdout
+
+
+class TestTmuxWrapperRewrite(unittest.TestCase):
+    def setUp(self):
+        self.block = appliers.render_tmux_attach_block("zbynek")
+
+    def test_new_t_rewritten_to_attach_or_create(self):
+        # THE bug shape: `tmux new -t X` must become `new-session -A -s X`.
+        rec = _run_shell(self.block, "tmux new -t proj")
+        self.assertEqual(rec, ["new-session -A -s proj"])
+
+    def test_new_session_t_rewritten(self):
+        rec = _run_shell(self.block, "tmux new-session -t proj")
+        self.assertEqual(rec, ["new-session -A -s proj"])
+
+    def test_all_attach_forms_rewritten(self):
+        for verb in ("a", "attach", "attach-session"):
+            rec = _run_shell(self.block, "tmux %s -t proj" % verb)
+            self.assertEqual(rec, ["new-session -A -s proj"],
+                             "verb %r not rewritten" % verb)
+
+    def test_extra_flags_pass_through_unchanged(self):
+        # 4+ args (an extra flag present) must NOT be rewritten.
+        rec = _run_shell(self.block, "tmux new -t proj -d")
+        self.assertEqual(rec, ["new -t proj -d"])
+
+    def test_other_subcommands_pass_through(self):
+        for line, expect in (("tmux ls", "ls"),
+                             ("tmux kill-server", "kill-server"),
+                             ("tmux list-sessions", "list-sessions")):
+            rec = _run_shell(self.block, line)
+            self.assertEqual(rec, [expect], "%r mis-handled" % line)
+
+    def test_t_bare_uses_default_session(self):
+        rec = _run_shell(self.block, "t")
+        self.assertEqual(rec, ["new-session -A -s zbynek"])
+
+    def test_t_with_name(self):
+        rec = _run_shell(self.block, "t other")
+        self.assertEqual(rec, ["new-session -A -s other"])
+
+    def test_functions_defined_only_when_interactive(self):
+        # Interactive: both defined.
+        interactive = _declared_funcs(self.block, interactive=True)
+        self.assertIn("declare -f t", interactive)
+        self.assertIn("declare -f tmux", interactive)
+        # Non-interactive: guard skips -> neither defined.
+        noninteractive = _declared_funcs(self.block, interactive=False)
+        self.assertNotIn("declare -f t", noninteractive)
+        self.assertNotIn("declare -f tmux", noninteractive)
+
+
+class TestOwnerSessionDefault(unittest.TestCase):
+    def test_owner_box_uses_owner_group(self):
+        with mock.patch.object(appliers, "is_single_session_box_user",
+                               return_value=False), \
+             mock.patch("cli_webterm.OWNER_GROUP", "zbynek"):
+            self.assertEqual(appliers._owner_session_default("newlevel"), "zbynek")
+
+    def test_stream_box_uses_own_username(self):
+        with mock.patch.object(appliers, "is_single_session_box_user",
+                               return_value=True):
+            self.assertEqual(appliers._owner_session_default("marek"), "marek")
+
+
+class _FakeRun:
+    """Records argv, returns canned list-sessions output for the FIRST
+    list-sessions call, and a success object for everything else."""
+    def __init__(self, session_names):
+        self._names = session_names
+        self.calls = []
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        if "list-sessions" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="\n".join(self._names) + "\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    def rename_calls(self):
+        return [c for c in self.calls if "rename-session" in c]
+
+
+class TestNormalizeOwnerSession(unittest.TestCase):
+    def test_renames_lone_numbered_survivor(self):
+        run = _FakeRun(["zbynek-3"])
+        tmuxprov._live_normalize_owner_session("zbynek", run=run)
+        self.assertEqual(run.rename_calls(),
+                         [["tmux", "rename-session", "-t", "zbynek-3", "zbynek"]])
+
+    def test_noop_when_exact_session_exists(self):
+        run = _FakeRun(["zbynek", "zbynek-3"])
+        tmuxprov._live_normalize_owner_session("zbynek", run=run)
+        self.assertEqual(run.rename_calls(), [])
+
+    def test_noop_when_multiple_survivors(self):
+        run = _FakeRun(["zbynek-1", "zbynek-2"])
+        tmuxprov._live_normalize_owner_session("zbynek", run=run)
+        self.assertEqual(run.rename_calls(), [])
+
+    def test_noop_when_no_survivor(self):
+        run = _FakeRun(["someproject", "another"])
+        tmuxprov._live_normalize_owner_session("zbynek", run=run)
+        self.assertEqual(run.rename_calls(), [])
+
+    def test_does_not_touch_sessions_outside_owner_namespace(self):
+        # a `zbynek-foo` (non-numeric tail) is NOT an owner grouped sibling.
+        run = _FakeRun(["zbynek-foo"])
+        tmuxprov._live_normalize_owner_session("zbynek", run=run)
+        self.assertEqual(run.rename_calls(), [])
+
+    def test_no_server_is_noop_not_exception(self):
+        def boom(argv):
+            raise FileNotFoundError("tmux: no server")
+        # must not raise
+        tmuxprov._live_normalize_owner_session("zbynek", run=boom)
+
+    def test_list_failure_returncode_noop(self):
+        def failing(argv):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="no server")
+        run_wrap = failing
+        tmuxprov._live_normalize_owner_session("zbynek", run=run_wrap)
+        # nothing to assert beyond "no crash + no rename"; a bare fn returns None
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()
