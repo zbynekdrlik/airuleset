@@ -42,6 +42,12 @@ def short_target_alias(user, box_name):
     # (fail-safe, non-corrupting) rather than shipping broken tmux syntax.
     if box_name == "dev1":
         return "dev1"
+    # #661: spinbike-vps -> "sb", the owner's canonical short alias (owner
+    # ROZHODNUTÉ 2026-08-24). A recognized owner box disambiguated by box name
+    # like dev1 -- kept at the SINGLE alias source (#592) so the webterm dashboard
+    # tab and the tmux WINDOW name agree, regardless of the box's unix user.
+    if box_name.split("-")[0] == "spinbike":
+        return "sb"
     user = (user or "").strip()
     if user == "gatekeeper":
         return "gk"
