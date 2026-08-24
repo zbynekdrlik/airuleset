@@ -763,26 +763,23 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 #frames { position: relative; flex: 1 1 auto; }
 #frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
   border: 0; background: #0C0C0C; }
-/* #655: the help text is no longer a persistent 11px micro-bar at the bottom
-   (the owner's "nezrozumiteľný mikro text dole"). It is a READABLE overlay panel,
-   hidden by default and opened by the ? button in the tab bar; being position:fixed
-   it also leaves the flex column, so the terminal gets that vertical space back. */
-#hint { display: none; position: fixed; left: 50%; bottom: 14px;
-  transform: translateX(-50%); z-index: 20; max-width: min(900px, 94vw);
-  max-height: 60vh; overflow: auto; padding: 12px 16px; color: #CCCCCC;
-  font-size: 13px; line-height: 1.55; background: #161616;
-  border: 1px solid #2b2b2b; border-radius: 8px;
-  box-shadow: 0 8px 28px rgba(0,0,0,0.55); }
-#hint.show { display: block; }
+/* #671/#674: the ? help overlay (#655) is removed together with the ? button
+   (owner: keep only fullscreen). The ONLY persistent hint is now this one quiet,
+   readable footer line carrying the verified clipboard combos — muted Campbell
+   grey (#767676) at a readable 12px (never the old 11px micro-text). It stays in
+   the flex column, so the terminal keeps the rest of the height. */
+#clip-hint { flex: 0 0 auto; padding: 4px 12px; color: #767676;
+  background: #0C0C0C; border-top: 1px solid #2b2b2b;
+  font-size: 12px; line-height: 1.4; text-align: center; }
 </style>
 </head>
 <body>
 <div id="tabbar">
-<span id="nav"><button class="cyc" data-cyc="-1" title="Predošlá session">&#9664;</button><button class="cyc" data-cyc="1" title="Ďalšia session">&#9654;</button><button class="cyc" id="fs" title="Fullscreen — Ctrl+W pôjde do terminálu (Keyboard Lock)">&#9974;</button><button class="cyc" id="help" title="Nápoveda — klávesové skratky a tipy">?</button></span>
+<span id="nav"><button class="cyc" id="fs" title="Fullscreen — Ctrl+W pôjde do terminálu (Keyboard Lock)">&#9974;</button></span>
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
-<div id="hint">@@COUNT@@ tmux sessions · klik na záložku alebo ◀ ▶ prepne vždy · Ctrl+Alt+1..9 skočí na záložku (funguje aj počas písania v termináli) · všetky záložky sú prednačítané a stále pripojené — prepínanie je instantné, bez reconnectu (scrollback ostáva v tmuxe) · Ctrl+W: potvrdenie pri zatváraní chráni vždy; &#9974; Fullscreen (Keyboard Lock) pošle Ctrl+W priamo do terminálu — vyžaduje HTTPS/localhost; PWA/app-okno zmenší riziko náhodného zatvorenia · prihlásenie raz (tailnet-only)</div>
+<div id="clip-hint">Označ text myšou = skopíruje sa &middot; vložiť <b>Ctrl+Shift+V</b> (nie Ctrl+V)</div>
 <script>
 const CFG = @@CFG_JSON@@;
 // #643: the Campbell palette (single source of truth) + a Cascadia-ish system
@@ -814,7 +811,7 @@ function themeTerminal(term) {           // idempotent: applied once per termina
 }
 const frames = document.getElementById('frames');
 const made = {};
-let current = 0;                          // the active tab index (drives cycle())
+let current = 0;                          // the active tab index (tab click / Ctrl+Alt+1..9)
 function ttydSrc(s) { return CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id); }
 function makeFrame(idx, s) {                // #586: create + CONNECT one iframe ONCE, hidden.
   if (made[idx]) return made[idx];         // idempotent — an iframe is never re-created/reloaded,
@@ -857,18 +854,14 @@ function activate(idx) {
     const on = +t.dataset.idx === idx;
     t.classList.toggle('active', on);
     // #582: keep the active tab visible even when the bar has scrolled past it
-    // (the exact case the ◀ ▶ cycle buttons exist for — stepping past tab 9).
+    // (e.g. a Ctrl+Alt+9 jump to a tab scrolled off-screen). #674 removed the
+    // ◀ ▶ cycle buttons, so tab clicks + Ctrl+Alt+1..9 are the switch paths now.
     // Optional call: a browser without scrollIntoView must never break switching.
     if (on) t.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
   });
   current = idx;
   applyFixedGrid(made[idx]);                 // #613 REOPEN-2: fit the now-VISIBLE tab
   focusTerminal(made[idx], idx);             // #661: type immediately after a switch
-}
-function cycle(delta) {                    // step to prev/next session, wrapping both ways
-  const n = CFG.sessions.length;
-  if (!n) return;
-  activate(((current + delta) % n + n) % n);
 }
 // #584: ONE keydown handler shared by the parent tab bar AND every terminal
 // iframe. Ctrl+Alt+1..9 jumps to a tab. Because the gateway now serves the
@@ -879,7 +872,7 @@ function cycle(delta) {                    // step to prev/next session, wrappin
 // stopPropagation keeps xterm from also acting on the (unused) Ctrl+Alt+digit
 // chord. (Still no Ctrl+Alt+arrow binding: Ctrl+Alt+Left/Right is the Linux
 // desktop workspace-switch shortcut, grabbed by the compositor before the page
-// sees it — advertising it would over-promise; the ◀ ▶ buttons cover cycling.)
+// sees it — advertising it would over-promise; a tab click covers arbitrary jumps.)
 function onHotkey(e) {
   if (!(e.ctrlKey && e.altKey)) return;
   if (e.key >= '1' && e.key <= '9') {
@@ -900,9 +893,9 @@ function attachForwarder(f) {
     if (w) w.addEventListener('keydown', onHotkey, true);
   } catch (err) { /* never same-origin under the gateway; switching stays alive */ }
 }
-// #661: move keyboard focus INTO the shown terminal after a tab switch (mouse
-// click, ◀ ▶ cycle, AND Ctrl+Alt+N all route through activate()), so the owner
-// can type immediately with no extra click into the prompt. Same-origin under
+// #661: move keyboard focus INTO the shown terminal after a tab switch (a tab
+// click AND Ctrl+Alt+N both route through activate()), so the owner can type
+// immediately with no extra click into the prompt. Same-origin under
 // the gateway, so we reach the iframe's own xterm: `window.term.focus()` (which
 // focuses xterm's helper textarea). ttyd connects async, so the term/textarea
 // may not exist for the first activate(0) at load — retry briefly, best-effort.
@@ -1066,6 +1059,47 @@ function scheduleFill(win) {
     setTimeout(() => { try { fillFixedGrid(win); } catch (e) {} }, ms);   // guard the CALL
   });
 }
+// #671: mouse select/copy -> browser clipboard. Empirically verified against a
+// real ttyd 1.7.4 replica (Playwright + tmux capture-pane): ttyd's bundled xterm
+// frontend registers NO OSC 52 handler, so a tmux copy-mode mouse drag (which,
+// under `set-clipboard external`, emits OSC 52) never reaches the browser
+// clipboard -- the owner's reported symptom. We register an OSC 52 handler on
+// xterm's OWN parser API and mirror the decoded payload to navigator.clipboard,
+// PLUS a copy-on-select mirror for native xterm selections (Shift+drag). Both are
+// wired through the same same-origin `window.term` bridge as #613/#643/#661, use
+// the IFRAME's own (focused) navigator.clipboard, and are fully guarded so a
+// missing/denied clipboard never throws. Paste needs no code: Ctrl+Shift+V pastes
+// natively (browser paste event -> xterm), plain Ctrl+V is ^V and is NOT rebound
+// (a legit readline key) -- see the footer hint.
+function attachClipboard(win) {                  // idempotent: attach once per terminal
+  const term = win && win.term;
+  if (!term || term.__wtClip) return;
+  term.__wtClip = true;
+  const clip = (win.navigator && win.navigator.clipboard) || null;   // iframe realm = focused doc
+  const write = (text) => {
+    try { if (clip && clip.writeText && text) clip.writeText(text).catch(function () {}); }
+    catch (e) { /* clipboard unavailable/denied -> silently skip */ }
+  };
+  try {
+    if (term.parser && term.parser.registerOscHandler) {
+      term.parser.registerOscHandler(52, (data) => {
+        try {
+          const parts = String(data).split(';');           // "<targets>;<base64>" (targets may be empty)
+          const b64 = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+          if (b64 && b64 !== '?') write(decodeURIComponent(escape(win.atob(b64))));  // '?' = read-request
+        } catch (e) { /* invalid base64 / read-request -> ignore */ }
+        return true;                                        // we own OSC 52
+      });
+    }
+  } catch (e) { /* older xterm without registerOscHandler -> no OSC 52 bridge */ }
+  try {
+    if (typeof term.onSelectionChange === 'function') {
+      term.onSelectionChange(() => {
+        try { const s = term.getSelection(); if (s) write(s); } catch (e) {}
+      });
+    }
+  } catch (e) {}
+}
 function applyFixedGrid(f) {                     // poll for window.term, fit, then watch resize
   if (!f) return;
   const win = f.contentWindow;
@@ -1073,6 +1107,7 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
   let tries = 0;
   const poll = () => {
     themeTerminal(win.term);                     // #643: Campbell palette + font, once term exists
+    attachClipboard(win);                        // #671: OSC 52 + copy-on-select -> browser clipboard
     if (fitFixedGrid(win)) {
       scheduleFill(win);                           // deferred FILL passes (below)
       if (!win.__wtResize) {                       // re-fit + re-fill on window resize
@@ -1089,21 +1124,18 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
 }
 document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
-document.querySelectorAll('.cyc[data-cyc]').forEach((b) =>   // fs/help buttons have no data-cyc
-  b.addEventListener('click', () => cycle(+b.dataset.cyc)));
-// #655: the ? button toggles the readable help panel (replaces the old 11px
-// persistent micro-bar). Clicking the panel itself, or Escape, closes it.
+// #674: the prev/next cycle arrows and the ? help toggle are removed (owner: keep
+// only fullscreen); tab switching stays via tab clicks + Ctrl+Alt+1..9 (onHotkey).
+// #671 HONESTY (mirrors the #585 Ctrl+W isSecureContext honesty below): the
+// mouse-select copy bridge writes navigator.clipboard, which exists ONLY in a
+// secure context (HTTPS). Over the plain-HTTP tailnet the copy bridge is inert,
+// so the footer must NOT promise mouse-copy there — rewrite it to the honest
+// message (paste via Ctrl+Shift+V is a native browser paste and still works).
 (function () {
-  const helpBtn = document.getElementById('help');
-  const hintEl = document.getElementById('hint');
-  if (!helpBtn || !hintEl) return;
-  helpBtn.addEventListener('click', () => hintEl.classList.toggle('show'));
-  // #655: the panel does NOT close on its own click (a selection drag's mouseup
-  // would fire click and close it, so its text stays selectable/copyable) --
-  // close via the ? button (toggle) or Escape.
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') hintEl.classList.remove('show');
-  });
+  const ch = document.getElementById('clip-hint');
+  if (ch && !(window.isSecureContext && navigator.clipboard)) {
+    ch.textContent = 'Vložiť: Ctrl+Shift+V (nie Ctrl+V) · kopírovanie myšou vyžaduje HTTPS';
+  }
 })();
 // #585(b): Ctrl+W is readline delete-word in the terminal but the browser
 // consumes it as close-tab (a reserved shortcut a normal window cannot

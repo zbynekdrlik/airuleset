@@ -1043,35 +1043,18 @@ class TestTabSwitchingUX(unittest.TestCase):
         for content in matches:
             self.assertRegex(content, r"^[0-9]+$")
 
-    def test_prev_next_cycle_buttons_present(self):
-        html = w.render_dashboard_html(self._inv(4), ttyd_base="http://b:7682")
-        self.assertIn('class="cyc"', html)
-        self.assertIn('data-cyc="-1"', html)   # prev
-        self.assertIn('data-cyc="1"', html)    # next
-        self.assertIn("function cycle(", html)  # the JS helper the buttons call
-
     def test_keydown_is_direct_jump_only_no_arrow_binding(self):
         # Ctrl+Alt+1..9 direct-jumps when the tab bar has focus — gate the ACTUAL
-        # handler code, not the decorative "Ctrl+Alt" hint text.
+        # handler code, not the decorative "Ctrl+Alt" hint text. (#674 removed the
+        # prev/next arrows + the cycle() helper; direct-jump switching stays and is
+        # the only cycling path now, alongside tab clicks.)
         html = w.render_dashboard_html(self._inv(4), ttyd_base="http://b:7682")
         self.assertIn("e.key >= '1'", html)          # the digit-jump handler
-        self.assertIn("function cycle(", html)        # cycling stays (via ◀ ▶ buttons)
         # No Ctrl+Alt+arrow binding: Ctrl+Alt+Left/Right is the Linux desktop
         # workspace-switch shortcut, grabbed by the compositor before the page
         # sees it — advertising it would over-promise (both #582 reviewers).
         self.assertNotIn("ArrowLeft", html)
         self.assertNotIn("ArrowRight", html)
-
-    def test_hint_advertises_click_cycle_and_working_shortcut(self):
-        # #584 fixed the #582 residual: the hint no longer warns of a
-        # focus/origin limitation. It still surfaces the always-works paths
-        # (click + ◀ ▶) AND the now-working Ctrl+Alt shortcut.
-        html = w.render_dashboard_html(self._inv(4), ttyd_base="/t")
-        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
-        self.assertIn("klik", hint.lower())          # click always works
-        self.assertIn("Ctrl+Alt", hint)              # the shortcut is advertised
-        self.assertTrue("◀" in hint or "▶" in hint)   # cycle affordance
-        self.assertNotIn("iný origin", hint)          # the old limitation note is gone
 
     def test_ux_additions_do_not_break_escaping_or_single_pass(self):
         # The security invariants from #579 must survive the UX additions.
@@ -1118,14 +1101,12 @@ class TestSameOriginKeyboard(unittest.TestCase):
         self.assertIn("e.key >= '1'", html)        # the digit-jump logic
         self.assertIn("stopPropagation", html)     # xterm must not also get it
 
-    def test_hint_no_longer_says_shortcut_fails_while_typing(self):
+    def test_no_stale_shortcut_origin_limitation_copy(self):
         # The honest #582 residual ("during typing it's a different origin — use
-        # click") is GONE now that the shortcut works while typing.
+        # click") must never reappear anywhere on the page. (#674 removed the whole
+        # #hint help overlay, so this is now a whole-page invariant.)
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
-        self.assertNotIn("iný origin", hint)
-        # click / cycle buttons still advertised as the always-works path
-        self.assertIn("klik", hint.lower())
+        self.assertNotIn("iný origin", html)
 
 
 class TestAllTabsPreloaded(unittest.TestCase):
@@ -1196,14 +1177,13 @@ class TestAllTabsPreloaded(unittest.TestCase):
         script = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
         self.assertEqual(script.count(".src ="), 1)
 
-    def test_hint_documents_preloaded_instant_switching(self):
-        # The owner-facing hint must state tabs are preloaded + switching is
-        # instant with no reconnect (the #585 "odpojí/obnoví" line is gone).
+    def test_no_stale_disconnect_language_on_page(self):
+        # The #585 "odpojí/obnoví" disconnect copy must never reappear (tabs stay
+        # preloaded + connected — behaviour locked by the other tests in this
+        # class). #674 removed the #hint overlay that used to carry this copy, so
+        # this is now a whole-page invariant.
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
-        self.assertNotIn("odpojí", hint)              # no disconnect language
-        self.assertTrue("prednač" in hint.lower() or "instant" in hint.lower(),
-                        "hint must advertise preloaded/instant switching")
+        self.assertNotIn("odpojí", html)              # no disconnect language anywhere
 
 
 class TestBrowserFixedGridFit(unittest.TestCase):
@@ -1373,29 +1353,19 @@ class TestFullDisplayAndDomains655(unittest.TestCase):
         self.assertIn("location.hostname", html)
         self.assertRegex(html, r"document\.title\s*=")
 
-    def test_hint_is_hidden_by_default_not_a_persistent_micro_bar(self):
+    def test_footer_hint_is_readable_not_micro_text(self):
+        # #674 removed the ? button and the #hint help OVERLAY (#655). The only
+        # persistent hint element is now the single #clip-hint footer line, which
+        # must stay READABLE (>= 12px — the #655 owner complaint was the old 11px
+        # "nezrozumiteľný mikro text dole") and muted, matching the dashboard chrome.
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        # the help text is no longer a persistent visible bottom bar; its base
-        # CSS hides it (display:none) until the user opens it.
-        self.assertRegex(
-            html, r"#hint\s*\{[^}]*display\s*:\s*none",
-            "the #hint help must be hidden by default (a toggled panel), not a "
-            "persistent micro bar at the bottom of the screen")
-
-    def test_help_toggle_button_exists_and_toggles_the_hint(self):
-        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertIn('id="help"', html)          # the ? help toggle control
-        # a click handler toggles the hint panel's visibility
-        self.assertRegex(html, r"getElementById\(['\"]help['\"]\)")
-        self.assertRegex(html, r"getElementById\(['\"]hint['\"]\)")
-
-    def test_help_panel_keeps_the_shortcut_content_at_a_readable_size(self):
-        # the help CONTENT (shortcuts) is preserved -- only its presentation
-        # changes from an 11px persistent bar to a readable toggled panel.
-        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
-        self.assertIn("Ctrl+Alt", hint)
-        self.assertIn("Ctrl+W", hint)
+        m = re.search(r"#clip-hint\s*\{[^}]*\}", html)
+        self.assertIsNotNone(m, "#clip-hint CSS rule not found")
+        rule = m.group(0)
+        self.assertIn("font-size: 12px", rule)     # readable, not the old 11px micro-text
+        self.assertIn("#767676", rule)             # muted Campbell grey
+        # the old hidden-overlay #hint rule + ? toggle are gone
+        self.assertNotIn("#hint", html)
 
 
 class TestCtrlWProtection(unittest.TestCase):
@@ -1404,8 +1374,9 @@ class TestCtrlWProtection(unittest.TestCase):
     in a normal window). Three layers: (1) a beforeunload confirm armed WHILE a
     terminal is connected (no silent tab loss); (2) a Fullscreen button that
     requests fullscreen + navigator.keyboard.lock so Chrome delivers Ctrl+W to
-    the terminal (feature-detected, honest hint when unsupported); (3) a
-    documented PWA alternative in the hint."""
+    the terminal (feature-detected, honest title when unsupported). (#674 removed
+    the #hint help overlay that also documented a PWA fallback; the beforeunload
+    confirm + the fullscreen button's own title still cover Ctrl+W.)"""
 
     def _inv(self, n=3):
         return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
@@ -1439,16 +1410,6 @@ class TestCtrlWProtection(unittest.TestCase):
         self.assertIn("isSecureContext", html)
         self.assertIn("HTTPS", html)
 
-    def test_pwa_alternative_documented_in_hint(self):
-        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
-        self.assertIn("PWA", hint)
-        self.assertIn("Ctrl+W", hint)                 # the shortcut it protects
-        # HONEST framing (#585 both reviewers): the hint must NOT promise PWA
-        # delivers Ctrl+W to the terminal (it does not for an iframe). Fullscreen
-        # is the mechanism that does; PWA only reduces accidental-close risk.
-        self.assertIn("Fullscreen", hint)
-
     def test_ctrlw_additions_preserve_escaping_and_single_pass(self):
         # The #579 injection invariants must survive the Ctrl+W / disconnect JS.
         inv = [{"id": "x", "label": "</script><script>alert(1)</script>",
@@ -1471,6 +1432,126 @@ class TestCtrlWProtection(unittest.TestCase):
         # the single beforeunload consults the live-terminal gate
         self.assertRegex(html, r"addEventListener\('beforeunload',[^)]*\)")
         self.assertIn("if (!hasLiveTerminal()) return;", html)
+
+
+class TestClipboardBridge(unittest.TestCase):
+    """#671: mouse select/copy in the webterm. ttyd 1.7.4's bundled xterm
+    frontend registers NO OSC 52 handler (empirically verified: a grep of the
+    served bundle finds registerOscHandler for 0/1/2/4/8/10/11/12/104/110/111/
+    112/1337 but NOT 52), so a tmux copy-mode mouse drag (which under
+    `set-clipboard external` emits OSC 52) never reaches the browser clipboard --
+    the owner's reported symptom. The gateway-injected JS registers an OSC 52
+    handler on xterm's OWN parser API -> navigator.clipboard.writeText via the
+    same-origin window.term bridge, PLUS a copy-on-select mirror for native
+    xterm selections. Runtime behaviour was verified with Playwright against a
+    real ttyd replica AND a same-origin iframe harness; these tests lock the
+    injected-JS SHAPE (the repo has no browser test runner)."""
+
+    def _inv(self, n=2):
+        return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
+                 "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
+                for i in range(1, n + 1)]
+
+    def test_osc52_handler_registered_and_writes_clipboard(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("function attachClipboard(", html)
+        # OSC 52 handler on xterm's OWN parser API (not a bundled addon we lack)
+        self.assertIn("registerOscHandler(52", html)
+        # decodes base64 and mirrors the payload to the browser clipboard
+        self.assertIn("navigator.clipboard", html)
+        self.assertIn("writeText", html)
+        self.assertIn("atob(", html)
+
+    def test_copy_on_select_mirrors_native_selection(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        # native xterm selection (Shift+drag) is mirrored too, daemon-agnostic
+        # (independent of ttyd's own deprecated execCommand copy-on-select).
+        self.assertIn("onSelectionChange(", html)
+        self.assertIn("getSelection()", html)
+
+    def test_clipboard_bridge_is_guarded_and_idempotent(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        # idempotent per terminal (never double-registers)
+        self.assertIn("__wtClip", html)
+        m2 = re.search(r"function attachClipboard\([^)]*\)\s*\{.*?\n\}", html, re.DOTALL)
+        self.assertIsNotNone(m2, "attachClipboard() not found")
+        body = m2.group(0)
+        self.assertIn("navigator", body)         # clipboard availability consulted
+        self.assertIn("try", body)               # guarded against a throw
+        # an OSC 52 read-request (52;c;?) must NOT attempt a decode/write
+        self.assertIn("'?'", body)
+
+    def test_clipboard_bridge_wired_into_grid_poll(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        # attached where the term first exists (same place as themeTerminal)
+        self.assertIn("attachClipboard(win)", html)
+
+    def test_footer_hint_states_paste_combo(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        # #671 + #674: the combos live in an unobtrusive footer line, NOT a ?
+        # button (the ? button is removed by #674).
+        self.assertIn('id="clip-hint"', html)
+        foot = next(ln for ln in html.splitlines() if 'id="clip-hint"' in ln)
+        self.assertIn("Ctrl+Shift+V", foot)          # the working paste combo
+        self.assertIn("Ctrl+V", foot)                # names the NON-working one ("nie Ctrl+V")
+        self.assertIn("myš", foot.lower())           # mouse-select copies
+
+    def test_footer_hint_honest_over_http_feature_detect(self):
+        # #671 review: navigator.clipboard needs a secure context; over the
+        # plain-HTTP tailnet the copy bridge is inert, so the footer is
+        # feature-detected and rewritten to an honest message when clipboard is
+        # unavailable (mirrors the #585 Ctrl+W isSecureContext honesty) — never a
+        # false "mouse copies" promise. Paste (Ctrl+Shift+V) still works there.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("getElementById('clip-hint')", html)      # footer is feature-detected
+        self.assertIn("window.isSecureContext", html)           # secure-context gate
+        # the honest fallback names the real reason, not a false browser-unsupported
+        self.assertIn("kopírovanie myšou vyžaduje HTTPS", html)
+
+
+class TestTopBarOnlyFullscreen(unittest.TestCase):
+    """#674 (owner directive 2026-08-24, verbatim "nechaj tam len fullscreen"):
+    the top-left controls are reduced to ONLY the fullscreen button -- the
+    prev/next arrows and the ? help button are removed, along with the
+    now-unreachable #hint help overlay and the dead cycle() helper. Tab
+    switching still works via tab clicks + Ctrl+Alt+1..9 (onHotkey)."""
+
+    def _inv(self, n=4):
+        return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
+                 "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
+                for i in range(1, n + 1)]
+
+    def test_nav_keeps_only_fullscreen(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        nav = next(ln for ln in html.splitlines() if 'id="nav"' in ln)
+        self.assertIn('id="fs"', nav)                 # fullscreen stays
+        self.assertNotIn("data-cyc", nav)             # prev/next arrows removed
+        self.assertNotIn('id="help"', nav)            # ? button removed
+        self.assertNotIn("&#9664;", nav)              # left-arrow glyph gone
+        self.assertNotIn("&#9654;", nav)              # right-arrow glyph gone
+
+    def test_cycle_helper_and_wiring_removed(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertNotIn("function cycle(", html)     # dead helper removed
+        self.assertNotIn(".cyc[data-cyc]", html)      # its click-wiring removed
+
+    def test_help_overlay_and_toggle_removed(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertNotIn('id="hint"', html)           # the ?-opened overlay is gone
+        self.assertNotIn('id="help"', html)
+        self.assertNotIn("getElementById('help')", html)
+
+    def test_tab_switching_still_works(self):
+        # removing the arrows must NOT break switching: tab clicks + Ctrl+Alt+1..9
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn("function activate(", html)
+        self.assertIn("() => activate(+t.dataset.idx)", html)   # tab click still wired
+        self.assertIn("e.key >= '1'", html)                     # Ctrl+Alt+1..9 handler stays
+
+    def test_fullscreen_control_preserved(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn('id="fs"', html)
+        self.assertIn("requestFullscreen", html)
 
 
 if __name__ == "__main__":
