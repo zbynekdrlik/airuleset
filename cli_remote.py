@@ -284,6 +284,9 @@ def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
     failed = []
     for remote in targets:
         identity = remote.get("identity")
+        # #669: pin the host key on a raw-public-IP owner_vps target; every
+        # other host keeps its unchanged StrictHostKeyChecking=no posture.
+        hostkey_opts = host_key_check_opts(remote)
         if identity:
             # #341: BatchMode=yes -- a failed pubkey attempt (an unprovisioned/
             # misconfigured account) must fail IMMEDIATELY rather than falling
@@ -291,7 +294,7 @@ def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
             # which is what turned a single "Permission denied" connection into
             # several distinct auth-failure log lines against subdev.
             ssh_prefix = ["ssh", "-i", os.path.expanduser(identity),
-                          "-o", "StrictHostKeyChecking=no",
+                          *hostkey_opts,
                           "-o", "BatchMode=yes"]
         elif require_identity:
             # #659: never ship an owner secret over the fleet-shared password.
@@ -307,7 +310,7 @@ def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
             # so a single sshpass call can burn at most one fail2ban-countable
             # strike instead of up to three.
             ssh_prefix = ["sshpass", "-p", "newlevel", "ssh",
-                          "-o", "StrictHostKeyChecking=no",
+                          *hostkey_opts,
                           "-o", "NumberOfPasswordPrompts=1"]
         argv = ssh_prefix + control_opts + [
             f"{remote['user']}@{remote['host']}", remote_write_cmd]
@@ -659,6 +662,87 @@ def _ssh_multiplex_opts(control_dir):
     ]
 
 
+# --- #669: pin the ssh host key for a raw-public-IP owner_vps target ---------
+# The fleet's private tailscale/subdev hosts are reached over a path where an
+# on-path MITM is implausible, so their ssh legs stay on
+# StrictHostKeyChecking=no (accept unknown+changed -- the fail2ban-conscious
+# #341 posture). spinbike-vps (167.233.245.147) is the first managed target
+# reached over the PUBLIC internet by raw IP: there a first-contact MITM, or a
+# silently rotated host key, on the deploy leg would hand the pushed code to an
+# attacker. A target that carries a committed PUBLIC host-key pin (`host_keys`
+# on its REMOTE_HOSTS entry -- captured once on the trusted maintainer box and
+# safe to commit, exactly like cli_owner_keys.OWNER_PUBKEYS) is verified
+# STRICTLY instead: ssh reads ONLY the materialized pin (UserKnownHostsFile
+# REPLACES the default ~/.ssh/known_hosts; GlobalKnownHostsFile=/dev/null drops
+# the /etc/ssh path) and StrictHostKeyChecking=yes refuses an unknown AND a
+# changed key, so a MITM or rotated key hard-fails LOUDLY (ssh exit 255) instead
+# of being trusted. The discriminator is the PRESENCE of a committed pin (you
+# can only pin a host whose genuine key you hold), so a "flagged-but-keyless"
+# inconsistent state is impossible by construction. Fail-closed
+# (script-failure-policy): a pinned host whose pin cannot be materialized RAISES
+# -- never a silent fall back to =no.
+_PINNED_KNOWN_HOSTS_FILES = {}  # host addr -> materialized known_hosts path
+
+
+def _unlink_quiet(path):
+    # airuleset:script-ok best-effort atexit cleanup of a process-temp pin file
+    # holding only PUBLIC host keys -- an already-removed file (OSError) is the
+    # expected no-op, and stderr may be closed at interpreter exit, so logging
+    # here would be noise or itself raise.
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _materialize_pinned_known_hosts(addr, host_keys):
+    """Write `host_keys` (each a `<type> <base64>` known_hosts line WITHOUT the
+    address) as a known_hosts file keyed to `addr`, and return its path. The
+    source of truth is the committed constant; this only MATERIALIZES it for
+    ssh, so the pin is re-enforced fresh every push with no persistent drift.
+    Process-cached per address and unlinked atexit. RAISES (never returns None,
+    never a `=no` fallback) when the pin is empty or the file cannot be written
+    -- a pinned host must fail LOUD, never silently downgrade to TOFU
+    (script-failure-policy)."""
+    import atexit
+    import tempfile
+    cached = _PINNED_KNOWN_HOSTS_FILES.get(addr)
+    if cached and os.path.exists(cached):
+        return cached
+    lines = "".join("%s %s\n" % (addr, k.strip())
+                    for k in host_keys if k and k.strip())
+    if not lines:
+        raise RuntimeError(
+            "host-key pin for %s is empty -- refusing to deploy without a "
+            "verifiable host key (never falling back to "
+            "StrictHostKeyChecking=no)" % addr)
+    fd, path = tempfile.mkstemp(prefix="arpin-known-hosts-")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(lines)
+    _PINNED_KNOWN_HOSTS_FILES[addr] = path
+    atexit.register(_unlink_quiet, path)
+    return path
+
+
+def host_key_check_opts(remote):
+    """The ssh `-o` host-key-verification options for `remote` (#669). A target
+    carrying a committed PUBLIC `host_keys` pin is verified STRICTLY against that
+    pin (`UserKnownHostsFile=<pin> GlobalKnownHostsFile=/dev/null
+    StrictHostKeyChecking=yes` -- refuses an unknown AND a changed key); every
+    other target keeps the unchanged `StrictHostKeyChecking=no` posture. Called
+    at every push-path ssh leg (the deploy loop AND the shared secret-delivery
+    loop) so the pin covers the whole surface and no leg can silently copy the
+    old =no default for a pinned host. Fail-closed: a pinned host whose pin
+    cannot be materialized propagates the RuntimeError, never a =no fallback."""
+    host_keys = remote.get("host_keys")
+    if not host_keys:
+        return ["-o", "StrictHostKeyChecking=no"]
+    path = _materialize_pinned_known_hosts(remote["host"], host_keys)
+    return ["-o", "UserKnownHostsFile=%s" % path,
+            "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", "StrictHostKeyChecking=yes"]
+
+
 def _redacted_ssh_cmd(cmd):
     """The same argv `ssh_cmd`/`ssh_prefix` list built for a deploy or
     soniox-key call, with any `sshpass -p <password>` password argument
@@ -837,6 +921,9 @@ def _deploy_to_all_remotes(failed, auth_failed):
             if audit_this_call:
                 remote_cmd = _remote_cmd_with_home_audit(remote_cmd)
             identity = remote.get("identity")
+            # #669: pin the host key on a raw-public-IP owner_vps target; every
+            # other host keeps its unchanged StrictHostKeyChecking=no posture.
+            hostkey_opts = host_key_check_opts(remote)
             if identity:
                 # key-based SSH (e.g. the gatekeeper — prod-critical, no shared
                 # password). #341: BatchMode=yes -- a failed pubkey attempt
@@ -847,7 +934,7 @@ def _deploy_to_all_remotes(failed, auth_failed):
                 # connection generate several distinct auth-failure log lines.
                 ssh_cmd = [
                     "ssh", "-i", os.path.expanduser(identity),
-                    "-o", "StrictHostKeyChecking=no",
+                    *hostkey_opts,
                     "-o", "BatchMode=yes",
                 ] + control_opts + [
                     f"{remote['user']}@{remote['host']}",
@@ -861,7 +948,7 @@ def _deploy_to_all_remotes(failed, auth_failed):
                 # fail2ban-countable strike instead of up to three.
                 ssh_cmd = [
                     "sshpass", "-p", "newlevel",
-                    "ssh", "-o", "StrictHostKeyChecking=no",
+                    "ssh", *hostkey_opts,
                     "-o", "NumberOfPasswordPrompts=1",
                 ] + control_opts + [
                     f"{remote['user']}@{remote['host']}",

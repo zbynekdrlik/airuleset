@@ -99,5 +99,92 @@ class TestDeployLegPinsPublicIpHost(unittest.TestCase):
         self.assertNotIn("StrictHostKeyChecking=yes", argv)
 
 
+class TestHostKeyCheckOpts(unittest.TestCase):
+    def test_pinned_host_gets_strict_yes_and_known_hosts(self):
+        opts = cli_remote.host_key_check_opts(PINNED)
+        self.assertIn("StrictHostKeyChecking=yes", opts)
+        self.assertIn("GlobalKnownHostsFile=/dev/null", opts)
+        self.assertTrue(any(o.startswith("UserKnownHostsFile=") for o in opts))
+        self.assertNotIn("StrictHostKeyChecking=no", opts)
+
+    def test_unpinned_host_keeps_strict_no(self):
+        # Regression: an ordinary tailscale/subdev host is unchanged.
+        self.assertEqual(cli_remote.host_key_check_opts(PLAIN),
+                         ["-o", "StrictHostKeyChecking=no"])
+
+    def test_empty_host_keys_is_treated_as_unpinned(self):
+        # `host_keys: []` (or absent) is not a pin — never strict.
+        self.assertEqual(
+            cli_remote.host_key_check_opts(
+                {"host": "203.0.113.9", "host_keys": []}),
+            ["-o", "StrictHostKeyChecking=no"])
+
+
+class TestMaterializePinnedKnownHosts(unittest.TestCase):
+    GENUINE_ED25519 = (
+        "ssh-ed25519 "
+        "AAAAC3NzaC1lZDI1NTE5AAAAIJ4gdjBncONNRHmRw+W8hNFBDkkvEORFWLBxXUWS2r7g")
+
+    def test_materialized_file_pins_genuine_key_keyed_to_address(self):
+        path = cli_remote._materialize_pinned_known_hosts(
+            "167.233.245.147", [self.GENUINE_ED25519])
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+        # keyed to the exact address ssh connects to, genuine key verbatim
+        self.assertIn("167.233.245.147 " + self.GENUINE_ED25519, body)
+
+    def test_fail_closed_empty_pin_raises(self):
+        # A pinned host with an empty/blank pin must RAISE, never silently
+        # produce a file that would let ssh fall back to acceptance.
+        with self.assertRaises(RuntimeError):
+            cli_remote._materialize_pinned_known_hosts("x.x.x.x", [])
+        with self.assertRaises(RuntimeError):
+            cli_remote._materialize_pinned_known_hosts("x.x.x.x", ["   ", ""])
+
+
+class TestRealFleetPinScope(unittest.TestCase):
+    """Prove the pin engages for the REAL fleet TODAY, and ONLY for the
+    raw-public-IP owner_vps class — not a hand-built fixture."""
+
+    def test_real_spinbike_entry_is_pinned_and_strict(self):
+        sb = [h for h in airuleset.REMOTE_HOSTS if h.get("name") == "spinbike-vps"]
+        self.assertEqual(len(sb), 1)
+        self.assertTrue(sb[0].get("host_keys"),
+                        "spinbike-vps must carry a committed host-key pin")
+        self.assertIn("StrictHostKeyChecking=yes",
+                      cli_remote.host_key_check_opts(sb[0]))
+
+    def test_every_other_real_host_stays_unpinned(self):
+        # Regression: pinning scope is spinbike-vps (raw public IP) ONLY —
+        # dev2/subdev/gatekeeper and every other target keep the =no posture.
+        for h in airuleset.REMOTE_HOSTS:
+            if h.get("name") == "spinbike-vps":
+                continue
+            self.assertFalse(
+                h.get("host_keys"),
+                "%s must not carry a host-key pin (pinning scope is the "
+                "raw-public-IP owner_vps class only)" % h.get("name"))
+            self.assertEqual(cli_remote.host_key_check_opts(h),
+                             ["-o", "StrictHostKeyChecking=no"])
+
+
+class TestSecretDeliveryLegPinsPinnedHost(unittest.TestCase):
+    def test_deliver_secret_to_a_pinned_host_uses_strict_yes(self):
+        # The shared secret-delivery loop (#659) must pin too, so a future
+        # owner-secret leg to a pinned host is never TOFU.
+        calls = []
+
+        def run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return m.Mock(returncode=0, stdout="", stderr="")
+        failed = cli_remote._deliver_secret_to_hosts(
+            [PINNED], "v", "cat > ~/x", "secret", run)
+        self.assertEqual(failed, [])
+        argv = calls[0]
+        self.assertIn("StrictHostKeyChecking=yes", argv)
+        self.assertTrue(any(a.startswith("UserKnownHostsFile=") for a in argv))
+        self.assertNotIn("StrictHostKeyChecking=no", argv)
+
+
 if __name__ == "__main__":
     unittest.main()
