@@ -294,30 +294,30 @@ def webterm_inventory(profile=profiles.OWNER):
 #      broken window-chooser was reported repeatedly -- a working switcher
 #      beats independent views.
 #
-#      MOUSE (#615) on the shared base -- session-scoped on connect, reverted
-#      on disconnect (trap, below). *** THIS BLOCK'S PREMISE IS STALE SINCE
-#      #646 -- honesty refresh #647. *** It was written when `mouse off` was
-#      the fleet-wide steady state (both tmux's factory default AND the
-#      DESIRED ssh state per #267). #646 REVERSED that: cli_tmux_provisioning
-#      now sets `set-option -g mouse on` as the managed FLEET-WIDE default,
-#      because the owner WANTS the wheel to reach tmux scrollback over ssh --
-#      the very "kolieskom cez ssh sa to blbo pouziva" #267 built the
-#      Shift+PageUp keybind for. So the owner's own ssh session is now
-#      `mouse on` by that global, NOT kept `mouse off` (the old claim here).
-#      `mouse` is a tmux SESSION option (never per-client): #615's `mouse on`
-#      once lived on the throwaway clone (an independent session), so #613's
-#      direct attach retargeted it to `$T` itself -- the SAME single session
-#      the owner's ssh is also attached to.
-#      CONSEQUENCE of #646 on this path (verified on an isolated tmux server,
-#      #647): the session-scoped `mouse on` set on connect is now REDUNDANT
-#      (the global already supplies it), and the disconnect-trap `mouse off`
-#      now writes a session-LOCAL override that DEVIATES from the #646 global
-#      -- a session-local `mouse off` wins over `-g mouse on`, so a webterm
-#      connect+disconnect leaves the owner's OWN ssh session `mouse off`
-#      until it restarts (`set-option -u -t "$T" mouse` would instead fall
-#      back to the global). That is a BEHAVIOR change, out of scope for the
-#      comment-only #647 -- the fix (drop this block now #646 makes it moot,
-#      or switch the trap to `-u`) is tracked in #648.
+#      MOUSE (#615) on the shared base -- session-scoped `mouse on` on
+#      connect, the session-local override UNSET on disconnect (trap, below;
+#      #648 FIX LANDED, Option 2). `mouse` is a tmux SESSION option (never
+#      per-client): #615's `mouse on` once lived on the throwaway clone (an
+#      independent session), so #613's direct attach retargeted it to `$T`
+#      itself -- the SAME single session the owner's ssh is also attached to.
+#      #646 CONTEXT: cli_tmux_provisioning now sets `set-option -g mouse on`
+#      as the managed FLEET-WIDE default (the owner WANTS the wheel to reach
+#      tmux scrollback over ssh -- the very "kolieskom cez ssh sa to blbo
+#      pouziva" #267 built the Shift+PageUp keybind for). So the connect-side
+#      `mouse on` here is REDUNDANT with that global on a provisioned box --
+#      but it is KEPT so a box WITHOUT the #646 conf still gets browser
+#      wheel->scrollback.
+#      #648 FIX (verified on an isolated tmux server): the disconnect trap
+#      MUST NOT force `mouse off` -- a session-LOCAL `mouse off` WINS over
+#      `-g mouse on`, so a forced-off revert left the owner's OWN ssh session
+#      (attached to the SAME session) `mouse off` after every webterm
+#      connect+disconnect until it restarted. The trap therefore UNSETS the
+#      session-local override (`set-option -u -t "$T" mouse`), restoring
+#      inheritance: the effective value falls back to the #646 global (`on`),
+#      or to tmux's factory default off on an unprovisioned box -- never a
+#      forced value. (Rejected: dropping the block entirely and relying on
+#      the #646 global -- that would lose browser wheel->scrollback on a box
+#      the #646 conf never reached.)
 #      WHAT STAYS TRUE: this join path still NEVER emits a global `-g mouse`
 #      -- the fleet default is cli_tmux_provisioning's job (#646), not this
 #      join script's, so the `assertNotIn("set-option -g mouse")` lock in
@@ -325,8 +325,8 @@ def webterm_inventory(profile=profiles.OWNER):
 #      existing session) still touches no mouse option at all. The trap is
 #      NOT reference-counted against multiple simultaneous webterm tabs to
 #      the SAME target -- the dashboard's own design (#579) is one tab per
-#      DISTINCT target, so an unconditional on-connect/off-disconnect toggle
-#      matches how the feature is used; a second simultaneous connect is a
+#      DISTINCT target, so an unconditional on-connect/unset-on-disconnect
+#      toggle matches how the feature is used; a second simultaneous connect is a
 #      rare, self-correcting edge (a reconnect re-arms for its own duration).
 #      While connected, the owner's ssh client (attached to the SAME session
 #      via the separate fleet ssh auto-attach convention below, not this
@@ -351,21 +351,26 @@ _ATTACH_BODY = (
     'fi; fi; '
     'if [ -n "$T" ]; then '
     # #615 (SCOPED to this connection -- see the block comment above for the
-    # full record + the #646 staleness note / #648): mouse mode so the
-    # browser's scroll-wheel reaches tmux copy-mode. Post-#646 this
-    # session-scoped set is REDUNDANT with the fleet `-g mouse on` (kept
-    # as-is by the comment-only #647). Session-scoped (`-t "$T"`), never `-g`
-    # (global) -- the fresh-base fallback below stays untouched.
+    # full record + the #646/#648 interaction): mouse mode so the browser's
+    # scroll-wheel reaches tmux copy-mode. Post-#646 this session-scoped set
+    # is REDUNDANT with the fleet `-g mouse on`, but KEPT so a box without
+    # the #646 conf still gets browser wheel->scrollback. Session-scoped
+    # (`-t "$T"`), never `-g` (global) -- the fresh-base fallback below stays
+    # untouched.
     'tmux set-option -t "$T" mouse on; '
-    # Revert on disconnect (post-#646 this writes a session-LOCAL `mouse off`
-    # that OVERRIDES the fleet `-g mouse on` -- see block above + #648): the
-    # SAME shell-level deferred-expansion trap pattern the removed clone used
-    # for its own cleanup (`$T` is expanded when the trap FIRES, not when it
-    # is armed, exactly like the old `$C` trap). This does NOT create any
-    # session (unlike the removed clone), so it cannot reproduce the #613
-    # REOPEN-3 chooser bug -- only the GROUPED-CLONE topology caused that,
-    # never "a trap exists" alone.
-    "trap 'tmux set-option -t \"$T\" mouse off 2>/dev/null || true' EXIT HUP INT TERM; "
+    # Revert on disconnect by UNSETTING the session-local override (#648,
+    # Option 2): `set-option -u` restores inheritance so the effective value
+    # falls back to the #646 global `-g mouse on` (or factory default off on
+    # an unprovisioned box) -- NEVER a forced `mouse off`, which as a
+    # session-LOCAL override would win over `-g mouse on` and leave the
+    # owner's own ssh session mouse-off (the #648 bug). SAME shell-level
+    # deferred-expansion trap pattern the removed clone used for its own
+    # cleanup (`$T` is expanded when the trap FIRES, not when it is armed,
+    # exactly like the old `$C` trap). This does NOT create any session
+    # (unlike the removed clone), so it cannot reproduce the #613 REOPEN-3
+    # chooser bug -- only the GROUPED-CLONE topology caused that, never "a
+    # trap exists" alone.
+    "trap 'tmux set-option -u -t \"$T\" mouse 2>/dev/null || true' EXIT HUP INT TERM; "
     # #613 REOPEN-3: DIRECT attach, no clone (see the block comment above
     # for the full root-cause + fix + trade-off record). NOT `exec`ed --
     # the wrapper shell must stay alive so the trap above can run once the
