@@ -428,6 +428,94 @@ if msg_has "$MSG_MENTION" -qiE "subagent.?driven.*inline|two execution options|w
     add_hard "Pre-answered prose question: subagent-vs-inline / two execution options / dispatch-now-or-skim"
 fi
 
+# Check for an OWNER-FACING BARE Odoo-Discuss thread id (#657). The owner
+# manages many client Discuss threads and cannot decode a bare internal channel
+# id ("vlakno 288") — the SAME rule as "#N always carries its title"
+# (issue-reference-context.md). #650 already HARD-blocks a missing thread NAME,
+# but ONLY on ❓ CLIENT-POSTING approval questions (stop-check-question-quality.sh
+# Check 6); this is the WIDER owner-facing surface the owner's actual complaint
+# lives on — status / narration, not a question (montalu3, 2026-08-24: "co ja mam
+# akoze robit s 'vlakno 288'?!"). It also requires the THREAD's own clickable
+# deep URL (#595 generalized), the form the exemption below keys on.
+#
+# Design (see the #657 design comment): three-stage gate, so an ordinary
+# sentence NEVER trips it —
+#   (1) ANCHOR gate: run ONLY when the message names the Odoo-DISCUSS context by
+#       a token an ordinary sentence does not carry — the module name `Discuss`
+#       (matched case-SENSITIVE + word-boundaried `\bDiscuss\b`: the Odoo product
+#       is Title-case, so the English verb "discuss" / its inflections
+#       "discussion"/"discussed" AND "Discord" never anchor — #657 review 🟡), the
+#       model `discuss.channel`, the XML-RPC method `message_post`, or the deep-URL
+#       param `active_id`. Deliberately NOT bare "odoo" (Odoo's OWN "Sales Channel
+#       01" vocabulary would over-anchor). A concurrency "vlákno 12", a Wi-Fi
+#       "kanál 36", or a Sales-Channel note carries no such token → not considered.
+#   (2) EXEMPTION: the canonical clickable deep URL discuss.channel_<N> present →
+#       the owner can click through → COMPLIANT, no violation (the URL itself is
+#       never mistaken for a bare id — the bare shapes below require a SPACE/colon
+#       before the number, the URL uses `channel_<N>`). Checked on raw $MSG so a
+#       backticked/quoted URL still exempts.
+#   (3) BARE-shape: a thread word (vlákn*/kanál*/channel) IMMEDIATELY followed by
+#       a bare 2+digit number, or the `ch<NN>` shorthand. The tight adjacency
+#       window (only whitespace/`:`/`#`/`-` between the word and the number) means
+#       a QUOTED thread NAME after the word (vlákno „Zakaznicky portal 3") never
+#       matches — the good form passes. The 2+digit floor keeps single-digit
+#       concurrency threads ("vlákno 2") out. Run on $MSG_BARE — $MSG_MENTION
+#       (strip_mentions: ASCII quotes/backticks/fenced) with Slovak GUILLEMET
+#       spans („…") ALSO stripped, so a message merely QUOTING the banned form —
+#       a completion report / playbook capture citing „vlákno 288" or `vlákno 288`
+#       — is NOT gated (#657 review 🔴; guillemets are the doctrine's OWN
+#       delimiter). Incriminating half mention-stripped, exemption on raw $MSG,
+#       same split the credential check ~330 lines below uses.
+# LC_ALL=C.UTF-8 per the repo's #319 diacritic-safe convention; msg_has reads via
+# a here-string, never a `printf|grep -q` pipe (#292).
+#
+# Accepted residuals (word-family heuristic, not a parser — a genuine occurrence
+# outside these families needs its own follow-up, never a blanket rewrite; the
+# doctrine in issue-reference-context.md covers all rewordings universally):
+# (1) a TERSE owner-facing status with a bare "vlákno 288" and NO Discuss token at
+#     all slips the anchor gate (safe UNDER-block; doctrine still governs it);
+# (2) a 2-digit concurrency "vlákno 12" INSIDE a Discuss-context message would
+#     trip (rare); (3) message-level exemption — a message that references thread
+#     A by its deep URL but sloppily names thread B by bare id passes (the same
+#     coarseness the "#N carries its title" doctrine accepts); (4) `channel`/
+#     `kanál`+NN INSIDE a message that ALSO says "Discuss" trips even when it means
+#     an Odoo "Sales Channel" (rare — the discuss anchor keeps a Sales-Channel-only
+#     note out); (5) natural Slovak separators break adjacency and ESCAPE —
+#     "vlákno č. 288", "vlákno číslo 288", "vlákna s ID 288" (safe UNDER-block), and
+#     a trailing UNIT ("vlákno 288-znakový", "kanál 36 GHz") false-fires because the
+#     number is merely adjacent (limited over-block; doctrine governs); (6) the
+#     plural-genitive "vlákien" is outside the `vl[áa]kn` stem (uncommon); (7) the
+#     URL-EXEMPTION deliberately uses msg_has (fail-OPEN on a grep error → "URL
+#     present" → EXEMPT), the SAFE direction for an EXONERATING check — an
+#     intentional divergence from the #194 msg_missing (fail-CLOSED) convention for
+#     INCRIMINATING patterns; a shared grep failure trips the URL check to EXEMPT
+#     before the BARE grep runs, so do NOT "fix" this to fail-closed.
+# \bDiscuss\b is case-SENSITIVE (grep -qE, no -i) so the English verb/inflections
+# and "Discord" never anchor (#657 review 🟡); the other tokens are exact literals.
+ODOO_ANCHOR_RX='\bDiscuss\b|discuss\.channel|message_post|active_id'
+DISCUSS_ANCHOR=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qE "$ODOO_ANCHOR_RX" && echo 1 || echo 0)
+if [ "$DISCUSS_ANCHOR" = "1" ]; then
+    # EXEMPT the moment the canonical clickable deep URL is present anywhere
+    # (raw $MSG so a backticked URL still exempts).
+    HAS_DEEP_URL=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE 'discuss\.channel_[0-9]' && echo 1 || echo 0)
+    if [ "$HAS_DEEP_URL" = "0" ]; then
+        # A thread word tightly adjacent to a bare 2+digit number, or `ch<NN>`.
+        # Separators between word and number are ONLY [[:space:]:#-] — a letter
+        # (a quoted NAME) breaks the match, so the good form passes. `channel_<N>`
+        # (the URL) never matches (`_` is not a separator); a left word-boundary on
+        # `channel` keeps "subchannel 288" out (#657 review 🔵). Run on $MSG_BARE:
+        # $MSG_MENTION with Slovak guillemet spans („…") also stripped, so a
+        # message merely QUOTING the banned form is exempted (see stage 3 above).
+        MSG_BARE=$(LC_ALL=C.UTF-8 sed -E 's/„[^„]*[“”"]/ /g' <<<"$MSG_MENTION" 2>/dev/null) || MSG_BARE="$MSG_MENTION"
+        BARE_THREAD_RX='(vl[áa]kn[a-z]*|kan[áa]l[a-z]*|(^|[^[:alnum:]])channel)[[:space:]:#-]*[0-9]{2,}|(^|[^[:alnum:]])ch[0-9]{2,}'
+        BARE_THREAD=$(LC_ALL=C.UTF-8 msg_has "$MSG_BARE" -qiE "$BARE_THREAD_RX" && echo 1 || echo 0)
+        if [ "$BARE_THREAD" = "1" ]; then
+            echo "VIOLATION: Your message names an Odoo Discuss thread by a BARE id (e.g. „vlákno 288\") with no clickable deep URL. The owner manages many client threads and cannot decode a bare channel id — the same rule as '#N always carries its title'. Name the thread AND give its clickable deep URL, e.g.: vlákno „<presný názov N>\" — https://<instancia>/odoo/discuss?active_id=discuss.channel_<N>. See modules/core/issue-reference-context.md + skills/odoo-discuss-xmlrpc/handover-compose.md (#657 — extends #650 name-in-question + #595 deep-link URLs)." >&2
+            add_hard "Owner-facing Odoo Discuss thread referenced by a BARE id with no clickable deep URL (discuss.channel_<N>) — give the thread name + its deep URL (#657)."
+        fi
+    fi
+fi
+
 # Check for visual companion prose question
 if msg_has "$MSG" -qiE "want to try.*(visual|mockup|browser)|easier to explain.*browser|visual companion"; then
     echo "VIOLATION: You offered visual companion in prose. This is a pre-answered question — always yes. Next time, just use it without asking. See ask-before-assuming.md pre-answered table." >&2

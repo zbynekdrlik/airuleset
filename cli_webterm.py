@@ -729,7 +729,7 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
   background: #0C0C0C; border-bottom: 1px solid #2b2b2b; overflow-x: auto;
   flex: 0 0 auto; white-space: nowrap; }
 .tab { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
-  padding: 6px 12px; border: 1px solid transparent; border-bottom: none;
+  padding: 6px 12px 6px 16px; border: 1px solid transparent; border-bottom: none; /* #661: left 12->16px, tab names indented a touch further from the left edge */
   border-radius: 7px 7px 0 0; background: #1b1b1b; color: #CCCCCC;
   font: inherit; line-height: 1; max-width: 170px; flex: 0 0 auto; }
 /* #661: unselected tab text lightened from #9a9a9a to the Campbell foreground

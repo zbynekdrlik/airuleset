@@ -56,6 +56,20 @@ is the FIRST rule for a reason).
   like „výrobné vlákno" no longer passes. The prose rule failed AGAIN on montalu1
   2026-08-24 („to tu znova nie je!!!"), so #650 escalated it to the chat surface
   the phone ping is built from, in the #596/#609/#628 tool-call-gate family.
+  **The `Vlákno:` line — and EVERY owner-facing mention of the thread, in a
+  proposal, a status update, or narration — carries the thread NAME **and** its
+  own clickable deep URL, never a bare channel number (airuleset #657, owner
+  montalu3 2026-08-24: „co ja mam akoze robit s 'vlakno 288'?!" — a bare id they
+  cannot decode across many client threads).** Canonical form:
+  `Vlákno: „Tabula objednavok 1" — https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_288`
+  (the `active_id=discuss.channel_<N>` deep link opens the exact thread; open it
+  and confirm it loads before pasting). This is the thread-reference sibling of
+  the LIVE-feature deep-link rule below (#595), and the WIDER owner-facing
+  surface (status/narration, not only the ❓ approval question) is now
+  HARD-backstopped in `hooks/stop-check-prose-violations.sh` (#657): a bare
+  Discuss channel id in an Odoo-context message with no `discuss.channel_<N>`
+  URL is blocked. The uniform doctrine lives in
+  `modules/core/issue-reference-context.md`.
 - **The thread NAME ends with the owning stream's NUMBER**, so the owner sees at
   a glance which stream owns the thread (montalu3 → "Kontrola zákazníckych
   e-mailov 3"). This formalizes the de-facto IT-support convention already on

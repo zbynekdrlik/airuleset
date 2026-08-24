@@ -202,5 +202,250 @@ class TestNormalizeOwnerSession(unittest.TestCase):
         # nothing to assert beyond "no crash + no rename"; a bare fn returns None
 
 
+# --------------------------------------------------------------------------- #
+# #660 — FLEET-WIDE kill-sweep for standalone idle-shell strays.
+#
+# Root cause (repro'd live across dev1+dev2 via the audit hook): the creator is
+# always `tmux new-session -A -s <name>` from an interactive ssh session (the
+# #651 `t`/`tmux()` wrapper mechanism) whose attach hangs, leaving a STANDALONE
+# idle bare-bash session; `<name>` is either the owner group with a numeric
+# suffix (`zbynek-0`) or a fleet STREAM username (dev2's `marek`/`marek-12`).
+# When the canonical `<owner>` exists, normalization absorbs each STRAY-named
+# session (owner-N, plus on an owner box the stream families) IFF it is provably
+# idle: unattached AND ungrouped AND every pane a bare shell with no child
+# process — NEVER one running claude / a non-shell / a suspended-or-background
+# job / a grouped or attached session (feedback_never_touch_stopped_sessions).
+# Same dependency-injected fake-`run`+`ps` discipline; no real tmux/ps.
+# --------------------------------------------------------------------------- #
+# the fake box's HOME -- the cwd-guard passes iff a pane's cwd equals it.
+_HOME = "/home/tester"
+
+
+class _FakeServer:
+    """Fake tmux+ps runner: maps session name -> (attached, group, [cmds]) and
+    answers list-sessions / list-panes (5-field `#{session_attached}\\t
+    #{session_group}\\t#{pane_current_command}\\t#{pane_pid}\\t
+    #{pane_current_path}`) and the ps child-probe (`ps -o pid= --ppid <pid>`).
+    A session in `busy` has a pane shell with a child (a suspended/background
+    job); `cwds` overrides a session's pane cwd (default `_HOME`) so the
+    cwd-guard can be exercised. No real tmux/ps, invisible to the isolation
+    lock. `kill_rc` forces a non-zero kill-session return."""
+    def __init__(self, sessions, busy=None, kill_rc=0, cwds=None):
+        self._sessions = {}
+        for name, spec in sessions.items():
+            att, grp, cmds = (spec if len(spec) == 3
+                              else (spec[0], "", spec[1]))
+            self._sessions[name] = (att, grp, list(cmds))
+        self._busy = set(busy or ())
+        self._kill_rc = kill_rc
+        self._cwds = dict(cwds or {})
+        self._pid2sess = {}
+        self._pc = 9000
+        self.calls = []
+
+    @staticmethod
+    def _target(argv):
+        for i, a in enumerate(argv):
+            if a == "-t" and i + 1 < len(argv):
+                return argv[i + 1].lstrip("=")
+        return None
+
+    def __call__(self, argv):
+        self.calls.append(argv)
+        if argv[:1] == ["ps"]:
+            pid = argv[-1]
+            name = self._pid2sess.get(pid)
+            has = name in self._busy
+            return subprocess.CompletedProcess(
+                argv, 0 if has else 1,
+                stdout=("4242\n" if has else ""), stderr="")
+        if "list-sessions" in argv:
+            out = "".join(n + "\n" for n in self._sessions)
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+        if "list-panes" in argv:
+            name = self._target(argv)
+            att, grp, cmds = self._sessions.get(name, ("0", "", []))
+            cwd = self._cwds.get(name, _HOME)
+            out = ""
+            for c in cmds:
+                pid = str(self._pc)
+                self._pc += 1
+                self._pid2sess[pid] = name
+                out += "%s\t%s\t%s\t%s\t%s\n" % (att, grp, c, pid, cwd)
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+        if "kill-session" in argv:
+            if self._kill_rc == 0:
+                self._sessions.pop(self._target(argv), None)
+            return subprocess.CompletedProcess(argv, self._kill_rc,
+                                               stdout="", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    def kill_calls(self):
+        return [c for c in self.calls if "kill-session" in c]
+
+    def rename_calls(self):
+        return [c for c in self.calls if "rename-session" in c]
+
+
+# The widened owner-box stray patterns (owner-N + fleet stream families), the
+# SAME the cmd_install caller builds via `_owner_box_stray_name_res`.
+_OWNER_BOX_RES = tmuxprov._owner_box_stray_name_res("zbynek", single_session=False)
+
+
+class TestNormalizeKillSweep660(unittest.TestCase):
+    def _run(self, sessions, owner="zbynek", audit_dir=None,
+             stray_name_res=None, busy=None, kill_rc=0, cwds=None):
+        srv = _FakeServer(sessions, busy=busy, kill_rc=kill_rc, cwds=cwds)
+        tmuxprov._live_normalize_owner_session(
+            owner, run=srv, audit_dir=audit_dir,
+            stray_name_res=stray_name_res, ps_run=srv, home=_HOME)
+        return srv
+
+    # --- <owner>-N (default namespace) --------------------------------------
+    def test_kills_idle_bare_shell_stray_when_owner_exists(self):
+        srv = self._run({"zbynek": ("1", "", ["node"]),
+                         "zbynek-0": ("0", "", ["bash"])})
+        self.assertEqual(srv.kill_calls(),
+                         [["tmux", "kill-session", "-t", "=zbynek-0"]])
+
+    def test_never_kills_stray_running_claude(self):
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "zbynek-0": ("0", "", ["claude"])})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_never_kills_attached_stray(self):
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "zbynek-0": ("1", "", ["bash"])})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_never_kills_grouped_stray(self):
+        # a grouped session shares a base's windows / is a work session.
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "zbynek-0": ("0", "zbynek", ["bash"])})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_never_kills_when_any_pane_is_non_shell(self):
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "zbynek-0": ("0", "", ["bash", "vim"])})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_never_kills_when_pane_has_child(self):
+        # bare bash foreground but a SUSPENDED/background child (Ctrl-Z'd claude)
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "zbynek-0": ("0", "", ["bash"])},
+                        busy={"zbynek-0"})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_kills_multiple_idle_strays(self):
+        srv = self._run({"zbynek": ("1", "", ["node"]),
+                         "zbynek-0": ("0", "", ["bash"]),
+                         "zbynek-2": ("0", "", ["-bash"])})
+        killed = {c[-1] for c in srv.kill_calls()}
+        self.assertEqual(killed, {"=zbynek-0", "=zbynek-2"})
+
+    def test_no_kill_sweep_when_owner_absent(self):
+        # owner missing -> the RENAME path runs, never the kill sweep.
+        srv = self._run({"zbynek-0": ("0", "", ["bash"])})
+        self.assertEqual(srv.kill_calls(), [])
+        self.assertEqual(srv.rename_calls(),
+                         [["tmux", "rename-session", "-t", "zbynek-0", "zbynek"]])
+
+    def test_kill_non_zero_does_not_log_killed(self):
+        # review 🟡3: a kill-session that returns non-zero is a SKIP, never
+        # a false "killed" audit line.
+        with tempfile.TemporaryDirectory() as td:
+            self._run({"zbynek": ("1", "", ["node"]),
+                       "zbynek-0": ("0", "", ["bash"])},
+                      audit_dir=td, kill_rc=1)
+            text = (Path(td) / "normalize.log").read_text()
+            self.assertNotIn("killed", text)
+            self.assertIn("skip", text)
+
+    # --- fleet-wide stream-family strays (dev2 marek incident) ---------------
+    def test_kills_foreign_stream_stray_on_owner_box(self):
+        # `marek` (a stream user) STANDALONE + idle on an owner box IS a stray.
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "marek": ("0", "", ["bash"]),
+                         "marek-12": ("0", "", ["bash"])},
+                        stray_name_res=_OWNER_BOX_RES)
+        killed = {c[-1] for c in srv.kill_calls()}
+        self.assertEqual(killed, {"=marek", "=marek-12"})
+
+    def test_preserves_grouped_stream_work_session(self):
+        # marek-3 (grouped, real work) + david-0 (attached) preserved; only the
+        # standalone idle `marek` stray is absorbed.
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "marek": ("0", "", ["bash"]),
+                         "marek-3": ("0", "marek", ["bash", "bash"]),
+                         "david-0": ("1", "david", ["node"])},
+                        stray_name_res=_OWNER_BOX_RES)
+        self.assertEqual({c[-1] for c in srv.kill_calls()}, {"=marek"})
+
+    def test_default_namespace_ignores_stream_names(self):
+        # WITHOUT the widened res, a `marek` stray is NOT swept (owner-N only).
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "marek": ("0", "", ["bash"])})
+        self.assertEqual(srv.kill_calls(), [])
+
+    def test_never_kills_stream_work_session_cwd_in_project_dir(self):
+        # the second-review residual: a `marek` name doubles as a real work
+        # session whose stopped-claude bare shell sits in a PROJECT dir -- the
+        # cwd-guard preserves it while a $HOME stray is still absorbed.
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "marek": ("0", "", ["bash"]),         # cwd $HOME -> kill
+                         "marek-2": ("0", "", ["bash"])},      # cwd project -> skip
+                        stray_name_res=_OWNER_BOX_RES,
+                        cwds={"marek-2": "/home/tester/devel/odoo"})
+        self.assertEqual({c[-1] for c in srv.kill_calls()}, {"=marek"})
+
+    def test_audit_log_records_kill(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._run({"zbynek": ("1", "", ["node"]),
+                       "zbynek-0": ("0", "", ["bash"])}, audit_dir=td)
+            log = Path(td) / "normalize.log"
+            self.assertTrue(log.is_file())
+            text = log.read_text()
+            self.assertIn("killed", text)
+            self.assertIn("zbynek-0", text)
+
+    def test_audit_log_records_skip_for_claude(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._run({"zbynek": ("1", "", ["bash"]),
+                       "zbynek-0": ("0", "", ["claude"])}, audit_dir=td)
+            text = (Path(td) / "normalize.log").read_text()
+            self.assertIn("skip", text)
+            self.assertIn("zbynek-0", text)
+
+
+class TestCmdInstallWiring660(unittest.TestCase):
+    """#660 review 🟡1/🟡2: lock the two cmd_install invariants a `cli_quals`/
+    doctrine grep misses -- the wiring is the ONE place they live.
+
+    (getsource can read a mid-integration-mutated file, the #629 race -- if
+    these ever fail together with the airuleset getsource canaries, look for
+    the push-gate VOID report before treating it as a regression.)"""
+    def setUp(self):
+        import inspect
+        import airuleset
+        self.src = inspect.getsource(airuleset.cmd_install)
+
+    def test_stream_widening_is_gated_on_owner_box_only(self):
+        # the widened stray patterns are built via `_owner_box_stray_name_res`
+        # and MUST be gated on `is_single_session_box_user` (owner boxes only) --
+        # dropping the gate would sweep a subdev account's own real session.
+        self.assertIn("_owner_box_stray_name_res(", self.src)
+        self.assertIn("is_single_session_box_user(_current_user())", self.src)
+        self.assertIn("_live_normalize_owner_session(", self.src)
+
+    def test_audit_applier_runs_after_window_name_applier(self):
+        # the audit `set-hook -g session-created` MUST be applied AFTER
+        # apply_stream_tmux_window_name (whose owner-box revert live-UNSETS
+        # session-created), or the live hook is wiped on every install.
+        i_window = self.src.index("apply_stream_tmux_window_name()")
+        i_audit = self.src.index("apply_owner_session_created_audit()")
+        self.assertLess(i_window, i_audit,
+                        "audit applier must run after apply_stream_tmux_window_name")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
