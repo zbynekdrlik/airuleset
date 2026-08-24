@@ -57,6 +57,7 @@ import asyncio
 import hmac
 import secrets
 import string
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -85,6 +86,28 @@ RELAY_CHUNK = 64 * 1024
 # coroutine open indefinitely. Not applied to the post-auth WS relay, which is a
 # legitimately long-lived interactive terminal connection.
 READ_TIMEOUT_S = 20
+
+# #677: the aggregate per-box U map for the tab dots. Served (auth-gated) at
+# /u-status; when it is older than U_STATUS_STALE_S the gateway fire-and-forgets a
+# DETACHED collector (the statusbar._spawn_refresh pattern), rate-limited to at
+# most one spawn per U_STATUS_SPAWN_GUARD_S so a burst of polls kicks only one.
+U_STATUS_STALE_S = 90
+U_STATUS_SPAWN_GUARD_S = 60
+
+
+def _default_u_status_path():
+    return Path.home() / ".claude" / "webterm-u-status.json"
+
+
+def _default_u_collect_spawn():
+    """Fire-and-forget the detached collector (`cli_webterm.py webterm-u-collect`),
+    which does the fleet ssh reads and rewrites the aggregate file. Never blocks
+    the async loop; a spawn failure is non-fatal (the stale file is still served)."""
+    repo = Path(__file__).resolve().parent
+    subprocess.Popen(
+        [sys.executable, str(repo / "cli_webterm.py"), "webterm-u-collect"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, start_new_session=True)
 
 
 def _close_quiet(writer):
@@ -449,9 +472,16 @@ class Gateway:
     }
 
     def __init__(self, dash_index, cred_path, ttyd_host, ttyd_port, base_path,
-                 origins, sessions=None, limiter=None, trust_access_header=None):
+                 origins, sessions=None, limiter=None, trust_access_header=None,
+                 u_status_path=None, u_collect_spawn=None):
         self.dash_index = dash_index
         self.dash_dir = Path(dash_index).parent   # #644: PWA assets live here
+        # #677: the aggregate U map served at /u-status + a detached spawner that
+        # refreshes it when stale. Both injectable (tests); defaults are the real
+        # ~/.claude path and a detached `cli_webterm.py webterm-u-collect`.
+        self.u_status_path = Path(u_status_path) if u_status_path else _default_u_status_path()
+        self.u_collect_spawn = u_collect_spawn or _default_u_collect_spawn
+        self._u_spawn_at = 0.0
         self.cred_path = cred_path
         self.ttyd_host = ttyd_host
         self.ttyd_port = ttyd_port
@@ -580,6 +610,9 @@ class Gateway:
         if path in self._PWA_ASSETS:
             await self._route_pwa_asset(writer, path, headers)
             return
+        if path == "/u-status":
+            await self._route_u_status(writer, headers)
+            return
         if self._is_proxy_path(target):
             await self._route_proxy(reader, writer, head, headers)
             return
@@ -665,6 +698,51 @@ class Gateway:
         await self._send(writer, http_response("200 OK", body,
                                                extra_headers=extra,
                                                content_type=ctype))
+
+    async def _route_u_status(self, writer, headers):
+        # #677: the aggregate per-box U map for the tab dots. AUTH-GATED exactly
+        # like `/` and the PWA assets (fail-closed for an unauthenticated request);
+        # a stale/absent file kicks a detached refresh but the current map is
+        # always served (never a 500, so the dashboard just renders no new dots).
+        if not self._authed(headers):
+            if self.trust_access_header:
+                await self._send(writer, self._access_denied())
+            else:
+                await self._send(writer, self._redirect("/login"))
+            return
+        body = self._u_status_body()
+        await self._send(writer, http_response(
+            "200 OK", body, extra_headers=["Cache-Control: no-store"],
+            content_type="application/json; charset=utf-8"))
+
+    def _u_status_body(self):
+        """The current aggregate U JSON (bytes). Reads the file; when it is
+        absent or older than U_STATUS_STALE_S, fire-and-forgets a detached
+        collector (rate-limited) so the NEXT poll is fresh. Always returns a
+        valid JSON map -- never raises, never a 500."""
+        now = time.time()
+        raw = None
+        stale = True
+        try:
+            raw = self.u_status_path.read_bytes()
+            stale = (now - self.u_status_path.stat().st_mtime) > U_STATUS_STALE_S
+        except OSError:
+            stale = True                    # absent/unreadable -> refresh + empty map
+        if stale:
+            self._maybe_spawn_u_collect(now)
+        return raw if raw is not None else b'{"u":{},"ts":0}'
+
+    def _maybe_spawn_u_collect(self, now):
+        """Fire the detached collector at most once per U_STATUS_SPAWN_GUARD_S, so
+        a burst of dashboard polls kicks exactly one refresh. A spawn failure is
+        logged and non-fatal (the stale file stays served)."""
+        if now - self._u_spawn_at < U_STATUS_SPAWN_GUARD_S:
+            return
+        self._u_spawn_at = now
+        try:
+            self.u_collect_spawn()
+        except Exception as e:
+            sys.stderr.write("webterm-gateway: u-collect spawn failed: %r\n" % e)
 
     async def _route_proxy(self, reader, writer, head, headers):
         is_ws = is_websocket_upgrade(headers)
@@ -785,13 +863,15 @@ class Gateway:
 
 async def start_gateway(host, port, dash_index, cred_path, ttyd_host="127.0.0.1",
                         ttyd_port=7682, base_path="/t", origins=None,
-                        sessions=None, limiter=None, trust_access_header=None):
+                        sessions=None, limiter=None, trust_access_header=None,
+                        u_status_path=None, u_collect_spawn=None):
     """Bind + start the gateway on `host:port`. Returns the asyncio.Server (the
     caller reads `server.sockets[0].getsockname()` for an ephemeral port and
     `server.serve_forever()` / `server.close()`)."""
     gw = Gateway(dash_index, cred_path, ttyd_host, ttyd_port, base_path,
                  origins or [], sessions=sessions, limiter=limiter,
-                 trust_access_header=trust_access_header)
+                 trust_access_header=trust_access_header,
+                 u_status_path=u_status_path, u_collect_spawn=u_collect_spawn)
     return await asyncio.start_server(gw.handle, host, port)
 
 

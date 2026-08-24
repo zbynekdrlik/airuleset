@@ -145,7 +145,6 @@ class TestUReaderSnippet(unittest.TestCase):
     sum as _box_u_count against a real tickets-status dir (no drift)."""
 
     def test_snippet_matches_box_u_count(self):
-        import shutil
         d = tempfile.mkdtemp()
         ts = Path(d) / ".claude" / "tickets-status"
         ts.mkdir(parents=True)

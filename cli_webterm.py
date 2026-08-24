@@ -46,6 +46,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import cli_aliases  # #592: the shared fleet target-alias derivation (stdlib-only)
@@ -612,6 +613,143 @@ def _tab_sessions(inventory, preserve_order=False):
     return tabs
 
 
+# --------------------------------------------------------------------------- #
+# #677: per-box U (a question/approval waiting on the OWNER) -> tab red dots.
+# Ground truth is each box's tickets-status cache (`user_waiting`, the #512/#526 U
+# bucket). The dev1 gateway aggregates it via a low-frequency ssh PULL of the
+# boxes' caches (ZERO gh -- the box already paid the gh cost writing them), writes
+# ~/.claude/webterm-u-status.json, serves it at /u-status, and the dashboard polls
+# it to render/remove a small corner dot per tab. #584 posture (loopback ttyd,
+# same-origin auth-gated gateway) unchanged; no new port; a minutes-fresh hint.
+# --------------------------------------------------------------------------- #
+
+WEBTERM_U_STATUS_PATH = CLAUDE_DIR / "webterm-u-status.json"
+
+# The inline python reader the collector runs over ssh on each REMOTE box -- a
+# self-contained mirror of `_box_u_count` (NO dependency on the remote airuleset
+# version, so it works across a deploy window). A FIXED string (no client input),
+# passed shell-quoted, so it carries no injection surface. Kept equal to
+# `_box_u_count` by tests/test_webterm_u_status.TestUReaderSnippet.
+_U_READER_SNIPPET = (
+    "import glob,json,os\n"
+    "def _u(p):\n"
+    " try:\n"
+    "  u=json.load(open(p)).get('user_waiting');return u if isinstance(u,int) and u>0 else 0\n"
+    " except Exception:return 0\n"
+    "print(sum(_u(p) for p in glob.glob(os.path.expanduser('~/.claude/tickets-status/*.json'))))"
+)
+
+
+def _box_u_count(home=None):
+    """Sum `user_waiting` (the statusline U bucket: needs-answer / needs-decision
+    / needs-acceptance / needs-owner-action) across THIS box's tickets-status
+    caches. Pure -- no gh, no network. A missing / None / non-int field counts 0;
+    a bad cache file is skipped, never fatal. `home` overrides ~ (tests)."""
+    base = Path(home) if home else Path.home()
+    total = 0
+    for p in (base / ".claude" / "tickets-status").glob("*.json"):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue                        # unreadable/broken cache -> skip, never fatal
+        if isinstance(d, dict):
+            u = d.get("user_waiting")
+            if isinstance(u, int) and u > 0:
+                total += u
+    return total
+
+
+def _ssh_read_prefix(entry):
+    """A NON-interactive ssh prefix for reading a remote box's U -- mirrors the
+    identity-vs-sshpass DECISION of `_ssh_interactive_prefix` / the deploy loop,
+    but WITHOUT a PTY (-t) and with BatchMode + a short ConnectTimeout so a dead
+    box fails fast instead of prompting or hanging the collection."""
+    common = ["-o", "StrictHostKeyChecking=no",
+              "-o", "UserKnownHostsFile=/dev/null",
+              "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+    identity = entry.get("identity")
+    if identity:
+        return ["ssh", "-i", os.path.expanduser(identity)] + common
+    return ["sshpass", "-p", "newlevel", "ssh"] + common
+
+
+def _read_box_u(entry, run, timeout_s):
+    """The U for one inventory entry, or None on ANY failure (unknown != 0, so a
+    transiently-unreachable box loses its dot rather than showing a false zero).
+    dev1 (local) reads its own caches directly; a remote box runs the inline
+    reader over ssh (the remote command is ONE shell-quoted argument, so the
+    remote shell passes the fixed snippet to python intact)."""
+    if entry.get("local"):
+        try:
+            return _box_u_count()
+        except Exception:
+            return None
+    target = "%s@%s" % (entry.get("user"), entry.get("host"))
+    remote_cmd = "python3 -c " + shlex.quote(_U_READER_SNIPPET)
+    argv = _ssh_read_prefix(entry) + [target, remote_cmd]
+    try:
+        r = run(argv, capture_output=True, text=True, timeout=timeout_s)
+    except Exception:                       # timeout / OSError / sshpass absent
+        return None
+    if getattr(r, "returncode", 1) != 0:
+        return None
+    try:
+        return int((r.stdout or "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def collect_fleet_u(entries, run=None, timeout_s=8, max_workers=8):
+    """Read U per box for `entries` (bounded-parallel, per-box timeout), returning
+    `{inv_id: U}` for the boxes that read OK. A box that errors / times out /
+    returns a non-int is OMITTED (never a false 0). `run` (subprocess.run) is
+    injectable for tests."""
+    run = run or subprocess.run
+    import concurrent.futures as _cf
+
+    def _one(e):
+        return e["id"], _read_box_u(e, run, timeout_s)
+
+    out = {}
+    workers = max(1, min(max_workers, len(entries) or 1))
+    with _cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        for eid, u in ex.map(_one, entries):
+            if isinstance(u, int):
+                out[eid] = u
+    return out
+
+
+def _owner_u_entries():
+    """The owner dashboard's tab targets (WEBTERM_DASHBOARD_TABS['zbynek']) with
+    their reach info, for the U collection -- the SAME inventory + tab-list filter
+    the dashboard renders, so the collected ids match the tab ids exactly."""
+    inv = webterm_inventory(profiles.OWNER)
+    return entries_for_tab_list(inv, _dashboard_tab_list(WEBTERM_LOGIN_USER) or [])
+
+
+def cmd_webterm_u_collect(argv):
+    """Collect per-box U for the owner dashboard tabs and write the aggregate to
+    WEBTERM_U_STATUS_PATH atomically. Spawned DETACHED by the gateway on a stale
+    /u-status read, so it never blocks a request. Best-effort: a box that can't be
+    read is simply omitted (no dot). Returns 0 always (a collection failure must
+    not crash the spawn)."""
+    try:
+        entries = _owner_u_entries()
+    except Exception:
+        entries = []
+    u = collect_fleet_u(entries)
+    payload = {"u": u, "ts": int(time.time())}
+    try:
+        WEBTERM_U_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = WEBTERM_U_STATUS_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(str(tmp), str(WEBTERM_U_STATUS_PATH))
+    except OSError as e:                     # disk-pressure is exactly when this runs
+        sys.stderr.write("webterm-u-collect: could not write %s: %s\n"
+                         % (WEBTERM_U_STATUS_PATH, e))
+    return 0
+
+
 def _json_for_script(obj):
     """`json.dumps` with the chars that could break out of a <script> element
     neutralized, so an inventory label can never inject markup/JS: `<`/`>`/`&`
@@ -691,8 +829,11 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
         # is faster to pick out by eye. It is a fixed POSITION digit, never
         # user data, so it adds no injection surface (unlike the escaped label).
         ordinal = ('<span class="ord">%d</span>' % (i + 1)) if i < 9 else ""
+        # #677: a per-tab corner dot, hidden until the tab's box has U > 0
+        # (toggled by applyUStatus). It carries no data -> no injection surface.
         return ('<button class="tab" data-idx="%d" title="%s">'
-                '<span class="ico">&#9656;</span>%s<span class="al">%s</span></button>'
+                '<span class="ico">&#9656;</span>%s<span class="al">%s</span>'
+                '<span class="udot"></span></button>'
                 % (i, _html_escape(t["title"]), ordinal, _html_escape(t["alias"])))
 
     buttons = "\n".join(_tab_button(i, t) for i, t in enumerate(tabs))
@@ -739,9 +880,18 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
   background: #0C0C0C; border-bottom: 1px solid #2b2b2b; overflow-x: auto;
   flex: 0 0 auto; white-space: nowrap; }
 .tab { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  position: relative; /* #677: anchor for the corner U dot */
   padding: 6px 12px 6px 16px; border: 1px solid transparent; border-bottom: none; /* #661: left 12->16px, tab names indented a touch further from the left edge */
   border-radius: 7px 7px 0 0; background: #1b1b1b; color: #CCCCCC;
   font: inherit; line-height: 1; max-width: 170px; flex: 0 0 auto; }
+/* #677: a small restrained corner dot on a tab whose box has a question/approval
+   waiting on the owner (U > 0). Campbell brightRed with a 1px body-coloured ring
+   so it reads clearly against any tab state; hidden until applyUStatus adds
+   .has-u, and removed again the moment U falls to 0. */
+.tab .udot { position: absolute; top: 3px; right: 4px; width: 6px; height: 6px;
+  border-radius: 50%; background: #E74856; box-shadow: 0 0 0 1px #0C0C0C;
+  display: none; }
+.tab.has-u .udot { display: block; }
 /* #661: unselected tab text lightened from #9a9a9a to the Campbell foreground
    #CCCCCC (owner: hard to read); hover brightens to #F2F2F2; the ACTIVE tab stays
    the lightest (#F2F2F2) and is further set apart by its #0C0C0C body-matching
@@ -1239,6 +1389,28 @@ if (CFG.sessions.length) activate(0);   // land in the first terminal, not a lan
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(function () {});
 }
+// #677: the per-tab U dot. Poll the gateway's /u-status (the aggregated per-box U
+// map) and toggle a tab's .has-u iff its target box currently has U > 0 -- a
+// navigation hint that a question/approval is waiting on the owner there. Read
+// LIVE (never a build-time value); a fetch failure leaves the current dots
+// untouched (graceful). The gateway fire-and-forgets a fresh collect on a stale
+// read, so a short burst after load catches it, then a steady minutes cadence.
+function applyUStatus(map) {
+  document.querySelectorAll('.tab').forEach((t) => {
+    const s = CFG.sessions[+t.dataset.idx];
+    const u = s && map ? map[s.id] : undefined;
+    t.classList.toggle('has-u', typeof u === 'number' && u > 0);
+  });
+}
+function pollUStatus() {
+  fetch('/u-status', { credentials: 'same-origin', cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => { if (d && d.u) applyUStatus(d.u); })
+    .catch(() => {});                     // absent/failed -> leave the dots as-is
+}
+pollUStatus();
+[4000, 12000, 30000].forEach((ms) => setTimeout(pollUStatus, ms));   // burst after a fresh collect
+setInterval(pollUStatus, 120000);                                     // then minutes-fresh
 </script>
 </body>
 </html>
@@ -1638,6 +1810,8 @@ def maybe_setup_webterm():
 def main(argv):
     if argv and argv[0] == "webterm-connect":
         return connect_main(argv[1:])
+    if argv and argv[0] == "webterm-u-collect":     # #677: spawned by the gateway
+        return cmd_webterm_u_collect(argv[1:])
     sys.stderr.write("usage: cli_webterm.py webterm-connect <session-id>\n")
     return 2
 
