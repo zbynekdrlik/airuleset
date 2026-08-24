@@ -73,6 +73,11 @@ def _assert_pinned(t, argv):
                  "a pinned leg must point ssh at the committed pin: %s" % joined)
     t.assertNotIn("StrictHostKeyChecking=no", argv,
                   "a pinned leg must NOT keep the TOFU posture: %s" % joined)
+    # A /dev/null known_hosts spliced BEFORE the pin would neutralize it
+    # (ssh first-value-wins), so lock that it never rides along on a pinned leg.
+    t.assertNotIn("UserKnownHostsFile=/dev/null", argv,
+                  "a pinned leg must NOT also carry a /dev/null known_hosts "
+                  "(first-value-wins would neutralize the pin): %s" % joined)
 
 
 def _assert_unpinned(t, argv):

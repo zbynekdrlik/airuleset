@@ -10,13 +10,18 @@ preserved verbatim) plus the external `burn`/`watchdog` packages (also local
 imports in the bodies). It deliberately does NOT `import airuleset` at module
 level — that would be the CLI-mode partially-initialized-import crash proven for
 the H/K splits (airuleset.py runs as `__main__`, so a top-level back-import
-re-enters this leaf mid-init). Its ONE outbound coupling is the shared
-`REMOTE_HOSTS` deploy registry (which stays in airuleset.py, referenced by ~20
-other functions there): the 3 functions that need it reach it via a lazily-
-placed deferred `import airuleset` (the C/D "new-module-needs-old-module-symbol"
-technique), scoped to the code path that actually needs it so the ~210 ms
-second-execution cost fires only on the rare `--host` CLI paths and never in
-production (fleet_burn_job always passes `hosts` explicitly).
+re-enters this leaf mid-init). It has TWO deferred outbound couplings, both
+call-time (never module-init): (1) the shared `REMOTE_HOSTS` deploy registry
+(which stays in airuleset.py, referenced by ~20 other functions there): the 3
+functions that need it reach it via a lazily-placed deferred `import airuleset`
+(the C/D "new-module-needs-old-module-symbol" technique), scoped to the code
+path that actually needs it so the ~210 ms second-execution cost fires only on
+the rare `--host` CLI paths and never in production (fleet_burn_job always
+passes `hosts` explicitly); (2) `cli_remote.host_key_check_opts` (#680), a
+deferred `from cli_remote import host_key_check_opts` inside `_remote_ssh_prefix`
+so a raw-public-IP burn target (spinbike-vps) is host-key-pinned -- cli_remote
+has no top-level `import airuleset`, so this coupling cannot re-enter airuleset
+mid-init.
 """
 import json
 import os

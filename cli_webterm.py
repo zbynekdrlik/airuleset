@@ -410,8 +410,11 @@ def _ssh_interactive_prefix(entry):
     """Match the deploy loop's identity rule (cli_remote.py cmd_push /
     provision_subdev_soniox_key, ~lines 204-223 / 770-795): `identity` present ->
     `ssh -i <identity>`; else -> `sshpass -p newlevel ssh` (default-key/shared-
-    password path). Interactive variant: force a PTY (-t), never write
-    known_hosts, fast connect timeout so a dead host fails visibly. DRIFT GUARD:
+    password path). Interactive variant: force a PTY (-t), never write the
+    USER's known_hosts (an unpinned host uses /dev/null; a #680-pinned host
+    reads a freshly materialized temp pin instead, with UpdateHostKeys=no so ssh
+    never appends to it either), fast connect timeout so a dead host fails
+    visibly. DRIFT GUARD:
     the identity-vs-sshpass DECISION is the same rule those two sites use — if the
     fleet's auth convention ever changes (password rotation, a new scheme), both
     those sites AND this one must move together; `test_webterm.py::
