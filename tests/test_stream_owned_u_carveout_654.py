@@ -126,6 +126,22 @@ class PartitionOwnershipCarveout(unittest.TestCase):
         self.assertEqual(workable, {})
         self.assertEqual(ops_wait, {})
 
+    def test_foreign_decision_plus_acceptance_row_is_carved_by_decision(self):
+        # A foreign row carrying BOTH needs-decision AND needs-acceptance: reason
+        # is `decision` (decision outranks acceptance in `_user_waiting_reason`),
+        # so the #654 carve-out fires (reason != "acceptance") → workable I
+        # action-only, never gk U. Correct + safe (a safe over-count per
+        # #589/#636 — the owning box still fields the acceptance in its own U).
+        # Locks the precedence so a future `_user_waiting_reason` tweak can't
+        # silently reroute it back into U.
+        rows = {30: {"number": 30, "labels": _labels(
+            "stream:david", "needs-decision", "needs-acceptance", "needs-gatekeeper")}}
+        workable, waiting, ops_wait = airuleset._partition_workable(
+            rows, own_stream=None)
+        self.assertEqual(set(workable), {30})
+        self.assertEqual(waiting, {})
+        self.assertEqual(ops_wait, {})
+
     def test_workable_foreign_row_renders_action_only(self):
         # The foreign row landing in workable must render `action-only` in the
         # --list/--audit column, so the gatekeeper never writes its code.

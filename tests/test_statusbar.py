@@ -1367,6 +1367,55 @@ class RefreshCLI(unittest.TestCase):
                 "(core ∪ needs-gatekeeper ∪ ready-for-review), not the "
                 "core partition alone")
 
+    def test_refresh_full_authority_foreign_stream_userwaiting_leaves_U(self):
+        # #654: the FOOTER core branch (cmd_tickets_status, own_stream=None) must
+        # NOT count a FOREIGN stream:<user> answer/decision/action row into `U N`
+        # even when it enters the obligation set via the needs-gatekeeper UNION
+        # arm — it routes to workable `I` (action-only). The gk box's OWN
+        # stream:core / bare user-waiting rows still surface as `U`. Direct footer
+        # assertion of the same 4607 label set the CLI tests lock (#367 hardening —
+        # the footer branch is hand-duplicated from the CLI partition path).
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            fake_gh = Path(bindir) / "gh"
+            # core arm: #1 plain workable + #2 stream:core+decision (gk's own U);
+            # needs-gatekeeper arm: 4607 = stream:david+needs-gatekeeper+decision
+            # (foreign → workable I, NOT U).
+            core = ('[{"number":1,"labels":[{"name":"bug"}]},'
+                    '{"number":2,"labels":[{"name":"stream:core"},'
+                    '{"name":"needs-decision"}]}]')
+            fake_gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/demo";;\n'
+                '  *"--search label:autopilot-skip"*) echo 0;;\n'
+                '  *label:needs-gatekeeper*) echo \'[{"number":4607,"labels":'
+                '[{"name":"stream:david"},{"name":"needs-gatekeeper"},'
+                '{"name":"needs-decision"}]}]\';;\n'
+                '  *label:ready-for-review*) echo "[]";;\n'
+                "  *-label:stream:*) echo '%s';;\n" % core +
+                '  *) echo "[]";;\n'
+                'esac\n')
+            fake_gh.chmod(0o755)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": f"{bindir}:{os.environ['PATH']}"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) /
+                                (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertEqual(
+                cache.get("user_waiting"), 1,
+                "#654: only the gk's OWN stream:core+decision #2 is U; the "
+                "foreign stream:david row 4607 must NOT inflate U")
+            self.assertEqual(
+                cache["open"], 2,
+                "#654: workable I = {#1 plain, 4607 foreign action-only}; "
+                "the foreign row is counted in I, not U")
+
     def test_refresh_core_count_excludes_permanent_ops_channel_tickets(self):
         # #362: a self-declared PERMANENT `ops-channel` ticket (odoo-erp
         # #1861/#3037 -- a teardown/refresh channel, an automated alert log)
