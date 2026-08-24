@@ -2475,6 +2475,34 @@ GOAL_LANE_WNT_MAX_DEFERS = 3
 # dip; the OOM skip itself is UNCHANGED (its threshold is the #574 effective,
 # env-overridable floor, no longer a hardcoded 1536).
 GOAL_LANE_LOWMEM_SURFACE_STREAK = 5
+# #662 -- consecutive one-glance `stuck` sweeps (armed /goal + 0 workers +
+# backlog + idle over GOAL_LANE_IDLE_S) before the ONE un-suppressed owner
+# alert fires (deduped once per episode). By then the session has stayed dark
+# for that whole window WITHOUT reviving (the bounded lane-nudge keystroke
+# recovery ran what it could and did not bring it back); combined with
+# one_glance's own 15-min idle floor the owner learns of a coverage OUTAGE
+# ~20 min after a session goes dark, not the 9,5h montalu6 never. A fresh
+# episode (any non-stuck decider verdict, or a definite goal-clear) resets the
+# streak, so a transient lull never alarms. THE DEFAULT; the effective value is
+# read at CALL time by `_stuck_alert_streak()` so a malformed env value can
+# never crash `import watchdog.goal` (the #545/#574 rule the sibling
+# `_lane_min_mem_avail_mb` documents -- a bare module-level `int(env)` raised
+# ValueError fleet-wide on garbage input, and `-2` fired on the FIRST sweep).
+GOAL_LANE_STUCK_ALERT_STREAK = 8
+
+
+def _stuck_alert_streak():
+    """#662 -- the effective stuck-alert streak, read at CALL time with a
+    malformed-value fallback (mirrors `_lane_min_mem_avail_mb`, #545/#574): a
+    garbage `AIRULESET_GOAL_LANE_STUCK_ALERT_STREAK` never crashes import, and a
+    non-positive value can never disable the transient-stuck guard (floors at
+    the GOAL_LANE_STUCK_ALERT_STREAK default)."""
+    try:
+        v = int(os.environ.get("AIRULESET_GOAL_LANE_STUCK_ALERT_STREAK") or
+                GOAL_LANE_STUCK_ALERT_STREAK)
+    except (TypeError, ValueError):
+        v = GOAL_LANE_STUCK_ALERT_STREAK
+    return v if v >= 1 else GOAL_LANE_STUCK_ALERT_STREAK
 
 # #442 re-fix 2 -- the UNDER-SATURATED (non-zero worker) nudge text. Distinct
 # from GOAL_LANE_NUDGE_TEXT (which says "0 dispatched workerov"): here 1-4 workers
@@ -3374,6 +3402,74 @@ def _prune_goal_lane_orphans(recs, visited_sids, now,
         recs.pop(sid, None)
 
 
+def _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid, loc,
+                            send_fn, dry_run):
+    """#662 -- route a PERSISTENT structural one-glance `stuck` verdict to a
+    real OWNER ALERT (never another pane keystroke). SILENCE B of the montalu6
+    9,5h outage: the lane KEYSTROKE nudge above tries to RECOVER a stuck pane
+    (bounded GOAL_LANE_MAX_NUDGES); when the pane stays `stuck` across
+    `_stuck_alert_streak()` sweeps the session has NOT revived (a dead /
+    login-dialog-covered session a `continue` cannot bring back) -- a real
+    coverage OUTAGE the owner must see. Fires ONE un-suppressed alert per
+    episode (dedup_key `stuckalert:` -- OUTSIDE the #546 apierr family, exactly
+    like `acctblock:`), reusing the ALREADY-cached `glance` (ZERO new fetch).
+    Episode state (`soa` streak, `soalert` fired-flag, `soa_ts` anchor) rides
+    the goal_lane `rec` (#531-reaped -- NO new namespace). `dry_run` mutates NO
+    persisted state (#516). Returns log lines only when the alert fires (the
+    per-sweep `stuck` verdict is ALREADY journalled by the one-glance line, so a
+    silent accumulation adds no per-sweep noise).
+
+    LATCH DISCIPLINE (#134/#551): `soalert` is set True ONLY on a real delivery
+    (`send_fn` present AND the send returned a delivered status), so a `no-config`
+    / `error` send RETRIES next sweep instead of permanently consuming the one
+    per-episode alert with nothing on the phone; a `send_fn is None` (test /
+    degraded call) never latches nor claims an ALERTED line.
+
+    Accepted residuals (documented, not gaps): a session whose heartbeat file is
+    ABSENT reads `warming` forever (never `stuck`) so Fix B cannot fire for a
+    broken-heartbeat box (inherited one_glance behaviour); and a supervisor
+    legitimately waiting >window on a long bg-bash CI with 0 lanes + backlog
+    draws ONE (bounded) stuckalert -- one_glance does not consult
+    `session_live_bg_bash`."""
+    prev_streak = rec.get("soa", 0)
+    dec = _one_glance.stuck_owner_alert_decision(
+        verdict=glance.verdict, streak=prev_streak,
+        max_streak=_stuck_alert_streak(),
+        already_alerted=bool(rec.get("soalert")))
+    if dry_run:
+        return (["one-glance %s -> STUCK owner-alert DUE (dry-run, %d sweeps)"
+                 % (loc, dec.streak)] if dec.alert else [])
+    # anchor the episode timestamp when the streak first starts (stable key)
+    if prev_streak == 0 and dec.streak == 1:
+        rec["soa_ts"] = int(now)
+    rec["soa"] = dec.streak
+    if not dec.alert:
+        rec["soalert"] = dec.alerted   # propagate reset (False) / stay-latched
+        return []
+    # dec.alert is True. Latch + ALERTED log ONLY on a real delivery so a failed
+    # send retries next sweep; a send_fn-less/degraded call never consumes the
+    # episode nor claims it alerted.
+    if send_fn is None:
+        return []
+    anchor = int(rec.get("soa_ts", now))
+    from notify import compose_stuck_owner_alert, stream_redirect
+    status = send_fn(compose_stuck_owner_alert(watchdog.project_label(cwd), loc,
+                                               dec.streak),
+                     owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
+                     dedup_key="stuckalert:%s:%d" % (sid, anchor),
+                     dry_run=dry_run)
+    if status in (None, "sent", "dedup", "dry-run"):   # delivered / already-claimed
+        rec["soalert"] = True
+        # #662 defense-in-depth: a stuck box that DID consume its 2 lane nudges
+        # also fires the un-suppressed lanestall: give-up ping -- deliberately
+        # NOT cross-deduped (two independent detectors, both naming the same
+        # session; the owner acts once), never a dup bug.
+        return ["one-glance %s -> STUCK owner ALERTED (%d sweeps, session did "
+                "not revive) [stuckalert:%s:%d]" % (loc, dec.streak, sid, anchor)]
+    return ["one-glance %s -> STUCK owner alert send FAILED (%s) -- will retry "
+            "next sweep [stuckalert:%s:%d]" % (loc, status, sid, anchor)]
+
+
 def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
@@ -3420,6 +3516,9 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # structured armed signal. Read-only here: dark_watch owns its lifecycle.
     gmarks = state.get("goal_mark", {})
     visited_sids = set()   # #531 -- live candidate sids kept by the orphan prune below
+    stuck_seen = set()     # #662 -- sids the stuck-alert decider ran on THIS sweep
+    #                         (two panes sharing one cwd resolve the SAME sid, #645
+    #                         -- guard the streak against a double-advance/sweep)
 
     for pid, cwd, _cmd in watchdog._reconcile_candidate_panes(run):
         if sweep_deadline is not None and time_fn() >= sweep_deadline:
@@ -3463,6 +3562,21 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         if _one_glance.is_informative(glance):
             logs.append(gline)
         if glance.goal_armed is not True:
+            # #662 -- a DEFINITE goal-clear (armed is False, not the transient
+            # `None` can't-tell) ENDS any stuck episode, so a later re-arm starts
+            # fresh and never inherits `already_alerted`=True (the Silence-B
+            # recurrence class) nor a stale streak/anchor. `None` (armed-unknown)
+            # deliberately does NOT reset -- a transient unreadable heartbeat
+            # must not churn a genuine dark episode's streak. Residual: a
+            # clear+re-arm landing entirely BETWEEN two sweeps (no intervening
+            # non-stuck sweep) keeps goal_mark "set" throughout, so the episode
+            # is not reset -- but the re-alert it suppresses is for a session
+            # that never recovered, i.e. the SAME outage the owner already heard.
+            if glance.goal_armed is False and not dry_run:
+                r = recs.get(sid)
+                if isinstance(r, dict):
+                    for _k in ("soa", "soalert", "soa_ts"):
+                        r.pop(_k, None)
             continue
         rec = recs.get(sid)
         if not isinstance(rec, dict):
@@ -3477,6 +3591,19 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         if handled is not None and any(ln.startswith("lane-occupancy nudge")
                                        for ln in llogs):
             handled.add(sid)
+        # #662 -- route a PERSISTENT structural `stuck` verdict to an owner
+        # ALERT (SILENCE B of the montalu6 9,5h outage). Runs AFTER the lane
+        # nudge on the SAME armed pane, using the ALREADY-cached `glance` (no
+        # fetch). A Discord SEND, not a keystroke, so it never conflicts with a
+        # `handled` keystroke this sweep and is authority-agnostic (a stuck
+        # /goal loop is a coverage outage on ANY box). `rec` is already in
+        # `recs`, so its `soa` streak mutation persists. `stuck_seen` guards the
+        # #645 two-panes-one-cwd shape (same sid twice per sweep) from a
+        # double-advance of the streak.
+        if sid not in stuck_seen:
+            stuck_seen.add(sid)
+            logs += _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid,
+                                            loc, send_fn, dry_run)
         # #547 W→I + #552 I→W/U -- partition-audit re-check for this SAME armed
         # pane. Runs AFTER the lane nudge so a pane the lane nudge already typed
         # (sid in `handled`) is deferred to next sweep; the orchestrator owns its

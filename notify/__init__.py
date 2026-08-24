@@ -1255,6 +1255,45 @@ def compose_api_error_alert(project, text):
             % (proj, err))
 
 
+def compose_oauth_block_alert(project, loc, nudges):
+    """#662 — the PERSISTENT interactive-/login escape-valve alert (Slovak,
+    Discord markdown). Fired by watchdog job 1 ONLY when an error needing an
+    interactive `/login` (`_needs_interactive_login`: a genuine
+    `access token has been revoked`, or a "Login expired"/"Not logged in ·
+    Please run /login") survived every one of the `nudges` automatic resume
+    attempts — i.e. the #602 self-heal (fresh token on disk) provably did NOT
+    land, so this is a non-self-healing AUTH block needing a MANUAL `/login`.
+    Keyed `oauthblock:` (OUTSIDE the #546 apierr family, exactly like
+    `acctblock:`) so it is NEVER swallowed — the montalu6 9,5h silent outage was
+    precisely this alarm not existing. `loc` names the session/pane. No @mention
+    here — send() prepends it."""
+    proj = stream_qualified((_clean(project) or "?").rstrip("/").split("/")[-1] or "?")
+    where = _clean(loc) or "?"
+    return ("⛔ **%s** — session (%s) potrebuje manuálny `/login` (odvolaný token "
+            "alebo vypršané prihlásenie) a automatické obnovenie ZLYHALO — po "
+            "%d× automatickom pokuse o obnovu sa stále nevie prihlásiť. Toto "
+            "NEMÁ automatický reset: prihlás sa prosím v tejto session, inak "
+            "coverage tejto slučky ďalej stojí." % (proj, where, int(nudges)))
+
+
+def compose_stuck_owner_alert(project, loc, sweeps):
+    """#662 — the STRUCTURAL persistent-stuck owner alert (Slovak, Discord
+    markdown). Fired by the goal lane sweep when one_glance's `stuck` verdict
+    (armed /goal + 0 workers + backlog waiting + idle over threshold) held for
+    `sweeps` consecutive ~1-min sweeps — long enough that the session did NOT
+    revive despite the bounded keystroke lane-nudge recovery (a dead /
+    login-dialog-covered session a `continue` cannot bring back). A real
+    coverage OUTAGE the owner must see. Keyed `stuckalert:` (OUTSIDE the #546
+    apierr family) so it always POSTs. No @mention here — send() prepends it."""
+    proj = stream_qualified((_clean(project) or "?").rstrip("/").split("/")[-1] or "?")
+    where = _clean(loc) or "?"
+    return ("⛔ **%s** — /goal slučka ZAMRZLA: %d× po sebe (~1 min/kontrola) "
+            "0 workerov, tikety čakajú a session sa nehýbe (%s). Sama sa "
+            "neoživila — pravdepodobne treba manuálny zásah (napr. `/login`, "
+            "reštart session alebo zatvorenie dialógu). Coverage tejto slučky "
+            "stojí, pozri sa na ňu prosím." % (proj, int(sweeps), where))
+
+
 # --- dedup ---------------------------------------------------------------
 def _dedup_dir():
     return os.path.join(_claude_dir(), _DEDUP_DIRNAME)

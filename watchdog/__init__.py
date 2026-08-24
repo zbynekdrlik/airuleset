@@ -1511,6 +1511,66 @@ def _apierr_stashabort_skip(state, logs, send_fn, project, pid, key, now, idle,
                 dry_run=dry_run)
 
 
+# #662 -- the interactive-/login instruction Claude Code surfaces on ANY auth
+# dead-end: the genuine token revoke ("Please run /login · … revoked"), a
+# "Login expired · Please run /login", a "Not logged in · Please run /login".
+# is_oauth_revoked (decide.py) matches ONLY the revoke text; this regex adds the
+# bare /login-instruction family so the escalation valve covers the WHOLE
+# "persistent non-self-healing AUTH block" class the ticket names, not just the
+# revoke sub-class. It is used ONLY at ESCALATION (after max_nudges continues
+# provably failed to self-heal), so a transient login-expired that resumes on an
+# early continue never reaches it -- only a genuinely stuck one fires.
+_LOGIN_NEEDED_RX = re.compile(r"run\s+/login", re.I)
+
+
+def _needs_interactive_login(text):
+    """#662 -- True for a PERSISTENT auth dead-end needing an interactive
+    `/login`: the OAuth-revoke class (is_oauth_revoked) OR any error naming the
+    `/login` instruction (login-expired / not-logged-in). Domain is always an
+    `isApiErrorMessage` transcript entry, so quoted prose can't false-match."""
+    return bool(text) and (is_oauth_revoked(text) or bool(_LOGIN_NEEDED_RX.search(text)))
+
+
+def _apierr_escalation_ping(send_fn, project, pid, run, key, err_hash, fs,
+                            err_text, owner, max_nudges, dry_run):
+    """#175 give-up ping + #662 interactive-/login escape valve, extracted from
+    job 1's escalation transition so run_once does not grow past its frozen
+    ratchet ceiling. Fired ONCE per err_hash episode, the moment
+    `entry['escalated']` first flips True (after `max_nudges` `continue`s).
+
+    (1) The #175 give-up ping (`apierr-giveup:`) -- nudging itself never stops,
+    only this ping is one-shot. Its key is #546-SUPPRESSED (apierr prefix), so
+    for an ordinary api-error this posts nothing; that is the owner directive.
+
+    (2) #662 -- but an error that needs an INTERACTIVE `/login`
+    (`_needs_interactive_login`: the genuine `access token has been revoked` OR
+    the bare "Please run /login" login-expired/not-logged-in family) and that
+    survived every one of the `max_nudges` `continue`s is NOT self-healing (the
+    #602 rotation resumes on nudge #1); it is a PERSISTENT non-self-healing AUTH
+    block, exactly the acctblock class. So for that class ONLY, ALSO fire ONE
+    un-suppressed `oauthblock:` alert (keyed OUTSIDE the apierr family, exactly
+    like `acctblock:`) naming the session (`loc`). The montalu6 9,5h silent
+    outage was precisely this alarm not existing -- the give-up ping being the
+    sole signal, and it being swallowed. Returns log lines."""
+    logs = []
+    body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
+            "stále nepohlo — treba zásah. (Skúšam ďalej, interval sa "
+            "postupne predlžuje až na 30 min.)" % (project, max_nudges))
+    send_fn(body, owner=owner,
+            dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
+            dry_run=dry_run)
+    if _needs_interactive_login(err_text):
+        from notify import compose_oauth_block_alert
+        loc = _pane_location(pid, run) or pid
+        send_fn(compose_oauth_block_alert(project, loc, max_nudges), owner=owner,
+                dedup_key="oauthblock:%s:%s:%s" % (key, err_hash, fs),
+                dry_run=dry_run)
+        logs.append("oauthblock owner ALERTED %s [%s] — persistent /login-needed "
+                    "auth block, self-heal failed after %d nudges (un-suppressed)"
+                    % (project, key, max_nudges))
+    return logs
+
+
 def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
     """#497 batch 3 — the shared janitor-marked transcript-proof send for the
     CHUNK-typed decide_working-family nudges (jobs 4 working, 4a textcall). The
@@ -1887,13 +1947,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
     still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
       (1) a session STALLED ON AN API ERROR → auto-resume it (`continue`).
-          NOTE (#546): every Discord "ping" jobs 1/1b/3/6 describe below is
-          RETIRED — `notify.send()` suppresses the api-error/limit/usage alert
-          classes (machine-channel `suppressed` log, never Discord). Only the
-          SILENT `continue` auto-resume stays; it never routes through send(),
-          so suppression leaves it untouched.
+          NOTE (#546): every ORDINARY Discord "ping" jobs 1/1b/3/6 describe
+          below is RETIRED — `notify.send()` suppresses the api-error/limit/usage
+          alert classes (machine-channel `suppressed` log, never Discord). Only
+          the SILENT `continue` auto-resume stays; it never routes through
+          send(), so suppression leaves it untouched.
           Past `max_nudges` it does NOT give up — it keeps nudging forever at a
-          widening interval (#175), with a one-shot "gave up" ping alongside.
+          widening interval (#175), with a one-shot #546-suppressed "gave up"
+          ping. EXCEPTION (#662, see `_apierr_escalation_ping`): a persistent
+          interactive-`/login` block that survived every `continue` ALSO fires
+          ONE un-suppressed `oauthblock:` alert; a dark pane the nudge can't
+          reach is backstopped by the lane-sweep `stuckalert:` rider (job 20).
           #176: a pane idle at `❯` but holding a FOREIGN DRAFT is genuinely idle,
           not busy — `_classify_boundary` tells it apart from a real foreground
           turn, and delivery goes through `deliver_with_stash` (never a raw
@@ -3108,11 +3172,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     if entry.get("escalated") and not prev_escalated:
                         logs.append("escalate %s [%s] — still stuck after %d nudges, "
                                      "backing off (keeps retrying)" % (project, key, max_nudges))
-                        body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
-                                "stále nepohlo — treba zásah. (Skúšam ďalej, interval sa "
-                                "postupne predlžuje až na 30 min.)" % (project, max_nudges))
-                        send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
-                                dry_run=dry_run)
+                        # #175 give-up ping (suppressed) + #662 un-suppressed
+                        # oauthblock valve for a persistent /login-needed block.
+                        logs += _apierr_escalation_ping(
+                            send_fn, project, pid, run, key, err_hash, fs,
+                            err_text, owner, max_nudges, dry_run)
                 else:
                     state[key] = entry
                     logs.append("%s %s [%s]" % (action, project, key))
