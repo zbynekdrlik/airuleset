@@ -16,11 +16,12 @@ session. The connect allowlist can never resolve an owner-fleet id OR a david id
 
 PREREQUISITE-GATED so a normal subdev install (as any other account) is a safe
 NO-OP: it provisions only when running as the `marek` account with ttyd installed;
-otherwise it prints the go-live steps and returns False, touching no systemd. The
-gateway binds LOOPBACK — a SEPARATE cloudflared tunnel is the public HTTPS front
-(no public port, no sudo). AUTH is Cloudflare Access (email one-time-PIN) at the
-edge; the gateway runs in `--trust-access-header` mode (no password/credential),
-exactly like the david lane.
+otherwise it prints the go-live steps and returns False, touching no systemd. #663
+the gateway + ttyd bind UNIX sockets in marek's mode-0700 /run/user/<uid> runtime
+dir (NOT TCP loopback) — a SEPARATE cloudflared tunnel (service: unix:<sock>) is
+the public HTTPS front (no public port, no sudo). AUTH is Cloudflare Access (email
+one-time-PIN) at the edge; the gateway runs in `--trust-access-header` mode (no
+password/credential), exactly like the david lane.
 
 Imports cli_webterm for the shared render/template helpers; the dispatch in
 cli_webterm.maybe_setup_webterm imports THIS module lazily, so there is no
@@ -62,10 +63,11 @@ import cli_binary_installers as binstall  # #614: ttyd static-binary auto-instal
 # profiles leaf so tests + the go-live message have one source.
 MAREK_GATEWAY_USER = profiles.MAREK_GATEWAY_USER
 
-# marek's own artifact paths + loopback ports — DISTINCT from owner (8080/7682)
-# AND david (8081/7683), so the shared subdev box is self-documenting. The gateway
-# binds loopback and a cloudflared tunnel fronts it (no public port, no tailscale
-# IP is involved).
+# marek's own artifact paths + distinct port constants (kept legacy for the go-live
+# text) — DISTINCT from owner (8080/7682) AND david (8081/7683), so the shared subdev
+# box is self-documenting. #663 the gateway + ttyd bind UNIX sockets in the account
+# runtime dir (NOT these TCP ports) and a cloudflared tunnel fronts the gateway
+# socket (no public port, no tailscale IP is involved).
 WEBTERM_MAREK_BIND = "127.0.0.1"
 WEBTERM_MAREK_TTYD_PORT = 7684
 WEBTERM_MAREK_GATEWAY_PORT = 8082
@@ -185,9 +187,10 @@ def render_marek_ttyd_unit():
 
 
 def render_marek_gateway_unit():
-    """The marek gateway unit: LOOPBACK bind (cloudflared fronts it), marek
-    dash/ports, `After=` repointed to the marek ttyd unit — and Cloudflare-ACCESS
-    mode instead of a password: the ExecStart's `--cred {{CRED_PATH}}` is swapped
+    """The marek gateway unit: #663 UNIX-socket bind in the account runtime dir
+    (cloudflared fronts it), marek dash, `After=` repointed to the marek ttyd unit
+    — and Cloudflare-ACCESS mode instead of a password: the ExecStart's
+    `--cred {{CRED_PATH}}` is swapped
     for `--trust-access-header <header>` so NO credential file is validated. The
     remaining `{{CRED_PATH}}` token lives only in the shared template's
     password-model COMMENT — neutralised to n/a here."""

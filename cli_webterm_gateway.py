@@ -510,9 +510,11 @@ class Gateway:
         # NOT traverse Access carries no such header and is refused). Default
         # None = the unchanged password/session model (owner profile, byte-
         # identical). Cloudflare strips client-supplied `Cf-*` headers before
-        # setting the authentic one; the gateway binds loopback and is reachable
-        # only via the cloudflared tunnel (see cli_webterm_access.py's honest
-        # residual note on the absence of stdlib RSA JWT validation).
+        # setting the authentic one; #663 the gateway binds a mode-0700 UNIX socket
+        # in the account runtime dir (reachable only by the account + its own
+        # cloudflared, so a peer unix account cannot forge this header) — see
+        # cli_webterm_access.py's honest residual note on the absence of stdlib RSA
+        # JWT validation.
         self.trust_access_header = trust_access_header
 
     # -- helpers ---------------------------------------------------------- #

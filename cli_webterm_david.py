@@ -35,9 +35,10 @@ import cli_webterm_profiles as profiles
 import cli_webterm_tunnel as tun  # #635: shared managed-tunnel render helpers
 import cli_binary_installers as binstall  # #614: ttyd static-binary auto-install
 
-# The david deployment's own artifact paths + loopback ports (distinct from the
-# owner's, so the subdev box is self-documenting; the gateway binds loopback and
-# cloudflared fronts it, so no public port and no tailscale-IP is involved).
+# The david deployment's own artifact paths + distinct port constants (kept legacy
+# for the go-live text; the owner's are 8080/7682). #663 the gateway + ttyd bind
+# UNIX sockets in the account runtime dir (NOT these TCP ports) and cloudflared
+# fronts the gateway socket, so no public port and no tailscale-IP is involved.
 WEBTERM_DAVID_BIND = "127.0.0.1"
 WEBTERM_DAVID_TTYD_PORT = 7683
 WEBTERM_DAVID_GATEWAY_PORT = 8081
@@ -166,9 +167,10 @@ def render_david_ttyd_unit():
 
 
 def render_david_gateway_unit():
-    """The david gateway unit: LOOPBACK bind (cloudflared fronts it), david
-    dash/ports, `After=` repointed to the david ttyd unit — and, per the #612
-    owner directive, Cloudflare-ACCESS mode instead of a password: the ExecStart's
+    """The david gateway unit: #663 UNIX-socket bind in the account runtime dir
+    (cloudflared fronts it), david dash, `After=` repointed to the david ttyd unit
+    — and, per the #612 owner directive, Cloudflare-ACCESS mode instead of a
+    password: the ExecStart's
     `--cred {{CRED_PATH}}` is swapped for `--trust-access-header <header>` so NO
     credential file is validated. The remaining `{{CRED_PATH}}` token lives only
     in the shared template's password-model COMMENT — neutralised to n/a here,

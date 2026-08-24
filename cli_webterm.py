@@ -29,9 +29,9 @@ z `_deployable_hosts()` + dev1, NIKDY ručný zoznam. Provisioning dev1-only
 #635 (owner ROZHODNUTÉ 2026-08-22): owner-ova doména `zbynek.newlevel.media`
 prechádza z tailnet-only na Cloudflare Access (email OTP, ako Davidova), gated cez
 `OWNER_GATEWAY_ACCESS_MODE` (default False). Keď je True, `setup_webterm_service`
-provisiuje bránu v Access režime — LOOPBACK bind + `--trust-access-header` (heslo
-zaniká), fronted cloudflared tunelom; default False necháva tailnet+heslo bránu
-byte-identickú.
+provisiuje bránu v Access režime — #663 UNIX-socket bind v account runtime dir +
+`--trust-access-header` (heslo zaniká), fronted cloudflared tunelom (service:
+unix:); default False necháva tailnet+heslo bránu byte-identickú.
 
 Dve úlohy modulu, oddelené aby CONNECT cesta (beží per-terminal-open, ttyd child)
 mala minimálne importy: (1) INVENTORY/PROVISIONING (install-time, dev1) generuje
@@ -101,9 +101,10 @@ OWNER_GROUP = "zbynek"
 WEBTERM_LOGIN_USER = "zbynek"
 # #635 GO-LIVE GATE (owner ROZHODNUTÉ 2026-08-22): move zbynek.newlevel.media
 # behind Cloudflare Access like David's side. When True, setup_webterm_service
-# provisions the owner gateway in Cloudflare-Access mode — LOOPBACK bind (a
-# cloudflared tunnel fronts it, so NO direct tailnet exposure and NO tailscale IP
-# is needed) + `--trust-access-header` (the password/login form is RETIRED,
+# provisions the owner gateway in Cloudflare-Access mode — #663 UNIX-socket bind in
+# the account runtime dir (a cloudflared tunnel fronts it, so NO direct tailnet
+# exposure and NO tailscale IP is needed) + `--trust-access-header` (the
+# password/login form is RETIRED,
 # Cloudflare email-OTP at the edge is the whole gate). Default **False** keeps the
 # current password/tailnet gateway BYTE-IDENTICAL, so a routine `install`/`push`
 # NEVER flips the owner's live terminal to loopback before the tunnel + DNS +
@@ -1240,7 +1241,9 @@ def _retire_owner_credential():
     return False
 
 
-# #584: ttyd binds LOOPBACK only (127.0.0.1) behind a `-b /t` base path. The
+# #584: in PASSWORD mode (this `_LAUNCH_TEMPLATE`; the #663 Access variant is
+# `_LAUNCH_TEMPLATE_SOCKET` below, which binds a UNIX socket) ttyd binds LOOPBACK
+# only (127.0.0.1) behind a `-b /t` base path. The
 # gateway is the sole tailnet entry AND authenticator (cookie-gated), so ttyd
 # needs NO basic-auth of its own (`-c` gone — the native dialog was exactly what
 # Bitwarden could not fill) and NO `-O`/check-origin (the gateway performs the
@@ -1485,9 +1488,10 @@ def setup_webterm_service(run=None):
                   "ttyd` failed — skipping the gateway", file=sys.stderr)
             return False
 
-    # #635: Cloudflare-Access mode (owner go-live) binds LOOPBACK — a cloudflared
-    # tunnel is the public front, so NO tailscale IP is needed and there is no
-    # direct tailnet exposure. Default (password mode): resolve dev1's tailscale IP
+    # #635/#663: Cloudflare-Access mode (owner go-live) binds a UNIX socket in the
+    # account runtime dir — a cloudflared tunnel is the public front, so NO tailscale
+    # IP is needed and there is no direct tailnet exposure (and no peer unix account
+    # can reach the socket). Default (password mode): resolve dev1's tailscale IP
     # ONCE as the GATEWAY's bind (ttyd is loopback, so this IP is only the
     # gateway's `--bind`); REFUSE LOUDLY if there is none — NEVER write a unit that
     # could bind 0.0.0.0.
