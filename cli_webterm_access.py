@@ -95,6 +95,18 @@ WEBTERM_ACCESS_APPS = {
         "allowed_emails": ["drlik.zbynek@gmail.com"],  # owner, #635; marek = +1 line
         "session_duration": "24h",
     },
+    # marek.newlevel.media — the THIRD per-developer gateway (#612 scope-add
+    # 2026-08-24, owner: "dohodli sme sa na zbynek…, david…, marek…!!!"). marek's
+    # e-mail is his real box account (drlik.marek@gmail.com — the same drlik.*
+    # gmail family as the owner's, evidenced in the statusbar/caveman tests);
+    # adjustable in this one line + `webterm-access --apply`. Deny-by-default: this
+    # list IS the whole authorization. Adding another person is one more e-mail.
+    "marek": {
+        "hostname": "marek.newlevel.media",
+        "name": "webterm — marek",
+        "allowed_emails": ["drlik.marek@gmail.com"],  # owner-provided, #612 go-live
+        "session_duration": "24h",
+    },
 }
 
 POLICY_NAME = "webterm allowed developers"
