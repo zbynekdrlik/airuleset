@@ -39,8 +39,14 @@ So a marek UNIX SHELL — which the webterm legitimately gives marek to his OWN
 account, and which marek already has independently of webterm — can `curl` david's
 loopback ttyd (127.0.0.1:<port>, itself auth-less by design) and vice-versa. This
 is the PRE-EXISTING multi-tenant-subdev floor the david lane shipped with and the
-#612 R2 review accepted; webterm adds no reachability a subdev account did not
-already have. Closing that floor (a mode-0600 unix-domain-socket origin per
+#612 R2 review accepted. Directionally (honest, #612 R2 review): this lane adds NO
+new reachability INTO owner/david (marek→david already held via david's live
+auth-less loopback ttyd, marek having his own independent subdev shell); it DOES
+newly expose marek's OWN account — any local subdev account gains a marek shell via
+marek's NEW loopback ttyd 7684 / header-forgeable gateway 8082, reachability that
+did not exist before (marek's account is keyed on the operator ssh identity, not a
+shared password). The party newly at risk is the lane's own tenant, and the class
+is the same accepted floor. Closing that floor (a mode-0600 unix-domain-socket origin per
 gateway user, or origin JWT verification) is CROSS-CUTTING — it must cover the
 LIVE owner + david gateways too — so it is the separate hardening ticket #663, not
 this scoped marek lane.

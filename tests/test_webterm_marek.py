@@ -354,6 +354,17 @@ class TestMarekTtydAutoInstall(unittest.TestCase):
             self.assertFalse(mk.setup_webterm_marek_service())
         self.assertEqual(order, ["install", "gate"])
 
+    def test_installer_failure_never_breaks_setup(self):
+        # Best-effort/non-fatal: a raise inside the installer must not crash the
+        # never-raises setup — it just no-ops on the gate as usual, touching no
+        # systemd (mirrors the david lane's lock, #612 R2 review).
+        with m.patch.object(binstall, "ensure_ttyd_static_binary",
+                            side_effect=RuntimeError("network down")), \
+                m.patch.object(fw, "_whoami", lambda: "david1"), \
+                m.patch.object(fw, "_run_systemctl",
+                               side_effect=AssertionError("must not touch systemd")):
+            self.assertFalse(mk.setup_webterm_marek_service())   # must not raise
+
 
 if __name__ == "__main__":
     unittest.main()

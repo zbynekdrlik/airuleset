@@ -107,7 +107,8 @@ WEBTERM_ACCESS_APPS = {
     "marek": {
         "hostname": "marek.newlevel.media",
         "name": "webterm — marek",
-        "allowed_emails": ["drlik.marek@gmail.com"],  # owner-provided, #612 go-live
+        # repo-evidenced (marek's real box account) — CONFIRM with owner at go-live (R1 🟡)
+        "allowed_emails": ["drlik.marek@gmail.com"],
         "session_duration": "24h",
     },
 }
