@@ -368,7 +368,7 @@
     "airuleset.py::cmd_gk_request": 209,
     "airuleset.py::cmd_install": 582,
     "airuleset.py::cmd_notify": 320,
-    "airuleset.py::cmd_tickets_status": 203,
+    "airuleset.py::cmd_tickets_status": 204,
     "airuleset.py::cmd_watchdog": 209,
     "airuleset.py::main": 651,
     "cli_quals.py::_slice_mine_and_handed": 217,
