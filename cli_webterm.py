@@ -663,12 +663,17 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
     unaffected (see WEBTERM_DASHBOARD_TABS)."""
     ttyd_base = (ttyd_base or "").rstrip("/")
     term_cols, term_rows = term_grid or _webterm_term_grid()
-    tab_ids = _dashboard_tab_list(human) if human is not None else None
-    if tab_ids is not None:
-        inventory = entries_for_tab_list(inventory, tab_ids)
-        tabs = _tab_sessions(inventory, preserve_order=True)
-    else:
+    # #661: `human=None` = the david gateway path (its inventory is already
+    # physically scoped) -> render unfiltered. A TRUTHY human ALWAYS filters to
+    # its owner-defined list; an unconfigured one FAILS CLOSED to an empty tab set
+    # (`... or []`) rather than leaking the full fleet onto a personal domain --
+    # the exact bug this ticket fixes (#661 review 🔵). Prod only ever passes
+    # "zbynek" or None; this bounds a future mis-wiring to a loud-empty dashboard.
+    if human is None:
         tabs = _tab_sessions(inventory)
+    else:
+        inventory = entries_for_tab_list(inventory, _dashboard_tab_list(human) or [])
+        tabs = _tab_sessions(inventory, preserve_order=True)
 
     def _tab_button(i, t):
         # #582: an ordinal badge (1-9) on the first nine tabs = the VISIBLE
@@ -848,7 +853,7 @@ function activate(idx) {
   });
   current = idx;
   applyFixedGrid(made[idx]);                 // #613 REOPEN-2: fit the now-VISIBLE tab
-  focusTerminal(made[idx]);                  // #661: type immediately after a switch
+  focusTerminal(made[idx], idx);             // #661: type immediately after a switch
 }
 function cycle(delta) {                    // step to prev/next session, wrapping both ways
   const n = CFG.sessions.length;
@@ -893,10 +898,16 @@ function attachForwarder(f) {
 // may not exist for the first activate(0) at load — retry briefly, best-effort.
 // A cross-origin frame would throw (impossible under the gateway) — caught so a
 // focus attempt can never break switching.
-function focusTerminal(f) {
+// GENERATION GUARD (#661 review): `idx` is the tab this chain focuses. ttyd may
+// still be connecting, so a chain started for tab A can outlive a fast switch to
+// tab B; without the guard, A's late-connecting term would steal focus back to
+// the now-HIDDEN A. Each retry bails the moment `current` has moved on, so
+// last-activate always wins and a superseded chain becomes a no-op.
+function focusTerminal(f, idx) {
   if (!f) return;
   let tries = 0;
   const tryFocus = () => {
+    if (idx !== current) return;            // superseded by a newer switch -> stop
     try {
       const w = f.contentWindow;
       if (w && w.term && typeof w.term.focus === 'function') { w.term.focus(); return; }

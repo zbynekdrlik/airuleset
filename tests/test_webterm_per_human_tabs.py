@@ -130,6 +130,17 @@ class TestOwnerDashboardRender(unittest.TestCase):
         aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
         self.assertEqual(len(aliases), len(inv))  # every fleet entry still a tab
 
+    def test_truthy_unconfigured_human_fails_closed_to_empty(self):
+        # #661 review 🔵: a truthy human with NO configured list must NOT leak the
+        # full fleet onto a personal domain — it renders an EMPTY tab set (loud
+        # fail-closed), never everyone. Only human=None is unfiltered.
+        inv = _owner_inv()
+        html = w.render_dashboard_html(inv, ttyd_base="/t", human="nobody", term_grid=(176, 51))
+        aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
+        self.assertEqual(aliases, [])
+        # no foreign account leaked
+        self.assertNotIn('title="marek@subdev"', html)
+
 
 class TestConnectAllowlistUnchanged(unittest.TestCase):
     def test_connect_allowlist_stays_full_fleet(self):
@@ -165,6 +176,16 @@ class TestFocusOnTabSwitch(unittest.TestCase):
         m = re.search(r"function activate\([^)]*\)\s*\{.*?\n\}", html, re.DOTALL)
         self.assertIsNotNone(m, "activate() not found")
         self.assertIn("focusTerminal(", m.group(0))
+
+    def test_focus_has_generation_guard(self):
+        # #661 review 🟡: a superseded retry chain must bail so a late-connecting
+        # hidden terminal never steals focus back. activate passes idx; the retry
+        # bails when `current` has moved on.
+        html = _render_owner()
+        self.assertIn("focusTerminal(made[idx], idx)", html)
+        fm = re.search(r"function focusTerminal\([^)]*\)\s*\{.*?\n\}", html, re.DOTALL)
+        self.assertIsNotNone(fm, "focusTerminal() not found")
+        self.assertIn("idx !== current", fm.group(0))
 
 
 class TestUnselectedTabContrast(unittest.TestCase):
