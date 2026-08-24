@@ -634,7 +634,7 @@ def _ops_wait_reason(labels):
     return "ops-wait"
 
 
-def _partition_workable(rows):
+def _partition_workable(rows, own_stream=None):
     """Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
     (`{number: {"number","title","createdAt","labels"}}`) THREE ways:
     `(workable, user_waiting, ops_wait)`. Both the user-waiting (#468) and the
@@ -700,11 +700,35 @@ def _partition_workable(rows):
     established semantics is the intended design, and a genuine owner-only-blocked
     ticket never carries a competing acceptance/answer label. The
     labelled-but-not-yet-announced defect is surfaced by the `no-action!` display
-    flag (`_no_question_flagged` + `_print_issue_rows`), not by a routing gate."""
+    flag (`_no_question_flagged` + `_print_issue_rows`), not by a routing gate.
+
+    `own_stream` (#654): the box's OWN reduced-authority stream (its canonical
+    AUTHORITY_BY_USER key, `_current_user()`), or None for a full-authority box.
+    An ANSWER/DECISION/ACTION row owned by a FOREIGN stream (`_stream_owner_of`
+    != own_stream) is routed to `workable` (action-only), NOT `user_waiting` —
+    STREAM OWNERSHIP WINS for U routing (the ROZHODNUTÉ decision): a full-authority
+    (gk) box never fields another stream's owner-question, its owning box does.
+    Checked FIRST, so it beats the acceptance→W / U splits. A full box
+    (own_stream=None) drops every such foreign row into I; a slice box keeps its
+    OWN stream rows in its own U (owner == own_stream). SCOPED to answer/decision/
+    action (the enumerated ROZHODNUTÉ reasons): needs-acceptance keeps its own
+    #526/#622 routing (bare → U, sent-thread+ops-wait → W) — a foreign acceptance
+    is search-excluded from the obligation set anyway, so it never reaches this
+    branch on the gk box (the real leak path is answer/decision/action carrying a
+    gk queue label, which have no gk-override). `stream:core`/bare/unreadable →
+    `_stream_owner_of` == "" → not foreign → stays U (the box's own court)."""
     workable, user_waiting, ops_wait = {}, {}, {}
     for number, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None
         if _row_is_user_waiting(labels):
+            reason = _user_waiting_reason(labels)
+            # #654: a FOREIGN stream:<user> answer/decision/action row NEVER
+            # enters THIS box's U — STREAM OWNERSHIP WINS (full contract + why
+            # SCOPED away from needs-acceptance in the `own_stream` docstring
+            # above). Checked FIRST, so it beats the acceptance→W / U splits.
+            owner = _stream_owner_of(labels)
+            if reason != "acceptance" and owner and owner != (own_stream or ""):
+                workable[number] = row
             # #526: a needs-acceptance-ONLY user-waiting row (its acceptance
             # thread already sent, marked by the stream's `ops-wait`) is waiting
             # on the CLIENT, not the owner → route it to W. A pending owner
@@ -713,8 +737,7 @@ def _partition_workable(rows):
             # user-waiting row — incl. a bare needs-acceptance queued for owner
             # approval, whether or not its draft was delivered — is the owner's
             # court → U.
-            if (_user_waiting_reason(labels) == "acceptance"
-                    and _row_is_ops_wait(labels)):
+            elif reason == "acceptance" and _row_is_ops_wait(labels):
                 ops_wait[number] = row
             else:
                 user_waiting[number] = row

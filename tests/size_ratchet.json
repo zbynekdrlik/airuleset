@@ -15,7 +15,7 @@
     "cli_filedrop_watchdog.py": 518,
     "cli_fleet.py": 406,
     "cli_push_gate.py": 218,
-    "cli_quals.py": 1670,
+    "cli_quals.py": 1693,
     "cli_quals_cmd.py": 777,
     "cli_remote.py": 1035,
     "cli_scratch_sweep.py": 1505,

@@ -528,8 +528,8 @@ def cmd_slice_quals(args):
         # #622: a bare needs-acceptance → U unconditionally (queued for owner
         # approval, never dispatchable-now I work). Pure label partition; the
         # question map is read only on the on-demand `--waiting` display path
-        # below, never here on the count path (#370).
-        workable_rows, waiting, ops_wait = airuleset._partition_workable(rows)
+        # below (#370). #654: own_stream=user keeps THIS box's OWN stream rows in U.
+        workable_rows, waiting, ops_wait = airuleset._partition_workable(rows, own_stream=user)
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`

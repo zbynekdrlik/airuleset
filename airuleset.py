@@ -2424,8 +2424,9 @@ def cmd_tickets_status(args):
                 # #622: a bare needs-acceptance → U unconditionally (queued for
                 # owner approval, never dispatchable-now I). Pure label partition;
                 # the queued/delivered display distinction lives on the on-demand
-                # `--waiting` path, never this hot footer refresh.
-                workable_rows, waiting, ops_wait = _partition_workable(rows)
+                # `--waiting` path, never this hot footer refresh. #654:
+                # own_stream keeps THIS box's OWN stream rows in its own U.
+                workable_rows, waiting, ops_wait = _partition_workable(rows, own_stream=_current_user())
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk

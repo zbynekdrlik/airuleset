@@ -109,6 +109,23 @@ class PartitionOwnershipCarveout(unittest.TestCase):
         self.assertIn(7, workable)
         self.assertNotIn(7, waiting)
 
+    def test_foreign_bare_needs_acceptance_stays_in_U_on_full_box(self):
+        # #654 is SCOPED to answer/decision/action (the enumerated ROZHODNUTÉ
+        # reasons). needs-acceptance keeps its own #526/#622 routing: a bare
+        # needs-acceptance is queued for owner approval → U, even a foreign one
+        # (it is search-excluded from the gk obligation set anyway, so it never
+        # reaches this branch on the gk box in practice — but the routing must
+        # not be disturbed). Mirrors test_gk_i_counting_audit_578's own lock.
+        rows = {4007: {"number": 4007,
+                       "labels": _labels("needs-acceptance", "stream:montalu3")}}
+        workable, waiting, ops_wait = airuleset._partition_workable(
+            rows, own_stream=None)
+        self.assertEqual(set(waiting), {4007},
+                         "#654 must NOT touch needs-acceptance: a bare foreign "
+                         "acceptance stays in U (#622 routing intact)")
+        self.assertEqual(workable, {})
+        self.assertEqual(ops_wait, {})
+
     def test_workable_foreign_row_renders_action_only(self):
         # The foreign row landing in workable must render `action-only` in the
         # --list/--audit column, so the gatekeeper never writes its code.
