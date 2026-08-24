@@ -44,10 +44,10 @@ from pathlib import Path
 REPO_DIR = Path(__file__).resolve().parent
 CLAUDE_DIR = Path.home() / ".claude"
 CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.sh"
-# #613 REOPEN-2 round-2: the tmux prefix+w WINDOW-PICKER helper (a pure tmux
-# concern, so it lives in THIS leaf, not cli_claude_scripts). See the module
-# comment above WINDOW_MENU_SCRIPT_CONTENT below.
-WINDOW_MENU_SCRIPT_DEST = CLAUDE_DIR / "airuleset-tmux-window-menu.sh"
+# #649: the #613-r2 prefix+w WINDOW-PICKER helper (airuleset-tmux-window-menu.sh)
+# is REMOVED -- prefix+w now binds to the native `choose-tree -ZwG` (see the
+# TMUX_CHOOSE_TREE_BIND_ARGVS module comment below). cli_bashrc_appliers cleans
+# up the previously-deployed ~/.claude/airuleset-tmux-window-menu.sh file.
 
 
 TMUX_CONF = Path.home() / ".tmux.conf"
@@ -438,127 +438,44 @@ TMUX_POPUP_BIND_ARGVS = [
 
 
 # --------------------------------------------------------------------------- #
-# #613 REOPEN-2 round-2: prefix+w WINDOW PICKER, rebinding tmux's default
-# `choose-tree` fleet-wide.
+# #649 (course change over #613 REOPEN-2 round-2): prefix+w MULTI-SESSION TREE,
+# via the NATIVE tmux `choose-tree -ZwG`.
 #
-# ROOT CAUSE (measured matrix on issue #613, 2026-08-24): tmux 3.7b renders
-# `choose-tree` (the default prefix+w) ONLY to clients of the NEWEST-created
-# grouped session; a client of an OLDER grouped session in the group gets a
-# BLACK screen -- even when the sibling has no client of its own, independent of
-# ignore-size and client sizes. The owner's launcher (`tmux new -t zbynek`) forms
-# a newer grouped sibling on every terminal attach, so his webterm (attached to
-# the base = the older group member per the round-1 direct-attach fix) always
-# loses the chooser. This is an UPSTREAM tmux bug -- not fixed here.
+# ROOT CAUSE (measured, issue #649, 2026-08-24): the owner's Ctrl+B w blackout is
+# UPSTREAM tmux bug #5180/#5493 -- a stale-pointer in `window_tree_build`'s
+# SQUASH-GROUPS filter (which by default collapses a session group to its first
+# member). It blackens `choose-tree` (the default prefix+w) for a client of an
+# OLDER grouped session once a newer grouped sibling exists -- exactly the
+# owner's topology (his launcher forms a newer grouped sibling on every attach,
+# so his webterm on the base always loses the chooser). Fixed only on tmux master
+# commit a6a06c5aa6, UNRELEASED in every 3.7.x incl. 3.7c (2026-08-17); the fleet
+# runs 3.7b.
 #
-# FIX: rebind prefix+w to a `run-shell` that invokes a deployed helper script
-# building a `display-menu` window picker dynamically from `tmux list-windows`.
-# `display-menu` renders on EVERY client (measured 17952 chars on the exact dead
-# base client vs 176 for choose-tree; pressing a number really switches the
-# window), sidestepping the upstream bug. The default `w` is DELIBERATELY
-# overridden EVERYWHERE (WT AND webterm) for consistent UX.
+# FIX: bind prefix+w to `choose-tree -ZwG`. The `-G` flag DISABLES the buggy
+# squash filter (renders every group member separately), sidestepping the
+# blackout -- and it gives the owner (#649) the multi-session TREE the native
+# chooser shows (sessions -> their windows), which the #613-r2 custom
+# `display-menu` picker had LOST (it only ever listed the CURRENT session's
+# windows). That custom picker (WINDOW_MENU_SCRIPT_*, a deployed helper script)
+# is REMOVED (mvp-philosophy: the native chooser replaces ~90 lines of custom
+# bash + its deploy). Verified live on an isolated -S tmux 3.7b socket (dead
+# topology: a client on the OLDER grouped base + a newer grouped sibling + an
+# independent 2nd session): default `choose-tree -Zw` = 366 chars, `sort:`
+# absent (blackout); `choose-tree -ZwG` = 4916 chars, `sort:` + the 2nd session
+# name present (full cross-session tree, Down+Enter navigates). `-Z` zooms the
+# pane, `-w` starts in the window list; flag order is irrelevant.
 #
-# RE-CHECK (2026-08-24): when the fleet upgrades tmux to a version whose grouped-
-# session choose-tree is fixed, re-evaluate whether this override is still needed
-# (this dated note is the trigger -- no separate ticket).
+# RE-CHECK (2026-08-24): when the fleet upgrades to a tmux carrying the upstream
+# fix (master a6a06c5aa6, unreleased as of 3.7c), the blackout is gone anyway --
+# but `-ZwG` STAYS desirable (it IS the multi-session view: all group members
+# shown separately), so the flag can remain. This dated note is the trigger --
+# no separate ticket.
 #
-# WHY A SEPARATE SCRIPT, not an inline bind: building the menu items from
-# `list-windows` fundamentally needs `$` shell variables, and `_tmux_conf_quote`
-# (below) REFUSES a literal `$` in a rendered conf line (tmux's own conf-parser
-# expands `$VAR` at conf-parse/bind time). A script invoked by absolute path is
-# the only viable shape -- exactly the #289 popup-script precedent (which self-
-# found the same landmine). The bind line carries no `$` at all, only the path +
-# the `#{client_name}` format token.
-#
-# CLIENT TARGETING: the bind hands run-shell the pressing client's name via
-# `#{client_name}`. run-shell format-EXPANDS its shell-command (verified live),
-# and it survives `_tmux_conf_quote`'s double-quoting AND a COLD conf-file parse
-# -- expansion is deferred to run-shell EXECUTION time, never baked empty at
-# conf-parse time (verified live on a cold `-f conf` server). The helper then
-# targets `display-menu -c "$client"` so the menu paints on the exact (dead-for-
-# choose-tree) client, reading windows with a bare `tmux` (inheriting run-shell's
-# own `$TMUX` socket -- correct for the user's real server AND an isolated test
-# socket).
-#
-# LIVE-APPLY SAFETY: like the scrollback/popup binds, a `bind-key` is a pure key-
-# table registration -- none of window-size's live-apply hazard -- so it is live-
-# applied the same way (a running tmux never re-reads the conf).
-WINDOW_MENU_SCRIPT_CONTENT = r'''#!/usr/bin/env bash
-# airuleset-managed (do NOT edit) -- tmux prefix+w window picker (#613 round-2).
-# Built dynamically from `tmux list-windows`; renders on EVERY client via
-# `display-menu`, dodging the upstream tmux 3.7b grouped-session choose-tree bug
-# (which blackens the chooser for a client of an OLDER grouped session). See the
-# module comment above WINDOW_MENU_SCRIPT_CONTENT in cli_tmux_provisioning.py.
-set -euo pipefail
-
-# $1 = the pressing client's name (run-shell expands #{client_name}); a bare
-# `tmux` below inherits run-shell's own $TMUX socket.
-client="${1:-}"
-[ -n "$client" ] || exit 0
-
-sess="$(tmux display-message -p -c "$client" '#{session_name}' 2>/dev/null || true)"
-[ -n "$sess" ] || exit 0
-
-# display-menu argv: `-c <client>` paints on the pressing (dead) client, then a
-# title, then a (label, key, command) triplet per window.
-#
-# #{window_name} is read LAST (adversarial review #613r2, A2): IFS=$'\t' treats
-# tab as IFS-WHITESPACE, so consecutive tabs collapse -- with name in the MIDDLE
-# an EMPTY window name would swallow the following field (the active flag lands
-# in $name, the `*` marker is lost). As the final field a trailing empty name is
-# safely dropped and any embedded tab is tolerated (`read` puts the remainder
-# verbatim into the last var).
-menu_args=(-c "$client" -T '#[align=centre] Okná ')
-n=0
-while IFS=$'\t' read -r wid idx active name; do
-  n=$((n + 1))
-  # The number HOT-KEY is the window INDEX itself when single-digit, so the
-  # number the row DISPLAYS is exactly the key you press (adversarial review
-  # #613r2, A1: base-index defaults to 0 and the managed conf never sets it, so
-  # keying off a 1..9 list ordinal was off-by-one from the shown index and left
-  # index 0 unreachable). Window indices are unique, so no key collides; a
-  # 2+-digit index gets no key and stays arrow-selectable.
-  case "$idx" in
-    [0-9]) key="$idx" ;;
-    *)     key="" ;;
-  esac
-  mark=" "
-  if [ "$active" = "1" ]; then mark="*"; fi
-  # `#`-double the name so a window named e.g. `#{foo}` cannot inject a tmux
-  # format expansion into the menu label; select by the unambiguous window id.
-  safe_name="${name//#/##}"
-  menu_args+=("${mark}${idx}: ${safe_name}" "$key" "select-window -t $wid")
-done < <(tmux list-windows -t "$sess" \
-         -F $'#{window_id}\t#{window_index}\t#{window_active}\t#{window_name}')
-
-[ "$n" -gt 0 ] || exit 0
-tmux display-menu "${menu_args[@]}"
-'''
-
-
-def render_window_menu_script():
-    """The prefix+w window-menu helper content. Its own function (mirroring
-    render_claude_history_popup_script) so `apply_ultracode_launcher`'s write
-    path is uniform across the managed scripts -- the content is static (no
-    placeholder), but keeping the render seam means a future parameter has one
-    obvious home."""
-    return WINDOW_MENU_SCRIPT_CONTENT
-
-
-def _tmux_window_menu_bind_argv():
-    """The `bind-key w run-shell "<helper> '#{client_name}'"` argv, SHARED
-    verbatim between the live-apply subprocess call (a plain argv list, each
-    element already exactly one tmux token) and the rendered conf line (which
-    per-token `_tmux_conf_quote`s -- the last token carries a space, single
-    quotes and `#`, but NO `$`, so it quotes cleanly). The helper path is baked
-    in at Python render time (absolute -- the #289 precedent for why an inline
-    shell command is impossible); `#{client_name}` is left for run-shell to
-    expand at keypress time."""
-    return ["bind-key", "w", "run-shell",
-            "%s '#{client_name}'" % WINDOW_MENU_SCRIPT_DEST]
-
-
-TMUX_WINDOW_MENU_BIND_ARGVS = [
-    _tmux_window_menu_bind_argv(),
+# LIVE-APPLY SAFETY: a `bind-key` is a pure key-table registration -- none of
+# window-size's live-apply hazard -- so it is live-applied the same way (a
+# running tmux never re-reads the conf), grouped with the scrollback/popup binds.
+TMUX_CHOOSE_TREE_BIND_ARGVS = [
+    ["bind-key", "w", "choose-tree", "-ZwG"],
 ]
 
 
@@ -610,14 +527,13 @@ def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
     popup_lines = "\n".join(
         " ".join(_tmux_conf_quote(tok) for tok in argv)
         for argv in TMUX_POPUP_BIND_ARGVS)
-    # #613 REOPEN-2 round-2: rebind prefix+w to the run-shell window picker,
-    # grouped with the other binds (after the popup bind). The last token
-    # (`<helper> '#{client_name}'`) carries a space/quotes/`#` but no `$`, so
-    # `_tmux_conf_quote` wraps it cleanly. See the module comment above
-    # WINDOW_MENU_SCRIPT_CONTENT.
-    menu_lines = "\n".join(
+    # #649: bind prefix+w to the native `choose-tree -ZwG`, grouped with the
+    # other binds (after the popup bind). `-ZwG` is flag-only, no `$`, so
+    # `_tmux_conf_quote` renders `bind-key w choose-tree -ZwG` cleanly. See the
+    # TMUX_CHOOSE_TREE_BIND_ARGVS module comment above.
+    choose_tree_lines = "\n".join(
         " ".join(_tmux_conf_quote(tok) for tok in argv)
-        for argv in TMUX_WINDOW_MENU_BIND_ARGVS)
+        for argv in TMUX_CHOOSE_TREE_BIND_ARGVS)
     # #586/#613 REOPEN-2: `window-size manual` pins the fixed geometry (the
     # owner's invariant -- no client resizes another's window) -- but only when
     # the caller has confirmed the reading tmux is a safe version (>= 3.5); a 3.4
@@ -646,7 +562,7 @@ def render_tmux_history_block(limit=TMUX_HISTORY_LIMIT,
         "set-option -g mouse on\n"
         f"{keybind_lines}\n"
         f"{popup_lines}\n"
-        f"{menu_lines}\n"
+        f"{choose_tree_lines}\n"
         f"{TMUX_MARK_END}"
     )
 
@@ -907,12 +823,14 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     ]
     live_argvs += [["tmux"] + argv for argv in TMUX_SCROLLBACK_KEYBINDS]
     live_argvs += [["tmux"] + argv for argv in TMUX_POPUP_BIND_ARGVS]
-    # #613 REOPEN-2 round-2: live-apply the prefix+w window-menu rebind too -- a
-    # running tmux never re-reads the conf, so an already-running session picks
-    # up the picker (dodging the upstream grouped-session choose-tree blackout)
-    # immediately at install/push. A pure key-table registration, same safety
-    # class as the scrollback/popup binds above.
-    live_argvs += [["tmux"] + argv for argv in TMUX_WINDOW_MENU_BIND_ARGVS]
+    # #649: live-apply the prefix+w `choose-tree -ZwG` bind too -- a running
+    # tmux never re-reads the conf, so an already-running session picks up the
+    # native multi-session tree (the -G flag dodging the upstream #5180/#5493
+    # grouped-session choose-tree blackout) immediately at install/push. It also
+    # OVERWRITES a box still carrying the old #613-r2 run-shell menu bind on `w`
+    # (bind-key replaces the existing binding). A pure key-table registration,
+    # same safety class as the scrollback/popup binds above.
+    live_argvs += [["tmux"] + argv for argv in TMUX_CHOOSE_TREE_BIND_ARGVS]
     # #376 CLEANUP: an ALREADY-RUNNING server that was live-bound before
     # this fix deployed still has S-F1/S-DC registered -- rewriting the
     # CONF file (above) does not retroactively unbind an already-live

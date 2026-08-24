@@ -48,6 +48,7 @@ resolves them without an import cycle.
 """
 
 import os
+import sys
 from pathlib import Path
 
 from cli_claude_scripts import (
@@ -58,14 +59,11 @@ from cli_claude_scripts import (
     render_claude_history_script,
     render_claude_history_popup_script,
 )
-# #613 REOPEN-2 round-2: the prefix+w window-menu helper lives in the tmux leaf
-# (a pure tmux concern), written to disk here alongside the other managed
-# scripts. cli_tmux_provisioning has zero internal imports, so this direct
-# import adds no cycle (cli_claude_scripts already imports from it).
-from cli_tmux_provisioning import (
-    WINDOW_MENU_SCRIPT_DEST,
-    render_window_menu_script,
-)
+# #649: the #613-r2 prefix+w window-menu helper is REMOVED (prefix+w now binds
+# to the native `choose-tree -ZwG`, cli_tmux_provisioning). Its previously-
+# deployed file is cleaned up below; the constant lives here so the cleanup and
+# a test can share one source.
+_LEGACY_WINDOW_MENU_SCRIPT_NAME = "airuleset-tmux-window-menu.sh"
 
 # Canonical dup of the two ultracode marker sentinels -- byte-identical to
 # airuleset.ULTRACODE_MARK_* (which stay resident for tests). Needed at
@@ -90,18 +88,20 @@ ULTRACODE_BASHRC_BLOCK = (
 
 def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
                               history_script_path: Path = None,
-                              popup_script_path: Path = None,
-                              menu_script_path: Path = None) -> bool:
+                              popup_script_path: Path = None) -> bool:
     """Install/refresh the managed claude launcher (#77) AND the
     claude-history companion (#267 -- same mechanism, same self-heal
     discipline, deliberately extended in place rather than given its own
     parallel marker-block machinery) AND the claude-history POPUP
     companion script (#289 -- see the module comment above
     CLAUDE_HISTORY_POPUP_SCRIPT_DEST for why this is its OWN script file
-    rather than an inline shell command in the tmux bind-key line) AND the
-    tmux prefix+w WINDOW-MENU helper (#613 REOPEN-2 round-2 -- same
-    OWN-script-file reason, see WINDOW_MENU_SCRIPT_CONTENT in
-    cli_tmux_provisioning).
+    rather than an inline shell command in the tmux bind-key line).
+
+    #649: the #613-r2 tmux prefix+w WINDOW-MENU helper is no longer written --
+    prefix+w now binds to the native `choose-tree -ZwG` (cli_tmux_provisioning),
+    so no helper script exists; this function CLEANS UP a previously-deployed
+    ~/.claude/airuleset-tmux-window-menu.sh (co-located with the popup script)
+    so an upgraded box does not keep the dead file.
 
     The SCRIPT (script_path, default CLAUDE_LAUNCH_SCRIPT_DEST) is written and
     chmod +x UNCONDITIONALLY on every call — like the caveman shim, it must
@@ -110,11 +110,9 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     actual logic, so a `push` changes launch behavior in every already-running
     shell immediately, with no `source ~/.bashrc` and no restart. The
     claude-history script (history_script_path, default
-    CLAUDE_HISTORY_SCRIPT_DEST), the claude-history POPUP script
-    (popup_script_path, default CLAUDE_HISTORY_POPUP_SCRIPT_DEST) and the
-    tmux window-menu helper (menu_script_path, default co-located with the
-    popup script in ~/.claude -- see its write below) all get the IDENTICAL
-    unconditional write + chmod +x + missing-after-write RuntimeError
+    CLAUDE_HISTORY_SCRIPT_DEST) and the claude-history POPUP script
+    (popup_script_path, default CLAUDE_HISTORY_POPUP_SCRIPT_DEST) both get the
+    IDENTICAL unconditional write + chmod +x + missing-after-write RuntimeError
     treatment.
 
     The ~/.bashrc block is idempotent (replaces the marked block if present,
@@ -145,29 +143,18 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     if not ppath.exists():
         raise RuntimeError(f"claude-history popup script missing right after write: {ppath}")
 
-    # #613 REOPEN-2 round-2: the tmux prefix+w window-menu helper -- IDENTICAL
-    # unconditional write + chmod +x + missing-after-write RuntimeError, so the
-    # rebind's helper is always on disk (the managed conf's `w` bind invokes it
-    # by absolute path). It is a static script, so a same-content rewrite is a
-    # true no-op on disk. Default: co-located in the SAME managed dir as the
-    # popup script (`ppath.parent`) -- in production that dir is `~/.claude`, so
-    # this resolves to exactly WINDOW_MENU_SCRIPT_DEST (the absolute path the
-    # conf's `w` bind points at); a test that redirects the popup path to a
-    # tempdir automatically lands this there too, so no caller writes into the
-    # real `~/.claude`. This co-location is DELIBERATE (adversarial review
-    # #613r2, A3): a plain `menu_script_path or WINDOW_MENU_SCRIPT_DEST` default
-    # would decouple the two, but WINDOW_MENU_SCRIPT_DEST is frozen at import to
-    # the real `~/.claude`, so it would make ALL ~19 existing 4-positional-arg
-    # test callers write the helper into the real home. Deploy ordering is safe:
-    # cmd_install runs apply_ultracode_launcher (this write) BEFORE
-    # apply_tmux_history_limit (the live `w` bind), so the bind never points at a
-    # not-yet-written script on a normal push.
-    mpath = menu_script_path or (ppath.parent / WINDOW_MENU_SCRIPT_DEST.name)
-    mpath.parent.mkdir(parents=True, exist_ok=True)
-    mpath.write_text(render_window_menu_script())
-    os.chmod(str(mpath), 0o755)
-    if not mpath.exists():
-        raise RuntimeError(f"tmux window-menu script missing right after write: {mpath}")
+    # #649: the #613-r2 prefix+w window-menu helper is REMOVED (prefix+w now
+    # binds to the native `choose-tree -ZwG`). CLEAN UP a previously-deployed
+    # helper co-located with the popup script (in production `~/.claude`), so an
+    # upgraded box does not keep the dead file. `missing_ok=True` makes this a
+    # true no-op on a fresh box or a repeated push; unlink is best-effort (a
+    # stray permission error must never break the launcher install).
+    legacy_menu = ppath.parent / _LEGACY_WINDOW_MENU_SCRIPT_NAME
+    try:
+        legacy_menu.unlink(missing_ok=True)
+    except OSError as e:
+        print(f"  #649 cleanup: could not remove dead window-menu helper "
+              f"{legacy_menu}: {e}", file=sys.stderr)
 
     existing = bpath.read_text() if bpath.exists() else ""
     if ULTRACODE_MARK_START in existing and ULTRACODE_MARK_END in existing:
