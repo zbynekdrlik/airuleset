@@ -366,7 +366,7 @@
   "functions": {
     "airuleset.py::_notify_run_card": 288,
     "airuleset.py::cmd_gk_request": 209,
-    "airuleset.py::cmd_install": 571,
+    "airuleset.py::cmd_install": 582,
     "airuleset.py::cmd_notify": 320,
     "airuleset.py::cmd_tickets_status": 203,
     "airuleset.py::cmd_watchdog": 209,
