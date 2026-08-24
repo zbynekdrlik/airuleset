@@ -60,9 +60,10 @@ from cli_claude_scripts import (
     render_claude_history_popup_script,
 )
 # #649: the #613-r2 prefix+w window-menu helper is REMOVED (prefix+w now binds
-# to the native `choose-tree -ZwG`, cli_tmux_provisioning). Its previously-
-# deployed file is cleaned up below; the constant lives here so the cleanup and
-# a test can share one source.
+# to the native `choose-tree -ZwG`, cli_tmux_provisioning). This constant names
+# the previously-deployed file the cleanup below removes; the cluster test
+# independently hard-codes the same literal filename (a cross-check that fails if
+# the cleanup ever targets a different name than the one that was deployed).
 _LEGACY_WINDOW_MENU_SCRIPT_NAME = "airuleset-tmux-window-menu.sh"
 
 # Canonical dup of the two ultracode marker sentinels -- byte-identical to
@@ -148,7 +149,12 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     # helper co-located with the popup script (in production `~/.claude`), so an
     # upgraded box does not keep the dead file. `missing_ok=True` makes this a
     # true no-op on a fresh box or a repeated push; unlink is best-effort (a
-    # stray permission error must never break the launcher install).
+    # stray permission error must never break the launcher install). Unlike the
+    # #613-r2 helper (whose deploy had to precede the `w` bind, since that bind
+    # invoked it by path), the native `choose-tree -ZwG` bind references NO
+    # script -- so this cleanup is ordering-independent (a running box keeps its
+    # existing `w` binding until apply_tmux_history_limit's live-apply rebinds it
+    # to choose-tree, and the conf file is rewritten regardless).
     legacy_menu = ppath.parent / _LEGACY_WINDOW_MENU_SCRIPT_NAME
     try:
         legacy_menu.unlink(missing_ok=True)

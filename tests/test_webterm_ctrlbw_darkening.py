@@ -847,20 +847,36 @@ class TestChooseTreeMultiSession649(unittest.TestCase):
             rows=_SSH_CLIENT_ROWS)
         cluster.wait_for_clients("base", 1)
         cluster.wait_for_clients("sib", 1)
-        _drain(base_fd, 1.0)
+        # CAPTURE the initial paint too (not a throwaway drain): the base status
+        # line renders its own window names ("beta"/"gamma"/...) even during the
+        # blackout, and asserting one is present proves the pty genuinely PAINTED
+        # (closing the vacuity hole -- a client that rendered NOTHING for an
+        # environmental reason would also lack `sort:` and pass a bare absence
+        # check).
+        text = _visible(_drain(base_fd, 1.0))
         os.write(base_fd, b"\x02w")
-        text = ""
         for _ in range(6):
             text += _visible(_drain(base_fd, 1.0))
             if "sort:" in text:
                 break
         os.write(base_fd, b"\x1b")
         _drain(base_fd, 0.4)
+        self.assertIn(
+            "beta", text,
+            "the base client must PAINT its status line (window names leak into "
+            "it even in the blackout) -- if nothing painted, a bare `sort:` "
+            "absence check below would pass vacuously; got %d chars:\n%s"
+            % (len(text), text[:600]))
         self.assertNotIn(
             "sort:", text,
             "the DEFAULT flagless `choose-tree -Zw` must BLACKOUT on the older "
-            "grouped client (upstream #5180) -- if it painted here, `-G` would "
-            "not be load-bearing; got %d chars:\n%s" % (len(text), text[:600]))
+            "grouped client (upstream #5180/#5493) -- if it painted here, `-G` "
+            "would not be load-bearing. NOTE: when the fleet upgrades to a tmux "
+            "carrying the upstream fix (master a6a06c5aa6, unreleased as of "
+            "3.7c), the default `-Zw` WILL paint and this control is EXPECTED to "
+            "flip -- that is the RE-CHECK trigger (cli_tmux_provisioning module "
+            "comment), not a regression; got %d chars:\n%s"
+            % (len(text), text[:600]))
 
     def _apply_production_choose_tree_bind(self, cluster):
         """Capture the prefix+w bind argv `apply_tmux_history_limit` would
