@@ -290,33 +290,61 @@ fi
 # reads is checked at the exact place it must appear.
 #
 # Fires only when the delivered block carries CLIENT-POSTING INTENT — a
-# send/reply verb adjacent (<=60 chars, either order) to a Discuss/thread
-# token, OR a closing/handover-message phrase — AND the block does NOT name the
-# thread (an explicit `Vlákno:` line, or a quoted name ending in the stream
-# number, the #632 heuristic). Deliberately narrow: it runs only on ❓ question
-# turns that already survived Checks 1-5, so an ordinary question / a bare
-# Discuss mention with no posting verb never matches. `.{0,60}` NOT
-# `[^\n]{0,60}` — inside a grep ERE bracket `\n` is the LITERAL chars '\','n'
-# (it would exclude every 'n', which is in klientovi/informovať/…); grep is
-# line-oriented so `.` already never crosses a newline. LC_ALL=C.UTF-8 per the
-# repo's #319 diacritic-safe-grep convention; here-strings not `printf|grep -q`
-# pipes per #292.
+# send/reply VERB present together with the DIRECTIONAL "do … vlákn/discuss"
+# ("into the thread"), OR a closing/handover-message phrase — AND the block does
+# NOT name the thread with a QUOTED name ending in the stream number (the #632
+# form). Deliberately narrow: it runs only on ❓ question turns past Checks 1-5,
+# and the directional "do …" is the discriminator that keeps the omnipresent
+# montalu Discuss-thread MENTIONS ("v/vo vlákne …", a status/design question)
+# from tripping the gate — only a genuine posting says "do … vlákna" (reviewer-A
+# false-positive finding). LC_ALL=C.UTF-8 per the repo's #319 diacritic-safe
+# convention; here-strings not `printf|grep -q` pipes per #292.
 #
 # Accepted residuals (this is a WORD-FAMILY heuristic, not a parser — a genuine
 # occurrence outside these families needs its own follow-up, never a blanket
-# rewrite): intent SPLIT ACROSS LINES (verb on one line, `vlákno` on another —
-# grep is per-line, so the adjacency never matches); a posting verb OUTSIDE the
-# declared stem list (an exotic synonym phrased far from the families); a thread
-# name carrying a numeric suffix but NO surrounding quotes and no `Vlákno:`
-# label; and a NON-Discuss "pošli … do vlákna" in an unrelated project
-# (harmless — it merely asks to name the thread). The present-user (~10 min)
-# bypass above also still applies BY DESIGN: these approval pings are away-user
-# autonomous asks whose ACTIVE file is never stamped, so the bypass does not
-# reach the montalu1 case.
+# rewrite): (1) a client-posting approval that mentions NO thread word at all
+# ("chcem to poslať klientovi") — nothing signals Discuss, so it is
+# indistinguishable from an ordinary e-mail/other send; the closing-message arm
+# still catches an "uzavieracej správy" phrasing (reviewer-A thread-word-
+# dependency FN); (2) a thread named only by its INTERNAL channel number in
+# quotes ("„vlákno 250"") — accepted as a specific identifier, though #632
+# prefers the human name (the create-time gate #596 + prose enforce that
+# separately); (3) intent SPLIT ACROSS LINES, or a posting phrased with the
+# locative "vo vlákne" rather than "do vlákna"; (4) a `Vlákno:` line placed
+# ABOVE the "Otázka —" head, which the head-anchored $BLOCK extraction drops —
+# the standard compose ordering puts the name AFTER the briefing, so it is
+# in-block. The present-user (~10 min) bypass above also still applies BY
+# DESIGN: these approval pings are away-user autonomous asks whose ACTIVE file
+# is never stamped, so the bypass does not reach the montalu1 case.
 if [ -z "$VIOLATION" ]; then
-    POST_INTENT_RX='(po[šs]l|odo[šs]l|posiel|odosiel|posun|zverej|odoslan|zasl|nap[ií][šs]|napis|odpoved|odp[ií][šs]|reaguj|inform|ozn[áa]m|ohl[áa]s).{0,60}(vl[áa]kn|discuss)|(vl[áa]kn|discuss).{0,60}(po[šs]l|odo[šs]l|posiel|odosiel|posun|zverej|odoslan|zasl|nap[ií][šs]|napis|odpoved|odp[ií][šs]|reaguj|inform|ozn[áa]m|ohl[áa]s)|uzavierac.{0,25}spr[áa]v|(odovzd[áa]v|handover).{0,25}spr[áa]v'
-    THREAD_NAMED_RX='(^|[[:space:]])vl[áa]kno[[:space:]]*:|[„“"][^„”“"]{0,60}[0-9][[:space:]]*[”“"]'
-    if LC_ALL=C.UTF-8 grep -qiE "$POST_INTENT_RX" <<<"$BLOCK" \
+    # A send / post / reply VERB (kept to genuine posting verbs; the earlier
+    # broad list's inform/posun/ozn[áa]m collided with common nouns —
+    # informácia / posunúť termín / oznámenie — reviewer-A finding).
+    SEND_VERB_RX='po[šs]l|odo[šs]l|posiel|odosiel|zverej|odoslan|zasl|nap[ií][šs]|napis|odpoved|odp[ií][šs]|reaguj'
+    # … directed INTO a thread: the DIRECTIONAL preposition "do … vlákn/discuss"
+    # (accusative "into the thread") — NOT the LOCATIVE "v/vo vlákne" ("in the
+    # thread") that ordinary status/design questions use. This is the clean
+    # discriminator (reviewer-A): montalu client comms run through Discuss, so
+    # away-user ❓ questions constantly MENTION a thread ("v Discuss vlákne …");
+    # only a genuine posting says "do … vlákna". `.` not `[^\n]` (the grep-
+    # bracket newline trap: `[^\n]` excludes the letter 'n', not a newline).
+    DIR_THREAD_RX='(^|[^[:alpha:]])do[[:space:]]+.{0,25}(vl[áa]kn|discuss)'
+    # … OR a closing / handover CLIENT message (which always targets a thread).
+    CLOSING_RX='uzavierac.{0,25}spr[áa]v|(odovzd[áa]v|handover).{0,25}spr[áa]v'
+    # NAMED = a QUOTED thread name ending in the stream-number digit (the #632
+    # canonical „<human name> <N>"). A bare `Vlákno:` LABEL with a generic value
+    # („výrobné vlákno") is deliberately NOT accepted — accepting the label
+    # alone let the fix instruction's own remedy defeat the check (reviewer-A
+    # DODGE-1).
+    THREAD_NAMED_RX='[„“"][^„”“"]{0,60}[0-9][[:space:]]*[”“"]'
+    intent=""
+    if LC_ALL=C.UTF-8 grep -qiE "$CLOSING_RX" <<<"$BLOCK"; then
+        intent=1
+    elif LC_ALL=C.UTF-8 grep -qiE "$SEND_VERB_RX" <<<"$BLOCK" \
+        && LC_ALL=C.UTF-8 grep -qiE "$DIR_THREAD_RX" <<<"$BLOCK"; then
+        intent=1
+    fi
+    if [ -n "$intent" ] \
         && ! LC_ALL=C.UTF-8 grep -qiE "$THREAD_NAMED_RX" <<<"$BLOCK"; then
         VIOLATION="thread"
     fi

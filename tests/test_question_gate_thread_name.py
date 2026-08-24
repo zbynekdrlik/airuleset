@@ -186,6 +186,80 @@ class TestNamedAndOrdinaryQuestionsPass(_HookCase):
             "intent) was falsely blocked: %s" % self._reason(r))
 
 
+# FALSE-POSITIVE SURFACE (reviewer #650-A): montalu's client comms run through
+# Discuss, so away-user ❓ questions constantly MENTION a thread ("v/vo Discuss
+# vlákne …") in an ordinary status/design context. The broad first cut over-blocked
+# these because a noun-colliding stem (informácia/oznámenie/nápis/zaslané) sat within
+# 60 chars of "vlákno". The directional-"do … vlákna" discriminator must let them ALL
+# pass — a locative mention is not a posting. Each is a full template-compliant block
+# so only Check 6 could (wrongly) fire.
+def _q(brief, dec):
+    return ("**Otázka — projekt montalu (Odoo ERP pre klienta montalu):** " + brief
+            + "\n\n• Áno (odporúčam) — pokračujem\n• Nie — nechám tak\n\n"
+            + "❓ NEEDS YOU: " + dec + "\n")
+
+FP_INFORM = _q("V klientskom Discuss vlákne je veľa informácií o objednávke a "
+               "informačný prehľad chce klient rozšíriť.",
+               "mám ten prehľad rozšíriť?")
+FP_OZNAM = _q("Vo vlákne riešime nastavenie oznámení pre klienta a jeho "
+              "notifikácie.", "mám tie oznámenia zapnúť?")
+FP_NAPIS = _q("Klient v Discuss vlákne chce iný nápis na tlačidle Objednať.",
+              "mám ten nápis zmeniť?")
+FP_ODOSLANIE = _q("Skontroloval som Discuss vlákno; e-mail o odoslaní objednávky "
+                  "klientovi nedorazil a zaslané faktúry mu chýbajú.",
+                  "mám ten e-mail poslať znova?")
+
+# DODGE-1 (reviewer #650-A): a generic `Vlákno:` LABEL must NOT satisfy the check.
+DODGE_GENERIC_LABEL = (
+    "**Otázka — projekt montalu (Odoo ERP pre klienta montalu):** Pripravil "
+    "som klientovi odpoveď a chcem ju poslať do výrobného vlákna na PROD.\n"
+    "\n"
+    "Vlákno: výrobné vlákno na PROD\n"
+    "\n"
+    "• Poslať teraz (odporúčam) — hneď\n"
+    "• Počkať — pomalšie\n"
+    "\n"
+    "❓ NEEDS YOU: mám poslať správu klientovi do výrobného vlákna?\n"
+)
+
+
+class TestFalsePositiveSurface(_HookCase):
+    """The directional discriminator: an ordinary montalu question that merely
+    MENTIONS a Discuss thread (locative) must PASS; only "do … vlákna" (posting
+    INTO it) with a send verb, or a closing message, is intent."""
+
+    def test_inform_status_question_passes(self):
+        r = self._run(FP_INFORM)
+        self.assertFalse(self._blocked(r),
+                         "'informácie … Discuss vlákne' status Q false-blocked: %s"
+                         % self._reason(r))
+
+    def test_oznamenia_design_question_passes(self):
+        r = self._run(FP_OZNAM)
+        self.assertFalse(self._blocked(r),
+                         "'oznámení … vo vlákne' design Q false-blocked: %s"
+                         % self._reason(r))
+
+    def test_napis_ui_question_passes(self):
+        r = self._run(FP_NAPIS)
+        self.assertFalse(self._blocked(r),
+                         "'nápis … Discuss vlákne' UI Q false-blocked: %s"
+                         % self._reason(r))
+
+    def test_email_odoslanie_bug_question_passes(self):
+        r = self._run(FP_ODOSLANIE)
+        self.assertFalse(self._blocked(r),
+                         "'o odoslaní … Discuss vlákno' bug Q false-blocked: %s"
+                         % self._reason(r))
+
+    def test_generic_vlakno_label_still_blocks(self):
+        r = self._run(DODGE_GENERIC_LABEL)
+        self.assertTrue(self._blocked(r),
+                        "a generic 'Vlákno: výrobné vlákno' label defeated the "
+                        "check (DODGE-1): %s" % r.stdout)
+        self.assertIn("Vlákno", self._reason(r))
+
+
 class TestCheck6ImplementedInHook(unittest.TestCase):
     """Content-lock: the hook must actually implement Check 6, and document its
     accepted residuals (repo convention for a word-family heuristic)."""
@@ -199,9 +273,13 @@ class TestCheck6ImplementedInHook(unittest.TestCase):
         self.assertIn("thread)", self.h)
 
     def test_intent_and_named_heuristics_present(self):
-        # the closing/handover-message intent stem and the Vlákno acceptance
+        # operative variables that live in the Check-6 code (not just prose):
+        # the send-verb, the directional-thread and the named-thread regexes.
+        self.assertIn("SEND_VERB_RX", self.h)
+        self.assertIn("DIR_THREAD_RX", self.h)
+        self.assertIn("THREAD_NAMED_RX", self.h)
+        # the closing/handover-message intent stem (operative, in CLOSING_RX)
         self.assertIn("uzavierac", self.h)
-        self.assertIn("Vl", self.h)  # Vlákno acceptance marker mentioned
         # repo #319 convention: LC_ALL=C.UTF-8 on the greps
         self.assertIn("LC_ALL=C.UTF-8", self.h)
 
