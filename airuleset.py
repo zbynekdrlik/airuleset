@@ -461,6 +461,7 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
     render_stream_tmux_window_block,
     _live_revert_stream_window_name,
     _live_normalize_owner_session,
+    _owner_box_stray_name_res,
     apply_stream_tmux_window_name,
     apply_owner_session_created_audit,
     _sudo_write_root_file,
@@ -1022,14 +1023,23 @@ def cmd_install(args):
     except Exception as e:
         print(f"  tmux managed-block error: {e}", file=sys.stderr)
 
-    # --- 3c-bis. tmux owner-session normalization (#651): live-rename a lone
-    # `<owner>-N` grouped-sibling survivor to `<owner>` (only when the exact
-    # `<owner>` is absent AND exactly one numbered survivor exists) so the #651
-    # `-A -s <owner>` helpers + webterm's exact join hit it. Never kills, never
-    # touches a session outside the owner namespace, no-op with no live server.
+    # --- 3c-bis. tmux owner-session normalization (#651/#660). Two branches:
+    #   * `<owner>` ABSENT -> live-rename a lone `<owner>-N` grouped-sibling
+    #     survivor to `<owner>` (#651) so the `-A -s <owner>` helpers hit it.
+    #   * `<owner>` PRESENT -> KILL-SWEEP (#660): absorb every STRAY-named
+    #     session (`<owner>-N`, plus on an owner box the fleet stream families
+    #     `marek`/`montalu*`/... from the dev2 fleet incident) that is PROVABLY
+    #     idle -- unattached AND ungrouped AND every pane a bare shell with no
+    #     child process; NEVER a session running claude / a suspended job / a
+    #     grouped or attached session / anything outside the stray namespaces.
+    # Every kill/skip is logged to ~/.claude/tmux-audit/normalize.log; the
+    # stream-family widening is owner-boxes-only (never a subdev box, which
+    # would target the account's own real session). No-op with no live server.
     try:
         _owner = _owner_session_default(_current_user())
-        _live_normalize_owner_session(_owner)
+        _stray_res = _owner_box_stray_name_res(
+            _owner, is_single_session_box_user(_current_user()))
+        _live_normalize_owner_session(_owner, stray_name_res=_stray_res)
     except Exception as e:
         print(f"  tmux owner-session normalize error (non-fatal): {e}", file=sys.stderr)
 
