@@ -549,3 +549,203 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
         os.replace(str(tmp), str(bpath))
         return True
     return False
+
+
+# --- #656: owner-VPS ssh auto-attach ---------------------------------------
+# A VPS-class OWNER target (spinbike-vps, #408) runs the owner `newlevel` unix
+# account but a SINGLE dev project, unlike dev1/dev2's many. It is therefore
+# NOT `is_single_session_box_user` (that set is subdev streams + gk, and its
+# session-name convention is whoami), so the #264 subdev block never installs
+# there -- the owner lands in a bare shell. This installs the OWNER-session
+# convention instead: session = the owner tmux group (`_owner_session_default`,
+# `zbynek`), window = the project, cwd = the project dev dir.
+#
+# STRAY-AVOIDANCE (#660): the block must NOT reintroduce the
+# `tmux new-session -A -s <name>` shape whose hung/failed ATTACH can strand a
+# standalone idle-bash session. So create and attach are SEPARATED -- the
+# session is ensured with a DETACHED create (`new-session -d`, project window
+# baked in) and the FINAL step is `attach-session` (which never creates
+# anything). The api-watchdog pre-creates the owner session with a DEFAULT
+# `bash` window at $HOME, so the block ALSO ensures the project window exists
+# and ABSORBS that default (a window matching all three of name==`bash`, pane
+# cmd==`bash`, cwd==$HOME -- a window with real work never matches all three),
+# but only once the project window is present so the session always keeps a
+# window.
+OWNER_VPS_SSH_ATTACH_MARK_START = "# >>> airuleset: vps ssh auto-attach >>>"
+OWNER_VPS_SSH_ATTACH_MARK_END = "# <<< airuleset: vps ssh auto-attach <<<"
+
+# The owner VPS-class boxes: owner `newlevel` unix account, a SINGLE dev
+# project. Keyed by the box's HOSTNAME PREFIX (`nodename.split("-")[0]`), NOT
+# the #661 webterm short alias (`sb`), so it is robust to that alias choice.
+# Value = (tmux window name, dev dir relative to $HOME); the session is always
+# the owner tmux group (`_owner_session_default`), never stored here.
+OWNER_VPS_PROJECTS = {
+    "spinbike": ("spinbike", "devel/spinbike"),
+}
+
+
+def render_owner_vps_ssh_attach_block(session, window, rel_dir):
+    """The ~/.bashrc marker block giving an owner VPS-class box (#656) an ssh
+    auto-attach into the owner tmux session's project window. `session`,
+    `window` and `rel_dir` are BAKED as literals into shell/tmux argv, so each
+    is constrained to a safe token shape (the same injection guard as the #651
+    `render_tmux_attach_block`): session/window are unix-name tokens; rel_dir
+    is a slash-joined chain of such tokens, never absolute and never containing
+    a `..` component. The rendered `__airuleset_dir` is `$HOME/<rel_dir>`.
+
+    Guards are identical to the #264 subdev block (interactive shell + a real
+    ssh TTY + not already inside tmux + `command -v tmux`), so push/scp/watchdog
+    automation -- which pass a COMMAND to ssh (no 'i', no PTY) -- never trigger
+    it, and a missing tmux never `exec`s into a closed session. The final
+    `exec tmux attach-session` runs AFTER the process-substitution loops close
+    (the #284 CRITICAL-1 constraint)."""
+    import re
+    for label, val in (("session", session), ("window", window)):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", val or ""):
+            raise ValueError(
+                "unsafe %s for #656 owner-VPS block: %r" % (label, val))
+    # A project window literally named `bash` would MATCH the watchdog-default
+    # absorb condition (name==bash AND cmd==bash AND cwd==$HOME) whenever the
+    # dev dir is absent (so `__airuleset_dir` falls back to $HOME) -- the
+    # absorb would then kill the very project window it just ensured, emptying
+    # the session. A named project window named `bash` is nonsensical anyway;
+    # reject it at config time so that failure path can never be reached.
+    if window == "bash":
+        raise ValueError(
+            "owner-VPS project window may not be named 'bash' (#656): it would "
+            "collide with the watchdog-default absorb condition")
+    if (not rel_dir
+            or not re.fullmatch(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*", rel_dir)
+            or ".." in rel_dir.split("/")):
+        raise ValueError(
+            "unsafe rel_dir for #656 owner-VPS block: %r" % (rel_dir,))
+    return (
+        f"{OWNER_VPS_SSH_ATTACH_MARK_START}\n"
+        "# #656: a VPS-class OWNER box (spinbike-vps) runs the owner `newlevel`\n"
+        "# unix account but a SINGLE dev project. An interactive ssh login\n"
+        "# lands straight in the owner tmux session's project window, cwd the\n"
+        "# project dev dir -- the OWNER-session naming (session=<owner group>,\n"
+        "# window=<project>), NOT the subdev whoami one. Same three guards as\n"
+        "# the #264 block (interactive shell + a real ssh TTY + not already in\n"
+        "# tmux) plus `command -v tmux`, so push/scp/watchdog automation (a\n"
+        "# COMMAND passed to ssh -- no 'i', no PTY) never trigger it.\n"
+        'if [[ $- == *i* ]] && [ -n "${SSH_TTY:-}" ] && [ -z "${TMUX:-}" ] '
+        '&& command -v tmux >/dev/null 2>&1; then\n'
+        "  # the user-space claude install lives here; export before exec so\n"
+        "  # the tmux server the session runs under inherits it.\n"
+        '  export PATH="$HOME/.local/bin:$PATH"\n'
+        '  __airuleset_sess="%s"\n' % session
+        + '  __airuleset_win="%s"\n' % window
+        + '  __airuleset_dir="$HOME/%s"\n' % rel_dir
+        + '  [ -d "$__airuleset_dir" ] || __airuleset_dir="$HOME"\n'
+        "  # Ensure the owner session exists. Create it DETACHED with the\n"
+        "  # project window baked in when absent (NEVER `-A -s`: a hung/failed\n"
+        "  # ATTACH of a freshly-created session is exactly how a standalone\n"
+        "  # idle-bash stray appears, #660 -- create and attach are kept apart\n"
+        "  # so the attach below can never create anything). A create race lost\n"
+        "  # to the watchdog just no-ops and falls through to ensure/attach.\n"
+        '  tmux has-session -t "=$__airuleset_sess" 2>/dev/null \\\n'
+        '    || tmux new-session -d -s "$__airuleset_sess" -n "$__airuleset_win" \\\n'
+        '         -c "$__airuleset_dir" 2>/dev/null\n'
+        "  # Ensure the project window exists: the api-watchdog pre-creates the\n"
+        "  # owner session with a DEFAULT `bash` window at $HOME, so `-A` alone\n"
+        "  # would attach without ever applying the project window/dir.\n"
+        '  __airuleset_have_win=""\n'
+        "  while read -r __airuleset_wn; do\n"
+        '    [ "$__airuleset_wn" = "$__airuleset_win" ] && __airuleset_have_win=1\n'
+        '  done < <(tmux list-windows -t "=$__airuleset_sess" \\\n'
+        "             -F '#{window_name}' 2>/dev/null)\n"
+        '  if [ -z "$__airuleset_have_win" ]; then\n'
+        '    tmux new-window -t "=$__airuleset_sess" -n "$__airuleset_win" \\\n'
+        '      -c "$__airuleset_dir" 2>/dev/null && __airuleset_have_win=1\n'
+        "  fi\n"
+        "  # Absorb the watchdog's pre-created default (name `bash` + pane cmd\n"
+        "  # `bash` + cwd $HOME -- a window with real work never matches all\n"
+        "  # three). ONLY when the project window is present, so the session\n"
+        "  # always keeps a window (killing the last one would destroy it).\n"
+        '  if [ -n "$__airuleset_have_win" ]; then\n'
+        "    while read -r __airuleset_wid __airuleset_wn __airuleset_wc __airuleset_wp; do\n"
+        '      if [ "$__airuleset_wn" = "bash" ] && [ "$__airuleset_wc" = "bash" ] \\\n'
+        '          && [ "$__airuleset_wp" = "$HOME" ]; then\n'
+        '        tmux kill-window -t "$__airuleset_wid" 2>/dev/null\n'
+        "      fi\n"
+        '    done < <(tmux list-windows -t "=$__airuleset_sess" \\\n'
+        "               -F '#{window_id} #{window_name} #{pane_current_command} #{pane_current_path}' 2>/dev/null)\n"
+        '    tmux select-window -t "=$__airuleset_sess:$__airuleset_win" 2>/dev/null\n'
+        "  fi\n"
+        "  # Final attach: `attach-session` NEVER creates a session, so a\n"
+        "  # hung/failed attach can never leave a stray (#660). The exec runs\n"
+        "  # AFTER the process-substitution loops close (#284 CRITICAL-1: an\n"
+        "  # exec inside `done < <(...)` inherits that pipe as its own stdin and\n"
+        "  # a real tmux client then refuses to attach).\n"
+        '  exec tmux attach-session -t "=$__airuleset_sess"\n'
+        "fi\n"
+        f"{OWNER_VPS_SSH_ATTACH_MARK_END}"
+    )
+
+
+def _owner_vps_project(user=None, hostname=None):
+    """(window, rel_dir) for the owner-VPS ssh auto-attach if THIS box is a
+    registered owner single-project VPS, else None. The owner `newlevel` unix
+    account is shared by dev1/dev2/spinbike-vps, so the box is disambiguated by
+    HOSTNAME PREFIX via `OWNER_VPS_PROJECTS`. A stream/gk account
+    (`is_single_session_box_user`) is refused outright -- it has its own
+    #264/#562 block, and this guard also stops a stream account that ever ran
+    on a spinbike-named host from wrongly matching (the hostname prefix alone
+    would)."""
+    import airuleset
+    u = user or airuleset._current_user()
+    if is_single_session_box_user(u):
+        return None
+    box = hostname or os.uname().nodename
+    prefix = box.split("-")[0] if box else ""
+    return OWNER_VPS_PROJECTS.get(prefix)
+
+
+def apply_owner_vps_ssh_attach(bashrc_path: Path = None, user: str = None,
+                                host: str = None) -> bool:
+    """Idempotently add/remove the #656 owner-VPS ssh-auto-attach marker block
+    in ~/.bashrc, scoped by `_owner_vps_project` (a registered owner
+    single-project VPS -- spinbike-vps). Every box OUTSIDE that set (dev1/dev2,
+    a subdev stream, gk, anything): the marker is actively REMOVED there if ever
+    present, so a future eligibility edit can never leave a stale block on the
+    wrong box, and push idempotently REPLACES the interim hand-installed block
+    (same markers). Same idempotent positional-span shape + atomic write as
+    `apply_stream_ssh_attach`. Returns True iff ~/.bashrc changed."""
+    import airuleset
+    bpath = bashrc_path or airuleset.BASHRC
+    u = user or airuleset._current_user()
+    proj = _owner_vps_project(u, host)
+    existing = bpath.read_text() if bpath.exists() else ""
+    spans = _stream_marker_block_spans(
+        existing, OWNER_VPS_SSH_ATTACH_MARK_START, OWNER_VPS_SSH_ATTACH_MARK_END)
+    if proj is not None:
+        window, rel_dir = proj
+        block = render_owner_vps_ssh_attach_block(
+            _owner_session_default(u), window, rel_dir)
+        if spans:
+            out, cursor = [], 0
+            for s, e in spans:
+                out.append(existing[cursor:s])
+                out.append(block)
+                cursor = e
+            out.append(existing[cursor:])
+            new = "".join(out)
+        else:
+            sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+            new = f"{existing}{sep}\n{block}\n"
+    else:
+        if not spans:
+            return False
+        out, cursor = [], 0
+        for s, e in spans:
+            out.append(existing[cursor:s])
+            cursor = e
+        out.append(existing[cursor:])
+        new = "".join(out)
+    if new != existing:
+        tmp = bpath.with_suffix(bpath.suffix + ".airuleset-tmp")
+        tmp.write_text(new)
+        os.replace(str(tmp), str(bpath))
+        return True
+    return False
