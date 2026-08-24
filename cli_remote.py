@@ -98,6 +98,18 @@ REMOTE_DEPLOY_TIMEOUT_S = 1800
 # account, sourced from dev1's own local voiceagent checkout ------------------
 SONIOX_KEY_SOURCE = Path.home() / "devel" / "voiceagent" / ".env"
 
+# #659: the managed headless OAuth token (from `claude setup-token`) that lets
+# `claude` authenticate on an owner VPS-class box WITHOUT ever showing the
+# interactive login dialog on first run. Lives in the fleet's managed secret
+# store on the dev1 DRIVER (`~/.secrets/claude-code-oauth-token`, a bare token +
+# trailing newline -- persist it with `airuleset.py secret request
+# CLAUDE_CODE_OAUTH_TOKEN --persist ~/.secrets/claude-code-oauth-token` after a
+# one-time `claude setup-token`) and is delivered to owner_vps targets by
+# `provision_owner_headless_token`. Per the CC auth docs this token is
+# INDEPENDENT of the interactive `/login` credential -- delivering it never
+# rotates/invalidates the owner's primary dev1 login.
+OWNER_HEADLESS_TOKEN_SOURCE = Path.home() / ".secrets" / "claude-code-oauth-token"
+
 
 def _soniox_key_line(source: Path = None):
     """Extract ONLY the `SONIOX_API_KEY=...` line out of dev1's voiceagent
@@ -292,6 +304,130 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
             failed.append((remote["name"], "rc=%d" % r.returncode))
         else:
             print("    soniox key: delivered to %s" % remote["name"])
+    return failed
+
+
+def _owner_headless_token_value(source: Path = None):
+    """The headless OAuth token value out of the managed secret store on the
+    driver (`OWNER_HEADLESS_TOKEN_SOURCE`, a bare token + trailing newline).
+    Returns the stripped non-empty token, or None when the source is missing or
+    empty -- never raises, and NEVER returns/prints the value anywhere but into
+    the ssh `input=` payload of the delivery below."""
+    src = source if source is not None else OWNER_HEADLESS_TOKEN_SOURCE
+    if not src.is_file():
+        return None
+    import airuleset  # #433 L-E: read_file_safe stays resident in airuleset.py
+    val = airuleset.read_file_safe(src).strip()
+    return val or None
+
+
+def provision_owner_headless_token(hosts=None, run=None, source: Path = None,
+                                    skip_names=None, control_opts=None):
+    """Deliver the managed headless OAuth token to every owner VPS-class target
+    (#659) -- a REMOTE_HOSTS entry flagged `"owner_vps": True` -- so first-run
+    `claude` there NEVER shows the interactive login dialog. Driver-side
+    per-host secret delivery, the SAME Pattern B as `provision_subdev_soniox_key`
+    (ssh stdin, value never in argv, never printed by this process); the token
+    lands in the target's `~/.secrets/claude-code-oauth-token` (mode 600) and
+    the managed launcher exports it as `CLAUDE_CODE_OAUTH_TOKEN` only when that
+    file exists+non-empty (so it is a no-op on every non-owner-VPS box).
+
+    A missing source on the driver is a LOUD stderr failure -- every owner_vps
+    target is reported failed (with the one-time `claude setup-token` + persist
+    instruction), never a silent skip (feedback_provisioning_base_activity: a
+    silent provisioning gap is a dead feature). Returns the list of
+    `(remote_name, reason)` failures, mirroring cmd_push()'s `failed` shape.
+
+    `control_opts`/`skip_names` behave exactly as in provision_subdev_soniox_key
+    (reuse this run's authenticated ssh master; skip a host that already failed
+    auth this run). A host list with no owner_vps target never reads the source
+    at all."""
+    import subprocess
+    import time
+    run = run or subprocess.run
+    control_opts = list(control_opts or [])
+    targets = [h for h in _deployable_hosts(hosts) if h.get("owner_vps")]
+    if not targets:
+        return []
+
+    failed = []
+    skip = set(skip_names or ())
+    if skip:
+        deliverable = []
+        for h in targets:
+            if h["name"] in skip:
+                print("  ⚠ headless token delivery to %s SKIPPED — its deploy "
+                      "leg already failed auth this run (see the FAILED line "
+                      "above); not opening a second ssh connection against a "
+                      "known-unprovisioned/unreachable account." % h["name"],
+                      file=sys.stderr)
+                failed.append((h["name"], "skipped-known-auth-failure"))
+            else:
+                deliverable.append(h)
+        targets = deliverable
+        if not targets:
+            return failed
+
+    token = _owner_headless_token_value(source)
+    if token is None:
+        src = source if source is not None else OWNER_HEADLESS_TOKEN_SOURCE
+        print("  ⚠ HEADLESS OAUTH TOKEN SOURCE MISSING (%s) — skipping "
+              "CLAUDE_CODE_OAUTH_TOKEN delivery to %d owner VPS target(s). "
+              "One-time on the dev1 driver: run `claude setup-token`, then "
+              "`airuleset.py secret request CLAUDE_CODE_OAUTH_TOKEN --persist "
+              "%s` (or write the token to that file, mode 600). Never commit "
+              "or print the value." % (src, len(targets), src), file=sys.stderr)
+        return failed + [(h["name"], "headless-token-source-missing")
+                          for h in targets]
+
+    for remote in targets:
+        identity = remote.get("identity")
+        if identity:
+            ssh_prefix = ["ssh", "-i", os.path.expanduser(identity),
+                          "-o", "StrictHostKeyChecking=no",
+                          "-o", "BatchMode=yes"]
+        else:
+            ssh_prefix = ["sshpass", "-p", "newlevel", "ssh",
+                          "-o", "StrictHostKeyChecking=no",
+                          "-o", "NumberOfPasswordPrompts=1"]
+        argv = ssh_prefix + control_opts + [
+            f"{remote['user']}@{remote['host']}",
+            "umask 077; mkdir -p ~/.secrets && "
+            "cat > ~/.secrets/claude-code-oauth-token && "
+            "chmod 600 ~/.secrets/claude-code-oauth-token"]
+        r = None
+        exc = None
+        for attempt in range(1, SSH_RETRY_MAX_ATTEMPTS + 1):
+            exc = None
+            try:
+                r = run(argv, input=token + "\n", capture_output=True,
+                        text=True, timeout=20)
+            except Exception as e:
+                exc = e
+                break
+            if r.returncode == 0:
+                break
+            if (attempt >= SSH_RETRY_MAX_ATTEMPTS
+                    or not _is_ssh_transient_failure(r.returncode, r.stderr)):
+                break
+            backoff = _ssh_retry_backoff_s()
+            print(f"  transient ssh failure delivering headless token to "
+                  f"{remote['name']} (attempt {attempt}/"
+                  f"{SSH_RETRY_MAX_ATTEMPTS}) — retrying in {backoff}s: "
+                  f"{r.stderr.strip()[:200]}")
+            time.sleep(backoff)
+        if exc is not None:
+            print("  ⚠ headless token delivery to %s failed: %s"
+                  % (remote["name"], exc), file=sys.stderr)
+            failed.append((remote["name"], repr(exc)))
+            continue
+        if r.returncode != 0:
+            print("  ⚠ headless token delivery to %s failed (rc=%d): %s"
+                  % (remote["name"], r.returncode,
+                     (r.stderr or "").strip()[:200]), file=sys.stderr)
+            failed.append((remote["name"], "rc=%d" % r.returncode))
+        else:
+            print("    headless token: delivered to %s" % remote["name"])
     return failed
 
 
@@ -655,7 +791,13 @@ def _deploy_to_all_remotes(failed, auth_failed):
         for remote in _deployable_hosts():
             print(f"\n{'=' * 50}")
             print(f"Deploying to {remote['name']} ({remote['host']})...")
-            remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && python3 airuleset.py install"
+            # #659: signal an owner VPS-class target so its remote install
+            # provisions NOPASSWD sudo for the owner user (provision_owner_sudo).
+            # Set ONLY for an `owner_vps` entry -- the local dev1 install runs
+            # directly (not through this loop) so it never carries the env, and
+            # a sub-dev/other host never carries it either.
+            owner_vps_env = "AIRULESET_OWNER_VPS=1 " if remote.get("owner_vps") else ""
+            remote_cmd = f"cd {remote['repo_path']} && git pull --ff-only && {owner_vps_env}python3 airuleset.py install"
             # #347 adversarial-review CRITICAL finding: `audited_hosts` must
             # NOT be marked here (before the ssh call even runs) — a first
             # entry that fails (timeout/auth) before the remote shell ever
@@ -840,6 +982,16 @@ def _deploy_to_all_remotes(failed, auth_failed):
         print("Delivering Soniox key to subdev stream accounts...")
         failed.extend(provision_subdev_soniox_key(skip_names=auth_failed,
                                                     control_opts=control_opts))
+
+        # 3c. Deliver the managed headless OAuth token to owner VPS-class
+        # targets (#659) so first-run claude never shows the login dialog -- a
+        # true no-op when REMOTE_HOSTS has no owner_vps entry (the source is
+        # never read). Same #341/#358 skip-known-auth-failure + shared control
+        # master reuse as the soniox phase above.
+        print(f"\n{'=' * 50}")
+        print("Delivering headless OAuth token to owner VPS targets...")
+        failed.extend(provision_owner_headless_token(skip_names=auth_failed,
+                                                       control_opts=control_opts))
 
         if failed:
             # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
