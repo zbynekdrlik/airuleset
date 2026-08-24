@@ -39,6 +39,13 @@ import cli_binary_installers as binstall  # #614: ttyd static-binary auto-instal
 WEBTERM_DAVID_BIND = "127.0.0.1"
 WEBTERM_DAVID_TTYD_PORT = 7683
 WEBTERM_DAVID_GATEWAY_PORT = 8081
+# #663: Access-mode UNIX-socket basenames (in david1's /run/user/<uid>, 0700) that
+# REPLACE the TCP loopback ports — on the shared subdev box any local account could
+# reach 127.0.0.1:<port>, so a peer account forged the trust header at :8081 / hit
+# the auth-less ttyd :7683 directly. Filesystem permissions on the 0700 runtime dir
+# are the account boundary now (see cli_webterm.webterm_runtime_socket_abs).
+WEBTERM_DAVID_GATEWAY_SOCK_BASENAME = "webterm-david-gateway.sock"
+WEBTERM_DAVID_TTYD_SOCK_BASENAME = "webterm-david-ttyd.sock"
 WEBTERM_DAVID_INVENTORY_PATH = w.CLAUDE_DIR / "webterm-david-inventory.json"
 WEBTERM_DAVID_DASH_DIR = w.CLAUDE_DIR / "webterm-david-dash"
 WEBTERM_DAVID_DASH_INDEX = WEBTERM_DAVID_DASH_DIR / "index.html"
@@ -160,10 +167,22 @@ def render_david_gateway_unit():
     in the shared template's password-model COMMENT — neutralised to n/a here,
     with the extended _DAVID_UNIT_NOTE stating the real (Access) auth model."""
     tmpl = w.WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
-    return _DAVID_UNIT_NOTE + (
-        # ExecStart: password -> Cloudflare Access header trust (retire --cred).
+    # ExecStart transforms FIRST (before the individual {{TOKEN}} substitutions),
+    # so the flag substrings still carry their literal tokens when matched:
+    #   password --cred  -> Cloudflare Access header trust
+    #   #663 TCP bind    -> UNIX socket in the account runtime dir (%t == $XDG_RUNTIME_DIR)
+    #   #663 TCP ttyd    -> UNIX socket upstream
+    execstart = (
         tmpl.replace("--cred {{CRED_PATH}}",
                      "--trust-access-header " + access.WEBTERM_ACCESS_TRUST_HEADER)
+            .replace("--bind {{BIND_IP}} --port {{GATEWAY_PORT}}",
+                     "--socket %t/" + WEBTERM_DAVID_GATEWAY_SOCK_BASENAME)
+            .replace("--ttyd-host 127.0.0.1 --ttyd-port {{TTYD_PORT}}",
+                     "--ttyd-socket %t/" + WEBTERM_DAVID_TTYD_SOCK_BASENAME))
+    return _DAVID_UNIT_NOTE + (
+        execstart
+            # {{BIND_IP}}/{{GATEWAY_PORT}}/{{TTYD_PORT}} now survive only in the
+            # header COMMENT (the ExecStart is socket-based); keep them corrected.
             .replace("{{BIND_IP}}", WEBTERM_DAVID_BIND)
             .replace("{{GATEWAY_MODULE}}", str(w.WEBTERM_GATEWAY_MODULE))
             .replace("{{GATEWAY_PORT}}", str(WEBTERM_DAVID_GATEWAY_PORT))
@@ -225,7 +244,7 @@ def _write_david_artifacts():
     WEBTERM_DAVID_LAUNCH_PATH.write_text(
         w.render_webterm_launch_script(
             inventory_path=WEBTERM_DAVID_INVENTORY_PATH,
-            ttyd_port=WEBTERM_DAVID_TTYD_PORT),
+            ttyd_socket_basename=WEBTERM_DAVID_TTYD_SOCK_BASENAME),  # #663
         encoding="utf-8")
     os.chmod(WEBTERM_DAVID_LAUNCH_PATH, 0o755)
     WEBTERM_DAVID_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
@@ -277,13 +296,14 @@ def setup_webterm_david_tunnel(run=None):
     local_bin = Path.home() / ".local" / "bin" / "cloudflared"
     cloudflared_bin = (str(local_bin) if local_bin.is_file()
                        else (shutil.which("cloudflared") or WEBTERM_DAVID_CLOUDFLARED_BIN))
+    # #663: front the gateway's mode-0700 UNIX socket, not a TCP loopback port.
+    gw_sock = w.webterm_runtime_socket_abs(WEBTERM_DAVID_GATEWAY_SOCK_BASENAME)
     config_text = tun.render_cloudflared_tunnel_config(
         WEBTERM_DAVID_TUNNEL_UUID, str(WEBTERM_DAVID_TUNNEL_CREDS),
-        WEBTERM_DAVID_TUNNEL_HOSTNAME,
-        "http://%s:%d" % (WEBTERM_DAVID_BIND, WEBTERM_DAVID_GATEWAY_PORT))
+        WEBTERM_DAVID_TUNNEL_HOSTNAME, "unix:" + gw_sock)
     unit_text = tun.render_cloudflared_tunnel_unit(
-        "david webterm cloudflared tunnel (%s -> 127.0.0.1:%d)"
-        % (WEBTERM_DAVID_TUNNEL_HOSTNAME, WEBTERM_DAVID_GATEWAY_PORT),
+        "david webterm cloudflared tunnel (%s -> unix:%s)"
+        % (WEBTERM_DAVID_TUNNEL_HOSTNAME, gw_sock),
         str(WEBTERM_DAVID_TUNNEL_CONFIG), cloudflared_bin,
         after="network-online.target webterm-david-gateway.service")
     return tun._provision_managed_tunnel(

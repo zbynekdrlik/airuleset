@@ -75,6 +75,13 @@ MAREK_GATEWAY_USER = profiles.MAREK_GATEWAY_USER
 WEBTERM_MAREK_BIND = "127.0.0.1"
 WEBTERM_MAREK_TTYD_PORT = 7684
 WEBTERM_MAREK_GATEWAY_PORT = 8082
+# #663: Access-mode UNIX-socket basenames (in marek's /run/user/<uid>, 0700) that
+# REPLACE the TCP loopback ports — this lane's NEW auth-less ttyd :7684 /
+# header-forgeable gateway :8082 were the reachability #663's directional note flags
+# as newly exposing marek's own account to every other local subdev account. The
+# 0700 runtime dir is the account boundary now (see cli_webterm.webterm_runtime_socket_abs).
+WEBTERM_MAREK_GATEWAY_SOCK_BASENAME = "webterm-marek-gateway.sock"
+WEBTERM_MAREK_TTYD_SOCK_BASENAME = "webterm-marek-ttyd.sock"
 WEBTERM_MAREK_INVENTORY_PATH = w.CLAUDE_DIR / "webterm-marek-inventory.json"
 WEBTERM_MAREK_DASH_DIR = w.CLAUDE_DIR / "webterm-marek-dash"
 WEBTERM_MAREK_DASH_INDEX = WEBTERM_MAREK_DASH_DIR / "index.html"
@@ -189,9 +196,18 @@ def render_marek_gateway_unit():
     remaining `{{CRED_PATH}}` token lives only in the shared template's
     password-model COMMENT — neutralised to n/a here."""
     tmpl = w.WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
-    return _MAREK_UNIT_NOTE + (
+    # ExecStart transforms FIRST (before the {{TOKEN}} substitutions) so the flag
+    # substrings still carry their literal tokens: password --cred -> Access header
+    # trust; #663 TCP bind/ttyd -> UNIX sockets in the account runtime dir.
+    execstart = (
         tmpl.replace("--cred {{CRED_PATH}}",
                      "--trust-access-header " + access.WEBTERM_ACCESS_TRUST_HEADER)
+            .replace("--bind {{BIND_IP}} --port {{GATEWAY_PORT}}",
+                     "--socket %t/" + WEBTERM_MAREK_GATEWAY_SOCK_BASENAME)
+            .replace("--ttyd-host 127.0.0.1 --ttyd-port {{TTYD_PORT}}",
+                     "--ttyd-socket %t/" + WEBTERM_MAREK_TTYD_SOCK_BASENAME))
+    return _MAREK_UNIT_NOTE + (
+        execstart
             .replace("{{BIND_IP}}", WEBTERM_MAREK_BIND)
             .replace("{{GATEWAY_MODULE}}", str(w.WEBTERM_GATEWAY_MODULE))
             .replace("{{GATEWAY_PORT}}", str(WEBTERM_MAREK_GATEWAY_PORT))
@@ -227,7 +243,7 @@ def _write_marek_artifacts():
     WEBTERM_MAREK_LAUNCH_PATH.write_text(
         w.render_webterm_launch_script(
             inventory_path=WEBTERM_MAREK_INVENTORY_PATH,
-            ttyd_port=WEBTERM_MAREK_TTYD_PORT),
+            ttyd_socket_basename=WEBTERM_MAREK_TTYD_SOCK_BASENAME),  # #663
         encoding="utf-8")
     os.chmod(WEBTERM_MAREK_LAUNCH_PATH, 0o755)
     WEBTERM_MAREK_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
@@ -273,13 +289,14 @@ def setup_webterm_marek_tunnel(run=None):
     cloudflared_bin = (str(local_bin) if local_bin.is_file()
                        else (shutil.which("cloudflared")
                              or WEBTERM_MAREK_CLOUDFLARED_BIN))
+    # #663: front the gateway's mode-0700 UNIX socket, not a TCP loopback port.
+    gw_sock = w.webterm_runtime_socket_abs(WEBTERM_MAREK_GATEWAY_SOCK_BASENAME)
     config_text = tun.render_cloudflared_tunnel_config(
         WEBTERM_MAREK_TUNNEL_UUID, str(WEBTERM_MAREK_TUNNEL_CREDS),
-        WEBTERM_MAREK_TUNNEL_HOSTNAME,
-        "http://%s:%d" % (WEBTERM_MAREK_BIND, WEBTERM_MAREK_GATEWAY_PORT))
+        WEBTERM_MAREK_TUNNEL_HOSTNAME, "unix:" + gw_sock)
     unit_text = tun.render_cloudflared_tunnel_unit(
-        "marek webterm cloudflared tunnel (%s -> 127.0.0.1:%d)"
-        % (WEBTERM_MAREK_TUNNEL_HOSTNAME, WEBTERM_MAREK_GATEWAY_PORT),
+        "marek webterm cloudflared tunnel (%s -> unix:%s)"
+        % (WEBTERM_MAREK_TUNNEL_HOSTNAME, gw_sock),
         str(WEBTERM_MAREK_TUNNEL_CONFIG), cloudflared_bin,
         after="network-online.target webterm-marek-gateway.service")
     return tun._provision_managed_tunnel(

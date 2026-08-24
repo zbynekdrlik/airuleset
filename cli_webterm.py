@@ -74,6 +74,27 @@ WEBTERM_TTYD_BASE = "/t"
 # #579 two-port topology (a separate unauthenticated http.server dashboard +
 # a directly-exposed ttyd). Non-privileged port, so no CAP_NET_BIND_SERVICE.
 WEBTERM_GATEWAY_PORT = 8080
+# #663: on the SHARED subdev box a TCP `127.0.0.1:<port>` origin is reachable by
+# EVERY local unix account, so a peer account could forge the Access trust header at
+# another lane's gateway port OR reach its auth-less ttyd directly. In Access mode
+# the gateway + ttyd instead bind mode-0700 UNIX-domain sockets in the account's XDG
+# runtime dir (/run/user/<uid>) — filesystem permissions become the account
+# boundary. The systemd --user units reference `%t/<basename>` (%t == the account's
+# $XDG_RUNTIME_DIR); the cloudflared config + the ttyd launch bash use the absolute
+# /run/user/<uid>/<basename>. (Password mode keeps its TCP tailscale bind — a
+# different, deliberately tailnet-reachable threat model.)
+WEBTERM_GATEWAY_SOCK_BASENAME = "webterm-gateway.sock"
+WEBTERM_TTYD_SOCK_BASENAME = "webterm-ttyd.sock"
+
+
+def webterm_runtime_socket_abs(basename):
+    """#663: the absolute path of a webterm UNIX socket in THIS account's XDG
+    runtime dir (/run/user/<uid>/<basename>). Resolved from os.getuid() — the
+    render runs AS the gateway account (owner on dev1, david1/marek on subdev), so
+    the uid is the service account's — NOT from $XDG_RUNTIME_DIR (a push-driven
+    non-login ssh shell may not set it). It is the SAME file the systemd unit reaches
+    via `%t/<basename>` (systemd resolves %t to /run/user/<uid> for a --user unit)."""
+    return "/run/user/%d/%s" % (os.getuid(), basename)
 # The owner tmux session group on his own boxes (dev1/dev2). A stream account's
 # own session is named after its unix user (#264 whoami auto-attach convention).
 OWNER_GROUP = "zbynek"
@@ -1237,21 +1258,51 @@ set -euo pipefail
 """
 
 
-def render_webterm_launch_script(inventory_path=None, ttyd_port=None):
-    """The ttyd launcher: loopback bind + `-b /t` base path, no basic-auth, no
-    `-O` (#584 — the gateway is the sole entry + authenticator). #612: when
-    `inventory_path` is given (the david profile), it is EXPORTED as the
-    `WEBTERM_INVENTORY` env var that the ttyd child (`webterm-connect`) reads —
-    NOT a client-injectable argv flag (ttyd's `-a` appends client `?arg=` values
-    as argv, so an argv `--inventory` would be injectable — #612 review). That
-    makes the ttyd child's allowlist physically the profile's scoped inventory.
-    `ttyd_port` overrides the owner default (the david box uses its own loopback
-    port). With no `inventory_path`/`ttyd_port` (owner), the emitted script is
-    BYTE-IDENTICAL to pre-#612 — no env line, owner port."""
+# #663: Access-mode ttyd binds a mode-0700 UNIX-domain socket in the account's XDG
+# runtime dir instead of a TCP loopback port. On a shared box only this account can
+# traverse /run/user/<uid> (0700), so a peer account cannot reach the auth-less ttyd
+# directly. `rm -f` clears a stale socket left by a restart (tmpfs clears on reboot);
+# `umask 077` keeps ttyd's socket owner-only. The gateway reaches it via
+# --ttyd-socket over the SAME path.
+_LAUNCH_TEMPLATE_SOCKET = """#!/usr/bin/env bash
+# airuleset-managed (#555/#579/#584/#663) — do NOT edit; regenerate via `python3 airuleset.py install`.
+# Execs ttyd bound on a mode-0700 UNIX-domain socket in the account's XDG runtime
+# dir behind a `-b /t` base path; the same-origin gateway reaches it over that socket.
+set -euo pipefail
+%(inventory_export)sSOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/%(ttyd_sock_basename)s"
+rm -f "$SOCK"
+umask 077
+exec ttyd -i "$SOCK" -b %(base_path)s -a -W \\
+  python3 %(repo_dir)s/cli_webterm.py webterm-connect
+"""
+
+
+def render_webterm_launch_script(inventory_path=None, ttyd_port=None,
+                                 ttyd_socket_basename=None):
+    """The ttyd launcher: `-b /t` base path, no basic-auth, no `-O` (#584 — the
+    gateway is the sole entry + authenticator). #612: when `inventory_path` is given
+    (the david/marek profiles), it is EXPORTED as the `WEBTERM_INVENTORY` env var the
+    ttyd child (`webterm-connect`) reads — NOT a client-injectable argv flag (ttyd's
+    `-a` appends client `?arg=` values as argv, so an argv `--inventory` would be
+    injectable — #612 review).
+
+    #663: when `ttyd_socket_basename` is given, ttyd binds a UNIX-domain socket in
+    the account's XDG runtime dir (mutually exclusive with `ttyd_port` — the account
+    boundary is filesystem permissions, closing the direct-ttyd vector on a shared
+    box). Otherwise it binds the TCP loopback port (`ttyd_port` overrides the owner
+    default); with no `inventory_path`/`ttyd_port`/`ttyd_socket_basename` (owner
+    password mode), the emitted script is BYTE-IDENTICAL to pre-#663."""
     inventory_export = ""
     if inventory_path:
         inventory_export = ("export WEBTERM_INVENTORY=%s\n"
                             % shlex.quote(str(inventory_path)))
+    if ttyd_socket_basename:
+        return _LAUNCH_TEMPLATE_SOCKET % {
+            "ttyd_sock_basename": ttyd_socket_basename,
+            "base_path": shlex.quote(WEBTERM_TTYD_BASE),
+            "repo_dir": shlex.quote(str(REPO_DIR)),
+            "inventory_export": inventory_export,
+        }
     return _LAUNCH_TEMPLATE % {
         "ttyd_port": ttyd_port if ttyd_port is not None else WEBTERM_TTYD_PORT,
         "ttyd_bind": shlex.quote(WEBTERM_TTYD_BIND),
@@ -1320,11 +1371,22 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
         tmpl = tmpl.replace(
             "--cred {{CRED_PATH}}",
             "--trust-access-header " + access.WEBTERM_ACCESS_TRUST_HEADER)
+        # #663: retire the TCP loopback origin entirely — bind + reach ttyd over
+        # mode-0700 UNIX sockets in the account runtime dir (`%t` == the account's
+        # $XDG_RUNTIME_DIR), so no peer unix account on a shared box can forge the
+        # trust header at the gateway port OR reach ttyd directly. These substrings
+        # are replaced BEFORE the individual {{TOKEN}} substitutions below, so the
+        # ExecStart carries the socket flags while the header COMMENT's tokens (now
+        # dead) are still corrected by the note.
+        tmpl = tmpl.replace(
+            "--bind {{BIND_IP}} --port {{GATEWAY_PORT}}",
+            "--socket %t/" + WEBTERM_GATEWAY_SOCK_BASENAME)
+        tmpl = tmpl.replace(
+            "--ttyd-host 127.0.0.1 --ttyd-port {{TTYD_PORT}}",
+            "--ttyd-socket %t/" + WEBTERM_TTYD_SOCK_BASENAME)
         cred_sub = "n/a (Cloudflare Access — no credential)"
-        # Defense in depth: in Access mode the gateway ALWAYS binds loopback
-        # (cloudflared is the front), regardless of what the caller passes — the
-        # render is the single place that guarantees no tailnet bind can leak here
-        # (mirrors cli_webterm_david's hardcoded loopback bind).
+        # In Access mode {{BIND_IP}} survives only in the header COMMENT now; keep
+        # it loopback there so no human reads a tailnet bind into a passwordless unit.
         bind_ip = WEBTERM_TTYD_BIND
         note = _OWNER_ACCESS_UNIT_NOTE
     else:
@@ -1459,7 +1521,14 @@ def setup_webterm_service(run=None):
         _retire_owner_credential()
     else:
         _ensure_credential()
-    WEBTERM_LAUNCH_PATH.write_text(render_webterm_launch_script(), encoding="utf-8")
+    # #663: Access mode binds ttyd on a UNIX socket in the account runtime dir (no
+    # TCP loopback origin); password mode keeps the TCP loopback port (byte-identical).
+    if access_mode:
+        launch = render_webterm_launch_script(
+            ttyd_socket_basename=WEBTERM_TTYD_SOCK_BASENAME)
+    else:
+        launch = render_webterm_launch_script()
+    WEBTERM_LAUNCH_PATH.write_text(launch, encoding="utf-8")
     os.chmod(WEBTERM_LAUNCH_PATH, 0o755)
 
     WEBTERM_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)

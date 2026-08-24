@@ -93,7 +93,10 @@ class TestOwnerTunnelProvision(_TunnelIsolate, unittest.TestCase):
             cfg = pt["WEBTERM_OWNER_TUNNEL_CONFIG"].read_text()
             self.assertIn("tunnel: " + tun.WEBTERM_OWNER_TUNNEL_UUID, cfg)
             self.assertIn("hostname: zbynek.newlevel.media", cfg)
-            self.assertIn("service: http://127.0.0.1:8080", cfg)
+            # #663: front the gateway's mode-0700 UNIX socket, not a TCP loopback port
+            self.assertIn("service: unix:/run/user/", cfg)
+            self.assertIn("webterm-gateway.sock", cfg)
+            self.assertNotIn("http://127.0.0.1", cfg)
             unit = pt["WEBTERM_OWNER_TUNNEL_SERVICE_DEST"].read_text()
             self.assertIn("--config", unit)
             self.assertIn(str(pt["WEBTERM_OWNER_TUNNEL_CONFIG"]), unit)
@@ -146,7 +149,10 @@ class TestDavidTunnelProvision(_DavidTunnelIsolate, unittest.TestCase):
             cfg = pt["WEBTERM_DAVID_TUNNEL_CONFIG"].read_text()
             self.assertIn("tunnel: " + dv.WEBTERM_DAVID_TUNNEL_UUID, cfg)
             self.assertIn("hostname: david.newlevel.media", cfg)
-            self.assertIn("service: http://127.0.0.1:8081", cfg)
+            # #663: UNIX socket origin (account boundary), not TCP loopback :8081
+            self.assertIn("service: unix:/run/user/", cfg)
+            self.assertIn("webterm-david-gateway.sock", cfg)
+            self.assertNotIn("http://127.0.0.1", cfg)
             unit = pt["WEBTERM_DAVID_TUNNEL_SERVICE_DEST"].read_text()
             self.assertIn("airuleset-managed", unit)      # no longer hand-managed
             self.assertIn(["enable", "--now", "webterm-david-tunnel.service"], self.sysctl)

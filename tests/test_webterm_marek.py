@@ -161,20 +161,22 @@ class TestMarekAccessApp(unittest.TestCase):
 
 
 class TestMarekUnitRender(unittest.TestCase):
-    def test_gateway_unit_binds_loopback_access_mode_no_credential(self):
+    def test_gateway_unit_binds_unix_socket_no_tcp_access_mode_no_credential(self):
+        # #663: UNIX-socket origin in marek's runtime dir — NO TCP loopback surface
+        # (this lane's NEW auth-less ttyd/header-forgeable gateway were the reach
+        # #663's directional note flags as newly exposing marek's own account).
         unit = mk.render_marek_gateway_unit()
-        self.assertIn("--bind %s" % mk.WEBTERM_MAREK_BIND, unit)
-        self.assertEqual(mk.WEBTERM_MAREK_BIND, "127.0.0.1")
-        self.assertNotIn("--bind 100.", unit)
-        self.assertNotIn("--bind 0.0.0.0", unit)
-        self.assertIn("--port %d" % mk.WEBTERM_MAREK_GATEWAY_PORT, unit)
-        self.assertIn("--ttyd-port %d" % mk.WEBTERM_MAREK_TTYD_PORT, unit)
+        exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+        self.assertIn("--socket %t/" + mk.WEBTERM_MAREK_GATEWAY_SOCK_BASENAME, exec_line)
+        self.assertIn("--ttyd-socket %t/" + mk.WEBTERM_MAREK_TTYD_SOCK_BASENAME, exec_line)
+        self.assertNotIn("--bind ", exec_line)
+        self.assertNotIn("--port ", exec_line)
+        self.assertNotIn("--ttyd-host", exec_line)
+        self.assertNotIn("--ttyd-port", exec_line)
         # Cloudflare Access mode: NO password/credential.
         self.assertIn("--trust-access-header Cf-Access-Authenticated-User-Email",
-                      unit)
-        self.assertNotIn("--cred ", unit)
-        # NOT the owner OR david realm ports/paths.
-        self.assertNotIn("--port %d" % w.WEBTERM_GATEWAY_PORT, unit)
+                      exec_line)
+        self.assertNotIn("--cred ", exec_line)
 
     def test_marek_ports_are_distinct_from_owner_and_david(self):
         import cli_webterm_david as d
@@ -288,7 +290,10 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             self.assertIn("export WEBTERM_INVENTORY=", launcher)
             self.assertIn("webterm-marek-inventory.json", launcher)
             self.assertNotIn("--inventory", launcher)
-            self.assertIn("-p %d" % mk.WEBTERM_MAREK_TTYD_PORT, launcher)
+            # #663: ttyd binds a UNIX socket in the account runtime dir, not a TCP port
+            self.assertIn(mk.WEBTERM_MAREK_TTYD_SOCK_BASENAME, launcher)
+            self.assertIn('-i "$SOCK"', launcher)
+            self.assertNotIn("-p %d" % mk.WEBTERM_MAREK_TTYD_PORT, launcher)
 
     def test_full_setup_when_ready_provisions_and_enables(self):
         calls = []

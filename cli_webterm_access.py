@@ -22,19 +22,22 @@ cli_webterm_profiles.py, so the connect path stays import-light.
 
 SECURITY NOTE (honest, not hidden): pure stdlib has no RSA, so we do NOT
 cryptographically validate the Access JWT (`Cf-Access-Jwt-Assertion`) at the
-origin. The boundary is: Access-at-edge (email OTP) + the loopback-only gateway
-reachable ONLY through the cloudflared tunnel (which serves only the
-Access-protected hostname) + Cloudflare STRIPPING client-supplied `Cf-*` headers
-before setting authentic ones. A local process on subdev that reaches
-127.0.0.1:<gwport> could forge the trust header — but the local floor is already
-the pre-existing LOOPBACK ttyd (127.0.0.1:<ttydport>, no auth of its own): a
-local subdev account can reach that directly regardless, so header-trust adds no
-local exposure the fleet did not already have, and retiring the password does not
-worsen the local posture. Parallels the existing "rate limiter behind cloudflared
-sees only 127.0.0.1" residual (#612 R2 review). A stronger stdlib-friendly
-hardening (out of scope here — it would need to cover ttyd too) is a mode-0600
-unix-domain socket owned by david1 so only cloudflared/david1 can reach the
-origin; filed as a possible future improvement, not required for this change.
+origin. The boundary is: Access-at-edge (email OTP) + Cloudflare STRIPPING
+client-supplied `Cf-*` headers before setting authentic ones + the gateway/ttyd
+origins being reachable ONLY by the account. #663 CLOSED the former loopback
+floor: on the SHARED subdev box a TCP `127.0.0.1:<port>` origin was reachable by
+EVERY local account — a peer account could forge this trust header at another
+lane's gateway OR reach its auth-less ttyd directly (both live-reproduced, #663).
+The gateway and ttyd now bind mode-0700 UNIX-domain sockets in the account's
+`/run/user/<uid>` runtime dir (cloudflared `service: unix:<path>`, ttyd
+`-i <sock>`, gateway `asyncio.start_unix_server`/`open_unix_connection`) instead
+of TCP loopback, so FILESYSTEM PERMISSIONS on the 0700 dir are the account
+boundary: only the account (its own cloudflared) can traverse to either socket,
+and the trust-header residual becomes a same-account no-escalation (an account
+"forging" a header into its OWN socket already owns that shell). The remaining
+stdlib residual — no RS256 JWT verification — is unrelated to local reachability
+and is superseded on that front by the socket boundary (JWT would protect only
+the gateway hop, never the direct-ttyd vector #663 also closed).
 """
 import json
 import os
