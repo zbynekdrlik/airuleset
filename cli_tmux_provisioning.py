@@ -53,6 +53,23 @@ CLAUDE_HISTORY_POPUP_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-history-popup.
 TMUX_CONF = Path.home() / ".tmux.conf"
 TMUX_HISTORY_LIMIT = 50000
 TMUX_DEFAULT_SIZE = "176x50"
+
+# #660: audit trail for tmux stray-session hygiene on the OWNER box --
+# `normalize.log` (the kill-sweep's kill/skip decisions) and, from the
+# native session-created hook, `session-created.log` (creator capture).
+TMUX_AUDIT_DIR = CLAUDE_DIR / "tmux-audit"
+
+# #660: a pane whose FOREGROUND command (tmux's `#{pane_current_command}`,
+# which strips the login-shell leading dash) is one of these bare shells is an
+# idle pane BY FOREGROUND ONLY -- NOT by itself proof the session is absorbable
+# (review 🔵3). `_maybe_absorb_idle_stray` requires TWO more conditions the
+# foreground command cannot show: no child process (`_pane_has_child` -- a
+# Ctrl-Z'd claude) and cwd in $HOME (a work session sits in a project dir). ANY
+# other foreground command (claude, node, an editor, ssh, python, ...) means the
+# session is doing work and is NEVER killed (feedback_never_touch_stopped_sessions).
+_BARE_SHELL_COMMANDS = frozenset({
+    "bash", "sh", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "ash", "mksh",
+})
 # #613 REOPEN-2 (owner directive 2026-08-22): `window-size manual` is RESTORED
 # (version-gated + conf-only, exactly #586), reversing the first reopen. The
 # owner's governing agreement is a FIXED terminal size for EVERY client so no
@@ -616,6 +633,14 @@ def _default_tmux_run(argv):
     return subprocess.run(argv, capture_output=True, text=True, timeout=8)
 
 
+def _default_ps_run(argv):
+    """#660: the real `ps` runner for the kill-sweep's no-suspended-child guard
+    (review 🟡4). Separate injection point from `_default_tmux_run` so a test
+    can fake tmux and ps independently; identical bounded-subprocess shape."""
+    import subprocess
+    return subprocess.run(argv, capture_output=True, text=True, timeout=8)
+
+
 def _parse_tmux_version(text):
     """`(major, minor)` from a `tmux -V` line like `tmux 3.7b` / `tmux 3.4` /
     `tmux next-3.8`, or None if unparseable/empty. Any trailing letter (the
@@ -1063,29 +1088,233 @@ def _live_revert_stream_window_name(alias, run=None):
                   % (wid, e), file=sys.stderr)
 
 
-def _live_normalize_owner_session(owner, run=None):
-    """#651: idempotent live normalization on any RUNNING server for this box.
-    If the owner group has EXACTLY ONE surviving session named `<owner>-N`
-    (N all-digits -- an accidental `tmux new -t <owner>` grouped sibling, the
-    exact pile-up this ticket fixes) AND no session named `<owner>` exists,
-    rename that lone survivor to `<owner>` so the native `new-session -A -s
-    <owner>` (the #651 `t` / `tmux()` wrapper, and webterm's exact `=<owner>`
-    join) attaches to it instead of spawning yet another sibling.
+def _is_bare_shell(cmd):
+    """#660: True iff `cmd` (a tmux `#{pane_current_command}`) is one of the
+    bare interactive shells -- an IDLE pane. tmux strips the login-shell
+    leading dash from `pane_current_command`, but a defensive `lstrip('-')`
+    covers any variant that carries it."""
+    return (cmd or "").strip().lstrip("-") in _BARE_SHELL_COMMANDS
 
-    Conservative by construction:
-      * `rename-session` NEVER kills anything -- an attached survivor stays
-        attached (the 'never kill an attached session automatically' rule);
-      * only the `<owner>-<digits>` namespace is ever matched, never a session
-        the owner deliberately named (e.g. `<owner>-foo`), and never a session
-        outside the owner group;
-      * ANY ambiguity is a silent no-op: the exact `<owner>` already exists,
-        zero or >=2 numbered survivors (don't guess which becomes canonical),
-        or no reachable server / a non-zero list-sessions.
 
-    Same dependency-injectable `run` + failure-tolerant shape as
-    `_live_apply_stream_window_name`; config-path ONLY (`rename-session`,
-    NEVER a `send-keys` keystroke), and it NEVER creates or resurrects a
-    session -- `rename-session` only relabels one that already exists."""
+def _audit_normalize(audit_dir, action, session, reason):
+    """#660: append ONE tab-separated line (`<iso-ts> <action> session=<name>
+    <reason>`) recording a kill/skip decision to `<audit_dir>/normalize.log`.
+    Best-effort: audit logging NEVER breaks normalization -- an unwritable
+    dir is noted on stderr, never allowed to raise into the caller."""
+    import datetime
+    try:
+        d = Path(audit_dir) if audit_dir else TMUX_AUDIT_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        with open(d / "normalize.log", "a") as f:
+            f.write("%s\t%s\tsession=%s\t%s\n" % (ts, action, session, reason))
+    except Exception as e:
+        print("  tmux normalize-audit write skipped (non-fatal): %s" % e,
+              file=sys.stderr)
+
+
+def _pane_has_child(pane_pid, ps_run):
+    """#660 (review 🟡4): True iff the shell at `pane_pid` has ANY child
+    process -- a SUSPENDED (Ctrl-Z'd claude) or BACKGROUNDED job. tmux's
+    `#{pane_current_command}` reports only the FOREGROUND process, so a shell
+    with a stopped/background child reads as a bare idle shell; killing it
+    SIGHUPs that hidden child (claude/build dies). This is the guard that
+    makes 'provably idle' true. FAILS SAFE -> True (skip the kill): a
+    non-numeric/empty pid, a ps error, or an unreadable result all read as
+    'has work'. `ps --ppid <pid>` exits 1 with empty output when there are NO
+    children (the safe-to-kill case); any output means a child exists."""
+    p = (pane_pid or "").strip()
+    if not p.isdigit():
+        return True
+    runner = ps_run or _default_ps_run
+    try:
+        res = runner(["ps", "-o", "pid=", "--ppid", p])
+    except Exception:
+        return True
+    # review 🔵4: a degenerate result (a runner returning None, or an object
+    # with no `returncode`) must read as UNREADABLE -> fail safe, so the
+    # default is OUTSIDE {0,1} (255), never 1 ("no children, safe to kill").
+    rc = getattr(res, "returncode", 255)
+    out = (getattr(res, "stdout", "") or "").strip()
+    if rc not in (0, 1):
+        # ps returns 1 == no matching child (GOOD); anything other than 0/1 is
+        # unreadable -> fail safe.
+        return True
+    return bool(out)
+
+
+def _maybe_absorb_idle_stray(stray, runner, audit_dir, ps_run=None, home=None):
+    """#660: kill a standalone stray IFF it is PROVABLY idle -- unattached AND
+    UNGROUPED (its own windows, never a grouped view or a grouped multi-window
+    work session like `marek-3`) AND every pane a bare shell whose shell has NO
+    child process (no suspended/backgrounded claude or build, review 🟡4) AND
+    every pane's cwd is exactly the user's HOME. ANY other state -- attached
+    (any pane), grouped, any non-shell pane, any pane with a child, any pane
+    cwd'd OUTSIDE $HOME (a real work session -- the second-review residual: a
+    stream name like `marek` doubles as a real work session whose stopped-claude
+    bare shell must be left alone, feedback_never_touch_stopped_sessions), no
+    readable pane data, or a tmux/kill error/non-zero -- is a logged SKIP, never
+    a kill. Every observed stray was created by `new-session -A -s <name>` from
+    an ssh login whose cwd is $HOME, so `cwd == $HOME` is the throwaway-stray
+    signal that distinguishes it from a deliberately-kept work session in a
+    project dir. Target `=<name>` (tmux exact-match) so a kill can never
+    prefix-match a different session. Config-path ONLY (`kill-session`, never
+    `send-keys`)."""
+    home_real = os.path.realpath(home or os.path.expanduser("~"))
+    try:
+        res = runner(["tmux", "list-panes", "-s", "-t", "=" + stray, "-F",
+                      "#{session_attached}\t#{session_group}\t"
+                      "#{pane_current_command}\t#{pane_pid}\t"
+                      "#{pane_current_path}"])
+    except Exception as e:
+        _audit_normalize(audit_dir, "skip", stray, "list-panes error: %s" % e)
+        return
+    if getattr(res, "returncode", 1) != 0:
+        _audit_normalize(audit_dir, "skip", stray, "list-panes non-zero")
+        return
+    lines = [ln for ln in (getattr(res, "stdout", "") or "").splitlines()
+             if ln.strip()]
+    if not lines:
+        # a real session always has >=1 pane -- empty output means we cannot
+        # confirm it is idle, so we NEVER kill (conservative).
+        _audit_normalize(audit_dir, "skip", stray, "no pane data")
+        return
+    attached_any = False
+    grouped = False
+    off_home = False
+    panes = []  # (cmd, pane_pid)
+    for ln in lines:
+        parts = ln.split("\t")
+        att = parts[0].strip() if len(parts) > 0 else ""
+        grp = parts[1].strip() if len(parts) > 1 else ""
+        cmd = parts[2].strip() if len(parts) > 2 else ""
+        pid = parts[3].strip() if len(parts) > 3 else ""
+        cwd = parts[4].strip() if len(parts) > 4 else ""
+        if att and att != "0":   # review 🔵5: any pane's attached flag counts
+            attached_any = True
+        if grp:
+            grouped = True
+        # a missing/unreadable cwd (no 5th field) fails SAFE -> treated as
+        # off-home so an ambiguous pane is never killed.
+        if not cwd or os.path.realpath(cwd) != home_real:
+            off_home = True
+        panes.append((cmd, pid))
+    if attached_any:
+        _audit_normalize(audit_dir, "skip", stray, "attached")
+        return
+    if grouped:
+        # a grouped session shares a base's windows (a webterm/ssh view) or is a
+        # multi-window work session (marek-3) -- never a standalone stray.
+        _audit_normalize(audit_dir, "skip", stray, "grouped (shared/work session)")
+        return
+    non_shell = sorted({c for c, _ in panes if not _is_bare_shell(c)})
+    if non_shell:
+        _audit_normalize(audit_dir, "skip", stray,
+                         "non-shell pane(s): %s" % ",".join(non_shell))
+        return
+    if off_home:
+        # a pane cwd'd outside $HOME is a real work session, not a throwaway
+        # stray -- never kill it (protects a stopped-claude stream work session).
+        _audit_normalize(audit_dir, "skip", stray, "pane cwd outside $HOME (work session)")
+        return
+    if any(_pane_has_child(pid, ps_run) for _, pid in panes):
+        _audit_normalize(audit_dir, "skip", stray,
+                         "pane shell has a child (suspended/background job)")
+        return
+    try:
+        kres = runner(["tmux", "kill-session", "-t", "=" + stray])
+    except Exception as e:
+        _audit_normalize(audit_dir, "skip", stray, "kill-session error: %s" % e)
+        return
+    if getattr(kres, "returncode", 1) != 0:   # review 🟡3: never log a false kill
+        _audit_normalize(audit_dir, "skip", stray, "kill-session non-zero")
+        return
+    _audit_normalize(audit_dir, "killed", stray,
+                     "idle standalone bare-shell stray (%d pane(s))" % len(panes))
+
+
+def _fleet_stream_stems():
+    """#660: the family STEMS of the fleet's subdev stream accounts (marek,
+    david, montalu, simap, miva, ...). On an OWNER (multi-project) box a
+    session named after one of these, STANDALONE + idle, is a STRAY -- the
+    streams work on the subdev box, never as a loose owner-box session (the
+    dev2 `marek`/`marek-12` incident, #660 fleet-wide). Derived from the SAME
+    registry the rest of the fleet uses (AUTHORITY_BY_USER + STREAM_RENAME_
+    ALIASES old names), never a parallel hardcoded list; a stem strips any
+    trailing digits (montalu2 -> montalu). Empty on any import failure
+    (fail-safe: no widening -- the `<owner>-N` sweep still runs)."""
+    import re as _re
+    try:
+        import airuleset
+        names = set(airuleset.AUTHORITY_BY_USER)
+        names |= set(getattr(airuleset, "STREAM_RENAME_ALIASES", {}).keys())
+    except Exception:
+        return set()
+    stems = set()
+    for n in names:
+        m = _re.match(r"^([a-z]+?)\d*$", n)
+        if m:
+            stems.add(m.group(1))
+    return stems
+
+
+def _owner_box_stray_name_res(owner, single_session):
+    """#660: the compiled name patterns the kill sweep treats as STRAY on this
+    box. ALWAYS the owner's own numbered-sibling namespace `^<owner>-\\d+$`
+    (the #651 accidental `tmux new -t <owner>` pile-up). On an OWNER
+    (multi-project) box ADDITIONALLY every fleet stream family: `^<stem>\\d*
+    (?:-\\d+)?$` for each stem != owner (so `marek`, `marek-12`, `montalu2`,
+    `montalu2-5` match, but a deliberately-named `marek-notes` does NOT -- only
+    a digit / `-<digits>` tail). Never the bare `<owner>` name itself (the
+    canonical session), and never a session the owner deliberately named
+    outside these namespaces. A single-session (subdev/gk) box gets ONLY the
+    owner-N pattern -- widening there would target the account's own real
+    session, so it is owner-boxes-only."""
+    import re
+    res = [re.compile(r"^" + re.escape(owner) + r"-\d+$")]
+    if not single_session:
+        for stem in sorted(_fleet_stream_stems()):
+            if stem != owner:
+                res.append(re.compile(r"^" + re.escape(stem) + r"\d*(?:-\d+)?$"))
+    return res
+
+
+def _live_normalize_owner_session(owner, run=None, audit_dir=None,
+                                  stray_name_res=None, ps_run=None, home=None):
+    """#651/#660: idempotent live normalization on any RUNNING server for this
+    box. Two mutually-exclusive branches, keyed on whether the canonical
+    `<owner>` session already exists:
+
+    * `<owner>` ABSENT (the #651 rename path, unchanged): if EXACTLY ONE
+      surviving `<owner>-N` (N all-digits -- an accidental `tmux new -t
+      <owner>` grouped sibling) exists, `rename-session` it to `<owner>` so
+      the native `-A -s <owner>` helpers attach to it. `rename-session` NEVER
+      kills; zero or >=2 survivors is a silent no-op (never guess which
+      becomes canonical).
+
+    * `<owner>` PRESENT (#660 kill sweep): the canonical session is safe, so
+      absorb (`kill-session`) every STRAY-named session that is provably an
+      idle bare shell -- unattached AND ungrouped AND every pane a bare shell
+      with no child process AND cwd'd in $HOME (`_maybe_absorb_idle_stray`);
+      NEVER one running claude / any non-shell / any suspended-or-background job
+      / any pane in a project dir (feedback_never_touch_stopped_sessions). Every
+      kill/skip decision is logged to `<audit_dir>/normalize.log`. `home` is the
+      injectable HOME for that cwd guard (default `~`).
+
+    `stray_name_res` (compiled regexes) selects WHICH names are stray-candidates
+    for the kill path -- default `[^<owner>-\\d+$]` (owner numbered siblings
+    only), and the cmd_install caller passes the widened owner-box set (owner-N
+    + fleet stream families, `_owner_box_stray_name_res`) so the dev2
+    `marek`/`marek-12` fleet strays are covered too. The bare `<owner>` name is
+    always excluded (the canonical session). `ps_run` is the injectable ps
+    runner for the no-suspended-child guard.
+
+    Conservative by construction throughout: only the stray namespaces are ever
+    matched (never a deliberately-named session outside them); config-path ONLY
+    (`rename-session` / `kill-session`, NEVER a `send-keys` keystroke);
+    failure-tolerant (no reachable server / a non-zero list-sessions -> silent
+    no-op). Same dependency-injectable `run` shape as
+    `_live_apply_stream_window_name`."""
     import re
     runner = run or _default_tmux_run
     try:
@@ -1099,17 +1328,28 @@ def _live_normalize_owner_session(owner, run=None):
     names = [ln.strip()
              for ln in (getattr(result, "stdout", "") or "").splitlines()
              if ln.strip()]
-    if owner in names:
-        return  # the canonical session already exists -- nothing to normalize
-    pat = re.compile(r"^" + re.escape(owner) + r"-\d+$")
-    survivors = [n for n in names if pat.match(n)]
-    if len(survivors) != 1:
-        return  # zero or ambiguous -- never guess which becomes canonical
-    try:
-        runner(["tmux", "rename-session", "-t", survivors[0], owner])
-    except Exception as e:
-        print("  tmux owner-session normalize (rename) skipped (non-fatal): %s"
-              % e, file=sys.stderr)
+    owner_pat = re.compile(r"^" + re.escape(owner) + r"-\d+$")
+    if owner not in names:
+        # #651 RENAME path (unchanged): promote a lone numbered survivor.
+        survivors = [n for n in names if owner_pat.match(n)]
+        if len(survivors) != 1:
+            return  # zero or ambiguous -- never guess which becomes canonical
+        try:
+            runner(["tmux", "rename-session", "-t", survivors[0], owner])
+        except Exception as e:
+            print("  tmux owner-session normalize (rename) skipped (non-fatal):"
+                  " %s" % e, file=sys.stderr)
+        return
+    # #660 KILL SWEEP: the canonical `<owner>` exists -- absorb each idle
+    # standalone bare-shell STRAY (by `stray_name_res`), log the rest. The bare
+    # `<owner>` canonical is never a candidate (it never matches `<owner>-\d+`
+    # and is guarded out explicitly).
+    res_list = stray_name_res if stray_name_res is not None else [owner_pat]
+    for name in names:
+        if name == owner:
+            continue
+        if any(r.match(name) for r in res_list):
+            _maybe_absorb_idle_stray(name, runner, audit_dir, ps_run, home)
 
 
 def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
@@ -1194,6 +1434,227 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
         # (so the owner's navigation is restored without a restart; the conf
         # strip above only fixes the NEXT server start).
         _live_revert_stream_window_name(alias, run)
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# #660: native `session-created` audit hook on the OWNER box.
+#
+# ROOT CAUSE (repro'd live on an isolated `-L` socket, tmux 3.7b): a stray
+# standalone `<owner>-N` (own bash window, no group tag) is created by a path
+# the #651 interactive-only 3-token `tmux()` wrapper does not cover (a 4-token
+# `new-session -d -t`, a non-interactive/ssh/webterm/script context, `command
+# tmux`, or an explicit `-s <owner>-N`). The stray pane's process tree ends at
+# the tmux SERVER, so the creating CLIENT is unrecoverable AFTER the fact --
+# meaning the creator cannot be pinned statically. This native hook is the
+# DETERMINISTIC answer (#649 native-beats-custom): it logs EVERY session
+# creation's client pid/tty/name + a ps chain of the creator, so the NEXT
+# stray's creator is captured for certain.
+#
+# OWNER BOXES ONLY. A single-session box (gk + subdev streams,
+# `is_single_session_box_user`) already binds `session-created` to
+# `rename-window` (#593), so this must NEVER render there -- the two are
+# mutually exclusive by box type, so the single global hook slot never
+# collides. On an owner box (dev1/dev2), `session-created` is otherwise unset
+# (apply_stream_tmux_window_name's owner-box path REVERTS/unsets it), so this
+# applier must run AFTER apply_stream_tmux_window_name in the install flow
+# (else that revert's live `set-hook -gu session-created` would clear this
+# hook right after we set it -- the persistent conf block below survives a
+# server restart regardless, but the live-apply needs the ordering).
+# ---------------------------------------------------------------------------
+
+OWNER_AUDIT_MARK_START = "# >>> airuleset tmux owner session-created audit >>>"
+OWNER_AUDIT_MARK_END = "# <<< airuleset tmux owner session-created audit <<<"
+OWNER_AUDIT_LOGGER_REL = ".claude/tmux-audit/log-session-created.sh"
+
+
+def render_owner_audit_logger():
+    """The managed logger script invoked by the `session-created` hook. Appends
+    ONE line per session creation to `~/.claude/tmux-audit/session-created.log`:
+    ISO timestamp, session name, creating-client pid/tty/name, a ps chain of
+    the creator (walked up to 3 ancestors of the client pid), and -- for a
+    DETACHED create with no client pid -- a snapshot of any live `tmux new*`
+    CLI process still mid-command. Best-effort throughout (`-b` backgrounds it,
+    every fallible step is guarded), so it can never block or fail a session
+    creation. Bounded to the last 500 log lines."""
+    return (
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        "# #660: airuleset owner-box tmux session-created audit logger. Invoked\n"
+        "# by the native `set-hook -g session-created` (run-shell -b) with the\n"
+        "# new session name + creating-client fields. The pane process tree of a\n"
+        "# stray ends at the tmux server, so the creating CLIENT is otherwise\n"
+        "# unrecoverable post-hoc; this line is the deterministic capture.\n"
+        "# #660 review 2: each field is sentinel-prefixed with a literal x\n"
+        "# (x#{q:...}) so an empty value keeps its positional slot; strip it.\n"
+        'sess="${1:-x}"; sess="${sess#x}"\n'
+        'cpid="${2:-x}"; cpid="${cpid#x}"\n'
+        'ctty="${3:-x}"; ctty="${ctty#x}"\n'
+        'cname="${4:-x}"; cname="${cname#x}"\n'
+        "# #660 review 7: guard HOME so a server spawned from a stripped env\n"
+        "# does not abort under set -u before anything is logged.\n"
+        '[ -n "${HOME:-}" ] || exit 0\n'
+        'dir="$HOME/.claude/tmux-audit"\n'
+        'log="$dir/session-created.log"\n'
+        'mkdir -p "$dir" 2>/dev/null || exit 0\n'
+        "ts=\"$(date -Is 2>/dev/null || date 2>/dev/null || echo '?')\"\n"
+        'creator=""\n'
+        'case "$cpid" in\n'
+        "  ''|*[!0-9]*) : ;;\n"
+        "  *)\n"
+        '    p="$cpid"\n'
+        "    for _ in 1 2 3; do\n"
+        '      row="$(ps -o pid=,ppid=,user=,args= -p "$p" 2>/dev/null '
+        "| tr -s ' ' | sed 's/^ //' || true)\"\n"
+        '      [ -n "$row" ] || break\n'
+        '      creator="${creator}[${row}] "\n'
+        '      p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d \' \' || true)"\n'
+        '      case "$p" in \'\'|0|1) break ;; esac\n'
+        "    done\n"
+        "    ;;\n"
+        "esac\n"
+        'tmuxprocs=""\n'
+        'if [ -z "$cpid" ]; then\n'
+        "  tmuxprocs=\"$(ps -eo pid=,ppid=,args= 2>/dev/null "
+        "| grep -E 'tmux( -[^ ]+)* (new-session|new)( |$)' "
+        "| grep -v ' grep' | tr '\\n' ';' || true)\"\n"
+        "fi\n"
+        "printf '%s\\tsession=%s\\tclient_pid=%s\\tclient_tty=%s"
+        "\\tclient_name=%s\\tcreator=%s\\ttmux_new_procs=%s\\n' \\\n"
+        '  "$ts" "$sess" "$cpid" "$ctty" "$cname" "$creator" "$tmuxprocs" '
+        '>> "$log" 2>/dev/null || exit 0\n'
+        'tail -n 500 "$log" > "$log.tmp" 2>/dev/null '
+        '&& mv "$log.tmp" "$log" 2>/dev/null || true\n'
+    )
+
+
+def _owner_audit_hook_command(logger_path):
+    """The tmux hook command string: run the logger in the BACKGROUND
+    (`run-shell -b`, so session creation is never blocked), passing the native
+    session + client fields as FOUR positional args.
+
+    Quoting (live-verified on an isolated `-L` tmux 3.7b server): the four
+    fields use the `#{q:...}` format modifier, which BACKSLASH-escapes sh(1)
+    special characters in each value -- so a session name carrying a shell
+    metacharacter (space, `;`, `$`, quote, ...) can never inject into the
+    run-shell command. `q:` does NOT wrap a value in quotes, so an EMPTY field
+    (a detached `new-session -d` create has no client) would otherwise VANISH
+    under sh word-splitting and SHIFT the positional args (review 🟡2); each
+    field is therefore SENTINEL-PREFIXED with a literal `x`, so an empty value
+    still yields the non-empty word `x` that holds its position, and the logger
+    strips the leading `x` back off (`${N:-x}` / `${N#x}`). The whole command is
+    stored UNEXPANDED (the caller wraps it in the conf with SINGLE quotes; the
+    live `set-hook` stores the argv verbatim) and tmux expands `#{...}` at FIRE
+    time, per hook. (A newline can't reach a field: tmux rejects newlines in
+    session names, and pid/tty/name never contain one.) `logger_path` is a
+    managed absolute path with no spaces (a fleet home dir)."""
+    return ('run-shell -b "%s x#{q:hook_session_name} x#{q:client_pid} '
+            'x#{q:client_tty} x#{q:client_name}"' % logger_path)
+
+
+def render_owner_session_audit_block(logger_path):
+    """The managed ~/.tmux.conf marker block that binds `session-created` to the
+    audit logger. Persistent so it survives a server restart; the applier also
+    live-applies it via `set-hook`. Owner boxes only (the caller gates).
+
+    The hook value is SINGLE-quoted (not double): a double-quoted set-hook value
+    is expanded at CONF-PARSE time (baking empty fields) AND collides with the
+    inner double-quotes around the run-shell argument -- both live-verified as
+    broken. Single quotes keep the `#{...}` unexpanded until the hook FIRES."""
+    return (
+        f"{OWNER_AUDIT_MARK_START}\n"
+        "# #660: capture the CREATOR of every new tmux session so a stray\n"
+        "# <owner>-N / foreign owner-session can be root-caused deterministically\n"
+        "# (the pane process tree ends at the server -> the creating CLIENT is\n"
+        "# otherwise unrecoverable). Native set-hook (#649). Owner boxes only --\n"
+        "# single-session boxes own session-created for rename-window (#593).\n"
+        f"set-hook -g session-created '{_owner_audit_hook_command(logger_path)}'\n"
+        f"{OWNER_AUDIT_MARK_END}"
+    )
+
+
+def _write_owner_audit_logger(logger_path):
+    """Write the managed logger script (idempotent) and mark it executable.
+    Best-effort: an unwritable path is noted on stderr, never fatal."""
+    try:
+        logger_path.parent.mkdir(parents=True, exist_ok=True)
+        logger_path.write_text(render_owner_audit_logger())
+        os.chmod(logger_path, 0o755)
+    except Exception as e:
+        print("  tmux owner audit-logger write skipped (non-fatal): %s" % e,
+              file=sys.stderr)
+
+
+def _live_apply_owner_session_audit(logger_path, run=None):
+    """Best-effort live `set-hook -g session-created` on any RUNNING server so an
+    already-running owner server captures creators WITHOUT waiting for a restart.
+    Config-path ONLY (`set-hook`, never a `send-keys` keystroke), failure-
+    tolerant (no server -> no-op). Mirrors `_live_apply_stream_window_name`."""
+    runner = run or _default_tmux_run
+    try:
+        runner(["tmux", "set-hook", "-g", "session-created",
+                _owner_audit_hook_command(logger_path)])
+    except Exception as e:
+        print("  tmux owner audit-hook live-apply skipped (non-fatal): %s" % e,
+              file=sys.stderr)
+
+
+def apply_owner_session_created_audit(tmux_conf_path=None, user=None, run=None,
+                                      home=None):
+    """#660: idempotently add/remove the owner-box `session-created` audit
+    marker block in ~/.tmux.conf. Rendered ONLY on an OWNER (multi-project)
+    box (`not is_single_session_box_user` -- dev1/dev2 newlevel); a single-
+    session box (gk + subdev streams) owns `session-created` for #593
+    rename-window, so the block is STRIPPED there (and never live-applied).
+
+    On an owner box it also writes the managed logger script and live-applies
+    the hook (`_live_apply_owner_session_audit`). Same positional-span rewrite
+    + create-file-if-absent + no-op-on-second-run shape as
+    apply_stream_tmux_window_name. Returns True iff ~/.tmux.conf changed.
+
+    MUST be called AFTER apply_stream_tmux_window_name in the install flow: on
+    an owner box that applier live-UNSETS session-created (its #593 revert), so
+    this applier's live `set-hook` has to run afterwards to win."""
+    import airuleset
+    from cli_bashrc_appliers import is_single_session_box_user
+    path = tmux_conf_path or TMUX_CONF
+    u = user or airuleset._current_user()
+    h = Path(home) if home else Path.home()
+    owner_box = not is_single_session_box_user(u)
+    logger_path = h / OWNER_AUDIT_LOGGER_REL
+    existing = path.read_text() if path.exists() else ""
+    spans = _clean_tmux_block_spans(
+        existing, OWNER_AUDIT_MARK_START, OWNER_AUDIT_MARK_END)
+    if owner_box:
+        _write_owner_audit_logger(logger_path)
+        block = render_owner_session_audit_block(str(logger_path))
+        if spans:
+            out, cursor = [], 0
+            for s, e in spans:
+                out.append(existing[cursor:s])
+                out.append(block)
+                cursor = e
+            out.append(existing[cursor:])
+            new = "".join(out)
+        else:
+            sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+            new = f"{existing}{sep}\n{block}\n"
+    else:
+        if not spans:
+            new = existing
+        else:
+            out, cursor = [], 0
+            for s, e in spans:
+                out.append(existing[cursor:s])
+                cursor = e
+            out.append(existing[cursor:])
+            new = "".join(out)
+    changed = new != existing
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new)
+    if owner_box:
+        _live_apply_owner_session_audit(str(logger_path), run)
     return changed
 
 
