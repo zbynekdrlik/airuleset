@@ -16,7 +16,6 @@ so the whole type-verify-submit protocol runs end to end.
 import json
 import sys
 import unittest
-import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 

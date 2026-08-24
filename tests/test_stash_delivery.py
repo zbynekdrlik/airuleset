@@ -350,7 +350,12 @@ class DeliverDiscordRepliesStashIntegration(unittest.TestCase):
             if "pane_in_mode" in j:
                 return "0"
             if "-l" in argv:
-                seen["typed"] = argv[-1]
+                # #670: ACCUMULATE the chunks (`_type_literal` sends a >=200-char
+                # payload in 120-char bursts), so the rendered box holds the WHOLE
+                # typed text -- a real pane always does, and the head-inclusive
+                # #670 verify reads the HEAD row (a genuine prefix of the text),
+                # not just the last chunk this fake used to keep.
+                seen["typed"] = seen.get("typed", "") + argv[-1]
                 return ""
             if "capture-pane" in j:
                 if seen.get("submitted"):

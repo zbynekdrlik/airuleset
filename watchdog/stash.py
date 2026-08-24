@@ -181,6 +181,66 @@ def _type_literal(pid, run, text, sleep_fn=None):
             sleep_fn(GOAL_TYPE_CHUNK_DELAY_S)
 
 
+GOAL_TYPE_VERIFY_RETRIES = 2         # #670: first-byte-race undo+retype budget
+
+
+def _type_verify_landed(pid, run, text, cap=None):
+    """#670 -- read the box back HEAD-INCLUSIVELY after a type. True iff it
+    holds `text` byte-exact: the HEAD row (`_input_box_head_text`) is a
+    whitespace-normalised, NON-EMPTY PREFIX of `text` (a dropped FIRST char
+    makes the head NOT a prefix -- the send-keys first-byte race, `ane-check`
+    for `lane-check`), AND the TAIL satisfies the existing `_typed_landed`
+    suffix contract. CC's collapsed `[Pasted text #N]` placeholder is exempt
+    (landed, exactly as `_typed_landed` treats it) -- checked FIRST, since its
+    head IS the placeholder, not a text prefix. The `_typed_landed` tail check
+    ALONE is head-blind (`ane-check...` IS a suffix of `lane-check...`), which
+    is precisely how the swallowed head passed the old verify (#670 root).
+
+    `cap` (optional): a capture the caller ALREADY took right after the type --
+    passed by `deliver_with_stash` so both head and tail are read from the SAME
+    snapshot and NO extra `capture-pane` is issued (its fixed-sequence test
+    fakes count captures). Default None -> a fresh capture (`_type_literal_verified`)."""
+    if cap is None:
+        cap = watchdog.capture_pane(pid, run, lines=40)
+    tail = watchdog._input_line_text(cap)
+    if _PASTED_PLACEHOLDER_RX.match((tail or "").strip()):
+        return True
+    if not _typed_landed(text, tail):
+        return False
+    head = watchdog._input_box_head_text(cap)
+    if not head:
+        return False
+    return " ".join(text.split()).startswith(" ".join(head.split()))
+
+
+def _type_literal_verified(pid, run, text, sleep_fn=None):
+    """#670 -- type `text` into a BARE box and VERIFY it landed byte-exact
+    (head + tail), retrying (undo + re-type) on a first-byte swallow. The
+    SHARED verified member of the type primitive: `send_verified` and
+    `deliver_with_stash`'s bare (PARKED/NOOP) branch both call it, so a
+    swallowed FIRST char is DETECTED and re-typed instead of submitted -- the
+    tail-only `_typed_landed` verify they used before is head-blind.
+
+    PRECONDITION: the box was verified BARE by the caller (both do), so
+    `_undo_typed_text`'s len(text) over-backspace can reach nothing of the
+    user's. On EVERY failed attempt (retry OR final give-up) the typed text is
+    backed off, so the box is left BARE on failure -- never a stranded
+    `ane-check...`. Returns True iff the box holds `text` byte-exact within
+    GOAL_TYPE_VERIFY_RETRIES retries; False otherwise -- the caller ABORTS
+    (retries next sweep), never submitting a head-corrupted prompt."""
+    sleep_fn = sleep_fn or time.sleep
+    for _attempt in range(GOAL_TYPE_VERIFY_RETRIES + 1):
+        _type_literal(pid, run, text, sleep_fn)
+        if _type_verify_landed(pid, run, text):
+            return True
+        # Head corrupted (first-byte race): back our own text off the bare-
+        # verified box before re-typing OR giving up. If we cannot confirm
+        # bare, abort rather than re-type onto a non-bare box (no blind retype).
+        if not _undo_typed_text(pid, run, text, sleep_fn):
+            return False
+    return False
+
+
 STASH_VERIFY_SETTLE_POLLS = 3      # bounded: a `C-s` toggle's render can lag
 STASH_VERIFY_SETTLE_S = 0.3        # behind the keystroke actually landing (#176 F4)
 
@@ -839,8 +899,17 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
         # exists specifically to avoid ever reaching this state.
         _log("stash-abort: collapsed-paste")
         return False
+    # #670 -- the BARE (PARKED/NOOP) branch verifies HEAD-INCLUSIVELY
+    # (`_type_verify_landed`: head-row prefix + tail suffix, placeholder-exempt),
+    # not the head-blind tail-only `_typed_landed` it used before: a swallowed
+    # FIRST char (`ane-check...`) IS a suffix of `lane-check...`, so it passed
+    # and was submitted. On a swallow this now reads not-landed -> the existing
+    # `_undo_and_release_slot` backs our text off + pops the parked draft, and
+    # the caller retries next sweep -- never a submitted corruption. The
+    # UNRESOLVED (`pre_text`) branch already uses the exact-match
+    # `_typed_exclusively`, which a swallow already fails, so it is unchanged.
     landed = (watchdog._typed_exclusively(text, itext) if pre_text
-              else watchdog._typed_landed(text, itext))
+              else watchdog._type_verify_landed(pid, run, text, cap=cap))
     if not landed:
         _log("stash-abort: type-verify-failed")
         if not pre_text:
