@@ -958,11 +958,15 @@ function fitFixedGrid(win) {
   const screenEl = () => doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
   const el = screenEl();
   if (!el) return false;                        // xterm not painted yet -> retry
-  // #655: clear any FILL scale from a previous pass so the natural-cell
-  // measurement below (and the font min-fit) is honest -- a re-fit on window
-  // resize must recompute from the natural grid, not last run's stretched one.
+  // #678: clear any prior FILL so the natural-cell measurement below (and the
+  // font min-fit) is honest -- a re-fit must recompute from the natural grid,
+  // not last run's stretched one. The fill is now NATIVE (lineHeight/letterSpacing
+  // grow the REAL cell, keeping xterm's mouse hit-test correct); the CSS transform
+  // clear stays only defensively (a pre-#678 deploy may have left one on .xterm).
   const fillTarget = () => doc.querySelector('.xterm') || el;
   fillTarget().style.transform = 'none';
+  term.options.lineHeight = 1;
+  term.options.letterSpacing = 0;
   // reads the element size right after resize/fontSize assuming xterm updates
   // the DOM synchronously (verified live: real ttyd + headless Chrome); the
   // bounded shrink loop below is the safety net if it ever lags by a frame.
@@ -977,61 +981,61 @@ function fitFixedGrid(win) {
     if (rr.width <= availW + 1 && rr.height <= availH + 1) break;
     term.options.fontSize = --F;
   }
-  // #655: the FILL (stretch the fixed grid to the viewport, killing the "okno v
-  // strede" letterbox) is a SEPARATE deferred pass -- fillFixedGrid(win) below.
-  // It must run AFTER this font change has settled: xterm re-renders ASYNC, so
-  // measuring the natural grid in the SAME synchronous call as the fontSize
-  // change reads a STALE size. fitFixedGrid does the CRISP bulk scaling (fontSize
-  // min-fit) and clears any prior fill scale (above); fillFixedGrid measures the
-  // settled natural grid and applies the small residual fill.
+  // #655/#678: the FILL (stretch the fixed grid to the viewport, killing the "okno
+  // v strede" letterbox) is a SEPARATE deferred pass -- fillFixedGrid(win) below.
+  // It must run AFTER this font change has settled. fitFixedGrid does the CRISP
+  // bulk scaling (fontSize min-fit) and RESETS the native fill (lineHeight 1 /
+  // letterSpacing 0, above) so its measurement is honest; fillFixedGrid measures
+  // the settled natural grid and applies the residual fill via lineHeight/
+  // letterSpacing (native cell growth -> correct mouse hit-test, #678), never a
+  // CSS transform.
   return true;
 }
-// #655 FILL (deferred pass): the crisp fontSize min-fit in fitFixedGrid already
-// scales the grid to within ~6% of the viewport (the tight dimension fills; the
-// loose one is the residual letterbox -- the owner's "okno v strede"). This pass
-// fills that residual with a SMALL CSS scale on the .xterm element. Why a
-// transform and not xterm letterSpacing/lineHeight: xterm rounds letterSpacing to
-// INTEGER pixels PER CELL, so with 176 cells it can only add 0 or 176px -- never
-// the ~116px needed here (measured live: 0 => 94% letterbox, 176 => 103% clip).
-// A CSS scale fills EXACTLY. The #613 "crisp not blurry transform" rule is about
-// the PRIMARY scaling (a large font scale via transform is very blurry); here the
-// font min-fit does that crisply and only the <=~6% RESIDUAL is transform-scaled,
-// whose softening is imperceptible. Bounded (WT_FILL_MAX_*) so an extreme
-// viewport degrades to a residual letterbox instead of a grotesque stretch, and
-// never scales BELOW 1 (that would shrink, not fill). getBoundingClientRect
-// reflects the transform, so a re-fit re-measures naturally (fitFixedGrid clears
-// the scale first).
+// #678 FILL (deferred pass): the crisp fontSize min-fit in fitFixedGrid fills the
+// TIGHT viewport dimension and letterboxes the LOOSE one (the owner's "okno v
+// strede"). This pass fills that residual via NATIVE xterm cell geometry --
+// lineHeight (taller cells, vertical) + letterSpacing (wider cells, horizontal) --
+// NEVER a CSS transform. WHY (the #678 regression): a CSS `transform: scale()`
+// scales getBoundingClientRect but NOT xterm's cssCellHeight, so xterm's mouse
+// hit-test (row = ceil((clientY - rect.top) / cssCellHeight)) reports a cell BELOW
+// the one the user points at, worse with depth (owner: "selectujem kde je kurzor
+// ale vybera sa mi ovela nizsie"). Growing the REAL cell keeps render and hit-test
+// consistent -- verified live (native fill: a click at every row's visual centre
+// hit-tests to that row). TRADE-OFF: xterm quantizes letterSpacing to INTEGER
+// px/cell, so the horizontal fill is COARSE (a small residual letterbox may remain,
+// <~5%); per #678 a WORKING MOUSE outranks a pixel-exact fill (owner: "funkčný
+// select má prednosť"). #655 chose a CSS transform for exact fill precisely because
+// letterSpacing/lineHeight quantize -- #678 reverses that trade for mouse
+// correctness. Bounded (WT_FILL_MAX_*) so an extreme viewport letterboxes the
+// remainder rather than distorting text. fitFixedGrid resets lineHeight/
+// letterSpacing before its own measurement, so this pass measures the natural grid;
+// xterm reflects an option change synchronously (the same path the fontSize min-fit
+// relies on) and the scheduleFill re-runs re-converge after any late layout settle.
 function fillFixedGrid(win) {
   const cols = CFG.term_cols, rows = CFG.term_rows;
   if (!win || !win.term || !cols || !rows) return false;
-  const doc = win.document;
-  const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
-  const box = doc.querySelector('.xterm') || el;   // the element the scale is set on
-  if (!el || !box) return false;
-  // self-contained: CLEAR any prior fill scale first so the measurement below is
-  // the NATURAL grid -- a CSS transform is reflected SYNCHRONOUSLY by the
-  // getBoundingClientRect reflow, so this run is correct even when called
-  // repeatedly (the multi-delay schedule re-runs it until the async font
-  // re-render has settled the natural size).
-  box.style.transform = 'none';
-  const g = el.getBoundingClientRect();            // NATURAL grid (scale just cleared)
+  const term = win.term;
+  const el = win.document.querySelector('.xterm-screen') || win.document.querySelector('.xterm');
+  if (!el) return false;
+  // reset the native fill so the measurement is the NATURAL grid (self-contained +
+  // idempotent -- a re-run recomputes from natural, never last run's stretched grid)
+  term.options.lineHeight = 1;
+  term.options.letterSpacing = 0;
+  const g = el.getBoundingClientRect();            // NATURAL grid (fill just reset)
   const availW = win.innerWidth, availH = win.innerHeight;
   if (!g.width || !g.height || !availW || !availH) return false;
-  let sx = Math.max(1, Math.min(WT_FILL_MAX_CELL_STRETCH, availW / g.width));
-  let sy = Math.max(1, Math.min(WT_FILL_MAX_LINE_STRETCH, availH / g.height));
-  box.style.transformOrigin = 'center center';
-  box.style.transform = 'scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
-  // CORRECTIVE pass: the NATURAL measurement above can be off (the font
-  // re-render is async), but a CSS transform IS reflected SYNCHRONOUSLY by
-  // getBoundingClientRect (it forces a reflow) -- so re-measuring the SCALED grid
-  // and applying the residual ratio converges to an EXACT fill regardless of the
-  // natural read, and can only SHRINK back under the cap (never a clip).
-  const g2 = el.getBoundingClientRect();
-  if (g2.width > 1 && g2.height > 1) {
-    sx = Math.max(1, Math.min(WT_FILL_MAX_CELL_STRETCH, sx * availW / g2.width));
-    sy = Math.max(1, Math.min(WT_FILL_MAX_LINE_STRETCH, sy * availH / g2.height));
-    box.style.transform = 'scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
-  }
+  // vertical: taller cells via lineHeight (bounded; never < 1 = a shrink, not fill)
+  const lh = Math.max(1, Math.min(WT_FILL_MAX_LINE_STRETCH, availH / g.height));
+  // horizontal: wider cells via letterSpacing (INTEGER px/cell -> coarse). FLOOR,
+  // never round: round can push cols*cellW PAST availW and CLIP the grid (worse
+  // than a letterbox); floor is the largest integer px/cell that never overflows,
+  // leaving a small residual letterbox. Bounded to WT_FILL_MAX_CELL_STRETCH of the
+  // natural cell width, never below 0.
+  const naturalCellW = g.width / cols;
+  const ls = Math.floor(Math.max(0, Math.min(naturalCellW * (WT_FILL_MAX_CELL_STRETCH - 1),
+                                             (availW - g.width) / cols)));
+  term.options.lineHeight = +lh.toFixed(4);
+  term.options.letterSpacing = ls;
   return true;
 }
 // #655: the FILL must re-run whenever the NATURAL grid size settles/changes.

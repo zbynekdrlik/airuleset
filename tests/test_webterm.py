@@ -106,7 +106,7 @@ const baseFont = 13;
 const ok = fitFixedGrid(win);
 const filled = fillFixedGrid(win);
 term.resize(300, 80);                     // simulate ttyd's own FitAddon firing
-const r = screenEl.getBoundingClientRect();   // FINAL size, reflects the fill scale
+const r = screenEl.getBoundingClientRect();   // FINAL size (reflects lineHeight/letterSpacing fill + any transform)
 const sm = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(screenEl.style.transform || '');
 process.stdout.write(JSON.stringify({
   ok, filled, cols: term.cols, rows: term.rows, clampedTo: [term.cols, term.rows],
@@ -1245,9 +1245,10 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         # source-lock the two load-bearing mechanics: (1) term.resize is
         # OVERRIDDEN to clamp to the fixed grid (defeats ttyd's FitAddon), and
         # (2) term.options.fontSize is set (crisp font scaling for the PRIMARY
-        # scale). fitFixedGrid may CLEAR a fill scale (transform:'none') but must
-        # never itself SCALE via a CSS transform -- that lives in fillFixedGrid
-        # and is only the small residual (#655).
+        # scale). fitFixedGrid must never SCALE via a CSS transform (its
+        # transform:'none' only defensively CLEARS a pre-#678 leftover); the
+        # residual fill lives in fillFixedGrid and is now NATIVE cell sizing
+        # (lineHeight/letterSpacing), never a CSS transform (#678).
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         fn = _extract_js_function(html, "fitFixedGrid")
         self.assertIn("term.resize =", fn)             # clamp installed
@@ -1278,13 +1279,17 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         self.assertLessEqual(out["gridH"], out["availH"] + 1)  # ... nor height
 
     def test_fit_fills_the_viewport_no_letterbox_via_bounded_stretch(self):
-        # #655 RED->GREEN: the min-fit font alone LETTERBOXES whenever the
-        # viewport aspect != the fixed 176x51 grid aspect (the owner's "okno v
-        # strede"). The fix fills the residual via a bounded CSS transform scale
-        # (fillFixedGrid) -- the fontSize min-fit does the crisp bulk -- BOUNDED so
-        # an extreme viewport degrades to a residual letterbox. Proven
-        # at the owner's real laptop shape (~12% horizontal margin, measured live)
-        # AND at the opposite (tall) shape, so the fill handles BOTH loose dims.
+        # #655 RED->GREEN, mechanism updated by #678: the min-fit font alone
+        # LETTERBOXES whenever the viewport aspect != the fixed 176x51 grid aspect
+        # (the owner's "okno v strede"). #655 filled the residual with a CSS
+        # transform scale; #678 proved that BREAKS xterm's mouse hit-test, so the
+        # fill now grows the REAL cell via lineHeight (vertical) + letterSpacing
+        # (horizontal) instead -- correct mouse (see
+        # test_fill_does_not_offset_mouse_selection). lineHeight is a fine float
+        # multiplier so the VERTICAL loose dim fills near-exactly; letterSpacing is
+        # integer px/cell so the HORIZONTAL fill is COARSER (a small residual
+        # letterbox may remain -- #678: a working mouse outranks a pixel-exact
+        # fill). Either way it never OVERFLOWS and never CSS-scales the terminal.
         if shutil.which("node") is None:
             self.skipTest("node not available")
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
@@ -1293,18 +1298,22 @@ class TestBrowserFixedGridFit(unittest.TestCase):
             out = _run_fit_harness(html, vw, vh)
             fillW = out["gridW"] / out["availW"]
             fillH = out["gridH"] / out["availH"]
-            # FILLS both dimensions within ~2% (RED: current code letterboxes the
-            # loose dim by 10%+), and still never OVERFLOWS.
+            # vertical loose dim fills near-exactly via lineHeight; horizontal via
+            # coarse letterSpacing fills much better than the ~88% fontSize-only
+            # letterbox but not pixel-exact (RED #655: current code letterboxed the
+            # loose dim by 10%+). NEVER overflows, NEVER a CSS transform (#678).
             self.assertGreaterEqual(
-                fillW, 0.98,
-                "%s: grid must FILL the width (no letterbox); filled %.1f%% "
-                "(scaleX=%s)" % (tag, fillW * 100, out["scaleX"]))
+                fillW, 0.95,
+                "%s: grid must FILL the width via letterSpacing (coarse ok, no big "
+                "letterbox); filled %.1f%% (ls=%s)" % (tag, fillW * 100, out["letterSpacing"]))
             self.assertGreaterEqual(
                 fillH, 0.98,
-                "%s: grid must FILL the height (no letterbox); filled %.1f%% "
-                "(scaleY=%s)" % (tag, fillH * 100, out["scaleY"]))
+                "%s: grid must FILL the height via lineHeight; filled %.1f%% "
+                "(lh=%s)" % (tag, fillH * 100, out["lineHeight"]))
             self.assertLessEqual(out["gridW"], out["availW"] + 1, "%s: no overflow W" % tag)
             self.assertLessEqual(out["gridH"], out["availH"] + 1, "%s: no overflow H" % tag)
+            self.assertEqual(out["scaleX"], 1, "%s: no CSS transform (breaks mouse)" % tag)
+            self.assertEqual(out["scaleY"], 1, "%s: no CSS transform (breaks mouse)" % tag)
 
     def test_fit_fill_caps_match_source(self):
         # #655: the node harness hardcodes the fill caps (they are top-level
@@ -1318,22 +1327,29 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         self.assertIn("const WT_FILL_MAX_LINE_STRETCH = 1.8;", _FIT_HARNESS)
 
     def test_fit_stretch_is_bounded_so_extreme_viewport_never_distorts(self):
-        # #655: an EXTREME viewport (very wide-and-short, or very tall-narrow)
-        # must NOT stretch a cell without bound -- the fill caps the stretch and
-        # letterboxes the remainder, so text never becomes grotesque.
+        # #655/#678: an EXTREME viewport must NOT stretch a cell without bound --
+        # the native fill (lineHeight/letterSpacing, #678) caps the stretch and
+        # letterboxes the remainder, so text never becomes grotesque, AND it never
+        # CSS-scales the terminal (scaleX==scaleY==1). A very TALL viewport caps the
+        # VERTICAL lineHeight stretch; a very WIDE one caps the HORIZONTAL
+        # letterSpacing widening. Neither overflows.
         if shutil.which("node") is None:
             self.skipTest("node not available")
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        out = _run_fit_harness(html, 6000, 400)   # absurdly wide-and-short
-        # the fill scale is capped (WT_FILL_MAX_*), never unbounded -- so an
-        # extreme viewport letterboxes the remainder instead of distorting text.
-        self.assertLessEqual(out["scaleX"], 1.5 + 1e-6,
-                             "scaleX must be capped, got %s" % out["scaleX"])
-        self.assertLessEqual(out["scaleY"], 1.8 + 1e-6,
-                             "scaleY must be capped, got %s" % out["scaleY"])
-        # and it still never overflows even when capped
-        self.assertLessEqual(out["gridW"], out["availW"] + 1)
-        self.assertLessEqual(out["gridH"], out["availH"] + 1)
+        for vw, vh, tag in ((6000, 400, "absurdly wide-and-short"),
+                            (700, 4000, "absurdly tall-and-narrow")):
+            out = _run_fit_harness(html, vw, vh)
+            # NEVER a CSS transform (the #678 mouse-breaking mechanism)
+            self.assertEqual(out["scaleX"], 1, "%s: no CSS scaleX" % tag)
+            self.assertEqual(out["scaleY"], 1, "%s: no CSS scaleY" % tag)
+            # lineHeight stretch capped at WT_FILL_MAX_LINE_STRETCH (never grotesque)
+            self.assertLessEqual(out["lineHeight"], 1.8 + 1e-6,
+                                 "%s: lineHeight must be capped, got %s"
+                                 % (tag, out["lineHeight"]))
+            self.assertGreaterEqual(out["lineHeight"], 1)   # a stretch, never a shrink
+            self.assertGreaterEqual(out["letterSpacing"], 0)  # never negative
+            # and the grid never overflows the viewport even at the cap
+            self.assertLessEqual(out["gridH"], out["availH"] + 1, "%s: no overflow H" % tag)
 
     def test_fill_does_not_offset_mouse_selection(self):
         # #678 REGRESSION (RED->GREEN): the #655 fill scaled `.xterm` with a CSS
