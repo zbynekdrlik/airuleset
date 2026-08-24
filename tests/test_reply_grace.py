@@ -239,27 +239,29 @@ class NeverSilentFloor(_Base):
         self.assertEqual(notify.load_grace_questions(), {},
                          "the expired grace entry must be dropped")
 
-    def test_plain_message_in_questions_thread_is_never_silent(self):
-        # secondary (a) of #449: parse_discord_reply requires an explicit
-        # message_reference, so a plain (non-reply) owner message in the
-        # questions thread was dropped with no trace. It must journal+ping.
+    def test_plain_message_in_questions_thread_triggers_nothing(self):
+        # #652 REVERSES #449's "never-silent for a non-reply": in a SHARED
+        # -q thread the owner and the stream deliberately CHAT, and a plain
+        # (non-reply) message must produce NO bot reaction at all ("my si
+        # tam chceme aj pisat ked sa nieco diskutuje"). Only an explicit
+        # reply to OUR OWN ❓ card may ever fire the floor.
         self._record()
         msg = {"id": _snow(self.now), "author": {"id": OWNER},
                "content": "mozes pouzit moznost 2"}
         logs = wd.deliver_discord_replies(
             self.now, self._run, {}, {SID: ("%1", IDLE)}, dry_run=False,
             discord_fetch=self._fetch([msg]))
-        self.assertTrue(any("orphan" in ln for ln in logs), logs)
-        self.assertTrue(self.pings)
-        self.assertTrue(any("Reply" in p["body"] for p in self.pings),
-                        "the ping must teach the user to answer via Reply: "
-                        "%r" % self.pings)
+        self.assertFalse(any("orphan" in ln for ln in logs), logs)
+        self.assertEqual(self.pings, [],
+                         "a free non-reply message must trigger nothing: %r"
+                         % self.pings)
 
     def test_orphan_ping_dedups_per_message(self):
-        self._record()
-        msg = {"id": _snow(self.now), "author": {"id": OWNER},
-               "content": "mozes pouzit moznost 2"}
-        state = {}
+        # #652: the at-most-once guarantee, now exercised with a reply to
+        # OUR OWN dropped card (the only case that fires post-#652).
+        state = {"dq_posted": {"888009": self.now},
+                 "dreply_channels": {"777001": {"ts": self.now, "q": True}}}
+        msg = self._reply(ref="888009", content="odpoved 2")
         wd.deliver_discord_replies(
             self.now, self._run, state, {SID: ("%1", IDLE)}, dry_run=False,
             discord_fetch=self._fetch([msg]))
@@ -267,16 +269,16 @@ class NeverSilentFloor(_Base):
             self.now + 60, self._run, state, {SID: ("%1", IDLE)},
             dry_run=False, discord_fetch=self._fetch([msg]))
         self.assertEqual(len(self.pings), 1,
-                         "one unroutable message = ONE ping, ever: %r"
-                         % self.pings)
+                         "one unroutable reply to OUR card = ONE ping, ever: "
+                         "%r" % self.pings)
 
     def test_dry_run_never_marks_orphan_state(self):
         # #304 discipline: a --dry-run sweep must not poison the real next
-        # sweep's dedup state.
-        self._record()
-        msg = {"id": _snow(self.now), "author": {"id": OWNER},
-               "content": "mozes pouzit moznost 2"}
-        state = {}
+        # sweep's dedup state. Exercised with a reply to OUR OWN dropped card
+        # (the case that fires post-#652).
+        state = {"dq_posted": {"888009": self.now},
+                 "dreply_channels": {"777001": {"ts": self.now, "q": True}}}
+        msg = self._reply(ref="888009", content="odpoved 2")
         wd.deliver_discord_replies(
             self.now, self._run, state, {SID: ("%1", IDLE)}, dry_run=True,
             discord_fetch=self._fetch([msg]))
@@ -295,6 +297,70 @@ class NeverSilentFloor(_Base):
             discord_fetch=self._fetch([msg]))
         self.assertFalse(any("orphan" in ln for ln in logs), logs)
         self.assertEqual(self.pings, [])
+
+
+class SharedThreadOrphanScoping652(_Base):
+    """#652: N stream boxes (david1, david2, codex-bridge, …) share ONE
+    `-q` thread and each runs its own job 7. A reply to a card owned by a
+    SIBLING box is "untracked by me" but is NOT a lost answer — it must
+    trigger NO reaction here, so the ONLY box that ever reacts is the one
+    that posted the card (fleet-wide at-most-once by construction). Live
+    incident: David's «Možnosť 1» reply routed fine (✅) yet the non-owning
+    boxes each spammed `⚠️ nedá sa priradiť`."""
+
+    def _sibling_reply(self, ref="999999", content="Možnosť 1"):
+        return {"id": _snow(self.now), "author": {"id": OWNER},
+                "message_reference": {"message_id": ref},
+                "content": content}
+
+    def test_reply_to_a_sibling_boxs_card_triggers_nothing(self):
+        # our box tracks 888001 (so the channel is fetched); the reply
+        # targets 999999 = a card THIS box never posted (a sibling's).
+        self._record()                       # 888001 -> qmap, channel 777001
+        state = {}
+        logs = wd.deliver_discord_replies(
+            self.now, self._run, state, {SID: ("%1", IDLE)}, dry_run=False,
+            discord_fetch=self._fetch([self._sibling_reply()]))
+        self.assertFalse(any("orphan" in ln for ln in logs),
+                         "a reply to a SIBLING box's card must not orphan: %r"
+                         % logs)
+        self.assertEqual(self.pings, [],
+                         "a reply to a SIBLING box's card must not ping: %r"
+                         % self.pings)
+
+    def test_reply_to_our_own_dropped_card_still_pings(self):
+        # the genuine #449 case is PRESERVED: a card THIS box posted (in
+        # dq_posted) but that has since dropped past grace still journals +
+        # pings when the late answer finally arrives.
+        state = {"dq_posted": {"888009": self.now},
+                 "dreply_channels": {"777001": {"ts": self.now, "q": True}}}
+        logs = wd.deliver_discord_replies(
+            self.now, self._run, state, {SID: ("%1", IDLE)}, dry_run=False,
+            discord_fetch=self._fetch([self._sibling_reply(ref="888009")]))
+        self.assertTrue(any("orphan" in ln for ln in logs), logs)
+        self.assertTrue(self.pings,
+                        "a reply to OUR OWN dropped card must still ping")
+
+    def test_posted_ids_are_remembered_across_sweeps(self):
+        # a card this box currently tracks is folded into state["dq_posted"]
+        # so it stays recognizable as ours after it later drops.
+        self._record()                       # 888001 -> qmap
+        state = {}
+        wd.deliver_discord_replies(
+            self.now, self._run, state, {}, dry_run=False,
+            discord_fetch=self._fetch([]))
+        self.assertIn("888001", state.get("dq_posted", {}),
+                      "a tracked card id must be remembered: %r"
+                      % state.get("dq_posted"))
+
+    def test_dry_run_never_persists_posted_ids(self):
+        # #304 discipline: a --dry-run sweep must not write dq_posted.
+        self._record()
+        state = {}
+        wd.deliver_discord_replies(
+            self.now, self._run, state, {}, dry_run=True,
+            discord_fetch=self._fetch([]))
+        self.assertNotIn("dq_posted", state)
 
 
 class ExplicitPathSandboxesGrace(unittest.TestCase):
