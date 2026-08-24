@@ -428,10 +428,12 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # shell-snippet level (see tests/test_webterm_ctrlbw_darkening.py
         # for the LIVE behavioral lock proving WHY it must never come
         # back). A disconnect TRAP itself is NOT banned any more -- the
-        # #615 mouse-revert trap (test_mouse_reverts_off_on_disconnect_trap
-        # below) legitimately adds one, but it only ever runs a
-        # `set-option ... mouse off`, never a `kill-session`/`new-session`
-        # (checked explicitly here, not just "no trap at all").
+        # #615 mouse-revert trap (test_disconnect_trap_unsets_mouse_
+        # restoring_inheritance below) legitimately adds one, but (post-#648)
+        # it only ever runs a `set-option -u ... mouse` (UNSET the
+        # session-local override, restoring inheritance -- never forcing a
+        # value), and NEVER a `kill-session`/`new-session` (checked
+        # explicitly here, not just "no trap at all").
         cases = (
             ("zbynek", "zbynek::zbynek-4\nmarek::marek-12"),
             ("zbynek", "::0"),
@@ -447,32 +449,45 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         self.assertNotIn("$$", cmd)
         self.assertNotIn("-web-", cmd)
         # The one trap that DOES exist is mouse-revert only -- never a
-        # session-killing one.
+        # session-killing one. Post-#648 it UNSETS the session-local mouse
+        # override (`set-option -u ... mouse`), restoring inheritance --
+        # never forcing `mouse off` (which would override the #646 fleet
+        # `-g mouse on`).
         trap_match = re.search(r"trap '([^']*)'", cmd)
         self.assertIsNotNone(trap_match, "expected exactly one trap (mouse revert)")
-        self.assertIn("mouse off", trap_match.group(1))
+        self.assertIn("set-option -u", trap_match.group(1))
+        self.assertIn("mouse", trap_match.group(1))
+        self.assertNotIn("mouse off", trap_match.group(1))
         self.assertNotIn("kill-session", trap_match.group(1))
         self.assertNotIn("kill-server", trap_match.group(1))
 
-    def test_mouse_reverts_off_on_disconnect_trap(self):
-        # #613 REOPEN-3: the connect-set `mouse on` is reverted by a
-        # disconnect trap. HONESTY NOTE (#647): #646 later made `-g mouse
-        # on` the fleet default, so this trap's `mouse off` now writes a
-        # session-LOCAL override that DEVIATES from the global (it no longer
-        # reverts to a clean pre-connect state -- the pre-connect state is
-        # now mouse-ON from the global). The trap + this assertion are kept
-        # AS-IS by the comment-only #647; the behavior fix (drop the block,
-        # or switch the trap to `set-option -u`) is tracked in #648. What
-        # this still locks mechanically: `$T` is deferred-expanded at
-        # trap-FIRE time (single-quoted at trap-SET time -- the same pattern
-        # the removed clone's own `$C` kill-session trap used), so it always
-        # targets the session actually joined, not whatever `$T` was later.
+    def test_disconnect_trap_unsets_mouse_restoring_inheritance(self):
+        # #648 (FIX LANDED, Option 2): #613 REOPEN-3 armed a disconnect trap
+        # that reverted the connect-set `mouse on` by FORCING `mouse off`.
+        # #646 then made `-g mouse on` the fleet default, so a forced
+        # session-LOCAL `mouse off` OVERRODE the global and left the owner's
+        # own ssh session mouse-off after every webterm connect+disconnect.
+        # The fix: the trap now UNSETS the session-local override
+        # (`set-option -u -t "$T" mouse`) instead of forcing a value, so the
+        # effective value falls back to inheritance (`-g mouse on` where
+        # #646 is provisioned, factory default elsewhere) -- never a forced
+        # `mouse off`. What this still locks mechanically: `$T` is
+        # deferred-expanded at trap-FIRE time (single-quoted at trap-SET
+        # time -- the same pattern the removed clone's own `$C` kill-session
+        # trap used), so it always targets the session actually joined, not
+        # whatever `$T` was later.
         log = self._run("zbynek", "zbynek::zbynek-4")
-        self.assertRegex(log, r"set-option -t zbynek-4 mouse off")
+        self.assertRegex(log, r"set-option -u -t zbynek-4 mouse\b")
+        # the OLD forced-off shape must be gone from the fired trap.
+        self.assertNotRegex(log, r"set-option -t zbynek-4 mouse off")
         cmd = w._remote_command("zbynek")
         self.assertIn(
-            'trap \'tmux set-option -t "$T" mouse off 2>/dev/null || true\' '
+            'trap \'tmux set-option -u -t "$T" mouse 2>/dev/null || true\' '
             'EXIT HUP INT TERM', cmd)
+        # the connect-side `mouse on` STAYS (covers a box without the #646
+        # global); only the trap changed -- so the command must NOT force
+        # `mouse off` anywhere.
+        self.assertNotIn("mouse off", cmd)
         # armed BEFORE the attach (so it is live for the WHOLE connection,
         # not just after it), and the join path is no longer `exec`ed (an
         # exec'd process replaces the shell outright, which would prevent

@@ -584,32 +584,59 @@ class TestBaseSessionSurvivesBrowserDisconnect(unittest.TestCase):
 
 
 class TestMouseRevertsOnDisconnect(unittest.TestCase):
-    """Adversarial review 🟡 fix, live proof: the FIRST cut of the #615
-    mouse retarget set `mouse on` with no revert path at all -- since
-    sessions on this fleet are kept alive indefinitely (#591), the very
-    FIRST webterm connection ever would have latched mouse mode on
-    PERMANENTLY, including every future ssh-only reattach with no browser
-    involved. The fix adds a disconnect trap reverting `mouse off`. This
-    proves it end-to-end against the REAL, unmodified production connect
-    path -- not just that the trap TEXT is present (that is
-    tests/test_webterm.py::test_mouse_reverts_off_on_disconnect_trap's
-    job), but that a REAL tmux server's session option actually flips back
-    off once the client genuinely disconnects."""
+    """#648 (FIX LANDED, Option 2), live proof against a REAL tmux server.
+    Background: #613 REOPEN-3 armed a disconnect trap that FORCED `mouse
+    off` to revert the connect-set `mouse on`. #646 then made `-g mouse on`
+    the managed fleet-wide default -- and a session-LOCAL `mouse off`
+    OVERRIDES `-g mouse on`, so after a webterm connect+disconnect the
+    owner's OWN ssh session (attached to the SAME session) was left
+    mouse-off until it restarted. The fix: the disconnect trap now UNSETS
+    the session-local override (`set-option -u -t "$T" mouse`) instead of
+    forcing a value, so the effective value falls back to inheritance. This
+    proves the SIDE EFFECT end-to-end against the REAL, unmodified
+    production connect path -- not just that the trap TEXT is right (that is
+    tests/test_webterm.py's job), but that a real tmux server's session
+    option genuinely stops overriding the global once the client
+    disconnects."""
 
     def setUp(self):
         self.cluster = _IsolatedTmuxServer()
         self.addCleanup(self.cluster.close)
         self.cluster.start_base("base")
 
-    def _mouse_option(self):
+    def _mouse_local(self):
+        # The SESSION-LOCAL mouse override only. `show-options` WITHOUT `-A`
+        # reports a value ONLY when set at the session scope; an unset
+        # session option (inheriting the global) reads as "" -- exactly how
+        # we prove the trap UNSET the local override (vs the old forced-off,
+        # which left "mouse off" set here).
         r = self.cluster.tmux("show-options", "-t", "base", "mouse")
         return r.stdout.strip()
 
-    def test_mouse_on_while_connected_off_after_disconnect(self):
+    def _mouse_effective(self):
+        # The EFFECTIVE computed value INCLUDING inheritance, as "on"/"off".
+        # `#{mouse}` renders 1/0 whether the value is set locally OR
+        # inherited from the global -- version-robust (no `mouse* on`
+        # asterisk parsing needed).
+        v = self.cluster.tmux("display-message", "-t", "base", "-p",
+                              "#{mouse}").stdout.strip()
+        return {"1": "on", "0": "off"}.get(v, v)
+
+    def test_mouse_reverts_to_the_fleet_global_after_disconnect(self):
+        # The real post-#646 fleet scenario: `-g mouse on` is set globally
+        # (cli_tmux_provisioning's managed default). A webterm connect sets a
+        # redundant session-local `mouse on`; on disconnect the trap must
+        # UNSET it (not force `mouse off`), so the session falls back to the
+        # global `on` -- NOT off. Before the fix the forced `mouse off`
+        # session-local override won over `-g mouse on` and left the owner's
+        # ssh session mouse-off (the bug this ticket fixes).
+        self.cluster.tmux("set-option", "-g", "mouse", "on")
         self.assertEqual(
-            self._mouse_option(), "",
-            "sanity: mouse must be unset (inherits factory default off) "
-            "before any webterm client ever connects")
+            self._mouse_local(), "",
+            "sanity: no session-LOCAL override before any webterm connect")
+        self.assertEqual(
+            self._mouse_effective(), "on",
+            "sanity: effective mouse inherits the -g mouse on global")
 
         entry = {"local": True, "preferred": "base"}
         argv = _scoped_connect_argv(entry, self.cluster.sock)
@@ -618,17 +645,58 @@ class TestMouseRevertsOnDisconnect(unittest.TestCase):
         _drain(web_fd, 1.0)
 
         self.assertEqual(
-            self._mouse_option(), "mouse on",
-            "mouse must be ON while a webterm client is connected (#615)")
+            self._mouse_local(), "mouse on",
+            "a webterm connect sets the session-local mouse on (#615)")
+
+        self.cluster.disconnect_client(web_fd)
+        self.cluster.wait_for_clients("base", 0)
+
+        # THE FIX: the trap UNSET the local override, so it is GONE ...
+        self.assertEqual(
+            self._mouse_local(), "",
+            "the disconnect trap must UNSET the session-local mouse "
+            "override (restore inheritance), never force a value -- a "
+            "leftover 'mouse off' here is exactly the #648 bug")
+        # ... and the effective value inherits the fleet global `on` again.
+        self.assertEqual(
+            self._mouse_effective(), "on",
+            "effective mouse must inherit the -g mouse on global after "
+            "disconnect -- a forced session-local 'mouse off' overriding the "
+            "fleet default is the regression #648 removed")
+
+    def test_disconnect_trap_never_forces_a_value_with_no_global(self):
+        # With NO global set (a box not provisioned by #646), the trap must
+        # STILL only UNSET the local override -- leaving it GONE (inheriting
+        # tmux's factory default off), never a forced session-local
+        # `mouse off`. Both old and new code read effective "off" here, so
+        # the DISCRIMINATOR is the LOCAL override: the old forced-off left
+        # "mouse off" set locally, the fix leaves it unset ("").
+        self.assertEqual(
+            self._mouse_local(), "",
+            "sanity: mouse unset (factory default) before any connect")
+
+        entry = {"local": True, "preferred": "base"}
+        argv = _scoped_connect_argv(entry, self.cluster.sock)
+        web_fd = self.cluster.attach_client(argv, rows=_SSH_CLIENT_ROWS)
+        self.cluster.wait_for_clients("base", 1)
+        _drain(web_fd, 1.0)
+
+        self.assertEqual(
+            self._mouse_local(), "mouse on",
+            "a webterm connect sets the session-local mouse on (#615)")
 
         self.cluster.disconnect_client(web_fd)
         self.cluster.wait_for_clients("base", 0)
 
         self.assertEqual(
-            self._mouse_option(), "mouse off",
-            "mouse must revert to OFF once the webterm client disconnects "
-            "-- a permanent on-latch is exactly the regression adversarial "
-            "review caught in the first cut of this fix")
+            self._mouse_local(), "",
+            "the trap must UNSET the local override (leaving it inherit the "
+            "factory default), never force a session-local 'mouse off' -- a "
+            "leftover 'mouse off' is the old, buggy forced-off shape")
+        self.assertEqual(
+            self._mouse_effective(), "off",
+            "with no global, the effective value is tmux's factory default "
+            "off once the local override is unset")
 
 
 if __name__ == "__main__":  # pragma: no cover
