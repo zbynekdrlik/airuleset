@@ -5033,6 +5033,7 @@ class TestTmuxHistoryLimit(TestCase):
         # just placement -- a self-referential expected string would pass
         # even if the two set-option lines were emitted out of order.
         popup_script = str(airuleset.CLAUDE_HISTORY_POPUP_SCRIPT_DEST)
+        menu_script = str(airuleset.WINDOW_MENU_SCRIPT_DEST)
         expected = (
             "set -g mouse on\n\n"
             f"{airuleset.TMUX_MARK_START}\n"
@@ -5054,6 +5055,10 @@ class TestTmuxHistoryLimit(TestCase):
             # any more (the popup script is unconditional).
             f'bind-key h display-popup -E -w 96% -h 96% -d "#{{pane_current_path}}" '
             f'-T claude-history {popup_script}\n'
+            # #613 REOPEN-2 round-2: the prefix+w window-menu rebind, emitted
+            # last among the binds (after the popup bind). The run-shell arg is
+            # double-quoted by _tmux_conf_quote (space/quotes/`#`, no `$`).
+            f'bind-key w run-shell "{menu_script} \'#{{client_name}}\'"\n'
             f"{airuleset.TMUX_MARK_END}"
             "\n\nset -g status-bg colour234\n"
         )
@@ -5120,12 +5125,14 @@ class TestTmuxHistoryLimit(TestCase):
         # the fixed-size invariant); it is conf-only (version-gated).
         # #646: `mouse on` IS live-applied -- a positive `set-option -g mouse on`
         # sitting at calls[4], AFTER the two self-heal UNSETs (so calls[1..3]
-        # keep their positions), before the keybinds. So 1 probe + 10 live = 11
-        # calls.
+        # keep their positions), before the keybinds.
+        # #613 REOPEN-2 round-2: the prefix+w window-menu rebind is live-applied
+        # too, grouped with the binds AFTER the popup bind (calls[9]), so the
+        # unbind cleanups shift to calls[10]/[11]. So 1 probe + 11 live = 12 calls.
         p = self._tmp()
         calls = []
         airuleset.apply_tmux_history_limit(p, run=calls.append)
-        self.assertEqual(len(calls), 11)
+        self.assertEqual(len(calls), 12)
         self.assertEqual(calls[0], ["tmux", "-V"])
         self.assertEqual(calls[1], ["tmux", "set-option", "-g", "history-limit", "50000"])
         self.assertEqual(calls[2], ["tmux", "set-option", "-gu", "destroy-unattached"])
@@ -5140,8 +5147,9 @@ class TestTmuxHistoryLimit(TestCase):
         self.assertEqual(calls[7], ["tmux", "bind-key", "-T", "copy-mode-vi", "S-PageDown",
                                      "send-keys", "-X", "page-down"])
         self.assertEqual(calls[8], ["tmux"] + airuleset.TMUX_POPUP_BIND_ARGVS[0])
-        self.assertEqual(calls[9], ["tmux", "unbind-key", "-n", "S-F1"])
-        self.assertEqual(calls[10], ["tmux", "unbind-key", "-n", "S-DC"])
+        self.assertEqual(calls[9], ["tmux"] + airuleset.TMUX_WINDOW_MENU_BIND_ARGVS[0])
+        self.assertEqual(calls[10], ["tmux", "unbind-key", "-n", "S-F1"])
+        self.assertEqual(calls[11], ["tmux", "unbind-key", "-n", "S-DC"])
         # window-size is NEVER a live call (conf-only).
         self.assertNotIn(["tmux", "set-option", "-gu", "window-size"], calls)
         # #646: mouse is only ever SET on, never UNSET or set off.
@@ -5153,7 +5161,8 @@ class TestTmuxHistoryLimit(TestCase):
         # ones from being attempted. #613 REOPEN-2: the version probe is
         # RESTORED (call 1 = `tmux -V`), so call 3 (the destroy-unattached
         # `-gu` self-heal) raises, and the remaining live-apply calls must
-        # still run -> 11 total (#646 mouse on adds a live call at calls[4]).
+        # still run -> 12 total (#646 mouse on at calls[4]; #613 round-2
+        # window-menu rebind at calls[9]).
         p = self._tmp()
         calls = []
 
@@ -5164,7 +5173,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 11)
+        self.assertEqual(len(calls), 12)
 
     def test_a_nonzero_rc_keybind_call_does_not_skip_the_remaining_ones(self):
         # ADVERSARIAL-REVIEW FINDING (#267, MAJOR -- F1): the RAISING case
@@ -5196,7 +5205,7 @@ class TestTmuxHistoryLimit(TestCase):
             return None
 
         airuleset.apply_tmux_history_limit(p, run=_runner)
-        self.assertEqual(len(calls), 11)
+        self.assertEqual(len(calls), 12)
 
     def test_live_apply_failure_is_silently_ignored(self):
         # "ignore failure when no server" -- a raising run() must not
