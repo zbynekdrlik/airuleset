@@ -988,6 +988,17 @@ def cmd_install(args):
     except Exception as e:
         print(f"  tmux attach-or-create helpers error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-ter. Owner SSH key provisioning (#653): append the owner's laptop
+    # public key(s) to THIS account's authorized_keys (idempotent, append-only,
+    # keyed on the key blob — never truncates/removes), so the owner reaches
+    # every managed box key-only, never a password. Runs on every target
+    # through the deploy loop's existing connection AND locally — non-fatal, so
+    # a provisioning hiccup never aborts the rest of install. ---
+    try:
+        provision_owner_keys()
+    except Exception as e:
+        print(f"  owner-key provisioning error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3c. tmux managed block: every managed user's ~/.tmux.conf (#235/#236/#241) ---
     # tmux's own 2000-line default plus the current CC renderer's re-render
     # frame-stacking made real scrollback holey within minutes under
@@ -3562,6 +3573,16 @@ from cli_remote import (  # noqa: E402, F401
     unregistered_home_accounts as unregistered_home_accounts,
     _deploy_to_all_remotes as _deploy_to_all_remotes,
     cmd_push as cmd_push,
+)
+
+# --- #653: owner SSH public-key provisioning — a self-contained leaf, consumed
+# by cmd_install below so every managed target (and the local box) gets the
+# owner's laptop key key-only, with no extra ssh round. Re-exported here so
+# cmd_install's `provision_owner_keys()` call resolves as a module global (and
+# stays test-patchable via `airuleset.provision_owner_keys`).
+from cli_owner_keys import (  # noqa: E402, F401
+    OWNER_PUBKEYS as OWNER_PUBKEYS,
+    provision_owner_keys as provision_owner_keys,
 )
 
 # --- #433 cluster L-E: REMOTE_HOSTS (the fleet deploy-target registry) promoted
