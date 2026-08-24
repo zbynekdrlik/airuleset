@@ -13,7 +13,7 @@
     "cli_config.py": 642,
     "cli_deployer_glue.py": 343,
     "cli_filedrop_watchdog.py": 518,
-    "cli_fleet.py": 373,
+    "cli_fleet.py": 394,
     "cli_onboard.py": 931,
     "cli_onboard_exec.py": 134,
     "cli_owner_keys.py": 233,
