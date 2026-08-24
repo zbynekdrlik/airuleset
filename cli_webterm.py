@@ -1580,8 +1580,10 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     neutralised to n/a, AND `_OWNER_ACCESS_UNIT_NOTE` is prepended (mirroring
     cli_webterm_david's _DAVID_UNIT_NOTE) to correct every OTHER now-false
     tailnet/password claim in the shared template header, so a human reading the
-    installed Access-mode unit is never misled. When off, the emitted unit is
-    BYTE-IDENTICAL to the pre-#635 render."""
+    installed Access-mode unit is never misled. #677: the owner unit ALSO always
+    carries `--u-collect` (the U-dot data channel is owner-only; david/marek units
+    omit it), so `access_mode=False` is BYTE-IDENTICAL to the pre-#635 render EXCEPT
+    for that single injected flag."""
     tmpl = WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
     # #677: the OWNER gateway (this renderer only) enables the U-dot data channel.
     # david/marek render the SAME shared template in their OWN functions and do NOT
