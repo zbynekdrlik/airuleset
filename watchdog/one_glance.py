@@ -345,3 +345,44 @@ def lane_low_mem_surface_decision(*, backlog, min_backlog,
     if streak >= max_streak and backlog >= min_backlog:
         return LaneLowMemSurface(True, streak, True)
     return LaneLowMemSurface(False, streak, False)
+
+
+# --- #662: the persistent-STUCK -> owner-ALERT decider -------------------------
+#
+# SILENCE B of the montalu6 9,5h outage: one_glance's `stuck` verdict (the ONLY
+# actionable one) was consumed solely by a journal line + the lane KEYSTROKE
+# nudge -- which cannot revive a dead / login-dialog-covered session. Nothing
+# routed a PERSISTENT structural stuck to an OWNER alert. This PURE decider
+# (facts in / verdict out, mutation-lockable in isolation like its two siblings
+# above) is the wire: the thin orchestrator `goal._lane_stuck_owner_alert`
+# consumes it and fires ONE un-suppressed `stuckalert:` alert per episode.
+
+StuckOwnerAlert = namedtuple("StuckOwnerAlert", "alert streak alerted")
+
+
+def stuck_owner_alert_decision(*, verdict, streak, max_streak, already_alerted):
+    """#662 -- decide whether a structurally-confirmed STUCK supervisor session
+    has been stuck long enough (the bounded keystroke lane-nudge recovery
+    provably failed) to warrant ONE un-suppressed owner alert.
+
+    Fires ONLY on the actionable ``stuck`` verdict; ANY other verdict RESETS
+    the episode (streak 0, alerted False) -- a session that recovered
+    (working / awaiting-user / no-backlog / warming / not-armed) is not stuck,
+    so a FUTURE stuck episode alarms afresh. Deduped per episode via
+    ``already_alerted`` so the alert fires EXACTLY once even though ``stuck``
+    re-derives every sweep. Returns ``StuckOwnerAlert(alert, streak, alerted)``
+    -- ``streak``/``alerted`` are the caller's NEW persisted episode state.
+
+    The threshold is a STREAK (consecutive stuck sweeps) rather than a single
+    reading so a one-off measurement never alarms; combined with one_glance's
+    own idle-over-threshold floor (``GOAL_LANE_IDLE_S``), the owner learns of a
+    coverage outage minutes after it starts instead of the 9,5h montalu6 never.
+    """
+    if verdict != "stuck":
+        return StuckOwnerAlert(False, 0, False)      # recovered -> reset episode
+    streak = streak + 1
+    if already_alerted:
+        return StuckOwnerAlert(False, streak, True)  # already alerted this episode
+    if streak >= max_streak:
+        return StuckOwnerAlert(True, streak, True)
+    return StuckOwnerAlert(False, streak, False)

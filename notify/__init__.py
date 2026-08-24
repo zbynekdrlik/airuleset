@@ -1255,6 +1255,42 @@ def compose_api_error_alert(project, text):
             % (proj, err))
 
 
+def compose_oauth_block_alert(project, nudges):
+    """#662 — the PERSISTENT OAuth-REVOKE escape-valve alert (Slovak, Discord
+    markdown). Fired by watchdog job 1 ONLY when a genuine
+    `access token has been revoked` (`is_oauth_revoked`) survived every one of
+    the `nudges` `continue`s — i.e. the #602 self-heal (fresh token on disk)
+    provably did NOT land, so this is an account-level revoke that needs an
+    INTERACTIVE `/login`. Keyed `oauthblock:` (OUTSIDE the #546 apierr family,
+    exactly like `acctblock:`) so it is NEVER swallowed — the montalu6 9,5h
+    silent outage was precisely this alarm not existing. No @mention here —
+    send() prepends it."""
+    proj = stream_qualified((_clean(project) or "?").rstrip("/").split("/")[-1] or "?")
+    return ("⛔ **%s** — účet má ODVOLANÝ prístupový token (OAuth revoked) a "
+            "automatické obnovenie ZLYHALO — po %d× `continue` sa session stále "
+            "nevie prihlásiť. Toto NEMÁ automatický reset: treba manuálny "
+            "`/login` v tejto session, inak coverage tejto slučky ďalej stojí."
+            % (proj, int(nudges)))
+
+
+def compose_stuck_owner_alert(project, loc, sweeps):
+    """#662 — the STRUCTURAL persistent-stuck owner alert (Slovak, Discord
+    markdown). Fired by the goal lane sweep when one_glance's `stuck` verdict
+    (armed /goal + 0 workers + backlog waiting + idle over threshold) held for
+    `sweeps` consecutive sweeps — long enough that the bounded keystroke
+    lane-nudge recovery has PROVABLY failed (a dead / login-dialog-covered
+    session a `continue` cannot revive). A real coverage OUTAGE the owner must
+    see. Keyed `stuckalert:` (OUTSIDE the #546 apierr family) so it always
+    POSTs. No @mention here — send() prepends it."""
+    proj = stream_qualified((_clean(project) or "?").rstrip("/").split("/")[-1] or "?")
+    where = _clean(loc) or "?"
+    return ("⛔ **%s** — /goal slučka ZAMRZLA: %d× po sebe 0 workerov, tikety "
+            "čakajú a session sa nehýbe (%s). Automatické oživenie (klávesy) "
+            "zlyhalo — pravdepodobne treba manuálny zásah (napr. `/login`, "
+            "reštart session alebo zatvorený dialóg). Coverage tejto slučky "
+            "stojí, pozri sa na ňu prosím." % (proj, int(sweeps), where))
+
+
 # --- dedup ---------------------------------------------------------------
 def _dedup_dir():
     return os.path.join(_claude_dir(), _DEDUP_DIRNAME)

@@ -1511,6 +1511,44 @@ def _apierr_stashabort_skip(state, logs, send_fn, project, pid, key, now, idle,
                 dry_run=dry_run)
 
 
+def _apierr_escalation_ping(send_fn, project, key, err_hash, fs, err_text,
+                            owner, max_nudges, dry_run):
+    """#175 give-up ping + #662 OAuth-REVOKE escape valve, extracted from job
+    1's escalation transition so run_once does not grow past its frozen ratchet
+    ceiling. Fired ONCE per err_hash episode, the moment `entry['escalated']`
+    first flips True (after `max_nudges` `continue`s).
+
+    (1) The #175 give-up ping (`apierr-giveup:`) -- nudging itself never stops,
+    only this ping is one-shot. Its key is #546-SUPPRESSED (apierr prefix), so
+    for an ordinary api-error this posts nothing; that is the owner directive.
+
+    (2) #662 -- but a GENUINE `access token has been revoked` (`is_oauth_revoked`)
+    that survived every one of the `max_nudges` `continue`s is NOT the #602
+    self-healing rotation (which resumes on nudge #1); it is an account-level
+    revoke needing an INTERACTIVE `/login` -- a PERSISTENT non-self-healing AUTH
+    block, exactly the acctblock class. So for that class ONLY, ALSO fire ONE
+    un-suppressed `oauthblock:` alert (keyed OUTSIDE the apierr family, exactly
+    like `acctblock:`) naming the session. The montalu6 9,5h silent outage was
+    precisely this alarm not existing -- the give-up ping being the sole signal,
+    and it being swallowed. Returns log lines."""
+    logs = []
+    body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
+            "stále nepohlo — treba zásah. (Skúšam ďalej, interval sa "
+            "postupne predlžuje až na 30 min.)" % (project, max_nudges))
+    send_fn(body, owner=owner,
+            dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
+            dry_run=dry_run)
+    if is_oauth_revoked(err_text):
+        from notify import compose_oauth_block_alert
+        send_fn(compose_oauth_block_alert(project, max_nudges), owner=owner,
+                dedup_key="oauthblock:%s:%s:%s" % (key, err_hash, fs),
+                dry_run=dry_run)
+        logs.append("oauthblock owner ALERTED %s [%s] — persistent /login-needed "
+                    "revoke, self-heal failed after %d nudges (un-suppressed)"
+                    % (project, key, max_nudges))
+    return logs
+
+
 def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
     """#497 batch 3 — the shared janitor-marked transcript-proof send for the
     CHUNK-typed decide_working-family nudges (jobs 4 working, 4a textcall). The
@@ -3108,11 +3146,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                     if entry.get("escalated") and not prev_escalated:
                         logs.append("escalate %s [%s] — still stuck after %d nudges, "
                                      "backing off (keeps retrying)" % (project, key, max_nudges))
-                        body = ("\U0001f6d1 **%s** — API chyba pretrváva\n> Po %d× `continue` sa to "
-                                "stále nepohlo — treba zásah. (Skúšam ďalej, interval sa "
-                                "postupne predlžuje až na 30 min.)" % (project, max_nudges))
-                        send_fn(body, owner=owner, dedup_key="apierr-giveup:%s:%s:%s" % (key, err_hash, fs),
-                                dry_run=dry_run)
+                        # #175 give-up ping (suppressed) + #662 un-suppressed
+                        # oauthblock valve for a persistent /login-needed revoke.
+                        logs += _apierr_escalation_ping(
+                            send_fn, project, key, err_hash, fs, err_text,
+                            owner, max_nudges, dry_run)
                 else:
                     state[key] = entry
                     logs.append("%s %s [%s]" % (action, project, key))
