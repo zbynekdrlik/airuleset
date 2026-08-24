@@ -140,6 +140,11 @@ DELIVERY_LOG="$HOME/.claude/notify-delivery.log"
 DELIVERY_LOG_CAP=512000
 _delivery_log() {
     # $1 = status, $2 = reason
+    # #668: dry-run must log NOTHING (the dry-run-logs-nothing contract, mirroring
+    # _pending_log). Every pre-existing caller already sits PAST emit_one's dry-run
+    # early return, so this only newly guards the top-level PROJECT_UNRESOLVED call
+    # below — but making the gate live here keeps ANY future caller safe too.
+    [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ] && return 0
     local size
     mkdir -p "$(dirname "$DELIVERY_LOG")" 2>/dev/null || true
     size=$(stat -c %s "$DELIVERY_LOG" 2>/dev/null || echo 0)

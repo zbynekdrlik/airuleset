@@ -24,6 +24,26 @@ dbg() {
     ( umask 077; printf '%s\n' "$*" >> "$log" ) 2>/dev/null || true
 }
 
+# #668: a ✅ DROPPED by the dedup suppression must leave a durable trace — a
+# traceless suppression is the #134/#135/#467 silence class (the ❓ path logs its
+# own LASTQ dedup the same way). Home-rooted (per-user by construction), rotated
+# at the same 512 KB cap as the other notify logs, dry-run-gated (the dry-run-
+# logs-nothing contract), and brace-grouped so a redirect-open failure can never
+# leak to stderr or abort under `set -e` (#492). $1=status $2=reason.
+_ok_log() {
+    [ "${DISCORD_NOTIFY_DRYRUN:-0}" = "1" ] && return 0
+    local log size
+    log="$HOME/.claude/notify-delivery.log"
+    mkdir -p "$(dirname "$log")" 2>/dev/null || true
+    size=$(stat -c %s "$log" 2>/dev/null || echo 0)
+    case "$size" in ''|*[!0-9]*) size=0 ;; esac
+    [ "$size" -gt 512000 ] && mv -f "$log" "$log.1" 2>/dev/null || true
+    { printf '%s %s kind=idle key=✅:%s reason=%s qhash=%s\n' \
+        "$(date -Iseconds 2>/dev/null || echo '?')" "$1" "$SID" "$2" "${OKFP:-}" \
+        >>"$log"; } 2>/dev/null || true
+    return 0
+}
+
 SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-'); [ -z "$SID" ] && SID="unknown"
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
@@ -65,6 +85,7 @@ if [ "$EMOJI" = "✅" ]; then
             && [ "$(cat "$LASTOK" 2>/dev/null)" = "$OKFP" ]; then
         rm -f "$PENDING" "$PENDING_CWD" 2>/dev/null || true
         dbg "SUPPRESSED duplicate ✅ ($SID)"
+        _ok_log "suppressed" "duplicate-ok"
         exit 0
     fi
 fi
@@ -88,14 +109,20 @@ rm -f "$PENDING" "$PENDING_CWD" 2>/dev/null || true
 dbg "SEND idle: $EMOJI ($SID) cwd=$CWD :: $TEXT"
 
 SEND="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/notify-discord-send.sh"
-ND_EMOJI="$EMOJI" ND_TEXT="$TEXT" ND_CWD="$CWD" bash "$SEND" || true
-
-# #668: record this ✅ as delivered so an IDENTICAL re-emit (with no user input
-# since) is deduped above. Best-effort — the ✅ path is fire-and-forget, so this
-# marks the ATTEMPT; a repeat would fail identically anyway, and a real user
-# prompt clears LASTOK so a genuinely fresh identical ✅ still re-pings.
-if [ -n "${OKFP:-}" ]; then
-    printf '%s' "$OKFP" > "$LASTOK" 2>/dev/null || true
+# #668: deliver with ND_CONFIRM=1 (FOREGROUND, delivery-confirmed) so LASTOK
+# records a DELIVERY, not a mere attempt. The idle Notification hook can afford
+# the bounded foreground wait (the send's own `--max-time 5`, well under the
+# hook's 15s timeout), and marking a transiently-FAILED ✅ (5xx / network blip,
+# logged `not-delivered` by the send path) as delivered would suppress the only
+# natural retry — the /goal re-poke re-emitting the identical ✅ — until the user
+# types. This mirrors the ❓ path, which records LASTQ only on a confirmed 2xx
+# (notify-discord-pending.sh, review finding 2026-07-04; #135 "a marker proves a
+# claim, not a delivery"). LASTOK is written ONLY on the send's zero exit.
+if ND_EMOJI="$EMOJI" ND_TEXT="$TEXT" ND_CWD="$CWD" ND_CONFIRM=1 \
+        ND_QHASH="${OKFP:-}" bash "$SEND"; then
+    if [ -n "${OKFP:-}" ]; then
+        { printf '%s' "$OKFP" > "$LASTOK"; } 2>/dev/null || true
+    fi
 fi
 
 exit 0
