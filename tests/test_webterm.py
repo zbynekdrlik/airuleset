@@ -132,6 +132,66 @@ def _run_fit_harness(html_or_fit, vw=1600, vh=1000, fill_js=None):
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
+# #673: a node harness that runs the REAL extracted reviveTerminal +
+# ttydReconnectOverlay against a fake ttyd iframe. Proves the BEHAVIOUR (not just
+# presence): a tab parked on ttyd's persistent "Press ⏎ to Reconnect" overlay gets
+# a synthetic Enter keydown (exactly what ttyd's own onKey reconnect trigger waits
+# for) dispatched on its helper textarea; a connected tab and a self-recovering
+# "Reconnecting..." tab get NOTHING; and a per-iframe cooldown blocks an immediate
+# second revive. (The live real-ttyd proof is the worker's browser run.)
+_REVIVE_HARNESS = r"""
+%(overlay)s
+%(revive)s
+function makeFrame(overlayText, opacity){
+  const dispatched = [];
+  const ta = { focus(){}, dispatchEvent(ev){ dispatched.push(ev.type + ':' + ev.key); return true; } };
+  const overlay = overlayText === null ? null : {
+    style: { fontSize: 'xx-large', position: 'absolute', opacity: opacity },
+    parentNode: {}, textContent: overlayText,
+  };
+  const divs = overlay ? [overlay] : [];
+  const win = {
+    term: { element: { querySelectorAll(sel){ return divs; } } },
+    document: { querySelector(sel){ return ta; } },
+    KeyboardEvent: function(type, init){ this.type = type; this.key = init && init.key; },
+  };
+  return { f: { contentWindow: win }, dispatched };
+}
+const out = {};
+let d = makeFrame('Press ⏎ to Reconnect', '0.75');   // DEAD -> Enter pressed
+reviveTerminal(d.f, 0);
+out.dead = d.dispatched.slice();
+let c = makeFrame(null, '0.75');                          // CONNECTED -> nothing
+reviveTerminal(c.f, 1);
+out.connected = c.dispatched.slice();
+let r = makeFrame('Reconnecting...', '0.75');            // self-recovering -> nothing
+reviveTerminal(r.f, 2);
+out.reconnecting = r.dispatched.slice();
+let h = makeFrame('Press ⏎ to Reconnect', '0');      // hidden overlay -> nothing
+reviveTerminal(h.f, 3);
+out.hidden = h.dispatched.slice();
+reviveTerminal(d.f, 0);                                   // cooldown: no 2nd dispatch
+out.deadAfterSecond = d.dispatched.length;
+process.stdout.write(JSON.stringify(out) + "\n");
+"""
+
+
+def _run_revive_harness(html):
+    """Run the extracted reviveTerminal + ttydReconnectOverlay in node; return the
+    parsed result dict. Skips if node is absent."""
+    import subprocess
+    overlay = _extract_js_function(html, "ttydReconnectOverlay")
+    revive = _extract_js_function(html, "reviveTerminal")
+    harness = _REVIVE_HARNESS % {"overlay": overlay, "revive": revive}
+    d = tempfile.mkdtemp()
+    hp = Path(d) / "reviveharness.js"
+    hp.write_text(harness, encoding="utf-8")
+    r = subprocess.run(["node", str(hp)], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise AssertionError("node revive harness failed:\n%s\n%s" % (r.stdout, r.stderr))
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
 # A small, controlled fleet: one owner box (identity), one owner box (no
 # identity/sshpass), one stream (identity), one stream (no identity), and one
 # PENDING host that must be filtered out.
@@ -1184,6 +1244,67 @@ class TestAllTabsPreloaded(unittest.TestCase):
         # this is now a whole-page invariant.
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         self.assertNotIn("odpojí", html)              # no disconnect language anywhere
+
+
+class TestReconnectOnActivate673(unittest.TestCase):
+    """#673: a slept tab whose ttyd WS dropped and whose reconnect attempt errored
+    lands on ttyd 1.7.4's persistent "Press ⏎ to Reconnect" overlay
+    (doReconnect=false), which otherwise needs a manual Enter. On tab activation
+    the dashboard auto-presses that Enter for the owner — a synthetic keydown on
+    xterm's helper textarea, exactly what ttyd's own onKey reconnect trigger waits
+    for — so the tab reconnects in place (tmux restores the scrollback) with no
+    click, no Enter, no iframe reload. Empirically verified live vs real ttyd 1.7.4."""
+
+    def _inv(self):
+        return [{"id": "s1", "label": "sess 1", "kind": "owner",
+                 "local": False, "host": "10.0.0.1", "user": "u1"},
+                {"id": "s2", "label": "sess 2", "kind": "owner",
+                 "local": False, "host": "10.0.0.2", "user": "u2"}]
+
+    def test_activate_wires_revive_on_switch(self):
+        # activate() must call reviveTerminal on the now-visible frame, so a
+        # switched-to slept tab reconnects with no manual Enter.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        m = re.search(r"function activate\(idx\)\s*\{(.*?)\n\}", html, re.S)
+        self.assertIsNotNone(m, "activate() body not found")
+        self.assertIn("reviveTerminal(", m.group(1))
+
+    def test_revive_uses_synthetic_enter_not_a_reload(self):
+        # the reconnect trigger is a synthetic Enter keydown (ttyd's own onKey
+        # path), NEVER an iframe reload/navigation — so the whole-script single
+        # `.src =` invariant (#586) and the "no beforeunload wedge" hold.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        revive = _extract_js_function(html, "reviveTerminal")
+        self.assertIn("dispatchEvent(", revive)       # synthesizes the key event
+        self.assertIn("Enter", revive)                # ... an Enter key
+        self.assertNotIn(".reload(", revive)          # never reloads the iframe
+        self.assertNotIn(".src", revive)              # never navigates
+        script = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+        self.assertEqual(script.count(".src ="), 1)   # still ONLY makeFrame's connect
+
+    def test_overlay_detection_keys_on_reconnect_text(self):
+        # ttydReconnectOverlay must fire ONLY on the reconnect-wait prompt, never
+        # on "Reconnecting..." (ttyd self-recovering) — the discriminator is TEXT.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        ov = _extract_js_function(html, "ttydReconnectOverlay")
+        self.assertIn("xx-large", ov)                 # ttyd OverlayAddon signature
+        self.assertIn("Reconnect", ov)
+        self.assertIn("Reconnecting", ov)             # ... explicitly EXCLUDED
+
+    def test_revive_behaviour_presses_enter_only_on_a_dead_tab(self):
+        # BEHAVIOURAL proof (node): run the REAL extracted reviveTerminal against
+        # fake ttyd iframes. A tab on the "Press ⏎ to Reconnect" overlay gets a
+        # synthetic Enter keydown; a connected / self-recovering / hidden-overlay
+        # tab gets nothing; a cooldown blocks an immediate second revive.
+        if shutil.which("node") is None:
+            self.skipTest("node not available")
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        out = _run_revive_harness(html)
+        self.assertEqual(out["dead"], ["keydown:Enter"])   # the owner's Enter, automated
+        self.assertEqual(out["connected"], [])             # connected -> untouched
+        self.assertEqual(out["reconnecting"], [])          # ttyd auto-recovering -> untouched
+        self.assertEqual(out["hidden"], [])                # hidden overlay -> untouched
+        self.assertEqual(out["deadAfterSecond"], 1)        # cooldown blocks a 2nd press
 
 
 class TestBrowserFixedGridFit(unittest.TestCase):
