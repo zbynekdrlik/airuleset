@@ -184,15 +184,21 @@ class TestDeferredCouplingsAreLive(unittest.TestCase):
         s = d / ".claude" / "l.sh"
         h = d / ".claude" / "h.py"
         pp = d / ".claude" / "pp.sh"
+        # #649: seed a previously-deployed #613-r2 window-menu helper co-located
+        # with the popup script -- the applier must CLEAN IT UP (prefix+w now
+        # binds to the native choose-tree -ZwG, so no helper script exists).
+        pp.parent.mkdir(parents=True, exist_ok=True)
+        legacy = pp.parent / "airuleset-tmux-window-menu.sh"
+        legacy.write_text("#!/usr/bin/env bash\n# stale #613-r2 helper\n")
         airuleset.apply_ultracode_launcher(bp, s, h, pp)
         self.assertEqual(s.read_text(), airuleset.render_claude_launch_script())
         self.assertEqual(h.read_text(), airuleset.render_claude_history_script())
         self.assertEqual(pp.read_text(), airuleset.render_claude_history_popup_script())
-        # #613 REOPEN-2 round-2: the window-menu helper co-locates in the same
-        # managed dir as the popup script (never the real ~/.claude in a test),
-        # and byte-matches its OWN renderer (same swap-the-renderer teeth).
-        mm = pp.parent / airuleset.WINDOW_MENU_SCRIPT_DEST.name
-        self.assertEqual(mm.read_text(), airuleset.render_window_menu_script())
+        # #649: the dead helper is removed, and no fresh one is written.
+        self.assertFalse(
+            legacy.exists(),
+            "apply_ultracode_launcher must remove the dead #613-r2 window-menu "
+            "helper (prefix+w now uses the native choose-tree -ZwG): %s" % legacy)
 
 
 if __name__ == "__main__":
