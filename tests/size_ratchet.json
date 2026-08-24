@@ -20,7 +20,7 @@
     "cli_remote.py": 1035,
     "cli_scratch_sweep.py": 1505,
     "cli_target_purge.py": 892,
-    "cli_tmux_provisioning.py": 1833,
+    "cli_tmux_provisioning.py": 1860,
     "cli_vault.py": 1012,
     "cli_webterm.py": 1426,
     "cli_worktree_sweep.py": 1750,

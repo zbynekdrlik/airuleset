@@ -217,14 +217,20 @@ class TestNormalizeOwnerSession(unittest.TestCase):
 # job / a grouped or attached session (feedback_never_touch_stopped_sessions).
 # Same dependency-injected fake-`run`+`ps` discipline; no real tmux/ps.
 # --------------------------------------------------------------------------- #
+# the fake box's HOME -- the cwd-guard passes iff a pane's cwd equals it.
+_HOME = "/home/tester"
+
+
 class _FakeServer:
     """Fake tmux+ps runner: maps session name -> (attached, group, [cmds]) and
-    answers list-sessions / list-panes (4-field `#{session_attached}\\t
-    #{session_group}\\t#{pane_current_command}\\t#{pane_pid}`) and the ps
-    child-probe (`ps -o pid= --ppid <pid>`). A session in `busy` has a pane
-    shell with a child (a suspended/background job). No real tmux/ps, invisible
-    to the isolation lock. `kill_rc` forces a non-zero kill-session return."""
-    def __init__(self, sessions, busy=None, kill_rc=0):
+    answers list-sessions / list-panes (5-field `#{session_attached}\\t
+    #{session_group}\\t#{pane_current_command}\\t#{pane_pid}\\t
+    #{pane_current_path}`) and the ps child-probe (`ps -o pid= --ppid <pid>`).
+    A session in `busy` has a pane shell with a child (a suspended/background
+    job); `cwds` overrides a session's pane cwd (default `_HOME`) so the
+    cwd-guard can be exercised. No real tmux/ps, invisible to the isolation
+    lock. `kill_rc` forces a non-zero kill-session return."""
+    def __init__(self, sessions, busy=None, kill_rc=0, cwds=None):
         self._sessions = {}
         for name, spec in sessions.items():
             att, grp, cmds = (spec if len(spec) == 3
@@ -232,6 +238,7 @@ class _FakeServer:
             self._sessions[name] = (att, grp, list(cmds))
         self._busy = set(busy or ())
         self._kill_rc = kill_rc
+        self._cwds = dict(cwds or {})
         self._pid2sess = {}
         self._pc = 9000
         self.calls = []
@@ -256,13 +263,15 @@ class _FakeServer:
             out = "".join(n + "\n" for n in self._sessions)
             return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
         if "list-panes" in argv:
-            att, grp, cmds = self._sessions.get(self._target(argv), ("0", "", []))
+            name = self._target(argv)
+            att, grp, cmds = self._sessions.get(name, ("0", "", []))
+            cwd = self._cwds.get(name, _HOME)
             out = ""
             for c in cmds:
                 pid = str(self._pc)
                 self._pc += 1
-                self._pid2sess[pid] = self._target(argv)
-                out += "%s\t%s\t%s\t%s\n" % (att, grp, c, pid)
+                self._pid2sess[pid] = name
+                out += "%s\t%s\t%s\t%s\t%s\n" % (att, grp, c, pid, cwd)
             return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
         if "kill-session" in argv:
             if self._kill_rc == 0:
@@ -285,11 +294,11 @@ _OWNER_BOX_RES = tmuxprov._owner_box_stray_name_res("zbynek", single_session=Fal
 
 class TestNormalizeKillSweep660(unittest.TestCase):
     def _run(self, sessions, owner="zbynek", audit_dir=None,
-             stray_name_res=None, busy=None, kill_rc=0):
-        srv = _FakeServer(sessions, busy=busy, kill_rc=kill_rc)
+             stray_name_res=None, busy=None, kill_rc=0, cwds=None):
+        srv = _FakeServer(sessions, busy=busy, kill_rc=kill_rc, cwds=cwds)
         tmuxprov._live_normalize_owner_session(
             owner, run=srv, audit_dir=audit_dir,
-            stray_name_res=stray_name_res, ps_run=srv)
+            stray_name_res=stray_name_res, ps_run=srv, home=_HOME)
         return srv
 
     # --- <owner>-N (default namespace) --------------------------------------
@@ -378,6 +387,17 @@ class TestNormalizeKillSweep660(unittest.TestCase):
                          "marek": ("0", "", ["bash"])})
         self.assertEqual(srv.kill_calls(), [])
 
+    def test_never_kills_stream_work_session_cwd_in_project_dir(self):
+        # the second-review residual: a `marek` name doubles as a real work
+        # session whose stopped-claude bare shell sits in a PROJECT dir -- the
+        # cwd-guard preserves it while a $HOME stray is still absorbed.
+        srv = self._run({"zbynek": ("1", "", ["bash"]),
+                         "marek": ("0", "", ["bash"]),         # cwd $HOME -> kill
+                         "marek-2": ("0", "", ["bash"])},      # cwd project -> skip
+                        stray_name_res=_OWNER_BOX_RES,
+                        cwds={"marek-2": "/home/tester/devel/odoo"})
+        self.assertEqual({c[-1] for c in srv.kill_calls()}, {"=marek"})
+
     def test_audit_log_records_kill(self):
         with tempfile.TemporaryDirectory() as td:
             self._run({"zbynek": ("1", "", ["node"]),
@@ -395,6 +415,36 @@ class TestNormalizeKillSweep660(unittest.TestCase):
             text = (Path(td) / "normalize.log").read_text()
             self.assertIn("skip", text)
             self.assertIn("zbynek-0", text)
+
+
+class TestCmdInstallWiring660(unittest.TestCase):
+    """#660 review 🟡1/🟡2: lock the two cmd_install invariants a `cli_quals`/
+    doctrine grep misses -- the wiring is the ONE place they live.
+
+    (getsource can read a mid-integration-mutated file, the #629 race -- if
+    these ever fail together with the airuleset getsource canaries, look for
+    the push-gate VOID report before treating it as a regression.)"""
+    def setUp(self):
+        import inspect
+        import airuleset
+        self.src = inspect.getsource(airuleset.cmd_install)
+
+    def test_stream_widening_is_gated_on_owner_box_only(self):
+        # the widened stray patterns are built via `_owner_box_stray_name_res`
+        # and MUST be gated on `is_single_session_box_user` (owner boxes only) --
+        # dropping the gate would sweep a subdev account's own real session.
+        self.assertIn("_owner_box_stray_name_res(", self.src)
+        self.assertIn("is_single_session_box_user(_current_user())", self.src)
+        self.assertIn("_live_normalize_owner_session(", self.src)
+
+    def test_audit_applier_runs_after_window_name_applier(self):
+        # the audit `set-hook -g session-created` MUST be applied AFTER
+        # apply_stream_tmux_window_name (whose owner-box revert live-UNSETS
+        # session-created), or the live hook is wiped on every install.
+        i_window = self.src.index("apply_stream_tmux_window_name()")
+        i_audit = self.src.index("apply_owner_session_created_audit()")
+        self.assertLess(i_window, i_audit,
+                        "audit applier must run after apply_stream_tmux_window_name")
 
 
 if __name__ == "__main__":  # pragma: no cover

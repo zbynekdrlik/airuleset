@@ -72,8 +72,11 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
         # CREATOR PATH: `new-session -A -s marek` (the #651 wrapper shape); `-d`
         # makes the resulting STANDALONE session deterministic in a non-terminal
         # test (live, the interactive attach hangs and leaves the same session).
-        self.assertEqual(self.iso.t("new-session", "-A", "-d", "-s", "marek")
-                         .returncode, 0)
+        # `-c <home>` puts the stray's cwd at the passed HOME so the cwd-guard
+        # (a stray sits in $HOME, a work session in a project dir) treats it as
+        # a stray.
+        self.assertEqual(self.iso.t("new-session", "-A", "-d", "-s", "marek",
+                                    "-c", self.iso.dir).returncode, 0)
         # a GROUPED stream work session (marek's real `marek-3` shape) must be
         # PRESERVED: create a base then a grouped sibling matching a stray name.
         self.iso.t("-f", "/dev/null", "new-session", "-d", "-s", "montwork")
@@ -82,9 +85,16 @@ class TestStrayCreatorAndSweep660(unittest.TestCase):
 
         stray_res = tmuxprov._owner_box_stray_name_res("zbynek",
                                                        single_session=False)
+        # a deterministic no-child ps runner keeps the sweep from probing the
+        # real freshly-spawned bash panes (whose transient rc-file children
+        # would flake the child-guard, review 🔵5); the child-guard itself is
+        # locked by a dedicated fake-runner test.
+        def idle_ps(argv):
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
         with tempfile.TemporaryDirectory() as td:
             tmuxprov._live_normalize_owner_session(
-                "zbynek", run=self.run, stray_name_res=stray_res, audit_dir=td)
+                "zbynek", run=self.run, stray_name_res=stray_res, audit_dir=td,
+                ps_run=idle_ps, home=self.iso.dir)
             log = (Path(td) / "normalize.log").read_text()
 
         after = self.iso.names()

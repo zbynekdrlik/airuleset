@@ -59,11 +59,14 @@ TMUX_DEFAULT_SIZE = "176x50"
 # native session-created hook, `session-created.log` (creator capture).
 TMUX_AUDIT_DIR = CLAUDE_DIR / "tmux-audit"
 
-# #660: a session whose EVERY pane runs one of these bare shells (tmux's
-# `#{pane_current_command}`, which strips the login-shell leading dash) is
-# an IDLE shell -- safe to absorb. ANY other foreground command (claude,
-# node, an editor, ssh, python, ...) means the session is doing work and is
-# NEVER killed (feedback_never_touch_stopped_sessions).
+# #660: a pane whose FOREGROUND command (tmux's `#{pane_current_command}`,
+# which strips the login-shell leading dash) is one of these bare shells is an
+# idle pane BY FOREGROUND ONLY -- NOT by itself proof the session is absorbable
+# (review 🔵3). `_maybe_absorb_idle_stray` requires TWO more conditions the
+# foreground command cannot show: no child process (`_pane_has_child` -- a
+# Ctrl-Z'd claude) and cwd in $HOME (a work session sits in a project dir). ANY
+# other foreground command (claude, node, an editor, ssh, python, ...) means the
+# session is doing work and is NEVER killed (feedback_never_touch_stopped_sessions).
 _BARE_SHELL_COMMANDS = frozenset({
     "bash", "sh", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "ash", "mksh",
 })
@@ -1128,7 +1131,10 @@ def _pane_has_child(pane_pid, ps_run):
         res = runner(["ps", "-o", "pid=", "--ppid", p])
     except Exception:
         return True
-    rc = getattr(res, "returncode", 1)
+    # review 🔵4: a degenerate result (a runner returning None, or an object
+    # with no `returncode`) must read as UNREADABLE -> fail safe, so the
+    # default is OUTSIDE {0,1} (255), never 1 ("no children, safe to kill").
+    rc = getattr(res, "returncode", 255)
     out = (getattr(res, "stdout", "") or "").strip()
     if rc not in (0, 1):
         # ps returns 1 == no matching child (GOOD); anything other than 0/1 is
@@ -1137,20 +1143,29 @@ def _pane_has_child(pane_pid, ps_run):
     return bool(out)
 
 
-def _maybe_absorb_idle_stray(stray, runner, audit_dir, ps_run=None):
+def _maybe_absorb_idle_stray(stray, runner, audit_dir, ps_run=None, home=None):
     """#660: kill a standalone stray IFF it is PROVABLY idle -- unattached AND
     UNGROUPED (its own windows, never a grouped view or a grouped multi-window
     work session like `marek-3`) AND every pane a bare shell whose shell has NO
-    child process (no suspended/backgrounded claude or build, review 🟡4). ANY
-    other state -- attached (any pane), grouped, any non-shell pane, any pane
-    with a child, no readable pane data, or a tmux/kill error/non-zero -- is a
-    logged SKIP, never a kill. Target `=<name>` (tmux exact-match) so a kill can
-    never prefix-match a different session. Config-path ONLY (`kill-session`,
-    never `send-keys`)."""
+    child process (no suspended/backgrounded claude or build, review 🟡4) AND
+    every pane's cwd is exactly the user's HOME. ANY other state -- attached
+    (any pane), grouped, any non-shell pane, any pane with a child, any pane
+    cwd'd OUTSIDE $HOME (a real work session -- the second-review residual: a
+    stream name like `marek` doubles as a real work session whose stopped-claude
+    bare shell must be left alone, feedback_never_touch_stopped_sessions), no
+    readable pane data, or a tmux/kill error/non-zero -- is a logged SKIP, never
+    a kill. Every observed stray was created by `new-session -A -s <name>` from
+    an ssh login whose cwd is $HOME, so `cwd == $HOME` is the throwaway-stray
+    signal that distinguishes it from a deliberately-kept work session in a
+    project dir. Target `=<name>` (tmux exact-match) so a kill can never
+    prefix-match a different session. Config-path ONLY (`kill-session`, never
+    `send-keys`)."""
+    home_real = os.path.realpath(home or os.path.expanduser("~"))
     try:
         res = runner(["tmux", "list-panes", "-s", "-t", "=" + stray, "-F",
                       "#{session_attached}\t#{session_group}\t"
-                      "#{pane_current_command}\t#{pane_pid}"])
+                      "#{pane_current_command}\t#{pane_pid}\t"
+                      "#{pane_current_path}"])
     except Exception as e:
         _audit_normalize(audit_dir, "skip", stray, "list-panes error: %s" % e)
         return
@@ -1166,6 +1181,7 @@ def _maybe_absorb_idle_stray(stray, runner, audit_dir, ps_run=None):
         return
     attached_any = False
     grouped = False
+    off_home = False
     panes = []  # (cmd, pane_pid)
     for ln in lines:
         parts = ln.split("\t")
@@ -1173,10 +1189,15 @@ def _maybe_absorb_idle_stray(stray, runner, audit_dir, ps_run=None):
         grp = parts[1].strip() if len(parts) > 1 else ""
         cmd = parts[2].strip() if len(parts) > 2 else ""
         pid = parts[3].strip() if len(parts) > 3 else ""
+        cwd = parts[4].strip() if len(parts) > 4 else ""
         if att and att != "0":   # review 🔵5: any pane's attached flag counts
             attached_any = True
         if grp:
             grouped = True
+        # a missing/unreadable cwd (no 5th field) fails SAFE -> treated as
+        # off-home so an ambiguous pane is never killed.
+        if not cwd or os.path.realpath(cwd) != home_real:
+            off_home = True
         panes.append((cmd, pid))
     if attached_any:
         _audit_normalize(audit_dir, "skip", stray, "attached")
@@ -1190,6 +1211,11 @@ def _maybe_absorb_idle_stray(stray, runner, audit_dir, ps_run=None):
     if non_shell:
         _audit_normalize(audit_dir, "skip", stray,
                          "non-shell pane(s): %s" % ",".join(non_shell))
+        return
+    if off_home:
+        # a pane cwd'd outside $HOME is a real work session, not a throwaway
+        # stray -- never kill it (protects a stopped-claude stream work session).
+        _audit_normalize(audit_dir, "skip", stray, "pane cwd outside $HOME (work session)")
         return
     if any(_pane_has_child(pid, ps_run) for _, pid in panes):
         _audit_normalize(audit_dir, "skip", stray,
@@ -1254,7 +1280,7 @@ def _owner_box_stray_name_res(owner, single_session):
 
 
 def _live_normalize_owner_session(owner, run=None, audit_dir=None,
-                                  stray_name_res=None, ps_run=None):
+                                  stray_name_res=None, ps_run=None, home=None):
     """#651/#660: idempotent live normalization on any RUNNING server for this
     box. Two mutually-exclusive branches, keyed on whether the canonical
     `<owner>` session already exists:
@@ -1269,10 +1295,11 @@ def _live_normalize_owner_session(owner, run=None, audit_dir=None,
     * `<owner>` PRESENT (#660 kill sweep): the canonical session is safe, so
       absorb (`kill-session`) every STRAY-named session that is provably an
       idle bare shell -- unattached AND ungrouped AND every pane a bare shell
-      with no child process (`_maybe_absorb_idle_stray`); NEVER one running
-      claude / any non-shell / any suspended-or-background job
-      (feedback_never_touch_stopped_sessions). Every kill/skip decision is
-      logged to `<audit_dir>/normalize.log`.
+      with no child process AND cwd'd in $HOME (`_maybe_absorb_idle_stray`);
+      NEVER one running claude / any non-shell / any suspended-or-background job
+      / any pane in a project dir (feedback_never_touch_stopped_sessions). Every
+      kill/skip decision is logged to `<audit_dir>/normalize.log`. `home` is the
+      injectable HOME for that cwd guard (default `~`).
 
     `stray_name_res` (compiled regexes) selects WHICH names are stray-candidates
     for the kill path -- default `[^<owner>-\\d+$]` (owner numbered siblings
@@ -1322,7 +1349,7 @@ def _live_normalize_owner_session(owner, run=None, audit_dir=None,
         if name == owner:
             continue
         if any(r.match(name) for r in res_list):
-            _maybe_absorb_idle_stray(name, runner, audit_dir, ps_run)
+            _maybe_absorb_idle_stray(name, runner, audit_dir, ps_run, home)
 
 
 def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
