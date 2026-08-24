@@ -245,15 +245,16 @@ class FacadeReexportSeamsGoThroughPackage(unittest.TestCase):
                "message_reference": {"message_id": "zzz"}}
         with mock.patch.object(wd, "_snowflake_ts", return_value=1000.0), \
              mock.patch.object(wd, "clean_reply_text", return_value="hi"):
-            # recent (now-sts small) -> proceeds to the untracked-ref verdict
+            # recent (now-sts small) + ref in posted_ids (#652 ownership)
+            # -> proceeds to the untracked-ref verdict
             r = wd._orphan_answer_reason(msg, {"owner"}, {}, {}, {"ch"},
-                                         "ch", 1001.0)
+                                         "ch", 1001.0, {"zzz"})
         self.assertEqual(r, "untracked-ref")
         with mock.patch.object(wd, "_snowflake_ts", return_value=1.0), \
              mock.patch.object(wd, "clean_reply_text", return_value="hi"):
             # a stale patched snowflake -> the age gate returns None
             r2 = wd._orphan_answer_reason(msg, {"owner"}, {}, {}, {"ch"},
-                                          "ch", 10 ** 9)
+                                          "ch", 10 ** 9, {"zzz"})
         self.assertIsNone(r2)
 
     def test_transcript_for_session_calls_patched_encode_project_dir(self):
@@ -295,12 +296,14 @@ class ConstantSeamsGoThroughPackage(unittest.TestCase):
              mock.patch.object(wd, "clean_reply_text", return_value="hi"), \
              mock.patch.object(wd, "ORPHAN_ANSWER_WINDOW_S", 5):
             # now-sts = 10 > 5 -> None
-            r = wd._orphan_answer_reason(msg, {"o"}, {}, {}, {"ch"}, "ch", 1010.0)
+            r = wd._orphan_answer_reason(msg, {"o"}, {}, {}, {"ch"}, "ch",
+                                         1010.0, {"z"})
         self.assertIsNone(r)
         with mock.patch.object(wd, "_snowflake_ts", return_value=1000.0), \
              mock.patch.object(wd, "clean_reply_text", return_value="hi"), \
              mock.patch.object(wd, "ORPHAN_ANSWER_WINDOW_S", 100000):
-            r2 = wd._orphan_answer_reason(msg, {"o"}, {}, {}, {"ch"}, "ch", 1010.0)
+            r2 = wd._orphan_answer_reason(msg, {"o"}, {}, {}, {"ch"}, "ch",
+                                          1010.0, {"z"})
         self.assertEqual(r2, "untracked-ref")
 
     def test_last_human_prompt_skips_patched_machine_exact(self):

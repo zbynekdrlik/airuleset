@@ -122,20 +122,23 @@ def _refresh_channel_memory(chan_seen, channels, q_channels, now):
 
 def _orphan_floor(msg, ch, allowed, qmap, cardmap, q_channels, now, env,
                   dry_run, skip_ids, orphan_done, orphan_done_set,
-                  state, persist, logs):
-    """#449 NEVER-SILENT floor: an owner's answer attempt that cannot be
-    routed (a reply to a message no longer tracked — pruned/superseded past
-    grace — or a plain non-reply message in a questions thread the security
-    gate can never match) must leave a journal line AND ping the owner,
-    never vanish. The journal line is unconditional (the floor even when
-    Discord itself is down); the ping is deduped per message id —
-    state-marked only on a CONFIRMED send ("sent"/"dedup"), so a transient
-    send error retries next sweep, and a dry-run marks nothing (#304)."""
+                  state, persist, logs, posted_ids):
+    """#449 NEVER-SILENT floor, #652-SCOPED: an owner's answer attempt to a
+    card THIS box posted that cannot be routed (a reply to OUR OWN ❓ no
+    longer tracked — pruned/superseded/dropped past grace) must leave a
+    journal line AND ping the owner, never vanish. `posted_ids` is the
+    per-box memory of card ids this box posted — a reply to a SIBLING box's
+    card in the shared `-q` thread, and any plain non-reply message, is NOT
+    ours and fires nothing (#652 kills the shared-thread spam). The journal
+    line is unconditional (the floor even when Discord itself is down); the
+    ping is deduped per message id — state-marked only on a CONFIRMED send
+    ("sent"/"dedup"), so a transient send error retries next sweep, and a
+    dry-run marks nothing (#304)."""
     mid_o = str(msg.get("id") or "").strip() if isinstance(msg, dict) else ""
     if not mid_o or mid_o in skip_ids or mid_o in orphan_done_set:
         return
     reason = watchdog._orphan_answer_reason(msg, allowed, qmap, cardmap,
-                                   q_channels, ch, now)
+                                   q_channels, ch, now, posted_ids)
     if not reason:
         return
     logs.append("reply orphaned (%s) %s [%s]" % (reason, mid_o[-8:], ch))
@@ -409,6 +412,30 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
     orphan_done = state.get("dorphan_done")
     orphan_done = list(orphan_done) if isinstance(orphan_done, list) else []
     orphan_done_set = set(orphan_done)
+    # #652: fold every id THIS box currently tracks (qmap here already = the
+    # main map + hosted maps + merged grace) into a persistent, age-pruned
+    # memory of "cards we posted", so the orphan floor below fires ONLY for a
+    # reply to OUR OWN card — never a sibling box's card in the shared `-q`
+    # thread. Populated every sweep (a card stays recognizable as ours even
+    # after it later drops past grace — the genuine #449 late-answer case).
+    # Mirrors dreply_channels/dreply_done: never persisted on a dry-run (#304).
+    dq_posted = state.get("dq_posted")
+    dq_posted = dict(dq_posted) if isinstance(dq_posted, dict) else {}
+    dq_posted = {k: v for k, v in dq_posted.items()
+                 if isinstance(v, (int, float)) and not isinstance(v, bool)
+                 and now - v <= watchdog.ORPHAN_ANSWER_WINDOW_S}
+    for qid in qmap:
+        dq_posted.setdefault(str(qid), now)
+    # The 48h age-prune above is the real bound; this cap is only a runaway-
+    # growth safety net, far above any real single-box question rate over the
+    # window (David's whole day = 4 questions), so the newest are kept.
+    if len(dq_posted) > _DREPLY_DONE_CAP:
+        for k, _v in sorted(dq_posted.items(),
+                            key=lambda kv: kv[1])[:len(dq_posted) - _DREPLY_DONE_CAP]:
+            dq_posted.pop(k, None)
+    posted_ids = set(dq_posted)
+    if not dry_run:
+        state["dq_posted"] = dq_posted
 
     def _ack(r):
         # ✅ = RECEIPT, fired the moment the reply is MATCHED (even while the
@@ -621,7 +648,7 @@ def deliver_discord_replies(now, run, state, panes_by_sid, dry_run=False,
                               now, env, dry_run,
                               done_set | card_done_set,
                               orphan_done, orphan_done_set,
-                              state, persist, logs)
+                              state, persist, logs, posted_ids)
                 continue
             if r["reply_id"] in done_set:
                 continue

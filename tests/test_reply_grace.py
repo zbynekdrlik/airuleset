@@ -440,12 +440,19 @@ class OrphanPingConfirmation(_Base):
     released so the next sweep re-POSTs."""
 
     def _msg(self):
+        # #652: the floor now fires ONLY for a reply to OUR OWN card, so the
+        # confirmation/dedup teeth are exercised with a reply to a card THIS
+        # box posted (888009 in dq_posted) that has since dropped.
         return {"id": _snow(self.now), "author": {"id": OWNER},
+                "message_reference": {"message_id": "888009"},
                 "content": "mozes pouzit moznost 2"}
+
+    def _state(self):
+        return {"dq_posted": {"888009": self.now}}
 
     def test_error_send_is_retried_and_never_marked(self):
         self._record()
-        state = {}
+        state = self._state()
         with m.patch.object(notify, "send",
                             lambda *a, **k: "error"):
             wd.deliver_discord_replies(
@@ -460,7 +467,7 @@ class OrphanPingConfirmation(_Base):
 
     def test_bare_dedup_claim_is_not_confirmation_and_gets_released(self):
         self._record()
-        state = {}
+        state = self._state()
         released = []
         with m.patch.object(notify, "send", lambda *a, **k: "dedup"), \
                 m.patch.object(notify, "marker_delivered",
@@ -478,7 +485,7 @@ class OrphanPingConfirmation(_Base):
 
     def test_dedup_with_recorded_delivery_marks_done(self):
         self._record()
-        state = {}
+        state = self._state()
         with m.patch.object(notify, "send", lambda *a, **k: "dedup"), \
                 m.patch.object(notify, "marker_delivered",
                                lambda key: True):
@@ -515,13 +522,17 @@ class AuthorlessReferenceIsNeverSilent(_Base):
     orphan ping — the never-silent mandate's own fail direction."""
 
     def test_authorless_referenced_message_still_pings(self):
+        # #652: still scoped to OUR OWN card (999888 in dq_posted) — the F5
+        # fail-toward-ping direction holds for a degenerate referenced_message
+        # on a card THIS box posted.
         self._record()
+        state = {"dq_posted": {"999888": self.now}}
         msg = {"id": _snow(self.now), "author": {"id": OWNER},
                "message_reference": {"message_id": "999888"},
                "referenced_message": {},
                "content": "odpoved na staru otazku"}
         logs = wd.deliver_discord_replies(
-            self.now, self._run, {}, {SID: ("%1", IDLE)}, dry_run=False,
+            self.now, self._run, state, {SID: ("%1", IDLE)}, dry_run=False,
             discord_fetch=self._fetch([msg]))
         self.assertTrue(any("orphan" in ln for ln in logs), logs)
         self.assertTrue(self.pings)

@@ -44,26 +44,36 @@ from watchdog import PROJECTS_DIR
 
 
 def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
-                          channel, now):
-    """Classify `msg` as an owner ANSWER ATTEMPT that can no longer be routed
-    (#449) — returns "untracked-ref" (an explicit reply to a message we no
-    longer track: pruned past grace, superseded past grace, or simply never
-    ours) or "not-a-reply" (a plain message in a QUESTIONS thread — the
-    security gate requires an explicit reply, so it can never route), else
-    None. Pure and deliberately NARROW:
+                          channel, now, posted_ids=None):
+    """Classify `msg` as an owner ANSWER ATTEMPT to OUR OWN ❓ card that can
+    no longer be routed (#449) — returns "untracked-ref", else None. Pure and
+    deliberately NARROW.
 
-    - scoped to QUESTION channels only (the per-owner `-q` threads, #296 —
-      every bot message there is a ❓, so an unmatched owner message there is
-      near-certainly a lost answer; the main thread's cards/✅ chatter is
-      excluded, the card-reopen flow owns replies there);
-    - owner-authored, usable text, recent (ORPHAN_ANSWER_WINDOW_S via the
-      message's own snowflake — an unparsable id reads as too old, skip);
-    - a reply to another HUMAN's message (referenced_message present with a
-      non-bot author) is conversation, never an answer attempt — stay quiet.
-      A missing/deleted referenced_message stays classified as an orphan:
-      in a questions thread the referenced message was almost certainly our
-      own ❓, and the never-silent mandate prefers a rare extra ping over a
-      silent loss."""
+    #652 SCOPES this to a reply to a card THIS box actually posted, reversing
+    #449's two over-broad firings that spammed a SHARED `-q` thread (david1,
+    david2, codex-bridge, … all post to and fetch ONE thread, each running
+    its own job 7):
+
+    - a PLAIN non-reply message no longer fires at all — in a shared thread
+      the owner and the stream deliberately converse, and "my si tam chceme
+      aj pisat" must never trigger a bot warning (the old "not-a-reply"
+      verdict is retired);
+    - an explicit reply fires "untracked-ref" ONLY when its referenced id is
+      in `posted_ids` — the bounded per-box memory of ❓ card ids THIS box
+      posted (deliver_discord_replies' state["dq_posted"]). A SIBLING box's
+      card is "untracked by me" but was NEVER ours, so we stay silent; only
+      the ONE box that posted a card can ever react to a reply to it, giving
+      fleet-wide at-most-once by construction. The genuine #449 case (our own
+      card dropped past 24h grace, late answer) is preserved: many sweeps
+      folded that card into dq_posted while it lived in qmap/grace, and the
+      memory outlives the grace window.
+
+    Gates kept from #449: scoped to QUESTION channels only (the per-owner
+    `-q` threads, #296); owner-authored, usable text, recent
+    (ORPHAN_ANSWER_WINDOW_S via the message's own snowflake — an unparsable
+    id reads as too old, skip). A reply to another HUMAN's message stays
+    quiet, though a reply whose ref is in `posted_ids` is by definition our
+    own bot card, so that guard is only a defensive backstop now."""
     if channel not in question_channels or not isinstance(msg, dict):
         return None
     mid = str(msg.get("id") or "").strip()
@@ -77,9 +87,13 @@ def _orphan_answer_reason(msg, allowed_ids, qmap, cardmap, question_channels,
         return None
     ref = str((msg.get("message_reference") or {}).get("message_id") or "").strip()
     if not ref:
-        return "not-a-reply"
+        return None                    # #652: a non-reply never fires
     if ref in qmap or ref in cardmap:
         return None                    # tracked — the normal flows own it
+    # #652: fire ONLY for a reply to a card THIS box posted. A sibling box's
+    # card in the shared thread was never in our posted memory — stay silent.
+    if ref not in (posted_ids or ()):
+        return None
     rm = msg.get("referenced_message")
     if isinstance(rm, dict):
         rauthor = rm.get("author")
