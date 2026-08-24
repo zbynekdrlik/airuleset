@@ -100,7 +100,10 @@ WEBTERM_ACCESS_APPS = {
     # e-mail is his real box account (drlik.marek@gmail.com — the same drlik.*
     # gmail family as the owner's, evidenced in the statusbar/caveman tests);
     # adjustable in this one line + `webterm-access --apply`. Deny-by-default: this
-    # list IS the whole authorization. Adding another person is one more e-mail.
+    # list IS the whole authorization, so a WRONG address only locks marek out (the
+    # safe direction) — but confirm it with the owner as a HARD go-live gate (#612
+    # R1 review 🟡): a genuinely attacker-controlled address would be an open door.
+    # Adding another person is one more e-mail.
     "marek": {
         "hostname": "marek.newlevel.media",
         "name": "webterm — marek",

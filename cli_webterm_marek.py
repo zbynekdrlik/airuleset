@@ -25,6 +25,25 @@ exactly like the david lane.
 Imports cli_webterm for the shared render/template helpers; the dispatch in
 cli_webterm.maybe_setup_webterm imports THIS module lazily, so there is no
 module-level import cycle.
+
+SECURITY NOTE — the boundary this lane DOES and does NOT provide (honest, #612
+R1 review, mirrors cli_webterm_access.py's own note). What it provides: the
+PUBLIC Access-gated path reaches ONLY marek's scoped session — the connect
+allowlist is physically `{marek-subdev}` (a single LOCAL attach, no ssh/key), so
+a marek WEB LOGIN can never drive an owner-fleet or david id, and marek's Access
+realm/tunnel are separate from every other developer's. What it does NOT close:
+the marek gateway/ttyd bind LOOPBACK on the SHARED subdev box, where 127.0.0.1 is
+reachable by every local unix account (and pure stdlib cannot verify the Access
+JWT signature at the origin — the same residual cli_webterm_access.py documents).
+So a marek UNIX SHELL — which the webterm legitimately gives marek to his OWN
+account, and which marek already has independently of webterm — can `curl` david's
+loopback ttyd (127.0.0.1:<port>, itself auth-less by design) and vice-versa. This
+is the PRE-EXISTING multi-tenant-subdev floor the david lane shipped with and the
+#612 R2 review accepted; webterm adds no reachability a subdev account did not
+already have. Closing that floor (a mode-0600 unix-domain-socket origin per
+gateway user, or origin JWT verification) is CROSS-CUTTING — it must cover the
+LIVE owner + david gateways too — so it is the separate hardening ticket #663, not
+this scoped marek lane.
 """
 import json
 import os
