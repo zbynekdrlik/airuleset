@@ -862,6 +862,7 @@ function activate(idx) {
   current = idx;
   applyFixedGrid(made[idx]);                 // #613 REOPEN-2: fit the now-VISIBLE tab
   focusTerminal(made[idx], idx);             // #661: type immediately after a switch
+  reviveTerminal(made[idx], idx);            // #673: auto-reconnect a slept tab, no manual Enter
 }
 // #584: ONE keydown handler shared by the parent tab bar AND every terminal
 // iframe. Ctrl+Alt+1..9 jumps to a tab. Because the gateway now serves the
@@ -921,6 +922,56 @@ function focusTerminal(f, idx) {
     if (++tries < 30) setTimeout(tryFocus, 100);   // ttyd/xterm still connecting
   };
   tryFocus();
+}
+// #673: detect ttyd 1.7.4's PERSISTENT reconnect-wait overlay. Empirically (real
+// ttyd + Playwright): a child that merely EXITS closes with WS code 1006 and ttyd
+// AUTO-reconnects; but a failed reconnect ATTEMPT fires ttyd's WS `error` handler
+// (doReconnect=false) and the next close parks on "Press ⏎ to Reconnect" -- an
+// OverlayAddon div (position:absolute, fontSize xx-large, appended to term.element,
+// NO auto-hide) that then waits for a manual Enter. Return that overlay node iff a
+// reconnect-wait prompt is CURRENTLY showing, else null. The discriminator is the
+// TEXT: "Reconnecting..." is ttyd self-recovering (leave it); ttyd's resize overlay
+// is xx-large too but its text is grid dimensions, so we key on the reconnect text.
+function ttydReconnectOverlay(win) {
+  try {
+    const t = win && win.term;
+    if (!t || !t.element) return null;
+    const nodes = t.element.querySelectorAll('div');
+    for (const n of nodes) {
+      if (n.style && n.style.fontSize === 'xx-large' && n.parentNode && n.style.opacity !== '0') {
+        const txt = n.textContent || '';
+        if (/Reconnect/.test(txt) && !/Reconnecting/.test(txt)) return n;   // "Press ⏎ to Reconnect"
+        if (/Connection Closed/.test(txt)) return n;                        // transient stuck close
+      }
+    }
+  } catch (e) { /* cross-origin (impossible under the gateway) -> treat as connected */ }
+  return null;
+}
+// #673: if the activated tab is stuck on ttyd's reconnect prompt, press Enter FOR
+// the owner -- a synthetic keydown on xterm's helper textarea is EXACTLY what
+// ttyd's own onKey reconnect trigger listens for, so ttyd reconnects IN PLACE
+// (tmux restores the full scrollback server-side) with no click, no Enter, and no
+// iframe reload (so the whole-script single-src-assignment invariant + the
+// #661/#671 beforeunload behaviour are untouched). A cooldown stops a tight loop
+// if a backend is genuinely offline (a re-switch just tries again). Verified live
+// against real ttyd 1.7.4: the synthetic Enter cleared the overlay and the fresh
+// backend banner appeared in the buffer, reconnected with ZERO user input.
+function reviveTerminal(f, idx) {
+  try {
+    const win = f && f.contentWindow;
+    if (!win) return;
+    if (!ttydReconnectOverlay(win)) return;         // healthy/self-recovering -> instant switch
+    const now = Date.now();
+    if (f.__wtReviveAt && now - f.__wtReviveAt < 3000) return;   // cooldown vs a dead-backend loop
+    f.__wtReviveAt = now;
+    const ta = win.document.querySelector('.xterm-helper-textarea, textarea');
+    if (ta) {
+      try { ta.focus(); } catch (e) {}
+      const ev = new win.KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true});
+      ta.dispatchEvent(ev);                          // ttyd's onKey Enter trigger -> reconnect
+    }
+  } catch (e) { /* iframe realm gone / cross-origin -> never break switching */ }
 }
 // #613 REOPEN-2: force each ttyd xterm to the owner's FIXED client grid
 // (CFG.term_cols x CFG.term_rows = the fixed 176x50 tmux window + 1 status row)
