@@ -204,6 +204,22 @@ class TestLoginForm(unittest.TestCase):
         self.assertIn("Nesprávne", g.login_form_html(error=True))
         self.assertNotIn("Nesprávne", g.login_form_html(error=False))
 
+    def test_login_title_is_dynamic_no_stale_domain(self):
+        # #655: the login <title> must NOT hardcode the NXDOMAIN
+        # work.newlevel.media -- it reflects the ACTUAL serving host passed in.
+        self.assertNotIn("work.newlevel.media", g.login_form_html())
+        self.assertNotIn("work.newlevel.media",
+                         g.login_form_html(host="zbynek.newlevel.media"))
+
+    def test_login_title_reflects_the_serving_host(self):
+        # #655: when the gateway knows the Host header, it appears in the title.
+        html = g.login_form_html(host="zbynek.newlevel.media")
+        self.assertIn("zbynek.newlevel.media", html)
+        # a missing/blank host degrades to a neutral title (never a stale domain)
+        neutral = g.login_form_html(host=None)
+        self.assertNotIn("work.newlevel.media", neutral)
+        self.assertIn("<title>", neutral)
+
 
 # --------------------------------------------------------------------------- #
 # Integration — real gateway + fake ttyd upstream, over 127.0.0.1 sockets.
@@ -333,6 +349,21 @@ class TestGatewayIntegration(unittest.TestCase):
                 resp = await h.request(b"GET /login HTTP/1.1\r\nHost: x\r\n\r\n")
                 self.assertIn(b"200 OK", resp)
                 self.assertIn(b'autocomplete="current-password"', resp)
+            finally:
+                await self._teardown(h)
+        _run(go())
+
+    def test_login_title_reflects_request_host_header(self):
+        # #655: the served login page's <title> reflects the request Host header
+        # (the actual serving domain), never the stale hardcoded work.newlevel.media.
+        async def go():
+            h = await self._harness()
+            try:
+                resp = await h.request(
+                    b"GET /login HTTP/1.1\r\nHost: zbynek.newlevel.media\r\n\r\n")
+                self.assertIn(b"200 OK", resp)
+                self.assertIn(b"zbynek.newlevel.media", resp)
+                self.assertNotIn(b"work.newlevel.media", resp)
             finally:
                 await self._teardown(h)
         _run(go())

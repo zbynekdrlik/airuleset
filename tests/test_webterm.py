@@ -51,8 +51,16 @@ def _extract_js_function(html, name):
 _FIT_HARNESS = r"""
 const CFG = { term_cols: 176, term_rows: 51 };
 const CW = 0.6, CH = 1.2;                 // fake monospace cell = 0.6*fs x 1.2*fs
-function rect(term){ return { width: term.cols*CW*term.options.fontSize,
-                              height: term.rows*CH*term.options.fontSize }; }
+// #655: the fake cell now models the two native xterm.js FILL options the
+// browser-side fit uses -- `letterSpacing` (px added to each cell's WIDTH) and
+// `lineHeight` (a multiplier on each cell's HEIGHT) -- so the harness can prove
+// the grid genuinely FILLS the viewport, not just that it never overflows.
+function rect(term){
+  const ls = term.options.letterSpacing || 0;
+  const lh = term.options.lineHeight || 1;
+  return { width:  term.cols * (CW*term.options.fontSize + ls),
+           height: term.rows * (CH*term.options.fontSize * lh) };
+}
 const term = {
   cols: 80, rows: 24,
   options: { fontSize: 13, theme: { background: '#0d1117' } },
@@ -66,7 +74,9 @@ const doc = {
   createElement(){ const e = { set id(v){ this._id=v; styleStore[v]=e; }, get id(){ return this._id; } }; return e; },
   querySelector(){ return screenEl; },
 };
-const win = { term, document: doc, innerWidth: 1600, innerHeight: 1000 };
+const VW = (typeof HARNESS_VW !== 'undefined') ? HARNESS_VW : 1600;
+const VH = (typeof HARNESS_VH !== 'undefined') ? HARNESS_VH : 1000;
+const win = { term, document: doc, innerWidth: VW, innerHeight: VH };
 %(fit)s
 const baseFont = 13;
 const ok = fitFixedGrid(win);
@@ -75,9 +85,27 @@ const r = rect(term);
 process.stdout.write(JSON.stringify({
   ok, cols: term.cols, rows: term.rows, clampedTo: [term.cols, term.rows],
   fontSize: term.options.fontSize, baseFont,
+  letterSpacing: term.options.letterSpacing || 0,
+  lineHeight: term.options.lineHeight || 1,
   gridW: r.width, gridH: r.height, availW: win.innerWidth, availH: win.innerHeight,
 }) + "\n");
 """
+
+
+def _run_fit_harness(fit_js, vw=1600, vh=1000):
+    """Run the extracted fitFixedGrid in node against a fake window of size
+    (vw, vh); return the parsed JSON result dict. Skips if node is absent."""
+    import subprocess
+    harness = ("const HARNESS_VW=%d, HARNESS_VH=%d;\n" % (vw, vh)) + (
+        _FIT_HARNESS % {"fit": fit_js})
+    d = tempfile.mkdtemp()
+    hp = Path(d) / "fitharness.js"
+    hp.write_text(harness, encoding="utf-8")
+    r = subprocess.run(["node", str(hp)], capture_output=True, text=True,
+                       timeout=30)
+    if r.returncode != 0:
+        raise AssertionError("node harness failed:\n%s\n%s" % (r.stdout, r.stderr))
+    return json.loads(r.stdout.strip().splitlines()[-1])
 
 
 # A small, controlled fleet: one owner box (identity), one owner box (no
@@ -1239,6 +1267,104 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         self.assertGreater(out["fontSize"], out["baseFont"])  # font raised to fill
         self.assertLessEqual(out["gridW"], out["availW"] + 1)  # never overflows width
         self.assertLessEqual(out["gridH"], out["availH"] + 1)  # ... nor height
+
+    def test_fit_fills_the_viewport_no_letterbox_via_bounded_stretch(self):
+        # #655 RED->GREEN: the min-fit font alone LETTERBOXES whenever the
+        # viewport aspect != the fixed 176x51 grid aspect (the owner's "okno v
+        # strede"). The fix stretches the LOOSE dimension to fill the viewport
+        # via native xterm letterSpacing/lineHeight (crisp, no glyph distortion),
+        # BOUNDED so an extreme viewport degrades to a residual letterbox. Proven
+        # at the owner's real laptop shape (~12% horizontal margin, measured live)
+        # AND at the opposite (tall) shape, so the fill handles BOTH loose dims.
+        if shutil.which("node") is None:
+            self.skipTest("node not available")
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        fit = _extract_js_function(html, "fitFixedGrid")
+        for vw, vh, tag in ((1920, 1011, "laptop wide (horizontal margin)"),
+                            (1200, 1400, "portrait (vertical margin)")):
+            out = _run_fit_harness(fit, vw, vh)
+            fillW = out["gridW"] / out["availW"]
+            fillH = out["gridH"] / out["availH"]
+            # FILLS both dimensions within ~2% (RED: current code letterboxes the
+            # loose dim by 10%+), and still never OVERFLOWS.
+            self.assertGreaterEqual(
+                fillW, 0.98,
+                "%s: grid must FILL the width (no letterbox); filled %.1f%% "
+                "(letterSpacing=%s)" % (tag, fillW * 100, out["letterSpacing"]))
+            self.assertGreaterEqual(
+                fillH, 0.98,
+                "%s: grid must FILL the height (no letterbox); filled %.1f%% "
+                "(lineHeight=%s)" % (tag, fillH * 100, out["lineHeight"]))
+            self.assertLessEqual(out["gridW"], out["availW"] + 1, "%s: no overflow W" % tag)
+            self.assertLessEqual(out["gridH"], out["availH"] + 1, "%s: no overflow H" % tag)
+
+    def test_fit_stretch_is_bounded_so_extreme_viewport_never_distorts(self):
+        # #655: an EXTREME viewport (very wide-and-short, or very tall-narrow)
+        # must NOT stretch a cell without bound -- the fill caps the stretch and
+        # letterboxes the remainder, so text never becomes grotesque.
+        if shutil.which("node") is None:
+            self.skipTest("node not available")
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        fit = _extract_js_function(html, "fitFixedGrid")
+        out = _run_fit_harness(fit, 6000, 400)   # absurdly wide-and-short
+        # letterSpacing (px per cell) is capped relative to the natural cell,
+        # never unbounded; lineHeight likewise stays within a sane ceiling.
+        self.assertLess(out["lineHeight"], 2.0,
+                        "lineHeight stretch must be capped, got %s" % out["lineHeight"])
+        # and it still never overflows even when capped
+        self.assertLessEqual(out["gridH"], out["availH"] + 1)
+
+
+class TestFullDisplayAndDomains655(unittest.TestCase):
+    """#655: (1) the persistent 11px `#hint` micro-bar at the bottom (the owner's
+    "nezrozumiteľný mikro text dole") is replaced by a `?`-toggled READABLE help
+    panel, hidden by default, freeing the terminal's vertical space; (2) the
+    hardcoded stale `work.newlevel.media` domain in the dashboard `<title>` is
+    replaced by a dynamic title from `location.hostname` (the domain is
+    NXDOMAIN; the live domains are zbynek/david.newlevel.media)."""
+
+    def _inv(self, n=3):
+        return [{"id": "s%d" % i, "label": "sess %d" % i, "kind": "owner",
+                 "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
+                for i in range(1, n + 1)]
+
+    def test_no_hardcoded_stale_domain_anywhere_in_rendered_dashboard(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertNotIn("work.newlevel.media", html,
+                         "the stale NXDOMAIN work.newlevel.media must not appear "
+                         "in the rendered dashboard (title is dynamic now)")
+
+    def test_dashboard_title_is_set_from_location_hostname(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        # the document title reflects the ACTUAL serving host, client-side, so it
+        # is correct on zbynek/david.newlevel.media (and any future domain)
+        # without a hardcoded literal baked into the static file.
+        self.assertIn("location.hostname", html)
+        self.assertRegex(html, r"document\.title\s*=")
+
+    def test_hint_is_hidden_by_default_not_a_persistent_micro_bar(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        # the help text is no longer a persistent visible bottom bar; its base
+        # CSS hides it (display:none) until the user opens it.
+        self.assertRegex(
+            html, r"#hint\s*\{[^}]*display\s*:\s*none",
+            "the #hint help must be hidden by default (a toggled panel), not a "
+            "persistent micro bar at the bottom of the screen")
+
+    def test_help_toggle_button_exists_and_toggles_the_hint(self):
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        self.assertIn('id="help"', html)          # the ? help toggle control
+        # a click handler toggles the hint panel's visibility
+        self.assertRegex(html, r"getElementById\(['\"]help['\"]\)")
+        self.assertRegex(html, r"getElementById\(['\"]hint['\"]\)")
+
+    def test_help_panel_keeps_the_shortcut_content_at_a_readable_size(self):
+        # the help CONTENT (shortcuts) is preserved -- only its presentation
+        # changes from an 11px persistent bar to a readable toggled panel.
+        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
+        hint = next(ln for ln in html.splitlines() if 'id="hint"' in ln)
+        self.assertIn("Ctrl+Alt", hint)
+        self.assertIn("Ctrl+W", hint)
 
 
 class TestCtrlWProtection(unittest.TestCase):
