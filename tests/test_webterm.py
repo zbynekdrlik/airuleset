@@ -373,10 +373,13 @@ class TestAttachSnippetBehavior(unittest.TestCase):
     for the live pty-driven regression proof of the actual chooser bug this
     fixes. #615's `mouse on` is RETARGETED, not dropped: it is now set on
     the shared base session itself (`-t "$T"`), since there is no more an
-    independent clone session to scope it to. HONESTY NOTE (#647): post-#646
-    that session-scoped set is REDUNDANT with the fleet `-g mouse on` (the
-    owner's ssh is mouse-on by that global, not "gaining" it here). See the
-    `_ATTACH_BODY` header comment in cli_webterm.py + #648 for the record."""
+    independent clone session to scope it to. Post-#646 that session-scoped
+    set is REDUNDANT with the fleet `-g mouse on` (kept so a box without the
+    #646 conf still gets browser wheel->scrollback); and #648 (FIX LANDED)
+    switched the disconnect trap to UNSET the session-local override
+    (`set-option -u`) instead of forcing `mouse off`, so it can no longer
+    override the fleet global. See the `_ATTACH_BODY` header comment in
+    cli_webterm.py for the record."""
 
     def setUp(self):
         import subprocess
@@ -536,12 +539,13 @@ class TestAttachSnippetBehavior(unittest.TestCase):
         # #613 REOPEN-3: #615's `mouse on` is RETARGETED, not dropped. On the
         # (now-removed) clone it was scoped to the browser's own independent
         # session; with a direct attach there is only ONE session, so it is
-        # now set on the BASE itself (`-t "$T"`). HONESTY NOTE (#647): #646
-        # made `-g mouse on` the fleet default, so post-#646 this
-        # session-scoped set is REDUNDANT with the global (and the owner's
-        # ssh session is now mouse-on by that global -- see #648). This test
-        # still locks the RIGHT thing: this join path never emits a global
-        # `-g mouse` (that is cli_tmux_provisioning's job, #646) -- hence the
+        # now set on the BASE itself (`-t "$T"`). Post-#646 this session-
+        # scoped set is REDUNDANT with the fleet `-g mouse on` but KEPT so a
+        # box without the #646 conf still gets browser wheel->scrollback;
+        # #648 (FIX LANDED) then made the disconnect trap UNSET this override
+        # rather than force `mouse off`. This test still locks the RIGHT
+        # thing: this join path never emits a global `-g mouse` (that is
+        # cli_tmux_provisioning's job, #646) -- hence the
         # `assertNotIn("set-option -g mouse", log)` below stays valid.
         log = self._run("zbynek", "zbynek::zbynek-4")
         self.assertRegex(log, r"set-option -t zbynek-4 mouse on")
