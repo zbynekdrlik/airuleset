@@ -157,14 +157,18 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;;
 [ "$mode" = plain ] || export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1
 
 # Headless OAuth token for owner VPS-class boxes (#659): export
-# CLAUDE_CODE_OAUTH_TOKEN ONLY when the managed secret file exists and is
-# non-empty. That file is delivered ONLY to owner_vps targets
-# (provision_owner_headless_token), so this is a strict no-op on every
-# owner-interactive box (dev1/dev2) and every sub-dev account -- where
-# ~/.claude/.credentials.json is the login -- and never contaminates an
-# interactive session. Per the CC auth docs this env var is independent of the
-# interactive /login credential. Applied in ALL modes (incl. plain) so an
-# owner VPS never shows the first-run login dialog whichever way claude starts.
+# CLAUDE_CODE_OAUTH_TOKEN ONLY when the managed DELIVERED secret file exists and
+# is non-empty. That file (`claude-code-oauth-token`) is written ONLY on
+# owner_vps targets by provision_owner_headless_token; the dev1 DRIVER holds the
+# token under a DIFFERENT basename (`owner-vps-claude-oauth-token`, the delivery
+# SOURCE) that this guard never checks -- so this is a strict no-op on dev1/dev2
+# and every sub-dev account, where ~/.claude/.credentials.json is the login, and
+# never contaminates an interactive session. (Distinct source/delivered names
+# are the #659 review fix: a shared name would make dev1 -- which hosts the
+# source AND runs this launcher -- export the token into the owner's own
+# sessions.) Per the CC auth docs this env var is independent of the interactive
+# /login credential. Applied in ALL modes (incl. plain) so an owner VPS never
+# shows the first-run login dialog whichever way claude starts.
 if [ -s "$HOME/.secrets/claude-code-oauth-token" ]; then
   CLAUDE_CODE_OAUTH_TOKEN="$(cat "$HOME/.secrets/claude-code-oauth-token")"
   export CLAUDE_CODE_OAUTH_TOKEN

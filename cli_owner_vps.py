@@ -88,6 +88,11 @@ def _sudoers_install_script(dest: str) -> str:
         "if [ -f \"$dest\" ] && [ \"$(cat \"$dest\")\" = \"$want\" ]; then "
         "echo AIRULESET_SUDOERS_UNCHANGED; exit 0; fi; "
         "tmp=$(mktemp \"$(dirname \"$dest\")/.airuleset-owner-sudo-XXXXXX\"); "
+        # #659 review: clean up the dotted candidate on ANY exit (a mid-script
+        # chown/chmod failure or the caller's timeout) so no temp litters
+        # /etc/sudoers.d. Set AFTER mktemp so $tmp is defined; the successful
+        # `mv` below moves the file out, making this a harmless no-op then.
+        "trap 'rm -f \"$tmp\"' EXIT; "
         "printf '%s\\n' \"$want\" > \"$tmp\"; "
         "if visudo -cf \"$tmp\" >/dev/null 2>&1; then "
         "chown root:root \"$tmp\"; chmod 0440 \"$tmp\"; "

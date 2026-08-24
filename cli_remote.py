@@ -101,14 +101,28 @@ SONIOX_KEY_SOURCE = Path.home() / "devel" / "voiceagent" / ".env"
 # #659: the managed headless OAuth token (from `claude setup-token`) that lets
 # `claude` authenticate on an owner VPS-class box WITHOUT ever showing the
 # interactive login dialog on first run. Lives in the fleet's managed secret
-# store on the dev1 DRIVER (`~/.secrets/claude-code-oauth-token`, a bare token +
+# store on the dev1 DRIVER at a DELIBERATELY DIFFERENT path from the one the
+# launcher exports (`~/.secrets/owner-vps-claude-oauth-token`, a bare token +
 # trailing newline -- persist it with `airuleset.py secret request
-# CLAUDE_CODE_OAUTH_TOKEN --persist ~/.secrets/claude-code-oauth-token` after a
-# one-time `claude setup-token`) and is delivered to owner_vps targets by
-# `provision_owner_headless_token`. Per the CC auth docs this token is
-# INDEPENDENT of the interactive `/login` credential -- delivering it never
-# rotates/invalidates the owner's primary dev1 login.
-OWNER_HEADLESS_TOKEN_SOURCE = Path.home() / ".secrets" / "claude-code-oauth-token"
+# CLAUDE_CODE_OAUTH_TOKEN --persist ~/.secrets/owner-vps-claude-oauth-token`
+# after a one-time `claude setup-token`). `provision_owner_headless_token`
+# delivers its VALUE to each owner_vps target's `~/.secrets/
+# claude-code-oauth-token` (OWNER_HEADLESS_TOKEN_DELIVERED_NAME), which is the
+# path the launcher's export guard checks. The two names MUST stay distinct
+# (adversarial review, #659): if the driver's source lived at the launcher-
+# checked name, dev1 -- which both hosts the source AND runs the launcher --
+# would export CLAUDE_CODE_OAUTH_TOKEN into the owner's own interactive
+# sessions, silently switching dev1's auth to the headless token (which expires
+# ~yearly and is revocable). With distinct names, dev1 holds only the SOURCE
+# name, the launcher checks only the DELIVERED name, so a delivered file never
+# exists on dev1 and the launcher never exports there. Per the CC auth docs the
+# token is INDEPENDENT of the interactive `/login` credential -- delivering it
+# never rotates/invalidates the owner's primary login.
+OWNER_HEADLESS_TOKEN_SOURCE = Path.home() / ".secrets" / "owner-vps-claude-oauth-token"
+# The basename the token lands at on a target -- the SAME name the managed
+# launcher's export guard checks (cli_claude_scripts.py). Distinct from the
+# SOURCE basename above by construction (see the comment there).
+OWNER_HEADLESS_TOKEN_DELIVERED_NAME = "claude-code-oauth-token"
 
 
 def _soniox_key_line(source: Path = None):
@@ -193,7 +207,6 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     this parameter exists to remove; it never touches an account that has
     not already, independently, failed auth THIS run."""
     import subprocess
-    import time
     run = run or subprocess.run
     control_opts = list(control_opts or [])
     import airuleset  # #433 L-E: REMOTE_HOSTS/AUTHORITY_BY_USER promoted to cli_fleet, read via facade
@@ -236,46 +249,78 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
         return failed + [(h["name"], "soniox-key-source-missing")
                           for h in targets]
 
+    failed.extend(_deliver_secret_to_hosts(
+        targets, line,
+        "umask 077; cat > ~/.soniox.env && chmod 600 ~/.soniox.env",
+        "soniox key", run, control_opts=control_opts))
+    return failed
+
+
+# FORWARD-TRIGGER (#659 review): the Pattern-B secret-delivery surface
+# (_deliver_secret_to_hosts + the two provision_* callers + their source-read
+# helpers) is cohesive with this module's deploy loop and stays here for now
+# (the size_ratchet, not the ~1000-line nudge, is the real cap; #545). If a
+# THIRD secret-delivery caller ever lands, extract this whole surface into a
+# `cli_secret_delivery.py` leaf (facade re-export from airuleset.py) FIRST.
+def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
+                             control_opts=None, require_identity=False):
+    """Shared per-host secret DELIVERY loop (#659 extraction) for
+    `provision_subdev_soniox_key` (the Soniox key) and
+    `provision_owner_headless_token` (the OAuth token). Delivers `value` to each
+    already-filtered host in `targets` by running `remote_write_cmd` there, with
+    the VALUE piped via ssh stdin -- NEVER in argv, NEVER printed by this
+    process. Carries the #341 ssh-prefix hardening (BatchMode / one password
+    prompt) and the #358 bounded, transient-only retry + backoff, so both
+    callers share ONE hardened copy instead of two hand-synchronised ones.
+    `noun` names the payload in log lines. Returns the list of `(name, reason)`
+    delivery failures.
+
+    `require_identity` (owner-secret classes, #659 review): a target WITHOUT an
+    `identity` is REFUSED with a `failed` entry -- an owner secret (the OAuth
+    token) must never ride the fleet-shared subdev password. Soniox passes False
+    (the montalu family authenticates via the shared default key by design)."""
+    import time
+    control_opts = list(control_opts or [])
+    failed = []
     for remote in targets:
         identity = remote.get("identity")
         if identity:
-            # #341: BatchMode=yes -- a failed pubkey attempt (an
-            # unprovisioned/misconfigured account) must fail IMMEDIATELY
-            # rather than falling through to an interactive password/
-            # keyboard-interactive attempt, which is what turned a single
-            # "Permission denied" connection into several distinct
-            # auth-failure log lines against subdev.
+            # #341: BatchMode=yes -- a failed pubkey attempt (an unprovisioned/
+            # misconfigured account) must fail IMMEDIATELY rather than falling
+            # through to an interactive password/keyboard-interactive attempt,
+            # which is what turned a single "Permission denied" connection into
+            # several distinct auth-failure log lines against subdev.
             ssh_prefix = ["ssh", "-i", os.path.expanduser(identity),
                           "-o", "StrictHostKeyChecking=no",
                           "-o", "BatchMode=yes"]
+        elif require_identity:
+            # #659: never ship an owner secret over the fleet-shared password.
+            print("  ⚠ %s delivery to %s REFUSED: an owner secret requires a "
+                  "pinned ssh identity, never the fleet-shared password."
+                  % (noun, remote["name"]), file=sys.stderr)
+            failed.append((remote["name"], "refused-no-identity"))
+            continue
         else:
             # #341: NumberOfPasswordPrompts=1 -- caps a wrong/unprovisioned
-            # password attempt to ONE try (openssh's own default is 3,
-            # and sshpass happily re-supplies the same password for every
-            # re-prompt), so a single sshpass call can burn at most one
-            # fail2ban-countable strike instead of up to three.
+            # password attempt to ONE try (openssh's own default is 3, and
+            # sshpass happily re-supplies the same password for every re-prompt),
+            # so a single sshpass call can burn at most one fail2ban-countable
+            # strike instead of up to three.
             ssh_prefix = ["sshpass", "-p", "newlevel", "ssh",
                           "-o", "StrictHostKeyChecking=no",
                           "-o", "NumberOfPasswordPrompts=1"]
         argv = ssh_prefix + control_opts + [
-            f"{remote['user']}@{remote['host']}",
-            "umask 077; cat > ~/.soniox.env && "
-            "chmod 600 ~/.soniox.env"]
-        # #358 adversarial-review F2 (MAJOR): this call used to be a
-        # single, un-retried attempt -- a connection-closed/reset drop
-        # here permanently lost that account's soniox key, the exact hole
-        # _deploy_to_all_remotes()'s deploy-loop retry exists to close, one
-        # function over. Same bounded target-level retry shape as that
-        # loop: only a genuine ssh connection-establishment failure
-        # (never an ordinary write failure) gets retried, up to
-        # SSH_RETRY_MAX_ATTEMPTS total attempts, with the SAME
-        # env-tunable backoff.
+            f"{remote['user']}@{remote['host']}", remote_write_cmd]
+        # #358: only a genuine ssh connection-establishment failure (never an
+        # ordinary write failure) is retried, up to SSH_RETRY_MAX_ATTEMPTS with
+        # the env-tunable backoff -- the exact hole the deploy loop's own retry
+        # closes, one function over.
         r = None
         exc = None
         for attempt in range(1, SSH_RETRY_MAX_ATTEMPTS + 1):
             exc = None
             try:
-                r = run(argv, input=line + "\n", capture_output=True,
+                r = run(argv, input=value + "\n", capture_output=True,
                         text=True, timeout=20)
             except Exception as e:
                 exc = e
@@ -283,41 +328,53 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
             if r.returncode == 0:
                 break
             if (attempt >= SSH_RETRY_MAX_ATTEMPTS
-                    or not _is_ssh_transient_failure(r.returncode,
-                                                      r.stderr)):
+                    or not _is_ssh_transient_failure(r.returncode, r.stderr)):
                 break
             backoff = _ssh_retry_backoff_s()
-            print(f"  transient ssh failure delivering soniox key to "
+            print(f"  transient ssh failure delivering {noun} to "
                   f"{remote['name']} (attempt {attempt}/"
                   f"{SSH_RETRY_MAX_ATTEMPTS}) — retrying in {backoff}s: "
                   f"{r.stderr.strip()[:200]}")
             time.sleep(backoff)
         if exc is not None:
-            print("  ⚠ soniox key delivery to %s failed: %s"
-                  % (remote["name"], exc), file=sys.stderr)
+            print("  ⚠ %s delivery to %s failed: %s"
+                  % (noun, remote["name"], exc), file=sys.stderr)
             failed.append((remote["name"], repr(exc)))
             continue
         if r.returncode != 0:
-            print("  ⚠ soniox key delivery to %s failed (rc=%d): %s"
-                  % (remote["name"], r.returncode,
+            print("  ⚠ %s delivery to %s failed (rc=%d): %s"
+                  % (noun, remote["name"], r.returncode,
                      (r.stderr or "").strip()[:200]), file=sys.stderr)
             failed.append((remote["name"], "rc=%d" % r.returncode))
         else:
-            print("    soniox key: delivered to %s" % remote["name"])
+            print("    %s: delivered to %s" % (noun, remote["name"]))
     return failed
 
 
 def _owner_headless_token_value(source: Path = None):
     """The headless OAuth token value out of the managed secret store on the
     driver (`OWNER_HEADLESS_TOKEN_SOURCE`, a bare token + trailing newline).
-    Returns the stripped non-empty token, or None when the source is missing or
-    empty -- never raises, and NEVER returns/prints the value anywhere but into
-    the ssh `input=` payload of the delivery below."""
+    Returns the stripped non-empty token, or None when the source is missing,
+    empty, or UNREADABLE (a permission / decode error while it exists) -- it
+    genuinely never raises (#659 review: `read_file_safe`'s `read_text()` can
+    raise on a 0400-root or non-utf8 file even though `is_file()` is true, and
+    the caller's delivery is inside a try/finally that would otherwise crash the
+    push tail). NEVER returns/prints the value anywhere but into the ssh
+    `input=` payload of the delivery below."""
     src = source if source is not None else OWNER_HEADLESS_TOKEN_SOURCE
     if not src.is_file():
         return None
     import airuleset  # #433 L-E: read_file_safe stays resident in airuleset.py
-    val = airuleset.read_file_safe(src).strip()
+    try:
+        val = airuleset.read_file_safe(src).strip()
+    except OSError as e:
+        print("  ⚠ headless token source %s exists but is unreadable "
+              "(non-fatal): %r" % (src, e), file=sys.stderr)
+        return None
+    except Exception as e:  # noqa: BLE001 -- a decode error must also degrade
+        print("  ⚠ headless token source %s could not be read (non-fatal): %r"
+              % (src, e), file=sys.stderr)
+        return None
     return val or None
 
 
@@ -327,10 +384,18 @@ def provision_owner_headless_token(hosts=None, run=None, source: Path = None,
     (#659) -- a REMOTE_HOSTS entry flagged `"owner_vps": True` -- so first-run
     `claude` there NEVER shows the interactive login dialog. Driver-side
     per-host secret delivery, the SAME Pattern B as `provision_subdev_soniox_key`
-    (ssh stdin, value never in argv, never printed by this process); the token
-    lands in the target's `~/.secrets/claude-code-oauth-token` (mode 600) and
-    the managed launcher exports it as `CLAUDE_CODE_OAUTH_TOKEN` only when that
-    file exists+non-empty (so it is a no-op on every non-owner-VPS box).
+    (ssh stdin, value never in argv, never printed by this process), sharing the
+    hardened `_deliver_secret_to_hosts` loop. The token's VALUE is read from the
+    driver's `OWNER_HEADLESS_TOKEN_SOURCE` (a DIFFERENT basename than the
+    launcher checks -- see that constant's comment for why) and lands at each
+    target's `~/.secrets/<OWNER_HEADLESS_TOKEN_DELIVERED_NAME>` (mode 600); the
+    managed launcher exports `CLAUDE_CODE_OAUTH_TOKEN` only when THAT delivered
+    file exists. dev1 (the driver) holds only the SOURCE name, so its launcher
+    never exports -- no contamination of the owner's interactive sessions.
+
+    Delivery `require_identity=True`: an owner_vps target without a pinned ssh
+    identity is REFUSED, never shipped over the fleet-shared password (an owner
+    OAuth token is secret-class).
 
     A missing source on the driver is a LOUD stderr failure -- every owner_vps
     target is reported failed (with the one-time `claude setup-token` + persist
@@ -343,7 +408,6 @@ def provision_owner_headless_token(hosts=None, run=None, source: Path = None,
     auth this run). A host list with no owner_vps target never reads the source
     at all."""
     import subprocess
-    import time
     run = run or subprocess.run
     control_opts = list(control_opts or [])
     targets = [h for h in _deployable_hosts(hosts) if h.get("owner_vps")]
@@ -380,54 +444,14 @@ def provision_owner_headless_token(hosts=None, run=None, source: Path = None,
         return failed + [(h["name"], "headless-token-source-missing")
                           for h in targets]
 
-    for remote in targets:
-        identity = remote.get("identity")
-        if identity:
-            ssh_prefix = ["ssh", "-i", os.path.expanduser(identity),
-                          "-o", "StrictHostKeyChecking=no",
-                          "-o", "BatchMode=yes"]
-        else:
-            ssh_prefix = ["sshpass", "-p", "newlevel", "ssh",
-                          "-o", "StrictHostKeyChecking=no",
-                          "-o", "NumberOfPasswordPrompts=1"]
-        argv = ssh_prefix + control_opts + [
-            f"{remote['user']}@{remote['host']}",
-            "umask 077; mkdir -p ~/.secrets && "
-            "cat > ~/.secrets/claude-code-oauth-token && "
-            "chmod 600 ~/.secrets/claude-code-oauth-token"]
-        r = None
-        exc = None
-        for attempt in range(1, SSH_RETRY_MAX_ATTEMPTS + 1):
-            exc = None
-            try:
-                r = run(argv, input=token + "\n", capture_output=True,
-                        text=True, timeout=20)
-            except Exception as e:
-                exc = e
-                break
-            if r.returncode == 0:
-                break
-            if (attempt >= SSH_RETRY_MAX_ATTEMPTS
-                    or not _is_ssh_transient_failure(r.returncode, r.stderr)):
-                break
-            backoff = _ssh_retry_backoff_s()
-            print(f"  transient ssh failure delivering headless token to "
-                  f"{remote['name']} (attempt {attempt}/"
-                  f"{SSH_RETRY_MAX_ATTEMPTS}) — retrying in {backoff}s: "
-                  f"{r.stderr.strip()[:200]}")
-            time.sleep(backoff)
-        if exc is not None:
-            print("  ⚠ headless token delivery to %s failed: %s"
-                  % (remote["name"], exc), file=sys.stderr)
-            failed.append((remote["name"], repr(exc)))
-            continue
-        if r.returncode != 0:
-            print("  ⚠ headless token delivery to %s failed (rc=%d): %s"
-                  % (remote["name"], r.returncode,
-                     (r.stderr or "").strip()[:200]), file=sys.stderr)
-            failed.append((remote["name"], "rc=%d" % r.returncode))
-        else:
-            print("    headless token: delivered to %s" % remote["name"])
+    remote_cmd = (
+        "umask 077; mkdir -p ~/.secrets && "
+        "cat > ~/.secrets/%s && chmod 600 ~/.secrets/%s"
+        % (OWNER_HEADLESS_TOKEN_DELIVERED_NAME,
+           OWNER_HEADLESS_TOKEN_DELIVERED_NAME))
+    failed.extend(_deliver_secret_to_hosts(
+        targets, token, remote_cmd, "headless token", run,
+        control_opts=control_opts, require_identity=True))
     return failed
 
 
@@ -995,10 +1019,11 @@ def _deploy_to_all_remotes(failed, auth_failed):
 
         if failed:
             # #341 adversarial-review F3 (MINOR, TRIGGERED): an auth-failed
-            # stream host now yields TWO `failed` entries by design (its own
-            # deploy `rc=...` PLUS the soniox `skipped-known-auth-failure`), so
-            # len(failed) double-counts -- report the DISTINCT host count, the
-            # full list still shows each reason.
+            # host now yields TWO `failed` entries by design (its own deploy
+            # `rc=...` PLUS a secret-phase `skipped-known-auth-failure` -- the
+            # soniox skip for a subdev host, or the headless-token skip for an
+            # owner_vps host, #659), so len(failed) double-counts -- report the
+            # DISTINCT host count; the full list still shows each reason.
             distinct_failed = {name for name, _reason in failed}
             print(f"\n⚠ {len(distinct_failed)} of {len(airuleset.REMOTE_HOSTS)} remote(s) "
                   f"FAILED: {failed}", file=sys.stderr)

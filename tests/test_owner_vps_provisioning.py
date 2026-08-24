@@ -235,6 +235,17 @@ class TestProvisionOwnerSudo(unittest.TestCase):
         self.assertIn("mv -f", script)
         self.assertIn("visudo -cf", script)
 
+    def test_install_script_validates_BEFORE_install(self):
+        # #659 review YELLOW-3a: lock the ORDER, not just presence -- a mutant
+        # that moves the `mv` before the `visudo -cf` check (landing an
+        # UNVALIDATED file, a sudo-lockout risk) must fail. visudo must come
+        # first, and the mv must sit in the visudo-success branch.
+        script = cli_owner_vps._sudoers_install_script("/etc/sudoers.d/newlevel")
+        self.assertLess(script.index("visudo -cf"), script.index("mv -f"))
+        self.assertIn("if visudo -cf", script)
+        # the candidate is cleaned up on any exit (no /etc/sudoers.d litter)
+        self.assertIn("trap 'rm -f", script)
+
 
 # --------------------------------------------------------------------------- #
 # Gap 3 — headless OAuth token so first-run claude never shows the login dialog
@@ -323,10 +334,111 @@ class TestProvisionOwnerHeadlessToken(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class TestDeliverSecretToHosts(unittest.TestCase):
+    OWNER = {"name": "spinbike-vps", "host": "1.2.3.4", "user": "newlevel",
+             "identity": "~/.ssh/spinbike_vps", "owner_vps": True}
+    NOKEY = {"name": "nokey-vps", "host": "9.9.9.9", "user": "newlevel",
+             "owner_vps": True}
+    _TRANSIENT = "kex_exchange_identification: read: Connection reset by peer\n"
+
+    def test_refuses_owner_secret_without_identity(self):
+        # #659 review: an owner secret must NEVER ride the fleet-shared password.
+        out = StringIO()
+        calls, run = _rec()
+        with m.patch("sys.stderr", out):
+            failed = cli_remote._deliver_secret_to_hosts(
+                [self.NOKEY], "tok", "cat > ~/x", "headless token", run,
+                require_identity=True)
+        self.assertEqual(failed, [("nokey-vps", "refused-no-identity")])
+        self.assertEqual(calls, [])   # never opened an ssh connection
+        self.assertIn("requires a pinned ssh identity", out.getvalue())
+
+    def test_soniox_style_allows_no_identity(self):
+        # require_identity=False (the subdev/soniox default) uses the sshpass
+        # branch for a no-identity host.
+        calls, run = _rec()
+        failed = cli_remote._deliver_secret_to_hosts(
+            [self.NOKEY], "v", "cat > ~/x", "soniox key", run,
+            require_identity=False)
+        self.assertEqual(failed, [])
+        self.assertEqual(calls[0]["argv"][0], "sshpass")
+
+    def test_transient_failure_is_retried_then_succeeds(self):
+        seq = [(255, self._TRANSIENT), (0, "")]
+        calls = []
+
+        def run(cmd, *a, **k):
+            calls.append(list(cmd))
+            rc, err = seq[min(len(calls) - 1, len(seq) - 1)]
+            return m.Mock(returncode=rc, stdout="", stderr=err)
+        with m.patch("time.sleep"):
+            failed = cli_remote._deliver_secret_to_hosts(
+                [self.OWNER], "tok", "cat > ~/x", "headless token", run,
+                require_identity=True)
+        self.assertEqual(failed, [])
+        self.assertEqual(len(calls), 2)   # retried the transient failure
+
+    def test_nontransient_failure_not_retried(self):
+        calls = []
+
+        def run(cmd, *a, **k):
+            calls.append(list(cmd))
+            return m.Mock(returncode=1, stdout="", stderr="cat: write error\n")
+        with m.patch("sys.stderr", StringIO()):
+            failed = cli_remote._deliver_secret_to_hosts(
+                [self.OWNER], "tok", "cat > ~/x", "headless token", run,
+                require_identity=True)
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(len(calls), 1)   # an ordinary write failure is NOT retried
+
+
 # --------------------------------------------------------------------------- #
-# Wiring — REMOTE_HOSTS flag, deploy-loop env signal, launcher guard
+# Wiring — facade re-exports, cmd_install calls, deploy-loop env, launcher
 # --------------------------------------------------------------------------- #
 class TestWiring(unittest.TestCase):
+    def test_facade_reexports(self):
+        self.assertIs(airuleset.provision_owner_sudo,
+                      cli_owner_vps.provision_owner_sudo)
+        self.assertIs(airuleset.provision_owner_headless_token,
+                      cli_remote.provision_owner_headless_token)
+        self.assertIs(airuleset.ensure_claude_native_userspace,
+                      cli_binary_installers.ensure_claude_native_userspace)
+        self.assertIs(airuleset._deliver_secret_to_hosts,
+                      cli_remote._deliver_secret_to_hosts)
+
+    def test_cmd_install_invokes_provision_owner_sudo(self):
+        import inspect
+        import re
+        src = inspect.getsource(airuleset.cmd_install)
+        self.assertTrue(re.search(r"(?m)^\s*provision_owner_sudo\(\)", src),
+                        "cmd_install must actually CALL provision_owner_sudo()")
+        self.assertIn("owner-sudo provisioning error (non-fatal)", src)
+
+    def test_cmd_install_invokes_ensure_claude_native_userspace(self):
+        import inspect
+        import re
+        src = inspect.getsource(airuleset.cmd_install)
+        self.assertTrue(
+            re.search(r"(?m)^\s*ensure_claude_native_userspace\(\)", src),
+            "cmd_install must actually CALL ensure_claude_native_userspace()")
+
+    def test_headless_source_and_delivered_names_are_distinct(self):
+        # #659 review RED-1 regression lock: the driver's SOURCE basename must
+        # differ from the launcher-guarded DELIVERED basename, else dev1 (which
+        # hosts the source AND runs the launcher) would export the token into
+        # the owner's interactive sessions.
+        self.assertNotEqual(airuleset.OWNER_HEADLESS_TOKEN_SOURCE.name,
+                            airuleset.OWNER_HEADLESS_TOKEN_DELIVERED_NAME)
+        launcher = airuleset.CLAUDE_LAUNCH_SCRIPT_CONTENT
+        # the launcher's export guard checks the DELIVERED .secrets/ path ...
+        self.assertIn(".secrets/" + airuleset.OWNER_HEADLESS_TOKEN_DELIVERED_NAME,
+                      launcher)
+        # ... and NEVER guards on the driver SOURCE .secrets/ path (so dev1,
+        # which holds only the source file, never exports). (The source basename
+        # may appear in an explanatory COMMENT -- only the `.secrets/<src>` guard
+        # path must be absent.)
+        self.assertNotIn(".secrets/" + airuleset.OWNER_HEADLESS_TOKEN_SOURCE.name,
+                         launcher)
     def test_spinbike_flagged_owner_vps(self):
         sb = [h for h in airuleset.REMOTE_HOSTS if h.get("name") == "spinbike-vps"]
         self.assertEqual(len(sb), 1)

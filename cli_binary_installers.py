@@ -147,15 +147,22 @@ def _claude_installer_argv():
 # `npm -g` install (the spinbike-vps case: `/usr/bin/claude` that cannot
 # self-update, `Auto-update failed: no write permission to npm prefix`) or any
 # other system-path copy. Deliberately EXCLUDES ~/.local/bin so the native
-# install is never mistaken for a system copy to remove.
-_CLAUDE_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+# install is never mistaken for a system copy to remove. `/snap/bin` is
+# deliberately OMITTED (#659 review): a snap-packaged claude's `/snap/bin/claude`
+# is a snapd-managed symlink that `rm -f` would only have snapd recreate on the
+# next refresh, and the correct removal is `snap remove` -- the fleet does not
+# use a snap claude, so excluding it avoids fighting snapd for no gain.
+_CLAUDE_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 def _native_claude_present() -> bool:
     """True iff the native user-space claude (`~/.local/bin/claude`) resolves
     and is executable -- the install we WANT (self-updating in user space).
     Uses `shutil.which` scoped to `~/.local/bin` so a dangling symlink from a
-    partial install reads as absent, same discipline as `_claude_cli_installed`."""
+    partial install reads as absent (the executable-check discipline of
+    `_claude_cli_installed`); this DELIBERATELY omits that function's login-shell
+    `command -v` fallback -- here we specifically need the NATIVE ~/.local copy
+    present, not merely some `claude` on some login PATH."""
     local_bin = str(Path.home() / ".local" / "bin")
     return shutil.which("claude", path=local_bin) is not None
 
@@ -181,7 +188,16 @@ def _remove_system_claude(syspath, run):
     resolved system-bin path (from `_system_claude_path`, not user input) is
     passed to `sudo -n rm -f` via argv (no shell), so there is no injection
     surface. The caller has already confirmed the native `~/.local` install is
-    present, so this can never leave the box with no `claude`."""
+    present, so this can never leave the box (for THIS user) with no `claude`.
+
+    Residuals accepted as best-effort (#659 review): (a) if the system copy was
+    a root-`npm -g` install, `rm -f` unlinks the launcher symlink but leaves the
+    npm PACKAGE tree, which a later root `npm update -g` could resurrect -- the
+    next install re-removes it, so it converges; (b) on a rare multi-user box a
+    non-managed account that relied on the shared `/usr/bin/claude` (and lacks
+    its own ~/.local copy) loses resolution -- every managed account carries the
+    native copy, and the fleet's boxes are single-owner, so this is not a real
+    case here."""
     if not shutil.which("sudo"):
         print("    claude: system copy %s left in place (no sudo to remove it)"
               % syspath)
