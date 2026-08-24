@@ -5,8 +5,8 @@ set -euo pipefail
 #
 # The ❓ device ping delivers the final contiguous question block to the
 # user's phone (notify-discord-pending.sh), and a Discord REPLY to it is typed
-# back into this session (watchdog job 7). Three live failures this gate kills
-# (user, 2026-07-05 + 2026-07-25, after the block-delivery fix):
+# back into this session (watchdog job 7). Four live failures this gate kills
+# (user, 2026-07-05 + 2026-07-25 + 2026-08-24, after the block-delivery fix):
 #   1. NO ÚVOD — a question block with no briefing ("Po zmazaní hneď overím…"
 #      — deleting WHAT? which project? why?). The reader is on a phone with
 #      ZERO terminal context; user-questions-slovak.md mandates the briefing,
@@ -23,6 +23,19 @@ set -euo pipefail
 #      since the last ask) — anything reaching Check 5 already failed that
 #      bypass, so it is either a genuinely new ask or a lazy reference to an
 #      old one; user-questions-slovak.md mandates the full block either way.
+#   4. CLIENT-POSTING WITHOUT A NAMED THREAD (#650) — a ❓ approval ping to
+#      SEND/APPROVE a client Discuss message (incl. a reply into an EXISTING
+#      thread, and a closing/handover message) that names its target only by a
+#      GENERIC description ("výrobné vlákno"), never the exact quoted thread
+#      name. The owner reads the ping on their phone and cannot tell WHICH
+#      thread it goes to (montalu1 2026-08-24: "napriek pokynu … to tu znova
+#      nie je!!!"). The prose rule (skills/odoo-discuss-xmlrpc/handover-
+#      compose.md #632, of the #596/#609/#628 tool-call-gate family) failed
+#      AGAIN; Check 6 escalates it to the CHAT surface — the block validated
+#      here IS the phone ping, so the name is checked exactly where it must
+#      appear. Only fires on a client-posting INTENT (a send/reply verb
+#      adjacent to a Discuss/thread token, or a closing/handover phrase) with
+#      NO thread name — an ordinary question never trips it.
 #
 # Required shape of the delivered block (user-questions-slovak.md):
 #   **Otázka — projekt <meno> (<čo projekt robí>):** <čo sa deje — 2–4 vety>
@@ -267,6 +280,48 @@ if [ -z "$VIOLATION" ]; then
     fi
 fi
 
+# Check 6 — a CLIENT-POSTING approval question must NAME the exact target
+# thread (#650). Owner incident (montalu1, 2026-08-24): an approval ping to
+# SEND a client Discuss message into an EXISTING thread named its target only
+# by a generic description ("výrobné vlákno"), not the exact quoted name — the
+# prose rule (skills/odoo-discuss-xmlrpc/handover-compose.md #632, in the
+# tool-call-gate #596/#609/#628 family) failed AGAIN. This is the CHAT-surface
+# escalation: the $BLOCK validated here IS the phone ping, so the name the owner
+# reads is checked at the exact place it must appear.
+#
+# Fires only when the delivered block carries CLIENT-POSTING INTENT — a
+# send/reply verb adjacent (<=60 chars, either order) to a Discuss/thread
+# token, OR a closing/handover-message phrase — AND the block does NOT name the
+# thread (an explicit `Vlákno:` line, or a quoted name ending in the stream
+# number, the #632 heuristic). Deliberately narrow: it runs only on ❓ question
+# turns that already survived Checks 1-5, so an ordinary question / a bare
+# Discuss mention with no posting verb never matches. `.{0,60}` NOT
+# `[^\n]{0,60}` — inside a grep ERE bracket `\n` is the LITERAL chars '\','n'
+# (it would exclude every 'n', which is in klientovi/informovať/…); grep is
+# line-oriented so `.` already never crosses a newline. LC_ALL=C.UTF-8 per the
+# repo's #319 diacritic-safe-grep convention; here-strings not `printf|grep -q`
+# pipes per #292.
+#
+# Accepted residuals (this is a WORD-FAMILY heuristic, not a parser — a genuine
+# occurrence outside these families needs its own follow-up, never a blanket
+# rewrite): intent SPLIT ACROSS LINES (verb on one line, `vlákno` on another —
+# grep is per-line, so the adjacency never matches); a posting verb OUTSIDE the
+# declared stem list (an exotic synonym phrased far from the families); a thread
+# name carrying a numeric suffix but NO surrounding quotes and no `Vlákno:`
+# label; and a NON-Discuss "pošli … do vlákna" in an unrelated project
+# (harmless — it merely asks to name the thread). The present-user (~10 min)
+# bypass above also still applies BY DESIGN: these approval pings are away-user
+# autonomous asks whose ACTIVE file is never stamped, so the bypass does not
+# reach the montalu1 case.
+if [ -z "$VIOLATION" ]; then
+    POST_INTENT_RX='(po[šs]l|odo[šs]l|posiel|odosiel|posun|zverej|odoslan|zasl|nap[ií][šs]|napis|odpoved|odp[ií][šs]|reaguj|inform|ozn[áa]m|ohl[áa]s).{0,60}(vl[áa]kn|discuss)|(vl[áa]kn|discuss).{0,60}(po[šs]l|odo[šs]l|posiel|odosiel|posun|zverej|odoslan|zasl|nap[ií][šs]|napis|odpoved|odp[ií][šs]|reaguj|inform|ozn[áa]m|ohl[áa]s)|uzavierac.{0,25}spr[áa]v|(odovzd[áa]v|handover).{0,25}spr[áa]v'
+    THREAD_NAMED_RX='(^|[[:space:]])vl[áa]kno[[:space:]]*:|[„“"][^„”“"]{0,60}[0-9][[:space:]]*[”“"]'
+    if LC_ALL=C.UTF-8 grep -qiE "$POST_INTENT_RX" <<<"$BLOCK" \
+        && ! LC_ALL=C.UTF-8 grep -qiE "$THREAD_NAMED_RX" <<<"$BLOCK"; then
+        VIOLATION="thread"
+    fi
+fi
+
 if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
     TEMPLATE="\nShape: **Otázka — projekt <meno> (<čo robí>):** <úvod 2–4 vety> · • <možnosť> (odporúčam) — <dôsledok> · ❓ NEEDS YOU: <jedno rozhodnutie>. See user-questions-slovak.md."
@@ -281,6 +336,8 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
             REASON="Your ❓ question has no option bullets (odrážky). Add '• <možnosť> (odporúčam) — <dôsledok>' lines; an open question offers candidates + '• iné — napíš vlastnú odpoveď'.${TEMPLATE}" ;;
         reference)
             REASON="Your ❓ block references an OLD question by allusion (\"pýtal som sa skôr\" / \"ako som spomínal\" / \"jediné otvorené rozhodnutie je X\") instead of restating it. If a conversation happened since it was last asked, this is a NEW ask — write the FULL self-contained block again (briefing + options + decision); the away user cannot see your history. A byte-identical VERBATIM repeat of the SAME still-blocked question is fine and does not hit this check.${TEMPLATE}" ;;
+        thread)
+            REASON="Your ❓ block asks to SEND/APPROVE a client Discuss message (or a closing/handover message) but does NOT name the exact target thread — the away owner sees only a generic description on their phone. Name the thread on its OWN line: Vlákno: „<presný názov vlákna vrátane čísla streamu>\" — aj pri EXISTUJÚCOM vlákne, nie len druhový opis ako „výrobné vlákno\". See skills/odoo-discuss-xmlrpc/handover-compose.md (#632/#650)." ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0

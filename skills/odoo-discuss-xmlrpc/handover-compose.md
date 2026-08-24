@@ -47,6 +47,15 @@ is the FIRST rule for a reason).
   vlákna to má ísť?" (airuleset #632, montalu1: an approval question for a
   production-board notice referenced its target only as „vlákno 250" — it should
   have carried „Tabula objednavok 1" as a separate, visible field from the start).
+  This is now ALSO HOOK-ENFORCED at the ❓ owner-approval CHAT surface
+  (`hooks/stop-check-question-quality.sh` Check 6, airuleset #650): a ❓ approval
+  question carrying client-posting intent — send/approve a client Discuss message
+  into a thread (INCLUDING an EXISTING one), or a closing/handover message — is
+  BLOCKED unless it names the exact target thread (an explicit `Vlákno:` line, or
+  a quoted thread name ending in the stream number), so a generic druhový opis
+  like „výrobné vlákno" no longer passes. The prose rule failed AGAIN on montalu1
+  2026-08-24 („to tu znova nie je!!!"), so #650 escalated it to the chat surface
+  the phone ping is built from, in the #596/#609/#628 tool-call-gate family.
 - **The thread NAME ends with the owning stream's NUMBER**, so the owner sees at
   a glance which stream owns the thread (montalu3 → "Kontrola zákazníckych
   e-mailov 3"). This formalizes the de-facto IT-support convention already on
