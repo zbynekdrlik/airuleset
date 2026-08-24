@@ -1291,6 +1291,216 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
 
 
 # ---------------------------------------------------------------------------
+# #660: native `session-created` audit hook on the OWNER box.
+#
+# ROOT CAUSE (repro'd live on an isolated `-L` socket, tmux 3.7b): a stray
+# standalone `<owner>-N` (own bash window, no group tag) is created by a path
+# the #651 interactive-only 3-token `tmux()` wrapper does not cover (a 4-token
+# `new-session -d -t`, a non-interactive/ssh/webterm/script context, `command
+# tmux`, or an explicit `-s <owner>-N`). The stray pane's process tree ends at
+# the tmux SERVER, so the creating CLIENT is unrecoverable AFTER the fact --
+# meaning the creator cannot be pinned statically. This native hook is the
+# DETERMINISTIC answer (#649 native-beats-custom): it logs EVERY session
+# creation's client pid/tty/name + a ps chain of the creator, so the NEXT
+# stray's creator is captured for certain.
+#
+# OWNER BOXES ONLY. A single-session box (gk + subdev streams,
+# `is_single_session_box_user`) already binds `session-created` to
+# `rename-window` (#593), so this must NEVER render there -- the two are
+# mutually exclusive by box type, so the single global hook slot never
+# collides. On an owner box (dev1/dev2), `session-created` is otherwise unset
+# (apply_stream_tmux_window_name's owner-box path REVERTS/unsets it), so this
+# applier must run AFTER apply_stream_tmux_window_name in the install flow
+# (else that revert's live `set-hook -gu session-created` would clear this
+# hook right after we set it -- the persistent conf block below survives a
+# server restart regardless, but the live-apply needs the ordering).
+# ---------------------------------------------------------------------------
+
+OWNER_AUDIT_MARK_START = "# >>> airuleset tmux owner session-created audit >>>"
+OWNER_AUDIT_MARK_END = "# <<< airuleset tmux owner session-created audit <<<"
+OWNER_AUDIT_LOGGER_REL = ".claude/tmux-audit/log-session-created.sh"
+
+
+def render_owner_audit_logger():
+    """The managed logger script invoked by the `session-created` hook. Appends
+    ONE line per session creation to `~/.claude/tmux-audit/session-created.log`:
+    ISO timestamp, session name, creating-client pid/tty/name, a ps chain of
+    the creator (walked up to 3 ancestors of the client pid), and -- for a
+    DETACHED create with no client pid -- a snapshot of any live `tmux new*`
+    CLI process still mid-command. Best-effort throughout (`-b` backgrounds it,
+    every fallible step is guarded), so it can never block or fail a session
+    creation. Bounded to the last 500 log lines."""
+    return (
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        "# #660: airuleset owner-box tmux session-created audit logger. Invoked\n"
+        "# by the native `set-hook -g session-created` (run-shell -b) with the\n"
+        "# new session name + creating-client fields. The pane process tree of a\n"
+        "# stray ends at the tmux server, so the creating CLIENT is otherwise\n"
+        "# unrecoverable post-hoc; this line is the deterministic capture.\n"
+        'sess="${1:-?}"\n'
+        'cpid="${2:-}"\n'
+        'ctty="${3:-}"\n'
+        'cname="${4:-}"\n'
+        'dir="$HOME/.claude/tmux-audit"\n'
+        'log="$dir/session-created.log"\n'
+        'mkdir -p "$dir" 2>/dev/null || exit 0\n'
+        "ts=\"$(date -Is 2>/dev/null || date 2>/dev/null || echo '?')\"\n"
+        'creator=""\n'
+        'case "$cpid" in\n'
+        "  ''|*[!0-9]*) : ;;\n"
+        "  *)\n"
+        '    p="$cpid"\n'
+        "    for _ in 1 2 3; do\n"
+        '      row="$(ps -o pid=,ppid=,user=,args= -p "$p" 2>/dev/null '
+        "| tr -s ' ' | sed 's/^ //' || true)\"\n"
+        '      [ -n "$row" ] || break\n'
+        '      creator="${creator}[${row}] "\n'
+        '      p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d \' \' || true)"\n'
+        '      case "$p" in \'\'|0|1) break ;; esac\n'
+        "    done\n"
+        "    ;;\n"
+        "esac\n"
+        'tmuxprocs=""\n'
+        'if [ -z "$cpid" ]; then\n'
+        "  tmuxprocs=\"$(ps -eo pid=,ppid=,args= 2>/dev/null "
+        "| grep -E 'tmux( -[^ ]+)* (new-session|new)( |$)' "
+        "| grep -v ' grep' | tr '\\n' ';' || true)\"\n"
+        "fi\n"
+        "printf '%s\\tsession=%s\\tclient_pid=%s\\tclient_tty=%s"
+        "\\tclient_name=%s\\tcreator=%s\\ttmux_new_procs=%s\\n' \\\n"
+        '  "$ts" "$sess" "$cpid" "$ctty" "$cname" "$creator" "$tmuxprocs" '
+        '>> "$log" 2>/dev/null || exit 0\n'
+        'tail -n 500 "$log" > "$log.tmp" 2>/dev/null '
+        '&& mv "$log.tmp" "$log" 2>/dev/null || true\n'
+    )
+
+
+def _owner_audit_hook_command(logger_path):
+    """The tmux hook command string: run the logger in the BACKGROUND
+    (`run-shell -b`, so session creation is never blocked), passing the native
+    session + client fields as FOUR positional args.
+
+    Quoting (live-verified on an isolated `-L` tmux 3.7b server): the four
+    fields use the `#{q:...}` format modifier, which shell-QUOTES each value --
+    so an EMPTY field (a detached `new-session -d` create has no client) becomes
+    `''` and keeps its position (`$2` stays client_pid, never shifting), and a
+    session name carrying a shell metacharacter can never inject into the
+    run-shell command. The whole command is stored UNEXPANDED (the caller wraps
+    it in the conf with SINGLE quotes; the live `set-hook` stores the argv
+    verbatim) and tmux expands `#{...}` at FIRE time, per hook. `logger_path` is
+    a managed absolute path with no spaces (a fleet home dir)."""
+    return ('run-shell -b "%s #{q:hook_session_name} #{q:client_pid} '
+            '#{q:client_tty} #{q:client_name}"' % logger_path)
+
+
+def render_owner_session_audit_block(logger_path):
+    """The managed ~/.tmux.conf marker block that binds `session-created` to the
+    audit logger. Persistent so it survives a server restart; the applier also
+    live-applies it via `set-hook`. Owner boxes only (the caller gates).
+
+    The hook value is SINGLE-quoted (not double): a double-quoted set-hook value
+    is expanded at CONF-PARSE time (baking empty fields) AND collides with the
+    inner double-quotes around the run-shell argument -- both live-verified as
+    broken. Single quotes keep the `#{...}` unexpanded until the hook FIRES."""
+    return (
+        f"{OWNER_AUDIT_MARK_START}\n"
+        "# #660: capture the CREATOR of every new tmux session so a stray\n"
+        "# <owner>-N / foreign owner-session can be root-caused deterministically\n"
+        "# (the pane process tree ends at the server -> the creating CLIENT is\n"
+        "# otherwise unrecoverable). Native set-hook (#649). Owner boxes only --\n"
+        "# single-session boxes own session-created for rename-window (#593).\n"
+        f"set-hook -g session-created '{_owner_audit_hook_command(logger_path)}'\n"
+        f"{OWNER_AUDIT_MARK_END}"
+    )
+
+
+def _write_owner_audit_logger(logger_path):
+    """Write the managed logger script (idempotent) and mark it executable.
+    Best-effort: an unwritable path is noted on stderr, never fatal."""
+    try:
+        logger_path.parent.mkdir(parents=True, exist_ok=True)
+        logger_path.write_text(render_owner_audit_logger())
+        os.chmod(logger_path, 0o755)
+    except Exception as e:
+        print("  tmux owner audit-logger write skipped (non-fatal): %s" % e,
+              file=sys.stderr)
+
+
+def _live_apply_owner_session_audit(logger_path, run=None):
+    """Best-effort live `set-hook -g session-created` on any RUNNING server so an
+    already-running owner server captures creators WITHOUT waiting for a restart.
+    Config-path ONLY (`set-hook`, never a `send-keys` keystroke), failure-
+    tolerant (no server -> no-op). Mirrors `_live_apply_stream_window_name`."""
+    runner = run or _default_tmux_run
+    try:
+        runner(["tmux", "set-hook", "-g", "session-created",
+                _owner_audit_hook_command(logger_path)])
+    except Exception as e:
+        print("  tmux owner audit-hook live-apply skipped (non-fatal): %s" % e,
+              file=sys.stderr)
+
+
+def apply_owner_session_created_audit(tmux_conf_path=None, user=None, run=None,
+                                      home=None):
+    """#660: idempotently add/remove the owner-box `session-created` audit
+    marker block in ~/.tmux.conf. Rendered ONLY on an OWNER (multi-project)
+    box (`not is_single_session_box_user` -- dev1/dev2 newlevel); a single-
+    session box (gk + subdev streams) owns `session-created` for #593
+    rename-window, so the block is STRIPPED there (and never live-applied).
+
+    On an owner box it also writes the managed logger script and live-applies
+    the hook (`_live_apply_owner_session_audit`). Same positional-span rewrite
+    + create-file-if-absent + no-op-on-second-run shape as
+    apply_stream_tmux_window_name. Returns True iff ~/.tmux.conf changed.
+
+    MUST be called AFTER apply_stream_tmux_window_name in the install flow: on
+    an owner box that applier live-UNSETS session-created (its #593 revert), so
+    this applier's live `set-hook` has to run afterwards to win."""
+    import airuleset
+    from cli_bashrc_appliers import is_single_session_box_user
+    path = tmux_conf_path or TMUX_CONF
+    u = user or airuleset._current_user()
+    h = Path(home) if home else Path.home()
+    owner_box = not is_single_session_box_user(u)
+    logger_path = h / OWNER_AUDIT_LOGGER_REL
+    existing = path.read_text() if path.exists() else ""
+    spans = _clean_tmux_block_spans(
+        existing, OWNER_AUDIT_MARK_START, OWNER_AUDIT_MARK_END)
+    if owner_box:
+        _write_owner_audit_logger(logger_path)
+        block = render_owner_session_audit_block(str(logger_path))
+        if spans:
+            out, cursor = [], 0
+            for s, e in spans:
+                out.append(existing[cursor:s])
+                out.append(block)
+                cursor = e
+            out.append(existing[cursor:])
+            new = "".join(out)
+        else:
+            sep = "" if (existing == "" or existing.endswith("\n")) else "\n"
+            new = f"{existing}{sep}\n{block}\n"
+    else:
+        if not spans:
+            new = existing
+        else:
+            out, cursor = [], 0
+            for s, e in spans:
+                out.append(existing[cursor:s])
+                cursor = e
+            out.append(existing[cursor:])
+            new = "".join(out)
+    changed = new != existing
+    if changed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new)
+    if owner_box:
+        _live_apply_owner_session_audit(str(logger_path), run)
+    return changed
+
+
+# ---------------------------------------------------------------------------
 # tmux boot-time cutover (#242) -- points /usr/local/bin/tmux at the newest
 # managed tmux build (tmux-3.7b) at the box's own NEXT boot, so the client
 # and server binary always match. #240/#241: repointing the symlink while a

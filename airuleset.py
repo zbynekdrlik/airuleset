@@ -462,6 +462,7 @@ from cli_tmux_provisioning import (  # noqa: E402, F401
     _live_revert_stream_window_name,
     _live_normalize_owner_session,
     apply_stream_tmux_window_name,
+    apply_owner_session_created_audit,
     _sudo_write_root_file,
     setup_tmux_cutover_provisioning,
     setup_tmux_cutover_subdev_via_gatekeeper,
@@ -1113,6 +1114,20 @@ def cmd_install(args):
             print(f"  Updated:   {TMUX_CONF} (tmux window-name block, #592/#593)")
     except Exception as e:
         print(f"  stream tmux window-name setup error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 3g-bis. #660: native session-created AUDIT hook on the OWNER box, to
+    # capture a future stray's creator deterministically (full rationale +
+    # ordering note in apply_owner_session_created_audit's docstring; MUST run
+    # AFTER apply_stream_tmux_window_name, whose owner-box #593 revert live-
+    # UNSETS session-created).
+    try:
+        audit_changed = apply_owner_session_created_audit()
+        if audit_changed:
+            print(f"  Updated:   {TMUX_CONF} (tmux session-created audit, #660)")
+    except Exception as e:
+        print(f"  tmux session-created audit setup error (non-fatal): {e}",
+              file=sys.stderr)
+
     try:
         report_stream_dev_env()
     except Exception as e:

@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 6155,
+    "airuleset.py": 6166,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 99,
@@ -20,7 +20,7 @@
     "cli_remote.py": 1035,
     "cli_scratch_sweep.py": 1505,
     "cli_target_purge.py": 892,
-    "cli_tmux_provisioning.py": 1481,
+    "cli_tmux_provisioning.py": 1702,
     "cli_vault.py": 1012,
     "cli_webterm.py": 1426,
     "cli_worktree_sweep.py": 1750,
@@ -286,7 +286,7 @@
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
-    "airuleset.py::cmd_install": 548,
+    "airuleset.py::cmd_install": 562,
     "airuleset.py::cmd_notify": 320,
     "airuleset.py::main": 651,
     "cli_remote.py::cmd_push": 402,
