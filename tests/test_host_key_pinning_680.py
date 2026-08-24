@@ -27,7 +27,6 @@ remote must keep `=no` (regression). Fails by assertion on the pre-fix `=no`
 code. A real-fleet case proves the ACTUAL committed spinbike entry engages the
 pin on every leg (so no key literal is duplicated — the one source is reused).
 """
-import os
 import sys
 import unittest
 import unittest.mock as m

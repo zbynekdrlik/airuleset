@@ -75,15 +75,26 @@ def _remote_ssh_prefix(remote):
     succeeds or fails, since `fleet_burn_job` claims the hour unconditionally
     once its `fetch()` returns — spreading any retries comfortably inside a
     typical fail2ban findtime window without new state."""
+    # #680: route the inline StrictHostKeyChecking=no through the #669 pin
+    # helper (the ONE source) -- a raw-public-IP target carrying a committed
+    # host_keys pin (spinbike-vps) is verified STRICTLY; every tailscale/subdev
+    # host keeps the unchanged =no. Deferred import (call-time, not module-init)
+    # so cli_burn's leaf-with-no-top-level-airuleset invariant is preserved --
+    # cli_remote is fully imported by the time any burn ssh runs. Spliced BEFORE
+    # BatchMode/NumberOfPasswordPrompts (distinct options, but keeps the pin
+    # first per #669's first-value-wins guidance).
+    from cli_remote import host_key_check_opts
+    hostkey_opts = host_key_check_opts(remote)
     identity = remote.get("identity")
     if identity:
-        return ["ssh", "-i", os.path.expanduser(identity),
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "BatchMode=yes",
-                f"{remote['user']}@{remote['host']}"]
-    return ["sshpass", "-p", "newlevel", "ssh", "-o", "StrictHostKeyChecking=no",
-            "-o", "NumberOfPasswordPrompts=1",
-            f"{remote['user']}@{remote['host']}"]
+        return (["ssh", "-i", os.path.expanduser(identity)]
+                + hostkey_opts
+                + ["-o", "BatchMode=yes",
+                   f"{remote['user']}@{remote['host']}"])
+    return (["sshpass", "-p", "newlevel", "ssh"]
+            + hostkey_opts
+            + ["-o", "NumberOfPasswordPrompts=1",
+               f"{remote['user']}@{remote['host']}"])
 
 
 def _burn_remote(remote, days):

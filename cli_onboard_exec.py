@@ -47,8 +47,14 @@ def _ssh_prefix(remote):
     `_exec` and `_remote_home`. BatchMode=yes + ConnectTimeout make the
     "refuse on unreachable" fail-safe load-bearing: without them a keyless or
     down box would PROMPT/HANG instead of returning non-zero (#583 review)."""
-    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-           "-o", "StrictHostKeyChecking=no"]
+    # #680: route the inline StrictHostKeyChecking=no through the #669 pin
+    # helper (the ONE source) -- a raw-public-IP target carrying a committed
+    # host_keys pin (spinbike-vps) is verified STRICTLY; every tailscale/subdev
+    # host keeps the unchanged =no. Deferred import (call-time) -- cli_remote
+    # is fully imported by the time an onboard --host ssh runs.
+    from cli_remote import host_key_check_opts
+    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    ssh += host_key_check_opts(remote)
     ident = remote.get("identity")
     if ident:
         ssh += ["-i", os.path.expanduser(ident)]
