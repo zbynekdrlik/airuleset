@@ -38,6 +38,7 @@ controllable stub, in tests/test_design_gate.py).
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,12 +52,50 @@ sys.path.insert(0, str(ROOT))
 import design_gate as dg                                    # noqa: E402
 
 
+# The corpus slice is a MOVING window (the N most recent distinct subjects),
+# and the replay invariant is shape-stable for every future commit -- the ref
+# extractor IS the hook's own design_gate.issue_refs -- EXCEPT one class: the
+# hook honors its `[no-design: reason]` / bare `[no-design]` bypass tag
+# BEFORE extracting refs (pass resp. block regardless of refs), so the FIRST
+# commit subject ever to carry the tag would break CI retroactively. Exclude
+# that single class here; the bypass path itself stays tested in
+# tests/test_block_commit_without_design.py (TestBypass: bare tag rejected
+# rc 2, reasoned tag honored rc 0 + audit-logged). (#683 run-3 hardening.)
+_BYPASS_TAG_RE = re.compile(r"\[no-design\b")
+
+
+def _replayable(subject):
+    """False for the one corpus shape whose ON-arm expectation is not
+    derivable from issue_refs alone (the hook's own bypass tag)."""
+    return not _BYPASS_TAG_RE.search(subject)
+
+
+def _scratch_home(prefix):
+    """A relocated $HOME for one hook arm -- isolates ~/.claude marker state.
+
+    It must carry its OWN git trust config: in a container CI the job runs
+    as uid 0 while the bind-mounted workspace is owned by the host runner
+    uid, so without `safe.directory` every `git -C ROOT` the hook runs dies
+    `fatal: detected dubious ownership` -- repo_name_for() then returns ""
+    and the hook's documented unmeasurable->never-block fail-open silently
+    passes EVERY commit (run 32836799214: all 28 has-ref corpus commits
+    misreported as [has-ref-but-ON-passed] at once). A real operating $HOME
+    always carries whatever trust config makes the repo readable; the
+    scratch HOME replicates exactly that, nothing more."""
+    home = Path(tempfile.mkdtemp(prefix=prefix))
+    (home / ".claude").mkdir(parents=True)
+    (home / ".gitconfig").write_text(
+        "[safe]\n\tdirectory = %s\n" % ROOT, encoding="utf-8")
+    return home
+
+
 def real_commit_subjects(limit=None):
     """Every distinct commit SUBJECT line across all branches of this repo's
     own history (`git log --all --format=%s`) -- the real shapes the hook
     must classify: `(#N)`, `Closes #N`, `#A/#B`, and plenty with no
     reference at all. Deduplicated (the corpus has many near-identical
-    RED/GREEN pairs); order preserved."""
+    RED/GREEN pairs); order preserved. Bypass-tagged subjects are excluded
+    (see _replayable above)."""
     r = subprocess.run(["git", "-C", str(ROOT), "log", "--all", "--format=%s"],
                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
@@ -67,6 +106,8 @@ def real_commit_subjects(limit=None):
         if not line or line in seen:
             continue
         seen.add(line)
+        if not _replayable(line):
+            continue
         out.append(line)
     return out[:limit] if limit else out
 
@@ -113,10 +154,8 @@ def main(argv=None):
         print("replay: no commit subjects found (git log failed?)", file=sys.stderr)
         return 1
 
-    home_on = Path(tempfile.mkdtemp(prefix="airuleset-replay-on-"))
-    home_off = Path(tempfile.mkdtemp(prefix="airuleset-replay-off-"))
-    (home_on / ".claude").mkdir(parents=True)
-    (home_off / ".claude").mkdir(parents=True)
+    home_on = _scratch_home("airuleset-replay-on-")
+    home_off = _scratch_home("airuleset-replay-off-")
     gh_bindir = _stub_gh_bindir()
 
     n_total = 0
