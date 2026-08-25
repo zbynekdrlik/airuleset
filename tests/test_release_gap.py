@@ -751,14 +751,19 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
     def test_no_develop_branch_compare_404_is_clean_no_gap(self):
         self.assertEqual(
             self._fetch(compare=(1, "", "gh: Not Found (HTTP 404)")),
-            {"ahead": 0, "in_flight": False})
+            {"ahead": 0, "in_flight": False, "train": False})
 
     def test_compare_transient_error_is_none(self):
         self.assertIsNone(self._fetch(compare=(1, "", "error connecting")))
 
-    def test_ahead_zero_short_circuits_clean(self):
-        self.assertEqual(self._fetch(compare=(0, "0", "")),
-                         {"ahead": 0, "in_flight": False})
+    def test_ahead_zero_with_staging_is_clean_proven_train(self):
+        # #698 contract extension: the drained (ahead 0) verdict no longer
+        # short-circuits blind — the staging branch is verified so the result
+        # can honestly carry `train` True for the release-landed escalation.
+        # Same ahead/in_flight semantics as the pre-#698 short-circuit.
+        self.assertEqual(self._fetch(compare=(0, "0", ""),
+                                     staging=(0, "staging", "")),
+                         {"ahead": 0, "in_flight": False, "train": True})
 
     def test_unparsable_ahead_is_none(self):
         self.assertIsNone(self._fetch(compare=(0, "nope", "")))
@@ -769,7 +774,7 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
         self.assertEqual(
             self._fetch(compare=(0, "9", ""),
                         staging=(1, "", "Not Found (HTTP 404)")),
-            {"ahead": 0, "in_flight": False})
+            {"ahead": 0, "in_flight": False, "train": False})
 
     def test_staging_transient_error_is_none(self):
         self.assertIsNone(self._fetch(compare=(0, "9", ""),
@@ -779,13 +784,13 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
         self.assertEqual(
             self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
                         prs={"staging": [{"number": 1}]}),
-            {"ahead": 9, "in_flight": True})
+            {"ahead": 9, "in_flight": True, "train": True})
 
     def test_gap_prod_release_pr_is_in_flight(self):
         self.assertEqual(
             self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
                         prs={"main": [{"number": 2}]}),
-            {"ahead": 9, "in_flight": True})
+            {"ahead": 9, "in_flight": True, "train": True})
 
     def test_gap_no_pr_deploy_run_is_in_flight(self):
         self.assertEqual(
@@ -793,7 +798,7 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
                         prs={}, runs={"in_progress": [
                             {"status": "in_progress", "event": "push",
                              "headBranch": "main", "name": "Deploy"}]}),
-            {"ahead": 9, "in_flight": True})
+            {"ahead": 9, "in_flight": True, "train": True})
 
     def test_gap_no_pr_only_utility_run_is_stalled(self):
         # THE NUDGE CASE (review F1 both directions): real gap, no release PR,
@@ -804,13 +809,13 @@ class TestWatchdogReleaseStateFetch(unittest.TestCase):
                         prs={}, runs={"in_progress": [
                             {"status": "in_progress", "event": "issue_comment",
                              "headBranch": "main", "name": "Bounce Label Hygiene"}]}),
-            {"ahead": 9, "in_flight": False})
+            {"ahead": 9, "in_flight": False, "train": True})
 
     def test_gap_no_pr_no_run_is_stalled(self):
         self.assertEqual(
             self._fetch(compare=(0, "9", ""), staging=(0, "staging", ""),
                         prs={}, runs={}),
-            {"ahead": 9, "in_flight": False})
+            {"ahead": 9, "in_flight": False, "train": True})
 
 
 if __name__ == "__main__":

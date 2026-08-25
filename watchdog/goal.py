@@ -3773,7 +3773,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs += _ops_wait_recheck.goal_ops_wait_recheck(
                 now, run, wrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 ops_wait_fetch=ops_wait_fetch, state=state, sleep_fn=sleep_fn,
-                i_count=glance.backlog, i_members_fetch=i_members_fetch)  # #578
+                i_count=glance.backlog, i_members_fetch=i_members_fetch,
+                release_state_fetch=release_state_fetch)  # #578 + #698
         # #616 -- release-gap re-check for this SAME armed pane. Runs AFTER the
         # lane nudge + ops-wait recheck so a pane they already typed (sid in
         # `handled`) is deferred to next sweep; it owns its own `handled` check +

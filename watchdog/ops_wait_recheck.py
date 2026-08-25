@@ -117,8 +117,35 @@ source, and a per-sweep NL comment-poll is the #172/#365/#550 class it rejects) 
 so the daily nudge cadence is unchanged (a 12×/day hourly keystroke would be the
 spam #552 already fought). REOPEN the hourly-granularity check only under the
 SAME T1/T2/T3 above. Full evidence: issue #607.
+
+RELEASE-LANDED ESCALATION (#698, owner hard-fail 2026-08-25 — ~25 release-gated
+W tickets hung parked long after their release landed). The W clause's release
+re-check used to be WORDING only (the #588 deployed-state doctrine is NAMED in
+`_W_CLAUSE`, but no code path ever READ any release state), so a session skims
+the same ~daily reminder and a landed release never re-enters mechanically.
+Now, in the nudge branch only: when a parked W member's TITLE names a
+release/version/stage (`_release_shaped_numbers` — the `--ops-wait` fetch now
+carries `member["title"]`, field 4 it already printed, zero new gh calls), the
+repo's OWN release-train state is read through `release_gap.
+_cached_release_state` (the SHARED #616 per-repo TTL cache in
+`state["release_state_cache"]` — one gh fetch per repo per TTL across BOTH
+job-20 consumers, never a parallel query) and IFF the train is PROVEN drained
+(`train` True — the staging branch verified to exist, so a 2-branch repo with a
+stray `develop` never counts — AND ahead == 0 AND no release in flight) the W
+clause gains `_W_RELEASE_LANDED_CLAUSE`: "release LANDOL — verify per the #588
+deployed-state doctrine and clear `ops-wait` WITH evidence TODAY", naming the
+members; above RELEASE_LANDED_OWNER_ASK_N members it additionally instructs the
+SESSION to summarise to the owner via the standard ❓ channel (never a new alarm
+class, #546/#688 — the session pings, the watchdog never does). HONEST
+BOUNDARY: cross-repo release waits, 2-branch repos, and a member whose release
+reference lives only in a COMMENT (the #550 T1 machine-readable-park reopen
+trigger) stay on the generic clause — an undetermined/unproven read SUPPRESSES
+the escalation, never invents it. The supervisor stays the ONLY one clearing
+`ops-wait` with evidence; this changes the nudge WORDING only — cadence, counts
+and labels are untouched (the #547/#552/#570/#636 pattern).
 """
 import os
+import re
 
 import watchdog
 
@@ -282,6 +309,54 @@ def _gk_handoff_numbers(members):
     return [m["number"] for m in (members or [])
             if isinstance(m, dict) and m.get("gk_handoff")
             and isinstance(m.get("number"), int)]
+
+
+# #698 — above this many release-landed-flagged W members on one box, the
+# escalated sub-clause additionally instructs the session to summarise the
+# state to the owner via the standard ❓ channel (the ticket's own >N=5; never
+# a new alarm class — the session pings, the watchdog never does, #546/#688).
+RELEASE_LANDED_OWNER_ASK_N = 5
+
+# #698 — a release-SHAPED title: a version (`2.180`, `v0.1.52`), a `stage-N`
+# token, or a release keyword (release/vydanie/nasadenie/deploy). Exactly the
+# ticket-body heuristic, scoped to the TITLE (the only member text the fetch
+# carries — a comment-only reference is the documented #550 T1 boundary). A
+# false positive is SAFE (the escalated clause demands evidence and offers the
+# "wait still holds — write why" branch); a false negative degrades to the
+# generic clause (pre-#698 behavior).
+_RELEASE_SHAPED_RX = re.compile(
+    r"(?i)(?:\breleas|\bvydan|\bnasaden|\bdeploy|\bstage-\d+\b|"
+    r"\bv?\d+\.\d+(?:\.\d+)*\b)")
+
+
+def _release_shaped_numbers(members):
+    """The subset of `_member_numbers` whose TITLE names a release/version/
+    stage token (#698) — only the dict shape carries a title, so a legacy int
+    list (or a member without one) yields an EMPTY list: no escalation, the
+    safe/unchanged direction, exactly like `_stale_numbers`. A malformed
+    element is dropped (never raises)."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and not isinstance(m, bool)
+            and isinstance(m.get("number"), int)
+            and isinstance(m.get("title"), str)
+            and _RELEASE_SHAPED_RX.search(m["title"])]
+
+
+def _release_train_drained(rstate):
+    """#698 — True IFF the repo-level release-train state PROVES a real,
+    fully-drained 3-branch train: `train` True (the staging branch was
+    verified to exist by `_watchdog_release_state_fetch`), `ahead` == 0 (the
+    integration branch is not ahead of prod) and `in_flight` False (no open
+    release PR, no running deploy). Anything else — None/undetermined, a
+    missing or False `train` (a 2-branch repo, or a legacy rstate), a live
+    gap, a moving train, a bool `ahead` — is False: the escalated "release
+    LANDOL" claim never rides an unproven state."""
+    if not isinstance(rstate, dict):
+        return False
+    ahead = rstate.get("ahead")
+    return (rstate.get("train") is True
+            and isinstance(ahead, int) and not isinstance(ahead, bool)
+            and ahead == 0 and rstate.get("in_flight") is False)
 
 
 def _sig(members):
@@ -552,8 +627,32 @@ _W_GK_HANDOFF_CLAUSE = (
     "`needs-gatekeeper`), aby sa presunul do gk N / do I gk-boxu a gatekeeper ho "
     "zavrel — nesmie visieť vo W, ktoré nikto netlačí. Label mení supervisor.")
 
+# The #698 release-landed sub-clause — appended when a release-SHAPED W member
+# (title names a release/version/stage) is parked while the repo's OWN release
+# train is PROVEN drained (`_release_train_drained` over the #616 fetch). The
+# claim states exactly WHAT was mechanically observed (train drained), demands
+# #588 deployed-state EVIDENCE for the clear, and keeps the honesty branch for
+# a member actually waiting on a foreign/other release. Label changes stay the
+# SUPERVISOR's, with evidence — this clause only escalates the WORDING.
+_W_RELEASE_LANDED_CLAUSE = (
+    "RELEASE LANDOL (#698) %s: tieto W tikety majú v titulku release/verziu a "
+    "MECHANICKÁ kontrola release vlaku TOHTO repa hovorí, že vlak je VYPUSTENÝ "
+    "— integračná vetva nie je pred produkciou a nebeží žiadny release PR ani "
+    "deploy. Ak tiket čakal na interný release tohto repa, event už NASTAL: "
+    "over podľa #588 (deploy-set zelený + priame čítanie verzie na cieli) a "
+    "zlož `ops-wait` s dôkazom EŠTE DNES — tiket sa vráti do práce. Ak čaká na "
+    "iný/cudzí release alebo kontrola nesedí, zapíš na tiket PREČO wait stále "
+    "platí.")
+# The >N owner-ask tail (#698 bod 2): the SESSION escalates via its standard ❓
+# channel — never a new watchdog alarm class (#546/#688).
+_W_RELEASE_LANDED_OWNER_TAIL = (
+    " Je ich %d (nad %d na jednom boxe): zhrň stav ownerovi štandardným ❓ "
+    "kanálom — ktoré tikety čakali na už-vypustený release a kedy ich zložíš "
+    "(žiadna nová alarm trieda, #546).")
 
-def _nudge_text(i_count, w_members, now, w_seen, i_members=None):
+
+def _nudge_text(i_count, w_members, now, w_seen, i_members=None,
+                release_landed=None):
     """The partition-audit keystroke injected into the armed loop. Carries the
     shared `stuck-check: ` prefix (own-payload recognition + machine-prompt
     exclusion — see the module docstring) and composes ONE ping from whichever
@@ -576,7 +675,14 @@ def _nudge_text(i_count, w_members, now, w_seen, i_members=None):
     createdAt, labels}`, via `_cached_i_members`). When present + non-empty, the
     I clause NAMES each member with age + labels + a shape-specific instruction
     (`_i_clause_named`); when None (fetch failed / not wired) or empty it degrades
-    to the generic `_I_CLAUSE` — never a crash, never a bare count."""
+    to the generic `_I_CLAUSE` — never a crash, never a bare count.
+
+    `release_landed` (#698): the release-SHAPED W member numbers whose repo's
+    own release train the caller PROVED drained (`_release_train_drained` over
+    the cached #616 fetch). Non-empty -> the `_W_RELEASE_LANDED_CLAUSE`
+    sub-clause names them with the clear-today action (plus the owner-ask tail
+    above RELEASE_LANDED_OWNER_ASK_N members); None/empty -> the text is
+    byte-identical to the pre-#698 nudge (never a false "landed" claim)."""
     i_pos = isinstance(i_count, int) and i_count > 0
     w_pos = isinstance(w_members, list) and bool(w_members)
     clauses = []
@@ -586,6 +692,14 @@ def _nudge_text(i_count, w_members, now, w_seen, i_members=None):
         clauses.append(_i_clause_named(valid, now) if valid else _I_CLAUSE)
     if w_pos:
         clauses.append(_W_CLAUSE % _members_line_aged(w_members, w_seen, now))
+        landed = [n for n in (release_landed or []) if isinstance(n, int)]
+        if landed:
+            clause = _W_RELEASE_LANDED_CLAUSE % " ".join(
+                "#%d" % n for n in sorted(landed))
+            if len(landed) > RELEASE_LANDED_OWNER_ASK_N:
+                clause += _W_RELEASE_LANDED_OWNER_TAIL % (
+                    len(landed), RELEASE_LANDED_OWNER_ASK_N)
+            clauses.append(clause)
         gk_handoff = _gk_handoff_numbers(w_members)
         if gk_handoff:
             clauses.append(_W_GK_HANDOFF_CLAUSE
@@ -629,7 +743,7 @@ def _prune_ops_wait_orphans(wrecs, visited_sids, now,
 def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                           dry_run, handled, ops_wait_fetch, state,
                           sleep_fn=None, cadence=None, i_count=None,
-                          i_members_fetch=None):
+                          i_members_fetch=None, release_state_fetch=None):
     """Audit ONE armed candidate pane's partition (I→W/U + W→I) and, on cadence,
     deliver ONE verified re-audit nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -664,7 +778,18 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     read through `_cached_i_members` (per-repo TTL cache) and ONLY inside the
     nudge branch, so the `--audit` subprocess fires at most once per repo per TTL
     AND only when actually nudging (~daily), never every sweep. None (not wired /
-    fetch failed) degrades the nudge to the generic `_I_CLAUSE` — never a crash."""
+    fetch failed) degrades the nudge to the generic `_I_CLAUSE` — never a crash.
+
+    `release_state_fetch(cwd)` (#698): the SAME injected seam the #616
+    release-gap rider uses, read here ONLY inside the nudge branch and ONLY
+    when a release-SHAPED W member exists, through `release_gap.
+    _cached_release_state` (the SHARED `state["release_state_cache"]` per-repo
+    TTL cache — one gh fetch per repo per TTL across BOTH job-20 consumers). A
+    PROVEN drained train escalates the W clause's wording
+    (`_W_RELEASE_LANDED_CLAUSE`); None / not wired / not drained keeps the
+    pre-#698 generic wording — the escalation fails safe, never invents a
+    "landed" claim, and never touches a label (supervisor-only, with
+    evidence)."""
     logs = []
     cadence = cadence or _cadence()
     # CACHED per-repo (#547 review): the fetch fires at most once per repo per
@@ -725,8 +850,26 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # degrades to the generic clause.
     i_members = (_cached_i_members(cwd, i_members_fetch, state, now)
                  if isinstance(i_count, int) and i_count > 0 else None)
+    # #698: the release-landed escalation — read the repo's release-train state
+    # ONLY here in the nudge branch, ONLY when a release-shaped W member exists
+    # (title names a release/version/stage), through the SHARED #616 per-repo
+    # TTL cache (`state["release_state_cache"]` — one gh fetch per repo per
+    # TTL across BOTH job-20 consumers, never a parallel query). Undetermined
+    # (None) / not a PROVEN drained train / seam not wired -> `landed` None ->
+    # the generic W clause (pre-#698 wording): the escalated "release LANDOL"
+    # claim only ever rides a proven drained train.
+    rel_shaped = _release_shaped_numbers(members)
+    rstate = None
+    if rel_shaped and release_state_fetch is not None:
+        from watchdog import release_gap
+        try:
+            rstate = release_gap._cached_release_state(
+                cwd, release_state_fetch, state, now)
+        except Exception:
+            rstate = None
+    landed = rel_shaped if _release_train_drained(rstate) else None
     text = _nudge_text(i_count, members, now, new_rec["w_seen"],
-                       i_members=i_members)
+                       i_members=i_members, release_landed=landed)
     # Mark janitor provenance BEFORE the send (mirrors the lane nudge): a residual
     # stuck send stays reclaimable, cleared only on a delivered submit.
     watchdog._janitor_mark_watch(state, pid, now)
