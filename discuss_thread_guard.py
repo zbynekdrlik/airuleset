@@ -566,3 +566,94 @@ def evaluate_message_post_binding(content, user):
     if binding_present(content):
         return None
     return BindingViolation(number=number)
+
+
+# --------------------------------------------------------------------------- #
+# #696 -- message_post FUTURE-PROMISE gate.
+#
+# OWNER RULING (2026-08-25, montalu5, verbatim): "Preco mu chces pisat o
+# zajtrajsom emaile, vzdy sa treba odvolavat na to co sa udialo nie na to co
+# sa udeje. Bud mu iniciuj email report teraz a posli ked si si ze mu odisiel
+# a obsahuje co si mu slubil alebo cakaj do zajtra!!!" -- a stream proposed a
+# client handover (thread 263) promising "od zajtrajsieho ranneho e-mailu..."
+# while the promised artifact (the digest e-mail) did not yet exist. A client
+# message may reference ONLY events that already happened AND were verified.
+#
+# DETECTION: the ticket's OWN Slovak pattern list, word-bounded and
+# case-insensitive, scanned over the whole message_post content (the #609
+# whole-content model -- the body is often a variable, so scoping to "the
+# body" is not reliably provable). The ONLY escape is the falsifiable
+# `airuleset:artifact-verified <ref>` evidence marker with a SAME-LINE
+# non-empty reference (the #628 `_APPROVAL_RE` shape) -- the ticket's
+# explicit "bypass len s falsifikovatelnou znackou"; there is deliberately NO
+# separate convenience bypass. Accepted residuals: an UNLISTED future
+# phrasing slips (fail toward not blocking on an un-named pattern -- the
+# doctrine in handover-compose.md covers the rest); a promise word outside
+# the client body but inside the same tool-call over-blocks (the same
+# whole-content residual as #609/#628, fail-safe direction); a genuinely
+# non-client post carrying a promise word needs an honest artifact-verified
+# ref naming why (rare; the marker stays falsifiable either way).
+# --------------------------------------------------------------------------- #
+
+ARTIFACT_MARKER_WORD = "airuleset:artifact-verified"
+
+# `airuleset:artifact-verified <ref>`: the marker word then SAME-LINE
+# horizontal whitespace then at least one non-whitespace char -- a real,
+# non-empty reference on the marker's OWN line (`[^\S\r\n]`, the #628
+# review-MAJOR lesson: a `\s+\S` spanning the newline would let a bare
+# reference-less marker pass whenever the call follows on the next line).
+_ARTIFACT_RE = re.compile(re.escape(ARTIFACT_MARKER_WORD) + r"[^\S\r\n]+\S")
+
+# The ticket's Slovak future-promise patterns. Word-bounded (`\b` is
+# unicode-aware in py3, so Slovak diacritics form real boundaries):
+#   od zajtra          -- also NOT inside "hod zajtra" (\b before `od`)
+#   zajtrajš           -- stem covers zajtrajší/zajtrajšieho/... declensions
+#   bude (pri|v|obsahovať) -- the trailing \b keeps "bude viac" out (`v` must
+#                            end at a boundary)
+#   v ďalšom (e-maile|reporte)  -- `e-?maile` covers the unhyphenated form
+#   od budúc           -- stem covers budúceho/budúcej/budúcich
+#   čoskoro, pripravujeme
+# `\s+` between words tolerates a hard-wrapped body.
+_PROMISE_RE = re.compile(
+    r"(?i)\b(?:od\s+zajtra\b|zajtrajš|bude\s+(?:pri|v|obsahovať)\b|"
+    r"v\s+ďalšom\s+(?:e-?maile|reporte)\b|od\s+budúc|čoskoro\b|"
+    r"pripravujeme\b)")
+
+PromiseViolation = namedtuple("PromiseViolation", "number matched")
+
+
+def promise_phrases(content):
+    """Every future-promise phrase matched in `content` (possibly empty)."""
+    return [m.group(0) for m in _PROMISE_RE.finditer(content or "")]
+
+
+def artifact_verified_present(content):
+    """True iff `content` carries the `airuleset:artifact-verified <ref>`
+    evidence marker WITH a non-empty same-line reference. A bare marker (no
+    reference, or the reference only on a later line) is NOT accepted -- the
+    falsifiable-claim requirement."""
+    if not content:
+        return False
+    return bool(_ARTIFACT_RE.search(content))
+
+
+def evaluate_message_post_promise(content, user):
+    """A `PromiseViolation` (number, matched phrases) iff `content` is a
+    discuss.channel message_post by a stream `user` (cli_aliases.
+    stream_number) whose content carries a Slovak FUTURE-PROMISE pattern and
+    NO `airuleset:artifact-verified <ref>` evidence marker; None (silent)
+    otherwise -- a non-stream user, a non-message_post op, past-tense-only
+    content, or a post carrying the artifact evidence. Unlike the sibling
+    gates there is NO separate convenience bypass -- the evidence marker IS
+    the only escape (#696, the ticket's explicit shape)."""
+    number = cli_aliases.stream_number(user)
+    if number is None:
+        return None
+    if not is_channel_message_post(content):
+        return None
+    matched = promise_phrases(content)
+    if not matched:
+        return None
+    if artifact_verified_present(content):
+        return None
+    return PromiseViolation(number=number, matched=matched)
