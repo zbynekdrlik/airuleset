@@ -1,33 +1,44 @@
-"""Locks the model tiering: Opus 5 BANNED; Fable 5 judgment + Opus 4.8 execution.
+"""Locks the model tiering: Opus 5 BANNED; Fable for judgment-content work.
 
-History: the 2026-07-03 middle tier (Opus 5 + Sonnet 5 default, Fable only on
-gated HARD escalations) was the ACTIVE policy until 2026-08-13, when the user
-banned Opus 5 outright (directive, verbatim: "intenet je plny obrovskej
-nespokojnosti s opus 5, chcem prerobit pravidla opus 5 sa nesmie pouzivat...")
-and refined the mapping the same day ("hlavne nie ze pouzijes sonnet na zlozite
-veci, radsej by som mal ze kde bol opus 5 bude fable a kde bol sonnet bude opus
-4.8"). The lineup these assertions lock:
+History: 2026-07-03 middle tier (Opus 5 + Sonnet 5 default) -> 2026-08-13
+(Opus 5 banned outright, gated Fable the default judgment layer) ->
+2026-08-14 refinement #455 (Fable narrowed to HARD-only after the
+inherited-Fable burn; Opus 4.8 default) -> **2026-08-25 revision #690**: the
+HARD-only boundary produced ZERO Fable subagent dispatches in practice (the
+"when unsure -> it is NOT hard" tie-break + the taxonomy's height; the owner
+never once saw a Fable subagent across the subdevs' lifetime), so the
+boundary MOVES. The lineup these assertions lock:
 
   main session managed default = Fable 5 (claude-fable-5[1m], MANAGED_MODEL)
-  judgment dispatches          = Fable 5 through the budget gate;
-                                 gate CLOSED -> Opus 4.8 (claude-opus-4-8)
-  execution dispatches         = Opus 4.8 via agent-definition frontmatter /
-                                 Workflow opts.model full id
-  mechanical / read-only       = Opus 4.8 low where nameable; sonnet ONLY for
-                                 genuinely trivial lookups; haiku most-trivial
+  judgment-CONTENT tasks       = Fable 5 through the budget gate (non-trivial
+                                 implementation, review of a non-trivial
+                                 change, hard debug, plan/design/synthesis;
+                                 tie-break REVERSED: unsure -> it QUALIFIES;
+                                 ~50% of subagent tasks is the owner's
+                                 CALIBRATION target, never a counter)
+  airuleset repo subagents     = Fable-MAJORITY: every substantive dispatch
+                                 carries model: "fable" at gate OPEN
+  routine execution fallback   = Opus 4.8 via agent-definition frontmatter /
+                                 Workflow opts.model full id / inheritance
+                                 (also the gate-CLOSED fallback tier)
+  mechanical / read-only       = sonnet low (haiku most-trivial) -- unchanged
   Opus 5 (claude-opus-5, and the bare `opus` alias that resolves to it)
                                = BANNED on every dispatch surface (grep-gated)
 
-The budget gate (airuleset.py fable-gate) now guards the DEFAULT judgment
-layer, not an exceptional escalation; CLOSED falls back to Opus 4.8, never
-lower and never the banned Opus 5. The 2026-07-01/02/03 history and the
-2026-07-25 Opus-5-era records stay preserved VERBATIM in the fable-advisor
-skill (dated history, not current policy) -- locked below too.
+The budget gate (airuleset.py fable-gate) guards EVERY automatic Fable
+dispatch; its default threshold is 90 (raised from 80 by #690 so the new
+usage level actually passes -- an 80% gate would dead-letter the policy
+mid-week); fail-safe CLOSED on missing/stale cache is UNCHANGED. CLOSED
+falls back to Opus 4.8, never lower and never the banned Opus 5. The
+2026-07-01/02/03 history and the 2026-07-25 Opus-5-era records stay
+preserved VERBATIM in the fable-advisor skill -- locked below too.
 """
 
 import re
 from pathlib import Path
 from unittest import TestCase, main
+
+from watchdog.usage import FABLE_GATE_PCT
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -47,15 +58,21 @@ class TestOpus5BanLineup(TestCase):
 
     def test_model_awareness_active_policy_header(self):
         t = read(MODULE)
-        # #455 refinement (2026-08-14): Opus 4.8 default, Fable HARD-only,
-        # Sonnet 5 rehabilitated for light work. Header split into two
-        # single-line fragments (the wrap-trap this file documents).
+        # #690 revision (2026-08-25): Fable for judgment-content work,
+        # airuleset subagents Fable-MAJORITY, Opus 4.8 the routine fallback.
+        # Header asserted as two single-line fragments (the wrap-trap this
+        # file documents).
         self.assertIn(
+            "Model tiering — Fable 5 for judgment-content work; "
+            "airuleset subagents Fable-MAJORITY; Opus 4.8 routine fallback", t)
+        self.assertIn(
+            "Opus 5 BANNED (ACTIVE policy, 2026-08-25 — revises 2026-08-14 "
+            "HARD-only)", t)
+        # the 2026-08-14 header (Fable HARD-only) is retired as the LIVE header:
+        self.assertNotIn(
             "Model tiering — Opus 4.8 default; Fable 5 for HARD work only; "
             "Sonnet 5 for light work", t)
-        self.assertIn(
-            "Opus 5 BANNED (ACTIVE policy, 2026-08-14 — refines 2026-08-13)", t)
-        # the 2026-08-13 header (Fable as the default judgment tier) is retired:
+        # the 2026-08-13 header (Fable as the default judgment tier) stays retired:
         self.assertNotIn(
             "Model tiering — Fable 5 judgment + Opus 4.8 execution; "
             "Opus 5 BANNED (ACTIVE policy, 2026-08-13 — replaces 2026-07-03)", t)
@@ -73,6 +90,48 @@ class TestOpus5BanLineup(TestCase):
         self.assertIn(
             "len ja dlhodobo pouzivam hlavny agent fable lebo potrebujem "
             "aby ten co komunikuje so mnou bol vysoko inteligentny", t)
+        # #690 -- the 2026-08-25 revision directive, verbatim (single-line
+        # fragments of the one physical quote line):
+        self.assertIn(
+            "chcem aby sa ta hranica posunula aby sa pouzival fable ovela viac", t)
+        self.assertIn("na airuleset chcem aby sa majoritne pouzival fable", t)
+
+    def test_judgment_content_criterion_is_the_selector(self):
+        # #690: the fleet-wide Fable selector is the JUDGMENT-CONTENT test --
+        # a mechanizable per-task criterion, never a percentage counter, with
+        # the tie-break REVERSED (the old "unsure -> NOT hard" tie-break is
+        # the traced root cause of zero Fable dispatches).
+        t = read(MODULE)
+        self.assertIn("JUDGMENT-CONTENT test", t)
+        self.assertIn("Non-trivial implementation", t)
+        self.assertIn("Review / verify of a non-trivial change", t)
+        self.assertIn("Hard debugging", t)
+        self.assertIn(
+            "when unsure whether a task carries judgment content → it DOES", t)
+        self.assertIn("calibration check, never a counter", t)
+        self.assertIn("≈50%", t)
+        # the old always-against-Fable tie-break must be gone as LIVE policy:
+        self.assertNotIn(
+            "When unsure whether it is design-heavy → it is NOT", t)
+
+    def test_airuleset_repo_is_fable_majority(self):
+        # #690: on the airuleset repo every substantive subagent dispatch is
+        # Fable at gate OPEN; gate CLOSED falls back to the frontmatter pin.
+        t = read(MODULE)
+        self.assertIn("Fable-MAJORITY", t)
+        self.assertIn(
+            'carries an explicit `model: "fable"` when the gate is OPEN', t)
+        self.assertRegex(
+            t, r"[Gg]ate CLOSED[^\n]*frontmatter-pinned `claude-opus-4-8`")
+
+    def test_gate_threshold_default_is_90(self):
+        # #690: threshold raised 80 -> 90 so the new usage level actually
+        # passes (at the observed baseline fable=43%/weekly=66% the new
+        # dispatch load projects into the 60-90% band, which an 80% gate
+        # would dead-letter mid-week). Fail-safe CLOSED semantics are locked
+        # separately in test_usage_cache.py and must NOT change.
+        self.assertEqual(FABLE_GATE_PCT, 90)
+        self.assertIn("raised 80→90", read(MODULE))
 
     def test_opus_5_is_banned_and_alias_named(self):
         t = read(MODULE)
@@ -93,17 +152,17 @@ class TestOpus5BanLineup(TestCase):
         self.assertIn("Sonnet 5 is never used for anything complex", t)
         self.assertIn("when in doubt, Opus 4.8", t)
 
-    def test_gate_guards_hard_only_fable_escalation(self):
-        # #455 (2026-08-14): the gate NO LONGER guards a "default judgment
-        # layer" -- Fable is dispatched ONLY for genuinely HARD work, so the
-        # gate guards the HARD-only escalation. The LIVE gate-role phrase must
-        # flip; the bare "DEFAULT judgment layer" survives only as a historical
-        # reference to the retired 2026-08-13 reading (not asserted-absent).
+    def test_gate_guards_every_automatic_fable_dispatch(self):
+        # #690 (2026-08-25): the gate guards EVERY automatic Fable dispatch
+        # (the judgment-content tier + the airuleset Fable-majority), no
+        # longer only a HARD-only escalation. The LIVE gate-role phrase must
+        # flip; older gate-role phrasings stay retired.
         t = read(MODULE)
         self.assertIn("airuleset.py fable-gate", t)
-        self.assertIn("guards the HARD-only Fable escalation", t)
+        self.assertIn("guards EVERY automatic Fable dispatch", t)
+        self.assertNotIn("guards the HARD-only Fable escalation", t)
         self.assertNotIn("guards the DEFAULT judgment layer", t)
-        self.assertIn("ONCE per hard task/batch", t)
+        self.assertIn("ONCE per qualifying task/batch", t)
         self.assertIn("missing/stale cache = CLOSED", t)
         self.assertIn("Never skip the gate", t)
         # CLOSED falls back to Opus 4.8, never the banned alias:
@@ -120,11 +179,12 @@ class TestOpus5BanLineup(TestCase):
         self.assertIn("never the `opus` alias", t)
 
     def test_design_heavy_taxonomy_survives(self):
-        # The HARD criteria no longer pick the judgment model (all judgment
-        # is gated Fable) -- they still classify design DEPTH (the autopilot
-        # skill's design-triage step reuses exactly this taxonomy), so the
-        # enumeration must survive.
+        # #690: the HARD criteria no longer SELECT the model (the
+        # judgment-content test does) -- they still classify design DEPTH
+        # (the autopilot skill's design-triage step reuses exactly this
+        # taxonomy), so the enumeration must survive, demoted explicitly.
         t = read(MODULE)
+        self.assertIn("no longer the Fable selector", t)
         self.assertIn(
             "Architecture / design / synthesis of a genuinely COMPLEX or cross-cutting", t)
         self.assertIn('"Multi-file" alone is NOT the bar', t)
@@ -142,10 +202,12 @@ class TestOpus5BanLineup(TestCase):
         t = read(MODULE)
         self.assertIn("digest in, decision out", t)
         self.assertIn("re-reads the full conversation context every turn", t)
-        # #455 (2026-08-14): a gated Fable judgment DISPATCH is sanctioned ONLY
-        # for genuinely HARD work now -- the 2026-08-13 "sanctioned DEFAULT"
-        # reading is retired.
-        self.assertIn("sanctioned ONLY for genuinely HARD", t)
+        # #690 (2026-08-25): a DISPATCHED, fresh-context Fable worker is a
+        # sanctioned shape now (the 2026-08-14 HARD-only sanction is
+        # retired); Fable as a long-lived MAIN implementer stays banned.
+        self.assertIn(
+            "a DISPATCHED, fresh-context Fable worker is a sanctioned shape", t)
+        self.assertNotIn("sanctioned ONLY for genuinely HARD", t)
 
     def test_behavior_header_is_fable_and_opus_4_8(self):
         t = read(MODULE)
@@ -189,9 +251,11 @@ class TestWorkflowStageTiering(TestCase):
         t = read(TOOLING)
         self.assertIn("`opts.model: 'fable'`", t)
         self.assertIn("ONLY when the budget gate is OPEN", t)
-        # #455 (2026-08-14): Fable judgment stages are narrowed to the HARD
-        # (design-heavy) subset -- a routine review/verify stage stays 4.8:
-        self.assertIn("ONLY for the HARD subset", t)
+        # #690 (2026-08-25): Fable stages are every stage with real
+        # judgment/design content (the judgment-content test), no longer the
+        # HARD-only subset; a genuinely mechanical stage stays cheap.
+        self.assertIn("every stage with real judgment/design content", t)
+        self.assertNotIn("ONLY for the HARD subset", t)
         self.assertIn("BEFORE authoring the script", t)
         self.assertIn("never bake in an ungated Fable stage", t)
         self.assertRegex(t, r"CLOSED[^\n]*claude-opus-4-8")
@@ -242,13 +306,18 @@ class TestDispatchSurfacesRewritten(TestCase):
                     "model: opus appears outside a BANNED trap-warning line: %r"
                     % ln[:80])
 
-    def test_autopilot_supervisor_dispatches_opus_4_8_default(self):
+    def test_autopilot_supervisor_dispatch_model_rule(self):
+        # #690: airuleset repo -> Fable-MAJORITY worker dispatch; other repos
+        # -> the judgment-content criterion; Opus 4.8 stays the routine
+        # fallback (frontmatter pin, dispatched AS-IS).
         s = read("skills/autopilot/SKILL.md")
-        self.assertIn("Model = Opus 4.8 by default", s)
+        self.assertIn("Fable-MAJORITY", s)
+        self.assertIn("JUDGMENT-CONTENT test", s)
         self.assertIn("gate OPEN (exit 0) → dispatch `model: fable`", s)
         self.assertIn("gate CLOSED (exit 1)", s)
         self.assertIn(
             "Never dispatch an automatic `model: fable` without the gate check", s)
+        self.assertNotIn("Model = Opus 4.8 by default", s)
         self.assertNotIn("Model = Sonnet 5 by default", s)
         self.assertNotIn('`model: "opus"`', s)
         self.assertNotIn("`model: opus`", s)
@@ -274,21 +343,25 @@ class TestDispatchSurfacesRewritten(TestCase):
         self.assertRegex(txt, r"CLOSED[^\n]*claude-opus-4-8")
 
     def test_autopilot_worker_review_stage_explicit_model_mandate(self):
-        # #455 (2026-08-14): CYCLE step 6 review dispatch defaults to NO model
-        # override (inherits the worker's claude-opus-4-8); Fable ONLY for a
-        # design-heavy ticket + gate OPEN; mechanical sub-dispatches carry an
-        # explicit sonnet/haiku, never model-less.
+        # #690 (2026-08-25): CYCLE step 6 review of a NON-TRIVIAL change is
+        # judgment-content work -> gated `model: "fable"`; only a genuinely
+        # TRIVIAL diff's review (or gate CLOSED) runs with NO override on the
+        # worker's pinned claude-opus-4-8. Mechanical sub-dispatches still
+        # carry an explicit sonnet/haiku, never model-less.
         w = read("agents/autopilot-worker.md")
         norm = " ".join(w.split())
         self.assertIn("MODEL for the review dispatch", norm)
-        self.assertIn("the DEFAULT is NO `model` override", norm)
-        self.assertIn("inherits YOUR pinned `claude-opus-4-8`", norm)
         self.assertIn(
+            "review of a NON-TRIVIAL change is judgment-content work", norm)
+        self.assertIn("inherits YOUR pinned `claude-opus-4-8`", norm)
+        # the 2026-08-14 HARD-only review rule is retired:
+        self.assertNotIn("the DEFAULT is NO `model` override", norm)
+        self.assertNotIn(
             "Escalate the review to Fable ONLY when the TICKET itself "
             "genuinely meets the design-heavy taxonomy", norm)
-        # #455 MINOR-2 fix: the worker's OWN model-less dispatch is safe
-        # (it is claude-opus-4-8-pinned, so no-override inherits 4.8 = the
-        # default); the model-less-inherits-Fable hazard is a Fable-MAIN one.
+        # #455 MINOR-2 fix survives: the worker's OWN model-less dispatch is
+        # safe (claude-opus-4-8-pinned, so no-override inherits 4.8); the
+        # model-less-inherits-Fable hazard is a Fable-MAIN one.
         self.assertIn("Your OWN model-less dispatch is SAFE", norm)
         self.assertIn('carries an explicit `model: "sonnet"`/`"haiku"`', norm)
 
@@ -347,6 +420,14 @@ class TestAdvisorHistoryPreserved(TestCase):
         self.assertIn("Opus 5 $5/$25", a)
         self.assertIn("Sonnet 5 $2/$10", a)
         self.assertIn("Haiku 4.5 $1/$5", a)
+
+    def test_2026_08_25_revision_recorded(self):
+        # #690: the advisor's history/tables must cite the current policy --
+        # judgment-content boundary + airuleset Fable-majority + gate 80->90.
+        a = read(ADVISOR)
+        self.assertIn("2026-08-25", a)
+        self.assertIn("majoritne pouzival fable", a)
+        self.assertIn("80→90", a)
 
 
 class TestOpus5GrepGate(TestCase):
