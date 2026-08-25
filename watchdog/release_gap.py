@@ -50,10 +50,13 @@ it is a third rider on job 20's armed-pane loop, exactly like the ops-wait and
 i-members riders — a separate numbered job would duplicate the pane walk (against
 #486).
 
-STATE (`{"ahead": int, "in_flight": bool}` or None) comes from ONE injected
+STATE (`{"ahead": int, "in_flight": bool, "train": bool}` or None — the
+`train` key, #698, feeds only the sibling ops-wait release-landed escalation;
+THIS decider ignores it) comes from ONE injected
 `release_state_fetch(cwd)` seam (network kept out of run_once unit tests, exactly
 like `backlog_fetch`/`ops_wait_fetch`), read through `_cached_release_state` (a
-per-repo TTL cache) so the gh subprocess fires at most once per repo per TTL,
+per-repo TTL cache SHARED with that #698 consumer) so the gh subprocess fires
+at most once per repo per TTL,
 never every sweep per pane. None (undetermined — a gh/ssh error, or a repo with
 no integration branch) fails SAFE to `skip`: never a false nudge.
 
@@ -87,7 +90,7 @@ RELEASE_GAP_MIN_S = 2 * 3600
 # AIRULESET_RELEASE_GAP_MIN_AHEAD, floored at 1 — a units error must never make a
 # 0-commit "gap" nudge). Default 1: any unreleased integration commit qualifies.
 RELEASE_GAP_MIN_AHEAD = 1
-# env AIRULESET_RELEASE_STATE_FETCH_TTL_S — how long a `{ahead,in_flight}` read is
+# env AIRULESET_RELEASE_STATE_FETCH_TTL_S — how long a `{ahead,in_flight,train}` read is
 # CACHED per repo (`state["release_state_cache"]`, keyed by cwd, shared across
 # every armed pane on that repo). 30 min — the nudge cadence is hours, so the
 # release state never needs minute-fresh; a resolved release is re-detected
@@ -202,8 +205,8 @@ def _cached_release_state(cwd, fetch, state, now, ttl=None, fail_ttl=None):
 
 
 # --- PURE DECIDER ----------------------------------------------------------
-# rec (persisted per-sid state) + rstate ({"ahead": int, "in_flight": bool} or
-# None) -> (action, new_rec, reason). action:
+# rec (persisted per-sid state) + rstate ({"ahead": int, "in_flight": bool,
+# "train": bool} or None; `train` (#698) is IGNORED here) -> (action, new_rec, reason). action:
 #   "skip"     -- undetermined (rstate None, or a non-int ahead / non-bool
 #                 in_flight) -> NEVER a nudge, NEVER a state change (safe direction);
 #   "clear"    -- no gap (ahead < min_ahead) -> drained, pop the sid's rec;
@@ -218,7 +221,8 @@ def _cached_release_state(cwd, fetch, state, now, ttl=None, fail_ttl=None):
 def _release_decision(rec, rstate, now, cadence, min_ahead):
     """Pure verdict for ONE armed session's release-gap state. `rec` is the
     persisted per-sid dict (or None/malformed for a fresh session). `rstate` is
-    the fetched `{"ahead": int, "in_flight": bool}`, or None when UNDETERMINED (a
+    the fetched `{"ahead": int, "in_flight": bool, "train": bool}` (the #698
+    `train` key is ignored by this decider), or None when UNDETERMINED (a
     gh/ssh error, or a repo with no integration branch) — None fails safe to
     `skip`.
 
@@ -323,7 +327,8 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
 
     `release_state_fetch(cwd)` is the injected seam (network kept out of run_once
     unit tests, exactly like `ops_wait_fetch`): returns `{"ahead": int,
-    "in_flight": bool}` or None when unmeasurable — None fails safe to `skip`. It
+    "in_flight": bool, "train": bool}` (the #698 key is ignored here) or None
+    when unmeasurable — None fails safe to `skip`. It
     is read through `_cached_release_state` (per-repo TTL cache) so the gh
     subprocess fires at most once per repo per TTL, never every sweep per pane.
 

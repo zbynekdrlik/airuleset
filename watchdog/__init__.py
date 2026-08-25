@@ -2216,7 +2216,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
           for the same coordination reason job 9 above does. It also carries
           the per-armed-pane RIDERS (ZERO extra pane walk, same `handled`
           coordination, NOT separately numbered): the W/I partition-audit
-          re-check (#547/#552/#578, `ops_wait_recheck`) and, when
+          re-check (#547/#552/#578/#698, `ops_wait_recheck` — since #698 it
+          ALSO consumes `release_state_fetch` on full/branch-merge boxes to
+          escalate a release-gated W member's nudge wording once the repo's
+          own release train is PROVEN drained) and, when
           `release_state_fetch` is wired, the release-gap nudge (#616,
           `release_gap.goal_release_gap_recheck`) — on a FULL-authority box
           only (the INVERSE of #618's lane-nudge authority gate) whose
