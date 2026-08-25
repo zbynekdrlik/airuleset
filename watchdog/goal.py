@@ -2354,6 +2354,12 @@ GOAL_LANE_MAX_NUDGES = 2
 # branch keeps its own stricter surplus floor (>= GOAL_LANE_UNDERSAT_SURPLUS).
 GOAL_LANE_MIN_BACKLOG = 3
 GOAL_LANE_LIVE_WINDOW_S = 15 * 60
+# #693 -- how fresh the tickets-status cache must be for the give-up CAUSE
+# classification to trust its I/U/W/gk partition. Mirrors airuleset.py's #618
+# `_BACKLOG_STATUS_CACHE_MAX_AGE_S` (the same cache, the same tolerance: a
+# give-up verdict tolerates counts minutes old). Older/unreadable -> the
+# classifier returns the honest `unknown`, never a guess.
+GOAL_LANE_GIVEUP_CACHE_MAX_AGE_S = 15 * 60
 
 # #442 -- the lane-fill path's OWN "live conversation" definition. The
 # shared check's default window (`GOAL_AUTOARM_RECENT_HUMAN_S`, 30 min) is
@@ -2381,11 +2387,12 @@ GOAL_LANE_LIVE_CONVO_S = 3 * 60
 # classic shape: the stash slot is occupied by the user's OWN parked
 # draft, which no janitor provenance will ever clear) is the repo's
 # known bounded-consecutive-occurrence class: without a bound, the
-# give-up ping is structurally unreachable (the nudge counter only
+# give-up branch is structurally unreachable (the nudge counter only
 # advances on SUCCESS), so a permanently-aborting lane would silently
 # retry -- and for keystroke-bearing abort shapes, retype -- forever.
-# Past this many consecutive aborts the existing give-up branch fires
-# its one-shot ping and stops attempting; the counter clears on any
+# Past this many consecutive aborts the existing give-up branch writes
+# its one-shot record (#693: a classified machine-channel verdict) and
+# stops attempting; the counter clears on any
 # successful delivery and on the session-active idle reset.
 GOAL_LANE_MAX_STASH_ABORTS = 5
 
@@ -2410,7 +2417,7 @@ GOAL_LANE_ORPHAN_TTL_S = 24 * 3600
 # (`WORKING_RESPONDED_BACKOFF_SCHEDULE_S`, `_gkreq_reping_due`) -- an explicit
 # tuple of widening intervals, `min(n-1, len-1)` indexing, holding at the cap
 # stage forever. The refusal itself is NEVER weakened: deliver_with_stash
-# still refuses the live draft, the give-up ping is still reached (just over
+# still refuses the live draft, the give-up record is still reached (just over
 # elapsed time, not once per sweep), and the park clears on any successful
 # delivery and on the session-active idle reset.
 GOAL_LANE_STASH_ABORT_BACKOFF_S = (120, 300, 900, 1800)
@@ -2886,9 +2893,10 @@ def _lane_count_giveup_reset(rec):
     Pre-#620 the reset (`_lane_idle_reset`) cleared `ln` on a BACKLOG CHANGE
     (`backlog_n != lnbk`, #530), but a busy-solo box churns its backlog inline
     (33->25 as it solves tickets), so `ln` was wiped between EVERY nudge -> the
-    MAX_NUDGES give-up owner ping was never reached (all nudges logged (1/2)).
+    MAX_NUDGES give-up (then an owner ping; a machine-channel record since
+    #693) was never reached (all nudges logged (1/2)).
     Keying the reset on lane APPEARANCE lets consecutive INEFFECTIVE empty-lane
-    nudges (workers stays 0) advance `ln` monotonically to the give-up ping. The
+    nudges (workers stays 0) advance `ln` monotonically to the give-up record. The
     shared `lpinged` latch clears too, unless a stash-abort give-up is still
     latched, so a future give-up can re-escalate. The stash-abort streak
     (`lna`/`lnpark`) is NOT touched here: it self-heals via the #479 park + the
@@ -2902,7 +2910,8 @@ def _lane_count_giveup_reset(rec):
     reads None. Otherwise a box that dispatched a worker then went straight back to
     working inline (pane busy -> boundary skip -> this reset never reached) whose
     worker drained before the pane next idled would reach the next 0-worker sweep
-    with `ln` still latched at the cap and fire a FALSE give-up owner ping
+    with `ln` still latched at the cap and fire a FALSE give-up record (#693:
+    machine-channel, but a false verdict pollutes the journal all the same)
     (adversarial-review 🔵)."""
     for k in ("ln", "lnbk"):
         rec.pop(k, None)
@@ -2936,23 +2945,59 @@ def _lane_skip(logs, loc, reason):
     logs.append("lane-occupancy %s -> %s" % (loc, reason))
 
 
+def _lane_giveup_cause(cwd, now):
+    """#693 -- resolve + classify WHY the lanes stayed empty at give-up time,
+    from the per-cwd tickets-status cache (`statusbar.obligation_partition` --
+    the SAME cache the footer renders and `obligation_count` reads, never a
+    parallel derivation) through the PURE `_one_glance.lane_giveup_cause_
+    decision`. The FRESH cache read matters: the nudge's own gate goes through
+    the ~10-min-TTL `backlog_cache`, so a session that drained its backlog to
+    0 workable (or parked everything on U/W/gk) mid-window still reaches the
+    give-up looking like "backlog>0, lanes empty" -- the exact NORMAL states
+    the owner ruled must be ANALYZED, never pinged. Fully guarded, mirroring
+    `_default_obligation_fn`: any failure (statusbar unimportable, corrupt
+    cache) degrades to the honest `unknown` verdict -- never a guess, never a
+    raise on the sweep path."""
+    try:
+        import statusbar
+        workable, user_waiting, ops_wait, gk, ts = \
+            statusbar.obligation_partition(cwd)
+    except Exception:
+        workable = user_waiting = ops_wait = gk = ts = None
+    age_s = (now - ts) if isinstance(ts, (int, float)) else None
+    return _one_glance.lane_giveup_cause_decision(
+        workable=workable, user_waiting=user_waiting, ops_wait=ops_wait,
+        gk=gk, age_s=age_s, max_age_s=GOAL_LANE_GIVEUP_CACHE_MAX_AGE_S)
+
+
 def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
                           backlog_n, idle, cwd, sid, tmtime, pid, run, send_fn,
-                          dry_run):
+                          dry_run, now):
     """#442-review F2 / #511 -- the give-up branch, extracted to keep
     `goal_lane_occupancy_nudge` under its function-line cap (the #509
     "never grow the capped function" rule). Returns `(skip, logs)`:
 
-    * The one-shot owner ping fires on the `lpinged` False->True transition for
-      EITHER give-up kind (a permanently-aborting / fully-stalled lane must
-      escalate to a human once).
+    * The one-shot per-episode record fires on the `lpinged` False->True
+      transition for EITHER give-up kind. #693 (owner ruling 2026-08-25): it
+      is a MACHINE-CHANNEL record now, not an owner escalation -- the body is
+      still composed and passed to send(), but `lanestall:` is in
+      `SUPPRESSED_ALERT_PREFIXES`, so send() drops the Discord PING and keeps
+      the machine channel (the journal GAVE-UP verdict below + the
+      `suppressed` delivery-log line) -- the #546/#676/#688 audience split.
+      The journal verdict additionally CLASSIFIES the cause of the empty
+      lanes (`_lane_giveup_cause`: backlog-exhausted / parked / stall /
+      unknown, with the I/U/W/gk counts) -- backlog-exhausted and parked are
+      NORMAL states; `stall` (workable>0, lanes stayed empty) is the one
+      airuleset-bug signal, machine-channel too. `acctblock:` + watchdog job
+      35 (dead-fleet) stay the only phone alarms for a coverage outage.
     * `count_gaveup` (0-worker EMPTY-lane, fully-stalled box): a genuine
       PERMANENT give-up -> `skip=True` every sweep. #620: its counters reset
       (`_lane_count_giveup_reset`) only when the box GETS a lane (workers>0 = the
       nudge worked / it dispatched), never on a backlog change -- a busy-solo box
       churns its backlog inline, and the pre-#620 backlog-change reset (#530) made
       GOAL_LANE_MAX_NUDGES structurally unreachable there; a box that ignored the
-      pokes and never dispatched needs a human, not a re-armed counter.
+      pokes and never dispatched needs the ANALYZED verdict (#693: which class
+      of empty-lane state this is), not a re-armed counter.
     * stash-abort give-up (already pinged): `skip=False` -- the caller FALLS
       THROUGH to the #479 abort-backoff park, which re-probes delivery on the
       capped (30-min) schedule. This is the #511 fix: the stash-abort give-up's
@@ -2975,12 +3020,19 @@ def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
                "(stash abort)" % aborts)
         gave = "GAVE UP after %d consecutive stash aborts" % aborts
     if not rec.get("lpinged"):
+        # #693 -- classify the cause of the empty lanes BEFORE writing the
+        # machine-channel verdict (read-only cache read, dry-run safe).
+        cause = _lane_giveup_cause(cwd, now)
         if send_fn is not None and not dry_run:
             rec["lpinged"] = True
             from notify import stream_redirect
             # #442 re-fix 2: the give-up is now reachable in the
             # UNDER-SATURATED state (1-4 workers), so the text names the
             # real count instead of the old "nebeží ani jeden worker".
+            # #693: send() SUPPRESSES this ping (`lanestall:` is in
+            # SUPPRESSED_ALERT_PREFIXES) -- the composed body survives only
+            # as the `suppressed` delivery-log trace; the owner-facing
+            # channel is gone, the journal verdict below is the signal.
             send_fn("⚠️ **%s** — backlog=%d otvorených (nie všetky "
                     "rozpracovateľné), "
                     "`/goal` armovaný, ale %d min sa lány nezaplnili na "
@@ -2992,13 +3044,14 @@ def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
                     dedup_key="lanestall:%s:%d" % (sid, int(tmtime or 0)),
                     dry_run=dry_run)
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
-                    "idle=%dm -> %s"
-                    % (loc, live_workers, waiters, backlog_n, idle // 60, gave))
+                    "idle=%dm -> %s; cause=%s (%s) [machine-channel per #693]"
+                    % (loc, live_workers, waiters, backlog_n, idle // 60, gave,
+                       cause.cause, cause.detail))
         return True, logs
-    # The one-shot owner ping has already fired (`lpinged`).
+    # The one-shot per-episode record has already fired (`lpinged`).
     if count_gaveup:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                    "skip:gave-up (already escalated, holding)"
+                    "skip:gave-up (already recorded, holding)"
                     % (loc, live_workers, waiters, backlog_n))
         return True, logs
     # #511 stash-abort give-up: re-probe -> fall through (skip=False).
@@ -3319,9 +3372,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     n = rec.get("ln", 0)
     aborts = rec.get("lna", 0)
     # #442 THIRD GAP -- the nudge-count give-up (GOAL_LANE_MAX_NUDGES) applies
-    # ONLY to the 0-worker empty-lane branch: a truly stalled box gets a bounded
-    # number of pokes then one give-up OWNER ping ("look at the session"), never
-    # a forever-nudge of a perpetually-0-lane session that ignored them. #620: the
+    # ONLY to the 0-worker empty-lane branch: a truly stalled box gets bounded
+    # pokes then ONE per-episode record (#693: classified machine-channel
+    # verdict; the owner ping is send()-suppressed), never a forever-nudge. #620: the
     # count give-up is REACHABLE now -- `ln` advances monotonically per landed
     # nudge and resets only on lane appearance (`_lane_count_giveup_reset`), never
     # on a backlog change, so consecutive ineffective empty-lane nudges reach it.
@@ -3333,7 +3386,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     if count_gaveup or stash_gaveup:
         giveup_skip, giveup_logs = _lane_giveup_decision(
             rec, count_gaveup, aborts, loc, live_workers, waiters, backlog_n,
-            idle, cwd, sid, tmtime, pid, run, send_fn, dry_run)
+            idle, cwd, sid, tmtime, pid, run, send_fn, dry_run, now)
         logs += giveup_logs
         if giveup_skip:
             return logs, True
@@ -3442,7 +3495,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                 # A recognized own draft that will not submit-verify is a
                 # genuinely wedged pane -- advance the SAME consecutive-abort
                 # streak + backoff park the foreign stash-abort uses, so it
-                # still reaches the give-up ping ("look at the session")
+                # still reaches the give-up record (#693: classified verdict)
                 # instead of retrying silently forever (#442-review F2). The
                 # own draft is NEVER backspaced/retyped -- it is left in place.
                 rec["lna"] = rec.get("lna", 0) + 1
@@ -3465,7 +3518,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             # transient, retried next sweep, and it must NOT consume the
             # ln/llast budget (a refused attempt is not a nudge). It DOES
             # advance the consecutive-abort streak, so a permanently-
-            # aborting lane eventually reaches the give-up ping above
+            # aborting lane eventually reaches the give-up record above
             # (#442-review F2) instead of retrying silently forever.
             rec["lna"] = rec.get("lna", 0) + 1
             # #479 -- park the NEXT attempt for a widening window instead of
@@ -3493,7 +3546,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
             # Unverified submit -- transient, retried next sweep, and it must
             # NOT consume the ln/llast budget (a refused attempt is not a
             # nudge). It DOES advance the consecutive-abort streak, so a
-            # permanently-unverified lane still reaches the give-up ping above
+            # permanently-unverified lane still reaches the give-up record above
             # -- the SAME escalation shape the stash-abort branch uses
             # (#442-review F2).
             rec["lna"] = rec.get("lna", 0) + 1

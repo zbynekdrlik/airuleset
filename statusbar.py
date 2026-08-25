@@ -101,6 +101,33 @@ def obligation_count(cwd, home=None):
     return open_n, (ts if isinstance(ts, (int, float)) else None)
 
 
+def obligation_partition(cwd, home=None):
+    """#693 — the FULL I/U/W/gk partition for `cwd`, off the SAME per-cwd
+    tickets-status cache file `obligation_count` reads (never a parallel
+    derivation — the #367 lesson). Returns `(workable, user_waiting,
+    ops_wait, gk, ts)`: each count is the cache's int or None (absent field,
+    non-int, or a failed refresh recorded as null; `gk` is also None on a
+    full-authority entry, which has no such bucket by construction), `ts` is
+    the cache write time or None. All-None when the cache file is absent or
+    unparseable. Reads only — never spawns a refresh, never touches the
+    network. Caller: the watchdog lane give-up cause classifier
+    (`watchdog/goal.py::_lane_giveup_cause`), which applies its OWN freshness
+    gate on `ts` — a stale partition classifies as `unknown`, never a guess."""
+    if not cwd:
+        return None, None, None, None, None
+    cache = _load(cache_dir(home) / (cwd_key(cwd) + ".json"))
+    if not isinstance(cache, dict):
+        return None, None, None, None, None
+
+    def _i(key):
+        v = cache.get(key)
+        return v if isinstance(v, int) else None
+
+    ts = cache.get("ts")
+    return (_i("open"), _i("user_waiting"), _i("ops_wait"), _i("gk"),
+            ts if isinstance(ts, (int, float)) else None)
+
+
 def _spawn_refresh(cwd, home=None):
     """Kick a DETACHED `tickets-status --refresh` for `cwd` — guarded by a marker
     mtime so a burst of statusline renders / watchdog sweeps (#618) spawns at most one per SPAWN_GUARD_S."""
