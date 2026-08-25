@@ -21,7 +21,7 @@
     "cli_push_gate.py": 218,
     "cli_quals.py": 1693,
     "cli_quals_cmd.py": 777,
-    "cli_remote.py": 1225,
+    "cli_remote.py": 1261,
     "cli_scratch_sweep.py": 1505,
     "cli_target_purge.py": 892,
     "cli_tmux_provisioning.py": 1860,

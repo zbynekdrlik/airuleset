@@ -578,20 +578,50 @@ def _unlink_quiet(path):
         pass
 
 
+def _pinned_known_hosts_dir():
+    """A PER-USER, mode-0700 directory under the system temp dir for
+    materialized pin files (#680 review 🟡-2). A deterministic pin filename is
+    derivable by ANY local user from the committed PUBLIC pin content, so if the
+    materialized files lived directly in the shared, sticky-bit `/tmp` a
+    different local user could pre-plant a file THEY own at that exact path,
+    making our `os.replace` fail EPERM and hard-fail every pinned deploy/connect
+    (availability only -- never a downgrade, since a path is trusted solely
+    AFTER this process's own successful write). Namespacing by uid gives each
+    user a private 0700 dir, so two legitimate users on one box (e.g. the shared
+    subdev VPS) never collide. Created 0700 and VERIFIED owned-by-us + not a
+    symlink; anything else RAISES (fail-closed, LOUD) rather than materialize a
+    pin into a path another user could control."""
+    import stat as _stat
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "arpin-%d" % os.getuid())
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    st = os.lstat(d)
+    if (_stat.S_ISLNK(st.st_mode) or not _stat.S_ISDIR(st.st_mode)
+            or st.st_uid != os.getuid()):
+        raise RuntimeError(
+            "host-key pin dir %s is a symlink, not a directory, or not owned by "
+            "this user -- refusing to materialize a pin into a path another "
+            "user could control (never falling back to "
+            "StrictHostKeyChecking=no)" % d)
+    os.chmod(d, 0o700)   # normalize mode even if a prior run/umask left it laxer
+    return d
+
+
 def _pinned_known_hosts_path(content):
     """A DETERMINISTIC, CONTENT-ADDRESSED path for a materialized pin file
-    (#680): the filename is a hash of the exact file CONTENT, so every process
-    that pins the same host to the same keys computes the SAME path -- the file
-    count is bounded to O(#distinct pins), never one-per-connect. This is what
-    makes the atexit-less ssh legs safe: a PINNED webterm connect child ends in
+    (#680), inside the per-user private dir (`_pinned_known_hosts_dir`): the
+    filename is a hash of the exact file CONTENT, so every process that pins the
+    same host to the same keys computes the SAME path -- the file count is
+    bounded to O(#distinct pins), never one-per-connect. This is what makes the
+    atexit-less ssh legs safe: a PINNED webterm connect child ends in
     `os.execvp`, so Python's atexit cleanup never runs there; a RANDOM
-    `mkstemp` name leaked one `/tmp/arpin-known-hosts-*` file per pinned
-    connect, whereas a deterministic name is simply re-used (re-written
-    idempotently) by the next connect."""
+    `mkstemp` name leaked one pin file per pinned connect, whereas a
+    deterministic name is simply re-used (re-written idempotently) by the next
+    connect."""
     import hashlib
-    import tempfile
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
-    return os.path.join(tempfile.gettempdir(), "arpin-known-hosts-%s" % digest)
+    return os.path.join(_pinned_known_hosts_dir(),
+                        "known-hosts-%s" % digest)
 
 
 def _materialize_pinned_known_hosts(addr, host_keys):
@@ -651,17 +681,22 @@ def host_key_check_opts(remote):
     """The ssh `-o` host-key-verification options for `remote` (#669). A target
     carrying a committed PUBLIC `host_keys` pin is verified STRICTLY against that
     pin (`UserKnownHostsFile=<pin> GlobalKnownHostsFile=/dev/null
-    UpdateHostKeys=no StrictHostKeyChecking=yes` -- refuses an unknown AND a
-    changed key, and never lets a post-auth server update append keys to the
-    materialized pin); every other target keeps the unchanged
-    `StrictHostKeyChecking=no` posture. Called at every PUSH-PATH ssh leg (the
-    deploy loop AND the shared secret-delivery loop), so the pin covers the whole
-    push-path surface and no such leg can silently copy the old =no default for a
-    pinned host. (#680 extended the same pin to the OTHER ssh consumers --
-    webterm/burn/onboard -- so every spinbike leg is now pinned, not just the
-    push path.) Fail-closed: a host whose `host_keys`
-    is PRESENT but empty/blank RAISES (never a =no fallback) -- only an ABSENT
-    `host_keys` is treated as an unpinned tailscale/subdev host."""
+    UpdateHostKeys=no CheckHostIP=no StrictHostKeyChecking=yes` -- refuses an
+    unknown AND a changed key, never lets a post-auth server update append keys
+    to the materialized pin, and (`CheckHostIP=no`) verifies by HOST NAME only
+    so a DNS-name pin -- forestshop-dev, #679 -- is authoritative even on an old
+    client where `CheckHostIP` still defaults yes and would otherwise consult
+    known_hosts for the resolved IP, which the name-keyed pin does not carry);
+    every other target keeps the unchanged `StrictHostKeyChecking=no` posture.
+    Called at every PUSH-PATH ssh leg (the deploy loop AND the shared
+    secret-delivery loop), so the pin covers the whole push-path surface and no
+    such leg can silently copy the old =no default for a pinned host. (#680's
+    separate lane extends the same pin to the OTHER ssh consumers --
+    webterm/burn/onboard, which still hardcode =no in THIS tree until that lane
+    lands -- so once both land every spinbike leg is pinned, not just the push
+    path.) Fail-closed: a host whose `host_keys` is PRESENT but empty/blank
+    RAISES (never a =no fallback) -- only an ABSENT `host_keys` is treated as an
+    unpinned tailscale/subdev host."""
     if remote.get("host_keys") is None:      # absent (or explicit None) = unpinned
         return ["-o", "StrictHostKeyChecking=no"]
     # present -- even if empty: _materialize RAISES on an empty/blank pin so a
@@ -670,6 +705,7 @@ def host_key_check_opts(remote):
     return ["-o", "UserKnownHostsFile=%s" % path,
             "-o", "GlobalKnownHostsFile=/dev/null",
             "-o", "UpdateHostKeys=no",
+            "-o", "CheckHostIP=no",
             "-o", "StrictHostKeyChecking=yes"]
 
 

@@ -105,6 +105,9 @@ class TestHostKeyCheckOpts(unittest.TestCase):
         self.assertIn("StrictHostKeyChecking=yes", opts)
         self.assertIn("GlobalKnownHostsFile=/dev/null", opts)
         self.assertIn("UpdateHostKeys=no", opts)   # pin can't drift post-auth
+        # #679 review 🔵-1: verify by host NAME only, so a DNS-name pin is
+        # authoritative even on an old client where CheckHostIP defaults yes.
+        self.assertIn("CheckHostIP=no", opts)
         self.assertTrue(any(o.startswith("UserKnownHostsFile=") for o in opts))
         self.assertNotIn("StrictHostKeyChecking=no", opts)
 
@@ -304,6 +307,23 @@ class TestPinFilePathContentAddressed(unittest.TestCase):
         path = self._fresh_process_materialize("203.0.113.7", [self.ED])
         with open(path, encoding="utf-8") as fh:
             self.assertIn("203.0.113.7 " + self.ED, fh.read())
+
+    def test_pin_file_lives_in_a_per_user_private_dir(self):
+        # #679 review 🟡-2: the deterministic name is derivable from the PUBLIC
+        # pin, so the file must NOT sit directly in shared, sticky /tmp (where
+        # another local user could pre-plant it and DoS our os.replace). It
+        # lives in a per-uid, mode-0700 dir instead.
+        import os
+        import stat
+        path = self._fresh_process_materialize("203.0.113.7", [self.ED])
+        d = os.path.dirname(path)
+        self.assertEqual(os.path.basename(d), "arpin-%d" % os.getuid(),
+                         "pin file must live in a per-uid private dir")
+        st = os.lstat(d)
+        self.assertTrue(stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode))
+        self.assertEqual(st.st_uid, os.getuid())
+        self.assertEqual(stat.S_IMODE(st.st_mode) & 0o077, 0,
+                         "pin dir must not be group/other accessible")
 
 
 if __name__ == "__main__":
