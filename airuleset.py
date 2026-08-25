@@ -2418,6 +2418,16 @@ def cmd_tickets_status(args):
         sys.stdout.write(statusbar.tickets_segment(cwd))
         return
 
+    # #689 hygiene: sweep dead-worktree / long-stale cache entries FIRST — a
+    # pure local FS op, so it runs unconditionally (before the gh block AND
+    # before the #370 graphql-budget early return, which serves stale cache).
+    # sweep_stale_cache is contractually never-raise; the guard is defense-in-
+    # depth on the statusline hot path (logs, never breaks a refresh).
+    try:
+        statusbar.sweep_stale_cache()
+    except Exception as e:
+        sys.stderr.write("tickets-status: cache sweep skipped (%s)\n" % e)
+
     gh_env = _gh_env()
 
     def _out(argv, cd):

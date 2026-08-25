@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 6338,
+    "airuleset.py": 6348,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2339,
     "cli_aliases.py": 105,
@@ -50,7 +50,7 @@
     "filedrop/vault_server.py": 580,
     "goal_registry.py": 283,
     "notify/__init__.py": 2763,
-    "statusbar.py": 745,
+    "statusbar.py": 800,
     "subagent_statusline.py": 300,
     "tests/_goal_arm_helpers.py": 261,
     "tests/_hook_state_cleanup.py": 164,
@@ -378,7 +378,7 @@
     "airuleset.py::cmd_gk_request": 209,
     "airuleset.py::cmd_install": 630,
     "airuleset.py::cmd_notify": 320,
-    "airuleset.py::cmd_tickets_status": 204,
+    "airuleset.py::cmd_tickets_status": 214,
     "airuleset.py::cmd_watchdog": 209,
     "airuleset.py::main": 677,
     "cli_quals.py::_slice_mine_and_handed": 217,

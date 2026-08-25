@@ -37,6 +37,7 @@ import burn
 TICKETS_TTL_S = 120                 # refresh the open-issues count at most this often
 SPAWN_GUARD_S = 30                  # min seconds between background refresh spawns
 AUTOPILOT_RUN_WINDOW_S = 6 * 3600   # a run-card younger than this = active run
+STALE_CACHE_MAX_AGE_S = 7 * 86400   # #689: sweep a cache entry unrefreshed this long
 CTX_GREEN_MAX = 150_000             # context-cost segment colour thresholds
 CTX_YELLOW_MAX = 400_000            # (raw token count, not %)
 
@@ -120,6 +121,60 @@ def _spawn_refresh(cwd, home=None):
             stdin=subprocess.DEVNULL, start_new_session=True)
     except Exception:
         pass
+
+
+def sweep_stale_cache(home=None, now=None, max_age_s=STALE_CACHE_MAX_AGE_S):
+    """#689 hygiene: delete tickets-status cache entries for worktrees that no
+    longer exist. Returns the list of removed filenames.
+
+    Deletes a `<cwd-key>.json` cache entry IFF EITHER
+      (a) its `root` is a non-empty path that no longer exists on disk — a
+          removed worktree, the primary case (dead `agent-*` roots), OR
+      (b) its `ts` is older than `max_age_s` (a conservative window, default 7
+          days) — a per-cwd entry no refresh has re-written that long, harmless
+          to drop (it is recreated on the next render of that cwd).
+
+    Best-effort: NEVER raises (the statusline / a refresh must never break over
+    hygiene). Skips `.spawn-*` guard files and anything not ending in `.json`,
+    and skips symlinks (a cache entry is never legitimately a symlink — never
+    follow one to read/unlink its target). Per-`$HOME` directory, so there is
+    NO cross-user concern (unlike the #687 shared dedup store). An UNPARSEABLE
+    entry is deliberately LEFT (no readable root/ts to judge; rare, low-harm,
+    overwritten on the next refresh of that cwd)."""
+    removed = []
+    now = time.time() if now is None else now
+    d = cache_dir(home)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return removed
+    for name in names:
+        if not name.endswith(".json"):
+            continue                      # `.spawn-*` guards + non-cache files
+        path = d / name
+        try:
+            if path.is_symlink():
+                continue                  # never follow/unlink a symlinked entry
+            data = _load(path)
+        except OSError:
+            continue
+        if not isinstance(data, dict):
+            continue                      # unparseable — leave it (safe direction)
+        dead = False
+        root = data.get("root")
+        if isinstance(root, str) and root and not os.path.exists(root):
+            dead = True
+        ts = data.get("ts")
+        if isinstance(ts, (int, float)) and (now - ts) > max_age_s:
+            dead = True
+        if not dead:
+            continue
+        try:
+            path.unlink()
+            removed.append(name)
+        except OSError:
+            continue                      # a concurrent sweep / perms — skip it
+    return removed
 
 
 def _stream_split_sfx(cache):
