@@ -92,3 +92,19 @@ which auto-load when you read `cli_webterm.py`):
   reach the host 127.0.0.1 → bind 0.0.0.0"), which a review agent literally executed
   → an unauthenticated writable terminal on the tailnet, killed by hand (#671). The
   `internals-tests.md` #661/#678 harness bullets now agree on loopback-only.
+- **#681 review lessons (reusable for any bind/security guard).** (1) A wildcard-bind
+  GUARD must be PARSE-based — `ipaddress.ip_address(b).is_unspecified` + `inet_aton(b)
+  == 0` — NOT a frozenset of literals: `::0` / `0` / `0.0` / `0.0.0` / `0:0:0:0:0:0:0:0`
+  all resolve to INADDR_ANY/in6addr_any but escape a literal set (only `""` / `*` need
+  the explicit sentinel branch). (2) Guard the RUNTIME chokepoint, not only the render
+  path — the #671 class is an agent HAND-RUNNING `--bind 0.0.0.0`; the gateway
+  `main()` argparse rejects it now, mirroring the render guard (module stays
+  standalone → a LOCAL `_bind_is_wildcard`, no cli_webterm import). (3) A regex SCAN
+  for a wildcard literal must NOT carry an empty-value arm — `(?:-i|--bind)…['\"]?(?:\s|…)`
+  matches EVERY `-i ` (the trailing space satisfies the empty arm); drop it (the parse
+  guard covers `""`) and verify the regex against the REAL rendered artifacts for
+  false-positives, never just seeds. (4) VERIFY a ticket's cited `#N` before repeating
+  it — the #661/#678 harness bullet was cited "#657" (an unrelated ticket); one
+  `grep -c 657 internals-tests.md` (0 hits) + `git log -S "<phrase>"` settled it. A
+  citation inherited from ticket text is itself the "unverified doc claim" class this
+  ticket fixes.
