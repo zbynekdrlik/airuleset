@@ -34,14 +34,21 @@ import cli_webterm_david as dvd  # noqa: E402
 import cli_webterm_marek as mrk  # noqa: E402
 
 
-# An interface-any bind, in either the `ttyd -i` or the gateway `--bind` argv form.
-# `0.0.0.0` is checked as a bare token (a dotted-quad guard avoids matching e.g.
-# `10.0.0.0/8` were it ever to appear); `::` only in an explicit `-i`/`--bind` slot
-# so a legitimate `%t/...` path or a `::`-in-prose never false-positives.
+# A coarse SECOND-LAYER scan of rendered output for an interface-any bind literal.
+# NOTE: the AUTHORITATIVE check is the parse-based `_reject_wildcard_bind` guard in
+# cli_webterm.py (and the gateway `main()` guard) — those resolve every unspecified
+# form (incl. the empty string and the legacy shorthands 0 / 0.0 / 0.0.0) via
+# ipaddress/inet_aton. This regex only needs to catch the realistic literal forms
+# that could appear in a rendered ttyd/gateway argv/unit: `0.0.0.0` (bare token — a
+# dotted-quad lookaround avoids matching e.g. `10.0.0.0/8`), the fully-expanded IPv6
+# any `0:0:0:0:0:0:0:0`, and `::` / `::0` / `*` in an explicit `-i`/`--bind` slot
+# (space or `=` separator, optional quote) so a legitimate `-i "$SOCK"` / `%t/...`
+# path or a `::` in prose never false-positives.
+_BIND_FLAG = r"(?:-i|--bind)\s*=?\s*['\"]?"
 _WILDCARD_RE = re.compile(
     r"(?<![\d.])0\.0\.0\.0(?![\d.])"
-    r"|-i\s+::(?:\s|\"|$)"
-    r"|--bind\s+::(?:\s|\"|$)"
+    r"|(?<![:\w])0:0:0:0:0:0:0:0(?![:\w])"
+    r"|" + _BIND_FLAG + r"(?:::0?|\*)(?:\s|['\"]|$)"
 )
 
 
@@ -52,13 +59,23 @@ def _has_wildcard_bind(text):
 def _all_rendered_spawn_artifacts():
     """Every ttyd/gateway spawn argv + systemd unit this repo can emit, built via the
     REAL render helpers (not re-derived — a tautology-free scan of the actual output).
-    Returns a list of (label, text) pairs covering all three lanes and both modes."""
+    Returns a list of (label, text) pairs covering all three lanes and both modes.
+
+    NB (#681 review 🔵5): this is a hand-enumerated list — a FUTURE ttyd/gateway
+    renderer is NOT auto-enrolled here, so enrol every new spawn renderer in this
+    list AND rely on the parse-based `_reject_wildcard_bind` guard (the runtime
+    authority) on its render path."""
     return [
         ("owner password launch",
          w.render_webterm_launch_script()),
         ("owner Access socket launch",
          w.render_webterm_launch_script(ttyd_socket_basename=w.WEBTERM_TTYD_SOCK_BASENAME)),
-        ("lane port-override launch",
+        # The REAL david/marek lane launch shape (#665/#663): inventory export + a
+        # UNIX socket (never ttyd_port). Kept alongside a loopback+port variant.
+        ("lane socket launch (david/marek shape)",
+         w.render_webterm_launch_script(inventory_path="/x/inv.json",
+                                        ttyd_socket_basename=w.WEBTERM_TTYD_SOCK_BASENAME)),
+        ("lane loopback+port launch",
          w.render_webterm_launch_script(inventory_path="/x/inv.json",
                                         ttyd_port=w.WEBTERM_TTYD_PORT)),
         ("owner password gateway unit",
@@ -85,12 +102,24 @@ class TestNoWildcardBind681(unittest.TestCase):
     def test_scan_catches_a_seeded_wildcard(self):
         # Positive control: the scan MUST flag a deliberately-wrong argv, so the
         # lock above is proven able to fail (not a tautology that always passes).
-        self.assertTrue(_has_wildcard_bind('exec ttyd -p 7682 -i 0.0.0.0 -b /t -a -W foo'))
-        self.assertTrue(_has_wildcard_bind('cli_webterm_gateway.py --bind 0.0.0.0 --port 8080'))
-        self.assertTrue(_has_wildcard_bind('exec ttyd -i :: -b /t -a -W foo'))
-        # ...and NOT flag the safe binds.
-        self.assertFalse(_has_wildcard_bind('exec ttyd -p 7682 -i 127.0.0.1 -b /t -a -W foo'))
-        self.assertFalse(_has_wildcard_bind('exec ttyd -i "$SOCK" -b /t -a -W foo'))
+        for bad in (
+            'exec ttyd -p 7682 -i 0.0.0.0 -b /t -a -W foo',
+            'cli_webterm_gateway.py --bind 0.0.0.0 --port 8080',
+            'exec ttyd -i :: -b /t -a -W foo',
+            'exec ttyd -i ::0 -b /t -a -W foo',
+            'cli_webterm_gateway.py --bind=:: --port 8080',
+            'exec ttyd -i 0:0:0:0:0:0:0:0 -b /t',
+            "exec ttyd -i '::' -b /t",
+        ):
+            self.assertTrue(_has_wildcard_bind(bad), "scan must flag: %s" % bad)
+        # ...and NOT flag the safe binds (no false positives on the real forms).
+        for ok in (
+            'exec ttyd -p 7682 -i 127.0.0.1 -b /t -a -W foo',
+            'exec ttyd -i "$SOCK" -b /t -a -W foo',
+            'cli_webterm_gateway.py --bind 100.104.8.125 --port 8080',
+            '# 10.0.0.0/8 is a private range, not a wildcard',
+        ):
+            self.assertFalse(_has_wildcard_bind(ok), "scan must NOT flag: %s" % ok)
 
     def test_password_launch_binds_loopback(self):
         s = w.render_webterm_launch_script()
@@ -110,8 +139,15 @@ class TestWildcardBindGuard681(unittest.TestCase):
     render chokepoints."""
 
     def test_guard_rejects_wildcard_and_accepts_loopback(self):
-        self.assertEqual(w._reject_wildcard_bind("127.0.0.1", "x"), "127.0.0.1")
-        for bad in ("0.0.0.0", "::", "", "*", None):
+        # Legitimate binds pass through unchanged (loopback, a tailscale IP, IPv6
+        # loopback) — the guard must never reject a real interface.
+        for good in ("127.0.0.1", "100.104.8.125", "::1"):
+            self.assertEqual(w._reject_wildcard_bind(good, "x"), good)
+        # Every interface-any / unspecified / empty form fails closed — including
+        # the IPv6-any spellings (::, ::0, 0:0:...:0) and the legacy IPv4 shorthands
+        # (0, 0.0, 0.0.0) that inet_aton resolves to 0.0.0.0 (#681 review 🟡2).
+        for bad in ("0.0.0.0", "::", "::0", "0:0:0:0:0:0:0:0",
+                    "0", "0.0", "0.0.0", "  0.0.0.0  ", "", "*", None):
             with self.assertRaises(ValueError):
                 w._reject_wildcard_bind(bad, "x")
 
