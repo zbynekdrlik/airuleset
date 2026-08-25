@@ -124,6 +124,17 @@ class TestBoxUCountFreshness(unittest.TestCase):
         ])
         self.assertEqual(w._box_u_count(home), 0)
 
+    def test_future_dated_ts_is_dropped(self):
+        # #686 review 🔵: doctrine parity with _watchdog_backlog_fetch (#459) — an
+        # implausibly future-dated ts (clock skew / a synced cache) is undatable,
+        # so it drops (the safe direction), never counts.
+        now = int(time.time())
+        home = self._home([
+            {"user_waiting": 3, "ts": now + 10000},    # future -> dropped
+            {"user_waiting": 2, "ts": now - 30},       # fresh -> counted
+        ])
+        self.assertEqual(w._box_u_count(home), 2)
+
 
 class TestUReaderSnippetFreshness(unittest.TestCase):
     """#686: the inline reader run over ssh on each remote box must apply the SAME
@@ -244,6 +255,12 @@ class TestUReaderSnippet(unittest.TestCase):
         # a stale dead cache both readers must drop identically (#686 equivalence)
         (ts / "d.json").write_text(
             json.dumps({"user_waiting": 9, "ts": now - 20 * 3600}), encoding="utf-8")
+        # #686 review 🔵: a non-dict JSON (list) and a future-dated ts must ALSO
+        # drop identically in both readers (the snippet drops the list via its broad
+        # except, _box_u_count via its isinstance(dict) guard — lock the equivalence).
+        (ts / "e.json").write_text("[1,2,3]", encoding="utf-8")
+        (ts / "f.json").write_text(
+            json.dumps({"user_waiting": 6, "ts": now + 10000}), encoding="utf-8")
         # run the real snippet with HOME pointed at the temp dir
         env = {"HOME": d, "PATH": __import__("os").environ.get("PATH", "")}
         r = subprocess.run(["python3", "-c", w._U_READER_SNIPPET],

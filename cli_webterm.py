@@ -742,7 +742,7 @@ _U_READER_SNIPPET = (
     "def _u(p):\n"
     " try:\n"
     "  d=json.load(open(p));t=d.get('ts')\n"
-    "  if not isinstance(t,(int,float)) or N-t>M:return 0\n"
+    "  if not isinstance(t,(int,float)) or not (0<=N-t<=M):return 0\n"
     "  u=d.get('user_waiting');return u if isinstance(u,int) and u>0 else 0\n"
     " except Exception:return 0\n"
     "print(sum(_u(p) for p in glob.glob(os.path.expanduser('~/.claude/tickets-status/*.json'))))"
@@ -757,10 +757,13 @@ def _box_u_count(home=None, now=None):
     overrides the clock (tests).
 
     #686: only a FRESH cache contributes -- an entry whose `ts` is absent /
-    non-numeric / older than `_U_FRESH_MAX_AGE_S` is skipped, so a DEAD session's
-    frozen `user_waiting` (a removed worktree, or an exited session in a real repo
-    dir) can never inflate the box U. Fail-safe direction: undatable / stale ->
-    dropped, never a false positive."""
+    non-numeric / older than `_U_FRESH_MAX_AGE_S` (or implausibly future-dated) is
+    skipped, so a DEAD session's frozen `user_waiting` (a removed worktree, or an
+    exited session in a real repo dir) can never inflate the box U. Fail-safe
+    direction: undatable / stale -> dropped, never a false positive. The
+    `0 <= now - ts` lower bound rejects a future-dated ts for doctrine parity with
+    the sibling `airuleset._watchdog_backlog_fetch` (#459) -- a same-box read never
+    sees a future ts, so this only guards clock skew / a synced cache."""
     base = Path(home) if home else Path.home()
     now = time.time() if now is None else now
     total = 0
@@ -772,8 +775,8 @@ def _box_u_count(home=None, now=None):
         if not isinstance(d, dict):
             continue
         ts = d.get("ts")
-        if not isinstance(ts, (int, float)) or now - ts > _U_FRESH_MAX_AGE_S:
-            continue                        # #686: stale / undatable -> drop (dead session)
+        if not isinstance(ts, (int, float)) or not (0 <= now - ts <= _U_FRESH_MAX_AGE_S):
+            continue                        # #686: stale / undatable / future -> drop
         u = d.get("user_waiting")
         if isinstance(u, int) and u > 0:
             total += u
