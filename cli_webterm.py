@@ -1622,9 +1622,9 @@ def _render_webterm_unit():
 
 # #635/#663: prepended to the OWNER gateway unit ONLY in Cloudflare-Access mode, so
 # a human reading the installed file is not misled by the shared template's
-# tailnet/password wording — the SAME honesty-bar correction cli_webterm_david's
-# _DAVID_UNIT_NOTE makes for the david lane. Every claim it corrects is FALSE for
-# the #663 UNIX-socket + cloudflared + Access owner gateway.
+# tailnet/password wording — the SAME honesty-bar correction the subdev lanes'
+# note makes (cli_webterm_lane.render_lane_unit_note, #665). Every claim it
+# corrects is FALSE for the #663 UNIX-socket + cloudflared + Access owner gateway.
 _OWNER_ACCESS_UNIT_NOTE = (
     "# NOTE (#635/#663, owner ROZHODNUTÉ 2026-08-22): this is the OWNER gateway in\n"
     "# CLOUDFLARE-ACCESS mode — #663 it binds a mode-0700 UNIX-domain socket in the\n"
@@ -1682,12 +1682,12 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
 
     #635 `access_mode=True` (Cloudflare Access): the `--cred {{CRED_PATH}}` in the
     shared template's ExecStart is swapped for `--trust-access-header <header>`
-    (the SAME transform David's lane uses, cli_webterm_david.render_david_gateway_
-    unit) — NO password/credential is validated; Cloudflare email-OTP at the edge
-    is the whole gate, and `bind_ip` is loopback (a cloudflared tunnel fronts it).
-    The password-model `{{CRED_PATH}}` still present in the template's COMMENT is
-    neutralised to n/a, AND `_OWNER_ACCESS_UNIT_NOTE` is prepended (mirroring
-    cli_webterm_david's _DAVID_UNIT_NOTE) to correct every OTHER now-false
+    (the SAME transform the subdev lanes use via cli_webterm_lane.render_gateway_
+    unit, #665) — NO password/credential is validated; Cloudflare email-OTP at the
+    edge is the whole gate, and `bind_ip` is loopback (a cloudflared tunnel fronts
+    it). The password-model `{{CRED_PATH}}` in the template's COMMENT is neutralised
+    to n/a, AND `_OWNER_ACCESS_UNIT_NOTE` is prepended (mirroring the subdev lanes'
+    shared note, cli_webterm_lane.render_lane_unit_note) to correct every OTHER now-false
     tailnet/password claim in the shared template header, so a human reading the
     installed Access-mode unit is never misled. #677: the owner unit ALSO always
     carries `--u-collect` (the U-dot data channel is owner-only; david/marek units
