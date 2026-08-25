@@ -56,6 +56,7 @@ const CFG = { term_cols: 176, term_rows: 51 };
 // reference. Kept in sync with cli_webterm.py by test_fit_fill_caps_match_source.
 const WT_FILL_MAX_CELL_STRETCH = 1.5;
 const WT_FILL_MAX_LINE_STRETCH = 1.8;
+const WT_FRAME_FILL_MAX_STRETCH = 1.25;
 const CW = 0.6, CH = 1.2;                 // fake NATURAL monospace cell = 0.6*fs x 1.2*fs
 // #678: cell dims track term.options — fontSize AND (native fill) lineHeight /
 // letterSpacing. A real xterm bakes lineHeight into cell HEIGHT and letterSpacing
@@ -100,9 +101,11 @@ const doc = {
 };
 const VW = (typeof HARNESS_VW !== 'undefined') ? HARNESS_VW : 1600;
 const VH = (typeof HARNESS_VH !== 'undefined') ? HARNESS_VH : 1000;
-const win = { term, document: doc, innerWidth: VW, innerHeight: VH };
+const frameEl = { style: {} };            // #700: the PARENT-doc iframe fake
+const win = { term, document: doc, innerWidth: VW, innerHeight: VH, frameElement: frameEl };
 %(fit)s
 %(fill)s
+%(stretch)s
 const baseFont = 13;
 // #655: fitFixedGrid clamps+resets+min-fits the font; fillFixedGrid is the
 // DEFERRED pass that stretches the grid to fill. In the browser they run one
@@ -110,11 +113,15 @@ const baseFont = 13;
 // synchronous, so calling them back-to-back is the same contract.
 const ok = fitFixedGrid(win);
 const filled = fillFixedGrid(win);
+const stretched = (typeof stretchFrameToFill === 'function') ? stretchFrameToFill(win) : false;   // #700
 term.resize(300, 80);                     // simulate ttyd's own FitAddon firing
 const r = screenEl.getBoundingClientRect();   // FINAL size (reflects lineHeight/letterSpacing fill + any transform)
 const sm = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(screenEl.style.transform || '');
+const fm = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(frameEl.style.transform || '');   // #700
 process.stdout.write(JSON.stringify({
   ok, filled, cols: term.cols, rows: term.rows, clampedTo: [term.cols, term.rows],
+  stretched, frameScaleX: fm ? parseFloat(fm[1]) : 1, frameScaleY: fm ? parseFloat(fm[2]) : 1,
+  frameOrigin: frameEl.style.transformOrigin || '', frameTransform: frameEl.style.transform || '',
   fontSize: term.options.fontSize, baseFont,
   scaleX: sm ? parseFloat(sm[1]) : 1,
   scaleY: sm ? parseFloat(sm[2]) : 1,
@@ -133,10 +140,15 @@ def _run_fit_harness(html_or_fit, vw=1600, vh=1000, fill_js=None):
     if fill_js is None:                 # `html_or_fit` is the rendered HTML
         fit_js = _extract_js_function(html_or_fit, "fitFixedGrid")
         fill_js = _extract_js_function(html_or_fit, "fillFixedGrid")
+        try:                            # #700: tolerate a pre-#700 HTML — the
+            stretch_js = _extract_js_function(html_or_fit, "stretchFrameToFill")
+        except (ValueError, AssertionError):
+            stretch_js = ""             # harness `typeof` guard then no-ops
     else:
         fit_js = html_or_fit
+        stretch_js = ""
     harness = ("const HARNESS_VW=%d, HARNESS_VH=%d;\n" % (vw, vh)) + (
-        _FIT_HARNESS % {"fit": fit_js, "fill": fill_js})
+        _FIT_HARNESS % {"fit": fit_js, "fill": fill_js, "stretch": stretch_js})
     d = tempfile.mkdtemp()
     hp = Path(d) / "fitharness.js"
     hp.write_text(harness, encoding="utf-8")
@@ -1425,9 +1437,9 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         # INTEGER-px per cell (xterm quantizes), so each floors to the largest cell
         # that fits, REDUCING the letterbox (fills the tight axis fully + shrinks the
         # loose-axis margin) without ELIMINATING it -- a small residual letterbox
-        # (up to ~one cell per axis) remains rather than the mouse-breaking exact
-        # transform (#678: a working mouse outranks a pixel-exact fill). It NEVER
-        # overflows (no clipped bottom row) and NEVER CSS-scales the terminal.
+        # (up to ~one cell per axis) remains in CHILD coords (#700 then removes it
+        # at the IFRAME boundary; #678: a working mouse outranks any SAME-document
+        # exact transform). It NEVER overflows and NEVER CSS-scales the terminal.
         # (Fill % is measured against the harness's modelled INTEGER cell — the real
         # ratio depends on the true cell aspect; the load-bearing invariants are
         # no-overflow + no-transform, verified live for mouse correctness.)

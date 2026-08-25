@@ -305,3 +305,41 @@ just gain the cosmetic dark margin the owner decreed. Acceptance read-back:
 50-row window.
 
 - **#661 go-live (supervisor, 2026-08-25):** authorized_keys forced-command tvar je `restrict,pty,command="…"` — samotné `restrict` vypína aj PTY a interaktívny tmux attach by zlyhal; `pty` ho musí explicitne vrátiť. Overenie živosti restrict línie bez interakcie: BatchMode probe (`ssh -T … true`) — forced command IGNORUJE `true` a padne na `open terminal failed: not a terminal` = auth OK + forced command beží. Presný remote command renderuj z `cli_webterm._remote_command(preferred)` (escape `\` a `"` pre authorized_keys), nikdy ručne prepísaný.
+### #700 webterm — exact viewport fill: the integer-cell residual is killed at the IFRAME boundary, never inside the xterm document
+
+The #678 native fill (integer px/cell `letterSpacing`/`lineHeight`) quantizes the
+WHOLE grid in steps of `cols`/`rows` px per axis (176 px horizontally!), so up to
+~176+~102 px of centered letterbox remained BY DESIGN — the owner's #700 report:
+side margins + an "empty row" under the status bar. Three reusable lessons:
+
+- **The "dead row" was a MISDIAGNOSIS — do the screenshot row-math before touching
+  geometry.** Client grid (176x51) = window (176x50, `TMUX_DEFAULT_SIZE`) + 1
+  status row; the status bar OCCUPIES grid row 51 (measure: first-row top + N×cell
+  height against the bar's position; mind DPR — a 2879-px-wide PWA screenshot at
+  Windows 150% is a 1920-CSS-px viewport, all JS math is CSS px). Forcing all
+  sources to ONE literal would crop: window 176x51 → the owner's own 176x51 WT
+  client loses the last row (#613 class); browser grid 176x50 → CC footer crop
+  (#672). Lock: `TestGeometryCanonDecision700`.
+- **The ONE mouse-safe place for an EXACT fill is a transform on the IFRAME in the
+  PARENT document** (`stretchFrameToFill`, capped `WT_FRAME_FILL_MAX_STRETCH`
+  1.25/axis, `#frames{overflow:hidden}` clips the spill). A SAME-document ancestor
+  transform of the xterm screen is the #678 mouse regression (getBoundingClientRect
+  scales, cssCellHeight doesn't); a PARENT-document transform never enters the
+  child's coordinate space — child rect AND pointer clientX/Y stay in child layout
+  px (the browser inverse-maps events through ancestor transforms), and
+  `win.innerWidth/innerHeight` stay layout-sized → no feedback loop, and a
+  parent-side style change cannot re-fire the child ResizeObserver. Proven LIVE
+  (2026-08-25, review 🟡 fix): real ttyd 1.7.4 + headless Chromium + REAL
+  `page.mouse` input through a parent-scaled iframe — 9/9 drags at scale
+  1.15x1.22 and at the 1.25 cap selected exactly the pointed row's text (rows
+  6/26/42 of 52; the #678 proof method re-run for the cross-document variant).
+  Rig gotcha: the fleet conf sets `mouse on`, under which xterm does NO local
+  selection (drags go to tmux copy-mode and `term.getSelection()` stays empty
+  even untransformed) — set `mouse off` on the sandbox tmux server to exercise
+  xterm's own pixel→cell mapping, and drag INTERIOR cells (a rig xterm fills
+  the whole iframe, so an arbitrary test scale clips the outer cell band —
+  unlike the real page, whose scale is exactly the letterbox residual).
+- **Harness gotcha:** extracted dashboard functions reference top-level consts —
+  every shipping cap needs a matching `const` in `_FIT_HARNESS` PLUS a caps-match
+  source lock (the #655 pattern), or the node run dies on ReferenceError only
+  AFTER the source lands (a RED test can't see it).
