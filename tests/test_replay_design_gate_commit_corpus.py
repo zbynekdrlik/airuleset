@@ -100,14 +100,19 @@ class TestNoOutOfRangeOrMissedReferences(TestCase):
             # targets; "issue N" / "GH-N" are the sanctioned non-triggering
             # prose forms (see the class docstring) and must never land
             # back in this check.
-            # #692 -- and only the SAME 1..5-digit run ISSUE_REF_RE itself
-            # caps: a 6+-digit all-digit token (`#333333`, an all-digit CSS
-            # hex colour — now sanctioned in commit messages) is a
-            # DELIBERATE exclusion, not a missed reference; without this
-            # lockstep narrowing the first legitimate post-#692 subject
-            # containing such a colour and no other ref would fail this
-            # lock — the same audit-definition narrowing #122 itself did.
-            if re.search(r'#\d{1,5}(?!\d)', line):
+            # #692 -- and only the SAME digit-run-then-boundary shape
+            # ISSUE_REF_RE itself targets: the trailing \b mirrors the
+            # gate's own boundary, so BOTH deliberately-excluded hex-colour
+            # halves (all-digit `#333333` -- \b subsumes the 6+-digit-run
+            # exclusion -- AND digit-leading letter hex `#3B78FF`/`#333a`,
+            # which the gate never matched) stay out of "issue-shaped";
+            # without this lockstep narrowing the first legitimate
+            # post-#692 subject carrying such a colour and no other ref
+            # would fail this lock -- the same audit-definition narrowing
+            # #122 itself did. The audit stays deliberately broader than
+            # the gate on the PREFIX side (`C#7` is still flagged) so a
+            # gate regression there is still caught.
+            if re.search(r'#\d{1,5}\b', line):
                 missed.append(line)
         self.assertEqual(missed, [], "issue-shaped mention with zero extracted refs")
 

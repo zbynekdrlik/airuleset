@@ -341,12 +341,14 @@ def classify_review_comment(body):
 # ref out of a longer run -- every shorter candidate fails the trailing \b
 # against the next digit. Letter-containing colours (`#3B78FF`) never
 # matched at all (\b cannot sit between a digit and a hex LETTER). The
-# accepted trade-off: a ref above #99999 (no fleet repo is within 20x of
-# that) would leave the gate silent for that ref -- the documented
-# low-cost direction -- while the over-match direction was a proven live
-# hard block on every CSS-touching commit. 3-digit shorthand (`#333`)
-# stays extracted: by shape it IS a plausible ref, and any rule dropping
-# it would open a real-ref bypass; #206 handles the real-and-closed case.
+# accepted trade-off: any 6+-digit RUN is dropped -- a ref above #99999
+# (no fleet repo is within 20x of that) and equally a zero-padded small
+# ref like `#000691` (not a fleet shape) -- leaving the gate silent for
+# it, the documented low-cost direction, while the over-match direction
+# was a proven live hard block on every CSS-touching commit. 3/4-digit
+# all-digit shorthand (`#333`, RGBA `#3338`) stays extracted: by shape it
+# IS a plausible ref, and any rule dropping it would open a real-ref
+# bypass; #206 handles the real-and-closed case.
 ISSUE_REF_RE = re.compile(r"(?:^|[\s(/\"'\[])#([0-9]{1,5})\b")
 
 
