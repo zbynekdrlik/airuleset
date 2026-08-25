@@ -916,17 +916,16 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
         tabs = _tab_sessions(inventory, preserve_order=True)
 
     def _tab_button(i, t):
-        # #582: an ordinal badge (1-9) on the first nine tabs = the VISIBLE
-        # Ctrl+Alt+1..9 map, so the shortcut is discoverable and a specific tab
-        # is faster to pick out by eye. It is a fixed POSITION digit, never
-        # user data, so it adds no injection surface (unlike the escaped label).
-        ordinal = ('<span class="ord">%d</span>' % (i + 1)) if i < 9 else ""
+        # #661 (owner ruling 2026-08-25): the #582 ordinal badge (a visible 1-9
+        # chip on the first nine tabs) is REMOVED — it added no needed info and
+        # ate space. The Ctrl+Alt+1..9 SHORTCUT stays fully functional (onHotkey
+        # below); only the visible digit went. The green ▸ .ico separator stays.
         # #677: a per-tab corner dot, hidden until the tab's box has U > 0
         # (toggled by applyUStatus). It carries no data -> no injection surface.
         return ('<button class="tab" data-idx="%d" title="%s">'
-                '<span class="ico">&#9656;</span>%s<span class="al">%s</span>'
+                '<span class="ico">&#9656;</span><span class="al">%s</span>'
                 '<span class="udot"></span></button>'
-                % (i, _html_escape(t["title"]), ordinal, _html_escape(t["alias"])))
+                % (i, _html_escape(t["title"]), _html_escape(t["alias"])))
 
     buttons = "\n".join(_tab_button(i, t) for i, t in enumerate(tabs))
     # #677 review 🟡: the U-dot poll is OWNER-ONLY. The david/marek gateways render
@@ -999,10 +998,6 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 .tab.active { background: #0C0C0C; color: #F2F2F2; border-color: #2b2b2b; }
 .tab .ico { color: #13A10E; font-size: 11px; }
 .tab .al { overflow: hidden; text-overflow: ellipsis; }
-.tab .ord { display: inline-flex; align-items: center; justify-content: center;
-  min-width: 15px; height: 15px; padding: 0 3px; border-radius: 3px;
-  background: #2b2b2b; color: #767676; font-size: 10px; line-height: 1; }
-.tab.active .ord { background: #3B78FF; color: #F2F2F2; }
 #nav { position: sticky; left: 0; z-index: 1; display: inline-flex; gap: 2px;
   padding-right: 4px; margin-right: 2px; background: #0C0C0C; flex: 0 0 auto; }
 .cyc { cursor: pointer; border: 1px solid #2b2b2b; border-radius: 6px;
