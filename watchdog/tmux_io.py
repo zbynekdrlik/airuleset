@@ -759,16 +759,23 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         # read from byte 0 (a prior identical nudge would false-confirm).
         _log("send-verified abort: transcript unreadable pre-send")
         return False
-    watchdog._type_literal(pane_id, run, text, sleep_fn)
-    if not _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
-        # Never rendered / collapsed — NEVER submit a garbage prompt into the
-        # user's session. Nothing typed reliably, so nothing to undo (the same
-        # collapsed-paste abort `_send_goal_verified` takes).
+    # #670 -- HEAD-INCLUSIVE verified type + bounded settle/undo/retry, replacing
+    # the old `_type_literal` + `_await_typed_landed(want=True)` pair that
+    # verified only the TAIL (`_typed_landed`'s endswith) and was head-blind: a
+    # swallowed FIRST char (`ane-check...` for `lane-check...`, the send-keys
+    # first-byte race) IS a suffix of the intended text, so it passed and Enter
+    # submitted the corrupted prompt. `_type_literal_verified` reads the box HEAD
+    # back too (it retains the same bounded render-settle tolerance, #670-review
+    # R1), re-types on a genuine swallow, and on a HOLD (unreadable / collapsed)
+    # box withholds every keystroke (#670-review R2) -- so a head-corrupted
+    # prompt is NEVER submitted, and no keystroke is fired into a box we cannot
+    # safely backspace.
+    if not watchdog._type_literal_verified(pane_id, run, text, sleep_fn):
         if watchdog._pane_shows_collapsed_paste(watchdog._input_line_text(
                 watchdog.capture_pane(pane_id, run, lines=40))):
             _log("send-verified abort: collapsed-paste, not submitted")
         else:
-            _log("send-verified abort: type not landed, not submitted")
+            _log("send-verified abort: type not head+tail-verified, not submitted")
         return False
     run(["tmux", "send-keys", "-t", pane_id, "Enter"])
     if _await_submit_confirmed(tpath, baseline, text, sleep_fn):

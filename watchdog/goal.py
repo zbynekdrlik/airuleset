@@ -2585,8 +2585,11 @@ GOAL_LANE_UNDERSAT_SURPLUS = 5
 # covered, nothing to lift" -- the live incident). A nudge is EFFECTIVE iff the
 # STRUCTURED live-worker count (`count_live_workers` -- wedged-excluding, #486 G2,
 # NEVER pane text) ROSE since it fired; an ineffective nudge widens the NEXT
-# interval along this schedule, holding at the cap FOREVER (re-probes at the widest
-# stage, never permanently silent -- #134 anti-silence). Mirrors the repo's
+# interval along this schedule, holding at the widest stage (#134 anti-silence).
+# #670 REFINES this: an EXACTLY-unchanged (workers, backlog) signature is now
+# DEDUPED before this backoff (permanently silent until the state moves -- owner
+# directive); the staged re-probe governs only a CHANGED-but-ineffective state
+# (a shrinking backlog, workers flat). Mirrors the repo's
 # staged-schedule PATTERN (GOAL_LANE_STASH_ABORT_BACKOFF_S / #502 limit-backoff):
 # an explicit tuple of widening intervals, min(streak, len-1) indexing. The FIRST
 # stage equals GOAL_LANE_INTERVAL_S so the first repeat is unchanged; the streak
@@ -2654,8 +2657,17 @@ def _lane_cooldown_decision(rec, now, under_saturated, eff_workers, backlog_n,
     GOAL_LANE_INEFFECTIVE_BACKOFF_S per consecutive ineffective nudge; a nudge
     that MOVED the fleet resets the streak to 0 (so the interval narrows back).
     The effectiveness reset is computed BEFORE the hourly-cap early-return so a
-    mid-cooldown recovery still resets the streak (#509 semantics preserved);
-    holds at the cap forever -- never permanently silent."""
+    mid-cooldown recovery still resets the streak (#509 semantics preserved).
+
+    #670 DEDUP: past the hourly cap, an EXACTLY-unchanged (eff_workers, backlog_n)
+    signature to the last landed nudge (`rec["lsw"]`/`rec["lsb"]`, stamped by
+    `_lane_record_nudge`) returns `skip:dedup-unchanged` -- deliberately
+    PERMANENTLY SILENT until the state MOVES (owner directive: rovnaký počet lán
+    + rovnaký backlog ⇒ žiadny nový prompt ani po hodine). This subsumes the
+    empty-lane MAX_NUDGES give-up on a frozen state (a correctly-declining
+    supervisor is not a stall) and preempts the under-saturated backoff below for
+    the exactly-unchanged case; the backoff still governs a CHANGED-but-
+    ineffective state (shrinking backlog / workers flat, #509 preserved)."""
     last = rec.get("llast")
     if last is None:
         return False, None, None
@@ -2672,6 +2684,23 @@ def _lane_cooldown_decision(rec, now, under_saturated, eff_workers, backlog_n,
                       "skip:hourly-cap remaining=%ds"
                       % (loc, live_workers, waiters, backlog_n,
                          int(GOAL_LANE_INTERVAL_S - (now - last)))), moved
+    # #670 -- DEDUP on UNCHANGED lane state (owner 2026-08-24). PAST the hourly
+    # cap, an IDENTICAL (workers, backlog) signature to the last LANDED nudge
+    # never re-nudges: the supervisor already saw+acted-on (or correctly
+    # DECLINED -- e.g. file-deps on unmerged branches) this exact state, so
+    # repeating the same "fill your lanes" line every hour is the "kazdu chvilu"
+    # spam. Only a genuinely CHANGED state re-nudges (still under the 1h floor).
+    # lsw/lsb are stamped by `_lane_record_nudge` on a LANDED nudge ONLY (both
+    # branches), so: a never-nudged sid (last is None) returned above and always
+    # fires its first; a pre-#670 rec (llast set, no lsw/lsb) sees None != int
+    # -> one grace nudge, then dedup engages. Applies to BOTH branches, which
+    # subsumes the empty-lane MAX_NUDGES give-up on a FROZEN state (a correctly-
+    # declining supervisor is not a stall -- an explicit decision, #620/#670).
+    if rec.get("lsw") == eff_workers and rec.get("lsb") == backlog_n:
+        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                      "skip:dedup-unchanged (workers+backlog unchanged since "
+                      "last nudge)"
+                      % (loc, live_workers, waiters, backlog_n)), moved
     if not under_saturated:
         return False, None, moved
     streak = rec.get("lineff", 0)
@@ -2708,6 +2737,11 @@ def _lane_record_nudge(rec, under_saturated, eff_workers, backlog_n, moved, n, n
         rec["lnb"] = backlog_n
     rec["ln"] = n + 1
     rec["llast"] = now
+    # #670 -- stamp the dedup signature on BOTH branches (unlike the under-
+    # saturated-only lnw/lnb effectiveness baseline): the next sweep suppresses
+    # an identical (workers, backlog) past the cooldown (skip:dedup-unchanged).
+    rec["lsw"] = eff_workers
+    rec["lsb"] = backlog_n
 
 
 def _lane_clear_effectiveness(rec):

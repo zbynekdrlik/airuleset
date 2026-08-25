@@ -2307,17 +2307,30 @@ class TestGoalLaneOccupancyNudge(unittest.TestCase):
         # 1h hourly cap so each fires, then a 3rd attempt 90 min after nudge 2 --
         # past the hourly cap but INSIDE the widened stage-1 (2h) interval -- must
         # skip:ineffective-backoff.
+        #
+        # #670 ADAPTATION: the backlog DECREASES 37->36->35 across the three
+        # sweeps (a supervisor solving tickets inline while staying under-
+        # saturated -- workers flat, no NEW lane). Pre-#670 this test held the
+        # backlog at a flat 37; #670's dedup now suppresses an EXACTLY-unchanged
+        # (workers, backlog) signature outright (skip:dedup-unchanged, locked in
+        # test_lane_dedup_670), so a flat 37 would dedup at nudge 2, never
+        # reaching the #509 ineffective-backoff this test exercises. A decreasing
+        # backlog is CHANGED (not deduped) yet still INEFFECTIVE (backlog did not
+        # GROW, workers did not increase) -> `_lane_effectiveness` is False ->
+        # the streak advances and the interval widens exactly as before. #509 and
+        # #670 partition the "not moved" space: exactly-unchanged -> #670 dedup,
+        # changed-but-not-improved -> #509 backoff.
         now = 100000
         tmtime = now - goal.GOAL_LANE_IDLE_S - 100
         rec = {}
         logs1, _, _ = self._undersat_call(37, now, tmtime, rec, 2, 2)
         self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs1), logs1)
         t2 = now + goal.GOAL_LANE_INTERVAL_S + 1
-        logs2, _, _ = self._undersat_call(37, t2, tmtime, rec, 2, 2)
+        logs2, _, _ = self._undersat_call(36, t2, tmtime, rec, 2, 2)
         self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs2), logs2)
         self.assertEqual(rec.get("lineff"), 1, rec)   # streak advanced
         t3 = t2 + 90 * 60
-        logs3, _, tmux3 = self._undersat_call(37, t3, tmtime, rec, 2, 2)
+        logs3, _, tmux3 = self._undersat_call(35, t3, tmtime, rec, 2, 2)
         self.assertTrue(any("skip:ineffective-backoff" in ln for ln in logs3), logs3)
         self.assertEqual(tmux3.sent, [])
 
