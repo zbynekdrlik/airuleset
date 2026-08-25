@@ -41,23 +41,25 @@ class TestBoxUCount(unittest.TestCase):
         return d
 
     def test_sums_user_waiting_across_caches(self):
+        now = int(time.time())            # #686: freshness is now a precondition
         home = self._home([
-            {"open": 5, "user_waiting": 2},
-            {"open": 1, "user_waiting": 3},
-            {"open": 0, "user_waiting": 0},
+            {"open": 5, "user_waiting": 2, "ts": now - 10},
+            {"open": 1, "user_waiting": 3, "ts": now - 20},
+            {"open": 0, "user_waiting": 0, "ts": now - 30},
         ])
         self.assertEqual(w._box_u_count(home), 5)
 
     def test_missing_or_none_field_counts_zero(self):
+        now = int(time.time())
         home = self._home([
-            {"open": 5},                      # pre-#468 cache: no field at all
-            {"user_waiting": None},           # explicit None
-            {"user_waiting": 4},
+            {"open": 5, "ts": now},           # pre-#468 cache: no U field at all
+            {"user_waiting": None, "ts": now},   # explicit None
+            {"user_waiting": 4, "ts": now},
         ])
         self.assertEqual(w._box_u_count(home), 4)
 
     def test_bad_json_is_skipped_not_fatal(self):
-        home = self._home([{"user_waiting": 2}])
+        home = self._home([{"user_waiting": 2, "ts": int(time.time())}])
         (Path(home) / ".claude" / "tickets-status" / "bad.json").write_text(
             "{not json", encoding="utf-8")
         self.assertEqual(w._box_u_count(home), 2)
@@ -233,9 +235,15 @@ class TestUReaderSnippet(unittest.TestCase):
         d = tempfile.mkdtemp()
         ts = Path(d) / ".claude" / "tickets-status"
         ts.mkdir(parents=True)
-        (ts / "a.json").write_text(json.dumps({"user_waiting": 2}), encoding="utf-8")
-        (ts / "b.json").write_text(json.dumps({"user_waiting": 5}), encoding="utf-8")
+        now = int(time.time())            # #686: fresh ts so both readers count it
+        (ts / "a.json").write_text(json.dumps({"user_waiting": 2, "ts": now}),
+                                   encoding="utf-8")
+        (ts / "b.json").write_text(json.dumps({"user_waiting": 5, "ts": now}),
+                                   encoding="utf-8")
         (ts / "c.json").write_text("{broken", encoding="utf-8")
+        # a stale dead cache both readers must drop identically (#686 equivalence)
+        (ts / "d.json").write_text(
+            json.dumps({"user_waiting": 9, "ts": now - 20 * 3600}), encoding="utf-8")
         # run the real snippet with HOME pointed at the temp dir
         env = {"HOME": d, "PATH": __import__("os").environ.get("PATH", "")}
         r = subprocess.run(["python3", "-c", w._U_READER_SNIPPET],

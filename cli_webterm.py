@@ -713,37 +713,70 @@ def _tab_sessions(inventory, preserve_order=False):
 
 WEBTERM_U_STATUS_PATH = CLAUDE_DIR / "webterm-u-status.json"
 
+# #686: how fresh a tickets-status cache must be to contribute to a box's U. A
+# cache is only ever refreshed by the OWNER of its cwd (the statusline shim on
+# render, TTL 120s; plus the watchdog's 60s-cadence re-warm of an ACTIVE cwd,
+# airuleset.py `_watchdog_backlog_fetch` -> `_spawn_refresh`), so a DEAD session's
+# cache (a removed worktree, or an exited session in a real repo dir) FREEZES its
+# `user_waiting` forever and would inflate the box U indefinitely (footer U0 /
+# /u-status 8 -- the red dot never clears). 30 min = 15x the 120s TTL: an enormous
+# margin over any live-session refresh cadence (even a live-but-idle WAITING
+# session, the case that legitimately has U>0, whose render hiccups for minutes
+# keeps its dot), yet ~20x below the smallest observed dead entry (>=10h). Slightly
+# more generous than the sibling `_BACKLOG_STATUS_CACHE_MAX_AGE_S` (15 min, the
+# same cache) because a false-negative here loses a navigation dot, not just a
+# fallback to a live count. Fail-safe direction (cli_webterm.py `_read_box_u`): a
+# stale / undatable entry is DROPPED (dot lost, self-heals on next refresh), never
+# summed as a false positive.
+_U_FRESH_MAX_AGE_S = 30 * 60
+
 # The inline python reader the collector runs over ssh on each REMOTE box -- a
 # self-contained mirror of `_box_u_count` (NO dependency on the remote airuleset
 # version, so it works across a deploy window). A FIXED string (no client input),
 # passed shell-quoted, so it carries no injection surface. Kept equal to
-# `_box_u_count` by tests/test_webterm_u_status.TestUReaderSnippet.
+# `_box_u_count` by tests/test_webterm_u_status.TestUReaderSnippet -- including the
+# #686 freshness filter (the max-age constant is baked in below).
 _U_READER_SNIPPET = (
-    "import glob,json,os\n"
+    "import glob,json,os,time\n"
+    "M=%d;N=time.time()\n"
     "def _u(p):\n"
     " try:\n"
-    "  u=json.load(open(p)).get('user_waiting');return u if isinstance(u,int) and u>0 else 0\n"
+    "  d=json.load(open(p));t=d.get('ts')\n"
+    "  if not isinstance(t,(int,float)) or N-t>M:return 0\n"
+    "  u=d.get('user_waiting');return u if isinstance(u,int) and u>0 else 0\n"
     " except Exception:return 0\n"
     "print(sum(_u(p) for p in glob.glob(os.path.expanduser('~/.claude/tickets-status/*.json'))))"
-)
+) % _U_FRESH_MAX_AGE_S
 
 
-def _box_u_count(home=None):
+def _box_u_count(home=None, now=None):
     """Sum `user_waiting` (the statusline U bucket: needs-answer / needs-decision
     / needs-acceptance / needs-owner-action) across THIS box's tickets-status
     caches. Pure -- no gh, no network. A missing / None / non-int field counts 0;
-    a bad cache file is skipped, never fatal. `home` overrides ~ (tests)."""
+    a bad cache file is skipped, never fatal. `home` overrides ~ (tests); `now`
+    overrides the clock (tests).
+
+    #686: only a FRESH cache contributes -- an entry whose `ts` is absent /
+    non-numeric / older than `_U_FRESH_MAX_AGE_S` is skipped, so a DEAD session's
+    frozen `user_waiting` (a removed worktree, or an exited session in a real repo
+    dir) can never inflate the box U. Fail-safe direction: undatable / stale ->
+    dropped, never a false positive."""
     base = Path(home) if home else Path.home()
+    now = time.time() if now is None else now
     total = 0
     for p in (base / ".claude" / "tickets-status").glob("*.json"):
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue                        # unreadable/broken cache -> skip, never fatal
-        if isinstance(d, dict):
-            u = d.get("user_waiting")
-            if isinstance(u, int) and u > 0:
-                total += u
+        if not isinstance(d, dict):
+            continue
+        ts = d.get("ts")
+        if not isinstance(ts, (int, float)) or now - ts > _U_FRESH_MAX_AGE_S:
+            continue                        # #686: stale / undatable -> drop (dead session)
+        u = d.get("user_waiting")
+        if isinstance(u, int) and u > 0:
+            total += u
     return total
 
 
