@@ -935,8 +935,14 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
     # physically scoped) -> render unfiltered. A TRUTHY human ALWAYS filters to
     # its owner-defined list; an unconfigured one FAILS CLOSED to an empty tab set
     # (`... or []`) rather than leaking the full fleet onto a personal domain --
-    # the exact bug this ticket fixes (#661 review 🔵). Prod only ever passes
-    # "zbynek" or None; this bounds a future mis-wiring to a loud-empty dashboard.
+    # the exact bug this ticket fixes (#661 review 🔵). Prod passes "zbynek"
+    # (owner), "marek" (his lane, LaneSpec.dashboard_human) or None (david).
+    # The fail-closed bound holds for an UNCONFIGURED human; NB it does NOT
+    # bound a mis-wired full-fleet render under human="marek" -- that list
+    # deliberately reuses fleet id spellings (dev1/dev2/montalu4-subdev) for
+    # MAREK-LANE entries, so such a render would show the OWNER's entries under
+    # those ids (see the WEBTERM_DASHBOARD_TABS["marek"] id-namespace note).
+    # No prod path renders the fleet inventory with human="marek".
     if human is None:
         tabs = _tab_sessions(inventory)
     else:

@@ -33,7 +33,14 @@ reaches ONLY marek's scoped five-member set — the connect allowlist is physica
 `{marek-subdev, montalu4-subdev, dev1, dev2, forestshop}` (his own owner-granted
 targets, ssh only via the dedicated marek key), so a marek WEB LOGIN can never
 drive another stream's, david's, or stepan's id, and
-marek's Access realm/tunnel are separate from every other developer's. The
+marek's Access realm/tunnel are separate from every other developer's. HONEST
+TRANSITIVE-REACH consequence (#661 review 🟡): the dev1/dev2 entries ssh as
+`newlevel` — the OWNER's maintainer account, whose home holds the fleet keys — so
+once the marek pubkey is authorized there, an interactive dev1/dev2 tab is an
+owner-account shell from which every stream is transitively reachable. That grant
+is the owner's explicit ruling ("marek-ové tmux sessions na dev1/dev2"), NEW trust
+(unlike codex-bridge's mirror-of-existing), and the reason _MAREK_GO_LIVE step 5
+RECOMMENDS a forced-command `restrict` authorized_keys entry as the default shape. The
 multi-tenant LOOPBACK floor is CLOSED (#663): the gateway + ttyd bind mode-0700 UNIX
 sockets in marek's runtime dir, so a peer subdev account can no longer reach marek's
 gateway/ttyd (or, from marek, another lane's). The only remaining stdlib residual
@@ -115,9 +122,12 @@ _MAREK_GO_LIVE = (
     "    5. #661 ssh tabs: deploy the dedicated key %s\n"
     "       (private key on subdev as marek; pubkey in authorized_keys of\n"
     "       montalu4@subdev, newlevel@dev1, newlevel@dev2,\n"
-    "       admin@forestshop-dev — optionally restricted there with\n"
-    "       command=\"tmux ...\" options). Until it lands the montalu4/dev1/\n"
-    "       dev2/forestshop tabs fail visibly; marek@subdev keeps working.\n"
+    "       admin@forestshop-dev). RECOMMENDED DEFAULT (#661 review): a\n"
+    "       forced-command entry — restrict,command=\"tmux ...\" — especially\n"
+    "       on newlevel@dev1/dev2 (the OWNER account: an unrestricted key\n"
+    "       there is a full owner shell with transitive fleet reach). Until\n"
+    "       the key lands the montalu4/dev1/dev2/forestshop tabs fail\n"
+    "       visibly; marek@subdev keeps working.\n"
     % (WEBTERM_MAREK_TUNNEL_UUID, WEBTERM_MAREK_TUNNEL_UUID,
        profiles.WEBTERM_MAREK_IDENTITY))
 
