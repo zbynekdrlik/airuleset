@@ -303,3 +303,5 @@ miva1, montalu1–8, marek@subdev, dev1: sessions untouched, attached larger cli
 just gain the cosmetic dark margin the owner decreed. Acceptance read-back:
 `tmux capture-pane -p -t <sess:win> | tail -6` shows the CC statusline inside the
 50-row window.
+
+- **#661 go-live (supervisor, 2026-08-25):** authorized_keys forced-command tvar je `restrict,pty,command="…"` — samotné `restrict` vypína aj PTY a interaktívny tmux attach by zlyhal; `pty` ho musí explicitne vrátiť. Overenie živosti restrict línie bez interakcie: BatchMode probe (`ssh -T … true`) — forced command IGNORUJE `true` a padne na `open terminal failed: not a terminal` = auth OK + forced command beží. Presný remote command renderuj z `cli_webterm._remote_command(preferred)` (escape `\` a `"` pre authorized_keys), nikdy ručne prepísaný.
