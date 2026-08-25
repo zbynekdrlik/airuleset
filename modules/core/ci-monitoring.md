@@ -47,6 +47,8 @@
   done'
   ```
 
+  **Cancelling a waiter: by ITS PID or a run-id-scoped pattern, never `pkill -f "sleep 60"`** — identical bodies fleet-wide, friendly-fire (#701).
+
   **Recovery is not optional.** The notification linkage may not survive a compaction boundary: across compaction the OS process usually keeps running but the session's task-handle registry is dropped and recreated (anthropics/claude-code **#29193**, "has repro"). The two issues this rule used to cite described the OPPOSITE failure mode and were wrong — the archaeology is in the playbook, not here. Either way no notification arrives, so on your NEXT turn re-derive from the DURABLE resource (`gh run view <id>` again) rather than trusting that silence means nothing happened, and relaunch ONE fresh waiter if the old one is gone. Never sit on a blind indefinite wait, and never fall back to chunked foreground polling once a long wait is already the right call.
 
   **A memory-pressure REAP also kills a MAIN-session `run_in_background` waiter** — Claude Code SIGKILLs it on a `memoryPressure` event, in MINUTES, on a memory-tight box (a subagent's bg shell is EXEMPT), so relaunch re-CREATES a dead process, not re-links a handle. Same recovery. `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1` on the CLI env disables it; fuller mechanism + subagent mitigation: `verify-launched-work-liveness`.
