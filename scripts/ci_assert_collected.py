@@ -68,7 +68,9 @@ def main(argv: list[str]) -> int:
         return 2
     try:
         n = collected_count(junit_path)
-    except (OSError, ET.ParseError) as exc:
+    except (OSError, ET.ParseError, ValueError) as exc:
+        # ValueError covers a malformed non-integer tests="" attribute — keep
+        # the loud BLOCKED message instead of an uncaught traceback (#683 review 🔵-3).
         print("BLOCKED: cannot read junit XML %r: %s — the hermetic pytest job "
               "produced no parseable result, treated as a no-op FAILURE (#683)."
               % (junit_path, exc), file=sys.stderr)

@@ -59,6 +59,17 @@ class TestGuardRejects(unittest.TestCase):
         r = _run("", 5000, write=False)
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_malformed_tests_attr_is_rejected_loudly(self):
+        # A non-integer tests="" attribute must yield the loud BLOCKED message,
+        # not an uncaught ValueError traceback (#683 review 🔵-3).
+        bad = ('<?xml version="1.0"?><testsuites>'
+               '<testsuite name="pytest" tests="not-a-number"></testsuite>'
+               "</testsuites>")
+        r = _run(bad, 5000)
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("BLOCKED", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
 
 class TestGuardAccepts(unittest.TestCase):
     def test_above_floor_passes(self):
