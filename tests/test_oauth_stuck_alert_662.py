@@ -476,6 +476,22 @@ class SweepStuckOwnerAlert(unittest.TestCase):
         self.assertEqual(len(set(keys)), len(keys), "no dup keys: %r" % keys)
         self.assertEqual(len(keys), 1, "exactly one alert per episode: %r" % keys)
 
+    def test_suppressed_send_latches_the_episode_688(self):
+        # #688: stuckalert is now #546-owner-suppressed, so in production
+        # notify.send() returns "suppressed" (machine-channel only, no Discord
+        # ping). A "suppressed" status IS a delivered decision (delivery-log +
+        # journal), so the episode MUST latch on it — exactly once, never
+        # re-firing the send() every sweep. RED on the pre-#688 latch set (which
+        # lacked "suppressed" → the else "send FAILED, will retry" branch →
+        # re-fires each sweep).
+        sends, _s, _sid = self._run(
+            self._stuck(goal.GOAL_LANE_STUCK_ALERT_STREAK + 3),
+            send_result="suppressed")
+        self.assertEqual(len(self._alerts(sends)), 1,
+                         "a suppressed (machine-channel) send must LATCH the "
+                         "episode exactly once, never re-fire each sweep: %r"
+                         % sends)
+
 
 if __name__ == "__main__":
     unittest.main()
