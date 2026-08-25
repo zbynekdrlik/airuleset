@@ -100,9 +100,11 @@ const doc = {
 };
 const VW = (typeof HARNESS_VW !== 'undefined') ? HARNESS_VW : 1600;
 const VH = (typeof HARNESS_VH !== 'undefined') ? HARNESS_VH : 1000;
-const win = { term, document: doc, innerWidth: VW, innerHeight: VH };
+const frameEl = { style: {} };            // #700: the PARENT-doc iframe fake
+const win = { term, document: doc, innerWidth: VW, innerHeight: VH, frameElement: frameEl };
 %(fit)s
 %(fill)s
+%(stretch)s
 const baseFont = 13;
 // #655: fitFixedGrid clamps+resets+min-fits the font; fillFixedGrid is the
 // DEFERRED pass that stretches the grid to fill. In the browser they run one
@@ -110,11 +112,15 @@ const baseFont = 13;
 // synchronous, so calling them back-to-back is the same contract.
 const ok = fitFixedGrid(win);
 const filled = fillFixedGrid(win);
+const stretched = (typeof stretchFrameToFill === 'function') ? stretchFrameToFill(win) : false;   // #700
 term.resize(300, 80);                     // simulate ttyd's own FitAddon firing
 const r = screenEl.getBoundingClientRect();   // FINAL size (reflects lineHeight/letterSpacing fill + any transform)
 const sm = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(screenEl.style.transform || '');
+const fm = /scale\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)/.exec(frameEl.style.transform || '');   // #700
 process.stdout.write(JSON.stringify({
   ok, filled, cols: term.cols, rows: term.rows, clampedTo: [term.cols, term.rows],
+  stretched, frameScaleX: fm ? parseFloat(fm[1]) : 1, frameScaleY: fm ? parseFloat(fm[2]) : 1,
+  frameOrigin: frameEl.style.transformOrigin || '', frameTransform: frameEl.style.transform || '',
   fontSize: term.options.fontSize, baseFont,
   scaleX: sm ? parseFloat(sm[1]) : 1,
   scaleY: sm ? parseFloat(sm[2]) : 1,
@@ -133,10 +139,15 @@ def _run_fit_harness(html_or_fit, vw=1600, vh=1000, fill_js=None):
     if fill_js is None:                 # `html_or_fit` is the rendered HTML
         fit_js = _extract_js_function(html_or_fit, "fitFixedGrid")
         fill_js = _extract_js_function(html_or_fit, "fillFixedGrid")
+        try:                            # #700: tolerate a pre-#700 HTML — the
+            stretch_js = _extract_js_function(html_or_fit, "stretchFrameToFill")
+        except (ValueError, AssertionError):
+            stretch_js = ""             # harness `typeof` guard then no-ops
     else:
         fit_js = html_or_fit
+        stretch_js = ""
     harness = ("const HARNESS_VW=%d, HARNESS_VH=%d;\n" % (vw, vh)) + (
-        _FIT_HARNESS % {"fit": fit_js, "fill": fill_js})
+        _FIT_HARNESS % {"fit": fit_js, "fill": fill_js, "stretch": stretch_js})
     d = tempfile.mkdtemp()
     hp = Path(d) / "fitharness.js"
     hp.write_text(harness, encoding="utf-8")
