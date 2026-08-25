@@ -29,12 +29,24 @@ gateway simply trusts the identity header Cloudflare injects downstream of a
 passed check (`Cf-Access-Authenticated-User-Email`) — no login form, no cookie,
 no credential file. FAIL-CLOSED: a request with no such header did not pass
 Access and is refused (403). Cloudflare strips client-supplied `Cf-*` headers
-before setting the authentic one, and the gateway binds loopback reachable only
-via the cloudflared tunnel (which serves only the Access-protected hostname).
-The two modes are mutually exclusive; `main()` refuses to start with neither or
-both (an unauthenticated shell is never bound). Pure stdlib has no RSA, so the
-Access JWT is NOT cryptographically validated at the origin — the honest
-residual is documented in cli_webterm_access.py.
+before setting the authentic one. The two auth modes are mutually exclusive;
+`main()` refuses to start with neither or both (an unauthenticated shell is never
+bound). Pure stdlib has no RSA, so the Access JWT is NOT cryptographically
+validated at the origin — the honest residual is documented in cli_webterm_access.py.
+
+TRANSPORT (#663 — the multi-tenant loopback fix). Two listener transports,
+selected by `main()` (exactly one, fail-closed): a TCP `--bind`/`--port` listener
+(password mode, tailnet-reachable by design) OR a `--socket` UNIX-domain socket
+(every live Access lane). On a SHARED box a TCP `127.0.0.1:<port>` origin is
+reachable by every local unix account — so a peer account could forge the trust
+header at another lane's gateway port OR reach its auth-less ttyd directly. In
+Access mode the gateway therefore binds a mode-0700 UNIX socket in the account's
+`/run/user/<uid>` runtime dir (`--socket`, bound under `umask 077` + chmod 0600)
+and reaches ttyd over its own UNIX socket (`--ttyd-socket`); cloudflared fronts it
+with `service: unix:<path>`. Filesystem permissions on the 0700 dir are the local
+account boundary — only the account (its own cloudflared) can traverse to either
+socket, closing both vectors with zero new deps. The default `--ttyd-host`/
+`--ttyd-port` TCP path (below, "127.0.0.1:<ttyd>") is the password-mode transport.
 
 Defence in depth. Failed logins are rate-limited PER SOURCE IP (a tailnet peer
 has its own 100.x address), so an attacker throttles only itself and never locks
@@ -55,6 +67,7 @@ whose WireGuard layer is the encryption boundary (the same tailnet-only model
 import argparse
 import asyncio
 import hmac
+import os
 import secrets
 import string
 import subprocess
@@ -125,6 +138,28 @@ def _eof_quiet(writer):
     try:
         writer.write_eof()
     except Exception:
+        return
+
+
+def _unlink_quiet(path):
+    """#663: remove a stale UNIX-socket path best-effort before binding a fresh
+    one (asyncio.start_unix_server does not unlink; a leftover from a prior
+    single-instance run would fail bind with EADDRINUSE). A missing path is the
+    normal steady state — not an error to log, mirroring _close_quiet/_eof_quiet."""
+    try:
+        os.unlink(path)
+    except OSError:
+        return
+
+
+def _chmod_quiet(path, mode):
+    """#663: tighten a freshly-bound UNIX socket to owner-only, best-effort.
+    Defence in depth on top of the mode-0700 runtime dir that is the real account
+    boundary; a chmod failure never leaves the socket reachable by another account
+    (the 0700 dir already blocks that), so it is not an error to log."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
         return
 
 
@@ -473,7 +508,7 @@ class Gateway:
 
     def __init__(self, dash_index, cred_path, ttyd_host, ttyd_port, base_path,
                  origins, sessions=None, limiter=None, trust_access_header=None,
-                 u_status_path=None, u_collect_spawn=None):
+                 u_status_path=None, u_collect_spawn=None, ttyd_socket=None):
         self.dash_index = dash_index
         self.dash_dir = Path(dash_index).parent   # #644: PWA assets live here
         # #677: the aggregate U map served at /u-status + a detached spawner that
@@ -488,6 +523,13 @@ class Gateway:
         self.cred_path = cred_path
         self.ttyd_host = ttyd_host
         self.ttyd_port = ttyd_port
+        # #663: on a multi-tenant box a TCP `127.0.0.1:<port>` upstream is reachable
+        # by EVERY local unix account, so a peer account can reach another lane's
+        # auth-less ttyd directly. When `ttyd_socket` is set, the gateway proxies to
+        # ttyd over a UNIX-domain socket in the account's mode-0700 runtime dir
+        # instead — filesystem permissions become the account boundary. Mutually
+        # exclusive with ttyd_host/ttyd_port; the caller picks one.
+        self.ttyd_socket = ttyd_socket
         self.base_path = base_path.rstrip("/") or "/t"
         self.origins = set(origins)          # allowed WS origins (own origin(s))
         self.sessions = sessions if sessions is not None else SessionStore()
@@ -500,9 +542,11 @@ class Gateway:
         # NOT traverse Access carries no such header and is refused). Default
         # None = the unchanged password/session model (owner profile, byte-
         # identical). Cloudflare strips client-supplied `Cf-*` headers before
-        # setting the authentic one; the gateway binds loopback and is reachable
-        # only via the cloudflared tunnel (see cli_webterm_access.py's honest
-        # residual note on the absence of stdlib RSA JWT validation).
+        # setting the authentic one; #663 the gateway binds a mode-0700 UNIX socket
+        # in the account runtime dir (reachable only by the account + its own
+        # cloudflared, so a peer unix account cannot forge this header) — see
+        # cli_webterm_access.py's honest residual note on the absence of stdlib RSA
+        # JWT validation.
         self.trust_access_header = trust_access_header
 
     # -- helpers ---------------------------------------------------------- #
@@ -773,8 +817,13 @@ class Gateway:
 
     async def _proxy(self, c_reader, c_writer, head, headers, is_ws):
         try:
-            u_reader, u_writer = await asyncio.open_connection(
-                self.ttyd_host, self.ttyd_port)
+            if self.ttyd_socket:
+                # #663: reach ttyd over its mode-0700 UNIX socket, not TCP loopback.
+                u_reader, u_writer = await asyncio.open_unix_connection(
+                    path=self.ttyd_socket)
+            else:
+                u_reader, u_writer = await asyncio.open_connection(
+                    self.ttyd_host, self.ttyd_port)
         except OSError:
             await self._send(c_writer, http_response("502 Bad Gateway",
                                                      "terminal backend unreachable"))
@@ -803,7 +852,12 @@ class Gateway:
             if not is_ws and kl == "connection":
                 continue
             lines.append("%s: %s" % (k, v))
-        lines.append("Host: %s:%d" % (self.ttyd_host, self.ttyd_port))
+        # ttyd does not check Host (no `-O`/check-origin); over a UNIX socket there
+        # is no host:port, so send a neutral literal (#663).
+        if self.ttyd_socket:
+            lines.append("Host: localhost")
+        else:
+            lines.append("Host: %s:%d" % (self.ttyd_host, self.ttyd_port))
         if not is_ws:
             lines.append("Connection: close")
         return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
@@ -870,14 +924,33 @@ class Gateway:
 async def start_gateway(host, port, dash_index, cred_path, ttyd_host="127.0.0.1",
                         ttyd_port=7682, base_path="/t", origins=None,
                         sessions=None, limiter=None, trust_access_header=None,
-                        u_status_path=None, u_collect_spawn=None):
-    """Bind + start the gateway on `host:port`. Returns the asyncio.Server (the
-    caller reads `server.sockets[0].getsockname()` for an ephemeral port and
-    `server.serve_forever()` / `server.close()`)."""
+                        u_status_path=None, u_collect_spawn=None,
+                        socket_path=None, ttyd_socket=None):
+    """Bind + start the gateway. Default: a TCP `host:port` listener (the caller
+    reads `server.sockets[0].getsockname()` for an ephemeral port). #663: when
+    `socket_path` is set, bind a UNIX-domain socket instead (a stale socket file is
+    unlinked first, then chmod 0600) — the account's mode-0700 runtime dir is the
+    account boundary, so no peer unix account can reach the gateway. `ttyd_socket`
+    (a unix path) makes the upstream ttyd hop a unix socket too. Returns the
+    asyncio.Server."""
     gw = Gateway(dash_index, cred_path, ttyd_host, ttyd_port, base_path,
                  origins or [], sessions=sessions, limiter=limiter,
                  trust_access_header=trust_access_header,
-                 u_status_path=u_status_path, u_collect_spawn=u_collect_spawn)
+                 u_status_path=u_status_path, u_collect_spawn=u_collect_spawn,
+                 ttyd_socket=ttyd_socket)
+    if socket_path:
+        _unlink_quiet(socket_path)      # clear a stale single-instance leftover
+        # #663 review: bind UNDER umask 077 so the socket is owner-only from the
+        # instant it appears — no brief 0755 window before the chmod (systemd's
+        # default 022 umask would otherwise leave that gap), mirroring the ttyd
+        # launcher's own `umask 077`. The chmod stays as belt-and-suspenders.
+        old_umask = os.umask(0o077)
+        try:
+            server = await asyncio.start_unix_server(gw.handle, path=socket_path)
+        finally:
+            os.umask(old_umask)
+        _chmod_quiet(socket_path, 0o600)
+        return server
     return await asyncio.start_server(gw.handle, host, port)
 
 
@@ -892,7 +965,11 @@ def _origins_for(host, port):
 
 
 async def _main_async(args):
-    origins = _origins_for(args.bind, args.port)
+    # #663: on a UNIX-socket bind, the browser's Origin is the public hostname
+    # (Cloudflare Access edge) and cloudflared preserves it as Host — the CSWSH
+    # PRIMARY Origin==Host check covers it, so no fixed origin allowlist is needed
+    # (there is no host:port to build one from). TCP bind keeps its own-origin list.
+    origins = [] if args.socket else _origins_for(args.bind, args.port)
     # #677: the U-dot data channel is OWNER-ONLY — enabled only by --u-collect,
     # which only the owner gateway unit passes (the david/marek units do not), so a
     # sub-dev gateway never spawns an owner-fleet collector as its own account.
@@ -902,19 +979,32 @@ async def _main_async(args):
         ttyd_host=args.ttyd_host, ttyd_port=args.ttyd_port,
         base_path=args.base_path, origins=origins,
         trust_access_header=args.trust_access_header,
-        u_status_path=u_status_path)
-    sock = server.sockets[0].getsockname()
-    sys.stderr.write("webterm-gateway: listening on http://%s:%d/ -> ttyd %s:%d%s\n"
-                     % (sock[0], sock[1], args.ttyd_host, args.ttyd_port,
-                        args.base_path))
+        u_status_path=u_status_path,
+        socket_path=args.socket, ttyd_socket=args.ttyd_socket)
+    if args.socket:
+        upstream = ("unix:%s" % args.ttyd_socket if args.ttyd_socket
+                    else "%s:%d" % (args.ttyd_host, args.ttyd_port))
+        sys.stderr.write("webterm-gateway: listening on unix:%s -> ttyd %s%s\n"
+                         % (args.socket, upstream, args.base_path))
+    else:
+        sock = server.sockets[0].getsockname()
+        sys.stderr.write("webterm-gateway: listening on http://%s:%d/ -> ttyd %s:%d%s\n"
+                         % (sock[0], sock[1], args.ttyd_host, args.ttyd_port,
+                            args.base_path))
     async with server:
         await server.serve_forever()
 
 
 def main(argv):
     p = argparse.ArgumentParser(description="airuleset webterm same-origin gateway")
-    p.add_argument("--bind", required=True, help="tailscale IP to bind (never 0.0.0.0)")
+    p.add_argument("--bind", default=None, help="tailscale IP to bind (never 0.0.0.0)")
     p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--socket", default=None,
+                   help="#663: bind a UNIX-domain socket (in the account's mode-0700 "
+                        "runtime dir) instead of a TCP --bind/--port — the account "
+                        "boundary is filesystem permissions, so no peer unix account "
+                        "on a shared box can reach the gateway. Mutually exclusive "
+                        "with --bind.")
     p.add_argument("--dash-index", required=True, help="path to the generated dashboard index.html")
     p.add_argument("--cred", default=None,
                    help="path to the user:pass credential file (password mode)")
@@ -929,6 +1019,11 @@ def main(argv):
                         "--cred.")
     p.add_argument("--ttyd-host", default="127.0.0.1")
     p.add_argument("--ttyd-port", type=int, default=7682)
+    p.add_argument("--ttyd-socket", dest="ttyd_socket", default=None,
+                   help="#663: reach ttyd over a UNIX-domain socket (in the account's "
+                        "mode-0700 runtime dir) instead of --ttyd-host/--ttyd-port — "
+                        "so a peer unix account cannot reach the auth-less ttyd "
+                        "directly. Mutually exclusive with --ttyd-host/--ttyd-port.")
     p.add_argument("--base-path", default="/t")
     args = p.parse_args(argv)
     # Fail-CLOSED: exactly one auth mode. Neither would serve the terminal with
@@ -937,6 +1032,21 @@ def main(argv):
     if bool(args.cred) == bool(args.trust_access_header):
         p.error("exactly one of --cred (password mode) or --trust-access-header "
                 "(Cloudflare Access mode) is required")
+    # #663: exactly one listener transport — a TCP `--bind` (tailnet/loopback) OR a
+    # `--socket` UNIX bind. Refuse both/neither rather than bind nothing (a missing
+    # `--bind` would otherwise reach `start_server(handle, None, ...)`, which binds
+    # ALL interfaces — a fail-OPEN) or two. #663-review lock: TestTransportModeMainGuard.
+    if bool(args.bind) == bool(args.socket):
+        p.error("exactly one of --bind (TCP) or --socket (UNIX-domain, #663) "
+                "is required")
+    # #663-review NOTE (latent combos, not rejected because airuleset NEVER renders
+    # them): the two SANCTIONED shapes are password+TCP (owner tailnet fallback:
+    # --cred + --bind/--port + --ttyd-host/--ttyd-port) and Access+UNIX (every live
+    # lane: --trust-access-header + --socket + --ttyd-socket). Mixed shapes
+    # (--socket + --cred, or --socket + TCP --ttyd-host/--ttyd-port) parse but are
+    # UNSUPPORTED: password-over-unix shares the single `peer_ip="?"` rate-limit
+    # bucket (all unix clients look like one IP) and no render emits them. Treat any
+    # mixed invocation as a config bug, not a supported mode.
     try:
         asyncio.run(_main_async(args))
     except KeyboardInterrupt:

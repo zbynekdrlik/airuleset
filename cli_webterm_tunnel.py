@@ -161,13 +161,15 @@ def setup_webterm_owner_tunnel(run=None):
     shared, never-raises, prereq-gated orchestration). Returns its result."""
     import cli_webterm as w
     cloudflared_bin = resolve_cloudflared_bin(WEBTERM_CLOUDFLARED_BIN)
+    # #663: front the gateway's mode-0700 UNIX socket in the account runtime dir,
+    # not a TCP loopback port — a peer unix account on a shared box cannot reach it.
+    gw_sock = w.webterm_runtime_socket_abs(w.WEBTERM_GATEWAY_SOCK_BASENAME)
     config_text = render_cloudflared_tunnel_config(
         WEBTERM_OWNER_TUNNEL_UUID, str(WEBTERM_OWNER_TUNNEL_CREDS),
-        WEBTERM_OWNER_TUNNEL_HOSTNAME,
-        "http://%s:%d" % (w.WEBTERM_TTYD_BIND, w.WEBTERM_GATEWAY_PORT))
+        WEBTERM_OWNER_TUNNEL_HOSTNAME, "unix:" + gw_sock)
     unit_text = render_cloudflared_tunnel_unit(
-        "owner webterm cloudflared tunnel (%s -> 127.0.0.1:%d)"
-        % (WEBTERM_OWNER_TUNNEL_HOSTNAME, w.WEBTERM_GATEWAY_PORT),
+        "owner webterm cloudflared tunnel (%s -> unix:%s)"
+        % (WEBTERM_OWNER_TUNNEL_HOSTNAME, gw_sock),
         str(WEBTERM_OWNER_TUNNEL_CONFIG), cloudflared_bin,
         after="network-online.target webterm-gateway.service")
     return _provision_managed_tunnel(

@@ -9,8 +9,11 @@ PREREQUISITE-GATED so a normal subdev install is a safe NO-OP until the owner
 completes go-live setup: it provisions only when running as the designated
 gateway account (david1) with the dedicated key present and ttyd installed;
 otherwise it prints the exact needs-owner-action steps and returns False,
-touching no systemd. The gateway binds LOOPBACK — a cloudflared tunnel is the
-public HTTPS front (no public port, no sudo). Its scoped inventory — handed to
+touching no systemd. #663: the gateway + ttyd bind mode-0700 UNIX-domain sockets
+in david1's /run/user/<uid> runtime dir (NOT TCP loopback) — a cloudflared tunnel
+(service: unix:<sock>) is the public HTTPS front (no public port, no sudo), and
+filesystem permissions on the 0700 dir are the local account boundary on the
+shared subdev box. Its scoped inventory — handed to
 the ttyd child via the `WEBTERM_INVENTORY` env var the launcher exports (NOT a
 client-injectable argv flag: ttyd's `-a` appends client `?arg=` values as argv,
 so an argv flag would be injectable — #612 review) — is david1..4 + codex-bridge
@@ -28,17 +31,24 @@ import sys
 from pathlib import Path
 
 import cli_webterm as w
-import cli_webterm_access as access
 import cli_webterm_profiles as profiles
 import cli_webterm_tunnel as tun  # #635: shared managed-tunnel render helpers
 import cli_binary_installers as binstall  # #614: ttyd static-binary auto-install
 
-# The david deployment's own artifact paths + loopback ports (distinct from the
-# owner's, so the subdev box is self-documenting; the gateway binds loopback and
-# cloudflared fronts it, so no public port and no tailscale-IP is involved).
+# The david deployment's own artifact paths + distinct port constants (kept legacy
+# for the go-live text; the owner's are 8080/7682). #663 the gateway + ttyd bind
+# UNIX sockets in the account runtime dir (NOT these TCP ports) and cloudflared
+# fronts the gateway socket, so no public port and no tailscale-IP is involved.
 WEBTERM_DAVID_BIND = "127.0.0.1"
 WEBTERM_DAVID_TTYD_PORT = 7683
 WEBTERM_DAVID_GATEWAY_PORT = 8081
+# #663: Access-mode UNIX-socket basenames (in david1's /run/user/<uid>, 0700) that
+# REPLACE the TCP loopback ports — on the shared subdev box any local account could
+# reach 127.0.0.1:<port>, so a peer account forged the trust header at :8081 / hit
+# the auth-less ttyd :7683 directly. Filesystem permissions on the 0700 runtime dir
+# are the account boundary now (see cli_webterm.webterm_runtime_socket_abs).
+WEBTERM_DAVID_GATEWAY_SOCK_BASENAME = "webterm-david-gateway.sock"
+WEBTERM_DAVID_TTYD_SOCK_BASENAME = "webterm-david-ttyd.sock"
 WEBTERM_DAVID_INVENTORY_PATH = w.CLAUDE_DIR / "webterm-david-inventory.json"
 WEBTERM_DAVID_DASH_DIR = w.CLAUDE_DIR / "webterm-david-dash"
 WEBTERM_DAVID_DASH_INDEX = WEBTERM_DAVID_DASH_DIR / "index.html"
@@ -74,26 +84,31 @@ _DAVID_GO_LIVE = (
     "       CNAME). (zbynek.newlevel.media is a SEPARATE owner lane now moving to\n"
     "       its OWN Cloudflare Access app + dedicated dev1 tunnel — #635.)\n"
     "    2. Install ttyd on subdev + run a cloudflared tunnel (as david1, no\n"
-    "       sudo) fronting HTTPS david.newlevel.media -> 127.0.0.1:%d.\n"
+    "       sudo) fronting HTTPS david.newlevel.media -> the gateway's #663 UNIX\n"
+    "       socket (service: unix:%s).\n"
     "    3. Deploy the dedicated key %s (authorized ONLY on david1-4).\n"
     "    4. AUTH (#612 owner directive): NO password. Put a Cloudflare Access\n"
     "       email-OTP app in front — set WEBTERM_ACCESS_APPS['david'] allow-list\n"
     "       and run `airuleset.py webterm-access --apply`. Adding a person\n"
     "       (marek) is one more e-mail in that list. No credential is delivered.\n"
-    % (WEBTERM_DAVID_GATEWAY_PORT, profiles.WEBTERM_DAVID_IDENTITY))
+    % (w.webterm_runtime_socket_abs(WEBTERM_DAVID_GATEWAY_SOCK_BASENAME),
+       profiles.WEBTERM_DAVID_IDENTITY))
 
 
 # Prepended to each rendered david unit so a human reading the installed file on
 # subdev is never misled by the shared template's "dev1 / tailscale" wording —
-# the david gateway is a DIFFERENT deployment (loopback + cloudflared).
+# the david gateway is a DIFFERENT deployment (#663 UNIX socket in the account
+# runtime dir + cloudflared).
 _DAVID_UNIT_NOTE = (
-    "# NOTE (#612): this is the DAVID developer gateway on SUBDEV — it binds\n"
-    "# LOOPBACK (127.0.0.1) and is fronted by a cloudflared public HTTPS tunnel\n"
-    "# for david.newlevel.media. The 'dev1 / tailscale IP' wording, the ttyd port\n"
-    "# 7682 and the 'webterm-gateway.service' name inherited from the shared\n"
-    "# template below refer to the OWNER deployment — the DAVID ports are ttyd\n"
-    "# 7683 / gateway 8081 and the units are webterm-david-*.service. Scoped\n"
-    "# inventory: david1-4 + codex-bridge only (never the owner fleet).\n"
+    "# NOTE (#612/#663): this is the DAVID developer gateway on SUBDEV — #663 it\n"
+    "# binds a mode-0700 UNIX-domain socket in david1's /run/user/<uid> runtime dir\n"
+    "# (NOT TCP 127.0.0.1:<port>) and is fronted by a cloudflared public HTTPS tunnel\n"
+    "# (service: unix:<sock>) for david.newlevel.media. The 'dev1 / tailscale IP'\n"
+    "# wording, the ttyd port 7682 and the 'webterm-gateway.service' name inherited\n"
+    "# from the shared template below refer to the OWNER deployment — the DAVID\n"
+    "# sockets are %t/webterm-david-{gateway,ttyd}.sock and the units are\n"
+    "# webterm-david-*.service. Scoped inventory: david1-4 + codex-bridge only\n"
+    "# (never the owner fleet).\n"
     "#\n"
     "# AUTH (#612 owner directive 2026-08-22): NO password / credential. Cloudflare\n"
     "# Access does email one-time-PIN verification at the EDGE before any request\n"
@@ -102,14 +117,14 @@ _DAVID_UNIT_NOTE = (
     "# The shared template's 'form login / credential / constant-time compare'\n"
     "# wording refers to the OWNER (password) deployment — it does NOT apply here.\n"
     "#\n"
-    "# EXPOSURE: unlike the OWNER unit, the shared template's 'tailnet-only entry\n"
-    "# point' / 'security boundary is tailnet-only exposure' claims below are FALSE\n"
-    "# for THIS gateway — it is PUBLIC (Cloudflare Access at the edge is the\n"
-    "# boundary). And 'failed logins rate-limited per source IP' does NOT hold at\n"
-    "# the origin: behind cloudflared the gateway sees only 127.0.0.1, so any\n"
-    "# per-real-IP brute-force protection lives on the Cloudflare EDGE, not here.\n"
-    "# (The template's 'bound to dev1's tailscale IP (127.0.0.1)' line is doubly\n"
-    "# wrong here: this gateway binds LOOPBACK on subdev, not a tailscale IP.)\n#\n")
+    "# EXPOSURE: this gateway is PUBLIC (Cloudflare Access at the edge is the\n"
+    "# boundary) AND #663 the origin is a UNIX socket in david1's 0700 runtime dir\n"
+    "# — filesystem permissions are the LOCAL account boundary, so a peer subdev\n"
+    "# account cannot reach the gateway or ttyd. The template's 'tailnet-only entry\n"
+    "# point' / 'bound to dev1's tailscale IP' / 'failed logins rate-limited per\n"
+    "# source IP' claims are all FALSE here (behind cloudflared the gateway sees only\n"
+    "# one peer, so per-real-IP brute-force protection lives on the Cloudflare\n"
+    "# EDGE).\n#\n")
 
 
 # The david ttyd binary is a NO-SUDO user-space static binary in ~/.local/bin
@@ -152,18 +167,26 @@ def render_david_ttyd_unit():
 
 
 def render_david_gateway_unit():
-    """The david gateway unit: LOOPBACK bind (cloudflared fronts it), david
-    dash/ports, `After=` repointed to the david ttyd unit — and, per the #612
-    owner directive, Cloudflare-ACCESS mode instead of a password: the ExecStart's
+    """The david gateway unit: #663 UNIX-socket bind in the account runtime dir
+    (cloudflared fronts it), david dash, `After=` repointed to the david ttyd unit
+    — and, per the #612 owner directive, Cloudflare-ACCESS mode instead of a
+    password: the ExecStart's
     `--cred {{CRED_PATH}}` is swapped for `--trust-access-header <header>` so NO
     credential file is validated. The remaining `{{CRED_PATH}}` token lives only
     in the shared template's password-model COMMENT — neutralised to n/a here,
     with the extended _DAVID_UNIT_NOTE stating the real (Access) auth model."""
     tmpl = w.WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
+    # #663: the SHARED Access ExecStart transform (password --cred -> Access header
+    # trust; TCP bind/ttyd -> UNIX sockets in the account runtime dir) runs FIRST,
+    # before the individual {{TOKEN}} substitutions, so the flag substrings still
+    # carry their literal tokens when matched. Shared across owner/david/marek so
+    # the three lanes cannot drift (cli_webterm.access_execstart_transform).
+    execstart = w.access_execstart_transform(
+        tmpl, WEBTERM_DAVID_GATEWAY_SOCK_BASENAME, WEBTERM_DAVID_TTYD_SOCK_BASENAME)
     return _DAVID_UNIT_NOTE + (
-        # ExecStart: password -> Cloudflare Access header trust (retire --cred).
-        tmpl.replace("--cred {{CRED_PATH}}",
-                     "--trust-access-header " + access.WEBTERM_ACCESS_TRUST_HEADER)
+        execstart
+            # {{BIND_IP}}/{{GATEWAY_PORT}}/{{TTYD_PORT}} now survive only in the
+            # header COMMENT (the ExecStart is socket-based); keep them corrected.
             .replace("{{BIND_IP}}", WEBTERM_DAVID_BIND)
             .replace("{{GATEWAY_MODULE}}", str(w.WEBTERM_GATEWAY_MODULE))
             .replace("{{GATEWAY_PORT}}", str(WEBTERM_DAVID_GATEWAY_PORT))
@@ -225,7 +248,7 @@ def _write_david_artifacts():
     WEBTERM_DAVID_LAUNCH_PATH.write_text(
         w.render_webterm_launch_script(
             inventory_path=WEBTERM_DAVID_INVENTORY_PATH,
-            ttyd_port=WEBTERM_DAVID_TTYD_PORT),
+            ttyd_socket_basename=WEBTERM_DAVID_TTYD_SOCK_BASENAME),  # #663
         encoding="utf-8")
     os.chmod(WEBTERM_DAVID_LAUNCH_PATH, 0o755)
     WEBTERM_DAVID_SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
@@ -277,13 +300,14 @@ def setup_webterm_david_tunnel(run=None):
     local_bin = Path.home() / ".local" / "bin" / "cloudflared"
     cloudflared_bin = (str(local_bin) if local_bin.is_file()
                        else (shutil.which("cloudflared") or WEBTERM_DAVID_CLOUDFLARED_BIN))
+    # #663: front the gateway's mode-0700 UNIX socket, not a TCP loopback port.
+    gw_sock = w.webterm_runtime_socket_abs(WEBTERM_DAVID_GATEWAY_SOCK_BASENAME)
     config_text = tun.render_cloudflared_tunnel_config(
         WEBTERM_DAVID_TUNNEL_UUID, str(WEBTERM_DAVID_TUNNEL_CREDS),
-        WEBTERM_DAVID_TUNNEL_HOSTNAME,
-        "http://%s:%d" % (WEBTERM_DAVID_BIND, WEBTERM_DAVID_GATEWAY_PORT))
+        WEBTERM_DAVID_TUNNEL_HOSTNAME, "unix:" + gw_sock)
     unit_text = tun.render_cloudflared_tunnel_unit(
-        "david webterm cloudflared tunnel (%s -> 127.0.0.1:%d)"
-        % (WEBTERM_DAVID_TUNNEL_HOSTNAME, WEBTERM_DAVID_GATEWAY_PORT),
+        "david webterm cloudflared tunnel (%s -> unix:%s)"
+        % (WEBTERM_DAVID_TUNNEL_HOSTNAME, gw_sock),
         str(WEBTERM_DAVID_TUNNEL_CONFIG), cloudflared_bin,
         after="network-online.target webterm-david-gateway.service")
     return tun._provision_managed_tunnel(
@@ -363,8 +387,10 @@ def setup_webterm_david_service(run=None):
               % e, file=sys.stderr)
         return False
     if ok_all:
-        print("  webterm(david): gateway live on 127.0.0.1:%d (loopback — front "
-              "with cloudflared). ttyd loopback 127.0.0.1:%d behind /t.\n%s"
-              % (WEBTERM_DAVID_GATEWAY_PORT, WEBTERM_DAVID_TTYD_PORT,
+        print("  webterm(david): gateway live on UNIX socket %s (#663 account-scoped "
+              "0700 runtime dir — front with cloudflared service: unix:). ttyd UNIX "
+              "socket %s behind /t.\n%s"
+              % (w.webterm_runtime_socket_abs(WEBTERM_DAVID_GATEWAY_SOCK_BASENAME),
+                 w.webterm_runtime_socket_abs(WEBTERM_DAVID_TTYD_SOCK_BASENAME),
                  _DAVID_GO_LIVE))
     return ok_all

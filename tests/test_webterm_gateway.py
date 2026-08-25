@@ -962,6 +962,23 @@ class TestAccessModeMainGuard(unittest.TestCase):
                     "--cred", "c", "--trust-access-header", ACCESS_HEADER])
 
 
+class TestTransportModeMainGuard(unittest.TestCase):
+    """#663: main() is FAIL-CLOSED on the LISTENER transport too — exactly one of a
+    TCP --bind or a UNIX --socket. NEITHER must be refused: a missing --bind would
+    otherwise reach `start_server(handle, None, ...)`, which binds ALL interfaces
+    (a fail-OPEN, the exact exposure this check prevents). BOTH is contradictory.
+    (Auth mode is satisfied here so the TRANSPORT check is what fires.)"""
+
+    def test_neither_transport_refused(self):
+        with self.assertRaises(SystemExit):
+            g.main(["--dash-index", "x", "--trust-access-header", ACCESS_HEADER])
+
+    def test_both_transports_refused(self):
+        with self.assertRaises(SystemExit):
+            g.main(["--bind", "127.0.0.1", "--socket", "/tmp/nonexistent-663.sock",
+                    "--dash-index", "x", "--trust-access-header", ACCESS_HEADER])
+
+
 class TestAccessModeRoutes(unittest.TestCase):
     """Integration over real sockets — Access-mode routing: with the trusted
     header the dashboard/proxy are served; without it, fail-closed 403 (never a

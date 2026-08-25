@@ -827,9 +827,14 @@ class TestOwnerAccessModeUnit(unittest.TestCase):
         self.assertIn("--trust-access-header %s" % acc.WEBTERM_ACCESS_TRUST_HEADER,
                       exec_line)
         self.assertNotIn("--cred ", exec_line)
-        # Loopback bind — cloudflared fronts it; no direct tailnet exposure.
-        self.assertIn("--bind 127.0.0.1", exec_line)
-        self.assertNotIn("--bind 0.0.0.0", exec_line)
+        # #663: UNIX-socket origin in the account runtime dir — NO TCP loopback
+        # surface (cloudflared fronts the socket). A peer unix account on a shared
+        # box can no longer forge the trust header at a gateway port or reach ttyd.
+        self.assertIn("--socket %t/" + w.WEBTERM_GATEWAY_SOCK_BASENAME, exec_line)
+        self.assertIn("--ttyd-socket %t/" + w.WEBTERM_TTYD_SOCK_BASENAME, exec_line)
+        self.assertNotIn("--bind ", exec_line)
+        self.assertNotIn("--port ", exec_line)
+        self.assertNotIn("--ttyd-port", exec_line)
 
     def test_access_mode_unit_prepends_honesty_correction_note(self):
         # #635 review 🟡: the installed Access-mode unit must NOT be left asserting
@@ -1029,8 +1034,8 @@ class TestSetupWiring(unittest.TestCase):
             self.assertEqual(first_unit, pt["WEBTERM_GATEWAY_SERVICE_DEST"].read_text())
 
     def test_access_mode_binds_loopback_retires_cred_needs_no_tailscale_ip(self):
-        # #635: with the go-live flag ON, the owner gateway provisions in
-        # Cloudflare-Access mode — loopback bind + trust-header, the password
+        # #635/#663: with the go-live flag ON, the owner gateway provisions in
+        # Cloudflare-Access mode — #663 UNIX-socket bind + trust-header, the password
         # credential RETIRED, and NO tailscale IP required (cloudflared fronts it).
         import contextlib
         with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as st:
@@ -1046,7 +1051,15 @@ class TestSetupWiring(unittest.TestCase):
             self.assertIn("--trust-access-header %s"
                           % acc.WEBTERM_ACCESS_TRUST_HEADER, unit)
             self.assertNotIn("--cred ", unit)
-            self.assertIn("--bind 127.0.0.1", unit)
+            # #663: UNIX-socket origin, NO TCP loopback surface for the gateway/ttyd
+            self.assertIn("--socket %t/" + w.WEBTERM_GATEWAY_SOCK_BASENAME, unit)
+            self.assertIn("--ttyd-socket %t/" + w.WEBTERM_TTYD_SOCK_BASENAME, unit)
+            self.assertNotIn("--bind ", unit)
+            self.assertNotIn("--ttyd-port", unit)
+            # the launcher execs ttyd on a UNIX socket, not a TCP port
+            launch = pt["WEBTERM_LAUNCH_PATH"].read_text()
+            self.assertIn(w.WEBTERM_TTYD_SOCK_BASENAME, launch)
+            self.assertNotIn("-p ", launch)
             # the password credential is retired (no password path any more)
             self.assertFalse(pt["WEBTERM_CRED_PATH"].exists())
 

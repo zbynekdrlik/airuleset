@@ -28,16 +28,17 @@ import cli_binary_installers as binstall  # noqa: E402  (#614 ttyd auto-install)
 
 
 class TestDavidUnitRender(unittest.TestCase):
-    def test_gateway_unit_binds_loopback_with_david_realm(self):
+    def test_gateway_unit_binds_unix_socket_no_tcp_with_david_realm(self):
+        # #663: the origin is a mode-0700 UNIX socket in david1's runtime dir, NOT a
+        # TCP loopback port any local subdev account could reach.
         unit = d.render_david_gateway_unit()
-        self.assertIn("--bind %s" % d.WEBTERM_DAVID_BIND, unit)
-        self.assertEqual(d.WEBTERM_DAVID_BIND, "127.0.0.1")
-        # The actual bind is loopback — never an `--bind` to a tailscale/public
-        # IP (the "100.64.0.0/10" text elsewhere is only a template comment).
-        self.assertNotIn("--bind 100.", unit)
-        self.assertNotIn("--bind 0.0.0.0", unit)
-        self.assertIn("--port %d" % d.WEBTERM_DAVID_GATEWAY_PORT, unit)
-        self.assertIn("--ttyd-port %d" % d.WEBTERM_DAVID_TTYD_PORT, unit)
+        exec_line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+        self.assertIn("--socket %t/" + d.WEBTERM_DAVID_GATEWAY_SOCK_BASENAME, exec_line)
+        self.assertIn("--ttyd-socket %t/" + d.WEBTERM_DAVID_TTYD_SOCK_BASENAME, exec_line)
+        self.assertNotIn("--bind ", exec_line)
+        self.assertNotIn("--port ", exec_line)
+        self.assertNotIn("--ttyd-host", exec_line)
+        self.assertNotIn("--ttyd-port", exec_line)
         self.assertIn(str(d.WEBTERM_DAVID_DASH_INDEX), unit)
         # NOT the owner credential/dashboard realm.
         self.assertNotIn(str(w.WEBTERM_CRED_PATH), unit)
@@ -213,7 +214,10 @@ class TestDavidArtifactsWrite(unittest.TestCase):
             self.assertIn("export WEBTERM_INVENTORY=", launcher)
             self.assertIn("webterm-david-inventory.json", launcher)
             self.assertNotIn("--inventory", launcher)
-            self.assertIn("-p %d" % d.WEBTERM_DAVID_TTYD_PORT, launcher)
+            # #663: ttyd binds a UNIX socket in the account runtime dir, not a TCP port
+            self.assertIn(d.WEBTERM_DAVID_TTYD_SOCK_BASENAME, launcher)
+            self.assertIn('-i "$SOCK"', launcher)
+            self.assertNotIn("-p %d" % d.WEBTERM_DAVID_TTYD_PORT, launcher)
             # #612 owner directive: NO credential is provisioned any more
             # (Cloudflare Access replaces the password) — the file is absent.
             self.assertFalse((secrets / "webterm_david_credential").exists())
