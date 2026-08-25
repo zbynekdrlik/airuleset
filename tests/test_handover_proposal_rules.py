@@ -402,7 +402,7 @@ class TestGreetingOnlyInFirstMessage(TestCase):
 
     def test_follow_up_keeps_delivery_and_names_the_incident(self):
         w = self._bullet_window()
-        # delivery is unconditional even without a greeting; the mention anchor is not
+        # delivery is unconditional even without a greeting; so is the mention anchor (#702)
         self.assertIn("partner_ids", w)
         self.assertIn("for delivery ALWAYS, on every message", w)
         # the live miva PROD incident is named so the rule carries its own why
