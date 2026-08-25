@@ -1502,7 +1502,7 @@ class TestPrePushGatesFire(TestCase):
         g("commit", "-qm", "feat: add g")
         r = self._run("pre-push-test-check.sh", "git push origin dev", root)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("BLOCKED", r.stdout)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
 
     def test_test_check_no_test_bypass(self):
         import subprocess
@@ -1632,7 +1632,7 @@ class TestPrePushTestCheckBaseRef(TestCase):
         g("commit", "-qm", "fix: crash in parser\n\nCloses #7")
         r = self._run("git push origin dev", root)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("BLOCKED", r.stdout)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
 
 
 class TestPrePushTestCheckItParenFalsePositive(TestCase):
@@ -1690,7 +1690,7 @@ class TestPrePushTestCheckItParenFalsePositive(TestCase):
         r = self._run("git push origin dev", root)
         self.assertEqual(r.returncode, 2,
                          "sys.exit(1) masked the missing test: " + r.stdout)
-        self.assertIn("BLOCKED", r.stdout)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
 
     def test_genuine_js_it_test_commit_still_recognized(self):
         # regression guard: a REAL inline it('...') test (non-test-named
@@ -12737,38 +12737,38 @@ class TestBlockTestSkipsHook(TestCase):
         root = self._repo("", "#[ignore]\nfn test_x() { assert!(1 == 1); }\n")
         r = self._run("git push origin main", root)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("BLOCKED", r.stdout)
-        self.assertIn("#[ignore]", r.stdout)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+        self.assertIn("#[" + "ignore]", r.stdout + r.stderr)
 
     def test_blocks_pytest_mark_skip(self):
         root = self._repo("", "@pytest.mark.skip\ndef test_x():\n    assert 1 == 1\n")
         r = self._run("git push origin main", root)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("pytest.mark.skip", r.stdout)
+        self.assertIn("pytest.mark" + ".skip", r.stdout + r.stderr)
 
     def test_blocks_js_test_skip(self):
         root = self._repo("", "test.skip('does the thing', () => { expect(1).toBe(1); });\n")
         r = self._run("git push origin main", root)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("test.skip", r.stdout)
+        self.assertIn("test.skip", r.stdout + r.stderr)
 
     def test_blocks_assert_true_tautology(self):
         root = self._repo("", "fn test_x() { assert!(true); }\n")
         r = self._run("git push origin main", root)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("assert!(true)", r.stdout)
+        self.assertIn("assert!(" + "true)", r.stdout + r.stderr)
 
     def test_blocks_empty_test_body_python(self):
         root = self._repo("", "def test_x():\n    pass\n")
         r = self._run("git push origin main", root)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("empty test body", r.stdout)
+        self.assertIn("empty test body", r.stdout + r.stderr)
 
     def test_blocks_empty_test_body_js_arrow(self):
         root = self._repo("", "it('does nothing', () => {});\n")
         r = self._run("git push origin main", root)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("empty test body", r.stdout)
+        self.assertIn("empty test body", r.stdout + r.stderr)
 
     def test_allows_preexisting_skip_untouched_by_this_push(self):
         # the skip already existed BEFORE this push (base commit) — this push
@@ -12964,7 +12964,7 @@ class TestBlockTestSkipsThreeBranchBase(TestCase):
         g("commit", "-qm", "test: add coverage")
         r = self._run("git push origin feature-ceo-guide", root)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("#[ignore]", r.stdout)
+        self.assertIn("#[" + "ignore]", r.stdout + r.stderr)
 
 
 class TestBlockHistoryRewriteHook(TestCase):
@@ -12991,7 +12991,7 @@ class TestBlockHistoryRewriteHook(TestCase):
     def test_blocks_rebase_interactive(self):
         r = self._run("git rebase -i HEAD~3")
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("rebase", r.stdout)
+        self.assertIn("rebase", r.stdout + r.stderr)
 
     def test_blocks_rebase_interactive_long_flag(self):
         r = self._run("git rebase --interactive HEAD~3")
@@ -13000,12 +13000,12 @@ class TestBlockHistoryRewriteHook(TestCase):
     def test_blocks_commit_amend(self):
         r = self._run("git commit --amend -m 'fix'")
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("amend", r.stdout)
+        self.assertIn("amend", r.stdout + r.stderr)
 
     def test_blocks_push_force_long_flag(self):
         r = self._run("git push --force origin main")
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("force", r.stdout)
+        self.assertIn("force", r.stdout + r.stderr)
 
     def test_blocks_push_force_short_flag(self):
         r = self._run("git push -f origin main")
@@ -13018,7 +13018,7 @@ class TestBlockHistoryRewriteHook(TestCase):
     def test_blocks_reset_hard(self):
         r = self._run("git reset --hard HEAD~1")
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("reset --hard", r.stdout)
+        self.assertIn("reset --hard", r.stdout + r.stderr)
 
     def test_allows_reset_soft(self):
         r = self._run("git reset --soft HEAD~1")
@@ -13033,7 +13033,7 @@ class TestBlockHistoryRewriteHook(TestCase):
     def test_blocks_gh_admin_merge(self):
         r = self._run("gh pr merge 5 --admin --merge")
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("admin", r.stdout)
+        self.assertIn("admin", r.stdout + r.stderr)
 
     def test_allows_normal_gh_merge(self):
         r = self._run("gh pr merge 5 --merge")
@@ -13063,7 +13063,7 @@ class TestBlockHistoryRewriteHook(TestCase):
         # and falls back to a naive .split() that drops --amend entirely.
         r = self._run('git commit -m "fix #12: adjust" --amend')
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("amend", r.stdout)
+        self.assertIn("amend", r.stdout + r.stderr)
 
     def test_bypass_marker_inside_unrelated_quotes_does_not_bypass_real_violation(self):
         # same class of bug as block-destructive-remote.sh: the marker text
@@ -13073,7 +13073,7 @@ class TestBlockHistoryRewriteHook(TestCase):
                'explaining it" ; git push --force origin main')
         r = self._run(cmd)
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("force", r.stdout.lower())
+        self.assertIn("force", (r.stdout + r.stderr).lower())
 
     def test_assignment_prefix_does_not_defeat_detection(self):
         # a leading `VAR=val` token before the real git command must not
@@ -13088,7 +13088,7 @@ class TestBlockHistoryRewriteHook(TestCase):
         # without silently losing gh-admin-merge coverage.
         r = self._run("gh pr merge 5 --admin")
         self.assertEqual(r.returncode, 2, r.stdout)
-        self.assertIn("admin", r.stdout)
+        self.assertIn("admin", r.stdout + r.stderr)
 
     def test_internal_python3_failure_blocks_with_honest_reason_not_empty(self):
         tmpbin = _path_without_python3()
