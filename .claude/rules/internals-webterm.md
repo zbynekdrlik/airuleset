@@ -343,3 +343,23 @@ side margins + an "empty row" under the status bar. Three reusable lessons:
   every shipping cap needs a matching `const` in `_FIT_HARNESS` PLUS a caps-match
   source lock (the #655 pattern), or the node run dies on ReferenceError only
   AFTER the source lands (a RED test can't see it).
+
+### #694 webterm — the dashboard template lives in `cli_webterm_dash_template.py`, NOT inline
+
+- **Where the HTML/CSS/JS is:** every dashboard markup/style/script edit (the #643/#661/#672/
+  #677/#678/#691/#700 class of ticket) goes into `cli_webterm_dash_template.py` —
+  `DASHBOARD_TEMPLATE`, a PURE CONSTANT LEAF (zero imports, zero defs; both locked by
+  `tests/test_webterm_template_extraction_694.py`). `cli_webterm.py` stays the LOGIC module and
+  merely aliases the constant (`… import DASHBOARD_TEMPLATE as _DASHBOARD_TEMPLATE`); the
+  `@@…@@` single-pass substitution contract stays in `render_dashboard_html` THERE. Never paste
+  HTML back into `cli_webterm.py` — the invariant test hard-fails on any inline `<!DOCTYPE`.
+- **Sentinel set == subst keys, exactly.** Live sentinels are `@@BUTTONS@@`/`@@CFG_JSON@@`/
+  `@@THEME_JSON@@`; `@@COUNT@@` was a VESTIGE (absent from the template since #671/#674,
+  removed from the subst dict+regex in #694). Adding a new sentinel means BOTH sides in one
+  commit — template token AND subst entry + regex alternative — or the 694 test fails
+  (template-side-only would otherwise ship an unsubstituted `@@X@@` to the browser silently).
+- **Ratchet after a split:** the extracted-from file's ceiling is LOWERED and the new module
+  enrolled in the SAME green commit (`tests/size_ratchet.json`). A worktree lane hand-edits
+  ONLY its own entries — a full `size_ratchet.py --update` also sweeps in ~25 unrelated
+  main-landed enrollments/tightenings (conflict surface for sibling lanes; the supervisor's
+  merge-side ratchet pass owns those).
