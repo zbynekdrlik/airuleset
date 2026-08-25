@@ -54,7 +54,7 @@ def _row_action(row, own_stream=None):
 
 def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                       stale_numbers=None, queued_numbers=None,
-                      gk_handoff_numbers=None):
+                      gk_handoff_numbers=None, recheck_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -97,11 +97,21 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     `stale_numbers`. Only meaningful alongside `reason_fn`; a member can carry
     both warnings (order: gk-handoff! then stale!). The tag prompts DROPPING the
     stale `ops-wait` (the gatekeeper is not a third party, so a gk hand-off
-    belongs in gk N / the gk box's I, never W)."""
+    belongs in gk N / the gk box's I, never W).
+
+    `recheck_numbers` (#699, `--ops-wait` only): a set of RELEASE-parked W-member
+    numbers with NO fresh (<=1h working-time) OWN re-check evidence — ` recheck!`
+    is APPENDED to their reason column, the SAME within-field-3 mechanism as
+    `stale_numbers`. Only meaningful alongside `reason_fn`; a member can carry
+    several warnings (order: gk-handoff! then stale! then recheck!). The tag
+    surfaces that a release-parked member is OVERDUE for its hourly deployed-state
+    re-check (#588) — a session DUTY at every work cycle, never left to the daily
+    nudge."""
     flag_numbers = flag_numbers or set()
     stale_numbers = stale_numbers or set()
     queued_numbers = queued_numbers or set()
     gk_handoff_numbers = gk_handoff_numbers or set()
+    recheck_numbers = recheck_numbers or set()
     for n in sorted(rows, key=lambda k: rows[k].get("createdAt") or ""):
         row = rows[n]
         action = _row_action(row, own_stream)
@@ -122,6 +132,8 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                 reason = (reason + " gk-handoff!").strip()
             if n in stale_numbers:
                 reason = (reason + " stale!").strip()
+            if n in recheck_numbers:
+                reason = (reason + " recheck!").strip()
             print("%s\t%s\t%s\t%s\t%s" % (n, row.get("createdAt") or "",
                                           action, reason,
                                           row.get("title") or ""))
@@ -376,6 +388,28 @@ def _handoff_label_mechanism_health(cwd=None):
     return ("ok", path)
 
 
+def _ops_wait_flag_sets(ops_wait, root):
+    """#699 — the (stale, recheck, gk_handoff) flag sets for the `--ops-wait`
+    reason column, SHARING ONE per-member comment-age fetch between the #570
+    `stale!` (24h) and #699 `recheck!` (1h release cadence) tags so the reason
+    column never DOUBLES the gh reads (margin for the 35s
+    `_watchdog_ops_wait_fetch` timeout). `gk-handoff!` is pure-label (no gh)."""
+    import airuleset
+    self_login = airuleset._stream_self_login()
+    ages_cache = {}
+
+    def _ages(n):
+        if n not in ages_cache:
+            ages_cache[n] = airuleset._issue_comment_ages(
+                n, self_login, None, cwd=root)
+        return ages_cache[n]
+
+    stale = airuleset._stale_ops_wait_flagged(ops_wait, ages_fn=_ages)
+    recheck = airuleset._release_recheck_flagged(ops_wait, ages_fn=_ages)
+    gk_handoff = airuleset._gk_handoff_ops_wait_flagged(ops_wait)
+    return stale, recheck, gk_handoff
+
+
 def cmd_slice_quals(args):
     """THE single definition of "my slice" (#181) — reused verbatim by the
     reduced-authority `/goal` stop-proof templates in skills/autopilot/SKILL.md
@@ -540,12 +574,13 @@ def cmd_slice_quals(args):
         # #636: tag `gk-handoff!` a member ALSO carrying needs-gatekeeper/
         # ready-for-review — the post-release-limbo contradiction (pure label
         # check, no gh; drop the stale ops-wait so it enters gk N / the gk box's I).
+        # #699: also tag `recheck!` a RELEASE-parked member with no fresh (<=1h
+        # working) OWN re-check — sharing the SAME comment-age fetch as stale!.
+        _stale, _recheck, _gkh = _ops_wait_flag_sets(ops_wait, root)
         _print_issue_rows(ops_wait, own_stream=user,
                           reason_fn=airuleset._ops_wait_reason,
-                          stale_numbers=airuleset._stale_ops_wait_flagged(
-                              ops_wait, cwd=root),
-                          gk_handoff_numbers=airuleset._gk_handoff_ops_wait_flagged(
-                              ops_wait))
+                          stale_numbers=_stale, recheck_numbers=_recheck,
+                          gk_handoff_numbers=_gkh)
         return
     if want_waiting:
         # #512: each labeled member gets a reason tag (answer/decision/
@@ -742,12 +777,13 @@ def cmd_core_quals(args):
         # ready-for-review — the post-release-limbo contradiction (pure label,
         # no gh). On a gk-model box this NAMES a stream ticket whose hand-off the
         # stale ops-wait hides from THIS box's own I; drop the ops-wait to close it.
+        # #699: also tag `recheck!` a RELEASE-parked member with no fresh (<=1h
+        # working) OWN re-check — sharing the SAME comment-age fetch as stale!.
+        _stale, _recheck, _gkh = _ops_wait_flag_sets(ops_wait, root)
         _print_issue_rows(ops_wait, own_stream=None,
                           reason_fn=airuleset._ops_wait_reason,
-                          stale_numbers=airuleset._stale_ops_wait_flagged(
-                              ops_wait, cwd=root),
-                          gk_handoff_numbers=airuleset._gk_handoff_ops_wait_flagged(
-                              ops_wait))
+                          stale_numbers=_stale, recheck_numbers=_recheck,
+                          gk_handoff_numbers=_gkh)
         return
     if want_waiting:
         # own_stream=None: a full-authority box owns no stream, so EVERY

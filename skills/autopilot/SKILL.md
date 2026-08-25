@@ -225,6 +225,17 @@ grep -n "airuleset:authority=" CLAUDE.md || python3 ~/devel/airuleset/airuleset.
   tretia strana — owner-blocked `ops-wait` je mis-shape, ktorý job-20 partition-audit nudge fleet-wide
   pomenúva, aby si bežiace slučky opravili svoje W tikety samy. Čistí ho SUPERVISOR s dôkazom, že owner
   krok spravil (paralela k `ops-wait`, nie auto Discord-answer).
+  **Release-parknutý W re-check = povinnosť VLASTNIACEJ relácie; recheck! kadencia je MECHANICKÁ
+  (#699, owner 2026-08-25 — „release chodi denne aj 5krat … cely den stojime aby si potom raz za
+  den zistil").** Release-parknutý `ops-wait` W člen (titulok menuje release/verziu/stage) sa
+  deployed-state re-checkuje (#588: deploy-set zelený + priame čítanie verzie z cieľa, NIE
+  run-terminal) VLASTNIACOU reláciou — KAŽDÝ pracovný cyklus, min 1×/hod — NIKDY sa nečaká na denný
+  job-20 nudge; pri ~5 release/deň to znamená unpark v ráde minút–hodiny, nie „celý deň stojíme".
+  Mechanizované: `core-quals`/`slice-quals --ops-wait` tagne `recheck!` release-parknutého člena bez
+  čerstvej (≤1h working, #607) VLASTNEJ re-check evidencie (fail-safe #539/#570: gh chyba / žiadny
+  vlastný komentár / non-release titulok = UNTAGGED), a job-20 denný nudge ho pomenuje s kadenčnou
+  povinnosťou — ostáva len BACKSTOP. Tag NEROBÍ „landol" tvrdenie (tá vetva je #698 proof-only
+  train-drained), len „re-check po termíne".
 - **NEVER prod/hardware-classify the backlog (the user's hardest rule — `approval-scope.md`).** When
   printing the banner / backlog / queue, do **NOT** flag, colour (🔴), tag, or bucket issues as
   "PROD / HARDWARE / live / off-air / invasive / risky / needs-the-rig / needs-you-present", do

@@ -331,6 +331,17 @@ def _gk_handoff_numbers(members):
             and isinstance(m.get("number"), int)]
 
 
+def _release_recheck_numbers(members):
+    """The subset of `_member_numbers` flagged `recheck!` (#699) — a RELEASE-
+    parked W ticket OVERDUE for its hourly deployed-state re-check (no fresh <=1h
+    working-time OWN re-check evidence). Only the structured shape carries the
+    flag, so a legacy int list yields an EMPTY list (no recheck sub-clause — the
+    safe/unchanged direction, exactly like `_stale_numbers`/`_gk_handoff_numbers`)."""
+    return [m["number"] for m in (members or [])
+            if isinstance(m, dict) and m.get("release_recheck")
+            and isinstance(m.get("number"), int)]
+
+
 # #698 — above this many release-landed-flagged W members on one box, the
 # escalated sub-clause additionally instructs the session to summarise the
 # state to the owner via the standard ❓ channel (the ticket's own >N=5; never
@@ -654,6 +665,23 @@ _W_GK_HANDOFF_CLAUSE = (
     "`needs-gatekeeper`), aby sa presunul do gk N / do I gk-boxu a gatekeeper ho "
     "zavrel — nesmie visieť vo W, ktoré nikto netlačí. Label mení supervisor.")
 
+# The #699 release-recheck sub-clause — appended when a RELEASE-parked W member
+# is OVERDUE for its hourly deployed-state re-check (`recheck!` in `--ops-wait`,
+# parsed into `member["release_recheck"]`). NAMES the overdue members + states the
+# cadence DUTY: the OWNING session re-checks deployed-state (#588) EVERY work
+# cycle, min 1x/hour — never left to THIS daily backstop. Makes NO "landed" claim
+# (that stays `_W_RELEASE_LANDED_CLAUSE`, #698 proof-only) — only "re-check
+# overdue" (directly falsifiable from the title + the own-comment age).
+_W_RELEASE_RECHECK_CLAUSE = (
+    "RELEASE-RECHECK (#699) %s: tieto W tikety majú v titulku release/verziu a "
+    "NEMAJÚ zaznamenaný re-check za poslednú hodinu. Deployed-state re-check "
+    "(#588: deploy-set zelený + priame čítanie verzie na cieli, NIE run-terminal) "
+    "rob KAŽDÝ pracovný cyklus, min 1×/hod — NEČAKAJ na tento denný nudge; pri "
+    "~5 release/deň to znamená unpark v ráde minút–hodiny, nie celý deň parknuté. "
+    "Ak release už dorazil, over podľa #588 a zlož `ops-wait` s dôkazom; ak nie, "
+    "zapíš na tiket že wait stále platí.")
+
+
 # The #698 release-landed sub-clause — appended when a release-SHAPED W member
 # (title names a release/version/stage) is parked while the repo's OWN release
 # train is PROVEN drained (`_release_train_drained` over the #616 fetch). The
@@ -722,11 +750,13 @@ def _nudge_text(i_count, w_members, now, w_seen, i_members=None,
     (naming the parked W numbers each with ITS OWN per-ticket park age from
     `w_seen`, #594) when W is non-empty. When ONLY W applies (I==0), the text
     degrades to #547's W-only nudge; when both apply, both clauses ride one
-    keystroke. Two W SUB-clauses are appended when their flags fire: the #636
-    `gk-handoff!` sub-clause (a W member ALSO carrying needs-gatekeeper/
-    ready-for-review — the post-release-limbo contradiction; drop ops-wait) and
-    the #570 `stale!` sub-clause. The label change is always the SUPERVISOR's with
-    evidence, never an auto-unlabel by the watchdog.
+    keystroke. Three W SUB-clauses are appended when their flags fire: the #699
+    `recheck!` sub-clause (a RELEASE-parked member OVERDUE for its hourly
+    deployed-state re-check — names the cadence duty), the #636 `gk-handoff!`
+    sub-clause (a W member ALSO carrying needs-gatekeeper/ready-for-review — the
+    post-release-limbo contradiction; drop ops-wait) and the #570 `stale!`
+    sub-clause. The label change is always the SUPERVISOR's with evidence, never
+    an auto-unlabel by the watchdog.
 
     `w_seen` (#594): the PER-TICKET first-seen map ({str(number): ts}) that ages
     each W member from its OWN W entry, never a single stale partition-level
@@ -758,6 +788,10 @@ def _nudge_text(i_count, w_members, now, w_seen, i_members=None,
         clauses.append(_i_clause_named(valid, now) if valid else _I_CLAUSE)
     if w_pos:
         clauses.append(_W_CLAUSE % _members_line_aged(w_members, w_seen, now))
+        recheck = _release_recheck_numbers(w_members)
+        if recheck:
+            clauses.append(_W_RELEASE_RECHECK_CLAUSE
+                           % " ".join("#%d" % n for n in sorted(recheck)))
         landed = [n for n in (release_landed or [])
                   if isinstance(n, int) and not isinstance(n, bool)]
         if landed:

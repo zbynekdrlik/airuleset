@@ -28,10 +28,10 @@ from zoneinfo import ZoneInfo
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import airuleset
-import cli_quals
-import cli_quals_cmd
-import watchdog.ops_wait_recheck as owr
+import airuleset  # noqa: E402
+import cli_quals  # noqa: E402
+import cli_quals_cmd  # noqa: E402
+import watchdog.ops_wait_recheck as owr  # noqa: E402
 
 DAY = 24 * 3600
 
@@ -174,7 +174,7 @@ class DoctrineContentLock699(unittest.TestCase):
 
     STATUS = REPO / "modules" / "core" / "statusline-vocabulary.md"
     SKILL = REPO / "skills" / "autopilot" / "SKILL.md"
-    FINDER = "recheck! kadencia je MECHANICKÁ (#699)"
+    FINDER = "recheck! kadencia je MECHANICKÁ (#699"
 
     def _line_with(self, text, finder):
         for ln in text.splitlines():
@@ -195,12 +195,14 @@ class DoctrineContentLock699(unittest.TestCase):
             self.assertIn(tok, line, "W bullet lost the #699 token %r" % tok)
 
     def test_autopilot_skill_carries_699_cadence(self):
-        text = self.SKILL.read_text(encoding="utf-8")
-        self.assertIn(self.FINDER, text,
-                      "autopilot SKILL must carry the #699 recheck! sentence")
-        win = self._norm_window(text, self.FINDER)
-        for tok in ("recheck!", "KAŽDÝ pracovný cyklus"):
-            self.assertIn(tok, win, "autopilot SKILL lost the #699 token %r" % tok)
+        # #500: the SKILL clause WRAPS across indented physical lines, so the
+        # finder/tokens are not contiguous in the raw text — normalise first.
+        # `recheck!` + `KAŽDÝ pracovný cyklus` appear ONLY in the #699 clause, so
+        # a full-clause removal drops all three from the normed text (real teeth).
+        norm = " ".join(self.SKILL.read_text(encoding="utf-8").split())
+        for tok in (self.FINDER, "recheck!", "KAŽDÝ pracovný cyklus"):
+            self.assertIn(tok, norm,
+                          "autopilot SKILL lost the #699 token %r" % tok)
 
 
 if __name__ == "__main__":
