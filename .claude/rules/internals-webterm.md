@@ -56,3 +56,55 @@ which auto-load when you read `cli_webterm.py`):
   (dev1 owner lane; subdev lane sockety: `webterm-<lane>-gateway.sock`).
 - Cross-account izolácia sa overuje NEGATÍVNE: cudzí účet dostane
   "Couldn't connect" + `ls /run/user/<uid>` Permission denied (0700 runtime dir).
+
+## ttyd/gateway bind invariant — loopback or UNIX socket, NEVER 0.0.0.0 (#681)
+
+- **THE INVARIANT.** Every webterm ttyd (owner replica AND each lane) and the
+  same-origin gateway binds LOOPBACK `127.0.0.1` (password mode) or a mode-0700
+  UNIX-domain socket in the account's `/run/user/<uid>` runtime dir (Access mode,
+  #663) — NEVER a wildcard / interface-any bind (`0.0.0.0`, `::`). A wildcard bind
+  exposes an unauthenticated, WRITABLE terminal on every interface incl. the
+  tailnet. The real spawn sites: `WEBTERM_TTYD_BIND = "127.0.0.1"` (cli_webterm.py),
+  `_LAUNCH_TEMPLATE` (`exec ttyd -p … -i 127.0.0.1 …`) and `_LAUNCH_TEMPLATE_SOCKET`
+  (`exec ttyd -i "$SOCK" …`); the gateway binds either a `--bind` TCP interface (the
+  real install passes a `_tailscale_ip`-validated IP) or a `--socket` UNIX socket,
+  and `main()` fail-closes to exactly one of them (#663) AND rejects a wildcard
+  `--bind` outright (#681, below). IP-validation of `--bind` happens at render/
+  provision time (`_tailscale_ip`); `main()` itself only rejects the wildcard forms.
+- **MITIGATION IN CODE (#681).** `_reject_wildcard_bind(bind, where)` (cli_webterm.py,
+  backed by `_bind_is_wildcard` — an ipaddress/inet_aton parse that catches EVERY
+  interface-any spelling: `0.0.0.0`, `::`, `::0`, `0:0:0:0:0:0:0:0`, the legacy
+  shorthands `0`/`0.0`/`0.0.0`, `""`, `*`) fails closed at the two TCP-render
+  chokepoints (`render_webterm_launch_script` password branch +
+  `_render_webterm_gateway_unit`). The gateway `main()` carries its OWN local
+  `_bind_is_wildcard` (the module is standalone) and refuses a wildcard `--bind` at
+  runtime — closing the #671 class where an agent HAND-RUNS `--bind 0.0.0.0
+  --trust-access-header …` (a forgeable header + all-interfaces bind), which no
+  render would ever emit. Locked by `tests/test_webterm_ttyd_wildcard_bind_681.py`
+  (scans the rendered spawn argv/units — a hand-enumerated list, so enrol any new
+  renderer there — + asserts the guard raises) and `TestWildcardBindMainGuard681`.
+  The UNIX-socket path is not a TCP interface and needs no guard.
+- **TEST HARNESS = loopback too, never 0.0.0.0.** To live-verify webterm in Playwright
+  MCP, bind the throwaway ttyd LOOPBACK `-i 127.0.0.1` and navigate
+  `http://127.0.0.1:<port>/`. Playwright MCP DOES reach 127.0.0.1 on dev1 —
+  EMPIRICALLY confirmed #681 (a loopback ttyd rendered its marker in the browser)
+  AND #678; this SUPERSEDES the earlier #661 harness claim ("Playwright MCP can't
+  reach the host 127.0.0.1 → bind 0.0.0.0"), which a review agent literally executed
+  → an unauthenticated writable terminal on the tailnet, killed by hand (#671). The
+  `internals-tests.md` #661/#678 harness bullets now agree on loopback-only.
+- **#681 review lessons (reusable for any bind/security guard).** (1) A wildcard-bind
+  GUARD must be PARSE-based — `ipaddress.ip_address(b).is_unspecified` + `inet_aton(b)
+  == 0` — NOT a frozenset of literals: `::0` / `0` / `0.0` / `0.0.0` / `0:0:0:0:0:0:0:0`
+  all resolve to INADDR_ANY/in6addr_any but escape a literal set (only `""` / `*` need
+  the explicit sentinel branch). (2) Guard the RUNTIME chokepoint, not only the render
+  path — the #671 class is an agent HAND-RUNNING `--bind 0.0.0.0`; the gateway
+  `main()` argparse rejects it now, mirroring the render guard (module stays
+  standalone → a LOCAL `_bind_is_wildcard`, no cli_webterm import). (3) A regex SCAN
+  for a wildcard literal must NOT carry an empty-value arm — `(?:-i|--bind)…['\"]?(?:\s|…)`
+  matches EVERY `-i ` (the trailing space satisfies the empty arm); drop it (the parse
+  guard covers `""`) and verify the regex against the REAL rendered artifacts for
+  false-positives, never just seeds. (4) VERIFY a ticket's cited `#N` before repeating
+  it — the #661/#678 harness bullet was cited "#657" (an unrelated ticket); one
+  `grep -c 657 internals-tests.md` (0 hits) + `git log -S "<phrase>"` settled it. A
+  citation inherited from ticket text is itself the "unverified doc claim" class this
+  ticket fixes.
