@@ -311,7 +311,7 @@ class CoMovedKeystrokeSeamsGoThroughPackageSeam(unittest.TestCase):
                     return_value=("❯ ", watchdog.STASH_NOOP, ""))
             tl = P("_type_literal", return_value=None)
             psc = P("_pane_shows_collapsed_paste", return_value=False)
-            tld = P("_typed_landed", side_effect=[True, False])
+            tld = P("_typed_landed", return_value=True)  # #670: delivery now RE-VERIFIES landed post-settle (head-verified contract) — happy path needs every landed check True; the [True, False] pair locked the pre-#670 single-verify flow
             ok = watchdog.deliver_with_stash(
                 "%1", "/goal x", run, sleep_fn=self._noop)
         self.assertTrue(ok)
