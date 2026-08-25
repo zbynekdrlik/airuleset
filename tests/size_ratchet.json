@@ -308,7 +308,7 @@
     "tests/test_watchdog_long_turn_split.py": 225,
     "tests/test_watchdog_pane_text_split.py": 167,
     "tests/test_watchdog_questions_split.py": 390,
-    "tests/test_watchdog_stash_split.py": 434,
+    "tests/test_watchdog_stash_split.py": 438,
     "tests/test_watchdog_state_keys.py": 113,
     "tests/test_watchdog_sweep_jobs_split.py": 132,
     "tests/test_watchdog_tmux_io_split.py": 159,
