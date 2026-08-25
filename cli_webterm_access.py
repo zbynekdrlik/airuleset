@@ -89,7 +89,7 @@ WEBTERM_ACCESS_APPS = {
     "david": {
         "hostname": "david.newlevel.media",
         "name": "webterm — david",
-        "allowed_emails": ["david@grena.biz"],   # owner-provided, #612 go-live
+        "allowed_emails": ["david@grena.sk"],   # owner-corrected 2026-08-25 (.biz was a mis-given address), #612
         "session_duration": "24h",
     },
     "owner": {

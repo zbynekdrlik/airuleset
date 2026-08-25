@@ -120,7 +120,7 @@ DROP_ACCESS_APPS = {
     DROP_HOST_DAVID: {
         "hostname": DROP_HOST_DAVID,
         "name": "drop — david",
-        "allowed_emails": ["david@grena.biz", "drlik.zbynek@gmail.com"],
+        "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
         "session_duration": "24h",
     },
 }
