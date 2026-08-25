@@ -1205,6 +1205,7 @@ from watchdog.goal_scan import (  # noqa: E402
     _goal_autoarm_recent_human_activity as _goal_autoarm_recent_human_activity,
     goal_templates_path as goal_templates_path,
     _goal_marker_content as _goal_marker_content,
+    _parse_error_clear_payload as _parse_error_clear_payload,
     _parse_goal_marker as _parse_goal_marker,
     _newest_marker as _newest_marker,
     scan_goal_markers as scan_goal_markers,
@@ -1417,6 +1418,32 @@ _GOAL_LCS_CLOSE = "</local-command-stdout>"
 GOAL_ARM_ACTIVE_PREFIX = ('A session-scoped Stop hook is now active with '
                           'condition: "')
 _GOAL_ARM_PROBE = GOAL_ARM_ACTIVE_PREFIX[:-1].encode()   # quote-free (JSON)
+
+# #675 -- CC's OWN goal-clear on a TRANSIENT failure (NEVER a user `/goal clear`):
+# a plain `system` message whose TOP-LEVEL `content` starts with this and is NOT
+# `<local-command-stdout>`-wrapped (so it matches neither of the two probes above).
+# CC writes it as `Goal cleared after an unrecoverable error (<reason>): "…". Run
+# /goal again to continue.` (camera-box 90bc51f3, 2026-08-18). The
+# `(authentication failed)` reason is the owner-ruled NORMAL transient
+# (subscription switching, #662/#676) -> `clear_kind="auth"`, auto-rearm eligible;
+# any OTHER reason is recognized as `cleared` (flips armed->false) but tagged
+# `clear_kind="error"` and NEVER auto-rearmed (needs human attention, not a
+# re-type loop). The byte probe widens `_newest_marker`'s pre-filter.
+_GOAL_CLEARED_ERROR_PREFIX = "Goal cleared after an unrecoverable error"
+_GOAL_CLEARED_ERROR_PROBE = _GOAL_CLEARED_ERROR_PREFIX.encode()
+
+# #675 -- a presence/human-prompt timestamp slightly in the FUTURE is legitimate
+# mid-sweep drift (`now` is captured once at run_once's top; job 9/20 run at the
+# TAIL, so a human prompt landing after that capture reads a small negative age)
+# and must still count as recent-human. But a GROSSLY future value (a clock
+# desync, a transcript synced off another box) is NOT a live human and must not
+# extend the recency window to a false ~30-min veto. This is the small future
+# tolerance `_goal_autoarm_recent_human_activity`'s clamp uses on BOTH signals in
+# place of the full `GOAL_AUTOARM_RECENT_HUMAN_S` window (refines #339's symmetric
+# bound into the small-future form #339 itself named as the goal). Comfortably
+# covers a delayed/slow sweep (the 120s TimeoutStartSec + contention) while
+# rejecting minutes-to-hours of skew.
+GOAL_PRESENCE_FUTURE_SKEW_S = 300
 
 
 # #433 item G step 14 -- the job-5 pending done-ping backstop (deliver_pending_done

@@ -50,7 +50,8 @@ import watchdog
 
 
 def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
-                                        extra_human_prefixes=()):
+                                        extra_human_prefixes=(),
+                                        future_skew_s=None):
     """#339 -- job 9's virgin-candidate path (`_goal_autoarm_virgin_candidate`)
     had NO discriminator at all for "is a live human using this pane RIGHT
     NOW" -- only whether `/goal` had ever been touched. montalu3's own
@@ -76,8 +77,11 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
        "Stop hook feedback:" both there) -- the ticket's own named
        job-7 edge case needed no special-casing here at all.
 
-    Both timestamps are clamped `-window_s <= now - ts < window_s`
-    ("recent" in EITHER direction, bounded) before counting as recent.
+    Both timestamps are clamped `-future_skew_s <= now - ts < window_s`
+    ("recent" bounded on both sides) before counting as recent. `future_skew_s`
+    defaults to `window_s`, i.e. the SYMMETRIC `-window_s <= age < window_s`
+    bound the #339-review below reasoned to (the default every caller EXCEPT the
+    delivery path keeps — see the `future_skew_s` note at the end).
 
     #339-review MAJOR (fresh-context adversarial review, live-reproduced
     against the real function): the first shipped clamp was the
@@ -125,15 +129,30 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
     default `()` is a no-op, so job 9's own call (which never passes this)
     keeps its exact reviewed behavior unchanged; a caller that DOES need a
     Discord-relayed answer to count (`_compact_recent_human_activity`)
-    passes its own prefix set."""
+    passes its own prefix set.
+
+    `future_skew_s` (#675, optional): the FUTURE side of the clamp. `None`
+    defaults to `window_s` -> the SYMMETRIC bound the #339 paragraph above
+    reasoned to, which EVERY caller keeps EXCEPT `deliver_goal` (arm delivery),
+    which passes the SMALL `GOAL_PRESENCE_FUTURE_SKEW_S` (300 s). WHY only there:
+    for delivery, `recent=True` VETOES the re-arm, so a GROSSLY-future presence
+    marker (a clock / cross-box-sync desync, minutes-to-hours ahead) reading
+    "recent" is a FALSE ~30-min veto that starves the re-arm (the #675 defect);
+    a small future tolerance still absorbs mid-sweep drift but rejects gross
+    skew. The DESTRUCTIVE consumers (the #522 `/goal clear`, the #617 stranded
+    clear, `_recovery_recent_human`) and the sub-window callers (compact,
+    lane-nudge) keep the symmetric default, where a future-dated read reading
+    "recent" only makes them MORE cautious (an extra VETO of a keystroke) --
+    exactly the fail-safe direction #339 relied on, unchanged."""
     window_s = watchdog.GOAL_AUTOARM_RECENT_HUMAN_S if window_s is None else window_s
+    skew_s = window_s if future_skew_s is None else future_skew_s
     try:
         mtime = os.stat("/tmp/claude-user-active-%s" % sid).st_mtime
     except OSError:
         mtime = None
     if mtime is not None:
         age = now - mtime
-        if -window_s <= age < window_s:
+        if -skew_s <= age < window_s:
             return True, "presence marker %s" % watchdog._human_age_desc(age)
     try:
         hts = watchdog._last_human_prompt_ts(tpath, extra_human_prefixes=extra_human_prefixes)
@@ -141,7 +160,7 @@ def _goal_autoarm_recent_human_activity(sid, tpath, now, window_s=None,
         hts = None
     if hts is not None:
         age = now - hts
-        if -window_s <= age < window_s:
+        if -skew_s <= age < window_s:
             return True, "transcript human prompt %s" % watchdog._human_age_desc(age)
     return False, ""
 
@@ -191,12 +210,40 @@ def _goal_marker_content(entry):
     return None
 
 
-def _parse_goal_marker(content):
-    """`{"state": "set"|"cleared", "payload": str|None}` for a genuine `/goal`
-    marker, else None. The whole entry content must BE the marker (it starts
-    with the `<local-command-stdout>` tag, or with CC's own arm instruction)
-    — a compaction SUMMARY narrating "the loop's Goal set: …" in prose, or any
-    message merely QUOTING the arm sentence, is not state."""
+def _parse_error_clear_payload(tail):
+    """#675 -- extract the (possibly CC-TRUNCATED) cleared condition from the
+    error-clear tail after `_GOAL_CLEARED_ERROR_PREFIX`, i.e. the text CC quotes
+    in `… (<reason>): "<condition>". Run /goal again to continue.`. Returns the
+    condition string, or None. Only the OPENING of the condition is needed by the
+    caller's foreign-goal signature check, so a `…`-truncated value is fine."""
+    q = tail.find(': "')
+    if q < 0:
+        return None
+    cond = tail[q + 3:]
+    cut = cond.rfind('". ')
+    if cut < 0:
+        cut = cond.rfind('"')
+    if cut <= 0:
+        return None
+    return cond[:cut].strip() or None
+
+
+def _parse_goal_marker(content, is_system=False):
+    """`{"state": "set"|"cleared", "payload": str|None[, "clear_kind": ...]}` for
+    a genuine `/goal` marker, else None. The whole entry content must BE the
+    marker (it starts with the `<local-command-stdout>` tag, CC's own arm
+    instruction, or — the #675 error-clear — CC's `Goal cleared after an
+    unrecoverable error …` sentence) — a compaction SUMMARY narrating "the loop's
+    Goal set: …" in prose, or any message merely QUOTING one of those sentences,
+    is not state.
+
+    `is_system` (#675, 🔴-1): the error-clear shape is recognized ONLY when it
+    came from a `system` transcript entry. CC writes that clear ONLY as `system`;
+    a `user` entry (a normal human prompt, a Discord-relayed answer, a supervisor
+    pasting logs) that merely BEGINS with the clear sentence is forgeable content
+    and must NEVER become a `cleared` marker (it would drive an auto-`/goal` into
+    a live human's session). The LCS + arm shapes are unchanged — they legitimately
+    arrive on `user` entries (a queued arm surfaces as a user entry, #64)."""
     s = (content or "").strip()
     if s.startswith(watchdog.GOAL_ARM_ACTIVE_PREFIX):
         # The record CC writes for EVERY arm — and the ONLY one it writes when
@@ -216,6 +263,23 @@ def _parse_goal_marker(content):
         if cut <= 0:
             return None
         return {"state": "set", "payload": rest[:cut].strip() or None}
+    # #675 -- CC's OWN clear on a TRANSIENT failure (a bare `system` message, NOT
+    # LCS-wrapped): "Goal cleared after an unrecoverable error (<reason>): …". The
+    # `clear_kind` keys on the REASON segment ONLY (`… error (<reason>): "…`, never
+    # the QUOTED condition, so a non-auth error clearing a goal whose CONDITION
+    # mentions authentication stays `error`): an `authentication` reason is the
+    # owner-ruled NORMAL transient (#662/#676) -> `clear_kind="auth"` (auto-rearm
+    # eligible); any other reason -> `cleared` (flips armed->false) but tagged
+    # `error` and NEVER auto-rearmed. The cleared CONDITION is extracted (even
+    # CC-truncated) so the re-arm path can refuse a FOREIGN (hand-armed) goal.
+    # `is_system` gates this whole shape (🔴-1). A deliberate `Goal cleared:`
+    # below is `clear_kind="user"` — the #170 boundary a re-arm must never cross.
+    if is_system and s.startswith(watchdog._GOAL_CLEARED_ERROR_PREFIX):
+        tail = s[len(watchdog._GOAL_CLEARED_ERROR_PREFIX):]
+        reason = tail.split(")", 1)[0] if tail.lstrip().startswith("(") else ""
+        kind = "auth" if "authentication" in reason else "error"
+        return {"state": "cleared", "clear_kind": kind,
+                "payload": _parse_error_clear_payload(tail)}
     if not s.startswith(watchdog._GOAL_LCS_OPEN):
         return None
     body = s[len(watchdog._GOAL_LCS_OPEN):]
@@ -225,7 +289,10 @@ def _parse_goal_marker(content):
         head = "Goal %s:" % kind
         if body.startswith(head):
             payload = body[len(head):].strip()
-            return {"state": kind, "payload": payload or None}
+            mark = {"state": kind, "payload": payload or None}
+            if kind == "cleared":
+                mark["clear_kind"] = "user"   # #675 -- a deliberate /goal clear
+            return mark
     return None
 
 
@@ -284,16 +351,23 @@ def _newest_marker(body):
     from datetime import datetime
     best = None
     for ln in body.splitlines():
-        # cheap pre-filter over the raw bytes — either of the TWO shapes CC
-        # writes (the `/goal` command's own stdout, or the arm instruction it
-        # injects, which is the only record a QUEUED arm leaves at all, #64).
-        if watchdog._GOAL_LCS_OPEN.encode() not in ln and watchdog._GOAL_ARM_PROBE not in ln:
+        # cheap pre-filter over the raw bytes — one of the THREE shapes CC
+        # writes (the `/goal` command's own stdout, the arm instruction it
+        # injects — the only record a QUEUED arm leaves at all, #64 — or the
+        # #675 transient-failure clear, which carries NEITHER of the other two).
+        if (watchdog._GOAL_LCS_OPEN.encode() not in ln
+                and watchdog._GOAL_ARM_PROBE not in ln
+                and watchdog._GOAL_CLEARED_ERROR_PROBE not in ln):
             continue
         try:
             entry = json.loads(ln)
         except Exception:
             continue
-        mark = _parse_goal_marker(_goal_marker_content(entry))
+        # #675 -- the error-clear shape is honoured ONLY from a `system` entry
+        # (CC never writes it as `user`); a `user` paste that merely begins with
+        # the clear sentence is forgeable content, not state.
+        is_system = isinstance(entry, dict) and entry.get("type") == "system"
+        mark = _parse_goal_marker(_goal_marker_content(entry), is_system=is_system)
         if mark is None:
             continue
         ts = None

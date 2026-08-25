@@ -62,6 +62,7 @@ MOVED_FUNCTIONS = [
     "_goal_autoarm_recent_human_activity",
     "goal_templates_path",
     "_goal_marker_content",
+    "_parse_error_clear_payload",   # #675 -- error-clear payload extractor
     "_parse_goal_marker",
     "_newest_marker",
     "scan_goal_markers",
