@@ -25,7 +25,7 @@
     "cli_remote.py": 1261,
     "cli_scratch_sweep.py": 1505,
     "cli_target_purge.py": 892,
-    "cli_tmux_provisioning.py": 2000,
+    "cli_tmux_provisioning.py": 2005,
     "cli_vault.py": 1084,
     "cli_webterm.py": 2123,
     "cli_webterm_access.py": 362,

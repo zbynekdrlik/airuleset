@@ -16,8 +16,9 @@ the live self-heals that UNSET stale globals on a running server
 tmux-server CUTOVER that swaps a box onto the newest tmux build. The conf block
 carries no destroy-unattached line (that is a live `-gu` unset, not conf policy),
 but DOES carry `window-size manual` version-gated (#586, restored by #613
-REOPEN-2: the owner's fixed-size invariant) + `default-size 176x50`, both
-conf-only.
+REOPEN-2: the owner's fixed-size invariant) + `default-size 176x50` -- both in
+the conf AND, since #685, live-converged on a running >= 3.5 server via the
+gated `converge_tmux_window_geometry`.
 
 Deliberately SELF-CONTAINED: stdlib only at module level (`subprocess` is
 imported locally inside the three functions that use it, verbatim), NO
@@ -89,8 +90,10 @@ _BARE_SHELL_COMMANDS = frozenset({
 # attached client (whatever its size) can ever resize a window away from
 # `default-size`. EMITTED ONLY on a tmux version where it is SAFE at conf-parse
 # startup (see _tmux_supports_window_size_manual / _MIN_WINDOW_SIZE_MANUAL_VERSION
-# below) -- never unconditionally, because #241 crashes tmux 3.4 with it. CONF-
-# ONLY (never live-applied), so no #236 live-apply resize hazard.
+# below) -- never unconditionally, because #241 crashes tmux 3.4 with it. In
+# the conf, and since #685 ALSO live-set -- but ONLY via the version-gated
+# `converge_tmux_window_geometry` (a 3.4/unprobeable box never gets a live
+# geometry call, so the #236/#241 hazard classes stay unreachable).
 TMUX_WINDOW_SIZE = "manual"
 # #586: the MINIMUM (major, minor) tmux version at which `set-option -g
 # window-size manual` is SAFE in the conf at server-startup. Reproduced LIVE on
@@ -760,6 +763,8 @@ def converge_tmux_window_geometry(run=None, default_size=TMUX_DEFAULT_SIZE,
     state = _read(["tmux", "show-options", "-g", "window-size"])
     if state is None:
         return []  # no server running -- the conf covers the next start
+    # (deliberately asymmetric from here on: a LATER failed read only skips
+    # its own step / partially returns -- the next install/push retries)
     if state.strip() != f"window-size {TMUX_WINDOW_SIZE}":
         _mutate(["tmux", "set-option", "-g", "window-size",
                  TMUX_WINDOW_SIZE])
@@ -895,11 +900,11 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
     failure when no server" acceptance."""
     path = tmux_conf_path or TMUX_CONF
     runner = run or _default_tmux_run
-    # #586/#613 REOPEN-2: probe the PATH tmux version ONCE (via the same
-    # injectable runner) to decide whether the conf may carry `window-size manual`
-    # -- a conf-content decision, NOT a live-apply (the option is never
-    # `set-option`'d live). Fails closed: an unprobeable / <3.5 box gets no
-    # window-size line (never the #241 3.4 conf-parse crash).
+    # #586/#613 REOPEN-2/#685: probe the PATH tmux version ONCE (via the same
+    # injectable runner). The result decides BOTH whether the conf may carry
+    # `window-size manual` AND whether the #685 live convergence at the end may
+    # run. Fails closed: an unprobeable / <3.5 box gets no window-size line
+    # (never the #241 3.4 conf-parse crash) and no live geometry call.
     window_size_manual = _tmux_supports_window_size_manual(runner)
     block = render_tmux_history_block(limit, default_size,
                                        window_size_manual=window_size_manual)
@@ -941,10 +946,10 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
         # regardless. `-gwu` (window-option unset) reverts it to tmux's default
         # `off`. Verified live on tmux 3.7b: `-gwu`/`-gu` both revert on->off,
         # idempotent, server unharmed. Unlike window-size, aggressive-resize is a
-        # plain window OPTION affecting only FUTURE resize computation, so it
-        # carries NONE of window-size's live-apply hazard (#236 snap-resize / #241
-        # 3.4 crash) -- which is why window-size stays conf-only (never live-
-        # applied) while this is safe.
+        # plain window OPTION affecting only FUTURE resize computation, so it is
+        # safe to fire UNCONDITIONALLY here -- while window-size touches live
+        # geometry and is live-set only via the version-gated, state-read-first
+        # #685 convergence after this loop (never unconditionally in this list).
         ["tmux", "set-option", "-gwu", "aggressive-resize"],
         # #646: SET the managed fleet-wide default `mouse on` on any running
         # server, so an already-running session picks up wheel-scroll into
