@@ -602,7 +602,8 @@ gap in either.
    inventing a second, parallel one. TRIVIAL members skip this sub-step entirely — no
    `Plan` dispatch, no extra cost, same one-paragraph design comment as today. For each
    DESIGN-HEAVY member: run `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE for the whole
-   batch (the gate now guards ONLY these HARD/design-heavy dispatches — routine work never runs it). Gate OPEN → dispatch ONE read-only
+   batch (the gate guards EVERY automatic Fable dispatch — worker-model escalation reuses the SAME
+   gate result, see the Model bullet in Step 2). Gate OPEN → dispatch ONE read-only
    `subagent_type: "Plan"` agent per member at `model: "fable"`; gate CLOSED → do NOT spend a new
    gated dispatch (omitting the override would inherit the Fable main — exactly what a CLOSED gate
    says there is no headroom for): hold the design synthesis in the main session itself (the
@@ -658,20 +659,24 @@ gap in either.
      worker's OWN Step 0 now posts its own validation evidence per issue as a durable `gh issue
      comment`, mechanically checked at its SubagentStop (`design_gate.py`) — so validation coverage
      no longer depends on your Step 1b prose actually having run for this specific dispatch.
-   - **Model = Opus 4.8 by default; HARD tickets escalate — Fable through the budget gate**
-     (`model-awareness.md` ACTIVE policy 2026-08-14 — Fable ONLY for design-heavy work; Opus 5 is BANNED — never any `opus`-aliased
-     dispatch, never sonnet on anything complex). The `autopilot-worker` frontmatter pins
-     `model: claude-opus-4-8` — dispatch it AS-IS for a routine ticket (bug fix, scoped feature).
-     When the ticket-validator or the issue signals genuinely HARD work — **architectural /
-     cross-cutting / ambiguous-design, a multi-component or concurrency bug, or a ticket a prior
-     worker already FAILED on** — escalate AUTOMATICALLY: run
-     `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE for the ticket/batch;
-     **gate OPEN (exit 0) → dispatch `model: fable`; gate CLOSED (exit 1) → dispatch AS-IS (the
-     frontmatter's `claude-opus-4-8`).** Merely non-trivial (but not HARD-criteria) work → AS-IS on
-     `claude-opus-4-8`, no gate needed.
-     Never dispatch an automatic `model: fable` without the gate check, and do NOT reflexively
-     uptier a routine ticket — Opus 4.8 + the judgment review bookend carries it. You (the main
-     session) re-verify every line of the worker's evidence block regardless.
+   - **Model — airuleset repo: Fable-MAJORITY; other repos: Fable for every judgment-content
+     ticket; Opus 4.8 the routine fallback** (`model-awareness.md` ACTIVE policy 2026-08-25; Opus 5
+     is BANNED — never any `opus`-aliased dispatch, never sonnet on anything complex). The
+     `autopilot-worker` frontmatter pins `model: claude-opus-4-8` — that pin is the FALLBACK tier,
+     reached by dispatching AS-IS (no `model` param). **On the airuleset repo:** run
+     `python3 ~/devel/airuleset/airuleset.py fable-gate` ONCE per round;
+     **gate OPEN (exit 0) → dispatch `model: fable` for EVERY worker; gate CLOSED (exit 1) →
+     dispatch AS-IS (the frontmatter's `claude-opus-4-8`).** **On other repos:** apply the
+     JUDGMENT-CONTENT test per ticket (non-trivial implementation, review of a non-trivial change,
+     hard debug, design/synthesis — when unsure, it QUALIFIES; the tie-break is deliberately
+     REVERSED from the retired 2026-08-14 HARD-only policy, whose "unsure → not hard" produced
+     zero Fable dispatches ever): a qualifying ticket → gate ONCE for the ticket/batch → OPEN →
+     `model: fable`; CLOSED, or a genuinely routine/mechanical-ish ticket (one obvious shape, zero
+     design decisions) → AS-IS on `claude-opus-4-8`. Honest application lands near the owner's
+     ≈50% Fable share of subagent tasks — a day of dispatches far below that means the test is
+     being applied too strictly, never that the backlog is special.
+     Never dispatch an automatic `model: fable` without the gate check. You (the main session)
+     re-verify every line of the worker's evidence block regardless of its model.
    - **Authority rides the dispatch.** Include the resolved profile in every worker prompt
      (`Authority profile: <profile>` + what "done" means for it). branch-merge: the worker's PR
      targets and merges into the INTEGRATION branch (develop unless the project CLAUDE.md names

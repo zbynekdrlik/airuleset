@@ -249,25 +249,33 @@ def _human_reset(iso):
 
 
 # --------------------------------------------------------------------------- #
-# Fable budget gate — `airuleset.py fable-gate`. Under the 2026-08-13
-# model-tiering policy (Opus 5 banned, #440) the gate guards the DEFAULT
-# judgment layer: every automatic Fable judgment dispatch is BUDGET-GATED so
-# the 2026-07-01 Fable-everywhere incident (limits tripped mid-work, user's
-# work stopped) can never repeat — Fable fires only while its weekly window
-# (and the shared weekly) has headroom. Reads the same usage cache the
-# watchdog writes every ~15 min (never hits the 429-prone endpoint).
-# FAIL-SAFE: missing/stale/empty cache → CLOSED (the work runs on Opus 4.8,
-# claude-opus-4-8), never a blind Fable burn.
+# Fable budget gate — `airuleset.py fable-gate`. Under the 2026-08-25
+# model-tiering policy (#690; Opus 5 stays banned, #440) the gate guards
+# EVERY automatic Fable dispatch — the fleet-wide judgment-content tier plus
+# the airuleset Fable-majority — so the 2026-07-01 Fable-everywhere incident
+# (limits tripped mid-work, user's work stopped) can never repeat: Fable
+# fires only while its weekly window (and the shared weekly) has headroom.
+# Reads the same usage cache the watchdog writes every ~15 min (never hits
+# the 429-prone endpoint). FAIL-SAFE: missing/stale/empty cache → CLOSED
+# (the work runs on Opus 4.8, claude-opus-4-8), never a blind Fable burn.
 # --------------------------------------------------------------------------- #
 
-FABLE_GATE_PCT = 80            # default: escalate only below 80% used (leaves the
-                               # user headroom for their own manual /model Fable)
+FABLE_GATE_PCT = 90            # default: dispatch Fable only below 90% used.
+                               # Raised 80→90 by #690 (2026-08-25): the 43%-fable
+                               # baseline was main-session-only usage, so the new
+                               # judgment-content + airuleset-majority dispatch
+                               # load projects the fable weekly into the 60–90%
+                               # band, where an 80% gate would flip CLOSED
+                               # mid-week and silently re-create the zero-Fable
+                               # dead letter. The last 10% stays reserved for the
+                               # user's own manual /model Fable main.
 FABLE_GATE_MAX_AGE = 6 * 3600  # cache older than this = unknown → CLOSED (same
                                # staleness bound the statusline uses)
 
 
 def fable_gate(now=None, path=None, threshold=None):
-    """(open, reason) — may automatic HARD-task escalation dispatch to Fable NOW?
+    """(open, reason) — may an automatic Fable dispatch fire NOW? (#690: guards EVERY
+    automatic Fable dispatch — judgment-content tier + airuleset Fable-majority.)
 
     OPEN  ⇔ the cache is fresh AND every gating window is below `threshold`%:
       - the Fable-scoped weekly window (the binding one under heavy Fable use), and
@@ -296,7 +304,7 @@ def fable_gate(now=None, path=None, threshold=None):
         # Any age outside [0, MAX] is unknown → stale.
         age = now - float(cache.get("ts") or 0)
         if not (0 <= age <= FABLE_GATE_MAX_AGE):
-            return False, "usage cache stale (ts %dh off) — fail-safe CLOSED, use opus" % (
+            return False, "usage cache stale (ts %dh off) — fail-safe CLOSED, use claude-opus-4-8" % (
                 abs(age) // 3600)
         # Window selection (F2): gate ONLY on WEEKLY windows (a per-model session/
         # surface window must neither gate nor mask), and across MULTIPLE matching
@@ -314,20 +322,20 @@ def fable_gate(now=None, path=None, threshold=None):
             elif not model:
                 shared_pct = pct if shared_pct is None else max(shared_pct, pct)
         if fable_pct is None and shared_pct is None:
-            return False, "no weekly window in cache — fail-safe CLOSED, use opus"
+            return False, "no weekly window in cache — fail-safe CLOSED, use claude-opus-4-8"
         parts = []
         for label, pct in (("fable", fable_pct), ("weekly", shared_pct)):
             if pct is None:
                 continue
             parts.append("%s=%d%%" % (label, pct))
             if pct >= threshold:
-                return False, ("%s window at %d%% (>= %d%% gate) — CLOSED, use opus"
+                return False, ("%s window at %d%% (>= %d%% gate) — CLOSED, use claude-opus-4-8"
                                % (label, pct, threshold))
         return True, " ".join(parts) + " (< %d%% gate)" % threshold
     except FileNotFoundError:
-        return False, "no usage cache (%s) — fail-safe CLOSED, use opus" % path
+        return False, "no usage cache (%s) — fail-safe CLOSED, use claude-opus-4-8" % path
     except Exception as e:
-        return False, "unreadable/corrupt usage cache (%s: %s) — fail-safe CLOSED, use opus" % (
+        return False, "unreadable/corrupt usage cache (%s: %s) — fail-safe CLOSED, use claude-opus-4-8" % (
             type(e).__name__, e)
 
 

@@ -7,7 +7,7 @@
     "cli_autopilot_lock.py": 793,
     "cli_bashrc_appliers.py": 751,
     "cli_binary_installers.py": 467,
-    "cli_burn.py": 569,
+    "cli_burn.py": 570,
     "cli_caveman_plugins.py": 565,
     "cli_claude_scripts.py": 982,
     "cli_config.py": 642,
@@ -369,7 +369,7 @@
     "watchdog/tmux_io.py": 1042,
     "watchdog/transcripts.py": 1547,
     "watchdog/u_labels.py": 369,
-    "watchdog/usage.py": 387,
+    "watchdog/usage.py": 395,
     "watchdog/wedge.py": 297,
     "watchdog/wip_ref_sweep.py": 347,
     "working_time.py": 78
