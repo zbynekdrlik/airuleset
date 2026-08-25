@@ -11,6 +11,12 @@ profily. Doména sa mapuje na (session set + auth realm):
     nemenia, mení sa len front (cloudflared tunel + Access namiesto tailnet+hesla).
   * ``david`` — subdev, VEREJNÝ HTTPS front (david.newlevel.media, Cloudflare),
     session set = david1..4 (subdev) + codex-bridge (dev2), login ``david``.
+  * ``marek`` — subdev (marek účet), VEREJNÝ HTTPS front (marek.newlevel.media,
+    Cloudflare). Session set (#661 rework, owner ruling 2026-08-25) = marek
+    lokálny attach + montalu4 (loopback ssh) + jeho `marek` tmux sessions na
+    dev1/dev2 + jeho forestshop VPS (admin@forestshop-dev) — ssh entries VŽDY
+    cez dedikovaný ``WEBTERM_MAREK_IDENTITY`` kľúč, nikdy gatekeeper kľúč,
+    nikdy sshpass vetva.
 
 Bezpečnostné invarianty (celé v tomto leaf + connect allowliste v cli_webterm):
   1. Davidov inventár = { david1..4, codex-bridge } IBA. Jeho ttyd child dostane
@@ -139,39 +145,136 @@ def david_inventory():
 
 
 # --------------------------------------------------------------------------- #
-# marek profile — session set (#612 scope-add 2026-08-24).
+# marek profile — session set (#612 scope-add 2026-08-24; #661 rework
+# 2026-08-25: the owner REJECTED the single-member set as incomplete).
 # --------------------------------------------------------------------------- #
 
-# marek's gateway runs AS this account on subdev, so his session set is a single
-# LOCAL tmux attach — NO ssh, NO key. That is a STRICTLY SMALLER reachability than
-# david's ssh-based set: marek's ttyd child has zero ssh capability, so even a
-# gateway compromise reaches nothing but the local marek tmux group.
+# marek's gateway runs AS this account on subdev; his own primary session is a
+# LOCAL tmux attach (no ssh, no key). #661 rework: the owner explicitly granted
+# marek FOUR MORE tabs (montalu4, his dev1/dev2 tmux sessions, his forestshop
+# VPS), so the lane is no longer "zero ssh capability" — its ssh reach is
+# exactly the four entries below, always via the DEDICATED marek key.
 MAREK_GATEWAY_USER = "marek"
 
-# marek's single scoped session id — matches the owner-defined #661 tab policy
-# WEBTERM_DASHBOARD_TABS["marek"] = ["marek-subdev"].
+# marek's own scoped session id — first member of the owner-defined #661 tab
+# policy WEBTERM_DASHBOARD_TABS["marek"] (cli_webterm.py), which the marek lane
+# render consumes (LaneSpec.dashboard_human="marek").
 MAREK_ID = "marek-subdev"
+
+# Dedicated key for the marek lane's ssh tabs — the WEBTERM_DAVID_IDENTITY
+# shape: authorized ONLY on the four targets below (montalu4@subdev over
+# loopback, newlevel@dev1, newlevel@dev2, admin@forestshop-dev), NEVER the
+# fleet gatekeeper key (`~/.secrets/gatekeeper_access_ed25519`, which reaches
+# every stream — a cross-stream escalation). A live #661 probe showed
+# marek@subdev holds NO key for any of these targets, so a codex-bridge-style
+# "mirror existing access" is impossible — the key + its authorized_keys
+# distribution is a provisioning step (owner-action, see _MAREK_GO_LIVE in
+# cli_webterm_marek.py); until it lands the ssh tabs fail VISIBLY while the
+# local marek-subdev tab keeps working.
+WEBTERM_MAREK_IDENTITY = "~/.secrets/webterm_marek_ed25519"
+
+# marek's dev-box tabs ssh the boxes' tailscale IPs (subdev is on the tailnet;
+# machine-identities: address by tailscale, never the drifting LAN IPs) as the
+# `newlevel` account and attach the `marek` tmux session group — the SAME
+# owner-group session mechanism (notify/statusbar grouping: zbynek/marek) the
+# owner's own tabs use with `zbynek`, never a hardcoded session list.
+MAREK_DEV1_HOST = "100.104.8.125"   # dev1 tailscale IP
+MAREK_DEV2_HOST = CODEX_HOST        # dev2 tailscale IP — same box as codex-bridge
+
+# marek's forestshop VPS tab (#661 DOPLNENIE — handled like the owner's
+# spinbike `sb` tab). The fleet's ONE forestshop box (cli_fleet.py): the tab
+# connects as `admin`, the box's PRINCIPAL account (the forestshop-app deploy
+# account; notify #572 routes the whole box to marek's realm) — NEVER `stepan`,
+# StepanDK's own isolated personal account (a third person's account on
+# Marek's dashboard would repeat the original #661 sin).
+MAREK_FORESTSHOP_ID = "forestshop"
+MAREK_FORESTSHOP_HOST = "forestshop-dev.newlevel.media"
+MAREK_FORESTSHOP_USER = "admin"
+# #679/#680: the box is public-DNS (no tailscale), so the connect child must
+# verify its host key STRICTLY against the committed pin. Duplicated VERBATIM
+# from cli_fleet.py's admin@forestshop-dev entry (this leaf imports no other
+# airuleset module — the CODEX_HOST precedent); a drift-lock test
+# (test_webterm_marek.test_forestshop_host_keys_match_the_fleet_pin) ties the
+# copies together. PUBLIC key material, safe to commit.
+MAREK_FORESTSHOP_HOST_KEYS = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF0hQYw2+OticG0PVhzzDeJzghERkK7g+WkqpDihlbiI",
+    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHpFPlgqeS8+KP2L9KrlVSKqezEK19l8IgdDCubJPxISCF8L4X7TO/TkOkBXoYVKPgaLyEV2rva6zlihdef4h9o=",
+    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCM20xevli5Jj4pdx3m0lQs7m81ZMY6+b20kIwrtM1hLjbEV9JOW7G2P15zcCEeHwtkqn36BSERbkKVX9tf8aXy7TD+Wh80o70cUhh77r2janngtCGkHNWbag/Q9mvOrIos6f1BQjkMlH77g6O5Fav5ZaOADzKPlyP9EqYc++ZIrGkaoqeJUirFGVVY7OhdF5Zx2g4UUfEv92SxvAB9W6mWVabotoFdEh2qlY0iX8o7uL0vTim63E82E1dxU2QkYH6mtMimn8rU1oNfg3IM5N2ZzIar3U6XwlcQmNkNm7Xjj2Fl95F1r6s4V363b3UrnDeK+qf1EtJMv9bOILDIJgqGDU+OQBEfvA/Y9jfeaC4LxO4JeniRcgJVIH8gyPhmOUJ7/RSp/R+7394KXo1ueKv1DVZKN0V99GLmUUwHjT8Eh6tg+Ma5tOoj81jHrRyJ07qYOC34ERvfTeH6bctKmCA73wsTXTbOVq6lPL9X6w/Disnfu6EBLPFLSiwFEHbNnLk=",
+]
 
 
 def marek_inventory():
-    """marek's SCOPED session set — a SINGLE LOCAL entry: his own tmux group on
-    subdev (the gateway runs as marek, so this is a local attach, never ssh).
-    This — and ONLY this — is what marek's ttyd is launched against, so it is his
-    full connect allowlist: no owner-fleet id and no david id can ever be present.
+    """marek's SCOPED session set (#661 rework, owner ruling 2026-08-25) — five
+    entries, in the owner-defined tab order (WEBTERM_DASHBOARD_TABS["marek"]):
 
-    A ``local`` entry (like the owner's dev1 entry) makes ``build_connect_argv``
-    emit ``sh -c <tmux attach>`` with NO ssh/identity — the strongest possible
-    scoping (no key to compromise, no host to reach)."""
-    return [{
-        "id": MAREK_ID,
-        "label": "marek@subdev",
-        "kind": "stream",
-        "local": True,
-        "host": None,
-        "user": MAREK_GATEWAY_USER,
-        "identity": None,
-        "preferred": MAREK_GATEWAY_USER,   # the local `marek` tmux group
-    }]
+      1. marek-subdev — his own tmux group, a LOCAL attach (the gateway runs as
+         marek; no ssh, no key — unchanged from #612);
+      2. montalu4-subdev — his montalu stream, ssh over loopback with the
+         dedicated key (the david1..4 shape);
+      3./4. dev1/dev2 — his `marek` tmux session group on the owner dev boxes,
+         ssh newlevel@<tailscale IP> with the dedicated key (codex-bridge is
+         the cross-box precedent);
+      5. forestshop — his VPS's principal account admin@forestshop-dev with the
+         dedicated key + the #679 strict host-key pin (the owner `sb` shape).
+
+    This — and ONLY this — is what marek's ttyd is launched against, so it is
+    his full connect allowlist: no other stream's id, no david id, and no other
+    person's account can ever be present. Every ssh entry carries
+    WEBTERM_MAREK_IDENTITY explicitly, so the connect child never takes the
+    sshpass shared-password branch and never touches the gatekeeper key."""
+    return [
+        {
+            "id": MAREK_ID,
+            "label": "marek@subdev",
+            "kind": "stream",
+            "local": True,
+            "host": None,
+            "user": MAREK_GATEWAY_USER,
+            "identity": None,
+            "preferred": MAREK_GATEWAY_USER,   # the local `marek` tmux group
+        },
+        {
+            "id": "montalu4-subdev",
+            "label": "montalu4@subdev",
+            "kind": "stream",
+            "local": False,
+            "host": SUBDEV_LOCAL,
+            "user": "montalu4",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": "montalu4",
+        },
+        {
+            "id": "dev1",
+            "label": "dev1 (marek sessions)",
+            "kind": "stream",
+            "local": False,
+            "host": MAREK_DEV1_HOST,
+            "user": "newlevel",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": MAREK_GATEWAY_USER,   # his session group on dev1
+        },
+        {
+            "id": "dev2",
+            "label": "dev2 (marek sessions)",
+            "kind": "stream",
+            "local": False,
+            "host": MAREK_DEV2_HOST,
+            "user": "newlevel",
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "preferred": MAREK_GATEWAY_USER,   # his session group on dev2
+        },
+        {
+            "id": MAREK_FORESTSHOP_ID,
+            "label": "forestshop (admin@forestshop-dev)",
+            "kind": "stream",
+            "local": False,
+            "host": MAREK_FORESTSHOP_HOST,
+            "user": MAREK_FORESTSHOP_USER,
+            "identity": WEBTERM_MAREK_IDENTITY,
+            "host_keys": MAREK_FORESTSHOP_HOST_KEYS,   # #680 strict pin
+            "preferred": MAREK_GATEWAY_USER,
+        },
+    ]
 
 
 def profile_inventory(profile, fleet_inventory):

@@ -91,10 +91,31 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         for excluded in ZBYNEK_EXCLUDED:
             self.assertNotIn(excluded, got)
 
-    def test_marek_domain_shows_only_marek(self):
-        inv = _owner_inv()
-        got = {e["id"] for e in w.entries_for_tab_list(inv, w.WEBTERM_DASHBOARD_TABS["marek"])}
-        self.assertEqual(got, {"marek-subdev"})
+    def test_marek_domain_resolves_his_lane_inventory_to_exact_order(self):
+        # #661 rework (owner ruling 2026-08-25): marek's set grew from the
+        # rejected single member to marek + montalu4 + his dev1/dev2 sessions +
+        # his forestshop VPS. The policy ids are the MAREK LANE inventory ids
+        # (cli_webterm_profiles.marek_inventory — the inventory his gateway
+        # actually renders with human="marek"), NOT the fleet ids: his `dev1`/
+        # `dev2` entries attach HIS `marek` tmux group, never the owner's.
+        got = [e["id"] for e in w.entries_for_tab_list(
+            profiles.marek_inventory(), w.WEBTERM_DASHBOARD_TABS["marek"])]
+        self.assertEqual(got, ["marek-subdev", "montalu4-subdev", "dev1",
+                               "dev2", "forestshop"])
+        self.assertEqual(w.WEBTERM_DASHBOARD_TABS["marek"], got)
+
+    def test_marek_lane_render_alias_order_and_exclusions(self):
+        # The prod marek-lane render path: his scoped inventory + human="marek".
+        html = w.render_dashboard_html(
+            profiles.marek_inventory(), ttyd_base="/t", human="marek",
+            term_grid=(176, 51))
+        aliases = re.findall(r'<span class="al">([^<]+)</span>', html)
+        self.assertEqual(aliases, ["marek", "m4", "dev1", "dev2", "fs"])
+        # No third person's personal account on Marek's dashboard (the original
+        # #661 sin): stepan@forestshop-dev must never render here.
+        self.assertNotIn("stepan", html)
+        # A lane render never enables the owner-only U-status poll (#677).
+        self.assertIn('"u_status": false', html)
 
     def test_david_domain_shows_only_david_accounts(self):
         inv = _owner_inv()

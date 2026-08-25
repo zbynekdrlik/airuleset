@@ -643,8 +643,16 @@ WEBTERM_DASHBOARD_TABS = {
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
         "david1-subdev", "david2-subdev", "miva1-subdev", "spinbike-vps",
     ],
-    # marek.newlevel.media -- only Marek's own account (owner #661 amendment 1).
-    "marek": ["marek-subdev"],
+    # marek.newlevel.media -- Marek's set (owner #661 rework 2026-08-25): his
+    # own subdev account first (default-active tab), his montalu4 stream, his
+    # `marek` tmux sessions on dev1 + dev2, and his forestshop VPS (handled
+    # like the owner's spinbike `sb` tab). The ids are the MAREK LANE inventory
+    # ids (cli_webterm_profiles.marek_inventory) -- his lane render consumes
+    # this list via LaneSpec.dashboard_human="marek", so it dictates order +
+    # exclusivity there. NB: `dev1`/`dev2` here name MAREK's lane entries
+    # (which attach HIS `marek` tmux group), not the fleet's owner entries --
+    # the two id namespaces meet only in tests, never in a prod render.
+    "marek": ["marek-subdev", "montalu4-subdev", "dev1", "dev2", "forestshop"],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,
     # ids david1..4 + codex-bridge) and does NOT consume this list; this records
@@ -931,8 +939,14 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
     # physically scoped) -> render unfiltered. A TRUTHY human ALWAYS filters to
     # its owner-defined list; an unconfigured one FAILS CLOSED to an empty tab set
     # (`... or []`) rather than leaking the full fleet onto a personal domain --
-    # the exact bug this ticket fixes (#661 review 🔵). Prod only ever passes
-    # "zbynek" or None; this bounds a future mis-wiring to a loud-empty dashboard.
+    # the exact bug this ticket fixes (#661 review 🔵). Prod passes "zbynek"
+    # (owner), "marek" (his lane, LaneSpec.dashboard_human) or None (david).
+    # The fail-closed bound holds for an UNCONFIGURED human; NB it does NOT
+    # bound a mis-wired full-fleet render under human="marek" -- that list
+    # deliberately reuses fleet id spellings (dev1/dev2/montalu4-subdev) for
+    # MAREK-LANE entries, so such a render would show the OWNER's entries under
+    # those ids (see the WEBTERM_DASHBOARD_TABS["marek"] id-namespace note).
+    # No prod path renders the fleet inventory with human="marek".
     if human is None:
         tabs = _tab_sessions(inventory)
     else:

@@ -182,6 +182,42 @@ which auto-load when you read `cli_webterm.py`):
   SimpleNamespace spec — setup_service only reads a handful of spec attrs on the ready
   path); (c) owner + lane render both drop `.ord` (parity, non-vacuous); (d) the
   `u_status` boundary above.
+### #661 rework — extending a per-human LANE SET (Marek: montalu4 + dev1/dev2 sessions + forestshop)
+
+Reusable shape for growing ANY lane's session set (the next "add X to <human>'s dashboard"):
+
+- **The set lives in `cli_webterm_profiles.<human>_inventory()` — a zero-import leaf.** A
+  public-DNS target's #679 host-key pin is DUPLICATED verbatim into the leaf (CODEX_HOST
+  precedent) + tied to `cli_fleet` by a drift-lock test — never an import. `write_artifacts`
+  json-dumps the entries, so `host_keys` rides into the inventory JSON and the connect child
+  takes the strict-pin branch (#680) with no code change.
+- **Every ssh entry MUST carry an explicit `identity`** — `identity=None` on a non-local entry
+  makes `_ssh_interactive_prefix` take the `sshpass -p newlevel` fleet-shared-password branch
+  FROM THE LANE GATEWAY (a cross-tenant leak). PROBE the lane account's existing keys first
+  (read-only ssh, one attempt); no existing access ⇒ a NEW dedicated `WEBTERM_<HUMAN>_IDENTITY`
+  (the david shape), never the gatekeeper key. Key+authorized_keys distribution = go-live
+  owner-action; for a target that is an OWNER account (newlevel@dev1/dev2) the go-live must
+  RECOMMEND a forced-command `restrict,command="tmux ..."` entry and the SECURITY NOTE must
+  name the transitive reach honestly (an unrestricted key there is a full owner shell).
+- **Do NOT grow the prereq gate a new key requirement for a LIVE lane** (`identity_key` stays
+  None): gating would no-op `write_artifacts` re-renders until the key lands — a #684 parity
+  regression. The ssh tabs degrade to a VISIBLE ssh failure instead.
+- **Tab order/exclusivity for a lane = `LaneSpec.dashboard_human` → the lane render consumes
+  `WEBTERM_DASHBOARD_TABS[human]`** (write_artifacts omits the `human` kwarg entirely when the
+  field is None — david stays unfiltered, its scoped ids differ from the policy dict's fleet
+  ids; the #684 `assertNotIn("human", kwargs)` lock stays green via getattr+conditional).
+  Marek's policy ids are LANE-namespace: `dev1`/`dev2` deliberately reuse the fleet id
+  spellings (load-bearing — they buy the right aliases from the single #592 source) but name
+  MAREK's entries (preferred=`marek` group); the two namespaces meet only in tests.
+- **"Marek's tmux sessions on box X" = an entry with `preferred="marek"`** — `_ATTACH_BODY`
+  resolves exact-name → session_group → single-session → create, i.e. the SAME owner-group
+  (zbynek/marek) session mechanism notify/statusbar use. Never a hardcoded session list.
+- **Forestshop verdict (verified, not guessed):** the fleet's ONE forestshop box is
+  `forestshop-dev.newlevel.media`; Marek's tab connects as `admin` (the principal
+  forestshop-app account; notify #572 routes the whole box to marek's realm), NEVER `stepan`
+  (StepanDK's own isolated personal account — a third person's account on someone's dashboard
+  is the original #661 sin). Box-keyed alias `fs` (like spinbike `sb`) at `cli_aliases`.
+
 ### #686 webterm U-dot — a per-box AGGREGATION over tickets-status caches must FRESHNESS-filter, or a dead session's frozen U inflates it forever
 
 The #677 U-dot collector (`cli_webterm.py` `_box_u_count` local + the inline

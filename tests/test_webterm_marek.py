@@ -2,13 +2,16 @@
 per-developer webterm profile (marek.newlevel.media), on the same subdev box as
 david.
 
-The SECURITY-CRITICAL boundary this pins (the ticket's hard requirement):
-  * marek's connect allowlist is PHYSICALLY his ONE-member set {marek-subdev} —
-    his ttyd cannot resolve ANY owner-fleet id (dev1/gk/montalu…) NOR any DAVID
-    id (david1..4/codex-bridge) → refused, never execed (the negative test);
-  * marek's session set is a single LOCAL attach (no ssh, no key) — a strictly
-    smaller reachability than david's, so even a gateway compromise reaches no
-    other box/account;
+The SECURITY-CRITICAL boundary this pins (#661 rework, owner ruling 2026-08-25 —
+the old "single local attach" set was owner-REJECTED as incomplete):
+  * marek's connect allowlist is PHYSICALLY his FIVE-member set {marek-subdev,
+    montalu4-subdev, dev1, dev2, forestshop} — his ttyd cannot resolve any
+    OTHER fleet id (gk/montalu1-3,5-8/miva/simap/stepan/admin-forestshop-dev)
+    NOR any DAVID id (david1..4/codex-bridge) → refused, never execed;
+  * every ssh member uses the DEDICATED WEBTERM_MAREK_IDENTITY key (never the
+    fleet gatekeeper key, never the sshpass shared-password branch) — the
+    WEBTERM_DAVID_IDENTITY precedent; marek-subdev itself stays a keyless
+    LOCAL attach;
   * a per-hostname Cloudflare Access realm (marek email only, deny-by-default);
   * the owner AND david profiles are byte-identical (marek is purely additive);
   * account-aware provisioning dispatch (marek@subdev -> marek, david1 -> david).
@@ -79,21 +82,88 @@ class TestProfileForHostAccountAware(unittest.TestCase):
 
 
 class TestMarekInventory(unittest.TestCase):
-    def test_exactly_one_local_member(self):
+    # #661 rework (owner ruling 2026-08-25): the old single-member lock
+    # (`test_exactly_one_local_member`) asserted the set the owner REJECTED as
+    # incomplete — a requirement change, not a weakening: the new locks pin the
+    # owner-defined FIVE-member set instead.
+    def test_five_member_set_in_owner_order(self):
         inv = p.marek_inventory()
-        self.assertEqual([e["id"] for e in inv], ["marek-subdev"])
+        self.assertEqual([e["id"] for e in inv],
+                         ["marek-subdev", "montalu4-subdev", "dev1", "dev2",
+                          "forestshop"])
 
     def test_marek_entry_is_a_local_attach_with_no_ssh(self):
-        # The isolation the ticket demands: marek's gateway attaches his LOCAL
-        # tmux (it runs AS marek on subdev) — NO ssh, NO key. So the connect
-        # child has zero ssh capability; it can reach nothing but the local
-        # marek session.
-        e = p.marek_inventory()[0]
+        # marek's own primary session stays what it was: the gateway runs AS
+        # marek on subdev and attaches his LOCAL tmux — no ssh, no key.
+        e = next(x for x in p.marek_inventory() if x["id"] == "marek-subdev")
         self.assertTrue(e["local"])
         self.assertIsNone(e["host"])
         self.assertIsNone(e["identity"])
         self.assertEqual(e["preferred"], "marek")
         self.assertEqual(e["user"], "marek")
+
+    def test_montalu4_entry_is_loopback_ssh_with_dedicated_key(self):
+        # His montalu stream — a local subdev unix account reached over loopback
+        # with the dedicated key (the david1-4 shape).
+        e = next(x for x in p.marek_inventory() if x["id"] == "montalu4-subdev")
+        self.assertFalse(e["local"])
+        self.assertEqual(e["host"], "127.0.0.1")
+        self.assertEqual(e["user"], "montalu4")
+        self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
+        self.assertEqual(e["preferred"], "montalu4")
+
+    def test_dev1_and_dev2_entries_attach_the_marek_tmux_group(self):
+        # marek-owned tmux sessions on the owner dev boxes: ssh newlevel@<box
+        # tailscale IP> (subdev is on the tailnet), preferred tmux group
+        # `marek` — the SAME owner-group mechanism (notify/statusbar session
+        # grouping) the owner's own tabs use with `zbynek`, never a hardcoded
+        # session list.
+        inv = {x["id"]: x for x in p.marek_inventory()}
+        d1, d2 = inv["dev1"], inv["dev2"]
+        self.assertEqual(d1["host"], "100.104.8.125")   # dev1 tailscale IP
+        self.assertEqual(d2["host"], "100.82.64.27")    # dev2 tailscale IP
+        for e in (d1, d2):
+            self.assertFalse(e["local"])
+            self.assertEqual(e["user"], "newlevel")
+            self.assertEqual(e["preferred"], "marek")
+            self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
+
+    def test_forestshop_entry_is_admin_on_the_pinned_public_box(self):
+        # Marek's forestshop VPS, handled like the owner's spinbike `sb` tab:
+        # the box's PRINCIPAL account (`admin` — the forestshop-app deploy
+        # account; #572 routes the box to marek's realm), NEVER `stepan`
+        # (StepanDK's own isolated personal account — putting a third person's
+        # account on Marek's dashboard would repeat the original #661 sin).
+        e = next(x for x in p.marek_inventory() if x["id"] == "forestshop")
+        self.assertFalse(e["local"])
+        self.assertEqual(e["host"], "forestshop-dev.newlevel.media")
+        self.assertEqual(e["user"], "admin")
+        self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY)
+        self.assertEqual(e["preferred"], "marek")
+
+    def test_forestshop_host_keys_match_the_fleet_pin(self):
+        # #679/#680: a public-DNS target is verified STRICTLY against the
+        # committed pin. The profiles leaf duplicates the literals (leaf
+        # discipline: no airuleset/fleet import on the connect path) — this
+        # drift-lock ties them to the ONE fleet source.
+        import cli_fleet
+        fleet_e = next(h for h in cli_fleet.REMOTE_HOSTS
+                       if h["name"] == "admin@forestshop-dev")
+        e = next(x for x in p.marek_inventory() if x["id"] == "forestshop")
+        self.assertEqual(e["host"], fleet_e["host"])
+        self.assertEqual(e["user"], fleet_e["user"])
+        self.assertEqual(list(e["host_keys"]), list(fleet_e["host_keys"]))
+
+    def test_every_ssh_entry_uses_the_dedicated_marek_identity(self):
+        # NEVER identity=None on an ssh entry (that would take the sshpass
+        # shared-password branch from marek's gateway) and NEVER the fleet
+        # gatekeeper key (cross-stream escalation).
+        self.assertNotIn("gatekeeper", p.WEBTERM_MAREK_IDENTITY)
+        for e in p.marek_inventory():
+            if e.get("local"):
+                continue
+            self.assertEqual(e["identity"], p.WEBTERM_MAREK_IDENTITY,
+                             "ssh entry %r must use the dedicated key" % e["id"])
 
     def test_profile_inventory_and_webterm_inventory_agree(self):
         fleet = _fleet_inventory()
@@ -104,8 +174,10 @@ class TestMarekInventory(unittest.TestCase):
 
 class TestMarekConnectAllowlistScoped(unittest.TestCase):
     """The heart of the boundary: marek's ttyd child reads marek's inventory,
-    so connect_main can ONLY resolve marek-subdev — never an owner-fleet OR a
-    david id."""
+    so connect_main can ONLY resolve his own five-member set — never another
+    stream's, another person's, or a david id. (#661 rework 2026-08-25: dev1/
+    dev2 moved OUT of the foreign list — the owner explicitly granted marek his
+    own dev1/dev2 session tabs, so those ids are now HIS lane entries.)"""
 
     def _marek_inv_file(self):
         d = tempfile.mkdtemp()
@@ -113,9 +185,12 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         f.write_text(json.dumps(p.marek_inventory()), encoding="utf-8")
         return f
 
-    def test_owner_and_david_ids_are_refused_against_marek_inventory(self):
+    def test_foreign_ids_are_refused_against_marek_inventory(self):
         f = self._marek_inv_file()
-        for foreign in ("dev1", "dev2", "gatekeeper", "gk", "montalu-subdev",
+        for foreign in ("gatekeeper", "gk", "montalu-subdev", "montalu3-subdev",
+                        "montalu5-subdev", "miva1-subdev", "simap1-subdev",
+                        "spinbike-vps", "stepan-forestshop-dev",
+                        "admin-forestshop-dev",
                         "david1", "david2", "david3", "david4", "codex-bridge"):
             with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
                     m.patch.object(w.os, "execvp",
@@ -137,12 +212,40 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         self.assertNotIn("ssh", argv)
         self.assertIn("marek", " ".join(argv))
 
-    def test_marek_allowed_ids_contain_no_owner_or_david_id(self):
+    def test_dev1_id_execs_ssh_with_dedicated_key_to_marek_group(self):
+        f = self._marek_inv_file()
+        with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
+                m.patch.object(w.os, "execvp") as ex:
+            w.connect_main(["dev1"])
+        ex.assert_called_once()
+        argv = ex.call_args[0][1]
+        self.assertEqual(argv[0], "ssh")
+        self.assertIn("-i", argv)
+        self.assertIn(os.path.expanduser(p.WEBTERM_MAREK_IDENTITY), argv)
+        self.assertIn("newlevel@100.104.8.125", argv)
+        self.assertNotIn("sshpass", argv)          # never the shared password
+        self.assertIn("P=marek; ", " ".join(argv))  # his tmux group, not zbynek
+
+    def test_forestshop_id_execs_ssh_as_admin_with_dedicated_key(self):
+        f = self._marek_inv_file()
+        with m.patch.dict(os.environ, {"WEBTERM_INVENTORY": str(f)}), \
+                m.patch.object(w.os, "execvp") as ex:
+            w.connect_main(["forestshop"])
+        ex.assert_called_once()
+        argv = ex.call_args[0][1]
+        self.assertEqual(argv[0], "ssh")
+        self.assertIn("admin@forestshop-dev.newlevel.media", argv)
+        self.assertIn(os.path.expanduser(p.WEBTERM_MAREK_IDENTITY), argv)
+        self.assertNotIn("sshpass", argv)
+
+    def test_marek_allowed_ids_are_exactly_his_five(self):
         fleet = _fleet_inventory()
         marek_ids = p.allowed_ids(p.MAREK, fleet)
-        self.assertEqual(marek_ids, {"marek-subdev"})
-        for foreign in ("dev1", "dev2", "gatekeeper", "montalu-subdev",
-                        "david1", "codex-bridge"):
+        self.assertEqual(marek_ids, {"marek-subdev", "montalu4-subdev", "dev1",
+                                     "dev2", "forestshop"})
+        for foreign in ("gatekeeper", "montalu-subdev", "david1",
+                        "codex-bridge", "stepan-forestshop-dev",
+                        "admin-forestshop-dev"):
             self.assertNotIn(foreign, marek_ids)
 
 
@@ -285,7 +388,10 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             mk._write_marek_artifacts()
             inv = json.loads((claude / "webterm-marek-inventory.json")
                              .read_text(encoding="utf-8"))
-            self.assertEqual([e["id"] for e in inv], ["marek-subdev"])
+            # #661 rework: the written connect allowlist is the five-member set.
+            self.assertEqual([e["id"] for e in inv],
+                             ["marek-subdev", "montalu4-subdev", "dev1", "dev2",
+                              "forestshop"])
             launcher = (claude / "airuleset-webterm-marek-ttyd.sh").read_text(
                 encoding="utf-8")
             self.assertIn("export WEBTERM_INVENTORY=", launcher)
@@ -314,6 +420,22 @@ class TestMarekArtifactsWrite(unittest.TestCase):
         flat = [" ".join(c) for c in calls]
         self.assertTrue(any("enable --now webterm-marek-gateway.service" in f
                             for f in flat))
+
+
+class TestMarekLaneDashboardHuman(unittest.TestCase):
+    """#661 rework: the marek lane render CONSUMES the declarative per-domain
+    tab policy (LaneSpec.dashboard_human="marek" -> render_dashboard_html
+    human="marek"), so WEBTERM_DASHBOARD_TABS['marek'] dictates tab order +
+    exclusivity. The david lane keeps dashboard_human=None (its scoped
+    inventory ids differ from the policy dict's fleet ids), so its render
+    stays unfiltered — the #684 lock."""
+
+    def test_marek_spec_declares_dashboard_human(self):
+        self.assertEqual(mk._spec().dashboard_human, "marek")
+
+    def test_david_spec_keeps_dashboard_human_none(self):
+        import cli_webterm_david as d
+        self.assertIsNone(d._spec().dashboard_human)
 
 
 class TestMarekDispatch(unittest.TestCase):
