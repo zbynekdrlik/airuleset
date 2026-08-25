@@ -108,3 +108,51 @@ which auto-load when you read `cli_webterm.py`):
   `grep -c 657 internals-tests.md` (0 hits) + `git log -S "<phrase>"` settled it. A
   citation inherited from ticket text is itself the "unverified doc claim" class this
   ticket fixes.
+
+## #661 rework + #684 parity — badge reversal + lane-dashboard regeneration (2026-08-25)
+
+- **#661 REVERSED its own #582 decision** (owner acceptance ruling): the `.ord`
+  ordinal badge (the visible Ctrl+Alt+1..9 map added by #582) was owner-vetoed — "adds
+  no needed info, eats space" — so it is REMOVED (the `<span class="ord">` in
+  `_tab_button` + the `.tab .ord` / `.tab.active .ord` CSS). The Ctrl+Alt+1..9
+  SHORTCUT itself stays fully functional (`onHotkey`, `e.key >= '1'`) — it never
+  depended on the badge; only the visible digit went. The green `▸ .ico` separator
+  STAYS (owner values its tab-separating role). Reusable shape: a KEEP-the-mechanism /
+  DROP-the-decoration reversal — the RED test asserts the rendered dashboard contains
+  NO `class="ord"` at any tab count, and a sibling test locks that `.ico` survives, so
+  "requirement change, not test-weakening" is provable.
+- **#684 finding: the lane-dashboard REGENERATION is ALREADY on the deploy path — do
+  NOT add a redundant re-render step.** Full chain (verify empirically, never assume):
+  `push` (cli_remote._deploy_to_all_remotes) deploys to `david1@subdev` AND
+  `marek@subdev` (both in `cli_fleet.REMOTE_HOSTS`) → `git pull && python3 airuleset.py
+  install` under each account → `cmd_install` → `maybe_setup_webterm()` → dispatch by
+  profile/account → `cli_webterm_lane.setup_service()` → `write_artifacts()`
+  REGENERATES `dash_index` from the LIVE `render_dashboard_html()` (human=None,
+  physically-scoped inventory) → daemon-reload → restart ttyd+gateway. The gateway
+  ALSO serves `dash_index` by reading the file per request
+  (`cli_webterm_gateway.py:558`), so a fresh `write_artifacts` alone serves current
+  HTML even before the restart. So the shared render is the parity mechanism: any owner
+  render change reaches david/marek on the next push, automatically.
+- **How to PROVE lane parity without touching live subdev units (worktree-safe).** (1)
+  LIVE READ (one ssh, read-only, key `~/.secrets/gatekeeper_access_ed25519`, NEVER retry
+  — subdev fail2ban): `grep -c 'class="ord"'` the live `~/.claude/webterm-<lane>-dash/
+  index.html` — before #661 both lanes carried `.ord` (david 5, marek 1), proving the
+  path already propagates owner-render changes. (2) LOCAL DRY-RUN: run the REAL
+  `_write_<lane>_artifacts()` with the lane path constants patched into a tmp dir (the
+  `test_webterm_david.py::_isolate` pattern) and read back the generated index.html
+  (post-#661: 0× `class="ord"`, 5× `.ico`, `.tab` padding `6px 12px 6px 16px`,
+  `"u_status": false`). (3) The live-service restart + unix-socket curl smoke is the
+  SUPERVISOR's post-merge job, not a worktree action.
+- **Parity is VISUAL/UX ONLY — the security boundary is `u_status` (#677).** A lane
+  render (`human=None` / `"marek"`) has `"u_status": false` in its embedded cfg; only
+  `human == WEBTERM_LOGIN_USER` ("zbynek") gets `true`. So a lane gateway NEVER polls
+  `/u-status` and NEVER spawns the cross-tenant `--u-collect` ssh collector under a
+  sub-dev account. Lock it in the parity test; a parity change must never flip it.
+- **The regression lock (`tests/test_webterm_lane_parity_684.py`) is the deliverable,
+  not new code**: (a) `write_artifacts` writes `dash_index` from the LIVE render (patch
+  `render_dashboard_html` to a sentinel → written file == sentinel, so a future
+  cached/hardcoded blob fails); (b) `setup_service` re-renders BEFORE it restarts the
+  units (order locked via the `run`/`_run_systemctl`/`write_artifacts_fn` seams + a
+  SimpleNamespace spec — setup_service only reads a handful of spec attrs on the ready
+  path); (c) owner + lane render both drop `.ord` (parity, non-vacuous); (d) the
+  `u_status` boundary above.
