@@ -267,3 +267,32 @@ miva1, montalu1–8, marek@subdev, dev1: sessions untouched, attached larger cli
 just gain the cosmetic dark margin the owner decreed. Acceptance read-back:
 `tmux capture-pane -p -t <sess:win> | tail -6` shows the CC statusline inside the
 50-row window.
+
+### #700 webterm — exact viewport fill: the integer-cell residual is killed at the IFRAME boundary, never inside the xterm document
+
+The #678 native fill (integer px/cell `letterSpacing`/`lineHeight`) quantizes the
+WHOLE grid in steps of `cols`/`rows` px per axis (176 px horizontally!), so up to
+~176+~102 px of centered letterbox remained BY DESIGN — the owner's #700 report:
+side margins + an "empty row" under the status bar. Three reusable lessons:
+
+- **The "dead row" was a MISDIAGNOSIS — do the screenshot row-math before touching
+  geometry.** Client grid (176x51) = window (176x50, `TMUX_DEFAULT_SIZE`) + 1
+  status row; the status bar OCCUPIES grid row 51 (measure: first-row top + N×cell
+  height against the bar's position; mind DPR — a 2879-px-wide PWA screenshot at
+  Windows 150% is a 1920-CSS-px viewport, all JS math is CSS px). Forcing all
+  sources to ONE literal would crop: window 176x51 → the owner's own 176x51 WT
+  client loses the last row (#613 class); browser grid 176x50 → CC footer crop
+  (#672). Lock: `TestGeometryCanonDecision700`.
+- **The ONE mouse-safe place for an EXACT fill is a transform on the IFRAME in the
+  PARENT document** (`stretchFrameToFill`, capped `WT_FRAME_FILL_MAX_STRETCH`
+  1.25/axis, `#frames{overflow:hidden}` clips the spill). A SAME-document ancestor
+  transform of the xterm screen is the #678 mouse regression (getBoundingClientRect
+  scales, cssCellHeight doesn't); a PARENT-document transform never enters the
+  child's coordinate space — child rect AND pointer clientX/Y stay in child layout
+  px (the browser inverse-maps events through ancestor transforms), and
+  `win.innerWidth/innerHeight` stay layout-sized → no feedback loop, and a
+  parent-side style change cannot re-fire the child ResizeObserver.
+- **Harness gotcha:** extracted dashboard functions reference top-level consts —
+  every shipping cap needs a matching `const` in `_FIT_HARNESS` PLUS a caps-match
+  source lock (the #655 pattern), or the node run dies on ReferenceError only
+  AFTER the source lands (a RED test can't see it).
