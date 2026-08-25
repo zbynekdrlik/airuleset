@@ -79,10 +79,10 @@ class TestLaneRegeneratesFromLiveRender(unittest.TestCase):
             written = (base / "dash" / "index.html").read_text(encoding="utf-8")
             self.assertEqual(written, sentinel)          # regenerated from live render
             rd.assert_called_once()                       # exactly one live render call
-            # The lane render is UNFILTERED (physically-scoped inventory) — human is
-            # never forced to a domain filter here (that is the owner-gateway path).
+            # The lane render is UNFILTERED — the lane write omits `human`
+            # ENTIRELY (default None), never a domain filter (owner-gateway path).
             _args, kwargs = rd.call_args
-            self.assertIsNone(kwargs.get("human"))
+            self.assertNotIn("human", kwargs)
 
 
 class TestSetupServiceRegeneratesBeforeRestart(unittest.TestCase):
