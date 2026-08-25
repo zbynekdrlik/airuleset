@@ -41,7 +41,7 @@
     "close_trigger.py": 477,
     "design_gate.py": 892,
     "discuss_close_guard.py": 180,
-    "discuss_thread_guard.py": 671,
+    "discuss_thread_guard.py": 785,
     "filedrop/__init__.py": 281,
     "filedrop/server.py": 193,
     "filedrop/share.py": 103,
