@@ -353,7 +353,17 @@ if [ -z "$VIOLATION" ]; then
     #       discriminator THREAD_NAMED_RX already uses) and a ticket-ref
     #       `Vlákno: pozri ticket #650` still blocks (the [^#] exclusion).
     THREAD_DEEPURL_RX='discuss\.channel_[0-9]+'
-    THREAD_VLAKNO_RX='^[[:space:]]*\**[[:space:]]*vl[áa]kno[[:space:]]*:[^#]{0,60}[0-9]'
+    #       Reviewer 🔵-1: `\**` also admitted around the colon so the bold
+    #       markdown variants (`**Vlákno:**`, `**Vlákno**:`) pass too.
+    #       Reviewer 🔵-2/-3 residuals (probed, accepted — same word-family
+    #       class as the list above): an INCIDENTAL digit in a generic label
+    #       ("Vlákno: výrobné vlákno (odpoviem do 2 dní)") satisfies the digit
+    #       discriminator — identical weakness to THREAD_NAMED_RX's „…do 2
+    #       dní"; and evidence is PRESENCE-checked, not bound to the TARGET
+    #       thread (a different thread's deep URL elsewhere in the block
+    #       satisfies) — semantic binding is beyond a word-family heuristic,
+    #       and the quoted-name form always shared this property.
+    THREAD_VLAKNO_RX='^[[:space:]]*\**[[:space:]]*vl[áa]kno[[:space:]]*\**[[:space:]]*:[^#]{0,60}[0-9]'
     intent=""
     if LC_ALL=C.UTF-8 grep -qiE "$CLOSING_RX" <<<"$BLOCK"; then
         intent=1

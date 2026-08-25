@@ -346,6 +346,19 @@ TICKET_REF_DODGE = (
 )
 
 
+# Reviewer 🔵-1: the bold markdown variant of the label (asterisks around the
+# word, colon outside the bold) is a natural phrasing and must PASS too.
+VLAKNO_BOLD = VLAKNO_UNQUOTED.replace(
+    "Vlákno: Tabula objednavok 1", "**Vlákno**: Tabula objednavok 1")
+
+# Reviewer 🔵-4 (#606 lesson — a window constant is untested without a
+# boundary fixture): a digit only appearing PAST the 60-non-#-char window of
+# the `Vlákno:` value is not stream-number evidence — must keep BLOCKING.
+VLAKNO_DIGIT_PAST_WINDOW = VLAKNO_UNQUOTED.replace(
+    "Vlákno: Tabula objednavok 1 (pod IT-support, montalu PROD)",
+    "Vlákno: " + "x" * 61 + "9")
+
+
 class TestEvidenceFormsAlignedWith657(_HookCase):
     """#697: the deep URL and the digit-bearing `Vlákno:` line are satisfying
     evidence; a digit-less or ticket-ref label still is not."""
@@ -365,6 +378,23 @@ class TestEvidenceFormsAlignedWith657(_HookCase):
             self._blocked(r),
             "a client-posting question with an unquoted 'Vlákno: <name> <N>' "
             "line was wrongly blocked: %s" % self._reason(r))
+
+    def test_bold_vlakno_variant_passes(self):
+        r = self._run(VLAKNO_BOLD)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(
+            self._blocked(r),
+            "the bold '**Vlákno**: <name> <N>' markdown variant was wrongly "
+            "blocked: %s" % self._reason(r))
+
+    def test_digit_past_60_char_window_still_blocks(self):
+        r = self._run(VLAKNO_DIGIT_PAST_WINDOW)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(
+            self._blocked(r),
+            "a Vlákno: value whose only digit sits past the 60-char window "
+            "defeated the check: %s" % r.stdout)
+        self.assertIn("Vlákno", self._reason(r))
 
     def test_ticket_ref_digits_do_not_satisfy(self):
         r = self._run(TICKET_REF_DODGE)

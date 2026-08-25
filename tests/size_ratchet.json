@@ -234,7 +234,7 @@
     "tests/test_quality_bypass_gate.py": 181,
     "tests/test_question_footer_e2e.py": 199,
     "tests/test_question_gate_pipeline_race.py": 556,
-    "tests/test_question_gate_thread_name.py": 405,
+    "tests/test_question_gate_thread_name.py": 435,
     "tests/test_question_policy.py": 193,
     "tests/test_question_prune.py": 678,
     "tests/test_release_gap.py": 817,
