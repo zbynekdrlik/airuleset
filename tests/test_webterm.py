@@ -1437,9 +1437,9 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         # INTEGER-px per cell (xterm quantizes), so each floors to the largest cell
         # that fits, REDUCING the letterbox (fills the tight axis fully + shrinks the
         # loose-axis margin) without ELIMINATING it -- a small residual letterbox
-        # (up to ~one cell per axis) remains rather than the mouse-breaking exact
-        # transform (#678: a working mouse outranks a pixel-exact fill). It NEVER
-        # overflows (no clipped bottom row) and NEVER CSS-scales the terminal.
+        # (up to ~one cell per axis) remains in CHILD coords (#700 then removes it
+        # at the IFRAME boundary; #678: a working mouse outranks any SAME-document
+        # exact transform). It NEVER overflows and NEVER CSS-scales the terminal.
         # (Fill % is measured against the harness's modelled INTEGER cell — the real
         # ratio depends on the true cell aspect; the load-bearing invariants are
         # no-overflow + no-transform, verified live for mouse correctness.)

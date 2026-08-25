@@ -291,7 +291,17 @@ side margins + an "empty row" under the status bar. Three reusable lessons:
   child's coordinate space — child rect AND pointer clientX/Y stay in child layout
   px (the browser inverse-maps events through ancestor transforms), and
   `win.innerWidth/innerHeight` stay layout-sized → no feedback loop, and a
-  parent-side style change cannot re-fire the child ResizeObserver.
+  parent-side style change cannot re-fire the child ResizeObserver. Proven LIVE
+  (2026-08-25, review 🟡 fix): real ttyd 1.7.4 + headless Chromium + REAL
+  `page.mouse` input through a parent-scaled iframe — 9/9 drags at scale
+  1.15x1.22 and at the 1.25 cap selected exactly the pointed row's text (rows
+  6/26/42 of 52; the #678 proof method re-run for the cross-document variant).
+  Rig gotcha: the fleet conf sets `mouse on`, under which xterm does NO local
+  selection (drags go to tmux copy-mode and `term.getSelection()` stays empty
+  even untransformed) — set `mouse off` on the sandbox tmux server to exercise
+  xterm's own pixel→cell mapping, and drag INTERIOR cells (a rig xterm fills
+  the whole iframe, so an arbitrary test scale clips the outer cell band —
+  unlike the real page, whose scale is exactly the letterbox residual).
 - **Harness gotcha:** extracted dashboard functions reference top-level consts —
   every shipping cap needs a matching `const` in `_FIT_HARNESS` PLUS a caps-match
   source lock (the #655 pattern), or the node run dies on ReferenceError only

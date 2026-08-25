@@ -49,11 +49,14 @@ class TestGeometryCanonDecision700(unittest.TestCase):
         dw, dh = (int(x) for x in prov.TMUX_DEFAULT_SIZE.split("x"))
         self.assertEqual((cols, rows), (dw, dh + w.WEBTERM_STATUS_ROWS))
         self.assertEqual((cols, rows), (176, 51))
-        # the #685 live-convergence helper targets the SAME constant object —
-        # its default_size can never drift from the conf pin.
-        sig = inspect.signature(prov.converge_tmux_window_geometry)
-        self.assertIs(sig.parameters["default_size"].default,
-                      prov.TMUX_DEFAULT_SIZE)
+        # DERIVATION lock (review 🔵: an `assertIs` on an interned "176x50"
+        # literal is value-level theater) — the #685 converge helper's default
+        # and the browser grid must literally SPELL the shared constant's name
+        # in source, so a copy-pasted literal cannot satisfy this.
+        src = inspect.getsource(prov.converge_tmux_window_geometry)
+        self.assertIn("default_size=TMUX_DEFAULT_SIZE", src)
+        self.assertIn("TMUX_DEFAULT_SIZE",
+                      inspect.getsource(w._webterm_term_grid))
 
 
 class TestViewportExactFill700(unittest.TestCase):
@@ -102,6 +105,44 @@ class TestViewportExactFill700(unittest.TestCase):
             # the child screen is NEVER transformed (#678 mouse hit-test)
             self.assertEqual(out["scaleX"], 1, "%s: child screen untouched" % tag)
             self.assertEqual(out["scaleY"], 1, "%s: child screen untouched" % tag)
+            # LAYERING HONESTY (review 🟡): layer 3 may only absorb a SUB-CELL
+            # residual — a dead layer-2 letterSpacing (grid short a whole cell
+            # quantum, >=176px) must FAIL here, never be silently blurred over.
+            self.assertLess(out["availW"] - out["gridW"], 176,
+                            "%s: stretch absorbing >= one cell-quantum — "
+                            "the native fill's horizontal arm is dead" % tag)
+
+    def test_fill_horizontal_arm_stays_alive_under_the_stretch(self):
+        # review 🟡: every other behavioural viewport legitimately lands
+        # letterSpacing 0, so a mutant killing the horizontal native fill was
+        # invisible pre-#700 fixes (the stretch would mask it as extra blur).
+        # At (2100, 1076) the model REQUIRES ls=1 (fit F=17, natural gridW
+        # 1760, residual 340 -> floor(340/176)=1 -> gridW 1936, residual 164).
+        if shutil.which("node") is None:
+            self.skipTest("node not available")
+        html = w.render_dashboard_html(_inv(), ttyd_base="/t")
+        out = _run_fit_harness(html, 2100, 1076)
+        self.assertEqual(out["letterSpacing"], 1,
+                         "native fill must take the whole-cell step; the "
+                         "stretch is only for the sub-cell residual")
+        self.assertLess(out["availW"] - out["gridW"], 176)
+        self.assertAlmostEqual(out["gridW"] * out["frameScaleX"], out["availW"],
+                               delta=1.5)
+
+    def test_stretch_never_shrinks_on_the_one_px_overflow_axis(self):
+        # review 🔵: fit tolerates a 1px grid overflow (grid <= avail+1), so
+        # the raw ratio can dip just below 1 — the Math.max(1, ...) clamp must
+        # hold it at EXACTLY 1 (a sub-1 scale would shrink the grid). At
+        # (1759, 1100) the model lands gridW 1760 = availW+1 (width axis) and
+        # a genuine vertical stretch, so the clamp is exercised non-vacuously.
+        if shutil.which("node") is None:
+            self.skipTest("node not available")
+        html = w.render_dashboard_html(_inv(), ttyd_base="/t")
+        out = _run_fit_harness(html, 1759, 1100)
+        self.assertGreater(out["frameScaleY"], 1)     # transform genuinely set
+        self.assertEqual(out["frameScaleX"], 1,
+                         "the never-shrink clamp must pin the 1px-overflow "
+                         "axis at exactly 1, not 0.999x")
 
     def test_stretch_capped_on_extreme_viewport_degrades_to_letterbox(self):
         # an absurd viewport must clamp at the cap (bounded distortion) and

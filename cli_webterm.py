@@ -1346,7 +1346,9 @@ function fitFixedGrid(win) {
 // (letterSpacing) and the cell HEIGHT (lineHeight) to INTEGER px/cell, so BOTH axes
 // fill COARSELY -- each floors to the largest integer cell that fits, leaving a
 // small residual letterbox (up to ~one cell per axis, <~5-9%) rather than
-// overflowing/clipping; per #678 a WORKING MOUSE outranks a pixel-exact fill (owner:
+// overflowing/clipping -- #700's stretchFrameToFill (below) then removes that
+// residual at the IFRAME boundary; per #678 a WORKING MOUSE outranks a
+// same-document pixel-exact fill (owner:
 // "funkčný select má prednosť"). #655 chose a CSS transform for exact fill precisely
 // because letterSpacing/lineHeight quantize -- #678 reverses that trade for mouse
 // correctness. Bounded (WT_FILL_MAX_*) so an extreme viewport letterboxes the
