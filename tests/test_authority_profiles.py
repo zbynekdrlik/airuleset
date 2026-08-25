@@ -262,7 +262,7 @@ class TestForkNoMergeHandoffCard(TestCase):
 
     def test_cmd_notify_passes_handoff_through(self):
         import unittest.mock as mk
-        args = mk.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+        args = mk.Mock(run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                        record_question=False, edit_question=False, channel_id=False,
@@ -589,7 +589,7 @@ class TestRunCardRemainingScopedToStream(TestCase):
 
     def _args(self, **over):
         import unittest.mock as mk
-        base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
+        base = dict(run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                     record_question=False, edit_question=False, channel_id=False,
@@ -1418,7 +1418,7 @@ class TestRunCardHeartbeatSurvivesStreamCards(TestCase):
 
     def _args(self, **over):
         import unittest.mock as mk
-        base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
+        base = dict(run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
                     repo_name=False, newest_card=False,
                     backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                     record_question=False, edit_question=False, channel_id=False,
@@ -3032,7 +3032,7 @@ class TestRunCardResolvesIdentityAgainstTheRepoRoot(TestCase):
 
     def _args(self, **over):
         import unittest.mock as mk
-        base = dict(run_card=True, autopilot_done=False, mention_prefix=False,
+        base = dict(run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
                     repo_name=False, newest_card=False, backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                     record_question=False, edit_question=False,
                     channel_id=False, owner=False, mirror_owners=False,

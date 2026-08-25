@@ -1165,6 +1165,14 @@ def cmd_push(args):
         # rule as the two env-overrides above.
         test_env["AIRULESET_SESSION_STATUS_DIR"] = str(
             Path(_lock_tmp) / "session-status")
+        # #687 (dual-coverage): notify.content_dedup_claim's shared ✅ dedup
+        # store defaults to the system tempdir; point the discover-gate run at a
+        # per-run dir so it never touches the real /tmp store. NOTE this is a
+        # per-RUN floor only — the store's key is deliberately shared for an
+        # identical payload, so colliding TestCase files ALSO isolate it
+        # per-test in their own setUp (conftest.py covers the pytest path).
+        test_env["AIRULESET_CONTENT_DEDUP_DIR"] = str(
+            Path(_lock_tmp) / "content-dedup")
         # #548 CORE (dual-coverage): conftest.py's session-scoped tempfile
         # redirect is pytest-only and is NEVER read by `unittest discover`, so
         # this is the single place the push gate's own ~459 raw

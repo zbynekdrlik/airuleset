@@ -1762,6 +1762,23 @@ def cmd_notify(args):
         sys.stdout.write(mention_prefix())
         return
 
+    if getattr(args, "content_dedup_claim", False):
+        # #687: cross-session (cross-USER) content dedup for the ✅ ping. The
+        # shell send hook pipes the ✅ TEXT on stdin (arbitrary quotes/backticks
+        # never touch argv) and passes --owner/--project. Print "claim"
+        # (deliver) or "dup" (suppress); ALWAYS exit 0 — a claim helper failure
+        # must never break the send path (fail-open lives inside the function).
+        from notify import content_dedup_claim
+        try:
+            text = sys.stdin.read()
+        except (OSError, ValueError):
+            text = ""
+        sys.stdout.write(content_dedup_claim(
+            text,
+            owner=getattr(args, "owner_name", "") or "",
+            project=getattr(args, "project", "") or ""))
+        return
+
     if getattr(args, "channel_id", False):
         # #296: --kind questions resolves the owner's SEPARATE questions
         # thread; omitted/--kind default is the pre-#296 behaviour unchanged.
@@ -5708,6 +5725,14 @@ def main():
                                "stream-qualified — the SAME label used to route "
                                "--channel-id --project and to name a project's "
                                "own Discord thread")
+    p_notify.add_argument("--content-dedup-claim", dest="content_dedup_claim",
+                          action="store_true",
+                          help="#687: cross-session (cross-USER) content dedup "
+                               "for the ✅ ping. Reads the ✅ TEXT from stdin, "
+                               "uses --owner-name + --project; prints 'claim' "
+                               "(first sender — deliver) or 'dup' (identical "
+                               "payload already claimed in the window — "
+                               "suppress). Always exits 0 (fail-open).")
     p_notify.add_argument("--find-only", dest="find_only", action="store_true",
                           help="With --provision-question-thread / "
                                "--provision-project-thread (#330/#369): only FIND "

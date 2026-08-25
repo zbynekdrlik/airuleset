@@ -55,6 +55,12 @@ class _HomeIsolated(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp(prefix="airuleset-notifylog-"))
         self.addCleanup(shutil.rmtree, self.home, True)
         (self.home / ".claude").mkdir(parents=True, exist_ok=True)
+        # #687: isolate the shared ✅ content-dedup store PER TEST — these tests
+        # send the IDENTICAL ✅ payload ("hotovo") across methods, which the new
+        # cross-session dedup would coalesce under a shared store. Per-test dir
+        # under self.home; works under BOTH pytest and `unittest discover` (the
+        # push gate never reads conftest.py's own isolation fixture).
+        self.cdedup = self.home / "content-dedup"
 
     @property
     def log(self):
@@ -107,7 +113,8 @@ class TestShellSendLogsEveryNonDelivery(_HomeIsolated):
 
     def _run(self, path=None, emoji="✅", text="hotovo"):
         env = {**os.environ, "HOME": str(self.home),
-               "ND_EMOJI": emoji, "ND_TEXT": text, "ND_CWD": str(ROOT)}
+               "ND_EMOJI": emoji, "ND_TEXT": text, "ND_CWD": str(ROOT),
+               "AIRULESET_CONTENT_DEDUP_DIR": str(self.cdedup)}
         env.pop("DISCORD_NOTIFY_DRYRUN", None)
         env.pop("ND_DRYRUN_FILE", None)
         if path is not None:

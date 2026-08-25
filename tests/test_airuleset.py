@@ -8044,7 +8044,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # early-return flag (mention_prefix / channel_id / owner / mirror_owners /
         # autopilot_done) MUST be pinned False here — a new flag left unpinned hijacks
         # this test.
-        args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+        args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                       record_question=False, edit_question=False,
@@ -8103,7 +8103,7 @@ class TestDiscordAutopilotNotify(TestCase):
             return "sent"
 
         def mk(repo):
-            return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+            return m.Mock(run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                           record_question=False, edit_question=False,
@@ -8124,7 +8124,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # #298: capture the sent card's OWN message id -> repo/issue, so a
         # later Discord reply on it can reopen the ticket with the remark.
         import unittest.mock as m
-        args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+        args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                       record_question=False, edit_question=False,
@@ -8159,7 +8159,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # bare status STRING (the old contract) rather than the opt-in
         # (status, message_id) tuple -- must not crash.
         import unittest.mock as m
-        args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False,
+        args = m.Mock(run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
                        repo_name=False, newest_card=False,
                        backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
                       record_question=False, edit_question=False,
@@ -8564,7 +8564,7 @@ class TestDiscordAutopilotNotify(TestCase):
     def test_cli_provision_question_thread_success(self):
         args = m.Mock(provision_question_thread=True, find_only=False,
                       autopilot_done=False,
-                      mention_prefix=False, repo_name=False, newest_card=False,
+                      mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
                       mirror_owners=False, run_card=False, api_error=False,
@@ -8582,7 +8582,7 @@ class TestDiscordAutopilotNotify(TestCase):
     def test_cli_provision_question_thread_defaults_to_resolved_owner(self):
         args = m.Mock(provision_question_thread=True, find_only=False,
                       autopilot_done=False,
-                      mention_prefix=False, repo_name=False, newest_card=False,
+                      mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
                       mirror_owners=False, run_card=False, api_error=False,
@@ -8604,7 +8604,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # ...failure_logs_provision_failed test's own isolation.
         args = m.Mock(provision_question_thread=True, find_only=False,
                       autopilot_done=False,
-                      mention_prefix=False, repo_name=False, newest_card=False,
+                      mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
                       mirror_owners=False, run_card=False, api_error=False,
@@ -8622,7 +8622,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # "fallback" line already told the operator one was attempted.
         args = m.Mock(provision_question_thread=True, find_only=False,
                       autopilot_done=False,
-                      mention_prefix=False, repo_name=False, newest_card=False,
+                      mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
                       mirror_owners=False, run_card=False, api_error=False,
@@ -8642,7 +8642,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # spin up a brand-new Discord thread on its own.
         args = m.Mock(provision_question_thread=True, find_only=True,
                       autopilot_done=False,
-                      mention_prefix=False, repo_name=False, newest_card=False,
+                      mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
                       mirror_owners=False, run_card=False, api_error=False,
@@ -8664,7 +8664,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # every existing caller/mock.
         args = m.Mock(provision_question_thread=True, find_only=False,
                       autopilot_done=False,
-                      mention_prefix=False, repo_name=False, newest_card=False,
+                      mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
                       mirror_owners=False, run_card=False, api_error=False,
@@ -8682,7 +8682,7 @@ class TestDiscordAutopilotNotify(TestCase):
         # it under a DEAD .env key nothing ever reads.
         args = m.Mock(provision_question_thread=True, find_only=False,
                       autopilot_done=False,
-                      mention_prefix=False, repo_name=False, newest_card=False,
+                      mention_prefix=False, content_dedup_claim=False, repo_name=False, newest_card=False,
                       backfill_digest=False, record_question=False,
                       edit_question=False, channel_id=False, owner=False,
                       mirror_owners=False, run_card=False, api_error=False,

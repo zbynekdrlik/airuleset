@@ -154,6 +154,30 @@ def _isolate_session_status_dir():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_content_dedup_store():
+    """#687: `notify.content_dedup_claim` (the ✅ cross-session dedup) writes its
+    claim markers to a SHARED sticky store — by default `tempfile.gettempdir()/
+    airuleset-notify-content-dedup` (deliberately NOT under $HOME, since it must
+    coalesce across separate unix accounts). Its KEY is deliberately SHARED for
+    an identical payload, so a per-run dir does NOT isolate it: two tests that
+    drive the ✅ send-hook with the SAME owner+project+text within the window
+    would coalesce cross-test (the exact failure in test_notify_delivery_log's
+    ✅ tests). Point it at a fresh PER-TEST dir so every test's ✅ path is a
+    clean slate; a test that needs a specific store still wins with its own
+    innermost `store_dir=`/`AIRULESET_CONTENT_DEDUP_DIR`. `mock.patch.dict` (a
+    real os.environ entry) so a SUBPROCESS the test spawns (the shell send-hook
+    → `notify --content-dedup-claim`) inherits it. The push-gate `unittest
+    discover` (which never reads this conftest) gets a per-run floor in
+    `cmd_push`; colliding TestCase files ALSO set it per-test in their own setUp
+    (dual-runner, the #385 pattern)."""
+    with TemporaryDirectory() as d:
+        target = Path(d) / "content-dedup"
+        with mock.patch.dict(os.environ,
+                             {"AIRULESET_CONTENT_DEDUP_DIR": str(target)}):
+            yield target
+
+
+@pytest.fixture(autouse=True)
 def _ignore_owner_kill_switch(monkeypatch):
     """#400: the owner kill-switch flag files under the REAL ~/.claude are
     production state; a direct pytest run on a box with them set must not

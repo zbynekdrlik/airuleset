@@ -53,7 +53,7 @@ def _run_card_args(**overrides):
     dispatch (see `test_run_card_gathers_title_and_backlog_then_sends`'s own
     note in `tests/test_airuleset.py`)."""
     base = dict(
-        run_card=True, autopilot_done=False, mention_prefix=False,
+        run_card=True, autopilot_done=False, mention_prefix=False, content_dedup_claim=False,
         repo_name=False, newest_card=False, backfill_digest=False, provision_question_thread=False, provision_project_thread=False, project_label=False,
         record_question=False, edit_question=False, channel_id=False,
         owner=False, mirror_owners=False, body=None, run=None,

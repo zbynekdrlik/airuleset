@@ -314,6 +314,23 @@ if [ "${PROJECT_UNRESOLVED:-0}" = "1" ]; then
     _delivery_log "unresolved-project" "no-cwd-or-origin"
 fi
 
+# #687: cross-session (cross-USER) content dedup for the ✅ ping ONLY. Four
+# david sessions (SEPARATE unix accounts) delivered the identical ✅ (bounce
+# resolved) as four Discord messages. Coalesce an identical payload across
+# sessions within a short window via a shared sticky /tmp claim store — the
+# FIRST sender delivers, the rest are deduped (logged, never silent — #135).
+# NEVER for ❓ (the question flow is unchanged — gated on ✅), never in dry-run
+# (a preview claims nothing), never the Python run-card path (its own dedup).
+if [ "$EMOJI" = "✅" ] && [ "${DISCORD_NOTIFY_DRYRUN:-0}" != "1" ]; then
+    CDEDUP=$(printf '%s' "$TEXT" | python3 "$AIRULESET_PY" notify \
+                 --content-dedup-claim --owner-name "$PRIMARY_OWNER" \
+                 --project "$PROJECT" 2>/dev/null || echo claim)
+    if [ "$CDEDUP" = "dup" ]; then
+        _delivery_log "deduped" "cross-session-content"
+        exit 0
+    fi
+fi
+
 emit_one "$PRIMARY_OWNER"      # primary — always fires (owner may be empty)
 for T in $MIRRORS; do          # mirrors — only when DISCORD_MIRROR_<OWNER> lists them
     [ -n "$T" ] || continue
