@@ -52,7 +52,16 @@ jobs:
           fetch-depth: 0
 
       - name: Mark workspace safe for git
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        run: |
+          # The container runs as uid 0 while the bind-mounted workspace is
+          # owned by the host runner uid — every git call needs safe.directory.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # `git clone <workspace>` (tests/test_rules_ab_experiment.py's
+          # make_tree) opens the SOURCE repo at <workspace>/.git — an
+          # EXACT-path safe.directory match the workspace entry alone does
+          # not cover (run 32836799214: `fatal: detected dubious ownership
+          # in repository at '.../.git'`).
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/.git"
 
       - name: Install jq (hooks under test parse their payload with jq)
         run: |

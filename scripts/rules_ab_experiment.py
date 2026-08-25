@@ -642,12 +642,29 @@ def bootstrap(root: Path) -> None:
 
 
 def make_tree(root: Path, task: Task, cond: str, rep: int = 1) -> Path:
-    """A standalone clone at the pre-fix commit, with no remote to push to."""
+    """A standalone clone at the pre-fix commit, with no remote to push to.
+
+    NO explicit `--local`: for a local source path git hardlinks by default
+    anyway (same cost on a same-fs box), but the EXPLICIT flag turns a
+    cross-filesystem hardlink failure FATAL (`Invalid cross-device link` --
+    the CI container's bind-mounted workspace vs its overlay /tmp, run
+    32836799214), while the default falls back to copying. And the two
+    steps that can fail for environment reasons fail LOUD (script-failure-
+    policy): the clone dying silently is exactly how run 3 surfaced as a
+    misleading FileNotFoundError two commands downstream."""
     tree = root / f"run-{slot_name(task.issue, cond, rep)}"
     if tree.exists():
         shutil.rmtree(tree)
-    _run(["git", "clone", "--local", "--no-checkout", str(REPO), str(tree)], timeout=600)
-    _run(["git", "checkout", "-B", "ab-run", task.base], cwd=tree)
+    r = _run(["git", "clone", "--no-checkout", str(REPO), str(tree)], timeout=600)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"git clone {REPO} -> {tree} failed (rc={r.returncode}): "
+            f"{(r.stderr or '').strip()}")
+    r = _run(["git", "checkout", "-B", "ab-run", task.base], cwd=tree)
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"git checkout {task.base} in {tree} failed (rc={r.returncode}): "
+            f"{(r.stderr or '').strip()}")
     _run(["git", "remote", "remove", "origin"], cwd=tree)
     _run(["git", "config", "user.email", "ab@experiment.local"], cwd=tree)
     _run(["git", "config", "user.name", "AB Experiment"], cwd=tree)
