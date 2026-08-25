@@ -9,12 +9,16 @@ THIN — the render + setup skeleton lives in the shared parameterized provision
 marek's per-user constants (the source of truth tests patch) + a `_spec()` factory +
 public-API wrappers delegating to that engine.
 
-Stronger isolation than david by design (see the #612 marek design comment): the
-marek gateway runs AS marek on subdev and attaches his LOCAL tmux group, so its
-scoped inventory is a SINGLE LOCAL entry — NO ssh, NO dedicated key (`identity_key`
-is None). marek's ttyd child therefore has ZERO ssh capability: it can reach nothing
-but the local marek session. The connect allowlist can never resolve an owner-fleet
-id OR a david id.
+Session set (#661 rework, owner ruling 2026-08-25 — the original single-local-attach
+set was owner-REJECTED as incomplete): marek's LOCAL tmux group (the gateway runs AS
+marek on subdev — no ssh, no key, unchanged) PLUS four ssh tabs — montalu4@subdev
+(loopback), his `marek` tmux sessions on dev1 + dev2 (newlevel@<tailscale IP>), and
+his forestshop VPS (admin@forestshop-dev, #679 strict host-key pin) — every ssh tab
+via the DEDICATED `profiles.WEBTERM_MAREK_IDENTITY` key (never the fleet gatekeeper
+key, never the sshpass shared-password branch). The connect allowlist is physically
+this five-member set: it can never resolve another stream's id, a david id, or
+another person's account (stepan). The lane dash renders through the owner-defined
+#661 tab policy (`LaneSpec.dashboard_human="marek"` → WEBTERM_DASHBOARD_TABS).
 
 PREREQUISITE-GATED so a normal subdev install (as any other account) is a safe
 NO-OP. #663: the gateway + ttyd bind mode-0700 UNIX sockets in marek's
@@ -24,9 +28,11 @@ one-time-PIN) at the edge; the gateway runs `--trust-access-header` (no
 password/credential), exactly like the david lane.
 
 SECURITY NOTE — the boundary this lane DOES and does NOT provide (honest, #612 R1
-review). The PUBLIC Access-gated path reaches ONLY marek's scoped session — the
-connect allowlist is physically `{marek-subdev}` (a single LOCAL attach, no
-ssh/key), so a marek WEB LOGIN can never drive an owner-fleet or david id, and
+review; reachability widened by the #661 rework). The PUBLIC Access-gated path
+reaches ONLY marek's scoped five-member set — the connect allowlist is physically
+`{marek-subdev, montalu4-subdev, dev1, dev2, forestshop}` (his own owner-granted
+targets, ssh only via the dedicated marek key), so a marek WEB LOGIN can never
+drive another stream's, david's, or stepan's id, and
 marek's Access realm/tunnel are separate from every other developer's. The
 multi-tenant LOOPBACK floor is CLOSED (#663): the gateway + ttyd bind mode-0700 UNIX
 sockets in marek's runtime dir, so a peer subdev account can no longer reach marek's
@@ -106,7 +112,14 @@ _MAREK_GO_LIVE = (
     "       OTP app fronts marek.newlevel.media — set WEBTERM_ACCESS_APPS['marek']\n"
     "       allow-list and run `airuleset.py webterm-access --apply`. No credential\n"
     "       is delivered.\n"
-    % (WEBTERM_MAREK_TUNNEL_UUID, WEBTERM_MAREK_TUNNEL_UUID))
+    "    5. #661 ssh tabs: deploy the dedicated key %s\n"
+    "       (private key on subdev as marek; pubkey in authorized_keys of\n"
+    "       montalu4@subdev, newlevel@dev1, newlevel@dev2,\n"
+    "       admin@forestshop-dev — optionally restricted there with\n"
+    "       command=\"tmux ...\" options). Until it lands the montalu4/dev1/\n"
+    "       dev2/forestshop tabs fail visibly; marek@subdev keeps working.\n"
+    % (WEBTERM_MAREK_TUNNEL_UUID, WEBTERM_MAREK_TUNNEL_UUID,
+       profiles.WEBTERM_MAREK_IDENTITY))
 
 # #614/#638 FOOTGUN: the marek ttyd unit carries the shared self-contained PATH
 # (cli_webterm_lane.TTYD_PATH_ENV) so the launcher's bare `exec ttyd` resolves the
@@ -154,14 +167,26 @@ def _spec():
             name_upper="MAREK", name_lower="marek", account_suffix=" (marek account)",
             runtime_owner="marek's", tunnel_adjective="a SEPARATE",
             hostname=WEBTERM_MAREK_TUNNEL_HOSTNAME,
-            scoped_inventory="Scoped inventory: the LOCAL marek tmux session ONLY\n"
-                             "# (never the owner fleet, never david's accounts) — a "
-                             "local attach, no ssh, no key."),
+            scoped_inventory="Scoped inventory (#661 rework): the LOCAL marek tmux\n"
+                             "# session + montalu4@subdev + marek's dev1/dev2 sessions\n"
+                             "# + admin@forestshop-dev — ssh ONLY via the dedicated\n"
+                             "# webterm_marek key (never the fleet gatekeeper key,\n"
+                             "# never a david account, never stepan's)."),
         go_live=_MAREK_GO_LIVE,
         label="(subdev marek)",
         log_prefix="webterm(marek)",
+        # #661 rework: identity_key STAYS None — the lane's core marek-subdev
+        # tab is a keyless LOCAL attach, and gating provisioning on the NEW
+        # WEBTERM_MAREK_IDENTITY would no-op re-renders of the LIVE lane until
+        # the key is provisioned (a #684 parity regression). The ssh tabs
+        # (montalu4/dev1/dev2/forestshop) degrade to a VISIBLE ssh failure
+        # until the key + authorized_keys land (owner-action, _MAREK_GO_LIVE
+        # step 5).
         identity_key=None,
         retire_credential_path=None,
+        # #661: the marek dash consumes the owner-defined per-domain tab list
+        # (order + exclusivity) — the policy key is the domain's login user.
+        dashboard_human=MAREK_GATEWAY_USER,
     )
 
 

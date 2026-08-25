@@ -48,6 +48,16 @@ def short_target_alias(user, box_name):
     # tab and the tmux WINDOW name agree, regardless of the box's unix user.
     if box_name.split("-")[0] == "spinbike":
         return "sb"
+    # #661 rework: forestshop -> "fs", Marek's forestshop VPS tab (owner
+    # DOPLNENIE 2026-08-25 -- handled like the owner's spinbike `sb`). Box-keyed
+    # like spinbike, regardless of the unix account (admin/stepan), at the
+    # SINGLE alias source (#592) so the webterm tab (lane id "forestshop") and
+    # the box's tmux WINDOW name (hostname "forestshop-dev") agree. The FLEET
+    # inventory ids (admin-forestshop-dev/stepan-forestshop-dev) do NOT match
+    # this branch (their first segment is the user), so they keep their
+    # user-derived aliases.
+    if box_name.split("-")[0] == "forestshop":
+        return "fs"
     user = (user or "").strip()
     if user == "gatekeeper":
         return "gk"

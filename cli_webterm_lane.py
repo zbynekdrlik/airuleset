@@ -133,6 +133,14 @@ class LaneSpec:
     log_prefix: str
     identity_key: Optional[str] = None
     retire_credential_path: Optional[object] = None
+    # #661 rework: a lane that declares its domain's human here has its dash
+    # rendered through the owner-defined per-domain tab list
+    # (cli_webterm.WEBTERM_DASHBOARD_TABS[human] -- order + exclusivity; marek).
+    # None (default -- david) keeps the unfiltered render: david's scoped
+    # inventory ids (david1..4/codex-bridge) differ from the policy dict's
+    # fleet ids, so a filter there would render empty. VISIBILITY only -- the
+    # inventory JSON (the connect allowlist) is never filtered.
+    dashboard_human: Optional[str] = None
 
 
 def render_ttyd_unit(spec):
@@ -196,10 +204,18 @@ def write_artifacts(spec):
     inv = w.webterm_inventory(profile=spec.profile)
     spec.inventory_path.write_text(
         json.dumps(inv, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    # The lane gateway renders its OWN physically-scoped inventory, so it does NOT
-    # consume the #661 WEBTERM_DASHBOARD_TABS policy (human=None -> unfiltered).
+    # The lane gateway renders its OWN physically-scoped inventory. #661 rework:
+    # a lane that declares `dashboard_human` (marek) consumes the per-domain
+    # WEBTERM_DASHBOARD_TABS policy for tab ORDER + exclusivity; one without it
+    # (david) renders unfiltered -- the `human` kwarg is then omitted ENTIRELY
+    # (the #684 parity lock). getattr: the parity tests drive this with a
+    # SimpleNamespace spec that predates the field.
+    render_kwargs = {"ttyd_base": w.WEBTERM_TTYD_BASE}
+    human = getattr(spec, "dashboard_human", None)
+    if human is not None:
+        render_kwargs["human"] = human
     spec.dash_index.write_text(
-        w.render_dashboard_html(inv, ttyd_base=w.WEBTERM_TTYD_BASE), encoding="utf-8")
+        w.render_dashboard_html(inv, **render_kwargs), encoding="utf-8")
     # The lane's own installable-PWA assets (#644 per-domain identity) next to index.
     import cli_webterm_pwa
     cli_webterm_pwa.write_pwa_assets(spec.dash_dir, spec.profile)
