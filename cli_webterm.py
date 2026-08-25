@@ -565,6 +565,9 @@ def connect_main(argv, inventory_path=None):
 # window + 1 status row) and its font is scaled to fill the viewport (see
 # `fitFixedGrid` in the page JS), so the fixed window fills the browser with no
 # dark unused region and without the browser ever influencing tmux sizing.
+# #700: the fill is EXACT — the integer-cell residual letterbox (side margins +
+# the perceived "empty row") is removed by the parent-frame residual stretch
+# (`stretchFrameToFill`), mouse-safe because it lives OUTSIDE the xterm document.
 # --------------------------------------------------------------------------- #
 
 def _html_escape(s):
@@ -1039,7 +1042,7 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
   background: #1b1b1b; color: #9a9a9a; font: inherit; line-height: 1;
   padding: 6px 9px; }
 .cyc:hover { background: #262626; color: #CCCCCC; }
-#frames { position: relative; flex: 1 1 auto; }
+#frames { position: relative; flex: 1 1 auto; overflow: hidden; /* #700: clips the stretch spill */ }
 #frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
   border: 0; background: #0C0C0C; }
 /* #671 REWORK (owner ruling 2026-08-25, verbatim "znova si napchal text na copy
@@ -1083,6 +1086,10 @@ try { document.title = location.hostname + ' — fleet terminal'; } catch (e) {}
 // stretch.
 const WT_FILL_MAX_CELL_STRETCH = 1.5;   // cell WIDTH (letterSpacing) may grow up to 1.5x
 const WT_FILL_MAX_LINE_STRETCH = 1.8;   // cell HEIGHT (lineHeight) may grow up to 1.8x
+// #700: cap for the third, RESIDUAL fill layer (stretchFrameToFill) -- the
+// parent-side iframe stretch that removes the integer-cell letterbox the native
+// fill cannot (its quantum is cols/rows x 1px per axis, ~176px horizontally).
+const WT_FRAME_FILL_MAX_STRETCH = 1.25; // parent-frame residual scale, per axis
 function themeTerminal(term) {           // idempotent: applied once per terminal
   if (!term || term.__wtThemed) return;
   term.options.theme = CAMPBELL_THEME;
@@ -1396,6 +1403,43 @@ function fillFixedGrid(win) {
   }
   return true;
 }
+// #700 EXACT FILL (third layer): fitFixedGrid (integer fontSize) and
+// fillFixedGrid (integer px/cell letterSpacing/lineHeight) BOTH quantize, so a
+// residual letterbox of up to cols/rows x 1px per axis remains -- the owner's
+// ~78 CSS px side margins + the "empty row" under the status bar (#700; NOT a
+// grid row: the status bar occupies grid row 51, geometry is correct). This
+// pass removes it EXACTLY by scaling the tab's IFRAME from the PARENT document
+// by the sub-cell residual (typically <1.1x -- layers 1+2 do the crisp bulk).
+// WHY THIS IS MOUSE-SAFE where the #655 same-document transform was not (#678):
+// the transform lives in the PARENT document, so the child xterm document's
+// coordinate space is untouched -- its getBoundingClientRect AND pointer
+// clientX/Y are both in the child's own layout space (the browser inverse-maps
+// pointer events through ancestor-document transforms), so xterm's
+// (clientY - rect.top)/cssCellHeight mapping stays exact at every row.
+// win.innerWidth/innerHeight stay the LAYOUT size and a parent-side style
+// change can never re-fire the child's ResizeObserver -> no feedback loop. The
+// grid is flex-CENTERED in the child, so scaling about the frame center lands
+// the grid edges exactly on the frame edges; the scaled letterbox spills
+// OUTSIDE the frame box and #frames{overflow:hidden} clips it. Capped
+// (WT_FRAME_FILL_MAX_STRETCH) so a pathological viewport keeps a bounded
+// letterbox instead of distorting; an already-exact grid gets 'none' (no
+// pointless compositing layer).
+function stretchFrameToFill(win) {
+  const fr = win && win.frameElement;       // same-origin under the gateway
+  if (!fr || !win.term) return false;
+  const doc = win.document;
+  const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
+  if (!el) return false;
+  const g = el.getBoundingClientRect();     // CHILD layout coords (settled fill)
+  const availW = win.innerWidth, availH = win.innerHeight;
+  if (!g.width || !g.height || !availW || !availH) return false;
+  const sx = Math.min(WT_FRAME_FILL_MAX_STRETCH, Math.max(1, availW / g.width));
+  const sy = Math.min(WT_FRAME_FILL_MAX_STRETCH, Math.max(1, availH / g.height));
+  fr.style.transformOrigin = '50% 50%';
+  fr.style.transform = (sx <= 1.0005 && sy <= 1.0005)
+    ? 'none' : 'scale(' + sx.toFixed(4) + ', ' + sy.toFixed(4) + ')';
+  return true;
+}
 // #655/#678: the FILL must re-run whenever the NATURAL grid size settles/changes.
 // xterm's grid layout can settle noticeably AFTER first paint (font metrics, the
 // multi-tab layout). The AUTHORITATIVE driver is a ResizeObserver on .xterm-screen,
@@ -1411,18 +1455,18 @@ function fillFixedGrid(win) {
 // overflow, so the RO corrects any transient the instant the layout settles -- no
 // persistent clip.
 function scheduleFill(win) {
-  try { fillFixedGrid(win); } catch (e) {}
+  // #700: every fill pass ends with the residual frame stretch (third layer).
+  const pass = () => { try { fillFixedGrid(win); stretchFrameToFill(win); } catch (e) {} };
+  pass();
   try {
     const doc = win.document;
     const el = doc.querySelector('.xterm-screen') || doc.querySelector('.xterm');
     if (el && win.ResizeObserver && !win.__wtFillRO) {
-      win.__wtFillRO = new win.ResizeObserver(() => { try { fillFixedGrid(win); } catch (e) {} });
+      win.__wtFillRO = new win.ResizeObserver(pass);
       win.__wtFillRO.observe(el);
     }
   } catch (e) {}
-  [200, 800, 2000].forEach((ms) => {
-    setTimeout(() => { try { fillFixedGrid(win); } catch (e) {} }, ms);   // guard the CALL
-  });
+  [200, 800, 2000].forEach((ms) => { setTimeout(pass, ms); });   // guard inside `pass`
 }
 // #671: mouse select/copy -> browser clipboard. Empirically verified against a
 // real ttyd 1.7.4 replica (Playwright + tmux capture-pane): ttyd's bundled xterm
