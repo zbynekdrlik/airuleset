@@ -1095,44 +1095,35 @@ class TestTabSwitchingUX(unittest.TestCase):
     """#582: Ctrl+Alt+N can't switch tabs while focus is inside a cross-origin
     ttyd iframe (a web-platform limitation — the parent :8080 page never
     receives keydowns dispatched inside the :7682 iframe). The proportionate
-    fix keeps reliable CLICK switching and adds discoverable UX: ordinal
-    badges (the visible Ctrl+Alt+N map), Prev/Next cycle controls that step
-    through ALL sessions, Ctrl+Alt+arrow cycling, and an honest hint."""
+    fix keeps reliable CLICK switching (and, since #584's same-origin iframes,
+    Ctrl+Alt+1..9 while typing too). #661 (owner ruling 2026-08-25) REVERSES
+    #582's VISIBLE ordinal-badge map: the 1-9 digit chip added no needed
+    information and ate space (and inconsistently skipped tabs past 9), so the
+    badge is REMOVED — the Ctrl+Alt+1..9 SHORTCUT itself stays fully functional
+    (invisible, space-free), and the green ▸ separator stays."""
 
     def _inv(self, n):
         return [{"id": "s%02d" % i, "label": "sess %02d" % i, "kind": "owner",
                  "local": False, "host": "10.0.0.%d" % i, "user": "usr%02d" % i}
                 for i in range(1, n + 1)]
 
-    def test_ordinal_badges_on_first_nine_tabs_only(self):
-        # 11 sessions -> exactly 9 ordinal badges (the Ctrl+Alt+1..9 range),
-        # numbered 1..9; the 10th/11th tabs carry no badge.
-        html = w.render_dashboard_html(self._inv(11), ttyd_base="http://b:7682")
-        self.assertEqual(html.count('class="ord"'), 9)
-        self.assertIn('<span class="ord">1</span>', html)
-        self.assertIn('<span class="ord">9</span>', html)
-        self.assertNotIn('<span class="ord">10</span>', html)
-        self.assertNotIn('<span class="ord">11</span>', html)
+    def test_no_ordinal_badge_rendered(self):
+        # #661 (owner ruling 2026-08-25 reverses #582's visible map): the 1-9
+        # ordinal chip is REMOVED — no tab, at ANY count, carries a `.ord`
+        # badge. The Ctrl+Alt+1..9 shortcut itself stays functional (see
+        # test_keydown_is_direct_jump_only_no_arrow_binding below); only the
+        # VISIBLE digit went. Requirement change, not test-weakening.
+        for n in (3, 11):
+            html = w.render_dashboard_html(self._inv(n), ttyd_base="http://b:7682")
+            self.assertNotIn('class="ord"', html)
+            self.assertNotIn('<span class="ord">', html)
 
-    def test_ordinal_badge_count_matches_small_inventory(self):
+    def test_green_arrow_separator_kept(self):
+        # #661: the green ▸ `.ico` prefix stays — owner values its
+        # tab-separating role, so the badge reversal must not remove it.
         html = w.render_dashboard_html(self._inv(3), ttyd_base="http://b:7682")
-        self.assertEqual(html.count('class="ord"'), 3)
-        self.assertIn('<span class="ord">1</span>', html)
-        self.assertIn('<span class="ord">3</span>', html)
-
-    def test_ordinal_badges_are_only_digits_never_a_label(self):
-        # Even a hostile label must never leak into the ordinal badge — the
-        # badge is a fixed position digit, not user data.
-        inv = [{"id": "x", "label": "<b>PWN</b>", "kind": "owner",
-                "local": True, "host": None, "user": None}]
-        # A single-tab inventory still gets one badge — assert it EXISTS so the
-        # digits-only guarantee can never be met vacuously (0 badges).
-        html = w.render_dashboard_html(inv, ttyd_base="http://b:7682")
-        import re as _re
-        matches = _re.findall(r'<span class="ord">([^<]*)</span>', html)
-        self.assertTrue(matches)                      # a badge is actually present
-        for content in matches:
-            self.assertRegex(content, r"^[0-9]+$")
+        self.assertEqual(html.count('class="ico"'), 3)   # one ▸ per tab
+        self.assertIn("&#9656;", html)                   # the ▸ glyph
 
     def test_keydown_is_direct_jump_only_no_arrow_binding(self):
         # Ctrl+Alt+1..9 direct-jumps when the tab bar has focus — gate the ACTUAL
