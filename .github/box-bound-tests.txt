@@ -1,0 +1,39 @@
+# Box-bound test deny-list for the hermetic CI job (#683).
+#
+# The CI workflow runs the WHOLE tests/ suite MINUS these entries, in a bare
+# `python:3.12` container (no tmux, no ~/.claude, fresh HOME, uid 0). Every
+# entry below was EMPIRICALLY measured to fail in exactly that container
+# (docker python:3.12 + jq, a fresh clone == actions/checkout). scripts/
+# ci_pytest_args.py turns this file into pytest --ignore / --deselect args:
+#   * a bare FILE path         -> --ignore   (errors at COLLECTION, must be
+#                                             dropped before collection)
+#   * a NODE-ID (contains ::)  -> --deselect (a single box-bound test inside
+#                                             an otherwise-hermetic file)
+#
+# This is a DENY-list on purpose: new hermetic tests run automatically, and a
+# newly-added box-bound test surfaces as an honest CI failure that forces its
+# author to classify it here. tests/test_ci_workflow_683.py locks that every
+# path below still exists (no rot).
+#
+# --- Files that ERROR AT COLLECTION (module-level `tmux not found`) ---
+tests/test_webterm_ctrlbw_darkening.py
+tests/test_webterm_stream_footer_672.py
+#
+# --- tmux-dependent tests (spawn a real pane / read a live session transcript) ---
+tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_fails_loudly_when_capture_pane_is_blank_too
+tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_falls_back_to_real_capture_pane
+tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_falls_back_when_claude_history_exits_zero_but_empty
+tests/test_send_verified_adoption.py::ReplyPointerAdoption::test_verifies_against_the_session_transcript_then_pops
+#
+# --- git/tmux session-state dependent ---
+tests/test_airuleset.py::TestSessionStartFetchHook::test_unmeasurable_status_refuses_rather_than_guesses_clean
+#
+# --- environment-dependent (subprocess/tooling) ---
+tests/test_watchdog.py::TestBurnSnapshotJob::test_failure_never_raises
+#
+# --- ROOT-user artifacts (container runs as uid 0: sudo / EACCES semantics differ) ---
+tests/test_owner_key_provisioning.py::TestProvisionOwnerKeys::test_root_keys_piped_via_stdin_never_argv
+tests/test_owner_key_provisioning.py::TestProvisionOwnerKeys::test_root_skipped_without_passwordless_sudo
+tests/test_owner_key_provisioning.py::TestProvisionOwnerKeys::test_user_keys_written_and_root_probed
+tests/test_count_live_workers.py::TestCorruptTolerance::test_is_dir_permission_error_is_safe_and_never_raises
+tests/test_count_live_workers.py::TestNeverRaises::test_the_default_on_warn_sink_writes_to_stderr
