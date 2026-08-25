@@ -297,15 +297,20 @@ class TestDashboardDot(unittest.TestCase):
                 {"id": "s2", "label": "sess 2", "kind": "owner",
                  "local": False, "host": "10.0.0.2", "user": "u2"}]
 
-    def test_each_tab_carries_a_udot_element(self):
+    def test_no_separate_dot_element(self):
+        # #691 rework (owner rejected v0.1.55): the separate corner dot was the
+        # LOUDEST element; it is retired from the tab surface entirely.
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertEqual(html.count('class="udot"'), 2)   # one per tab
+        self.assertEqual(html.count('class="udot"'), 0)   # dot markup gone
 
-    def test_css_dot_shown_only_on_has_u_and_is_restrained(self):
+    def test_u_state_recolours_the_left_arrow_not_a_dot(self):
+        # #691 rework: the existing green ▸ arrow turns Campbell brightRed when
+        # the tab is in U state — an accessory, not a separate badge.
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertIn(".udot", html)
-        self.assertIn(".tab.has-u .udot", html)           # dot shown only at U>0
-        self.assertIn("border-radius: 50%", html)         # a small round badge
+        self.assertNotIn(".tab .udot", html)              # dot CSS gone
+        self.assertNotIn(".tab.has-u .udot", html)
+        self.assertIn(".tab.has-u .ico", html)            # arrow recoloured on U>0
+        self.assertIn("#E74856", html)                    # Campbell brightRed
 
     def test_poll_fetches_u_status_and_toggles_on_u_gt_0(self):
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
