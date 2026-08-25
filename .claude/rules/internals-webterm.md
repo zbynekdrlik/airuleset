@@ -10,6 +10,32 @@ The webterm sizing area has been reopened many times (#584/#586/#613×3/#615/#64
 Non-obvious, hard-won invariants (deep detail lives in the code comments of the named symbols,
 which auto-load when you read `cli_webterm.py`):
 
+- **#672 REWORK (owner ruling 2026-08-25) — ONE canonical grid for EVERY tab; the per-tab
+  browser stream grid is REVERSED, the crop is a TMUX-side fix, and #648 is REVERSED too.**
+  The original #672 gave a foreign-stream tab a LARGER browser grid (`WEBTERM_STREAM_TERM_GRID`
+  320×64) so the owner's `-f ignore-size` client was ≥ the stream window and tmux never cropped
+  the footer. That was the WRONG layer: the owner's browser VIEWPORT is fixed (his lowest-res
+  notebook, PWA zoom 100%), so a bigger grid → the font-fit shrinks it → MICRO FONTS on the
+  m1..m6 tabs (unusable; owner: "nie je ani jeden dovod aby boli tmuxi a windows v nich
+  rozdielne, vsetky musia maximalne vyhovovat mne"). REMOVED: `WEBTERM_STREAM_TERM_GRID`, the
+  `_tab_sessions` `kind=="stream"` tcols/trows override, and the per-current-tab CFG getter IIFE
+  — every tab now renders at the ONE owner canonical grid `_webterm_term_grid()` (176×51). The
+  foreign-stream footer crop is instead solved on the TMUX side by the fleet-wide `window-size
+  manual` + `default-size 176x50` pin (`apply_tmux_history_limit`, on EVERY box incl. subdev):
+  `manual` pins every window to the owner size regardless of ANY client, so the owner's 176×51
+  ignore-size client shows every window whole (footer included) and David/Marek get the owner's
+  size (a harmless cosmetic dark border) — which the owner EXPLICITLY wants, **reversing the #648
+  "never degrade David" invariant by owner decree.** Verified LIVE on dev1 (`show-options -g` →
+  `window-size manual`, every window 176×50). CONSEQUENCE: the two bullets below ("crop fix is
+  BROWSER-GRID-bound" and "owner box vs foreign-stream box grid") are the OLD #672 design and are
+  SUPERSEDED — the geometry claim (a too-small client is cropped) still holds, but the FIX is now
+  the tmux pin, never a per-tab browser grid. The subdev/dev2 cross-box tmux convergence + an
+  isolated-tmux empirical pin proof are the #685 / tmux-convergence follow-up (the `window-size
+  manual` conf is CONF-ONLY = takes effect at the next server start; a running subdev server that
+  predates the conf still follows David's client until it restarts). See also #671 rework: the
+  `#clip-hint` copy/paste footer strip was removed ENTIRELY (element + CSS + isSecureContext
+  honesty JS) — owner: "potrebujem hlavne pracovnu plochu nie tvoje blbe vysvetlivky" — while
+  `attachClipboard` (OSC 52 + copy-on-select) stayed, so copy/paste FUNCTIONALITY is unchanged.
 - **A too-small tmux CLIENT is CROPPED, never scaled (#672).** A client attached `-f ignore-size`
   that is SMALLER than the window gets a cursor-following CROP of the window — everything below
   the cursor (the CC statusline footer + agent strip) is clipped. `capture-pane` shows the footer
