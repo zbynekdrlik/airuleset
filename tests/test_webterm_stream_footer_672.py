@@ -90,6 +90,21 @@ class TestStreamTabGridInRender(unittest.TestCase):
         self.assertEqual(_grid_for(_render_cfg(), "dev1"),
                          w._webterm_term_grid())
 
+    def test_owner_dashboard_prod_path_applies_stream_grid(self):
+        # Production's OWNER dashboard renders via human="zbynek" ->
+        # entries_for_tab_list + preserve_order=True (cli_webterm.py), NOT the
+        # human=None path _render_cfg() uses. It works today only because
+        # entries_for_tab_list returns the original entry dicts (kind preserved);
+        # lock the ACTUAL prod path so a future change that dropped kind there is
+        # caught. Both _INV ids are in WEBTERM_DASHBOARD_TABS["zbynek"].
+        cfg = _cfg_from_html(w.render_dashboard_html(_INV, ttyd_base="/t",
+                                                     human="zbynek"))
+        stream = next(t for t in cfg["sessions"] if t["id"] == "david1-subdev")
+        owner = next(t for t in cfg["sessions"] if t["id"] == "dev1")
+        self.assertEqual((stream.get("tcols"), stream.get("trows")),
+                         tuple(w.WEBTERM_STREAM_TERM_GRID))
+        self.assertIsNone(owner.get("tcols"))   # owner tab: no override leak
+
     def test_stream_override_is_the_named_constant(self):
         cols, rows = _grid_for(_render_cfg(), "david1-subdev")
         self.assertEqual((cols, rows), tuple(w.WEBTERM_STREAM_TERM_GRID))
@@ -147,6 +162,10 @@ class TestStreamCropFixture(unittest.TestCase):
             ["tmux", "-S", srv.sock, "attach-session", "-t", "base",
              "-f", "ignore-size"],
             rows=ow_rows, cols=ow_cols)
+        # Assert BOTH clients actually attached -- otherwise a silently-failed
+        # owner attach would make part (A)'s assertFalse(vis) pass for the wrong
+        # reason (the footer "cropped" only because no client rendered it).
+        srv.wait_for_clients("base", 2)
         time.sleep(0.6)
         win = srv.tmux("display-message", "-t", "base", "-p",
                        "#{window_width}x#{window_height}").stdout.strip()

@@ -1257,7 +1257,9 @@ class TestBrowserFixedGridFit(unittest.TestCase):
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         fn = _extract_js_function(html, "fitFixedGrid")
         self.assertIn("term.resize =", fn)             # clamp installed
-        self.assertIn("real(cols, rows)", fn)          # clamped to the fixed grid
+        # #672: clamp reads the per-current-tab grid LIVE (getters), not a value
+        # captured at install time -- still the fixed grid, just the live source.
+        self.assertIn("real(CFG.term_cols, CFG.term_rows)", fn)
         self.assertIn("term.options.fontSize", fn)     # font scaling (crisp)
         self.assertNotIn("scale(", fn)                 # never a CSS scale in the PRIMARY fit
         apply = _extract_js_function(html, "applyFixedGrid")

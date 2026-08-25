@@ -126,8 +126,15 @@ WEBTERM_STATUS_ROWS = 1
 # stream dev in a SMALLER terminal gets a harmless cosmetic dark border on that
 # monitoring tab (everything visible) rather than a crop -- a strict improvement
 # toward "the owner sees the footer". All current owner-dashboard streams live
-# on the same UNPINNED subdev VPS, so no pinned box is dark-bordered in practice.
-# BUMP this if a stream developer starts working in a terminal larger than it.
+# on the same UNPINNED subdev VPS, so no pinned box is dark-bordered in practice
+# (an owner-classified box like spinbike-vps/#656 is NOT a stream tab, gets no
+# override, and stays on the 176x51 owner grid -- verify its kind stays "owner"
+# if it is ever pinned differently). BUMP this if a stream developer starts
+# working in a terminal larger than it.
+# SCOPE: _tab_sessions runs for EVERY profile, and the david/marek self-gateways
+# (cli_webterm_profiles) mark every entry kind=="stream", so their OWN dashboards
+# also render at this grid. That is intended + harmless: -f ignore-size keeps
+# their own window un-resized, and a client >= the window shows it whole.
 WEBTERM_STREAM_TERM_GRID = (320, 64)
 
 WEBTERM_INVENTORY_PATH = CLAUDE_DIR / "webterm-inventory.json"
@@ -1005,7 +1012,17 @@ function fitFixedGrid(win) {
   const doc = win.document;
   if (!term.__wtClamped) {                      // clamp resize -> defeat ttyd's FitAddon
     const real = term.resize.bind(term);
-    term.resize = () => real(cols, rows);
+    // #672: read the per-CURRENT-tab grid LIVE on every clamped resize, NOT a
+    // value captured at install time. A tab's ttyd can connect LATE (preloaded)
+    // while `current` has already moved to a DIFFERENT-grid tab, so this clamp
+    // may be installed with the wrong tab as `current`; reading CFG.term_cols/
+    // term_rows (the per-current-tab getter) at call time means the resize still
+    // resolves to the RIGHT grid once THIS tab is `current` (activate() shows
+    // only the current tab, so a clamped resize of a visible terminal always
+    // sees its own grid) -- never a sticky wrong grid that would re-crop it (the
+    // #672 race the getter alone did not close). A hidden tab may resize
+    // transiently to another grid; it is corrected the moment it is shown.
+    term.resize = () => real(CFG.term_cols, CFG.term_rows);
     term.__wtClamped = true;
   }
   try { term.resize(cols, rows); } catch (e) { return false; }
