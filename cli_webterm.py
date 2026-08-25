@@ -716,6 +716,19 @@ def _tab_sessions(inventory, preserve_order=False):
 
 WEBTERM_U_STATUS_PATH = CLAUDE_DIR / "webterm-u-status.json"
 
+
+def webterm_lane_u_status_path(profile):
+    """#703: the PER-LANE aggregate U file a lane gateway serves at /u-status
+    (``webterm-<lane>-u-status.json`` — the established per-lane artifact
+    naming). It lives under the LANE account's own $HOME (the unix account
+    boundary IS the tenant boundary, #663) and is written only by that
+    account's own SCOPED collector (``webterm-u-collect --lane <profile>``).
+    The standalone gateway carries a deliberate local mirror
+    (``cli_webterm_gateway._lane_u_status_path`` — the
+    ``_default_u_status_path`` precedent); a #703 drift-lock test ties the two
+    copies together."""
+    return CLAUDE_DIR / ("webterm-%s-u-status.json" % profile)
+
 # #686: how fresh a tickets-status cache must be to contribute to a box's U. A
 # cache is only ever refreshed by the OWNER of its cwd (the statusline shim on
 # render, TTL 120s; plus the watchdog's 60s-cadence re-warm of an ACTIVE cwd,
@@ -790,10 +803,20 @@ def _ssh_read_prefix(entry):
     """A NON-interactive ssh prefix for reading a remote box's U -- mirrors the
     identity-vs-sshpass DECISION of `_ssh_interactive_prefix` / the deploy loop,
     but WITHOUT a PTY (-t) and with BatchMode + a short ConnectTimeout so a dead
-    box fails fast instead of prompting or hanging the collection."""
-    common = ["-o", "StrictHostKeyChecking=no",
-              "-o", "UserKnownHostsFile=/dev/null",
-              "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
+    box fails fast instead of prompting or hanging the collection.
+
+    #703: a target carrying a committed #680 `host_keys` pin (marek's
+    forestshop, a PUBLIC-DNS box) is verified STRICTLY against it via the same
+    #669 helper `_ssh_interactive_prefix` uses -- the U read must not keep a
+    TOFU `=no` posture the connect path already dropped for that host. Every
+    unpinned tailscale/loopback host keeps the unchanged `=no` posture."""
+    if entry.get("host_keys") is not None:
+        from cli_remote import host_key_check_opts  # the ONE #669 pin source
+        hostkey_opts = host_key_check_opts(entry)
+    else:
+        hostkey_opts = ["-o", "StrictHostKeyChecking=no",
+                        "-o", "UserKnownHostsFile=/dev/null"]
+    common = hostkey_opts + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
     identity = entry.get("identity")
     if identity:
         return ["ssh", "-i", os.path.expanduser(identity)] + common
@@ -855,29 +878,56 @@ def _owner_u_entries():
 
 
 def cmd_webterm_u_collect(argv):
-    """Collect per-box U for the owner dashboard tabs and write the aggregate to
-    WEBTERM_U_STATUS_PATH atomically. Spawned DETACHED by the gateway on a stale
-    /u-status read, so it never blocks a request. Best-effort: a box that can't be
-    read is simply omitted (no dot). Returns 0 always (a collection failure must
-    not crash the spawn)."""
+    """Collect per-box U and write the aggregate atomically. Two modes:
+
+    OWNER (no args, #677): the owner dashboard tabs (`_owner_u_entries` —
+    cross-tenant fleet ssh reads), written to WEBTERM_U_STATUS_PATH; spawned
+    DETACHED by the OWNER gateway (--u-collect) on a stale /u-status read.
+
+    LANE (`--lane <profile>`, #703): ONLY the lane's own tenant sessions
+    (`profiles.u_tenant_entries` — the explicit within-tenant opt-in subset of
+    the lane's own inventory, every ssh entry with its dedicated identity),
+    written to `webterm_lane_u_status_path(profile)`; spawned by that lane's
+    gateway (--u-lane). A malformed profile fails CLOSED with nothing written
+    anywhere — the profile is embedded in the output FILENAME, so an
+    unvalidated value would be a path traversal.
+
+    Both modes share the SAME #686 freshness-filtered readers
+    (`collect_fleet_u` -> `_read_box_u`/`_box_u_count`), so a dead session's
+    frozen cache never inflates either map, and a box that can't be read is
+    simply omitted (no dot — fail-safe). Returns 0 always (a collection
+    failure must not crash the spawn)."""
+    lane_profile = None
+    if argv:
+        if argv[0] == "--lane" and len(argv) == 2:
+            lane_profile = argv[1]
+        else:
+            sys.stderr.write("webterm-u-collect: unknown args %r\n" % (argv,))
+            return 0
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", lane_profile):
+            sys.stderr.write("webterm-u-collect: invalid --lane %r "
+                             "(fail-closed, #703)\n" % lane_profile)
+            return 0
     try:                                    # #677 review 🔵: the whole collect is
-        entries = _owner_u_entries()        # guarded, so the docstring's "always 0"
-        u = collect_fleet_u(entries)        # holds even for a malformed entry.
+        entries = (profiles.u_tenant_entries(lane_profile) if lane_profile
+                   else _owner_u_entries())  # guarded, so "always 0" holds even
+        u = collect_fleet_u(entries)         # for a malformed entry.
     except Exception as e:
         sys.stderr.write("webterm-u-collect: collection failed: %r\n" % e)
         u = {}
+    out_path = (webterm_lane_u_status_path(lane_profile) if lane_profile
+                else WEBTERM_U_STATUS_PATH)
     payload = {"u": u, "ts": int(time.time())}
     try:
-        WEBTERM_U_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         # #677 review 🔵: a PER-PROCESS unique tmp (a slow fleet read can outlast the
         # 60 s in-memory spawn guard, so two collectors can overlap) -> no torn write.
-        tmp = WEBTERM_U_STATUS_PATH.with_name(
-            WEBTERM_U_STATUS_PATH.name + ".%d.tmp" % os.getpid())
+        tmp = out_path.with_name(out_path.name + ".%d.tmp" % os.getpid())
         tmp.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(str(tmp), str(WEBTERM_U_STATUS_PATH))
+        os.replace(str(tmp), str(out_path))
     except OSError as e:                     # disk-pressure is exactly when this runs
         sys.stderr.write("webterm-u-collect: could not write %s: %s\n"
-                         % (WEBTERM_U_STATUS_PATH, e))
+                         % (out_path, e))
     return 0
 
 
@@ -925,7 +975,8 @@ CAMPBELL_THEME = {
 }
 
 
-def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None):
+def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None,
+                          lane_u_status=False):
     """The single-page tabbed terminal UI. `ttyd_base` is the SAME-ORIGIN ttyd
     base path under the #584 gateway (`/t`); the page's JS builds each tab's
     iframe src as `<ttyd_base>/?arg=<id>` on first activation — same-origin, so
@@ -939,7 +990,15 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
     list order (not the WT sort). `human=None` (the david gateway path, whose
     inventory is already physically scoped) renders the given inventory
     unfiltered. Filtering is tab VISIBILITY only; the connect allowlist is
-    unaffected (see WEBTERM_DASHBOARD_TABS)."""
+    unaffected (see WEBTERM_DASHBOARD_TABS).
+
+    #703 `lane_u_status=True` (the lane provisioner, cli_webterm_lane.
+    write_artifacts): activate the /u-status poll on a LANE dashboard too —
+    safe there because the LANE gateway serves the PER-TENANT scoped map
+    (--u-lane: its own webterm-<lane>-u-status.json, refreshed by the scoped
+    `webterm-u-collect --lane` collector over the lane's own u_tenant
+    sessions only), never the owner fleet map. The default (False) keeps the
+    #677 lane posture: `"u_status": false`, no poll."""
     ttyd_base = (ttyd_base or "").rstrip("/")
     term_cols, term_rows = term_grid or _webterm_term_grid()
     # #661: `human=None` = the david gateway path (its inventory is already
@@ -973,15 +1032,19 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None)
                 % (i, _html_escape(t["title"]), _html_escape(t["alias"])))
 
     buttons = "\n".join(_tab_button(i, t) for i, t in enumerate(tabs))
-    # #677 review 🟡: the U-dot poll is OWNER-ONLY. The david/marek gateways render
-    # the SAME dashboard (human=None / "marek"); if they polled /u-status their
-    # gateway would spawn an owner-fleet collector AS the sub-dev account (a
-    # cross-tenant ssh read via the shared password). Gate the poll ACTIVATION on
-    # this flag so only the owner dashboard (human == WEBTERM_LOGIN_USER) ever polls
-    # -- the gateway route is ALSO default-off and owner-enabled (defence in depth).
+    # #677 review 🟡 + #703: the poll ACTIVATION stays a plain BOOLEAN gate --
+    # the OWNER dashboard (human == WEBTERM_LOGIN_USER) always polls, and a LANE
+    # dashboard polls ONLY via the explicit `lane_u_status` opt-in its own
+    # provisioner passes. Tenant SCOPING is deliberately NOT enforced in client
+    # JS (a client-side "boundary" is no boundary): it is enforced where the
+    # data is READ (profiles.u_tenant_entries -- the collector's entry set) and
+    # SERVED (the lane gateway's own per-lane file via --u-lane). A DEFAULT lane
+    # render (no opt-in) keeps `"u_status": false` -- and a lane gateway still
+    # never spawns the owner-fleet collector (its unit carries --u-lane, never
+    # --u-collect; defence in depth).
     cfg = {"ttyd_base": ttyd_base, "sessions": tabs,
            "term_cols": term_cols, "term_rows": term_rows,
-           "u_status": human == WEBTERM_LOGIN_USER}
+           "u_status": human == WEBTERM_LOGIN_USER or bool(lane_u_status)}
     # #694: vestigial @@COUNT@@ dropped (absent from template since #671/#674).
     subst = {"@@BUTTONS@@": buttons, "@@CFG_JSON@@": _json_for_script(cfg),
              # #643: the Campbell palette as an xterm.js theme object literal.
@@ -1260,10 +1323,12 @@ def _render_webterm_gateway_unit(bind_ip, access_mode=False):
     omit it), so `access_mode=False` is BYTE-IDENTICAL to the pre-#635 render EXCEPT
     for that single injected flag."""
     tmpl = WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
-    # #677: the OWNER gateway (this renderer only) enables the U-dot data channel.
-    # david/marek render the SAME shared template in their OWN functions and do NOT
-    # inject this, so their gateway runs WITHOUT --u-collect -> /u-status serves an
-    # empty map and never spawns an owner-fleet collector as the sub-dev account.
+    # #677: the OWNER gateway (this renderer only) enables the cross-tenant U-dot
+    # data channel. david/marek render the SAME shared template in their OWN
+    # engine (cli_webterm_lane.render_gateway_unit) and NEVER inject --u-collect
+    # -- #703: they inject the PER-TENANT `--u-lane <profile>` instead, so a lane
+    # /u-status serves only that lane's own scoped map and a lane gateway never
+    # spawns an owner-fleet collector as the sub-dev account.
     tmpl = tmpl.replace("--base-path {{TTYD_BASE}}",
                         "--base-path {{TTYD_BASE}} --u-collect")
     if access_mode:

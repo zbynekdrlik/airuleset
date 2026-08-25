@@ -130,6 +130,10 @@ def david_inventory():
             "user": user,
             "identity": WEBTERM_DAVID_IDENTITY,
             "preferred": user,
+            # #703: David's OWN account — its tickets-status caches are his
+            # tenant's, so his lane gateway's scoped collector may read them
+            # (u_tenant_entries below).
+            "u_tenant": True,
         })
     entries.append({
         "id": CODEX_ID,
@@ -140,6 +144,9 @@ def david_inventory():
         "user": CODEX_USER,
         "identity": CODEX_IDENTITY,
         "preferred": CODEX_PREFERRED,
+        # #703: NO u_tenant — the target ACCOUNT is the OWNER's (newlevel@dev2);
+        # its per-cwd tickets-status caches aggregate the OWNER's sessions, so a
+        # lane U read there would be cross-tenant (#677/#684 boundary).
     })
     return entries
 
@@ -232,6 +239,8 @@ def marek_inventory():
             "user": MAREK_GATEWAY_USER,
             "identity": None,
             "preferred": MAREK_GATEWAY_USER,   # the local `marek` tmux group
+            # #703: marek's OWN gateway account — a LOCAL within-tenant read.
+            "u_tenant": True,
         },
         {
             "id": "montalu4-subdev",
@@ -242,6 +251,8 @@ def marek_inventory():
             "user": "montalu4",
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": "montalu4",
+            # #703: marek's own montalu stream account — within-tenant.
+            "u_tenant": True,
         },
         {
             "id": "dev1",
@@ -252,6 +263,10 @@ def marek_inventory():
             "user": "newlevel",
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": MAREK_GATEWAY_USER,   # his session group on dev1
+            # #703: NO u_tenant — newlevel@dev1 is the OWNER's account; its
+            # per-cwd tickets-status caches aggregate the OWNER's sessions
+            # (cross-tenant). The forced-command key couldn't run the reader
+            # anyway, but the boundary is the OPT-IN, not that accident.
         },
         {
             "id": "dev2",
@@ -262,6 +277,7 @@ def marek_inventory():
             "user": "newlevel",
             "identity": WEBTERM_MAREK_IDENTITY,
             "preferred": MAREK_GATEWAY_USER,   # his session group on dev2
+            # #703: NO u_tenant — owner account, same as dev1 above.
         },
         {
             "id": MAREK_FORESTSHOP_ID,
@@ -273,6 +289,10 @@ def marek_inventory():
             "identity": WEBTERM_MAREK_IDENTITY,
             "host_keys": MAREK_FORESTSHOP_HOST_KEYS,   # #680 strict pin
             "preferred": MAREK_GATEWAY_USER,
+            # #703: marek's realm box (notify #572 routes it to his realm),
+            # principal account — within-tenant; the U read honors the #680
+            # host-key pin (cli_webterm._ssh_read_prefix).
+            "u_tenant": True,
         },
     ]
 
@@ -294,3 +314,32 @@ def allowed_ids(profile, fleet_inventory):
     For ``david`` this is exactly {david1..4, codex-bridge}; the security test
     asserts NO owner-fleet id is ever a member."""
     return {e["id"] for e in profile_inventory(profile, fleet_inventory)}
+
+
+def u_tenant_entries(profile):
+    """#703: the per-tenant U-collection set for a LANE gateway — exactly the
+    lane's own inventory entries explicitly marked ``u_tenant: True`` (an
+    OPT-IN meaning: the target ACCOUNT belongs to this lane's tenant, so
+    reading its ``~/.claude/tickets-status`` caches is a within-tenant read).
+
+    Fail-closed on every axis:
+      * an entry WITHOUT the field is never collected — adding a new tab does
+        not silently add U collection;
+      * a shared/OWNER-account target (newlevel@dev1/dev2 — marek's dev
+        tabs, david's codex-bridge) never carries the field: those per-cwd
+        caches aggregate the OWNER's sessions, so a lane read there would be
+        cross-tenant (the #677/#684 boundary this ticket keeps intact);
+      * an ssh entry WITHOUT an explicit identity is DROPPED here even if
+        mis-marked, so a lane collector can never reach the
+        ``_ssh_read_prefix`` sshpass shared-password branch;
+      * the owner / an unknown profile yields ``[]`` (the owner's
+        cross-tenant collector is the separate #677 ``--u-collect`` path,
+        untouched by #703).
+
+    The result is therefore always a SUBSET of the lane's existing connect
+    allowlist (same entries, same dedicated identities, minus the
+    owner-account ones) — per-tenant U collection grants a lane account ZERO
+    new reach."""
+    return [e for e in profile_inventory(profile, [])
+            if e.get("u_tenant") is True
+            and (e.get("local") or e.get("identity"))]

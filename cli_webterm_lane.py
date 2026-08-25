@@ -159,10 +159,21 @@ def render_gateway_unit(spec):
     `--trust-access-header` + UNIX sockets FIRST (the flag substrings still carry
     their literal `{{TOKEN}}`s at that point), before the per-lane substitutions. The
     remaining `{{CRED_PATH}}` survives only in the template's password-model COMMENT,
-    neutralised to n/a here."""
+    neutralised to n/a here.
+
+    #703: every lane unit also carries `--u-lane <profile>` — the PER-TENANT
+    U-dot data channel (the lane gateway serves its own scoped map, refreshed
+    by the scoped `webterm-u-collect --lane` collector over the lane's own
+    u_tenant sessions only). NEVER `--u-collect`: that owner-only cross-tenant
+    flag stays exclusive to the owner unit (#677 boundary, lock-tested)."""
     tmpl = w.WEBTERM_GATEWAY_SERVICE_TEMPLATE.read_text(encoding="utf-8")
     execstart = w.access_execstart_transform(
         tmpl, spec.gateway_sock_basename, spec.ttyd_sock_basename)
+    # #703: the lane-mode sibling of the owner unit's --u-collect injection
+    # (same replace shape, one ExecStart occurrence in the shared template).
+    execstart = execstart.replace(
+        "--base-path {{TTYD_BASE}}",
+        "--base-path {{TTYD_BASE}} --u-lane " + spec.profile)
     return spec.unit_note + (
         execstart
         .replace("{{BIND_IP}}", spec.bind)
@@ -214,6 +225,11 @@ def write_artifacts(spec):
     human = getattr(spec, "dashboard_human", None)
     if human is not None:
         render_kwargs["human"] = human
+    # #703: every lane dashboard polls its OWN gateway's /u-status -- that
+    # gateway serves the PER-TENANT scoped map (--u-lane in the unit rendered
+    # below), so enabling the poll here leaks nothing cross-tenant; both lanes
+    # get the U-dot automatically at every deploy (#684 parity).
+    render_kwargs["lane_u_status"] = True
     spec.dash_index.write_text(
         w.render_dashboard_html(inv, **render_kwargs), encoding="utf-8")
     # The lane's own installable-PWA assets (#644 per-domain identity) next to index.

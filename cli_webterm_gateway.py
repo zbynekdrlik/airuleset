@@ -125,6 +125,46 @@ def _default_u_collect_spawn():
         stdin=subprocess.DEVNULL, start_new_session=True)
 
 
+def _lane_u_status_path(profile):
+    """#703: the per-lane aggregate U file (``webterm-<lane>-u-status.json``)
+    under the LANE account's own $HOME — the unix account boundary is the
+    tenant boundary (#663). Deliberately a LOCAL mirror of
+    ``cli_webterm.webterm_lane_u_status_path`` (this module is standalone —
+    the ``_default_u_status_path`` precedent); a #703 drift-lock test ties the
+    two copies together."""
+    return Path.home() / ".claude" / ("webterm-%s-u-status.json" % profile)
+
+
+def _lane_u_collect_spawn(profile):
+    """#703: a fire-and-forget spawner factory for the PER-TENANT scoped
+    collector (`cli_webterm.py webterm-u-collect --lane <profile>`) — the
+    lane-mode sibling of `_default_u_collect_spawn`. The scoped collector
+    reads ONLY the lane's own tenant sessions
+    (cli_webterm_profiles.u_tenant_entries), so a lane gateway never spawns
+    the owner's cross-tenant fleet collector (#677 boundary intact)."""
+    def _spawn():
+        repo = Path(__file__).resolve().parent
+        subprocess.Popen(
+            [sys.executable, str(repo / "cli_webterm.py"),
+             "webterm-u-collect", "--lane", profile],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+    return _spawn
+
+
+# #703: fail-closed charset gate for --u-lane — the value is embedded in the
+# served file's NAME (webterm-<profile>-u-status.json), so anything outside
+# [a-z0-9][a-z0-9_-]* is refused outright (a '/' or '..' would be a path
+# traversal). No render ever emits such a value; this guards a hand-typed
+# invocation — the #681 runtime-chokepoint lesson.
+_U_LANE_PROFILE_CHARS = set(string.ascii_lowercase + string.digits + "_-")
+
+
+def _u_lane_profile_ok(profile):
+    return (bool(profile) and profile[0] not in "_-"
+            and set(profile) <= _U_LANE_PROFILE_CHARS)
+
+
 def _close_quiet(writer):
     """Close a StreamWriter, ignoring an already-closed/broken transport. A
     client vanishing is normal control flow in a proxy, not an error to log."""
@@ -515,10 +555,12 @@ class Gateway:
         self.dash_dir = Path(dash_index).parent   # #644: PWA assets live here
         # #677: the aggregate U map served at /u-status + a detached spawner that
         # refreshes it when stale. The feature is OFF unless a `u_status_path` is
-        # given (#677 review 🟡): only the OWNER gateway enables it (via --u-collect
-        # in its unit); the shared david/marek gateways run WITHOUT it, so their
-        # /u-status serves an empty map and NEVER spawns an owner-fleet collector as
-        # the sub-dev account. Both injectable (tests).
+        # given (#677 review 🟡). The OWNER gateway enables the FLEET map
+        # (--u-collect in its unit); #703: a LANE gateway enables its own
+        # PER-TENANT map instead (--u-lane <profile> -> the lane's own scoped
+        # file + the scoped `webterm-u-collect --lane` spawner), so a lane
+        # NEVER spawns an owner-fleet collector as the sub-dev account. Both
+        # injectable (tests).
         self.u_status_path = Path(u_status_path) if u_status_path else None
         self.u_collect_spawn = u_collect_spawn or _default_u_collect_spawn
         self._u_spawn_at = 0.0
@@ -766,11 +808,13 @@ class Gateway:
 
     def _u_status_body(self):
         """The current aggregate U JSON (bytes). When the feature is OFF (no
-        u_status_path -- the david/marek gateways), serve an empty map and NEVER
-        spawn a collector. When ON, read the file; if it is absent or older than
-        U_STATUS_STALE_S, fire-and-forget a detached collector (rate-limited) so
-        the NEXT poll is fresh. Always returns a valid JSON map -- never a 500."""
-        if self.u_status_path is None:      # #677 review 🟡: off on non-owner gateways
+        u_status_path -- a gateway with neither --u-collect nor --u-lane),
+        serve an empty map and NEVER spawn a collector. When ON (owner fleet
+        map, or a #703 lane's per-tenant map), read the file; if it is absent
+        or older than U_STATUS_STALE_S, fire-and-forget the configured
+        detached collector (rate-limited) so the NEXT poll is fresh. Always
+        returns a valid JSON map -- never a 500."""
+        if self.u_status_path is None:      # #677 review 🟡: feature off -> inert
             return b'{"u":{},"ts":0}'
         now = time.time()
         raw = None
@@ -972,16 +1016,14 @@ async def _main_async(args):
     # PRIMARY Origin==Host check covers it, so no fixed origin allowlist is needed
     # (there is no host:port to build one from). TCP bind keeps its own-origin list.
     origins = [] if args.socket else _origins_for(args.bind, args.port)
-    # #677: the U-dot data channel is OWNER-ONLY — enabled only by --u-collect,
-    # which only the owner gateway unit passes (the david/marek units do not), so a
-    # sub-dev gateway never spawns an owner-fleet collector as its own account.
-    u_status_path = str(_default_u_status_path()) if args.u_collect else None
+    # #677 owner --u-collect / #703 lane --u-lane — see _u_status_config.
+    u_status_path, u_collect_spawn = _u_status_config(args)
     server = await start_gateway(
         args.bind, args.port, args.dash_index, args.cred,
         ttyd_host=args.ttyd_host, ttyd_port=args.ttyd_port,
         base_path=args.base_path, origins=origins,
         trust_access_header=args.trust_access_header,
-        u_status_path=u_status_path,
+        u_status_path=u_status_path, u_collect_spawn=u_collect_spawn,
         socket_path=args.socket, ttyd_socket=args.ttyd_socket)
     if args.socket:
         upstream = ("unix:%s" % args.ttyd_socket if args.ttyd_socket
@@ -995,6 +1037,22 @@ async def _main_async(args):
                             args.base_path))
     async with server:
         await server.serve_forever()
+
+
+def _u_status_config(args):
+    """#677/#703: the `(u_status_path, u_collect_spawn)` pair for the parsed
+    args. `--u-collect` (OWNER unit only): the fleet-wide map + the default
+    owner collector spawn (None → Gateway's built-in default). `--u-lane
+    <profile>` (#703, lane units): the per-lane scoped file + the scoped
+    collector spawn. Neither: the feature is OFF (`u_status_path` None →
+    /u-status serves an empty map and never spawns anything). `main()` rejects
+    both flags together before this runs."""
+    if args.u_collect:
+        return str(_default_u_status_path()), None
+    if args.u_lane:
+        return (str(_lane_u_status_path(args.u_lane)),
+                _lane_u_collect_spawn(args.u_lane))
+    return None, None
 
 
 def _bind_is_wildcard(bind):
@@ -1042,7 +1100,16 @@ def main(argv):
     p.add_argument("--u-collect", dest="u_collect", action="store_true",
                    help="#677: enable the owner-only per-box U map at /u-status "
                         "(the OWNER gateway unit sets this; david/marek omit it, so "
-                        "their gateway never spawns an owner-fleet collector).")
+                        "their gateway never spawns an owner-fleet collector — "
+                        "#703: lane units carry the per-tenant --u-lane instead).")
+    p.add_argument("--u-lane", dest="u_lane", default=None,
+                   help="#703: enable the PER-TENANT per-box U map at /u-status "
+                        "for this lane profile (david/marek) — served from the "
+                        "lane account's own webterm-<lane>-u-status.json and "
+                        "refreshed by the SCOPED collector (webterm-u-collect "
+                        "--lane <profile>), which reads only the lane's own "
+                        "u_tenant sessions. Mutually exclusive with the "
+                        "owner-only --u-collect.")
     p.add_argument("--trust-access-header", dest="trust_access_header", default=None,
                    help="#612 Cloudflare-Access mode: trust this Cloudflare-injected "
                         "identity header (e.g. Cf-Access-Authenticated-User-Email) "
@@ -1080,6 +1147,17 @@ def main(argv):
         p.error("--bind must be a specific interface (loopback 127.0.0.1 or a "
                 "validated tailscale IP), never a wildcard / interface-any address "
                 "like 0.0.0.0 (#681 security invariant)")
+    # #703: at most ONE U mode — the owner fleet collector and a lane's
+    # per-tenant collector are different security domains; refuse both at once.
+    if args.u_collect and args.u_lane:
+        p.error("--u-collect (owner fleet map, #677) and --u-lane (per-tenant "
+                "lane map, #703) are mutually exclusive")
+    # #703: fail closed on a malformed lane profile — it names the served file.
+    # `is not None` (never truthiness): an EMPTY `--u-lane ""` must be refused
+    # here, not silently fall through as feature-off.
+    if args.u_lane is not None and not _u_lane_profile_ok(args.u_lane):
+        p.error("--u-lane must match [a-z0-9][a-z0-9_-]* (the value names the "
+                "served u-status file; fail-closed, #703)")
     # #663-review NOTE (latent combos, not rejected because airuleset NEVER renders
     # them): the two SANCTIONED shapes are password+TCP (owner tailnet fallback:
     # --cred + --bind/--port + --ttyd-host/--ttyd-port) and Access+UNIX (every live

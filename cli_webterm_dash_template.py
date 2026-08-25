@@ -651,7 +651,7 @@ function pollUStatus() {
     .then((d) => { if (d && d.u) applyUStatus(d.u); })
     .catch(() => {});                     // absent/failed -> leave the dots as-is
 }
-if (CFG.u_status) {                       // #677 review: OWNER dashboard only
+if (CFG.u_status) {     // #677 owner; #703 lane (per-tenant scoped gateway map)
   pollUStatus();
   [4000, 12000, 30000].forEach((ms) => setTimeout(pollUStatus, ms));   // burst after a fresh collect
   setInterval(pollUStatus, 120000);                                     // then minutes-fresh
