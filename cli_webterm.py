@@ -1012,10 +1012,21 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 .tab.has-u .udot { display: block; }
 /* #661: unselected tab text lightened from #9a9a9a to the Campbell foreground
    #CCCCCC (owner: hard to read); hover brightens to #F2F2F2; the ACTIVE tab stays
-   the lightest (#F2F2F2) and is further set apart by its #0C0C0C body-matching
-   background + border. Restrained Campbell greys, never garish. */
+   the lightest (#F2F2F2). Restrained Campbell greys, never garish. */
 .tab:hover { background: #262626; color: #F2F2F2; }
-.tab.active { background: #0C0C0C; color: #F2F2F2; border-color: #2b2b2b; }
+/* #691: the old body-matching #0C0C0C active background read as RECESSED (it
+   was DARKER than the inactive #1b1b1b tabs) and the last chromatic active cue
+   left with the #661 .ord chip. One coherent restrained combination instead:
+   the active tab is the LIGHTEST shade on the ramp (inactive #1b1b1b < hover
+   #262626 < active #333333 — hover can never masquerade as active), carries a
+   2px Campbell-brightBlue top accent bar (inset shadow = zero layout shift,
+   follows the corner radius), a rim lightened to stay visible on the lighter
+   body, and a bold label (monospace face, so no advance-width change / no
+   tab-row reflow). Declared AFTER .tab:hover on purpose: equal specificity,
+   so source order keeps a hovered ACTIVE tab from dimming to the hover shade. */
+.tab.active { background: #333333; color: #F2F2F2; border-color: #3f3f3f;
+  box-shadow: inset 0 2px 0 0 #3B78FF; }
+.tab.active .al { font-weight: 700; }
 .tab .ico { color: #13A10E; font-size: 11px; }
 .tab .al { overflow: hidden; text-overflow: ellipsis; }
 #nav { position: sticky; left: 0; z-index: 1; display: inline-flex; gap: 2px;

@@ -225,3 +225,17 @@ Lessons reusable for any future per-box aggregation over these caches:
   (a deliberate precondition change, not a weakening). The JS poll (`applyUStatus`,
   ~1564) is UNCHANGED — a box aggregating to 0 yields `map[id]=0` → the existing
   `u>0` toggle removes the dot.
+
+- **#691 (2026-08-25) — two process gotchas from the active-tab CSS ticket.** (1) NEVER write
+  hash-prefixed hex colours (`#333333`) in a COMMIT MESSAGE: `block-commit-without-design.sh`
+  parses them as issue refs and hard-blocks the commit ("no design comment posted yet for
+  #333333") — write them hash-less (`333333`) until #692 (hook hex-misparse) is fixed.
+  (2) Visual-verify recipe for the dashboard: Playwright MCP blocks `file://` — render
+  `render_dashboard_html(...)` to the scratchpad, serve it with
+  `timeout 300 python3 -m http.server <port> --bind 127.0.0.1 -d <scratchpad-dir> &`, then
+  read computed styles via `browser_evaluate` (getComputedStyle read-back beats eyeballing)
+  and screenshot `#tabbar`. Beware: `browser_take_screenshot` saves relative paths into the
+  MAIN checkout root (the MCP server's cwd), not your worktree — move the file out so the
+  shared tree stays clean. Styling invariant worth knowing before touching tab CSS:
+  `.tab:hover` and `.tab.active` have EQUAL specificity, so `.tab.active` must stay declared
+  AFTER `.tab:hover` (source order is what keeps a hovered active tab from dimming).
