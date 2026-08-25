@@ -9,14 +9,14 @@ logic.
 
 PURE CONSTANT LEAF by design (locked by
 ``tests/test_webterm_template_extraction_694.py``): zero imports, zero
-functions — logic never creeps in here. The ``@@COUNT@@`` / ``@@BUTTONS@@`` /
-``@@CFG_JSON@@`` / ``@@THEME_JSON@@`` sentinels are substituted by
-``cli_webterm.render_dashboard_html`` in a SINGLE pass (inserted content is
-never re-scanned); the render/substitution contract lives THERE — this module
-carries only the bytes.
+functions — logic never creeps in here. The ``@@BUTTONS@@`` / ``@@CFG_JSON@@``
+/ ``@@THEME_JSON@@`` sentinels are substituted by
+``cli_webterm.render_dashboard_html`` in a SINGLE pass; the render/substitution
+contract lives THERE — this module carries only the bytes. A new sentinel needs
+BOTH sides in one commit (token here + subst/regex there), or the #694 test fails.
 """
 
-# NOTE: `.replace()` substitution (not `%`-formatting) — the CSS/JS body is full
+# NOTE: sentinel substitution, not `%`-formatting — the CSS/JS body is full
 # of `{}`, `%`, and `:` that would otherwise need escaping.
 DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <html lang="sk">
