@@ -88,6 +88,11 @@ class TestPartnerIdsPresent(unittest.TestCase):
         # naming the concept without USING it as a key is not an addressee claim
         self.assertFalse(g.partner_ids_present("the partner_ids list drives delivery"))
 
+    def test_a_different_field_carrying_the_substring_is_not_a_claim(self):
+        # `channel_partner_ids` is a real discuss.channel field (a channel-create
+        # concern) — the substring must not read as THIS post's addressee claim
+        self.assertFalse(g.partner_ids_present('{"channel_partner_ids": [7]}'))
+
     def test_empty_content(self):
         self.assertFalse(g.partner_ids_present(""))
         self.assertFalse(g.partner_ids_present(None))

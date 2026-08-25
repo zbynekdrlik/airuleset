@@ -723,8 +723,12 @@ def evaluate_message_post_promise(content, user):
 MENTION_BYPASS_MARKER = "airuleset:discuss-mention-ok"
 
 # `partner_ids` used as a KEY: JSON `"partner_ids":`, dict `'partner_ids':`,
-# or a python kwarg/assignment `partner_ids=`.
-_PARTNER_IDS_RE = re.compile(r"""['"]?partner_ids['"]?\s*[:=]""")
+# or a python kwarg/assignment `partner_ids=`. The `(?<![\w.])` lookbehind
+# (the _NAME_RE precedent) keeps a DIFFERENT field carrying the substring --
+# `channel_partner_ids` (a real discuss.channel field), `x_partner_ids` -- and
+# an ORM attribute write (`.partner_ids =`) from being read as this post's
+# addressee claim.
+_PARTNER_IDS_RE = re.compile(r"""(?<![\w.])['"]?partner_ids['"]?\s*[:=]""")
 
 # A REAL mention anchor token, anywhere in the content: the composer-emitted
 # `class="o_mail_redirect"` OR `data-oe-model="res.partner"` (single/double/
