@@ -1389,7 +1389,7 @@ function scheduleFill(win) {
 // the IFRAME's own (focused) navigator.clipboard, and are fully guarded so a
 // missing/denied clipboard never throws. Paste needs no code: Ctrl+Shift+V pastes
 // natively (browser paste event -> xterm), plain Ctrl+V is ^V and is NOT rebound
-// (a legit readline key) -- see the footer hint.
+// (a legit readline key). (#671 rework removed the on-screen copy/paste hint strip.)
 function attachClipboard(win) {                  // idempotent: attach once per terminal
   const term = win && win.term;
   if (!term || term.__wtClip) return;
