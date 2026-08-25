@@ -18,9 +18,12 @@ lock gets re-violated by hand):
   * `cli_webterm._DASHBOARD_TEMPLATE` IS the extracted constant (identity,
     not a copy), so every existing render path/test keeps working unchanged;
   * `cli_webterm.py` source carries no inline dashboard HTML any more;
-  * the four substitution sentinels are present, are the ONLY sentinel-shaped
-    tokens in the template, and are all substituted on render — with a #700
-    content-continuity spot check (`stretchFrameToFill` shipped in the output).
+  * the LIVE substitution sentinels (`@@BUTTONS@@`/`@@CFG_JSON@@`/
+    `@@THEME_JSON@@` — `@@COUNT@@` left the template with #671/#674's top-bar
+    rework and survives only as a vestigial subst entry) are present, are the
+    ONLY sentinel-shaped tokens in the template, and NO sentinel-shaped token
+    survives rendering — with a #700 content-continuity spot check
+    (`stretchFrameToFill` shipped in the output).
 """
 import re
 import sys
@@ -31,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 REPO = Path(__file__).resolve().parent.parent
 
-_SENTINELS = {"@@COUNT@@", "@@BUTTONS@@", "@@CFG_JSON@@", "@@THEME_JSON@@"}
+_SENTINELS = {"@@BUTTONS@@", "@@CFG_JSON@@", "@@THEME_JSON@@"}
 
 
 def _inv():
@@ -69,12 +72,12 @@ class TestTemplateExtraction694(unittest.TestCase):
         import cli_webterm_dash_template as t
         for s in _SENTINELS:
             self.assertIn(s, t.DASHBOARD_TEMPLATE)
-        # no fifth sentinel the single-pass render would leave unsubstituted
+        # no extra sentinel the single-pass render would leave unsubstituted
         self.assertEqual(set(re.findall(r"@@[A-Z_]+@@", t.DASHBOARD_TEMPLATE)),
                          _SENTINELS)
         html = w.render_dashboard_html(_inv(), ttyd_base="/t")
-        for s in _SENTINELS:
-            self.assertNotIn(s, html)
+        # NO sentinel-shaped token survives rendering at all
+        self.assertNotRegex(html, r"@@[A-Z_]+@@")
         # #700 content-continuity spot check: the third fill layer still ships
         self.assertIn("function stretchFrameToFill", html)
 
